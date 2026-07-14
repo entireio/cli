@@ -1,0 +1,1236 @@
+let's review this PR https://github.com/entireio/cli/pull/1726 / trail https://entire.io/gh/entireio/cli/trails/833/fix-redact-catch-supabase-sb-secret-keys-1716 which is supposed to fix a reported issue, but I am wondering why this wasn't covered by betterleaks, or https://github.com/entireio/cli/pull/1045 - there was this issue where betterleaks wasn;t working but it looks liek it was fixed https://github.com/betterleaks/betterleaks/issues/224
+
+---
+
+why didn't betterleaks see the supabase pattern?
+
+---
+
+is this not what the pr is adding `sb_secret_ and then this is what betterleaks has? `sb_secret_[A-Za-z0-9_-]{31}
+
+---
+
+so do we need to implement regex mathc redact elsewhere? and did 1045 not do this?
+
+---
+
+so what are the fixes that we need to comment on for 1726?
+
+---
+
+you should do 1,2,3 on the trail please
+
+---
+
+okay now lets look at this one https://github.com/entireio/cli/pull/1710, https://entire.io/gh/entireio/cli/trails/817 - the only thing is, this one is quite old and im not sure if gicing the full transcript to sub agents will waste tokens? Also, see recent subagent work that was done in cli too
+
+---
+
+yes go ahead
+
+---
+
+okay now check out the trail
+
+---
+
+i mean can you run /review and /pr-review-toolkit:review-pr
+
+---
+
+<task-notification>
+<task-id>abe92dadc694f8ab2</task-id>
+<tool-use-id>toolu_01EwTHwvrzd84ibbXeAoUTXr</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/abe92dadc694f8ab2.output</output-file>
+<status>completed</status>
+<summary>Agent "General code review PR #1710" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result># PR #1710 Review — `fix(attribution): scan full transcript for subagents spawned before checkpoint`
+
+## Scope reviewed
+The exact PR diff (merge-base `7cd6662`..HEAD): the two transcript extractors (`claudecode`, `factoryaidroid`), `types.SubtractTokenUsage`, `session/state.go` baseline field, the three condensation-reset sites, `accumulateTokenUsage` + `SaveStep`, and the new `subagent_token_dedup_test.go`. Build of all changed packages is green.
+
+The core design is sound: subagent-ID discovery now scans the full transcript while main-agent extraction stays sliced, `accumulateTokenUsage` correctly switches SubagentTokens from add→replace, and a baseline is captured at all three reset sites (`CondenseSessionByID`, `CondenseAndMarkFullyCondensed`, `condenseAndUpdateState`). I confirmed there is no fourth site that nulls `CheckpointTokenUsage` without also setting the baseline.
+
+---
+
+## Critical issues
+None.
+
+---
+
+## Important issues
+
+### 1. Double-subtraction of the subagent baseline is reachable (CONFIRMED) — confidence 85
+`cmd/entire/cli/strategy/manual_commit_git.go:137-140`
+
+The candidate bug is real and reachable. Trace:
+
+- The baseline subtraction at lines 137-140 runs on **every** step where `step.TokenUsage != nil`.
+- But `accumulateTokenUsage` (lines 366-368) only **replaces** `CheckpointTokenUsage.SubagentTokens` when `incoming.SubagentTokens != nil`. When incoming is nil, the field keeps its prior (already-subtracted) value.
+- `CalculateTotalTokenUsage` returns a non-nil `TokenUsage` with **nil** `SubagentTokens` whenever the per-call subagent scan yields nothing — specifically the `if subagentUsage.APICallCount &gt; 0` guard at `claudecode/transcript.go:438` (and the factoryaidroid equivalent). The immediately preceding loop does `continue` on any subagent-file read error, with the code's own comment: *"Agent transcript may not exist yet or may have been cleaned up."* So a subagent readable on one step can become unreadable on a later step in the same window → nil SubagentTokens after non-nil. The caller (`lifecycle.go:920-922` → `agent.CalculateTokenUsage`, which returns `mainUsage` directly) passes this straight through as `step.TokenUsage`.
+
+Concrete failure (baseline B=500 from a prior condensation, matching the PR's own test values):
+- Ckpt-2 step 1: incoming S=620 → accumulate replaces → 620 → subtract 500 → **120** (correct).
+- Ckpt-2 step 2 with nil SubagentTokens: accumulate leaves 120 → subtract 500 again → `clampSubtract(120,500)` → **0**.
+
+Result: `CheckpointTokenUsage.SubagentTokens` is silently zeroed (under-reported) for that checkpoint. Scope is limited — `state.TokenUsage` (session-wide total shown by `entire status`) is unaffected because it never subtracts, and the clamp prevents negatives — so impact is checkpoint-metadata accuracy in an edge case, not a crash or session-total corruption. That, plus the edge-case trigger, is why I rate it 85 rather than critical.
+
+Suggested fix — derive the checkpoint delta from the authoritative cumulative snapshot (`state.TokenUsage.SubagentTokens`, which always holds the latest cumulative total and is non-nil here since accumulate just ran with non-nil incoming) instead of from the mutated `CheckpointTokenUsage.SubagentTokens`. This is idempotent regardless of a nil incoming step:
+```go
+if state.CheckpointTokenUsage != nil {
+    state.CheckpointTokenUsage.SubagentTokens = types.SubtractTokenUsage(
+        state.TokenUsage.SubagentTokens, state.SubagentTokensBaseline)
+}
+```
+Alternatively, gate the existing subtraction on `step.TokenUsage.SubagentTokens != nil` so it only runs on the steps where accumulate actually re-applied a fresh snapshot.
+
+### 2. The regression test does not cover the double-subtraction path — confidence 82
+`cmd/entire/cli/strategy/subagent_token_dedup_test.go:152-190`
+
+`TestSaveStep_SubagentTokensNotDoubleCountedAcrossCheckpoints` gives checkpoint 2 exactly **one** step with non-nil SubagentTokens, so the replace masks the unconditional subtraction and the test passes green over the bug in issue #1. Add a second step in checkpoint 2 whose `TokenUsage.SubagentTokens` is nil (main-agent-only step, the "subagent file cleaned up" case) and assert `CheckpointTokenUsage.SubagentTokens.InputTokens` stays 120 — that assertion fails on the current code and passes after the fix.
+
+### 3. Missing `t.Parallel()` — CLAUDE.md violation — confidence 90
+`cmd/entire/cli/strategy/subagent_token_dedup_test.go:34` (`TestAccumulateTokenUsage_SubagentTokensReplacedNotSummed`)
+
+CLAUDE.md: *"Every top-level test function and subtest should call `t.Parallel()` unless it modifies process-global state."* This test is pure (no `t.Chdir`/`t.Setenv`), so the exception does not apply. Add `t.Parallel()`. (The sibling `TestSaveStep_...` and its subtests correctly omit it because they use `t.Chdir`; the agent-package tests all correctly include it.)
+
+---
+
+## Suggestions
+
+- **`accumulateTokenUsage` existing==nil branch shares the SubagentTokens pointer** (`manual_commit_git.go:352`): the comment says "Return a copy to avoid sharing the pointer" but `SubagentTokens: incoming.SubagentTokens` aliases the incoming pointer. It is currently harmless because `SubtractTokenUsage` reassigns rather than mutates, and the persisted snapshot is read-only afterward — but the comment is misleading given the field is now load-bearing. Pre-existing; worth a note or a shallow copy for future safety.
+- **Carry-forward reset does not update the baseline** (`manual_commit_hooks.go:3056-3068`): this post-commit path resets `StepCount`/`CheckpointTranscriptStart` but leaves `CheckpointTokenUsage` and `SubagentTokensBaseline` untouched. It appears not to recompute checkpoint token usage at all (pre-existing behavior, out of this PR's scope), so I could not construct a miscount from it — flagging only so the author can confirm the baseline stays consistent through carry-forward.
+
+---
+
+## Positives
+
+- Excellent, accurate doc comments on `SubtractTokenUsage`, `accumulateTokenUsage`, and the three reset sites explaining the cumulative-vs-delta distinction and pointing readers to the caller-side fix — this is genuinely hard-to-follow accounting and the comments carry it well.
+- `clampSubtract` flooring at zero correctly defends against a stale/racy baseline producing negative deltas.
+- The full-transcript scan change is applied symmetrically to both agents with matching NOTE comments cross-referencing the strategy-layer contract.
+- Baseline captured at all three condensation-reset sites — no site missed (verified by grep).
+- Logging/settings/error-handling rules all respected; no `fmt.Print*` for operational output, uses `logging.*`, `testutil.InitRepo` used for the git-touching test.
+
+Key file references: `cmd/entire/cli/strategy/manual_commit_git.go:122-141`, `:340-371`; `cmd/entire/cli/agent/claudecode/transcript.go:398-443`; `cmd/entire/cli/agent/types/token_usage.go:48-80`; `cmd/entire/cli/strategy/subagent_token_dedup_test.go:34,152-190`.</result>
+<usage><subagent_tokens>75700</subagent_tokens><tool_uses>23</tool_uses><duration_ms>254588</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a18da8728bc55dc02</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/a18da8728bc55dc02.output</output-file>
+<status>completed</status>
+<summary>Agent "Comment accuracy review PR #1710" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have everything I need. Compiling the report.
+
+# Comment Analysis: PR #1710 (fix/329-subagent-extract)
+
+**Summary**: The PR's comments are unusually thorough and mostly accurate — the core claims ("subagent transcripts are re-read from line 0 on every call", "SubagentTokens is cumulative-since-session-start", "agent IDs are discovered from the full transcript") all verify against the code. However, the SaveStep comment asserts an unconditional correctness guarantee that the code only provides conditionally (masking a latent double-subtraction bug), two agent-package comments reference an unexported symbol and a misattributed field in another package, and the same explanation is written out in prose ten times across seven non-test files.
+
+---
+
+## Critical Issues
+
+### 1. SaveStep comment overstates the guarantee — and hides a latent bug
+
+**Location**: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/strategy/manual_commit_git.go:125-140`
+
+**Issue**: The comment claims:
+
+&gt; "accumulateTokenUsage already replaces (rather than adds) the SubagentTokens field for that reason, so state.TokenUsage ends up correctly holding the latest cumulative total."
+
+Replacement is **conditional**: `accumulateTokenUsage` only replaces when `incoming.SubagentTokens != nil` (manual_commit_git.go:366-368). And `SubagentTokens` can legitimately arrive nil mid-session even after a subagent was previously counted: `CalculateTotalTokenUsage` only sets it when `subagentUsage.APICallCount &gt; 0` (claudecode/transcript.go:438, factoryaidroid/transcript.go:404), and each per-subagent read `continue`s on error — the code's own comment says the transcript "may have been cleaned up" (claudecode/transcript.go:429-430).
+
+The consequence the comment glosses over: the baseline subtraction at lines 137-140 runs on **every** step with non-nil `step.TokenUsage`, but is only idempotent when replacement actually happened that step. Trace the nil case:
+
+- Step N (snapshot present): `CheckpointTokenUsage.SubagentTokens` = fresh cumulative snapshot → minus baseline → correct delta.
+- Step N+1 (`SubagentTokens == nil`): accumulate leaves the field at the **already-rescoped delta**; the SaveStep block then subtracts the baseline **again** → double subtraction, silently clamped to zero by `clampSubtract`.
+
+The invariant the subtraction depends on ("this field is a fresh cumulative snapshot whenever this line runs") is exactly what the comment should state — instead it asserts the conclusion ("ends up correctly") without the precondition. A future maintainer reading this comment will believe the rescoping is unconditionally safe. Note also that `clampSubtract`'s doc (`types/token_usage.go:72-73` — "so a stale or racy baseline never produces a negative delta") inadvertently documents the mechanism that masks this bug.
+
+**Suggestion**: Either fix the code so the comment becomes true (e.g., compute the delta from the fresh snapshot — `SubtractTokenUsage(step.TokenUsage.SubagentTokens, state.SubagentTokensBaseline)` — guarded by `step.TokenUsage.SubagentTokens != nil`, instead of subtracting from possibly-already-rescoped state), or amend the comment to state the precondition honestly: "This subtraction assumes accumulateTokenUsage replaced SubagentTokens with a fresh cumulative snapshot this step; when step.TokenUsage.SubagentTokens is nil (subagent transcripts unreadable/cleaned up), the field still holds the prior step's delta and re-subtracting under-counts (clamped at zero)." Given this is a token-accuracy PR, the code fix is the better outcome.
+
+Minor secondary inaccuracy in the same block: "state.TokenUsage ends up correctly holding the latest cumulative total" — when incoming is nil it holds the last *known* snapshot, which is the right behavior, but "already replaces" is stated as unconditional when it isn't.
+
+### 2. Cross-package reference misattributes where the field lives
+
+**Location**: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/agent/claudecode/transcript.go:421-422` and `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/agent/factoryaidroid/transcript.go:388-389`
+
+**Issue**: "See accumulateTokenUsage and SessionState.SubagentTokensBaseline in cmd/entire/cli/strategy" — `SubagentTokensBaseline` is defined on `session.State` in `cmd/entire/cli/session/state.go:295`; strategy only has the alias `type SessionState = session.State` (`manual_commit_types.go:26`). A maintainer grepping the strategy package for the field's definition and doc finds only usages. Additionally, `accumulateTokenUsage` is an **unexported** function in another package — no tooling (gopls rename, compiler, lint) will ever flag these comments when it's renamed or moved. Two copies of this fragile pointer exist, doubling the rot surface.
+
+**Suggestion**: Point at the exported, stable anchor instead: `session.State.SubagentTokensBaseline` (or just "see the caller in cmd/entire/cli/strategy (SaveStep)"). Better: see Consolidation item 1 below — move the contract to the interface doc and shrink these NOTEs to one line each.
+
+---
+
+## Rot-Prone References
+
+1. **Agent packages documenting their caller's implementation** (claudecode/transcript.go:416-422, factoryaidroid/transcript.go:384-389). The "MUST NOT sum / replace / subtract a baseline" prescription is the *strategy package's* design, written inside two extractor function bodies where (a) callers reading godoc will never see it (it's a body comment, not the doc comment), and (b) nobody refactoring strategy will remember to update it. The dependency direction is inverted: the callee should state its contract ("this field is cumulative, not a delta" — which genuinely belongs here), not prescribe caller architecture.
+
+2. **The interface doc was not updated** — `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/agent/agent.go:363-365` (`CalculateTotalTokenUsage` on the subagent-extractor interface) still says only "computes token usage including all spawned subagents." The cumulative-snapshot semantics is a contract of the *interface method* — both implementations share it and callers dispatch through it (`agent/token_usage.go:20`) — yet it is documented only inside two implementation bodies. A third agent implementing this interface will not see the NOTE and may return per-window deltas, silently breaking the strategy's replace-not-sum logic. This is the single most valuable place to document the semantics, and it's the one place the PR didn't touch.
+
+3. **"(shared with Claude Code)"** (factoryaidroid/transcript.go:389) will rot as soon as a third agent adopts the same pattern.
+
+---
+
+## Redundancy — Consolidation Suggestions
+
+The "subagent usage is a cumulative snapshot; replace, don't sum; rescope via baseline" explanation appears in full prose **seven times** in non-test code, plus three near-identical reset comments:
+
+| # | Location | Lines of prose |
+|---|----------|----------------|
+| 1 | claudecode/transcript.go:412-422 | 11 |
+| 2 | factoryaidroid/transcript.go:381-389 | 9 |
+| 3 | types/token_usage.go:49-53 (SubtractTokenUsage doc) | 3 |
+| 4 | session/state.go:286-294 (SubagentTokensBaseline doc) | 9 |
+| 5 | strategy/manual_commit_git.go:330-339 (accumulateTokenUsage doc) | 10 |
+| 6 | strategy/manual_commit_git.go:125-136 (SaveStep inline) | 12 |
+| 7 | strategy/manual_commit_git.go:363-365 (inline in accumulateTokenUsage) | 3 |
+| 8-10 | manual_commit_condensation.go:1212-1215, :1338-1341; manual_commit_hooks.go:1412-1415 | 4 each, near-identical |
+
+When the same fact is stated ten times, a future change updates three of them and the other seven become lies. Suggested canonical structure:
+
+- **Producer contract** (what the value means): the `CalculateTotalTokenUsage` interface doc in `agent/agent.go:363-365`. One sentence: "SubagentTokens in the result is cumulative since session start (subagent transcripts are always read from line 0 and agent IDs discovered from the full transcript), not scoped to fromOffset." The two implementation NOTEs shrink to one line each: the genuinely local insight ("agent IDs from the FULL transcript, not the slice — #329") stays, the caller prescription goes.
+- **Consumer design** (why replace + baseline): the `accumulateTokenUsage` doc (item 5) is a good home and is well-written — keep it as the canonical explanation. The SaveStep inline (item 6) shrinks to ~3 lines: what the subtraction does + the precondition from Critical Issue 1 + "see accumulateTokenUsage."
+- **Three reset-site comments** (items 8-10): the *code* is duplicated three times (5-line block). Extract a helper (e.g., `resetCheckpointWindow(state)` or at least `snapshotSubagentBaseline(state)`) so the comment exists once. Failing that, cut each to one line: "Baseline for rescoping the next checkpoint's subagent delta — see accumulateTokenUsage." Note the hooks.go copy says "in manual_commit_git.go" while the condensation.go copies don't — inconsistency that shows the duplication already drifting.
+- **SubtractTokenUsage doc** (item 3): the second sentence ("Used to rescope a cumulative-since-session-start snapshot (e.g. subagent token usage, which is always re-read...)") leaks caller-specific rationale into a generic types package and duplicates the story a fourth time. Trim to: "Used to rescope a cumulative snapshot down to a delta since a captured baseline."
+
+---
+
+## Improvement Opportunities
+
+1. **`session/state.go:286` — "snapshot" is a pointer alias, not a copy.** `state.SubagentTokensBaseline = state.TokenUsage.SubagentTokens` stores the pointer. It behaves as a snapshot today only because `accumulateTokenUsage` replaces the `SubagentTokens` pointer rather than mutating the struct in place — an immutability assumption stated nowhere. If someone later "optimizes" accumulate to mutate in place, the baseline silently tracks the live total and every delta becomes zero. Either document the invariant ("TokenUsage.SubagentTokens structs are treated as immutable; the baseline aliases one") or have the reset sites store a copy.
+
+2. **`session/state.go:286-287` — "captured at the last condensation reset" has a fourth, uncovered reset site.** `session_adopt.go:473-482` resets the checkpoint window (`StepCount`, `CheckpointTranscriptStart`, `CheckpointTokenUsage = nil`) but neither re-baselines nor clears `SubagentTokensBaseline`, so an adopted session carries the source's baseline while `CheckpointTranscriptStart` resets to 0. The comment is technically accurate (adoption isn't condensation), but the design intent — "baseline = subagent total already reported to earlier checkpoints" — may not hold after adoption. Worth a deliberate decision and, if intentional, a one-line note at the adopt site.
+
+3. **`types/token_usage.go:49-50` — "(a nil operand is treated as zero)" is ambiguous for `a`.** When `a == nil` the function returns nil, not a zero-valued struct (which matters for `omitempty` and nil checks downstream). Suggest: "a nil b is treated as zero; a nil a yields nil."
+
+4. **`manual_commit_git.go:137` — the `state.CheckpointTokenUsage != nil` guard is unreachable** given the preceding `accumulateTokenUsage(state.CheckpointTokenUsage, step.TokenUsage)` with non-nil incoming always returns non-nil. Harmless, but a reader may infer a nil path exists. (Code observation, noted since the comment block sits directly on it.)
+
+## PR-Review-Talk That Will Age Badly
+
+- **"for the caller-side fix"** (claudecode/transcript.go:422, factoryaidroid/transcript.go:389): "fix" frames this relative to bug #329's timeline; in a year it is simply the design. Prefer "for how callers rescope this" — the `(#329)` references elsewhere are the right way to anchor history and can stay.
+
+## Positive Findings
+
+- **`accumulateTokenUsage` doc** (manual_commit_git.go:327-339): exemplary — explains *why* two fields in the same struct have opposite accumulation semantics, which the code cannot show. This is the comment worth keeping verbatim as the canonical copy.
+- **Full-transcript-scan comments** (claudecode/transcript.go:402-405, factoryaidroid/transcript.go:373-375, and the ExtractAllModifiedFiles twins): accurate, local to the code they explain, state a non-obvious constraint (slice-scan undercounts), and carry a durable issue anchor. The "Main-agent file extraction above stays scoped to the slice" clarification preempts a real misreading.
+- **The inline replace comment** (manual_commit_git.go:363-365) exactly matches the code it annotates.
+- **Test documentation** (subagent_token_dedup_test.go:476-484, transcript_test.go regression headers): the scenario narration inside `TestSaveStep_SubagentTokensNotDoubleCountedAcrossCheckpoints` is a model of executable documentation — redundancy in tests is fine because tests are self-verifying.
+
+**Bottom line**: fix or honestly caveat the SaveStep correctness claim (Critical 1 — there is a real latent under-count behind it), move the producer contract to the interface doc in agent/agent.go, correct the `SessionState`-in-strategy misattribution, and collapse the seven prose copies to two canonical homes plus one-line pointers.</result>
+<usage><subagent_tokens>73469</subagent_tokens><tool_uses>12</tool_uses><duration_ms>273028</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a6cd0aead958f0d28</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/a6cd0aead958f0d28.output</output-file>
+<status>completed</status>
+<summary>Agent "Test coverage review PR #1710" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All verification complete. Here is the report.
+
+---
+
+# Test Coverage Analysis: PR #1710 (fix #329 — subagent extraction from full transcript)
+
+## 1. Summary
+
+The PR's tests are behavioral, well-commented, and correctly pin the two headline behaviors: full-transcript subagent discovery (4 extractor regression tests) and replace-not-sum accumulation (strategy unit + SaveStep test). However, the most fragile part of the fix — the three production baseline-snapshot sites and the per-step re-subtraction in SaveStep — is **empirically unprotected**: I deleted all three `SubagentTokensBaseline` snapshot blocks and the full strategy suite, types suite, and integration suite all passed (`ok` across the board). I also confirmed by code trace a **latent double-subtraction bug** in SaveStep that no test exercises, and a **fourth checkpoint-reset site** (`session_adopt.go`) the PR did not touch.
+
+## 2. Critical Gaps (must add)
+
+### Gap A — Production baseline-snapshot sites have zero coverage. Rating: 8/10 — VERIFIED
+
+I removed the `state.SubagentTokensBaseline = state.TokenUsage.SubagentTokens` blocks at:
+- `cmd/entire/cli/strategy/manual_commit_condensation.go:1212-1218` (CondenseSessionByID)
+- `cmd/entire/cli/strategy/manual_commit_condensation.go:1337-1344` (CondenseAndMarkFullyCondensed)
+- `cmd/entire/cli/strategy/manual_commit_hooks.go:1412-1418` (condenseAndUpdateState)
+
+then ran `go test ./cmd/entire/cli/strategy/ ./cmd/entire/cli/agent/types/` and `go test -tags integration ./cmd/entire/cli/integration_test/`. **Everything passed.** The reason: `TestSaveStep_SubagentTokensNotDoubleCountedAcrossCheckpoints` re-implements the snapshot by hand inside `MutateSessionState` (`cmd/entire/cli/strategy/subagent_token_dedup_test.go:599-607`), so it validates the test's own inline copy of the logic, not the production code. If any of the three sites is deleted or drifts (e.g., a future refactor consolidates the resets and drops the snapshot), checkpoint 2+ silently re-reports the full cumulative subagent total — exactly the bug #329's fix creates the risk of.
+
+**Recommendation:** In the dedup test, replace the `MutateSessionState` block with a call to the real `s.CondenseSessionByID(ctx, sessionID)`. This is feasible: `condense_skip_test.go:263-302` (`TestCondenseSessionByID_SkippedPreservesState`) already shows the required setup (SaveStep first so the shadow branch exists, then condense). Add a parallel assertion that `state.SubagentTokensBaseline` equals the checkpoint-1 cumulative snapshot after condensation. `CondenseAndMarkFullyCondensed` can be covered the same way via the `checkpoint_policy_test.go:110` pattern; `condenseAndUpdateState` (post-commit hook path) is harder to drive but is a near-verbatim copy — covering one exported path plus asserting the field directly is a pragmatic floor.
+
+### Gap B — Double-subtraction when a later step's SubagentTokens is nil. Rating: 8/10 — VERIFIED BY CODE TRACE (this is a latent production bug, not just a test gap)
+
+`cmd/entire/cli/strategy/manual_commit_git.go:137-140` runs the subtraction on **every** SaveStep, guarded only by `step.TokenUsage != nil`:
+
+```go
+if state.CheckpointTokenUsage != nil {
+    state.CheckpointTokenUsage.SubagentTokens = types.SubtractTokenUsage(
+        state.CheckpointTokenUsage.SubagentTokens, state.SubagentTokensBaseline)
+}
+```
+
+Trace: baseline = {500}. Step 1 arrives with cumulative SubagentTokens {620} → replaced, subtracted → checkpoint delta {120}. Step 2 in the same window arrives with `SubagentTokens == nil` — `accumulateTokenUsage` (manual_commit_git.go:366-368) correctly keeps the existing {120}, but the subtraction then runs **again on the already-rescoped value**: `clampSubtract(120, 500)` → **0**. The checkpoint's subagent delta is silently destroyed (or silently shrunk if baseline &lt; delta).
+
+The nil-incoming path is real: both extractors return nil SubagentTokens when the subagent transcript file is missing/cleaned up (`continue` at `claudecode/transcript.go:428-430`, `factoryaidroid/transcript.go:395-397`, and `SubagentTokens` only set when `APICallCount &gt; 0`), and non-claudecode/droid steps never set it. Every step in the PR's tests carries a non-nil snapshot, so this path is untested.
+
+**Recommendation:** Fix by moving the subtraction inside `if step.TokenUsage.SubagentTokens != nil`, or better, recompute the delta from `state.TokenUsage.SubagentTokens − baseline` (idempotent). Then add a test: step 1 with snapshot {620}, step 2 with `TokenUsage: {InputTokens: 10}` (SubagentTokens nil), assert `CheckpointTokenUsage.SubagentTokens` is still {120}.
+
+## 3. Important Improvements
+
+### Gap C — `SubtractTokenUsage` / `clampSubtract` have no direct unit tests. Rating: 6/10 — VERIFIED
+
+`cmd/entire/cli/agent/types/token_usage_test.go` contains only `TestAddTokenUsage`. The new `SubtractTokenUsage` (`token_usage.go:54-70`) has non-obvious contract points that only fail indirectly today: `a == nil → nil` (not zero struct), `b == nil → copy of a`, per-field clamping at zero, recursion into `SubagentTokens`, and the no-mutation guarantee (callers alias `state.TokenUsage.SubagentTokens` into both `CheckpointTokenUsage` and `SubagentTokensBaseline`, so an in-place refactor would corrupt three fields at once). A table-driven test mirroring `TestAddTokenUsage` is cheap and pins all of these. The no-mutation assertion is the highest-value case.
+
+### Gap D — Fourth `CheckpointTokenUsage = nil` reset site not snapshotting baseline. Rating: 6/10 — NEW FINDING
+
+`cmd/entire/cli/session_adopt.go:482` clears `CheckpointTokenUsage` when adopting a session, but the adopted state shallow-copies the source (`adopted := *source`, line 502) so `SubagentTokensBaseline` is whatever the **source** session's last condensation left (possibly nil), while `TokenUsage` (cloned at line 509) carries the full cumulative subagent total. The first post-adopt checkpoint's `SubagentTokens` delta = cumulative − stale baseline → over-reports, contradicting the adopt code's own intent ("the first adopted checkpoint only counts target-side turns", line 488-490). Recommend snapshotting `SubagentTokensBaseline = TokenUsage.SubagentTokens` at adopt and adding an assertion in `session_adopt_test.go`. This may be deliberately out of PR scope, but the invariant ("every site that clears CheckpointTokenUsage must re-baseline") now exists and is enforced nowhere.
+
+### Gap E — Slice-scoping asymmetry of main-agent extraction is unasserted. Rating: 5/10
+
+The new code comments claim "Main-agent file extraction above stays scoped to the slice" (`claudecode/transcript.go:445-446`, `factoryaidroid/transcript.go:433-435`), but the new tests place only Task marker lines before startLine. If someone later "simplifies" by parsing the full transcript for main-agent files/tokens too (double-counting main usage across checkpoints), all four regression tests still pass. Add one `makeWriteToolLine` (and one assistant-usage line) **before** startLine and assert the file is absent / main tokens exclude it.
+
+### Gap F — Multiple subagents straddling the boundary. Rating: 4/10
+
+No test has two subagents (one spawned before startLine, one after) verifying both IDs union and both usages sum. The summation loop is pre-existing, so this is a completeness nicety only.
+
+## 4. Test Quality Issues
+
+- `TestAccumulateTokenUsage_SubagentTokensReplacedNotSummed` (`subagent_token_dedup_test.go:485`) is missing `t.Parallel()` — CLAUDE.md requires it for tests without global state (the sibling SaveStep test correctly can't parallelize due to `t.Chdir`).
+- The SaveStep test's inline condensation simulation (`:599-607`) duplicates production logic — this is the root of Gap A and should become a real `CondenseSessionByID` call rather than being kept in sync by hand.
+- Minor: the SaveStep test uses `git.PlainOpen` + `worktree.Commit` where `testutil.GitAdd/GitCommit` would match house style; harmless since `testutil.InitRepo` is used.
+
+## 5. Positive Observations
+
+- The four extractor regression tests (`claudecode/transcript_test.go:895-965`, `factoryaidroid/transcript_test.go:1228-1296`) are genuinely behavioral: they build real JSONL through shared helpers, drive the public functions with `startLine=2`, and assert outputs. I verified a revert (scoping `ExtractSpawnedAgentIDs` back to the sliced parse) makes `agentIDs` empty in all four → each test fails on its primary assertion. Both agents are covered symmetrically for both files and tokens.
+- `TestAccumulateTokenUsage_SubagentTokensReplacedNotSummed` cleverly reuses one snapshot pointer for both steps, so the old summing code would double it in place — it reliably catches a revert of the replace semantics.
+- The SaveStep test asserts all three externally-visible invariants (checkpoint-window fold-once, session-wide latest-snapshot, cross-checkpoint delta rescoping) against persisted state, not internals, and runs for both affected agent types.
+- The extensive cross-referencing comments (extractors ↔ `accumulateTokenUsage` ↔ `SubagentTokensBaseline`) meaningfully lower the risk of a partial revert, though comments are not tests.
+
+**Priority order:** fix + test Gap B (latent bug), wire real condensation into the dedup test (Gap A), then C, D, E.
+
+*Note: I temporarily modified `manual_commit_condensation.go`/`manual_commit_hooks.go` to run the Gap A deletion experiment and restored them via `git checkout --`; the worktree is back to PR state (only pre-existing untracked `.codex/agents/` remains).*</result>
+<usage><subagent_tokens>84912</subagent_tokens><tool_uses>28</tool_uses><duration_ms>436299</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a842840d95a81bd14</task-id>
+<tool-use-id>toolu_01NtRJVbTbo6y1Qrunaj2EmP</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/a842840d95a81bd14.output</output-file>
+<status>completed</status>
+<summary>Agent "Silent failure hunt PR #1710" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>The investigation is complete. Everything below was verified against HEAD (`9e4217c7a`) of `fix/329-subagent-extract` and the merge-base `7cd6662`.
+
+---
+
+# Error Handling Audit: PR #1710 (subagent token/file extraction, #329)
+
+## What this PR does well
+
+- The new full-transcript parse errors are **propagated, not swallowed** (`cmd/entire/cli/agent/claudecode/transcript.go:406-409`, `481-484`; `cmd/entire/cli/agent/factoryaidroid/transcript.go:376-379`, `440-443`).
+- `SubtractTokenUsage` (`cmd/entire/cli/agent/types/token_usage.go:54-70`) is non-mutating, which matters: `accumulateTokenUsage` aliases `incoming.SubagentTokens` into both `state.TokenUsage` and `state.CheckpointTokenUsage`, and an in-place subtract would have corrupted the session-wide total. This was done correctly.
+- The cumulative-vs-delta semantics are exhaustively documented at every site.
+
+That said, the PR builds a subtraction-based accounting scheme on top of an error-handling foundation that is completely silent, and adds a clamp that converts every accounting bug into a plausible-looking number.
+
+---
+
+## Finding 1 — Subagent transcript read errors are 100% silent, and this PR makes that silence load-bearing
+
+**Severity: HIGH** (loop pattern pre-existing; materially amplified by this PR)
+**Locations:**
+- `cmd/entire/cli/agent/claudecode/transcript.go:427-431` (token loop: `CalculateTokenUsageFromFile` error → bare `continue`)
+- `cmd/entire/cli/agent/claudecode/transcript.go:488-492` (files loop: `ParseFromFileAtLine` error → bare `continue`)
+- `cmd/entire/cli/agent/factoryaidroid/transcript.go:394-397` and `:447-450` (same pattern, `ParseDroidTranscript`)
+
+**Hidden errors.** The only errors these calls can return are file-level (`cmd/entire/cli/transcript/parse.go:57-61`, `factoryaidroid/transcript.go:41-48`): `ENOENT` (expected — subagent not started yet), but also `EACCES`, `EISDIR`, symlink loops, and mid-read I/O errors (all unexpected). All are collapsed into one silent `continue`. There is **no logging call of any kind** — not even `logging.Debug` — despite the claudecode package already importing and using `logging` elsewhere (`discovery.go:39`, `lifecycle.go:211`). A subagent's tokens and modified files simply vanish, and six months from now nobody debugging "checkpoint missing a file the subagent wrote" will find a single log line.
+
+**Why the PR amplifies it — two ways:**
+
+1. **More agents whose files can be gone.** Discovery now scans the full transcript (`transcript.go:406-410`), so on long-running or resumed sessions it finds every subagent since session start — including ones whose `agent-*.jsonl` files Claude Code has since pruned (its `cleanupPeriodDays` transcript cleanup) or that predate a `~/.claude` relocation. Pre-PR, slice-scoped discovery naturally aged those agents out; post-PR each of them is a fresh silent-skip on every single call.
+
+2. **The silence now violates a correctness invariant.** The new replace-semantics (`manual_commit_git.go:367`) plus baseline subtraction (`manual_commit_git.go:137-140`) implicitly require the cumulative snapshot to be **monotonically non-decreasing**. A subagent file that becomes unreadable makes the snapshot silently *shrink*. Consequences, all invisible: `state.TokenUsage.SubagentTokens` (shown by `entire session tokens`, `sessions.go:626-632`) silently drops backwards on the next replace; and `clampSubtract` flattens the now-negative checkpoint delta to 0. Pre-PR the `continue` merely undercounted one turn. Post-PR it corrupts the running total *and* the delta math. The silent skip went from "lossy" to "actively poisoning the new arithmetic."
+
+**Recommendation.** Distinguish `os.IsNotExist` (legitimately expected mid-turn) from everything else, and debug-log both, warn-log the unexpected class:
+
+```go
+agentUsage, err := CalculateTokenUsageFromFile(agentPath, 0)
+if err != nil {
+    if os.IsNotExist(err) {
+        logging.Debug(ctx, "subagent transcript not yet present", slog.String("path", agentPath))
+    } else {
+        logging.Warn(ctx, "subagent transcript unreadable; its tokens will be missing from this checkpoint",
+            slog.String("path", agentPath), slog.String("error", err.Error()))
+    }
+    continue
+}
+```
+
+The interface method lacks a `ctx` parameter; `context.Background()` is acceptable for logging, or plumb `ctx` through when the `Agent` interface is next touched.
+
+---
+
+## Finding 2 — Double-subtraction of the baseline when a step arrives with nil `SubagentTokens`, silently clamped to zero
+
+**Severity: HIGH — introduced by this PR**
+**Location:** `cmd/entire/cli/strategy/manual_commit_git.go:137-140`, masked by `cmd/entire/cli/agent/types/token_usage.go:74-79`
+
+The rescope runs on **every** `SaveStep` where `step.TokenUsage != nil`, but `accumulateTokenUsage` only *replaces* `SubagentTokens` when the incoming snapshot is non-nil (`manual_commit_git.go:366-368`). Trace two steps in one checkpoint window, baseline `B` from the last condensation:
+
+- Step 1: incoming snapshot `S` → accumulate sets `CTU.SubagentTokens = S` → line 138 rescopes to `S − B`. Correct.
+- Step 2: incoming `SubagentTokens == nil` → accumulate **retains** the already-rescoped `S − B` → line 138 subtracts `B` **again** → `clamp((S − B) − B)`.
+
+If `S &lt; 2B` (typical shortly after a condensation) the delta silently becomes **0**; otherwise it's an arbitrary undercount. Either way `clampSubtract` guarantees the corruption looks like a valid number.
+
+**Is nil-after-non-nil reachable?** Yes:
+- All subagent files unreadable this turn (Finding 1's cleanup/permission scenario) → `subagentUsage.APICallCount == 0` → `SubagentTokens` never set (`claudecode/transcript.go:438-440`).
+- Race: a just-spawned subagent's transcript exists but contains no assistant/usage lines yet at stop-hook time → `APICallCount == 0` → nil, while a previous step in the same window already carried a snapshot.
+
+**On the clamp itself.** `clampSubtract` is documented as protection against "a stale or racy baseline" — but it is equally the only thing standing between this exact class of defect and a visible negative number. Flooring at zero for display is defensible; doing it with **zero telemetry** means the one signal that would have exposed this double-subtraction (a negative delta) is destroyed at the source. `types` has no `ctx`/logging access, so detect it at the call site, where strategy has both:
+
+```go
+if step.TokenUsage.SubagentTokens != nil &amp;&amp; state.CheckpointTokenUsage != nil {
+    if state.SubagentTokensBaseline != nil &amp;&amp;
+        state.CheckpointTokenUsage.SubagentTokens.InputTokens &lt; state.SubagentTokensBaseline.InputTokens {
+        logging.Warn(ctx, "subagent snapshot below baseline; delta clamped",
+            slog.String("session_id", sessionID), ...)
+    }
+    state.CheckpointTokenUsage.SubagentTokens = types.SubtractTokenUsage(
+        state.CheckpointTokenUsage.SubagentTokens, state.SubagentTokensBaseline)
+}
+```
+
+Note the fix is the added `step.TokenUsage.SubagentTokens != nil` condition: only rescope when accumulate actually replaced the snapshot. A structurally safer alternative: keep the **raw cumulative** in `CheckpointTokenUsage.SubagentTokens` and subtract the baseline exactly once, at condensation/report time — that makes the operation idempotent by construction instead of by careful step ordering.
+
+The new test (`cmd/entire/cli/strategy/subagent_token_dedup_test.go:515+`) never exercises a nil-`SubagentTokens` step after a non-nil one, so this path is untested.
+
+---
+
+## Finding 3 — The baseline snapshot reads `state.TokenUsage` *after* a pre-existing backfill that strips `SubagentTokens`, silently resurrecting the #329 double-count on real condensation paths
+
+**Severity: HIGH — interaction introduced by this PR (underlying clobber is pre-existing)**
+**Locations:** `cmd/entire/cli/strategy/manual_commit_condensation.go:267-269` + `:738-756` (pre-existing) → poisons the new snapshots at `manual_commit_condensation.go:1216-1218`, `:1342-1344`, `manual_commit_hooks.go:1416-1418`
+
+Inside `CondenseSession`, before any of the new baseline snapshots run:
+
+- `sessionData.TokenUsage` is recomputed with `subagentsDir: ""` (`condensation.go:1024`, `:1066` — both carry a live `//TODO: why do we not use here subagents dir?`), so it **never contains `SubagentTokens`**.
+- `sessionStateBackfillTokenUsage`'s last branch (`:751-753`) applies to **every agent type**, not just Copilot: `if checkpointUsage != nil &amp;&amp; checkpointUsage.InputTokens &gt; 0 { return checkpointUsage }`. Any window with input tokens — i.e., essentially always — fires it.
+- `:268` then does `state.TokenUsage = backfillUsage`, replacing the session state's cumulative usage with a subagent-free, window-scoped value.
+
+Immediately afterwards, the PR's new code snapshots `state.SubagentTokensBaseline = state.TokenUsage.SubagentTokens` — which is now **nil**. Result on the next checkpoint window: `SubtractTokenUsage(cumulative, nil)` returns the **full cumulative subagent total**, i.e., the exact re-reporting bug this PR exists to fix, back in production on the `CondenseSessionByID` / post-commit `condenseAndUpdateState` / `CondenseAndMarkFullyCondensed` paths. No error, no log, and the PR's integration test (`subagent_token_dedup_test.go:599-607`) **simulates the condensation reset by hand with `MutateSessionState`** instead of running `CondenseSession`, so the test suite cannot see it.
+
+**Recommendation.** Snapshot the baseline from a value that is guaranteed to still be the cumulative subagent total — e.g., capture `state.TokenUsage.SubagentTokens` (or the last step's raw snapshot) *before* the backfill at `:268`, or make the backfill preserve `SubagentTokens` when the replacement lacks it. And resolve the two `TODO`s — passing the real subagents dir at `:1024`/`:1066` would fix both this and Finding 5. Add a test that goes through the real `CondenseSession`.
+
+---
+
+## Finding 4 — `if state.TokenUsage != nil` guards at the reset sites; plus the reset that was missed entirely
+
+**Severity: LOW (the guards) / MEDIUM (the adopt gap)**
+
+**The guards** (`condensation.go:1216`, `:1342`, `hooks.go:1416`): if `TokenUsage` were nil, the baseline would silently retain its previous value instead of being cleared. I traced every assignment to `state.TokenUsage` (`manual_commit_git.go:123` accumulate, `condensation.go:268` guarded non-nil, `attach.go:707-708` guarded non-nil): it never transitions non-nil → nil, so "nil `TokenUsage` with a stale non-nil baseline" is unreachable through normal flows — the guard's skip branch only fires when both are nil anyway. Not a live defect, but the invariant ("baseline == cumulative already reported") currently holds only by whole-repo reasoning. Make it hold by construction:
+
+```go
+state.SubagentTokensBaseline = nil
+if state.TokenUsage != nil {
+    state.SubagentTokensBaseline = state.TokenUsage.SubagentTokens
+}
+```
+
+**The missed reset — `cmd/entire/cli/session_adopt.go:473-482`:** the "Reset target-local checkpoint bookkeeping" block clears `CheckpointTokenUsage` (`:482`) but was not updated to handle the new `SubagentTokensBaseline` field, which the shallow clone (`cloneAdoptSourceState`, `:501-504`) carries over from the source session. An adopted session therefore subtracts the *source repo's* last-condensation baseline (or nil, if the source never condensed — re-reporting the source session's entire cumulative subagent usage in the target repo's first checkpoint). Silent, and exactly the kind of cross-cutting field-add that this block exists to catch. It should snapshot `adopted.TokenUsage.SubagentTokens` as the new baseline, parallel to `PromptWindowBase = SessionTurnCount` at `:491`.
+
+---
+
+## Finding 5 — `subagentsDir == ""` early returns: confirmed reachable for sessions that DO have subagents
+
+**Severity: MEDIUM — pre-existing, unchanged in behavior by this PR (the guard was hoisted, correctly, above the new full parse in commit `9e4217c7a`)**
+
+The empty-dir early returns (`claudecode/transcript.go:398-400`, `factoryaidroid/transcript.go:369-371`) are behaviorally identical to the old `&amp;&amp; subagentsDir != ""` condition. But callers absolutely can hit them for subagent-bearing sessions:
+
+- `condensation.go:1024` and `:1066` pass `""` at condensation time (the `TODO`s) — so **condensed checkpoint metadata token usage silently omits subagent tokens** on the normal path; the PR's carefully rescoped `CheckpointTokenUsage.SubagentTokens` only reaches metadata via the `!hasTokenUsageData` fallback at `:271-273`, which a normal window (with main-agent tokens) never takes.
+- `claudecode/lifecycle.go:109-111` and `factoryaidroid/lifecycle.go:151-153` hardcode `""` for the plain `TokenCalculator` interface (only used by non-subagent-aware fallbacks/diagnostics — acceptable, but undocumented at the call sites).
+
+The hot paths are safe: `lifecycle.go:780` and `hooks.go:1944` always construct a non-empty dir; `review/manifest.go:442-445` returns `""` only when `TranscriptPath`/`SessionID` are empty (no subagents resolvable anyway).
+
+---
+
+## Finding 6 — The propagated full-parse errors are effectively dead code; the *real* silent failure is inside the parser
+
+**Severity: LOW (informational)**
+
+`transcript.ParseFromBytes` (`cmd/entire/cli/transcript/parse.go:17-45`) and `ParseDroidTranscriptFromBytes` (`factoryaidroid/transcript.go:56-91`) **silently skip malformed JSON lines** (`parse.go:36`: `if err := json.Unmarshal(...); err == nil`) and can only error on reader failure — impossible for an in-memory `bytes.Reader`. Two consequences:
+
+1. The new `failed to parse full transcript` error paths are unreachable in practice — fine as defensive code, but reviewers should not credit them as the safety net. (Had they been reachable, note the failure mode: the error bubbles to `agent.CalculateTokenUsage` at `cmd/entire/cli/agent/token_usage.go:20-24`, which debug-logs and returns nil — discarding the already-computed main-agent usage — and to `lifecycle.go:788-791`, which warn-logs and drops the already-extracted main-agent file list. Partial results discarded on subagent-side failure.)
+2. The converse is the actual silent failure: a truncated or garbled transcript line containing a Task spawn marker is dropped by the parser with no signal, the subagent is never discovered, and its tokens/files vanish — indistinguishable from "no subagents." Pre-existing, but this PR's whole premise (full-transcript discovery as the source of truth) leans harder on it. A debug-level counter of skipped lines in the parser would make this diagnosable.
+
+---
+
+## Summary table
+
+| # | Severity | Introduced/Pre-existing | Location | Issue |
+|---|----------|------------------------|----------|-------|
+| 1 | HIGH | Pre-existing pattern, amplified | claudecode/transcript.go:427-431, 488-492; factoryaidroid/transcript.go:394-397, 447-450 | Bare `continue` on subagent read errors, zero logging; silence now breaks the monotonicity the new math requires |
+| 2 | HIGH | Introduced | manual_commit_git.go:137-140; types/token_usage.go:74-79 | Baseline subtracted twice when a step has nil SubagentTokens; clamp converts it to a silent 0 |
+| 3 | HIGH | Interaction introduced (clobber pre-existing) | condensation.go:267-269, 751-753 → 1216-1218, 1342-1344; hooks.go:1416-1418 | Backfill strips SubagentTokens before the baseline snapshot → baseline nil → #329 double-count resurrected, untested |
+| 4 | LOW / MEDIUM | Introduced (adopt gap) | condensation.go:1216, 1342; hooks.go:1416; session_adopt.go:473-482 | Guards preserve rather than clear; adopt carries stale baseline across repos |
+| 5 | MEDIUM | Pre-existing | condensation.go:1024, 1066 (TODOs) | Condensed metadata recomputed with `""` subagentsDir — subagent tokens silently absent from checkpoint metadata |
+| 6 | LOW | Pre-existing | transcript/parse.go:36; token_usage.go:20-24 | Parser silently drops malformed lines; new error paths are dead code |
+
+The two changes I would block on: Finding 2 (guard the rescope on `step.TokenUsage.SubagentTokens != nil` + warn on clamp) and Finding 3 (snapshot the baseline from a value the backfill can't have stripped, with a test through the real `CondenseSession`). Finding 1's logging is a small diff with outsized debugging value and I'd strongly push for it in this PR, since this PR is what makes those skips corrupting rather than merely lossy.</result>
+<usage><subagent_tokens>123130</subagent_tokens><tool_uses>32</tool_uses><duration_ms>1798366</duration_ms></usage>
+</task-notification>
+
+---
+
+yes
+
+---
+
+are you applying as comments to the trail or trying to fix?
+
+---
+
+yes comments only
+
+---
+
+can you run /review and /pr-review-toolkit:review-pr on https://entire.io/gh/entireio/cli/trails/833/fix-redact-catch-supabase-sb-secret-keys-1716 please
+
+---
+
+<task-notification>
+<task-id>adf860c4cbb3c6998</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/adf860c4cbb3c6998.output</output-file>
+<status>completed</status>
+<summary>Agent "Test coverage review PR #1726" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have everything I need. Final verification state: worktree restored to HEAD (only pre-existing stray files from another session remain untouched), all PR tests green, integration test passes.
+
+---
+
+# Test Coverage Analysis: PR #1726 — Supabase provider-token redaction
+
+## 1. Summary
+
+Coverage quality is **high**. The test suite is behavior-focused, uses low-entropy probe fixtures that provably isolate the new layer (entropy assertions guard fixture validity in-test), pins both directions (redaction and over-redaction guards), documents the accepted false-positive tradeoff as an executable test, and includes a full-lifecycle integration test with capture-control methodology. I verified the core wiring empirically via mutation testing — it is well covered. Two genuine gaps survived mutation testing: the **charset's hyphen** and the **sbp_ length floor** are unpinned; a plausible "tidy the regex" refactor removing `-` from the body charsets passes every test in the PR while silently reopening the under-redaction hole for real base64url keys.
+
+## 2. Critical Gaps
+
+**None at 8-10.** The one gap that could reach production (charset hyphen) is rated 7 because real current key bodies usually contain a hyphen-free 20-char prefix run, limiting live exposure — but see below.
+
+## 3. Important Improvements
+
+### 3.1 Charset hyphen is unpinned — mutation escapes (rating: 7)
+
+**Verified empirically.** I mutated `redact/providers.go:59-60` from `[A-Za-z0-9_-]` → `[A-Za-z0-9_]` (both patterns) and **all PR tests pass**. No fixture body in `redact/redact_test.go` contains a `-`:
+- `probe_20260710_7f91c2d8e4a6b3f0` (no hyphen)
+- `REDACTED` — the "real-shaped mixed-case body" at redact_test.go:~357 (no hyphen)
+- sbp probe `test_probe_20260710_test_probe_2026071` (no hyphen)
+
+Failure this would catch: real Supabase key bodies are base64url (`[A-Za-z0-9_-]`). Under the mutated regex, a key with a hyphen before body position 20 stops matching early and, because the pre-hyphen run is &lt;20 chars, **leaks entirely raw** — and by the PR's own premise (entropy ~4.2 &lt; 4.5, composite betterleaks rule not firing), no other layer backs it up. That is precisely the issue-#1716 failure mode recurring.
+
+Recommendation: add one positive case per pattern with a hyphen early in the body, e.g. body `probe-20260710-7f91c2d8e4a6b3f0`, to `TestString_SupabaseProviderTokens` (redact/redact_test.go, cases block starting ~line 368). The mixed-case fixture already pins uppercase (I confirmed by reasoning: a lowercase-only mutation breaks on `9uM4…`), so hyphen is the only unpinned charset member.
+
+### 3.2 Length floor `{20,}` boundary pinned only accidentally, and not at all for sbp_ (rating: 5)
+
+**Verified empirically.**
+- Mutating both floors to `{21,}`: only `TestString_SupabaseProviderTokenLongIdentifierOverRedaction/long_snake_case…` fails — because `key_rotation_handler` happens to be exactly 20 chars. That is an accidental pin inside a test whose stated purpose is the over-redaction tradeoff; rewording that identifier during a future edit silently unpins the boundary.
+- The **sbp_ floor is not pinned at all up to `{27,}`** (its only long fixture body, `something_long_enough_value`, is 27 chars); `{21,}`–`{27,}` mutations of the sbp_ pattern pass everything.
+- Loosening is covered: the `…short` body guards (redact_test.go, `TestString_SupabaseProviderTokenOverRedactionGuards`) catch floors ≤5.
+
+Recommendation: add explicit boundary cases — body of exactly 20 chars → `REDACTED`, exactly 19 → preserved — for **both** patterns, in `TestString_SupabaseProviderTokens` / `…OverRedactionGuards`. I confirmed at HEAD the behavior is correct (20 redacts, 19 preserved, for both prefixes), so these are pure pinning tests. Cheap, and they make the boundary intent explicit rather than an emergent property of an unrelated fixture.
+
+## 4. Candidate gaps: verified/refuted
+
+1. **Layer-order wiring — REFUTED (well covered).** Mutation: deleted the `detectProviderTokens` append at redact/redact.go:230 keeping providers.go intact → 12+ subtests fail across all five positive test functions (unit tests route through `String()` → `detectAllLayers`). Any wiring removal is loudly caught.
+
+2. **Interaction with other layers claiming overlapping regions — VERIFIED WORKING, but untested in the PR (rating: 3).** Probed at HEAD: `REDACTED` → `REDACTED` (whole URI, clean merge); `DB_PASSWORD=&lt;secret&gt;` → `REDACTED`; keyword DSN → `password=REDACTED` — no mangled residue in any case. The region-merge code (`applyRegions`) predates this PR and is unchanged, so this is a nice-to-have pin, not a hole. One case (secret inside a credentialed URI) would suffice if you want it.
+
+3. **Bytes / raw entry points — REFUTED as a gap structurally, VERIFIED empirically.** `Bytes` (redact.go:502) is a trivial wrapper over `String`; `JSONLBytes` (redact.go:513) wraps `JSONLContent`, which has two dedicated PR tests including the malformed-line fallback (`TestJSONLContent_SupabaseSecretMalformedLineFallback` — which specifically targets the raw-line fallback branch at redact.go:602-604, a thoughtful test). Probed both: token redacted. No public entry point bypasses the new layer.
+
+4. **OPF-augmented paths — VERIFIED WORKING, untested for this layer (rating: 2-3).** `StringWithPrivacyFilter` (redact.go:618) calls `detectAllLayers` directly; `JSONLContentWithPrivacyFilter` (redact.go:634) falls back to `jsonlContentImpl(content, String)` when OPF is unconfigured and uses `String`-derived spans otherwise. Probed both unconfigured: token redacted. A divergence would require someone to hand-roll a second layer list, which the current structure makes unlikely. Optional single-assert addition at most.
+
+5. **Edge shapes — mixed.** Exactly-20/19 boundary: correct at HEAD, unpinned (see 3.2). Charset-edge-only body (`----____…`): redacted (matches spec; over-redacts, safe direction; not worth a test). Greediness: `&lt;secret&gt;_and_this_trailing_prose_is_eaten more` → `REDACTED more` — trailing charset-run absorption is exactly the tradeoff already pinned by `TestString_SupabaseProviderTokenLongIdentifierOverRedaction` and documented in providers.go:37-45; adequately covered. `sbp_` uppercase body correctly not matched (per betterleaks lowercase charset) — unpinned but the lowercase choice is deliberate and documented; rating 2.
+
+6. **Integration test — PASSES at HEAD** (`ok … 19.4s`, run with `-count=1`). Assertion quality is **excellent**: (a) capture-control marker must survive, so a zero secret count can't be confused with capture failure (supabase_secret_redaction_test.go:102-105); (b) exact-count `secretCount != 0` over the real `entire/checkpoints/v1` blob, not a mock (lines 97, 106-109); (c) positive `REDACTED` presence check (110-112); (d) over-redaction control — publishable key must survive (113-116); (e) covers both leak vectors from the issue (prompt text + tool input/output) and both lifecycle write points (mid-turn condensation + Stop finalize). This is the model for how redaction integration tests should be written. One nit: the publishable-key check is `t.Errorf` while everything else is `Fatalf` — intentional-looking (soft-fail on the over-redaction control), fine.
+
+## 5. Test Quality Issues
+
+- **Boundary pin lives in the wrong test (fragility, not incorrectness).** As noted in 3.2, the only thing standing between the codebase and a `{21,}` tightening of the sb_secret_ floor is the character count of the identifier `key_rotation_handler` in a tradeoff-documentation test. Move the boundary responsibility into explicit boundary cases.
+- No brittleness or implementation-coupling found otherwise: tests assert on public-API output strings, fixtures are assembled from fragments to stay scanner-safe (redact_test.go, `supabaseSecretPrefix()` et al.), and entropy preconditions are asserted rather than assumed.
+
+## 6. Positive Observations
+
+- In-test fixture validation (`shannonEntropy(low) &gt; entropyThreshold` fatal guard) means the "this layer, not the entropy layer, did the redaction" claim can never silently rot as fixtures change.
+- The anchor-free design decision is pinned three ways: prose (providers.go:47-57), mutation-killing unit tests (`TestString_SupabaseProviderTokenBoundaries` — each case fails if a leading `\b` is reintroduced; the JSON-escape-letter cases are a subtle and realistic shape), and the accepted-tradeoff test. Reversal of the decision cannot happen silently.
+- The malformed-JSONL fallback test targets a genuinely realistic leak path (truncated transcript line) rather than an academic one.
+
+## Recommended additions (all in `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/redact/redact_test.go`)
+
+1. **(7)** Hyphenated bodies: `REDACTED` → `REDACTED`, and an sbp_ equivalent — kills the charset mutation that currently escapes.
+2. **(5)** Explicit 20/19-char body boundary cases for both prefixes (redact + preserve).
+3. **(3, optional)** One cross-layer case: secret inside `REDACTED` → whole-URI `REDACTED`.
+4. **(2, optional)** `sbp_` uppercase-body preserved case to pin the lowercase charset choice.
+
+Verification state: worktree restored to HEAD after mutation probes (`git status` clean except pre-existing untracked `.codex/agents/` and two `zz_audit*_tmp_test.go` scratch files from another session, which I did not create or modify and left in place; they contain no Supabase coverage relevant to the PR and did not affect mutation results). All PR tests re-verified green after restore.</result>
+<usage><subagent_tokens>68553</subagent_tokens><tool_uses>27</tool_uses><duration_ms>358997</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>af48b30182de04f49</task-id>
+<tool-use-id>toolu_015zEM2zpm2Ym2VWvsWBnwgq</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/af48b30182de04f49.output</output-file>
+<status>completed</status>
+<summary>Agent "Silent failure hunt PR #1726" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result># Silent-failure audit — PR #1726 (`fix/1716-redact-supabase-secrets`, HEAD c01083003)
+
+Bottom line: **the PR itself introduces no silent-failure path.** The new provider layer is a pure, always-on regex pass with no error paths, no config gate, and no fallback branch, wired into the single choke point (`detectAllLayers`) that every exported redaction entry point reaches. However, the JSONL walker the layer rides on has **one verified pre-existing silent under-redaction bug** (encoding-mismatch replacement no-op) that defeats the new layer too, plus several deliberate-but-silent skip branches. I verified the leak empirically with throwaway tests (since removed).
+
+---
+
+## Hunt 1 — Entry-point coverage: PASS
+
+Every exported redaction function reaches `detectAllLayers` (and therefore `detectProviderTokens`):
+
+| Entry point | Path to provider layer |
+|---|---|
+| `String` (redact.go:171) | `detectAllLayers` directly |
+| `Bytes` (redact.go:502) | → `String` |
+| `JSONLContent` (redact.go:561) | → `jsonlContentImpl(content, String)` per leaf |
+| `JSONLBytes` (redact.go:513) | → `JSONLContent` |
+| `StringWithPrivacyFilter` (redact.go:618) | `detectAllLayers` + OPF spans |
+| `BytesWithPrivacyFilter` (redact.go:543) | → `StringWithPrivacyFilter` |
+| `JSONLContentWithPrivacyFilter` (redact.go:634) | all three exits use `String` or a `detectAllLayers` closure |
+| `JSONLBytesWithPrivacyFilter` (redact.go:528) | → above |
+| `BatchBytesWithPrivacyFilter` (batch.go:40) | `apply7LayerToBlobs` uses `String`; `applyToBlob` (batch.go:134) uses `detectAllLayers` |
+| `checkpoint.RedactedJoinedPrompts` (checkpoint/prompts.go:31) | → `String` |
+
+The only bypass is `AlreadyRedacted` (redact.go:110), which is bypass-by-design for previously-persisted blobs; all non-test callers I traced (explain.go:1041/1061/1449/1723, persistent.go:1143, condensation.go:623) feed it data that came out of a redacting write path. No exported function skips the new layer.
+
+**MEDIUM (pre-existing, not this PR): `getDetector` swallows init failure with zero logging** — redact.go:119-128. If `detect.NewDetectorDefaultConfig()` errors, layer 2 (betterleaks, 260+ patterns) silently vanishes for the process lifetime: no log, no error, no user feedback. The PR's doc edit re-asserts "The six secret-detection passes above are **always on** and cannot be disabled" (docs/security-and-privacy.md), which this code path can silently falsify. One `logging.Warn`/`slog.Warn` in the `sync.Once` would fix it. Note the new provider layer is *immune* to this failure mode (no init, no config) — good design.
+
+## Hunt 2 — JSONL walker fallback/skip branches
+
+**HIGH (pre-existing, inherited by the new layer): `applyJSONReplacements` silently no-ops on raw-encoding mismatch — secret reaches output with nil error and no log.** redact.go:703-727 / 733-770. The walker redacts the *decoded* leaf, then substitutes `jsonEncodeString(original)` into the raw text via string match. When the raw file encodes the leaf differently than Go's encoder — `\/` (solidus escape), `\u00e9` (Python `json.dumps` `ensure_ascii=True`), `\u003c` (Go HTML escaping) — the match fails, `strings.ReplaceAll`/`replaceKeyedJSONValue` find nothing, and the function returns success with the secret intact. Verified:
+
+```
+{"text":"a\/b then sb_secret_AbC…"}        → leaked, nil error
+{"text": "caf\u00e9 \u003ckey\u003e sb_secret_AbC…"} → leaked, nil error
+```
+
+Because the line parsed as valid JSON, the malformed-line fallback (`redactor(line)`, redact.go:602-604 — which *would* catch it) never runs. This is exactly the failure class this PR exists to close (low-entropy secret, no other layer as backstop), just one branch over. Recommend a follow-up: count landed replacements and fall back to whole-line `String()` (or at least `logging.Warn`) when a collected replacement finds zero occurrences. Not introduced by this PR, but the PR's threat model makes it worth filing.
+
+**MEDIUM (pre-existing, deliberate): skip lists pass secrets through unexamined.** Verified leaks via `JSONLContent`:
+- `shouldSkipJSONLField` (redact.go:831-850): a Supabase secret as the value of `signature`, any `*id`/`*ids` key (e.g. `session_id`), or `path`/`cwd`/`dir`/… passes through raw — including entire *subtrees* under those keys, since `walk` is never called on the child.
+- `shouldSkipJSONLObject` (redact.go:853-856): `{"type":"image","note":"sb_secret_…"}` — *all sibling fields* of an image-typed object are skipped, not just the base64 payload.
+- Keys are never redacted (redact.go:794-823 walks values only): `{"sb_secret_…":"value"}` leaks the key.
+
+These are documented design trade-offs (ID-corruption avoidance), but they are silent — nothing records "N leaves skipped." Pre-existing; the PR neither introduces nor worsens them, but its docs now promise deterministic prefix redaction "regardless of … surrounding context," which these branches qualify.
+
+Non-string leaves (numbers/bools) are a non-issue — the provider charset can't survive JSON number/bool syntax. The malformed-line fallback correctly applies the full `String()` pipeline (covered by the PR's tests). No size caps exist in the walker.
+
+## Hunt 3 — Condensation call paths: PASS (all fail closed or fall back to *stricter* redaction)
+
+- `strategy/manual_commit_condensation.go:487-492` (`redactSessionTranscript` → `redactSessionJSONLBytes` at :117): error **aborts** the checkpoint write with a wrapped error. Good.
+- `strategy/manual_commit_hooks.go:2888-2896` (finalize): on redact error, **drops the transcript entirely** (`redact.RedactedBytes{}`) and logs `Warn` — fail-closed in the privacy direction (loses data rather than leaking it), and logged. Acceptable.
+- `checkpoint/persistent.go:487-490, 1031-1036` and `ephemeral.go:375-379`: error **aborts** with wrapped error. Good.
+- `persistent.go:546-556` / `ephemeral.go:446-455` (subagent transcripts): on JSONL error, falls back to `redact.Bytes` — the fallback is still the full 8-layer pipeline, just not field-aware, and it logs `Warn`. Not a leak.
+- `persistent.go:2336-2362` (`RedactBlobBytes`): same fall-through to `redact.Bytes`. Safe. (Nit: the comment "JSONL parse failed" is inaccurate — `jsonlContentImpl` never errors on parse failure, only on encode failure; parse failures are handled internally.)
+- Pre-push OPF rewrite `manual_commit_opf_rewrite.go:324-328`: batch error → `OPFRuntimeFailedError`, **push aborts**. Fail-closed as documented.
+- `attach.go:346-350`, `agentimport/agentimport.go:157-160`: propagate. Good.
+
+Caveat: `JSONLBytes`'s error path is nearly dead code (only `jsonEncodeString` of an already-decoded string can fail) — the real hazard is the Hunt-2 nil-error no-op, which none of this error handling can see.
+
+## Hunt 4 — `applyRegions` overlap merging: PASS (verified)
+
+redact.go:254-290. Regions are sorted by start (larger-end first on ties) and merged whenever `r.start &lt;= last.end`, extending `last.end`; the merged span is replaced wholesale. I verified directly that a partial overlap ([2,10) + [5,15)) produces `01REDACTEDFGHIJ` — no `REDACTED`+secret-tail is possible from overlapping layers. Additionally, the provider charset `[A-Za-z0-9_-]` is a strict subset of the entropy candidate charset `[A-Za-z0-9+_=-]`, so a provider match can never extend past an entropy candidate run in the first place. The end-to-end case (`ZxQ9` + secret + `9kPw` glued) collapses to a single `REDACTED`. Label mixing on merge keeps the first region's label but never shrinks coverage. No issue.
+
+## Hunt 5 — Custom rules config: acceptable, not touched by this PR
+
+`ConfigureCustomRules` (redact/custom.go:48-83): invalid inline patterns and pack rules are **logged via `slog.Warn` (with `component=redaction`) and dropped** — degradation, but not silent. The PR only renumbers this layer in docs; behavior untouched. No action.
+
+## Doc/comment drift introduced by the PR's renumbering (LOW)
+
+The PR renumbers layers in redact.go, CLAUDE.md, and docs/security-and-privacy.md but missed sibling files, leaving the codebase internally inconsistent about layer counts — confusing for exactly the kind of audit this file family invites:
+- `redact/batch.go:31, 37, 133, 148, 151` — "7-layer", "the 7 regex layers", `apply7LayerToBlobs` (now 8 regex layers).
+- `strategy/manual_commit_condensation.go:108-113` and `checkpoint/prompts.go:27` — "7-layer redaction pipeline" / "7-layer blobs … produces 8-layer commits" (now 8/9).
+- `checkpoint/persistent.go:2331-2333` — "the full 8-layer pipeline (including OPF) … otherwise the 7-layer pipeline."
+
+## Housekeeping note
+
+The working tree contains an **uncommitted** modification to `cmd/entire/cli/integration_test/supabase_secret_redaction_test.go` (adds a `highEntropy` control token to the prompt) that is not in HEAD c01083003 and is not mine — likely another session's in-progress work in this shared worktree. My review covers committed PR content only.
+
+## Verdict
+
+- **PR-introduced silent failures: none.** The layer is unconditional, error-free, reaches every entry point, and merges safely.
+- **Worth filing as follow-ups (pre-existing, verified):** the `applyJSONReplacements` encoding-mismatch nil-error leak (HIGH — directly undermines this PR's guarantee for transcripts written with `\uXXXX`/`\/` escapes), and the unlogged `getDetector` init swallow (MEDIUM — contradicts the "cannot be disabled" doc claim the PR re-asserts).
+- **Cheap fix to include in this PR:** the stale "7-layer" comments in batch.go / condensation.go / prompts.go / persistent.go, since the PR already took on the renumbering.</result>
+<usage><subagent_tokens>95530</subagent_tokens><tool_uses>24</tool_uses><duration_ms>356710</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a093db43d4e34402b</task-id>
+<tool-use-id>toolu_01B8amMQW2abLMdUHG1awg1c</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/a093db43d4e34402b.output</output-file>
+<status>completed</status>
+<summary>Agent "Comment accuracy review PR #1726" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result># Comment Analysis Report — PR #1726 (fix/1716-redact-supabase-secrets)
+
+## Summary
+
+Analyzed every comment surface in the PR diff: the `providers.go` header block, renumbered layer lists in `redact.go`, test doc comments in `redact_test.go`, the integration test methodology comment, and the layer-count updates in `docs/security-and-privacy.md` and `CLAUDE.md`. All quantitative claims were verified against the vendored betterleaks v1.5.0 source and by executing the package's own `shannonEntropy` formula and the actual regexes. Most claims are accurate and unusually well-grounded. Two factual errors were found (one wrong causal explanation, one example string that doesn't match the regex it illustrates), plus a significant consistency gap: commit e6d8f516d renumbered layers in only 3 files while ~25 layer-count references elsewhere in the codebase now carry the old numbering.
+
+## Critical Issues
+
+**1. The `sbp_` betterleaks miss is attributed to the composite rule — that explanation is wrong for `sbp_`**
+
+- Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/redact/providers.go:11-15` and `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/redact/redact_test.go:347-352`
+- Issue: `providers.go:11` says "The betterleaks layer misses **these** in isolation" — "these" covers both `sb_secret_` and `sbp_` — and explains it via the composite `RequiredRules: supabase-project-url` rule. The test doc at `redact_test.go:349-352` is more explicitly wrong: it states `sbp_` personal access tokens are "missed by … the betterleaks Supabase rule (a composite rule that only fires when a *.supabase.co URL is co-present)." Verified against `betterleaks@v1.5.0/cmd/generate/config/rules/supabase.go`: only `supabase-project-api-key` (`sb_secret_`) is composite. The `sbp_` rule (`supabase-management-token`) has **no** `RequiredRules` and fires standalone; it misses tokens for entirely different reasons — an exact-40-char body regex (`sbp_[a-z0-9_-]{40}`), an entropy filter (`entropy &lt;= 3.5` discards), and a two-digit minimum. A real high-entropy `sbp_` token captured in isolation **is** caught by betterleaks, directly contradicting "A secret captured on its own therefore passes straight through" for that prefix. Related nuance: the fixture at `redact_test.go:409` is named "(low entropy, betterleaks misses)", but its full-token entropy is 3.598 (&gt; the 3.5 filter) and it has digits — betterleaks misses it because its body is 38 chars, not 40, i.e. by length, not entropy.
+- Suggestion: Split the explanation per prefix. For `sb_secret_`: composite rule + entropy filter (accurate as written). For `sbp_`: standalone rule that requires exactly 40 lowercase body chars, entropy &gt; 3.5, and ≥ 2 digits — the provider layer adds coverage for low-entropy, digit-poor, or non-40-length variants. Update `providers.go:11-15`, the `TestString_SupabaseProviderTokens` doc comment, and the `sbp_` case name.
+
+**2. The `libsbp_something_long` false-positive example does not actually match the pattern**
+
+- Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/redact/providers.go:41`
+- Issue: The over-redaction note (added in d929dae6d) gives `libsbp_something_long` as an example of a mid-word identifier that gets redacted. Verified by running the regex: the body after `sbp_` is `something_long` — 14 chars, below the `{20,}` floor — so it is **not** matched. The comment's own example contradicts the documented behavior. (The other example, `REDACTED`, matches with a body of exactly 20 chars; the corresponding test at `redact_test.go` uses the longer `libREDACTED` shape, which does match.)
+- Suggestion: Replace with the test's input, e.g. `libREDACTED`, so the example is executable-true and stays aligned with `TestString_SupabaseProviderTokenLongIdentifierOverRedaction`.
+
+**3. Layer renumbering was applied to only 3 files; ~25 references elsewhere now state wrong counts**
+
+- Location: e6d8f516d updated `redact/redact.go`, `docs/security-and-privacy.md`, and `CLAUDE.md:586` — but the same ordinals appear throughout the codebase and were not touched. Now-stale examples (old "7-layer" pipeline is now 8; OPF "8th layer"/"8-layer" is now 9th):
+  - `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/strategy/common.go:445` — "opt-in 8th layer"
+  - `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/strategy/manual_commit_opf_rewrite.go:93` — a **runtime error string**: "aborting push so 7-layer content isn't tagged as 8-layer-applied"
+  - `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/trailers/trailers.go:54` — "OpenAI Privacy Filter (8-layer pipeline)"
+  - `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/settings/settings.go:287`; `checkpoint/prompts.go:26`; `checkpoint/persistent.go:451, 718, 2257-2261, 2284-2289, 2331`; `strategy/manual_commit_opf_prompt.go:24-25`; `strategy/manual_commit_hooks.go:2845-2847, 2898`; `strategy/manual_commit_condensation.go:108-112, 358`; `strategy/manual_commit_push.go:74, 95`; plus test doc comments in `checkpoint/prompts_test.go:31`, `checkpoint/checkpoint_test.go:4698`, `checkpoint/persistent_opf_trailer_test.go:21-26`, `trailers/trailers_test.go:354`, `strategy/manual_commit_opf_rewrite_test.go:659`.
+- Issue: The PR-touched files are internally consistent (8 regex layers, OPF ninth), but they now actively disagree with every other layer-count comment in the tree. Anyone reading `trailers.go` or the pre-push error message gets numbers the PR's own docs contradict.
+- Suggestion: Either sweep the remaining references, or — better — de-numerify: `detectAllLayers`'s new phrasing "the final, network-backed layer" (`redact.go:175-179`) shows the rot-resistant pattern. Prefer "the always-on regex pipeline" / "the OPF pass" over ordinals everywhere they don't need to be a numbered list. This PR is itself the proof of how expensive ordinal comments are: adding one layer required edits in 3 files and missed ~25 more.
+
+## Improvement Opportunities
+
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/redact/redact.go:161` — "betterleaks regex rules (260+ known secret formats)": vendored v1.5.0 ships 325 rules. "260+" is technically true but stale (pre-existing text, merely renumbered by this PR). Consider "300+" or dropping the count.
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/redact/redact.go:175` — "eight always-on/opt-in regex-based redaction layers": layer 1 is entropy scoring (regex candidate scan + entropy math), so "regex-based" is a loose family label; acceptable as a contrast with the network-backed OPF, but "in-process" would be more precise. Pre-existing phrasing.
+- `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/docs/security-and-privacy.md:19-27` vs `redact.go:157-165` — the docs number bounded-credential detection as pass 6 and custom rules as pass 7; the code runs custom rules as layer 6 and bounded-credential as layer 7. Neither claims execution order, and the mismatch predates this PR, but now that both use explicit numerals, a future reader cross-referencing them will trip. Worth aligning or de-numbering while in the area.
+
+## Recommended Removals
+
+None. The d929dae6d trim was well-judged: it removed the issue-#1716 narrative and PR-review restatements while keeping every load-bearing constraint (composite-rule dependency, publishable-key rationale, unanchored-prefix justification), and it correctly replaced the trimmed "mid-word collision is vanishingly unlikely" claim — which was in tension with reality — with an honest, test-pinned false-positive class. The only defect in the new text is the example string (Critical Issue 2).
+
+## Positive Findings
+
+- **Entropy claims are exactly right and self-verifying.** Computed with the package's own `shannonEntropy`: the probe token measures 4.1988, matching both the `// entropy 4.199` annotation (`redact_test.go:356`) and issue #1716's reported value (confirmed against the actual issue). Better still, `redact_test.go:360-365` asserts the below-threshold property at runtime, so the comment cannot silently rot.
+- **Character-count and charset claims verified against betterleaks source**: `sb_secret_[A-Za-z0-9_-]{31}` (31-char mixed-case body) and `sbp_[a-z0-9_-]{40}` (40-char lowercase) match `providers.go:31-33` exactly. The `realSecret` fixture is literally betterleaks' own true-positive example value.
+- **"betterleaks ships no publishable-key rule" verified**: no Supabase publishable rule exists in v1.5.0's ruleset.
+- **The fa1d633ce correction is accurate.** The old comments claimed quotes "break the token" for the entropy layer; the corrected text ("quoting has no effect on secretPattern matching") is right — `secretPattern` is `[A-Za-z0-9+_=-]{10,}`, which excludes quote characters, so the candidate is the bare token either way and the miss is purely the token's own entropy.
+- **The unanchored-prefix justification (`providers.go:47-61`) is sound and test-pinned**: the `\b`-after-word-char failure mode and the JSONL raw-line fallback scenario (`jsonlContentImpl` on unparseable lines) are both real code paths, each covered by `TestString_SupabaseProviderTokenBoundaries` and `TestJSONLContent_SupabaseSecretMalformedLineFallback`.
+- **The integration test's attribution claim holds** (`supabase_secret_redaction_test.go:13-30`): no `*.supabase.co` URL is co-present (composite rule can't fire), the token is below the entropy threshold, and `SUPABASE_SERVICE_ROLE_KEY` cannot match `dbPasswordKeyShape` (requires a db-vendor prefix + password/passwd/pwd suffix) — so redaction really is attributable to the new provider layer. The capture-control methodology comment accurately mirrors the issue.
+- **`detectAllLayers`'s rewritten doc (`redact.go:175-179`)** replaced "layer 8" with "the final, network-backed layer" — exactly the rot-resistant style the rest of the codebase should adopt (see Critical Issue 3).
+- **The fixture-fragment-assembly rationale (`redact_test.go:337-342`)** correctly cites the existing `openSSHPrivateKeyMarker` precedent (verified at `redact_test.go:27`) and explains a non-obvious "why" that would otherwise look like pointless string concatenation.</result>
+<usage><subagent_tokens>87311</subagent_tokens><tool_uses>21</tool_uses><duration_ms>408373</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a00fcb2a1548ab8e0</task-id>
+<tool-use-id>toolu_01RRzFTpwLNtfj8fRjJ12WPG</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/a00fcb2a1548ab8e0.output</output-file>
+<status>completed</status>
+<summary>Agent "General code review PR #1726" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result># PR #1726 Review — `fix/1716-redact-supabase-secrets`
+
+## What I reviewed
+The exact PR diff (`git diff origin/main...HEAD`): `redact/providers.go` (new provider-prefix layer), `redact/redact.go` (layer wiring + renumbered comments), `redact/redact_test.go` (+228 lines of unit tests), `cmd/entire/cli/integration_test/supabase_secret_redaction_test.go` (new end-to-end regression), and the layer-count updates in `docs/security-and-privacy.md` and `CLAUDE.md`.
+
+I verified the fix functionally: ran the redact unit tests (pass), exercised `redact.JSONLBytes` directly on the integration transcript (secret redacted, publishable preserved), and ran the new integration test 9 times.
+
+## Critical issues
+None confirmed.
+
+One observation worth recording (low confidence, ~25 — below my normal reporting bar, but security-relevant so I'm flagging it): my very first run of `TestSupabaseSecretRedaction_FullHookFlow` failed with a **completely raw** `full.jsonl` (`sb_secret_=3, REDACTED=0`), i.e. no layer redacted anything. Every one of the 8 subsequent runs passed cleanly (`sb_secret_=0, REDACTED=3`, publishable preserved). The single failure coincided exactly with a `git checkout origin/main` / stash dance I had just done (which deletes `providers.go` from the tree), so I attribute it to transient build state in my own environment, not a product defect — `TestMain` rebuilds the binary fresh each run and aborts on build failure, so a stale binary shouldn't be possible. I could not reproduce it in 8 attempts on a clean tree. No action needed unless CI ever shows the same all-raw signature; if it does, it points at the finalize redaction path silently falling back to an empty/raw transcript rather than anything Supabase-specific.
+
+## Important issues
+
+**Incomplete layer renumbering — 8 stale "7-layer" comments + a `apply7LayerToBlobs` function name now describe an 8-layer pipeline** (confidence 88)
+
+The PR correctly renumbered `redact/redact.go`, `docs/security-and-privacy.md`, and `CLAUDE.md` (7→8 always-on layers, OPF 8th→9th). But the same regex-only pipeline is described by "7-layer" language in two sibling files the diff didn't touch, which the renumbering makes inconsistent:
+
+- `redact/opf.go:91, 104, 106, 188` — comments referring to the non-OPF pipeline as "7-layer" / "the 7-layer functions".
+- `redact/batch.go:31, 37, 117, 132` — comments ("falls back to 7-layer", "returns 7-layer-only", "the 7-layer pipeline applied", "combining the 7 regex layers").
+- `redact/batch.go:148/151` — the function `apply7LayerToBlobs` (and its comment) is now a misnomer; it applies 8 layers. Called at `redact/batch.go:46` and `:50`.
+
+These are comment/identifier-only (no functional impact — all three paths route through `detectAllLayers`/`String`, so they DO run the new provider layer), but the task explicitly asked to verify "every 7-layer/8-layer count." Suggest updating the eight comments to "8-layer" and renaming `apply7LayerToBlobs` → `applyRegexLayersToBlobs` (or `apply8LayerToBlobs`) so the codebase's layer vocabulary stays coherent and this doesn't drift further on the next layer addition.
+
+## Suggestions
+
+- `redact/providers.go:52` — the `sbp_` pattern `sbp_[a-z0-9_-]{20,}` is lowercase-only in the body. This mirrors betterleaks and is deliberate, but if Supabase ever issues mixed-case personal-access tokens they'd slip past this deterministic layer (and, being low-entropy, past every other always-on layer too). Fine to keep as-is given it matches the current real format; worth a one-line note next to the `sb_secret_` `[A-Za-z0-9_-]` contrast so the asymmetry reads as intentional rather than a typo. (confidence 40)
+- I did not run the full `golangci-lint` suite (heavy); `gofmt -l` and `go vet ./redact/` are both clean on all changed files, and the code is idiomatic, so I expect lint to pass — but the CLAUDE.md pre-push gate (`mise run lint`) should still be the source of truth before merge.
+
+## Positives
+
+- **The fix is correct and minimal.** `detectProviderTokens` is wired as layer 3 in `detectAllLayers` (`redact/redact.go:230`), so it flows through the single `String` chokepoint — every entrypoint (`String`, `Bytes`, `JSONLContent`, `JSONLBytes`) inherits it. Verified `redact.JSONLBytes` redacts the issue-#1716 repro value while leaving `sb_publishable_` intact.
+- **Region merging is sound.** Provider regions use the empty label like the other secret layers, and `applyRegions` (`redact/redact.go:254`) sorts + unions overlapping extents, so overlap with entropy/betterleaks/PII regions can only ever widen a redaction, never corrupt output.
+- **The "purely additive" OPF claim holds.** Both OPF-augmented per-leaf paths — `StringWithPrivacyFilter` (`redact/redact.go:619-621`) and `applyToBlob` (`redact/batch.go:136-138`) — call `detectAllLayers` before appending OPF spans, so the provider layer is present on the push-time path too. Confirmed by reading `applyToBlob`.
+- **Strong test suite.** The unit tests assert the probe values are genuinely sub-4.5 entropy (`redact/redact_test.go`), proving they isolate the new layer rather than piggy-backing on the entropy layer; boundary tests pin the deliberate no-`\b`-anchor behavior; and `TestString_SupabaseProviderTokenLongIdentifierOverRedaction` pins the accepted over-redaction tradeoff so it can't be silently reversed. The integration test drives the real hook lifecycle and includes a capture-control marker so a zero-secret result can't be a false pass from lost content — good methodology.
+- **The integration test correctly omits `t.Parallel()`.** It matches the established convention in `cmd/entire/cli/integration_test/` (sibling hook-driven tests `image_externalize_test.go`, `codex_image_externalize_test.go`, etc. also skip it), and the file documents why (shared hook subprocess settings/env) — consistent with the CLAUDE.md process-global-state exception.
+- **Layer-count edits within the diff are fully consistent.** Every count in `docs/security-and-privacy.md` (the intro, the always-on/opt-in framing, the OPF section, the retained-content table) and the strategy section of `CLAUDE.md:586` are internally coherent at 6 always-on / 7th custom / 8th PII / 9th OPF.</result>
+<usage><subagent_tokens>105650</subagent_tokens><tool_uses>40</tool_uses><duration_ms>738888</duration_ms></usage>
+</task-notification>
+
+---
+
+yes, but we don't have to do the follow up ones
+
+---
+
+make sure you are on the latest version, nightly of entire please
+
+---
+
+okay now i want to review this one https://github.com/entireio/cli/pull/1712 / https://entire.io/gh/entireio/cli/trails/819 but the issue is that rewind is deprecated, correct?
+
+---
+
+okay now i want to review this one https://github.com/entireio/cli/pull/1712 / https://entire.io/gh/entireio/cli/trails/819 but the issue is that rewind is deprecated, correct? so i think these should be closed and the issue should be closed?
+
+---
+
+now can you run /review and /pr-review-toolkit:review-pr on https://github.com/entireio/cli/pull/1714 and https://entire.io/gh/entireio/cli/trails/820/fix-settings-recognize-local-only-setup-so-hooks-run-after
+
+---
+
+sorry, fix only https://github.com/entireio/cli/pull/1714 and https://entire.io/gh/entireio/cli/trails/821/fix-setup-enable-writes-the-enabled-flag-to-the-resolved
+
+---
+
+<task-notification>
+<task-id>ac00fa86bed63df3d</task-id>
+<tool-use-id>toolu_01Aa2cuDjafiBDoAnp1BXPfZ</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/ac00fa86bed63df3d.output</output-file>
+<status>completed</status>
+<summary>Agent "General code review PR #1714" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Review complete. All relevant unit tests pass, `go vet` on the integration package is clean, and I traced every caller and the settings-package helpers. Here is my report.
+
+---
+
+# PR #1714 Review — `fix/1140-enable-state`
+
+**Scope reviewed:** `cmd/entire/cli/setup.go`, `cmd/entire/cli/setup_test.go`, `cmd/entire/cli/integration_test/issue_1140_enable_state_e2e_test.go` (diff `origin/main...HEAD`, 6 commits).
+
+**Verification performed:**
+- Ran the 10 affected unit tests (`TestRunEnable_*`, `TestRunDisable_*`, `TestSetupAgentHooksNonInteractive_*`, `TestEnableCmd_StrategyFlags...`) — all pass.
+- `go vet -tags integration ./cmd/entire/cli/integration_test/` — clean.
+- Traced `settingsTargetFile`, `setEnabledFlag`/`setEnabledRaw`, `saveEnabledState`, `localExists`, and the settings-package raw helpers.
+
+## Critical issues
+None.
+
+## Important issues
+
+**1. Behavioral change: bare `entire disable` now flips the committed `settings.json`, and there is no `--local` escape hatch** — confidence 82
+`cmd/entire/cli/setup.go:1317-1327` (and the disable command at `:1048-1077`, which exposes only `--project`).
+
+Pre-PR, a bare `entire disable` always wrote `settings.local.json` (`saveEnabledState(..., useProjectSettings=false)` → `SaveEntireSettingsLocal`), creating that gitignored file if absent and leaving the committed `settings.json` untouched. Post-PR it resolves via `settingsTargetFile(ctx, false, useProjectSettings)`: in the common team-repo case (committed `settings.json` present, no local file), it now flips the **committed** `settings.json` to `enabled:false`.
+
+Consequences worth confirming as intended product behavior:
+- A developer who runs `entire disable` to turn Entire off *for themselves* now mutates the shared, committed file. A subsequent `git add .` silently disables Entire for the whole team. This is a real footgun.
+- The `disable` command has no `--local` flag (only `--project`), so there is now **no way** to request a local-only disable — the capability the old bare behavior provided is gone.
+
+This is a deliberate, tested change (the old `TestRunDisable_CreatesLocalSettingsWhenMissing` was intentionally replaced by `TestRunDisable_FlipsProjectSettingsWhenLocalMissing`, `setup_test.go:617`), and the in-code comment at `setup.go:1318-1324` frames it as the symmetric mirror of the #1140 enable fix — which is a defensible direction (enable/disable now round-trip on the same file). But the loss of local-only disable plus the commit footgun should be an explicit product decision. Recommend either adding a `--local` flag to `disable` for symmetry with `enable`, or documenting the new scope-resolution behavior in the disable help text / CLAUDE.md command-layout notes. At minimum, confirm intent before merge.
+
+## Suggestions
+
+**2. Package-name shadowing in `setupAgentHooksNonInteractive` is safe but fragile** — confidence 80 (that it's a readability risk, not a bug)
+`cmd/entire/cli/setup.go:1756` — `settings, err := settings.LoadFromFile(targetFileAbs)` shadows the `settings` package import for the rest of the function.
+
+I confirmed this is **not** a bug: the RHS `settings.LoadFromFile` resolves to the package (a short-var identifier's scope begins after the statement), and no code after line 1756 references the `settings` package — the merged read uses the cli-package alias `LoadEntireSettings` (`:1801`) and `EntireSettingsFile` (`:1788`), not the package. The shadow also pre-existed (`main` had `settings, err := LoadEntireSettings(ctx)`). Tests and `go vet` pass. Still, keeping a local variable named identically to the package it now calls into is a latent trap for the next editor who adds a `settings.X` reference below the shadow. Renaming the local to `targetSettings` (or similar) would remove the hazard at zero behavioral cost.
+
+## Positives / things I verified are correct
+
+- **Scope-comparison reliability (scrutiny #1):** `settingsTargetFile` returns the relative constants `settings.EntireSettingsFile` / `settings.EntireSettingsLocalFile` themselves (`setup.go:332-357`), never an absolute path, so `targetFile == settings.EntireSettingsFile` (`:1129`, `:1326`, `:1788`) is a reliable equality regardless of cwd / worktree subdirectory. All three callers pass the correct flag pair; `runDisable`'s hardcoded `useLocal=false` (`:1326`) is correct because the disable command has no `--local` flag.
+- **File-creation safety (scrutiny #2):** `setEnabledRaw` (`:1367`) loads via `LoadProjectRaw`/`LoadLocalRaw` (which return an empty map on ENOENT) and preserves every existing key, only overwriting `"enabled"`. The project-scope branch of `setEnabledFlag` only touches local when `localExists(ctx)` is true (`:1351`), so it never *creates* the local file unexpectedly and never clobbers unrelated keys. The bare-disable-with-no-files-at-all case creates `settings.json` (not local), consistent with `settingsTargetFile`'s project-default — an edge case, and the correct one given the enable/disable symmetry goal.
+- **CLAUDE.md settings-access rule (scrutiny #4):** `LoadProjectRaw`/`LoadLocalRaw`/`SaveProjectRaw`/`SaveLocalRaw` live in the `settings` package (`settings/settings.go:570-637`) and pre-exist on `main` (settings.go is not in this diff), so the raw read-modify-write path goes through the package as required — no direct `os.ReadFile` of settings files in production code.
+- **`t.Parallel()` (scrutiny #4):** The new unit tests correctly omit `t.Parallel()` because `setupTestDir`/`setupTestRepo` call `t.Chdir()` (`setup_test.go`), which is the documented CLAUDE.md exception (Go panics if `t.Parallel()` precedes `t.Chdir()`). The integration test does call `t.Parallel()` and uses `NewTestEnv` isolation — correct.
+- **Merged-view-for-hooks fix (scrutiny #5, commit b9a5e4667):** `setupAgentHooksNonInteractive` writes the target-scoped struct (`:1788`) but computes `hookLocalDev`/`hookAbsoluteGitHookPath` from `LoadEntireSettings` (merged) plus the `|| opts.X` flags (`:1801-1806`), with a safe fallback to the scoped struct on load error. This correctly prevents a `local_dev` override in `settings.local.json` from being dropped during hook regeneration when the write resolves to `settings.json`, while keeping the write scoped. The leak-fix (commit e1f7e8bb5) and this hook-read fix are internally consistent, and `saveEnabledState`'s asymmetry (project write syncs only `enabled`→local; local write does not sync to project) correctly reflects local-overrides-project precedence.
+- **Test coverage is genuinely strong:** the new tests exercise both leak directions, both merged-view-read and scoped-write invariants, the no-local-file case, the both-files case, and a full end-to-end reproduction of #1140 through the real binary. Each test's doc comment cites the specific finding/line it guards.
+
+**Bottom line:** The fix is correct, well-tested, and CLAUDE.md-compliant. The only thing that needs a decision before merge is item #1 — the changed bare-`disable` scope is a deliberate behavior change that removes local-only disable and can lead to accidentally committing a repo-wide disable; confirm intent and consider a `--local` flag / doc update. Items #2 is optional polish.</result>
+<usage><subagent_tokens>74375</subagent_tokens><tool_uses>21</tool_uses><duration_ms>263935</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a148fb5dccbe2f98f</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/a148fb5dccbe2f98f.output</output-file>
+<status>completed</status>
+<summary>Agent "Comment accuracy review PR #1714" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result># Comment Analysis Report — PR #1714 (fix/1140-enable-state)
+
+**Summary**: I verified every factual claim in the PR's comments against the current code, the pre-change code on `origin/main`, the `settings` package merge implementation, and the actual text of issue #1140. Most of the heavy scope-semantics commentary is accurate — the strategy/checkpoint-backend resolver claim, the runDisable pre-change behavior, the merge-field list, the single-caller scoping contract on `saveEnabledState`, and the `runEnableInteractive` mirror claim all check out. There are two factual problems (one invented symptom, one doc block that contradicts its neighbor), a stale doc comment left on `runEnable`, and significant rot-prone/redundant material.
+
+## Critical Issues
+
+**1. Invented symptom: "`entire status` then still showed disabled" is factually wrong.**
+- Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/integration_test/issue_1140_enable_state_e2e_test.go:16-17`
+- Issue: Pre-fix, the buggy enable wrote `enabled:true` into `settings.local.json`. Because local overrides project in the merged view (`loadMergedSettings`, settings.go:510-536), and both `entire status` and `IsEnabled` read the merged view (`status.go:129`, `config.go:58-64`), status would have shown **Enabled** after the buggy enable — the effective state was correct; only the project file was stale. Issue #1140 itself never claims status showed disabled; the reporter's complaint is the file/output mismatch. The test also asserts nothing about status output, so this sentence overstates both the bug and the test's coverage.
+- Suggestion: Delete the sentence, or replace with the accurate symptom: "leaving the committed settings.json the user disabled still at enabled:false — a confusing mismatch between CLI output and the shared project file (and a repo that reverts to disabled for anyone without the local file)."
+
+**2. `setEnabledFlag` doc contradicts the adjacent `saveEnabledState` doc about what `saveEnabledState` operates on.**
+- Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/setup.go:1336-1338`
+- Issue: "Unlike saveEnabledState, this operates on each file's own raw content rather than the LoadEntireSettings merged view" implies `saveEnabledState` operates on the merged view. But `saveEnabledState`'s own doc (setup.go:1389-1390) says — correctly, verified at its sole remaining call site, setup.go:1788, which loads via `settings.LoadFromFile(targetFileAbs)` — that `s` is *target-scoped*, not merged. The "unlike" clause describes the pre-PR call pattern (callers passing `LoadEntireSettings` output), which no longer exists. A maintainer reading only this doc would conclude `saveEnabledState` is the dangerous merged-write path, the exact opposite of what the fix established.
+- Suggestion: Rephrase the contrast to what actually differs: "Unlike saveEnabledState, which writes a caller-provided struct, this reads and writes each file's raw JSON, so callers never need to load settings at all. It must never be fed the LoadEntireSettings merged view: that view flattens ..."
+
+## Inaccurate / Imprecise (moderate)
+
+**3. `setEnabledFlag` doc overclaims bidirectional sync.**
+- Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/setup.go:1334-1336`
+- Issue: "also updates the other scope's file if it exists, so local/project can't get out of sync" — the code (setup.go:1346-1362) only syncs the other file in the **project-target** branch. When the target is local, an existing project file is left untouched (correct behavior — local overrides — but the files *are* then out of sync). The rewritten `saveEnabledState` doc gets this exactly right ("when writing project settings — also syncs just the 'enabled' key..."); `setEnabledFlag`'s doc should match.
+- Suggestion: "…and, when the target is project, also syncs the key into settings.local.json if it exists so a stale local override can't mask the new value."
+
+**4. `runEnable`'s pre-existing doc comment is now stale (the PR rewrote the body directly beneath it but left the doc).**
+- Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/setup.go:1304-1306`
+- Issue: "Writes to the target file (local by default, project with --project), and also updates the other file if it exists". Two problems: (a) "local by default" no longer describes the enable command — its only caller, `runEnableOnConfiguredRepo` (setup.go:1128-1129), now resolves the scope via `settingsTargetFile`, which prefers an existing project file; (b) "also updates the other file if it exists" is only true in the project direction (same as issue 3). This is the exact kind of comment the PR exists to fix, sitting on the function the PR rewrote.
+- Suggestion: Update to describe the parameter contract: "runEnable sets the enabled flag in the scope selected by useProjectSettings (callers resolve the scope via settingsTargetFile)."
+
+## Rot-Prone References
+
+**5. Hardcoded line-number references to review findings.**
+- Locations: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/setup_test.go:373` ("the finding at cmd/entire/cli/setup.go:1747"), `setup_test.go:616` and `setup_test.go:657` ("the finding at cmd/entire/cli/setup.go:1317")
+- Issue: These line numbers happen to be correct today (1747 is the `settingsTargetFile` call, 1317 is `runDisable`), but they will silently drift with the next edit to a 2500-line file and become misleading anchors. They also reference an ephemeral review "finding," not a durable artifact.
+- Suggestion: Replace with symbol names: "regression test for the scope resolution in runDisable" / "for the target-scoped load in setupAgentHooksNonInteractive". The test bodies plus the #1140 issue number carry all the durable context needed.
+
+**6. Opaque, truncated finding ID.**
+- Location: `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/setup_test.go:330` ("covers finding 019f5185-5be")
+- Issue: This is a truncated review-session ID that resolves to nothing a future maintainer can look up from the repo (unlike `#1140`, which is a durable GitHub anchor). It narrates the review process, not the invariant.
+- Suggestion: Drop the ID; keep the #1140 reference and the behavioral description, which stand alone.
+
+**7. PR-history narration.**
+- Locations: `setup_test.go:331` ("used to load the merged settings view and write it back wholesale"), `integration_test/issue_1140_enable_state_e2e_test.go:38` ("Pre-fix the enabled flag landed in..."), `setup_test.go:613` and `setup.go:1323` ("the mirror image of the #1140 bug fixed for `entire enable`")
+- Issue: "used to" / "Pre-fix" phrasing dates the comments to this PR; in a year, "pre-fix" requires git archaeology to interpret. In regression-test docs some history is legitimately load-bearing, but the framing should be the invariant, with history secondary. The "mirror image of the bug fixed for enable" cross-reference in `runDisable` (setup.go:1323-1324) also breaks if the enable-side comment is ever reworded.
+- Suggestion: Lead with the invariant ("a bare disable must flip whichever settings file already carries the state"), keep `(#1140)` as the anchor, drop "pre-fix"/"used to" framing where the invariant statement makes it redundant.
+
+## Redundancy
+
+**8. The merged-view-vs-target-scoped principle is explained in six places in setup.go alone.**
+- Locations: setup.go:1122-1127 (`runEnableOnConfiguredRepo`), 1318-1324 (`runDisable`), 1334-1345 (`setEnabledFlag`), 1385-1394 (`saveEnabledState`), 1743-1746 and 1792-1800 (twice inside `setupAgentHooksNonInteractive`) — plus restatements in four test doc comments. `#1140` appears five times in setup.go.
+- Issue: Beyond sheer repetition, the pointers are inconsistent: both `setupAgentHooksNonInteractive` comments say "see the comment above saveEnabledState for why," but the fullest statement of the *why* (merged view flattens local overrides; writing it back leaks them) lives on `setEnabledFlag`, not `saveEnabledState` — a reader following the pointer lands on the other direction of the leak. And two pointers to the same comment within one function is noise.
+- Suggestion: Make `setEnabledFlag`'s doc the single canonical explanation (it is the write primitive both paths share, and its doc is already the most complete). Reduce the others to one line each: "write path stays scoped to the target file — see setEnabledFlag" — and keep only the first of the two pointers inside `setupAgentHooksNonInteractive`.
+
+## Verified Accurate (claims I checked and confirmed)
+
+- **setup.go:1122-1123** — "also what strategy/checkpoint-backend updates above use": `updateStrategyOptions` (setup.go:165) and `updateCheckpointBackend` (checkpoint_backend.go:89) both call `settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)` — same resolver, same arguments.
+- **setup.go:1318-1324** — the pre-change bare-disable behavior is exactly as described: origin/main's `saveEnabledState` else-branch unconditionally called `SaveEntireSettingsLocal`, creating a fresh `settings.local.json` with `enabled:false` while the project file stayed `true` (the deleted `TestRunDisable_CreatesLocalSettingsWhenMissing` asserted precisely this).
+- **setup.go:1338-1339** — the merge-field list is correct: `mergeScalarFields` merges `local_dev` and `log_level` (settings.go:953, 971); `mergeStrategyOptions` overlays `strategy_options` per-key (settings.go:1037-1053), and `checkpoint_remote` lives under `strategy_options` (settings.go:1379-1381). One omission, not an error: `Load` also applies a clone-preferences layer (settings.go:517-523), covered by the comment's "...".
+- **setup.go:1388-1390** — `saveEnabledState` has exactly one caller (setup.go:1788, in `setupAgentHooksNonInteractive`), and `s` there is loaded via `settings.LoadFromFile(targetFileAbs)` (setup.go:1756), i.e. genuinely target-scoped. The comment's contract holds. (It is single-caller-fragile, but the doc states the precondition, which is the right mitigation.)
+- **setup.go:1797-1798** — "mirrors runEnableInteractive": confirmed; `runEnableInteractive` loads the merged view (setup.go:1162) and passes `settings.LocalDev` / `settings.AbsoluteGitHookPath` to `InstallGitHook` and `CheckAndWarnHookManagers` (setup.go:1227, 1230), with the same `opts` overlay pattern.
+- **setup_test.go:381** — the `./scripts/entire-dev` prefix claim matches `localDevHookCmdPrefix` in `strategy/hooks.go:28`.
+- Test doc descriptions otherwise match their assertions, including the inline note in `TestRunDisable_BareCommand_FlipsCorrectFileWhenBothExist` correctly attributing the local-file sync to `setEnabledFlag`'s project-scope branch.
+
+## Positive Findings
+
+- **setup.go:1365-1366** (`setEnabledRaw`): a model comment — states exactly what the function does and the one property that matters (preserves every other key), nothing more.
+- **setup.go:1385-1394** (`saveEnabledState`): precise about the one-directional sync ("when writing project settings"), states the caller precondition, and explains the counterfactual harm. This is the phrasing `setEnabledFlag`'s doc should be aligned with.
+- **setup.go:1792-1796**: the hook-install comment documents a genuinely non-obvious silent-drop hazard (local-only `local_dev` vanishing from a regenerated hook script) — high-value "why" commentary that a future refactorer would otherwise break.
+- The `runEnableInteractive` merged-write leak, incidentally, still exists on the interactive path (setup.go:1162 + 1219 write the merged struct to a single target file) — outside this PR's scope, but worth a follow-up issue so the comments' "only the write path needs to stay scoped" story becomes true everywhere.</result>
+<usage><subagent_tokens>102475</subagent_tokens><tool_uses>27</tool_uses><duration_ms>438504</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a6f74efc9ca9ce991</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/a6f74efc9ca9ce991.output</output-file>
+<status>completed</status>
+<summary>Agent "Silent failure hunt PR #1714" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result># Silent-Failure Audit — PR #1714 (fix/1140-enable-state, HEAD 3224beb33)
+
+All findings below were verified empirically by building both this branch and origin/main and running the actual scenarios. File paths are in `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/`.
+
+---
+
+## CRITICAL — 1. Introduced regression: bare `entire disable` hard-fails in a repo without `.entire/`
+
+**Location:** `cmd/entire/cli/setup.go:1325-1326` → `setEnabledFlag` → `settings.SaveProjectRaw` → `saveRaw` (`cmd/entire/cli/settings/settings.go:628-637`) → `jsonutil.WriteFileAtomic` (`cmd/entire/cli/jsonutil/write.go:34`)
+
+The struct-based save path (`settings.Save`/`SaveLocal`, settings.go:1495) does `os.MkdirAll` before writing. The raw path does not — `WriteFileAtomic` goes straight to `os.CreateTemp(dir, ...)`. `runDisable` now resolves "neither file exists" to the project file (`settingsTargetFile`, setup.go:355-356) and writes via the raw path.
+
+**Verified on this branch:**
+```
+$ entire disable        # repo with no .entire/ dir
+failed to save settings: writing project settings: create temp for .../.entire/settings.json:
+open .../.entire/settings.json.795808459.tmp: no such file or directory
+exit=1
+```
+**Verified on origin/main:** same command prints `Entire is now disabled.`, exit 0, creates `.entire/settings.local.json`.
+
+Not silent, but a functional regression with a plumbing-internals error message ("create temp for...") that gives the user no idea what to do. The PR deleted the test that covered exactly this (`TestRunDisable_CreatesLocalSettingsWhenMissing`) and its replacement (`TestRunDisable_FlipsProjectSettingsWhenLocalMissing`) pre-creates `settings.json`, so the regression is untested. `entire disable --project` in a fresh repo hits it too. The same latent gap exists for the pre-existing `SaveLocalRaw` callers (`review/profile.go:555`, `strategy/manual_commit_opf_prompt.go:158`), but those run only in configured repos.
+
+**Fix:** `MkdirAll(filepath.Dir(path), 0o750)` inside `saveRaw` (mirroring settings.go:1495), plus restore a no-settings-files disable test.
+
+---
+
+## CRITICAL — 2. Pre-existing (but rewritten by this PR): unparseable target settings file is silently wiped to defaults
+
+**Location:** `cmd/entire/cli/setup.go:1756-1760`
+
+```go
+settings, err := settings.LoadFromFile(targetFileAbs)
+if err != nil {
+    // If we can't load, start with defaults
+    settings = &amp;EntireSettings{}
+}
+```
+
+`loadFromFile` (settings.go:721-756) errors on corrupt JSON **and on any unknown key** (`dec.DisallowUnknownFields()`, settings.go:735). The defaults are then written back via `saveEnabledState` → `SaveEntireSettings`.
+
+**Verified on this branch:** `.entire/settings.json` containing `strategy_options`, `log_level: DEBUG`, and one unrecognized key; `entire enable --agent claude-code --yes` exits 0, prints "Ready.", and the file afterwards is exactly `{"enabled": true}`. Every user setting destroyed, zero warning. The unknown-field trigger means a settings.json written by a *newer* CLI version gets wiped by an older one running `enable --agent`.
+
+**Pre-existing vs introduced:** verified byte-identical behavior on origin/main — pre-existing. The PR actually *narrows* the blast radius elsewhere (an unknown key in the *local* file no longer poisons the project write, and `enable`/`disable` themselves now go through the raw path which preserves unknown keys — confirmed). But the PR rewrote these exact lines and consciously kept the "can't load → defaults → write back" wipe. Users will be confused when their committed team settings vanish after a routine `enable --agent`.
+
+**Fix:** distinguish `fs.ErrNotExist` (defaults fine) from parse/validation errors (return the error, or at minimum print a warning naming the file and refuse to overwrite it). This is one `errors.Is` away from correct.
+
+---
+
+## HIGH — 3. Introduced: unlogged fallback from merged view to scoped view silently drops `local_dev` from the regenerated git hooks
+
+**Location:** `cmd/entire/cli/setup.go:1801-1804`
+
+```go
+mergedSettings, err := LoadEntireSettings(ctx)
+if err != nil {
+    mergedSettings = settings
+}
+```
+
+**Hidden errors this branch can swallow:** local-file unknown fields (most likely — the raw enabled-write at line 1788 tolerates unknown keys, so execution reaches here), invalid `commit_linking`, merged `SummaryGeneration` validation failures, OPF validation failures, I/O errors.
+
+**Verified on this branch:** project `settings.json` + local `{"local_dev": true, "some_future_key": 1}`; `enable --agent claude-code --yes` installed all git hooks with the release-binary prefix (`command -v entire ...`) instead of `./scripts/entire-dev` — the exact override the surrounding comment says this code exists to preserve. The command does eventually exit 1, but from an unrelated-looking downstream error (`failed to setup strategy: failed to initialize vercel settings: ... unknown field "some_future_key"`) — **after** the wrong hooks are already on disk, and nothing tells the user the hook regeneration ignored their local override. If any future refactor makes the downstream steps tolerant, this becomes fully silent.
+
+**Fix:** this fallback masks the real problem — either return the error (the merged view is loadable in every healthy state; if it isn't, something is genuinely wrong) or at minimum `logging.Warn` + user-visible notice that hook installation is proceeding without local overrides.
+
+---
+
+## MEDIUM — 4. Introduced behavior change, unannounced: bare `disable` with no settings files now materializes committed-scope `settings.json`
+
+**Location:** `cmd/entire/cli/setup.go:1325` (discards `configDisplay`), `setup.go:1330`, default at `setup.go:355-356`
+
+When `.entire/` exists but neither settings file does, `settingsTargetFile` defaults to project scope, so bare `entire disable` now creates `.entire/settings.json` containing only `{"enabled": false}` — a file destined for commit — where main created `settings.local.json`. Output is only `Entire is now disabled.`; the user is never told which file was written, let alone that a new committable file appeared. Note `runDisable` explicitly discards the `configDisplay` string that exists precisely for this purpose (and which `setupAgentHooksNonInteractive` does print at setup.go:1828).
+
+**Fix:** print the target, e.g. `Entire is now disabled (.entire/settings.json).` — the display string is already in hand.
+
+---
+
+## MEDIUM — 5. Partial-write split state in `setEnabledFlag` is surfaced but not actionably
+
+**Location:** `cmd/entire/cli/setup.go:1346-1363`
+
+Project scope writes the project file first, then the local file. **Verified:** with a corrupt `settings.local.json`, `entire enable` exits 1 with `failed to save local settings: parsing local settings: invalid character ...` — but `settings.json` was already flipped to `enabled: true`. The stale local `"enabled": false` override still wins the merge, so the repo remains effectively disabled while the committed file now says enabled. The error names neither file path, doesn't say the project file *was* updated, and doesn't say the local override still masks it. Users will be confused when `entire status` disagrees with the settings.json they can see.
+
+Shape is pre-existing (`saveEnabledState` had the same ordering), but the PR rebuilt this function and could cheaply fix it: **load both raw maps up front (validating both files) before writing either** — that makes the common failure (unreadable/corrupt local) abort before any write. Alternatively, append state guidance to the error.
+
+---
+
+## LOW / notes
+
+- **`targetFile, _ := settingsTargetFile(...)` (setup.go:1128, 1325):** the discarded second return is the display string, **not an error** — no failure is lost. (See finding 4 for why discarding it at 1325 is still a missed message.) Inside `settingsTargetFile`, `paths.AbsPath` errors are silently swallowed (setup.go:342-353), degrading to "default to project" — pre-existing, shared by 5 other call sites.
+- **`targetFileAbs` AbsPath fallback (setup.go:1748-1751):** new copy of the pre-existing pattern in `checkpoint_backend.go:89-95` / `setup.go:165-172`. On AbsPath failure, `LoadFromFile` reads a CWD-relative path — from a subdirectory that scopes the load to the wrong (usually nonexistent) file, feeding finding 2's wipe. In practice `AbsPath` only fails outside a worktree, where earlier steps fail first. Keep an eye on it, but LOW.
+- **Raw round-trip (settings.go:588-637):** invalid JSON fails loudly with a file-labeled error (verified — no empty-map-on-corrupt behavior); values survive verbatim via `json.RawMessage`; `exists` being discarded in `setEnabledRaw` (setup.go:1373) is safe given `loadRaw`'s empty-map contract. Key order is re-sorted alphabetically and formatting normalized on save (verified) — cosmetic diff noise in a committed file, no worse than the pre-PR whole-struct rewrite.
+- **Genuine improvements worth acknowledging:** the raw single-key write preserves unknown/future keys in `enable`/`disable` (verified: nested `checkpoint_storage` survived a disable), and a corrupt settings.json now makes `disable` fail loudly *without* wiping the file. Both are strictly better than main.
+
+## Recommended pre-merge blockers
+
+Finding 1 (missing `MkdirAll` in `saveRaw` — verified user-visible regression) and finding 3 (unlogged merged-view fallback installing wrong hook content). Finding 2 is pre-existing but sits on lines this PR rewrote and is a one-conditional fix to stop wiping user settings files.</result>
+<usage><subagent_tokens>85086</subagent_tokens><tool_uses>26</tool_uses><duration_ms>475169</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a6c104deafc5a0250</task-id>
+<tool-use-id>toolu_01UbtwTjfTLi4FrtDor7Kc8n</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/a6c104deafc5a0250.output</output-file>
+<status>completed</status>
+<summary>Agent "Test coverage review PR #1714" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>The tree is restored to HEAD and all tests pass. Here is the report.
+
+---
+
+# Test Coverage Analysis — PR #1714 (fix #1140: enable/disable settings-scope resolution)
+
+**Method:** diff review + 5 code mutations run against the full `cmd/entire/cli` unit suite, 3 behavioral probes for untested cells, integration test executed at HEAD. Tree verified restored (`git status` clean except pre-existing `.codex/agents/`).
+
+## 1. Summary
+
+Coverage of the three code paths this PR changes is **strong on the disable side and the `--agent` setup path, weaker on the enable-side sync**. Four of five mutations of the new logic were killed by PR tests; one survived (enable-direction local sync). The PR also introduces two untested behavior changes in the "neither settings file exists" cell, one of which is a genuine regression (bare `disable` now errors on a never-enabled repo). Two pre-existing tests were silently hollowed out by the behavior change: they still pass but no longer exercise the scenario their names describe.
+
+Mutation results:
+
+| Mutation | Killed by |
+|---|---|
+| A: revert `runDisable` scope resolution (setup.go:1317) | `TestRunDisable_FlipsProjectSettingsWhenLocalMissing` (setup_test.go:617), `TestRunDisable_BareCommand_FlipsCorrectFileWhenBothExist` (:658) |
+| B: skip local sync in `setEnabledFlag` when `enabled==true` (setup.go:1346) | **SURVIVED — nothing failed** |
+| C: revert merged-view hook install to scoped struct (setup.go:1801) | `TestSetupAgentHooksNonInteractive_UsesMergedViewForHookInstall` (:382) |
+| D: revert `saveEnabledState` local sync to full-struct write (setup.go:1395) | `TestSetupAgentHooksNonInteractive_DoesNotLeakLocalOverridesIntoProject` (:336), `_UsesMergedViewForHookInstall` |
+| E: revert `runEnableOnConfiguredRepo` target resolution (setup.go:1127) | `TestEnableCmd_StrategyFlagsOnDisabledProjectRepo_EnablesProjectFile` (:1455) |
+
+## 2. Verdicts on the six candidate gaps
+
+**Gap 1 — scope-resolution matrix: PARTIALLY VERIFIED.**
+- Bare `disable`, only `settings.json` exists: **COVERED** (refuted as gap). Mutation A confirms `TestRunDisable_FlipsProjectSettingsWhenLocalMissing` fails on revert — it asserts project flipped AND `settings.local.json` not created.
+- Bare `disable`/`enable`, both files exist: covered (`TestRunDisable_BareCommand_FlipsCorrectFileWhenBothExist`; enable via `TestRunEnable_ProjectFlag_DoesNotLeakLocalOverrides`, setup_test.go:711).
+- Bare `disable`, only local exists: **untested cell**, but behavior identical pre/post PR (resolver picks local). Criticality 3.
+- **Neither file exists: VERIFIED GAP, and a real regression.** Probed empirically:
+  - No `.entire/` dir at all: bare `disable` now **fails** with `failed to save settings: writing project settings: create temp for .entire/settings.json: ... no such file or directory`. Pre-PR it succeeded (created `settings.local.json`) because the old struct path `SaveEntireSettingsLocal` does `MkdirAll` (settings/settings.go:791/830) while the new raw path `saveRaw` → `jsonutil.WriteFileAtomic` (cmd/entire/cli/jsonutil/write.go:31) does not. **Criticality 7** — user-facing error on a plausible command (`entire disable` in a never-enabled repo), zero test coverage, and the failure would also hit `setEnabledRaw` any time the target file's directory is missing.
+  - `.entire/` exists but empty: bare `disable` now creates `settings.json` with `enabled:false` (pre-PR: `settings.local.json`). Probably intended per `settingsTargetFile`'s project default (setup.go:355), but untested. Criticality 5.
+- `settingsTargetFile` itself has no direct unit tests — the `TestDetermineSettingsTarget_*` tests (setup_test.go:796–869) test a *different* function, `determineSettingsTarget`. Precedence is covered only transitively. Criticality 4.
+
+**Gap 2 — both-files sync on enable: VERIFIED GAP (mutation B survived).** No test in the package fails if the enable direction of `setEnabledFlag`'s local-sync branch is dropped. Root cause: `TestRunEnable_ProjectFlag_ClearsLocalDisable` (setup_test.go:230) builds its "local disable" via bare `runDisable`, which post-PR flips the **project** file and never creates a local file — the test still passes but no longer tests local-override clearing. Same hollowing affects `TestSetupAgentHooksNonInteractive_ClearsLocalDisable` (:292). The scenario "local has explicit `enabled:false`, project-scoped enable must flip it" (probe C confirmed the code handles it correctly) has **zero** asserting coverage. Key preservation in local after a project-scoped enable IS covered (log_level survives, mutation D). **Criticality 8** — this is the exact "local override wins over re-enable" failure mode the sync exists to prevent.
+
+**Gap 3 — `saveEnabledState` enabled-only sync: COVERED (refuted).** Mutation D killed by two tests; transitive coverage is adequate, no direct unit test needed.
+
+**Gap 4 — merged-view hook install test: REAL COVERAGE (refuted).** It reads the actual `post-commit` hook from `strategy.GetHooksDir` and asserts the `./scripts/entire-dev` prefix (the real `localDevHookCmdPrefix`, strategy/hooks.go:28); mutation C fails it. Minor sub-gap: only the `local_dev` half of the merged read is asserted — a mutation reverting just `hookAbsoluteGitHookPath` to the scoped struct would survive. Criticality 4.
+
+**Gap 5 — integration test doesn't check local file: VERIFIED but low-stakes.** In that flow `settings.local.json` is never created (fresh enable and re-enable both resolve to project; no local exists to sync), so no contradiction can arise — but that's an accident of the flow, not asserted. A one-line "local file absent or enabled:true" assertion in `issue_1140_enable_state_e2e_test.go` would be cheap. Criticality 4.
+
+**Gap 6 — reproduction fidelity: HIGH for steps 1–3, MISSING step 4. Runs green at HEAD** (`PASS 0.79s`, real binary end-to-end). The test faithfully reproduces the issue's core repro: project-configured repo → `disable --project` → bare `enable --checkpoint-remote` → assert project `settings.json`. Fidelity ~8/10. What it does NOT reproduce: the issue's **step 4** — `enable --project --checkpoint-remote` *also* failed for the reporter. That symptom comes from the early-return at setup.go:1114–1120: with the legacy broken state (project `enabled:false`, local `enabled:true` — exactly what pre-fix binaries left behind), `IsEnabled` (merged, local wins) returns true → "already enabled" → the project file is never flipped, even with `--project`. The PR prevents *creating* that state but does not fix *recovering* from it; users upgrading from an affected version can still hit the step-4 symptom verbatim. Untested and unaddressed. Criticality 7.
+
+## 3. Critical Gaps (8–10)
+
+1. **[8] Enable-direction local sync is mutation-invisible** (setup.go:1352–1356). Add to setup_test.go:
+   `TestRunEnable_ProjectScope_ClearsExplicitLocalDisable`: `writeSettings(disabled)`, `writeLocalSettings('{"enabled": false, "local_dev": true}')`, `runEnable(ctx, w, true)`, assert `IsEnabled()==true` and local file contains `"enabled": true` plus retained `local_dev`. (My probe version of exactly this test was the *only* test in the package that caught mutation B.) Also repair the hollowed tests at setup_test.go:230 and :292 by seeding local explicitly via `writeLocalSettings` instead of relying on bare `runDisable`.
+
+## 4. Important Improvements (5–7)
+
+2. **[7] Bare `disable` with no `.entire/` dir errors** — decide the intended behavior (no-op with message, or create the file) and pin it with a test; if file creation is intended, `setEnabledRaw`/`saveRaw` needs `MkdirAll` (compare settings/settings.go:830). Currently: `TestRunDisable_NoSettingsFiles` would immediately expose the regression.
+3. **[7] Legacy-state recovery (`enable --project` on project-false/local-true)** — add `TestEnableCmd_ProjectFlag_OnLegacySplitState_FlipsProjectFile`: seed project `enabled:false` + local `enabled:true`, run `enable --project`, assert project file flipped. This currently fails against HEAD (early-return at setup.go:1114), so it's a bug-documenting test — worth raising with the author since the issue's step 4 explicitly reports it.
+4. **[5] Neither-file bare disable writes `settings.json`** — pin the new default-to-project behavior with an assertion (extends #2's test).
+
+## 5. Test Quality Issues
+
+- `TestRunEnable_ProjectFlag_ClearsLocalDisable` (setup_test.go:230) and `TestSetupAgentHooksNonInteractive_ClearsLocalDisable` (:292): **silently degraded** by this PR — their setup (`runDisable` bare) no longer creates the local file, so "ClearsLocalDisable" tests a scenario that no longer occurs. They pass vacuously. This is precisely why mutation B survived.
+- `TestSetupAgentHooksNonInteractive_UsesMergedViewForHookInstall` asserts only the `local_dev` half of the merged read; `absolute_git_hook_path` (setup.go:1806) is untested.
+
+## 6. Positive Observations
+
+- The two new disable tests and the enable-cmd test are genuine regression guards — each new code path in `runDisable`, `runEnableOnConfiguredRepo`, and `saveEnabledState` fails at least one test when reverted (mutations A, D, E).
+- The merged-view hook test asserts real artifact content (the installed hook script), not implementation details — resilient and behavior-focused.
+- The integration test drives the real binary through the issue's exact command sequence and asserts the file the user actually cared about; excellent fidelity for steps 1–3 and it passes at HEAD.
+- Test comments consistently link findings/issue numbers to the code lines they guard — good DAMP practice.
+
+**Key files:** `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/setup.go` (fix), `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/setup_test.go` (unit tests), `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/integration_test/issue_1140_enable_state_e2e_test.go` (integration), `/Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review/cmd/entire/cli/jsonutil/write.go:31` (missing-dir regression root cause).</result>
+<usage><subagent_tokens>96088</subagent_tokens><tool_uses>43</tool_uses><duration_ms>669886</duration_ms></usage>
+</task-notification>
+
+---
+
+yes please
+
+---
+
+okay now let's review an old PR, https://github.com/entireio/cli/pull/1127, this one, you will have to look at other work that has been done for entire auth token and auth in general, like this one si really old so let's have a good look at this one
+
+---
+
+I closed the PR, but do you see on the issue, there was another comment?
+
+---
+
+so I just closed the PR, but what do you think needs to be done for this issue to be resolved?
+
+---
+
+Should we just do this now then? the first, then the second, then maybe third it seems easy
+
+---
+
+<task-notification>
+<task-id>blednwuhl</task-id>
+<tool-use-id>toolu_01A61AWFXkwVfX2wpw7vfQJX</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/blednwuhl.output</output-file>
+<status>completed</status>
+<summary>Background command "Full pre-commit gate: fmt, lint, test:ci" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+okay can you run /review and /pr-review-toolkit:review-pr on the changes please first
+
+---
+
+<task-notification>
+<task-id>ab4cc41bf35001446</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/ab4cc41bf35001446.output</output-file>
+<status>completed</status>
+<summary>Agent "Code review local #1036 fix" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have everything I need. Build, vet, and the relevant tests all pass. Let me compile the review.
+
+## Code Review: `fix/1036-headless-login-hint` (fccb6edb3 + f208a3623)
+
+**Scope reviewed:** `git diff origin/main..HEAD` — 10 files. Verification run: `go build ./...` (pass), `go vet` on all touched packages (pass), `go test ./internal/entireclient/tokenstore/... ./cmd/entire/cli/auth/...` (pass), and the new tests `TestPersistLogin_*` + `TestRunAuthStatus_FileTokenStoreProvenance` (all pass).
+
+### Critical
+None.
+
+### Important
+
+**1. README troubleshooting callout references an error string the CLI never emits**
+`README.md` (Headless &amp; CI Authentication, the blockquote near the end of the new section)
+
+The callout tells users: *"Seeing `save auth token` / `failed to unlock correct collection` errors from `entire login`?"* I grepped the entire non-test codebase: `save auth token` is produced nowhere. The actual failure message on this path is `save login: store refresh token in keyring: &lt;keyring error&gt;` (`login.go:331` → `contexts.go:99`/`:107`). So a headless user hitting the keyring failure and grepping the README for their exact error text (`save login` / `store ... token in keyring`) won't match the documented phrase — which defeats the point of a troubleshooting pointer aimed exactly at these users.
+- `failed to unlock correct collection` is fine — that's a genuine Secret Service/D-Bus error surfaced through the keyring dependency.
+- Fix: change `save auth token` to the string this code actually emits, e.g. `save login` or `store ... token in keyring`.
+- Confidence: 85.
+
+### Suggestions
+
+**2. New login tests force a write failure via a read-only dir; a fault-injection helper already exists and is root-safe**
+`cmd/entire/cli/login_headless_hint_test.go:38-50` (`unwritableTokenStore`)
+
+The test creates a `0o500` directory so `fileStore.save()` fails on `os.CreateTemp`. This is fragile when the suite runs as root (common in root Docker images), because root ignores directory write-permission bits — the write would succeed and the test would fail its `persistLogin should fail` assertion. The package already ships `tokenstore.UseFailingBackendForTesting(path, failSet)` (`testing.go:35`), which injects a deterministic `Set` error regardless of UID. Because `RecordLoginContext` wraps *any* `tokenstore.Set` error in `credStoreWriteError` (tagging `ErrCredentialStoreWrite`), the injected error still exercises the hint path — so the helper is a drop-in that is both root-safe and reuses existing infrastructure (CLAUDE.md reuse guidance). GitHub-hosted runners run non-root, so this isn't a guaranteed break today; hence a suggestion, not Important. Confidence: 75.
+
+**3. Read-side permission check blast radius is wider than login (intended, worth a note)**
+`internal/entireclient/tokenstore/file.go:61-65`
+
+The `0o077` check lives in `load()`, which runs on every `Get`/`Set`/`Delete`, so a loosely-permissioned file fails *all* token reads across the CLI (refresh, `auth status`, `logout`), not just login. This is the intended fail-closed / SSH-like posture and the error message tells the user exactly what to run (`chmod 0600`). One real-world snag to be aware of: CI cache/restore or `tar` round-trips can widen perms on a previously-0600 `tokens.json`, turning a cached login into a hard failure on the next run. No code change required — flagging so it's a known support answer. Confidence: n/a (informational).
+
+### Positives (verified, not just skimmed)
+
+- **Sentinel wrapping is correct and non-disruptive.** `credStoreWriteError.Unwrap() []error{inner, sentinel}` is the standard Go 1.20+ multi-error pattern; `errors.Is(err, ErrCredentialStoreWrite)` and `errors.Is(err, &lt;innerKeyringErr&gt;)` both resolve, and `Error()` preserves the original message verbatim (`contexts.go:34-35`). No caller anywhere string-matches the keyring error text (grep confirmed), so the wrap breaks nothing.
+- **`withHeadlessStoreHint` gating is sound.** It only appends the hint when `errors.Is(err, ErrCredentialStoreWrite)` and `ENTIRE_TOKEN_STORE != "file"` (`login.go:344-345`). Notably, a file-backend permission failure only occurs when `ENTIRE_TOKEN_STORE=file` in production, so the hint is correctly suppressed for the user who's already on the file store — the three tests confirm hint / no-hint-on-file / no-hint-on-non-store-error.
+- **`BackendDescription()` env-only resolution matches production.** `resolveBackendLocked` returns `fileStore` only when env is `file` (or the test-only `testdirs` fallback), so for real users the description can't diverge from the live backend. The documented decision to mirror env semantics rather than introspect (`tokenstore.go:113-123`) correctly keeps `UseFileBackendForTesting` from leaking "file" into user-facing wording. Not a bug.
+- **Read-side check can't break existing flows.** Every code path that writes `tokens.json` goes through `save()`, which chmods `0600` (`file.go:98`); no other code or test harness pre-creates the file (grep confirmed — all `ENTIRE_TOKEN_STORE_PATH` setters point at store-created files). First-ever write is safe because `os.Stat` fails → check skipped. The `testdirs` go-test fallback file is likewise `save()`-created at 0600.
+- **No import-cycle/layering issue.** `tokenstore` pulled into `cli` (login.go/auth.go) is a leaf that imports only `userdirs`/`testdirs`/`keyring`; `auth/contexts.go` already depended on it. Build confirms.
+- **CLAUDE.md test compliance.** All three non-parallel tests carry explicit `// Not parallel:` justifications (t.Setenv / process-global backend), matching the documented exception. The `goosWindows` const dedupes the Windows string across `file.go` and `keyring_timeout.go`. No `fmt.Print` operational output and no user-content logging introduced.</result>
+<usage><subagent_tokens>64350</subagent_tokens><tool_uses>16</tool_uses><duration_ms>221869</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>wzo4jn3vc</task-id>
+<tool-use-id>toolu_01MpGttVp2M5WLxDu1nUbqPZ</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/wzo4jn3vc.output</output-file>
+<status>completed</status>
+<summary>Dynamic workflow "Workflow-backed code review — one finder per correctness angle plus one finder covering all cleanup angles, an independent verifier for every distinct (file, line) location across the pooled candidates, then a ranked, capped findings report." completed</summary>
+<result>{"level":"high","target":"Review the two local commits on branch fix/1036-headless-login-hint (diff origin/main..HEAD in /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review): a headless-login keyring hint (withHeadlessStoreHint in cmd/entire/cli/login.go, ErrCredentialStoreWrite sentinel in cmd/entire/cli/auth/contexts.go), tokenstore changes (exported BackendEnvVar/PathEnvVar consts, BackendDescription, read-side 0600 permission check in internal/entireclient/tokenstore), an auth status provenance line change (cmd/entire/cli/auth.go), new tests, and a README section. Working tree is clean; the review target is the committed diff, not unstaged changes.","summary":"The dominant issue is the new read-side 0600 permission gate in the file token store: because it runs inside load(), it hard-fails Get, Set, and Delete alike, locking out externally provisioned token files (CI secret mounts, read-only or 0777-reporting filesystems) with no override, blocking the self-healing rewrite that login used to perform, and preventing logout from deleting the very credentials the check flags as exposed. Secondary correctness issues include git-remote-entire silently swallowing the new refusal (so the warning is never surfaced and stale tokens are never purged) and two test fixtures whose permission-based failure injection breaks under hardened umask or root-run CI. The remaining findings are cleanup: misleading \"keyring\" wording on file-backend errors, a README callout quoting an error string no code emits, inconsistent backend naming, a thrice-duplicated backend-selection predicate, and sentinel-error tagging applied at the wrong altitude.","findings":[{"file":"internal/entireclient/tokenstore/file.go","line":62,"summary":"New read-side 0600 permission check hard-fails every credential read for token files whose mode the user cannot fix (read-only mounts, Kubernetes secret volumes defaulting to 0644, filesystems that report synthetic wide modes), breaking previously-working ENTIRE_TOKEN_STORE=file setups on upgrade. [same root cause also at: internal/entireclient/tokenstore/file.go:62, internal/entireclient/tokenstore/file.go:62]","failure_scenario":"A CI/headless setup that already uses ENTIRE_TOKEN_STORE=file with ENTIRE_TOKEN_STORE_PATH pointing at a provisioned tokens.json (e.g. a Kubernetes secret mount, defaultMode 0644 and read-only, or a bind mount that reports 0777) upgrades the CLI; every `entire` command that reads a credential (not just login) now fails with 'token store ... is accessible by group/others ... run: chmod 0600 ...', and the suggested chmod is impossible on the read-only mount — the exact headless environments this PR targets are locked out with no override.","category":"correctness","verdict":"CONFIRMED"},{"file":"internal/entireclient/tokenstore/file.go","line":142,"summary":"Set() previously self-healed a loose-permission token file (save() always rewrites it 0600 via temp+rename); the new load() gate inside Set() removes that, so a fresh `entire login` can no longer repair a group-readable tokens.json. [same root cause also at: internal/entireclient/tokenstore/file.go:160]","failure_scenario":"A CI image bakes a tokens.json at 0640 (or a manual copy drifts permissions); before this change, re-running `ENTIRE_TOKEN_STORE=file entire login` would overwrite the file at 0600 and proceed — now login fails with the chmod message even though the write it was about to perform would have restored 0600 and replaced the exposed contents, forcing an out-of-band chmod step that automation pipelines don't have.","category":"correctness","verdict":"CONFIRMED"},{"file":"internal/entireclient/tokenstore/file.go","line":62,"summary":"git-remote-entire's jurisdiction token path silently swallows the new permission refusal, so the exposed token file is never reported and its stale bearer tokens are never purged","failure_scenario":"With ENTIRE_TOKEN_STORE=file and a group/world-readable tokens.json, cmd/git-remote-entire/jurisdictionauth.go:119 discards the load() permission error (`if ..., err := tokenstore.Get(...); err == nil` cache-read), :152 logs the Set failure only to debuglog, and Invalidate's Delete at :174 also fails silently — so git fetch/push keeps succeeding while the user is never shown the security warning the check exists to raise, the previously-written bearer tokens keep sitting readable in the exposed file indefinitely (even a 401-triggered Invalidate can't delete them), and every git command incurs a fresh token-exchange round trip because caching is permanently broken.","category":"correctness","verdict":"CONFIRMED"},{"file":"internal/entireclient/tokenstore/file_test.go","line":257,"summary":"TestFileStore_RefusesGroupOrWorldReadableFile creates the loose-permission fixture with os.WriteFile(perm), which is subject to the process umask, so under a hardened umask (e.g. 077 or 027) the file is actually created 0600/0640-masked and the refusal never fires.","failure_scenario":"A developer or CI runner with umask 077 runs `go test ./internal/entireclient/tokenstore/`: os.WriteFile masks 0o640 and 0o604 down to 0o600, fileStore.Get succeeds, and both subtests fail with 'Get should refuse a group-readable token store file' even though the production check is correct — a spurious red build. Fix is to chmod the file explicitly after writing.","category":"correctness","verdict":"CONFIRMED"},{"file":"cmd/entire/cli/login_headless_hint_test.go","line":23,"summary":"unwritableTokenStore simulates an unwritable store with a 0o500 parent directory, which does not block writes when the test runs as root (common in Docker-based CI), so persistLogin succeeds and both hint tests fail spuriously. [same root cause also at: cmd/entire/cli/login_headless_hint_test.go:23]","failure_scenario":"Running `go test ./cmd/entire/cli/ -run TestPersistLogin_StoreWriteFailure...` as root (e.g. inside a plain Docker container) lets os.CreateTemp succeed inside the 0o500 dir; persistLogin returns nil and the tests fail with 'persistLogin should fail when the token store is unwritable' despite the production code being correct.","category":"correctness","verdict":"CONFIRMED"},{"file":"cmd/entire/cli/auth/contexts.go","line":107,"summary":"The store-write error messages still hardcode 'in keyring' ('store login token in keyring', 'store refresh token in keyring') even when the resolved backend is the file store, so file-backend users get a misleading error naming a component that was never involved. [same root cause also at: cmd/entire/cli/auth/contexts.go:107]","failure_scenario":"A headless user follows the new hint/README, sets ENTIRE_TOKEN_STORE=file, and the file write fails (e.g. unwritable config dir or the new loose-permissions refusal): `entire login` prints 'save login: store login token in keyring: ...' with no headless hint (correctly suppressed), sending the user down keyring-daemon debugging when the failure is a plain file-path problem; tokenstore.BackendDescription() exists and could name the actual backend.","category":"correctness","verdict":"CONFIRMED"},{"file":"README.md","line":244,"summary":"README callout quotes an error string `save auth token` that does not exist anywhere in the codebase; the actual login failure prefix is \"save login: store login token in keyring\"","failure_scenario":"A headless user hits the real error (\"save login: store login token in keyring: ...\"), searches the README (or Google) for it, and never matches the troubleshooting callout because it quotes `save auth token`, a string no code path emits (grep over *.go finds zero occurrences). The callout's discoverability — its whole purpose — is broken; quoting \"save login\" or \"store login token in keyring\" would match.","category":"cleanup","verdict":"CONFIRMED"},{"file":"internal/entireclient/tokenstore/tokenstore.go","line":118,"summary":"BackendDescription returns generic \"OS keychain\" while the same package already has keyringProvide
+... (truncated 2467 chars, full result in /private/tmp/claude-501/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/tasks/wzo4jn3vc.output)</result>
+<diagnostics>Per-agent results: /Users/peytonmontei/.claude/projects/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/subagents/workflows/wf_f988b66c-177/journal.jsonl — one {"type":"result",...} line per completed agent with its full return value.
+If the result above is empty or unexpected, Read this file BEFORE diagnosing — do not assume agents returned non-empty results.
+To re-run with edited post-processing: Workflow({scriptPath: '/Users/peytonmontei/.claude/projects/-Users-peytonmontei-Documents-entire-devenv-entireio-cli--worktrees-pr-review/e58f9710-b989-430f-85d9-848c55561c35/workflows/scripts/code-review-wf_f988b66c-177.js', resumeFromRunId: 'wf_f988b66c-177', args: "high Review the two local commits on branch fix/1036-headless-login-hint (diff origin/main..HEAD in /Users/peytonmontei/Documents/entire/devenv/entireio/cli/.worktrees/pr-review): a headless-login keyring hint (withHeadlessStoreHint in cmd/entire/cli/login.go, ErrCredentialStoreWrite sentinel in cmd/entire/cli/auth/contexts.go), tokenstore changes (exported BackendEnvVar/PathEnvVar consts, BackendDescription, read-side 0600 permission check in internal/entireclient/tokenstore), an auth status provenance line change (cmd/entire/cli/auth.go), new tests, and a README section. Working tree is clean; the review target is the committed diff, not unstaged changes."}) — agents whose (prompt, opts) are unchanged replay from cache.</diagnostics>
+<usage><agent_count>17</agent_count><agents_done>17</agents_done><agents_error>0</agents_error><agents_skipped>0</agents_skipped><agents_empty_result>0</agents_empty_result><subagent_tokens>785056</subagent_tokens><tool_uses>94</tool_uses><duration_ms>490064</duration_ms></usage>
+</task-notification>
