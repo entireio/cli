@@ -231,6 +231,176 @@ func TestExecuteAgentHookSessionStartSkipsCaptureWhenPolicyUnreadable(t *testing
 	require.True(t, os.IsNotExist(statErr), "session-start must not claim the session when checkpoint policy is unreadable")
 }
 
+// TestExecuteAgentHookShortCircuitsWhenDisabled is a regression test for #524:
+// a hook must not perform any dispatch/strategy work when Entire is
+// disabled. Asserted via the same "session was never claimed" signal the
+// checkpoint-policy tests above use, rather than a timing assertion.
+func TestExecuteAgentHookShortCircuitsWhenDisabled(t *testing.T) {
+	setupStopTestRepo(t)
+	repoRoot := mustGetwd(t)
+
+	entireDir := filepath.Join(repoRoot, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(`{"enabled":false}`), 0o600))
+
+	sessionID := "disabled-session-start"
+	payload, err := json.Marshal(map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": filepath.Join(repoRoot, "transcript.jsonl"),
+	})
+	require.NoError(t, err)
+
+	cmd := &cobra.Command{}
+	cmd.SetIn(bytes.NewReader(payload))
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, false))
+
+	hintPath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, sessionID+".agent")
+	_, statErr := os.Stat(hintPath)
+	require.True(t, os.IsNotExist(statErr), "disabled hook must not dispatch or claim the session")
+}
+
+// TestExecuteAgentHookShortCircuitsWhenSettingsMissing is a regression test
+// for #524: a repo that was never `entire enable`d (no .entire/settings.json)
+// must short-circuit rather than falling through to full lifecycle dispatch.
+func TestExecuteAgentHookShortCircuitsWhenSettingsMissing(t *testing.T) {
+	setupStopTestRepo(t)
+	repoRoot := mustGetwd(t)
+	// Deliberately do NOT create .entire/settings.json.
+
+	sessionID := "missing-settings-session-start"
+	payload, err := json.Marshal(map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": filepath.Join(repoRoot, "transcript.jsonl"),
+	})
+	require.NoError(t, err)
+
+	cmd := &cobra.Command{}
+	cmd.SetIn(bytes.NewReader(payload))
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, false))
+
+	hintPath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, sessionID+".agent")
+	_, statErr := os.Stat(hintPath)
+	require.True(t, os.IsNotExist(statErr), "hook must not dispatch when Entire was never enabled in this repo")
+}
+
+// TestExecuteAgentHookShortCircuitsWhenSettingsCorrupted is a regression test
+// for #524. Before this fix, IsEnabled() failed OPEN on a settings.Load()
+// error (the caller's `err == nil && !enabled` check only short-circuited
+// when the read succeeded), so a corrupted settings file made every hook
+// invocation pay the full dispatch cost — including, for Stop hooks, a
+// multi-second wait on the transcript-flush sentinel (see
+// ClaudeCodeAgent.ParseHookEvent) — instead of exiting fast. The gate must
+// fail closed on any settings read error.
+func TestExecuteAgentHookShortCircuitsWhenSettingsCorrupted(t *testing.T) {
+	setupStopTestRepo(t)
+	repoRoot := mustGetwd(t)
+
+	entireDir := filepath.Join(repoRoot, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(`{ enabled: false, not valid json`), 0o600))
+
+	sessionID := "corrupted-settings-session-start"
+	payload, err := json.Marshal(map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": filepath.Join(repoRoot, "transcript.jsonl"),
+	})
+	require.NoError(t, err)
+
+	cmd := &cobra.Command{}
+	cmd.SetIn(bytes.NewReader(payload))
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, false))
+
+	hintPath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, sessionID+".agent")
+	_, statErr := os.Stat(hintPath)
+	require.True(t, os.IsNotExist(statErr), "hook must fail closed (not dispatch) when settings are unreadable")
+}
+
+// TestExecuteAgentHookStopReturnsFastWhenSettingsCorrupted directly
+// regression-tests the reported symptom: `entire hooks claude-code stop`
+// against a corrupted settings file must return in well under the
+// multi-second transcript-flush-sentinel timeout it used to hit, not just
+// skip dispatch. The bound is intentionally generous (this repo has no
+// other timing-based tests to match precedent against) — it only needs to
+// distinguish "short-circuited" from "waited on the sentinel timeout".
+func TestExecuteAgentHookStopReturnsFastWhenSettingsCorrupted(t *testing.T) {
+	setupStopTestRepo(t)
+	repoRoot := mustGetwd(t)
+
+	entireDir := filepath.Join(repoRoot, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(`{ enabled: false, not valid json`), 0o600))
+
+	transcriptPath := filepath.Join(repoRoot, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":{"content":"hi"}}`+"\n"), 0o600))
+
+	payload, err := json.Marshal(map[string]string{
+		"session_id":      "corrupted-settings-stop",
+		"transcript_path": transcriptPath,
+	})
+	require.NoError(t, err)
+
+	cmd := &cobra.Command{}
+	cmd.SetIn(bytes.NewReader(payload))
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	start := time.Now()
+	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameStop, false))
+	elapsed := time.Since(start)
+
+	require.Lessf(t, elapsed, 1*time.Second,
+		"stop hook took %s against a corrupted settings file; want a fast short-circuit, not the transcript-flush-sentinel timeout path", elapsed)
+}
+
+// TestExecuteAgentHookCapturesWhenEnabledViaLocalSettingsOnly guards against a
+// regression in the #524 fix: `entire enable --local` writes only
+// .entire/settings.local.json and never creates the base .entire/settings.json
+// (see determineSettingsTarget in setup.go). The disabled-hook gate must
+// recognize that local-only enablement — gating on the base file alone
+// (settings.IsSetUp) would silently no-op every agent hook for that repo and
+// drop all checkpoint capture. Asserted via the same "session was claimed"
+// signal (the .agent hint StoreAgentTypeHint writes during SessionStart
+// dispatch) the short-circuit tests above assert the *absence* of.
+func TestExecuteAgentHookCapturesWhenEnabledViaLocalSettingsOnly(t *testing.T) {
+	setupStopTestRepo(t)
+	repoRoot := mustGetwd(t)
+
+	entireDir := filepath.Join(repoRoot, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o750))
+	// Local-only enablement: settings.local.json present, base settings.json absent.
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(`{"enabled":true}`), 0o600))
+	require.NoFileExists(t, filepath.Join(entireDir, "settings.json"))
+
+	transcriptPath := filepath.Join(repoRoot, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":{"content":"hi"}}`+"\n"), 0o600))
+
+	sessionID := "local-only-session-start"
+	payload, err := json.Marshal(map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+	})
+	require.NoError(t, err)
+
+	cmd := &cobra.Command{}
+	cmd.SetIn(bytes.NewReader(payload))
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, false))
+
+	hintPath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, sessionID+".agent")
+	require.FileExists(t, hintPath, "SessionStart must dispatch and claim the session when Entire is enabled via settings.local.json only")
+}
+
 func TestAgentHookPolicyFailsWhenRepoCannotOpen(t *testing.T) {
 	_, err := agentHookPolicy(context.Background(), filepath.Join(t.TempDir(), "missing"))
 

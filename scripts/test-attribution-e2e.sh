@@ -144,7 +144,7 @@ echo ""
 
 # Check rewind points
 echo -e "${BLUE}=== Step 9: Check rewind points ===${NC}"
-entire rewind --list || true
+entire checkpoint list --pending --json || true
 
 # Show session state (includes PromptAttributions for debugging)
 echo ""
@@ -257,7 +257,7 @@ fi
 # Show rewind points summary
 echo ""
 echo -e "${BLUE}=== Step 15: Rewind points summary ===${NC}"
-entire rewind --list | jq -r '.[] | "  \(.id[0:8])... - \(.message[0:60])"' 2>/dev/null || echo "  (no rewind points)"
+entire checkpoint list --pending --json | jq -r '.[] | "  \(.id[0:8])... - \(.message[0:60])"' 2>/dev/null || echo "  (no rewind points)"
 
 # Final summary
 echo ""

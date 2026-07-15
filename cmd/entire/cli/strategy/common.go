@@ -352,7 +352,7 @@ const (
 // registered agent config directories.
 func isProtectedPath(relPath string) bool {
 	for _, dir := range protectedDirs() {
-		if paths.IsSubpath(dir, relPath) {
+		if paths.IsProtectedSubpath(dir, relPath) {
 			return true
 		}
 	}
@@ -442,7 +442,7 @@ func EnsureRedactionConfigured() {
 			})
 		}
 
-		// OpenAI Privacy Filter (opt-in 8th layer).
+		// OpenAI Privacy Filter (opt-in 9th layer).
 		if s.Redaction != nil && s.Redaction.OpenAIPrivacyFilter != nil {
 			opf := s.Redaction.OpenAIPrivacyFilter
 			redact.ConfigurePrivacyFilter(redact.OPFConfig{

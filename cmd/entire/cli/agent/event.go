@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // EventType represents a normalized lifecycle event from any agent.
@@ -157,19 +160,69 @@ type Event struct {
 	Metadata map[string]string
 }
 
-// ReadAndParseHookInput reads all bytes from stdin and unmarshals JSON into the given type.
-// This is a shared helper for agent ParseHookEvent implementations.
+// ReadAndParseHookInput decodes a single JSON hook payload from stdin into the
+// given type. This is a shared helper for agent ParseHookEvent implementations.
+//
+// It deliberately does NOT use io.ReadAll, which waits for stdin to reach EOF.
+// Agents drive hooks by piping a JSON payload to the hook process, but some
+// keep the write end of that pipe open for the hook's lifetime rather than
+// closing it after writing — notably on Windows/Git Bash, where a full payload
+// arrives but EOF never does. io.ReadAll then blocked indefinitely and the hook
+// (e.g. gemini session-start) hung forever (issue #1398). A streaming
+// json.Decoder returns as soon as one complete JSON value has been read,
+// independent of when — or whether — stdin is closed.
 func ReadAndParseHookInput[T any](stdin io.Reader) (*T, error) {
-	data, err := io.ReadAll(stdin)
+	raw, err := ReadHookInputRaw(stdin)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read hook input: %w", err)
-	}
-	if len(data) == 0 {
-		return nil, errors.New("empty hook input")
+		return nil, err
 	}
 	var result T
-	if err := json.Unmarshal(data, &result); err != nil {
+	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse hook input: %w", err)
 	}
 	return &result, nil
+}
+
+// ReadHookInputRaw returns the raw bytes of a single JSON hook payload read from
+// stdin, without waiting for EOF. It is the shared primitive behind every
+// agent's hook-input read (issue #1398); callers that need custom parsing
+// (e.g. key-name fallbacks, or forwarding the bytes to a subprocess) use this
+// directly, while the common case uses ReadAndParseHookInput.
+func ReadHookInputRaw(stdin io.Reader) (json.RawMessage, error) {
+	return ReadHookInputRawLimited(stdin, -1)
+}
+
+// ReadHookInputRawLimited is ReadHookInputRaw with a ceiling of limit bytes on
+// the JSON value (limit < 0 means unlimited). It is used at the external/plugin
+// boundary to bound an untrusted payload — without reintroducing the EOF-wait
+// hang, since the streaming decoder still returns on the first complete value.
+func ReadHookInputRawLimited(stdin io.Reader, limit int64) (json.RawMessage, error) {
+	// If stdin is an interactive terminal there is no payload coming at all: the
+	// command was run by hand, or the agent left the console attached instead of
+	// wiring up a pipe. Decoding would block waiting for input that never comes,
+	// so treat it as empty and return promptly.
+	if StdinLooksInteractive(stdin) {
+		return nil, errors.New("empty hook input")
+	}
+
+	r := stdin
+	if limit >= 0 {
+		r = io.LimitReader(stdin, limit)
+	}
+	var raw json.RawMessage
+	if err := json.NewDecoder(r).Decode(&raw); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, errors.New("empty hook input")
+		}
+		return nil, fmt.Errorf("failed to parse hook input: %w", err)
+	}
+	return raw, nil
+}
+
+// StdinLooksInteractive reports whether r is an interactive terminal, i.e. no
+// piped hook payload is on its way. Hook readers use it to bail out promptly
+// instead of blocking on a read that will never complete (issue #1398).
+func StdinLooksInteractive(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd())) //nolint:gosec // G115: uintptr->int is safe for fd
 }

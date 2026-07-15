@@ -100,13 +100,48 @@ func currentBackend() store {
 	return backend
 }
 
+// BackendEnvVar selects the credential backend: set to "file" to use the
+// JSON file store instead of the OS keyring. PathEnvVar overrides where the
+// file store lives (default: tokens.json in the per-user config directory).
+// Exported so user-facing guidance (e.g. login's headless hint) names the
+// same variables this package actually reads.
+const (
+	BackendEnvVar = "ENTIRE_TOKEN_STORE"
+	PathEnvVar    = "ENTIRE_TOKEN_STORE_PATH"
+)
+
+// FileBackendSelected reports whether the environment selects the file
+// backend — the single predicate shared by backend resolution, provenance
+// wording, and login's headless hint, so they can never disagree.
+func FileBackendSelected() bool {
+	return os.Getenv(BackendEnvVar) == "file"
+}
+
+// BackendDescription names the credential backend the current environment
+// resolves to, for user-facing provenance lines (e.g. `entire auth status`).
+// It mirrors resolveBackendLocked's env semantics — the production resolution
+// — rather than introspecting the live backend, so test-only overrides don't
+// leak into user-facing wording.
+func BackendDescription() string {
+	if FileBackendSelected() {
+		return "file " + FileBackendPath()
+	}
+	return keyringProviderName()
+}
+
+// FileBackendPath resolves where the file backend stores (or would store)
+// tokens: PathEnvVar when set, else tokens.json in the per-user config
+// directory. Exported so user-facing guidance can name the concrete path.
+func FileBackendPath() string {
+	if path := os.Getenv(PathEnvVar); path != "" {
+		return path
+	}
+	return filepath.Join(userdirs.Config(), "tokens.json")
+}
+
 func resolveBackendLocked() store {
-	if os.Getenv("ENTIRE_TOKEN_STORE") == "file" {
-		path := os.Getenv("ENTIRE_TOKEN_STORE_PATH")
-		if path == "" {
-			path = filepath.Join(userdirs.Config(), "tokens.json")
-		}
-		return &fileStore{path: path}
+	if FileBackendSelected() {
+		return &fileStore{path: FileBackendPath()}
 	}
 	// Under `go test`, never fall through to the real OS keyring: a test
 	// that forgets tokenstore.UseFileBackendForTesting would otherwise write

@@ -44,7 +44,16 @@ type Turn struct {
 	UUID               string
 	Prompt, Model      string
 	CreatedAt          time.Time
-	Tokens             *types.TokenUsage
+	// Tokens is this turn's token usage. Every field is a per-turn delta:
+	// main-agent fields are scoped to the turn's [LineStart, LineEnd) slice by
+	// the token helpers, and SubagentTokens is rescoped from the cumulative
+	// snapshot those helpers return to a per-turn increment by
+	// rescopeSubagentTokensToDeltas (see linesplit.go). That invariant lets
+	// callers sum turns freely: writeSessionState sums them for the session
+	// total and each imported checkpoint stores its own turn's delta, so a
+	// subagent's tokens are counted exactly once rather than re-added on every
+	// turn after it is discovered.
+	Tokens *types.TokenUsage
 }
 
 // Importer is the per-agent seam: it locates an agent's transcripts for a repo
@@ -215,6 +224,13 @@ func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns 
 		if turn.Model != "" {
 			model = turn.Model
 		}
+		// turn.Tokens holds per-turn deltas for every field, including
+		// SubagentTokens (rescoped from a cumulative snapshot in
+		// rescopeSubagentTokensToDeltas — see the Turn.Tokens doc). Summing
+		// them therefore yields the correct session total: main-agent fields
+		// add up, and the subagent deltas sum back to the final cumulative
+		// subagent snapshot exactly once instead of being multiplied by the
+		// number of turns after each subagent was first discovered.
 		tokens = types.AddTokenUsage(tokens, turn.Tokens)
 	}
 	if started.IsZero() {

@@ -337,6 +337,88 @@ func TestResolvePushSettings_ForkDetection(t *testing.T) {
 }
 
 // Not parallel: uses t.Chdir()
+//
+// When origin is an entire:// push-through mirror whose forge (gh) matches the
+// configured checkpoint provider (github), checkpoints route through the same
+// cluster mirror instead of falling back to a direct github.com URL.
+func TestResolvePushSettings_WithCheckpointRemote_EntireMirror(t *testing.T) {
+	ctx := context.Background()
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+
+	// Origin is an entire:// mirror on cluster app.entire.io for forge gh.
+	cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", "entire://app.entire.io/gh/org/main-repo")
+	cmd.Dir = localDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
+		0o644,
+	))
+
+	// Seed the local v1 metadata branch so resolvePushSettings finds it and
+	// skips fetchMetadataBranchIfMissing — which would otherwise invoke the
+	// entire:// remote helper against a live cluster.
+	runCheckpointRemoteGit(ctx, t, localDir, "branch", paths.MetadataBranchName)
+
+	t.Chdir(localDir)
+
+	ps := resolvePushSettings(ctx, "origin")
+	assert.True(t, ps.hasCheckpointURL())
+	// Keeps the cluster host and forge segment, swaps in the checkpoint repo.
+	assert.Equal(t, "entire://app.entire.io/gh/org/checkpoints", ps.pushTarget())
+	assert.False(t, ps.pushDisabled)
+}
+
+// Not parallel: uses t.Chdir()
+//
+// When origin is an entire:// mirror of a different forge (et) than the
+// configured checkpoint provider (github), it must not route through the
+// mirror; it falls back to the provider's canonical host.
+func TestResolvePushSettings_EntireMirrorForgeMismatchFallsBackToProvider(t *testing.T) {
+	ctx := context.Background()
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+
+	cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", "entire://app.entire.io/et/org/main-repo")
+	cmd.Dir = localDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
+		0o644,
+	))
+
+	// Seed the local v1 branch so the provider-host fallback URL isn't fetched
+	// from github.com for real.
+	runCheckpointRemoteGit(ctx, t, localDir, "branch", paths.MetadataBranchName)
+
+	t.Chdir(localDir)
+
+	ps := resolvePushSettings(ctx, "origin")
+	assert.True(t, ps.hasCheckpointURL())
+	// Provider host over SSH (default transport), not the non-matching mirror.
+	assert.Equal(t, "git@github.com:org/checkpoints.git", ps.pushTarget())
+	assert.False(t, ps.pushDisabled)
+}
+
+// Not parallel: uses t.Chdir()
 func TestResolvePushSettings_CheckpointURLDoesNotAffectRemoteField(t *testing.T) {
 	ctx := context.Background()
 

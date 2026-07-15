@@ -284,7 +284,7 @@ type OPFSettings struct {
 
 	// PromptDefault controls whether the pre-push hook asks the user
 	// before running OPF. "" (default) and "ask" both surface the
-	// interactive prompt; "never" skips OPF and pushes 7-layer content;
+	// interactive prompt; "never" skips OPF and pushes regex-only content;
 	// "always" runs without asking. ENTIRE_OPF=yes|no on the push
 	// invocation overrides this setting per-push.
 	PromptDefault string `json:"prompt_default,omitempty"`
@@ -629,6 +629,13 @@ func saveRaw(path, label string, raw map[string]json.RawMessage) error {
 	data, err := jsonutil.MarshalIndentWithNewline(raw, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal %s settings: %w", label, err)
+	}
+	// Ensure the parent directory exists, mirroring the struct save path
+	// (saveToFile). Without this, the raw save path fails in a repo that has
+	// never created .entire/ — e.g. a bare `entire disable` in a fresh repo,
+	// which resolves to a raw flip before any directory is created.
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("creating %s settings directory: %w", label, err)
 	}
 	if err := jsonutil.WriteFileAtomic(path, data, 0o644); err != nil {
 		return fmt.Errorf("writing %s settings: %w", label, err)
@@ -1310,10 +1317,18 @@ func IsSetUpAny(ctx context.Context) bool {
 }
 
 // IsSetUpAndEnabled returns true if Entire is both set up and enabled.
-// This checks if .entire/settings.json exists AND has enabled: true.
+// "Set up" spans either scope — .entire/settings.json OR
+// .entire/settings.local.json — so it must check IsSetUpAny, not IsSetUp.
+// `entire enable --local` writes only settings.local.json and never creates the
+// base file; gating on the base file alone would treat such a local-only repo
+// as inactive and make every hook a silent no-op, dropping all checkpoint
+// capture for that documented workflow. The IsSetUpAny guard is still required
+// so a never-enabled repo (no settings file in any scope) is not treated as
+// enabled by Load's default Enabled: true. Any settings read error is treated
+// as disabled (fail closed).
 // Use this for hooks that should be no-ops when Entire is not active.
 func IsSetUpAndEnabled(ctx context.Context) bool {
-	if !IsSetUp(ctx) {
+	if !IsSetUpAny(ctx) {
 		return false
 	}
 	s, err := Load(ctx)
