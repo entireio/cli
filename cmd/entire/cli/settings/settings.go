@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -123,6 +124,14 @@ type EntireSettings struct {
 	// ExternalAgents enables discovery and registration of external agent
 	// plugins (entire-agent-* binaries on $PATH). Defaults to false.
 	ExternalAgents bool `json:"external_agents,omitempty"`
+
+	// Plugins is the allow-list of Lua plugins keyed by plugin name, carrying
+	// per-plugin capability grants. It mirrors the external_agents opt-in
+	// posture: a Lua plugin (whether installed under the per-user managed dir
+	// or discovered as repo-local under .entire/plugins) is inert until it has
+	// an entry here with enabled=true. Repo-local plugins NEVER auto-run
+	// without such an explicit entry — see docs/architecture/plugins-lua.md.
+	Plugins map[string]PluginSettings `json:"plugins,omitempty"`
 
 	// SummaryGeneration stores provider preferences for explain --generate.
 	// This is separate from strategy_options.summarize, which controls
@@ -433,6 +442,105 @@ func (s *EntireSettings) InvestigateConfig() *InvestigateConfig {
 	return s.Investigate
 }
 
+// Plugin capability names. These gate the privileged Lua APIs a plugin may
+// call. A capability not granted in the plugin's allow-list entry causes the
+// corresponding Lua API to error at call time rather than silently no-op.
+//
+// The names are defined here (rather than in the plugins package) so the strict
+// settings validator can reject typos at parse time without the settings
+// package importing plugins (which would create an import cycle: plugins already
+// imports settings).
+const (
+	// PluginCapabilityHTTP grants outbound HTTP requests (entire.http).
+	PluginCapabilityHTTP = "http"
+	// PluginCapabilityExec grants running external subprocesses (entire.exec).
+	PluginCapabilityExec = "exec"
+	// PluginCapabilityFS grants filesystem reads/writes outside the plugin
+	// data dir (entire.fs).
+	PluginCapabilityFS = "fs"
+	// PluginCapabilityNet grants raw network access (entire.net).
+	PluginCapabilityNet = "net"
+)
+
+// PluginSettings configures a single Lua plugin's activation and the
+// capabilities granted to it. It mirrors the external_agents opt-in posture:
+// the plugin is inert until Enabled is true, and privileged APIs stay denied
+// unless explicitly listed in Capabilities.
+type PluginSettings struct {
+	// Enabled activates the plugin. Defaults to false: an absent entry or one
+	// with enabled=false means the plugin's hooks and commands never run.
+	Enabled bool `json:"enabled"`
+
+	// Capabilities grants privileged Lua APIs (http, exec, fs, net). Any
+	// capability not listed here is denied. Unknown capability names are
+	// rejected at settings load time.
+	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+// HasCapability reports whether the plugin was granted the named capability.
+func (p PluginSettings) HasCapability(name string) bool {
+	return slices.Contains(p.Capabilities, name)
+}
+
+// PluginGrant returns the allow-list entry for the named plugin and whether an
+// entry exists for it. A missing entry (ok=false) means the plugin is not
+// allow-listed and must not run.
+func (s *EntireSettings) PluginGrant(name string) (PluginSettings, bool) {
+	if s == nil || s.Plugins == nil {
+		return PluginSettings{}, false
+	}
+	ps, ok := s.Plugins[name]
+	return ps, ok
+}
+
+// IsPluginEnabled reports whether the named plugin is allow-listed and enabled.
+func (s *EntireSettings) IsPluginEnabled(name string) bool {
+	ps, ok := s.PluginGrant(name)
+	return ok && ps.Enabled
+}
+
+// isKnownPluginCapability reports whether name is a recognized capability.
+func isKnownPluginCapability(name string) bool {
+	switch name {
+	case PluginCapabilityHTTP, PluginCapabilityExec, PluginCapabilityFS, PluginCapabilityNet:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsKnownPluginCapabilityName reports whether name is a recognized plugin
+// capability. Exported for the plugins package's manifest validator so both the
+// settings allow-list and the manifest reject the same typos.
+func IsKnownPluginCapabilityName(name string) bool {
+	return isKnownPluginCapability(name)
+}
+
+// KnownPluginCapabilities returns the recognized capability names in a stable
+// order, for use in validation error messages and manifest validation.
+func KnownPluginCapabilities() []string {
+	return []string{PluginCapabilityHTTP, PluginCapabilityExec, PluginCapabilityFS, PluginCapabilityNet}
+}
+
+// validatePluginSettings rejects empty plugin names and unknown capability
+// grants so typos surface at settings load time rather than as a silently
+// ignored (and therefore never-granted) capability at runtime.
+func validatePluginSettings(plugins map[string]PluginSettings) error {
+	for name, ps := range plugins {
+		if strings.TrimSpace(name) == "" {
+			return errors.New("plugins: empty plugin name")
+		}
+		for _, capName := range ps.Capabilities {
+			if !isKnownPluginCapability(capName) {
+				return fmt.Errorf("plugins.%s.capabilities has unknown capability %q (allowed: %s, %s, %s, %s)",
+					name, capName,
+					PluginCapabilityHTTP, PluginCapabilityExec, PluginCapabilityFS, PluginCapabilityNet)
+			}
+		}
+	}
+	return nil
+}
+
 // Load loads the Entire settings from .entire/settings.json, then applies
 // clone-local preferences from the git common dir, then applies any overrides
 // from .entire/settings.local.json if it exists.
@@ -540,6 +648,12 @@ func loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAb
 	// (e.g. model without provider when the local override sets only a model
 	// on top of a base with no provider) that neither file alone contained.
 	if err := settings.SummaryGeneration.Validate(); err != nil {
+		return nil, fmt.Errorf("merged settings invalid: %w", err)
+	}
+
+	// Re-validate plugin capability grants after merge: a local override can
+	// add a plugins entry (or capabilities) neither file alone contained.
+	if err := validatePluginSettings(settings.Plugins); err != nil {
 		return nil, fmt.Errorf("merged settings invalid: %w", err)
 	}
 
@@ -686,6 +800,9 @@ func LoadFromBytes(data []byte) (*EntireSettings, error) {
 			return nil, err
 		}
 	}
+	if err := validatePluginSettings(s.Plugins); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -750,6 +867,10 @@ func loadFromFile(filePath string) (*EntireSettings, error) {
 		if err := validateOPFSettings(settings.Redaction.OpenAIPrivacyFilter); err != nil {
 			return nil, err
 		}
+	}
+
+	if err := validatePluginSettings(settings.Plugins); err != nil {
+		return nil, err
 	}
 
 	return settings, nil
@@ -926,6 +1047,35 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		return err
 	}
 
+	if err := mergePlugins(settings, raw); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// mergePlugins overlays the override's plugins map onto the base by plugin
+// name: an entry from the higher-precedence layer replaces the same-named base
+// entry wholesale, while entries unique to each layer are preserved. This lets
+// a team allow-list plugins in .entire/settings.json while individuals enable
+// or grant extra capabilities in settings.local.json without either layer
+// hiding the other's plugins.
+func mergePlugins(settings *EntireSettings, raw map[string]json.RawMessage) error {
+	pluginsRaw, ok := raw["plugins"]
+	if !ok {
+		return nil
+	}
+	var plugins map[string]PluginSettings
+	if err := unmarshalField("plugins", pluginsRaw, &plugins); err != nil {
+		return err
+	}
+	if settings.Plugins == nil {
+		settings.Plugins = plugins
+		return nil
+	}
+	for name, ps := range plugins {
+		settings.Plugins[name] = ps
+	}
 	return nil
 }
 
