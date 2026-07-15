@@ -643,3 +643,37 @@ func TestBuildEventLines_LabelsSkillWhenMultipleSources(t *testing.T) {
 		t.Errorf("single-source drill-in must not add a skill prefix:\n%s", sl)
 	}
 }
+
+// TestTUISink_GroupWorkersSendsRowWorkerCounts pins the sink→model handshake
+// that lets the dashboard know how many workers fold into each row: without
+// it the model completes a collapsed row on the FIRST worker's terminal event
+// (frozen duration, premature "✓ done") while sibling skills still run.
+func TestTUISink_GroupWorkersSendsRowWorkerCounts(t *testing.T) {
+	t.Parallel()
+	prog := newRecordingProgram()
+	sink := newTUISinkWithProgram(prog)
+	sink.groupWorkers([]string{tAgentClaude, "codex"}, map[string]string{
+		"claude-code:review":    tAgentClaude,
+		"claude-code:pr-review": tAgentClaude,
+		"codex":                 "codex",
+	})
+	sink.Start()
+	defer func() { prog.Kill(); sink.Wait() }()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		for _, m := range prog.recorded() {
+			if wc, ok := m.(rowWorkerCountsMsg); ok {
+				if wc.counts[tAgentClaude] != 2 || wc.counts["codex"] != 1 {
+					t.Fatalf("worker counts = %v, want {%s:2, codex:1}", wc.counts, tAgentClaude)
+				}
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatal("no rowWorkerCountsMsg reached the program after groupWorkers + Start")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}

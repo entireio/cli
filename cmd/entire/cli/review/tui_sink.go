@@ -76,6 +76,16 @@ type TUISink struct {
 // Called before Start.
 func (s *TUISink) groupWorkers(rowOrder []string, workerToAgent map[string]string) {
 	s.group = newAgentGrouping(rowOrder, workerToAgent)
+	// Tell the model how many workers fold into each row so it defers a row's
+	// terminal display state until ALL of them finish (not just the fastest
+	// skill). Pre-Start the queue is empty and never drained, so this plain
+	// send cannot block or drop, and FIFO order guarantees the model sees it
+	// before any agentEventMsg.
+	counts := make(map[string]int, len(s.group.rowWorkers))
+	for row, workers := range s.group.rowWorkers {
+		counts[row] = len(workers)
+	}
+	s.msgs <- rowWorkerCountsMsg{counts: counts}
 }
 
 // Compile-time interface check.

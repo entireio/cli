@@ -41,11 +41,48 @@ type agentRow struct {
 	name     string
 	status   reviewtypes.AgentStatus
 	runStart time.Time          // stamped on first event from this agent
-	runEnd   time.Time          // stamped on Finished/RunError event
+	runEnd   time.Time          // stamped when ALL of the row's workers reached Finished/RunError
 	tokens   reviewtypes.Tokens // cumulative
 	preview  string             // latest AssistantText preview, capped by display width
 	buffer   []bufferedEvent
 	err      error
+
+	// Skill fan-out folds N workers onto one row; the row must not display a
+	// terminal state until every worker is done (a frozen duration and
+	// "✓ done" while a sibling skill still runs would misreport the agent's
+	// real shape). expectedWorkers comes from rowWorkerCountsMsg (0 → 1,
+	// the ungrouped/single-agent path); doneWorkers is keyed by worker label
+	// because a torn stream can emit RunError AND Finished for one worker
+	// (CU3 contract) and must not double-count; failed is the sticky
+	// worst-wins aggregate across workers, mirroring collapseSummary.
+	expectedWorkers int
+	doneWorkers     map[string]struct{}
+	failed          bool
+}
+
+// workerFinished records a terminal event from the given worker and, once all
+// expected workers are done, stamps the row's terminal status (worst-wins:
+// any worker failure ⇒ Failed) and freezes its duration.
+func (r *agentRow) workerFinished(source string) {
+	if r.doneWorkers == nil {
+		r.doneWorkers = make(map[string]struct{})
+	}
+	r.doneWorkers[source] = struct{}{}
+	expected := r.expectedWorkers
+	if expected < 1 {
+		expected = 1
+	}
+	if len(r.doneWorkers) < expected {
+		return
+	}
+	if r.failed {
+		r.status = reviewtypes.AgentStatusFailed
+	} else {
+		r.status = reviewtypes.AgentStatusSucceeded
+	}
+	if r.runEnd.IsZero() {
+		r.runEnd = time.Now()
+	}
 }
 
 // agentEventMsg is sent to the Bubble Tea program when an agent emits an event.
@@ -60,6 +97,14 @@ type agentEventMsg struct {
 type bufferedEvent struct {
 	source string
 	ev     reviewtypes.Event
+}
+
+// rowWorkerCountsMsg tells the model how many workers fold into each agent
+// row (skill fan-out). Sent by TUISink.groupWorkers before Start, so it is
+// delivered ahead of any agentEventMsg. A row only reaches a terminal display
+// state once that many distinct workers have emitted Finished/RunError.
+type rowWorkerCountsMsg struct {
+	counts map[string]int // agent row → worker count
 }
 
 // runFinishedMsg is sent when the orchestrator calls RunFinished.
@@ -171,6 +216,14 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case agentEventMsg:
 		return m.handleAgentEvent(msg)
+
+	case rowWorkerCountsMsg:
+		for rowName, n := range msg.counts {
+			if idx, ok := m.rowIdx[rowName]; ok {
+				m.rows[idx].expectedWorkers = n
+			}
+		}
+		return m, nil
 
 	case runFinishedMsg:
 		m.finished = true
@@ -339,26 +392,23 @@ func (m reviewTUIModel) handleAgentEvent(msg agentEventMsg) (tea.Model, tea.Cmd)
 	case reviewtypes.Tokens:
 		row.tokens = e // cumulative: overwrite, not sum
 	case reviewtypes.Finished:
-		// RunError is sticky: if a prior RunError event already classified
-		// this row as Failed, a subsequent Finished{Success: true} must NOT
-		// flip it back to Succeeded. CU3's parser-fix-loop guarantees that
-		// RunError + Finished{Success:false} both accompany torn streams;
-		// matching that contract here keeps the TUI consistent with
-		// classifyStatus from CU4 (which honors sawRunError).
-		if row.status != reviewtypes.AgentStatusFailed {
-			if e.Success {
-				row.status = reviewtypes.AgentStatusSucceeded
-			} else {
-				row.status = reviewtypes.AgentStatusFailed
-			}
+		// row.failed is sticky: a prior RunError (from this or any sibling
+		// worker) must NOT be flipped back by a Finished{Success: true}.
+		// CU3's parser-fix-loop guarantees that RunError +
+		// Finished{Success:false} both accompany torn streams; matching that
+		// contract here keeps the TUI consistent with classifyStatus from
+		// CU4 (which honors sawRunError). The terminal status/runEnd stamp
+		// waits until every worker folded into this row is done.
+		if !e.Success {
+			row.failed = true
 		}
-		row.runEnd = time.Now()
+		row.workerFinished(msg.source)
 	case reviewtypes.RunError:
-		row.status = reviewtypes.AgentStatusFailed
-		row.err = e.Err
-		if row.runEnd.IsZero() {
-			row.runEnd = time.Now()
+		row.failed = true
+		if row.err == nil {
+			row.err = e.Err
 		}
+		row.workerFinished(msg.source)
 	case reviewtypes.ToolCall:
 		// No visible state update for tool calls in the dashboard.
 	}
