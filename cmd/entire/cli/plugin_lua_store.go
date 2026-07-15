@@ -199,6 +199,12 @@ func UpdateLuaPlugin(ctx context.Context, name string) error {
 		return err
 	}
 	if p.Ref != "" {
+		// p.Ref is read from the plugin's install metadata; validate it here too
+		// so a tampered .entire-install.json cannot smuggle a "-"-prefixed value
+		// into git checkout as an option.
+		if err := validateGitArg("ref", p.Ref); err != nil {
+			return err
+		}
 		if err := runPluginGit(ctx, p.Dir, "checkout", "--quiet", p.Ref); err != nil {
 			return err
 		}
@@ -264,23 +270,42 @@ func placeLuaPlugin(luaDir, name, tmp string, force bool) (string, error) {
 	return dest, nil
 }
 
-// cloneGitPlugin clones url into dest. A ref triggers a full clone + checkout
-// (so tags, branches, and commits all work); no ref does a shallow clone of the
-// default branch.
-func cloneGitPlugin(ctx context.Context, url, ref, dest string) error {
-	if ref == "" {
-		if err := runPluginGit(ctx, "", "clone", "--depth", "1", url, dest); err != nil {
-			return err
-		}
-		return nil
-	}
-	if err := runPluginGit(ctx, "", "clone", url, dest); err != nil {
-		return err
-	}
-	if err := runPluginGit(ctx, dest, "checkout", "--quiet", ref); err != nil {
-		return err
+// validateGitArg rejects a url/ref that could be misparsed as a git option. A
+// value beginning with "-" (e.g. "--upload-pack=payload" or "-oProxyCommand=…")
+// would be consumed by git as a flag rather than as the intended positional
+// argument, turning a plugin install into arbitrary command execution. We reject
+// such values loudly. Callers additionally pass "--" before positional
+// arguments where the subcommand supports it (git clone), but "git checkout"'s
+// "--" introduces a pathspec rather than a ref, so leading-dash rejection is the
+// load-bearing guard for refs.
+func validateGitArg(kind, value string) error {
+	if strings.HasPrefix(value, "-") {
+		return fmt.Errorf("invalid plugin %s %q: must not start with '-'", kind, value)
 	}
 	return nil
+}
+
+// cloneGitPlugin clones url into dest. A ref triggers a full clone + checkout
+// (so tags, branches, and commits all work); no ref does a shallow clone of the
+// default branch. url and ref are validated and the clone passes "--" before its
+// positional arguments so neither can be interpreted as a git option.
+func cloneGitPlugin(ctx context.Context, url, ref, dest string) error {
+	if err := validateGitArg("url", url); err != nil {
+		return err
+	}
+	if ref == "" {
+		return runPluginGit(ctx, "", "clone", "--depth", "1", "--", url, dest)
+	}
+	if err := validateGitArg("ref", ref); err != nil {
+		return err
+	}
+	if err := runPluginGit(ctx, "", "clone", "--", url, dest); err != nil {
+		return err
+	}
+	// "git checkout <ref>" cannot use "--" (that would select a pathspec), so
+	// the leading-dash validation above is what keeps ref from being parsed as
+	// an option here.
+	return runPluginGit(ctx, dest, "checkout", "--quiet", ref)
 }
 
 // copyPluginDir copies a plugin source dir into dest, excluding any .git dir.

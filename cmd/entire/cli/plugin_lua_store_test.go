@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -33,6 +34,47 @@ func TestLooksLikeGitURL(t *testing.T) {
 		if looksLikeGitURL(u) {
 			t.Errorf("looksLikeGitURL(%q) = true, want false", u)
 		}
+	}
+}
+
+func TestValidateGitArg(t *testing.T) {
+	t.Parallel()
+	bad := []string{"-x", "--upload-pack=payload", "-oProxyCommand=x", "--evil"}
+	for _, v := range bad {
+		if err := validateGitArg("url", v); err == nil {
+			t.Errorf("validateGitArg(url, %q) = nil, want error", v)
+		}
+	}
+	ok := []string{
+		"https://github.com/acme/x.git", "git@github.com:acme/x.git",
+		"v1.2.0", "main", "abc123", "./local", "/abs/path",
+	}
+	for _, v := range ok {
+		if err := validateGitArg("ref", v); err != nil {
+			t.Errorf("validateGitArg(ref, %q) = %v, want nil", v, err)
+		}
+	}
+}
+
+func TestCloneGitPlugin_RejectsDashArgs(t *testing.T) {
+	t.Parallel()
+	dest := filepath.Join(t.TempDir(), "dest")
+	// A dash-prefixed url must be rejected before any git process runs, so a
+	// value like "--upload-pack=<cmd>" cannot smuggle in command execution.
+	if err := cloneGitPlugin(context.Background(), "--upload-pack=touch pwned", "", dest); err == nil {
+		t.Error("expected error for dash-prefixed url")
+	}
+	// A valid url but dash-prefixed ref must also be rejected (before clone).
+	if err := cloneGitPlugin(context.Background(), "https://example.com/x.git", "--evil", dest); err == nil {
+		t.Error("expected error for dash-prefixed ref")
+	}
+}
+
+func TestInstallLuaPluginFromGit_RejectsDashURL(t *testing.T) {
+	t.Setenv("ENTIRE_PLUGIN_DIR", t.TempDir())
+	_, err := InstallLuaPluginFromGit(context.Background(), "--upload-pack=payload", "", false)
+	if err == nil || !strings.Contains(err.Error(), "must not start with '-'") {
+		t.Fatalf("expected dash-url rejection, got %v", err)
 	}
 }
 
