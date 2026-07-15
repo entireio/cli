@@ -32,6 +32,23 @@ Environment Variables:
                 TUI elements, which works better with screen readers.
 `
 
+// Help groups for the root command. AddGroup order is display order.
+// Visible commands without a GroupID render under "Additional Commands"
+// (version, labs, agent-help, help) — that placement is intentional.
+const (
+	groupSetup        = "setup"
+	groupSessions     = "sessions"
+	groupAccount      = "account"
+	groupControlPlane = "controlplane"
+)
+
+// inGroup assigns a help group to a command at registration time so all
+// grouping stays visible in NewRootCmd rather than spread across constructors.
+func inGroup(c *cobra.Command, groupID string) *cobra.Command {
+	c.GroupID = groupID
+	return c
+}
+
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "entire",
@@ -85,39 +102,47 @@ func NewRootCmd() *cobra.Command {
 		},
 	}
 
+	// Help groups; AddGroup order is display order in `entire --help`.
+	cmd.AddGroup(
+		&cobra.Group{ID: groupSetup, Title: "Entire Setup:"},
+		&cobra.Group{ID: groupSessions, Title: "Sessions & Checkpoints:"},
+		&cobra.Group{ID: groupAccount, Title: "Account:"},
+		&cobra.Group{ID: groupControlPlane, Title: "Control Plane:"},
+	)
+
 	// Noun groups (canonical homes for subcommands).
-	cmd.AddCommand(newSessionsCmd())                // 'session' (with 'sessions' as Cobra alias)
-	cmd.AddCommand(newCheckpointGroupCmd())         // 'checkpoint' / 'cp' / 'checkpoints'
-	experimental.Register(cmd, newTokensGroupCmd()) // 'tokens' (experimental)
-	cmd.AddCommand(newAgentGroupCmd())              // 'agent'
-	cmd.AddCommand(newAuthCmd())                    // 'auth'
-	cmd.AddCommand(newDoctorCmd())                  // 'doctor' (group: trace/logs/bundle)
-	cmd.AddCommand(newLabsCmd())                    // 'labs' (experimental workflow discovery)
-	cmd.AddCommand(newPluginGroupCmd())             // 'plugin' (managed install/list/remove)
-	experimental.Register(cmd, newImportCmd())      // 'import' (experimental; import pre-existing agent history)
-	cmd.AddCommand(newOrgCmd())                     // 'org' — control-plane org management
-	cmd.AddCommand(newProjectCmd())                 // 'project' — control-plane project management
-	cmd.AddCommand(newRepoCmd())                    // 'repo' — control-plane repo lifecycle
-	cmd.AddCommand(newGrantCmd())                   // 'grant' — control-plane access grants
+	cmd.AddCommand(inGroup(newSessionsCmd(), groupSessions))        // 'session' (with 'sessions' as Cobra alias)
+	cmd.AddCommand(inGroup(newCheckpointGroupCmd(), groupSessions)) // 'checkpoint' / 'cp' / 'checkpoints'
+	experimental.Register(cmd, newTokensGroupCmd())                 // 'tokens' (experimental)
+	cmd.AddCommand(inGroup(newAgentGroupCmd(), groupSetup))         // 'agent'
+	cmd.AddCommand(inGroup(newAuthCmd(), groupAccount))             // 'auth'
+	cmd.AddCommand(inGroup(newDoctorCmd(), groupSetup))             // 'doctor' (group: trace/logs/bundle)
+	cmd.AddCommand(newLabsCmd())                                    // 'labs' (experimental workflow discovery)
+	cmd.AddCommand(inGroup(newPluginGroupCmd(), groupSetup))        // 'plugin' (managed install/list/remove)
+	experimental.Register(cmd, newImportCmd())                      // 'import' (experimental; import pre-existing agent history)
+	cmd.AddCommand(inGroup(newOrgCmd(), groupControlPlane))         // 'org' — control-plane org management
+	cmd.AddCommand(inGroup(newProjectCmd(), groupControlPlane))     // 'project' — control-plane project management
+	cmd.AddCommand(inGroup(newRepoCmd(), groupControlPlane))        // 'repo' — control-plane repo lifecycle
+	cmd.AddCommand(inGroup(newGrantCmd(), groupControlPlane))       // 'grant' — control-plane access grants
 
 	// Top-level lifecycle and standalone commands.
 	experimental.Register(cmd, cliReview.NewCommand(buildReviewDeps()))        // `review` (experimental)
 	experimental.Register(cmd, investigate.NewCommand(buildInvestigateDeps())) // `investigate` (experimental); multi-agent investigation
-	cmd.AddCommand(newCleanCmd())
-	cmd.AddCommand(newSetupCmd()) // 'configure' — non-agent settings; agent CRUD lives under 'agent'
-	cmd.AddCommand(newEnableCmd())
-	cmd.AddCommand(newDisableCmd())
-	cmd.AddCommand(newStatusCmd())
+	cmd.AddCommand(inGroup(newCleanCmd(), groupSetup))
+	cmd.AddCommand(inGroup(newSetupCmd(), groupSetup)) // 'configure' — non-agent settings; agent CRUD lives under 'agent'
+	cmd.AddCommand(inGroup(newEnableCmd(), groupSetup))
+	cmd.AddCommand(inGroup(newDisableCmd(), groupSetup))
+	cmd.AddCommand(inGroup(newStatusCmd(), groupSetup))
 	experimental.Register(cmd, newBlameCmd()) // 'blame' (experimental)
 	experimental.Register(cmd, newWhyCmd())   // 'why' (experimental)
-	cmd.AddCommand(newLoginCmd())
-	cmd.AddCommand(newLogoutCmd())
+	cmd.AddCommand(inGroup(newLoginCmd(), groupAccount))
+	cmd.AddCommand(inGroup(newLogoutCmd(), groupAccount))
 	cmd.AddCommand(newVersionCmd())
-	cmd.AddCommand(newDispatchCmd())
-	cmd.AddCommand(newActivityCmd())
-	cmd.AddCommand(newRecapCmd())
-	cmd.AddCommand(newAPICmd())          // authenticated passthrough to core/cell APIs
-	cmd.AddCommand(newAgentHelpCmd(cmd)) // visible: agents on transports without context injection discover it via `entire help`
+	cmd.AddCommand(inGroup(newDispatchCmd(), groupSessions))
+	cmd.AddCommand(inGroup(newActivityCmd(), groupSessions))
+	cmd.AddCommand(inGroup(newRecapCmd(), groupSessions))
+	cmd.AddCommand(inGroup(newAPICmd(), groupControlPlane)) // authenticated passthrough to core/cell APIs
+	cmd.AddCommand(newAgentHelpCmd(cmd))                    // visible: agents on transports without context injection discover it via `entire help`
 
 	// Hidden top-level shortcuts. Functional but print a deprecation hint.
 	cmd.AddCommand(hideAsAlias(newResumeCmd(), "entire session resume"))
@@ -140,6 +165,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newTrailCmd())
 	cmd.AddCommand(newSendAnalyticsCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
+	cmd.AddCommand(newRefreshTrailEnablementCmd())
 
 	// Experimental command (developer-only visibility; setup/tune runners).
 	experimental.Register(cmd, newRunnerCmd()) // 'runner' (experimental)

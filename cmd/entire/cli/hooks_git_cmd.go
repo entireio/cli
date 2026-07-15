@@ -326,7 +326,7 @@ func newHooksGitPrePushCmd() *cobra.Command {
 			defer g.span.End()
 			g.logInvoked(slog.String("remote", remote))
 
-			hookErr := g.strategy.PrePush(g.ctx, remote)
+			hookErr := g.strategy.PrePushFromGitHook(g.ctx, remote)
 			g.logCompleted(hookErr)
 
 			// Propagate the error so the hook script exits non-zero and

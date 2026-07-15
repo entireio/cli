@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 	"unicode"
 
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
@@ -19,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
-	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -79,8 +77,12 @@ your agent's context.`,
 			external.DiscoverAndRegister(ctx)
 			w := cmd.OutOrStdout()
 			errW := cmd.ErrOrStderr()
+			// --list is a hidden deprecated bridge for external scripts that still
+			// invoke rewind --list. Same JSON bytes as checkpoint list --pending
+			// --json; remove together with the rewind command itself.
 			if listFlag {
-				return runRewindList(ctx, w)
+				fmt.Fprintln(errW, "note: 'rewind --list' is deprecated; use 'entire checkpoint list --pending --json'")
+				return runCheckpointPendingListJSON(ctx, w)
 			}
 			if toFlag != "" {
 				return runRewindToWithOptions(ctx, w, errW, toFlag, logsOnlyFlag, resetFlag)
@@ -89,7 +91,8 @@ your agent's context.`,
 		},
 	}
 
-	cmd.Flags().BoolVar(&listFlag, "list", false, "List available rewind points (JSON output)")
+	cmd.Flags().BoolVar(&listFlag, "list", false, "List available rewind points (JSON output); deprecated, use checkpoint list --pending --json")
+	_ = cmd.Flags().MarkHidden("list") //nolint:errcheck // flag is defined above
 	cmd.Flags().StringVar(&toFlag, "to", "", "Rewind to specific commit ID (non-interactive)")
 	cmd.Flags().BoolVar(&logsOnlyFlag, "logs-only", false, "Only restore logs, don't modify working directory (for logs-only points)")
 	cmd.Flags().BoolVar(&resetFlag, "reset", false, "Reset branch to commit (destructive, for logs-only points)")
@@ -124,43 +127,12 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 	}
 
 	// Check if there are multiple sessions (to show session identifier)
-	sessionIDs := make(map[string]bool)
-	for _, p := range points {
-		if p.SessionID != "" {
-			sessionIDs[p.SessionID] = true
-		}
-	}
-	hasMultipleSessions := len(sessionIDs) > 1
+	multi := hasMultipleSessions(points)
 
 	// Build options for the select menu
 	options := make([]huh.Option[string], 0, len(points)+1)
 	for _, p := range points {
-		var label string
-		timestamp := p.Date.Format("2006-01-02 15:04")
-
-		// Build session identifier for display when multiple sessions exist
-		sessionLabel := ""
-		if hasMultipleSessions && p.SessionPrompt != "" {
-			// Show truncated prompt to identify the session
-			sessionLabel = fmt.Sprintf(" [%s]", sanitizeForTerminal(p.SessionPrompt))
-		}
-
-		switch {
-		case p.IsLogsOnly:
-			// Committed checkpoint - show commit sha (this is the real user commit)
-			shortID := p.ID
-			if len(shortID) >= 7 {
-				shortID = shortID[:7]
-			}
-			label = fmt.Sprintf("%s (%s) %s%s", shortID, timestamp, sanitizeForTerminal(p.Message), sessionLabel)
-		case p.IsTaskCheckpoint:
-			// Task checkpoint (uncommitted) - no sha shown
-			label = fmt.Sprintf("        (%s) [Task] %s%s", timestamp, sanitizeForTerminal(p.Message), sessionLabel)
-		default:
-			// Shadow checkpoint (uncommitted) - no sha shown (internal commit)
-			label = fmt.Sprintf("        (%s) %s%s", timestamp, sanitizeForTerminal(p.Message), sessionLabel)
-		}
-		options = append(options, huh.NewOption(label, p.ID))
+		options = append(options, huh.NewOption(rewindPointLabel(p, multi), p.ID))
 	}
 	options = append(options, huh.NewOption("Cancel", "cancel"))
 
@@ -344,53 +316,6 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 	}
 
 	fmt.Fprintf(w, "✓ Rewound to %s. %s\n", shortID, agent.FormatResumeCommand(sessionID))
-	return nil
-}
-
-func runRewindList(ctx context.Context, w io.Writer) error {
-	start := GetStrategy(ctx)
-
-	points, err := start.GetRewindPoints(ctx, 20)
-	if err != nil {
-		return fmt.Errorf("failed to find rewind points: %w", err)
-	}
-
-	// Output as JSON for programmatic use
-	type jsonPoint struct {
-		ID               string `json:"id"`
-		Message          string `json:"message"`
-		MetadataDir      string `json:"metadata_dir"`
-		Date             string `json:"date"`
-		IsTaskCheckpoint bool   `json:"is_task_checkpoint"`
-		ToolUseID        string `json:"tool_use_id,omitempty"`
-		IsLogsOnly       bool   `json:"is_logs_only"`
-		CondensationID   string `json:"condensation_id,omitempty"`
-		SessionID        string `json:"session_id,omitempty"`
-		SessionPrompt    string `json:"session_prompt,omitempty"`
-	}
-
-	output := make([]jsonPoint, len(points))
-	for i, p := range points {
-		output[i] = jsonPoint{
-			ID:               p.ID,
-			Message:          p.Message,
-			MetadataDir:      p.MetadataDir,
-			Date:             p.Date.Format(time.RFC3339),
-			IsTaskCheckpoint: p.IsTaskCheckpoint,
-			ToolUseID:        p.ToolUseID,
-			IsLogsOnly:       p.IsLogsOnly,
-			CondensationID:   p.CheckpointID.String(),
-			SessionID:        p.SessionID,
-			SessionPrompt:    p.SessionPrompt,
-		}
-	}
-
-	// Print as JSON
-	data, err := jsonutil.MarshalIndentWithNewline(output, "", "  ")
-	if err != nil {
-		return err //nolint:wrapcheck // already present in codebase
-	}
-	fmt.Fprintln(w, string(data))
 	return nil
 }
 

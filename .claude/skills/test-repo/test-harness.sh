@@ -151,7 +151,7 @@ list-rewind-points)
   echo "==> Listing rewind points..."
   cd "$REPO_DIR"
 
-  "$BIN_PATH" rewind --list
+  "$BIN_PATH" checkpoint list --pending --json
   ;;
 
 create-changes)

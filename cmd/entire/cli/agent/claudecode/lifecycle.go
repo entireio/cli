@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/textutil"
 )
 
 // Compile-time interface assertions for new interfaces.
@@ -137,8 +138,11 @@ func (c *ClaudeCodeAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) 
 		Type:       agent.TurnStart,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
-		Prompt:     raw.Prompt,
-		Timestamp:  time.Now(),
+		// Strip IDE-injected context (e.g. <ide_opened_file> from the VS Code
+		// extension) so the session/checkpoint title and prompt show what the
+		// user actually typed, not the injected block.
+		Prompt:    textutil.StripIDEContextTags(raw.Prompt),
+		Timestamp: time.Now(),
 	}, nil
 }
 
