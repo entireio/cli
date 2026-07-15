@@ -2,9 +2,12 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +16,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agentimport"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/onboarding"
@@ -284,7 +288,13 @@ func discoverAgentImports(ctx context.Context) ([]agentImportStatus, error) {
 		return nil, fmt.Errorf("%w: %w", errImportsPolicyRestricted, policyErr)
 	}
 
-	fingerprint := importScanFingerprint(inputs, metadataBranchTip(repo))
+	tip, tipErr := metadataTip(repo)
+	if tipErr != nil {
+		// A digest computed without the checkpoint refs could collide with the
+		// pre-import fingerprint and serve a stale "not imported" result.
+		cacheable = false
+	}
+	fingerprint := importScanFingerprint(inputs, tip)
 	cache := defaultImportScanCache()
 	if cacheable {
 		if statuses, ok := cache.get(repoRoot, fingerprint); ok {
@@ -325,14 +335,48 @@ func discoverAgentImports(ctx context.Context) ([]agentImportStatus, error) {
 	return statuses, nil
 }
 
-// metadataBranchTip identifies the local checkpoint-metadata state for the
-// import-scan fingerprint: any new checkpoint or import moves the ref.
+// metadataTip identifies the local checkpoint-metadata state for the
+// import-scan fingerprint: any new checkpoint or import moves it. Imports land
+// on whichever backend is the configured primary, so both are covered — the
+// v1 metadata branch tip plus the per-checkpoint refs the git-refs store
+// writes (refs/entire/checkpoints/...), which never move the branch tip. The
+// error reports a digest computed without the checkpoint refs; callers must
+// not cache under it.
+func metadataTip(repo *git.Repository) (string, error) {
+	digest, err := checkpointRefsDigest(repo)
+	return metadataBranchTip(repo) + "+" + digest, err
+}
+
+// metadataBranchTip is the git-branch backend's tip (the v1 metadata branch).
 func metadataBranchTip(repo *git.Repository) string {
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
 		return "none"
 	}
 	return ref.Hash().String()
+}
+
+// checkpointRefsDigest hashes the git-refs backend's per-checkpoint refs
+// (name and hash), order-independently. An iteration failure returns the
+// digest of whatever was seen plus the error.
+func checkpointRefsDigest(repo *git.Repository) (string, error) {
+	var lines []string
+	iter, err := repo.References()
+	if err == nil {
+		err = iter.ForEach(func(ref *plumbing.Reference) error {
+			if name := ref.Name().String(); strings.HasPrefix(name, checkpoint.CheckpointRefPrefix) {
+				lines = append(lines, name+"|"+ref.Hash().String())
+			}
+			return nil
+		})
+	}
+	sort.Strings(lines)
+	h := sha256.New()
+	for _, l := range lines {
+		h.Write([]byte(l))
+		h.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(h.Sum(nil)), err
 }
 
 func hooksRung(deps onboardingRungDeps) onboarding.Rung {

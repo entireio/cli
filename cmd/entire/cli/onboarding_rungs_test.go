@@ -10,7 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/onboarding"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 )
@@ -674,6 +679,47 @@ func TestImportScanFingerprint_ChangesWithInputs(t *testing.T) {
 
 	if importScanFingerprint(base, "def456") == fp {
 		t.Error("a moved metadata branch tip (new checkpoints/imports) must change the fingerprint")
+	}
+}
+
+// Regression: under a git-refs checkpoint primary, an import writes
+// refs/entire/checkpoints/<shard>/<id> and never moves the v1 metadata
+// branch. The scan fingerprint's metadata tip must still change, or the
+// post-import re-check serves the stale pre-import cache entry — `entire
+// enable` printed "Imported 2 turn(s)" directly above "✗ History ... not
+// imported".
+func TestMetadataTip_MovesWithCheckpointRefs(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	repo, err := git.PlainOpen(dir)
+	if err != nil {
+		t.Fatalf("open repo: %v", err)
+	}
+
+	before, err := metadataTip(repo)
+	if err != nil {
+		t.Fatalf("metadataTip before: %v", err)
+	}
+
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	refName := plumbing.ReferenceName(checkpoint.CheckpointRefPrefix + "3q/01hzxw2e8g0000000000003q3q")
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(refName, head.Hash())); err != nil {
+		t.Fatalf("set checkpoint ref: %v", err)
+	}
+
+	after, err := metadataTip(repo)
+	if err != nil {
+		t.Fatalf("metadataTip after: %v", err)
+	}
+	if after == before {
+		t.Error("a new per-checkpoint ref (git-refs import) must change the metadata tip")
 	}
 }
 
