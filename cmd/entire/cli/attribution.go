@@ -274,9 +274,9 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, opts att
 	// deterministic plain/JSON output below, which carries the full
 	// information. --json wins over --tui so scripted callers never block.
 	if opts.TUI && !opts.JSON && interactive.IsTerminalWriter(w) && !IsAccessibleMode() {
-		startLine := 0
-		if hasLine {
-			startLine = line
+		startLine, err := whyTUIStartLine(result, hasLine, line)
+		if err != nil {
+			return err
 		}
 		return runWhyTUI(result, attributionRepoFullName(ctx), shouldUseColor(w), startLine)
 	}
@@ -289,13 +289,7 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, opts att
 		return nil
 	}
 
-	var selected *attributionLine
-	for i := range result.Lines {
-		if result.Lines[i].LineNumber == line {
-			selected = &result.Lines[i]
-			break
-		}
-	}
+	selected := findAttributionLine(result.Lines, line)
 	if selected == nil {
 		return fmt.Errorf("line %d is outside %s", line, result.File)
 	}
@@ -314,6 +308,32 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, opts att
 	}
 	renderAttributionLineWhy(w, result.File, *selected)
 	return nil
+}
+
+// findAttributionLine returns the attribution entry for the given 1-based line
+// number, or nil when the file has no such line. Both the plain and TUI why
+// paths rely on this so an out-of-range line is reported consistently.
+func findAttributionLine(lines []attributionLine, lineNumber int) *attributionLine {
+	for i := range lines {
+		if lines[i].LineNumber == lineNumber {
+			return &lines[i]
+		}
+	}
+	return nil
+}
+
+// whyTUIStartLine resolves the cursor start line for the interactive why
+// viewer. When a specific line was requested it must exist in the file:
+// otherwise we return the same "line N is outside <file>" error the plain
+// path emits, rather than silently opening the viewer at line 1.
+func whyTUIStartLine(result *fileAttributionResult, hasLine bool, line int) (int, error) {
+	if !hasLine {
+		return 0, nil
+	}
+	if findAttributionLine(result.Lines, line) == nil {
+		return 0, fmt.Errorf("line %d is outside %s", line, result.File)
+	}
+	return line, nil
 }
 
 func resolveFileAttribution(ctx context.Context, file string, fetchOnMiss bool) (*fileAttributionResult, error) {

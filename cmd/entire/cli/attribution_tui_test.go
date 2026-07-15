@@ -265,6 +265,31 @@ func TestWhyTUIFlagFallsBackToPlainTextWhenNotTTY(t *testing.T) {
 	}
 }
 
+// The interactive viewer must reject an out-of-range start line the same way
+// the plain path does, instead of silently opening at line 1.
+func TestWhyTUIStartLineOutOfRangeErrors(t *testing.T) {
+	t.Parallel()
+	result := whyTUIFixture() // lines 1-4
+
+	if _, err := whyTUIStartLine(result, true, 99); err == nil {
+		t.Fatal("expected an error for a start line outside the file")
+	} else if !strings.Contains(err.Error(), "is outside") {
+		t.Fatalf("error %q missing the shared \"is outside\" wording", err)
+	}
+
+	start, err := whyTUIStartLine(result, true, 3)
+	if err != nil {
+		t.Fatalf("in-range start line errored: %v", err)
+	}
+	if start != 3 {
+		t.Fatalf("in-range start line = %d, want 3", start)
+	}
+
+	if start, err := whyTUIStartLine(result, false, 0); err != nil || start != 0 {
+		t.Fatalf("no explicit line: got (%d, %v), want (0, nil)", start, err)
+	}
+}
+
 // --json must win over --tui so scripted callers always get JSON.
 func TestWhyTUIFlagJSONWins(t *testing.T) {
 	newAttributionRepo(t)
