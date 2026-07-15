@@ -37,6 +37,19 @@ func Enabled(ctx context.Context) bool {
 	return globalRegistry(ctx).Len() > 0
 }
 
+// FireCommitMsg dispatches the prepare_commit_msg mutating hook and returns the
+// trailer lines contributed by capable plugins (empty when none). See
+// Registry.FireCommitMsg for semantics.
+func FireCommitMsg(ctx context.Context, payload map[string]any) []string {
+	return globalRegistry(ctx).FireCommitMsg(ctx, payload)
+}
+
+// FirePrePush dispatches the pre_push hook (observer + veto). Returns a non-nil
+// error when a capable plugin vetoes the push. See Registry.FirePrePush.
+func FirePrePush(ctx context.Context, payload map[string]any) error {
+	return globalRegistry(ctx).FirePrePush(ctx, payload)
+}
+
 func globalRegistry(ctx context.Context) *Registry {
 	globalMu.Lock()
 	defer globalMu.Unlock()

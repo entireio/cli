@@ -354,7 +354,7 @@ func isGitSequenceOperation(ctx context.Context) bool {
 //   - "commit": amend operation - preserves existing trailer or restores from LastCheckpointID
 //
 
-func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFile string, source string) error {
+func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFile string, source string) (err error) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
 	// Skip during rebase, cherry-pick, or revert operations
@@ -377,6 +377,17 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		)
 		return nil
 	}
+
+	// After the built-in trailer handling below completes successfully, let
+	// commit_msg-capable plugins append their own trailers. Deferred so it runs
+	// on every non-sequence, non-merge/squash return path (normal and amend)
+	// without threading the call through each branch. Plugin trailers land after
+	// the Entire-Checkpoint trailer, never displacing it.
+	defer func() {
+		if err == nil {
+			appendPluginCommitTrailers(ctx, commitMsgFile, source)
+		}
+	}()
 
 	// Handle amend (source="commit") separately: preserve or restore trailer
 	if source == "commit" {

@@ -460,6 +460,12 @@ const (
 	PluginCapabilityFS = "fs"
 	// PluginCapabilityNet grants raw network access (entire.net).
 	PluginCapabilityNet = "net"
+	// PluginCapabilityCommitMsg lets a plugin's prepare_commit_msg hook append
+	// a trailer to the user's commit message.
+	PluginCapabilityCommitMsg = "commit_msg"
+	// PluginCapabilityPrePush lets a plugin's pre_push hook veto a push
+	// (aborting it with a non-zero hook exit).
+	PluginCapabilityPrePush = "pre_push"
 )
 
 // PluginSettings configures a single Lua plugin's activation and the
@@ -502,7 +508,8 @@ func (s *EntireSettings) IsPluginEnabled(name string) bool {
 // isKnownPluginCapability reports whether name is a recognized capability.
 func isKnownPluginCapability(name string) bool {
 	switch name {
-	case PluginCapabilityHTTP, PluginCapabilityExec, PluginCapabilityFS, PluginCapabilityNet:
+	case PluginCapabilityHTTP, PluginCapabilityExec, PluginCapabilityFS, PluginCapabilityNet,
+		PluginCapabilityCommitMsg, PluginCapabilityPrePush:
 		return true
 	default:
 		return false
@@ -519,7 +526,10 @@ func IsKnownPluginCapabilityName(name string) bool {
 // KnownPluginCapabilities returns the recognized capability names in a stable
 // order, for use in validation error messages and manifest validation.
 func KnownPluginCapabilities() []string {
-	return []string{PluginCapabilityHTTP, PluginCapabilityExec, PluginCapabilityFS, PluginCapabilityNet}
+	return []string{
+		PluginCapabilityHTTP, PluginCapabilityExec, PluginCapabilityFS, PluginCapabilityNet,
+		PluginCapabilityCommitMsg, PluginCapabilityPrePush,
+	}
 }
 
 // validatePluginSettings rejects empty plugin names and unknown capability
@@ -532,9 +542,8 @@ func validatePluginSettings(plugins map[string]PluginSettings) error {
 		}
 		for _, capName := range ps.Capabilities {
 			if !isKnownPluginCapability(capName) {
-				return fmt.Errorf("plugins.%s.capabilities has unknown capability %q (allowed: %s, %s, %s, %s)",
-					name, capName,
-					PluginCapabilityHTTP, PluginCapabilityExec, PluginCapabilityFS, PluginCapabilityNet)
+				return fmt.Errorf("plugins.%s.capabilities has unknown capability %q (allowed: %s)",
+					name, capName, strings.Join(KnownPluginCapabilities(), ", "))
 			}
 		}
 	}
