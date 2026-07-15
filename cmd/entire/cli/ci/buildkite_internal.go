@@ -34,6 +34,7 @@ func newBuildkiteCmd() *cobra.Command {
 	cmd.AddCommand(newBuildkiteListCmd())
 	cmd.AddCommand(newBuildkiteUpdateCmd())
 	cmd.AddCommand(newBuildkiteRemoveCmd())
+	cmd.AddCommand(newBuildkiteWatchCmd())
 	return cmd
 }
 

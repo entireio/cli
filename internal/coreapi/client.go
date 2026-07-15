@@ -2,8 +2,12 @@ package coreapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -134,6 +138,59 @@ func clientForTarget(target auth.ControlPlaneTarget) (*Client, error) {
 // silently miss the ENTIRE_TOKEN and cluster cases.
 func (c *Client) CoreOrigin() string {
 	return c.serverURL.Scheme + "://" + c.serverURL.Host
+}
+
+// GetJSON issues a GET to path (relative to this client's /api/v1 base),
+// applying the same bearer auth and cross-jurisdiction transport as the
+// generated operations, and decodes a 2xx JSON body into dst. A non-2xx
+// response is returned as an *ErrorModelStatusCode, so callers get the server's
+// RFC 7807 problem detail via APIError exactly as they do for generated calls.
+//
+// It is a deliberate escape hatch for control-plane endpoints not yet present
+// in the generated spec: it reuses this client's own serverURL, SecuritySource,
+// and HTTP transport rather than opening a second auth path. Its only caller is
+// `entire ci buildkite watch`, which reads GET /repos/{repoId}/ci-builds (added
+// by entiredb#2741, not yet regenerated into this client's spec). Once the spec
+// is regenerated to include ci-builds, delete GetJSON and switch that caller to
+// the generated Invoker method.
+func (c *Client) GetJSON(ctx context.Context, path string, query url.Values, dst any) error {
+	u := c.serverURL.JoinPath(path)
+	if len(query) > 0 {
+		u.RawQuery = query.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if err := c.securityBearerAuth(ctx, "GetJSON", req); err != nil {
+		return fmt.Errorf("apply bearer auth: %w", err)
+	}
+	resp, err := c.cfg.Client.Do(req)
+	if err != nil {
+		return fmt.Errorf("do request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return statusCodeError(resp)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	return nil
+}
+
+// statusCodeError turns a non-2xx response into an *ErrorModelStatusCode,
+// decoding the RFC 7807 problem body when present so APIError renders the
+// server's title/detail; a body that is absent or non-JSON still yields a
+// well-formed error carrying the status code.
+func statusCodeError(resp *http.Response) error {
+	e := &ErrorModelStatusCode{StatusCode: resp.StatusCode}
+	if body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)); err == nil && len(body) > 0 {
+		_ = json.Unmarshal(body, &e.Response) //nolint:errcheck // best-effort: a missing/non-JSON body just yields a status-only error
+	}
+	return e
 }
 
 // NewWithBearer returns a *Client targeting an explicit core origin with a

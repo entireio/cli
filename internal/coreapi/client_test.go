@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -291,5 +292,72 @@ func TestListProjectRepos_UnknownEnumValuesPassThrough(t *testing.T) {
 	}
 	if got := repo.ObjectFormat.Or(""); got != "sha512" {
 		t.Errorf("ObjectFormat = %q, want the unknown value %q passed through verbatim", got, "sha512")
+	}
+}
+
+// TestGetJSON_SuccessDecodesAndSendsBearer covers the escape-hatch GET added for
+// endpoints not yet in the generated spec: it must resolve the path against the
+// client's /api/v1 base, apply the bearer from the SecuritySource, encode the
+// query, and decode a 2xx JSON body into dst.
+func TestGetJSON_SuccessDecodesAndSendsBearer(t *testing.T) {
+	var gotPath, gotAuth, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth, gotQuery = r.URL.Path, r.Header.Get("Authorization"), r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true,"n":7}`)) //nolint:errcheck // test
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewWithBearer(srv.URL, "tok")
+	if err != nil {
+		t.Fatalf("NewWithBearer: %v", err)
+	}
+	var dst struct {
+		OK bool `json:"ok"`
+		N  int  `json:"n"`
+	}
+	if err := c.GetJSON(context.Background(), "repos/R/ci-builds", url.Values{"limit": {"100"}}, &dst); err != nil {
+		t.Fatalf("GetJSON: %v", err)
+	}
+	if gotPath != "/api/v1/repos/R/ci-builds" {
+		t.Errorf("path = %q, want /api/v1/repos/R/ci-builds", gotPath)
+	}
+	if gotAuth != "Bearer tok" {
+		t.Errorf("auth = %q, want Bearer tok", gotAuth)
+	}
+	if gotQuery != "limit=100" {
+		t.Errorf("query = %q, want limit=100", gotQuery)
+	}
+	if !dst.OK || dst.N != 7 {
+		t.Errorf("decoded = %+v, want {OK:true N:7}", dst)
+	}
+}
+
+// TestGetJSON_Non2xxReturnsProblemDetail asserts a non-2xx response surfaces as
+// an *ErrorModelStatusCode carrying the RFC 7807 detail, so APIError renders the
+// server's message exactly as it does for generated operations.
+func TestGetJSON_Non2xxReturnsProblemDetail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"title":"Not Found","detail":"repo not found","status":404}`)) //nolint:errcheck // test
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewWithBearer(srv.URL, "tok")
+	if err != nil {
+		t.Fatalf("NewWithBearer: %v", err)
+	}
+	var dst map[string]any
+	err = c.GetJSON(context.Background(), "repos/R/ci-builds", nil, &dst)
+	if err == nil {
+		t.Fatal("GetJSON: want error on 404")
+	}
+	var se *ErrorModelStatusCode
+	if !errors.As(err, &se) || se.StatusCode != http.StatusNotFound {
+		t.Fatalf("err = %v, want *ErrorModelStatusCode with 404", err)
+	}
+	if msg := APIError(err); msg != "repo not found" {
+		t.Errorf("APIError = %q, want %q", msg, "repo not found")
 	}
 }
