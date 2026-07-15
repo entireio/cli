@@ -442,6 +442,64 @@ func (m Metadata) GetCompactTranscriptStart() (offset int, ok bool) {
 	return *m.CompactTranscriptStart, true
 }
 
+// WithoutCost returns a copy of the session Metadata with all token-usage cost
+// provenance removed (the flat TokenUsage, every per-model ModelUsage bucket, and
+// each nested SubagentTokens subtree). Token counts, APICallCount, model ids,
+// SessionMetrics, and every other field are preserved.
+//
+// The CLI no longer persists cost: entire-api prices server-side from the token
+// breakdown, so cost is a display-only local estimate (see the token commands).
+// Every checkpoint-metadata write funnels through this so no committed blob ever
+// carries cost_usd/cost_source, while keeping the four token fields + model id
+// per model that the platform's server-side pricing depends on. The returned copy
+// never aliases the receiver's TokenUsage/ModelUsage, so callers can keep using
+// the originals (e.g. for local diagnostics) after persisting.
+func (m Metadata) WithoutCost() Metadata {
+	m.TokenUsage = tokenUsageWithoutCost(m.TokenUsage)
+	m.ModelUsage = modelUsageWithoutCost(m.ModelUsage)
+	return m
+}
+
+// WithoutCost returns a copy of the root CheckpointSummary with all token-usage
+// cost provenance removed. See Metadata.WithoutCost.
+func (s CheckpointSummary) WithoutCost() CheckpointSummary {
+	s.TokenUsage = tokenUsageWithoutCost(s.TokenUsage)
+	s.ModelUsage = modelUsageWithoutCost(s.ModelUsage)
+	return s
+}
+
+// tokenUsageWithoutCost deep-copies u with its cost fields cleared at every level
+// (flat plus the whole SubagentTokens subtree), preserving the token counts and
+// APICallCount. Returns nil for nil so an absent usage stays absent.
+func tokenUsageWithoutCost(u *types.TokenUsage) *types.TokenUsage {
+	if u == nil {
+		return nil
+	}
+	c := *u
+	c.CostUSD = nil
+	c.CostSource = ""
+	c.SubagentTokens = tokenUsageWithoutCost(u.SubagentTokens)
+	return &c
+}
+
+// modelUsageWithoutCost copies the per-model buckets with each bucket's cost
+// cleared, preserving the model id and the four token fields the platform prices
+// from. Returns nil for a nil/empty slice.
+func modelUsageWithoutCost(in []types.ModelUsage) []types.ModelUsage {
+	if len(in) == 0 {
+		return in
+	}
+	out := make([]types.ModelUsage, len(in))
+	for i := range in {
+		tu := in[i].TokenUsage
+		tu.CostUSD = nil
+		tu.CostSource = ""
+		tu.SubagentTokens = tokenUsageWithoutCost(in[i].TokenUsage.SubagentTokens)
+		out[i] = types.ModelUsage{Model: in[i].Model, TokenUsage: tu}
+	}
+	return out
+}
+
 // SessionFilePaths contains the absolute paths to session files from the git tree root.
 // Paths include the full checkpoint path prefix (e.g., "/a1/b2c3d4e5f6/1/metadata.json").
 // Used in CheckpointSummary.Sessions to map session IDs to their file locations.

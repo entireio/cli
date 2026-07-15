@@ -310,6 +310,8 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		// Contract: a zero CreatedAt means "use the current time".
 		createdAt = time.Now()
 	}
+	// WithoutCost mirrors the git store: no checkpoint backend persists cost
+	// (entire-api prices server-side); cost is a display-only local estimate.
 	return cp.Metadata{
 		CheckpointID:                opts.CheckpointID,
 		SessionID:                   opts.SessionID,
@@ -338,7 +340,7 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		ReviewPrompt:                opts.ReviewPrompt,
 		InvestigateRunID:            opts.InvestigateRunID,
 		InvestigateTopic:            opts.InvestigateTopic,
-	}
+	}.WithoutCost()
 }
 
 func upsertSession(sessions []storedSession, session storedSession) []storedSession {
