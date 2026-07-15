@@ -526,6 +526,15 @@ func TestModelKeyWithSpeed(t *testing.T) {
 		{"claude-opus-4-8", "", "claude-opus-4-8"},
 		{"", "fast", ""},
 		{"claude-opus-4-8-fast", "fast", "claude-opus-4-8-fast"},
+		// A 1m-context fast turn must strip the "[1m]" marker before
+		// appending "-fast" so the key lands on the priceable fast variant
+		// (pricing.Lookup only peels a bracketed suffix when the id ends "]").
+		{"claude-opus-4-8[1m]", "fast", "claude-opus-4-8-fast"},
+		{"claude-opus-4-8[1m]", "FAST", "claude-opus-4-8-fast"},
+		// Standard/empty speed leaves the "[1m]" marker in place; pricing.Lookup
+		// strips it on the query side, so the base rate still resolves.
+		{"claude-opus-4-8[1m]", "standard", "claude-opus-4-8[1m]"},
+		{"claude-opus-4-8[1m]", "", "claude-opus-4-8[1m]"},
 	}
 	for _, tc := range cases {
 		if got := modelKeyWithSpeed(tc.model, tc.speed); got != tc.want {

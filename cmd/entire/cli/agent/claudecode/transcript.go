@@ -211,11 +211,32 @@ type modelUsageRow struct {
 // (speed == "fast", case-insensitive). It leaves the model unchanged for
 // standard/empty speed, an empty model id, or an id that already ends in
 // "-fast", so buckets never double-suffix.
+//
+// Any trailing long-context marker such as "[1m]" is stripped BEFORE the
+// suffix is appended, so a 1m-context fast turn keys to "claude-opus-4-8-fast"
+// rather than "claude-opus-4-8[1m]-fast". pricing.Lookup only peels a bracketed
+// suffix when the id ends in "]", so the un-stripped form ends in "-fast" and
+// resolves to neither the "-fast" variant nor the base rate — leaving the fast
+// premium unpriced. Stripping here keeps the key on the priceable fast variant.
 func modelKeyWithSpeed(model, speed string) string {
 	if !strings.EqualFold(speed, "fast") || model == "" || strings.HasSuffix(model, "-fast") {
 		return model
 	}
-	return model + "-fast"
+	return stripLongContextSuffix(model) + "-fast"
+}
+
+// stripLongContextSuffix removes a trailing bracketed suffix such as the "[1m]"
+// long-context marker Claude Code appends to model ids (e.g.
+// "claude-opus-4-8[1m]"). It returns s unchanged when there is no such suffix.
+// This mirrors pricing.stripLongContextSuffix, which is unexported in that
+// package; the two must agree so a stripped "-fast" key still resolves there.
+func stripLongContextSuffix(s string) string {
+	if strings.HasSuffix(s, "]") {
+		if i := strings.IndexByte(s, '['); i >= 0 {
+			return s[:i]
+		}
+	}
+	return s
 }
 
 // CalculateModelUsage attributes per-message token usage to the model that
