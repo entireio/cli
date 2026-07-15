@@ -517,3 +517,47 @@ func TestNewEnableOnboardingRunner_AutoRunGatedOnFirstRun(t *testing.T) {
 		}
 	}
 }
+
+// The consent prompt's summary must never promise web-UI visibility for the
+// import step: imported history is local-only (session list, explain) and
+// does not appear in the web UI. Login and mirror keep the web-UI clause.
+func TestOnboardingSetupSummary_ImportClauseIsLocal(t *testing.T) {
+	t.Parallel()
+	result := func(key string) onboarding.Result {
+		return onboarding.Result{Rung: onboarding.Rung{Key: key}}
+	}
+
+	cases := []struct {
+		name    string
+		missing []onboarding.Result
+		want    string
+	}{
+		{
+			name:    "web steps and import",
+			missing: []onboarding.Result{result(onboarding.KeyAuth), result(onboarding.KeyMirror), result(onboarding.KeyImport)},
+			want:    "Logs in to entire.io and mirrors this repo so your work shows up in the web UI. Imports existing agent history so past sessions show up in entire session list.",
+		},
+		{
+			name:    "import only",
+			missing: []onboarding.Result{result(onboarding.KeyImport)},
+			want:    "Imports existing agent history so past sessions show up in entire session list.",
+		},
+		{
+			name:    "web steps only",
+			missing: []onboarding.Result{result(onboarding.KeyAuth)},
+			want:    "Logs in to entire.io so your work shows up in the web UI.",
+		},
+		{
+			name: "nothing missing",
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := onboardingSetupSummary(tc.missing); got != tc.want {
+				t.Errorf("onboardingSetupSummary = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

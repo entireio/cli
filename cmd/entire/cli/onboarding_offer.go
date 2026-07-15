@@ -271,25 +271,34 @@ func promptOnboardingSetupMode(ctx context.Context, missing []onboarding.Result)
 
 // onboardingSetupSummary describes what the fast path will do, e.g.
 // "Logs in to entire.io and mirrors this repo so your work shows up in the
-// web UI."
+// web UI." The import step carries its own benefit clause: imported history
+// is local-only (session list, explain) and does not appear in the web UI,
+// so the web-UI promise must never attach to it.
 func onboardingSetupSummary(missing []onboarding.Result) string {
-	steps := make([]string, 0, len(missing))
+	webSteps := make([]string, 0, len(missing))
+	importStep := false
 	for _, r := range missing {
 		switch r.Rung.Key {
 		case onboarding.KeyAuth:
-			steps = append(steps, "logs in to entire.io")
+			webSteps = append(webSteps, "logs in to entire.io")
 		case onboarding.KeyMirror:
-			steps = append(steps, "mirrors this repo")
+			webSteps = append(webSteps, "mirrors this repo")
 		case onboarding.KeyImport:
-			steps = append(steps, "imports existing agent history")
+			importStep = true
 		}
 	}
-	if len(steps) == 0 {
-		return ""
+	var sentences []string
+	if len(webSteps) > 0 {
+		sentences = append(sentences, formatTokenClassList(webSteps)+" so your work shows up in the web UI.")
 	}
-	summary := formatTokenClassList(steps)
-	// Capitalize the first step: summaries are full sentences in the prompt.
-	return strings.ToUpper(summary[:1]) + summary[1:] + " so your work shows up in the web UI."
+	if importStep {
+		sentences = append(sentences, "imports existing agent history so past sessions show up in entire session list.")
+	}
+	// Capitalize each sentence: summaries are full sentences in the prompt.
+	for i, s := range sentences {
+		sentences[i] = strings.ToUpper(s[:1]) + s[1:]
+	}
+	return strings.Join(sentences, " ")
 }
 
 func confirmOnboardingRung(ctx context.Context, r onboarding.Result) (bool, error) {
