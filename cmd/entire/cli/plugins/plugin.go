@@ -37,6 +37,7 @@ type LoadedPlugin struct {
 
 	L         *lua.LState
 	callbacks map[string][]*lua.LFunction
+	commands  map[string]*commandEntry
 	kv        *kvStore
 
 	// dispatchCtx is the context of the in-flight load or hook dispatch, used
@@ -80,6 +81,7 @@ func LoadPlugin(ctx context.Context, dir string, source Source, worktreeRoot str
 		WorktreeRoot: worktreeRoot,
 		L:            L,
 		callbacks:    make(map[string][]*lua.LFunction),
+		commands:     make(map[string]*commandEntry),
 		dispatchCtx:  ctx,
 	}
 	if dataDir, derr := PluginDataDir(manifest.Name); derr == nil {

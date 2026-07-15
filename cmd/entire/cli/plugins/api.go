@@ -44,6 +44,11 @@ func (p *LoadedPlugin) installAPI(ls *lua.LState) {
 	ls.SetField(kvTbl, "delete", ls.NewFunction(p.luaKVDelete))
 	ls.SetField(mod, "kv", kvTbl)
 
+	// Command contribution and stdout output (for plugin commands).
+	ls.SetField(mod, "command", ls.NewFunction(p.luaCommand))
+	ls.SetField(mod, "print", ls.NewFunction(luaStdoutPrint(true)))
+	ls.SetField(mod, "write", ls.NewFunction(luaStdoutPrint(false)))
+
 	p.installCapabilityAPI(ls, mod)
 
 	ls.SetGlobal(entireModuleName, mod)

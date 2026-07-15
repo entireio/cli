@@ -69,6 +69,14 @@ func main() {
 	// inherits the prepended PATH so it can spawn sibling managed plugins.
 	restorePATH := cli.PrependPluginBinDirToPATH(ctx)
 
+	// Resolution order: built-in > Lua plugin command > entire-<name> binary.
+	// Lua commands are dispatched before the binary dispatcher so a Lua command
+	// wins over a same-named binary plugin; both defer to built-ins.
+	if handled, code := cli.MaybeRunLuaCommand(ctx, rootCmd, os.Args[1:]); handled {
+		cancel()
+		os.Exit(code)
+	}
+
 	if handled, code := cli.MaybeRunPlugin(ctx, rootCmd, os.Args[1:]); handled {
 		cancel()
 		os.Exit(code)

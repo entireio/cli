@@ -50,6 +50,18 @@ func FirePrePush(ctx context.Context, payload map[string]any) error {
 	return globalRegistry(ctx).FirePrePush(ctx, payload)
 }
 
+// RunCommand runs a plugin-contributed command by name, returning its exit code
+// and whether a command was found. See Registry.RunCommand.
+func RunCommand(ctx context.Context, name string, args []string) (exitCode int, found bool) {
+	return globalRegistry(ctx).RunCommand(ctx, name, args)
+}
+
+// ProcessCommands returns the plugin-contributed commands available in this
+// process, for listing/help.
+func ProcessCommands(ctx context.Context) []CommandInfo {
+	return globalRegistry(ctx).Commands()
+}
+
 func globalRegistry(ctx context.Context) *Registry {
 	globalMu.Lock()
 	defer globalMu.Unlock()
