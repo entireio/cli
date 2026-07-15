@@ -22,11 +22,17 @@ is **opt-in at every step**:
 
 - A plugin is **inert until allow-listed**. Discovery finds plugins in the
   managed user dir and in the repo-local `.entire/plugins/`, but none run unless
-  there is an entry for it in `.entire/settings.json` under `plugins` with
-  `"enabled": true`.
-- **Repo-local plugins never auto-run.** A repo can ship a `.entire/plugins/foo`
-  directory, but it does nothing until *you* add `plugins.foo.enabled = true` to
-  your settings. Cloning a hostile repo cannot execute code through this path.
+  there is an entry for it under `plugins` with `"enabled": true`.
+- **Repo-local plugins can only be enabled from your personal, uncommitted
+  `.entire/settings.local.json`** — never from the committed team
+  `.entire/settings.json`. A repo can ship a `.entire/plugins/foo` directory
+  *and* a team `.entire/settings.json` with `plugins.foo.enabled = true`, but
+  that team entry does **not** activate a repo-local plugin. It stays inert until
+  *you* add `plugins.foo.enabled = true` (and any capabilities) to your own
+  `.entire/settings.local.json`. This is what makes cloning a hostile repo safe:
+  a malicious PR cannot ship both the plugin and the enable and have it run on
+  clone. (User-global installed plugins under the managed `lua/` dir are
+  unaffected — they may be enabled from either file.)
 - **Privileged APIs are capability-gated.** Network, subprocess, filesystem, and
   the mutating hooks are denied unless the capability is granted in the plugin's
   allow-list entry. An ungranted call raises a Lua error (fail loud, never a
@@ -107,6 +113,15 @@ Mirrors the `external_agents` opt-in posture.
 Team settings (`.entire/settings.json`) and per-developer overrides
 (`.entire/settings.local.json`) merge per-plugin: an override can enable or grant
 extra capabilities without hiding the team's entries.
+
+**Scope matters for repo-local plugins.** Because `.entire/settings.json` is
+committed, a hostile repo could otherwise ship both a `.entire/plugins/<name>`
+directory and a team entry enabling it. To prevent that, a **repo-local plugin
+is governed only by `.entire/settings.local.json`** (which is not committed): its
+`enabled` flag and capabilities must come from that personal file, and any entry
+for it in the committed team `.entire/settings.json` is ignored for activation.
+User-global plugins installed under the managed `lua/` dir are governed by the
+merged allow-list and may be enabled from either file.
 
 ## The `entire` Lua API
 

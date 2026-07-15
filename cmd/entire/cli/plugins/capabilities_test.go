@@ -178,7 +178,7 @@ func TestDiscover_KillSwitchDisablesAll(t *testing.T) {
 	writeUserPlugin(t, parent, "notify", `{"name":"notify"}`, turnEndCounter)
 
 	s := &settings.EntireSettings{Plugins: map[string]settings.PluginSettings{"notify": {Enabled: true}}}
-	reg := Discover(context.Background(), "", s)
+	reg := Discover(context.Background(), "", s, nil)
 	defer reg.Close()
 	if reg.Len() != 0 {
 		t.Fatalf("kill switch should disable all plugins, got %d", reg.Len())

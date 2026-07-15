@@ -1,9 +1,83 @@
 package settings
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// writePluginTestRepo creates a temp git repo with optional team
+// (.entire/settings.json) and local (.entire/settings.local.json) contents and
+// chdir's into it. Empty content skips that file.
+func writePluginTestRepo(t *testing.T, team, local string) {
+	t.Helper()
+	dir := t.TempDir()
+	entireDir := filepath.Join(dir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if team != "" {
+		if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(team), 0o600); err != nil {
+			t.Fatalf("write settings.json: %v", err)
+		}
+	}
+	if local != "" {
+		if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(local), 0o600); err != nil {
+			t.Fatalf("write settings.local.json: %v", err)
+		}
+	}
+	// paths.AbsPath resolves relative to the git worktree root.
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	t.Chdir(dir)
+}
+
+func TestLocalPluginGrants_OnlyReadsLocalFile(t *testing.T) {
+	// A repo-local plugin enabled solely in committed team settings must NOT
+	// appear in the local grants; only settings.local.json entries do.
+	team := `{"plugins": {"teamplug": {"enabled": true}}}`
+	local := `{"plugins": {"localplug": {"enabled": true, "capabilities": ["exec"]}}}`
+	writePluginTestRepo(t, team, local)
+
+	grants, err := LocalPluginGrants(context.Background())
+	if err != nil {
+		t.Fatalf("LocalPluginGrants() error = %v", err)
+	}
+	if _, ok := grants["teamplug"]; ok {
+		t.Error("team-settings plugin must not be reported as a local grant")
+	}
+	g, ok := grants["localplug"]
+	if !ok || !g.Enabled {
+		t.Fatalf("expected localplug enabled in local grants, got %+v", grants)
+	}
+	if !g.HasCapability(PluginCapabilityExec) {
+		t.Errorf("localplug missing exec capability: %+v", g.Capabilities)
+	}
+}
+
+func TestLocalPluginGrants_AbsentFileIsEmpty(t *testing.T) {
+	writePluginTestRepo(t, `{"plugins": {"teamplug": {"enabled": true}}}`, "")
+
+	grants, err := LocalPluginGrants(context.Background())
+	if err != nil {
+		t.Fatalf("LocalPluginGrants() error = %v", err)
+	}
+	if len(grants) != 0 {
+		t.Errorf("expected no local grants when settings.local.json absent, got %+v", grants)
+	}
+}
+
+func TestLocalPluginGrants_RejectsUnknownCapability(t *testing.T) {
+	writePluginTestRepo(t, "", `{"plugins": {"bad": {"enabled": true, "capabilities": ["telepathy"]}}}`)
+
+	_, err := LocalPluginGrants(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "unknown capability") {
+		t.Fatalf("expected unknown capability error, got %v", err)
+	}
+}
 
 func TestLoadFromBytes_PluginsAllowlist(t *testing.T) {
 	t.Parallel()

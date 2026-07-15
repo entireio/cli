@@ -37,10 +37,18 @@ type discoverySource struct {
 // only when settings has an entry for it with enabled=true; repo-local plugins
 // therefore never auto-run without an explicit opt-in.
 //
+// s is the merged team+local allow-list and governs user-global plugins.
+// localGrants is the allow-list from the per-developer .entire/settings.local.json
+// only (see settings.LocalPluginGrants) and is the *sole* authority for
+// repo-local plugins: a committed team .entire/settings.json can neither enable
+// a repo-local plugin nor grant it capabilities. This closes the trust hole
+// where cloning a hostile repo that ships both a .entire/plugins/<name>
+// directory and a team settings enable would auto-run the plugin's code.
+//
 // Discovery is resilient: a plugin that fails to parse or load is logged and
 // skipped rather than failing the whole registry — one broken third-party
 // plugin must not break the CLI.
-func Discover(ctx context.Context, worktreeRoot string, s *settings.EntireSettings) *Registry {
+func Discover(ctx context.Context, worktreeRoot string, s *settings.EntireSettings, localGrants map[string]settings.PluginSettings) *Registry {
 	logCtx := logging.WithComponent(ctx, "plugins")
 	r := &Registry{}
 	// Kill switch: an operator can disable all plugins process-wide regardless
@@ -79,7 +87,7 @@ func Discover(ctx context.Context, worktreeRoot string, s *settings.EntireSettin
 				continue
 			}
 			pluginDir := filepath.Join(src.dir, e.Name())
-			r.tryLoadCandidate(ctx, logCtx, pluginDir, src.source, worktreeRoot, s, loaded)
+			r.tryLoadCandidate(ctx, logCtx, pluginDir, src.source, worktreeRoot, s, localGrants, loaded)
 		}
 	}
 	return r
@@ -98,9 +106,27 @@ func hasEnabledPlugin(s *settings.EntireSettings) bool {
 	return false
 }
 
+// grantForSource returns the allow-list entry that governs a plugin and whether
+// one exists, enforcing that repo-local plugins may only be enabled from the
+// per-developer local settings file.
+//
+// User-global plugins (SourceUser) use the merged team+local allow-list, as
+// before. Repo-local plugins (SourceRepo) use ONLY the grants sourced from
+// .entire/settings.local.json: a committed team .entire/settings.json can
+// neither enable a repo-local plugin nor grant it capabilities. This is the
+// trust boundary — cloning a hostile repo that ships both a .entire/plugins/<name>
+// directory and a team settings enable must not execute the plugin's code.
+func grantForSource(source Source, name string, s *settings.EntireSettings, localGrants map[string]settings.PluginSettings) (settings.PluginSettings, bool) {
+	if source == SourceRepo {
+		grant, ok := localGrants[name]
+		return grant, ok
+	}
+	return s.PluginGrant(name)
+}
+
 // tryLoadCandidate parses a candidate plugin dir, checks the allow-list, and
 // loads it when enabled. Failures are logged and skipped.
-func (r *Registry) tryLoadCandidate(ctx, logCtx context.Context, dir string, source Source, worktreeRoot string, s *settings.EntireSettings, loaded map[string]struct{}) {
+func (r *Registry) tryLoadCandidate(ctx, logCtx context.Context, dir string, source Source, worktreeRoot string, s *settings.EntireSettings, localGrants map[string]settings.PluginSettings, loaded map[string]struct{}) {
 	if _, statErr := os.Stat(filepath.Join(dir, ManifestFileName)); statErr != nil {
 		return // not a plugin dir
 	}
@@ -115,7 +141,7 @@ func (r *Registry) tryLoadCandidate(ctx, logCtx context.Context, dir string, sou
 			slog.String("plugin", name), slog.String("dir", dir), slog.String("source", string(source)))
 		return
 	}
-	grant, ok := s.PluginGrant(name)
+	grant, ok := grantForSource(source, name, s, localGrants)
 	if !ok || !grant.Enabled {
 		// Not allow-listed (or disabled): never auto-run. Logged at debug so a
 		// repo shipping a plugin the user hasn't opted into stays quiet.

@@ -505,6 +505,48 @@ func (s *EntireSettings) IsPluginEnabled(name string) bool {
 	return ok && ps.Enabled
 }
 
+// LocalPluginGrants returns the Lua plugin allow-list entries defined ONLY in
+// the per-developer .entire/settings.local.json file, ignoring the committed
+// team .entire/settings.json entirely.
+//
+// This is the trust boundary that keeps cloning a hostile repo safe. Repo-local
+// plugins (.entire/plugins/<name>) may be activated only from this personal,
+// uncommitted scope: a malicious PR can ship both a .entire/plugins/<name>
+// directory and a team .entire/settings.json that sets
+// plugins.<name>.enabled = true, but because that enable lives in committed team
+// settings it must NOT count for a repo-local plugin — only a grant the local
+// developer wrote in settings.local.json does. User-global installed plugins
+// (under the managed lua/ dir) are unaffected and may still be allow-listed from
+// either file via the merged settings.
+//
+// Returns an empty (non-nil) map when the local file is absent or defines no
+// plugins. Capability grants are validated so a typo in the local file fails
+// loud, mirroring the merged-settings load path.
+func LocalPluginGrants(ctx context.Context) (map[string]PluginSettings, error) {
+	_, raw, exists, err := LoadLocalRaw(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return map[string]PluginSettings{}, nil
+	}
+	pluginsRaw, ok := raw["plugins"]
+	if !ok {
+		return map[string]PluginSettings{}, nil
+	}
+	var grants map[string]PluginSettings
+	if err := json.Unmarshal(pluginsRaw, &grants); err != nil {
+		return nil, fmt.Errorf("parsing local plugins: %w", err)
+	}
+	if err := validatePluginSettings(grants); err != nil {
+		return nil, err
+	}
+	if grants == nil {
+		return map[string]PluginSettings{}, nil
+	}
+	return grants, nil
+}
+
 // isKnownPluginCapability reports whether name is a recognized capability.
 func isKnownPluginCapability(name string) bool {
 	switch name {

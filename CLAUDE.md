@@ -639,11 +639,15 @@ Third parties can author no-build-step plugins in Lua (pure-Go gopher-lua, so
 
 Key invariants when touching this code:
 
-- Plugins are **inert until allow-listed** in `.entire/settings.json`
-  (`plugins.<name>.enabled = true`); **repo-local `.entire/plugins/` never
-  auto-run**. Privileged APIs (`http`/`exec`/`fs`/`net`) and the mutating hooks
-  (`prepare_commit_msg`, `pre_push`) are **capability-gated** and fail loud when
-  ungranted.
+- Plugins are **inert until allow-listed** (`plugins.<name>.enabled = true`).
+  **Repo-local `.entire/plugins/` plugins may only be enabled from the personal,
+  uncommitted `.entire/settings.local.json` — never from the committed team
+  `.entire/settings.json`** (`settings.LocalPluginGrants` + `grantForSource` in
+  the `plugins` package), so cloning a hostile repo that ships both a plugin and
+  a team-settings enable cannot run its code. User-global installed plugins use
+  the merged allow-list (either file). Privileged APIs (`http`/`exec`/`fs`/`net`)
+  and the mutating hooks (`prepare_commit_msg`, `pre_push`) are
+  **capability-gated** and fail loud when ungranted.
 - The `plugins` package must NOT import `cli` or `strategy` (they import it);
   seams build `map[string]any` payloads that the package converts to Lua tables.
 - Command resolution order is built-in > Lua command > `entire-<name>` binary.

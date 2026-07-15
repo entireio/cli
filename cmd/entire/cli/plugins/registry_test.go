@@ -55,12 +55,15 @@ func TestDiscover_LoadsEnabledUserPlugin_AndFires(t *testing.T) {
 	writeUserPlugin(t, parent, "notify",
 		`{"name":"notify","hooks":["turn_end"]}`, turnEndCounter)
 
+	// A user-global plugin enabled via the merged team settings (localGrants nil)
+	// runs, mirroring the external_agents posture — team settings.json may
+	// enable a user-installed plugin.
 	s := &settings.EntireSettings{
 		Plugins: map[string]settings.PluginSettings{
 			"notify": {Enabled: true},
 		},
 	}
-	reg := Discover(context.Background(), "", s)
+	reg := Discover(context.Background(), "", s, nil)
 	defer reg.Close()
 
 	if reg.Len() != 1 {
@@ -87,7 +90,7 @@ func TestDiscover_SkipsNotAllowlisted(t *testing.T) {
 	writeUserPlugin(t, parent, "notify", `{"name":"notify"}`, turnEndCounter)
 
 	// Empty allow-list: nothing runs.
-	reg := Discover(context.Background(), "", &settings.EntireSettings{})
+	reg := Discover(context.Background(), "", &settings.EntireSettings{}, nil)
 	defer reg.Close()
 	if reg.Len() != 0 {
 		t.Fatalf("expected 0 plugins for empty allow-list, got %d", reg.Len())
@@ -102,7 +105,7 @@ func TestDiscover_SkipsDisabled(t *testing.T) {
 	s := &settings.EntireSettings{
 		Plugins: map[string]settings.PluginSettings{"notify": {Enabled: false}},
 	}
-	reg := Discover(context.Background(), "", s)
+	reg := Discover(context.Background(), "", s, nil)
 	defer reg.Close()
 	if reg.Len() != 0 {
 		t.Fatalf("expected 0 plugins for disabled entry, got %d", reg.Len())
@@ -115,21 +118,54 @@ func TestDiscover_RepoLocalNeverAutoRunsWithoutAllowlist(t *testing.T) {
 	root := t.TempDir()
 	writeRepoPlugin(t, root, "repoplug", `{"name":"repoplug"}`, turnEndCounter)
 
-	// No allow-list entry: the repo-local plugin must not load.
-	reg := Discover(context.Background(), root, &settings.EntireSettings{})
+	// No allow-list entry anywhere: the repo-local plugin must not load.
+	reg := Discover(context.Background(), root, &settings.EntireSettings{}, nil)
 	defer reg.Close()
 	if reg.Len() != 0 {
 		t.Fatalf("repo-local plugin auto-ran without allow-list: got %d", reg.Len())
 	}
+}
 
-	// With an explicit allow-list entry it loads.
-	s := &settings.EntireSettings{
+func TestDiscover_RepoLocalIgnoresTeamSettingsEnable(t *testing.T) {
+	parent := t.TempDir()
+	t.Setenv("ENTIRE_PLUGIN_DIR", parent)
+	root := t.TempDir()
+	writeRepoPlugin(t, root, "repoplug", `{"name":"repoplug"}`, turnEndCounter)
+
+	// Enabled via committed team settings (merged EntireSettings) but NOT in the
+	// per-developer local settings: a repo-local plugin must stay inert. This is
+	// the trust boundary — cloning a hostile repo that ships a plugin plus a team
+	// settings enable cannot execute the plugin's code.
+	teamEnabled := &settings.EntireSettings{
 		Plugins: map[string]settings.PluginSettings{"repoplug": {Enabled: true}},
 	}
-	reg2 := Discover(context.Background(), root, s)
-	defer reg2.Close()
-	if reg2.Len() != 1 {
-		t.Fatalf("expected repo-local plugin to load once allow-listed, got %d", reg2.Len())
+	reg := Discover(context.Background(), root, teamEnabled, nil)
+	defer reg.Close()
+	if reg.Len() != 0 {
+		t.Fatalf("repo-local plugin ran from team settings alone: got %d", reg.Len())
+	}
+}
+
+func TestDiscover_RepoLocalRunsWhenEnabledInLocalSettings(t *testing.T) {
+	parent := t.TempDir()
+	t.Setenv("ENTIRE_PLUGIN_DIR", parent)
+	root := t.TempDir()
+	writeRepoPlugin(t, root, "repoplug", `{"name":"repoplug"}`, turnEndCounter)
+
+	// The local developer opted in via .entire/settings.local.json. The merged
+	// settings therefore also show it enabled, and localGrants carries the same
+	// entry — the repo-local plugin may now run.
+	merged := &settings.EntireSettings{
+		Plugins: map[string]settings.PluginSettings{"repoplug": {Enabled: true}},
+	}
+	localGrants := map[string]settings.PluginSettings{"repoplug": {Enabled: true}}
+	reg := Discover(context.Background(), root, merged, localGrants)
+	defer reg.Close()
+	if reg.Len() != 1 {
+		t.Fatalf("expected repo-local plugin to load when enabled in local settings, got %d", reg.Len())
+	}
+	if got := reg.Plugins()[0].Source; got != SourceRepo {
+		t.Errorf("expected repo source, got %q", got)
 	}
 }
 
@@ -144,7 +180,10 @@ func TestDiscover_UserWinsNameCollision(t *testing.T) {
 	s := &settings.EntireSettings{
 		Plugins: map[string]settings.PluginSettings{"dup": {Enabled: true}},
 	}
-	reg := Discover(context.Background(), root, s)
+	// Enable the repo copy locally too, so if precedence somehow flipped the
+	// repo-local plugin would be eligible; the user copy must still win.
+	localGrants := map[string]settings.PluginSettings{"dup": {Enabled: true}}
+	reg := Discover(context.Background(), root, s, localGrants)
 	defer reg.Close()
 
 	if reg.Len() != 1 {
@@ -169,7 +208,7 @@ func TestFireObserver_ErrorIsNonFatal(t *testing.T) {
 	s := &settings.EntireSettings{
 		Plugins: map[string]settings.PluginSettings{"boom": {Enabled: true}},
 	}
-	reg := Discover(context.Background(), "", s)
+	reg := Discover(context.Background(), "", s, nil)
 	defer reg.Close()
 
 	// Must not panic or propagate; the error is swallowed and logged.

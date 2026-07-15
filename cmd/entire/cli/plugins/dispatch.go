@@ -82,7 +82,16 @@ func buildProcessRegistry(ctx context.Context) *Registry {
 		return &Registry{}
 	}
 	worktreeRoot, _ := paths.WorktreeRoot(ctx) //nolint:errcheck // outside a repo only user plugins are considered; empty root is fine
-	return Discover(ctx, worktreeRoot, s)
+	// localGrants comes from .entire/settings.local.json only; it is the sole
+	// authority for enabling repo-local plugins so a committed team
+	// settings.json cannot auto-run repo-shipped plugin code. On error we fail
+	// closed (nil grants → repo-local plugins stay inert); user-global plugins
+	// still resolve from the merged settings s.
+	localGrants, lgErr := settings.LocalPluginGrants(ctx)
+	if lgErr != nil {
+		localGrants = nil
+	}
+	return Discover(ctx, worktreeRoot, s, localGrants)
 }
 
 // ResetProcessRegistryForTest clears the process registry so a test can rebuild

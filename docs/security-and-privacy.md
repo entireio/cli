@@ -389,8 +389,11 @@ Entire supports two kinds of plugins, both of which run third-party code:
   programs invoked by the CLI; only install ones you trust.
 - **Lua plugins** — no-build-step scripts run in an embedded sandboxed
   interpreter. The trust model is opt-in at every step: a plugin is inert until
-  allow-listed in `.entire/settings.json` (`plugins.<name>.enabled = true`),
-  **repo-local `.entire/plugins/` plugins never auto-run**, privileged APIs
+  allow-listed with `plugins.<name>.enabled = true`, **repo-local
+  `.entire/plugins/` plugins can only be enabled from your personal,
+  uncommitted `.entire/settings.local.json` — never from the committed team
+  `.entire/settings.json`**, so cloning a hostile repo that ships both a plugin
+  and a team-settings enable cannot execute its code. Privileged APIs
   (`http`/`exec`/`fs`/`net`) and the mutating hooks (commit-message trailer,
   push veto) are capability-gated, and `entire plugin install` only places files
   (it cannot run the code until you enable it). `ENTIRE_PLUGINS_DISABLED=1` is a
