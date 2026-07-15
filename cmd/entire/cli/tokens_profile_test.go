@@ -297,47 +297,53 @@ func TestTokensProfileCmd_EmptyHistory(t *testing.T) {
 	}
 }
 
+// The profile total is a LOCAL estimate summed across checkpoints (the CLI no
+// longer persists cost). Two checkpoints under test-model ($1/MTok) price to
+// $0.42 + $0.58 = $1.00; a third with token data under an unpriceable model
+// contributes tokens but no cost, folding the aggregate source to "mixed"
+// (partial coverage) and counting toward M, not N.
 func TestTokensProfileCmd_TotalCostAcrossCheckpoints(t *testing.T) {
 	repo, _ := runExplainAutoTestRepo(t)
 	ctx := context.Background()
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 
-	writeProfileTokenCheckpoint(ctx, t, store, "700ddd000001", "profile-cost-a", &agent.TokenUsage{
-		InputTokens:  1000,
-		OutputTokens: 100,
-		APICallCount: 2,
-		CostUSD:      costPtr(0.40),
-		CostSource:   types.CostSourceEstimated,
+	writeProfileTokenCheckpointModel(ctx, t, store, "700ddd000001", "profile-cost-a", "test-model", &agent.TokenUsage{
+		InputTokens: 400000, OutputTokens: 20000, APICallCount: 2, // $0.42
 	})
-	writeProfileTokenCheckpoint(ctx, t, store, "700ddd000002", "profile-cost-b", &agent.TokenUsage{
-		InputTokens:  2000,
-		OutputTokens: 200,
-		APICallCount: 3,
-		CostUSD:      costPtr(0.60),
-		CostSource:   types.CostSourceEstimated,
+	writeProfileTokenCheckpointModel(ctx, t, store, "700ddd000002", "profile-cost-b", "test-model", &agent.TokenUsage{
+		InputTokens: 560000, OutputTokens: 20000, APICallCount: 3, // $0.58
 	})
-	// Third checkpoint has token data but no cost: counts toward M, not N. Merging
-	// its uncosted-but-token-bearing usage with the priced checkpoints folds the
-	// aggregate cost source to "mixed" — partial coverage — so the $1.00 total is
-	// honestly flagged as combining priced and unpriced-token data.
-	writeProfileTokenCheckpoint(ctx, t, store, "700ddd000003", "profile-cost-none", &agent.TokenUsage{
-		InputTokens:  500,
-		OutputTokens: 50,
-		APICallCount: 1,
+	writeProfileTokenCheckpointModel(ctx, t, store, "700ddd000003", "profile-cost-none", "unpriceable-model", &agent.TokenUsage{
+		InputTokens: 500, OutputTokens: 50, APICallCount: 1,
 	})
 
-	cmd := newTokensGroupCmd()
-	var stdout bytes.Buffer
-	cmd.SetOut(&stdout)
-	cmd.SetArgs([]string{"profile"})
-
-	if err := cmd.ExecuteContext(ctx); err != nil {
-		t.Fatalf("expected no error, got: %v", err)
+	infos, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	report, err := buildTokensProfileReport(ctx, store, infos, 0, testDisplayPricingTable(t))
+	if err != nil {
+		t.Fatalf("buildTokensProfileReport: %v", err)
 	}
 
-	out := stdout.String()
-	if !strings.Contains(out, "Total cost: $1.00 (mixed) across 2 of 3 checkpoints") {
-		t.Fatalf("expected total cost line, got:\n%s", out)
+	if report.CostUSD == nil || *report.CostUSD != 1.00 {
+		t.Fatalf("total cost = %v, want 1.00", report.CostUSD)
+	}
+	if report.CostSource != types.CostSourceMixed {
+		t.Fatalf("cost source = %q, want mixed (partial coverage)", report.CostSource)
+	}
+	if report.CheckpointsWithCostData != 2 {
+		t.Fatalf("checkpoints_with_cost_data = %d, want 2", report.CheckpointsWithCostData)
+	}
+
+	var buf bytes.Buffer
+	writeTokensProfileText(&buf, report)
+	out := buf.String()
+	if !strings.Contains(out, "Total cost: $1.00 (estimated locally, partial) across 2 of 3 checkpoints") {
+		t.Fatalf("expected local-estimate total cost line, got:\n%s", out)
+	}
+	if !strings.Contains(out, localCostEstimateNote) {
+		t.Fatalf("expected local-estimate note, got:\n%s", out)
 	}
 }
 
@@ -346,31 +352,32 @@ func TestTokensProfileCmd_JSONCost(t *testing.T) {
 	ctx := context.Background()
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 
-	writeProfileTokenCheckpoint(ctx, t, store, "710eee000001", "profile-json-cost", &agent.TokenUsage{
-		InputTokens:  1000,
-		APICallCount: 1,
-		CostUSD:      costPtr(0.42),
-		CostSource:   types.CostSourceReported,
+	writeProfileTokenCheckpointModel(ctx, t, store, "710eee000001", "profile-json-cost", "test-model", &agent.TokenUsage{
+		InputTokens: 400000, OutputTokens: 20000, APICallCount: 1, // $0.42
 	})
 
-	cmd := newTokensGroupCmd()
-	var stdout bytes.Buffer
-	cmd.SetOut(&stdout)
-	cmd.SetArgs([]string{"profile", "--json"})
-
-	if err := cmd.ExecuteContext(ctx); err != nil {
-		t.Fatalf("expected no error, got: %v", err)
+	infos, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	report, err := buildTokensProfileReport(ctx, store, infos, 0, testDisplayPricingTable(t))
+	if err != nil {
+		t.Fatalf("buildTokensProfileReport: %v", err)
 	}
 
+	data, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
 	var result tokensProfileReport
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("expected valid JSON, got parse error: %v\noutput: %s", err, stdout.String())
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("expected valid JSON, got parse error: %v\noutput: %s", err, data)
 	}
 	if result.CostUSD == nil || *result.CostUSD != 0.42 {
-		t.Fatalf("cost_usd = %v, want 0.42", result.CostUSD)
+		t.Fatalf("cost_usd = %v, want 0.42 (local estimate)", result.CostUSD)
 	}
-	if result.CostSource != types.CostSourceReported {
-		t.Fatalf("cost_source = %q, want reported", result.CostSource)
+	if result.CostSource != types.CostSourceEstimated {
+		t.Fatalf("cost_source = %q, want estimated", result.CostSource)
 	}
 	if result.CheckpointsWithCostData != 1 {
 		t.Fatalf("checkpoints_with_cost_data = %d, want 1", result.CheckpointsWithCostData)
@@ -412,6 +419,13 @@ func signalCount(signals []tokensProfileSignal, id string) int {
 
 func writeProfileTokenCheckpoint(ctx context.Context, t *testing.T, store *checkpoint.GitStore, checkpointID string, sessionID string, usage *agent.TokenUsage) {
 	t.Helper()
+	writeProfileTokenCheckpointModel(ctx, t, store, checkpointID, sessionID, "", usage)
+}
+
+// writeProfileTokenCheckpointModel is writeProfileTokenCheckpoint with an explicit
+// model, so the display-side local cost estimate has a model to price under.
+func writeProfileTokenCheckpointModel(ctx context.Context, t *testing.T, store *checkpoint.GitStore, checkpointID string, sessionID string, model string, usage *agent.TokenUsage) {
+	t.Helper()
 
 	if err := store.Write(ctx, checkpoint.Session{
 		CheckpointID: id.MustCheckpointID(checkpointID),
@@ -419,6 +433,7 @@ func writeProfileTokenCheckpoint(ctx context.Context, t *testing.T, store *check
 		Strategy:     strategy.StrategyNameManualCommit,
 		Branch:       "tokens-profile",
 		Agent:        testAgentClaude,
+		Model:        model,
 		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"profile"}]}}` + "\n")),
 		AuthorName:   "Test",
 		AuthorEmail:  "test@example.com",

@@ -128,6 +128,44 @@ func PriceUsage(usage *types.TokenUsage, model string, table *pricing.Table, dis
 	return &out, buckets
 }
 
+// EstimateCost computes a LOCAL, on-the-fly USD cost estimate for an
+// already-recorded token breakdown, for DISPLAY ONLY. The CLI no longer persists
+// cost — entire-api prices server-side from the token breakdown — so the token
+// commands (`entire session tokens`, `entire checkpoint tokens`, `entire tokens
+// profile`) call this to show a clearly-labeled local estimate alongside the
+// token counts.
+//
+// It prefers the persisted per-model buckets, pricing each priceable bucket at
+// table's current rates and folding them exactly as CalculateUsageWithCost's
+// pricing pass does. When no buckets are supplied it falls back to pricing the
+// flat usage (subagent tokens flattened in) under fallbackModel. It never trusts
+// any pre-existing cost — every bucket is re-estimated — so the result is a pure
+// current-rate estimate whose CostSource is CostSourceEstimated (or
+// CostSourceMixed when some tokens are priceable and some are not). Returns
+// (nil, "") when nothing is priceable (nil table, unknown models, or no billable
+// tokens) so callers render no cost, never $0.
+func EstimateCost(usage *types.TokenUsage, models []types.ModelUsage, fallbackModel string, table *pricing.Table) (*float64, string) {
+	if table == nil {
+		return nil, ""
+	}
+	var buckets []types.ModelUsage
+	switch {
+	case len(models) > 0:
+		buckets = make([]types.ModelUsage, len(models))
+		for i := range models {
+			buckets[i] = types.ModelUsage{Model: models[i].Model, TokenUsage: bucketTokens(&models[i].TokenUsage)}
+		}
+	case usage != nil:
+		// No per-model breakdown: price the flat total, flattening the subagent
+		// subtree into the single bucket so subagent tokens are not dropped.
+		buckets = []types.ModelUsage{{Model: fallbackModel, TokenUsage: flattenTokenUsage(usage)}}
+	default:
+		return nil, ""
+	}
+	priceBuckets(buckets, table, false)
+	return foldBucketCost(buckets)
+}
+
 // tierVariantSuffixes are the pricing-tier decorations a caller may have
 // appended to fallbackModel via settings.PricingModelForAgent (e.g. the Codex
 // priority service tier). They exist in the pricing table as distinct model

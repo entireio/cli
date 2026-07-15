@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/pricing"
 	"github.com/spf13/cobra"
 )
 
@@ -172,7 +173,7 @@ func loadCheckpointTokensReport(ctx context.Context, cmd *cobra.Command, checkpo
 		return checkpointTokensReport{}, lookup, err
 	}
 
-	return buildCheckpointTokensReport(cpID, summary, metas, metadataWarnings), lookup, nil
+	return buildCheckpointTokensReport(cpID, summary, metas, metadataWarnings, loadDisplayPricingTable(ctx)), lookup, nil
 }
 
 func readCheckpointTokenSessionMetadata(ctx context.Context, store reviewContextSessionMetadataReader, cpID id.CheckpointID, sessionCount int) ([]*checkpoint.Metadata, int, error) {
@@ -198,7 +199,7 @@ func readCheckpointTokenSessionMetadata(ctx context.Context, store reviewContext
 	return metas, warnings, nil
 }
 
-func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.CheckpointSummary, metas []*checkpoint.Metadata, metadataWarnings int) checkpointTokensReport {
+func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.CheckpointSummary, metas []*checkpoint.Metadata, metadataWarnings int, table *pricing.Table) checkpointTokensReport {
 	report := checkpointTokensReport{
 		CheckpointID: cpID.String(),
 		Source:       "committed_checkpoint",
@@ -232,6 +233,7 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 	usage := checkpointTokenUsage(summary, metas, metadataWarnings > 0)
 	if tokens := buildSessionTokensUsage(usage); tokens != nil {
 		report.Tokens = tokens
+		applyLocalCostEstimate(tokens, usage, checkpointModelUsage(summary, metas, metadataWarnings > 0), report.Model, table)
 		if tokens.SubagentTotal > 0 {
 			report.Contributors = append(report.Contributors, sessionTokensContributor{
 				Kind:       "subagents",
@@ -371,6 +373,27 @@ func checkpointTokenUsage(summary *checkpoint.CheckpointSummary, metas []*checkp
 		return summary.TokenUsage
 	}
 	return sessionUsage
+}
+
+// checkpointModelUsage returns the per-model token buckets for a checkpoint,
+// mirroring checkpointTokenUsage's source preference so the local cost estimate
+// prices the same tokens the report displays: the per-session buckets when
+// metadata read cleanly, else the aggregated root-summary buckets. Buckets carry
+// only token counts (cost is a display-only local estimate applied downstream).
+func checkpointModelUsage(summary *checkpoint.CheckpointSummary, metas []*checkpoint.Metadata, metadataReadWarning bool) []types.ModelUsage {
+	var sessionBuckets []types.ModelUsage
+	for _, meta := range metas {
+		if meta != nil {
+			sessionBuckets = append(sessionBuckets, meta.ModelUsage...)
+		}
+	}
+	if !metadataReadWarning && len(sessionBuckets) > 0 {
+		return sessionBuckets
+	}
+	if summary != nil && len(summary.ModelUsage) > 0 {
+		return summary.ModelUsage
+	}
+	return sessionBuckets
 }
 
 func addCheckpointTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {

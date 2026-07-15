@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"math/bits"
+	"sort"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/pricing"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/spf13/cobra"
 )
@@ -144,7 +146,7 @@ func runSessionTokens(ctx context.Context, cmd *cobra.Command, sessionID string,
 		return NewSilentError(fmt.Errorf("session not found: %s", sessionID))
 	}
 
-	report := buildSessionTokensReport(state, sessionPhaseLabel(state))
+	report := buildSessionTokensReport(state, sessionPhaseLabel(state), loadDisplayPricingTable(ctx))
 	if jsonOutput {
 		return printJSON(cmd.OutOrStdout(), report)
 	}
@@ -170,7 +172,7 @@ func tokenCommandError(err error) error {
 	return err
 }
 
-func buildSessionTokensReport(state *strategy.SessionState, status string) sessionTokensReport {
+func buildSessionTokensReport(state *strategy.SessionState, status string, table *pricing.Table) sessionTokensReport {
 	agentLabel := string(state.AgentType)
 	if agentLabel == "" {
 		agentLabel = unknownPlaceholder
@@ -186,6 +188,7 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 
 	if tokens := buildSessionTokensUsage(state.TokenUsage); tokens != nil {
 		report.Tokens = tokens
+		applyLocalCostEstimate(tokens, state.TokenUsage, modelUsageSliceFromMap(state.ModelUsage), state.ModelName, table)
 		if tokens.SubagentTotal > 0 {
 			report.Contributors = append(report.Contributors, sessionTokensContributor{
 				Kind:       "subagents",
@@ -242,6 +245,9 @@ func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {
 	if total == 0 && usage.APICallCount == 0 {
 		return nil
 	}
+	// Cost is intentionally NOT copied from usage: the CLI no longer persists
+	// cost, so any persisted value is nil. Callers apply a local cost estimate
+	// via applyLocalCostEstimate instead (entire-api owns the authoritative cost).
 	return &sessionTokensUsage{
 		Total:         total,
 		Input:         usage.InputTokens,
@@ -250,9 +256,50 @@ func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {
 		Output:        usage.OutputTokens,
 		APICalls:      usage.APICallCount,
 		SubagentTotal: totalTokens(usage.SubagentTokens),
-		CostUSD:       usage.CostUSD,
-		CostSource:    usage.CostSource,
 	}
+}
+
+// loadDisplayPricingTable returns the pricing table the token commands use to
+// compute a LOCAL cost estimate for display, or nil when estimation is disabled
+// (so no cost is shown). Never fails: on load error the table is nil.
+func loadDisplayPricingTable(ctx context.Context) *pricing.Table {
+	table, disableEstimation := LoadPricingTable(ctx)
+	if disableEstimation {
+		return nil
+	}
+	return table
+}
+
+// applyLocalCostEstimate replaces a rendered usage's cost with a LOCAL, on-the-fly
+// estimate computed from its token breakdown at current rates. The CLI no longer
+// persists cost — entire-api prices server-side — so token commands show this as
+// an explicitly-labeled local estimate (see costSourceSuffix / localCostEstimateNote).
+// A nil result (nothing priceable) leaves the cost unset so no cost line renders.
+func applyLocalCostEstimate(tokens *sessionTokensUsage, usage *agent.TokenUsage, models []types.ModelUsage, fallbackModel string, table *pricing.Table) {
+	if tokens == nil {
+		return
+	}
+	cost, source := agent.EstimateCost(usage, models, fallbackModel, table)
+	tokens.CostUSD = cost
+	tokens.CostSource = source
+}
+
+// modelUsageSliceFromMap converts a session-state per-model usage map into a
+// model-sorted slice for deterministic local cost estimation. Nil entries are
+// skipped; a nil/empty map yields nil.
+func modelUsageSliceFromMap(m map[string]*agent.TokenUsage) []types.ModelUsage {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]types.ModelUsage, 0, len(m))
+	for model, usage := range m {
+		if usage == nil {
+			continue
+		}
+		out = append(out, types.ModelUsage{Model: model, TokenUsage: *usage})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
+	return out
 }
 
 func topLevelSessionTokenTotal(tokens *sessionTokensUsage) int {
@@ -414,15 +461,23 @@ func formatPercent(percent float64) string {
 	return formatted + "%"
 }
 
-// formatCostUSD renders a stored cost for display. It never computes cost; it
-// only formats what was persisted upstream at lifecycle/condensation time.
+// localCostEstimateNote explains that a rendered cost is a CLI-side estimate and
+// that the authoritative value lives on the platform. The CLI no longer persists
+// cost (entire-api prices server-side), so every cost the token commands show is
+// recomputed locally from the persisted token breakdown.
+const localCostEstimateNote = "Cost is a local estimate at current rates; the authoritative cost is computed on the Entire platform."
+
+// formatCostUSD renders a locally-estimated cost for display. The value is a
+// current-rate estimate the token command recomputed from the persisted token
+// breakdown — the CLI no longer persists cost.
 //
-//   - v == nil        -> "" (unknown cost: caller omits the line, never $0.00)
+//   - v == nil        -> "" (unknown/unpriceable cost: caller omits the line, never $0.00)
 //   - 0 < v < $0.005  -> "<$0.01" (sub-cent, would round to $0.00)
 //   - otherwise       -> "$X.XX" (2dp)
 //
-// A non-empty source appends a provenance suffix: " (estimated)", " (reported)",
-// or " (mixed)". An empty/unknown source adds no suffix.
+// A non-empty source appends a provenance suffix: " (estimated locally)", or
+// " (estimated locally, partial)" when only some tokens were priceable. An
+// empty/unknown source adds no suffix.
 func formatCostUSD(v *float64, source string) string {
 	if v == nil {
 		return ""
@@ -444,15 +499,16 @@ func formatCostAmount(v float64) string {
 }
 
 // costSourceSuffix maps a CostSource provenance to its parenthetical display
-// suffix; an empty/unknown source yields "".
+// suffix. Cost is a local estimate now (the CLI no longer persists cost), so the
+// estimated/mixed cases say so explicitly; an empty/unknown source yields "".
 func costSourceSuffix(source string) string {
 	switch source {
 	case types.CostSourceReported:
 		return "(reported)"
 	case types.CostSourceEstimated:
-		return "(estimated)"
+		return "(estimated locally)"
 	case types.CostSourceMixed:
-		return "(mixed)"
+		return "(estimated locally, partial)"
 	default:
 		return ""
 	}
@@ -467,6 +523,7 @@ func writeTokenCostLine(w io.Writer, tokens *sessionTokensUsage) {
 	}
 	if line := formatCostUSD(tokens.CostUSD, tokens.CostSource); line != "" {
 		fmt.Fprintf(w, "Cost:  %s\n", line)
+		fmt.Fprintf(w, "  %s\n", localCostEstimateNote)
 	}
 }
 

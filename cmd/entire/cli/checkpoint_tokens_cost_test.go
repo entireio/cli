@@ -9,9 +9,25 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/pricing"
 )
 
 func costPtr(v float64) *float64 { return &v }
+
+// testDisplayPricingTable is a deterministic table for the display-side local
+// cost estimate: "test-model" prices every token class at $1/MTok (provider
+// "test" has no explicit cache rates, so cache tokens fall back to the input
+// rate). A usage of input+output = N tokens therefore estimates to N/1e6 USD.
+func testDisplayPricingTable(t *testing.T) *pricing.Table {
+	t.Helper()
+	table, err := pricing.LoadTable([]pricing.ModelRate{
+		{ID: "test-model", Provider: "test", InputPerMTok: 1, OutputPerMTok: 1},
+	})
+	if err != nil {
+		t.Fatalf("LoadTable: %v", err)
+	}
+	return table
+}
 
 // addCheckpointTokenUsage must sum CostUSD, merge CostSource, and carry cost
 // through the SubagentTokens recursion.
@@ -68,8 +84,11 @@ func TestAddCheckpointTokenUsage_NilCostStaysNil(t *testing.T) {
 	}
 }
 
-// buildCheckpointTokensReport must surface the aggregated cost on its usage.
-func TestBuildCheckpointTokensReport_CarriesCost(t *testing.T) {
+// buildCheckpointTokensReport must recompute a LOCAL cost estimate from the
+// persisted token breakdown (the CLI no longer persists cost) and label it as a
+// local estimate. Here the per-model breakdown carries 420000 priceable tokens
+// under test-model ($1/MTok) => $0.42.
+func TestBuildCheckpointTokensReport_RecomputesLocalCostEstimate(t *testing.T) {
 	t.Parallel()
 	cpID := id.MustCheckpointID("abc123abc123")
 	report := buildCheckpointTokensReport(
@@ -82,17 +101,19 @@ func TestBuildCheckpointTokensReport_CarriesCost(t *testing.T) {
 			{
 				SessionID: "cost-session",
 				Agent:     "Claude Code",
-				TokenUsage: &agent.TokenUsage{
-					InputTokens: 1000,
-					CostUSD:     costPtr(0.42),
-					CostSource:  types.CostSourceEstimated,
+				Model:     "test-model",
+				// Persisted usage carries NO cost (stripped on write); only tokens.
+				TokenUsage: &agent.TokenUsage{InputTokens: 400000, OutputTokens: 20000},
+				ModelUsage: []types.ModelUsage{
+					{Model: "test-model", TokenUsage: agent.TokenUsage{InputTokens: 400000, OutputTokens: 20000}},
 				},
 			},
 		},
 		0,
+		testDisplayPricingTable(t),
 	)
 	if report.Tokens == nil || report.Tokens.CostUSD == nil || *report.Tokens.CostUSD != 0.42 {
-		t.Fatalf("expected cost 0.42, got %+v", report.Tokens)
+		t.Fatalf("expected recomputed cost 0.42, got %+v", report.Tokens)
 	}
 	if report.Tokens.CostSource != types.CostSourceEstimated {
 		t.Fatalf("cost source = %q, want estimated", report.Tokens.CostSource)
@@ -100,8 +121,47 @@ func TestBuildCheckpointTokensReport_CarriesCost(t *testing.T) {
 
 	var buf bytes.Buffer
 	writeCheckpointTokensText(&buf, report)
-	if !strings.Contains(buf.String(), "Cost:  $0.42 (estimated)") {
-		t.Fatalf("expected cost line in text, got:\n%s", buf.String())
+	out := buf.String()
+	if !strings.Contains(out, "Cost:  $0.42 (estimated locally)") {
+		t.Fatalf("expected local-estimate cost line, got:\n%s", out)
+	}
+	if !strings.Contains(out, localCostEstimateNote) {
+		t.Fatalf("expected local-estimate note, got:\n%s", out)
+	}
+}
+
+// With no pricing table (estimation disabled) and no priceable model, no cost is
+// shown — never $0.
+func TestBuildCheckpointTokensReport_NoCostWhenUnpriceable(t *testing.T) {
+	t.Parallel()
+	cpID := id.MustCheckpointID("abc123abc124")
+	report := buildCheckpointTokensReport(
+		cpID,
+		&checkpoint.CheckpointSummary{
+			CheckpointID: cpID,
+			Sessions:     []checkpoint.SessionFilePaths{{Metadata: "0/metadata.json"}},
+		},
+		[]*checkpoint.Metadata{
+			{
+				SessionID:  "cost-session",
+				Agent:      "Claude Code",
+				Model:      "test-model",
+				TokenUsage: &agent.TokenUsage{InputTokens: 400000, OutputTokens: 20000},
+			},
+		},
+		0,
+		nil, // estimation disabled
+	)
+	if report.Tokens == nil {
+		t.Fatal("expected token usage")
+	}
+	if report.Tokens.CostUSD != nil {
+		t.Fatalf("expected no cost when unpriceable, got %v", report.Tokens.CostUSD)
+	}
+	var buf bytes.Buffer
+	writeCheckpointTokensText(&buf, report)
+	if strings.Contains(buf.String(), "Cost:") {
+		t.Fatalf("expected no cost line, got:\n%s", buf.String())
 	}
 }
 
