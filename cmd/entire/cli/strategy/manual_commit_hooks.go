@@ -907,6 +907,14 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	checkpointID, found := trailers.ParseCheckpoint(commit.Message)
 	openRepoSpan.End()
 
+	// Observer hook: a commit landed. Fired for every commit (with or without a
+	// checkpoint trailer) so plugins can react to the user's commit.
+	cpIDStr := ""
+	if found {
+		cpIDStr = checkpointID.String()
+	}
+	firePluginPostCommit(ctx, commit.Hash.String(), cpIDStr, found)
+
 	if !found {
 		// No trailer — user removed it or it was never added (mid-turn commit).
 		// Still update BaseCommit for active sessions so future commits can match.

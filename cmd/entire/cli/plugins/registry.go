@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -16,6 +17,9 @@ import (
 // hook events to them. All access to plugin Lua states goes through the
 // registry, which serializes it (LStates are not goroutine-safe).
 type Registry struct {
+	// mu serializes hook dispatch: LStates are not goroutine-safe, so at most
+	// one callback runs at a time even if two hooks fire concurrently.
+	mu      sync.Mutex
 	plugins []*LoadedPlugin
 }
 
@@ -39,7 +43,9 @@ type discoverySource struct {
 func Discover(ctx context.Context, worktreeRoot string, s *settings.EntireSettings) *Registry {
 	logCtx := logging.WithComponent(ctx, "plugins")
 	r := &Registry{}
-	if s == nil {
+	// Fast path: with no enabled allow-list entry, nothing can run. Skip all
+	// filesystem work so the common (no-plugins) case is essentially free.
+	if !hasEnabledPlugin(s) {
 		return r
 	}
 
@@ -67,15 +73,28 @@ func Discover(ctx context.Context, worktreeRoot string, s *settings.EntireSettin
 				continue
 			}
 			pluginDir := filepath.Join(src.dir, e.Name())
-			r.tryLoadCandidate(ctx, logCtx, pluginDir, src.source, s, loaded)
+			r.tryLoadCandidate(ctx, logCtx, pluginDir, src.source, worktreeRoot, s, loaded)
 		}
 	}
 	return r
 }
 
+// hasEnabledPlugin reports whether settings enables at least one plugin.
+func hasEnabledPlugin(s *settings.EntireSettings) bool {
+	if s == nil {
+		return false
+	}
+	for _, ps := range s.Plugins {
+		if ps.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
 // tryLoadCandidate parses a candidate plugin dir, checks the allow-list, and
 // loads it when enabled. Failures are logged and skipped.
-func (r *Registry) tryLoadCandidate(ctx, logCtx context.Context, dir string, source Source, s *settings.EntireSettings, loaded map[string]struct{}) {
+func (r *Registry) tryLoadCandidate(ctx, logCtx context.Context, dir string, source Source, worktreeRoot string, s *settings.EntireSettings, loaded map[string]struct{}) {
 	if _, statErr := os.Stat(filepath.Join(dir, ManifestFileName)); statErr != nil {
 		return // not a plugin dir
 	}
@@ -98,7 +117,7 @@ func (r *Registry) tryLoadCandidate(ctx, logCtx context.Context, dir string, sou
 			slog.String("plugin", name), slog.String("source", string(source)))
 		return
 	}
-	p, err := LoadPlugin(ctx, dir, source, grant)
+	p, err := LoadPlugin(ctx, dir, source, worktreeRoot, grant)
 	if err != nil {
 		logging.Warn(logCtx, "skip plugin: load failed", slog.String("plugin", name), slog.String("error", err.Error()))
 		return
@@ -140,7 +159,12 @@ func (r *Registry) PluginNames() []string {
 // ignored, never propagated to the host. Each callback runs under its own
 // timeout so one plugin cannot stall the hook.
 func (r *Registry) FireObserver(ctx context.Context, hook string, payload map[string]any) {
-	if r == nil || len(r.plugins) == 0 {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.plugins) == 0 {
 		return
 	}
 	logCtx := logging.WithComponent(ctx, "plugins")

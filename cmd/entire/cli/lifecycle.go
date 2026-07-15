@@ -95,6 +95,23 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 
+	err := dispatchLifecycleEventHandlers(ctx, ag, event)
+
+	// Dispatch the corresponding observer hook to Lua plugins after the
+	// framework has handled the event, so plugins observe post-handling state.
+	// Only on success — a failed handler leaves state the plugin shouldn't act
+	// on. Best-effort and a no-op when no plugin is enabled.
+	if err == nil {
+		firePluginLifecycleHook(ctx, ag, event)
+	}
+	return err
+}
+
+// dispatchLifecycleEventHandlers routes an event to its handler. It is split
+// from DispatchLifecycleEvent so plugin observer hooks can fire after a
+// successful handler without changing the handlers' direct error-propagation
+// shape (which several handlers rely on to stay lint-clean).
+func dispatchLifecycleEventHandlers(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	switch event.Type {
 	case agent.SessionStart:
 		return handleLifecycleSessionStart(ctx, ag, event)
@@ -943,6 +960,11 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	if err := strat.SaveStep(ctx, stepCtx); err != nil {
 		return fmt.Errorf("failed to save step: %w", err)
 	}
+
+	// Observer hook: a session step checkpoint was written. Fired here (rather
+	// than inside SaveStep) so the strategy package stays decoupled from the
+	// plugin layer and the payload can draw on the fully-populated step context.
+	firePluginCheckpointSaved(ctx, stepCtx)
 
 	// Update session state with backfilled prompt after SaveStep.
 	// Done after SaveStep because SaveStep may reinitialize session state,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	lua "github.com/yuin/gopher-lua"
@@ -19,8 +20,16 @@ func (p *LoadedPlugin) installAPI(ls *lua.LState) {
 	mod := ls.NewTable()
 
 	ls.SetField(mod, "on", ls.NewFunction(p.luaOn))
+
+	// Read-only accessors. Strings are copied by value into Lua, so a plugin
+	// cannot mutate host state through them.
 	ls.SetField(mod, "plugin_name", lua.LString(p.Manifest.Name))
 	ls.SetField(mod, "version", lua.LString(p.Manifest.Version))
+	ls.SetField(mod, "source", lua.LString(string(p.Source)))
+	ls.SetField(mod, "repo_root", lua.LString(p.WorktreeRoot))
+	if p.kv != nil {
+		ls.SetField(mod, "data_dir", lua.LString(p.kv.dir))
+	}
 
 	logTbl := ls.NewTable()
 	ls.SetField(logTbl, "debug", ls.NewFunction(p.luaLog(slog.LevelDebug)))
@@ -29,6 +38,14 @@ func (p *LoadedPlugin) installAPI(ls *lua.LState) {
 	ls.SetField(logTbl, "error", ls.NewFunction(p.luaLog(slog.LevelError)))
 	ls.SetField(mod, "log", logTbl)
 
+	kvTbl := ls.NewTable()
+	ls.SetField(kvTbl, "get", ls.NewFunction(p.luaKVGet))
+	ls.SetField(kvTbl, "set", ls.NewFunction(p.luaKVSet))
+	ls.SetField(kvTbl, "delete", ls.NewFunction(p.luaKVDelete))
+	ls.SetField(mod, "kv", kvTbl)
+
+	p.installCapabilityStubs(ls, mod)
+
 	ls.SetGlobal(entireModuleName, mod)
 
 	// Re-provide print, routed to the plugin logger at info level, so authors
@@ -36,16 +53,14 @@ func (p *LoadedPlugin) installAPI(ls *lua.LState) {
 	// stripped the stdout-writing base print).
 	ls.SetGlobal("print", ls.NewFunction(func(l *lua.LState) int {
 		top := l.GetTop()
-		msg := ""
-		var msgSb40 strings.Builder
+		var sb strings.Builder
 		for i := 1; i <= top; i++ {
 			if i > 1 {
-				msgSb40.WriteString("\t")
+				sb.WriteByte('\t')
 			}
-			msgSb40.WriteString(l.ToStringMeta(l.Get(i)).String())
+			sb.WriteString(l.ToStringMeta(l.Get(i)).String())
 		}
-		msg += msgSb40.String()
-		p.log(slog.LevelInfo, msg)
+		p.log(slog.LevelInfo, sb.String())
 		return 0
 	}))
 }
@@ -71,6 +86,53 @@ func (p *LoadedPlugin) luaLog(level slog.Level) lua.LGFunction {
 		p.log(level, msg)
 		return 0
 	}
+}
+
+// luaKVGet implements entire.kv.get(key) -> string|nil. It returns nil when
+// the key is absent and raises a Lua error on a storage failure.
+func (p *LoadedPlugin) luaKVGet(ls *lua.LState) int {
+	key := ls.CheckString(1)
+	if p.kv == nil {
+		ls.Push(lua.LNil)
+		return 1
+	}
+	v, ok, err := p.kv.get(key)
+	if err != nil {
+		ls.RaiseError("entire.kv.get(%q): %v", key, err)
+		return 0
+	}
+	if !ok {
+		ls.Push(lua.LNil)
+		return 1
+	}
+	ls.Push(lua.LString(v))
+	return 1
+}
+
+// luaKVSet implements entire.kv.set(key, value). value is coerced to a string.
+func (p *LoadedPlugin) luaKVSet(ls *lua.LState) int {
+	key := ls.CheckString(1)
+	value := ls.CheckString(2)
+	if p.kv == nil {
+		ls.RaiseError("entire.kv is unavailable (no data dir resolved for plugin %q)", p.Manifest.Name)
+		return 0
+	}
+	if err := p.kv.set(key, value); err != nil {
+		ls.RaiseError("entire.kv.set(%q): %v", key, err)
+	}
+	return 0
+}
+
+// luaKVDelete implements entire.kv.delete(key).
+func (p *LoadedPlugin) luaKVDelete(ls *lua.LState) int {
+	key := ls.CheckString(1)
+	if p.kv == nil {
+		return 0
+	}
+	if err := p.kv.del(key); err != nil {
+		ls.RaiseError("entire.kv.delete(%q): %v", key, err)
+	}
+	return 0
 }
 
 // log routes a plugin-authored message to the Entire log with the plugin's

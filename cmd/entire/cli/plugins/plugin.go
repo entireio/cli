@@ -31,8 +31,13 @@ type LoadedPlugin struct {
 	Source   Source
 	Grant    settings.PluginSettings
 
+	// WorktreeRoot is the repo root at load time, exposed to Lua as
+	// entire.repo_root. Empty when loaded outside a repo.
+	WorktreeRoot string
+
 	L         *lua.LState
 	callbacks map[string][]*lua.LFunction
+	kv        *kvStore
 
 	// dispatchCtx is the context of the in-flight load or hook dispatch, used
 	// only for logging correlation. It is set under the Registry mutex before
@@ -58,8 +63,9 @@ func LoadManifestFromDir(dir string) (*Manifest, error) {
 // (via the Registry) when done.
 //
 // grant is the plugin's allow-list entry; callers must have already confirmed
-// the plugin is enabled. ctx bounds the entry-script execution.
-func LoadPlugin(ctx context.Context, dir string, source Source, grant settings.PluginSettings) (*LoadedPlugin, error) {
+// the plugin is enabled. worktreeRoot is exposed to Lua (may be empty). ctx
+// bounds the entry-script execution.
+func LoadPlugin(ctx context.Context, dir string, source Source, worktreeRoot string, grant settings.PluginSettings) (*LoadedPlugin, error) {
 	manifest, err := LoadManifestFromDir(dir)
 	if err != nil {
 		return nil, err
@@ -67,13 +73,17 @@ func LoadPlugin(ctx context.Context, dir string, source Source, grant settings.P
 
 	L := NewSandboxedState(context.Background())
 	p := &LoadedPlugin{
-		Manifest:    *manifest,
-		Dir:         dir,
-		Source:      source,
-		Grant:       grant,
-		L:           L,
-		callbacks:   make(map[string][]*lua.LFunction),
-		dispatchCtx: ctx,
+		Manifest:     *manifest,
+		Dir:          dir,
+		Source:       source,
+		Grant:        grant,
+		WorktreeRoot: worktreeRoot,
+		L:            L,
+		callbacks:    make(map[string][]*lua.LFunction),
+		dispatchCtx:  ctx,
+	}
+	if dataDir, derr := PluginDataDir(manifest.Name); derr == nil {
+		p.kv = newKVStore(dataDir)
 	}
 	p.installAPI(L)
 

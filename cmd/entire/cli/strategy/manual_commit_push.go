@@ -43,6 +43,10 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 	ps := resolvePushSettings(resolveCtx, remote)
 	resolveSpan.End()
 
+	// Observer hook: a push is starting. Fired before the push-disabled gate so
+	// plugins see every pre-push, and before any veto semantics (added later).
+	firePluginPrePush(ctx, remote, ps.pushTarget())
+
 	if ps.pushDisabled {
 		return nil
 	}
