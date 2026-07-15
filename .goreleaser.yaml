@@ -32,6 +32,36 @@ builds:
       # builds carry no stamp and use the package default ("true" = visible).
       - -X github.com/entireio/cli/cmd/entire/cli/experimental.Visible={{ if .Prerelease }}true{{ else }}false{{ end }}
 
+  # entire-internal builds the same ./cmd/entire main with `-tags=internal`, so
+  # the internal-only command groups (e.g. `entire ci`, gated in
+  # cmd/entire/cli/ci) are compiled in. It reuses the public build's env/matrix
+  # and ldflags verbatim and only adds the tag. This variant is intentionally
+  # NOT published: the archives below allow-list only the public build ids, so
+  # the internal binary is produced under dist/ for internal distribution but
+  # never lands in the release archives, scoop manifest, or Homebrew cask. The
+  # public `entire` build stays untagged.
+  - id: entire-internal
+    main: ./cmd/entire
+    binary: entire
+    flags:
+      - -tags=internal
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Version={{.Version}}
+      - -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Commit={{.ShortCommit}}
+      - -X github.com/entireio/cli/cmd/entire/cli/telemetry.PostHogAPIKey={{.Env.POSTHOG_API_KEY}}
+      - -X github.com/entireio/cli/cmd/entire/cli/telemetry.PostHogEndpoint={{.Env.POSTHOG_ENDPOINT}}
+      - -X github.com/entireio/cli/cmd/entire/cli/experimental.Visible={{ if .Prerelease }}true{{ else }}false{{ end }}
+
   # git-remote-entire is the git remote helper for entire:// URLs (see
   # cmd/git-remote-entire). A small, dedicated binary shipped alongside
   # entire so `git clone entire://…` resolves it on PATH — no telemetry,
@@ -74,7 +104,15 @@ notarize:
         wait: true # do not let an unusable binary slip into the wild
 
 archives:
-  - formats:
+  # Allow-list the published build ids explicitly. Without this, archives bundle
+  # every build for each os/arch — which would (a) collide on the duplicate
+  # `entire` binary name shared by the entire and entire-internal builds, and
+  # (b) ship the internal-tagged binary in the public release. Listing only the
+  # public ids keeps the internal build out of every published artifact.
+  - builds:
+      - entire
+      - git-remote-entire
+    formats:
       - tar.gz
     format_overrides:
       - goos: windows

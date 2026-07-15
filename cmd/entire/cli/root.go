@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"runtime"
 
+	"github.com/entireio/cli/cmd/entire/cli/ci"
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -99,6 +100,12 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newProjectCmd())                 // 'project' — control-plane project management
 	cmd.AddCommand(newRepoCmd())                    // 'repo' — control-plane repo lifecycle
 	cmd.AddCommand(newGrantCmd())                   // 'grant' — control-plane access grants
+
+	// Internal-only CI integrations. Register mounts the hidden `ci` group only
+	// under the `internal` build tag; in the public (untagged) build it's a
+	// no-op, so the group is absent from released binaries. Later PRs stack the
+	// Buildkite verbs onto `ci buildkite`.
+	ci.Register(cmd)
 
 	// Top-level lifecycle and standalone commands.
 	experimental.Register(cmd, cliReview.NewCommand(buildReviewDeps()))        // `review` (experimental)
