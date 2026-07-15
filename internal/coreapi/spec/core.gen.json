@@ -5191,7 +5191,7 @@
           "required": true
         },
         "responses": {
-          "201": {
+          "2XX": {
             "content": {
               "application/json": {
                 "schema": {

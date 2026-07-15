@@ -74,7 +74,7 @@ type Invoker interface {
 	// Enroll a repo into a CI webhook (Buildkite).
 	//
 	// POST /repos/{repoId}/ci-webhooks
-	CreateRepoCIWebhook(ctx context.Context, request *CreateRepoCIWebhookInputBody, params CreateRepoCIWebhookParams) (*CIWebhookView, error)
+	CreateRepoCIWebhook(ctx context.Context, request *CreateRepoCIWebhookInputBody, params CreateRepoCIWebhookParams) (*CIWebhookViewStatusCode, error)
 	// CreateServiceAccount invokes createServiceAccount operation.
 	//
 	// Create service account.
@@ -1156,12 +1156,12 @@ func (c *Client) sendCreateRepo(ctx context.Context, request *CreateRepoInputBod
 // Enroll a repo into a CI webhook (Buildkite).
 //
 // POST /repos/{repoId}/ci-webhooks
-func (c *Client) CreateRepoCIWebhook(ctx context.Context, request *CreateRepoCIWebhookInputBody, params CreateRepoCIWebhookParams) (*CIWebhookView, error) {
+func (c *Client) CreateRepoCIWebhook(ctx context.Context, request *CreateRepoCIWebhookInputBody, params CreateRepoCIWebhookParams) (*CIWebhookViewStatusCode, error) {
 	res, err := c.sendCreateRepoCIWebhook(ctx, request, params)
 	return res, err
 }
 
-func (c *Client) sendCreateRepoCIWebhook(ctx context.Context, request *CreateRepoCIWebhookInputBody, params CreateRepoCIWebhookParams) (res *CIWebhookView, err error) {
+func (c *Client) sendCreateRepoCIWebhook(ctx context.Context, request *CreateRepoCIWebhookInputBody, params CreateRepoCIWebhookParams) (res *CIWebhookViewStatusCode, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [3]string

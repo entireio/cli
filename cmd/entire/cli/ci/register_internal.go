@@ -8,6 +8,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// newBuildkiteCmd and the four Buildkite verbs it mounts live in
+// buildkite_internal.go, alongside the control-plane client seam and rendering
+// helpers they share.
+
 // Register mounts the hidden `ci` command group onto root. This variant is
 // compiled only under the `internal` build tag; the `!internal` build gets the
 // no-op twin in register_stub.go, so the public `entire` binary omits the group
@@ -32,23 +36,6 @@ func newCICmd() *cobra.Command {
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newBuildkiteCmd())
 	return cmd
-}
-
-// newBuildkiteCmd is the placeholder `entire ci buildkite` subgroup. The
-// Buildkite verbs (list/create/…) stack onto it in later PRs; for now bare
-// invocation prints a "coming soon" notice so the wiring is exercised
-// end-to-end.
-func newBuildkiteCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "buildkite",
-		Short: "Manage Buildkite CI webhook integrations (coming soon)",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			// cobra's Print* writes to stderr in production, so use Fprintln
-			// against OutOrStdout explicitly (enforced by the forbidigo linter).
-			fmt.Fprintln(cmd.OutOrStdout(), "entire ci buildkite: coming soon")
-			return nil
-		},
-	}
 }
 
 // addControlPlaneFlags registers the persistent flags shared by the

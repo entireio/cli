@@ -809,6 +809,32 @@ func (s *CIWebhookViewAdditional) init() CIWebhookViewAdditional {
 	return m
 }
 
+// CIWebhookViewStatusCode wraps CIWebhookView with StatusCode.
+type CIWebhookViewStatusCode struct {
+	StatusCode int
+	Response   CIWebhookView
+}
+
+// GetStatusCode returns the value of StatusCode.
+func (s *CIWebhookViewStatusCode) GetStatusCode() int {
+	return s.StatusCode
+}
+
+// GetResponse returns the value of Response.
+func (s *CIWebhookViewStatusCode) GetResponse() CIWebhookView {
+	return s.Response
+}
+
+// SetStatusCode sets the value of StatusCode.
+func (s *CIWebhookViewStatusCode) SetStatusCode(val int) {
+	s.StatusCode = val
+}
+
+// SetResponse sets the value of Response.
+func (s *CIWebhookViewStatusCode) SetResponse(val CIWebhookView) {
+	s.Response = val
+}
+
 // CancelDeletionOK is response for CancelDeletion operation.
 type CancelDeletionOK struct{}
 

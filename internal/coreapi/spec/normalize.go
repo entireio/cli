@@ -78,6 +78,7 @@ func run() error {
 
 	ops := foldErrorResponses(doc)
 	loosened := loosenReadModelEnums(doc)
+	reenroll := addCreateCIWebhookReenrollStatus(doc)
 
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -90,8 +91,52 @@ func run() error {
 		return fmt.Errorf("write spec: %w", err)
 	}
 
-	fmt.Printf("normalize: folded error responses on %d operation(s), loosened %d read-model enum field(s) → %s\n", ops, loosened, outPath)
+	fmt.Printf("normalize: folded error responses on %d operation(s), loosened %d read-model enum field(s), added %d re-enroll status → %s\n", ops, loosened, reenroll, outPath)
 	return nil
+}
+
+// addCreateCIWebhookReenrollStatus teaches the generated client that
+// POST /repos/{repoId}/ci-webhooks can answer 200 as well as 201.
+//
+// The handler is idempotent: it returns 201 on a fresh enroll and 200 on an
+// idempotent re-enroll of an existing subscription (both carry the same
+// CIWebhookView body). huma only documents its Operation.DefaultStatus (201),
+// so the pristine spec omits the 200 — and ogen's decoder then treats a 200
+// re-enroll as an unexpected status, surfacing the idempotent success as a
+// content-type error rather than returning the subscription.
+//
+// The fix replaces the single literal 201 with a "2XX" range (same schema),
+// so ogen decodes any 2xx to one concrete *CIWebhookViewStatusCode — no
+// per-status sum type (declaring 200 and 201 separately would force one),
+// and the wrapper's StatusCode still tells fresh (201) from re-enroll (200)
+// apart. Returns 1 if applied, else 0.
+//
+// See UPSTREAM.md item 3: the real fix is huma advertising the 200 upstream,
+// after which this transform can be deleted.
+func addCreateCIWebhookReenrollStatus(doc map[string]any) int {
+	paths, ok := doc["paths"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	item, ok := paths["/repos/{repoId}/ci-webhooks"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	post, ok := item["post"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	responses, ok := post["responses"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	created, ok := responses["201"]
+	if !ok {
+		return 0
+	}
+	delete(responses, "201")
+	responses["2XX"] = created
+	return 1
 }
 
 // readModelEnumFields lists the response read-model schema fields whose
