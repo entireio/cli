@@ -44,7 +44,7 @@ func (p *LoadedPlugin) installAPI(ls *lua.LState) {
 	ls.SetField(kvTbl, "delete", ls.NewFunction(p.luaKVDelete))
 	ls.SetField(mod, "kv", kvTbl)
 
-	p.installCapabilityStubs(ls, mod)
+	p.installCapabilityAPI(ls, mod)
 
 	ls.SetGlobal(entireModuleName, mod)
 

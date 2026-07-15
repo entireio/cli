@@ -43,6 +43,12 @@ type discoverySource struct {
 func Discover(ctx context.Context, worktreeRoot string, s *settings.EntireSettings) *Registry {
 	logCtx := logging.WithComponent(ctx, "plugins")
 	r := &Registry{}
+	// Kill switch: an operator can disable all plugins process-wide regardless
+	// of the allow-list.
+	if pluginsDisabledByEnv() {
+		logging.Debug(logCtx, "lua plugins disabled via "+pluginsDisabledEnv)
+		return r
+	}
 	// Fast path: with no enabled allow-list entry, nothing can run. Skip all
 	// filesystem work so the common (no-plugins) case is essentially free.
 	if !hasEnabledPlugin(s) {
@@ -178,7 +184,7 @@ func (r *Registry) FireObserver(ctx context.Context, hook string, payload map[st
 // invokeObserver runs a single observer callback with a bounded context and
 // panic isolation.
 func (r *Registry) invokeObserver(ctx, logCtx context.Context, p *LoadedPlugin, hook string, cb *lua.LFunction, payload map[string]any) {
-	cctx, cancel := context.WithTimeout(ctx, observerHookTimeout)
+	cctx, cancel := context.WithTimeout(ctx, hookTimeout())
 	defer cancel()
 
 	p.dispatchCtx = cctx
