@@ -15,6 +15,7 @@ This repo contains the CLI for Entire.
 - `entire/cli/commands`: actual command implementations
 - `entire/cli/agent`: agent implementations (Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi) - see [Agent Integration Checklist](docs/architecture/agent-integration-checklist.md) and [Agent Implementation Guide](docs/architecture/agent-guide.md)
 - `entire/cli/strategy`: strategy implementation (manual-commit) - see section below
+- `entire/cli/plugins`: embedded Lua plugin runtime (pure-Go gopher-lua sandbox, lifecycle/git hook bus, capability model, plugin-contributed commands) - see [Lua Plugins](docs/architecture/plugins-lua.md)
 - `entire/cli/checkpoint`: checkpoint storage abstractions (ephemeral and persistent)
 - `entire/cli/session`: session state management
 - `entire/cli/integration_test`: integration tests (simulated hooks)
@@ -629,6 +630,28 @@ The phase state machine, metadata directory layout, sharded checkpoint format, m
 - The strategy must implement the full `Strategy` interface
 - Test with `mise run test` - strategy tests are in `*_test.go` files
 - Keep this file and `docs/architecture/sessions-and-checkpoints.md` current when changing strategy behavior (`AGENTS.md` is a symlink to this file)
+
+### Lua Plugins (`cmd/entire/cli/plugins/`)
+
+Third parties can author no-build-step plugins in Lua (pure-Go gopher-lua, so
+`CGO_ENABLED=0` still holds) that subscribe to lifecycle/git hooks and contribute
+`entire <name>` commands, layered on the kubectl-style binary plugins.
+
+Key invariants when touching this code:
+
+- Plugins are **inert until allow-listed** in `.entire/settings.json`
+  (`plugins.<name>.enabled = true`); **repo-local `.entire/plugins/` never
+  auto-run**. Privileged APIs (`http`/`exec`/`fs`/`net`) and the mutating hooks
+  (`prepare_commit_msg`, `pre_push`) are **capability-gated** and fail loud when
+  ungranted.
+- The `plugins` package must NOT import `cli` or `strategy` (they import it);
+  seams build `map[string]any` payloads that the package converts to Lua tables.
+- Command resolution order is built-in > Lua command > `entire-<name>` binary.
+- Hooks fire best-effort with per-hook timeouts and panic isolation; an observer
+  must never break a lifecycle event or git hook.
+
+See [Lua Plugins](docs/architecture/plugins-lua.md) for the full reference and
+`examples/plugins/` for working examples.
 
 ### `entire review` Command
 

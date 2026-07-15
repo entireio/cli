@@ -381,6 +381,26 @@ File an issue when the rule would benefit every Entire user (e.g., a major SaaS 
 - **Custom PII patterns are user-authored.** Teams own the correctness of their `custom_patterns`. An invalid regex is logged and skipped, not enforced.
 - **Users are ultimately responsible** for reviewing what they commit and push. Redaction is a safety net, not a guarantee.
 
+## Third-party plugins
+
+Entire supports two kinds of plugins, both of which run third-party code:
+
+- **Binary plugins** — `entire-<name>` executables on `$PATH`. Arbitrary
+  programs invoked by the CLI; only install ones you trust.
+- **Lua plugins** — no-build-step scripts run in an embedded sandboxed
+  interpreter. The trust model is opt-in at every step: a plugin is inert until
+  allow-listed in `.entire/settings.json` (`plugins.<name>.enabled = true`),
+  **repo-local `.entire/plugins/` plugins never auto-run**, privileged APIs
+  (`http`/`exec`/`fs`/`net`) and the mutating hooks (commit-message trailer,
+  push veto) are capability-gated, and `entire plugin install` only places files
+  (it cannot run the code until you enable it). `ENTIRE_PLUGINS_DISABLED=1` is a
+  process-wide kill switch.
+
+The allow-list plus capability grants are the trust boundary — enabling a plugin
+is equivalent to running its code. The sandbox limits accidental damage, not a
+deliberately malicious enabled plugin. See
+[Lua Plugins](architecture/plugins-lua.md) for the full model.
+
 ## Telemetry
 
 The CLI captures anonymous usage analytics by default. Sent to PostHog with `DisableGeoIP` enabled. Captured per command: command name, selected agent, whether Entire is enabled in the repo, CLI version, OS/arch, installed git version (best-effort; omitted if git is absent or unparseable), and **names** of flags passed (never their values). The distinct ID is a hashed machine identifier (`machineid.ProtectedID`), not a user identity.
@@ -401,3 +421,4 @@ For vulnerability disclosure, see [SECURITY.md](../SECURITY.md) at the repo root
 
 - [Checkpoint commit signing](architecture/checkpoint-signing.md) — best-effort GPG/SSH signing of checkpoint commits, opt-out via `sign_checkpoint_commits: false`.
 - External agent plugins are arbitrary executables on `$PATH` invoked by the CLI; only install plugins you trust.
+- [Lua Plugins](architecture/plugins-lua.md) — embedded, sandboxed, opt-in plugins with a capability model; enabling one runs its code.

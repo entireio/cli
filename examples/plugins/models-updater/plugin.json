@@ -1,0 +1,8 @@
+{
+  "name": "models-updater",
+  "version": "0.1.0",
+  "description": "Fetches a models.json pricing file and caches it in the repo (example of http + fs)",
+  "entry": "main.lua",
+  "commands": [{ "name": "models-update", "short": "download the latest models.json into .entire/" }],
+  "capabilities": ["http", "fs"]
+}

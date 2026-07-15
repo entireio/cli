@@ -1,0 +1,9 @@
+{
+  "name": "checkpoint-notify",
+  "version": "1.0.0",
+  "description": "Logs and (optionally) desktop-notifies on each checkpoint and commit",
+  "entry": "main.lua",
+  "hooks": ["checkpoint_saved", "post_commit"],
+  "commands": [{ "name": "notify-stats", "short": "show how many checkpoints this plugin has seen" }],
+  "capabilities": ["exec"]
+}
