@@ -9,51 +9,66 @@ import (
 )
 
 type experimentalCommandInfo struct {
-	Name       string
-	Invocation string
-	Summary    string
+	CommandPath []string
+	Invocation  string
+	Summary     string
 }
 
 var experimentalCommands = []experimentalCommandInfo{
 	{
-		Name:       "review",
-		Invocation: "entire review",
-		Summary:    "Run configured review skills against the current branch",
+		CommandPath: []string{"review"},
+		Invocation:  "entire review",
+		Summary:     "Run a multi-agent review against the current branch",
 	},
 	{
-		Name:       "investigate",
-		Invocation: "entire investigate",
-		Summary:    "Run a multi-agent investigation against a topic, issue, or seed doc",
+		CommandPath: []string{"investigate"},
+		Invocation:  "entire investigate",
+		Summary:     "Run a multi-agent investigation against a topic, issue, or seed doc",
 	},
 	{
-		Name:       "replay",
-		Invocation: "entire replay",
-		Summary:    "Replay checkpoint tasks in isolated worktrees",
+		CommandPath: []string{"replay"},
+		Invocation:  "entire replay",
+		Summary:     "Replay checkpoint tasks in isolated worktrees",
 	},
 	{
-		Name:       "eval",
-		Invocation: "entire eval",
-		Summary:    "Run private agent benchmarks from Entire checkpoints",
+		CommandPath: []string{"eval"},
+		Invocation:  "entire eval",
+		Summary:     "Run private agent benchmarks from Entire checkpoints",
 	},
 	{
-		Name:       "org",
-		Invocation: "entire org",
-		Summary:    "Manage Entire organizations (create, list)",
+		CommandPath: []string{"import", "claude-code"},
+		Invocation:  "entire import claude-code",
+		Summary:     "Import existing Claude Code transcripts as local, read-only history",
 	},
 	{
-		Name:       "project",
-		Invocation: "entire project",
-		Summary:    "Manage Entire projects (create, list)",
+		CommandPath: []string{"tokens"},
+		Invocation:  "entire tokens",
+		Summary:     "Analyze experimental token usage diagnostics",
 	},
 	{
-		Name:       "repo",
-		Invocation: "entire repo",
-		Summary:    "Manage Entire repositories (create, list, get, delete)",
+		CommandPath: []string{"tokens", "profile"},
+		Invocation:  "entire tokens profile",
+		Summary:     "Aggregate token usage across committed checkpoints",
 	},
 	{
-		Name:       "grant",
-		Invocation: "entire grant",
-		Summary:    "Manage access grants and org membership (org, project, repo)",
+		CommandPath: []string{"session", "tokens"},
+		Invocation:  "entire session tokens",
+		Summary:     "Show token usage and recommendations for a session",
+	},
+	{
+		CommandPath: []string{"blame"},
+		Invocation:  "entire blame",
+		Summary:     "Show which lines came from Entire checkpoints",
+	},
+	{
+		CommandPath: []string{"why"},
+		Invocation:  "entire why",
+		Summary:     "Show why a line exists (commit, checkpoint, prompt, session)",
+	},
+	{
+		CommandPath: []string{"experts"},
+		Invocation:  "entire experts",
+		Summary:     "Show agent, skill, and tool provenance for files or topics",
 	},
 }
 
@@ -67,7 +82,9 @@ func newLabsCmd() *cobra.Command {
 				return nil
 			}
 			err := fmt.Errorf("unknown labs topic %q", args[0])
-			fmt.Fprintf(cmd.ErrOrStderr(), "%v\n\n%s\n", err, labsTopicHint(args[0]))
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"%v\n\nRun `entire labs` to see available experimental commands, or run `entire review --help` for command-specific help.\n",
+				err)
 			return NewSilentError(err)
 		},
 		Run: func(cmd *cobra.Command, _ []string) {
@@ -97,20 +114,13 @@ Try:
   entire investigate --help
   entire replay --help
   entire eval --help
-  entire org --help
-  entire project --help
-  entire repo --help
-  entire grant --help
+  entire tokens --help
+  entire tokens profile --help
+  entire session tokens --help
+  entire blame --help
+  entire why --help
+  entire experts --help
 `
-}
-
-func labsTopicHint(topic string) string {
-	for _, info := range experimentalCommands {
-		if topic == info.Name {
-			return fmt.Sprintf("Run `entire labs` to see available experimental commands, or run `%s --help` for command-specific help.", info.Invocation)
-		}
-	}
-	return "Run `entire labs` to see available experimental commands and their command-specific help."
 }
 
 func renderExperimentalCommands(commands []experimentalCommandInfo) string {

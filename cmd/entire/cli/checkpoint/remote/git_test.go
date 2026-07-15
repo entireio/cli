@@ -3,13 +3,13 @@ package remote
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -324,6 +324,72 @@ func TestFetch_Shallow(t *testing.T) {
 		"Shallow=true should request --depth=1 and leave the repo shallow")
 }
 
+// TestFetch_Depth verifies that Depth is ref-scoped: it fully fetches (heals)
+// the named branch while leaving an independently-shallow branch shallow —
+// unlike Unshallow, which is repo-global.
+func TestFetch_Depth(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "bare.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	runIsolatedGit(ctx, t, "", "init", "--bare", bareDir)
+
+	testutil.InitRepo(t, seedDir)
+	runIsolatedGit(ctx, t, seedDir, "remote", "add", "origin", bareDir)
+	for _, c := range []string{"m1", "m2", "m3"} { // main: 3 commits
+		testutil.WriteFile(t, seedDir, "f.txt", c)
+		testutil.GitAdd(t, seedDir, "f.txt")
+		testutil.GitCommit(t, seedDir, c)
+	}
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, seedDir, "checkout", "--orphan", "meta")
+	runIsolatedGit(ctx, t, seedDir, "rm", "-rf", ".")
+	for _, c := range []string{"c1", "c2"} { // meta: 2 commits
+		testutil.WriteFile(t, seedDir, "g.txt", c)
+		testutil.GitAdd(t, seedDir, "g.txt")
+		testutil.GitCommit(t, seedDir, c)
+	}
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/meta")
+
+	// Shallow clone of main + shallow fetch of meta → both branches shallow.
+	cloneDir := filepath.Join(tmpDir, "clone")
+	runIsolatedGit(ctx, t, "", "clone", "--depth=1", "--single-branch", "--branch", "main", "file://"+bareDir, cloneDir)
+	runIsolatedGit(ctx, t, cloneDir, "fetch", "--depth=1", "origin", "+refs/heads/meta:refs/remotes/origin/meta")
+	require.True(t, isShallowRepository(ctx, cloneDir))
+	require.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/meta"))
+	require.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/main"))
+
+	out, err := Fetch(ctx, FetchOptions{
+		Remote:   "file://" + bareDir,
+		RefSpecs: []string{"+refs/heads/meta:refs/remotes/origin/meta"},
+		NoTags:   true,
+		Depth:    1_000_000_000,
+		Dir:      cloneDir,
+	})
+	require.NoError(t, err, "fetch output: %s", out)
+
+	assert.Equal(t, 2, revListCount(ctx, t, cloneDir, "refs/remotes/origin/meta"),
+		"Depth should fully fetch (heal) the named branch")
+	assert.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/main"),
+		"Depth is ref-scoped: an independently-shallow branch must stay shallow")
+	assert.True(t, isShallowRepository(ctx, cloneDir),
+		"repo stays shallow because main is still bounded")
+}
+
+func revListCount(ctx context.Context, t *testing.T, dir, ref string) int {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "git", "rev-list", "--count", ref)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	require.NoError(t, err)
+	return n
+}
+
 // setupShallowClone creates a bare origin, a seed repo with one commit pushed
 // to it, a shallow (--depth=1) clone, and then advances origin by one more
 // commit so that a subsequent fetch into the clone has work to do. Returns the
@@ -414,48 +480,6 @@ func TestAppendCheckpointTokenEnv(t *testing.T) {
 		assert.Contains(t, env, "GIT_CONFIG_COUNT=1")
 		assert.Contains(t, env, "GIT_CONFIG_KEY_0=http.extraHeader")
 	})
-}
-
-func TestCatFilesReadsBlobAndMissingSpec(t *testing.T) {
-	t.Parallel()
-
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-
-	blobHash := writeRemoteGitBlob(t, repoDir, "metadata")
-	missingHash := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-
-	results := CatFiles(context.Background(), CatFilesOptions{
-		Specs: []string{blobHash, missingHash},
-		Dir:   repoDir,
-	})
-
-	assert.Equal(t, []byte("metadata"), results[blobHash].Content)
-	assert.False(t, results[blobHash].Missing)
-	require.NoError(t, results[blobHash].Err)
-	assert.True(t, results[missingHash].Missing)
-	require.NoError(t, results[missingHash].Err)
-}
-
-func TestCatFilesErrorIncludesStderr(t *testing.T) {
-	t.Parallel()
-
-	err := catFilesError(errors.New("exit status 128"), "fatal: could not fetch blob\n")
-
-	assert.Contains(t, err.Error(), "fatal: could not fetch blob")
-}
-
-func writeRemoteGitBlob(t *testing.T, dir, content string) string {
-	t.Helper()
-
-	cmd := exec.CommandContext(t.Context(), "git", "hash-object", "-w", "--stdin")
-	cmd.Dir = dir
-	cmd.Stdin = strings.NewReader(content)
-	output, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("git hash-object failed: %v", err)
-	}
-	return strings.TrimSpace(string(output))
 }
 
 func TestIsValidToken(t *testing.T) {
@@ -766,4 +790,302 @@ func envToMap(env []string) map[string]string {
 		}
 	}
 	return m
+}
+
+// gitConfigBool reads a local git config key and reports whether it is set to a
+// true value. Missing keys and read errors report false.
+func gitConfigBool(ctx context.Context, dir, key string) bool {
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get", "--type=bool", key)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "true"
+}
+
+// TestFetch_FilteredURLFetchMarksNewRemoteSkipped verifies that when a filtered
+// fetch from a URL creates a new URL-keyed remote section, that section is
+// excluded from `git fetch --all` / `git remote update` — otherwise every
+// checkpoint URL ever fetched from lingers as a phantom remote that bulk
+// fetches keep dialing.
+func TestFetch_FilteredURLFetchMarksNewRemoteSkipped(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	originBare := filepath.Join(tmpDir, "origin.git")
+	checkpointBare := filepath.Join(tmpDir, "checkpoints.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	cloneDir := filepath.Join(tmpDir, "clone")
+
+	testutil.InitRepo(t, seedDir)
+	testutil.WriteFile(t, seedDir, "f.txt", "init")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "init")
+
+	// Separate origin and checkpoint repos, mirroring the real setup where
+	// checkpoints are fetched by URL from a repo that is not origin.
+	runIsolatedGit(ctx, t, "", "init", "--bare", originBare)
+	runIsolatedGit(ctx, t, "", "init", "--bare", checkpointBare)
+	runIsolatedGit(ctx, t, checkpointBare, "config", "uploadpack.allowFilter", "true")
+	runIsolatedGit(ctx, t, seedDir, "push", originBare, "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+originBare, cloneDir)
+
+	// A commit only in the checkpoint repo so the filtered fetch has
+	// something to transfer.
+	testutil.WriteFile(t, seedDir, "f.txt", "init\nnext\n")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "next")
+	runIsolatedGit(ctx, t, seedDir, "push", checkpointBare, "HEAD:refs/heads/main")
+
+	// Filtered fetches read .entire settings from the CWD repo.
+	testutil.WriteFile(
+		t,
+		cloneDir,
+		".entire/settings.json",
+		`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
+	)
+	t.Chdir(cloneDir)
+
+	fetchURL := "file://" + checkpointBare
+	out, err := Fetch(ctx, FetchOptions{
+		Remote:   fetchURL,
+		RefSpecs: []string{"+refs/heads/main:refs/entire-fetch-tmp/main"},
+		NoTags:   true,
+		Dir:      cloneDir,
+	})
+	require.NoError(t, err, "fetch output: %s", out)
+
+	// Sanity: git recorded the URL-keyed promisor entry for the filtered fetch.
+	require.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".promisor"),
+		"expected git to record a promisor entry for the filtered URL fetch")
+
+	assert.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"),
+		"URL-keyed promisor entry should be excluded from git fetch --all")
+
+	// git fetch --all must no longer dial the phantom entry: with the
+	// checkpoint repo gone, --all only succeeds if the URL-keyed entry is
+	// skipped (origin is still reachable).
+	require.NoError(t, os.RemoveAll(checkpointBare))
+	runIsolatedGit(ctx, t, cloneDir, "fetch", "--all", "--no-auto-gc")
+}
+
+// TestFetch_FailedFilteredFetchStillStampsNewRemote guards the resume
+// regression: git writes remote.<url>.promisor eagerly during connection
+// setup, so a filtered fetch that then fails (e.g. a missing ref) still leaves
+// the phantom remote behind. The stamp must land anyway — otherwise the section
+// exists on the next attempt, never looks new again, and lingers unstamped.
+func TestFetch_FailedFilteredFetchStillStampsNewRemote(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	originBare := filepath.Join(tmpDir, "origin.git")
+	checkpointBare := filepath.Join(tmpDir, "checkpoints.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	cloneDir := filepath.Join(tmpDir, "clone")
+
+	testutil.InitRepo(t, seedDir)
+	testutil.WriteFile(t, seedDir, "f.txt", "init")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "init")
+
+	runIsolatedGit(ctx, t, "", "init", "--bare", originBare)
+	runIsolatedGit(ctx, t, "", "init", "--bare", checkpointBare)
+	runIsolatedGit(ctx, t, checkpointBare, "config", "uploadpack.allowFilter", "true")
+	runIsolatedGit(ctx, t, seedDir, "push", originBare, "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+originBare, cloneDir)
+
+	testutil.WriteFile(
+		t,
+		cloneDir,
+		".entire/settings.json",
+		`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
+	)
+	t.Chdir(cloneDir)
+
+	fetchURL := "file://" + checkpointBare
+	// Fetch a ref that does not exist on the checkpoint remote: the command
+	// fails, but git has already recorded the URL-keyed promisor section.
+	_, err := Fetch(ctx, FetchOptions{
+		Remote:   fetchURL,
+		RefSpecs: []string{"+refs/heads/does-not-exist:refs/entire-fetch-tmp/x"},
+		NoTags:   true,
+		Dir:      cloneDir,
+	})
+	require.Error(t, err, "fetch of a missing ref should fail")
+
+	require.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".promisor"),
+		"git records the promisor section even when the fetch fails")
+	assert.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"),
+		"a phantom remote left by a failed fetch must still be stamped")
+}
+
+// TestFetch_UnfilteredFetchDoesNotCreateConfigSection verifies the stamp is
+// gated on a filtered fetch: a plain (unfiltered) URL fetch records no
+// URL-keyed section, so we must not invent a remote.<url> config section.
+func TestFetch_UnfilteredFetchDoesNotCreateConfigSection(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "bare.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	cloneDir := filepath.Join(tmpDir, "clone")
+
+	testutil.InitRepo(t, seedDir)
+	testutil.WriteFile(t, seedDir, "f.txt", "init")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "init")
+
+	runIsolatedGit(ctx, t, "", "init", "--bare", bareDir)
+	runIsolatedGit(ctx, t, seedDir, "remote", "add", "origin", bareDir)
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+bareDir, cloneDir)
+
+	testutil.WriteFile(
+		t,
+		cloneDir,
+		".entire/settings.json",
+		`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
+	)
+	t.Chdir(cloneDir)
+
+	fetchURL := "file://" + bareDir
+	out, err := Fetch(ctx, FetchOptions{
+		Remote:   fetchURL,
+		RefSpecs: []string{"+refs/heads/main:refs/remotes/origin/main"},
+		NoTags:   true,
+		NoFilter: true,
+		Dir:      cloneDir,
+	})
+	require.NoError(t, err, "fetch output: %s", out)
+
+	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".promisor"))
+	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"))
+}
+
+// TestFetch_ExistingURLRemoteNotReStamped verifies we only stamp remotes we
+// create: a filtered fetch from a URL that already has a remote.<url> section
+// must leave that section as-is rather than rewriting the user's git config.
+func TestFetch_ExistingURLRemoteNotReStamped(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	originBare := filepath.Join(tmpDir, "origin.git")
+	checkpointBare := filepath.Join(tmpDir, "checkpoints.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	cloneDir := filepath.Join(tmpDir, "clone")
+
+	testutil.InitRepo(t, seedDir)
+	testutil.WriteFile(t, seedDir, "f.txt", "init")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "init")
+
+	runIsolatedGit(ctx, t, "", "init", "--bare", originBare)
+	runIsolatedGit(ctx, t, "", "init", "--bare", checkpointBare)
+	runIsolatedGit(ctx, t, checkpointBare, "config", "uploadpack.allowFilter", "true")
+	runIsolatedGit(ctx, t, seedDir, "push", originBare, "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+originBare, cloneDir)
+
+	testutil.WriteFile(t, seedDir, "f.txt", "init\nnext\n")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "next")
+	runIsolatedGit(ctx, t, seedDir, "push", checkpointBare, "HEAD:refs/heads/main")
+
+	testutil.WriteFile(
+		t,
+		cloneDir,
+		".entire/settings.json",
+		`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
+	)
+	t.Chdir(cloneDir)
+
+	fetchURL := "file://" + checkpointBare
+	// Simulate a pre-existing URL-keyed remote (e.g. a phantom left by an older
+	// CLI). Its presence means the section already exists before our fetch.
+	runIsolatedGit(ctx, t, cloneDir, "config", "--local", "remote."+fetchURL+".promisor", "true")
+
+	out, err := Fetch(ctx, FetchOptions{
+		Remote:   fetchURL,
+		RefSpecs: []string{"+refs/heads/main:refs/entire-fetch-tmp/main"},
+		NoTags:   true,
+		Dir:      cloneDir,
+	})
+	require.NoError(t, err, "fetch output: %s", out)
+
+	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"),
+		"a remote that already existed must not be stamped")
+}
+
+// TestMarkRemoteSkipped_SetsSkipFetchAll verifies the helper stamps skipFetchAll.
+func TestMarkRemoteSkipped_SetsSkipFetchAll(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	const url = "https://example.com/org/checkpoints.git"
+	markRemoteSkipped(ctx, repoDir, url)
+
+	assert.True(t, gitConfigBool(ctx, repoDir, "remote."+url+".skipFetchAll"))
+}
+
+// TestGitRemoteSectionExists reports true only once a remote.<url>.* key is set.
+func TestGitRemoteSectionExists(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	const url = "https://example.com/org/checkpoints.git"
+	assert.False(t, gitRemoteSectionExists(ctx, repoDir, url))
+
+	runIsolatedGit(ctx, t, repoDir, "config", "--local", "remote."+url+".promisor", "true")
+	assert.True(t, gitRemoteSectionExists(ctx, repoDir, url))
+}
+
+// TestGitRemoteSectionExists_ExactSubsectionMatch verifies the check compares
+// the whole URL subsection, not a prefix: a longer URL that shares a prefix
+// (e.g. ".../repo.git") must not make a shorter one (".../repo") look present.
+func TestGitRemoteSectionExists_ExactSubsectionMatch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	const longURL = "https://example.com/org/repo.git"
+	const shortURL = "https://example.com/org/repo"
+	runIsolatedGit(ctx, t, repoDir, "config", "--local", "remote."+longURL+".promisor", "true")
+
+	assert.True(t, gitRemoteSectionExists(ctx, repoDir, longURL),
+		"the exact URL section is present")
+	assert.False(t, gitRemoteSectionExists(ctx, repoDir, shortURL),
+		"a prefix of an existing URL section must not count as present")
+}
+
+// TestStampNewlyCreatedRemote_StampsUnderCancelledContext guards the timed-out
+// fetch case: git records the promisor section before the fetch times out, so
+// the stamp must still land even though the fetch context is already cancelled.
+func TestStampNewlyCreatedRemote_StampsUnderCancelledContext(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	const url = "https://example.com/org/checkpoints.git"
+	// Simulate git having recorded the promisor section during a fetch that
+	// then timed out.
+	runIsolatedGit(context.Background(), t, repoDir, "config", "--local", "remote."+url+".promisor", "true")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // parent context already done, as after a timed-out fetch
+
+	stampNewlyCreatedRemote(ctx, repoDir, url)
+
+	assert.True(t, gitConfigBool(context.Background(), repoDir, "remote."+url+".skipFetchAll"),
+		"stamp must land even though the parent context is cancelled")
 }

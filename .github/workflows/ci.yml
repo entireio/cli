@@ -9,7 +9,7 @@ jobs:
   test-core:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Setup Keyring
@@ -17,7 +17,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gnome-keyring
           echo 'somecredstorepass' | gnome-keyring-daemon --unlock
-      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
       - name: Core Tests
         env:
           GO_TEST_PARALLEL: "16"
@@ -30,7 +30,7 @@ jobs:
       matrix:
         shard: [a, b, c]
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Setup Keyring
@@ -38,7 +38,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gnome-keyring
           echo 'somecredstorepass' | gnome-keyring-daemon --unlock
-      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
       - name: Integration Tests
         env:
           GO_TEST_PARALLEL: "16"
@@ -46,8 +46,14 @@ jobs:
 
   test-canary:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # Run the (no-cost, no-API) Vogon canary against each checkpoint backend so
+      # the git-refs store is guarded on every PR alongside the default git-branch.
+      matrix:
+        checkpoint_store: [git-branch, git-refs]
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Setup Keyring
@@ -55,8 +61,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gnome-keyring
           echo 'somecredstorepass' | gnome-keyring-daemon --unlock
-      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
       - name: E2E Canary
+        env:
+          E2E_CHECKPOINT_STORE: ${{ matrix.checkpoint_store }}
         run: mise run test:e2e:canary
 
   test:

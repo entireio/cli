@@ -5,7 +5,7 @@
 set -eu
 
 # Build entire CLI
-mise run build:e2e
+mise run build
 export E2E_ENTIRE_BIN="$PWD/entire"
 
 # Build vogon binary

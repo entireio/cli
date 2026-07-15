@@ -110,7 +110,14 @@ func IsOnDefaultBranch(ctx context.Context) (bool, string, error) {
 		return false, "", fmt.Errorf("failed to open git repository: %w", err)
 	}
 	defer repo.Close()
+	return isOnDefaultBranchRepo(repo)
+}
 
+// isOnDefaultBranchRepo reports whether the repo's current branch is its default
+// branch, along with the current branch name (empty on a detached HEAD). It
+// operates on an already-open repository so callers that already hold one need
+// not reopen it.
+func isOnDefaultBranchRepo(repo *git.Repository) (bool, string, error) {
 	// Get current branch
 	head, err := repo.Head()
 	if err != nil {
@@ -197,51 +204,6 @@ func GetCurrentBranch(ctx context.Context) (string, error) {
 	return head.Name().Short(), nil
 }
 
-// GetMergeBase finds the common ancestor (merge-base) between two branches.
-// Returns the hash of the merge-base commit.
-func GetMergeBase(ctx context.Context, branch1, branch2 string) (*plumbing.Hash, error) {
-	repo, err := openRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open git repository: %w", err)
-	}
-	defer repo.Close()
-
-	// Resolve branch references
-	ref1, err := repo.Reference(plumbing.NewBranchReferenceName(branch1), true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve branch %s: %w", branch1, err)
-	}
-
-	ref2, err := repo.Reference(plumbing.NewBranchReferenceName(branch2), true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve branch %s: %w", branch2, err)
-	}
-
-	// Get commit objects
-	commit1, err := repo.CommitObject(ref1.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit for %s: %w", branch1, err)
-	}
-
-	commit2, err := repo.CommitObject(ref2.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit for %s: %w", branch2, err)
-	}
-
-	// Find common ancestor
-	mergeBase, err := commit1.MergeBase(commit2)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find merge base: %w", err)
-	}
-
-	if len(mergeBase) == 0 {
-		return nil, errors.New("no common ancestor found")
-	}
-
-	hash := mergeBase[0].Hash
-	return &hash, nil
-}
-
 // HasUncommittedChanges checks if there are any uncommitted changes in the repository.
 // This includes staged changes, unstaged changes, and untracked files.
 // Uses git CLI instead of go-git because go-git doesn't respect global gitignore
@@ -255,22 +217,6 @@ func HasUncommittedChanges(ctx context.Context) (bool, error) {
 
 	// If output is empty, there are no changes
 	return len(strings.TrimSpace(string(output))) > 0, nil
-}
-
-// findNewUntrackedFiles finds files that are newly untracked (not in pre-existing list)
-func findNewUntrackedFiles(current, preExisting []string) []string {
-	preExistingSet := make(map[string]bool)
-	for _, file := range preExisting {
-		preExistingSet[file] = true
-	}
-
-	var newFiles []string
-	for _, file := range current {
-		if !preExistingSet[file] {
-			newFiles = append(newFiles, file)
-		}
-	}
-	return newFiles
 }
 
 // BranchExistsOnRemote checks if a branch exists on the origin remote.
@@ -345,6 +291,9 @@ func CheckoutBranch(ctx context.Context, ref string) error {
 // ValidateBranchName checks if a branch name is valid using git check-ref-format.
 // Returns an error if the name is invalid or contains unsafe characters.
 func ValidateBranchName(ctx context.Context, branchName string) error {
+	if strings.HasPrefix(branchName, "-") {
+		return fmt.Errorf("invalid branch name %q", branchName)
+	}
 	cmd := exec.CommandContext(ctx, "git", "check-ref-format", "--branch", branchName)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("invalid branch name %q", branchName)
@@ -404,31 +353,44 @@ func FetchAndCheckoutRemoteBranch(ctx context.Context, branchName string) error 
 	return CheckoutBranch(ctx, branchName)
 }
 
+// metadataFetchDepth is the absolute --depth used when fetching the metadata
+// branch. It is far above any realistic checkpoint-branch length, so it fully
+// fetches the branch (and heals a prior --depth=1 shallow boundary on it),
+// while staying below math.MaxInt32 (2147483647) — which git special-cases as
+// a global unshallow that would also deepen an unrelated shallow source tree.
+const metadataFetchDepth = 1_000_000_000
+
 // FetchMetadataBranch fetches the entire/checkpoints/v1 branch from origin
 // with full blob content. Used as a fallback by resume/explain when the
 // tree-only probe is insufficient (e.g. the metadata.json blob is missing).
-// Does NOT --unshallow: --unshallow is a global property of the clone, so on
-// shallow checkpoint repos it would also deepen unrelated branches.
 func FetchMetadataBranch(ctx context.Context) error {
-	return fetchMetadataFromOrigin(ctx, fetchMetadataOpts{NoFilter: true})
+	return fetchMetadataFromOrigin(ctx, true /* noFilter */)
 }
 
-// FetchMetadataTreeOnly fetches just the tip of the entire/checkpoints/v1
-// branch (--depth=1). Used by resume/explain to resolve the latest checkpoint
-// cheaply without pulling the entire history. May leave .git/shallow set;
-// FetchMetadataBranch will undo that when full ancestry is later needed.
+// FetchMetadataTreeOnly fetches the entire/checkpoints/v1 commit+tree graph
+// from origin to resolve the latest checkpoint, relying on --filter=blob:none
+// (when filtered fetches are enabled) to skip blob content rather than on a
+// shallow --depth=1 fetch.
+//
+// It deliberately does NOT use --depth=1. A depth-1 fetch adds the fetched tip
+// to .git/shallow, and any ref pointing at a shallow commit (the durable
+// refs/remotes/origin/<branch> that git updates opportunistically, or the local
+// primary) can no longer be walked past that boundary. A later `git merge-base`
+// against it then falsely reports "no common ancestor", which makes push and
+// `entire doctor` treat an ordinary diverged-but-behind branch as disconnected
+// (see strategy.IsMetadataDisconnected). Fetching at full depth keeps the
+// remote-tracking ref connected; git fetches incrementally, so after the first
+// fetch only new commits/trees travel.
+//
+// It also heals a repo that an older CLI already shallowed: the ref-scoped deep
+// fetch removes the boundary left by a prior --depth=1 fetch rather than letting
+// it linger forever, without deepening an independently-shallow source tree.
 func FetchMetadataTreeOnly(ctx context.Context) error {
-	return fetchMetadataFromOrigin(ctx, fetchMetadataOpts{Shallow: true})
+	return fetchMetadataFromOrigin(ctx, false /* noFilter */)
 }
 
-type fetchMetadataOpts struct {
-	NoFilter  bool
-	Shallow   bool
-	Unshallow bool
-}
-
-func fetchMetadataFromOrigin(ctx context.Context, fopts fetchMetadataOpts) error {
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+func fetchMetadataFromOrigin(ctx context.Context, noFilter bool) error {
+	refs := checkpoint.ResolveRefs(ctx)
 	if !refs.Primary.IsBranch() {
 		return fmt.Errorf("primary metadata ref %s is not a branch", refs.Primary)
 	}
@@ -445,12 +407,17 @@ func fetchMetadataFromOrigin(ctx context.Context, fopts fetchMetadataOpts) error
 	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branchName, branchName)
 
 	output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:    fetchTarget,
-		RefSpecs:  []string{refSpec},
-		NoTags:    true,
-		NoFilter:  fopts.NoFilter,
-		Shallow:   fopts.Shallow,
-		Unshallow: fopts.Unshallow,
+		Remote:   fetchTarget,
+		RefSpecs: []string{refSpec},
+		NoTags:   true,
+		NoFilter: noFilter,
+		// Heal a repo that an older CLI already shallowed with --depth=1: the
+		// metadata tip is grafted in .git/shallow, which breaks merge-base
+		// connectivity checks for the metadata branch. A ref-scoped deep fetch
+		// removes that boundary without deepening an independently-shallow
+		// source-tree clone (unlike --unshallow), and is a no-op on a normally
+		// cloned repo.
+		Depth: metadataFetchDepth,
 	})
 	if fetchErr != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -471,11 +438,6 @@ func fetchMetadataFromOrigin(ctx context.Context, fopts fetchMetadataOpts) error
 	}
 	if err := strategy.SafelyAdvanceLocalRef(ctx, repo, refs.Primary, remoteRef.Hash()); err != nil {
 		return fmt.Errorf("failed to advance local %s branch: %w", branchName, err)
-	}
-	if err := strategy.MirrorCommittedMetadataRef(ctx, repo, refs); err != nil && !errors.Is(err, strategy.ErrPrimaryMetadataMissing) {
-		logging.Warn(ctx, "committed-ref mirror failed after origin fetch",
-			slog.String("ref", refs.Mirror.String()),
-			slog.String("error", err.Error()))
 	}
 	return nil
 }
@@ -509,6 +471,26 @@ func resolveCheckpointFetchTarget(ctx context.Context) string {
 		return url
 	}
 	return "origin"
+}
+
+// FetchCheckpointRef fetches a single per-checkpoint ref (refs/entire/checkpoints/
+// <shard>/<id>) from the checkpoint remote into the local ref of the same name,
+// so the git-refs store can resolve a checkpoint written on another machine.
+// Best-effort: the caller treats a fetch failure as "checkpoint not found".
+func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	fetchTarget := resolveCheckpointFetchTarget(ctx)
+	refSpec := "+" + ref.String() + ":" + ref.String()
+	if _, err := remote.Fetch(ctx, remote.FetchOptions{
+		Remote:   fetchTarget,
+		RefSpecs: []string{refSpec},
+		NoTags:   true,
+	}); err != nil {
+		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, fetchTarget, err)
+	}
+	return nil
 }
 
 // FetchBlobsByHash fetches specific blob objects from the remote by their SHA-1 hashes.

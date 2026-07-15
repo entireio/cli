@@ -37,15 +37,6 @@ type RepoEntry struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-// DefaultCacheDir returns ~/.cache/entire, respecting XDG_CACHE_HOME.
-func DefaultCacheDir() string {
-	if xdg := os.Getenv("XDG_CACHE_HOME"); xdg != "" {
-		return filepath.Join(xdg, "entire")
-	}
-	home, _ := os.UserHomeDir() //nolint:errcheck // best-effort default
-	return filepath.Join(home, ".cache", "entire")
-}
-
 // LoadCache reads the node cache from disk. Returns an empty cache if the file
 // does not exist. This is an unlocked read — fine for read-only callers; use
 // ModifyCache for read-modify-write sequences.

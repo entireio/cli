@@ -17,19 +17,20 @@ import (
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 func TestShadowStrategy_PreviewRewind(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -175,10 +176,7 @@ func TestShadowStrategy_PreviewRewind(t *testing.T) {
 
 func TestShadowStrategy_PreviewRewind_LogsOnly(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -209,47 +207,81 @@ func TestShadowStrategy_PreviewRewind_LogsOnly(t *testing.T) {
 	}
 }
 
-func TestRestoreLogsOnly_UsesV11Transcript(t *testing.T) {
-	repo := setupV1CustomRefRepo(t, `"1.1"`)
-	repoRoot, err := os.Getwd()
-	require.NoError(t, err)
+// TestRestoreLogsOnly_KeepsExistingLocalLog verifies the default (non-force)
+// behavior: a session log already present on disk is kept untouched and still
+// reported so the caller prints its resume command. --force overwrites it.
+func TestRestoreLogsOnly_KeepsExistingLocalLog(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
 
-	agentName := types.AgentName("restore-logs-v11-agent")
-	agentType := types.AgentType("Restore Logs V11 Agent")
-	sessionDir := filepath.Join(repoRoot, "restored-sessions")
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { repo.Close() })
+
+	agentName := types.AgentName("keep-existing-agent")
+	agentType := types.AgentType("Keep Existing Agent")
+	sessionDir := filepath.Join(dir, "keep-existing-sessions")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o750))
 	agent.Register(agentName, func() agent.Agent {
-		return &restoreLogsOnlyAgent{
-			name:       agentName,
-			agentType:  agentType,
-			sessionDir: sessionDir,
-		}
+		return &restoreLogsOnlyAgent{name: agentName, agentType: agentType, sessionDir: sessionDir}
 	})
 
 	ctx := context.Background()
-	cpID := id.MustCheckpointID("abc987abc987")
-	sessionID := "restore-v11-session"
-	v11Transcript := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"restore from v11"}]}}` + "\n")
-	staleV1Transcript := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"stale v1"}]}}` + "\n")
+	cpID := id.MustCheckpointID("abc111abc111")
+	sessionID := "keep-existing-session"
 
-	writeCommittedRewindCheckpoint(t, repo, cpID, sessionID, agentType, v11Transcript, time.Date(2025, 1, 2, 10, 0, 0, 0, time.UTC))
-	v1Ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err)
-	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(paths.MetadataRefName), v1Ref.Hash())))
+	checkpointTranscript := []byte(`{"type":"user","timestamp":"2025-01-02T10:00:00Z","message":{"content":[{"type":"text","text":"from checkpoint"}]}}` + "\n")
+	writeCommittedRewindCheckpoint(t, repo, cpID, sessionID, agentType, checkpointTranscript, time.Date(2025, 1, 2, 10, 0, 0, 0, time.UTC))
 
-	writeCommittedRewindCheckpoint(t, repo, cpID, sessionID, agentType, staleV1Transcript, time.Date(2025, 1, 3, 10, 0, 0, 0, time.UTC))
+	// Pre-existing local log with a (different) timestamped entry.
+	localPath := filepath.Join(sessionDir, sessionID+".jsonl")
+	existingLocal := []byte(`{"type":"user","timestamp":"2025-06-01T10:00:00Z","message":{"content":[{"type":"text","text":"live local"}]}}` + "\n")
+	require.NoError(t, os.WriteFile(localPath, existingLocal, 0o600))
 
+	point := RewindPoint{IsLogsOnly: true, CheckpointID: cpID}
+
+	// Non-force: keep the existing local log, but still report the session.
 	var stdout, stderr bytes.Buffer
-	restored, err := NewManualCommitStrategy().RestoreLogsOnly(ctx, &stdout, &stderr, RewindPoint{
-		IsLogsOnly:   true,
-		CheckpointID: cpID,
-	}, true)
+	restored, err := NewManualCommitStrategy().RestoreLogsOnly(ctx, &stdout, &stderr, point, false)
 	require.NoError(t, err, "stderr: %s", stderr.String())
-	require.Len(t, restored, 1, "stdout: %s\nstderr: %s", stdout.String(), stderr.String())
+	require.Len(t, restored, 1, "stdout: %s", stdout.String())
+	require.Contains(t, stdout.String(), "Keeping existing")
 
-	restoredPath := filepath.Join(sessionDir, sessionID+".jsonl")
-	got, err := os.ReadFile(restoredPath)
+	got, err := os.ReadFile(localPath)
 	require.NoError(t, err)
-	require.Equal(t, string(v11Transcript), string(got))
+	require.Equal(t, string(existingLocal), string(got), "non-force restore must not overwrite an existing local log")
+
+	// Force: overwrite from the checkpoint.
+	restored, err = NewManualCommitStrategy().RestoreLogsOnly(ctx, io.Discard, io.Discard, point, true)
+	require.NoError(t, err)
+	require.Len(t, restored, 1)
+
+	got, err = os.ReadFile(localPath)
+	require.NoError(t, err)
+	require.Equal(t, string(checkpointTranscript), string(got), "force restore must overwrite from the checkpoint")
+}
+
+func TestRestoredPromptPreviewFallsBackInOrder(t *testing.T) {
+	t.Parallel()
+
+	ag := &restoreLogsOnlyAgent{
+		extractedPrompts: []string{
+			"# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nskip me\n</INSTRUCTIONS>",
+			"<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>",
+			"prompt from transcript",
+		},
+	}
+
+	if got := restoredPromptPreview(ag, "prompt sidecar", []byte("transcript"), "review prompt"); got != "prompt sidecar" {
+		t.Fatalf("sidecar prompt = %q, want prompt sidecar", got)
+	}
+	if got := restoredPromptPreview(ag, "", []byte("transcript"), "review prompt"); got != "review prompt" {
+		t.Fatalf("review prompt = %q, want review prompt", got)
+	}
+	if got := restoredPromptPreview(ag, "", []byte("transcript"), ""); got != "prompt from transcript" {
+		t.Fatalf("transcript prompt = %q, want prompt from transcript", got)
+	}
 }
 
 func TestResolveAgentForRewind(t *testing.T) {
@@ -342,9 +374,10 @@ func TestPromptOverwriteNewerLogs_NonInteractiveRequiresForce(t *testing.T) {
 // of the repo root.
 func TestShadowStrategy_Rewind_FromSubdirectory(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -478,9 +511,10 @@ func TestShadowStrategy_Rewind_FromSubdirectory(t *testing.T) {
 // fix did not break the happy path.
 func TestShadowStrategy_Rewind_FromRepoRoot(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -604,7 +638,7 @@ func writeCommittedRewindCheckpoint(
 ) {
 	t.Helper()
 
-	err := cpkg.NewGitStore(repo, cpkg.DefaultV1Refs()).WriteCommitted(context.Background(), cpkg.WriteCommittedOptions{
+	err := cpkg.NewGitStore(repo, cpkg.DefaultV1Refs()).Write(context.Background(), cpkg.Session{
 		CheckpointID: checkpointID,
 		SessionID:    sessionID,
 		CreatedAt:    createdAt,
@@ -619,9 +653,10 @@ func writeCommittedRewindCheckpoint(
 }
 
 type restoreLogsOnlyAgent struct {
-	name       types.AgentName
-	agentType  types.AgentType
-	sessionDir string
+	name             types.AgentName
+	agentType        types.AgentType
+	sessionDir       string
+	extractedPrompts []string
 }
 
 var _ agent.Agent = (*restoreLogsOnlyAgent)(nil)
@@ -659,6 +694,11 @@ func (a *restoreLogsOnlyAgent) WriteSession(_ context.Context, session *agent.Ag
 }
 func (a *restoreLogsOnlyAgent) FormatResumeCommand(sessionID string) string {
 	return "restore-logs " + sessionID
+}
+
+//nolint:unparam // error is always nil in this test helper; satisfies PromptExtractor.
+func (a *restoreLogsOnlyAgent) ExtractPrompts(string, int) ([]string, error) {
+	return a.extractedPrompts, nil
 }
 
 // fakeExternalAgent is a minimal Agent implementation for testing dynamic registration.

@@ -467,14 +467,17 @@ func buildReplaySpec(ctx context.Context, checkpointRef string) (ReplaySpec, err
 		return ReplaySpec{}, fmt.Errorf("open repository: %w", err)
 	}
 	defer repo.Close()
-	store := checkpoint.NewGitStore(repo)
-	store.SetBlobFetcher(FetchBlobsByHash)
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	if err != nil {
+		return ReplaySpec{}, fmt.Errorf("open checkpoint stores: %w", err)
+	}
+	store := stores.Persistent
 
 	cpID, err := checkpointid.NewCheckpointID(fullID)
 	if err != nil {
 		return ReplaySpec{}, fmt.Errorf("parse checkpoint id %s: %w", fullID, err)
 	}
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
+	summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
 	if err != nil {
 		return ReplaySpec{}, fmt.Errorf("read checkpoint %s: %w", fullID, err)
 	}
@@ -1171,7 +1174,11 @@ func recentReplayCheckpoints(ctx context.Context, limit int) ([]string, error) {
 		return nil, err
 	}
 	defer repo.Close()
-	infos, err := checkpoint.NewGitStore(repo).ListCommitted(ctx)
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	if err != nil {
+		return nil, fmt.Errorf("open checkpoint stores: %w", err)
+	}
+	infos, err := stores.Persistent.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list committed checkpoints: %w", err)
 	}

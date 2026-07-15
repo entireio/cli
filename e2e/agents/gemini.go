@@ -120,21 +120,7 @@ func (g *Gemini) RunPrompt(ctx context.Context, dir string, prompt string, opts 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
-	exitCode := 0
-	if err != nil {
-		exitErr := &exec.ExitError{}
-		if errors.As(err, &exitErr) {
-			exitCode = exitErr.ExitCode()
-		} else {
-			exitCode = -1
-		}
-		// Wrap the prompt-level deadline so IsTransientError can detect it.
-		// cmd.Run() returns "signal: killed", not the context error.
-		if promptCtx.Err() == context.DeadlineExceeded {
-			err = fmt.Errorf("%w: %w", err, context.DeadlineExceeded)
-		}
-	}
+	exitCode, err := runCapture(cmd, promptCtx)
 
 	// gemini-cli can abort a turn server-side (empty/malformed model response)
 	// yet still exit 0 with empty stdout. Surface it as an error so the

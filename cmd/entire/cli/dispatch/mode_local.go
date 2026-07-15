@@ -24,11 +24,12 @@ import (
 )
 
 var (
-	// lookupResourceToken returns a bearer scoped to the given resource
-	// origin. Production wiring goes through auth.TokenForResource so
-	// the tokenmanager's same-host shortcut, JWT-aud shortcut, and
-	// exchange dispatch all apply. Tests swap to a fixed-token closure.
-	lookupResourceToken = auth.TokenForResource
+	// lookupResourceToken returns a bearer for the given data-API base URL.
+	// Production wiring goes through auth.ResolveDataAPIToken so the dispatch
+	// host's /.well-known/entire-api.json picks the matching login context
+	// (a host that doesn't advertise discovery is a surfaced error). Tests
+	// swap to a fixed-token closure.
+	lookupResourceToken = auth.ResolveDataAPIToken
 
 	nowUTC = func() time.Time { return time.Now().UTC() }
 )
@@ -172,14 +173,15 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 		return nil, err
 	}
 
-	// The committed-read topology (and thus the v1.1 mirror opt-in) is resolved
-	// from settings relative to the context's worktree root, which defaults to
-	// the process cwd. repoRoot may be a different repo (--repo/RepoPaths) or
-	// the cwd may not be a repo at all, so scope settings resolution to this
-	// repo before consulting the topology.
+	// repoRoot may be a different repo (--repo/RepoPaths) or the cwd may not be
+	// a repo at all, so scope checkpoint store construction to this repo.
 	repoCtx := settings.WithWorktreeRoot(ctx, repoRoot)
-	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(repoCtx))
-	infos, err := store.ListCommitted(ctx)
+	stores, err := checkpoint.Open(repoCtx, repo, checkpoint.OpenOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("open checkpoint store: %w", err)
+	}
+	store := stores.Persistent
+	infos, err := store.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list committed checkpoints: %w", err)
 	}
@@ -190,7 +192,7 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 			continue
 		}
 
-		summary, err := store.ReadCommitted(ctx, info.CheckpointID)
+		summary, err := store.Read(ctx, info.CheckpointID)
 		if err != nil {
 			logging.Warn(ctx, "failed to read committed checkpoint for dispatch", "checkpoint_id", info.CheckpointID.String(), "error", err)
 			continue

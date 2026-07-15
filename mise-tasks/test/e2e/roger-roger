@@ -7,7 +7,7 @@ set -eu
 export E2E_AGENT="roger-roger"
 
 # Build entire CLI
-mise run build:e2e
+mise run build
 export E2E_ENTIRE_BIN="$PWD/entire"
 
 # Ensure roger-roger binaries are available on PATH before running E2E tests.

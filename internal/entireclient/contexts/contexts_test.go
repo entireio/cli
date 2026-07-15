@@ -284,10 +284,3 @@ func TestModify_HoldsLockAcrossLoadAndSave(t *testing.T) {
 		t.Errorf("CurrentContext = %q, want %q (lost updates indicate non-atomic RMW)", got.CurrentContext, strconv.Itoa(n))
 	}
 }
-
-func TestDefaultConfigDir_HonorsEnv(t *testing.T) {
-	t.Setenv("ENTIRE_CONFIG_DIR", "/tmp/explicit/path")
-	if got := contexts.DefaultConfigDir(); got != "/tmp/explicit/path" {
-		t.Errorf("DefaultConfigDir = %q, want /tmp/explicit/path", got)
-	}
-}

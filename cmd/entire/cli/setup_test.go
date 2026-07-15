@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
@@ -1030,6 +1031,7 @@ func TestEnableUsesSetupFlow(t *testing.T) {
 		{name: "telemetry changed", args: []string{"--telemetry=false"}, want: true},
 		{name: "checkpoint remote", args: []string{"--checkpoint-remote", "github:org/repo"}, want: true},
 		{name: "skip push sessions", args: []string{"--skip-push-sessions"}, want: true},
+		{name: "search skill", args: []string{"--search-skill"}, want: true},
 		{name: "agent flag", args: []string{"--agent", "claude-code"}, agentName: "claude-code", want: true},
 		{name: "yes flag", args: []string{"--yes"}, want: true},
 		{name: "yes short flag", args: []string{"-y"}, want: true},
@@ -1174,6 +1176,9 @@ func TestDetectOrSelectAgent_AgentDetected(t *testing.T) {
 		t.Fatalf("Failed to create .claude directory: %v", err)
 	}
 
+	// No TTY here, so this exercises the non-interactive fallback: the single
+	// detected agent is used without a picker. The interactive path pre-selects
+	// it in the multi-select instead (see FirstRun_SingleBuiltIn test below).
 	var buf bytes.Buffer
 	agents, err := detectOrSelectAgent(context.Background(), &buf, nil)
 	if err != nil {
@@ -1223,6 +1228,58 @@ func TestDetectOrSelectAgent_GeminiDetected(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "Detected agent:") {
 		t.Errorf("Expected output to contain 'Detected agent:', got: %s", output)
+	}
+}
+
+func TestDetectOrSelectAgent_FirstRun_SingleBuiltIn_ShowsPickerPreSelected(t *testing.T) {
+	// Not parallel: uses t.Chdir/t.Setenv and swaps the package-level
+	// promptAgentSelection seam.
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+
+	// Create .claude directory so exactly one built-in agent (Claude Code) is detected.
+	if err := os.MkdirAll(".claude", 0o755); err != nil {
+		t.Fatalf("Failed to create .claude directory: %v", err)
+	}
+
+	// First run: no hooks installed yet.
+	if installed := GetAgentsWithHooksInstalled(context.Background()); len(installed) != 0 {
+		t.Fatalf("Expected no installed hooks on first run, got %v", installed)
+	}
+
+	// Stub the real picker so we can assert it is shown (rather than the agent
+	// being auto-used) and inspect which options it was given. Driving the
+	// selectFn == nil path is what makes this a real regression guard: the old
+	// shortcut returned early precisely when selectFn == nil, so a test that
+	// injected a selectFn would have passed even before the fix.
+	prev := promptAgentSelection
+	t.Cleanup(func() { promptAgentSelection = prev })
+	var offered []string
+	var shown bool
+	promptAgentSelection = func(options []huh.Option[string]) ([]string, error) {
+		shown = true
+		for _, o := range options {
+			offered = append(offered, o.Value)
+		}
+		return []string{string(agent.AgentNameClaudeCode)}, nil
+	}
+
+	var buf bytes.Buffer
+	agents, err := detectOrSelectAgent(context.Background(), &buf, nil)
+	if err != nil {
+		t.Fatalf("detectOrSelectAgent() error = %v", err)
+	}
+
+	// A lone detected built-in agent must no longer be auto-used: the picker
+	// must be shown so the user can confirm it or add more.
+	if !shown {
+		t.Fatal("Expected the picker to be shown for a single detected agent, but it was auto-used")
+	}
+	if !slices.Contains(offered, string(agent.AgentNameClaudeCode)) {
+		t.Errorf("Expected the detected agent among the picker options, got %v", offered)
+	}
+	if len(agents) != 1 || agents[0].Name() != agent.AgentNameClaudeCode {
+		t.Fatalf("Expected the picked agent [claude-code] to be returned, got %v", agents)
 	}
 }
 
@@ -3087,5 +3144,88 @@ func TestConfigureCmd_FreshRepo_PointsAtEnable(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "entire enable") {
 		t.Errorf("expected hint pointing at 'entire enable', got stderr: %s", stderr.String())
+	}
+}
+
+func TestCleanRemoteURLForReport(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		rawURL  string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:   "https without credentials is normalized",
+			rawURL: "https://github.com/entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "https token credentials are stripped",
+			rawURL: "https://ghp_secrettoken@github.com/entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "https user:password credentials are stripped",
+			rawURL: "https://x-access-token:ghp_secret@github.com/entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "query parameters are dropped",
+			rawURL: "https://github.com/entireio/cli.git?token=secret",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "scp-style ssh remote is normalized to https and the user is dropped",
+			rawURL: "git@github.com:entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "missing .git suffix is added",
+			rawURL: "https://github.com/entireio/cli",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "entire:// mirror origin maps the forge back to its real host",
+			rawURL: "entire://aws-us-east-2.entire.io/gh/entireio/cli",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "unknown forge host is preserved (self-hosted enterprise)",
+			rawURL: "git@ghe.corp.example.com:entireio/cli.git",
+			want:   "https://ghe.corp.example.com/entireio/cli.git",
+		},
+		{
+			name:    "unparseable single-segment path errors",
+			rawURL:  "https://github.com/onlyowner.git",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := cleanRemoteURLForReport(tt.rawURL)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got %q", tt.rawURL, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tt.rawURL, err)
+			}
+			if got != tt.want {
+				t.Errorf("cleanRemoteURLForReport(%q) = %q, want %q", tt.rawURL, got, tt.want)
+			}
+			// The cleaned URL must never carry the original credentials.
+			for _, secret := range []string{"ghp_secrettoken", "ghp_secret", "x-access-token", "token=secret"} {
+				if strings.Contains(got, secret) {
+					t.Errorf("cleaned URL %q leaked credential %q", got, secret)
+				}
+			}
+		})
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -700,44 +701,6 @@ func TestMergeJSON_SummaryGeneration_SameProviderPreservesModel(t *testing.T) {
 	}
 }
 
-func TestMirrorsToV1CustomRef(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		opts map[string]any
-		want bool
-	}{
-		{"unset", nil, false},
-		{"empty options", map[string]any{}, false},
-		{"string 1.1 opts in", map[string]any{"checkpoints_version": "1.1"}, true},
-		{"float 1.1 does not opt in (string only)", map[string]any{"checkpoints_version": 1.1}, false},
-		{"integer 1 does not mirror", map[string]any{"checkpoints_version": 1}, false},
-		{"string 1 does not mirror", map[string]any{"checkpoints_version": "1"}, false},
-		{"unrelated string does not mirror", map[string]any{"checkpoints_version": "abc"}, false},
-		{"bool does not mirror", map[string]any{"checkpoints_version": true}, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			s := &EntireSettings{StrategyOptions: tt.opts}
-			if got := s.MirrorsToV1CustomRef(); got != tt.want {
-				t.Errorf("MirrorsToV1CustomRef() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestV1CustomRefValueIsStringOnly(t *testing.T) {
-	t.Parallel()
-	if !isV1CustomRefValue("1.1") {
-		t.Errorf(`isV1CustomRefValue("1.1") = false, want true`)
-	}
-	if isV1CustomRefValue(1.1) {
-		t.Errorf("isV1CustomRefValue(1.1 float) = true, want false")
-	}
-}
 func TestIsFilteredFetchesEnabled_DefaultsFalse(t *testing.T) {
 	t.Parallel()
 	s := &EntireSettings{Enabled: true}
@@ -870,6 +833,185 @@ func TestLoadFromBytes_CustomRedactions(t *testing.T) {
 	}
 }
 
+func TestLoadFromBytes_OPFSettings_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{
+  "redaction": {
+    "openai_privacy_filter": {
+      "enabled": true,
+      "categories": {"private_person": true, "secret": false},
+      "command": "/usr/local/bin/opf",
+      "timeout_seconds": 45
+    }
+  }
+}`)
+	got, err := LoadFromBytes(data)
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	opf := got.Redaction.OpenAIPrivacyFilter
+	if opf == nil {
+		t.Fatal("OpenAIPrivacyFilter is nil")
+	}
+	if !opf.Enabled {
+		t.Error("Enabled: want true")
+	}
+	if !opf.Categories["private_person"] {
+		t.Error("Categories[private_person]: want true")
+	}
+	if opf.Categories["secret"] {
+		t.Error("Categories[secret]: want false")
+	}
+	if opf.Command != "/usr/local/bin/opf" {
+		t.Errorf("Command: want /usr/local/bin/opf, got %q", opf.Command)
+	}
+	if opf.TimeoutSeconds != 45 {
+		t.Errorf("TimeoutSeconds: want 45, got %d", opf.TimeoutSeconds)
+	}
+}
+
+// TestLoadFromBytes_OPFSettings_RejectsUnknownCategory pins down that
+// category-name typos fail at parse time. Silent zero-detection of a
+// privacy category is effectively a correctness bug — the user thinks
+// they're protected but they're not. Runs on both load paths.
+func TestLoadFromBytes_OPFSettings_RejectsUnknownCategory(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		key     string
+		wantErr bool
+	}{
+		{"known_person", "private_person", false},
+		{"known_email", "private_email", false},
+		{"known_secret", "secret", false},
+		{"typo_peerson", "private_peerson", true},
+		{"unknown", "social_security_number", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := `{"redaction":{"openai_privacy_filter":{"categories":{"` + tc.key + `":true}}}}`
+			_, err := LoadFromBytes([]byte(body))
+			if tc.wantErr && err == nil {
+				t.Errorf("LoadFromBytes(%q): want error, got nil", tc.key)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("LoadFromBytes(%q): want nil, got %v", tc.key, err)
+			}
+		})
+	}
+}
+
+// TestLoadFromBytes_OPFSettings_RejectsOnFailureField pins down that the
+// dropped on_failure field is rejected by DisallowUnknownFields — there is
+// no warn-only fallback masquerading as fail-closed.
+func TestLoadFromBytes_OPFSettings_RejectsOnFailureField(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"redaction":{"openai_privacy_filter":{"enabled":true,"on_failure":"block"}}}`)
+	if _, err := LoadFromBytes(body); err == nil {
+		t.Error("LoadFromBytes with on_failure: want error from DisallowUnknownFields, got nil")
+	}
+}
+
+// TestLoadFromBytes_OPFSettings_PromptDefault covers parsing + validation
+// of the prompt_default field added for the pre-push prompt UX. Empty is
+// allowed (treated as "ask"); ask/never/always are the only valid values.
+func TestLoadFromBytes_OPFSettings_PromptDefault(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		value   string
+		wantErr bool
+		wantVal string
+	}{
+		{name: "ask", value: `"ask"`, wantVal: "ask"},
+		{name: "never", value: `"never"`, wantVal: "never"},
+		{name: "always", value: `"always"`, wantVal: "always"},
+		{name: "empty_string_allowed_as_ask", value: `""`, wantVal: ""},
+		{name: "bogus_value_rejected", value: `"sometimes"`, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := []byte(`{"redaction":{"openai_privacy_filter":{"prompt_default":` + tc.value + `}}}`)
+			s, err := LoadFromBytes(body)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil", tc.value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if s.Redaction == nil || s.Redaction.OpenAIPrivacyFilter == nil {
+				t.Fatal("OPF settings not parsed")
+			}
+			if got := s.Redaction.OpenAIPrivacyFilter.PromptDefault; got != tc.wantVal {
+				t.Errorf("PromptDefault = %q, want %q", got, tc.wantVal)
+			}
+		})
+	}
+}
+
+func TestLoadFromBytes_OPFSettings_TimeoutValidation(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{name: "positive_allowed", value: 45},
+		{name: "zero_allowed_as_default", value: 0},
+		{name: "negative_rejected", value: -1, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := []byte(`{"redaction":{"openai_privacy_filter":{"timeout_seconds":` + strconv.Itoa(tc.value) + `}}}`)
+			_, err := LoadFromBytes(body)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for timeout_seconds=%d, got nil", tc.value)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error for timeout_seconds=%d: %v", tc.value, err)
+			}
+		})
+	}
+}
+
+// TestLoadFromBytes_OPFSettings_Merge verifies override semantics for the
+// merge path (settings.local.json on top of settings.json): present fields
+// override, omitted fields preserve, categories merge per-key.
+func TestLoadFromBytes_OPFSettings_Merge(t *testing.T) {
+	t.Parallel()
+	base := []byte(`{"redaction":{"openai_privacy_filter":{"enabled":true,"categories":{"private_person":true,"secret":false}}}}`)
+	override := []byte(`{"redaction":{"openai_privacy_filter":{"categories":{"secret":true},"command":"/opt/opf"}}}`)
+
+	s, err := LoadFromBytes(base)
+	if err != nil {
+		t.Fatalf("base load: %v", err)
+	}
+	if err := mergeJSON(s, override); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	opf := s.Redaction.OpenAIPrivacyFilter
+	if !opf.Enabled {
+		t.Error("Enabled: want preserved=true")
+	}
+	if !opf.Categories["private_person"] {
+		t.Error("Categories[private_person]: want preserved=true")
+	}
+	if !opf.Categories["secret"] {
+		t.Error("Categories[secret]: want override=true")
+	}
+	if opf.Command != "/opt/opf" {
+		t.Errorf("Command: want override /opt/opf, got %q", opf.Command)
+	}
+}
+
 func TestEntireSettings_ReviewRoundTrip(t *testing.T) {
 	t.Parallel()
 	raw := []byte(`{
@@ -980,19 +1122,6 @@ func TestLoad_AppliesClonePreferencesBeforeLocalSettings(t *testing.T) {
 	}
 	if s.ReviewFixAgent != "local-agent" {
 		t.Fatalf("ReviewFixAgent = %q, want local-agent", s.ReviewFixAgent)
-	}
-}
-
-func TestEntireSettings_ReviewConfigFor(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{Review: map[string]ReviewConfig{
-		"claude-code": {Skills: []string{"/pr-review-toolkit:review-pr"}},
-	}}
-	if cfg := s.ReviewConfigFor("claude-code"); len(cfg.Skills) != 1 {
-		t.Fatalf("expected 1 skill, got %v", cfg.Skills)
-	}
-	if cfg := s.ReviewConfigFor("codex"); !cfg.IsZero() {
-		t.Fatalf("expected zero config for unconfigured agent, got %+v", cfg)
 	}
 }
 
@@ -1152,5 +1281,52 @@ func TestLoad_MergesInvestigateLocalOverride(t *testing.T) {
 	}
 	if cfg.AlwaysPrompt != "Be brief." {
 		t.Errorf("AlwaysPrompt = %q, want %q", cfg.AlwaysPrompt, "Be brief.")
+	}
+}
+
+func TestMergeReviewProfiles_PureAndPrecedence(t *testing.T) {
+	t.Parallel()
+	base := map[string]ReviewProfileConfig{
+		"general":  {Task: "base general"},
+		"security": {Task: "base security"},
+	}
+	src := map[string]ReviewProfileConfig{
+		"general": {Task: "override general"}, // overrides base
+		"scratch": {Task: "src scratch"},      // unique to src
+	}
+
+	out := mergeReviewProfiles(base, src)
+
+	// Merged result: src overrides same-named, both layers' unique profiles kept.
+	if out["general"].Task != "override general" {
+		t.Errorf("general = %q, want src override", out["general"].Task)
+	}
+	if out["security"].Task != "base security" {
+		t.Errorf("security = %q, want base preserved", out["security"].Task)
+	}
+	if out["scratch"].Task != "src scratch" {
+		t.Errorf("scratch = %q, want src-only profile kept", out["scratch"].Task)
+	}
+
+	// Inputs must not be mutated.
+	if _, leaked := base["scratch"]; leaked {
+		t.Error("base was mutated: src profile leaked into it")
+	}
+	if base["general"].Task != "base general" {
+		t.Errorf("base[general] mutated: %q", base["general"].Task)
+	}
+	if len(src) != 2 {
+		t.Errorf("src mutated: len = %d, want 2", len(src))
+	}
+
+	// The result is always a fresh, non-nil map, even when both inputs are
+	// empty/nil, so callers never receive nil from a non-nil input.
+	if got := mergeReviewProfiles(nil, nil); got == nil {
+		t.Error("merge(nil, nil) should return a non-nil empty map, got nil")
+	} else if len(got) != 0 {
+		t.Errorf("merge(nil, nil) = %v, want empty", got)
+	}
+	if got := mergeReviewProfiles(nil, map[string]ReviewProfileConfig{}); got == nil {
+		t.Error("merge(nil, emptyNonNil) should return a non-nil empty map, got nil")
 	}
 }

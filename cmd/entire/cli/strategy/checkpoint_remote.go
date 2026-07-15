@@ -103,7 +103,7 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 // The fetch is unfiltered (NoFilter: true) because resume needs blob content
 // (transcripts, metadata JSON) — not just tree objects.
 func FetchMetadataBranch(ctx context.Context, remoteURL string) error {
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	if !refs.Primary.IsBranch() {
 		return fmt.Errorf("primary metadata ref %s is not a branch", refs.Primary)
 	}
@@ -111,21 +111,13 @@ func FetchMetadataBranch(ctx context.Context, remoteURL string) error {
 	tmpRef := FetchTmpRefPrefix + branchName
 	srcRef := refs.Primary.String()
 
-	if err := fetchURLIntoTmpRef(ctx, remoteURL, srcRef, tmpRef, "metadata branch", true); err != nil {
+	if err := fetchURLIntoTmpRef(ctx, "", remoteURL, srcRef, tmpRef, "metadata branch", true); err != nil {
 		return err
 	}
 	if err := PromoteTmpRefSafely(ctx, plumbing.ReferenceName(tmpRef), refs.Primary, branchName); err != nil {
 		return err
 	}
 
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		logging.Warn(ctx, "committed-ref mirror skipped after metadata fetch",
-			slog.String("error", err.Error()))
-		return nil
-	}
-	defer repo.Close()
-	mirrorCommittedMetadataRefBestEffort(ctx, repo, refs)
 	return nil
 }
 
@@ -139,7 +131,7 @@ func FetchMetadataBranch(ctx context.Context, remoteURL string) error {
 // fetches are globally enabled. Use noFilter for operations that need blob
 // content (resume, explain) as opposed to sync operations (push recovery)
 // that only need tree structure.
-func fetchURLIntoTmpRef(ctx context.Context, remoteURL, srcRef, tmpRef, label string, noFilter bool) error {
+func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, label string, noFilter bool) error {
 	fetchCtx, cancel := context.WithTimeout(ctx, checkpointRemoteFetchTimeout)
 	defer cancel()
 
@@ -149,6 +141,7 @@ func fetchURLIntoTmpRef(ctx context.Context, remoteURL, srcRef, tmpRef, label st
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
 		NoFilter: noFilter,
+		Dir:      dir,
 	})
 	if fetchErr == nil {
 		return nil
@@ -174,7 +167,7 @@ func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) error {
 	defer repo.Close()
 
 	// Check if branch already exists locally - if so, nothing to do
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	if _, err := repo.Reference(refs.Primary, true); err == nil {
 		return nil // Branch exists locally, skip fetch
 	}

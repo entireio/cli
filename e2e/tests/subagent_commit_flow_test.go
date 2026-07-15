@@ -17,7 +17,7 @@ import (
 func TestSubagentCommitFlow(t *testing.T) {
 	testutil.ForEachAgent(t, 3*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		_, err := s.RunPrompt(t, ctx,
-			"use a subagent: create a markdown file at docs/red.md with a paragraph about the colour red. Do not commit the file. Do not ask for confirmation, just make the change.")
+			"use a subagent: create a markdown file at docs/red.md with a paragraph about the colour red. Run the subagent in the foreground and wait for it to finish; never run it in the background. Do not commit the file. Do not ask for confirmation, just make the change.")
 		if err != nil {
 			t.Fatalf("agent failed: %v", err)
 		}

@@ -5,14 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
-	"github.com/zalando/go-keyring"
 )
+
+// testRefreshToken is the refresh-token fixture shared by the tests that
+// seed a refreshable login.
+const testRefreshToken = "entr_refresh"
 
 // makeJWT builds a three-segment JWT-shaped string with a non-"none" alg
 // (so ParseClaims accepts it) and the given payload. The signature segment
@@ -23,6 +26,48 @@ func makeJWT(t *testing.T, payloadJSON string) string {
 	header := enc.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 	payload := enc.EncodeToString([]byte(payloadJSON))
 	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"))
+}
+
+func TestLocalIdentityCacheKey_ActiveContext(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	t.Setenv(EnvTokenVar, "")
+
+	ctx := &contexts.Context{
+		Name:            "alice@core",
+		CoreURL:         "https://core.example.com/",
+		Handle:          "alice",
+		KeychainService: "entire-core:https://core.example.com",
+	}
+	if err := contexts.Save(cfgDir, &contexts.File{CurrentContext: ctx.Name, Contexts: []*contexts.Context{ctx}}); err != nil {
+		t.Fatalf("save contexts: %v", err)
+	}
+
+	got, err := LocalIdentityCacheKey()
+	if err != nil {
+		t.Fatalf("LocalIdentityCacheKey: %v", err)
+	}
+	want := "context|https://core.example.com|alice@core|alice|entire-core:https://core.example.com"
+	if got != want {
+		t.Fatalf("cache key = %q, want %q", got, want)
+	}
+}
+
+func TestLocalIdentityCacheKey_EnvToken(t *testing.T) {
+	token := makeJWT(t, `{"iss":"https://core.example.com/","sub":"svc-1","handle":"robot","aud":"https://api.example.com"}`)
+	t.Setenv(EnvTokenVar, token)
+
+	got, err := LocalIdentityCacheKey()
+	if err != nil {
+		t.Fatalf("LocalIdentityCacheKey: %v", err)
+	}
+	want := "env|https://core.example.com|svc-1|robot|https://api.example.com"
+	if got != want {
+		t.Fatalf("cache key = %q, want %q", got, want)
+	}
+	if strings.Contains(got, token) {
+		t.Fatalf("cache key appears to contain raw JWT material: %q", got)
+	}
 }
 
 // RecordLoginContext must persist the refresh token before the access token,
@@ -120,51 +165,6 @@ func TestRecordLoginContext_WritesContextAndToken(t *testing.T) {
 	}
 }
 
-func TestMigrateLegacyLoginContext_SynthesizesContext(t *testing.T) {
-	// Mocks the legacy keyring + swaps the new tokenstore + sets the config
-	// dir — all process-global, so not parallel.
-	keyring.MockInit()
-	cfgDir := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
-	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
-	t.Cleanup(restore)
-
-	const coreURL = "https://legacy-core.example.com"
-	const handle = "bob"
-	exp := time.Now().Add(time.Hour).Unix()
-	legacy := makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":%q,"exp":%d}`, coreURL, handle, exp))
-
-	// Seed only the legacy single-host keyring entry.
-	if err := NewStore().SaveToken(api.AuthBaseURL(), legacy); err != nil {
-		t.Fatalf("seed legacy token: %v", err)
-	}
-
-	migrated, err := MigrateLegacyLoginContext()
-	if err != nil {
-		t.Fatalf("MigrateLegacyLoginContext: %v", err)
-	}
-	if !migrated {
-		t.Fatal("expected migration to synthesize a context")
-	}
-
-	f, err := contexts.Load(cfgDir)
-	if err != nil {
-		t.Fatalf("load contexts: %v", err)
-	}
-	if got := f.ContextsForIssuer(coreURL); len(got) != 1 {
-		t.Fatalf("contexts for issuer = %d, want 1", len(got))
-	}
-
-	// Idempotent: a second call is a no-op now that a context exists.
-	migratedAgain, err := MigrateLegacyLoginContext()
-	if err != nil {
-		t.Fatalf("second MigrateLegacyLoginContext: %v", err)
-	}
-	if migratedAgain {
-		t.Fatal("second migration should be a no-op")
-	}
-}
-
 func TestLoginTokenForContext(t *testing.T) {
 	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
 	t.Cleanup(restore)
@@ -192,42 +192,6 @@ func TestLoginTokenForContext(t *testing.T) {
 	}
 }
 
-func TestContextStore_PrefersCurrentContextThenLegacy(t *testing.T) {
-	keyring.MockInit()
-	cfgDir := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
-	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
-	t.Cleanup(restore)
-
-	store := NewContextStore()
-
-	// No context yet: falls back to the legacy entry.
-	if err := store.SaveToken(api.AuthBaseURL(), "legacy-token"); err != nil {
-		t.Fatalf("seed legacy: %v", err)
-	}
-	legacyGot, err := store.GetToken(api.AuthBaseURL())
-	if err != nil {
-		t.Fatalf("GetToken (legacy): %v", err)
-	}
-	if legacyGot != "legacy-token" {
-		t.Fatalf("with no context, GetToken = %q, want legacy-token", legacyGot)
-	}
-
-	// Record a context: its token now wins over the legacy entry.
-	exp := time.Now().Add(time.Hour).Unix()
-	ctxToken := makeJWT(t, fmt.Sprintf(`{"iss":"https://core.example.com","handle":"alice","exp":%d}`, exp))
-	if _, err := RecordLoginContext(ctxToken, "", true); err != nil {
-		t.Fatalf("RecordLoginContext: %v", err)
-	}
-	got, err := store.GetToken(api.AuthBaseURL())
-	if err != nil {
-		t.Fatalf("GetToken: %v", err)
-	}
-	if got != ctxToken {
-		t.Fatal("with a current context, GetToken should return the context token")
-	}
-}
-
 func TestRemoveCurrentContext(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
@@ -236,22 +200,22 @@ func TestRemoveCurrentContext(t *testing.T) {
 
 	exp := time.Now().Add(time.Hour).Unix()
 	token := makeJWT(t, fmt.Sprintf(`{"iss":"https://core.example.com","handle":"alice","exp":%d}`, exp))
-	if _, err := RecordLoginContext(token, "entr_refresh", true); err != nil {
+	if _, err := RecordLoginContext(token, testRefreshToken, true); err != nil {
 		t.Fatalf("RecordLoginContext: %v", err)
 	}
-	if _, ok := CurrentContextToken(); !ok {
-		t.Fatal("precondition: expected a current context token")
+	if _, current, err := Contexts(); err != nil || current == "" {
+		t.Fatalf("precondition: expected a current context (current=%q, err=%v)", current, err)
 	}
 	svc := tokenstore.CoreKeyringService("https://core.example.com")
-	if r, _ := tokenstore.Get(tokenstore.RefreshService(svc), "alice"); r != "entr_refresh" { //nolint:errcheck // read-back; only the value matters
+	if r, _ := tokenstore.Get(tokenstore.RefreshService(svc), "alice"); r != testRefreshToken { //nolint:errcheck // read-back; only the value matters
 		t.Fatalf("precondition: expected refresh slot seeded, got %q", r)
 	}
 
 	if err := RemoveCurrentContext(); err != nil {
 		t.Fatalf("RemoveCurrentContext: %v", err)
 	}
-	if _, ok := CurrentContextToken(); ok {
-		t.Fatal("after RemoveCurrentContext, expected no current context token")
+	if _, current, err := Contexts(); err != nil || current != "" {
+		t.Fatalf("after RemoveCurrentContext, expected no current context (current=%q, err=%v)", current, err)
 	}
 	// Logout must scrub both slots: the access token and the long-lived
 	// refresh token. A leftover refresh token would let any keyring-capable
@@ -450,85 +414,6 @@ func TestRecordLoginContext_SameCoreDifferentHandlesCoexist(t *testing.T) {
 	}
 }
 
-func TestMigrateLegacyLoginContext_PreservesCurrentContext(t *testing.T) {
-	keyring.MockInit()
-	cfgDir := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
-	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
-	t.Cleanup(restore)
-
-	exp := time.Now().Add(time.Hour).Unix()
-
-	// An existing, active context for one core.
-	active, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://active.example.com","handle":"alice","exp":%d}`, exp)), "", true)
-	if err != nil {
-		t.Fatalf("seed active context: %v", err)
-	}
-
-	// A legacy keyring login for a *different* core, not yet migrated.
-	legacy := makeJWT(t, fmt.Sprintf(`{"iss":"https://legacy.example.com","handle":"alice","exp":%d}`, exp))
-	if err := NewStore().SaveToken(api.AuthBaseURL(), legacy); err != nil {
-		t.Fatalf("seed legacy token: %v", err)
-	}
-
-	migrated, err := MigrateLegacyLoginContext()
-	if err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	if !migrated {
-		t.Fatal("expected migration to run")
-	}
-
-	// Migration recorded the legacy context but must NOT have switched away
-	// from the already-active one.
-	_, current, err := Contexts()
-	if err != nil {
-		t.Fatalf("Contexts: %v", err)
-	}
-	if current != active {
-		t.Fatalf("current_context = %q, want unchanged %q after migration", current, active)
-	}
-}
-
-func TestMigrateLegacyLoginContext_DifferentHandleSameCore(t *testing.T) {
-	keyring.MockInit()
-	cfgDir := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
-	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
-	t.Cleanup(restore)
-
-	const coreURL = "https://core.example.com"
-	exp := time.Now().Add(time.Hour).Unix()
-
-	// contexts.json already has alice@core (e.g. from another CLI).
-	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"alice","exp":%d}`, coreURL, exp)), "", true); err != nil {
-		t.Fatalf("seed alice: %v", err)
-	}
-
-	// The legacy keyring token is bob on the *same* core — migration must
-	// still run (issuer-only dedup would wrongly skip it).
-	bob := makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"bob","exp":%d}`, coreURL, exp))
-	if err := NewStore().SaveToken(api.AuthBaseURL(), bob); err != nil {
-		t.Fatalf("seed legacy bob: %v", err)
-	}
-
-	migrated, err := MigrateLegacyLoginContext()
-	if err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	if !migrated {
-		t.Fatal("expected bob to be migrated despite alice@core existing")
-	}
-
-	f, err := contexts.Load(cfgDir)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if got := f.ContextsForIssuer(coreURL); len(got) != 2 {
-		t.Fatalf("contexts for issuer = %d, want 2 (alice + bob)", len(got))
-	}
-}
-
 func TestRecordLoginContext_RejectsTokenWithoutIssuer(t *testing.T) {
 	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
 	t.Cleanup(restore)
@@ -536,5 +421,42 @@ func TestRecordLoginContext_RejectsTokenWithoutIssuer(t *testing.T) {
 	token := makeJWT(t, `{"handle":"alice"}`)
 	if _, err := RecordLoginContext(token, "", true); err == nil {
 		t.Fatal("expected error for token without iss claim, got nil")
+	}
+}
+
+// TestRemoveContext_KeychainDeleteFailureAbortsLogout pins the logout
+// success contract: when the keyring delete fails, the context entry must
+// survive and the error must surface — never "Logged out." over a live
+// refresh token.
+func TestRemoveContext_KeychainDeleteFailureAbortsLogout(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	seedRestore := tokenstore.UseFileBackendForTesting(path)
+
+	exp := time.Now().Add(time.Hour).Unix()
+	token := makeJWT(t, fmt.Sprintf(`{"iss":"https://core.example.com","handle":"alice","exp":%d}`, exp))
+	name, err := RecordLoginContext(token, testRefreshToken, true)
+	if err != nil {
+		t.Fatalf("RecordLoginContext: %v", err)
+	}
+	seedRestore()
+
+	svc := tokenstore.CoreKeyringService("https://core.example.com")
+	failRefreshDelete := func(service, _ string) bool { return service == tokenstore.RefreshService(svc) }
+	t.Cleanup(tokenstore.UseFailingDeleteBackendForTesting(path, failRefreshDelete))
+
+	if err := RemoveContext(name); err == nil {
+		t.Fatal("RemoveContext: want error when the refresh-slot delete fails")
+	}
+	f, err := contexts.Load(cfgDir)
+	if err != nil {
+		t.Fatalf("reload contexts: %v", err)
+	}
+	if f.Find(name) == nil {
+		t.Fatal("context entry was removed despite the failed credential delete")
+	}
+	if r, _ := tokenstore.Get(tokenstore.RefreshService(svc), "alice"); r != testRefreshToken { //nolint:errcheck // read-back
+		t.Fatalf("refresh slot = %q, want it untouched after the aborted logout", r)
 	}
 }

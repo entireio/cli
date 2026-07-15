@@ -241,3 +241,14 @@ func TestParseHookEvent_MalformedJSON_ReturnsError(t *testing.T) {
 	_, err := ag.ParseHookEvent(context.Background(), HookNameSessionStart, strings.NewReader("{invalid json"))
 	require.Error(t, err)
 }
+
+func TestCodexAgent_ContextInjector(t *testing.T) {
+	t.Parallel()
+	c := &CodexAgent{}
+	require.Equal(t, agent.TurnStart, c.InjectionEvent())
+	out, err := c.RenderContextInjection(agent.ContextInjection{Text: "use entire trail"})
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"hookEventName":"UserPromptSubmit"`)
+	require.Contains(t, string(out), `"additionalContext":"use entire trail"`)
+	require.True(t, strings.HasSuffix(string(out), "\n"))
+}

@@ -170,109 +170,13 @@ func TestWorktreeRoot_Worktree(t *testing.T) {
 	}
 }
 
-func TestIsInsideWorktree(t *testing.T) {
-	t.Run("main repo", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		initTestRepo(t, tmpDir)
-		t.Chdir(tmpDir)
-
-		if IsInsideWorktree(context.Background()) {
-			t.Error("IsInsideWorktree(context.Background()) should return false in main repo")
-		}
-	})
-
-	t.Run("worktree", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		initTestRepo(t, tmpDir)
-
-		// Create a worktree
-		worktreeDir := filepath.Join(tmpDir, "worktree")
-		if err := createWorktree(tmpDir, worktreeDir, "test-branch"); err != nil {
-			t.Fatalf("failed to create worktree: %v", err)
-		}
-		t.Cleanup(func() {
-			removeWorktree(tmpDir, worktreeDir)
-		})
-
-		t.Chdir(worktreeDir)
-
-		if !IsInsideWorktree(context.Background()) {
-			t.Error("IsInsideWorktree(context.Background()) should return true in worktree")
-		}
-	})
-
-	t.Run("non-repo", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
-
-		if IsInsideWorktree(context.Background()) {
-			t.Error("IsInsideWorktree(context.Background()) should return false in non-repo")
-		}
-	})
-}
-
-func TestGetMainRepoRoot(t *testing.T) {
-	t.Run("main repo", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		// Resolve symlinks (macOS /var -> /private/var)
-		// git rev-parse --show-toplevel returns the resolved path
-		resolved, err := filepath.EvalSymlinks(tmpDir)
-		if err != nil {
-			t.Fatalf("filepath.EvalSymlinks() failed: %v", err)
-		}
-		tmpDir = resolved
-
-		initTestRepo(t, tmpDir)
-		t.Chdir(tmpDir)
-
-		root, err := GetMainRepoRoot(context.Background())
-		if err != nil {
-			t.Fatalf("GetMainRepoRoot(context.Background()) failed: %v", err)
-		}
-
-		if root != tmpDir {
-			t.Errorf("GetMainRepoRoot(context.Background()) = %q, want %q", root, tmpDir)
-		}
-	})
-
-	t.Run("worktree", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		// Resolve symlinks (macOS /var -> /private/var)
-		resolved, err := filepath.EvalSymlinks(tmpDir)
-		if err != nil {
-			t.Fatalf("filepath.EvalSymlinks() failed: %v", err)
-		}
-		tmpDir = resolved
-
-		initTestRepo(t, tmpDir)
-
-		worktreeDir := filepath.Join(tmpDir, "worktree")
-		if err := createWorktree(tmpDir, worktreeDir, "test-branch"); err != nil {
-			t.Fatalf("failed to create worktree: %v", err)
-		}
-		t.Cleanup(func() {
-			removeWorktree(tmpDir, worktreeDir)
-		})
-
-		t.Chdir(worktreeDir)
-
-		root, err := GetMainRepoRoot(context.Background())
-		if err != nil {
-			t.Fatalf("GetMainRepoRoot(context.Background()) failed: %v", err)
-		}
-
-		if root != tmpDir {
-			t.Errorf("GetMainRepoRoot(context.Background()) = %q, want %q", root, tmpDir)
-		}
-	})
-}
-
 func TestGetCurrentBranchName(t *testing.T) {
 	t.Run("on branch", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		repo, err := git.PlainInit(tmpDir, false)
+		testutil.InitRepo(t, tmpDir)
+		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
-			t.Fatalf("failed to init repo: %v", err)
+			t.Fatalf("failed to open repo: %v", err)
 		}
 
 		// Create initial commit
@@ -326,9 +230,10 @@ func TestGetCurrentBranchName(t *testing.T) {
 
 	t.Run("detached HEAD", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		repo, err := git.PlainInit(tmpDir, false)
+		testutil.InitRepo(t, tmpDir)
+		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
-			t.Fatalf("failed to init repo: %v", err)
+			t.Fatalf("failed to open repo: %v", err)
 		}
 
 		// Create initial commit
@@ -369,9 +274,10 @@ func TestGetCurrentBranchName(t *testing.T) {
 // initTestRepo creates a git repo with an initial commit
 func initTestRepo(t *testing.T, dir string) {
 	t.Helper()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open repo: %v", err)
 	}
 
 	testFile := filepath.Join(dir, "README.md")
@@ -412,9 +318,10 @@ func removeWorktree(repoDir, worktreeDir string) {
 func TestGetDefaultBranchName(t *testing.T) {
 	t.Run("returns main when main branch exists", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		repo, err := git.PlainInit(tmpDir, false)
+		testutil.InitRepo(t, tmpDir)
+		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
-			t.Fatalf("failed to init repo: %v", err)
+			t.Fatalf("failed to open repo: %v", err)
 		}
 
 		// Create initial commit (go-git creates master by default)
@@ -454,9 +361,10 @@ func TestGetDefaultBranchName(t *testing.T) {
 
 	t.Run("returns master when only master exists", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		repo, err := git.PlainInit(tmpDir, false)
+		testutil.InitRepo(t, tmpDir)
+		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
-			t.Fatalf("failed to init repo: %v", err)
+			t.Fatalf("failed to open repo: %v", err)
 		}
 
 		// Create initial commit (go-git creates master by default)
@@ -489,9 +397,10 @@ func TestGetDefaultBranchName(t *testing.T) {
 
 	t.Run("returns empty when no main or master", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		repo, err := git.PlainInit(tmpDir, false)
+		testutil.InitRepo(t, tmpDir)
+		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
-			t.Fatalf("failed to init repo: %v", err)
+			t.Fatalf("failed to open repo: %v", err)
 		}
 
 		// Create initial commit
@@ -538,9 +447,10 @@ func TestGetDefaultBranchName(t *testing.T) {
 
 	t.Run("returns origin/HEAD target when set", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		repo, err := git.PlainInit(tmpDir, false)
+		testutil.InitRepo(t, tmpDir)
+		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
-			t.Fatalf("failed to init repo: %v", err)
+			t.Fatalf("failed to open repo: %v", err)
 		}
 
 		// Create initial commit
@@ -597,9 +507,10 @@ func TestGetDefaultBranchName(t *testing.T) {
 func TestIsOnDefaultBranch(t *testing.T) {
 	t.Run("returns true when on main", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		repo, err := git.PlainInit(tmpDir, false)
+		testutil.InitRepo(t, tmpDir)
+		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
-			t.Fatalf("failed to init repo: %v", err)
+			t.Fatalf("failed to open repo: %v", err)
 		}
 
 		// Create initial commit
@@ -644,9 +555,10 @@ func TestIsOnDefaultBranch(t *testing.T) {
 
 	t.Run("returns true when on master", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		repo, err := git.PlainInit(tmpDir, false)
+		testutil.InitRepo(t, tmpDir)
+		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
-			t.Fatalf("failed to init repo: %v", err)
+			t.Fatalf("failed to open repo: %v", err)
 		}
 
 		// Create initial commit (go-git creates master by default)
@@ -681,9 +593,10 @@ func TestIsOnDefaultBranch(t *testing.T) {
 
 	t.Run("returns false when on feature branch", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		repo, err := git.PlainInit(tmpDir, false)
+		testutil.InitRepo(t, tmpDir)
+		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
-			t.Fatalf("failed to init repo: %v", err)
+			t.Fatalf("failed to open repo: %v", err)
 		}
 
 		// Create initial commit
@@ -728,9 +641,10 @@ func TestIsOnDefaultBranch(t *testing.T) {
 
 	t.Run("returns false for detached HEAD", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		repo, err := git.PlainInit(tmpDir, false)
+		testutil.InitRepo(t, tmpDir)
+		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
-			t.Fatalf("failed to init repo: %v", err)
+			t.Fatalf("failed to open repo: %v", err)
 		}
 
 		// Create initial commit
@@ -1131,17 +1045,11 @@ func TestEnsurePrimaryRef_WritesVercelConfigWhenEnabled(t *testing.T) {
 	}
 }
 
-// Not parallel: uses t.Chdir so settings.Load picks up the v1.1 opt-in.
-func TestEnsurePrimaryRef_MirrorsV11WhenSeedingFromRemote(t *testing.T) {
+// Not parallel: uses t.Chdir.
+func TestEnsurePrimaryRef_SeedsV1FromRemote(t *testing.T) {
 	bareDir := initBareWithMetadataBranch(t)
 	cloneDir, _ := cloneWithConfig(t, bareDir)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(cloneDir, ".entire", paths.SettingsFileName),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
-		0o644,
-	))
 	t.Chdir(cloneDir)
 	paths.ClearWorktreeRootCache()
 
@@ -1150,12 +1058,8 @@ func TestEnsurePrimaryRef_MirrorsV11WhenSeedingFromRemote(t *testing.T) {
 
 	require.NoError(t, EnsurePrimaryRef(t.Context(), repo))
 
-	v1Ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.NoError(t, err, "local v1 branch should be seeded from origin")
-
-	mirrorRef, err := repo.Reference(plumbing.ReferenceName(paths.MetadataRefName), true)
-	require.NoError(t, err, "v1.1 mirror should track the v1 write performed by EnsurePrimaryRef")
-	assert.Equal(t, v1Ref.Hash(), mirrorRef.Hash())
 }
 
 // cloneWithConfig clones bareDir into a new temp directory, configures git identity,
@@ -1405,9 +1309,10 @@ func TestSafelyAdvanceLocalRef_DoesNotReplayDisconnectedChainWhenTargetIsShallow
 func buildCommittedTree(t *testing.T, files map[string]string) *object.Tree {
 	t.Helper()
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open repo: %v", err)
 	}
 
 	for path, content := range files {
@@ -1616,9 +1521,10 @@ func TestIsEmptyRepository(t *testing.T) {
 	t.Run("empty repo returns true", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		repo, err := git.PlainInit(dir, false)
+		testutil.InitRepo(t, dir)
+		repo, err := git.PlainOpen(dir)
 		if err != nil {
-			t.Fatalf("failed to init repo: %v", err)
+			t.Fatalf("failed to open repo: %v", err)
 		}
 		if !IsEmptyRepository(repo) {
 			t.Error("IsEmptyRepository() = false, want true for empty repo")
@@ -1628,9 +1534,10 @@ func TestIsEmptyRepository(t *testing.T) {
 	t.Run("repo with commit returns false", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		repo, err := git.PlainInit(dir, false)
+		testutil.InitRepo(t, dir)
+		repo, err := git.PlainOpen(dir)
 		if err != nil {
-			t.Fatalf("failed to init repo: %v", err)
+			t.Fatalf("failed to open repo: %v", err)
 		}
 
 		// Create a commit

@@ -76,6 +76,7 @@ var summaryProviderBinaries = map[types.AgentName]string{
 	AgentNameCopilotCLI: "copilot",
 	AgentNameCursor:     "agent",
 	AgentNameGemini:     "gemini",
+	AgentNamePi:         "pi",
 }
 
 // IsSummaryCLIAvailable reports whether the CLI binary for a summary-capable

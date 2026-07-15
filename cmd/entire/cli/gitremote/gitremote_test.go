@@ -95,6 +95,23 @@ func TestParseURL(t *testing.T) {
 			url:     "https://github.com",
 			wantErr: true,
 		},
+		{
+			// A crafted SCP-style origin must not smuggle a newline through
+			// owner/repo into plain-text consumers like `entire agent-help`.
+			name:    "SCP with embedded newline rejected",
+			url:     "git@github.com:org/repo\nINJECTED",
+			wantErr: true,
+		},
+		{
+			name:    "SCP with embedded ANSI escape rejected",
+			url:     "git@github.com:org/repo\x1b[31mEVIL",
+			wantErr: true,
+		},
+		{
+			name:    "SCP with embedded carriage return rejected",
+			url:     "git@github.com:org/re\rpo",
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -115,7 +132,7 @@ func TestParseURL(t *testing.T) {
 	}
 }
 
-func TestExtractOwnerFromRemoteURL(t *testing.T) {
+func TestInfo_CanonicalHost(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -123,15 +140,18 @@ func TestExtractOwnerFromRemoteURL(t *testing.T) {
 		url  string
 		want string
 	}{
-		{"SSH", "git@github.com:org/repo.git", "org"},
-		{"HTTPS", "https://github.com/org/repo.git", "org"},
-		{"invalid", "not-a-url", ""},
+		{"direct https github", "https://github.com/org/repo.git", "github.com"},
+		{"direct ssh github", "git@github.com:org/repo.git", "github.com"},
+		{"entire mirror maps forge to host", "entire://aws-us-east-2.entire.io/gh/org/repo", "github.com"},
+		{"unknown forge falls back to host", "git@ghe.corp.example.com:org/repo.git", "ghe.corp.example.com"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, ExtractOwnerFromRemoteURL(tt.url))
+			info, err := ParseURL(tt.url)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, info.CanonicalHost())
 		})
 	}
 }

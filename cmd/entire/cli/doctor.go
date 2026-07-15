@@ -34,18 +34,13 @@ Checks performed:
      entire/checkpoints/v1 branches share no common ancestor (caused by a
      previous bug). Fixes by cherry-picking local checkpoints onto remote tip.
 
-  2. Checkpoint read mirror (checkpoints v1.1 only): detects when the
-     local-only refs/entire/checkpoints/v1.1 read mirror is missing, stale,
-     or diverged relative to entire/checkpoints/v1, which makes reads miss
-     checkpoints. Fixes by pointing the mirror at the v1 tip.
-
   When Codex hooks are installed:
-  3. Codex hook trust: warn when hooks declared in .codex/hooks.json
+  2. Codex hook trust: warn when hooks declared in .codex/hooks.json
      lack a trusted_hash entry in the user's Codex config (i.e. /hooks
      review hasn't run yet on this machine, or a newer entire release
      added a hook the user hasn't approved yet).
 
-  4. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  3. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -72,6 +67,7 @@ be condensed will be discarded.`,
 	cmd.AddCommand(newTraceCmd())
 	cmd.AddCommand(newDoctorLogsCmd())
 	cmd.AddCommand(newDoctorBundleCmd())
+	cmd.AddCommand(newDoctorMigrateCheckpointsCmd())
 
 	return cmd
 }
@@ -96,14 +92,6 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		finalErr = NewSilentError(fmt.Errorf("metadata check failed: %w", metadataErr))
 	}
 
-	// Check 2: v1.1 read-mirror drift (after check 1: reconciliation rewrites
-	// v1 and re-mirrors).
-	if mirrorErr := checkCommittedMetadataMirror(cmd, force); mirrorErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Error: checkpoint read mirror check failed: %v\n", mirrorErr)
-		if finalErr == nil {
-			finalErr = NewSilentError(fmt.Errorf("checkpoint read mirror check failed: %w", mirrorErr))
-		}
-	}
 	fmt.Fprintln(cmd.OutOrStdout())
 
 	ctx := cmd.Context()
@@ -132,6 +120,14 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
 	defer repo.Close()
+
+	// Finalize any ACTIVE session whose agent process has exited (no SessionStop
+	// hook fired). A gone process is unambiguous, so these are condensed on the
+	// spot rather than left for the interactive prompt below; the sweep marks
+	// them ended in place so classifySession won't re-flag them.
+	if n := finalizeExitedSessions(ctx, states); n > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "Finalized %d exited session(s) (agent process gone).\n\n", n)
+	}
 
 	// Identify stuck sessions
 	now := time.Now()
@@ -223,14 +219,22 @@ func classifySession(state *strategy.SessionState, repo *git.Repository, now tim
 
 	switch {
 	case state.Phase.IsActive():
-		if !state.IsStuckActive() {
-			return nil
-		}
-
 		var reason string
-		if state.LastInteractionTime != nil {
+		switch {
+		case state.OwnerExited():
+			// Detected immediately (no timeout wait): the owning agent process
+			// is gone. Normally finalized up front in runSessionsFix; this
+			// branch covers a session that couldn't be finalized there.
+			pid := 0
+			if state.Owner != nil {
+				pid = state.Owner.PID
+			}
+			reason = fmt.Sprintf("agent process %d exited (no longer running)", pid)
+		case !state.IsStuckActive():
+			return nil
+		case state.LastInteractionTime != nil:
 			reason = fmt.Sprintf("active, last interaction %s ago", now.Sub(*state.LastInteractionTime).Truncate(time.Minute))
-		} else {
+		default:
 			reason = fmt.Sprintf("active, started %s ago with no recorded interaction", now.Sub(state.StartedAt).Truncate(time.Minute))
 		}
 
@@ -350,7 +354,7 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	defer repo.Close()
 
 	ctx := cmd.Context()
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	w := cmd.OutOrStdout()
 	if !refs.PrimaryFetchableFromOrigin() {
 		fmt.Fprintf(w, "✓ Metadata branches: OK (primary ref %s is not pushed to origin)\n", refs.Primary)
@@ -390,76 +394,6 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	return nil
 }
 
-// checkCommittedMetadataMirror detects and optionally repairs v1.1 read-mirror
-// drift. Read paths use the mirror as-is, so doctor is the repair tool.
-// Silent when the topology has no mirror.
-func checkCommittedMetadataMirror(cmd *cobra.Command, force bool) error {
-	ctx := cmd.Context()
-	repo, err := openRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-	defer repo.Close()
-
-	diag, err := strategy.DiagnoseCommittedMetadataMirror(ctx, repo)
-	if err != nil {
-		return fmt.Errorf("could not check checkpoint read mirror state: %w", err)
-	}
-
-	w := cmd.OutOrStdout()
-	primary := diag.Refs.Primary.Short()
-
-	switch diag.Status {
-	case strategy.MirrorNotConfigured:
-		return nil
-	case strategy.MirrorOK:
-		fmt.Fprintln(w, "✓ Checkpoint read mirror: OK")
-		return nil
-	case strategy.MirrorNoMetadata:
-		fmt.Fprintln(w, "✓ Checkpoint read mirror: OK (no committed metadata yet)")
-		return nil
-	case strategy.MirrorPrimaryMissing:
-		fmt.Fprintf(w, "Checkpoint read mirror: %s\n", diag.Status)
-		fmt.Fprintf(w, "  The read mirror %s exists, but the %s branch it mirrors is gone.\n",
-			diag.Refs.Mirror, primary)
-		fmt.Fprintln(w, "  Restore the branch and re-run doctor:")
-		fmt.Fprintf(w, "    git fetch origin %s:%s\n", primary, primary)
-		return nil
-	case strategy.MirrorMissing:
-		fmt.Fprintf(w, "Checkpoint read mirror: %s\n", diag.Status)
-		fmt.Fprintf(w, "  %s does not exist; reads will find no checkpoints.\n", diag.Refs.Mirror)
-		fmt.Fprintf(w, "  Fix: seed the mirror at the %s tip.\n", primary)
-	case strategy.MirrorBehind:
-		fmt.Fprintf(w, "Checkpoint read mirror: %s\n", diag.Status)
-		fmt.Fprintf(w, "  Mirror is at %s, behind %s at %s; reads miss newer checkpoints.\n",
-			shortMirrorHash(diag.Mirror), primary, shortMirrorHash(diag.Primary))
-		fmt.Fprintf(w, "  Fix: advance the mirror to the %s tip.\n", primary)
-	case strategy.MirrorDiverged:
-		fmt.Fprintf(w, "Checkpoint read mirror: %s\n", diag.Status)
-		fmt.Fprintf(w, "  Mirror at %s has commits not on %s (at %s). Writes never target the\n",
-			shortMirrorHash(diag.Mirror), primary, shortMirrorHash(diag.Primary))
-		fmt.Fprintln(w, "  mirror, so something outside entire moved it.")
-		fmt.Fprintf(w, "  Fix: reset the mirror to the %s tip — the diverged mirror commits\n", primary)
-		fmt.Fprintf(w, "  are discarded (%s is the source of truth).\n", primary)
-	}
-
-	if !force {
-		proceed, promptErr := confirmDoctorFix(ctx, w, "Repair checkpoint read mirror?")
-		if promptErr != nil {
-			return promptErr
-		}
-		if !proceed {
-			return nil
-		}
-	}
-
-	if fixErr := strategy.MirrorCommittedMetadataRef(ctx, repo, diag.Refs); fixErr != nil {
-		return fmt.Errorf("failed to repair checkpoint read mirror: %w", fixErr)
-	}
-	fmt.Fprintf(w, "  ✓ Fixed: mirror now points at the %s tip\n", primary)
-	return nil
-}
-
 // confirmDoctorFix prompts to apply a doctor fix. Declining (which prints
 // "-> Skipped"), aborting (Ctrl+C), and context cancellation all return false
 // with no error.
@@ -487,14 +421,6 @@ func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, err
 		fmt.Fprintln(w, "  -> Skipped")
 	}
 	return confirmed, nil
-}
-
-// shortMirrorHash abbreviates a hash for mirror-check output; "none" when zero.
-func shortMirrorHash(h plumbing.Hash) string {
-	if h.IsZero() {
-		return "none"
-	}
-	return h.String()[:7]
 }
 
 // checkCodexHookTrust warns about two kinds of drift in the Codex hook

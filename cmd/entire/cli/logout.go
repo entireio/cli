@@ -12,14 +12,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// tokenStore abstracts keyring access so commands that read or delete the
-// stored bearer token can be unit-tested without hitting the real OS keyring.
-// Used by logout and the auth subcommands.
-type tokenStore interface {
-	GetToken(baseURL string) (string, error)
-	DeleteToken(baseURL string) error
-}
-
 // boundRevokeFunc revokes login session(s) server-side — either just the
 // current session or every session on the core, depending on which the caller
 // selected (--everywhere). The caller resolves the active context's core URL +
@@ -54,9 +46,6 @@ func newLogoutCmd() *cobra.Command {
 			"Without --all-contexts, logging out promotes the next saved login (if any) to\n" +
 			"active, so running `entire logout` repeatedly drains every saved login in turn.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := requireSecureBaseURL(insecureHTTPAuth); err != nil {
-				return err
-			}
 			outW, errW := cmd.OutOrStdout(), cmd.ErrOrStderr()
 
 			// Pick the per-target revocation: just the current session, or
@@ -69,16 +58,22 @@ func newLogoutCmd() *cobra.Command {
 			if allContexts {
 				return runLogoutAll(cmd.Context(), outW, errW, auth.Contexts,
 					auth.LoginTokenForContext, revokeForTarget, auth.RemoveContext,
-					auth.NewContextStore(), api.AuthBaseURL(), insecureHTTPAuth)
+					applyInsecureHTTPAuth(insecureHTTPAuth))
 			}
 
-			// Revoke against the active context's core (matching what
-			// `auth status` lists), not a static AuthBaseURL.
-			target, err := resolveStatusTarget(auth.NewContextStore(), auth.Contexts, api.AuthBaseURL())
+			// Revoke against the active context's core, matching what
+			// `auth status` lists. The refreshing resolver means an
+			// expired-but-refreshable session still yields a bearer that can
+			// authenticate the revoke call.
+			target, err := resolveStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)
 			if err != nil {
 				return err
 			}
-			if !insecureHTTPAuth {
+			if target.coreURL == "" {
+				fmt.Fprintln(outW, "Not logged in.")
+				return nil
+			}
+			if !applyInsecureHTTPAuth(insecureHTTPAuth) {
 				if err := api.RequireSecureURL(target.coreURL); err != nil {
 					return fmt.Errorf("context login server URL check: %w", err)
 				}
@@ -87,8 +82,7 @@ func newLogoutCmd() *cobra.Command {
 				return revokeForTarget(ctx, target.coreURL, target.token)
 			}
 			if err := runLogout(cmd.Context(), outW, errW,
-				auth.NewContextStore(), revoke,
-				auth.RemoveCurrentContext, api.AuthBaseURL()); err != nil {
+				target.token, revoke, auth.RemoveCurrentContext); err != nil {
 				return err
 			}
 			promoteNextLogin(outW, errW)
@@ -148,16 +142,10 @@ func revokeAllAuthSessions(ctx context.Context, coreURL, token string) error {
 
 // runLogout ends the user's login. revoke is the caller-selected server-side
 // revocation — just the active session, or every session on the active core
-// when --everywhere is set. Either way the local keyring entry and active
-// context are removed, so the CLI reports logged-out even if the server call
-// fails.
-func runLogout(ctx context.Context, outW, errW io.Writer, store tokenStore, revoke boundRevokeFunc, clearContext clearContextFunc, baseURL string) error {
-	token, err := store.GetToken(baseURL)
-	if err != nil {
-		// Fall through to the local delete: we still want the keyring entry
-		// gone, even if we couldn't read it well enough to revoke server-side.
-		fmt.Fprintf(errW, "Warning: failed to read token before revocation: %v\n", err)
-	}
+// when --everywhere is set. token is the resolved bearer for the revoke call
+// (empty skips it). The active context (and its keyring entry) is removed
+// either way, so the CLI reports logged-out even if the server call fails.
+func runLogout(ctx context.Context, outW, errW io.Writer, token string, revoke boundRevokeFunc, clearContext clearContextFunc) error {
 	if token != "" {
 		if err := revoke(ctx); err != nil && !api.IsHTTPErrorStatus(err, http.StatusUnauthorized) {
 			// Best-effort: a transient network error shouldn't block local
@@ -167,14 +155,8 @@ func runLogout(ctx context.Context, outW, errW io.Writer, store tokenStore, revo
 		}
 	}
 
-	if err := store.DeleteToken(baseURL); err != nil {
-		return fmt.Errorf("remove auth token: %w", err)
-	}
-
-	// Remove the active context so the context-preferring readers no longer
-	// report a login. Best-effort: the legacy entry is already gone above.
 	if err := clearContext(); err != nil {
-		fmt.Fprintf(errW, "Warning: failed to clear current context: %v\n", err)
+		return fmt.Errorf("remove login: %w", err)
 	}
 
 	fmt.Fprintln(outW, "Logged out.")
@@ -189,9 +171,9 @@ type revokeTargetFunc func(ctx context.Context, coreURL, token string) error
 
 // runLogoutAll drains every saved login. For each context it revokes the
 // session(s) on that context's own core (using its own bearer) and removes
-// the login locally, then clears the legacy keyring entry. Per-context
-// failures warn but never abort the sweep — one stuck login can't strand the
-// rest, and local removal always proceeds so the CLI ends fully logged out.
+// the login locally. Per-context failures warn but never abort the sweep —
+// one stuck login can't strand the rest, and local removal always proceeds
+// so the CLI ends fully logged out.
 //
 // Dependencies are injected so the sweep is unit-testable without the real
 // keyring or config dir: listContexts (auth.Contexts), tokenForContext
@@ -202,7 +184,7 @@ func runLogoutAll(ctx context.Context, outW, errW io.Writer,
 	tokenForContext func(*contexts.Context) (string, error),
 	revoke revokeTargetFunc,
 	removeContext func(name string) error,
-	store tokenStore, baseURL string, insecureHTTPAuth bool,
+	insecureHTTPAuth bool,
 ) error {
 	all, _, err := listContexts()
 	if err != nil {
@@ -236,13 +218,6 @@ func runLogoutAll(ctx context.Context, outW, errW io.Writer,
 			continue
 		}
 		removed++
-	}
-
-	// Clear the legacy keyring entry too so a pre-contexts login doesn't
-	// linger after a full logout. Best-effort: the contexts above are the
-	// source of truth for the logged-out state.
-	if derr := store.DeleteToken(baseURL); derr != nil {
-		fmt.Fprintf(errW, "Warning: failed to remove legacy auth token: %v\n", derr)
 	}
 
 	if removed == 0 {

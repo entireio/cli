@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 
 	"charm.land/huh/v2"
@@ -30,7 +31,7 @@ import (
 )
 
 // GetRewindPoints returns available rewind points.
-// Uses checkpoint.GitStore.ListTemporaryCheckpoints for reading from shadow branches.
+// Uses checkpoint.EphemeralStore for reading from shadow branches.
 func (s *ManualCommitStrategy) GetRewindPoints(ctx context.Context, limit int) ([]RewindPoint, error) {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -38,7 +39,10 @@ func (s *ManualCommitStrategy) GetRewindPoints(ctx context.Context, limit int) (
 	}
 	defer repo.Close()
 
-	store := s.getCheckpointStore(ctx, repo)
+	store, err := s.getEphemeralStore(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
 
 	// Get current HEAD to find matching shadow branch
 	head, err := repo.Head()
@@ -55,12 +59,12 @@ func (s *ManualCommitStrategy) GetRewindPoints(ctx context.Context, limit int) (
 
 	var allPoints []RewindPoint
 
-	// Collect checkpoint points from active sessions using checkpoint.GitStore
+	// Collect checkpoint points from active sessions using temporary storage.
 	// Cache session prompts by session ID to avoid re-reading the same prompt file
 	sessionPrompts := make(map[string]string)
 
 	for _, state := range sessions {
-		checkpoints, err := store.ListTemporaryCheckpoints(ctx, state.BaseCommit, state.WorktreeID, state.SessionID, limit)
+		checkpoints, err := store.ListCheckpoints(ctx, state.BaseCommit, state.WorktreeID, state.SessionID, limit)
 		if err != nil {
 			continue // Error reading checkpoints, skip this session
 		}
@@ -163,7 +167,7 @@ func (s *ManualCommitStrategy) GetLogsOnlyRewindPoints(ctx context.Context, limi
 	}
 
 	// Get committed metadata read tree for session prompts (best-effort, ignore errors)
-	readRef := cpkg.ResolveCommittedRefs(ctx).Read
+	readRef := cpkg.ResolveRefs(ctx).Read
 	metadataTree, _ := GetMetadataRefTree(repo, readRef) //nolint:errcheck // Best-effort for session prompts
 
 	head, err := repo.Head()
@@ -639,39 +643,31 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 	defer repo.Close()
 
 	WarnIfMetadataDisconnected()
-	store := cpkg.NewGitStore(repo, cpkg.ResolveCommittedRefs(ctx))
-	if s.blobFetcher != nil {
-		store.SetBlobFetcher(s.blobFetcher)
+	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{BlobFetcher: s.blobFetcher})
+	if err != nil {
+		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
-	summary, err := cpkg.ReadCommittedCheckpoint(ctx, store, point.CheckpointID)
+	store := stores.Persistent
+	summary, err := cpkg.ReadCheckpoint(ctx, store, point.CheckpointID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
-
 	// Get worktree root for agent session directory lookup
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get worktree root: %w", err)
 	}
 
-	// Check for newer local logs if not forcing
+	// By default (no --force), never overwrite a session log that already exists
+	// locally: the on-disk transcript is the live session being resumed, so we
+	// keep it and only restore logs that are missing. The write loop below skips
+	// any session whose ID is in skipExisting but still reports it so the caller
+	// prints its resume command. --force overwrites everything from the checkpoint.
+	skipExisting := map[string]bool{}
 	if !force {
-		sessions := s.classifySessionsForRestore(ctx, repoRoot, store, point.CheckpointID, summary)
-		hasConflicts := false
-		for _, sess := range sessions {
-			if sess.Status == StatusLocalNewer {
-				hasConflicts = true
-				break
-			}
-		}
-		if hasConflicts {
-			shouldOverwrite, promptErr := PromptOverwriteNewerLogs(errW, sessions)
-			if promptErr != nil {
-				return nil, promptErr
-			}
-			if !shouldOverwrite {
-				fmt.Fprintf(w, "Resume cancelled. Local session logs preserved.\n")
-				return nil, nil
+		for _, sess := range s.classifySessionsForRestore(ctx, repoRoot, store, point.CheckpointID, summary) {
+			if sess.Status != StatusNew {
+				skipExisting[sess.SessionID] = true
 			}
 		}
 	}
@@ -703,7 +699,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 		}
 		// Checkpoint metadata comes from the shared entire/checkpoints/v1 branch
 		// and is attacker-influenceable. Reject path separators/absolute IDs before
-		// they reach ResolveSessionFile + WriteSession, which would otherwise let a
+		// they reach ResolveSessionFile + Session, which would otherwise let a
 		// crafted session ID overwrite files outside the agent session directory.
 		if err := validation.ValidateSessionID(sessionID); err != nil {
 			fmt.Fprintf(errW, "  Warning: session %d has unsafe session ID %q, skipping: %v\n", i, sessionID, err)
@@ -737,8 +733,27 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 			}
 		}
 
-		// Get first prompt for display
-		promptPreview := ExtractFirstPrompt(content.Prompts)
+		promptPreview := restoredPromptPreview(sessionAgent, content.Prompts, content.Transcript, content.Metadata.ReviewPrompt)
+
+		// Local log already present and not forcing: keep it untouched, but still
+		// report the session so the caller can print its resume command.
+		if skipExisting[sessionID] {
+			if totalSessions > 1 {
+				fmt.Fprintf(w, "  Session %d: keeping existing local log\n", i+1)
+			} else {
+				fmt.Fprintf(w, "Keeping existing local session log\n")
+			}
+			restored = append(restored, RestoredSession{
+				SessionID:    sessionID,
+				CheckpointID: point.CheckpointID.String(),
+				Agent:        sessionAgent.Type(),
+				Prompt:       promptPreview,
+				CreatedAt:    content.Metadata.CreatedAt,
+				Kind:         content.Metadata.Kind,
+				ReviewPrompt: content.Metadata.ReviewPrompt,
+			})
+			continue
+		}
 
 		if totalSessions > 1 {
 			isLatest := i == totalSessions-1
@@ -776,14 +791,75 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 		}
 
 		restored = append(restored, RestoredSession{
-			SessionID: sessionID,
-			Agent:     sessionAgent.Type(),
-			Prompt:    promptPreview,
-			CreatedAt: content.Metadata.CreatedAt,
+			SessionID:    sessionID,
+			CheckpointID: point.CheckpointID.String(),
+			Agent:        sessionAgent.Type(),
+			Prompt:       promptPreview,
+			CreatedAt:    content.Metadata.CreatedAt,
+			Kind:         content.Metadata.Kind,
+			ReviewPrompt: content.Metadata.ReviewPrompt,
 		})
 	}
 
 	return restored, nil
+}
+
+func restoredPromptPreview(sessionAgent agent.Agent, promptContent string, transcript []byte, reviewPrompt string) string {
+	if prompt := ExtractFirstPrompt(promptContent); prompt != "" {
+		return prompt
+	}
+	if prompt := strings.TrimSpace(reviewPrompt); prompt != "" {
+		return prompt
+	}
+	extractor, ok := sessionAgent.(agent.PromptExtractor)
+	if !ok || len(transcript) == 0 {
+		return ""
+	}
+	prompts, err := extractPromptsFromTranscriptBytes(extractor, transcript)
+	if err != nil || len(prompts) == 0 {
+		return ""
+	}
+	return firstRestoredDisplayPrompt(prompts)
+}
+
+func firstRestoredDisplayPrompt(prompts []string) string {
+	for _, prompt := range prompts {
+		cleaned := strings.TrimSpace(prompt)
+		if cleaned == "" || isOnlySeparators(cleaned) || isInjectedInstructionPrompt(cleaned) {
+			continue
+		}
+		return TruncateDescription(cleaned, MaxDescriptionLength)
+	}
+	return ""
+}
+
+func isInjectedInstructionPrompt(prompt string) bool {
+	trimmed := strings.TrimSpace(prompt)
+	return strings.HasPrefix(trimmed, "# AGENTS.md instructions for ") ||
+		strings.HasPrefix(trimmed, "<environment_context>") ||
+		(strings.Contains(trimmed, "<INSTRUCTIONS>") && strings.Contains(trimmed, "AGENTS.md instructions"))
+}
+
+func extractPromptsFromTranscriptBytes(extractor agent.PromptExtractor, transcript []byte) ([]string, error) {
+	tmp, err := os.CreateTemp("", "entire-restored-transcript-*.jsonl")
+	if err != nil {
+		return nil, fmt.Errorf("create temporary transcript: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmp.Write(transcript); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("write temporary transcript: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("close temporary transcript: %w", err)
+	}
+	prompts, err := extractor.ExtractPrompts(tmpPath, 0)
+	if err != nil {
+		return nil, fmt.Errorf("extract prompts from temporary transcript: %w", err)
+	}
+	return prompts, nil
 }
 
 // ResolveAgentForRewind resolves the agent from checkpoint metadata.
@@ -847,7 +923,7 @@ type SessionRestoreInfo struct {
 // about each session, including whether local logs have newer timestamps.
 // repoRoot is used to compute per-session agent directories.
 // Sessions without agent metadata are skipped (cannot determine target directory).
-func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, repoRoot string, store cpkg.CommittedReader, checkpointID id.CheckpointID, summary *cpkg.CheckpointSummary) []SessionRestoreInfo {
+func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, repoRoot string, store cpkg.SessionReader, checkpointID id.CheckpointID, summary *cpkg.CheckpointSummary) []SessionRestoreInfo {
 	var sessions []SessionRestoreInfo
 
 	totalSessions := len(summary.Sessions)
@@ -883,6 +959,14 @@ func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, r
 		localTime := paths.GetLastTimestampFromFile(localPath)
 		checkpointTime := paths.GetLastTimestampFromBytes(content.Transcript)
 		status := ClassifyTimestamps(localTime, checkpointTime)
+		// ClassifyTimestamps reports StatusNew when the local file has no parseable
+		// timestamp — but a present-but-untimestamped log still exists and must not
+		// be silently overwritten. Only a truly-absent file counts as new.
+		if status == StatusNew {
+			if _, statErr := os.Stat(localPath); statErr == nil {
+				status = StatusUnchanged
+			}
+		}
 
 		sessions = append(sessions, SessionRestoreInfo{
 			SessionID:      sessionID,
@@ -979,16 +1063,13 @@ func PromptOverwriteNewerLogs(errW io.Writer, sessions []SessionRestoreInfo) (bo
 	fmt.Fprintf(errW, "\nOverwriting will lose the newer local entries.\n\n")
 
 	var confirmed bool
-	form := huh.NewForm(
+	form := uiform.New(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title("Overwrite local session logs with checkpoint versions?").
 				Value(&confirmed),
 		),
 	)
-	if isAccessibleMode() {
-		form = form.WithAccessible(true)
-	}
 
 	if err := form.Run(); err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {

@@ -131,3 +131,34 @@ func TestCoreURLFromEnvToken_RejectsAlgNone(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), EnvTokenVar)
 }
+
+// ParseEnvToken owns the shared trim → blank-check → aud-derivation sequence.
+// Unlike CoreURLFromEnvToken it DOES trim, and it returns the (trimmed) token
+// so callers send the same bytes verbatim as the bearer.
+func TestParseEnvToken(t *testing.T) {
+	t.Parallel()
+	const core = "https://core.us.entire.io"
+	tok := makeJWT(t, `{"sub":"ci-runner","aud":"`+core+`"}`)
+
+	t.Run("trims and returns aud core + trimmed token", func(t *testing.T) {
+		t.Parallel()
+		coreURL, token, err := ParseEnvToken("  " + tok + "\n")
+		require.NoError(t, err)
+		assert.Equal(t, core, coreURL)
+		assert.Equal(t, tok, token, "token must be returned trimmed for verbatim bearer use")
+	})
+
+	t.Run("blank is fail-closed", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := ParseEnvToken("   ")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), EnvTokenVar)
+	})
+
+	t.Run("no URL aud is rejected", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := ParseEnvToken(makeJWT(t, `{"sub":"ci-runner"}`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), EnvTokenVar)
+	})
+}

@@ -122,15 +122,3 @@ func TestDiscover(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
-
-func TestRenderLoginHint(t *testing.T) {
-	hint := RenderLoginHint("rc.partial.to", []string{"https://a.example", "https://b.example"})
-
-	// Each URL is on its own indented line — the "bog-simple stdout
-	// list" requirement.
-	assert.Contains(t, hint, "no auth context for cluster rc.partial.to")
-	assert.Contains(t, hint, "\n  https://a.example\n", "missing indented URL line: %q", hint)
-	assert.Contains(t, hint, "\n  https://b.example\n", "missing indented URL line: %q", hint)
-	assert.Contains(t, hint, "entire login")
-	assert.Contains(t, hint, "ENTIRE_AUTH_BASE_URL")
-}

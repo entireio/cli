@@ -15,6 +15,25 @@ import (
 // without an interactive `entire login`.
 const EnvTokenVar = "ENTIRE_TOKEN"
 
+// ParseEnvToken is the single owner of the ENTIRE_TOKEN validation sequence
+// shared by coreapi.New's bypass and `entire auth status`: it trims the raw
+// value, enforces fail-closed that it is non-blank, and derives the control-
+// plane core origin from its aud via CoreURLFromEnvToken. Callers pass the raw
+// env value (presence is the caller's LookupEnv decision) and send the returned
+// token verbatim as the bearer to coreURL. A blank or aud-less value is an
+// error, never a silent fall-back to context resolution.
+func ParseEnvToken(raw string) (coreURL, token string, err error) {
+	token = strings.TrimSpace(raw)
+	if token == "" {
+		return "", "", fmt.Errorf("%s is set but blank", EnvTokenVar)
+	}
+	coreURL, err = CoreURLFromEnvToken(token)
+	if err != nil {
+		return "", "", err
+	}
+	return coreURL, token, nil
+}
+
 // CoreURLFromEnvToken derives the home-region core URL from an ENTIRE_TOKEN
 // JWT's audience claim. Login and sa-session JWTs carry aud=<home-region URL>,
 // which is what STS routing keys on — so we read aud, not iss (iss may be a

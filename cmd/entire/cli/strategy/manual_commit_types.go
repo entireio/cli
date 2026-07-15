@@ -7,21 +7,18 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 )
 
 const (
 	// logsOnlyScanLimit is the maximum number of commits to scan for logs-only points.
 	logsOnlyScanLimit = 50
-
-	// maxLastPromptRunes is the maximum rune length for LastPrompt stored in session state.
-	maxLastPromptRunes = 100
 )
 
 // truncatePromptForStorage collapses whitespace and truncates a user prompt
-// for storage in LastPrompt.
+// for storage in LastPrompt. It delegates to session.TruncatePromptForStorage
+// so imports and live sessions format the field identically.
 func truncatePromptForStorage(prompt string) string {
-	return stringutil.TruncateRunes(stringutil.CollapseWhitespace(prompt), maxLastPromptRunes, "...")
+	return session.TruncatePromptForStorage(prompt)
 }
 
 // SessionState is an alias for session.State.
@@ -44,6 +41,7 @@ type CheckpointInfo struct {
 	ToolUseID        string          `json:"tool_use_id,omitempty"`
 	SessionCount     int             `json:"session_count,omitempty"` // Number of sessions (1 if omitted)
 	SessionIDs       []string        `json:"session_ids,omitempty"`   // All session IDs in this checkpoint
+	Imported         bool            `json:"imported,omitempty"`      // True for read-only imported (commit-less) checkpoints
 }
 
 // CondenseResult contains the result of a session condensation operation.

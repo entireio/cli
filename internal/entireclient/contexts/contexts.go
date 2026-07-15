@@ -63,18 +63,6 @@ func FilePath(configDir string) (string, error) {
 	return filepath.Join(configDir, "contexts.json"), nil
 }
 
-// DefaultConfigDir is $ENTIRE_CONFIG_DIR if set, else ~/.config/entire.
-func DefaultConfigDir() string {
-	if dir := os.Getenv("ENTIRE_CONFIG_DIR"); dir != "" {
-		return dir
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
-	}
-	return filepath.Join(home, ".config", "entire")
-}
-
 // Load reads contexts.json under configDir, returning an empty *File
 // when the file doesn't exist yet (a fresh user). Holds an exclusive
 // flock for the duration of the read.

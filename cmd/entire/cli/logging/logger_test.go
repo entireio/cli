@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 // Test constants to avoid goconst warnings
@@ -440,70 +439,6 @@ func TestLogging_AdditionalAttrs(t *testing.T) {
 	}
 	if logEntry["success"] != true {
 		t.Errorf("Expected success=true, got %v", logEntry["success"])
-	}
-}
-
-func TestLogDuration(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	initGitRepo(t, tmpDir)
-
-	sessionID := "2025-01-15-duration-test"
-	err := Init(context.Background(), sessionID)
-	if err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
-
-	ctx := WithSession(context.Background(), "context-session") // Will be ignored, global takes precedence
-	ctx = WithComponent(ctx, testComponent)
-
-	// Simulate some work
-	start := time.Now().Add(-100 * time.Millisecond) // Fake 100ms ago
-
-	LogDuration(ctx, slog.LevelInfo, "operation completed", start,
-		slog.String("hook", "pre-push"),
-		slog.Bool("success", true),
-	)
-
-	Close()
-
-	// Read log file
-	content, err := os.ReadFile(testLogFilePath(tmpDir))
-	if err != nil {
-		t.Fatalf("Failed to read log file: %v", err)
-	}
-
-	// Parse as JSON
-	var logEntry map[string]interface{}
-	if err := json.Unmarshal(content, &logEntry); err != nil {
-		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, content)
-	}
-
-	// Verify duration_ms is present and reasonable
-	durationMs, ok := logEntry["duration_ms"].(float64)
-	if !ok {
-		t.Fatalf("Expected duration_ms to be a number, got %T: %v", logEntry["duration_ms"], logEntry["duration_ms"])
-	}
-	if durationMs < 90 || durationMs > 200 {
-		t.Errorf("Expected duration_ms around 100, got %v", durationMs)
-	}
-
-	// session_id comes from Init(), not context
-	if logEntry["session_id"] != sessionID {
-		t.Errorf("Expected session_id='%s' (from Init), got %v", sessionID, logEntry["session_id"])
-	}
-	if logEntry["component"] != testComponent {
-		t.Errorf("Expected component='%s', got %v", testComponent, logEntry["component"])
-	}
-	if logEntry["hook"] != "pre-push" {
-		t.Errorf("Expected hook='pre-push', got %v", logEntry["hook"])
-	}
-	if logEntry["success"] != true {
-		t.Errorf("Expected success=true, got %v", logEntry["success"])
-	}
-	if logEntry["level"] != levelINFO {
-		t.Errorf("Expected level='%s', got %v", levelINFO, logEntry["level"])
 	}
 }
 

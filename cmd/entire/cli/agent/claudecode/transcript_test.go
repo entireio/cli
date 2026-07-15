@@ -229,6 +229,8 @@ func TestFindCheckpointUUID(t *testing.T) {
 // Token calculation tests - Claude Code specific token format
 
 func TestCalculateTokenUsage_BasicMessages(t *testing.T) {
+	t.Parallel()
+
 	transcript := []TranscriptLine{
 		{
 			Type: "assistant",
@@ -278,6 +280,8 @@ func TestCalculateTokenUsage_BasicMessages(t *testing.T) {
 }
 
 func TestCalculateTokenUsage_StreamingDeduplication(t *testing.T) {
+	t.Parallel()
+
 	// Simulate streaming: multiple rows with same message ID, increasing output_tokens
 	transcript := []TranscriptLine{
 		{
@@ -337,6 +341,8 @@ func TestCalculateTokenUsage_StreamingDeduplication(t *testing.T) {
 }
 
 func TestCalculateTokenUsage_IgnoresUserMessages(t *testing.T) {
+	t.Parallel()
+
 	transcript := []TranscriptLine{
 		{
 			Type:    "user",
@@ -366,6 +372,8 @@ func TestCalculateTokenUsage_IgnoresUserMessages(t *testing.T) {
 }
 
 func TestCalculateTokenUsage_EmptyTranscript(t *testing.T) {
+	t.Parallel()
+
 	usage := CalculateTokenUsage(nil)
 
 	if usage.APICallCount != 0 {
@@ -377,6 +385,8 @@ func TestCalculateTokenUsage_EmptyTranscript(t *testing.T) {
 }
 
 func TestExtractSpawnedAgentIDs_FromToolResult(t *testing.T) {
+	t.Parallel()
+
 	transcript := []TranscriptLine{
 		{
 			Type: "user",
@@ -409,6 +419,8 @@ func TestExtractSpawnedAgentIDs_FromToolResult(t *testing.T) {
 }
 
 func TestExtractSpawnedAgentIDs_MultipleAgents(t *testing.T) {
+	t.Parallel()
+
 	transcript := []TranscriptLine{
 		{
 			Type: "user",
@@ -456,6 +468,8 @@ func TestExtractSpawnedAgentIDs_MultipleAgents(t *testing.T) {
 }
 
 func TestExtractSpawnedAgentIDs_NoAgentID(t *testing.T) {
+	t.Parallel()
+
 	transcript := []TranscriptLine{
 		{
 			Type: "user",
@@ -482,6 +496,8 @@ func TestExtractSpawnedAgentIDs_NoAgentID(t *testing.T) {
 }
 
 func TestExtractAgentIDFromText(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		text     string
@@ -516,6 +532,8 @@ func TestExtractAgentIDFromText(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			got := extractAgentIDFromText(tt.text)
 			if got != tt.expected {
 				t.Errorf("extractAgentIDFromText(%q) = %q, want %q", tt.text, got, tt.expected)

@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -22,6 +21,78 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
+
+// partitionLocalRefs splits refs into those that exist locally (pushable) and
+// those that don't (stale queue entries — e.g. a checkpoint ref deleted by
+// cleanup). Stale refs can never push, so callers drop them from the queue
+// rather than retrying them forever.
+func partitionLocalRefs(repo *git.Repository, refs []plumbing.ReferenceName) (existing, stale []plumbing.ReferenceName) {
+	for _, ref := range refs {
+		_, err := repo.Reference(ref, false)
+		switch {
+		case err == nil:
+			existing = append(existing, ref)
+		case errors.Is(err, plumbing.ErrReferenceNotFound):
+			// Genuinely gone (e.g. deleted by cleanup) — never pushable, drop it.
+			stale = append(stale, ref)
+		default:
+			// A transient/IO lookup error: keep the ref as pushable so a real
+			// entry isn't dropped from the queue forever over a flaky read.
+			existing = append(existing, ref)
+		}
+	}
+	return existing, stale
+}
+
+// batchPushRefs pushes all of refs to target in a single git push,
+// fast-forward-only (NOT a force push). Batching keeps a backfill of many refs to
+// one network round-trip. Per-checkpoint refs normally advance by fast-forward
+// (each write parents on the prior tip), so the common case succeeds; a
+// non-fast-forward update — genuine divergence, e.g. the same checkpoint written
+// differently on another machine — is REJECTED rather than silently overwriting
+// the remote. We deliberately do not force: there is no server-side ref
+// protection, so a force push would make a buggy or racing client clobber good
+// remote history with no signal. On rejection the whole push errors; the caller
+// retries the rejected refs individually with fetch+replay recovery
+// (pushCheckpointRefWithRecovery).
+func batchPushRefs(ctx context.Context, target string, refs []plumbing.ReferenceName) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	refSpecs := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		refSpecs = append(refSpecs, ref.String()+":"+ref.String())
+	}
+	if _, err := remote.PushWithOptions(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs}); err != nil {
+		return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
+	}
+	return nil
+}
+
+// pushCheckpointRefWithRecovery pushes a single checkpoint ref fast-forward-only;
+// on rejection — typically the ref diverged on the remote (the same checkpoint
+// re-written elsewhere) — it fetches the remote ref and replays the local-only
+// commits on top via fetchAndRebaseRefCommon, then retries. The retry is still
+// non-force: after the replay the local ref is a fast-forward over the remote, so
+// the remote commit is preserved as an ancestor rather than overwritten. The
+// cherry-pick is delta-based, so non-overlapping changes merge; a genuine overlap
+// (e.g. both sides rewrote the root metadata.json) surfaces as a rebase error and
+// the ref is left for a later pre-push. Returns nil only if the ref reached the
+// remote.
+func pushCheckpointRefWithRecovery(ctx context.Context, target string, ref plumbing.ReferenceName) error {
+	// One shared budget across the initial push, fetch+replay, and retry, matching
+	// doPushRef (fetchAndRebaseRefCommon relies on the caller's deadline).
+	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
+	defer cancel()
+
+	if err := batchPushRefs(ctx, target, []plumbing.ReferenceName{ref}); err == nil {
+		return nil
+	}
+	if err := fetchAndRebaseRefCommon(ctx, target, ref); err != nil {
+		return fmt.Errorf("sync diverged checkpoint ref %s: %w", ref, err)
+	}
+	return batchPushRefs(ctx, target, []plumbing.ReferenceName{ref})
+}
 
 // pushRefIfNeeded pushes a ref to the given target if it has unpushed changes.
 // The target can be a remote name (e.g., "origin") or a URL for direct push.
@@ -235,12 +306,16 @@ func finishPush(ctx context.Context, stop func(string), result pushResult, targe
 
 // tryPushRefCommon attempts to push a ref. No timeout of its own —
 // runs under doPushRef's shared budget. Branch refs use a bare branch-name
-// refSpec so existing remote-tracking works; non-branch refs use a force
-// refspec ("+refs/...:refs/...") with no tracking shadow.
+// refSpec so existing remote-tracking works; non-branch refs use an explicit
+// "refs/...:refs/..." refSpec with no tracking shadow. Neither forces: a
+// non-fast-forward is rejected so doPushRef's fetch+rebase recovery runs (and a
+// genuinely diverged ref is never silently overwritten — there is no
+// server-side ref protection). This keeps one consistent non-force policy for
+// every checkpoint ref, branch or per-checkpoint.
 func tryPushRefCommon(ctx context.Context, remoteName string, ref plumbing.ReferenceName) (pushResult, error) {
 	refSpec := ref.Short()
 	if !ref.IsBranch() {
-		refSpec = "+" + ref.String() + ":" + ref.String()
+		refSpec = ref.String() + ":" + ref.String()
 	}
 
 	// Span the actual `git push` subprocess: on a slow remote (e.g. a custom
@@ -414,9 +489,8 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 		return fmt.Errorf("failed to get remote ref: %w", err)
 	}
 
-	refs := checkpoint.ResolveCommittedRefs(ctx)
 	advance := func(hash plumbing.Hash) error {
-		if err := AdvanceLocalRef(ctx, repo, refs, ref, hash); err != nil {
+		if err := setRefHash(repo, ref, hash); err != nil {
 			return err
 		}
 		if usedTempRef {

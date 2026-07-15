@@ -1,24 +1,28 @@
 package recap
 
-import "charm.land/lipgloss/v2"
+import (
+	"charm.land/lipgloss/v2"
+
+	"github.com/entireio/cli/cmd/entire/cli/palette"
+)
 
 const (
-	colorAccent = "214"
-	colorMuted  = "8"
-	colorBorder = "243"
-	colorInfo   = "6"
-	colorTeam   = "170"
+	colorAccent = palette.Accent
+	colorMuted  = palette.Muted
+	colorBorder = palette.Muted
+	colorInfo   = palette.Info
+	colorTeam   = palette.Accent2
 
-	colorActivityEmpty = "240"
-	colorActivityLow   = "6"
-	colorActivityMid   = "214"
+	colorActivityEmpty = palette.Muted
+	colorActivityLow   = palette.Cyan
+	colorActivityMid   = palette.Accent
 
-	colorLabelFeature     = "42"
-	colorLabelFix         = "203"
-	colorLabelInformation = "81"
-	colorLabelPerformance = "214"
-	colorLabelRefactor    = "220"
-	colorLabelTesting     = "170"
+	colorLabelFeature     = palette.Green
+	colorLabelFix         = palette.Red
+	colorLabelInformation = palette.Cyan
+	colorLabelPerformance = palette.Yellow
+	colorLabelRefactor    = palette.BrightYellow
+	colorLabelTesting     = palette.Magenta
 )
 
 type staticStyles struct {

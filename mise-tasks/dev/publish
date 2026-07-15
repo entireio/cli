@@ -1,10 +1,21 @@
 #!/usr/bin/env bash
-#MISE description="Install binaries into ~/go/bin"
+#MISE description="Install binaries into ~/go/bin (or a target folder)"
+#USAGE arg "[target]" help="Target folder to install binaries into; defaults to $GOPATH/bin or ~/go/bin"
 
 set -eu
 
-export GOBIN=${GOPATH:-$HOME/go}/bin
-echo "NOTE: we're overriding \$GOBIN: $GOBIN" 1>&2
+# Precedence: explicit target arg, else $GOPATH/bin, else ~/go/bin. We do NOT
+# fall back to a pre-existing $GOBIN: mise sets GOBIN to its own managed Go
+# toolchain dir, which is usually behind ~/go/bin on PATH, so honoring it
+# silently installs a shadowed binary the user never runs. Anyone wanting a
+# custom location passes it as the target arg.
+target=${usage_target:-${1:-}}
+GOBIN=${target:-${GOPATH:-$HOME/go}/bin}
+mkdir -p "$GOBIN"
+# go install requires an absolute GOBIN path
+GOBIN=$(cd "$GOBIN" && pwd)
+export GOBIN
+echo "Installing into: $GOBIN" 1>&2
 
 commands=(
   entire

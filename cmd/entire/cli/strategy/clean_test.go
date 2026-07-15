@@ -2,9 +2,7 @@ package strategy
 
 import (
 	"context"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -72,9 +70,10 @@ func TestIsShadowBranch(t *testing.T) {
 func TestListShadowBranches(t *testing.T) {
 	// Setup: create a temp git repo with various branches
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -146,9 +145,10 @@ func TestListShadowBranches(t *testing.T) {
 func TestListShadowBranches_Empty(t *testing.T) {
 	// Setup: create a temp git repo with no shadow branches
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -188,9 +188,10 @@ func TestListShadowBranches_Empty(t *testing.T) {
 func TestDeleteShadowBranches(t *testing.T) {
 	// Setup: create a temp git repo with shadow branches
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -252,9 +253,10 @@ func TestDeleteShadowBranches(t *testing.T) {
 func TestDeleteShadowBranches_NonExistent(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -295,10 +297,7 @@ func TestDeleteShadowBranches_NonExistent(t *testing.T) {
 func TestDeleteShadowBranches_Empty(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -326,9 +325,10 @@ func TestDeleteShadowBranches_Empty(t *testing.T) {
 func TestListOrphanedSessionStates_RecentSessionNotOrphaned(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -390,9 +390,10 @@ func TestListOrphanedSessionStates_RecentSessionNotOrphaned(t *testing.T) {
 func TestListOrphanedSessionStates_ShadowBranchMatching(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -474,63 +475,6 @@ func TestListOrphanedSessionStates_ShadowBranchMatching(t *testing.T) {
 	}
 }
 
-// In v1.1 mode, a session whose checkpoint lives only on v1 must be flagged
-// orphaned because the topology read goes to the (unset) mirror.
-func TestListOrphanedSessionStates_V11ReadsViaTopology(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	testutil.WriteFile(t, dir, "f.txt", "init")
-	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "init")
-
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	const sessionID = "test-session-v11-orphan"
-	cpID := id.MustCheckpointID("b2c3d4e5f6a1")
-	require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
-		CheckpointID: cpID,
-		SessionID:    sessionID,
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
-		Prompts:      []string{"prompt"},
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
-	}))
-
-	// BaseCommit is arbitrary; no shadow branch is created, so any value routes
-	// through the same orphan path. StartedAt clears the grace window.
-	state := &SessionState{
-		SessionID:  sessionID,
-		BaseCommit: "0000000000000000000000000000000000000000",
-		StartedAt:  time.Now().Add(-(sessionGracePeriod + time.Minute)),
-		StepCount:  1,
-	}
-	require.NoError(t, SaveSessionState(t.Context(), state))
-
-	settingsDir := filepath.Join(dir, ".entire")
-	require.NoError(t, os.MkdirAll(settingsDir, 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(settingsDir, paths.SettingsFileName),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
-		0o644,
-	))
-
-	orphans, err := ListOrphanedSessionStates(t.Context())
-	require.NoError(t, err)
-
-	var flagged bool
-	for _, item := range orphans {
-		if item.ID == sessionID {
-			flagged = true
-			break
-		}
-	}
-	assert.True(t, flagged, "session must be flagged orphaned: mirror is unset, so topology read returns no checkpoints")
-}
-
 // Archived sessions of a multi-session condensed checkpoint must not be
 // flagged as orphaned: their IDs appear in cp.SessionIDs even though
 // cp.SessionID is the most-recent session.
@@ -555,7 +499,7 @@ func TestListOrphanedSessionStates_MultiSessionArchivedNotOrphaned(t *testing.T)
 	// and lists both IDs in SessionIDs.
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	for _, sid := range []string{archivedSessionID, latestSessionID} {
-		require.NoError(t, store.WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
+		require.NoError(t, store.Write(t.Context(), checkpoint.Session{
 			CheckpointID: cpID,
 			SessionID:    sid,
 			Strategy:     "manual-commit",

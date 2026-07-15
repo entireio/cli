@@ -154,11 +154,46 @@ func TestInstallHooks_TurnStartUsesSyncHook(t *testing.T) {
 	}
 
 	content := string(data)
-	if !strings.Contains(content, `callHookSync("turn-start", {`) {
-		t.Fatal("plugin file should dispatch turn-start via callHookSync")
+	// turn-start is dispatched via fireTurnStart, which fires synchronously
+	// (Bun.spawnSync) so session state is ready before any mid-turn commit, and
+	// also captures the hook's stdout to apply Entire's one-time context injection.
+	if !strings.Contains(content, `fireTurnStart({`) {
+		t.Fatal("plugin file should dispatch turn-start via fireTurnStart")
+	}
+	if !strings.Contains(content, `const proc = Bun.spawnSync(hookCmd("turn-start"), {`) {
+		t.Fatal("fireTurnStart should dispatch turn-start synchronously via Bun.spawnSync")
 	}
 	if strings.Contains(content, `await callHook("turn-start", {`) {
 		t.Fatal("plugin file should not dispatch turn-start via async callHook")
+	}
+}
+
+func TestInstallHooks_AppliesContextInjection(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ag := &OpenCodeAgent{}
+
+	if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	pluginPath := filepath.Join(dir, ".opencode", "plugins", "entire.ts")
+	data, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("plugin file not created: %v", err)
+	}
+
+	content := string(data)
+	// The plugin must read the injection envelope from the turn-start hook's
+	// stdout and apply it to the system prompt via the chat system transform.
+	if !strings.Contains(content, `inject_context`) {
+		t.Fatal("plugin file should parse the inject_context envelope")
+	}
+	if !strings.Contains(content, `"experimental.chat.system.transform"`) {
+		t.Fatal("plugin file should apply injection via experimental.chat.system.transform")
+	}
+	if !strings.Contains(content, `output.system.push(pendingInjection)`) {
+		t.Fatal("plugin file should push the injection onto the system prompt")
 	}
 }
 

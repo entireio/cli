@@ -17,6 +17,12 @@ import (
 // BlobFetchFunc fetches missing blob objects by hash from a remote.
 type BlobFetchFunc func(ctx context.Context, hashes []plumbing.Hash) error
 
+// RefFetchFunc fetches a single checkpoint ref from the remote into the local
+// ref of the same name. The git-refs store uses it to resolve a checkpoint ref
+// that is not present locally (e.g. written on another machine). The checkpoint
+// package cannot resolve the remote target itself, so the CLI layer injects it.
+type RefFetchFunc func(ctx context.Context, ref plumbing.ReferenceName) error
+
 // FetchingTree wraps a git tree to automatically fetch missing blobs on demand.
 // After a treeless fetch (--filter=blob:none), tree objects are available locally
 // but blob objects are not. Each File() call checks whether the target blob
@@ -235,18 +241,6 @@ func (t *FetchingTree) Tree(path string) (*FetchingTree, error) {
 // RawEntries returns the direct tree entries (no blob reads needed).
 func (t *FetchingTree) RawEntries() []object.TreeEntry {
 	return t.inner.Entries
-}
-
-// Unwrap returns the underlying *object.Tree.
-func (t *FetchingTree) Unwrap() *object.Tree {
-	return t.inner
-}
-
-// Files returns a recursive file iterator from the underlying tree.
-// Warning: after a treeless fetch, this iterator will fail when it tries
-// to resolve blob objects. Use File() for on-demand blob fetching instead.
-func (t *FetchingTree) Files() *object.FileIter {
-	return t.inner.Files()
 }
 
 // FileReader provides read access to files within a git tree.

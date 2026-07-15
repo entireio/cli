@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/entireio/auth-go/sts"
-	"github.com/entireio/auth-go/tokens"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
+	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
 )
 
 func strPtr(v string) *string { return &v }
@@ -25,20 +28,19 @@ func strPtr(v string) *string { return &v }
 // failures got mis-labeled. This PR surfaces real errors but has to
 // keep the cancellation case silent.
 func TestRunActivity_SilencesContextCanceled(t *testing.T) {
-	// No t.Parallel: SetManagerForTest mutates package-level auth state.
-	store := newAuthMemStore()
-	saveCoreToken(t, store, authResolveTestIssuer, "opaque-core-token")
-
-	mgr := newResolveTestManager(t, store, func(context.Context, sts.ExchangeRequest) (*tokens.TokenSet, error) {
-		// Simulate the user hitting Ctrl+C mid-exchange. The real
-		// transport would return ctx.Err() wrapped; both shapes flow
-		// through errors.Is(err, context.Canceled) identically.
-		return nil, context.Canceled
-	})
-	t.Cleanup(auth.SetManagerForTest(t, mgr))
+	// No t.Parallel: SetResolveContextForAPIForTest mutates package-level
+	// auth state.
+	//
+	// Simulate the user hitting Ctrl+C during auth resolution: the
+	// cancellation surfaces from the discovery fetch, and runActivity must
+	// silence it rather than mislabel it "Not logged in".
+	t.Cleanup(auth.SetResolveContextForAPIForTest(t,
+		func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
+			return nil, context.Canceled
+		}))
 
 	var out, errOut bytes.Buffer
-	err := runActivity(t.Context(), &out, &errOut)
+	err := runActivity(t.Context(), &out, &errOut, false)
 	if err == nil {
 		t.Fatal("expected error when STS exchange is cancelled")
 	}
@@ -59,17 +61,20 @@ func TestRunActivity_SilencesContextCanceled(t *testing.T) {
 // hint and a SilentError so the raw "not logged in" string doesn't
 // also print via cobra.
 func TestRunActivity_PrintsLoginHintOnNotLoggedIn(t *testing.T) {
-	// No t.Parallel: SetManagerForTest mutates package-level auth state.
-	store := newAuthMemStore() // empty: LookupCoreToken returns "" → ErrNotLoggedIn
-
-	mgr := newResolveTestManager(t, store, func(context.Context, sts.ExchangeRequest) (*tokens.TokenSet, error) {
-		t.Fatal("exchange should not run when no core token is stored")
-		return nil, errors.New("unreachable")
-	})
-	t.Cleanup(auth.SetManagerForTest(t, mgr))
+	// No t.Parallel: SetResolveContextForAPIForTest mutates package-level
+	// auth state.
+	//
+	// Discovery selects a context whose keyring slot holds nothing, so the
+	// per-context provider reports ErrNotLoggedIn.
+	t.Cleanup(tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json")))
+	c := &contexts.Context{Name: "me@core", CoreURL: "https://core.example", Handle: "me", KeychainService: "kc:me"}
+	t.Cleanup(auth.SetResolveContextForAPIForTest(t,
+		func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
+			return c, nil
+		}))
 
 	var out, errOut bytes.Buffer
-	err := runActivity(t.Context(), &out, &errOut)
+	err := runActivity(t.Context(), &out, &errOut, false)
 	if err == nil {
 		t.Fatal("expected error when not logged in")
 	}

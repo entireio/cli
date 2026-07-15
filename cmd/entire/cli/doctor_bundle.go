@@ -16,11 +16,8 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
-	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/redact"
-	"github.com/go-git/go-git/v6"
 	"github.com/spf13/cobra"
 )
 
@@ -148,13 +145,13 @@ func writeDoctorBundle(ctx context.Context, repoRoot, outPath string, raw bool) 
 	return nil
 }
 
-// entireRefsReport captures entire-related git refs plus the mirror diagnosis.
+// entireRefsReport captures entire-related git refs.
 // Best-effort: failures are recorded in the report, not returned.
 func entireRefsReport(ctx context.Context, repoRoot string) string {
 	var sb strings.Builder
 
-	// Broad globs on purpose: refs/heads/entire also catches shadow/trails
-	// branches, refs/entire catches the v1.1 mirror and future custom refs.
+	// Broad globs on purpose: refs/heads/entire catches shadow/trails branches,
+	// and refs/entire captures custom or legacy Entire refs.
 	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(refname) %(objectname)",
 		"refs/heads/entire", "refs/entire", "refs/remotes/origin/entire")
 	cmd.Dir = repoRoot
@@ -164,28 +161,7 @@ func entireRefsReport(ctx context.Context, repoRoot string) string {
 		fmt.Fprintf(&sb, "[error: %v]\n", err)
 	}
 
-	sb.WriteString("\n")
-	sb.WriteString(mirrorStatusReportLine(ctx, repoRoot))
 	return sb.String()
-}
-
-// mirrorStatusReportLine renders the v1.1 mirror diagnosis for the bundle.
-func mirrorStatusReportLine(ctx context.Context, repoRoot string) string {
-	repo, err := git.PlainOpen(repoRoot)
-	if err != nil {
-		return fmt.Sprintf("mirror status: [error: %v]\n", err)
-	}
-	defer repo.Close()
-	// Scope settings to repoRoot; the bundle's CWD may be elsewhere.
-	diag, err := strategy.DiagnoseCommittedMetadataMirror(settings.WithWorktreeRoot(ctx, repoRoot), repo)
-	if err != nil {
-		return fmt.Sprintf("mirror status: [error: %v]\n", err)
-	}
-	if diag.Status == strategy.MirrorNotConfigured {
-		return "mirror status: not configured (checkpoints v1)\n"
-	}
-	return fmt.Sprintf("mirror status: %s (mirror %s, v1 %s)\n",
-		diag.Status, shortMirrorHash(diag.Mirror), shortMirrorHash(diag.Primary))
 }
 
 func versionInfoString() string {

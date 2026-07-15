@@ -153,7 +153,7 @@ func TestCondenseSession_SkipsWhenNoOverlapAndRedactionFails(t *testing.T) {
 
 	// Force the redactor to fail so redactedTranscript ends up empty.
 	originalRedactor := redactSessionJSONLBytes
-	redactSessionJSONLBytes = func(_ []byte) (redact.RedactedBytes, error) {
+	redactSessionJSONLBytes = func(_ context.Context, _ []byte) (redact.RedactedBytes, error) {
 		return redact.RedactedBytes{}, errors.New("simulated redaction failure")
 	}
 	t.Cleanup(func() { redactSessionJSONLBytes = originalRedactor })

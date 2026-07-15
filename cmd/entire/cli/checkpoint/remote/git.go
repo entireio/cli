@@ -1,21 +1,27 @@
 package remote
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
-	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
+
+// stampConfigTimeout bounds the local git-config reads/writes that mark a newly
+// created checkpoint remote as skipped. They run detached from the fetch's
+// context (see stampNewlyCreatedRemote), so a bound guards against a stuck
+// config lock hanging the caller.
+const stampConfigTimeout = 10 * time.Second
 
 // CheckpointTokenEnvVar is the environment variable for providing an access token
 // used to authenticate git push/fetch operations for checkpoint branches.
@@ -45,6 +51,15 @@ type FetchOptions struct {
 	// checkpoint ancestry. Do not set on generic branch fetches — it would
 	// silently convert a deliberately-shallow user clone into a full one.
 	Unshallow bool
+	// Depth adds --depth=<Depth>, fetching the refspec to this absolute depth.
+	// Unlike Unshallow (which is repo-global) this is ref-scoped: it fully
+	// fetches the named branch — healing a prior shallow boundary on it — while
+	// leaving an independently-shallow source-tree clone untouched, and it does
+	// not introduce shallowness on a full repo when the value exceeds the
+	// branch's length. Use a value above the branch's realistic length but below
+	// math.MaxInt32 (2147483647), which git special-cases as a global unshallow.
+	// Ignored when zero or when Shallow is set.
+	Depth     int
 	Dir       string   // working directory (empty = CWD)
 	ExtraArgs []string // additional flags before remote (e.g., "--no-write-fetch-head")
 }
@@ -65,14 +80,37 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	switch {
 	case opts.Shallow:
 		args = append(args, "--depth=1")
+	case opts.Depth > 0:
+		args = append(args, fmt.Sprintf("--depth=%d", opts.Depth))
 	case opts.Unshallow && isShallowRepository(ctx, opts.Dir):
 		args = append(args, "--unshallow")
 	}
-	if !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx) {
+	filtered := !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx)
+	if filtered {
 		args = append(args, "--filter=blob:none")
 	}
 	args = append(args, opts.Remote)
 	args = append(args, opts.RefSpecs...)
+
+	// A filtered fetch from a URL makes git record a URL-keyed remote section
+	// (remote.<url>.*) so it can lazy-fetch filtered-out objects later. That
+	// section also turns the URL into a phantom remote that `git fetch --all`
+	// and `git remote update` keep dialing. When this fetch is the one creating
+	// the section, stamp skipFetchAll so bulk fetches skip our adhoc remote.
+	// Remotes that already existed are left untouched so we never rewrite the
+	// user's config.
+	var stampURL string
+	var stampCandidate, existedBefore bool
+	if filtered && IsURL(opts.Remote) {
+		stampCandidate = true
+		stampURL = opts.Remote
+		if token := strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)); token != "" && isValidToken(token) {
+			// With a checkpoint token, newCommand rewrites SSH targets to HTTPS
+			// and git records the section under the rewritten URL.
+			stampURL, _ = resolveTargetForTokenAuth(ctx, stampURL)
+		}
+		existedBefore = gitRemoteSectionExists(ctx, opts.Dir, stampURL)
+	}
 
 	cmd := newCommand(ctx, args...)
 	if opts.Dir != "" {
@@ -80,10 +118,94 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	}
 	disableTerminalPrompt(cmd)
 	out, err := cmd.CombinedOutput()
+
+	if stampCandidate && !existedBefore {
+		stampNewlyCreatedRemote(ctx, opts.Dir, stampURL)
+	}
+
 	if err != nil {
 		return out, fmt.Errorf("git fetch: %w", err)
 	}
 	return out, nil
+}
+
+// stampNewlyCreatedRemote stamps a URL-keyed remote section that this fetch just
+// created. Git writes remote.<url>.promisor eagerly during connection setup, so
+// a filtered fetch that later fails still leaves the phantom remote behind;
+// stamping here — rather than only on fetch success — keeps it from lingering
+// unstamped forever (the section then exists on the next attempt, so it never
+// looks "new" again). Re-checking existence keeps us from inventing a section
+// when the fetch died before git wrote anything.
+//
+// The git-config commands run on a context detached from the fetch's deadline:
+// a filtered fetch that timed out leaves ctx already past its deadline, and
+// inheriting it would make these local commands fail immediately and leave the
+// phantom unstamped — the very miss this stamping exists to prevent.
+func stampNewlyCreatedRemote(ctx context.Context, dir, url string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stampConfigTimeout)
+	defer cancel()
+	if gitRemoteSectionExists(ctx, dir, url) {
+		markRemoteSkipped(ctx, dir, url)
+	}
+}
+
+// markRemoteSkipped stamps skipFetchAll on a URL-keyed remote section so
+// `git fetch --all` and `git remote update` skip it. Called only for remotes
+// this fetch just created, so an adhoc checkpoint URL never lingers as a phantom
+// remote that bulk fetches keep dialing.
+// Best-effort: the git config write is not worth failing the fetch over, so
+// failures only log.
+func markRemoteSkipped(ctx context.Context, dir, url string) {
+	fullKey := "remote." + url + ".skipFetchAll"
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", fullKey, "true")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	if out, cfgErr := cmd.CombinedOutput(); cfgErr != nil {
+		redactedURL := RedactURL(url)
+		// The output can echo the key, which embeds the URL — and a URL can
+		// carry credentials. Redact before logging.
+		msg := strings.TrimSpace(strings.ReplaceAll(string(out), url, redactedURL))
+		logging.Warn(ctx, "failed to mark remote config entry as skipped for bulk fetches",
+			slog.String("url", redactedURL),
+			slog.String("output", msg),
+			slog.String("error", cfgErr.Error()),
+		)
+	}
+}
+
+// gitRemoteSectionExists reports whether a remote.<url>.* config section already
+// exists in the local git config. Used to tell whether a filtered URL fetch is
+// about to create a new URL-keyed remote, so we only stamp remotes we create and
+// never rewrite ones the user already has.
+func gitRemoteSectionExists(ctx context.Context, dir, url string) bool {
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--list", "--name-only")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	// Each name is "remote.<url>.<key>". Git config keys carry no dots, so the
+	// final dotted component is the key and everything between "remote." and it
+	// is the subsection (the URL, whose case git preserves). Compare the
+	// subsection exactly so a longer URL that shares a prefix (e.g. a
+	// ".../repo.git" section vs a ".../repo" fetch) is not a false match.
+	for line := range strings.SplitSeq(string(out), "\n") {
+		rest, ok := strings.CutPrefix(line, "remote.")
+		if !ok {
+			continue
+		}
+		lastDot := strings.LastIndexByte(rest, '.')
+		if lastDot < 0 {
+			continue
+		}
+		if rest[:lastDot] == url {
+			return true
+		}
+	}
+	return false
 }
 
 // FetchBlobs fetches specific objects (typically blobs) by hash from a remote.
@@ -112,124 +234,6 @@ func FetchBlobs(ctx context.Context, remote string, hashes []string) error {
 		return fmt.Errorf("git fetch-pack from %s: %w", redactedURL, err)
 	}
 	return nil
-}
-
-// CatFilesOptions configures a git cat-file --batch read.
-type CatFilesOptions struct {
-	Specs     []string // one or more object names or revspecs
-	Dir       string   // working directory (empty = CWD)
-	ExtraArgs []string // additional flags before --batch
-}
-
-// CatFileResult is the result of reading one cat-file batch spec.
-type CatFileResult struct {
-	Content []byte
-	Missing bool
-	Err     error
-}
-
-// CatFiles reads specs through git cat-file --batch.
-func CatFiles(ctx context.Context, opts CatFilesOptions) map[string]CatFileResult {
-	specs := uniqueStrings(opts.Specs)
-	results := make(map[string]CatFileResult, len(specs))
-	if len(specs) == 0 {
-		return results
-	}
-
-	args := []string{"cat-file"}
-	args = append(args, opts.ExtraArgs...)
-	args = append(args, "--batch")
-	cmd := newCommand(ctx, args...)
-	if opts.Dir != "" {
-		cmd.Dir = opts.Dir
-	}
-	cmd.Stdin = strings.NewReader(strings.Join(specs, "\n") + "\n")
-	disableTerminalPrompt(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	output, err := cmd.Output()
-	if err != nil {
-		wrapped := catFilesError(err, stderr.String())
-		for _, spec := range specs {
-			results[spec] = CatFileResult{Err: wrapped}
-		}
-		return results
-	}
-
-	reader := bufio.NewReader(bytes.NewReader(output))
-	for i, spec := range specs {
-		result, parseErr := parseBlobBatchEntry(reader)
-		if parseErr != nil {
-			for _, s := range specs[i:] {
-				results[s] = CatFileResult{Err: parseErr}
-			}
-			break
-		}
-		results[spec] = result
-	}
-	return results
-}
-
-func parseBlobBatchEntry(reader *bufio.Reader) (CatFileResult, error) {
-	header, err := reader.ReadString('\n')
-	if err != nil {
-		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: %w", err)
-	}
-	header = strings.TrimSuffix(header, "\n")
-
-	fields := strings.Fields(header)
-	if len(fields) == 2 && fields[1] == "missing" {
-		return CatFileResult{Missing: true}, nil
-	}
-	if len(fields) != 3 {
-		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: unexpected header %q", header)
-	}
-
-	size, err := strconv.ParseInt(fields[2], 10, 64)
-	if err != nil {
-		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: invalid size %q: %w", fields[2], err)
-	}
-	content := make([]byte, size)
-	if _, err := io.ReadFull(reader, content); err != nil {
-		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: %w", err)
-	}
-	separator, err := reader.ReadByte()
-	if err != nil {
-		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: %w", err)
-	}
-	if separator != '\n' {
-		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: unexpected separator %q", separator)
-	}
-
-	if fields[1] != "blob" {
-		return CatFileResult{Err: fmt.Errorf("object %s is %s, want blob", fields[0], fields[1])}, nil
-	}
-	return CatFileResult{Content: content}, nil
-}
-
-func catFilesError(err error, stderr string) error {
-	msg := strings.TrimSpace(stderr)
-	if msg == "" {
-		return fmt.Errorf("git cat-file --batch: %w", err)
-	}
-	return fmt.Errorf("git cat-file --batch: %s: %w", msg, err)
-}
-
-func uniqueStrings(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	unique := make([]string, 0, len(values))
-	for _, value := range values {
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		unique = append(unique, value)
-	}
-	return unique
 }
 
 // PushResult holds raw porcelain output from git push.

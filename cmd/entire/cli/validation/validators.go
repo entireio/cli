@@ -21,6 +21,9 @@ func ValidateSessionID(id string) error {
 	if strings.TrimSpace(id) == "" {
 		return errors.New("session ID cannot be empty")
 	}
+	if strings.HasPrefix(id, "-") {
+		return fmt.Errorf("invalid session ID %q: starts with dash", id)
+	}
 	if strings.ContainsAny(id, "/\\") {
 		return fmt.Errorf("invalid session ID %q: contains path separators", id)
 	}
@@ -79,6 +82,9 @@ func ValidateAgentID(id string) error {
 func ValidateAgentSessionID(id string) error {
 	if id == "" {
 		return errors.New("agent session ID cannot be empty")
+	}
+	if strings.HasPrefix(id, "-") {
+		return fmt.Errorf("invalid agent session ID %q: starts with dash", id)
 	}
 	if !pathSafeRegex.MatchString(id) {
 		return fmt.Errorf("invalid agent session ID %q: must be alphanumeric with underscores/hyphens only", id)

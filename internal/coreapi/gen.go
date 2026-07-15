@@ -7,12 +7,19 @@
 // upstream spec/core.openapi.json). Do not edit them by hand. To refresh:
 //
 //	curl -fsSL https://us.console.entire.io/api/v1/openapi.json \
-//	    -o internal/coreapi/spec/core.openapi.json
+//	    | jq . > internal/coreapi/spec/core.openapi.json
 //	go generate ./internal/coreapi/...
 //
 // The hand-written authenticated constructor and error helpers live in
 // client.go alongside the generated code.
+//
+// The trailing `gofmt -s -w .` is load-bearing: ogen emits empty role
+// slices as `[]string{}`, but `lint:gofmt` enforces the simplified form
+// (`gofmt -l -s`), which collapses them to `{}`. Running the simplify pass
+// here keeps a bare `go generate` idempotent and CI-clean instead of
+// leaving churn that lint rejects.
 package coreapi
 
 //go:generate go run spec/normalize.go
 //go:generate go run github.com/ogen-go/ogen/cmd/ogen@v1.20.3 --target . --package coreapi --config ogen.yml --clean spec/core.gen.json
+//go:generate gofmt -s -w .

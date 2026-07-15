@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -25,6 +26,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
@@ -62,6 +64,14 @@ type TestEnv struct {
 	// invocations (RunPrePush, GitCommitWithShadowHooks, etc.). Use this to
 	// pass ENTIRE_CHECKPOINT_TOKEN, GIT_SSL_CAINFO, and similar per-test env.
 	ExtraEnv []string
+
+	// CheckpointStore, when set (via ForEachBackend), selects the checkpoint
+	// storage backend for every spawned CLI/hook by injecting
+	// ENTIRE_CHECKPOINTS_PRIMARY into their environment. Empty means the CLI
+	// default (git-branch). It must be set before the first checkpoint-creating
+	// operation; the InitRepo/InitEntire/GitCommit factory steps create no
+	// checkpoints, so setting it right after a factory call is safe.
+	CheckpointStore string
 }
 
 // NewTestEnv creates a new isolated test environment.
@@ -129,7 +139,19 @@ func (env *TestEnv) cliEnv() []string {
 		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 	)
+	base = append(base, env.checkpointStoreEnv()...)
 	return append(base, env.ExtraEnv...)
+}
+
+// checkpointStoreEnv returns the ENTIRE_CHECKPOINTS_PRIMARY override for the
+// selected backend, or nil when unset. Included in both cliEnv (RunCLI, resume,
+// pre-push) and gitHookEnv (post-commit condensation, prepare-commit-msg) so the
+// backend is consistent across every subprocess a test spawns.
+func (env *TestEnv) checkpointStoreEnv() []string {
+	if env.CheckpointStore == "" {
+		return nil
+	}
+	return []string{settings.EnvCheckpointsPrimary + "=" + env.CheckpointStore}
 }
 
 // RunCLI runs the entire CLI with the given arguments and returns stdout.
@@ -291,15 +313,21 @@ func (env *TestEnv) gitConfigPath() string {
 var gitConfigGuardRepositoryFormatVersionRE = regexp.MustCompile(`(?m)^([ \t]*)repositoryformatversion = [01]$`)
 
 var gitConfigGuardTransportPromisorRemoteRE = regexp.MustCompile(
-	`(?m)^\[remote "(?:(?:https?|ssh|file)://|/|[A-Za-z]:[\\/]|[^"\n]+@[^"\n]+:[^"\n]+).+"\]\n(?:[ \t]+promisor = true\n[ \t]+partialclonefilter = blob:none\n?|[ \t]+partialclonefilter = blob:none\n[ \t]+promisor = true\n?)`,
+	`(?m)^\[remote "(?:(?:https?|ssh|file)://|/|[A-Za-z]:[\\/]|[^"\n]+@[^"\n]+:[^"\n]+).+"\]\n(?:[ \t]+(?:promisor = true|partialclonefilter = blob:none|skipFetchAll = true)\n?){2,3}`,
 )
 
 func normalizeGitConfigForGuard(content string) string {
 	content = gitConfigGuardRepositoryFormatVersionRE.ReplaceAllString(content, `${1}repositoryformatversion = <normalized>`)
-	// Deliberately ignore only the full promisor+partialclonefilter pair that
-	// git writes for transport-keyed remotes during filtered fetches. If git ever
-	// writes a partial section, the guard should still fail loudly.
-	content = gitConfigGuardTransportPromisorRemoteRE.ReplaceAllString(content, "")
+	// Deliberately ignore only the URL-keyed remote sections written during
+	// filtered fetches: git's promisor+partialclonefilter pair plus the
+	// skipFetchAll stamp the CLI adds so bulk fetches skip the entry. A section
+	// without the full promisor pair (or with any other key) still fails loudly.
+	content = gitConfigGuardTransportPromisorRemoteRE.ReplaceAllStringFunc(content, func(section string) string {
+		if strings.Contains(section, "promisor = true") && strings.Contains(section, "partialclonefilter = blob:none") {
+			return ""
+		}
+		return section
+	})
 	return content
 }
 
@@ -692,14 +720,17 @@ type RewindPoint struct {
 func (env *TestEnv) GetRewindPoints() []RewindPoint {
 	env.T.Helper()
 
-	// Run rewind --list using the shared binary
+	// Run rewind --list using the shared binary. Parse stdout only — the
+	// deprecated command prints a notice on stderr that would break the JSON.
 	cmd := exec.Command(getTestBinary(), "checkpoint", "rewind", "--list")
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
 
-	output, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
 	if err != nil {
-		env.T.Fatalf("rewind --list failed: %v\nOutput: %s", err, output)
+		env.T.Fatalf("rewind --list failed: %v\nOutput: %s\nStderr: %s", err, output, stderr.String())
 	}
 
 	// Parse JSON output
@@ -944,7 +975,7 @@ func (env *TestEnv) sessionMetadataMatchesID(metadataPath, sessionID string) boo
 	if !found {
 		return false
 	}
-	var meta checkpoint.CommittedMetadata
+	var meta checkpoint.Metadata
 	if err := json.Unmarshal([]byte(content), &meta); err != nil {
 		return false
 	}
@@ -1078,6 +1109,10 @@ func (env *TestEnv) gitHookEnv(extra ...string) []string {
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_TEST_OPENCODE_MOCK_EXPORT=1",
 	)
+	// Propagate per-test overrides (e.g. agent project/store dirs) to hook
+	// subprocesses. Empty for tests that don't set ExtraEnv.
+	envVars = append(envVars, env.ExtraEnv...)
+	envVars = append(envVars, env.checkpointStoreEnv()...)
 	return append(envVars, extra...)
 }
 
@@ -1537,7 +1572,7 @@ type CheckpointValidation struct {
 // ValidateCheckpoint performs comprehensive validation of a checkpoint on the metadata branch.
 // It validates:
 // - Root metadata.json (CheckpointSummary) structure and expected fields
-// - Session metadata.json (CommittedMetadata) structure and expected fields
+// - Session metadata.json (Metadata) structure and expected fields
 // - Transcript file (full.jsonl) is valid JSONL and contains expected content
 // - Content hash file (content_hash.txt) matches SHA256 of transcript
 // - Prompt file (prompt.txt) contains expected prompts
@@ -1547,7 +1582,7 @@ func (env *TestEnv) ValidateCheckpoint(v CheckpointValidation) {
 	// Validate root metadata.json (CheckpointSummary)
 	env.validateCheckpointSummary(v)
 
-	// Validate session metadata.json (CommittedMetadata)
+	// Validate session metadata.json (Metadata)
 	env.validateSessionMetadata(v)
 
 	// Validate transcript is valid JSONL
@@ -1611,7 +1646,7 @@ func (env *TestEnv) validateCheckpointSummary(v CheckpointValidation) {
 	}
 }
 
-// validateSessionMetadata validates the session-level metadata.json (CommittedMetadata).
+// validateSessionMetadata validates the session-level metadata.json (Metadata).
 func (env *TestEnv) validateSessionMetadata(v CheckpointValidation) {
 	env.T.Helper()
 
@@ -1621,29 +1656,29 @@ func (env *TestEnv) validateSessionMetadata(v CheckpointValidation) {
 		env.T.Fatalf("Session metadata not found at %s", metadataPath)
 	}
 
-	var metadata checkpoint.CommittedMetadata
+	var metadata checkpoint.Metadata
 	if err := json.Unmarshal([]byte(content), &metadata); err != nil {
-		env.T.Fatalf("Failed to parse CommittedMetadata: %v\nContent: %s", err, content)
+		env.T.Fatalf("Failed to parse Metadata: %v\nContent: %s", err, content)
 	}
 
 	// Validate checkpoint_id
 	if metadata.CheckpointID.String() != v.CheckpointID {
-		env.T.Errorf("CommittedMetadata.CheckpointID = %q, want %q", metadata.CheckpointID, v.CheckpointID)
+		env.T.Errorf("Metadata.CheckpointID = %q, want %q", metadata.CheckpointID, v.CheckpointID)
 	}
 
 	// Validate session_id
 	if v.SessionID != "" && metadata.SessionID != v.SessionID {
-		env.T.Errorf("CommittedMetadata.SessionID = %q, want %q", metadata.SessionID, v.SessionID)
+		env.T.Errorf("Metadata.SessionID = %q, want %q", metadata.SessionID, v.SessionID)
 	}
 
 	// Validate strategy
 	if v.Strategy != "" && metadata.Strategy != v.Strategy {
-		env.T.Errorf("CommittedMetadata.Strategy = %q, want %q", metadata.Strategy, v.Strategy)
+		env.T.Errorf("Metadata.Strategy = %q, want %q", metadata.Strategy, v.Strategy)
 	}
 
 	// Validate created_at is not zero
 	if metadata.CreatedAt.IsZero() {
-		env.T.Error("CommittedMetadata.CreatedAt should not be zero")
+		env.T.Error("Metadata.CreatedAt should not be zero")
 	}
 
 	// Validate files_touched
@@ -1654,14 +1689,14 @@ func (env *TestEnv) validateSessionMetadata(v CheckpointValidation) {
 		}
 		for _, expected := range v.FilesTouched {
 			if !touchedSet[expected] {
-				env.T.Errorf("CommittedMetadata.FilesTouched missing %q, got %v", expected, metadata.FilesTouched)
+				env.T.Errorf("Metadata.FilesTouched missing %q, got %v", expected, metadata.FilesTouched)
 			}
 		}
 	}
 
 	// Validate checkpoints_count
 	if v.CheckpointsCount > 0 && metadata.CheckpointsCount != v.CheckpointsCount {
-		env.T.Errorf("CommittedMetadata.CheckpointsCount = %d, want %d", metadata.CheckpointsCount, v.CheckpointsCount)
+		env.T.Errorf("Metadata.CheckpointsCount = %d, want %d", metadata.CheckpointsCount, v.CheckpointsCount)
 	}
 }
 
@@ -1869,6 +1904,7 @@ func (env *TestEnv) CloneFrom(bareDir string) *TestEnv {
 		ClaudeProjectDir:   claudeProjectDir,
 		GeminiProjectDir:   geminiProjectDir,
 		OpenCodeProjectDir: openCodeProjectDir,
+		CheckpointStore:    env.CheckpointStore,
 	}
 
 	// Initialize Entire in the clone
@@ -1918,7 +1954,10 @@ func (env *TestEnv) PatchSettings(extra map[string]any) {
 	}
 }
 
-// GitPush pushes a branch to a remote. Fails the test on error.
+// GitPush pushes a branch to a remote with --no-verify, bypassing the pre-push
+// hook. Use this for setup plumbing (seeding remotes, pushing the user branch)
+// where the checkpoint sync should NOT run. To exercise the real hook, use
+// GitPushWithHooks. Fails the test on error.
 func (env *TestEnv) GitPush(remote, refSpec string) {
 	env.T.Helper()
 
@@ -1930,8 +1969,50 @@ func (env *TestEnv) GitPush(remote, refSpec string) {
 	}
 }
 
-// RunPrePush runs the pre-push hook via the CLI binary, consistent with how
-// other CLI invocations (GitCommitWithShadowHooks, RunCLI) use env.cliEnv().
+// InstallRealPrePushHook writes .git/hooks/pre-push so a plain `git push` (no
+// --no-verify) runs the checkpoint sync exactly as git runs it: git invokes the
+// hook with the remote name ($1) and URL ($2) as argv and feeds
+// "<local-ref> <local-sha> <remote-ref> <remote-sha>" lines on stdin. The hook
+// inherits the pushing process's environment, so the checkpoint-store and git
+// isolation overrides from GitPushWithHooks propagate into it.
+func (env *TestEnv) InstallRealPrePushHook() {
+	env.T.Helper()
+
+	hooksDir := filepath.Join(env.RepoDir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		env.T.Fatalf("failed to create hooks dir: %v", err)
+	}
+	// Quote the binary path so a temp path containing spaces still execs.
+	script := fmt.Sprintf("#!/bin/sh\nexec %q hooks git pre-push \"$1\"\n", getTestBinary())
+	hookPath := filepath.Join(hooksDir, "pre-push")
+	if err := os.WriteFile(hookPath, []byte(script), 0o755); err != nil { //nolint:gosec // G306: hook scripts must be executable
+		env.T.Fatalf("failed to write pre-push hook: %v", err)
+	}
+}
+
+// GitPushWithHooks pushes a branch to a remote WITHOUT --no-verify, so the
+// installed pre-push hook (see InstallRealPrePushHook) runs as part of the push.
+// This is the real-git path: git feeds the hook realistic stdin refspec lines
+// and the remote name/URL argv, so the checkpoint sync happens without any
+// explicit RunPrePush. Fails the test on error.
+func (env *TestEnv) GitPushWithHooks(remote, refSpec string) {
+	env.T.Helper()
+
+	env.InstallRealPrePushHook()
+
+	cmd := execx.NonInteractive(env.T.Context(), "git", "push", remote, refSpec)
+	cmd.Dir = env.RepoDir
+	cmd.Env = env.cliEnv()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		env.T.Fatalf("git push (with hooks) %s %s failed: %v\n%s", remote, refSpec, err, output)
+	}
+}
+
+// RunPrePush runs the pre-push hook via the CLI binary, feeding realistic stdin
+// refspec lines for the current branch (see defaultPrePushStdin). This is the
+// direct-invocation stand-in for GitPushWithHooks used by tests that don't push
+// the user branch. Consistent with other CLI invocations (RunCLI) it uses
+// env.cliEnv().
 func (env *TestEnv) RunPrePush(remote string) {
 	env.T.Helper()
 	if err := env.RunPrePushWithError(remote); err != nil {
@@ -1942,11 +2023,24 @@ func (env *TestEnv) RunPrePush(remote string) {
 // RunPrePushWithError runs the pre-push hook and returns any error instead of failing.
 func (env *TestEnv) RunPrePushWithError(remote string) error {
 	env.T.Helper()
+	return env.runPrePush(remote, env.defaultPrePushStdin())
+}
 
+// RunPrePushWithStdin runs the pre-push hook feeding the given stdin verbatim.
+// Pass "" to exercise the real no-op case (a `git push` with nothing new to
+// push feeds the hook empty stdin).
+func (env *TestEnv) RunPrePushWithStdin(remote, stdin string) error {
+	env.T.Helper()
+	return env.runPrePush(remote, stdin)
+}
+
+func (env *TestEnv) runPrePush(remote, stdin string) error {
 	cmd := exec.CommandContext(env.T.Context(), getTestBinary(), "hooks", "git", "pre-push", remote)
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
-	cmd.Stdin = nil
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 
 	output, err := cmd.CombinedOutput()
 	env.T.Logf("pre-push output: %s", output)
@@ -1954,6 +2048,29 @@ func (env *TestEnv) RunPrePushWithError(remote string) error {
 		return fmt.Errorf("pre-push hook failed: %w", err)
 	}
 	return nil
+}
+
+// defaultPrePushStdin builds the stdin line git feeds a pre-push hook for the
+// current branch: "<local-ref> <local-sha> <remote-ref> <remote-sha>". The
+// remote sha is all-zeros (a new branch) since it doesn't change the checkpoint
+// sync behavior. Returns "" when HEAD is detached or unresolvable, so callers
+// exercise the empty-stdin (no-op) case.
+func (env *TestEnv) defaultPrePushStdin() string {
+	branch := env.GetCurrentBranch()
+	if branch == "" {
+		return ""
+	}
+	repo, err := gitrepo.OpenPath(env.RepoDir)
+	if err != nil {
+		return ""
+	}
+	defer repo.Close()
+	head, err := repo.Head()
+	if err != nil {
+		return ""
+	}
+	ref := "refs/heads/" + branch
+	return fmt.Sprintf("%s %s %s %s\n", ref, head.Hash().String(), ref, plumbing.ZeroHash.String())
 }
 
 // FetchMetadataBranch fetches the entire/checkpoints/v1 branch from a remote URL.

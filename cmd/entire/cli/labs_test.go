@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/entireio/cli/cmd/entire/cli/experimental"
 )
 
 func TestLabsCmd_PrintsExperimentalCommandList(t *testing.T) {
@@ -30,6 +32,11 @@ func TestLabsCmd_PrintsExperimentalCommandList(t *testing.T) {
 		"entire review --help",
 		"entire replay --help",
 		"entire eval --help",
+		"entire tokens",
+		"entire tokens profile",
+		"entire tokens profile --help",
+		"entire session tokens",
+		"entire session tokens --help",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("entire labs output missing %q:\n%s", want, got)
@@ -81,43 +88,69 @@ func TestLabsCmd_RejectsTopicWithoutRunningIt(t *testing.T) {
 	}
 }
 
-func TestLabsCmd_UnknownTopicPointsBackToLabs(t *testing.T) {
-	t.Parallel()
-
-	root := NewRootCmd()
-	var out, errOut bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&errOut)
-	root.SetArgs([]string{"labs", "unknown-topic"})
-
-	err := root.Execute()
-	if err == nil {
-		t.Fatal("entire labs unknown-topic should return an error")
-	}
-	stderr := errOut.String()
-	if !strings.Contains(stderr, "entire labs") || strings.Contains(stderr, "entire unknown-topic --help") {
-		t.Fatalf("stderr should point unknown topics back to labs without inventing a command, got:\n%s", stderr)
-	}
-}
-
-func TestRootHelp_ShowsLabsButHidesReview(t *testing.T) {
-	t.Parallel()
-
+// rootHelp renders `entire --help` and returns its stdout.
+func rootHelp(t *testing.T) string {
+	t.Helper()
 	root := NewRootCmd()
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&bytes.Buffer{})
 	root.SetArgs([]string{"--help"})
-
 	if err := root.Execute(); err != nil {
 		t.Fatalf("entire --help failed: %v", err)
 	}
-	got := out.String()
+	return out.String()
+}
+
+// TestRootHelp_AlwaysShowsLabs confirms the labs command is present in root
+// help regardless of the experimental visibility gate — labs is the always-on
+// discovery entry point for experimental workflows.
+func TestRootHelp_AlwaysShowsLabs(t *testing.T) {
+	t.Parallel()
+
+	got := rootHelp(t)
 	if !strings.Contains(got, "labs") || !strings.Contains(got, "Explore experimental Entire workflows") {
 		t.Fatalf("root help should include labs command, got:\n%s", got)
 	}
-	if strings.Contains(got, "review") {
-		t.Fatalf("root help should not include review while it is listed in labs, got:\n%s", got)
+}
+
+// experimentalCommandMarkers are substrings that only appear in root help when
+// experimental commands are visible.
+var experimentalCommandMarkers = []string{
+	"Experimental commands:",
+	"review",
+	"tokens                 Analyze token usage across sessions and checkpoints",
+}
+
+// TestRootHelp_ReleaseHidesExperimental verifies a shipped build
+// (experimental.Visible="false") omits experimental commands and the group
+// header from root help. Mutates the global gate, so it cannot run in parallel.
+func TestRootHelp_ReleaseHidesExperimental(t *testing.T) {
+	withVisible(t, "false")
+
+	got := rootHelp(t)
+	for _, marker := range experimentalCommandMarkers {
+		if strings.Contains(got, marker) {
+			t.Fatalf("release root help should not include %q, got:\n%s", marker, got)
+		}
+	}
+}
+
+// TestRootHelp_DevShowsExperimentalGroup verifies a developer build
+// (experimental.Visible="true") shows experimental commands under the
+// "Experimental commands:" group in root help. Mutates the global gate, so it
+// cannot run in parallel.
+func TestRootHelp_DevShowsExperimentalGroup(t *testing.T) {
+	withVisible(t, "true")
+
+	got := rootHelp(t)
+	if !strings.Contains(got, experimental.GroupID) && !strings.Contains(got, "Experimental commands:") {
+		t.Fatalf("dev root help should include the experimental group header, got:\n%s", got)
+	}
+	for _, marker := range experimentalCommandMarkers {
+		if !strings.Contains(got, marker) {
+			t.Fatalf("dev root help should include %q, got:\n%s", marker, got)
+		}
 	}
 }
 
@@ -166,12 +199,12 @@ func TestRenderExperimentalCommands_ColumnWidthAdjustsToLongest(t *testing.T) {
 	t.Parallel()
 
 	short := []experimentalCommandInfo{
-		{Name: "a", Invocation: "entire a", Summary: "first"},
-		{Name: "b", Invocation: "entire b", Summary: "second"},
+		{Invocation: "entire a", Summary: "first"},
+		{Invocation: "entire b", Summary: "second"},
 	}
 	long := []experimentalCommandInfo{
-		{Name: "a", Invocation: "entire a", Summary: "first"},
-		{Name: "verylongcommand", Invocation: "entire verylongcommand", Summary: "second"},
+		{Invocation: "entire a", Summary: "first"},
+		{Invocation: "entire verylongcommand", Summary: "second"},
 	}
 
 	shortCol := summaryColumns(t, short)[0]
@@ -196,8 +229,8 @@ func TestRenderExperimentalCommands_MultiByteInvocationAligns(t *testing.T) {
 	// padding, len("entire ▶▶") == 13 >= 12 would skip padding and misalign the
 	// row; rune-based padding correctly adds 3 spaces.
 	commands := []experimentalCommandInfo{
-		{Name: "long", Invocation: "entire aaaaa", Summary: "first"},
-		{Name: "multibyte", Invocation: "entire ▶▶", Summary: "second"},
+		{Invocation: "entire aaaaa", Summary: "first"},
+		{Invocation: "entire ▶▶", Summary: "second"},
 	}
 
 	if got := len("entire ▶▶"); got < 12 {
@@ -215,12 +248,12 @@ func TestLabsRegistryCommandsExistAtCanonicalPaths(t *testing.T) {
 
 	root := NewRootCmd()
 	for _, info := range experimentalCommands {
-		cmd, _, err := root.Find([]string{info.Name})
+		cmd, _, err := root.Find(info.CommandPath)
 		if err != nil {
-			t.Fatalf("labs command %q should exist at canonical path: %v", info.Name, err)
+			t.Fatalf("labs command %q should exist at canonical path: %v", info.Invocation, err)
 		}
 		if cmd == nil {
-			t.Fatalf("labs command %q resolved to nil command", info.Name)
+			t.Fatalf("labs command %q resolved to nil command", info.Invocation)
 		}
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -29,22 +28,25 @@ const (
 	PromptFileName           = "prompt.txt"
 	TranscriptFileName       = "full.jsonl"
 	TranscriptFileNameLegacy = "full.log"
-	MetadataFileName         = "metadata.json"
-	CheckpointFileName       = "checkpoint.json"
-	ContentHashFileName      = "content_hash.txt"
-	SettingsFileName         = "settings.json"
+	// CompactTranscriptFileName is the compact transcript stored alongside
+	// full.jsonl. It holds the full compacted session; this checkpoint's slice
+	// begins at the session metadata's compact_transcript_start.
+	CompactTranscriptFileName = "transcript.jsonl"
+	MetadataFileName          = "metadata.json"
+	CheckpointFileName        = "checkpoint.json"
+	ContentHashFileName       = "content_hash.txt"
+	SettingsFileName          = "settings.json"
+
+	// AssetsDir is the per-session subfolder holding externalized transcript
+	// assets (e.g. images); AssetsManifestFile indexes them. AssetsDirName is the
+	// bare tree-entry name (no trailing slash) used when walking git trees.
+	AssetsDirName      = "assets"
+	AssetsDir          = "assets/"
+	AssetsManifestFile = "assets/manifest.json"
 )
 
 // MetadataBranchName is the orphan branch used by manual-commit strategy to store metadata
 const MetadataBranchName = "entire/checkpoints/v1"
-
-// MetadataRefName is the v1 custom ref that committed metadata is mirrored to
-// when checkpoints_version is "1.1". It lives under refs/entire/ (not
-// refs/heads/) so it stays invisible to `git branch -a` and is not pulled by a
-// default `git clone`. v1 remains the source of truth; this ref mirrors it.
-// When v1.1 is enabled, committed reads resolve against this ref, active v1
-// write/fetch paths update the mirror, and PrePush pushes it alongside v1.
-const MetadataRefName = "refs/entire/checkpoints/v1.1"
 
 // TrailsBranchName is the orphan branch used to store trail metadata.
 // Trails are branch-centric work tracking abstractions that link to checkpoints by branch name.
@@ -145,7 +147,13 @@ func IsSubpath(parent, child string) bool {
 	if err != nil {
 		return false
 	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return !IsRelativeTraversal(rel)
+}
+
+// IsRelativeTraversal reports whether rel escapes its base directory.
+// It accepts both OS-native paths and Git-style slash-normalized paths.
+func IsRelativeTraversal(rel string) bool {
+	return rel == ".." || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, `..\`)
 }
 
 // ToRelativePath converts an absolute path to relative.
@@ -165,7 +173,7 @@ func ToRelativePath(absPath, cwd string) string {
 		return absPath
 	}
 	relPath, err := filepath.Rel(cwd, absPath)
-	if err != nil || strings.HasPrefix(relPath, "..") {
+	if err != nil || IsRelativeTraversal(relPath) {
 		return ""
 	}
 
@@ -186,34 +194,6 @@ func normalizeMSYSPath(p string) string {
 		return string(unicode.ToUpper(rune(p[1]))) + ":" + p[2:]
 	}
 	return p
-}
-
-// nonAlphanumericRegex matches any non-alphanumeric character
-var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9]`)
-
-// SanitizePathForClaude converts a path to Claude's project directory format.
-// Claude replaces any non-alphanumeric character with a dash.
-func SanitizePathForClaude(path string) string {
-	return nonAlphanumericRegex.ReplaceAllString(path, "-")
-}
-
-// GetClaudeProjectDir returns the directory where Claude stores session transcripts
-// for the given repository path.
-//
-// In test environments, set ENTIRE_TEST_CLAUDE_PROJECT_DIR to override the default location.
-func GetClaudeProjectDir(repoPath string) (string, error) {
-	override := os.Getenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR")
-	if override != "" {
-		return override, nil
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	projectDir := SanitizePathForClaude(repoPath)
-	return filepath.Join(homeDir, ".claude", "projects", projectDir), nil
 }
 
 // SessionMetadataDirFromSessionID returns the path to a session's metadata directory

@@ -64,31 +64,76 @@ func NewTmuxSession(name string, dir string, unsetEnv []string, command string, 
 }
 
 func (s *TmuxSession) Send(input string) error {
-	preSend := stableContent(s.Capture())
-	// Send text and Enter separately — Claude's TUI can swallow Enter
+	preSendRaw := s.Capture()
+	// Send text and Enter separately — TUIs (Claude, droid) can swallow Enter
 	// if it arrives before the input handler finishes processing the text.
+	// Droid ingests long pasted prompts over several seconds, so wait until
+	// the echoed input has fully rendered before submitting.
 	if err := s.SendKeys(input); err != nil {
 		return err
 	}
-	time.Sleep(200 * time.Millisecond)
-	if err := s.SendKeys("Enter"); err != nil {
-		return err
-	}
+	settled := s.waitForInputIngested(preSendRaw)
 
-	// Wait for the terminal to reflect the echoed input, then snapshot.
-	// This ensures WaitFor compares against post-echo content, preventing
-	// false matches on prompt characters (e.g. ❯) in the echoed input.
-	deadline := time.Now().Add(5 * time.Second)
+	// Snapshot the post-echo, pre-submit content. WaitFor requires content to
+	// change from this snapshot before it can settle, preventing false matches
+	// on prompt characters (e.g. ❯) in the echoed input. Taken before Enter so
+	// it can never include response output from a fast agent.
+	s.stableAtSend = stableContent(settled)
+
+	// Verify the pane reacted to Enter; a swallowed Enter leaves the prompt
+	// sitting unsubmitted in the input box. Retry a couple of times — TUIs
+	// treat Enter on an already-submitted (empty) input box as a no-op, and
+	// the vogon REPL ignores empty lines.
+	preEnter := settled
+	for range 3 {
+		if err := s.SendKeys("Enter"); err != nil {
+			return err
+		}
+		if s.paneChangedFrom(preEnter, 2*time.Second) {
+			break
+		}
+		preEnter = s.Capture()
+	}
+	return nil
+}
+
+// waitForInputIngested waits until the pane content has changed from preSend
+// (the echoed input is visible) and held still for two consecutive polls
+// (the TUI's input handler has caught up — droid renders long pastes in
+// bursts, so a single quiet interval can fake stability), then returns the
+// settled content. Gives up after 15s and returns the last capture.
+//
+// Compares raw captures: the input box lives in the bottom lines that
+// stableContent strips, so stable comparison would be blind to the echo.
+func (s *TmuxSession) waitForInputIngested(preSend string) string {
+	deadline := time.Now().Add(15 * time.Second)
+	last := s.Capture()
+	stablePolls := 0
 	for time.Now().Before(deadline) {
-		time.Sleep(200 * time.Millisecond)
-		current := stableContent(s.Capture())
-		if current != preSend {
-			s.stableAtSend = current
-			return nil
+		time.Sleep(300 * time.Millisecond)
+		current := s.Capture()
+		if current != last || current == preSend {
+			stablePolls = 0
+			last = current
+			continue
+		}
+		stablePolls++
+		if stablePolls >= 2 {
+			return current
 		}
 	}
-	s.stableAtSend = stableContent(s.Capture())
-	return nil
+	return last
+}
+
+func (s *TmuxSession) paneChangedFrom(prev string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		if s.Capture() != prev {
+			return true
+		}
+	}
+	return false
 }
 
 // SendKeys sends raw tmux key names without appending Enter.

@@ -1038,7 +1038,8 @@ func newReplayRepoWithOptions(t *testing.T, opts replayRepoOptions) (repoRoot, c
 		t.Fatalf("open repo: %v", err)
 	}
 	defer repo.Close()
-	if err := checkpoint.NewGitStore(repo).WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	if err := store.Write(context.Background(), checkpoint.Session{
 		CheckpointID:     checkpointid.MustCheckpointID(cpID),
 		SessionID:        "session-replay-12345678",
 		Strategy:         "manual-commit",

@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +17,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// SSE control events for the agent-native code-review stream. Domain events
+// SSE control events for the trail-wide event stream. Domain events
 // (for example "session.started" or "comment.created") are emitted as their
 // code_review_events.event_type values.
 const (
@@ -42,61 +41,61 @@ func newTrailWatchCmd() *cobra.Command {
 		jsonOutput bool
 		showPings  bool
 		once       bool
-		number     int
+		branch     string
 	)
 
 	cmd := &cobra.Command{
-		Use:   "watch [<number>]",
-		Short: "Tail a trail's code-review events live",
-		Long: `Subscribe to the trail-scoped agent-native code-review SSE stream and
-print events as they arrive. Reconnects automatically when the server caps the
-connection (~50s) and on transient network errors.
+		Use:   "watch [<trail>]",
+		Short: "Tail a trail's events live",
+		Long: `Subscribe to the trail-wide SSE stream and print events as they arrive.
+Reconnects automatically when the server caps the connection (~50s) and on
+transient network errors.
 
-If <number> is omitted, the trail for the current branch is used.
+<trail> may be a number, id, or branch name. If omitted, the trail for the
+current branch is used.
 
 This command resolves the trail's id internally and streams
-GET /api/v1/trails/<id>/reviews/events with Accept: text/event-stream.
+GET /api/v1/trails/<id>/events with Accept: text/event-stream.
 
 Events emitted by the server:
   ready              initial frame, includes trail and cursor
-  <event_type>       code-review domain event (session.started, comment.created, ...)
+  <event_type>       trail domain event (reviews, findings, runners, monitors, ...)
   reconnect          server cap reached; re-establishing
   forbidden          access was revoked; stream ends
   error              server-side error; treated as reconnect`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			selector := ""
 			if len(args) == 1 {
-				n, err := strconv.Atoi(args[0])
-				if err != nil || n <= 0 {
-					return fmt.Errorf("invalid trail number %q", args[0])
-				}
-				number = n
+				selector = args[0]
 			}
-			return runTrailWatch(cmd, number, jsonOutput, showPings, once)
+			// Delegates to the shared trail-review resolver so number/id/branch
+			// selectors and insecure-HTTP handling stay in one place.
+			return runTrailReviewWatch(cmd, selector, jsonOutput, showPings, once)
 		},
 	}
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print each event as a single JSON line")
 	cmd.Flags().BoolVar(&showPings, "show-pings", false, "Print SSE keepalive pings (otherwise suppressed)")
 	cmd.Flags().BoolVar(&once, "once", false, "Open one SSE connection then exit instead of reconnecting")
+	cmd.Flags().StringVar(&branch, "branch", "", "Watch the trail for this branch instead of the current branch; cannot be combined with a trail selector")
 
 	return cmd
 }
 
-func runTrailWatch(cmd *cobra.Command, number int, jsonOutput, showPings, once bool) error {
-	ctx := cmd.Context()
-	w := cmd.OutOrStdout()
-	errW := cmd.ErrOrStderr()
-
-	client, err := NewAuthenticatedAPIClient(ctx, trailInsecureHTTP(cmd))
-	if err != nil {
-		return fmt.Errorf("authentication required: %w", err)
-	}
-
-	trailID, description, err := resolveTrailWatchTarget(ctx, client, number)
+func runTrailReviewWatch(cmd *cobra.Command, selector string, jsonOutput, showPings, once bool) error {
+	client, target, err := authenticatedTrailReviewTarget(cmd, selector)
 	if err != nil {
 		return err
 	}
+	description := trailWatchDescription(target.Host, target.Owner, target.Repo, target.Trail.Number, target.Trail.ID)
+	return runTrailWatchResolved(cmd, client, target.Trail.ID, description, jsonOutput, showPings, once)
+}
+
+func runTrailWatchResolved(cmd *cobra.Command, client *api.Client, trailID, description string, jsonOutput, showPings, once bool) error {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+	errW := cmd.ErrOrStderr()
 	streamPath := reviewEventsPath(trailID)
 
 	fmt.Fprintf(errW, "Watching %s — Ctrl+C to stop\n", description)
@@ -167,50 +166,6 @@ func runTrailWatch(cmd *cobra.Command, number int, jsonOutput, showPings, once b
 	}
 }
 
-func resolveTrailWatchTarget(ctx context.Context, client *api.Client, number int) (trailID, description string, err error) {
-	if number > 0 {
-		return resolveTrailWatchNumber(ctx, client, number)
-	}
-
-	forge, owner, repo, err := resolveTrailRemote(ctx)
-	if err != nil {
-		return "", "", err
-	}
-	branch, err := GetCurrentBranch(ctx)
-	if err != nil {
-		return "", "", fmt.Errorf("no trail number given and current branch is unknown: %w", err)
-	}
-	found, err := findTrailByBranch(ctx, client, forge, owner, repo, branch)
-	if err != nil {
-		return "", "", err
-	}
-	if found == nil {
-		return "", "", fmt.Errorf("no trail found for branch %q (pass an explicit trail number)", branch)
-	}
-	if found.ID == "" {
-		return "", "", fmt.Errorf("trail for branch %q has no id yet", branch)
-	}
-	return found.ID, trailWatchDescription(forge, owner, repo, found.Number, found.ID), nil
-}
-
-func resolveTrailWatchNumber(ctx context.Context, client *api.Client, number int) (trailID, description string, err error) {
-	forge, owner, repo, err := resolveTrailRemote(ctx)
-	if err != nil {
-		return "", "", err
-	}
-	found, err := findTrailByNumber(ctx, client, forge, owner, repo, number)
-	if err != nil {
-		return "", "", err
-	}
-	if found == nil {
-		return "", "", fmt.Errorf("no trail #%d found in %s/%s/%s", number, forge, owner, repo)
-	}
-	if found.ID == "" {
-		return "", "", fmt.Errorf("trail #%d has no id yet", number)
-	}
-	return found.ID, trailWatchDescription(forge, owner, repo, found.Number, found.ID), nil
-}
-
 func trailWatchDescription(forge, owner, repo string, number int, trailID string) string {
 	if number > 0 {
 		return fmt.Sprintf("trail #%d (%s/%s/%s, id %s)", number, forge, owner, repo, trailID)
@@ -219,7 +174,7 @@ func trailWatchDescription(forge, owner, repo string, number int, trailID string
 }
 
 func reviewEventsPath(trailID string) string {
-	return "/api/v1/trails/" + url.PathEscape(trailID) + "/reviews/events"
+	return "/api/v1/trails/" + url.PathEscape(trailID) + "/events"
 }
 
 type streamCloseReason int
@@ -375,7 +330,7 @@ func streamOnce(
 		}
 		return streamCloseTransport, lastSeenID, fmt.Errorf("read SSE stream: %w", err)
 	}
-	return streamCloseTransport, lastSeenID, io.ErrUnexpectedEOF
+	return streamCloseTransport, lastSeenID, nil
 }
 
 // printSSEEvent renders a single SSE event in either human-readable or
@@ -520,34 +475,34 @@ func printReviewStreamEvent(w io.Writer, ev reviewStreamEvent) {
 		severity := payloadString(ev.Payload, "severity")
 		switch {
 		case file != "" && severity != "":
-			fmt.Fprintf(w, "%scomment created by %s on %s (%s) — %s\n", prefix, actor, file, severity, ev.TargetID)
+			fmt.Fprintf(w, "%sfinding created by %s on %s (%s) — %s\n", prefix, actor, file, severity, ev.TargetID)
 		case file != "":
-			fmt.Fprintf(w, "%scomment created by %s on %s — %s\n", prefix, actor, file, ev.TargetID)
+			fmt.Fprintf(w, "%sfinding created by %s on %s — %s\n", prefix, actor, file, ev.TargetID)
 		default:
-			fmt.Fprintf(w, "%scomment created by %s — %s\n", prefix, actor, ev.TargetID)
+			fmt.Fprintf(w, "%sfinding created by %s — %s\n", prefix, actor, ev.TargetID)
 		}
 	case "comment.status_changed":
-		fmt.Fprintf(w, "%scomment %s status %s → %s\n", prefix, ev.TargetID, payloadString(ev.Payload, "from"), payloadString(ev.Payload, "to"))
+		fmt.Fprintf(w, "%sfinding %s status %s → %s\n", prefix, ev.TargetID, payloadString(ev.Payload, "from"), payloadString(ev.Payload, "to"))
 	case "comment.updated":
-		fmt.Fprintf(w, "%scomment %s updated by %s\n", prefix, ev.TargetID, actor)
+		fmt.Fprintf(w, "%sfinding %s updated by %s\n", prefix, ev.TargetID, actor)
 	case "comment.stale_checked":
-		fmt.Fprintf(w, "%scomment %s marked %s (%s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "outcome"), payloadString(ev.Payload, "reason"))
+		fmt.Fprintf(w, "%sfinding %s marked %s (%s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "outcome"), payloadString(ev.Payload, "reason"))
 	case "suggested_change.created":
-		fmt.Fprintf(w, "%ssuggested change %s created for comment %s (%s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "review_comment_id"), payloadString(ev.Payload, "change_type"))
+		fmt.Fprintf(w, "%ssuggested change %s created for finding %s (%s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "review_comment_id"), payloadString(ev.Payload, "change_type"))
 	case "suggested_change.updated":
 		fmt.Fprintf(w, "%ssuggested change %s updated by %s\n", prefix, ev.TargetID, actor)
 	case "suggested_change.check_result", "suggested_change.apply_result":
 		fmt.Fprintf(w, "%s%s for %s: %s\n", prefix, ev.EventType, payloadString(ev.Payload, "suggested_change_id"), payloadString(ev.Payload, "status"))
 	case "thread.created":
-		fmt.Fprintf(w, "%sthread %s created for comment %s\n", prefix, ev.TargetID, payloadString(ev.Payload, "review_comment_id"))
+		fmt.Fprintf(w, "%sthread %s created for finding %s\n", prefix, ev.TargetID, payloadString(ev.Payload, "review_comment_id"))
 	case "thread.message_added":
 		fmt.Fprintf(w, "%sthread message %s added by %s\n", prefix, ev.TargetID, actor)
 	case "thread.message_edited":
 		fmt.Fprintf(w, "%sthread message %s edited by %s\n", prefix, ev.TargetID, actor)
 	case "comment.linked":
-		fmt.Fprintf(w, "%scomment link created: %s → %s\n", prefix, payloadString(ev.Payload, "source_comment_id"), payloadString(ev.Payload, "target_comment_id"))
+		fmt.Fprintf(w, "%sfinding link created: %s → %s\n", prefix, payloadString(ev.Payload, "source_comment_id"), payloadString(ev.Payload, "target_comment_id"))
 	case "comment.unlinked":
-		fmt.Fprintf(w, "%scomment link removed: %s → %s\n", prefix, payloadString(ev.Payload, "source_comment_id"), payloadString(ev.Payload, "target_comment_id"))
+		fmt.Fprintf(w, "%sfinding link removed: %s → %s\n", prefix, payloadString(ev.Payload, "source_comment_id"), payloadString(ev.Payload, "target_comment_id"))
 	default:
 		fmt.Fprintf(w, "%s%s %s/%s by %s\n", prefix, ev.EventType, ev.TargetType, ev.TargetID, actor)
 	}

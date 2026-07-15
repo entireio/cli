@@ -3,7 +3,6 @@ package pi
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -53,6 +52,31 @@ func (a *PiAgent) GetSupportedHooks() []agent.HookType {
 	}
 }
 
+// Compile-time assertion that Pi can inject context into the model.
+var _ agent.ContextInjector = (*PiAgent)(nil)
+
+// InjectionEvent reports that Pi injects model context at TurnStart
+// (before_agent_start) — the only Pi event where the embedded extension can
+// return a message that Pi stores in the session and sends to the LLM.
+func (a *PiAgent) InjectionEvent() agent.EventType { return agent.TurnStart }
+
+// RenderContextInjection emits a {"inject_context":"..."} envelope on stdout.
+// The embedded extension (entire_extension.ts) reads it from the
+// before_agent_start hook's stdout and returns it to Pi as a hidden persistent
+// message. An empty Text renders nothing.
+func (a *PiAgent) RenderContextInjection(inj agent.ContextInjection) ([]byte, error) {
+	if strings.TrimSpace(inj.Text) == "" {
+		return nil, nil
+	}
+	b, err := json.Marshal(struct {
+		InjectContext string `json:"inject_context"`
+	}{InjectContext: inj.Text})
+	if err != nil {
+		return nil, fmt.Errorf("marshal pi context injection: %w", err)
+	}
+	return append(b, '\n'), nil
+}
+
 // piHookPayload is the JSON the embedded TypeScript extension pipes to
 // `entire hooks pi <event>` on stdin.
 type piHookPayload struct {
@@ -70,6 +94,11 @@ type piSkillEventInput struct {
 	Timestamp  string `json:"timestamp,omitempty"`
 }
 
+// piSkillEvents converts the Pi extension's live skill-invocation reports into
+// agent.SkillEvents. This is Pi's only skill-capture path. PiAgent intentionally
+// does NOT implement agent.SkillEventExtractor: a transcript extractor would
+// double-count these live events at condensation (see
+// TestPiAgent_UsesLiveSkillCaptureNotTranscriptExtraction).
 func piSkillEvents(in []piSkillEventInput) []agent.SkillEvent {
 	if len(in) == 0 {
 		return nil
@@ -116,18 +145,13 @@ func piSkillEvents(in []piSkillEventInput) []agent.SkillEvent {
 // ParseHookEvent translates a Pi hook invocation into a normalised lifecycle
 // event. Implements agent.HookSupport.
 func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
-	data, err := io.ReadAll(stdin)
+	// Stream one JSON value rather than io.ReadAll so the hook never blocks
+	// waiting for stdin EOF that some agents don't send on Windows (issue #1398).
+	parsed, err := agent.ReadAndParseHookInput[piHookPayload](stdin)
 	if err != nil {
-		return nil, fmt.Errorf("read pi hook input: %w", err)
+		return nil, err
 	}
-	if len(data) == 0 {
-		return nil, errors.New("empty pi hook input")
-	}
-
-	var payload piHookPayload
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return nil, fmt.Errorf("parse pi hook payload: %w", err)
-	}
+	payload := *parsed
 
 	sessionID := payload.SessionID
 	if sessionID == "" {
@@ -178,6 +202,7 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 			Type:       agent.TurnEnd,
 			SessionID:  sessionID,
 			SessionRef: sessionRef,
+			Model:      extractModelFromPiSessionFile(sessionRef),
 			Timestamp:  now,
 		}, nil
 
@@ -261,6 +286,22 @@ func cacheSessionID(ctx context.Context, id string) {
 	if err := os.WriteFile(filepath.Join(dir, activeSessionFile), []byte(id), 0o600); err != nil {
 		logging.Debug(ctx, "pi: cache session id write", slog.String("err", err.Error()))
 	}
+}
+
+func extractModelFromPiSessionFile(path string) string {
+	if path == "" {
+		return ""
+	}
+	//nolint:gosec // path comes from Pi's hook payload or our captured transcript path
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	model, err := (&PiAgent{}).ExtractModel(data)
+	if err != nil {
+		return ""
+	}
+	return model
 }
 
 func readCachedSessionID(ctx context.Context) string {

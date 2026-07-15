@@ -99,9 +99,14 @@ func GetAgentsWithHooksInstalled(ctx context.Context) []types.AgentName {
 
 // InstalledAgentDisplayNames returns user-facing display names for agents with hooks installed.
 func InstalledAgentDisplayNames(ctx context.Context) []string {
-	installedNames := GetAgentsWithHooksInstalled(ctx)
-	displayNames := make([]string, 0, len(installedNames))
-	for _, name := range installedNames {
+	return agentDisplayNames(GetAgentsWithHooksInstalled(ctx))
+}
+
+// agentDisplayNames maps agent names to their user-facing display names,
+// skipping names that aren't registered.
+func agentDisplayNames(names []types.AgentName) []string {
+	displayNames := make([]string, 0, len(names))
+	for _, name := range names {
 		if ag, err := agent.Get(name); err == nil {
 			displayNames = append(displayNames, string(ag.Type()))
 		}

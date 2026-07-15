@@ -32,15 +32,12 @@ const testTranscriptPromptResponse = "{\"type\":\"human\",\"message\":{\"content
 
 func TestShadowStrategy_ValidateRepository(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
 	s := NewManualCommitStrategy()
-	err = s.ValidateRepository()
+	err := s.ValidateRepository()
 	if err != nil {
 		t.Errorf("ValidateRepository() error = %v, want nil", err)
 	}
@@ -59,10 +56,7 @@ func TestShadowStrategy_ValidateRepository_NotGitRepo(t *testing.T) {
 
 func TestShadowStrategy_SessionState_SaveLoad(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -76,7 +70,7 @@ func TestShadowStrategy_SessionState_SaveLoad(t *testing.T) {
 	}
 
 	// Save state
-	err = s.saveSessionState(context.Background(), state)
+	err := s.saveSessionState(context.Background(), state)
 	if err != nil {
 		t.Fatalf("saveSessionState() error = %v", err)
 	}
@@ -107,10 +101,7 @@ func TestShadowStrategy_SessionState_SaveLoad(t *testing.T) {
 
 func TestShadowStrategy_SessionState_LoadNonExistent(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -127,9 +118,10 @@ func TestShadowStrategy_SessionState_LoadNonExistent(t *testing.T) {
 
 func TestShadowStrategy_ListAllSessionStates(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -190,10 +182,7 @@ func TestShadowStrategy_ListAllSessionStates(t *testing.T) {
 // that were never condensed. Active sessions and sessions with LastCheckpointID are kept.
 func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -297,9 +286,10 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 
 func TestShadowStrategy_FindSessionsForCommit(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -383,10 +373,7 @@ func TestShadowStrategy_FindSessionsForCommit(t *testing.T) {
 
 func TestShadowStrategy_ClearSessionState(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -430,9 +417,10 @@ func TestShadowStrategy_ClearSessionState(t *testing.T) {
 
 func TestShadowStrategy_GetRewindPoints_NoShadowBranch(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create initial commit
@@ -466,64 +454,6 @@ func TestShadowStrategy_GetRewindPoints_NoShadowBranch(t *testing.T) {
 	}
 }
 
-// In v1.1 mode the picker must read prompt text from the topology mirror,
-// not v1.
-func TestShadowStrategy_GetRewindPoints_V11ReadsPromptFromMirror(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	testutil.WriteFile(t, dir, "f.txt", "init")
-	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "init")
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	baseRef, err := repo.Head()
-	require.NoError(t, err)
-	baseHash := baseRef.Hash()
-
-	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
-	const wantPrompt = "only-on-mirror"
-
-	require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
-		CheckpointID: cpID,
-		SessionID:    "test-session-v11-rewind",
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
-		Prompts:      []string{wantPrompt},
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
-	}))
-	v1Ref := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	committedRef, err := repo.Reference(v1Ref, true)
-	require.NoError(t, err)
-
-	// Mirror carries the checkpoint; v1 points at the initial commit (no metadata).
-	mirrorRef := plumbing.ReferenceName(paths.MetadataRefName)
-	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(mirrorRef, committedRef.Hash())))
-	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(v1Ref, baseHash)))
-
-	// HEAD trailer drives the picker's log walk.
-	testutil.WriteFile(t, dir, "g.txt", "feat")
-	testutil.GitAdd(t, dir, "g.txt")
-	testutil.GitCommit(t, dir, "feat\n\nEntire-Checkpoint: "+cpID.String())
-
-	t.Chdir(dir)
-	settingsDir := filepath.Join(dir, ".entire")
-	require.NoError(t, os.MkdirAll(settingsDir, 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(settingsDir, paths.SettingsFileName),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
-		0o644,
-	))
-
-	strat := NewManualCommitStrategy()
-	points, err := strat.GetRewindPoints(t.Context(), 10)
-	require.NoError(t, err)
-	require.Len(t, points, 1)
-	assert.Equal(t, wantPrompt, points[0].SessionPrompt, "prompt must come from the mirror, not v1")
-}
-
 // When the most-recent session of a multi-session condensed checkpoint has no
 // prompt, the picker must fall back to the latest non-empty session prompt
 // rather than displaying nothing.
@@ -544,7 +474,7 @@ func TestShadowStrategy_GetRewindPoints_MultiSessionFallsBackToEarlierPrompt(t *
 
 	// Earlier session carries the only usable prompt.
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	require.NoError(t, store.WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
+	require.NoError(t, store.Write(t.Context(), checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    "session-earlier",
 		Strategy:     "manual-commit",
@@ -554,7 +484,7 @@ func TestShadowStrategy_GetRewindPoints_MultiSessionFallsBackToEarlierPrompt(t *
 		AuthorEmail:  "test@test.com",
 	}))
 	// Latest session has no prompt at all.
-	require.NoError(t, store.WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
+	require.NoError(t, store.Write(t.Context(), checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    "session-latest",
 		Strategy:     "manual-commit",
@@ -578,9 +508,10 @@ func TestShadowStrategy_GetRewindPoints_MultiSessionFallsBackToEarlierPrompt(t *
 
 func TestShadowStrategy_GetSessionInfo_NoShadowBranch(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create initial commit
@@ -613,9 +544,10 @@ func TestShadowStrategy_GetSessionInfo_NoShadowBranch(t *testing.T) {
 
 func TestShadowStrategy_CanRewind_CleanRepo(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create initial commit
@@ -658,9 +590,10 @@ func TestShadowStrategy_CanRewind_DirtyRepo(t *testing.T) {
 	// Users rewind to undo Claude's changes, which are uncommitted by definition.
 	// However, it now returns a warning message with diff stats.
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create initial commit
@@ -729,10 +662,7 @@ func TestShadowStrategy_CanRewind_NoRepo(t *testing.T) {
 
 func TestShadowStrategy_GetTaskCheckpoint_NotTaskCheckpoint(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -743,7 +673,7 @@ func TestShadowStrategy_GetTaskCheckpoint_NotTaskCheckpoint(t *testing.T) {
 		IsTaskCheckpoint: false,
 	}
 
-	_, err = s.GetTaskCheckpoint(context.Background(), point)
+	_, err := s.GetTaskCheckpoint(context.Background(), point)
 	if !errors.Is(err, ErrNotTaskCheckpoint) {
 		t.Errorf("GetTaskCheckpoint() error = %v, want ErrNotTaskCheckpoint", err)
 	}
@@ -751,10 +681,7 @@ func TestShadowStrategy_GetTaskCheckpoint_NotTaskCheckpoint(t *testing.T) {
 
 func TestShadowStrategy_GetTaskCheckpointTranscript_NotTaskCheckpoint(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -765,7 +692,7 @@ func TestShadowStrategy_GetTaskCheckpointTranscript_NotTaskCheckpoint(t *testing
 		IsTaskCheckpoint: false,
 	}
 
-	_, err = s.GetTaskCheckpointTranscript(context.Background(), point)
+	_, err := s.GetTaskCheckpointTranscript(context.Background(), point)
 	if !errors.Is(err, ErrNotTaskCheckpoint) {
 		t.Errorf("GetTaskCheckpointTranscript() error = %v, want ErrNotTaskCheckpoint", err)
 	}
@@ -819,9 +746,10 @@ func TestGetShadowBranchNameForCommit(t *testing.T) {
 
 func TestShadowStrategy_PrepareCommitMsg_NoActiveSession(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create initial commit
@@ -870,10 +798,7 @@ func TestShadowStrategy_PrepareCommitMsg_NoActiveSession(t *testing.T) {
 func TestShadowStrategy_PrepareCommitMsg_SkipSources(t *testing.T) {
 	// Tests that merge, squash, and commit sources are skipped
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -1083,10 +1008,7 @@ func TestShadowStrategy_GetCheckpointLog_WithCheckpointID(t *testing.T) {
 	// with entire/checkpoints/v1 branch, we test the lookup logic by checking error behavior.
 
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -1102,7 +1024,7 @@ func TestShadowStrategy_GetCheckpointLog_WithCheckpointID(t *testing.T) {
 	// This should attempt to call getCheckpointLog (which will fail because
 	// there's no entire/checkpoints/v1 branch), but the important thing is it uses
 	// the checkpoint ID to look up metadata
-	_, err = s.GetCheckpointLog(context.Background(), checkpoint)
+	_, err := s.GetCheckpointLog(context.Background(), checkpoint)
 	if err == nil {
 		t.Error("GetCheckpointLog() expected error (no sessions branch), got nil")
 	}
@@ -1115,10 +1037,7 @@ func TestShadowStrategy_GetCheckpointLog_WithCheckpointID(t *testing.T) {
 func TestShadowStrategy_GetCheckpointLog_NoCheckpointID(t *testing.T) {
 	// Test that checkpoints without checkpoint ID return ErrNoMetadata
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -1132,7 +1051,7 @@ func TestShadowStrategy_GetCheckpointLog_NoCheckpointID(t *testing.T) {
 	}
 
 	// This should return ErrNoMetadata since there's no checkpoint ID
-	_, err = s.GetCheckpointLog(context.Background(), checkpoint)
+	_, err := s.GetCheckpointLog(context.Background(), checkpoint)
 	if err == nil {
 		t.Error("GetCheckpointLog() expected error for missing checkpoint ID, got nil")
 	}
@@ -1149,9 +1068,10 @@ func TestShadowStrategy_FilesTouched_OnlyModifiedFiles(t *testing.T) {
 	// rather than collecting all files from the shadow branch tree.
 
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create initial commit with multiple pre-existing files
@@ -1288,9 +1208,10 @@ func TestShadowStrategy_FilesTouched_OnlyModifiedFiles(t *testing.T) {
 // TestDeleteShadowBranch verifies that deleteShadowBranch correctly deletes a shadow branch.
 func TestDeleteShadowBranch(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -1332,9 +1253,10 @@ func TestDeleteShadowBranch(t *testing.T) {
 // TestDeleteShadowBranch_NonExistent verifies that deleting a non-existent branch is idempotent.
 func TestDeleteShadowBranch_NonExistent(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	t.Chdir(dir)
@@ -1349,10 +1271,7 @@ func TestDeleteShadowBranch_NonExistent(t *testing.T) {
 // TestSessionState_LastCheckpointID verifies that LastCheckpointID is persisted correctly.
 func TestSessionState_LastCheckpointID(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -1368,7 +1287,7 @@ func TestSessionState_LastCheckpointID(t *testing.T) {
 	}
 
 	// Save state
-	err = s.saveSessionState(context.Background(), state)
+	err := s.saveSessionState(context.Background(), state)
 	if err != nil {
 		t.Fatalf("saveSessionState() error = %v", err)
 	}
@@ -1390,10 +1309,7 @@ func TestSessionState_LastCheckpointID(t *testing.T) {
 // manual-commit strategy where session state is persisted to disk between checkpoints.
 func TestSessionState_TokenUsagePersistence(t *testing.T) {
 	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	t.Chdir(dir)
 
@@ -1414,10 +1330,17 @@ func TestSessionState_TokenUsagePersistence(t *testing.T) {
 			OutputTokens:        500,
 			APICallCount:        5,
 		},
+		CheckpointTokenUsage: &agent.TokenUsage{
+			InputTokens:         100,
+			CacheCreationTokens: 20,
+			CacheReadTokens:     30,
+			OutputTokens:        50,
+			APICallCount:        1,
+		},
 	}
 
 	// Save state
-	err = s.saveSessionState(context.Background(), state)
+	err := s.saveSessionState(context.Background(), state)
 	if err != nil {
 		t.Fatalf("saveSessionState() error = %v", err)
 	}
@@ -1458,15 +1381,36 @@ func TestSessionState_TokenUsagePersistence(t *testing.T) {
 	if loaded.TokenUsage.APICallCount != state.TokenUsage.APICallCount {
 		t.Errorf("TokenUsage.APICallCount = %d, want %d", loaded.TokenUsage.APICallCount, state.TokenUsage.APICallCount)
 	}
+
+	// Verify CheckpointTokenUsage
+	if loaded.CheckpointTokenUsage == nil {
+		t.Fatal("CheckpointTokenUsage should be persisted, got nil")
+	}
+	if loaded.CheckpointTokenUsage.InputTokens != state.CheckpointTokenUsage.InputTokens {
+		t.Errorf("CheckpointTokenUsage.InputTokens = %d, want %d", loaded.CheckpointTokenUsage.InputTokens, state.CheckpointTokenUsage.InputTokens)
+	}
+	if loaded.CheckpointTokenUsage.CacheCreationTokens != state.CheckpointTokenUsage.CacheCreationTokens {
+		t.Errorf("CheckpointTokenUsage.CacheCreationTokens = %d, want %d", loaded.CheckpointTokenUsage.CacheCreationTokens, state.CheckpointTokenUsage.CacheCreationTokens)
+	}
+	if loaded.CheckpointTokenUsage.CacheReadTokens != state.CheckpointTokenUsage.CacheReadTokens {
+		t.Errorf("CheckpointTokenUsage.CacheReadTokens = %d, want %d", loaded.CheckpointTokenUsage.CacheReadTokens, state.CheckpointTokenUsage.CacheReadTokens)
+	}
+	if loaded.CheckpointTokenUsage.OutputTokens != state.CheckpointTokenUsage.OutputTokens {
+		t.Errorf("CheckpointTokenUsage.OutputTokens = %d, want %d", loaded.CheckpointTokenUsage.OutputTokens, state.CheckpointTokenUsage.OutputTokens)
+	}
+	if loaded.CheckpointTokenUsage.APICallCount != state.CheckpointTokenUsage.APICallCount {
+		t.Errorf("CheckpointTokenUsage.APICallCount = %d, want %d", loaded.CheckpointTokenUsage.APICallCount, state.CheckpointTokenUsage.APICallCount)
+	}
 }
 
 // TestShadowStrategy_PrepareCommitMsg_ReusesLastCheckpointID verifies that PrepareCommitMsg
 // reuses the LastCheckpointID when there's no new content to condense.
 func TestShadowStrategy_PrepareCommitMsg_ReusesLastCheckpointID(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create initial commit
@@ -1792,9 +1736,10 @@ func referenceExists(t *testing.T, repo *git.Repository, refName plumbing.Refere
 // branch the checkpoint originated from.
 func TestShadowStrategy_CondenseSession_EphemeralBranchTrailer(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create initial commit with a file
@@ -1886,9 +1831,10 @@ func TestShadowStrategy_CondenseSession_EphemeralBranchTrailer(t *testing.T) {
 // when a session state exists with empty BaseCommit (can happen from concurrent warning state).
 func TestSaveStep_EmptyBaseCommit_Recovery(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create initial commit
@@ -1971,9 +1917,10 @@ func TestSaveStep_EmptyBaseCommit_Recovery(t *testing.T) {
 // ctx.AgentType when no session state exists.
 func TestSaveStep_UsesCtxAgentType_WhenNoSessionState(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -2039,9 +1986,10 @@ func TestSaveStep_UsesCtxAgentType_WhenNoSessionState(t *testing.T) {
 // ctx.AgentType when a partial session state exists (empty BaseCommit and AgentType).
 func TestSaveStep_UsesCtxAgentType_WhenPartialState(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -2205,100 +2153,15 @@ func TestCountTranscriptItems(t *testing.T) {
 	}
 }
 
-// TestExtractUserPrompts tests extraction of user prompts from different transcript formats.
-func TestExtractUserPrompts(t *testing.T) {
-	tests := []struct {
-		name      string
-		agentType types.AgentType
-		content   string
-		expected  []string
-	}{
-		{
-			name:      "Gemini single user prompt",
-			agentType: agent.AgentTypeGemini,
-			content: `{
-				"messages": [
-					{"type": "user", "content": "Create a file called test.txt"}
-				]
-			}`,
-			expected: []string{"Create a file called test.txt"},
-		},
-		{
-			name:      "Gemini multiple user prompts",
-			agentType: agent.AgentTypeGemini,
-			content: `{
-				"messages": [
-					{"type": "user", "content": "First prompt"},
-					{"type": "gemini", "content": "Response 1"},
-					{"type": "user", "content": "Second prompt"},
-					{"type": "gemini", "content": "Response 2"}
-				]
-			}`,
-			expected: []string{"First prompt", "Second prompt"},
-		},
-		{
-			name:      "Gemini no user messages",
-			agentType: agent.AgentTypeGemini,
-			content: `{
-				"messages": [
-					{"type": "gemini", "content": "Hello!"}
-				]
-			}`,
-			expected: nil,
-		},
-		{
-			name:      "Claude Code JSONL with user messages",
-			agentType: agent.AgentTypeClaudeCode,
-			content: `{"type":"user","message":{"content":"Hello"}}
-{"type":"assistant","message":{"content":"Hi"}}
-{"type":"user","message":{"content":"Goodbye"}}`,
-			expected: []string{"Hello", "Goodbye"},
-		},
-		{
-			name:      "empty string",
-			agentType: agent.AgentTypeClaudeCode,
-			content:   "",
-			expected:  nil,
-		},
-		{
-			name:      "Gemini array content (real format)",
-			agentType: agent.AgentTypeGemini,
-			content: `{
-				"messages": [
-					{"type": "user", "content": [{"text": "Create a file"}]},
-					{"type": "gemini", "content": "Done!"},
-					{"type": "user", "content": [{"text": "Edit the file"}]},
-					{"type": "gemini", "content": "Updated!"}
-				]
-			}`,
-			expected: []string{"Create a file", "Edit the file"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := extractUserPrompts(tt.agentType, tt.content)
-			if len(result) != len(tt.expected) {
-				t.Errorf("extractUserPrompts() returned %d prompts, want %d", len(result), len(tt.expected))
-				return
-			}
-			for i, prompt := range result {
-				if prompt != tt.expected[i] {
-					t.Errorf("prompt[%d] = %q, want %q", i, prompt, tt.expected[i])
-				}
-			}
-		})
-	}
-}
-
-// TestCondenseSession_IncludesInitialAttribution verifies that when manual-commit
-// condenses a session, it calculates InitialAttribution by comparing the shadow branch
+// TestCondenseSession_IncludesAttribution verifies that when manual-commit
+// condenses a session, it calculates Attribution by comparing the shadow branch
 // (agent work) to HEAD (what was committed).
-func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
+func TestCondenseSession_IncludesAttribution(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create initial commit with a file
@@ -2388,7 +2251,7 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Fatalf("loadSessionState() error = %v", err)
 	}
 
-	// Condense the session - this should calculate InitialAttribution
+	// Condense the session - this should calculate Attribution
 	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
 	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
 	if err != nil {
@@ -2400,7 +2263,7 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Errorf("CheckpointID = %q, want %q", result.CheckpointID, checkpointID)
 	}
 
-	// Read metadata from entire/checkpoints/v1 branch and verify InitialAttribution
+	// Read metadata from entire/checkpoints/v1 branch and verify Attribution
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
 		t.Fatalf("failed to get sessions branch: %v", err)
@@ -2416,7 +2279,7 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Fatalf("failed to get tree: %v", err)
 	}
 
-	// InitialAttribution is stored in session-level metadata (0/metadata.json), not root (0-based indexing)
+	// Attribution is stored in session-level metadata (0/metadata.json), not root (0-based indexing)
 	sessionMetadataPath := checkpointID.Path() + "/0/" + paths.MetadataFileName
 	metadataFile, err := tree.File(sessionMetadataPath)
 	if err != nil {
@@ -2428,9 +2291,9 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Fatalf("failed to read metadata.json: %v", err)
 	}
 
-	// Parse and verify InitialAttribution is present
+	// Parse and verify Attribution is present
 	var metadata struct {
-		InitialAttribution *struct {
+		Attribution *struct {
 			AgentLines      int     `json:"agent_lines"`
 			HumanAdded      int     `json:"human_added"`
 			HumanModified   int     `json:"human_modified"`
@@ -2443,40 +2306,40 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Fatalf("failed to parse metadata.json: %v", err)
 	}
 
-	if metadata.InitialAttribution == nil {
-		t.Fatal("InitialAttribution should be present in session metadata.json for manual-commit")
+	if metadata.Attribution == nil {
+		t.Fatal("Attribution should be present in session metadata.json for manual-commit")
 	}
 
 	// Verify the attribution values are reasonable
 	// Agent added new function, human added a comment line
 	// The exact line counts depend on how the diff algorithm interprets the changes
 	// (insertion vs modification), but we should have non-zero totals and reasonable percentages.
-	if metadata.InitialAttribution.TotalCommitted == 0 {
+	if metadata.Attribution.TotalCommitted == 0 {
 		t.Error("TotalCommitted should be > 0")
 	}
-	if metadata.InitialAttribution.AgentLines == 0 {
+	if metadata.Attribution.AgentLines == 0 {
 		t.Error("AgentLines should be > 0 (agent wrote code)")
 	}
 
 	// Human contribution should be captured in either HumanAdded or HumanModified
 	// When inserting lines in the middle of existing code, the diff algorithm may
 	// interpret it as a modification rather than a pure addition.
-	humanContribution := metadata.InitialAttribution.HumanAdded + metadata.InitialAttribution.HumanModified
+	humanContribution := metadata.Attribution.HumanAdded + metadata.Attribution.HumanModified
 	if humanContribution == 0 {
 		t.Error("Human contribution (HumanAdded + HumanModified) should be > 0")
 	}
 
-	if metadata.InitialAttribution.AgentPercentage <= 0 || metadata.InitialAttribution.AgentPercentage > 100 {
-		t.Errorf("AgentPercentage should be between 0-100, got %f", metadata.InitialAttribution.AgentPercentage)
+	if metadata.Attribution.AgentPercentage <= 0 || metadata.Attribution.AgentPercentage > 100 {
+		t.Errorf("AgentPercentage should be between 0-100, got %f", metadata.Attribution.AgentPercentage)
 	}
 
 	t.Logf("Attribution: agent=%d, human_added=%d, human_modified=%d, human_removed=%d, total=%d, percentage=%.1f%%",
-		metadata.InitialAttribution.AgentLines,
-		metadata.InitialAttribution.HumanAdded,
-		metadata.InitialAttribution.HumanModified,
-		metadata.InitialAttribution.HumanRemoved,
-		metadata.InitialAttribution.TotalCommitted,
-		metadata.InitialAttribution.AgentPercentage)
+		metadata.Attribution.AgentLines,
+		metadata.Attribution.HumanAdded,
+		metadata.Attribution.HumanModified,
+		metadata.Attribution.HumanRemoved,
+		metadata.Attribution.TotalCommitted,
+		metadata.Attribution.AgentPercentage)
 }
 
 // TestCondenseSession_AttributionWithoutShadowBranch verifies that when an agent
@@ -2484,9 +2347,10 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 // as the shadow tree. This reproduces the bug where agent_lines=0 for mid-turn commits.
 func TestCondenseSession_AttributionWithoutShadowBranch(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -2594,7 +2458,7 @@ func TestCondenseSession_AttributionWithoutShadowBranch(t *testing.T) {
 	}
 
 	var metadata struct {
-		InitialAttribution *struct {
+		Attribution *struct {
 			AgentLines      int     `json:"agent_lines"`
 			HumanAdded      int     `json:"human_added"`
 			TotalCommitted  int     `json:"total_committed"`
@@ -2605,27 +2469,27 @@ func TestCondenseSession_AttributionWithoutShadowBranch(t *testing.T) {
 		t.Fatalf("failed to parse metadata: %v", err)
 	}
 
-	if metadata.InitialAttribution == nil {
-		t.Fatal("InitialAttribution should be present even without shadow branch")
+	if metadata.Attribution == nil {
+		t.Fatal("Attribution should be present even without shadow branch")
 	}
 
 	// Agent created all content (10 lines across 2 files), no human edits
-	if metadata.InitialAttribution.AgentLines == 0 {
+	if metadata.Attribution.AgentLines == 0 {
 		t.Error("AgentLines should be > 0 (agent created the file)")
 	}
-	if metadata.InitialAttribution.TotalCommitted == 0 {
+	if metadata.Attribution.TotalCommitted == 0 {
 		t.Error("TotalCommitted should be > 0")
 	}
-	if metadata.InitialAttribution.AgentPercentage <= 50 {
+	if metadata.Attribution.AgentPercentage <= 50 {
 		t.Errorf("AgentPercentage should be > 50%% (agent wrote all content), got %.1f%%",
-			metadata.InitialAttribution.AgentPercentage)
+			metadata.Attribution.AgentPercentage)
 	}
 
 	t.Logf("Attribution (no shadow branch): agent=%d, human_added=%d, total=%d, percentage=%.1f%%",
-		metadata.InitialAttribution.AgentLines,
-		metadata.InitialAttribution.HumanAdded,
-		metadata.InitialAttribution.TotalCommitted,
-		metadata.InitialAttribution.AgentPercentage)
+		metadata.Attribution.AgentLines,
+		metadata.Attribution.HumanAdded,
+		metadata.Attribution.TotalCommitted,
+		metadata.Attribution.AgentPercentage)
 }
 
 // TestCondenseSession_AttributionWithoutShadowBranch_MixedHumanAgent verifies attribution
@@ -2634,9 +2498,10 @@ func TestCondenseSession_AttributionWithoutShadowBranch(t *testing.T) {
 // and should be subtracted from the total to isolate agent contribution.
 func TestCondenseSession_AttributionWithoutShadowBranch_MixedHumanAgent(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	wt, err := repo.Worktree()
@@ -2760,7 +2625,7 @@ func TestCondenseSession_AttributionWithoutShadowBranch_MixedHumanAgent(t *testi
 	}
 
 	var metadata struct {
-		InitialAttribution *struct {
+		Attribution *struct {
 			AgentLines      int     `json:"agent_lines"`
 			HumanAdded      int     `json:"human_added"`
 			TotalCommitted  int     `json:"total_committed"`
@@ -2771,11 +2636,11 @@ func TestCondenseSession_AttributionWithoutShadowBranch_MixedHumanAgent(t *testi
 		t.Fatalf("failed to parse metadata: %v", err)
 	}
 
-	if metadata.InitialAttribution == nil {
-		t.Fatal("InitialAttribution should be present")
+	if metadata.Attribution == nil {
+		t.Fatal("Attribution should be present")
 	}
 
-	attr := metadata.InitialAttribution
+	attr := metadata.Attribution
 	t.Logf("Attribution (mixed, no shadow): agent=%d, human_added=%d, total=%d, percentage=%.1f%%",
 		attr.AgentLines, attr.HumanAdded, attr.TotalCommitted, attr.AgentPercentage)
 
@@ -2796,78 +2661,6 @@ func TestCondenseSession_AttributionWithoutShadowBranch_MixedHumanAgent(t *testi
 	}
 }
 
-// TestExtractUserPromptsFromLines tests extraction of user prompts from JSONL format.
-func TestExtractUserPromptsFromLines(t *testing.T) {
-	tests := []struct {
-		name     string
-		lines    []string
-		expected []string
-	}{
-		{
-			name: "human type message",
-			lines: []string{
-				`{"type":"human","message":{"content":"Hello world"}}`,
-			},
-			expected: []string{"Hello world"},
-		},
-		{
-			name: "user type message",
-			lines: []string{
-				`{"type":"user","message":{"content":"Test prompt"}}`,
-			},
-			expected: []string{"Test prompt"},
-		},
-		{
-			name: "mixed human and assistant",
-			lines: []string{
-				`{"type":"human","message":{"content":"First"}}`,
-				`{"type":"assistant","message":{"content":"Response"}}`,
-				`{"type":"human","message":{"content":"Second"}}`,
-			},
-			expected: []string{"First", "Second"},
-		},
-		{
-			name: "array content",
-			lines: []string{
-				`{"type":"human","message":{"content":[{"type":"text","text":"Part 1"},{"type":"text","text":"Part 2"}]}}`,
-			},
-			expected: []string{"Part 1\n\nPart 2"},
-		},
-		{
-			name: "empty lines ignored",
-			lines: []string{
-				`{"type":"human","message":{"content":"Valid"}}`,
-				"",
-				"  ",
-			},
-			expected: []string{"Valid"},
-		},
-		{
-			name: "invalid JSON ignored",
-			lines: []string{
-				`{"type":"human","message":{"content":"Valid"}}`,
-				"not json",
-			},
-			expected: []string{"Valid"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := extractUserPromptsFromLines(tt.lines)
-			if len(result) != len(tt.expected) {
-				t.Errorf("extractUserPromptsFromLines() returned %d prompts, want %d", len(result), len(tt.expected))
-				return
-			}
-			for i, prompt := range result {
-				if prompt != tt.expected[i] {
-					t.Errorf("prompt[%d] = %q, want %q", i, prompt, tt.expected[i])
-				}
-			}
-		})
-	}
-}
-
 // TestMultiCheckpoint_UserEditsBetweenCheckpoints tests that user edits made between
 // agent checkpoints are correctly attributed to the user, not the agent.
 //
@@ -2878,9 +2671,10 @@ func TestExtractUserPromptsFromLines(t *testing.T) {
 //nolint:maintidx // Integration test with multiple steps is inherently complex
 func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -3064,7 +2858,7 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 		t.Fatalf("failed to get tree: %v", err)
 	}
 
-	// InitialAttribution is stored in session-level metadata (0/metadata.json), not root (0-based indexing)
+	// Attribution is stored in session-level metadata (0/metadata.json), not root (0-based indexing)
 	sessionMetadataPath := checkpointID.Path() + "/0/" + paths.MetadataFileName
 	metadataFile, err := tree.File(sessionMetadataPath)
 	if err != nil {
@@ -3077,7 +2871,7 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 	}
 
 	var metadata struct {
-		InitialAttribution *struct {
+		Attribution *struct {
 			AgentLines      int     `json:"agent_lines"`
 			HumanAdded      int     `json:"human_added"`
 			HumanModified   int     `json:"human_modified"`
@@ -3090,38 +2884,38 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 		t.Fatalf("failed to parse metadata.json: %v", err)
 	}
 
-	if metadata.InitialAttribution == nil {
-		t.Fatal("InitialAttribution should be present in session metadata")
+	if metadata.Attribution == nil {
+		t.Fatal("Attribution should be present in session metadata")
 	}
 
 	t.Logf("Final Attribution: agent=%d, human_added=%d, human_modified=%d, human_removed=%d, total=%d, percentage=%.1f%%",
-		metadata.InitialAttribution.AgentLines,
-		metadata.InitialAttribution.HumanAdded,
-		metadata.InitialAttribution.HumanModified,
-		metadata.InitialAttribution.HumanRemoved,
-		metadata.InitialAttribution.TotalCommitted,
-		metadata.InitialAttribution.AgentPercentage)
+		metadata.Attribution.AgentLines,
+		metadata.Attribution.HumanAdded,
+		metadata.Attribution.HumanModified,
+		metadata.Attribution.HumanRemoved,
+		metadata.Attribution.TotalCommitted,
+		metadata.Attribution.AgentPercentage)
 
 	// Verify the attribution makes sense:
 	// - Agent modified agent.go: added ~8 lines total
 	// - User modified user.go: added ~5 lines
 	// - So agent percentage should be around 50-70%
-	if metadata.InitialAttribution.AgentLines == 0 {
+	if metadata.Attribution.AgentLines == 0 {
 		t.Error("AgentLines should be > 0")
 	}
-	if metadata.InitialAttribution.TotalCommitted == 0 {
+	if metadata.Attribution.TotalCommitted == 0 {
 		t.Error("TotalCommitted should be > 0")
 	}
 
 	// The key test: user's lines should be captured in HumanAdded
-	if metadata.InitialAttribution.HumanAdded == 0 {
+	if metadata.Attribution.HumanAdded == 0 {
 		t.Error("HumanAdded should be > 0 because user added lines to user.go")
 	}
 
 	// Agent percentage should not be 100% since user contributed
-	if metadata.InitialAttribution.AgentPercentage >= 100 {
+	if metadata.Attribution.AgentPercentage >= 100 {
 		t.Errorf("AgentPercentage should be < 100%% since user contributed, got %.1f%%",
-			metadata.InitialAttribution.AgentPercentage)
+			metadata.Attribution.AgentPercentage)
 	}
 }
 
@@ -3131,9 +2925,10 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 // transcript continued growing — deferred condensation would read stale data.
 func TestCondenseSession_PrefersLiveTranscript(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	// Create initial commit
@@ -3243,9 +3038,10 @@ func TestCondenseSession_PrefersLiveTranscript(t *testing.T) {
 // commits because the stored TranscriptPath became stale.
 func TestCondenseSession_TranscriptRelocatedMidSession(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	wt, err := repo.Worktree()
@@ -3327,9 +3123,10 @@ func TestCondenseSession_TranscriptRelocatedMidSession(t *testing.T) {
 // with Gemini JSON format transcripts, including prompt extraction and format detection.
 func TestCondenseSession_GeminiTranscript(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -3484,9 +3281,10 @@ func TestCondenseSession_GeminiTranscript(t *testing.T) {
 //nolint:maintidx // Integration test with comprehensive verification steps
 func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -3636,6 +3434,9 @@ func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 	// what would happen after condensing checkpoint 1
 	state.CheckpointTranscriptStart = 2 // Start from message index 2 (the second user prompt)
 	state.StepCount = 1                 // Set to 1 (will be incremented to 2 by SaveStep)
+	// CheckpointsCount is now the prompt window (SessionTurnCount - PromptWindowBase),
+	// not StepCount. Simulate two counted turns so the assertion below still expects 2.
+	state.SessionTurnCount = 2
 	if err := s.saveSessionState(context.Background(), state); err != nil {
 		t.Fatalf("failed to update session state: %v", err)
 	}
@@ -3726,9 +3527,10 @@ func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 
 func TestCondenseSession_CopilotScopedCheckpointMetadataAndSessionBackfill(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -3844,9 +3646,10 @@ func TestCondenseSession_CopilotScopedCheckpointMetadataAndSessionBackfill(t *te
 // This is the legitimate use case for the fallback.
 func TestCondenseSession_FilesTouchedFallback_EmptyState(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -3955,9 +3758,10 @@ func TestCondenseSession_FilesTouchedFallback_EmptyState(t *testing.T) {
 // This prevents the bug where unrelated sessions get incorrect files_touched.
 func TestCondenseSession_FilesTouchedNoFallback_NoOverlap(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -4205,7 +4009,7 @@ func TestResolveFilesTouched_PrefersStateFallsBackToTranscript(t *testing.T) {
 
 func TestCondenseSession_RedactionFailure_DropsTranscriptButWritesMetadata(t *testing.T) {
 	originalRedact := redactSessionJSONLBytes
-	redactSessionJSONLBytes = func([]byte) (redact.RedactedBytes, error) {
+	redactSessionJSONLBytes = func(context.Context, []byte) (redact.RedactedBytes, error) {
 		return redact.RedactedBytes{}, errors.New("forced redaction failure")
 	}
 	t.Cleanup(func() {
@@ -4259,9 +4063,9 @@ func TestCondenseSession_RedactionFailure_DropsTranscriptButWritesMetadata(t *te
 	require.NoError(t, err, "redaction failure should not abort condensation")
 	require.NotNil(t, result)
 
-	store := s.getCheckpointStore(context.Background(), repo)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 
-	committed, err := store.ListCommitted(context.Background())
+	committed, err := store.List(context.Background())
 	require.NoError(t, err)
 	require.NotEmpty(t, committed)
 

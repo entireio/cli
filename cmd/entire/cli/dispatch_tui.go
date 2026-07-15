@@ -15,6 +15,7 @@ import (
 
 	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
 	"github.com/entireio/cli/cmd/entire/cli/mdrender"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 )
 
 type dispatchRenderResult struct {
@@ -138,11 +139,11 @@ func newDispatchStatusStyles(ss statusStyles) dispatchStatusStyles {
 		return styles
 	}
 
-	styles.title = styles.title.Foreground(lipgloss.Color("#fb923c"))
-	styles.subtitle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	styles.detail = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	styles.footer = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	styles.spinner = lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")).Bold(true)
+	styles.title = styles.title.Foreground(lipgloss.Color(palette.Accent))
+	styles.subtitle = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
+	styles.detail = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
+	styles.footer = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
+	styles.spinner = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)).Bold(true)
 	return styles
 }
 

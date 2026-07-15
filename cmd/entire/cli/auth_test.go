@@ -7,11 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/entireio/auth-go/sts"
-	"github.com/entireio/auth-go/tokenmanager"
-	"github.com/entireio/auth-go/tokens"
-	"github.com/entireio/auth-go/tokenstore"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/coreapi"
@@ -93,6 +90,100 @@ func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	}
 }
 
+// TestWriteProfileLines_Jurisdiction verifies the home jurisdiction slug is
+// rendered (so `auth token --jurisdiction` is discoverable) and omitted when the
+// server didn't populate it.
+func TestWriteProfileLines_Jurisdiction(t *testing.T) {
+	t.Parallel()
+
+	var withJ bytes.Buffer
+	writeProfileLines(&withJ, &authProfile{Handle: "alice", Provider: "github", Jurisdiction: "us"})
+	if !strings.Contains(withJ.String(), "Jurisdiction: us") {
+		t.Fatalf("output = %q, want a 'Jurisdiction: us' line", withJ.String())
+	}
+
+	var withoutJ bytes.Buffer
+	writeProfileLines(&withoutJ, &authProfile{Handle: "alice", Provider: "github"})
+	if strings.Contains(withoutJ.String(), "Jurisdiction") {
+		t.Fatalf("output = %q, want no Jurisdiction line when the slug is empty", withoutJ.String())
+	}
+}
+
+// In ENTIRE_TOKEN mode there is no stored context, keychain slot, or revocable
+// session: status names the env-token core and bearer source, and renders none
+// of the context/keychain/session lines. listSessions must not be called — you
+// can't manage an env-token session.
+func TestRunAuthStatus_EnvTokenMode(t *testing.T) {
+	t.Parallel()
+
+	target := statusTarget{coreURL: testCoreURL, token: "tok", envToken: true}
+	listSessions := func(context.Context, string, string) ([]api.AuthSession, error) {
+		t.Helper()
+		t.Fatal("listSessions must not be called in ENTIRE_TOKEN mode")
+		return nil, nil
+	}
+
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, okProfile, listSessions, target); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "Logged in to "+testCoreURL) {
+		t.Fatalf("output = %q, want 'Logged in' to the env token's core", got)
+	}
+	if !strings.Contains(got, "Alice Smith") {
+		t.Fatalf("output = %q, want the profile header", got)
+	}
+	if !strings.Contains(got, auth.EnvTokenVar+" environment variable") {
+		t.Fatalf("output = %q, want the ENTIRE_TOKEN bearer note", got)
+	}
+	for _, unwanted := range []string{"Context:", "stored in OS keychain", "Active sessions", "login contexts saved"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("output = %q, must not contain %q in ENTIRE_TOKEN mode", got, unwanted)
+		}
+	}
+}
+
+// resolveEnvTokenStatusTarget reads the core from the token's aud (the same
+// origin coreapi.New dials) and uses the token verbatim as the bearer; a blank
+// or aud-less token is a fail-closed error, never a fall-back to a context.
+func TestResolveEnvTokenStatusTarget(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid token yields aud core + verbatim bearer", func(t *testing.T) {
+		t.Parallel()
+		tok := makeJWT(t, `{"alg":"HS256","typ":"JWT"}`, `{"aud":"`+testCoreURL+`"}`)
+		got, err := resolveEnvTokenStatusTarget("  " + tok + "  ") // surrounding whitespace trimmed
+		if err != nil {
+			t.Fatalf("resolveEnvTokenStatusTarget: %v", err)
+		}
+		if got.coreURL != testCoreURL {
+			t.Fatalf("coreURL = %q, want the token's aud %q", got.coreURL, testCoreURL)
+		}
+		if got.token != tok {
+			t.Fatalf("token = %q, want the verbatim env token", got.token)
+		}
+		if !got.envToken {
+			t.Fatal("envToken = false, want true")
+		}
+	})
+
+	t.Run("blank is fail-closed", func(t *testing.T) {
+		t.Parallel()
+		if _, err := resolveEnvTokenStatusTarget("   "); err == nil {
+			t.Fatal("want an error for a blank ENTIRE_TOKEN, got nil")
+		}
+	})
+
+	t.Run("token without a URL aud is rejected", func(t *testing.T) {
+		t.Parallel()
+		tok := makeJWT(t, `{"alg":"HS256","typ":"JWT"}`, `{"sub":"ci-runner"}`)
+		if _, err := resolveEnvTokenStatusTarget(tok); err == nil {
+			t.Fatal("want an error when the token has no URL-shaped aud, got nil")
+		}
+	})
+}
+
 func TestRunAuthStatus_RendersSessionsTable(t *testing.T) {
 	t.Parallel()
 
@@ -116,13 +207,26 @@ func TestRunAuthStatus_RendersSessionsTable(t *testing.T) {
 	if !strings.Contains(got, "Active sessions (2):") {
 		t.Fatalf("output = %q, want active-sessions heading with count", got)
 	}
-	for _, want := range []string{"NAME", "CREATED", "LAST USED", "EXPIRES", "2026-01-01", "never"} {
+	for _, want := range []string{"NAME", "CREATED", "LAST USED", "EXPIRES", formatAuthDate("2026-01-01T00:00:00Z"), "never"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("output = %q, want table to contain %q", got, want)
 		}
 	}
 	if !strings.Contains(got, "entire logout --everywhere") {
 		t.Fatalf("output = %q, want logout hint tying the table to logout", got)
+	}
+}
+
+func TestFormatAuthDate_DoesNotShiftUTCDateToLocalTimezone(t *testing.T) {
+	oldLocal := time.Local
+	time.Local = time.FixedZone("PST", -8*60*60)
+	t.Cleanup(func() {
+		time.Local = oldLocal
+	})
+
+	got := formatAuthDate("2026-01-01T00:00:00Z")
+	if got != "2026-01-01" {
+		t.Fatalf("formatAuthDate() = %q, want %q", got, "2026-01-01")
 	}
 }
 
@@ -271,74 +375,6 @@ func TestAuthCmd_RegistersExpectedSubcommands(t *testing.T) {
 	}
 }
 
-// --- resolveDataAPIToken ----------------------------------------------------
-//
-// These tests exercise the production path: they install a real
-// tokenmanager.Manager via auth.SetManagerForTest and stub only the
-// STS wire call via SetExchangeForTest. That covers the audience-
-// matching logic the function-injection tests above can't reach
-// (revokeCurrentAuthSession / revokeAllAuthSessions call
-// resolveAuthHostToken directly, but unit tests for the surrounding flows
-// inject fakes that bypass it).
-
-// authResolveTestIssuer is intentionally distinct from api.AuthBaseURL() so
-// the manager's same-host shortcut is skipped and the STS-exchange path runs.
-const authResolveTestIssuer = "https://auth.resolve-test.example.com"
-
-func TestResolveAuthHostToken_ScopesExchangeToAuthHostOrigin(t *testing.T) {
-	// No t.Parallel: SetManagerForTest mutates package-level state in the
-	// auth package. Concurrent tests in this package don't reach the real
-	// auth.TokenForResource path (they inject lister/revoker fakes), so
-	// serial execution here is purely defensive.
-
-	store := newAuthMemStore()
-	saveCoreToken(t, store, authResolveTestIssuer, "opaque-core-token")
-
-	var capturedResource string
-	mgr := newResolveTestManager(t, store, func(_ context.Context, req sts.ExchangeRequest) (*tokens.TokenSet, error) {
-		capturedResource = req.Resource
-		return &tokens.TokenSet{AccessToken: "exchanged-auth-host-tok"}, nil
-	})
-	t.Cleanup(auth.SetManagerForTest(t, mgr))
-
-	got, err := resolveAuthHostToken(t.Context())
-	if err != nil {
-		t.Fatalf("resolveAuthHostToken: %v", err)
-	}
-
-	if got != "exchanged-auth-host-tok" {
-		t.Errorf("token = %q, want %q", got, "exchanged-auth-host-tok")
-	}
-	// The whole point of the helper: when an exchange happens, the resource
-	// handed to STS must be the auth host's origin (where the session
-	// endpoints live), not the raw env-var value.
-	if want := api.OriginOnly(api.AuthBaseURL()); capturedResource != want {
-		t.Errorf("STS exchange Resource = %q, want %q (api.OriginOnly(api.AuthBaseURL()))",
-			capturedResource, want)
-	}
-}
-
-func TestResolveAuthHostToken_WrapsManagerError(t *testing.T) {
-	store := newAuthMemStore()
-	saveCoreToken(t, store, authResolveTestIssuer, "opaque-core-token")
-
-	mgr := newResolveTestManager(t, store, func(context.Context, sts.ExchangeRequest) (*tokens.TokenSet, error) {
-		return nil, errors.New("simulated transport failure")
-	})
-	t.Cleanup(auth.SetManagerForTest(t, mgr))
-
-	_, err := resolveAuthHostToken(t.Context())
-	if err == nil {
-		t.Fatal("expected error when exchange fails")
-	}
-	if !strings.Contains(err.Error(), "resolve auth-host token") {
-		t.Errorf("error = %v, want 'resolve auth-host token' wrap prefix", err)
-	}
-	if !strings.Contains(err.Error(), "simulated transport failure") {
-		t.Errorf("error = %v, want underlying message preserved", err)
-	}
-}
-
 // --- isKeychainTokenRejected -----------------------------------------------
 
 func TestIsKeychainTokenRejected_AllShapes(t *testing.T) {
@@ -377,58 +413,6 @@ func TestIsKeychainTokenRejected_AllShapes(t *testing.T) {
 			}
 		})
 	}
-}
-
-// --- helpers for resolveAuthHostToken tests ---------------------------------
-
-// authMemStore is an in-memory tokenstore.Store for tests that need a
-// real tokenmanager.Manager. Mirrors the private memStore in auth-go's
-// tokenmanager_test.go — that one isn't exported, so we duplicate the
-// trivial implementation rather than pull in a fragile internal package.
-type authMemStore struct {
-	data map[string]tokens.TokenSet
-}
-
-func newAuthMemStore() *authMemStore { return &authMemStore{data: map[string]tokens.TokenSet{}} }
-
-func (s *authMemStore) SaveTokens(profile string, t tokens.TokenSet) error {
-	s.data[profile] = t
-	return nil
-}
-
-func (s *authMemStore) LoadTokens(profile string) (tokens.TokenSet, error) {
-	t, ok := s.data[profile]
-	if !ok {
-		return tokens.TokenSet{}, tokenstore.ErrNotFound
-	}
-	return t, nil
-}
-
-func (s *authMemStore) DeleteTokens(profile string) error {
-	delete(s.data, profile)
-	return nil
-}
-
-func saveCoreToken(t *testing.T, store tokenstore.Store, profile, accessToken string) {
-	t.Helper()
-	if err := store.SaveTokens(profile, tokens.TokenSet{AccessToken: accessToken}); err != nil {
-		t.Fatalf("SaveTokens: %v", err)
-	}
-}
-
-func newResolveTestManager(t *testing.T, store tokenstore.Store, exchange func(context.Context, sts.ExchangeRequest) (*tokens.TokenSet, error)) *tokenmanager.Manager {
-	t.Helper()
-	mgr, err := tokenmanager.New(tokenmanager.Config{
-		Issuer:   authResolveTestIssuer,
-		ClientID: "entire-cli-test",
-		STSPath:  "/sts/token",
-		Store:    store,
-	})
-	if err != nil {
-		t.Fatalf("tokenmanager.New: %v", err)
-	}
-	tokenmanager.SetExchangeForTest(t, mgr, exchange)
-	return mgr
 }
 
 func TestAuthCmd_TopLevelLoginAndLogoutStillRegistered(t *testing.T) {

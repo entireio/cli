@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1140,6 +1141,129 @@ func TestHandleLifecycleTurnStart_WritesPromptContent(t *testing.T) {
 	}
 }
 
+// TestHandleLifecycleTurnEnd_PrefersEventTokenUsage verifies that when the
+// hook payload reports per-turn token usage (e.g., Cursor's stop hook),
+// the lifecycle handler uses those numbers verbatim instead of falling back
+// to transcript-based computation. This is the only way Cursor sessions get
+// non-zero token data, since Cursor's JSONL transcript has no usage fields.
+func TestHandleLifecycleTurnEnd_PrefersEventTokenUsage(t *testing.T) {
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	// Modify a file so SaveStep actually runs.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "init.txt"), []byte("changed"), 0o600))
+
+	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
+
+	sessionID := "test-prefer-event-tokens"
+	ag := newMockAgent()
+	ag.transcriptData = []byte(`{"type":"user","message":"test"}` + "\n")
+
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+		TokenUsage: &agent.TokenUsage{
+			InputTokens:         200,
+			CacheReadTokens:     4000,
+			CacheCreationTokens: 800,
+			OutputTokens:        50,
+			APICallCount:        1,
+		},
+	}
+
+	require.NoError(t, handleLifecycleTurnEnd(context.Background(), ag, event))
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.NotNil(t, state.TokenUsage, "session state TokenUsage must be populated from event.TokenUsage")
+	require.Equal(t, 200, state.TokenUsage.InputTokens, "InputTokens must match event-provided value, not transcript-derived")
+	require.Equal(t, 4000, state.TokenUsage.CacheReadTokens)
+	require.Equal(t, 800, state.TokenUsage.CacheCreationTokens)
+	require.Equal(t, 50, state.TokenUsage.OutputTokens)
+	require.Equal(t, 1, state.TokenUsage.APICallCount)
+}
+
+type mockContextInjectorAgent struct {
+	mockLifecycleAgent
+}
+
+var _ agent.ContextInjector = (*mockContextInjectorAgent)(nil)
+
+func (m *mockContextInjectorAgent) InjectionEvent() agent.EventType { return agent.TurnStart }
+
+func (m *mockContextInjectorAgent) RenderContextInjection(agent.ContextInjection) ([]byte, error) {
+	return nil, nil
+}
+
+func addGitHubOriginForLifecycleTest(t *testing.T, repoDir string) {
+	t.Helper()
+	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@github.com:acme/repo.git")
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+}
+
+func TestHandleLifecycleTurnStart_ContextInjectionUnknownCacheDoesNotMarkDecided(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir().
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	addGitHubOriginForLifecycleTest(t, tmpDir)
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+
+	ag := &mockContextInjectorAgent{mockLifecycleAgent: *newMockAgent()}
+	sessionID := "test-trail-inject-unknown"
+	event := &agent.Event{Type: agent.TurnStart, SessionID: sessionID, Prompt: "hello", Timestamp: time.Now()}
+
+	require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, event))
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.False(t, state.ContextInjectionDecided, "unknown/missing cache should not permanently suppress later injection")
+}
+
+func TestHandleLifecycleTurnStart_ContextInjectionFreshTrueMarksDecided(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir().
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	addGitHubOriginForLifecycleTest(t, tmpDir)
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	require.NoError(t, saveTrailsEnabledForRepo(context.Background(), true))
+
+	ag := &mockContextInjectorAgent{mockLifecycleAgent: *newMockAgent()}
+	sessionID := "test-trail-inject-true"
+	scope, err := currentTrailEnablementScope(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, saveTrailEnablementScopeHint(context.Background(), sessionID, scope))
+	event := &agent.Event{Type: agent.TurnStart, SessionID: sessionID, Prompt: "hello", Timestamp: time.Now()}
+
+	require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, event))
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.True(t, state.ContextInjectionDecided, "fresh true cache should make a final injection decision")
+}
+
 func TestHandleLifecycleTurnStart_RecordsGenericSkillSlashEvent(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir()
 	tmpDir := t.TempDir()
@@ -1998,5 +2122,111 @@ func TestAdoptInvestigateEnv_RejectsBadRunID(t *testing.T) {
 				t.Errorf("InvestigateRunID: got %q, want empty (must not be set)", state.InvestigateRunID)
 			}
 		})
+	}
+}
+
+// promptWindow mirrors strategy.checkpointStepCount (unexported there): the
+// displayed step count = SessionTurnCount - PromptWindowBase, floored at 1.
+func promptWindow(s *strategy.SessionState) int {
+	if w := s.SessionTurnCount - s.PromptWindowBase; w >= 1 {
+		return w
+	}
+	return 1
+}
+
+// writeCheckpoint simulates what CondenseSession does to the window state: read
+// the count, then set the deferred-reset flag (without zeroing the window).
+func writeCheckpoint(s *strategy.SessionState) int {
+	n := promptWindow(s)
+	s.PromptWindowResetPending = true
+	return n
+}
+
+// TestPromptWindowDeferredReset exercises the two product-required examples:
+// (1) p1,p2,p3 -> A=3 then p4,p5 -> C=2, and (2) two checkpoints with no prompt
+// in between report the same count (deferred reset).
+func TestPromptWindowDeferredReset(t *testing.T) {
+	turn := func(s *strategy.SessionState) {
+		persistEventMetadataToState(&agent.Event{Type: agent.TurnEnd}, s)
+	}
+
+	s := &strategy.SessionState{}
+
+	// p1,p2,p3 -> checkpoint A => 3
+	turn(s)
+	turn(s)
+	turn(s)
+	if got := writeCheckpoint(s); got != 3 {
+		t.Fatalf("checkpoint A = %d, want 3", got)
+	}
+
+	// Back-to-back: checkpoint B with no prompt in between => same as A (3), not 0.
+	if got := writeCheckpoint(s); got != 3 {
+		t.Fatalf("back-to-back checkpoint B = %d, want 3", got)
+	}
+
+	// The next prompt re-anchors the window to start fresh.
+	turn(s) // p4: first prompt of the new window
+	if s.PromptWindowResetPending {
+		t.Fatalf("ResetPending should be cleared after the first post-checkpoint turn")
+	}
+	if s.PromptWindowBase != 3 {
+		t.Fatalf("PromptWindowBase = %d, want 3 (re-anchored to pre-turn count)", s.PromptWindowBase)
+	}
+	turn(s) // p5
+	if got := writeCheckpoint(s); got != 2 {
+		t.Fatalf("checkpoint C = %d, want 2", got)
+	}
+}
+
+// TestPromptWindowExecModeCumulativeTurnCount verifies the window derives
+// correctly when turns arrive as a cumulative hook-reported TurnCount (exec-mode
+// agents that never fire UserPromptSubmit/TurnStart), rather than as self-counted
+// TurnEnd increments.
+func TestPromptWindowExecModeCumulativeTurnCount(t *testing.T) {
+	exec := func(s *strategy.SessionState, cumulative int) {
+		persistEventMetadataToState(&agent.Event{Type: agent.TurnEnd, TurnCount: cumulative}, s)
+	}
+
+	s := &strategy.SessionState{}
+
+	exec(s, 1)
+	exec(s, 2)
+	exec(s, 3)
+	if got := writeCheckpoint(s); got != 3 {
+		t.Fatalf("exec checkpoint A = %d, want 3", got)
+	}
+
+	exec(s, 4) // re-anchors base to 3
+	exec(s, 5)
+	if got := writeCheckpoint(s); got != 2 {
+		t.Fatalf("exec checkpoint B = %d, want 2", got)
+	}
+}
+
+// TestPromptWindowStaleHookDoesNotResetEarly guards against a repeated/stale hook
+// (same cumulative TurnCount, so the count doesn't actually advance) clearing the
+// deferred reset early. If it did, a later back-to-back checkpoint would report 1
+// instead of matching the prior checkpoint's count.
+func TestPromptWindowStaleHookDoesNotResetEarly(t *testing.T) {
+	exec := func(s *strategy.SessionState, cumulative int) {
+		persistEventMetadataToState(&agent.Event{Type: agent.TurnEnd, TurnCount: cumulative}, s)
+	}
+
+	s := &strategy.SessionState{}
+	exec(s, 1)
+	exec(s, 2)
+	exec(s, 3)
+	if got := writeCheckpoint(s); got != 3 {
+		t.Fatalf("checkpoint A = %d, want 3", got)
+	}
+
+	// Stale hook: same cumulative count, no real advance — must not re-anchor.
+	exec(s, 3)
+	if !s.PromptWindowResetPending {
+		t.Fatalf("stale hook should not clear ResetPending")
+	}
+	if got := writeCheckpoint(s); got != 3 {
+		t.Fatalf("back-to-back checkpoint B after stale hook = %d, want 3", got)
 	}
 }

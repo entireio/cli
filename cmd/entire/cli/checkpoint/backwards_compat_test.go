@@ -8,6 +8,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
@@ -25,9 +26,10 @@ import (
 func TestReadCommitted_MissingTokenUsage(t *testing.T) {
 	tempDir := t.TempDir()
 
-	repo, err := git.PlainInit(tempDir, false)
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
 	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+		t.Fatalf("failed to open git repo: %v", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -52,7 +54,7 @@ func TestReadCommitted_MissingTokenUsage(t *testing.T) {
 	checkpointID := id.MustCheckpointID("def456abc123")
 
 	// Write checkpoint WITHOUT token usage (simulates old checkpoints)
-	err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
+	err = store.Write(context.Background(), Session{
 		CheckpointID: checkpointID,
 		SessionID:    "test-session-old",
 		Strategy:     "manual-commit",
@@ -68,9 +70,9 @@ func TestReadCommitted_MissingTokenUsage(t *testing.T) {
 	}
 
 	// Reading should succeed with nil TokenUsage
-	summary, err := store.ReadCommitted(context.Background(), checkpointID)
+	summary, err := store.Read(context.Background(), checkpointID)
 	if err != nil {
-		t.Fatalf("ReadCommitted() error = %v", err)
+		t.Fatalf("Read() error = %v", err)
 	}
 
 	if summary.CheckpointID != checkpointID {

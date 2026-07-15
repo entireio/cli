@@ -21,7 +21,7 @@ import (
 )
 
 // SaveStep saves a checkpoint to the shadow branch.
-// Uses checkpoint.GitStore.WriteTemporary for git operations.
+// Uses checkpoint.EphemeralStore.Write with a checkpoint.Step request.
 func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) error {
 	_, openRepoSpan := perf.Start(ctx, "open_repository")
 	repo, err := OpenRepository(ctx)
@@ -52,7 +52,10 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		}
 		migrateSpan.End()
 
-		store := s.getCheckpointStore(ctx, repo)
+		store, err := s.getEphemeralStore(ctx, repo)
+		if err != nil {
+			return err
+		}
 
 		shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		branchExisted := store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
@@ -76,7 +79,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 
 		_, writeCheckpointSpan := perf.Start(ctx, "write_temporary_checkpoint")
 		isFirstCheckpointOfSession := state.StepCount == 0
-		result, err := store.WriteTemporary(ctx, checkpoint.WriteTemporaryOptions{
+		result, err := store.Write(ctx, checkpoint.Step{
 			SessionID:         sessionID,
 			BaseCommit:        state.BaseCommit,
 			WorktreeID:        state.WorktreeID,
@@ -118,6 +121,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		}
 		if step.TokenUsage != nil {
 			state.TokenUsage = accumulateTokenUsage(state.TokenUsage, step.TokenUsage)
+			state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, step.TokenUsage)
 		}
 
 		if !branchExisted {
@@ -165,7 +169,7 @@ func (s *ManualCommitStrategy) ensureSessionInitialized(ctx context.Context, rep
 }
 
 // SaveTaskStep saves a task step checkpoint to the shadow branch.
-// Uses checkpoint.GitStore.WriteTemporaryTask for git operations.
+// Uses checkpoint.EphemeralStore.Write with a checkpoint.TaskStep request.
 func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepContext) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -182,7 +186,10 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 			return fmt.Errorf("failed to check/migrate shadow branch: %w", err)
 		}
 
-		store := s.getCheckpointStore(ctx, repo)
+		store, err := s.getEphemeralStore(ctx, repo)
+		if err != nil {
+			return err
+		}
 
 		shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		branchExisted := store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
@@ -214,7 +221,7 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 			step.SessionID,
 		)
 
-		if _, err := store.WriteTemporaryTask(ctx, checkpoint.WriteTemporaryTaskOptions{
+		if _, err := store.Write(ctx, checkpoint.TaskStep{
 			SessionID:              step.SessionID,
 			BaseCommit:             state.BaseCommit,
 			WorktreeID:             state.WorktreeID,

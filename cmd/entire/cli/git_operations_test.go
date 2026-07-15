@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/go-git/go-git/v6"
@@ -35,6 +34,12 @@ func initOpenedTestRepo(t *testing.T, dir string) *git.Repository {
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 	return repo
+}
+
+func TestValidateBranchNameRejectsLeadingDash(t *testing.T) {
+	err := ValidateBranchName(context.Background(), "--all")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid branch name")
 }
 
 func TestGetCurrentBranch(t *testing.T) {
@@ -123,111 +128,6 @@ func TestGetCurrentBranchDetachedHead(t *testing.T) {
 	_, err = GetCurrentBranch(context.Background())
 	if err == nil {
 		t.Error("GetCurrentBranch(context.Background()) expected error for detached HEAD, got nil")
-	}
-}
-
-func TestGetMergeBase(t *testing.T) {
-	// Create temp directory for test repo
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize repo
-	repo := initOpenedTestRepo(t, tmpDir)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("Failed to get worktree: %v", err)
-	}
-
-	// Create initial commit on main
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
-		t.Fatalf("Failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("Failed to add test file: %v", err)
-	}
-	baseCommit, err := w.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test",
-			Email: "test@example.com",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create initial commit: %v", err)
-	}
-
-	// Create main branch reference
-	mainRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), baseCommit)
-	if err := repo.Storer.SetReference(mainRef); err != nil {
-		t.Fatalf("Failed to create main branch: %v", err)
-	}
-
-	// Create feature branch from base
-	featureRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName("feature"), baseCommit)
-	if err := repo.Storer.SetReference(featureRef); err != nil {
-		t.Fatalf("Failed to create feature branch: %v", err)
-	}
-
-	// Checkout feature and make a commit
-	gitCheckout(t, tmpDir, "feature")
-	if err := os.WriteFile(testFile, []byte("feature change"), 0o644); err != nil {
-		t.Fatalf("Failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("Failed to add test file: %v", err)
-	}
-	if _, err := w.Commit("feature commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test",
-			Email: "test@example.com",
-		},
-	}); err != nil {
-		t.Fatalf("Failed to commit: %v", err)
-	}
-
-	// Test getting merge base
-	mergeBase, err := GetMergeBase(context.Background(), "feature", "main")
-	if err != nil {
-		t.Fatalf("GetMergeBase(context.Background(),) error = %v", err)
-	}
-	if mergeBase.String() != baseCommit.String() {
-		t.Errorf("GetMergeBase(context.Background(),) = %v, want %v", mergeBase, baseCommit)
-	}
-}
-
-func TestGetMergeBaseNonExistentBranch(t *testing.T) {
-	// Create temp directory for test repo
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize repo with commit
-	repo := initOpenedTestRepo(t, tmpDir)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("Failed to get worktree: %v", err)
-	}
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("test"), 0o644); err != nil {
-		t.Fatalf("Failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("Failed to add test file: %v", err)
-	}
-	if _, err := w.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test",
-			Email: "test@example.com",
-		},
-	}); err != nil {
-		t.Fatalf("Failed to commit: %v", err)
-	}
-
-	// Test with non-existent branch
-	_, err = GetMergeBase(context.Background(), "feature", "nonexistent")
-	if err == nil {
-		t.Error("GetMergeBase(context.Background(),) expected error for nonexistent branch, got nil")
 	}
 }
 
@@ -356,100 +256,6 @@ func TestHasUncommittedChanges(t *testing.T) {
 	}
 	if hasChanges {
 		t.Error("HasUncommittedChanges(context.Background()) = true, want false for globally gitignored file (core.excludesfile)")
-	}
-}
-
-func TestFindNewUntrackedFiles(t *testing.T) {
-	tests := []struct {
-		name        string
-		current     []string
-		preExisting []string
-		expected    []string
-	}{
-		{
-			name:        "finds new files not in pre-existing list",
-			current:     []string{"file1.go", "file2.go", "file3.go"},
-			preExisting: []string{"file1.go"},
-			expected:    []string{"file2.go", "file3.go"},
-		},
-		{
-			name:        "returns empty when all files pre-exist",
-			current:     []string{"file1.go", "file2.go"},
-			preExisting: []string{"file1.go", "file2.go"},
-			expected:    nil,
-		},
-		{
-			name:        "returns all files when pre-existing is empty",
-			current:     []string{"file1.go", "file2.go"},
-			preExisting: []string{},
-			expected:    []string{"file1.go", "file2.go"},
-		},
-		{
-			name:        "returns nil when current is empty",
-			current:     []string{},
-			preExisting: []string{"file1.go"},
-			expected:    nil,
-		},
-		{
-			name:        "handles nil current slice",
-			current:     nil,
-			preExisting: []string{"file1.go"},
-			expected:    nil,
-		},
-		{
-			name:        "handles nil pre-existing slice",
-			current:     []string{"file1.go", "file2.go"},
-			preExisting: nil,
-			expected:    []string{"file1.go", "file2.go"},
-		},
-		{
-			name:        "handles both nil slices",
-			current:     nil,
-			preExisting: nil,
-			expected:    nil,
-		},
-		{
-			name:        "handles files with paths",
-			current:     []string{"src/main.go", "src/utils.go", "test/main_test.go"},
-			preExisting: []string{"src/main.go"},
-			expected:    []string{"src/utils.go", "test/main_test.go"},
-		},
-		{
-			name:        "handles duplicate files in pre-existing",
-			current:     []string{"file1.go", "file2.go"},
-			preExisting: []string{"file1.go", "file1.go"},
-			expected:    []string{"file2.go"},
-		},
-		{
-			name:        "is case-sensitive",
-			current:     []string{"File.go", "file.go"},
-			preExisting: []string{"file.go"},
-			expected:    []string{"File.go"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := findNewUntrackedFiles(tt.current, tt.preExisting)
-
-			if len(result) != len(tt.expected) {
-				t.Errorf("findNewUntrackedFiles() returned %d files, want %d", len(result), len(tt.expected))
-				t.Errorf("got: %v, want: %v", result, tt.expected)
-				return
-			}
-
-			// Create a map for easy lookup
-			expectedMap := make(map[string]bool)
-			for _, f := range tt.expected {
-				expectedMap[f] = true
-			}
-
-			for _, f := range result {
-				if !expectedMap[f] {
-					t.Errorf("findNewUntrackedFiles() returned unexpected file %q", f)
-				}
-			}
-		})
 	}
 }
 
@@ -711,48 +517,6 @@ func TestResolveCheckpointFetchTarget_FallsBackOnError(t *testing.T) {
 	// Falls back to the origin remote name when URL resolution fails.
 	target := resolveCheckpointFetchTarget(context.Background())
 	assert.Equal(t, "origin", target)
-}
-
-// Not parallel: uses t.Chdir().
-func TestFetchMetadataBranch_MirrorsV11Ref(t *testing.T) {
-	ctx := context.Background()
-
-	remoteDir := t.TempDir()
-	testutil.InitRepo(t, remoteDir)
-	testutil.WriteFile(t, remoteDir, "f.txt", "init")
-	testutil.GitAdd(t, remoteDir, "f.txt")
-	testutil.GitCommit(t, remoteDir, "init")
-	defaultBranch := gitDefaultBranch(t, remoteDir)
-
-	gitRun(t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
-	gitRun(t, remoteDir, "rm", "-rf", ".")
-	testutil.WriteFile(t, remoteDir, "metadata.json", `{"version": 1}`)
-	testutil.GitAdd(t, remoteDir, "metadata.json")
-	gitRun(t, remoteDir, "-c", "commit.gpgsign=false", "commit", "-m", "checkpoint metadata")
-	gitRun(t, remoteDir, "checkout", defaultBranch)
-
-	localDir := t.TempDir()
-	testutil.InitRepo(t, localDir)
-	testutil.WriteFile(t, localDir, "f.txt", "init")
-	testutil.GitAdd(t, localDir, "f.txt")
-	testutil.GitCommit(t, localDir, "init")
-	gitRun(t, localDir, "remote", "add", "origin", remoteDir)
-
-	require.NoError(t, os.MkdirAll(filepath.Join(localDir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(localDir, ".entire", paths.SettingsFileName),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
-		0o644,
-	))
-
-	t.Chdir(localDir)
-	paths.ClearWorktreeRootCache()
-
-	require.NoError(t, FetchMetadataBranch(ctx))
-
-	v1Hash := gitOutput(t, localDir, "rev-parse", paths.MetadataBranchName)
-	mirrorHash := gitOutput(t, localDir, "rev-parse", paths.MetadataRefName)
-	assert.Equal(t, v1Hash, mirrorHash)
 }
 
 // setupRepoWithBlobOnMetadataBranch creates a repo with a blob committed on

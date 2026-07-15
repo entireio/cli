@@ -4,54 +4,30 @@ package search
 import (
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
+
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 )
 
-// ParseGitHubRemote extracts owner and repo from a GitHub remote URL.
-// Supports SCP-style SSH (git@github.com:owner/repo.git),
-// ssh:// URLs (ssh://git@github.com/owner/repo.git),
-// and HTTPS (https://github.com/owner/repo.git).
+// ParseGitHubRemote extracts owner and repo from a git remote URL that resolves
+// to GitHub. It accepts direct GitHub remotes (SCP-style SSH, ssh://, and
+// https://) as well as Entire mirror remotes (entire://host/gh/owner/repo),
+// whose forge prefix maps back to github.com. Remotes resolving to any other
+// host, or whose path holds extra segments beyond owner/repo, are rejected.
 func ParseGitHubRemote(remoteURL string) (owner, repo string, err error) {
 	remoteURL = strings.TrimSpace(remoteURL)
 	if remoteURL == "" {
 		return "", "", errors.New("empty remote URL")
 	}
-
-	var path string
-
-	// SCP-style SSH: git@github.com:owner/repo.git
-	// Distinguished from ssh:// URLs by having no scheme and a colon before the path.
-	if strings.HasPrefix(remoteURL, "git@") && !strings.Contains(remoteURL, "://") {
-		idx := strings.Index(remoteURL, ":")
-		if idx < 0 {
-			return "", "", fmt.Errorf("invalid SSH remote URL: %s", remoteURL)
-		}
-		host := remoteURL[len("git@"):idx]
-		if host != "github.com" {
-			return "", "", fmt.Errorf("remote is not a GitHub repository (host: %s)", host)
-		}
-		path = remoteURL[idx+1:]
-	} else {
-		// URL format: https://, ssh://, git://
-		u, parseErr := url.Parse(remoteURL)
-		if parseErr != nil {
-			return "", "", fmt.Errorf("parsing remote URL: %w", parseErr)
-		}
-		host := u.Hostname()
-		if host != "github.com" {
-			return "", "", fmt.Errorf("remote is not a GitHub repository (host: %s)", host)
-		}
-		path = strings.TrimPrefix(u.Path, "/")
+	info, err := gitremote.ParseURL(remoteURL)
+	if err != nil {
+		return "", "", fmt.Errorf("parsing remote URL: %w", err)
 	}
-
-	// Remove .git suffix
-	path = strings.TrimSuffix(path, ".git")
-
-	parts := strings.SplitN(path, "/", 3)
-	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", fmt.Errorf("could not extract owner/repo from remote URL: %s", remoteURL)
+	if host := info.CanonicalHost(); host != "github.com" {
+		return "", "", fmt.Errorf("remote is not a GitHub repository (host: %s)", host)
 	}
-
-	return parts[0], parts[1], nil
+	if strings.Contains(info.Repo, "/") {
+		return "", "", fmt.Errorf("remote path has extra segments beyond owner/repo: %s", gitremote.RedactURL(remoteURL))
+	}
+	return info.Owner, info.Repo, nil
 }

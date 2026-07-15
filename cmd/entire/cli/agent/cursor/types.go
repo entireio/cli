@@ -55,6 +55,11 @@ type sessionStartRaw struct {
 // stopHookInputRaw is the JSON structure from Stop hooks.
 // IDE provides transcript_path; CLI sends null.
 // Both provide status and loop_count.
+//
+// Token fields (input_tokens, output_tokens, cache_read_tokens,
+// cache_write_tokens) are reported per turn by recent Cursor versions and are
+// the only authoritative source of token accounting — the JSONL transcript
+// does not include usage data.
 type stopHookInputRaw struct {
 	// common
 	ConversationID string   `json:"conversation_id"`
@@ -67,8 +72,12 @@ type stopHookInputRaw struct {
 	TranscriptPath string   `json:"transcript_path"`
 
 	// hook specific
-	Status    string      `json:"status"`
-	LoopCount json.Number `json:"loop_count"`
+	Status           string      `json:"status"`
+	LoopCount        json.Number `json:"loop_count"`
+	InputTokens      json.Number `json:"input_tokens"`       // Total input tokens (includes cache portions)
+	OutputTokens     json.Number `json:"output_tokens"`      // Generated output tokens
+	CacheReadTokens  json.Number `json:"cache_read_tokens"`  // Tokens served from cache (subset of input_tokens)
+	CacheWriteTokens json.Number `json:"cache_write_tokens"` // Tokens written to cache (subset of input_tokens)
 }
 
 // sessionEndRaw is the JSON structure from SessionEnd hooks.

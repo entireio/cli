@@ -14,19 +14,19 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
-	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
-	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	"github.com/entireio/cli/cmd/entire/cli/transcript/imageextract"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
 
@@ -49,9 +49,12 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 	defer repo.Close()
 
 	WarnIfMetadataDisconnected()
-	store := s.getCheckpointStore(ctx, repo)
+	store, err := s.getPersistentStore(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
 
-	committed, err := store.ListCommitted(ctx)
+	committed, err := store.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list committed checkpoints: %w", err)
 	}
@@ -68,9 +71,12 @@ func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointI
 	defer repo.Close()
 
 	WarnIfMetadataDisconnected()
-	store := s.getCheckpointStore(ctx, repo)
+	store, err := s.getPersistentStore(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
 
-	summary, err := cpkg.ReadCommittedCheckpoint(ctx, store, checkpointID)
+	summary, err := cpkg.ReadCheckpoint(ctx, store, checkpointID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
@@ -99,12 +105,118 @@ type condenseOpts struct {
 	allAgentFiles    map[string]struct{} // Union of all sessions' FilesTouched for cross-session exclusion (nil = single-session)
 }
 
-var redactSessionJSONLBytes = redact.JSONLBytes
+// redactSessionJSONLBytes runs the 7-layer redaction pipeline over a
+// session transcript at post-commit condensation. OPF is intentionally
+// NOT included here — it runs exclusively in the pre-push rewrite path
+// (strategy/manual_commit_opf_rewrite.go), which re-redacts the
+// 7-layer blobs and produces 8-layer commits before the push.
+//
+// Exposed as a var so tests can inject deterministic success/error
+// returns. The signature still takes a context so the var can be
+// re-wired to JSONLBytesWithPrivacyFilter from tests that need OPF.
+var redactSessionJSONLBytes = func(_ context.Context, b []byte) (redact.RedactedBytes, error) {
+	return redact.JSONLBytes(b)
+}
+
+// extractSessionImages lifts inline base64 images out of a transcript into
+// externalized assets via the per-agent image codec, returning the rewritten
+// (placeholder-bearing) transcript. Agents with no codec, or transcripts with no
+// externalizable images, pass through unchanged. Injectable for tests.
+var extractSessionImages = func(agentType types.AgentType, transcript []byte) ([]byte, []cpkg.TranscriptAsset, error) {
+	codec := imageextract.CodecFor(agentType)
+	if codec == nil {
+		return transcript, nil, nil
+	}
+	rewritten, assets, err := codec.ExtractImages(transcript)
+	if err != nil {
+		return transcript, nil, fmt.Errorf("extract images: %w", err)
+	}
+	if len(assets) == 0 {
+		return transcript, nil, nil
+	}
+	out := make([]cpkg.TranscriptAsset, len(assets))
+	for i, a := range assets {
+		out[i] = cpkg.TranscriptAsset{Name: a.Name, MediaType: a.MediaType, Data: a.Data}
+	}
+	return rewritten, out, nil
+}
+
+// externalizeSessionImages runs the opt-in image-externalization step over a
+// session transcript before redaction. When enabled it returns the rewritten
+// (placeholder-bearing) transcript plus the extracted assets; when disabled,
+// unsupported for the agent, or on error it returns the transcript unchanged with
+// nil assets (the checkpoint then stores the inline transcript).
+//
+// It deliberately does NOT mutate the caller's transcript: the raw transcript is
+// still needed for CondenseResult.Transcript (trail titles) and, critically, as
+// the CheckpointTranscriptSize growth baseline, which is compared against the raw
+// inline shadow-branch blob — feeding it the shrunken externalized size would
+// report spurious growth on every subsequent commit.
+func externalizeSessionImages(ctx, logCtx context.Context, state *SessionState, transcript []byte) ([]byte, []cpkg.TranscriptAsset) {
+	if !settings.IsImageExternalizationEnabled(ctx) {
+		return transcript, nil
+	}
+	rewritten, assets, err := extractSessionImages(state.AgentType, transcript)
+	if err != nil {
+		logging.Warn(logCtx, "image externalization failed; leaving transcript inline",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()))
+		return transcript, nil
+	}
+	return rewritten, assets
+}
+
+// sidecarSessionImages captures images an agent stores OUTSIDE the transcript
+// (e.g. Cursor's per-session SQLite blob store) as checkpoint assets, so they are
+// preserved with the session even though they never appear in full.jsonl. Unlike
+// externalizeSessionImages there is no transcript placeholder and no round trip:
+// these assets are preserve/view-only (the agent reads its own store on restore).
+//
+// Gated on the same opt-in flag. Best-effort: agents without the capability, or
+// any capture error, yield no assets (the checkpoint is written without them).
+func sidecarSessionImages(ctx, logCtx context.Context, ag agent.Agent, state *SessionState) []cpkg.TranscriptAsset {
+	if !settings.IsImageExternalizationEnabled(ctx) {
+		return nil
+	}
+	provider, ok := agent.AsSidecarImageProvider(ag)
+	if !ok {
+		return nil
+	}
+	assets, err := provider.SidecarImages(ctx, state.TranscriptPath)
+	if err != nil {
+		logging.Warn(logCtx, "sidecar image capture failed; checkpoint stored without them",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()))
+		return nil
+	}
+	if len(assets) == 0 {
+		return nil
+	}
+	out := make([]cpkg.TranscriptAsset, len(assets))
+	for i, a := range assets {
+		out[i] = cpkg.TranscriptAsset{Name: a.Name, MediaType: a.MediaType, Data: a.Data}
+	}
+	return out
+}
+
+// checkpointStepCount returns the number of user prompts attributed to the
+// checkpoint being written: the turns counted since the current window's base.
+// The base is re-anchored (deferred) the next time a turn is counted after a
+// checkpoint write, so back-to-back checkpoints with no prompt between them share
+// a count. Floored at 1 so we never record 0 (covers a fast-path checkpoint
+// before any turn, and exec-mode gaps where turns weren't counted). Attach has
+// its own count (see attachStepCount); it does not go through this path.
+func checkpointStepCount(s *SessionState) int {
+	if w := s.SessionTurnCount - s.PromptWindowBase; w >= 1 {
+		return w
+	}
+	return 1
+}
 
 // CondenseSession condenses a session's shadow branch to permanent storage.
 // checkpointID is the 12-hex-char value from the Entire-Checkpoint trailer.
 // Metadata is stored at sharded path: <checkpoint_id[:2]>/<checkpoint_id[2:]>/
-// Uses checkpoint.GitStore.WriteCommitted for the git operations.
+// Uses checkpoint.PersistentStore.Write with a checkpoint.Session request for persistent storage.
 //
 // For mid-session commits (no Stop/SaveStep called yet), the shadow branch may not exist.
 // In this case, data is extracted from the live transcript instead.
@@ -116,6 +228,14 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	condenseStart := time.Now()
+	policy, err := readLocalCheckpointPolicy(logCtx, repo)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint policy could not be read: %w", err)
+	}
+	if !checkpointpolicy.CanSatisfyPolicy(policy) {
+		warnIfCheckpointPolicyNeedsUpgrade(logCtx, policy)
+		return nil, errors.New("checkpoint policy cannot be satisfied by this Entire CLI")
+	}
 
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	ref, hasShadowBranch := resolveShadowRef(repo, shadowBranchName, o.shadowRef)
@@ -146,6 +266,10 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// while keeping checkpoint metadata scoped to CheckpointTranscriptStart.
 	if backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, sessionData.Transcript, sessionData.TokenUsage); backfillUsage != nil {
 		state.TokenUsage = backfillUsage
+	}
+
+	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.CheckpointTokenUsage) {
+		sessionData.TokenUsage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
 	}
 
 	// Backfill the model from the transcript for agents that don't report it via
@@ -179,12 +303,26 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	filterFilesTouched(sessionData, committedFiles, state)
 
-	redactedTranscript, redactDuration := redactOrDrop(logCtx, sessionData.Transcript, state.SessionID, checkpointID)
+	// Externalize inline images BEFORE redaction: base64 is high-entropy and
+	// redaction would otherwise flag/destroy it. Opt-in; a no-codec agent or a
+	// transcript with no externalizable images is a no-op. sessionData.Transcript
+	// is left as the raw transcript (used for the result / growth baseline); only
+	// the redacted, externalized copy is stored.
+	externalizedTranscript, extractedAssets := externalizeSessionImages(ctx, logCtx, state, sessionData.Transcript)
+
+	redactedTranscript, redactDuration := redactOrDrop(logCtx, externalizedTranscript, state.SessionID, checkpointID)
 	if skipped := skipIfPostRedactionEmpty(logCtx, redactedTranscript, sessionData, state, checkpointID); skipped != nil {
 		return skipped, nil
 	}
 
-	store := s.getCheckpointStore(ctx, repo)
+	// Capture agent sidecar images (e.g. Cursor's SQLite store) after the skip
+	// check, so the sqlite3 shell-out is avoided when the checkpoint is discarded.
+	extractedAssets = append(extractedAssets, sidecarSessionImages(ctx, logCtx, ag, state)...)
+
+	store, err := s.getPersistentStore(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
 
 	// Get author info
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
@@ -217,17 +355,21 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		summary = generateSummary(ctx, redactedTranscript, sessionData.FilesTouched, state)
 	}
 
+	// Post-commit emits 7-layer-only blobs. OPF runs later in the
+	// pre-push rewrite path, never here.
 	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(sessionData.SkillEvents, state.TurnID))
 
-	writeOpts := cpkg.WriteCommittedOptions{
+	writeOpts := cpkg.WriteOptions{
 		CheckpointID:                checkpointID,
 		SessionID:                   state.SessionID,
 		Strategy:                    StrategyNameManualCommit,
 		Branch:                      branchName,
 		Transcript:                  redactedTranscript,
+		Assets:                      extractedAssets,
 		Prompts:                     sessionData.Prompts,
 		FilesTouched:                sessionData.FilesTouched,
-		CheckpointsCount:            state.StepCount,
+		CheckpointsCount:            checkpointStepCount(state),
+		SaveStepCount:               state.StepCount,
 		EphemeralBranch:             shadowBranchName,
 		AuthorName:                  authorName,
 		AuthorEmail:                 authorEmail,
@@ -239,7 +381,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		TokenUsage:                  sessionData.TokenUsage,
 		SkillEvents:                 skillEvents,
 		SessionMetrics:              buildSessionMetrics(state),
-		InitialAttribution:          attribution,
+		Attribution:                 attribution,
 		PromptAttributionsJSON:      marshalPromptAttributionsIncludingPending(state),
 		Summary:                     summary,
 		Kind:                        string(state.Kind),
@@ -253,7 +395,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")
-	if err := store.WriteCommitted(writeCtx, writeOpts); err != nil {
+	if err := store.Write(writeCtx, cpkg.Session(writeOpts)); err != nil {
 		writeCommittedSpan.RecordError(err)
 		writeCommittedSpan.End()
 		return nil, fmt.Errorf("failed to write checkpoint metadata: %w", err)
@@ -261,9 +403,11 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	writeCommittedSpan.End()
 	writeV1Duration := time.Since(writeV1Start)
 
-	// Mirror the committed write to refs.Mirror when configured (best-effort;
-	// failures are logged, not fatal).
-	mirrorCommittedMetadataRefBestEffort(ctx, repo, store.Refs())
+	// Deferred prompt-window reset: a checkpoint was written, so the window base
+	// must be re-anchored — but not now. We defer until the next counted turn (in
+	// persistEventMetadataToState) so two checkpoints with no prompt between them
+	// report the same count instead of the second showing 0.
+	state.PromptWindowResetPending = true
 
 	logging.Debug(logCtx, "condense timings",
 		slog.String("session_id", state.SessionID),
@@ -280,7 +424,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	return &CondenseResult{
 		CheckpointID:         checkpointID,
 		SessionID:            state.SessionID,
-		CheckpointsCount:     state.StepCount,
+		CheckpointsCount:     checkpointStepCount(state),
 		FilesTouched:         sessionData.FilesTouched,
 		Prompts:              sessionData.Prompts,
 		TotalTranscriptLines: sessionData.FullTranscriptLines,
@@ -340,7 +484,7 @@ func redactSessionTranscript(ctx context.Context, transcript []byte) (redact.Red
 		return redact.RedactedBytes{}, time.Since(start), nil
 	}
 
-	redacted, err := redactSessionJSONLBytes(transcript)
+	redacted, err := redactSessionJSONLBytes(ctx, transcript)
 	if err != nil {
 		span.RecordError(err)
 		return redact.RedactedBytes{}, time.Since(start), fmt.Errorf("failed to redact transcript secrets: %w", err)
@@ -494,7 +638,7 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 // The return type is the summarize.Generator interface rather than the concrete
 // adapter pointer so callers can't accidentally hold a non-nil interface that
 // wraps a nil pointer (the classic Go nil-interface footgun).
-func buildSummaryGenerator(ctx context.Context) summarize.Generator { //nolint:ireturn,nolintlint // interface return is intentional for provider abstraction and nil-safety; nolintlint flagged as "unused" under some linter versions but ireturn fires in others
+func buildSummaryGenerator(ctx context.Context) summarize.Generator {
 	s, err := settings.Load(ctx)
 	if err != nil {
 		// Warn (not Debug): this is the auto-summarize hot path on every commit.
@@ -546,7 +690,7 @@ func buildSummaryGenerator(ctx context.Context) summarize.Generator { //nolint:i
 // marshalPromptAttributionsIncludingPending builds the complete prompt attribution slice
 // (including PendingPromptAttribution for mid-turn commits) and encodes it to JSON.
 // This must stay consistent with the slice used by calculateSessionAttributions so the
-// persisted diagnostics match the computed InitialAttribution.
+// persisted diagnostics match the computed Attribution.
 func marshalPromptAttributionsIncludingPending(state *SessionState) json.RawMessage {
 	pas := make([]PromptAttribution, len(state.PromptAttributions), len(state.PromptAttributions)+1)
 	copy(pas, state.PromptAttributions)
@@ -641,7 +785,7 @@ type attributionOpts struct {
 	allAgentFiles         map[string]struct{} // Union of all sessions' FilesTouched (nil = single-session)
 }
 
-func calculateSessionAttributions(ctx context.Context, repo *git.Repository, shadowRef *plumbing.Reference, sessionData *ExtractedSessionData, state *SessionState, opts ...attributionOpts) *cpkg.InitialAttribution {
+func calculateSessionAttributions(ctx context.Context, repo *git.Repository, shadowRef *plumbing.Reference, sessionData *ExtractedSessionData, state *SessionState, opts ...attributionOpts) *cpkg.Attribution {
 	// Calculate initial attribution using accumulated prompt attribution data.
 	// This uses user edits captured at each prompt start (before agent works),
 	// plus any user edits after the final checkpoint (shadow → head).
@@ -966,135 +1110,6 @@ func countTranscriptItems(agentType types.AgentType, content string) int {
 	return len(allLines)
 }
 
-// extractUserPrompts extracts all user prompts from transcript content.
-// Returns prompts with IDE context tags stripped (e.g., <ide_opened_file>).
-func extractUserPrompts(agentType types.AgentType, content string) []string {
-	if content == "" {
-		return nil
-	}
-
-	// Droid has its own envelope format — use its parser to normalize first
-	if agentType == agent.AgentTypeFactoryAIDroid {
-		lines, _, err := factoryaidroid.ParseDroidTranscriptFromBytes([]byte(content), 0)
-		if err != nil {
-			return nil
-		}
-		var prompts []string
-		for _, line := range lines {
-			if line.Type != transcript.TypeUser {
-				continue
-			}
-			if text := transcript.ExtractUserContent(line.Message); text != "" {
-				if stripped := textutil.StripIDEContextTags(text); stripped != "" {
-					prompts = append(prompts, stripped)
-				}
-			}
-		}
-		return prompts
-	}
-
-	// OpenCode uses JSONL with a different per-line schema than Claude Code
-	if agentType == agent.AgentTypeOpenCode {
-		prompts, err := opencode.ExtractAllUserPrompts([]byte(content))
-		if err == nil && len(prompts) > 0 {
-			cleaned := make([]string, 0, len(prompts))
-			for _, prompt := range prompts {
-				if stripped := textutil.StripIDEContextTags(prompt); stripped != "" {
-					cleaned = append(cleaned, stripped)
-				}
-			}
-			return cleaned
-		}
-		return nil
-	}
-
-	// Try Gemini format first if agentType is Gemini, or as fallback if Unknown
-	if agentType == agent.AgentTypeGemini || agentType == agent.AgentTypeUnknown {
-		prompts, err := geminicli.ExtractAllUserPrompts([]byte(content))
-		if err == nil && len(prompts) > 0 {
-			// Strip IDE context tags for consistency with Claude Code handling
-			cleaned := make([]string, 0, len(prompts))
-			for _, prompt := range prompts {
-				if stripped := textutil.StripIDEContextTags(prompt); stripped != "" {
-					cleaned = append(cleaned, stripped)
-				}
-			}
-			return cleaned
-		}
-		// If agentType is explicitly Gemini but parsing failed, return nil
-		if agentType == agent.AgentTypeGemini {
-			return nil
-		}
-		// Otherwise fall through to JSONL parsing for Unknown type
-	}
-
-	// Claude Code and other JSONL-based agents
-	return extractUserPromptsFromLines(strings.Split(content, "\n"))
-}
-
-// extractUserPromptsFromLines extracts user prompts from JSONL transcript lines.
-// IDE-injected context tags (like <ide_opened_file>) are stripped from the results.
-func extractUserPromptsFromLines(lines []string) []string {
-	var prompts []string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		var entry map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
-		}
-
-		// Check for user message:
-		// - Claude Code uses "type": "human" or "type": "user"
-		// - Cursor uses "role": "user"
-		msgType, _ := entry["type"].(string) //nolint:errcheck // type assertion on interface{} from JSON
-		msgRole, _ := entry["role"].(string) //nolint:errcheck // type assertion on interface{} from JSON
-		isUser := msgType == "human" || msgType == "user" || msgRole == "user"
-		if !isUser {
-			continue
-		}
-
-		// Extract message content
-		message, ok := entry["message"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		// Handle string content
-		if content, ok := message["content"].(string); ok && content != "" {
-			cleaned := textutil.StripIDEContextTags(content)
-			if cleaned != "" {
-				prompts = append(prompts, cleaned)
-			}
-			continue
-		}
-
-		// Handle array content (e.g., multiple text blocks from VSCode)
-		if arr, ok := message["content"].([]interface{}); ok {
-			var texts []string
-			for _, item := range arr {
-				if m, ok := item.(map[string]interface{}); ok {
-					if m["type"] == "text" {
-						if text, ok := m["text"].(string); ok {
-							texts = append(texts, text)
-						}
-					}
-				}
-			}
-			if len(texts) > 0 {
-				cleaned := textutil.StripIDEContextTags(strings.Join(texts, "\n\n"))
-				if cleaned != "" {
-					prompts = append(prompts, cleaned)
-				}
-			}
-		}
-	}
-	return prompts
-}
-
 // splitPromptContent splits prompt.txt content on the "\n\n---\n\n" separator.
 // Returns nil if content is empty.
 func splitPromptContent(content string) []string {
@@ -1151,7 +1166,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	}
 	defer repo.Close()
 
-	checkpointID, err := id.Generate()
+	checkpointID, err := cpkg.GenerateCheckpointID(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to generate checkpoint ID: %w", err)
 	}
@@ -1193,6 +1208,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		)
 
 		state.StepCount = 0
+		state.CheckpointTokenUsage = nil
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
 		state.CheckpointTranscriptSize = int64(len(result.Transcript))
 		state.Phase = session.PhaseIdle
@@ -1250,14 +1266,6 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	}
 	defer repo.Close()
 
-	checkpointID, err := id.Generate()
-	if err != nil {
-		logging.Warn(logCtx, "eager condense: failed to generate checkpoint ID",
-			slog.String("error", err.Error()),
-		)
-		return nil // fail-open
-	}
-
 	var shadowBranchName string
 	var didCondense bool
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
@@ -1289,6 +1297,18 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			return nil
 		}
 
+		// Mint the checkpoint ID only now that condensation is actually going to
+		// run — the skip paths above (files-touched, no steps, no shadow branch)
+		// return before this, so a no-op session stop no longer pays the ID mint
+		// (and its checkpoints-config load).
+		checkpointID, genErr := cpkg.GenerateCheckpointID(logCtx)
+		if genErr != nil {
+			logging.Warn(logCtx, "eager condense: failed to generate checkpoint ID",
+				slog.String("error", genErr.Error()),
+			)
+			return ErrMutationSkip // fail-open; PostCommit retries
+		}
+
 		result, condErr := s.CondenseSession(ctx, repo, checkpointID, state, nil)
 		if condErr != nil {
 			logging.Warn(logCtx, "eager condense on session stop failed, PostCommit will retry",
@@ -1307,6 +1327,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		}
 
 		state.StepCount = 0
+		state.CheckpointTokenUsage = nil
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
 		state.LastCheckpointID = checkpointID
 		state.LastCheckpointCommitHash = state.BaseCommit

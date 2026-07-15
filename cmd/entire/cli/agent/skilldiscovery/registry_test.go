@@ -12,9 +12,11 @@ func TestCuratedBuiltinsFor_KnownAgents(t *testing.T) {
 	if len(claude) != 3 {
 		t.Fatalf("claude-code built-ins: got %d entries, want 3", len(claude))
 	}
+	// Codex has no binary-bundled review command usable from `codex exec`;
+	// its review skills are discovered on disk in $name form instead.
 	codex := skilldiscovery.CuratedBuiltinsFor("codex")
-	if len(codex) != 1 || codex[0].Name != "/review" {
-		t.Errorf("codex built-ins: got %+v, want 1x /review", codex)
+	if len(codex) != 0 {
+		t.Errorf("codex built-ins: got %+v, want 0 (discovery-driven)", codex)
 	}
 	gemini := skilldiscovery.CuratedBuiltinsFor("gemini")
 	if len(gemini) != 0 {
@@ -68,5 +70,18 @@ func TestIsEligible_IncludesAgentWithOnlyInstallHint(t *testing.T) {
 	}
 	if skilldiscovery.IsEligible("nonexistent") {
 		t.Error("unknown agent should not be eligible")
+	}
+}
+
+// TestActiveInstallHintsFor_CodexFingerprintMatchesDollarFormDiscovery pins
+// the suppression fingerprint to the invocation form codex discovery actually
+// produces: DiscoverReviewSkills emits `$plugin:name`, so a slash-form
+// ProvidesAny entry could never intersect the discovered set and the hint
+// would show forever even with the plugin installed.
+func TestActiveInstallHintsFor_CodexFingerprintMatchesDollarFormDiscovery(t *testing.T) {
+	t.Parallel()
+	discovered := map[string]struct{}{"$codex:adversarial-review": {}}
+	if hints := skilldiscovery.ActiveInstallHintsFor("codex", discovered); len(hints) != 0 {
+		t.Fatalf("codex hint not suppressed by $-form discovery; got %d hints: %+v", len(hints), hints)
 	}
 }

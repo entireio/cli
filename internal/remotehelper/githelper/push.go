@@ -42,13 +42,17 @@ import (
 //  6. Send-pack writes a trailing flush + helper-status lines to
 //     stdout; we discard the flush and relay helper-status to git,
 //     then append the blank line that terminates the status batch.
-func handlePush(ctx context.Context, t Transport, firstLine string, opts *Options, stdin *bufio.Reader, stdout io.Writer) error {
+func handlePush(ctx context.Context, t Transport, adv *refAdvCache, firstLine string, opts *Options, stdin *bufio.Reader, stdout io.Writer) error {
 	refspecs, err := readPushBatch(firstLine, stdin)
 	if err != nil {
 		return err
 	}
 
-	refsResp, err := t.InfoRefs(ctx, serviceReceivePack)
+	// Reuse the advertisement "list for-push" already fetched. Re-fetching
+	// here would observe refs the pre-push hook pushed after Git's ref
+	// snapshot, which send-pack reports and Git flags as "unexpected status"
+	// (see refAdvCache / ENCLI-267).
+	refsResp, err := adv.infoRefs(ctx, t, serviceReceivePack)
 	if err != nil {
 		return fmt.Errorf("fetching receive-pack info/refs: %w", err)
 	}
@@ -81,7 +85,7 @@ func handlePush(ctx context.Context, t Transport, firstLine string, opts *Option
 		return fmt.Errorf("starting send-pack: %w", err)
 	}
 
-	respCh := make(chan io.Reader, 1)
+	respCh := make(chan io.ReadCloser, 1)
 	feedErr := make(chan error, 1)
 	go func() {
 		defer spIn.Close()
@@ -98,6 +102,13 @@ func handlePush(ctx context.Context, t Transport, firstLine string, opts *Option
 			feedErr <- nil
 			return
 		}
+		// io.Copy may still be reading after send-pack has consumed the
+		// report-status — the HTTP chunked terminator hasn't necessarily
+		// arrived yet. If main closed resp during that read, the body's
+		// Read would fail with "use of closed network connection" and
+		// the helper would exit non-zero on a push that actually
+		// succeeded. Own the close here so it runs strictly after Copy.
+		defer resp.Close()
 		if _, err := io.Copy(spIn, resp); err != nil {
 			feedErr <- fmt.Errorf("piping receive-pack response to send-pack: %w", err)
 			return
@@ -135,18 +146,19 @@ func handlePush(ctx context.Context, t Transport, firstLine string, opts *Option
 	// Drain the trailing flush so git sees only the newline-delimited
 	// status lines that transport-helper.c:push_update_refs_status
 	// expects.
+	//
+	// resp is closed by the feeder goroutine (above), not here — closing
+	// while io.Copy is mid-read aborts the body Read with "use of closed
+	// network connection" and turns successful pushes into fatal errors.
 	flushBuf := make([]byte, 4)
 	if _, err := io.ReadFull(spOutReader, flushBuf); err != nil {
-		_ = resp.Close()
 		return fmt.Errorf("reading send-pack trailing flush: %w", err)
 	}
 	if string(flushBuf) != "0000" {
-		_ = resp.Close()
 		return fmt.Errorf("expected trailing flush from send-pack, got %q", flushBuf)
 	}
 
 	helperStatus, err := io.ReadAll(spOutReader)
-	_ = resp.Close()
 	if err != nil {
 		return fmt.Errorf("reading helper-status: %w", err)
 	}
@@ -165,16 +177,25 @@ func handlePush(ctx context.Context, t Transport, firstLine string, opts *Option
 		return fmt.Errorf("writing push terminator: %w", err)
 	}
 
-	if err := <-feedErr; err != nil {
-		if waitErr := sp.Wait(); waitErr != nil {
-			return errors.Join(err, fmt.Errorf("send-pack exited after feeder error: %w", waitErr))
-		}
-		return err
+	// Wait for send-pack first: its exit code is the authoritative
+	// signal for push success. If send-pack exited 0, it parsed a
+	// valid receive-pack report-status — the protocol completed.
+	// Any feeder error after that point is cleanup noise: io.Copy
+	// reading from resp can race with the server-side close of the
+	// underlying TCP socket (httptest.Server.Close in parallel CI
+	// tests, idle-conn reaping in long-running daemons) and surface
+	// "use of closed network connection" *after* send-pack has
+	// already drained everything it needed. Failing the push on
+	// that turned successful pushes into fatal errors.
+	spErr := sp.Wait()
+	feedRes := <-feedErr
+	if spErr == nil {
+		return nil
 	}
-	if err := sp.Wait(); err != nil {
-		return fmt.Errorf("send-pack exited with error: %w", err)
+	if feedRes != nil {
+		return errors.Join(feedRes, fmt.Errorf("send-pack exited after feeder error: %w", spErr))
 	}
-	return nil
+	return fmt.Errorf("send-pack exited with error: %w", spErr)
 }
 
 // readPushBatch collects the "push <src>:<dst>" lines that follow the

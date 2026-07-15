@@ -34,11 +34,11 @@ func TestLineAttributionReasonable(t *testing.T) {
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		sm := testutil.ReadSessionMetadata(t, s.Dir, cpID, 0)
 
-		assert.Greater(t, sm.InitialAttribution.AgentLines, 0,
+		assert.Greater(t, sm.Attribution.AgentLines, 0,
 			"agent lines should be > 0")
-		assert.Greater(t, sm.InitialAttribution.TotalCommitted, 0,
+		assert.Greater(t, sm.Attribution.TotalCommitted, 0,
 			"total committed should be > 0")
-		assert.Greater(t, sm.InitialAttribution.AgentPercentage, 50.0,
+		assert.Greater(t, sm.Attribution.AgentPercentage, 50.0,
 			"agent created 100%% of content, percentage should be > 50%%")
 		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
@@ -66,9 +66,9 @@ func TestInteractiveAttributionOnAgentCommit(t *testing.T) {
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		sm := testutil.ReadSessionMetadata(t, s.Dir, cpID, 0)
 
-		assert.Greater(t, sm.InitialAttribution.AgentLines, 0,
+		assert.Greater(t, sm.Attribution.AgentLines, 0,
 			"agent lines should be > 0 on first agent commit")
-		assert.Greater(t, sm.InitialAttribution.TotalCommitted, 0,
+		assert.Greater(t, sm.Attribution.TotalCommitted, 0,
 			"total committed should be > 0 on first agent commit")
 		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
@@ -104,11 +104,11 @@ func TestInteractiveAttributionMultiCommitSameSession(t *testing.T) {
 		testutil.WaitForCheckpointExists(t, s.Dir, cpID2, 30*time.Second)
 		sm := testutil.WaitForSessionMetadata(t, s.Dir, cpID2, 0, 10*time.Second)
 
-		assert.Greater(t, sm.InitialAttribution.AgentLines, 0,
+		assert.Greater(t, sm.Attribution.AgentLines, 0,
 			"agent lines should be > 0 on second commit")
-		assert.Greater(t, sm.InitialAttribution.TotalCommitted, 0,
+		assert.Greater(t, sm.Attribution.TotalCommitted, 0,
 			"total committed should be > 0 on second commit")
-		assert.Greater(t, sm.InitialAttribution.AgentPercentage, 50.0,
+		assert.Greater(t, sm.Attribution.AgentPercentage, 50.0,
 			"agent wrote all content, percentage should be > 50%%")
 		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
@@ -174,15 +174,15 @@ func TestAttributionMixedHumanAndAgent(t *testing.T) {
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		sm := testutil.ReadSessionMetadata(t, s.Dir, cpID, 0)
 
-		assert.Equal(t, agentLines, sm.InitialAttribution.AgentLines,
+		assert.Equal(t, agentLines, sm.Attribution.AgentLines,
 			"agent_lines should match actual lines in agent.txt")
-		assert.Equal(t, humanLines, sm.InitialAttribution.HumanAdded,
+		assert.Equal(t, humanLines, sm.Attribution.HumanAdded,
 			"human_added should match lines in human.txt")
-		assert.Equal(t, agentLines+humanLines, sm.InitialAttribution.TotalCommitted,
+		assert.Equal(t, agentLines+humanLines, sm.Attribution.TotalCommitted,
 			"total_committed should be sum of agent and human lines")
-		assert.Greater(t, sm.InitialAttribution.AgentPercentage, 0.0,
+		assert.Greater(t, sm.Attribution.AgentPercentage, 0.0,
 			"agent_percentage should be > 0 when agent wrote content")
-		assert.Less(t, sm.InitialAttribution.AgentPercentage, 100.0,
+		assert.Less(t, sm.Attribution.AgentPercentage, 100.0,
 			"agent_percentage should be < 100 when human also wrote content")
 		// Shadow branch may persist if agent created extra files beyond
 		// agent.txt — we only stage the two known files for precise

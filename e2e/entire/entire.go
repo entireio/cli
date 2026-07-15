@@ -1,6 +1,7 @@
 package entire
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log"
@@ -64,10 +65,10 @@ func CleanForce(t *testing.T, dir string) string {
 	return run(t, dir, "clean", "--force")
 }
 
-// RewindList runs `entire rewind --list` and parses the JSON output.
+// RewindList runs `entire checkpoint rewind --list` and parses the JSON output.
 func RewindList(t *testing.T, dir string) []RewindPoint {
 	t.Helper()
-	out := run(t, dir, "checkpoint", "rewind", "--list")
+	out := runStdout(t, dir, "checkpoint", "rewind", "--list")
 
 	var points []RewindPoint
 	if err := json.Unmarshal([]byte(out), &points); err != nil {
@@ -99,6 +100,24 @@ func run(t *testing.T, dir string, args ...string) string {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("entire %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// runStdout executes an `entire` subcommand in dir and fails the test on
+// error, returning stdout only. Use for commands whose stdout is parsed
+// (e.g. JSON) and must not be mixed with stderr notices.
+func runStdout(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := execx.NonInteractive(context.Background(), BinPath(), args...)
+	cmd.Dir = dir
+	cmd.Env = os.Environ()
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("entire %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, out, stderr.String())
 	}
 	return strings.TrimSpace(string(out))
 }

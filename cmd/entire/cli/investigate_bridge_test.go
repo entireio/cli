@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/experimental"
 )
 
 // TestBuildInvestigateDeps_HasRequiredFields asserts that the bridge
@@ -68,8 +70,12 @@ func TestLaunchableSpawnerFor_KnownAgents(t *testing.T) {
 }
 
 // TestRootCommand_HasInvestigate confirms `entire investigate` is wired
-// into the root command tree. It also checks that the command is
-// Hidden (the experimental discovery happens via `entire labs`).
+// into the root command tree as an experimental command. Experimental
+// commands are gated by the build-time visibility flag (see the
+// experimental package): shown and grouped in developer builds, hidden
+// in shipped releases. This test runs with the default (developer)
+// visibility, so it asserts the command is visible and filed under the
+// experimental group.
 func TestRootCommand_HasInvestigate(t *testing.T) {
 	t.Parallel()
 
@@ -84,8 +90,8 @@ func TestRootCommand_HasInvestigate(t *testing.T) {
 	if cmd.Name() != "investigate" {
 		t.Fatalf("resolved command name = %q, want %q", cmd.Name(), "investigate")
 	}
-	if !cmd.Hidden {
-		t.Fatal("investigate should be Hidden during maturation")
+	if cmd.GroupID != experimental.GroupID {
+		t.Fatalf("investigate GroupID = %q, want %q (experimental)", cmd.GroupID, experimental.GroupID)
 	}
 }
 

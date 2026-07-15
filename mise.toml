@@ -17,19 +17,12 @@ run = "gotestsum --format pkgname --format-icons text --format-hide-empty-pkg --
 
 [tasks."test:integration"]
 description = "Run integration tests"
-run = "gotestsum --format testname --format-icons text --hide-summary skipped -- -tags=integration,authfilestore ./cmd/entire/cli/integration_test/... ./cmd/entire/cli/auth/..."
-
-[tasks."build:e2e"]
-description = "Build the CLI for e2e tests with the file-backed auth store (-tags=authfilestore), so the spawned binary, the git-remote-entire helper, and git hooks never touch the developer's OS keychain"
-run = """
-go build -tags=authfilestore ./cmd/entire
-go build -tags=authfilestore ./cmd/git-remote-entire
-"""
+run = "gotestsum --format testname --format-icons text --hide-summary skipped -- -tags=integration ./cmd/entire/cli/integration_test/... ./cmd/entire/cli/auth/..."
 
 [tasks."test:ci"]
 description = "Run all tests (unit + integration + E2E canary) with race detection"
 run = """
-go test -tags=integration,authfilestore -race ./...
+go test -tags=integration -race ./...
 mise run test:e2e:canary
 """
 

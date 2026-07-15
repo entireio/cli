@@ -2,7 +2,7 @@
   "components": {
     "schemas": {
       "AddOrgMemberInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -39,7 +39,7 @@
         "type": "object"
       },
       "AuditEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "actorId": {
             "type": "string"
@@ -71,8 +71,50 @@
         ],
         "type": "object"
       },
+      "AvailableMirror": {
+        "additionalProperties": true,
+        "properties": {
+          "access": {
+            "description": "Caller's effective GitHub access: read, write, or admin.",
+            "enum": [
+              "read",
+              "write",
+              "admin"
+            ],
+            "type": "string"
+          },
+          "isArchived": {
+            "type": "boolean"
+          },
+          "isPrivate": {
+            "type": "boolean"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "status": {
+            "description": "available (can onboard), mirrored (already mirrored), or owner-only (personal repo of another user).",
+            "enum": [
+              "available",
+              "mirrored",
+              "owner-only"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "access",
+          "status"
+        ],
+        "type": "object"
+      },
       "BatchLookupInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -98,7 +140,7 @@
         "type": "object"
       },
       "BatchLookupOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -122,7 +164,7 @@
         "type": "object"
       },
       "Binding": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -157,8 +199,101 @@
         ],
         "type": "object"
       },
+      "CIWebhookView": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CIWebhookView.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "bk_organization": {
+            "type": "string"
+          },
+          "bk_pipeline": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "events": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "ref_filter": {
+            "type": "string"
+          },
+          "repo_id": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "repo_id",
+          "provider",
+          "display_name",
+          "bk_organization",
+          "bk_pipeline",
+          "ref_filter",
+          "events",
+          "enabled",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "Cluster": {
+        "additionalProperties": true,
+        "properties": {
+          "apiUrl": {
+            "type": "string"
+          },
+          "isDefault": {
+            "type": "boolean"
+          },
+          "jurisdiction": {
+            "type": "string"
+          },
+          "publicUrl": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "jurisdiction",
+          "publicUrl",
+          "isDefault"
+        ],
+        "type": "object"
+      },
       "CreateBindingInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -183,7 +318,7 @@
         "type": "object"
       },
       "CreateMirrorInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -195,7 +330,7 @@
             "type": "string"
           },
           "clusterHost": {
-            "description": "DNS host of the destination cluster.",
+            "description": "Destination cluster, as either a bare DNS host or the publicUrl returned by GET /api/v1/clusters.",
             "minLength": 1,
             "type": "string"
           },
@@ -223,7 +358,7 @@
         "type": "object"
       },
       "CreateOrgInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -251,7 +386,7 @@
         "type": "object"
       },
       "CreateProjectInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -289,8 +424,57 @@
         ],
         "type": "object"
       },
+      "CreateRepoCIWebhookInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CreateRepoCIWebhookInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "bk_cluster_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "bk_organization": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "bk_pipeline": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "events": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "provider": {
+            "enum": [
+              "buildkite"
+            ],
+            "type": "string"
+          },
+          "ref_filter": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "bk_organization",
+          "bk_cluster_id"
+        ],
+        "type": "object"
+      },
       "CreateRepoInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -329,7 +513,7 @@
         "type": "object"
       },
       "CreateServiceAccountInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -356,7 +540,7 @@
         "type": "object"
       },
       "CreatedMirror": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -372,7 +556,7 @@
             "type": "boolean"
           },
           "empty": {
-            "description": "true when the upstream has no refs to clone.",
+            "description": "Deprecated: always false. Poll the mirror status instead — an empty upstream still reaches 'ready'.",
             "type": "boolean"
           },
           "mirrorId": {
@@ -383,6 +567,10 @@
           },
           "publicUrl": {
             "type": "string"
+          },
+          "suspended": {
+            "description": "true when an existing placement was returned that an admin suspended.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -390,12 +578,125 @@
           "mirrorUrl",
           "publicUrl",
           "created",
-          "empty"
+          "empty",
+          "suspended"
+        ],
+        "type": "object"
+      },
+      "DeletionBlocker": {
+        "additionalProperties": true,
+        "properties": {
+          "deletable": {
+            "description": "True when the account can self-serve delete this org (it is the only member and the org has no projects). When false, the org has other members or data and must be transferred/removed via support. The UI should offer a delete action only when this is true.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "Resource ID (org ULID).",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Blocker kind. Currently always 'owned_org'.",
+            "enum": [
+              "owned_org"
+            ],
+            "type": "string"
+          },
+          "message": {
+            "description": "Copy explaining how to clear the blocker.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Human-readable resource name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "name",
+          "deletable",
+          "message"
+        ],
+        "type": "object"
+      },
+      "DeletionGrant": {
+        "additionalProperties": true,
+        "properties": {
+          "jurisdiction": {
+            "description": "Region the repo lives in (us/eu/au); empty for project grants.",
+            "type": "string"
+          },
+          "resourceId": {
+            "description": "Granted resource ULID.",
+            "type": "string"
+          },
+          "resourceName": {
+            "description": "Granted resource name.",
+            "type": "string"
+          },
+          "resourceType": {
+            "description": "Granted resource type.",
+            "enum": [
+              "project",
+              "repo"
+            ],
+            "type": "string"
+          },
+          "role": {
+            "description": "Granted role.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "resourceType",
+          "resourceId",
+          "resourceName",
+          "role"
+        ],
+        "type": "object"
+      },
+      "DeletionMembership": {
+        "additionalProperties": true,
+        "properties": {
+          "name": {
+            "description": "Org name.",
+            "type": "string"
+          },
+          "orgId": {
+            "description": "Org ULID.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "orgId",
+          "name"
+        ],
+        "type": "object"
+      },
+      "DeletionRepo": {
+        "additionalProperties": true,
+        "properties": {
+          "cluster": {
+            "description": "Cluster slug the repo is placed on, if known.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Repo ULID.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Repo name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
         ],
         "type": "object"
       },
       "ErrorDetail": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "location": {
             "description": "Where the error occurred, e.g. 'body.items[3].tags' or 'path.thing-id'",
@@ -412,7 +713,7 @@
         "type": "object"
       },
       "ErrorModel": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -472,8 +773,46 @@
         },
         "type": "object"
       },
+      "GetDeletionPreviewOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/GetDeletionPreviewOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "blocked": {
+            "description": "True when Blockers is non-empty: DELETE /me will be refused with 409.",
+            "type": "boolean"
+          },
+          "blockers": {
+            "description": "Resources that must be resolved before deletion (owned orgs).",
+            "items": {
+              "$ref": "#/components/schemas/DeletionBlocker"
+            },
+            "type": "array"
+          },
+          "willDelete": {
+            "$ref": "#/components/schemas/WillDeleteStruct"
+          },
+          "willUnlink": {
+            "$ref": "#/components/schemas/WillUnlinkStruct"
+          }
+        },
+        "required": [
+          "blocked",
+          "blockers",
+          "willDelete",
+          "willUnlink"
+        ],
+        "type": "object"
+      },
       "GetMeOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -486,6 +825,10 @@
           },
           "auth": {
             "$ref": "#/components/schemas/MeAuth"
+          },
+          "deletion": {
+            "$ref": "#/components/schemas/MeDeletion",
+            "description": "Present only when a deletion is pending; carries the cooldown window."
           },
           "global": {
             "$ref": "#/components/schemas/MeGlobal"
@@ -514,8 +857,30 @@
         ],
         "type": "object"
       },
+      "GetOnboardingStatusOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/GetOnboardingStatusOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "needsOnboarding": {
+            "description": "True when the account has no mirrored repo yet and should be sent through onboarding.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "needsOnboarding"
+        ],
+        "type": "object"
+      },
       "GetPermissionsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -549,8 +914,88 @@
         ],
         "type": "object"
       },
+      "GetRepoVisibilityOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/GetRepoVisibilityOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "visibility": {
+            "enum": [
+              "public",
+              "private"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "visibility"
+        ],
+        "type": "object"
+      },
+      "GetTopologyOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/GetTopologyOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "jurisdictions": {
+            "items": {
+              "$ref": "#/components/schemas/TopologyJurisdiction"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "jurisdictions"
+        ],
+        "type": "object"
+      },
+      "GetVersionOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/GetVersionOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "mode": {
+            "description": "Server mode.",
+            "enum": [
+              "standalone",
+              "global",
+              "regional"
+            ],
+            "type": "string"
+          },
+          "version": {
+            "description": "Git commit SHA of the running entire-core binary, or \"dev\" for an untagged local build.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "type": "object"
+      },
       "GrantProjectAccessInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -564,9 +1009,7 @@
           "granteeType": {
             "default": "account",
             "enum": [
-              "account",
-              "org",
-              "team"
+              "account"
             ],
             "type": "string"
           },
@@ -579,7 +1022,11 @@
             "type": "string"
           },
           "role": {
-            "minLength": 1,
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
             "type": "string"
           }
         },
@@ -591,7 +1038,7 @@
         "type": "object"
       },
       "GrantProjectAccessOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -612,7 +1059,7 @@
         "type": "object"
       },
       "GrantRepoAccessInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -626,9 +1073,7 @@
           "granteeType": {
             "default": "account",
             "enum": [
-              "account",
-              "org",
-              "team"
+              "account"
             ],
             "type": "string"
           },
@@ -641,7 +1086,12 @@
             "type": "string"
           },
           "role": {
-            "minLength": 1,
+            "enum": [
+              "reader",
+              "writer",
+              "admin",
+              "ci_manager"
+            ],
             "type": "string"
           }
         },
@@ -653,7 +1103,7 @@
         "type": "object"
       },
       "GrantRepoAccessOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -674,7 +1124,7 @@
         "type": "object"
       },
       "GrantServiceAccountAccessInputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -697,7 +1147,11 @@
             "type": "string"
           },
           "role": {
-            "minLength": 1,
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
             "type": "string"
           }
         },
@@ -709,7 +1163,7 @@
         "type": "object"
       },
       "GrantServiceAccountAccessOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -730,7 +1184,7 @@
         "type": "object"
       },
       "ListAuditEventsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -746,6 +1200,10 @@
               "$ref": "#/components/schemas/AuditEvent"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -753,8 +1211,32 @@
         ],
         "type": "object"
       },
+      "ListAvailableMirrorsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListAvailableMirrorsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "available": {
+            "items": {
+              "$ref": "#/components/schemas/AvailableMirror"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "type": "object"
+      },
       "ListBindingsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -770,6 +1252,10 @@
               "$ref": "#/components/schemas/Binding"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -777,8 +1263,56 @@
         ],
         "type": "object"
       },
+      "ListClustersOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListClustersOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "clusters": {
+            "items": {
+              "$ref": "#/components/schemas/Cluster"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "clusters"
+        ],
+        "type": "object"
+      },
+      "ListMirrorCollaboratorsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListMirrorCollaboratorsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "collaborators": {
+            "items": {
+              "$ref": "#/components/schemas/MirrorCollaborator"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "collaborators"
+        ],
+        "type": "object"
+      },
       "ListMirrorsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -794,6 +1328,10 @@
               "$ref": "#/components/schemas/Mirror"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -802,7 +1340,7 @@
         "type": "object"
       },
       "ListOIDCProvidersOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -811,6 +1349,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "providers": {
@@ -826,7 +1368,7 @@
         "type": "object"
       },
       "ListOrgMembersOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -842,6 +1384,10 @@
               "$ref": "#/components/schemas/Membership"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -850,7 +1396,7 @@
         "type": "object"
       },
       "ListOrgProjectsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -861,6 +1407,13 @@
             "readOnly": true,
             "type": "string"
           },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          },
+          "project": {
+            "$ref": "#/components/schemas/Project"
+          },
           "projects": {
             "items": {
               "$ref": "#/components/schemas/Project"
@@ -868,13 +1421,10 @@
             "type": "array"
           }
         },
-        "required": [
-          "projects"
-        ],
         "type": "object"
       },
       "ListOrgsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -885,6 +1435,13 @@
             "readOnly": true,
             "type": "string"
           },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          },
+          "org": {
+            "$ref": "#/components/schemas/Org"
+          },
           "orgs": {
             "items": {
               "$ref": "#/components/schemas/Org"
@@ -892,13 +1449,10 @@
             "type": "array"
           }
         },
-        "required": [
-          "orgs"
-        ],
         "type": "object"
       },
       "ListProjectMembersOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -914,6 +1468,10 @@
               "$ref": "#/components/schemas/ProjectGrant"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -922,7 +1480,7 @@
         "type": "object"
       },
       "ListProjectReposOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -933,6 +1491,13 @@
             "readOnly": true,
             "type": "string"
           },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          },
+          "repo": {
+            "$ref": "#/components/schemas/Repo"
+          },
           "repos": {
             "items": {
               "$ref": "#/components/schemas/Repo"
@@ -940,13 +1505,10 @@
             "type": "array"
           }
         },
-        "required": [
-          "repos"
-        ],
         "type": "object"
       },
       "ListProjectsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -955,6 +1517,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "project": {
@@ -969,8 +1535,88 @@
         },
         "type": "object"
       },
+      "ListRepoCIWebhooksOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListRepoCIWebhooksOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "subscriptions": {
+            "items": {
+              "$ref": "#/components/schemas/CIWebhookView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "subscriptions"
+        ],
+        "type": "object"
+      },
+      "ListRepoGrantsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListRepoGrantsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "grants": {
+            "items": {
+              "$ref": "#/components/schemas/RepoGrant"
+            },
+            "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "grants"
+        ],
+        "type": "object"
+      },
+      "ListReposOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListReposOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "repos": {
+            "items": {
+              "$ref": "#/components/schemas/RepoIndexEntry"
+            },
+            "type": "array"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "repos",
+          "truncated"
+        ],
+        "type": "object"
+      },
       "ListServiceAccountGrantsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -986,6 +1632,10 @@
               "$ref": "#/components/schemas/ServiceAccountGrant"
             },
             "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
           }
         },
         "required": [
@@ -994,7 +1644,7 @@
         "type": "object"
       },
       "ListServiceAccountsOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1003,6 +1653,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "serviceAccounts": {
@@ -1017,8 +1671,45 @@
         ],
         "type": "object"
       },
+      "LookupBySlugOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/LookupBySlugOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "cell": {
+            "type": "string"
+          },
+          "jurisdiction": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId",
+          "cell",
+          "jurisdiction",
+          "owner",
+          "repo"
+        ],
+        "type": "object"
+      },
       "LookupRef": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "id": {
             "minLength": 1,
@@ -1037,7 +1728,7 @@
         "type": "object"
       },
       "LookupRefResult": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "id": {
             "type": "string"
@@ -1072,7 +1763,7 @@
         "type": "object"
       },
       "LookupResourcesOutputBody": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1081,6 +1772,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "permission": {
@@ -1108,7 +1803,7 @@
         "type": "object"
       },
       "MeAuth": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "provider": {
             "type": "string"
@@ -1123,13 +1818,38 @@
         ],
         "type": "object"
       },
+      "MeDeletion": {
+        "additionalProperties": true,
+        "properties": {
+          "cooldownEndsAt": {
+            "description": "When the cooldown elapses and the account becomes eligible for irreversible hard-deletion.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "requestedAt": {
+            "description": "When deletion was requested (deletion_requested_at).",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "requestedAt",
+          "cooldownEndsAt"
+        ],
+        "type": "object"
+      },
       "MeGlobal": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "accountId": {
             "type": "string"
           },
           "avatarUrl": {
+            "type": "string"
+          },
+          "createdAt": {
+            "description": "When the account was created (accounts.created_at).",
+            "format": "date-time",
             "type": "string"
           },
           "handle": {
@@ -1147,13 +1867,18 @@
         },
         "required": [
           "accountId",
+          "createdAt",
           "handles"
         ],
         "type": "object"
       },
       "MeIdentityHandle": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
+          "email": {
+            "description": "The provider's publicly-visible profile email (from the provider at login; may be empty). NOT the account's contact email.",
+            "type": "string"
+          },
           "handle": {
             "type": "string"
           },
@@ -1172,7 +1897,7 @@
         "type": "object"
       },
       "MeRegional": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "bio": {
             "type": "string"
@@ -1193,7 +1918,7 @@
         "type": "object"
       },
       "MeRegionalUnavailable": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "error": {
             "description": "Always 'foreign_jurisdiction'. Discriminator for client-side state machines.",
@@ -1224,7 +1949,7 @@
         "type": "object"
       },
       "Membership": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1269,7 +1994,7 @@
         "type": "object"
       },
       "Mirror": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1278,6 +2003,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "cell": {
+            "description": "Physical cell the mirror's cluster runs in, e.g. aws-us-east-2.",
             "type": "string"
           },
           "clusterHost": {
@@ -1313,6 +2042,16 @@
           "repo": {
             "type": "string"
           },
+          "status": {
+            "description": "Clone lifecycle: processing (cloning), ready (clonable), failed (initial clone failed), or suspended.",
+            "enum": [
+              "processing",
+              "ready",
+              "failed",
+              "suspended"
+            ],
+            "type": "string"
+          },
           "suspendedAt": {
             "format": "date-time",
             "type": "string"
@@ -1328,8 +2067,29 @@
         ],
         "type": "object"
       },
+      "MirrorCollaborator": {
+        "additionalProperties": true,
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "handle": {
+            "description": "Primary handle (provider:label), empty if none resolves.",
+            "type": "string"
+          },
+          "role": {
+            "description": "reader (pull) or writer (pull+push).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId",
+          "role"
+        ],
+        "type": "object"
+      },
       "OIDCProvider": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "description": {
             "type": "string"
@@ -1351,7 +2111,7 @@
         "type": "object"
       },
       "Org": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1387,8 +2147,38 @@
         ],
         "type": "object"
       },
+      "PatchRepoCIWebhookInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/PatchRepoCIWebhookInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "events": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ref_filter": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "Project": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1434,9 +2224,12 @@
         "type": "object"
       },
       "ProjectGrant": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "granteeId": {
+            "type": "string"
+          },
+          "granteeName": {
             "type": "string"
           },
           "granteeType": {
@@ -1444,17 +2237,21 @@
           },
           "role": {
             "type": "string"
+          },
+          "source": {
+            "type": "string"
           }
         },
         "required": [
           "granteeType",
           "granteeId",
-          "role"
+          "role",
+          "source"
         ],
         "type": "object"
       },
       "Repo": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1471,17 +2268,22 @@
           "foreign": {
             "type": "boolean"
           },
+          "fullName": {
+            "type": "string"
+          },
           "id": {
+            "type": "string"
+          },
+          "mirrorSuspended": {
+            "type": "boolean"
+          },
+          "mirrorSuspendedAt": {
             "type": "string"
           },
           "name": {
             "type": "string"
           },
           "objectFormat": {
-            "enum": [
-              "sha1",
-              "sha256"
-            ],
             "type": "string"
           },
           "owningProjectId": {
@@ -1497,12 +2299,13 @@
           "provisionReason": {
             "type": "string"
           },
+          "repoGroupId": {
+            "type": "string"
+          },
           "state": {
-            "enum": [
-              "provisioning",
-              "active",
-              "failed"
-            ],
+            "type": "string"
+          },
+          "visibility": {
             "type": "string"
           }
         },
@@ -1513,8 +2316,143 @@
         ],
         "type": "object"
       },
+      "RepoCandidate": {
+        "additionalProperties": true,
+        "properties": {
+          "access": {
+            "enum": [
+              "read",
+              "write",
+              "admin"
+            ],
+            "type": "string"
+          },
+          "onboardable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "access",
+          "onboardable"
+        ],
+        "type": "object"
+      },
+      "RepoGrant": {
+        "additionalProperties": true,
+        "properties": {
+          "granteeId": {
+            "type": "string"
+          },
+          "granteeName": {
+            "type": "string"
+          },
+          "granteeType": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "granteeType",
+          "granteeId",
+          "role",
+          "source"
+        ],
+        "type": "object"
+      },
+      "RepoIndexEntry": {
+        "additionalProperties": true,
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/RepoCandidate"
+          },
+          "cell": {
+            "deprecated": true,
+            "type": "string"
+          },
+          "clusterSlug": {
+            "deprecated": true,
+            "type": "string"
+          },
+          "full_name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "jurisdiction": {
+            "deprecated": true,
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "placements": {
+            "items": {
+              "$ref": "#/components/schemas/RepoPlacement"
+            },
+            "type": "array"
+          },
+          "visibility": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "jurisdiction",
+          "cell",
+          "clusterSlug",
+          "name",
+          "full_name",
+          "visibility",
+          "placements"
+        ],
+        "type": "object"
+      },
+      "RepoPlacement": {
+        "additionalProperties": true,
+        "properties": {
+          "cell": {
+            "type": "string"
+          },
+          "clusterSlug": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "jurisdiction": {
+            "type": "string"
+          },
+          "mirror": {
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "processing",
+              "ready",
+              "failed",
+              "suspended"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "jurisdiction",
+          "cell",
+          "clusterSlug",
+          "mirror",
+          "status"
+        ],
+        "type": "object"
+      },
       "ResolvedIdentity": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1547,7 +2485,7 @@
         "type": "object"
       },
       "ResourceAccess": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "permissions": {
             "items": {
@@ -1566,7 +2504,7 @@
         "type": "object"
       },
       "ServiceAccount": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
@@ -1608,7 +2546,7 @@
         "type": "object"
       },
       "ServiceAccountGrant": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "resourceId": {
             "type": "string"
@@ -1631,7 +2569,7 @@
         "type": "object"
       },
       "ServiceAccountWithGrants": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "accountId": {
             "type": "string"
@@ -1669,6 +2607,179 @@
           "createdAt"
         ],
         "type": "object"
+      },
+      "SetRepoVisibilityInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/SetRepoVisibilityInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "visibility": {
+            "enum": [
+              "public",
+              "private"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "visibility"
+        ],
+        "type": "object"
+      },
+      "SetRepoVisibilityOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/SetRepoVisibilityOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "visibility": {
+            "enum": [
+              "public",
+              "private"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "visibility"
+        ],
+        "type": "object"
+      },
+      "TopologyCluster": {
+        "additionalProperties": true,
+        "properties": {
+          "host": {
+            "description": "DNS host of this cluster; pass verbatim as clusterHost to POST /api/v1/mirrors.",
+            "type": "string"
+          },
+          "isDefault": {
+            "type": "boolean"
+          },
+          "label": {
+            "description": "Human cluster label (the cluster's display name).",
+            "type": "string"
+          },
+          "publicUrl": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "label",
+          "host",
+          "publicUrl",
+          "isDefault"
+        ],
+        "type": "object"
+      },
+      "TopologyJurisdiction": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "description": "Jurisdiction id from the cluster registry (e.g. \"us\").",
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "regions": {
+            "items": {
+              "$ref": "#/components/schemas/TopologyRegion"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "regions"
+        ],
+        "type": "object"
+      },
+      "TopologyRegion": {
+        "additionalProperties": true,
+        "properties": {
+          "clusters": {
+            "items": {
+              "$ref": "#/components/schemas/TopologyCluster"
+            },
+            "type": "array"
+          },
+          "id": {
+            "description": "Region id (the cell id from the cluster registry).",
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "clusters"
+        ],
+        "type": "object"
+      },
+      "WillDeleteStruct": {
+        "additionalProperties": true,
+        "properties": {
+          "profileDataNote": {
+            "description": "Blanket note: profile PII is erased across all regions the account has data in (per-region residency is not globally tracked).",
+            "type": "string"
+          },
+          "repos": {
+            "description": "Repos in the account's home region that will be permanently deleted (personal + mirror). Foreign-region repos are also erased by the fan-out but not enumerated here.",
+            "items": {
+              "$ref": "#/components/schemas/DeletionRepo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "repos",
+          "profileDataNote"
+        ],
+        "type": "object"
+      },
+      "WillUnlinkStruct": {
+        "additionalProperties": true,
+        "properties": {
+          "grants": {
+            "description": "Collaborator grants that will be unlinked.",
+            "items": {
+              "$ref": "#/components/schemas/DeletionGrant"
+            },
+            "type": "array"
+          },
+          "memberships": {
+            "description": "Org memberships that will be dropped (non-owned).",
+            "items": {
+              "$ref": "#/components/schemas/DeletionMembership"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "grants",
+          "memberships"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -1698,6 +2809,29 @@
         "operationId": "lookupResources",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "description": "SpiceDB resource type (e.g. \"repo\", \"project\", \"org\").",
             "in": "path",
             "name": "resourceType",
@@ -1709,12 +2843,12 @@
             }
           },
           {
-            "description": "Optional: only list resources where the caller has this permission.",
+            "description": "Optional: only list resources where the caller has this permission. pageSize/pageToken apply only when set.",
             "explode": false,
             "in": "query",
             "name": "permission",
             "schema": {
-              "description": "Optional: only list resources where the caller has this permission.",
+              "description": "Optional: only list resources where the caller has this permission. pageSize/pageToken apply only when set.",
               "type": "string"
             }
           }
@@ -1827,6 +2961,31 @@
     "/audit": {
       "get": {
         "operationId": "listAuditEvents",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -1860,6 +3019,45 @@
         "summary": "List the calling account's recent audit events",
         "tags": [
           "identity"
+        ]
+      }
+    },
+    "/clusters": {
+      "get": {
+        "operationId": "listClusters",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListClustersOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List data-plane clusters attached to this control plane",
+        "tags": [
+          "clusters"
         ]
       }
     },
@@ -1976,6 +3174,36 @@
       }
     },
     "/me": {
+      "delete": {
+        "operationId": "deleteMe",
+        "responses": {
+          "202": {
+            "description": "Accepted"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Request deletion of the calling account (7-day cooldown; cancel via POST /me/cancel-deletion)",
+        "tags": [
+          "identity"
+        ]
+      },
       "get": {
         "operationId": "getMe",
         "responses": {
@@ -2009,6 +3237,116 @@
           }
         ],
         "summary": "Get the calling account's identity and profile",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/me/cancel-deletion": {
+      "post": {
+        "operationId": "cancelDeletion",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Cancel a pending deletion request for the calling account",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/me/deletion-preview": {
+      "get": {
+        "operationId": "getDeletionPreview",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetDeletionPreviewOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Preview what deleting the calling account will erase, unlink, and block on",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/me/onboarding": {
+      "get": {
+        "operationId": "getOnboardingStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetOnboardingStatusOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Report whether the calling account still needs to onboard (has no mirror yet)",
         "tags": [
           "identity"
         ]
@@ -2095,32 +3433,55 @@
         "operationId": "listMirrors",
         "parameters": [
           {
-            "description": "Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to).",
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to). Case-sensitive exact match.",
             "explode": false,
             "in": "query",
             "name": "cluster",
             "schema": {
-              "description": "Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to).",
+              "description": "Optional: restrict to mirrors on this cluster (public host, e.g. royalcanin.partial.to). Case-sensitive exact match.",
               "type": "string"
             }
           },
           {
-            "description": "Optional: restrict to mirrors of this upstream provider (e.g. \"github\").",
+            "description": "Optional: restrict to mirrors of this upstream provider, case-insensitive (e.g. \"github\").",
             "explode": false,
             "in": "query",
             "name": "provider",
             "schema": {
-              "description": "Optional: restrict to mirrors of this upstream provider (e.g. \"github\").",
+              "description": "Optional: restrict to mirrors of this upstream provider, case-insensitive (e.g. \"github\").",
               "type": "string"
             }
           },
           {
-            "description": "Optional: restrict to mirrors with this upstream owner login.",
+            "description": "Optional: restrict to mirrors with this upstream owner login (case-insensitive).",
             "explode": false,
             "in": "query",
             "name": "owner",
             "schema": {
-              "description": "Optional: restrict to mirrors with this upstream owner login.",
+              "description": "Optional: restrict to mirrors with this upstream owner login (case-insensitive).",
               "type": "string"
             }
           }
@@ -2208,6 +3569,142 @@
         ]
       }
     },
+    "/mirrors/available": {
+      "get": {
+        "operationId": "listAvailableMirrors",
+        "parameters": [
+          {
+            "description": "Optional: restrict to repos with this owner login (case-insensitive).",
+            "explode": false,
+            "in": "query",
+            "name": "owner",
+            "schema": {
+              "description": "Optional: restrict to repos with this owner login (case-insensitive).",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListAvailableMirrorsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List GitHub repos the caller could onboard as mirrors",
+        "tags": [
+          "mirrors"
+        ]
+      }
+    },
+    "/mirrors/collaborators": {
+      "get": {
+        "operationId": "listMirrorCollaborators",
+        "parameters": [
+          {
+            "explode": false,
+            "in": "query",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "enum": [
+                "github"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "owner",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Public host of the cluster serving the mirror.",
+            "explode": false,
+            "in": "query",
+            "name": "clusterHost",
+            "required": true,
+            "schema": {
+              "description": "Public host of the cluster serving the mirror.",
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListMirrorCollaboratorsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List the principals with access to a mirror (live GitHub-admin gated)",
+        "tags": [
+          "mirrors"
+        ]
+      }
+    },
     "/mirrors/{mirrorId}": {
       "get": {
         "operationId": "getMirror",
@@ -2261,6 +3758,31 @@
     "/oidc-providers": {
       "get": {
         "operationId": "listOIDCProviders",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2300,6 +3822,48 @@
     "/orgs": {
       "get": {
         "operationId": "listOrgs",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: exact-match org name (case-insensitive).",
+            "explode": false,
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "description": "Optional: exact-match org name (case-insensitive).",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2309,7 +3873,24 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "default": {
             "content": {
@@ -2330,7 +3911,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "List organizations the caller can see",
+        "summary": "List organizations the caller can see (or one by name)",
         "tags": [
           "orgs"
         ]
@@ -2383,10 +3964,124 @@
         ]
       }
     },
+    "/orgs/{orgId}": {
+      "delete": {
+        "operationId": "deleteOrg",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete an organization",
+        "tags": [
+          "orgs"
+        ]
+      },
+      "get": {
+        "operationId": "getOrg",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Org"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get an organization",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
     "/orgs/{orgId}/members": {
       "get": {
         "operationId": "listOrgMembers",
         "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
           {
             "in": "path",
             "name": "orgId",
@@ -2557,11 +4252,44 @@
         "operationId": "listOrgProjects",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "in": "path",
             "name": "orgId",
             "required": true,
             "schema": {
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: exact-match project name (case-insensitive).",
+            "explode": false,
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "description": "Optional: exact-match project name (case-insensitive).",
               "type": "string"
             }
           }
@@ -2607,12 +4335,35 @@
         "operationId": "listProjects",
         "parameters": [
           {
-            "description": "Optional: exact-match project name.",
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: exact-match project name (case-insensitive).",
             "explode": false,
             "in": "query",
             "name": "name",
             "schema": {
-              "description": "Optional: exact-match project name.",
+              "description": "Optional: exact-match project name (case-insensitive).",
               "type": "string"
             }
           }
@@ -2695,6 +4446,97 @@
           }
         ],
         "summary": "Create project",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/projects/{projectId}": {
+      "delete": {
+        "operationId": "deleteProject",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete a project",
+        "tags": [
+          "projects"
+        ]
+      },
+      "get": {
+        "operationId": "getProject",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get a project by id",
         "tags": [
           "projects"
         ]
@@ -2887,6 +4729,29 @@
         "operationId": "listProjectMembers",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "in": "path",
             "name": "projectId",
             "required": true,
@@ -2937,11 +4802,44 @@
         "operationId": "listProjectRepos",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "in": "path",
             "name": "projectId",
             "required": true,
             "schema": {
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: exact-match repo name (case-insensitive).",
+            "explode": false,
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "description": "Optional: exact-match repo name (case-insensitive).",
               "type": "string"
             }
           }
@@ -2976,13 +4874,67 @@
             "sessionAuth": []
           }
         ],
-        "summary": "List repositories in a project",
+        "summary": "List repositories in a project (or one by name)",
         "tags": [
           "repos"
         ]
       }
     },
     "/repos": {
+      "get": {
+        "operationId": "listRepos",
+        "parameters": [
+          {
+            "description": "onboarded (default): repos in Entire; all: also include onboardable GitHub candidates.",
+            "explode": false,
+            "in": "query",
+            "name": "scope",
+            "schema": {
+              "default": "onboarded",
+              "description": "onboarded (default): repos in Entire; all: also include onboardable GitHub candidates.",
+              "enum": [
+                "onboarded",
+                "all"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListReposOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List the caller's readable repositories (placement index)",
+        "tags": [
+          "repos"
+        ]
+      },
       "post": {
         "operationId": "createRepo",
         "requestBody": {
@@ -3026,6 +4978,50 @@
           }
         ],
         "summary": "Create repository",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/lookup-by-slug": {
+      "get": {
+        "operationId": "lookupRepoBySlug",
+        "parameters": [
+          {
+            "description": "Provider-scoped slug, e.g. gh/acme/oss-lib or et/my-project/my-repo",
+            "explode": false,
+            "in": "query",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "description": "Provider-scoped slug, e.g. gh/acme/oss-lib or et/my-project/my-repo",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LookupBySlugOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Resolve a repo slug to routing info (unauthenticated)",
         "tags": [
           "repos"
         ]
@@ -3122,7 +5118,311 @@
         ]
       }
     },
+    "/repos/{repoId}/ci-webhooks": {
+      "get": {
+        "operationId": "listRepoCIWebhooks",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListRepoCIWebhooksOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List a repo's CI webhooks",
+        "tags": [
+          "ci-webhooks"
+        ]
+      },
+      "post": {
+        "operationId": "createRepoCIWebhook",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRepoCIWebhookInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CIWebhookView"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Enroll a repo into a CI webhook (Buildkite)",
+        "tags": [
+          "ci-webhooks"
+        ]
+      }
+    },
+    "/repos/{repoId}/ci-webhooks/{id}": {
+      "delete": {
+        "operationId": "deleteRepoCIWebhook",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "teardown",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete a repo's CI webhook",
+        "tags": [
+          "ci-webhooks"
+        ]
+      },
+      "patch": {
+        "operationId": "patchRepoCIWebhook",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchRepoCIWebhookInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CIWebhookView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Update a repo's CI webhook",
+        "tags": [
+          "ci-webhooks"
+        ]
+      }
+    },
     "/repos/{repoId}/grants": {
+      "get": {
+        "operationId": "listRepoGrants",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListRepoGrantsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List repo grants",
+        "tags": [
+          "repos"
+        ]
+      },
       "post": {
         "operationId": "grantRepoAccess",
         "parameters": [
@@ -3182,10 +5482,263 @@
         ]
       }
     },
+    "/repos/{repoId}/grants/account/{provider}/{providerUserId}": {
+      "delete": {
+        "operationId": "revokeRepoAccessByProvider",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "providerUserId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke repo access by provider identity",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/grants/{granteeType}/{granteeId}": {
+      "delete": {
+        "operationId": "revokeRepoAccess",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "granteeType",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "granteeId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke repo access by grantee id",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/visibility": {
+      "get": {
+        "operationId": "getRepoVisibility",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetRepoVisibilityOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get repository visibility",
+        "tags": [
+          "repos"
+        ]
+      },
+      "put": {
+        "operationId": "setRepoVisibility",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetRepoVisibilityInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetRepoVisibilityOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Set repository visibility",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
     "/service-accounts": {
       "get": {
         "operationId": "listServiceAccounts",
         "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
           {
             "explode": false,
             "in": "query",
@@ -3376,6 +5929,29 @@
         "operationId": "listBindings",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "in": "path",
             "name": "accountId",
             "required": true,
@@ -3535,6 +6111,29 @@
       "get": {
         "operationId": "listServiceAccountGrants",
         "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
           {
             "in": "path",
             "name": "accountId",
@@ -3700,6 +6299,76 @@
         "summary": "Revoke service account access",
         "tags": [
           "service-accounts"
+        ]
+      }
+    },
+    "/topology": {
+      "get": {
+        "operationId": "getTopology",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetTopologyOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get the cluster topology as a jurisdiction → region → cluster tree",
+        "tags": [
+          "clusters"
+        ]
+      }
+    },
+    "/version": {
+      "get": {
+        "operationId": "getVersion",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetVersionOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get the server version and mode",
+        "tags": [
+          "meta"
         ]
       }
     }

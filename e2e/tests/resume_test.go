@@ -122,8 +122,8 @@ func TestResumeSquashMergeMultipleCheckpoints(t *testing.T) {
 
 		out, err := entire.Resume(s.Dir, mainBranch)
 		require.NoError(t, err, "github format: entire resume failed: %s", out)
-		assert.Contains(t, out, "older checkpoints skipped",
-			"github format: squash merge should skip older checkpoints")
+		assert.Contains(t, out, "latest checkpoint",
+			"github format: squash merge should resume the latest checkpoint")
 
 		// Reset main to before the squash merge for the next format test.
 		s.Git(t, "reset", "--hard", mainHead)
@@ -154,8 +154,8 @@ func TestResumeSquashMergeMultipleCheckpoints(t *testing.T) {
 
 		out, err = entire.Resume(s.Dir, mainBranch)
 		require.NoError(t, err, "git-cli format: entire resume failed: %s", out)
-		assert.Contains(t, out, "older checkpoints skipped",
-			"git-cli format: squash merge should skip older checkpoints")
+		assert.Contains(t, out, "latest checkpoint",
+			"git-cli format: squash merge should resume the latest checkpoint")
 	})
 }
 

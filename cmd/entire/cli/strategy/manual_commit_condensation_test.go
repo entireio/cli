@@ -247,40 +247,6 @@ func TestCountTranscriptItems_CursorEmpty(t *testing.T) {
 	}
 }
 
-func TestExtractUserPrompts_Cursor(t *testing.T) {
-	t.Parallel()
-
-	// Cursor uses "role":"user" instead of "type":"human". extractUserPromptsFromLines
-	// handles both via the "role" fallback.
-	prompts := extractUserPrompts(agent.AgentTypeCursor, cursorSampleTranscript)
-	if len(prompts) != 3 {
-		t.Fatalf("extractUserPrompts(Cursor) returned %d prompts, want 3", len(prompts))
-	}
-
-	if !strings.Contains(prompts[0], "create a file with contents 'a'") {
-		t.Errorf("prompt[0] = %q, expected to contain file creation request", prompts[0])
-	}
-	if !strings.Contains(prompts[2], "bingo") {
-		t.Errorf("prompt[2] = %q, expected to contain 'bingo'", prompts[2])
-	}
-
-	// Verify <user_query> tags are stripped
-	for i, p := range prompts {
-		if strings.Contains(p, "<user_query>") || strings.Contains(p, "</user_query>") {
-			t.Errorf("prompt[%d] still contains <user_query> tags: %q", i, p)
-		}
-	}
-}
-
-func TestExtractUserPrompts_CursorEmpty(t *testing.T) {
-	t.Parallel()
-
-	prompts := extractUserPrompts(agent.AgentTypeCursor, "")
-	if len(prompts) != 0 {
-		t.Errorf("extractUserPrompts(Cursor, empty) = %v, want empty", prompts)
-	}
-}
-
 func TestSessionStateBackfillTokenUsage_CopilotUsesZeroInputSessionAggregate(t *testing.T) {
 	t.Parallel()
 
@@ -458,7 +424,7 @@ func TestCalculateTokenUsage_DroidStartOffsetBeyondEnd(t *testing.T) {
 // when state.Kind is KindAgentInvestigate, condensation propagates the kind
 // through to CheckpointSummary.HasInvestigation on the metadata branch and
 // writes the per-session investigate fields into the per-session
-// CommittedMetadata. Mirrors the (untested) review-tagging path so future
+// Metadata. Mirrors the (untested) review-tagging path so future
 // regressions in either flow are caught here.
 //
 // Tests in this file use t.Chdir for CWD-based git resolution, so this
@@ -547,10 +513,41 @@ func TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation(t *testing.T)
 	}
 	sessionBytes, err := sessionMeta.Contents()
 	require.NoError(t, err)
-	var meta checkpoint.CommittedMetadata
+	var meta checkpoint.Metadata
 	require.NoError(t, json.Unmarshal([]byte(sessionBytes), &meta))
 
 	require.Equal(t, string(session.KindAgentInvestigate), meta.Kind, "per-session Kind")
 	require.Equal(t, "0123456789ab", meta.InvestigateRunID, "per-session InvestigateRunID")
 	require.Equal(t, "Why is checkout flaky?", meta.InvestigateTopic, "per-session InvestigateTopic")
+}
+
+// TestCheckpointStepCount covers the prompt-window math that produces the
+// displayed "steps" count: SessionTurnCount - PromptWindowBase, floored at 1.
+func TestCheckpointStepCount(t *testing.T) {
+	tests := []struct {
+		name             string
+		sessionTurnCount int
+		promptWindowBase int
+		want             int
+	}{
+		{"first window of three prompts", 3, 0, 3},
+		{"second window of two prompts", 5, 3, 2},
+		{"no turns counted floors to 1", 0, 0, 1},
+		// Back-to-back checkpoint: base not yet re-anchored, so it reports the same
+		// count as the prior checkpoint rather than 0.
+		{"back-to-back reports same as prior", 3, 0, 3},
+		{"empty window floors to 1", 3, 3, 1},
+		{"negative guard floors to 1", 2, 5, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &SessionState{
+				SessionTurnCount: tt.sessionTurnCount,
+				PromptWindowBase: tt.promptWindowBase,
+			}
+			if got := checkpointStepCount(s); got != tt.want {
+				t.Errorf("checkpointStepCount() = %d, want %d", got, tt.want)
+			}
+		})
+	}
 }

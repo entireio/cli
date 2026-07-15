@@ -34,35 +34,6 @@ func TestEnvNamesAreStable(t *testing.T) {
 	}
 }
 
-// TestIsInvestigateEnvEntry pins the prefix-matching helper used to strip
-// stale ENTIRE_INVESTIGATE_* entries before AppendInvestigateEnv writes new
-// ones.
-func TestIsInvestigateEnvEntry(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		kv   string
-		want bool
-	}{
-		{EnvSession + "=1", true},
-		{EnvAgent + "=claude-code", true},
-		{EnvRunID + "=abcdef012345", true},
-		{EnvTopic + "=topic", true},
-		{EnvFindingsDoc + "=/tmp/x", true},
-		{EnvStateDoc + "=/tmp/state.json", true},
-		{EnvStartingSHA + "=deadbeef", true},
-		{"PATH=/usr/bin", false},
-		{"HOME=/home/u", false},
-		{"ENTIRE_REVIEW_SESSION=1", false},    // review entries are not investigate entries
-		{"ENTIRE_INVESTIGATE_OTHER=1", false}, // unknown investigate-style key
-		{"NOT_ENTIRE_INVESTIGATE_SESSION", false},
-	}
-	for _, tc := range tests {
-		if got := IsInvestigateEnvEntry(tc.kv); got != tc.want {
-			t.Errorf("IsInvestigateEnvEntry(%q) = %v, want %v", tc.kv, got, tc.want)
-		}
-	}
-}
-
 // TestAppendInvestigateEnv_StripsStaleInvestigateAndReview pins the contract
 // that AppendInvestigateEnv removes both ENTIRE_INVESTIGATE_* and
 // ENTIRE_REVIEW_* entries before appending fresh values. The review-strip

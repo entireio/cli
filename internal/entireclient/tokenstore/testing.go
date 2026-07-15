@@ -43,6 +43,14 @@ func UseFailingGetBackendForTesting(path string, failGet func(service, user stri
 	return installFaultStore(faultStore{inner: &fileStore{path: path}, failGet: failGet})
 }
 
+// UseFailingDeleteBackendForTesting is the delete-side analogue: Delete
+// returns an error for any (service, user) pair where failDelete reports
+// true. Used to test that logout treats credential deletion as part of its
+// success contract.
+func UseFailingDeleteBackendForTesting(path string, failDelete func(service, user string) bool) func() {
+	return installFaultStore(faultStore{inner: &fileStore{path: path}, failDelete: failDelete})
+}
+
 func installFaultStore(fs faultStore) func() {
 	backendMu.Lock()
 	prevBackend := backend
@@ -60,9 +68,10 @@ func installFaultStore(fs faultStore) func() {
 }
 
 type faultStore struct {
-	inner   store
-	failSet func(service, user string) bool
-	failGet func(service, user string) bool
+	inner      store
+	failSet    func(service, user string) bool
+	failGet    func(service, user string) bool
+	failDelete func(service, user string) bool
 }
 
 func (f faultStore) Get(service, user string) (string, error) {
@@ -82,6 +91,9 @@ func (f faultStore) Set(service, user, password string) error {
 }
 
 func (f faultStore) Delete(service, user string) error {
+	if f.failDelete != nil && f.failDelete(service, user) {
+		return fmt.Errorf("injected Delete failure for %s/%s", service, user)
+	}
 	//nolint:wrapcheck // thin test wrapper; callers handle errors
 	return f.inner.Delete(service, user)
 }

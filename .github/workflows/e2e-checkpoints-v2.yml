@@ -38,7 +38,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
@@ -49,7 +49,7 @@ jobs:
           echo 'somecredstorepass' | gnome-keyring-daemon --unlock
 
       - name: Setup mise
-        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
 
       - name: Build entire CLI
         run: go build -o /usr/local/bin/entire ./cmd/entire
@@ -125,7 +125,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
@@ -136,7 +136,7 @@ jobs:
           echo 'somecredstorepass' | gnome-keyring-daemon --unlock
 
       - name: Setup mise
-        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
 
       - name: Build entire CLI
         run: go build -o /usr/local/bin/entire ./cmd/entire

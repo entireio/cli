@@ -85,34 +85,35 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 		cmdPrefix = "entire hooks codex "
 	}
 	sessionStartCmd := cmdPrefix + "session-start"
+	useWindowsProductionHooks := agent.UseWindowsProductionHooks(ctx, localDev)
 	if !localDev {
-		sessionStartCmd = agent.WrapProductionJSONWarningHookCommand(sessionStartCmd, agent.WarningFormatSingleLine)
+		sessionStartCmd = agent.WrapProductionJSONWarningHookCommandForOS(sessionStartCmd, agent.WarningFormatSingleLine, useWindowsProductionHooks)
 	}
 	userPromptSubmitCmd := cmdPrefix + "user-prompt-submit"
 	stopCmd := cmdPrefix + "stop"
 	postToolUseCmd := cmdPrefix + "post-tool-use"
 	if !localDev {
-		userPromptSubmitCmd = agent.WrapProductionSilentHookCommand(userPromptSubmitCmd)
-		stopCmd = agent.WrapProductionSilentHookCommand(stopCmd)
-		postToolUseCmd = agent.WrapProductionSilentHookCommand(postToolUseCmd)
+		userPromptSubmitCmd = agent.WrapProductionSilentHookCommandForOS(userPromptSubmitCmd, useWindowsProductionHooks)
+		stopCmd = agent.WrapProductionSilentHookCommandForOS(stopCmd, useWindowsProductionHooks)
+		postToolUseCmd = agent.WrapProductionSilentHookCommandForOS(postToolUseCmd, useWindowsProductionHooks)
 	}
 
 	count := 0
 
-	if !hookCommandExists(sessionStart, sessionStartCmd) {
-		sessionStart = addHook(sessionStart, sessionStartCmd)
+	if updated, changed := syncHookCommand(sessionStart, sessionStartCmd); changed {
+		sessionStart = updated
 		count++
 	}
-	if !hookCommandExists(userPromptSubmit, userPromptSubmitCmd) {
-		userPromptSubmit = addHook(userPromptSubmit, userPromptSubmitCmd)
+	if updated, changed := syncHookCommand(userPromptSubmit, userPromptSubmitCmd); changed {
+		userPromptSubmit = updated
 		count++
 	}
-	if !hookCommandExists(stop, stopCmd) {
-		stop = addHook(stop, stopCmd)
+	if updated, changed := syncHookCommand(stop, stopCmd); changed {
+		stop = updated
 		count++
 	}
-	if !hookCommandExists(postToolUse, postToolUseCmd) {
-		postToolUse = addHook(postToolUse, postToolUseCmd)
+	if updated, changed := syncHookCommand(postToolUse, postToolUseCmd); changed {
+		postToolUse = updated
 		count++
 	}
 
@@ -294,6 +295,16 @@ func hookCommandExists(groups []MatcherGroup, command string) bool {
 		}
 	}
 	return false
+}
+
+func syncHookCommand(groups []MatcherGroup, command string) ([]MatcherGroup, bool) {
+	if hookCommandExists(groups, command) {
+		return groups, false
+	}
+	if hasEntireHook(groups) {
+		groups = removeEntireHooks(groups)
+	}
+	return addHook(groups, command), true
 }
 
 func addHook(groups []MatcherGroup, command string) []MatcherGroup {

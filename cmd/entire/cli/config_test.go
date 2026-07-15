@@ -290,7 +290,7 @@ func TestLoadEntireSettings_RejectsUnknownKeysInBase(t *testing.T) {
 // FetchingTree has no fetcher to download them — causing "session log not
 // available" errors during resume.
 //
-// Regression test for the bug introduced in b92b37b3 where ReadCommitted and
+// Regression test for the bug introduced in b92b37b3 where Read and
 // ReadSessionContent were changed to use FetchingTree but GetStrategy did not
 // configure a blob fetcher on the strategy.
 func TestGetStrategy_HasBlobFetcher(t *testing.T) {

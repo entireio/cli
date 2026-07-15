@@ -3,29 +3,30 @@ package cli
 import (
 	"errors"
 
+	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/spf13/cobra"
 )
 
 // newCheckpointGroupCmd builds the `entire checkpoint` parent command and
-// registers list/explain/rewind/search as children.
+// registers list/explain/tokens/search/resume as children, plus the deprecated rewind.
 func newCheckpointGroupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "checkpoint",
 		Aliases: []string{"cp", "checkpoints"},
-		Short:   "Inspect, rewind, and search checkpoints",
+		Short:   "Inspect and search checkpoints",
 		Long: `Operations on checkpoints — the persistent records of agent work tied to commits.
 
 Commands:
   list     List checkpoints on the current branch
   explain  Explain a checkpoint, commit, or session
-  rewind   Browse and rewind to a checkpoint
+  tokens   Show token usage and optimization recommendations
   search   Search checkpoints (semantic + keyword)
 
 Examples:
   entire checkpoint list
   entire checkpoint explain <id|sha>
-  entire checkpoint rewind --to <id>
+  entire checkpoint tokens <id>
   entire checkpoint search "fix login"`,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			if _, err := paths.WorktreeRoot(cmd.Context()); err != nil {
@@ -36,7 +37,10 @@ Examples:
 	}
 
 	cmd.AddCommand(newCheckpointListCmd())
+	cmd.AddCommand(newCheckpointResumeCmd())
 	cmd.AddCommand(newExplainCmd())
+	cmd.AddCommand(newCheckpointTokensCmd())
+	experimental.Register(cmd, newCheckpointPolicyCmd()) // 'checkpoint policy' (experimental)
 	cmd.AddCommand(newRewindCmd())
 	cmd.AddCommand(newCheckpointSearchCmd())
 
@@ -64,7 +68,7 @@ Optionally filter by session ID with --session.`,
 			if checkDisabledGuard(cmd.Context(), cmd.OutOrStdout()) {
 				return nil
 			}
-			return runExplainBranchWithFilter(cmd.Context(), cmd.OutOrStdout(), noPagerFlag, sessionFlag)
+			return runExplainBranchWithFilter(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), noPagerFlag, sessionFlag)
 		},
 	}
 

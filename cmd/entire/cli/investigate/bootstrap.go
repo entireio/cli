@@ -219,10 +219,13 @@ revealed. -->
 
 ## System under investigation
 
-<!-- A small diagram of the path under investigation. For
-producer/consumer or queue-shaped systems, show: who writes the input,
-who reads it, where retries happen, and the per-attempt cost. ASCII or
-mermaid both fine. Two boxes and an arrow beats a paragraph. -->
+<!-- A small Mermaid diagram of the path under investigation, in a
+`+"```mermaid"+` fenced block (use `+"`flowchart LR`"+`; it may fork to show
+success/failure paths). Do NOT use ASCII art — it renders poorly. For
+producer/consumer or queue-shaped systems, show: who writes the input, who
+reads it, where retries happen, and the per-attempt cost. Keep node and
+edge labels to a few words so the rendered diagram stays readable. Two boxes
+and an arrow beats a paragraph. -->
 
 ## Approach
 

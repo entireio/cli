@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
@@ -212,7 +213,7 @@ func TestRoot_NounGroupShorthandsUseCobraAliases(t *testing.T) {
 	}
 }
 
-func TestCheckpointSearchIsVisibleButTopLevelSearchIsHidden(t *testing.T) {
+func TestCheckpointSearchIsVisibleButTopLevelSearchIsExperimental(t *testing.T) {
 	t.Parallel()
 
 	root := NewRootCmd()
@@ -225,12 +226,39 @@ func TestCheckpointSearchIsVisibleButTopLevelSearchIsHidden(t *testing.T) {
 		t.Fatal("checkpoint search should be visible in checkpoint help")
 	}
 
+	// The top-level `entire search` shortcut is gated as experimental:
+	// visible and grouped in developer builds (the default test build),
+	// hidden in shipped releases.
 	topLevelSearch, _, err := root.Find([]string{"search"})
 	if err != nil {
 		t.Fatalf("find top-level search: %v", err)
 	}
-	if !topLevelSearch.Hidden {
-		t.Fatal("top-level search should remain hidden as a compatibility alias")
+	if topLevelSearch.GroupID != experimental.GroupID {
+		t.Fatalf("top-level search GroupID = %q, want %q (experimental)", topLevelSearch.GroupID, experimental.GroupID)
+	}
+}
+
+func TestCheckpointPolicyCommandIsExperimental(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+
+	checkpointPolicy, remaining, err := root.Find([]string{"checkpoint", "policy"})
+	if err != nil {
+		t.Fatalf("find checkpoint policy command: %v", err)
+	}
+	if len(remaining) != 0 || checkpointPolicy.Use != "policy" {
+		t.Fatalf("checkpoint policy resolved to %q with remaining args %v", checkpointPolicy.Use, remaining)
+	}
+	// Gated as experimental: visible and grouped in developer builds
+	// (the default test build), hidden in shipped releases.
+	if checkpointPolicy.GroupID != experimental.GroupID {
+		t.Fatalf("checkpoint policy GroupID = %q, want %q (experimental)", checkpointPolicy.GroupID, experimental.GroupID)
+	}
+
+	topLevelPolicy, remaining, err := root.Find([]string{"policy"})
+	if err == nil && len(remaining) == 0 && topLevelPolicy.Use == "policy" {
+		t.Fatal("top-level policy command should not remain after moving policy under checkpoint")
 	}
 }
 

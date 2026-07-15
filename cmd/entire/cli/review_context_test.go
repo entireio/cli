@@ -13,7 +13,6 @@ import (
 	"time"
 
 	git "github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -77,34 +76,6 @@ func TestReviewCheckpointContext_IncludesSummaryAndPromptFallback(t *testing.T) 
 	}
 }
 
-// Review committed-context reads resolve against the v1 custom ref when the
-// mirror is enabled, and the v1 branch otherwise. No t.Parallel: t.Chdir drives
-// settings.
-func TestReviewCheckpointContext_ReadsV1CustomRefWhenEnabled(t *testing.T) {
-	repoRoot := newReviewContextRepo(t)
-	t.Chdir(repoRoot)
-
-	const cpID = "c1d2e3f4a5b6"
-	writeReviewContextCheckpointCustomRefOnly(t, repoRoot, cpID, reviewContextCheckpointOptions{
-		agentType: agent.AgentTypeClaudeCode,
-		summary:   &checkpoint.Summary{Intent: "custom-ref-only checkpoint", Outcome: "read via custom ref"},
-	})
-	commitReviewContextChange(t, repoRoot, "cp.go", "cp\n", "cp change", "Entire-Checkpoint: "+cpID)
-
-	const wantDetail = "summary: custom-ref-only checkpoint; read via custom ref"
-
-	// Mirror disabled: reads hit the v1 branch, which no longer holds the checkpoint.
-	if got := reviewCheckpointContext(context.Background(), repoRoot, "master"); strings.Contains(got, wantDetail) {
-		t.Fatalf("checkpoint detail leaked with mirror disabled:\n%s", got)
-	}
-
-	// Mirror enabled: reads hit the custom ref.
-	enableV1CustomRefMirror(t, repoRoot)
-	if got := reviewCheckpointContext(context.Background(), repoRoot, "master"); !strings.Contains(got, wantDetail) {
-		t.Fatalf("checkpoint detail missing with mirror enabled:\n%s", got)
-	}
-}
-
 func TestReviewCheckpointContext_CapsCheckpointLines(t *testing.T) {
 	t.Parallel()
 
@@ -150,7 +121,7 @@ func TestReviewCheckpointDetail_ReadsSessionMetadataOnceForPromptFallback(t *tes
 
 	cpID := checkpointid.MustCheckpointID("d1b2c3d4e5f6")
 	reader := &countingReviewContextReader{
-		metadata: checkpoint.CommittedMetadata{
+		metadata: checkpoint.Metadata{
 			CheckpointID: cpID,
 			SessionID:    "session-1",
 		},
@@ -204,7 +175,7 @@ func TestReviewCommandSmoke_IncludesCheckpointContextInPrompt(t *testing.T) {
 	var errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"review", "--agent", string(agent.AgentNameClaudeCode)})
+	cmd.SetArgs([]string{"review", "general", "--agent", string(agent.AgentNameClaudeCode)})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("entire review failed: %v\nstdout:\n%s\nstderr:\n%s", err, out.String(), errOut.String())
@@ -267,7 +238,7 @@ func TestReviewCommandSmoke_IncludesInProgressSessionContextInPrompt(t *testing.
 	var errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"review", "--agent", string(agent.AgentNameClaudeCode)})
+	cmd.SetArgs([]string{"review", "general", "--agent", string(agent.AgentNameClaudeCode)})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("entire review failed: %v\nstdout:\n%s\nstderr:\n%s", err, out.String(), errOut.String())
@@ -328,7 +299,7 @@ func TestReviewCommandSmoke_BaseFlagThreadsThroughToPromptAndBanner(t *testing.T
 	var errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"review", "--agent", string(agent.AgentNameClaudeCode), "--base", "feat/parent"})
+	cmd.SetArgs([]string{"review", "general", "--agent", string(agent.AgentNameClaudeCode), "--base", "feat/parent"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("entire review failed: %v\nstdout:\n%s\nstderr:\n%s", err, out.String(), errOut.String())
@@ -372,7 +343,7 @@ func TestReviewCommandSmoke_BadBaseRefErrorsBeforeAgentSpawn(t *testing.T) {
 	var errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"review", "--agent", string(agent.AgentNameClaudeCode), "--base", "no-such-ref"})
+	cmd.SetArgs([]string{"review", "general", "--agent", string(agent.AgentNameClaudeCode), "--base", "no-such-ref"})
 
 	err := cmd.Execute()
 	if err == nil {
@@ -425,7 +396,7 @@ func writeReviewContextCheckpoint(t *testing.T, repoRoot string, checkpointID st
 		t.Fatalf("open repo: %v", err)
 	}
 	cpID := checkpointid.MustCheckpointID(checkpointID)
-	err = checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	err = checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).Write(context.Background(), checkpoint.Session{
 		CheckpointID:     cpID,
 		SessionID:        checkpointID,
 		Strategy:         "manual-commit",
@@ -439,44 +410,6 @@ func writeReviewContextCheckpoint(t *testing.T, repoRoot string, checkpointID st
 	})
 	if err != nil {
 		t.Fatalf("write checkpoint: %v", err)
-	}
-}
-
-// writeReviewContextCheckpointCustomRefOnly writes a checkpoint, then points the
-// custom ref at it and drops the v1 branch so it is reachable only via the
-// custom ref.
-func writeReviewContextCheckpointCustomRefOnly(t *testing.T, repoRoot, checkpointID string, opts reviewContextCheckpointOptions) {
-	t.Helper()
-	writeReviewContextCheckpoint(t, repoRoot, checkpointID, opts)
-
-	repo, err := git.PlainOpen(repoRoot)
-	if err != nil {
-		t.Fatalf("open repo: %v", err)
-	}
-	v1Branch := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	v1Ref, err := repo.Reference(v1Branch, true)
-	if err != nil {
-		t.Fatalf("resolve v1 metadata branch: %v", err)
-	}
-	customRef := plumbing.ReferenceName(paths.MetadataRefName)
-	if err := repo.Storer.SetReference(plumbing.NewHashReference(customRef, v1Ref.Hash())); err != nil {
-		t.Fatalf("point custom ref at v1 tip: %v", err)
-	}
-	if err := repo.Storer.RemoveReference(v1Branch); err != nil {
-		t.Fatalf("remove v1 metadata branch: %v", err)
-	}
-}
-
-// enableV1CustomRefMirror enables the v1 custom-ref mirror in repo settings.
-func enableV1CustomRefMirror(t *testing.T, repoRoot string) {
-	t.Helper()
-	entireDir := filepath.Join(repoRoot, ".entire")
-	if err := os.MkdirAll(entireDir, 0o750); err != nil {
-		t.Fatalf("create .entire dir: %v", err)
-	}
-	body := `{"enabled":true,"strategy_options":{"checkpoints_version":"1.1"}}` + "\n"
-	if err := os.WriteFile(filepath.Join(entireDir, paths.SettingsFileName), []byte(body), 0o600); err != nil {
-		t.Fatalf("write settings: %v", err)
 	}
 }
 
@@ -501,7 +434,7 @@ func writeReviewContextSettings(t *testing.T, repoRoot string) {
 	if err := os.MkdirAll(entireDir, 0o750); err != nil {
 		t.Fatalf("create .entire dir: %v", err)
 	}
-	settingsJSON := `{"enabled":true,"review":{"claude-code":{"skills":["/review"]}}}` + "\n"
+	settingsJSON := `{"enabled":true,"review_default_profile":"general","review_profiles":{"general":{"task":"Test review task.","agents":{"claude-code":{"skills":["/review"]}},"judge":{"agent":"claude-code"}}}}` + "\n"
 	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(settingsJSON), 0o600); err != nil {
 		t.Fatalf("write review settings: %v", err)
 	}
@@ -519,7 +452,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
 }
 
 type countingReviewContextReader struct {
-	metadata      checkpoint.CommittedMetadata
+	metadata      checkpoint.Metadata
 	prompts       string
 	metadataErr   error
 	promptErr     error
@@ -527,11 +460,20 @@ type countingReviewContextReader struct {
 	promptCalls   int
 }
 
-func (r *countingReviewContextReader) ReadCommitted(
+func (r *countingReviewContextReader) Read(
 	context.Context,
 	checkpointid.CheckpointID,
 ) (*checkpoint.CheckpointSummary, error) {
 	return nil, checkpoint.ErrCheckpointNotFound
+}
+
+func (r *countingReviewContextReader) ReadSessionPrompts(
+	context.Context,
+	checkpointid.CheckpointID,
+	int,
+) (string, error) {
+	r.promptCalls++
+	return r.prompts, r.promptErr
 }
 
 func (r *countingReviewContextReader) ReadSessionContent(
@@ -549,7 +491,7 @@ func (r *countingReviewContextReader) ReadSessionMetadata(
 	context.Context,
 	checkpointid.CheckpointID,
 	int,
-) (*checkpoint.CommittedMetadata, error) {
+) (*checkpoint.Metadata, error) {
 	r.metadataCalls++
 	return &r.metadata, r.metadataErr
 }
@@ -558,12 +500,8 @@ func (r *countingReviewContextReader) ReadSessionMetadataAndPrompts(
 	context.Context,
 	checkpointid.CheckpointID,
 	int,
-) (*checkpoint.SessionContent, error) {
-	r.promptCalls++
-	return &checkpoint.SessionContent{
-		Metadata: r.metadata,
-		Prompts:  r.prompts,
-	}, r.promptErr
+) (*checkpoint.Metadata, string, error) {
+	return &r.metadata, r.prompts, r.promptErr
 }
 
 // TestReviewSessionContext_IncludesActiveSessionWithLatestPrompt verifies
