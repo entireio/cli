@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 )
 
 // Bearer tokens the fixtures assert on, hoisted to consts so goconst is happy.
@@ -93,8 +95,19 @@ func writeTestFederation(w http.ResponseWriter, peers []string) {
 	w.Write([]byte(b.String())) //nolint:errcheck // test
 }
 
+// transportFor backs the round tripper with its OWN dedicated transport,
+// mirroring production (newCrossJurisHTTPClient wraps a fresh
+// httpclient.NewTransport, never the process-global http.DefaultTransport).
+//
+// The isolation is load-bearing under t.Parallel(): httptest.Server.Close()
+// unconditionally calls http.DefaultTransport.CloseIdleConnections() (see
+// net/http/httptest/server.go). If these tests shared the default transport,
+// one test tearing down its server would close a keep-alive connection out
+// from under an in-flight request in a sibling test, surfacing as the flaky
+// "net/http: HTTP/1.x transport connection broken: http: CloseIdleConnections
+// called". A per-test transport is never touched by another test's teardown.
 func transportFor() *crossJurisRoundTripper {
-	return newCrossJurisRoundTripper(http.DefaultTransport)
+	return newCrossJurisRoundTripper(httpclient.NewTransport(false))
 }
 
 // TestRoundTripper_PassThrough: a 2xx is returned unchanged.
