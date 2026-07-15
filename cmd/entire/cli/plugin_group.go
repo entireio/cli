@@ -18,29 +18,42 @@ import (
 func newPluginGroupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "plugin",
-		Short: "Manage Entire plugins (install, list, remove)",
+		Short: "Manage Entire plugins (install, update, list, remove)",
 		Long: `Manage Entire plugins.
 
-Plugins are external executables named 'entire-<name>'. The CLI discovers
-plugins on $PATH and from a per-user managed directory which is
-auto-prepended to PATH at startup. The managed directory is, in order of
-precedence:
+Two kinds of plugins are supported:
 
-  $ENTIRE_PLUGIN_DIR/bin (override)
-  $XDG_DATA_HOME/entire/plugins/bin (Linux/macOS, when set)
-  ~/.local/share/entire/plugins/bin (Linux/macOS default)
-  %LOCALAPPDATA%\entire\plugins\bin (Windows, when set)
-  ~\AppData\Local\entire\plugins\bin (Windows fallback when LOCALAPPDATA is unset)
+  - Binary plugins: 'entire-<name>' executables discovered on $PATH and in a
+    per-user managed bin/ dir that is auto-prepended to PATH at startup.
+  - Lua plugins: no-build-step scripts (a plugin.json + main.lua) that subscribe
+    to lifecycle/git hooks and contribute commands, run in a sandboxed embedded
+    interpreter. Installed under the managed lua/ dir. See
+    docs/architecture/plugins-lua.md.
+
+A Lua plugin is inert until you allow-list it in .entire/settings.json
+(plugins.<name>.enabled = true) and grant any capabilities it needs; installing
+alone does not run it. Repo-local .entire/plugins/ plugins never auto-run.
+
+The managed parent directory is, in order of precedence:
+
+  $ENTIRE_PLUGIN_DIR (override)
+  $XDG_DATA_HOME/entire/plugins (Linux/macOS, when set)
+  ~/.local/share/entire/plugins (Linux/macOS default)
+  %LOCALAPPDATA%\entire\plugins (Windows, when set)
+  ~\AppData\Local\entire\plugins (Windows fallback when LOCALAPPDATA is unset)
 
 Commands:
-  install   Install a plugin by linking or copying an existing executable
-  list      List plugins installed in the managed directory
-  remove    Remove a plugin from the managed directory
+  install   Install a plugin from a git URL, a directory, or an executable
+  update    Update git-installed Lua plugins
+  list      List installed Lua and binary plugins
+  remove    Remove an installed plugin
 
 Examples:
+  entire plugin install https://github.com/acme/entire-notify.git --ref v1.0.0
+  entire plugin install ./examples/plugins/checkpoint-notify
   entire plugin install ./dist/entire-pgr
   entire plugin list
-  entire plugin remove pgr`,
+  entire plugin remove checkpoint-notify`,
 	}
 
 	cmd.AddCommand(newPluginInstallCmd())
