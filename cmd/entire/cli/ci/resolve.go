@@ -34,7 +34,7 @@ func ResolveNativeRepo(ctx context.Context, c *coreapi.Client, ref string) (repo
 	if ref == "" {
 		return "", errors.New("repo reference is empty")
 	}
-	if looksLikeRepoULID(ref) {
+	if looksLikeULID(ref) {
 		return ref, nil
 	}
 	if looksLikeMirrorRef(ref) {
@@ -68,6 +68,38 @@ func ResolveNativeRepo(ctx context.Context, c *coreapi.Client, ref string) (repo
 		return "", noRepoNamedErr(repoName, projectName)
 	}
 	return repo.ID, nil
+}
+
+// ResolveOrg turns an org reference into its org ULID — the identifier the
+// `entire ci buildkite org` verbs address an org by. A raw 26-character ULID is
+// round-tripped unchanged after a shape check (never hitting the network); any
+// other value is treated as an org name and resolved via the control plane's
+// O(1) case-insensitive by-name filter (?name=), the same one resolveOrgRef and
+// `entire org list --name` use. It mirrors ResolveNativeRepo's ULID-or-name
+// contract and lives beside it so the two resolvers stay consistent.
+func ResolveOrg(ctx context.Context, c *coreapi.Client, ref string) (orgULID string, err error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", errors.New("org reference is empty")
+	}
+	if looksLikeULID(ref) {
+		return ref, nil
+	}
+	out, err := c.ListOrgs(ctx, coreapi.ListOrgsParams{Name: coreapi.NewOptString(ref)})
+	if err != nil {
+		if isCoreNotFound(err) {
+			return "", noOrgNamedErr(ref)
+		}
+		return "", err
+	}
+	// A name-filtered list returns the single match under the singular `org`
+	// field (the plural `orgs` is only populated for an unfiltered page), so an
+	// unset `org` means no match — same contract as the project/repo lookups.
+	org, ok := out.Response.Org.Get()
+	if !ok || org.ID == "" {
+		return "", noOrgNamedErr(ref)
+	}
+	return org.ID, nil
 }
 
 // resolveProjectByName resolves a project name to its ULID via the control
@@ -123,17 +155,18 @@ func looksLikeMirrorRef(ref string) bool {
 	return false
 }
 
-// looksLikeRepoULID reports whether s has the shape of a ULID: 26 characters
+// looksLikeULID reports whether s has the shape of a ULID: 26 characters
 // drawn from Crockford base32 (digits plus uppercase letters, excluding I, L,
 // O, U). The check is shape-only and case-insensitive on the alphabet; it never
 // hits the network. Entire ULIDs carry no type prefix, so this is the light
-// validity check a raw repo ULID passes before being round-tripped unchanged.
+// validity check a raw repo or org ULID passes before being round-tripped
+// unchanged.
 //
 // Replicated from cli.looksLikeULID rather than imported: the cli package
 // imports this package (root.go calls ci.Register), so importing cli back would
 // form an import cycle — the same reason the scaffold replicates
 // addControlPlaneFlags.
-func looksLikeRepoULID(s string) bool {
+func looksLikeULID(s string) bool {
 	if len(s) != 26 {
 		return false
 	}
@@ -154,6 +187,10 @@ func looksLikeRepoULID(s string) bool {
 func isCoreNotFound(err error) bool {
 	var se *coreapi.ErrorModelStatusCode
 	return errors.As(err, &se) && se.StatusCode == http.StatusNotFound
+}
+
+func noOrgNamedErr(name string) error {
+	return fmt.Errorf("no org named %q (run `entire org list` to see names, or pass an org ULID)", name)
 }
 
 func noProjectNamedErr(name string) error {

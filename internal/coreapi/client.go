@@ -1,6 +1,7 @@
 package coreapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -177,6 +178,80 @@ func (c *Client) GetJSON(ctx context.Context, path string, query url.Values, dst
 	}
 	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
 		return fmt.Errorf("decode response: %w", err)
+	}
+	return nil
+}
+
+// PostJSON issues a POST to path (relative to this client's /api/v1 base) with
+// a JSON-encoded body, applying the same bearer auth and cross-jurisdiction
+// transport as GetJSON, and decodes a 2xx JSON body into dst (pass nil to
+// discard the body). It returns the response status code so callers can tell a
+// 201-created from a 200-updated. A non-2xx response is returned as an
+// *ErrorModelStatusCode, so callers get the server's RFC 7807 problem detail
+// via APIError exactly as they do for generated calls.
+//
+// Same escape-hatch rationale and removal contract as GetJSON: it reuses this
+// client's serverURL, SecuritySource, and HTTP transport rather than opening a
+// second auth path. Its callers are the `entire ci buildkite org` verbs, which
+// hit the org-scoped CI-webhooks endpoints added by the DRAFT entiredb#2744,
+// not yet regenerated into this client's spec. Once that spec is regenerated,
+// delete PostJSON/DeleteJSON and switch those callers to the generated Invoker
+// methods.
+func (c *Client) PostJSON(ctx context.Context, path string, body, dst any) (int, error) {
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return 0, fmt.Errorf("encode request body: %w", err)
+	}
+	u := c.serverURL.JoinPath(path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(buf))
+	if err != nil {
+		return 0, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if err := c.securityBearerAuth(ctx, "PostJSON", req); err != nil {
+		return 0, fmt.Errorf("apply bearer auth: %w", err)
+	}
+	resp, err := c.cfg.Client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("do request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return resp.StatusCode, statusCodeError(resp)
+	}
+	if dst != nil {
+		if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+			return resp.StatusCode, fmt.Errorf("decode response: %w", err)
+		}
+	}
+	return resp.StatusCode, nil
+}
+
+// DeleteJSON issues a DELETE to path (relative to this client's /api/v1 base)
+// with no body, applying the same bearer auth and transport as GetJSON. A 2xx
+// (typically 204 No Content) yields nil; a non-2xx yields an
+// *ErrorModelStatusCode. Same escape-hatch rationale and removal contract as
+// PostJSON.
+func (c *Client) DeleteJSON(ctx context.Context, path string) error {
+	u := c.serverURL.JoinPath(path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u.String(), http.NoBody)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if err := c.securityBearerAuth(ctx, "DeleteJSON", req); err != nil {
+		return fmt.Errorf("apply bearer auth: %w", err)
+	}
+	resp, err := c.cfg.Client.Do(req)
+	if err != nil {
+		return fmt.Errorf("do request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return statusCodeError(resp)
 	}
 	return nil
 }

@@ -179,6 +179,72 @@ func TestResolveNativeRepo_UnknownRepo(t *testing.T) {
 	}
 }
 
+func TestResolveOrg_ULIDPassthrough(t *testing.T) {
+	t.Parallel()
+	c, calls := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("unexpected HTTP call for a ULID org ref")
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	got, err := ci.ResolveOrg(context.Background(), c, ulidOrgAcme)
+	if err != nil {
+		t.Fatalf("ResolveOrg: %v", err)
+	}
+	if got != ulidOrgAcme {
+		t.Errorf("ResolveOrg = %q, want the ULID unchanged", got)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("ULID org ref made %d HTTP calls, want 0", n)
+	}
+}
+
+func TestResolveOrg_NameLookup(t *testing.T) {
+	t.Parallel()
+	var gotName string
+	c, calls := resolveTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotName = r.URL.Query().Get("name")
+		writeJSON(t, w, &coreapi.ListOrgsOutputBody{Org: coreapi.NewOptOrg(coreapi.Org{ID: ulidOrgAcme, Name: "acme"})})
+	})
+	got, err := ci.ResolveOrg(context.Background(), c, "acme")
+	if err != nil {
+		t.Fatalf("ResolveOrg: %v", err)
+	}
+	if got != ulidOrgAcme {
+		t.Errorf("ResolveOrg = %q, want %q", got, ulidOrgAcme)
+	}
+	if gotName != "acme" {
+		t.Errorf("server received name=%q, want %q (filtering must be server-side)", gotName, "acme")
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("name ref made %d HTTP calls, want 1", n)
+	}
+}
+
+func TestResolveOrg_UnknownName(t *testing.T) {
+	t.Parallel()
+	// An unset Org match means "no such org".
+	c, _ := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, &coreapi.ListOrgsOutputBody{})
+	})
+	_, err := ci.ResolveOrg(context.Background(), c, "ghost")
+	if err == nil || !strings.Contains(err.Error(), "no org named") {
+		t.Errorf("ResolveOrg unknown name: err = %v, want a \"no org named\" error", err)
+	}
+}
+
+func TestResolveOrg_Empty(t *testing.T) {
+	t.Parallel()
+	c, calls := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("unexpected HTTP call for an empty org ref")
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	if _, err := ci.ResolveOrg(context.Background(), c, "   "); err == nil {
+		t.Error("ResolveOrg(\"   \") expected an error")
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("empty org ref made %d HTTP calls, want 0", n)
+	}
+}
+
 func TestResolveNativeRepo_InvalidShape(t *testing.T) {
 	t.Parallel()
 	for _, ref := range []string{"", "  ", "widgets", "widgets/", "/et/widgets"} {
