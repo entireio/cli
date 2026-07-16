@@ -1,8 +1,9 @@
 {
   "name": "models-updater",
-  "version": "0.1.0",
-  "description": "Fetches a models.json pricing file and caches it in the repo (example of http + fs)",
+  "version": "1.0.0",
+  "description": "Refreshes .entire/models.json from upstream, reports per-model pricing drift, preserves local-only ids, and nudges when the cache goes stale (command + session_start hook, http + fs + kv)",
   "entry": "main.lua",
-  "commands": [{ "name": "models-update", "short": "download the latest models.json into .entire/" }],
+  "hooks": ["session_start"],
+  "commands": [{ "name": "models-update", "short": "refresh .entire/models.json and report pricing drift" }],
   "capabilities": ["http", "fs"]
 }

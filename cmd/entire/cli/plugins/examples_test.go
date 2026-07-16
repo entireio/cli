@@ -37,9 +37,10 @@ func TestExamplePlugins_LoadCleanly(t *testing.T) {
 			wantCmd:  "notify-stats",
 		},
 		{
-			name:    "models-updater",
-			grant:   settings.PluginSettings{Enabled: true, Capabilities: []string{settings.PluginCapabilityHTTP, settings.PluginCapabilityFS}},
-			wantCmd: "models-update",
+			name:     "models-updater",
+			grant:    settings.PluginSettings{Enabled: true, Capabilities: []string{settings.PluginCapabilityHTTP, settings.PluginCapabilityFS}},
+			wantHook: HookSessionStart,
+			wantCmd:  "models-update",
 		},
 	}
 

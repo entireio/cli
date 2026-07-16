@@ -5,10 +5,10 @@ No-build-step plugins for the Entire CLI. See
 the full reference, and [`entire.lua`](entire.lua) for editor type hints
 (EmmyLua / lua-language-server).
 
-| Plugin                                     | Shows                                                    |
-| ------------------------------------------ | ------------------------------------------------------- |
-| [`checkpoint-notify`](checkpoint-notify)   | observer hooks, `entire.kv`, a command, optional `exec`  |
-| [`models-updater`](models-updater)         | a command using the `http` + `fs` capabilities           |
+| Plugin                                     | Shows                                                        |
+| ------------------------------------------ | ----------------------------------------------------------- |
+| [`checkpoint-notify`](checkpoint-notify)   | observer hooks, `entire.kv`, a command, optional `exec`      |
+| [`models-updater`](models-updater)         | a command + a `session_start` hook using `http` + `fs` + `kv` |
 
 ## Try one
 
