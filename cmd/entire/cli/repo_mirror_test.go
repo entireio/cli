@@ -230,6 +230,67 @@ func TestCreateAndAwaitMirror_OnCreated(t *testing.T) {
 	})
 }
 
+// A suspended *empty-upstream* placement is only detectable via the follow-up
+// GetMirror read — CreateMirror's Suspended flag stays false for it. The probe
+// cache write-through must wait for that read: caching first would render a
+// green "Repo mirrored" rung for the cache TTL while the placement never
+// serves.
+//
+// Not parallel: redirects the probe cache via XDG_CACHE_HOME.
+func TestCreateAndAwaitMirror_EmptyUpstreamCacheWaitsForSuspensionRead(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	ctx := t.Context()
+
+	serve := func(t *testing.T, status coreapi.MirrorStatus) *coreapi.Client {
+		t.Helper()
+		created := &coreapi.CreatedMirror{Created: false, MirrorId: "m1"}
+		created.Empty = true //nolint:staticcheck // deprecated field is exactly the case under test
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == mirrorsAPIPath:
+				w.WriteHeader(http.StatusCreated)
+				if err := printJSON(w, created); err != nil {
+					t.Errorf("encode created response: %v", err)
+				}
+			case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/mirrors/"):
+				m := &coreapi.Mirror{}
+				m.Status = coreapi.NewOptMirrorStatus(status)
+				if err := printJSON(w, m); err != nil {
+					t.Errorf("encode mirror response: %v", err)
+				}
+			default:
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := coreapi.NewWithBearer(srv.URL, "tok")
+		require.NoError(t, err)
+		return c
+	}
+
+	t.Run("suspended is an error and never cached as mirrored", func(t *testing.T) {
+		c := serve(t, coreapi.MirrorStatusSuspended)
+		outcome, err := createAndAwaitMirror(ctx, c, "sus", "r", "c", false, time.Second, nil, nil)
+		require.ErrorIs(t, err, errMirrorSuspended)
+		require.Equal(t, coreapi.MirrorStatusSuspended, outcome.status)
+		_, _, ok := defaultMirrorProbeCache().get("sus/r", time.Now())
+		require.False(t, ok, "suspended empty placement must not be written through to the probe cache")
+	})
+
+	t.Run("serving empty placement still heals the cache", func(t *testing.T) {
+		c := serve(t, coreapi.MirrorStatusReady)
+		_, err := createAndAwaitMirror(ctx, c, "ok", "r", "c", false, time.Second, nil, nil)
+		require.NoError(t, err)
+		probe, unreachable, ok := defaultMirrorProbeCache().get("ok/r", time.Now())
+		require.True(t, ok, "serving placement should be cached")
+		require.False(t, unreachable)
+		require.True(t, probe.Mirrored)
+		require.False(t, probe.Suspended)
+	})
+}
+
 func countEq(xs []string, want string) int {
 	n := 0
 	for _, x := range xs {

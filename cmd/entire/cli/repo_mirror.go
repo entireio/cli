@@ -415,14 +415,6 @@ func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, c
 	if onCreated != nil {
 		onCreated(created)
 	}
-	// Heal the onboarding probe cache on every successful placement — the
-	// setup checklist's own hint is `entire repo mirror create <slug>`, and a
-	// cached "not mirrored" must not survive the prescribed remediation. A
-	// suspended placement never serves, so it is deliberately not cached.
-	if !created.Suspended {
-		slugOwner, slugRepo := githubSlug(owner, repo)
-		defaultMirrorProbeCache().put(slugOwner+"/"+slugRepo, mirrorProbeResult{Mirrored: true}, time.Now())
-	}
 	outcome := mirrorCreateOutcome{created: created}
 	if created.Suspended {
 		// The placement already existed and an admin has suspended it, so it
@@ -438,6 +430,10 @@ func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, c
 		// suspended — suspension follows upstream access loss). Mirrors the old
 		// finishMirrorCreate behavior; the read is best-effort, so a transient
 		// GetMirror error just falls through to the benign "nothing to clone".
+		// The read must precede the probe-cache write-through: CreateMirror's
+		// Suspended flag does not cover this case, and caching first would
+		// render a green "Repo mirrored" rung for the cache TTL while the
+		// placement never serves.
 		if !created.Created {
 			if m, gerr := c.GetMirror(ctx, coreapi.GetMirrorParams{MirrorId: created.MirrorId}); gerr == nil {
 				if s, ok := m.Status.Get(); ok && s == coreapi.MirrorStatusSuspended {
@@ -447,8 +443,10 @@ func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, c
 				}
 			}
 		}
+		healMirrorProbeCache(owner, repo)
 		return outcome, nil
 	}
+	healMirrorProbeCache(owner, repo)
 	if noWait {
 		return outcome, nil
 	}
@@ -456,6 +454,17 @@ func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, c
 	outcome.status = status
 	outcome.polled = true
 	return outcome, werr
+}
+
+// healMirrorProbeCache records a serving placement in the onboarding probe
+// cache — the setup checklist's own hint is `entire repo mirror create
+// <slug>`, and a cached "not mirrored" must not survive the prescribed
+// remediation. A suspended placement never serves, so callers write through
+// only after every suspension signal is checked (CreateMirror's Suspended
+// flag, plus the GetMirror read for existing empty-upstream placements).
+func healMirrorProbeCache(owner, repo string) {
+	slugOwner, slugRepo := githubSlug(owner, repo)
+	defaultMirrorProbeCache().put(slugOwner+"/"+slugRepo, mirrorProbeResult{Mirrored: true}, time.Now())
 }
 
 // reportOneShotMirror renders the human output for `repo mirror create
