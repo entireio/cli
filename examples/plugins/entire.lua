@@ -53,6 +53,14 @@
 ---@field set fun(key: string, value: string)
 ---@field delete fun(key: string)
 
+--- JSON codec. Pure/deterministic, so always available (no capability needed).
+--- decode raises on invalid JSON; encode raises on values with no JSON form
+--- (functions, userdata) or cyclic tables. A dense 1..n table encodes as an
+--- array; any other table (including an empty one) encodes as an object.
+---@class EntireJson
+---@field decode fun(str: string): any
+---@field encode fun(value: any): string
+
 ---@class EntireHttp
 ---@field get fun(url: string): EntireHttpResponse
 ---@field post fun(url: string, body: string, content_type: string|nil): EntireHttpResponse
@@ -72,6 +80,7 @@
 ---@field data_dir string
 ---@field log EntireLog
 ---@field kv EntireKV
+---@field json EntireJson         # JSON decode/encode (always available)
 ---@field http EntireHttp         # requires "http" capability
 ---@field exec EntireExec         # requires "exec" capability
 ---@field fs EntireFs             # requires "fs" capability

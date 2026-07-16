@@ -159,8 +159,9 @@ func TestModelsUpdater_DriftAndPreserveLocalOnly(t *testing.T) {
 }
 
 // TestModelsUpdater_HandlesRealisticJSONShape exercises the shipped plugin's
-// hand-rolled JSON scanner (the sandbox exposes no JSON library) against the
-// awkward shapes present in the real LiteLLM file.
+// entire.json.decode path against the awkward shapes present in the real LiteLLM
+// file: scientific-notation rates, arrays, nested objects, a brace inside a
+// string value, and a decoy field whose name prefixes the real rate field.
 func TestModelsUpdater_HandlesRealisticJSONShape(t *testing.T) {
 	root := t.TempDir()
 	writeCache(t, root, modelsRealisticCached)
@@ -176,9 +177,9 @@ func TestModelsUpdater_HandlesRealisticJSONShape(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; output:\n%s", code, out)
 	}
 	// Exactly one rate change: input 5e-06 -> 3e-06 (scientific notation parsed).
-	// The decoy input_cost_per_token_above_128k_tokens and the unchanged output
-	// rate must NOT be counted, and the "{token}" string / array / nested object
-	// must not confuse the top-level member scan.
+	// The decoy input_cost_per_token_above_128k_tokens is a distinct key that the
+	// exact-field lookup ignores, and the unchanged output rate must NOT be
+	// counted; the "{token}" string / array / nested object are decoded natively.
 	if !strings.Contains(out, "Rate drift detected (1 change(s))") {
 		t.Errorf("expected exactly 1 drift change, got:\n%s", out)
 	}

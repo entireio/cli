@@ -137,6 +137,14 @@ for editor autocompletion.
 - `entire.log.debug|info|warn|error(msg)` — write to the Entire log.
 - `entire.kv.get(key) / set(key, value) / delete(key)` — durable per-plugin
   string store (JSON file in the data dir).
+- `entire.json.decode(str) → value / encode(value) → string` — a JSON codec.
+  Objects ↔ tables, arrays ↔ 1..n sequences, numbers ↔ Lua numbers (scientific
+  notation such as `3e-06` is handled), and `true`/`false`/`null` ↔
+  boolean/boolean/nil. `decode` raises on invalid JSON; `encode` renders a dense
+  1..n table as an array and any other table (including `{}`) as an object, and
+  raises on values with no JSON form (functions, userdata) or cyclic tables. It
+  is pure and deterministic — it reaches nothing outside the Lua state — so it is
+  always available, **not** capability-gated.
 - `entire.print(...) / entire.write(...)` — write to stdout (for commands; avoid
   in hooks, where it can corrupt hook stdout). The global `print()` is routed to
   the log instead.

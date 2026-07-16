@@ -44,6 +44,14 @@ func (p *LoadedPlugin) installAPI(ls *lua.LState) {
 	ls.SetField(kvTbl, "delete", ls.NewFunction(p.luaKVDelete))
 	ls.SetField(mod, "kv", kvTbl)
 
+	// entire.json is pure/deterministic (it touches nothing outside the Lua
+	// state), so it lives in the always-available surface, not behind a
+	// capability. See json.go.
+	jsonTbl := ls.NewTable()
+	ls.SetField(jsonTbl, "decode", ls.NewFunction(luaJSONDecode))
+	ls.SetField(jsonTbl, "encode", ls.NewFunction(luaJSONEncode))
+	ls.SetField(mod, "json", jsonTbl)
+
 	// Command contribution and stdout output (for plugin commands).
 	ls.SetField(mod, "command", ls.NewFunction(p.luaCommand))
 	ls.SetField(mod, "print", ls.NewFunction(luaStdoutPrint(true)))

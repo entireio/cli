@@ -6,7 +6,8 @@ embedded pricing never rots silently.
 
 It exercises the whole plugin surface in one place: a **command**
 (`entire.command`), an observer **hook** (`entire.on`), the **http** and **fs**
-capabilities, durable **kv** state, and **capability-gating**.
+capabilities, durable **kv** state, the always-available **json** codec
+(`entire.json`), and **capability-gating**.
 
 ## What it does
 
@@ -18,8 +19,8 @@ capabilities, durable **kv** state, and **capability-gating**.
 2. If `.entire/models.json` already exists, reads it (`entire.fs`) and **diffs**
    it against the fetched data, reporting per-model input/output **rate drift**.
 3. **Preserves local-only models** — any id present in your cached file but
-   absent upstream (your own newer or internal ids) is kept verbatim, never
-   erased, and listed as manually maintained.
+   absent upstream (your own newer or internal ids) is preserved, never erased,
+   and listed as manually maintained.
 4. Writes the merged result back to `.entire/models.json` (`entire.fs`) and
    records the refresh via `entire.kv`.
 5. Prints a concise summary: models seen, rate changes, local-only preserved.
@@ -75,7 +76,8 @@ see the plugin's own comments.
 | `http`     | fetching the upstream pricing JSON (`entire.http.get`)    |
 | `fs`       | reading/writing `.entire/models.json` (`entire.fs.*`)     |
 
-`entire.kv` (the session clock + refresh marker) needs no capability.
+`entire.kv` (the session clock + refresh marker) and `entire.json` (decode the
+fetched body, re-encode preserved local-only models) need no capability.
 
 ## Enabling it
 

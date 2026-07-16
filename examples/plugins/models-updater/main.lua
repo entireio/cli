@@ -42,120 +42,32 @@ local KV_LAST_UPDATED = "last_updated_session" -- session_count value at the las
 local NOT_A_MODEL = { sample_spec = true }
 
 -- ---------------------------------------------------------------------------
--- Tiny JSON reader.
+-- Model parsing.
 --
--- The sandbox exposes no JSON library, so the plugin ships just enough to walk
--- the LiteLLM shape: a flat object whose values are per-model objects. We keep
--- each model's value as its verbatim JSON text so the merged file we write back
--- preserves upstream bytes exactly (a minimal diff), and pull the two headline
--- rate fields out with a pattern. This is not a general JSON parser; it assumes
--- the well-known object-of-objects shape.
+-- The runtime provides entire.json (always available — pure/deterministic, so
+-- no capability is needed), so we decode the whole body in one call instead of
+-- hand-rolling a scanner. The LiteLLM shape is a flat object whose values are
+-- per-model objects; we keep each model's decoded value so a preserved
+-- local-only id can be re-encoded (entire.json.encode) when we splice it back
+-- in. Scientific-notation rates (e.g. 3e-06) parse correctly for free — no
+-- custom number parser, and a rate is read by exact key so the decoy field
+-- "input_cost_per_token_above_128k_tokens" is never mistaken for the real one.
 -- ---------------------------------------------------------------------------
 
--- split_top_level returns an ordered array of { key = <name>, entry = <verbatim
--- "name": value text> } for each member of the JSON object in `text`. It is
--- string-aware: braces, brackets and commas inside string values (and escaped
--- quotes) never confuse the member boundaries.
-local function split_top_level(text)
-  local raw_entries = {}
-  local n = #text
-  local i = 1
-  while i <= n and text:sub(i, i) ~= "{" do
-    i = i + 1
+-- rate reads a numeric rate field from a decoded model object, returning nil
+-- when the field is absent or not a number (some entries omit a rate).
+local function rate(model, field)
+  local v = model[field]
+  if type(v) == "number" then
+    return v
   end
-  i = i + 1 -- step past the root "{"
-
-  local depth = 0 -- nesting depth *inside* the root object
-  local in_str, esc = false, false
-  local start = nil -- index of the first char of the current member
-
-  local function flush(stop)
-    if start then
-      raw_entries[#raw_entries + 1] = text:sub(start, stop)
-      start = nil
-    end
-  end
-
-  while i <= n do
-    local c = text:sub(i, i)
-    if in_str then
-      if esc then
-        esc = false
-      elseif c == "\\" then
-        esc = true
-      elseif c == '"' then
-        in_str = false
-      end
-    elseif c == '"' then
-      in_str = true
-      if not start then
-        start = i
-      end
-    elseif c == "{" or c == "[" then
-      if not start then
-        start = i
-      end
-      depth = depth + 1
-    elseif c == "}" or c == "]" then
-      if depth == 0 then
-        flush(i - 1) -- closing the root object ends the final member
-        break
-      end
-      depth = depth - 1
-    elseif c == "," and depth == 0 then
-      flush(i - 1)
-    elseif not start and c ~= " " and c ~= "\t" and c ~= "\n" and c ~= "\r" then
-      start = i
-    end
-    i = i + 1
-  end
-
-  local out = {}
-  for _, raw in ipairs(raw_entries) do
-    local entry = raw:gsub("%s+$", "")
-    local key = entry:match('^%s*"(.-)"%s*:') -- first quoted token, before its colon
-    if key then
-      out[#out + 1] = { key = key, entry = entry }
-    end
-  end
-  return out
+  return nil
 end
 
--- parse_number turns a JSON numeric literal into a Lua number. The sandbox's
--- tonumber accepts plain decimals/integers but rejects exponent notation
--- ("3e-06" -> nil), which the LiteLLM file uses, so parse the mantissa and
--- exponent by hand and recombine.
-local function parse_number(s)
-  if not s then
-    return nil
-  end
-  local n = tonumber(s)
-  if n then
-    return n -- plain decimal or integer
-  end
-  local mant, esign, edigits = s:match("^(%-?[%d%.]+)[eE]([%-%+]?)(%d+)$")
-  if not mant then
-    return nil
-  end
-  local m, e = tonumber(mant), tonumber(edigits)
-  if not m or not e then
-    return nil
-  end
-  if esign == "-" then
-    e = -e
-  end
-  return m * 10 ^ e
-end
-
--- number_field pulls a numeric field out of a model's raw JSON text (decimal or
--- scientific notation). Returns nil when the field is absent.
-local function number_field(entry, field)
-  return parse_number(entry:match('"' .. field .. '"%s*:%s*([%-%+%d%.eE]+)'))
-end
-
--- rates_differ compares two rates with a small relative tolerance, so that the
--- same value written in different notations (0.000003 vs 3e-06) never registers
--- as drift, while genuine rate changes still do.
+-- rates_differ compares two rates with a small relative tolerance, so a genuine
+-- rate change registers as drift while floating-point noise does not. (Values
+-- written in different notations now decode to the same number, so 0.000003 and
+-- 3e-06 compare equal regardless.)
 local function rates_differ(a, b)
   if a == nil or b == nil then
     return a ~= b
@@ -165,20 +77,28 @@ local function rates_differ(a, b)
   return diff > scale * 1e-9
 end
 
--- parse_models turns a models.json body into a name -> {entry, input, output}
--- map plus the ordered list of model names (upstream order, sans sample_spec).
+-- parse_models decodes a models.json body (a JSON object of per-model objects)
+-- into a name -> { value, input, output } map plus the sorted list of model
+-- names (sans the non-model sample_spec entry). `value` is the decoded model
+-- object, kept so a local-only model can be re-encoded when spliced back into a
+-- refreshed file.
 local function parse_models(body)
+  local root = entire.json.decode(body)
   local by_name, order = {}, {}
-  for _, e in ipairs(split_top_level(body)) do
-    if not NOT_A_MODEL[e.key] then
-      by_name[e.key] = {
-        entry = e.entry,
-        input = number_field(e.entry, "input_cost_per_token"),
-        output = number_field(e.entry, "output_cost_per_token"),
+  if type(root) ~= "table" then
+    return by_name, order -- not the object-of-objects shape we expect
+  end
+  for name, value in pairs(root) do
+    if type(value) == "table" and not NOT_A_MODEL[name] then
+      by_name[name] = {
+        value = value,
+        input = rate(value, "input_cost_per_token"),
+        output = rate(value, "output_cost_per_token"),
       }
-      order[#order + 1] = e.key
+      order[#order + 1] = name
     end
   end
+  table.sort(order) -- pairs() order is unspecified; sort for a stable count
   return by_name, order
 end
 
@@ -225,9 +145,10 @@ local function local_only_models(old, new)
   return names
 end
 
--- splice_local_only reinserts the preserved (local-only) models verbatim just
--- before the closing brace of the freshly fetched upstream body, so upstream
--- bytes are otherwise untouched and the local ids survive the refresh.
+-- splice_local_only reinserts the preserved (local-only) models just before the
+-- closing brace of the freshly fetched upstream body, so the upstream bytes are
+-- otherwise untouched and the local ids survive the refresh. Each preserved
+-- model is re-encoded from its decoded value with entire.json.encode.
 local function splice_local_only(upstream, old, keep_names)
   local close = upstream:find("}%s*$")
   if not close then
@@ -237,7 +158,7 @@ local function splice_local_only(upstream, old, keep_names)
   local tail = upstream:sub(close)
   local blocks = {}
   for _, name in ipairs(keep_names) do
-    blocks[#blocks + 1] = old[name].entry
+    blocks[#blocks + 1] = entire.json.encode(name) .. ": " .. entire.json.encode(old[name].value)
   end
   local sep = head:match("{%s*$") and "\n  " or ",\n  " -- no comma if upstream was empty
   return head .. sep .. table.concat(blocks, ",\n  ") .. "\n" .. tail
