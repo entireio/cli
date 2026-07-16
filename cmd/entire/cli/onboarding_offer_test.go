@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/onboarding"
-	"github.com/entireio/cli/internal/coreapi"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 )
 
@@ -268,16 +267,15 @@ func TestNewOnboardingOfferRunner_WiresImportOffer(t *testing.T) {
 	}
 }
 
-// A suspended placement returns nil error from createAndAwaitMirror; the
-// offer must not report it as success or write-through the probe cache —
-// otherwise the checklist shows ✓ for an unusable mirror and the cache
-// suppresses re-offering for the TTL.
-func TestFinalizeMirrorOffer_SuspendedIsAnErrorAndNotCached(t *testing.T) {
+// A suspended-only placement set must be an error — the checklist would
+// otherwise show ✓ for a mirror that never serves. (The probe cache is safe
+// either way: createAndAwaitMirror only writes through for serving
+// placements.)
+func TestFinalizeMirrorOffer_SuspendedIsAnError(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	outcome := mirrorCreateOutcome{created: &coreapi.CreatedMirror{Suspended: true}}
 
-	err := finalizeMirrorOffer(&out, outcome)
+	err := finalizeMirrorOffer(&out, []mirrorResult{{status: mirrorStatusSuspended}})
 
 	if err == nil {
 		t.Error("suspended placement must be an error so the rung keeps its retry hint")
@@ -287,16 +285,34 @@ func TestFinalizeMirrorOffer_SuspendedIsAnErrorAndNotCached(t *testing.T) {
 	}
 }
 
-func TestFinalizeMirrorOffer_SuccessCachesAndReportsCloning(t *testing.T) {
+// One serving placement is a success, even when another region failed —
+// the repo is mirrored somewhere the user chose.
+func TestFinalizeMirrorOffer_AnyServingPlacementSucceeds(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	outcome := mirrorCreateOutcome{created: &coreapi.CreatedMirror{}}
+	results := []mirrorResult{
+		{status: mirrorStatusRegistered},
+		{status: mirrorStatusError, err: errors.New("cluster unreachable")},
+	}
 
-	if err := finalizeMirrorOffer(&out, outcome); err != nil {
+	if err := finalizeMirrorOffer(&out, results); err != nil {
 		t.Fatalf("finalizeMirrorOffer error = %v", err)
 	}
 	if !strings.Contains(out.String(), "clone continues in the background") {
 		t.Errorf("successful placement should mention the background clone, got:\n%s", out.String())
+	}
+}
+
+// Total failure surfaces the underlying error so the offer's notice names the
+// cause and the checklist keeps the retry hint.
+func TestFinalizeMirrorOffer_TotalFailureSurfacesError(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+
+	err := finalizeMirrorOffer(&out, []mirrorResult{{status: mirrorStatusError, err: errors.New("boom")}})
+
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("err = %v, want the create failure surfaced", err)
 	}
 }
 

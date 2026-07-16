@@ -11,7 +11,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/internal/coreapi"
 )
 
 // runOnboardingLogin is the auth rung's offer: the same browser-first login
@@ -80,9 +79,12 @@ func installedImportAgents(ctx context.Context) []agent.Agent {
 	return out
 }
 
-// runOnboardingMirrorCreate is the mirror rung's offer: register a mirror for
-// the origin repo on the default cluster and return once placement is
-// confirmed. The initial clone continues server-side (`--no-wait` semantics),
+// runOnboardingMirrorCreate is the mirror rung's offer: register the origin
+// repo's mirror placement(s) using the create wizard's own machinery — the
+// region multi-select pre-checked to the caller's jurisdiction
+// (resolveOfferRegions) and the parallel per-region create (createMirrors) —
+// so setup and `entire repo mirror create` resolve placements identically.
+// Placements are registered without awaiting clones (`--no-wait` semantics),
 // so enable never blocks on a large repo's clone.
 func runOnboardingMirrorCreate(ctx context.Context, errW io.Writer, deps onboardingRungDeps) error {
 	forge, owner, repo, err := deps.resolveOrigin(ctx)
@@ -93,35 +95,49 @@ func runOnboardingMirrorCreate(ctx context.Context, errW io.Writer, deps onboard
 		return errors.New("origin is not a GitHub repository")
 	}
 	owner, repo = githubSlug(owner, repo)
-	client, err := coreapi.NewForCluster(ctx, defaultClusterHost)
-	if err != nil {
-		return fmt.Errorf("connect to %s: %w", defaultClusterHost, err)
-	}
-	spin := startSpinner(errW, fmt.Sprintf("Mirroring %s/%s to %s", owner, repo, defaultClusterHost))
-	outcome, err := createAndAwaitMirror(ctx, client, owner, repo, defaultClusterHost,
-		true /* noWait: clone continues in the background */, 0, nil, nil)
-	spin(err == nil)
+	regions, err := resolveOfferRegions(ctx, errW)
 	if err != nil {
 		return err
 	}
-	return finalizeMirrorOffer(errW, outcome)
+	targets := make([]mirrorTarget, 0, len(regions))
+	for _, region := range regions {
+		targets = append(targets, mirrorTarget{owner: owner, repo: repo, region: region})
+	}
+	results := createMirrors(ctx, errW, targets,
+		true /* noWait: clones continue in the background */, 0)
+	return finalizeMirrorOffer(errW, results)
 }
 
-// finalizeMirrorOffer turns a nil-error createAndAwaitMirror outcome into the
-// offer's result. A suspended placement returns nil error from the create
-// path but will never serve — report it like `entire repo mirror create`
-// does and return an error so the rung keeps its retry hint. (The probe-cache
-// write-through lives in createAndAwaitMirror, which already skips suspended
-// placements.)
-func finalizeMirrorOffer(w io.Writer, outcome mirrorCreateOutcome) error {
-	created := outcome.created
-	if created == nil {
-		return errors.New("mirror placement not registered")
+// finalizeMirrorOffer folds the per-region create results into the offer's
+// outcome. Any serving placement is a success (the probe-cache write-through
+// already happened inside createAndAwaitMirror); suspended-only placements
+// are reported like `entire repo mirror create` does and return an error so
+// the rung keeps its retry hint, as does a total failure.
+func finalizeMirrorOffer(w io.Writer, results []mirrorResult) error {
+	served, suspended := 0, 0
+	var firstErr error
+	for _, r := range results {
+		switch r.status {
+		case mirrorStatusSuspended:
+			suspended++
+		case mirrorStatusError:
+			if firstErr == nil && r.err != nil {
+				firstErr = r.err
+			}
+		default:
+			served++
+		}
 	}
-	if created.Suspended {
+	if served > 0 {
+		fmt.Fprintln(w, "  Mirror registered — the initial clone continues in the background.")
+		return nil
+	}
+	if suspended > 0 {
 		fmt.Fprintln(w, "  WARNING: this mirror has been suspended by an admin and won't be usable.")
 		return errMirrorSuspended
 	}
-	fmt.Fprintln(w, "  Mirror registered — the initial clone continues in the background.")
-	return nil
+	if firstErr != nil {
+		return firstErr
+	}
+	return errors.New("mirror placement not registered")
 }
