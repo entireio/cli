@@ -1338,7 +1338,7 @@ func CollectUntrackedFiles(ctx context.Context) ([]string, error) {
 // SwiftPM .build/, etc.). Only entries that differ from HEAD/index appear in
 // the map — callers treat missing entries as unmodified, matching how the
 // go-git map is consumed.
-func GitCLIStatus(ctx context.Context) (git.Status, error) {
+func WorktreeStatus(ctx context.Context) (git.Status, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
