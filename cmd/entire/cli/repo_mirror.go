@@ -464,7 +464,7 @@ func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, c
 // flag, plus the GetMirror read for existing empty-upstream placements).
 func healMirrorProbeCache(owner, repo string) {
 	slugOwner, slugRepo := githubSlug(owner, repo)
-	defaultMirrorProbeCache().put(slugOwner+"/"+slugRepo, mirrorProbeResult{Mirrored: true}, time.Now())
+	defaultMirrorProbeCache().put(mirrorProbeKey(slugOwner+"/"+slugRepo), mirrorProbeResult{Mirrored: true}, time.Now())
 }
 
 // reportOneShotMirror renders the human output for `repo mirror create

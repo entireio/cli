@@ -186,10 +186,10 @@ func mirrorSuspendedOn(ctx context.Context, client mirrorLister, owner, repo str
 // terminal doesn't hang on every invocation. Owner/repo arrive lowercased
 // from the mirror rung.
 func probeRepoMirrored(ctx context.Context, owner, repo string) (mirrorProbeResult, error) {
-	slug := owner + "/" + repo
+	key := mirrorProbeKey(owner + "/" + repo)
 	cache := defaultMirrorProbeCache()
 	now := time.Now()
-	if probe, unreachable, ok := cache.get(slug, now); ok {
+	if probe, unreachable, ok := cache.get(key, now); ok {
 		if unreachable {
 			return mirrorProbeResult{}, errors.New("control plane unreachable (cached)")
 		}
@@ -206,10 +206,10 @@ func probeRepoMirrored(ctx context.Context, owner, repo string) (mirrorProbeResu
 	}
 	probe, err := probeMirrorAcross(ctx, clients, owner, repo)
 	if err != nil {
-		cache.putUnreachable(slug, now)
+		cache.putUnreachable(key, now)
 		return mirrorProbeResult{}, err
 	}
-	cache.put(slug, probe, now)
+	cache.put(key, probe, now)
 	return probe, nil
 }
 

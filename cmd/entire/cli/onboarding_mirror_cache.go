@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -19,13 +23,31 @@ const mirrorProbeTTL = 15 * time.Minute
 // back online.
 const mirrorProbeFailureTTL = 5 * time.Minute
 
-// mirrorProbeCache is a best-effort per-user cache of mirror-probe results
-// keyed by "owner/repo", on the shared jsonFileCache shell. The ground truth
-// stays the control plane.
+// mirrorProbeCache is a best-effort per-user cache of mirror-probe results,
+// keyed by mirrorProbeKey (auth identity + "owner/repo"), on the shared
+// jsonFileCache shell. The ground truth stays the control plane.
 type mirrorProbeCache struct {
 	path       string
 	ttl        time.Duration
 	failureTTL time.Duration
+}
+
+// mirrorProbeKey scopes a probe-cache entry to the auth identity the probe
+// runs under. probeRepoMirrored consults the *active context's* core, so the
+// answer is identity-dependent: after `entire auth use`, a result cached
+// under the previous context could show the wrong identity's mirror state for
+// the rest of the TTL. ENTIRE_TOKEN sessions are scoped by a token digest — a
+// changed token is a changed identity, and parsing the aud claim would cost
+// more than it buys.
+func mirrorProbeKey(slug string) string {
+	if tok := os.Getenv(auth.EnvTokenVar); tok != "" {
+		sum := sha256.Sum256([]byte(tok))
+		return "env-" + hex.EncodeToString(sum[:4]) + "|" + slug
+	}
+	if _, current, err := auth.Contexts(); err == nil && current != "" {
+		return "ctx-" + current + "|" + slug
+	}
+	return "ctx-none|" + slug
 }
 
 func defaultMirrorProbeCache() mirrorProbeCache {

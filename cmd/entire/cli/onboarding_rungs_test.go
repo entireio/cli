@@ -758,6 +758,31 @@ func TestMetadataTip_MovesWithCheckpointRefs(t *testing.T) {
 	}
 }
 
+// The probe consults the active context's core, so a cached answer is only
+// valid for the identity that produced it: `entire auth use` must change the
+// cache key, or the mirror rung serves the previous org's mirror state for
+// the rest of the TTL. Not parallel: mutates ENTIRE_TOKEN and the config dir.
+func TestMirrorProbeKey_ScopedByAuthIdentity(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir()) // no contexts configured
+
+	base := mirrorProbeKey(testOwnerAcme + "/" + testRepoAPI)
+	if !strings.HasPrefix(base, "ctx-none|") {
+		t.Errorf("key with no login = %q, want ctx-none scope", base)
+	}
+
+	t.Setenv("ENTIRE_TOKEN", "token-a")
+	keyA := mirrorProbeKey(testOwnerAcme + "/" + testRepoAPI)
+	t.Setenv("ENTIRE_TOKEN", "token-b")
+	keyB := mirrorProbeKey(testOwnerAcme + "/" + testRepoAPI)
+
+	if keyA == base || keyA == keyB {
+		t.Errorf("env-token keys must differ per identity: base=%q a=%q b=%q", base, keyA, keyB)
+	}
+	if !strings.HasSuffix(keyA, "|"+testOwnerAcme+"/"+testRepoAPI) {
+		t.Errorf("key %q should end with the repo slug", keyA)
+	}
+}
+
 func TestImportScanCache_HitRequiresMatchingFingerprint(t *testing.T) {
 	t.Parallel()
 	cache := importScanCache{path: filepath.Join(t.TempDir(), "imports.json")}

@@ -275,7 +275,7 @@ func TestCreateAndAwaitMirror_EmptyUpstreamCacheWaitsForSuspensionRead(t *testin
 		outcome, err := createAndAwaitMirror(ctx, c, "sus", "r", "c", false, time.Second, nil, nil)
 		require.ErrorIs(t, err, errMirrorSuspended)
 		require.Equal(t, coreapi.MirrorStatusSuspended, outcome.status)
-		_, _, ok := defaultMirrorProbeCache().get("sus/r", time.Now())
+		_, _, ok := defaultMirrorProbeCache().get(mirrorProbeKey("sus/r"), time.Now())
 		require.False(t, ok, "suspended empty placement must not be written through to the probe cache")
 	})
 
@@ -283,7 +283,7 @@ func TestCreateAndAwaitMirror_EmptyUpstreamCacheWaitsForSuspensionRead(t *testin
 		c := serve(t, coreapi.MirrorStatusReady)
 		_, err := createAndAwaitMirror(ctx, c, "ok", "r", "c", false, time.Second, nil, nil)
 		require.NoError(t, err)
-		probe, unreachable, ok := defaultMirrorProbeCache().get("ok/r", time.Now())
+		probe, unreachable, ok := defaultMirrorProbeCache().get(mirrorProbeKey("ok/r"), time.Now())
 		require.True(t, ok, "serving placement should be cached")
 		require.False(t, unreachable)
 		require.True(t, probe.Mirrored)
