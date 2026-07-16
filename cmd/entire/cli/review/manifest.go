@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -529,17 +530,10 @@ func stringSetsEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	set := make(map[string]int, len(a))
-	for _, s := range a {
-		set[s]++
-	}
-	for _, s := range b {
-		set[s]--
-		if set[s] < 0 {
-			return false
-		}
-	}
-	return true
+	as, bs := slices.Clone(a), slices.Clone(b)
+	slices.Sort(as)
+	slices.Sort(bs)
+	return slices.Equal(as, bs)
 }
 
 func reviewRunModelMatches(want, got string) bool {

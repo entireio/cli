@@ -264,36 +264,19 @@ func judgeLabel(j judgeSpec) string {
 	return labelForSimpleAgent(j.agent)
 }
 
+// selectProfileWorker resolves a selector to exactly one worker, erroring
+// when the selector matches several — call sites that need a single reviewer
+// (e.g. --model targeting) cannot pick among an agent's workers themselves.
 func selectProfileWorker(profile settings.ReviewProfileConfig, selector string) (string, settings.ReviewConfig, error) {
-	selector = strings.TrimSpace(selector)
-	if selector == "" {
-		return "", settings.ReviewConfig{}, errors.New("empty review reviewer selector")
+	matched, err := selectProfileWorkers(profile, selector)
+	if err != nil {
+		return "", settings.ReviewConfig{}, err
 	}
-	if cfg, ok := profile.Agents[selector]; ok && !cfg.IsZero() {
-		return selector, cfg, nil
+	names := sortedMapKeys(matched)
+	if len(names) > 1 {
+		return "", settings.ReviewConfig{}, fmt.Errorf("agent %q has multiple review reviewers (%s); choose one by reviewer name", selector, strings.Join(names, ", "))
 	}
-	var matches []string
-	for workerName, cfg := range profile.Agents {
-		if cfg.IsZero() {
-			continue
-		}
-		if reviewAgentName(workerName, cfg) == selector {
-			matches = append(matches, workerName)
-		}
-	}
-	sort.Strings(matches)
-	switch len(matches) {
-	case 1:
-		return matches[0], profile.Agents[matches[0]], nil
-	case 0:
-		configured := sortedMapKeys(profile.Agents)
-		if len(configured) == 0 {
-			return "", settings.ReviewConfig{}, fmt.Errorf("review reviewer or agent %q is not configured", selector)
-		}
-		return "", settings.ReviewConfig{}, fmt.Errorf("review reviewer or agent %q is not configured; configured reviewers: %s", selector, strings.Join(configured, ", "))
-	default:
-		return "", settings.ReviewConfig{}, fmt.Errorf("agent %q has multiple review reviewers (%s); choose one by reviewer name", selector, strings.Join(matches, ", "))
-	}
+	return names[0], matched[names[0]], nil
 }
 
 // selectProfileWorkers resolves an --agent/worker selector to every matching
