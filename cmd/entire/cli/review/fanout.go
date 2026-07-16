@@ -15,14 +15,19 @@ import (
 )
 
 // explodeSkillWorkers returns a copy of profile whose multi-skill workers are
-// split into one worker per skill. Single-skill and skill-less workers pass
+// split into one worker per skill, plus an origins map recording which source
+// worker each exploded key came from (pass-through workers are absent). Row
+// planning needs the origins to collapse only genuine fan-out siblings —
+// independently configured duplicate slots of the same agent+model must keep
+// their own dashboard rows. Single-skill and skill-less workers pass
 // through unchanged under their original keys. Exploded workers keep the
 // source worker's model and prompt, carry an explicit Agent so the derived
 // key still resolves to the real agent, and get deterministic keys
 // (<worker>:<skill-slug>, deduped against existing keys).
-func explodeSkillWorkers(profile settings.ReviewProfileConfig, hasAdapter func(agentName string) bool) settings.ReviewProfileConfig {
+func explodeSkillWorkers(profile settings.ReviewProfileConfig, hasAdapter func(agentName string) bool) (settings.ReviewProfileConfig, map[string]string) {
 	out := profile
 	agents := make(map[string]settings.ReviewConfig, len(profile.Agents))
+	origins := make(map[string]string)
 
 	// Pass-through workers claim their keys first so exploded keys can never
 	// clobber an existing worker that happens to match a derived name.
@@ -47,12 +52,14 @@ func explodeSkillWorkers(profile settings.ReviewProfileConfig, hasAdapter func(a
 			worker := cfg
 			worker.Skills = []string{skill}
 			worker.Agent = agentName
-			agents[workerIDForSkill(name, skill, agents)] = worker
+			key := workerIDForSkill(name, skill, agents)
+			agents[key] = worker
+			origins[key] = name
 		}
 	}
 
 	out.Agents = agents
-	return out
+	return out, origins
 }
 
 // workerIDForSkill derives a stable worker key for one exploded skill run,

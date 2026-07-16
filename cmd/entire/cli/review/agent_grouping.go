@@ -10,6 +10,7 @@
 package review
 
 import (
+	"strconv"
 	"time"
 
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
@@ -36,6 +37,49 @@ func newAgentGrouping(rowOrder []string, workerToAgent map[string]string) *agent
 		g.rowWorkers[row] = append(g.rowWorkers[row], worker)
 	}
 	return g
+}
+
+// rowPlanEntry describes one worker for dashboard row planning.
+type rowPlanEntry struct {
+	workerKey string // profile key (exploded or pass-through)
+	name      string // reviewer display name — the key events and summaries carry
+	agentName string
+	model     string
+}
+
+// planAgentRows assigns each worker its dashboard row. Only skill fan-out
+// siblings (workers exploded from the same source worker, per skillOrigins)
+// share a row; independently configured workers — including duplicate slots
+// of the same agent+model — keep their own rows, since merging them would
+// blend the live tokens, statuses, and summaries of unrelated reviewers.
+// Labels prefer "agent (model)"; when two sources would collide, later ones
+// fall back to the unique source worker key (numeric suffix as a last resort).
+func planAgentRows(entries []rowPlanEntry, skillOrigins map[string]string) ([]string, map[string]string) {
+	rowNames := make([]string, 0, len(entries))
+	workerToRow := make(map[string]string, len(entries))
+	rowBySource := make(map[string]string, len(entries))
+	labelTaken := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		source, exploded := skillOrigins[e.workerKey]
+		if !exploded {
+			source = e.workerKey
+		}
+		row, planned := rowBySource[source]
+		if !planned {
+			row = agentRowLabel(e.agentName, e.model)
+			if labelTaken[row] {
+				row = agentRowLabel(source, e.model)
+			}
+			for base, i := row, 2; labelTaken[row]; i++ {
+				row = base + " #" + strconv.Itoa(i)
+			}
+			labelTaken[row] = true
+			rowBySource[source] = row
+			rowNames = append(rowNames, row)
+		}
+		workerToRow[e.name] = row
+	}
+	return rowNames, workerToRow
 }
 
 // rowFor resolves a worker label to its agent row, passing through any name

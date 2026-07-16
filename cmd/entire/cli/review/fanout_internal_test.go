@@ -24,7 +24,7 @@ func TestExplodeSkillWorkers_SplitsMultiSkillWorker(t *testing.T) {
 			},
 		},
 	}
-	got := explodeSkillWorkers(profile, allAdapters)
+	got, _ := explodeSkillWorkers(profile, allAdapters)
 
 	if len(got.Agents) != 2 {
 		t.Fatalf("Agents = %v, want 2 exploded workers", got.Agents)
@@ -64,7 +64,7 @@ func TestExplodeSkillWorkers_PassThrough(t *testing.T) {
 			"pi":    {Prompt: "review the change"},
 		},
 	}
-	got := explodeSkillWorkers(profile, allAdapters)
+	got, _ := explodeSkillWorkers(profile, allAdapters)
 	if len(got.Agents) != 2 {
 		t.Fatalf("Agents = %v, want unchanged worker count", got.Agents)
 	}
@@ -87,8 +87,8 @@ func TestExplodeSkillWorkers_DeterministicDistinctKeys(t *testing.T) {
 			"claude-code:review": {Agent: "claude-code", Prompt: "existing worker with colliding name"},
 		},
 	}
-	a := explodeSkillWorkers(profile, allAdapters)
-	b := explodeSkillWorkers(profile, allAdapters)
+	a, _ := explodeSkillWorkers(profile, allAdapters)
+	b, _ := explodeSkillWorkers(profile, allAdapters)
 	if len(a.Agents) != 3 {
 		t.Fatalf("Agents = %v, want 3 (2 exploded + 1 pass-through)", a.Agents)
 	}
@@ -155,7 +155,7 @@ func TestExplodeSkillWorkers_SkipsAgentsWithoutRunnerAdapter(t *testing.T) {
 		},
 	}
 	hasAdapter := func(agentName string) bool { return agentName == tAgentClaude }
-	got := explodeSkillWorkers(profile, hasAdapter)
+	got, _ := explodeSkillWorkers(profile, hasAdapter)
 
 	if cfg, ok := got.Agents["cursor"]; !ok || len(cfg.Skills) != 2 {
 		t.Fatalf("adapter-less worker must pass through unexploded; got %+v", got.Agents)
@@ -179,3 +179,99 @@ func mapKeys(m map[string]settings.ReviewConfig) []string {
 // allAdapters treats every agent as having a review-runner adapter — the
 // common case for the explosion tests above.
 func allAdapters(string) bool { return true }
+
+// TestPlanAgentRows_DuplicateSlotsKeepSeparateRows pins the fix for trail
+// finding 019f6c52: two independently configured workers sharing agent AND
+// model (duplicate slots, e.g. claude-code / claude-code-2) must NOT collapse
+// into one dashboard row — collapsing is reserved for skill fan-out siblings.
+// Merging unrelated reviewers would blend their live tokens, statuses
+// (worst-wins), and summary entries.
+func TestPlanAgentRows_DuplicateSlotsKeepSeparateRows(t *testing.T) {
+	t.Parallel()
+	entries := []rowPlanEntry{
+		{workerKey: tAgentClaude, name: "claude-code  (model opus)", agentName: tAgentClaude, model: "opus"},
+		{workerKey: "claude-code-2", name: "claude-code-2  (claude-code, model opus)", agentName: tAgentClaude, model: "opus"},
+	}
+	rowNames, workerToRow := planAgentRows(entries, nil)
+	if len(rowNames) != 2 {
+		t.Fatalf("rows = %v, want 2 separate rows for duplicate slots", rowNames)
+	}
+	if rowNames[0] == rowNames[1] {
+		t.Fatalf("row labels must be distinct, both = %q", rowNames[0])
+	}
+	if workerToRow[entries[0].name] == workerToRow[entries[1].name] {
+		t.Errorf("duplicate slots mapped to the same row %q", workerToRow[entries[0].name])
+	}
+}
+
+// TestPlanAgentRows_FanoutSiblingsShareSourceRow pins that workers exploded
+// from the same source worker still fold into one row.
+func TestPlanAgentRows_FanoutSiblingsShareSourceRow(t *testing.T) {
+	t.Parallel()
+	entries := []rowPlanEntry{
+		{workerKey: "claude-code:review", name: "claude-code:review  (claude-code)", agentName: tAgentClaude, model: ""},
+		{workerKey: "claude-code:pr-review", name: "claude-code:pr-review  (claude-code)", agentName: tAgentClaude, model: ""},
+		{workerKey: "codex", name: "codex", agentName: "codex", model: ""},
+	}
+	origins := map[string]string{
+		"claude-code:review":    tAgentClaude,
+		"claude-code:pr-review": tAgentClaude,
+	}
+	rowNames, workerToRow := planAgentRows(entries, origins)
+	if len(rowNames) != 2 {
+		t.Fatalf("rows = %v, want 2 (collapsed claude-code + codex)", rowNames)
+	}
+	if workerToRow[entries[0].name] != workerToRow[entries[1].name] {
+		t.Errorf("fan-out siblings should share a row: %q vs %q", workerToRow[entries[0].name], workerToRow[entries[1].name])
+	}
+	if workerToRow["codex"] == workerToRow[entries[0].name] {
+		t.Error("codex must not share the claude-code row")
+	}
+}
+
+// TestPlanAgentRows_DuplicateSlotWithFanoutStaysSeparate pins the compound
+// case: one slot fans out into skills while its duplicate slot (same
+// agent+model) runs standalone — the fan-out row and the duplicate's row must
+// stay distinct even though the default "agent (model)" label collides.
+func TestPlanAgentRows_DuplicateSlotWithFanoutStaysSeparate(t *testing.T) {
+	t.Parallel()
+	entries := []rowPlanEntry{
+		{workerKey: "claude-code:review", name: "claude-code:review  (claude-code, model opus)", agentName: tAgentClaude, model: "opus"},
+		{workerKey: "claude-code:pr-review", name: "claude-code:pr-review  (claude-code, model opus)", agentName: tAgentClaude, model: "opus"},
+		{workerKey: "claude-code-2", name: "claude-code-2  (claude-code, model opus)", agentName: tAgentClaude, model: "opus"},
+	}
+	origins := map[string]string{
+		"claude-code:review":    tAgentClaude,
+		"claude-code:pr-review": tAgentClaude,
+	}
+	rowNames, workerToRow := planAgentRows(entries, origins)
+	if len(rowNames) != 2 {
+		t.Fatalf("rows = %v, want 2 (fan-out row + duplicate slot row)", rowNames)
+	}
+	if workerToRow[entries[0].name] == workerToRow[entries[2].name] {
+		t.Errorf("duplicate slot %q must not fold into the fan-out row %q", entries[2].workerKey, workerToRow[entries[0].name])
+	}
+}
+
+// TestExplodeSkillWorkers_ReportsOrigins pins that explosion reports which
+// source worker each exploded key came from — row planning needs it to
+// distinguish fan-out siblings from independently configured duplicates.
+func TestExplodeSkillWorkers_ReportsOrigins(t *testing.T) {
+	t.Parallel()
+	profile := settings.ReviewProfileConfig{Agents: map[string]settings.ReviewConfig{
+		tAgentClaude: {Skills: []string{"/review", "/pr-review"}},
+		"codex":      {Prompt: "review it"},
+	}}
+	_, origins := explodeSkillWorkers(profile, allAdapters)
+	if len(origins) != 2 {
+		t.Fatalf("origins = %v, want entries for the 2 exploded workers only", origins)
+	}
+	for worker, source := range origins {
+		if source != tAgentClaude {
+			t.Errorf("origin[%s] = %q, want claude-code", worker, source)
+		}
+	}
+	if _, ok := origins["codex"]; ok {
+		t.Error("pass-through worker codex must not appear in origins")
+	}
+}

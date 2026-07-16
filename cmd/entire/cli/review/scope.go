@@ -246,8 +246,11 @@ func countUncommitted(ctx context.Context, repoRoot string) (int, error) {
 	return len(strings.Split(trimmed, "\n")), nil
 }
 
-// runGit runs `git <args>` in repoDir and returns stdout as a string. Thin
-// wrapper around gitexec.Run preserved so existing call sites don't change.
+// runGit runs `git <args>` in repoRoot and returns stdout as a string. It
+// exists to centralize the wrapcheck exemption: gitexec.Run already wraps
+// its errors with the failing git command, so per-call-site wrapping would
+// only duplicate that context, and .golangci.yaml deliberately does not
+// exempt gitexec globally — call sites elsewhere must still add context.
 func runGit(ctx context.Context, repoRoot string, args ...string) (string, error) {
 	return gitexec.Run(ctx, repoRoot, args...) //nolint:wrapcheck // gitexec already wraps
 }

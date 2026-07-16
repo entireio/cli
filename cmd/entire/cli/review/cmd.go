@@ -885,7 +885,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	// concurrently: the wait is the slowest skill, not the sum. Agents
 	// without a review-runner adapter stay unexploded so they keep the
 	// single-agent marker-fallback path.
-	profile = explodeSkillWorkers(profile, func(agentName string) bool {
+	profile, skillOrigins := explodeSkillWorkers(profile, func(agentName string) bool {
 		return deps.ReviewerFor(agentName) != nil
 	})
 	outputMode := profileOutput(profile)
@@ -940,7 +940,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 			fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
 			return silentErr(err)
 		}
-		return runMultiAgentPath(ctx, cmd, profileName, profile, launchableEligible, judge, outputMode, timeout, baseOverride, perRunPrompt, deps, out)
+		return runMultiAgentPath(ctx, cmd, profileName, profile, skillOrigins, launchableEligible, judge, outputMode, timeout, baseOverride, perRunPrompt, deps, out)
 	}
 }
 
@@ -1172,6 +1172,7 @@ func runMultiAgentPath(
 	cmd *cobra.Command,
 	profileName string,
 	profile settings.ReviewProfileConfig,
+	skillOrigins map[string]string,
 	launchableEligible []AgentChoice,
 	judge judgeSpec,
 	outputMode string,
@@ -1213,6 +1214,7 @@ func runMultiAgentPath(
 	}
 	scopeCtx := buildScopeContextBestEffort(ctx, out, worktreeRoot, scopeBaseRef)
 	reviewers := make([]reviewtypes.AgentReviewer, 0, len(launchableEligible))
+	rowEntries := make([]rowPlanEntry, 0, len(launchableEligible))
 	var excludedWorkers []string
 	for _, choice := range launchableEligible {
 		workerName := choice.Name
@@ -1239,6 +1241,12 @@ func runMultiAgentPath(
 			cmd.SilenceUsage = true
 			return deps.NewSilentError(fmt.Errorf("agent %q has no review runner adapter but appeared in eligible list", agentName))
 		}
+		rowEntries = append(rowEntries, rowPlanEntry{
+			workerKey: workerName,
+			name:      reviewWorkerLabel(workerName, agentCfg),
+			agentName: agentName,
+			model:     strings.TrimSpace(agentCfg.Model),
+		})
 		reviewers = append(reviewers, &perAgentConfiguredReviewer{
 			name:  reviewWorkerLabel(workerName, agentCfg),
 			inner: reviewer,
@@ -1265,21 +1273,11 @@ func runMultiAgentPath(
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
-	// The dashboard shows one row per agent (skill fan-out is behavior-only:
-	// N parallel workers per agent must not leak into per-skill rows).
-	// rowNames is the ordered per-agent row labels (agent + optional model);
-	// workerToAgent folds each worker's events and summary entry into its row.
-	rowNames := make([]string, 0, len(reviewers))
-	workerToAgent := make(map[string]string, len(reviewers))
-	seenRow := make(map[string]bool, len(reviewers))
-	for _, r := range reviewers {
-		row := agentRowLabel(reviewerActualAgentName(r), reviewerModelName(r))
-		workerToAgent[r.Name()] = row
-		if !seenRow[row] {
-			seenRow[row] = true
-			rowNames = append(rowNames, row)
-		}
-	}
+	// The dashboard shows one row per configured worker, with skill fan-out
+	// staying behavior-only: exploded siblings of one source worker fold into
+	// that worker's row, while independently configured workers — including
+	// duplicate slots of the same agent+model — keep their own rows.
+	rowNames, workerToAgent := planAgentRows(rowEntries, skillOrigins)
 	aggregateOutput := ""
 	var synthErr error
 
