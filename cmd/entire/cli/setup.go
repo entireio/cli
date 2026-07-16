@@ -898,6 +898,16 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				}()
 			}
 
+			// Operational logging (ladder probes, offer failures) belongs in
+			// .entire/logs — without Init the logging package falls back to
+			// slog's stderr default and WARN lines leak verbatim into
+			// enable's output. After the bootstrap block, so a declined
+			// bootstrap doesn't leave a stray .entire/ in a non-repo folder.
+			logging.SetLogLevelGetter(GetLogLevel)
+			if lerr := logging.Init(ctx, ""); lerr == nil {
+				defer logging.Close()
+			}
+
 			if err := validateSetupFlags(opts.UseLocalSettings, opts.UseProjectSettings); err != nil {
 				return err
 			}

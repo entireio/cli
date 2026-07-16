@@ -147,3 +147,27 @@ func TestPrintFields(t *testing.T) {
 		t.Errorf("printFields output:\n%q\nwant:\n%q", got, want)
 	}
 }
+
+// A response that fails decoding (e.g. a gateway 502 serving text/plain)
+// carries its status only in ogen's wrap string; renderCoreError must
+// collapse that developer noise to a one-line message instead of showing the
+// raw decoder chain (it reached a user's terminal verbatim in the enable
+// mirror offer).
+func TestRenderCoreError_CollapsesDecodeFailures(t *testing.T) {
+	t.Parallel()
+	raw := errors.New(`decode response: default (code 502): unexpected Content-Type: text/plain`)
+	got := renderCoreError(raw)
+	if got.Error() != "the control plane returned HTTP 502 — try again shortly" {
+		t.Errorf("renderCoreError(502 decode) = %q", got.Error())
+	}
+
+	client := errors.New(`decode response: default (code 404): unexpected Content-Type: text/html`)
+	if got := renderCoreError(client); got.Error() != "control-plane request failed with HTTP 404" {
+		t.Errorf("renderCoreError(404 decode) = %q", got.Error())
+	}
+
+	plain := errors.New("dial tcp: connection refused")
+	if got := renderCoreError(plain); !errors.Is(got, plain) {
+		t.Errorf("renderCoreError(plain) = %v, want passthrough", got)
+	}
+}
