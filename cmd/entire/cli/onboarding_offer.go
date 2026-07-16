@@ -257,7 +257,7 @@ func promptOnboardingSetupMode(ctx context.Context, missing []onboarding.Result)
 				Description(summary).
 				Options(
 					huh.NewOption("Yes, set up everything (recommended)", setupModeAll),
-					huh.NewOption("Choose step by step", setupModeStepByStep),
+					huh.NewOption("Step by step", setupModeStepByStep),
 					huh.NewOption("Skip for now — finish anytime with `entire enable`", setupModeSkip),
 				).
 				Value(&mode),
