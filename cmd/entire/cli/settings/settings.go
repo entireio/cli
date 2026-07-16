@@ -188,6 +188,14 @@ type ClonePreferences struct {
 	TrailsEnabledRepoKey   string     `json:"trails_enabled_repo_key,omitempty"`
 	TrailsEnabledAPIBase   string     `json:"trails_enabled_api_base,omitempty"`
 	TrailsEnabledAuthKey   string     `json:"trails_enabled_auth_key,omitempty"`
+
+	// Agent-help refresh failures use a separate, short-lived backoff. Keeping
+	// this out of TrailsEnabled ensures a transient help-command failure cannot
+	// suppress SessionStart's authoritative enablement probe or context injection.
+	TrailsAgentHelpRefreshFailedAt *time.Time `json:"trails_agent_help_refresh_failed_at,omitempty"`
+	TrailsAgentHelpFailureRepoKey  string     `json:"trails_agent_help_failure_repo_key,omitempty"`
+	TrailsAgentHelpFailureAPIBase  string     `json:"trails_agent_help_failure_api_base,omitempty"`
+	TrailsAgentHelpFailureAuthKey  string     `json:"trails_agent_help_failure_auth_key,omitempty"`
 }
 
 // SummaryGenerationSettings configures provider selection for on-demand
