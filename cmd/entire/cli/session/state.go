@@ -672,6 +672,15 @@ func (s *StateStore) Save(ctx context.Context, state *State) error {
 		return fmt.Errorf("failed to rename session state file: %w", err)
 	}
 	removeTmp = false
+
+	// Best-effort cross-repo live pointer so prepare-commit-msg in another
+	// common dir can auto-adopt a unique ACTIVE session (#1439).
+	commonDir := CommonDirFromStateDir(s.stateDir)
+	if ShouldRegisterLive(state) {
+		_ = RegisterLiveSession(state, commonDir) //nolint:errcheck // hook-path resilient
+	} else {
+		_ = UnregisterLiveSession(state.SessionID) //nolint:errcheck // hook-path resilient
+	}
 	return nil
 }
 
@@ -701,6 +710,7 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 		}
 	}
 
+	_ = UnregisterLiveSession(sessionID) //nolint:errcheck // best-effort registry cleanup
 	return nil
 }
 

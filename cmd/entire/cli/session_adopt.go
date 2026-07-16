@@ -26,6 +26,10 @@ import (
 type adoptOptions struct {
 	FromWorktree string
 	Force        bool
+	// SkipTranscriptValidation allows auto-adopt to proceed when a source
+	// transcript path is missing or not owned by a registered agent. The
+	// adopted state clears an invalid transcript path instead of failing.
+	SkipTranscriptValidation bool
 }
 
 const adoptRecentWindow = 12 * time.Hour
@@ -88,8 +92,10 @@ func runAdopt(ctx context.Context, w io.Writer, sessionID string, opts adoptOpti
 	if err != nil {
 		return err
 	}
-	if err := validateAdoptSourceTranscript(sourceState, sourceWorktree); err != nil {
-		return err
+	if !opts.SkipTranscriptValidation {
+		if err := validateAdoptSourceTranscript(sourceState, sourceWorktree); err != nil {
+			return err
+		}
 	}
 
 	var adopted *session.State
@@ -154,13 +160,18 @@ func adoptFromExternalSessionStore(
 			return fmt.Errorf("session %s belongs to %s, not %s",
 				sessionID, adoptSessionWorktreeLabel(sourceState), sourceWorktree)
 		}
-		if err := validateAdoptSourceTranscript(sourceState, sourceWorktree); err != nil {
-			return err
+		if !opts.SkipTranscriptValidation {
+			if err := validateAdoptSourceTranscript(sourceState, sourceWorktree); err != nil {
+				return err
+			}
 		}
 
 		next, touched, err := buildAdoptedSessionState(ctx, sourceState)
 		if err != nil {
 			return err
+		}
+		if opts.SkipTranscriptValidation {
+			clearInvalidAdoptTranscript(next, sourceWorktree)
 		}
 		existing, err := targetStore.Load(ctx, next.SessionID)
 		if err != nil {
@@ -275,6 +286,15 @@ func validateAdoptSourceTranscript(source *session.State, sourceWorktree string)
 			source.SessionID, source.TranscriptPath, owner.Type(), source.AgentType)
 	}
 	return nil
+}
+
+func clearInvalidAdoptTranscript(state *session.State, sourceWorktree string) {
+	if state == nil || strings.TrimSpace(state.TranscriptPath) == "" {
+		return
+	}
+	if err := validateAdoptSourceTranscript(state, sourceWorktree); err != nil {
+		state.TranscriptPath = ""
+	}
 }
 
 func stateStoreForWorktree(ctx context.Context, worktreePath string) (*session.StateStore, string, string, error) {

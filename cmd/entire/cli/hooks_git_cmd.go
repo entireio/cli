@@ -219,6 +219,9 @@ func newHooksGitPrepareCommitMsgCmd() *cobra.Command {
 			if g.skipUnsupportedCheckpointPolicy() {
 				return nil
 			}
+			// When an ACTIVE agent session lives in another git common dir,
+			// adopt it into this repo before trailer insertion (#1439).
+			tryAutoAdoptCrossCommonDirSession(g.ctx)
 			hookErr := g.strategy.PrepareCommitMsg(g.ctx, commitMsgFile, source)
 			g.logCompleted(hookErr)
 
