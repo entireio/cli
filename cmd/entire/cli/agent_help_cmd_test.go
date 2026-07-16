@@ -2,13 +2,20 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/spf13/cobra"
 )
+
+const agentHelpTestRepo = "gh/acme/app"
 
 // commandNames returns the Use-name of each command, for assertions.
 func commandNames(cmds []*cobra.Command) []string {
@@ -91,15 +98,143 @@ func TestAgentHelpCommands_GatesTrailOnTrailsEnabled(t *testing.T) {
 	}
 }
 
+// agent-help is invoked explicitly, so an absent cache entry must trigger the
+// repo-scoped trails availability check instead of being treated as disabled.
+// Not parallel: changes the process working directory.
+func TestAgentHelpRepoContext_RefreshesUnknownTrailsEnablement(t *testing.T) {
+	t.Setenv("ENTIRE_TOKEN", makeTestJWT(t, `{"iss":"https://auth.entire.io","sub":"user-1","handle":"alice","aud":"https://entire.io"}`))
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.IsolateGitConfigEnv(t)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", "git@github.com:acme/app.git")
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git remote add: %v", err)
+	}
+	t.Chdir(repoDir)
+
+	refreshCalls := 0
+	repoLine, enabled := agentHelpRepoContextWithRefresh(t.Context(), func(ctx context.Context, scope trailEnablementScope) error {
+		refreshCalls++
+		if scope.RepoKey != agentHelpTestRepo {
+			t.Fatalf("refresh scope repo = %q, want %s", scope.RepoKey, agentHelpTestRepo)
+		}
+		return saveTrailsEnabledForScope(ctx, scope, true, time.Now())
+	})
+
+	if refreshCalls != 1 {
+		t.Fatalf("refresh calls = %d, want 1", refreshCalls)
+	}
+	if repoLine != agentHelpTestRepo {
+		t.Errorf("repo line = %q, want %s", repoLine, agentHelpTestRepo)
+	}
+	if !enabled {
+		t.Fatal("trails should be enabled after the availability refresh succeeds")
+	}
+}
+
+// A failed availability refresh is cached only long enough to prevent repeated
+// blocking calls during a network outage, then becomes retryable.
+// Not parallel: changes the process working directory and auth environment.
+func TestAgentHelpRepoContext_CachesRefreshFailureBriefly(t *testing.T) {
+	t.Setenv("ENTIRE_TOKEN", makeTestJWT(t, `{"iss":"https://auth.entire.io","sub":"user-1","handle":"alice","aud":"https://entire.io"}`))
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", "git@github.com:acme/app.git")
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git remote add: %v", err)
+	}
+	t.Chdir(repoDir)
+
+	refreshCalls := 0
+	_, enabled := agentHelpRepoContextWithRefresh(t.Context(), func(context.Context, trailEnablementScope) error {
+		refreshCalls++
+		return errors.New("offline")
+	})
+	if enabled {
+		t.Fatal("trails should not be advertised after a failed availability refresh")
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refresh calls after first invocation = %d, want 1", refreshCalls)
+	}
+
+	// The failed attempt leaves a short-lived agent-help-only backoff, so another
+	// invocation does not repeat the blocking refresh.
+	_, enabled = agentHelpRepoContextWithRefresh(t.Context(), func(context.Context, trailEnablementScope) error {
+		refreshCalls++
+		return errors.New("refresh should have been suppressed by the failure cache")
+	})
+	if enabled {
+		t.Fatal("trails should remain unadvertised during the refresh-failure backoff")
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refresh calls after second invocation = %d, want 1", refreshCalls)
+	}
+
+	scope, err := currentTrailEnablementScope(t.Context())
+	if err != nil {
+		t.Fatalf("resolve trail scope: %v", err)
+	}
+	// The shared decision remains unknown, so SessionStart is not prevented from
+	// doing its own authoritative refresh and context-injection decision.
+	if got := cachedTrailsEnablementForScope(t.Context(), scope, time.Now()); got != trailEnablementCacheUnknown {
+		t.Fatalf("shared trails cache after agent-help failure = %v, want unknown", got)
+	}
+	// The agent-help-only marker expires after the short backoff and permits a
+	// later help invocation to retry.
+	if recentAgentHelpTrailsRefreshFailure(t.Context(), scope, time.Now().Add(agentHelpTrailsRefreshFailureBackoff+time.Second)) {
+		t.Fatal("agent-help refresh failure should expire after the backoff")
+	}
+}
+
+// Without a local auth identity, refreshing cannot produce a usable trails
+// decision. Skip it locally so agent-help does not block on API discovery before
+// auth eventually reports that the user is not logged in.
+// Not parallel: changes the process working directory and auth environment.
+func TestAgentHelpRepoContext_SkipsRefreshWithoutLocalIdentity(t *testing.T) {
+	t.Setenv("ENTIRE_TOKEN", "")
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", "git@github.com:acme/app.git")
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git remote add: %v", err)
+	}
+	t.Chdir(repoDir)
+
+	refreshCalls := 0
+	repoLine, enabled := agentHelpRepoContextWithRefresh(t.Context(), func(context.Context, trailEnablementScope) error {
+		refreshCalls++
+		return nil
+	})
+
+	if refreshCalls != 0 {
+		t.Fatalf("refresh calls = %d, want 0 without a local auth identity", refreshCalls)
+	}
+	if repoLine != agentHelpTestRepo {
+		t.Errorf("repo line = %q, want %s", repoLine, agentHelpTestRepo)
+	}
+	if enabled {
+		t.Fatal("trails should not be advertised without a local auth identity")
+	}
+}
+
 // Drilling into a trail-gated command is blocked when trails are disabled.
 func TestRunAgentHelp_TrailDrillGatedOnTrailsEnabled(t *testing.T) {
 	t.Parallel()
 	root := NewRootCmd()
 
-	if _, err := runAgentHelp(root, []string{"trail"}, "gh/acme/app", false, true); err != nil {
+	if _, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, false, true); err != nil {
 		t.Errorf("trail drill should resolve when trails enabled: %v", err)
 	}
-	_, err := runAgentHelp(root, []string{"trail"}, "gh/acme/app", false, false)
+	_, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, false, false)
 	if err == nil {
 		t.Fatalf("trail drill should be unavailable when trails disabled")
 	}
@@ -131,7 +266,7 @@ func TestRunAgentHelp_JSONGatesTrailOnTrailsEnabled(t *testing.T) {
 		return false
 	}
 
-	disabled, err := runAgentHelp(NewRootCmd(), nil, "gh/acme/app", true /*json*/, false /*trailsDisabled*/)
+	disabled, err := runAgentHelp(NewRootCmd(), nil, agentHelpTestRepo, true /*json*/, false /*trailsDisabled*/)
 	if err != nil {
 		t.Fatalf("json top (trails disabled): %v", err)
 	}
@@ -142,7 +277,7 @@ func TestRunAgentHelp_JSONGatesTrailOnTrailsEnabled(t *testing.T) {
 		t.Errorf("checkpoint should always appear in --json subcommands:\n%s", disabled)
 	}
 
-	enabled, err := runAgentHelp(NewRootCmd(), nil, "gh/acme/app", true, true)
+	enabled, err := runAgentHelp(NewRootCmd(), nil, agentHelpTestRepo, true, true)
 	if err != nil {
 		t.Fatalf("json top (trails enabled): %v", err)
 	}
@@ -162,11 +297,11 @@ func TestRunAgentHelp_DrillRejectsUnadvertisedCommands(t *testing.T) {
 	root.AddCommand(&cobra.Command{Use: "hooks", Short: "infra", Hidden: true})
 	root.AddCommand(&cobra.Command{Use: "reset", Short: "old", Deprecated: "use clean"})
 
-	if _, err := runAgentHelp(root, []string{"status"}, "gh/acme/app", false, true); err != nil {
+	if _, err := runAgentHelp(root, []string{"status"}, agentHelpTestRepo, false, true); err != nil {
 		t.Errorf("visible command should be drillable: %v", err)
 	}
 	for _, name := range []string{"hooks", "reset"} {
-		if _, err := runAgentHelp(root, []string{name}, "gh/acme/app", false, true); err == nil {
+		if _, err := runAgentHelp(root, []string{name}, agentHelpTestRepo, false, true); err == nil {
 			t.Errorf("drilling unadvertised command %q should error, matching the advertised listing", name)
 		}
 	}
@@ -178,7 +313,7 @@ func TestRunAgentHelp_DrillRejectsUnadvertisedCommands(t *testing.T) {
 func TestRenderAgentHelpTop_DisabledExampleIsNonTrail(t *testing.T) {
 	t.Parallel()
 
-	out := renderAgentHelpTop(NewRootCmd(), "gh/acme/app", false)
+	out := renderAgentHelpTop(NewRootCmd(), agentHelpTestRepo, false)
 	if !strings.Contains(out, "entire agent-help checkpoint") {
 		t.Errorf("disabled top should use checkpoint as the drill example:\n%s", out)
 	}
@@ -228,7 +363,7 @@ func TestRenderAgentHelpCommand_ShowsFlagsAndSubcommands(t *testing.T) {
 	cmd.AddCommand(&cobra.Command{Use: "show", Short: "Show a trail"})
 	cmd.AddCommand(&cobra.Command{Use: "list", Short: "List trails"})
 
-	out := renderAgentHelpCommand(cmd, "gh/acme/app", true)
+	out := renderAgentHelpCommand(cmd, agentHelpTestRepo, true)
 
 	for _, want := range []string{
 		"trail",
@@ -238,7 +373,7 @@ func TestRenderAgentHelpCommand_ShowsFlagsAndSubcommands(t *testing.T) {
 		"--branch",
 		"show",
 		"list",
-		"gh/acme/app",
+		agentHelpTestRepo,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("agent-help command output missing %q:\n%s", want, out)
@@ -255,13 +390,13 @@ func TestRenderAgentHelpTop_ListsCommandsRepoAndRule(t *testing.T) {
 	t.Parallel()
 
 	root := NewRootCmd()
-	out := renderAgentHelpTop(root, "gh/acme/app", true)
+	out := renderAgentHelpTop(root, agentHelpTestRepo, true)
 
 	for _, want := range []string{
 		"trail",             // hidden but revealed via annotation
 		"checkpoint",        // visible
 		"status",            // visible
-		"gh/acme/app",       // auto-detected repo
+		agentHelpTestRepo,   // auto-detected repo
 		"entire agent-help", // drill-down pointer
 		"never ask",         // the standing repo-inference rule
 	} {
@@ -278,7 +413,7 @@ func TestRunAgentHelp_Dispatch(t *testing.T) {
 
 	root := NewRootCmd()
 
-	top, err := runAgentHelp(root, nil, "gh/acme/app", false, true)
+	top, err := runAgentHelp(root, nil, agentHelpTestRepo, false, true)
 	if err != nil {
 		t.Fatalf("top: unexpected error: %v", err)
 	}
@@ -286,7 +421,7 @@ func TestRunAgentHelp_Dispatch(t *testing.T) {
 		t.Fatalf("top output unexpected:\n%s", top)
 	}
 
-	drill, err := runAgentHelp(root, []string{"trail"}, "gh/acme/app", false, true)
+	drill, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, false, true)
 	if err != nil {
 		t.Fatalf("drill: unexpected error: %v", err)
 	}
@@ -294,7 +429,7 @@ func TestRunAgentHelp_Dispatch(t *testing.T) {
 		t.Fatalf("drill output unexpected:\n%s", drill)
 	}
 
-	jsonOut, err := runAgentHelp(root, []string{"trail"}, "gh/acme/app", true, true)
+	jsonOut, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, true, true)
 	if err != nil {
 		t.Fatalf("json: unexpected error: %v", err)
 	}
@@ -311,8 +446,8 @@ func TestRunAgentHelp_Dispatch(t *testing.T) {
 	if parsed.Command != "entire trail" {
 		t.Errorf("json command = %q, want %q", parsed.Command, "entire trail")
 	}
-	if parsed.Repo != "gh/acme/app" {
-		t.Errorf("json repo = %q, want %q", parsed.Repo, "gh/acme/app")
+	if parsed.Repo != agentHelpTestRepo {
+		t.Errorf("json repo = %q, want %q", parsed.Repo, agentHelpTestRepo)
 	}
 	var hasRepoFlag bool
 	for _, f := range parsed.Flags {

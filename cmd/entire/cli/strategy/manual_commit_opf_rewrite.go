@@ -1,9 +1,9 @@
 // Pre-push OPF rewrite for entire/checkpoints/v1.
 //
 // This is the ONLY production code path that runs the OPF-augmented
-// redaction entry points. Post-commit condensation stays on 7-layer
-// for predictable latency; OPF runs here, once per push, after the
-// user opted in via settings.
+// redaction entry points. Post-commit condensation stays on the
+// regex-only pipeline for predictable latency; OPF runs here, once per
+// push, after the user opted in via settings.
 package strategy
 
 import (
@@ -80,17 +80,17 @@ func (e *V1RefMovedError) Error() string {
 }
 
 // OPFRuntimeFailedError: the OPF circuit breaker tripped mid-rewrite.
-// Some blobs were silently downgraded to 7-layer; tagging those commits
-// as Entire-OPF-Applied would be a privacy regression (future pushes
-// would skip them while their content is 7-layer-only). Abort before
-// CAS so the user fixes their OPF install and retries.
+// Some blobs were silently downgraded to regex-only; tagging those
+// commits as Entire-OPF-Applied would be a privacy regression (future
+// pushes would skip them while their content is regex-only). Abort
+// before CAS so the user fixes their OPF install and retries.
 type OPFRuntimeFailedError struct {
 	OPFCommand string
 }
 
 func (e *OPFRuntimeFailedError) Error() string {
 	return fmt.Sprintf("OPF runtime failed during pre-push rewrite (command=%q); "+
-		"aborting push so 7-layer content isn't tagged as 8-layer-applied. "+
+		"aborting push so regex-only content isn't tagged as OPF-applied. "+
 		"Run `%s --help` to verify your OPF install, then retry. Or set "+
 		"ENTIRE_OPF=no on the push to skip OPF for this push only.",
 		e.OPFCommand, e.OPFCommand)
@@ -255,7 +255,7 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 	// this push (an earlier process step tripped the breaker), abort
 	// before tagging any commits as OPF-applied. Without this, the
 	// per-blob fallback inside the no-OPF cases of BatchBytesWithPrivacyFilter
-	// could let 7-layer content slip out with the trailer attached.
+	// could let regex-only content slip out with the trailer attached.
 	if redact.OPFBreakerTripped() {
 		return plumbing.ZeroHash, &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand()}
 	}
@@ -293,7 +293,7 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 			}
 			pc.startIdx = len(globalBlobs)
 			// Whole-tree redaction: each v1 commit tree is cumulative, so the
-			// newest commit can still carry older shards that were 7-layer-only
+			// newest commit can still carry older shards that were regex-only
 			// before this rewrite. Redacting the whole tree for every unapplied
 			// commit keeps the final rewritten tip from reintroducing an
 			// un-OPF-redacted older shard. collect and apply walk the tree the
@@ -487,7 +487,7 @@ func listUnpushedV1Commits(repo *git.Repository, localTip, remoteTip plumbing.Ha
 //
 // Correctness note: each v1 commit tree is cumulative. During a multi-commit
 // rewrite, the newest original commit can still contain older shards that were
-// 7-layer-only before this rewrite. The collect/apply walkers redact the whole
+// regex-only before this rewrite. The collect/apply walkers redact the whole
 // tree for every unapplied commit so the final rewritten tip cannot
 // reintroduce an older un-OPF-redacted shard.
 func rebuildV1Commit(ctx context.Context, repo *git.Repository, oldCommit *object.Commit, parent plumbing.Hash, redactedByPath map[string][]byte) (plumbing.Hash, error) {

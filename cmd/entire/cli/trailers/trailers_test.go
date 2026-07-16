@@ -351,8 +351,9 @@ func TestParseCheckpoint(t *testing.T) {
 
 // TestHasOPFApplied covers the Entire-OPF-Applied trailer reader. The
 // trailer marks a v1 commit whose blobs have been redacted by the
-// OpenAI Privacy Filter (8-layer); commits without it carry 7-layer
-// content and are eligible for the pre-push rewrite to add OPF.
+// OpenAI Privacy Filter (OPF-applied, 9-layer); commits without it carry
+// regex-only (8-layer) content and are eligible for the pre-push rewrite
+// to add OPF.
 func TestHasOPFApplied(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

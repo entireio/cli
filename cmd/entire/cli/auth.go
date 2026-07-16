@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
 	"github.com/spf13/cobra"
 )
 
@@ -417,7 +418,7 @@ func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher
 	if t.activeContext != "" {
 		writeAuthStatusLine(w, "Context:", t.activeContext)
 	}
-	writeAuthStatusLine(w, "Token:", "stored in OS keychain")
+	writeAuthStatusLine(w, "Token:", "stored in "+tokenstore.BackendDescription())
 
 	// Active sessions on this core. The token is already known good, so a
 	// listing failure is non-fatal — note it and carry on.

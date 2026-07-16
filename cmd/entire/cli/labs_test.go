@@ -111,11 +111,26 @@ func TestRootHelp_AlwaysShowsLabs(t *testing.T) {
 }
 
 // experimentalCommandMarkers are substrings that only appear in root help when
-// experimental commands are visible.
+// experimental commands are visible. Do not pin cobra's Use/Short column
+// padding — group membership and longest-command width shift the spaces.
 var experimentalCommandMarkers = []string{
 	"Experimental commands:",
 	"review",
-	"tokens                 Analyze token usage across sessions and checkpoints",
+}
+
+// rootHelpHasTokensCommand reports whether root help lists the experimental
+// `tokens` command with its Short description, ignoring Use/Short padding.
+func rootHelpHasTokensCommand(got string) bool {
+	for _, line := range strings.Split(got, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "tokens" {
+			continue
+		}
+		if strings.Contains(line, "Analyze token usage across sessions and checkpoints") {
+			return true
+		}
+	}
+	return false
 }
 
 // TestRootHelp_ReleaseHidesExperimental verifies a shipped build
@@ -129,6 +144,9 @@ func TestRootHelp_ReleaseHidesExperimental(t *testing.T) {
 		if strings.Contains(got, marker) {
 			t.Fatalf("release root help should not include %q, got:\n%s", marker, got)
 		}
+	}
+	if rootHelpHasTokensCommand(got) {
+		t.Fatalf("release root help should not list tokens, got:\n%s", got)
 	}
 }
 
@@ -147,6 +165,9 @@ func TestRootHelp_DevShowsExperimentalGroup(t *testing.T) {
 		if !strings.Contains(got, marker) {
 			t.Fatalf("dev root help should include %q, got:\n%s", marker, got)
 		}
+	}
+	if !rootHelpHasTokensCommand(got) {
+		t.Fatalf("dev root help should list tokens with its Short description, got:\n%s", got)
 	}
 }
 
