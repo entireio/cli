@@ -39,6 +39,12 @@ type Invoker interface {
 	//
 	// POST /me/cancel-deletion
 	CancelDeletion(ctx context.Context) error
+	// CompleteOnboarding invokes completeOnboarding operation.
+	//
+	// Record that the calling account completed web onboarding.
+	//
+	// POST /me/onboarding/complete
+	CompleteOnboarding(ctx context.Context) (*CompleteOnboardingOutputBody, error)
 	// CreateBinding invokes createBinding operation.
 	//
 	// Create OIDC binding.
@@ -149,7 +155,7 @@ type Invoker interface {
 	GetMirror(ctx context.Context, params GetMirrorParams) (*Mirror, error)
 	// GetOnboardingStatus invokes getOnboardingStatus operation.
 	//
-	// Report whether the calling account still needs to onboard (has no mirror yet).
+	// Report whether the calling account still needs to complete onboarding.
 	//
 	// GET /me/onboarding
 	GetOnboardingStatus(ctx context.Context) (*GetOnboardingStatusOutputBody, error)
@@ -700,6 +706,88 @@ func (c *Client) sendCancelDeletion(ctx context.Context) (res *CancelDeletionOK,
 	defer body.Close()
 
 	result, err := decodeCancelDeletionResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// CompleteOnboarding invokes completeOnboarding operation.
+//
+// Record that the calling account completed web onboarding.
+//
+// POST /me/onboarding/complete
+func (c *Client) CompleteOnboarding(ctx context.Context) (*CompleteOnboardingOutputBody, error) {
+	res, err := c.sendCompleteOnboarding(ctx)
+	return res, err
+}
+
+func (c *Client) sendCompleteOnboarding(ctx context.Context) (res *CompleteOnboardingOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/me/onboarding/complete"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, CompleteOnboardingOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, CompleteOnboardingOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeCompleteOnboardingResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -2487,7 +2575,7 @@ func (c *Client) sendGetMirror(ctx context.Context, params GetMirrorParams) (res
 
 // GetOnboardingStatus invokes getOnboardingStatus operation.
 //
-// Report whether the calling account still needs to onboard (has no mirror yet).
+// Report whether the calling account still needs to complete onboarding.
 //
 // GET /me/onboarding
 func (c *Client) GetOnboardingStatus(ctx context.Context) (*GetOnboardingStatusOutputBody, error) {
@@ -5641,6 +5729,40 @@ func (c *Client) sendListRepos(ctx context.Context, params ListReposParams) (res
 
 	q := uri.NewQueryEncoder()
 	{
+		// Encode "pageSize" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageSize",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageSize.Get(); ok {
+				return e.EncodeValue(conv.Int32ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "pageToken" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageToken",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageToken.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
 		// Encode "scope" parameter.
 		cfg := uri.QueryParameterEncodingConfig{
 			Name:    "scope",
@@ -5651,6 +5773,23 @@ func (c *Client) sendListRepos(ctx context.Context, params ListReposParams) (res
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
 			if val, ok := params.Scope.Get(); ok {
 				return e.EncodeValue(conv.StringToString(string(val)))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "filter" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "filter",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Filter.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
 			}
 			return nil
 		}); err != nil {

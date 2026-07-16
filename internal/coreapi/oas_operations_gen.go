@@ -9,6 +9,7 @@ const (
 	AddOrgMemberOperation                  OperationName = "AddOrgMember"
 	BatchLookupOperation                   OperationName = "BatchLookup"
 	CancelDeletionOperation                OperationName = "CancelDeletion"
+	CompleteOnboardingOperation            OperationName = "CompleteOnboarding"
 	CreateBindingOperation                 OperationName = "CreateBinding"
 	CreateMirrorOperation                  OperationName = "CreateMirror"
 	CreateOrgOperation                     OperationName = "CreateOrg"
