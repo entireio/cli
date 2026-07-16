@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"math/bits"
-	"sort"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -188,7 +187,16 @@ func buildSessionTokensReport(state *strategy.SessionState, status string, table
 
 	if tokens := buildSessionTokensUsage(state.TokenUsage); tokens != nil {
 		report.Tokens = tokens
-		applyLocalCostEstimate(tokens, state.TokenUsage, modelUsageSliceFromMap(state.ModelUsage), state.ModelName, table)
+		// Estimate cost from the SESSION-WIDE flat usage (state.TokenUsage) — the
+		// same scope as the displayed token total. state.ModelUsage is deliberately
+		// NOT passed: it is CHECKPOINT-scoped (reset at every condensation, see
+		// session.State.ModelUsage), so pricing it while the displayed total is the
+		// whole session would silently understate cost after any condensation.
+		// Session state carries no session-cumulative per-model breakdown, so the
+		// flat total (EstimateCost flattens the subagent subtree into it, matching
+		// totalTokens) is the only scope-consistent basis; it is priced under the
+		// session's current model as an explicit local estimate.
+		applyLocalCostEstimate(tokens, state.TokenUsage, nil, state.ModelName, table)
 		if tokens.SubagentTotal > 0 {
 			report.Contributors = append(report.Contributors, sessionTokensContributor{
 				Kind:       "subagents",
@@ -282,24 +290,6 @@ func applyLocalCostEstimate(tokens *sessionTokensUsage, usage *agent.TokenUsage,
 	cost, source := agent.EstimateCost(usage, models, fallbackModel, table)
 	tokens.CostUSD = cost
 	tokens.CostSource = source
-}
-
-// modelUsageSliceFromMap converts a session-state per-model usage map into a
-// model-sorted slice for deterministic local cost estimation. Nil entries are
-// skipped; a nil/empty map yields nil.
-func modelUsageSliceFromMap(m map[string]*agent.TokenUsage) []types.ModelUsage {
-	if len(m) == 0 {
-		return nil
-	}
-	out := make([]types.ModelUsage, 0, len(m))
-	for model, usage := range m {
-		if usage == nil {
-			continue
-		}
-		out = append(out, types.ModelUsage{Model: model, TokenUsage: *usage})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
-	return out
 }
 
 func topLevelSessionTokenTotal(tokens *sessionTokensUsage) int {

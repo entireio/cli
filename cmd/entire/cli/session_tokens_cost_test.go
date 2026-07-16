@@ -147,3 +147,50 @@ func TestAgentBriefUsageLine_AppendsLocalEstimateWhenKnown(t *testing.T) {
 		t.Fatalf("expected no cost clause, got: %q", withoutCost)
 	}
 }
+
+// After a condensation, state.ModelUsage is reset to only the most recent
+// checkpoint's per-model buckets, while state.TokenUsage keeps the session-wide
+// cumulative total that drives the displayed token counts. The local cost
+// estimate must be priced from the SAME (session-wide) scope as the displayed
+// token total — not the checkpoint-scoped per-model map — or the displayed cost
+// silently understates the displayed token total. Mutation check: pricing the
+// checkpoint-scoped ModelUsage (the pre-fix behavior) yields $0.42 for a session
+// whose displayed total is 840000 tokens; pricing the session-wide flat total
+// yields the scope-consistent $0.84.
+func TestBuildSessionTokensReport_CostMatchesSessionScopeAfterCondensation(t *testing.T) {
+	t.Parallel()
+
+	state := makeSessionState("post-condensation-session", session.PhaseActive)
+	state.AgentType = testAgentClaude
+	state.ModelName = "test-model"
+	// Session-wide cumulative total spans the whole session (840000 priceable tokens).
+	state.TokenUsage = &agent.TokenUsage{
+		InputTokens:  800000,
+		OutputTokens: 40000,
+		APICallCount: 6,
+	}
+	// ModelUsage is checkpoint-scoped: reset at the last condensation, it covers
+	// only the most recent checkpoint (420000 tokens) — half the session.
+	state.ModelUsage = map[string]*agent.TokenUsage{
+		"test-model": {InputTokens: 400000, OutputTokens: 20000},
+	}
+
+	report := buildSessionTokensReport(state, "active", testDisplayPricingTable(t))
+	if report.Tokens == nil {
+		t.Fatal("expected token usage")
+	}
+	// Displayed token total is session-wide.
+	if report.Tokens.Total != 840000 {
+		t.Fatalf("displayed total = %d, want 840000 (session-wide)", report.Tokens.Total)
+	}
+	// Cost must be priced from the same session-wide scope: 840000 * $1/MTok = $0.84.
+	if report.Tokens.CostUSD == nil {
+		t.Fatal("cost = nil, want 0.84 (session-wide scope)")
+	}
+	if *report.Tokens.CostUSD != 0.84 {
+		t.Fatalf("cost = %v, want 0.84 (session-wide scope); pricing the checkpoint-scoped ModelUsage understates to 0.42", *report.Tokens.CostUSD)
+	}
+	if report.Tokens.CostSource != types.CostSourceEstimated {
+		t.Fatalf("cost source = %q, want estimated", report.Tokens.CostSource)
+	}
+}

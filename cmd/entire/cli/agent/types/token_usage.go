@@ -116,9 +116,20 @@ func MergeCostSourceUsages(a, b *TokenUsage) string {
 }
 
 // usageHasBillableTokens reports whether u carries any nonzero billable token
-// count (input, cache-creation, cache-read, or output). It is nil-safe.
+// count (input, cache-creation, cache-read, or output) at any depth. It recurses
+// into the SubagentTokens subtree so a step whose tokens live entirely in an
+// unpriced subagent subtree still counts as token-bearing — otherwise
+// MergeCostSourceUsages would miss the mixed-coverage case and report a merged
+// cost as fully "estimated" instead of "mixed". Mirrors hasTokenUsageData /
+// flattenTokenUsage, which also recurse. It is nil-safe.
 func usageHasBillableTokens(u *TokenUsage) bool {
-	return u != nil && (u.InputTokens != 0 || u.CacheCreationTokens != 0 || u.CacheReadTokens != 0 || u.OutputTokens != 0)
+	if u == nil {
+		return false
+	}
+	if u.InputTokens != 0 || u.CacheCreationTokens != 0 || u.CacheReadTokens != 0 || u.OutputTokens != 0 {
+		return true
+	}
+	return usageHasBillableTokens(u.SubagentTokens)
 }
 
 // AddTokenUsage returns the sum of a and b, recursing into subagent usage.

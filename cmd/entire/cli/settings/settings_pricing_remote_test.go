@@ -86,6 +86,39 @@ func TestLoadPricingTable_RemoteEnabled_SchemaVersion99Ignored(t *testing.T) {
 	}
 }
 
+// A single malformed pricing.models override must not sink the whole table. The
+// invalid entry (input_per_mtok 0) is dropped and logged; the valid one still
+// applies and cost estimation stays enabled. Mutation check: passing the raw
+// overrides straight to LoadTable (the pre-fix behavior) hard-errors on the bad
+// entry, so LoadPricingTable returns a nil table and disables estimation.
+func TestLoadPricingTable_DropsInvalidUserOverride_KeepsValid(t *testing.T) {
+	// Not parallel: setupSettingsDir chdirs and LoadPricingTable reads cwd settings.
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	settingsJSON := `{"enabled":true,"pricing":{"models":[` +
+		`{"id":"gpt-5.5","provider":"openai","input_per_mtok":111,"output_per_mtok":222},` +
+		`{"id":"bad-model","provider":"openai","input_per_mtok":0,"output_per_mtok":10}]}}`
+	setupSettingsDir(t, settingsJSON, "")
+
+	table, disable := LoadPricingTable(context.Background())
+	if table == nil {
+		t.Fatal("expected a usable table; one bad override must not disable estimation")
+	}
+	if disable {
+		t.Fatal("estimation must stay enabled when only one override entry is invalid")
+	}
+	rate, ok := table.Lookup("gpt-5.5")
+	if !ok {
+		t.Fatal("gpt-5.5 did not resolve")
+	}
+	if rate.InputPerMTok != 111 {
+		t.Errorf("gpt-5.5 input = %v, want 111 (valid override applied despite a sibling bad entry)", rate.InputPerMTok)
+	}
+	// The invalid entry must have been dropped, not added to the table.
+	if _, ok := table.Lookup("bad-model"); ok {
+		t.Error("bad-model must have been dropped, not added to the table")
+	}
+}
+
 func TestIsRemoteEnabled_Accessor(t *testing.T) {
 	t.Parallel()
 

@@ -128,6 +128,26 @@ func TestMergeCostSourceUsages_Matrix(t *testing.T) {
 	}
 }
 
+// A priced usage merged with a step whose tokens live ENTIRELY in an unpriced
+// SubagentTokens subtree must report mixed coverage: the subtree is billable but
+// carries no cost, so the merged provenance is "mixed", not "estimated".
+// Mutation check: a non-recursive usageHasBillableTokens sees only the top-level
+// scalars (all zero here) and misses the subtree, so the merge would report
+// "estimated".
+func TestMergeCostSourceUsages_SubagentOnlyTokensAreBillable(t *testing.T) {
+	t.Parallel()
+	priced := &TokenUsage{InputTokens: 100, CostUSD: costPtr(1.0), CostSource: CostSourceEstimated}
+	subagentOnly := &TokenUsage{SubagentTokens: &TokenUsage{InputTokens: 50}}
+
+	if got := MergeCostSourceUsages(priced, subagentOnly); got != CostSourceMixed {
+		t.Fatalf("MergeCostSourceUsages(priced, subagent-only) = %q, want mixed", got)
+	}
+	// Order-independent.
+	if got := MergeCostSourceUsages(subagentOnly, priced); got != CostSourceMixed {
+		t.Fatalf("MergeCostSourceUsages(subagent-only, priced) = %q, want mixed", got)
+	}
+}
+
 func TestTokenUsage_JSON_NilCostOmitted(t *testing.T) {
 	t.Parallel()
 	u := TokenUsage{InputTokens: 10, OutputTokens: 5}

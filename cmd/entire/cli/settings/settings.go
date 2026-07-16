@@ -404,7 +404,12 @@ func LoadPricingTable(ctx context.Context) (*pricing.Table, bool) {
 	// cached remote table first, then the user overrides, so LoadTable's
 	// last-writer-wins keeps a user override authoritative over the same id from
 	// the remote table, which in turn overrides the embedded default.
-	overrides := s.PricingOverrides()
+	//
+	// Validate the user overrides per-entry and drop only the invalid ones
+	// (mirroring LoadRemoteEntries): a single malformed pricing.models entry must
+	// not make LoadTable hard-error and disable cost estimation for the whole
+	// table.
+	overrides := pricing.ValidOverrides(ctx, s.PricingOverrides())
 	if s.IsRemoteEnabled() {
 		remote := pricing.LoadRemoteEntries(ctx)
 		fetchedAt := pricing.RemoteFetchedAt()

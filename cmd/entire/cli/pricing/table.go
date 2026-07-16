@@ -1,14 +1,17 @@
 package pricing
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"path"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // ModelRate is the price of a single model, in USD per million tokens (MTok).
@@ -96,6 +99,31 @@ func LoadTable(overrides []ModelRate) (*Table, error) {
 	}
 
 	return t, nil
+}
+
+// ValidOverrides returns the subset of overrides that pass validation, dropping
+// and logging each invalid entry rather than failing on it. It mirrors
+// LoadRemoteEntries so a single malformed user override in .entire/settings.json
+// cannot sink the whole pricing table: LoadTable hard-errors on any invalid
+// override, and LoadPricingTable would then discard the entire table and disable
+// cost estimation. Callers pre-filter user overrides through this before handing
+// them to LoadTable. Order is preserved so LoadTable's last-writer-wins layering
+// is unaffected. A nil/empty input yields nil.
+func ValidOverrides(ctx context.Context, overrides []ModelRate) []ModelRate {
+	if len(overrides) == 0 {
+		return nil
+	}
+	valid := make([]ModelRate, 0, len(overrides))
+	for i := range overrides {
+		o := overrides[i]
+		if err := validateRate(o); err != nil {
+			logging.Warn(ctx, "pricing: dropping invalid pricing override entry",
+				slog.String("id", o.ID), slog.String("error", err.Error()))
+			continue
+		}
+		valid = append(valid, o)
+	}
+	return valid
 }
 
 // add inserts m, replacing any existing entry that shares its id. Ids are
