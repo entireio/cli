@@ -682,6 +682,22 @@ func TestImportScanFingerprint_ChangesWithInputs(t *testing.T) {
 	}
 }
 
+// One hint slot, several agents with pending history: naming only the first
+// agent's subcommand would read as "import resolved" after running it. The
+// hint points at the group command instead, which lists the per-agent
+// subcommands; a single pending agent keeps the direct subcommand.
+func TestImportHint_MultiAgentPointsAtGroupCommand(t *testing.T) {
+	t.Parallel()
+	one := []agentImportStatus{{Agent: "claude-code", UnimportedTurns: 3}}
+	if got := importHint(one); got != "entire import claude-code" {
+		t.Errorf("importHint(one agent) = %q, want %q", got, "entire import claude-code")
+	}
+	two := []agentImportStatus{{Agent: "claude-code", UnimportedTurns: 3}, {Agent: "cursor", UnimportedTurns: 1}}
+	if got := importHint(two); got != "entire import" {
+		t.Errorf("importHint(two agents) = %q, want %q", got, "entire import")
+	}
+}
+
 // Regression: under a git-refs checkpoint primary, an import writes
 // refs/entire/checkpoints/<shard>/<id> and never moves the v1 metadata
 // branch. The scan fingerprint's metadata tip must still change, or the

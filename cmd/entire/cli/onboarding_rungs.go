@@ -482,10 +482,22 @@ func importRung(deps onboardingRungDeps) onboarding.Rung {
 			return onboarding.Check{
 				State:  onboarding.StateMissing,
 				Detail: unimportedDetail(unimported),
-				Hint:   "entire import " + unimported[0].Agent,
+				Hint:   importHint(unimported),
 			}
 		},
 	}
+}
+
+// importHint is the import rung's remediation command. With one agent pending
+// it names that agent's import subcommand directly. With several there is
+// only one hint slot, and naming just the first would read as "the import
+// step is resolved" after running it — point at the group command instead,
+// which lists the per-agent subcommands.
+func importHint(unimported []agentImportStatus) string {
+	if len(unimported) == 1 {
+		return "entire import " + unimported[0].Agent
+	}
+	return "entire import"
 }
 
 // unimportedDetail phrases the import rung's remaining work. When nothing was
