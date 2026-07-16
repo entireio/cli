@@ -857,12 +857,17 @@ func TestInstallGitHook_CoreHooksPathRelative(t *testing.T) {
 	tmpDir, _ := initHooksTestRepo(t)
 	ctx := context.Background()
 
-	// Simulate Husky-style override: hooks live outside .git/hooks.
+	// Simulate Husky-style override: git invokes stubs in .husky/_, but Entire
+	// must install into the parent .husky/ user-hook directory so husky prepare
+	// cannot clobber the wrappers (issue #784).
 	cmd := exec.CommandContext(ctx, "git", "config", "core.hooksPath", ".husky/_")
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to set core.hooksPath: %v", err)
 	}
+	// Seed husky-owned stubs + dispatcher the way `husky` would.
+	huskyOwnedDir := filepath.Join(tmpDir, ".husky", "_")
+	seedHuskyOwnedDir(t, huskyOwnedDir)
 
 	count, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
@@ -872,15 +877,27 @@ func TestInstallGitHook_CoreHooksPathRelative(t *testing.T) {
 		t.Fatal("InstallGitHook() should install hooks when core.hooksPath is set")
 	}
 
-	configuredHooksDir := filepath.Join(tmpDir, ".husky", "_")
+	userHooksDir := filepath.Join(tmpDir, ".husky")
 	for _, hook := range gitHookNames {
-		hookPath := filepath.Join(configuredHooksDir, hook)
+		hookPath := filepath.Join(userHooksDir, hook)
 		data, readErr := os.ReadFile(hookPath)
 		if readErr != nil {
-			t.Fatalf("expected hook %s in core.hooksPath dir: %v", hook, readErr)
+			t.Fatalf("expected hook %s in husky user-hook dir: %v", hook, readErr)
 		}
 		if !strings.Contains(string(data), entireHookMarker) {
-			t.Errorf("hook %s in core.hooksPath dir should contain Entire marker", hook)
+			t.Errorf("hook %s in .husky/ should contain Entire marker", hook)
+		}
+	}
+
+	// Must not replace husky-owned stubs in .husky/_.
+	for _, hook := range gitHookNames {
+		hookPath := filepath.Join(huskyOwnedDir, hook)
+		data, readErr := os.ReadFile(hookPath)
+		if readErr != nil {
+			t.Fatalf("expected husky stub %s to remain: %v", hook, readErr)
+		}
+		if strings.Contains(string(data), entireHookMarker) {
+			t.Errorf("husky-owned stub %s must not contain Entire marker", hook)
 		}
 	}
 
@@ -894,7 +911,158 @@ func TestInstallGitHook_CoreHooksPathRelative(t *testing.T) {
 	}
 
 	if !IsGitHookInstalledInDir(context.Background(), tmpDir) {
-		t.Error("IsGitHookInstalledInDir() should detect hooks installed in core.hooksPath")
+		t.Error("IsGitHookInstalledInDir() should detect hooks installed in .husky/")
+	}
+}
+
+func TestInstallGitHook_HuskyPrepareDoesNotClobberUserHooks(t *testing.T) {
+	tmpDir, _ := initHooksTestRepo(t)
+	ctx := context.Background()
+
+	cmd := exec.CommandContext(ctx, "git", "config", "core.hooksPath", ".husky/_")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath: %v", err)
+	}
+	huskyOwnedDir := filepath.Join(tmpDir, ".husky", "_")
+	seedHuskyOwnedDir(t, huskyOwnedDir)
+
+	if _, err := InstallGitHook(context.Background(), true, false, false); err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+	if !IsGitHookInstalledInDir(context.Background(), tmpDir) {
+		t.Fatal("hooks should be installed before simulated husky prepare")
+	}
+
+	// Simulate `npx husky` / npm prepare regenerating .husky/_.
+	seedHuskyOwnedDir(t, huskyOwnedDir)
+
+	if !IsGitHookInstalledInDir(context.Background(), tmpDir) {
+		t.Fatal("Entire hooks in .husky/ must survive husky prepare regenerating .husky/_")
+	}
+	for _, hook := range gitHookNames {
+		data, err := os.ReadFile(filepath.Join(tmpDir, ".husky", hook))
+		if err != nil {
+			t.Fatalf("read user hook %s: %v", hook, err)
+		}
+		if !strings.Contains(string(data), entireHookMarker) {
+			t.Errorf("user hook %s lost Entire marker after husky prepare", hook)
+		}
+	}
+}
+
+func TestInstallGitHook_MigratesLegacyEntireHooksFromHuskyOwnedDir(t *testing.T) {
+	tmpDir, _ := initHooksTestRepo(t)
+	ctx := context.Background()
+
+	cmd := exec.CommandContext(ctx, "git", "config", "core.hooksPath", ".husky/_")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath: %v", err)
+	}
+
+	huskyOwnedDir := filepath.Join(tmpDir, ".husky", "_")
+	if err := os.MkdirAll(huskyOwnedDir, 0o755); err != nil {
+		t.Fatalf("mkdir .husky/_: %v", err)
+	}
+	// Legacy layout: Entire wrappers live in `_`, husky stubs backed up beside them.
+	for _, hook := range gitHookNames {
+		stub := huskyForwardingStub
+		if err := os.WriteFile(filepath.Join(huskyOwnedDir, hook+backupSuffix), []byte(stub), 0o755); err != nil {
+			t.Fatalf("write backup stub %s: %v", hook, err)
+		}
+		legacy := "#!/bin/sh\n# " + entireHookMarker + "\nentire hooks git " + hook + "\n"
+		if err := os.WriteFile(filepath.Join(huskyOwnedDir, hook), []byte(legacy), 0o755); err != nil {
+			t.Fatalf("write legacy Entire hook %s: %v", hook, err)
+		}
+	}
+	// Dispatcher present so hookInstallDir redirects to parent.
+	if err := os.WriteFile(filepath.Join(huskyOwnedDir, "h"), []byte("#!/usr/bin/env sh\n"), 0o755); err != nil {
+		t.Fatalf("write husky dispatcher: %v", err)
+	}
+
+	if _, err := InstallGitHook(context.Background(), true, false, false); err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+
+	for _, hook := range gitHookNames {
+		userData, err := os.ReadFile(filepath.Join(tmpDir, ".husky", hook))
+		if err != nil {
+			t.Fatalf("expected migrated hook in .husky/%s: %v", hook, err)
+		}
+		if !strings.Contains(string(userData), entireHookMarker) {
+			t.Errorf(".husky/%s should contain Entire marker after migrate", hook)
+		}
+		ownedData, err := os.ReadFile(filepath.Join(huskyOwnedDir, hook))
+		if err != nil {
+			t.Fatalf("expected restored husky stub %s: %v", hook, err)
+		}
+		if strings.Contains(string(ownedData), entireHookMarker) {
+			t.Errorf("legacy Entire wrapper should be removed from .husky/_/%s", hook)
+		}
+		if !strings.Contains(string(ownedData), `dirname "$0"`) {
+			t.Errorf("husky stub should be restored for %s", hook)
+		}
+	}
+}
+
+func TestInstallGitHook_MigratesLegacyEntireHooksWithoutBackupWritesStub(t *testing.T) {
+	tmpDir, _ := initHooksTestRepo(t)
+	ctx := context.Background()
+
+	cmd := exec.CommandContext(ctx, "git", "config", "core.hooksPath", ".husky/_")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath: %v", err)
+	}
+
+	huskyOwnedDir := filepath.Join(tmpDir, ".husky", "_")
+	if err := os.MkdirAll(huskyOwnedDir, 0o755); err != nil {
+		t.Fatalf("mkdir .husky/_: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(huskyOwnedDir, "h"), []byte("#!/usr/bin/env sh\n"), 0o755); err != nil {
+		t.Fatalf("write husky dispatcher: %v", err)
+	}
+	// Legacy Entire wrappers with no .pre-entire backup.
+	for _, hook := range gitHookNames {
+		legacy := "#!/bin/sh\n# " + entireHookMarker + "\nentire hooks git " + hook + "\n"
+		if err := os.WriteFile(filepath.Join(huskyOwnedDir, hook), []byte(legacy), 0o755); err != nil {
+			t.Fatalf("write legacy Entire hook %s: %v", hook, err)
+		}
+	}
+
+	if _, err := InstallGitHook(context.Background(), true, false, false); err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+	if !IsGitHookInstalledInDir(context.Background(), tmpDir) {
+		t.Fatal("hooks should be installed after migrate-without-backup")
+	}
+	for _, hook := range gitHookNames {
+		ownedData, err := os.ReadFile(filepath.Join(huskyOwnedDir, hook))
+		if err != nil {
+			t.Fatalf("expected husky stub written for %s: %v", hook, err)
+		}
+		if string(ownedData) != huskyForwardingStub {
+			t.Errorf("stub for %s = %q, want huskyForwardingStub", hook, ownedData)
+		}
+	}
+}
+
+// seedHuskyOwnedDir writes husky v9 stubs + the `_/h` dispatcher into ownedDir.
+func seedHuskyOwnedDir(t *testing.T, ownedDir string) {
+	t.Helper()
+	if err := os.MkdirAll(ownedDir, 0o755); err != nil {
+		t.Fatalf("mkdir husky owned dir: %v", err)
+	}
+	dispatcher := "#!/usr/bin/env sh\nn=$(basename \"$0\")\ns=$(dirname \"$(dirname \"$0\")\")/$n\n[ ! -f \"$s\" ] && exit 0\nsh -e \"$s\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(ownedDir, "h"), []byte(dispatcher), 0o755); err != nil {
+		t.Fatalf("write husky dispatcher: %v", err)
+	}
+	stub := "#!/usr/bin/env sh\n. \"$(dirname \"$0\")/h\"\n"
+	for _, hook := range gitHookNames {
+		if err := os.WriteFile(filepath.Join(ownedDir, hook), []byte(stub), 0o755); err != nil {
+			t.Fatalf("write husky stub %s: %v", hook, err)
+		}
 	}
 }
 
@@ -907,6 +1075,7 @@ func TestRemoveGitHook_CoreHooksPathRelative(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to set core.hooksPath: %v", err)
 	}
+	seedHuskyOwnedDir(t, filepath.Join(tmpDir, ".husky", "_"))
 
 	installCount, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
@@ -916,12 +1085,12 @@ func TestRemoveGitHook_CoreHooksPathRelative(t *testing.T) {
 		t.Fatal("InstallGitHook() should install hooks before removal test")
 	}
 
-	// Hooks must be installed in core.hooksPath (not .git/hooks).
-	configuredHooksDir := filepath.Join(tmpDir, ".husky", "_")
+	// Hooks must be installed in .husky/ user-hook dir (not regenerable .husky/_).
+	userHooksDir := filepath.Join(tmpDir, ".husky")
 	for _, hook := range gitHookNames {
-		hookPath := filepath.Join(configuredHooksDir, hook)
+		hookPath := filepath.Join(userHooksDir, hook)
 		if _, statErr := os.Stat(hookPath); statErr != nil {
-			t.Fatalf("expected hook %s in core.hooksPath before removal: %v", hook, statErr)
+			t.Fatalf("expected hook %s in .husky/ before removal: %v", hook, statErr)
 		}
 	}
 
@@ -934,14 +1103,69 @@ func TestRemoveGitHook_CoreHooksPathRelative(t *testing.T) {
 	}
 
 	for _, hook := range gitHookNames {
-		hookPath := filepath.Join(configuredHooksDir, hook)
+		hookPath := filepath.Join(userHooksDir, hook)
 		if _, statErr := os.Stat(hookPath); !os.IsNotExist(statErr) {
-			t.Errorf("hook file %s should not exist in core.hooksPath after removal", hook)
+			t.Errorf("hook file %s should not exist in .husky/ after removal", hook)
 		}
 	}
 
 	if IsGitHookInstalledInDir(context.Background(), tmpDir) {
-		t.Error("IsGitHookInstalledInDir() should be false after removing hooks in core.hooksPath")
+		t.Error("IsGitHookInstalledInDir() should be false after removing hooks in .husky/")
+	}
+}
+
+func TestHuskyUserHooksDir(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	huskyOwned := filepath.Join(tmp, ".husky", "_")
+	if err := os.MkdirAll(huskyOwned, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Without dispatcher, do not redirect (git would not forward to parent).
+	if got := huskyUserHooksDir(huskyOwned); got != "" {
+		t.Errorf("huskyUserHooksDir without dispatcher = %q, want \"\"", got)
+	}
+	if got := hookInstallDir(huskyOwned); got != huskyOwned {
+		t.Errorf("hookInstallDir without dispatcher = %q, want %q", got, huskyOwned)
+	}
+
+	if err := os.WriteFile(filepath.Join(huskyOwned, "h"), []byte("#!/usr/bin/env sh\n"), 0o755); err != nil {
+		t.Fatalf("write dispatcher: %v", err)
+	}
+	wantParent := filepath.Join(tmp, ".husky")
+	if got := huskyUserHooksDir(huskyOwned); got != wantParent {
+		t.Errorf("huskyUserHooksDir with dispatcher = %q, want %q", got, wantParent)
+	}
+	if got := hookInstallDir(huskyOwned); got != wantParent {
+		t.Errorf("hookInstallDir with dispatcher = %q, want %q", got, wantParent)
+	}
+
+	// Non-husky shapes never redirect (no `_`+`h` dispatcher layout).
+	for _, hooksDir := range []string{
+		filepath.Join(tmp, ".git", "hooks"),
+		filepath.Join(tmp, ".husky"),
+	} {
+		if got := huskyUserHooksDir(hooksDir); got != "" {
+			t.Errorf("huskyUserHooksDir(%q) = %q, want \"\"", hooksDir, got)
+		}
+		if got := hookInstallDir(hooksDir); got != hooksDir {
+			t.Errorf("hookInstallDir(%q) = %q, want %q", hooksDir, got, hooksDir)
+		}
+	}
+
+	// Custom husky dir (e.g. husky frontend/.husky) still redirects when `_/h` exists.
+	customOwned := filepath.Join(tmp, "frontend", ".husky", "_")
+	if err := os.MkdirAll(customOwned, 0o755); err != nil {
+		t.Fatalf("mkdir custom husky: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(customOwned, "h"), []byte("#!/usr/bin/env sh\n"), 0o755); err != nil {
+		t.Fatalf("write custom dispatcher: %v", err)
+	}
+	wantCustomParent := filepath.Join(tmp, "frontend", ".husky")
+	if got := huskyUserHooksDir(customOwned); got != wantCustomParent {
+		t.Errorf("huskyUserHooksDir(custom) = %q, want %q", got, wantCustomParent)
 	}
 }
 

@@ -64,7 +64,9 @@ func detectHookManagers(repoRoot string) []hookManager {
 
 // hookManagerWarning builds a warning string for detected hook managers.
 // cmdPrefix is the CLI command prefix (e.g., "entire" or "./scripts/entire-dev").
-func hookManagerWarning(managers []hookManager, cmdPrefix string) string {
+// huskySafe is true when the current core.hooksPath is a husky `_` dir with the
+// dispatcher present (Entire will install into the parent user-hook directory).
+func hookManagerWarning(managers []hookManager, cmdPrefix string, huskySafe bool) string {
 	if len(managers) == 0 {
 		return ""
 	}
@@ -75,6 +77,17 @@ func hookManagerWarning(managers []hookManager, cmdPrefix string) string {
 
 	for _, m := range managers {
 		if m.OverwritesHooks {
+			// Husky v9 safe path: dispatcher present under core.hooksPath=`_/`.
+			if m.Name == "Husky" && huskySafe {
+				fmt.Fprintf(&b, "Note: %s detected (%s)\n", m.Name, m.ConfigPath)
+				fmt.Fprintf(&b, "\n")
+				fmt.Fprintf(&b, "  Entire installs git hooks into the husky user-hook directory\n")
+				fmt.Fprintf(&b, "  (parent of core.hooksPath), which survives husky/npm prepare.\n")
+				fmt.Fprintf(&b, "  Regenerable `_` stubs are left alone.\n")
+				fmt.Fprintf(&b, "\n")
+				continue
+			}
+
 			fmt.Fprintf(&b, "Warning: %s detected (%s)\n", m.Name, m.ConfigPath)
 			fmt.Fprintf(&b, "\n")
 			fmt.Fprintf(&b, "  %s may overwrite hooks installed by Entire on npm install.\n", m.Name)
@@ -138,7 +151,11 @@ func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, localDev, absolu
 		// Best-effort: hook manager warnings are advisory, skip on resolution failure
 		return
 	}
-	warning := hookManagerWarning(managers, cmdPrefix)
+	huskySafe := false
+	if hooksDir, hooksErr := getHooksDirInPath(ctx, repoRoot); hooksErr == nil {
+		huskySafe = huskyUserHooksDir(hooksDir) != ""
+	}
+	warning := hookManagerWarning(managers, cmdPrefix, huskySafe)
 	if warning != "" {
 		fmt.Fprintln(w)
 		fmt.Fprint(w, warning)

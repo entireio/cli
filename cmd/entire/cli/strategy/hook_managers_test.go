@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -317,34 +318,25 @@ func TestHookManagerWarning_Husky(t *testing.T) {
 		{Name: "Husky", ConfigPath: ".husky/", OverwritesHooks: true},
 	}
 
-	warning := hookManagerWarning(managers, "entire")
+	warning := hookManagerWarning(managers, "entire", true)
 
-	// Should contain all 4 hook file references
-	for _, hook := range gitHookNames {
-		if !strings.Contains(warning, ".husky/"+hook+":") {
-			t.Errorf("warning should contain .husky/%s:", hook)
-		}
+	// Husky-safe install: advisory note only (hooks live in parent user dir).
+	if !strings.Contains(warning, "Note: Husky detected") {
+		t.Error("warning should start with 'Note: Husky detected'")
+	}
+	if !strings.Contains(warning, "survive") {
+		t.Error("warning should mention that Entire hooks survive husky/npm prepare")
+	}
+	if strings.Contains(warning, "Warning: Husky detected") {
+		t.Error("Husky should not emit the overwrite Warning after husky-safe install")
+	}
+	if strings.Contains(warning, "may overwrite hooks") {
+		t.Error("Husky advisory should not claim Entire hooks may be overwritten")
 	}
 
-	// Should contain the actual command lines from buildHookSpecs
-	specs := buildHookSpecs("entire")
-	for _, spec := range specs {
-		cmdLine := extractCommandLine(spec.content)
-		if cmdLine == "" {
-			t.Errorf("failed to extract command line for %s", spec.name)
-			continue
-		}
-		if !strings.Contains(warning, cmdLine) {
-			t.Errorf("warning should contain command line %q for %s", cmdLine, spec.name)
-		}
-	}
-
-	// Should mention Husky by name and warn about overwriting
-	if !strings.Contains(warning, "Warning: Husky detected") {
-		t.Error("warning should start with 'Warning: Husky detected'")
-	}
-	if !strings.Contains(warning, "may overwrite hooks") {
-		t.Error("warning should mention 'may overwrite hooks'")
+	unsafe := hookManagerWarning(managers, "entire", false)
+	if !strings.Contains(unsafe, "Warning: Husky detected") {
+		t.Error("Husky without safe hooksPath should emit overwrite Warning")
 	}
 }
 
@@ -355,7 +347,7 @@ func TestHookManagerWarning_GitHooksManager(t *testing.T) {
 		{Name: "Lefthook", ConfigPath: "lefthook.yml", OverwritesHooks: false},
 	}
 
-	warning := hookManagerWarning(managers, "entire")
+	warning := hookManagerWarning(managers, "entire", false)
 
 	// Category B: should be a Note, not a Warning
 	if !strings.Contains(warning, "Note: Lefthook detected") {
@@ -374,12 +366,12 @@ func TestHookManagerWarning_GitHooksManager(t *testing.T) {
 func TestHookManagerWarning_Empty(t *testing.T) {
 	t.Parallel()
 
-	warning := hookManagerWarning(nil, "entire")
+	warning := hookManagerWarning(nil, "entire", false)
 	if warning != "" {
 		t.Errorf("expected empty string for nil managers, got %q", warning)
 	}
 
-	warning = hookManagerWarning([]hookManager{}, "entire")
+	warning = hookManagerWarning([]hookManager{}, "entire", false)
 	if warning != "" {
 		t.Errorf("expected empty string for empty managers, got %q", warning)
 	}
@@ -388,13 +380,14 @@ func TestHookManagerWarning_Empty(t *testing.T) {
 func TestHookManagerWarning_LocalDev(t *testing.T) {
 	t.Parallel()
 
+	// Non-Husky overwrite managers still emit command-line guidance with the
+	// configured cmd prefix. (Husky is Note-only after the husky-safe install.)
 	managers := []hookManager{
-		{Name: "Husky", ConfigPath: ".husky/", OverwritesHooks: true},
+		{Name: "CustomManager", ConfigPath: ".custom/", OverwritesHooks: true},
 	}
 
-	warning := hookManagerWarning(managers, localDevHookCmdPrefix)
+	warning := hookManagerWarning(managers, localDevHookCmdPrefix, false)
 
-	// Should use the local dev prefix in command lines
 	if !strings.Contains(warning, localDevHookCmdPrefix+" hooks git") {
 		t.Error("warning should use local dev command prefix")
 	}
@@ -408,10 +401,10 @@ func TestHookManagerWarning_Multiple(t *testing.T) {
 		{Name: "Lefthook", ConfigPath: "lefthook.yml", OverwritesHooks: false},
 	}
 
-	warning := hookManagerWarning(managers, "entire")
+	warning := hookManagerWarning(managers, "entire", true)
 
-	if !strings.Contains(warning, "Warning: Husky detected") {
-		t.Error("should contain Husky warning")
+	if !strings.Contains(warning, "Note: Husky detected") {
+		t.Error("should contain Husky note")
 	}
 	if !strings.Contains(warning, "Note: Lefthook detected") {
 		t.Error("should contain Lefthook note")
@@ -480,16 +473,25 @@ func TestCheckAndWarnHookManagers_WithHusky(t *testing.T) {
 	// Needs t.Chdir (via initHooksTestRepo), cannot be parallel
 	tmpDir, _ := initHooksTestRepo(t)
 
-	// Create .husky/_/ directory
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".husky", "_"), 0o755); err != nil {
+	// Create husky v9 layout: .husky/_ + dispatcher, core.hooksPath=.husky/_
+	huskyOwned := filepath.Join(tmpDir, ".husky", "_")
+	if err := os.MkdirAll(huskyOwned, 0o755); err != nil {
 		t.Fatalf("failed to create .husky/_/: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(huskyOwned, "h"), []byte("#!/usr/bin/env sh\n"), 0o755); err != nil {
+		t.Fatalf("write husky dispatcher: %v", err)
+	}
+	cmd := exec.CommandContext(context.Background(), "git", "config", "core.hooksPath", ".husky/_")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath: %v", err)
 	}
 
 	var buf bytes.Buffer
 	CheckAndWarnHookManagers(context.Background(), &buf, false, false)
 
 	output := buf.String()
-	if !strings.Contains(output, "Warning: Husky detected") {
-		t.Errorf("expected warning output, got %q", output)
+	if !strings.Contains(output, "Note: Husky detected") {
+		t.Errorf("expected husky note output, got %q", output)
 	}
 }
