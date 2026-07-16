@@ -433,7 +433,8 @@ func listExpertsAccessibleRepos(ctx context.Context, client expertsAPIClient) ([
 	})
 }
 
-// expertsWebBaseURL is the origin used to build user-facing session links.
+// webBaseURL is the origin used to build user-facing entire.io web links
+// (expert sessions, the setup checklist's repo overview link).
 //
 // Session links must point at the real Entire web app, not at whatever data API
 // the CLI happens to be talking to. So:
@@ -443,7 +444,7 @@ func listExpertsAccessibleRepos(ctx context.Context, client expertsAPIClient) ([
 //     it (frontend and API share that origin).
 //   - otherwise (local dev API like 127.0.0.1) fall back to the canonical
 //     https://entire.io so links still resolve to the proper site.
-func expertsWebBaseURL() string {
+func webBaseURL() string {
 	if raw := strings.TrimSpace(os.Getenv("ENTIRE_WEB_BASE_URL")); raw != "" {
 		return strings.TrimRight(raw, "/")
 	}
@@ -472,7 +473,7 @@ func expertsSessionURL(repoFullName, sessionID string) string {
 		return ""
 	}
 	return fmt.Sprintf("%s/gh/%s/%s/session/%s",
-		expertsWebBaseURL(), url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sessionID))
+		webBaseURL(), url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sessionID))
 }
 
 func localExpertScope(ctx context.Context, input string) (expertLocalScopeResult, error) {

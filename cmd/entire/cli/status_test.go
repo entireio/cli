@@ -2062,9 +2062,11 @@ func TestRunStatus_ShowsSetupChecklistWhenIncomplete(t *testing.T) {
 	}
 }
 
-// Fully connected collapses to a single quiet line.
+// Fully connected collapses to a single quiet line carrying the repo's
+// entire.io overview link. Not parallel: pins the web base via env.
 func TestRunStatus_CollapsedChecklistWhenConnected(t *testing.T) {
 	setupTestRepo(t)
+	t.Setenv("ENTIRE_WEB_BASE_URL", "https://entire.example")
 	writeSettings(t, testSettingsEnabled)
 	stubOnboardingResults(t, []onboarding.Result{
 		{Rung: onboarding.Rung{Key: onboarding.KeyHooks, Title: "Agent hooks"}, Check: onboarding.Check{State: onboarding.StateDone, Detail: "Claude Code"}},
@@ -2078,8 +2080,8 @@ func TestRunStatus_CollapsedChecklistWhenConnected(t *testing.T) {
 	}
 
 	out := stdout.String()
-	if !strings.Contains(out, "Connected: peyton · mirrored to github.com/acme/api") {
-		t.Errorf("expected collapsed connected line, got: %s", out)
+	if !strings.Contains(out, "Connected: peyton · https://entire.example/gh/acme/api") {
+		t.Errorf("expected collapsed connected line with overview link, got: %s", out)
 	}
 	if strings.Contains(out, "Setup") {
 		t.Errorf("connected status should not show setup counter, got: %s", out)

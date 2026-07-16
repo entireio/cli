@@ -50,8 +50,9 @@ func TestRenderOnboardingChecklist_MidSetup(t *testing.T) {
 	}
 }
 
+// Not parallel: pins the web base via ENTIRE_WEB_BASE_URL.
 func TestRenderOnboardingChecklist_CollapsesWhenComplete(t *testing.T) {
-	t.Parallel()
+	t.Setenv("ENTIRE_WEB_BASE_URL", "https://entire.example")
 	results := []onboarding.Result{
 		resultFor(onboarding.KeyHooks, "Agent hooks", onboarding.Check{State: onboarding.StateDone, Detail: "Claude Code"}),
 		resultFor(onboarding.KeyAuth, "Logged in", onboarding.Check{State: onboarding.StateDone, Detail: "peyton"}),
@@ -61,8 +62,8 @@ func TestRenderOnboardingChecklist_CollapsesWhenComplete(t *testing.T) {
 
 	out := renderOnboardingChecklist(results, plainStyles())
 
-	if !strings.Contains(out, "Connected: peyton · mirrored to github.com/acme/api") {
-		t.Errorf("complete checklist should collapse to one connected line, got:\n%s", out)
+	if !strings.Contains(out, "Connected: peyton · https://entire.example/gh/acme/api") {
+		t.Errorf("complete checklist should collapse to identity + repo overview link, got:\n%s", out)
 	}
 	if strings.Contains(out, "Setup") || strings.Contains(out, "✗") {
 		t.Errorf("complete checklist should not render rows or setup counter, got:\n%s", out)

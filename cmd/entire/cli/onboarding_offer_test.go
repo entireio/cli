@@ -535,17 +535,21 @@ func TestOnboardingSetupSummary_ImportClauseIsLocal(t *testing.T) {
 		{
 			name:    "web steps and import",
 			missing: []onboarding.Result{result(onboarding.KeyAuth), result(onboarding.KeyMirror), result(onboarding.KeyImport)},
-			want:    "Logs in to entire.io and mirrors this repo so your work shows up in the web UI. Imports existing agent history so past sessions show up in entire session list.",
+			want: "3 steps left:\n" +
+				"• Log in\n" +
+				"• Mirror this repo\n" +
+				"• Import local sessions",
 		},
 		{
 			name:    "import only",
 			missing: []onboarding.Result{result(onboarding.KeyImport)},
-			want:    "Imports existing agent history so past sessions show up in entire session list.",
+			want: "1 step left:\n" +
+				"• Import local sessions",
 		},
 		{
 			name:    "web steps only",
 			missing: []onboarding.Result{result(onboarding.KeyAuth)},
-			want:    "Logs in to entire.io so your work shows up in the web UI.",
+			want:    "1 step left:\n• Log in",
 		},
 		{
 			name: "nothing missing",

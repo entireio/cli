@@ -92,7 +92,7 @@ func promptImportSelection(ctx context.Context, w io.Writer, eligible []eligible
 	form := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewMultiSelect[string]().
-				Title("Import existing sessions into Entire? (optional)").
+				Title("Import existing sessions? (optional)").
 				Description("Space to select, enter to confirm. Select none to skip.").
 				Options(options...).
 				Value(&chosen),
@@ -121,8 +121,8 @@ func promptImportConfirmSingle(ctx context.Context, w io.Writer, e eligibleImpor
 	form := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewConfirm().
-				Title(fmt.Sprintf("Import existing %s sessions into Entire? (optional)", e.displayName)).
-				Description(fmt.Sprintf("%s from the last %d days. Enter to confirm.", pluralSessions(e.sessionCount), agentimport.LookbackDays)).
+				Title(fmt.Sprintf("Import existing %s sessions? (optional)", e.displayName)).
+				Description(fmt.Sprintf("%s from the last %d days, stored locally. Enter to confirm.", pluralSessions(e.sessionCount), agentimport.LookbackDays)).
 				Affirmative("Import").
 				Negative("Skip").
 				Value(&confirmed),

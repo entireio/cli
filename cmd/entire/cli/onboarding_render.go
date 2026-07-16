@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/onboarding"
@@ -82,8 +83,9 @@ func onboardingRowMarker(state onboarding.State, sty statusStyles) string {
 	return "?"
 }
 
-// renderConnectedLine is the fully-connected collapse: identity plus mirror
-// slug when one exists, e.g. "Connected: peyton · mirrored to github.com/o/r".
+// renderConnectedLine is the fully-connected collapse: identity plus, when a
+// mirror exists, the repo's entire.io overview link — the payoff the setup
+// was for, e.g. "Connected: peyton · https://entire.io/gh/o/r".
 func renderConnectedLine(results []onboarding.Result, sty statusStyles) string {
 	var identity, mirror string
 	for _, r := range results {
@@ -101,7 +103,26 @@ func renderConnectedLine(results []onboarding.Result, sty statusStyles) string {
 		line += ": " + identity
 	}
 	if mirror != "" {
-		line += sty.render(sty.dim, " · ") + "mirrored to " + mirror
+		if u := repoWebURL(mirror); u != "" {
+			line += sty.render(sty.dim, " · ") + sty.render(sty.cyan, u)
+		} else {
+			line += sty.render(sty.dim, " · ") + "mirrored to " + mirror
+		}
 	}
 	return line + "\n"
+}
+
+// repoWebURL builds the entire.io overview page for a mirrored GitHub repo
+// from the checklist's "github.com/owner/repo" detail; "" when the detail
+// isn't that shape.
+func repoWebURL(mirrorSlug string) string {
+	rest, ok := strings.CutPrefix(mirrorSlug, "github.com/")
+	if !ok {
+		return ""
+	}
+	owner, repo, ok := strings.Cut(rest, "/")
+	if !ok || owner == "" || repo == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/gh/%s/%s", webBaseURL(), url.PathEscape(owner), url.PathEscape(repo))
 }

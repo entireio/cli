@@ -269,48 +269,60 @@ func promptOnboardingSetupMode(ctx context.Context, missing []onboarding.Result)
 	return mode, nil
 }
 
-// onboardingSetupSummary describes what the fast path will do, e.g.
-// "Logs in to entire.io and mirrors this repo so your work shows up in the
-// web UI." The import step carries its own benefit clause: imported history
-// is local-only (session list, explain) and does not appear in the web UI,
-// so the web-UI promise must never attach to it.
+// onboardingSetupSummary lists what "finish setup" still covers, one line per
+// missing rung with its own benefit, under the same "N steps left" heading the
+// closing checklist uses — so the prompt says exactly what is missing and what
+// each step does. The import line names its real benefit: imported history is
+// local-only (session list, explain) and does not appear in the web UI, so
+// the web-UI promise must never attach to it.
 func onboardingSetupSummary(missing []onboarding.Result) string {
-	webSteps := make([]string, 0, len(missing))
-	importStep := false
+	lines := make([]string, 0, len(missing))
 	for _, r := range missing {
 		switch r.Rung.Key {
 		case onboarding.KeyAuth:
-			webSteps = append(webSteps, "logs in to entire.io")
+			lines = append(lines, "• Log in")
 		case onboarding.KeyMirror:
-			webSteps = append(webSteps, "mirrors this repo")
+			lines = append(lines, "• Mirror this repo")
 		case onboarding.KeyImport:
-			importStep = true
+			lines = append(lines, "• Import local sessions")
 		}
 	}
-	var sentences []string
-	if len(webSteps) > 0 {
-		sentences = append(sentences, formatTokenClassList(webSteps)+" so your work shows up in the web UI.")
+	if len(lines) == 0 {
+		return ""
 	}
-	if importStep {
-		sentences = append(sentences, "imports existing agent history so past sessions show up in entire session list.")
+	noun := "steps"
+	if len(lines) == 1 {
+		noun = "step"
 	}
-	// Capitalize each sentence: summaries are full sentences in the prompt.
-	for i, s := range sentences {
-		sentences[i] = strings.ToUpper(s[:1]) + s[1:]
+	return fmt.Sprintf("%d %s left:\n%s", len(lines), noun, strings.Join(lines, "\n"))
+}
+
+// onboardingRungQuestion phrases a rung's step-by-step confirm as the action
+// it will take. The rung Title is a checklist row label ("Logged in"), which
+// reads as nonsense above a Yes/No — the question must name the step, and it
+// must not claim a web login or promise a browser: the login step
+// authenticates the CLI (same as `entire auth login`), and headless/SSH
+// terminals fall back to a device code. Deliberately terse — the checklist
+// rows already carry each step's consequence.
+func onboardingRungQuestion(r onboarding.Result) (title, description string) {
+	switch r.Rung.Key {
+	case onboarding.KeyAuth:
+		return "Log in?", ""
+	case onboarding.KeyMirror:
+		return "Mirror this repo?", ""
+	default:
+		return "Set up " + r.Rung.Title + "?", r.Check.Detail
 	}
-	return strings.Join(sentences, " ")
 }
 
 func confirmOnboardingRung(ctx context.Context, r onboarding.Result) (bool, error) {
-	title := r.Rung.Title
-	if r.Check.Detail != "" {
-		title += " — " + r.Check.Detail
-	}
+	title, description := onboardingRungQuestion(r)
 	confirmed := true
 	form := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title(title).
+				Description(description).
 				Value(&confirmed),
 		),
 	)
