@@ -5,10 +5,10 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/pricing"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
-	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/spf13/cobra"
 )
 
@@ -18,21 +18,18 @@ const refreshPricingCmdName = "__refresh_pricing"
 
 // detachedSpawn is the detached spawner used for the pricing-refresh worker,
 // held as a package var so tests can capture the working directory the worker is
-// asked to run in without spawning a real process.
-var detachedSpawn = telemetry.SpawnDetached
+// asked to run in without spawning a real process. It re-execs the current
+// binary itself (execx.SpawnDetached) and is a no-op under `go test`.
+var detachedSpawn = execx.SpawnDetached
 
 // spawnDetachedRefresh starts the hidden pricing-refresh worker as a detached
 // background process rooted at the current working directory — the project the
 // hook ran in — so the worker's own IsRemoteEnabled check resolves the project's
-// .entire/settings.json. Running at "/" (the analytics default) would hide a
-// project-only pricing.remote opt-in and silently no-op the refresh forever.
-// It is a package var so tests can replace it to assert the turn-end / post-run
-// triggers only ever *spawn* — they never fetch inline.
+// .entire/settings.json. Running at the platform default (analytics' empty dir)
+// would hide a project-only pricing.remote opt-in and silently no-op the refresh
+// forever. It is a package var so tests can replace it to assert the turn-end /
+// post-run triggers only ever *spawn* — they never fetch inline.
 var spawnDetachedRefresh = func() {
-	exe, err := os.Executable()
-	if err != nil {
-		return
-	}
 	// Root the worker at the process working directory so its own settings load
 	// resolves the project's .entire/settings.json. os.Getwd (not paths.RepoRoot)
 	// is deliberate: this captures the literal cwd to hand a detached child, not a
@@ -42,8 +39,7 @@ var spawnDetachedRefresh = func() {
 	if err != nil {
 		dir = ""
 	}
-	//nolint:errcheck // Best effort background refresh - a failed spawn is non-fatal
-	_ = detachedSpawn(dir, exe, refreshPricingCmdName)
+	detachedSpawn(dir, refreshPricingCmdName)
 }
 
 // maybeSpawnPricingRefresh spawns the detached remote-pricing refresh worker

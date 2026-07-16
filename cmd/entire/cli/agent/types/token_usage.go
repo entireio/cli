@@ -149,3 +149,35 @@ func AddTokenUsage(a, b *TokenUsage) *TokenUsage {
 	sum.SubagentTokens = AddTokenUsage(aSub, bSub)
 	return sum
 }
+
+// SubtractTokenUsage returns a-b, recursing into subagent usage and clamping
+// every field at zero (a nil operand is treated as zero). Neither input is
+// mutated. Used to rescope a cumulative-since-session-start snapshot (e.g.
+// subagent token usage, which is always re-read from the start of each
+// subagent transcript) down to a delta since a previously captured baseline.
+func SubtractTokenUsage(a, b *TokenUsage) *TokenUsage {
+	if a == nil {
+		return nil
+	}
+	if b == nil {
+		b = &TokenUsage{}
+	}
+	diff := &TokenUsage{
+		InputTokens:         clampSubtract(a.InputTokens, b.InputTokens),
+		CacheCreationTokens: clampSubtract(a.CacheCreationTokens, b.CacheCreationTokens),
+		CacheReadTokens:     clampSubtract(a.CacheReadTokens, b.CacheReadTokens),
+		OutputTokens:        clampSubtract(a.OutputTokens, b.OutputTokens),
+		APICallCount:        clampSubtract(a.APICallCount, b.APICallCount),
+	}
+	diff.SubagentTokens = SubtractTokenUsage(a.SubagentTokens, b.SubagentTokens)
+	return diff
+}
+
+// clampSubtract returns a-b, floored at zero so a stale or racy baseline
+// never produces a negative delta.
+func clampSubtract(a, b int) int {
+	if a < b {
+		return 0
+	}
+	return a - b
+}

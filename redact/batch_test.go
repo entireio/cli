@@ -202,7 +202,7 @@ func TestBatchBytesWithPrivacyFilter_EmptyInputs(t *testing.T) {
 
 // TestBatchBytesWithPrivacyFilter_FailsClosedOnBatchError is the
 // fail-closed contract: when the OPF runtime errors, callers must see
-// the error rather than silently get 7-layer-only output tagged as if
+// the error rather than silently get regex-only output tagged as if
 // OPF ran. This is the privacy-critical difference vs
 // JSONLContentWithPrivacyFilter (which silently falls back).
 func TestBatchBytesWithPrivacyFilter_FailsClosedOnBatchError(t *testing.T) {
@@ -277,12 +277,12 @@ func TestBatchBytesWithPrivacyFilter_ShortReturnFailsClosed(t *testing.T) {
 	}
 }
 
-// TestBatchBytesWithPrivacyFilter_OPFDisabledReturns7Layer covers the
+// TestBatchBytesWithPrivacyFilter_OPFDisabledReturnsRegexOnly covers the
 // "OPF turned off in settings" path: every blob gets regex-only
 // redaction, no shell-out happens, no error. Without this, a user with
 // OPF disabled would get a hard error from the new API instead of the
-// fast 7-layer path they expect.
-func TestBatchBytesWithPrivacyFilter_OPFDisabledReturns7Layer(t *testing.T) {
+// fast regex-only path they expect.
+func TestBatchBytesWithPrivacyFilter_OPFDisabledReturnsRegexOnly(t *testing.T) {
 	resetOPFConfig()
 	t.Cleanup(resetOPFConfig)
 	// No ConfigurePrivacyFilter call → cfg == nil
@@ -295,16 +295,16 @@ func TestBatchBytesWithPrivacyFilter_OPFDisabledReturns7Layer(t *testing.T) {
 		t.Fatalf("OPF-disabled path should not error: %v", err)
 	}
 	if !strings.Contains(string(got[0]), "REDACTED") {
-		t.Errorf("7-layer fallback should still redact AWS key, got %q", string(got[0]))
+		t.Errorf("regex-only fallback should still redact AWS key, got %q", string(got[0]))
 	}
 }
 
-// TestBatchBytesWithPrivacyFilter_BreakerTrippedReturns7Layer ensures
+// TestBatchBytesWithPrivacyFilter_BreakerTrippedReturnsRegexOnly ensures
 // that once the circuit breaker has tripped (e.g. an earlier batch
 // failed and the strategy aborted), subsequent calls in the same
 // process don't pay another shell-out cost. They short-circuit to
 // regex-only with no error.
-func TestBatchBytesWithPrivacyFilter_BreakerTrippedReturns7Layer(t *testing.T) {
+func TestBatchBytesWithPrivacyFilter_BreakerTrippedReturnsRegexOnly(t *testing.T) {
 	fake := &fakeRuntime{spans: []Span{{Start: 0, End: 5, Label: "private_person"}}}
 	configureFakeOPF(t, fake, map[string]bool{"private_person": true})
 	opfBreakerTripped.Store(true)

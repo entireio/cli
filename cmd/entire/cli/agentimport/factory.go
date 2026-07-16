@@ -34,8 +34,10 @@ func (factoryImporter) Discover(repoRoot, overridePath string, now time.Time, se
 }
 
 // SplitTurns produces one Turn per user-prompt envelope, bounded by the next.
-// Token usage (including spawned subagents) is delegated to the Factory agent;
-// the model is read once from the session's adjacent settings file. Droid
+// Token usage is delegated to the Factory agent; spawned-subagent usage comes
+// back as a cumulative snapshot and is rescoped to a per-turn delta by
+// splitLineTurns (see rescopeSubagentTokensToDeltas). The model is read once
+// from the session's adjacent settings file. Droid
 // envelopes carry no per-message timestamp (the agent stamps events with
 // time.Now() at hook time), so every turn falls back to the transcript file's
 // modtime — the same fallback the Gemini importer uses.

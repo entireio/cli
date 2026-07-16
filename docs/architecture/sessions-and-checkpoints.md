@@ -4,6 +4,8 @@
 
 Entire CLI creates checkpoints for AI coding sessions. The system is agent-agnostic - it works with Claude Code, Codex, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, or any tool that triggers Entire hooks.
 
+This document covers the domain model shared by both checkpoint storage backends. For how the **git-refs** backend stores checkpoints as one ref per checkpoint — its layout, push/fetch model, read routing, and configuration — see [Ref-Based Checkpoint Backend](ref-checkpoint-backend.md).
+
 ## Domain Model
 
 ### Session
@@ -144,7 +146,10 @@ func (s *ManualCommitStrategy) CondenseSession(
 |------|----------|----------|
 | Session State | `.git/entire-sessions/<id>.json` | Active session tracking |
 | Ephemeral | `entire/<commit[:7]>-<worktreeHash[:6]>` branch | Full state (code + metadata) |
-| Persistent | `entire/checkpoints/v1` branch (sharded) | Metadata + commit reference |
+| Persistent (git-branch) | `entire/checkpoints/v1` branch, sharded `<id[:2]>/<id[2:]>/` | Metadata + commit reference |
+| Persistent (git-refs) | `refs/entire/checkpoints/<shard>/<id>`, one ref per checkpoint | Metadata + commit reference |
+
+The persistent store is pluggable: `git-branch` (the default) stores every committed checkpoint as a subtree of a single `entire/checkpoints/v1` branch, while `git-refs` stores one ref per checkpoint. Both are git-backed and share the same checkpoint tree layout; they differ only in where that tree is committed. This document describes the git-branch layout; for the ref-based backend — its ref naming, sharding, push/fetch model, read routing, and configuration — see [Ref-Based Checkpoint Backend](ref-checkpoint-backend.md).
 
 ### Session State
 
@@ -474,15 +479,24 @@ session/
 ├── phase.go             # Session phase state machine (ACTIVE, IDLE, ENDED, etc.)
 
 checkpoint/
-├── checkpoint.go        # checkpoint.Type, checkpoint.Store interface, CheckpointSummary, etc.
-├── store.go             # GitStore implementation
-├── temporary.go         # Shadow branch storage
-├── committed.go         # Metadata branch storage
-├── id/                  # CheckpointID type and generation
+├── checkpoint.go        # checkpoint.Type, store interfaces, CheckpointSummary, etc.
+├── open.go              # Open() facade: resolves topology, wires stores + fetchers
+├── registry.go          # Backend registry + gitBacked capability (git-branch, git-refs)
+├── routing_store.go     # kindRoutingStore: id-kind read routing across both backends
+├── fanout.go            # Mirror write fan-out (primary + best-effort mirrors)
+├── generate.go          # GenerateCheckpointID (format follows the configured primary)
+├── persistent.go        # git-branch persistent store (entire/checkpoints/v1)
+├── persistent_write.go  # git-branch write path (treeWriter, subtree splicing)
+├── refs_store.go        # git-refs persistent store (one ref per checkpoint)
+├── refs_naming.go       # RefName / ParseRef, CheckpointRefPrefix, sharding
+├── pushqueue.go         # git-refs push-discovery queue (flock JSONL)
+├── ephemeral.go         # Shadow-branch (ephemeral) store
+├── fsstore/             # Filesystem mirror backend (non-git-backed, mirror-only)
+├── id/                  # CheckpointID type, Kind/KindOf, ShardFor, generation
 │   └── id.go
 ```
 
-Strategies use `checkpoint.Store` primitives - storage details are encapsulated.
+Strategies use the `checkpoint.Open` facade and store primitives - backend and storage details are encapsulated.
 
 ## Strategy Role
 

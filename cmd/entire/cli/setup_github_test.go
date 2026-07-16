@@ -385,7 +385,9 @@ func TestRunGitHubBootstrap_GhMissingFallsBackToLocal(t *testing.T) {
 	r.set("git", []string{"add", "-A"}, "", nil)
 	r.set("git", []string{"status", "--porcelain"}, "", nil)
 
-	opts := GitHubBootstrapOptions{InitRepo: true}
+	// A repo flag is an explicit GitHub request, so gh is probed; since it's
+	// missing we warn and fall back to local-only.
+	opts := GitHubBootstrapOptions{InitRepo: true, RepoName: "wanted"}
 	var errBuf bytes.Buffer
 	err := runGitHubBootstrapWith(context.Background(), io.Discard, &errBuf, opts, r)
 	if err != nil {
@@ -425,6 +427,7 @@ func TestRunGitHubBootstrap_FullNonInteractive(t *testing.T) {
 		RepoName:             "my-new",
 		RepoVisibility:       "private",
 		InitialCommitMessage: "Seed",
+		Push:                 true,
 	}
 	err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, r)
 	if err != nil {
@@ -588,30 +591,79 @@ func TestGhFlagsProvided(t *testing.T) {
 	}
 }
 
-// TestRunGitHubBootstrap_NonInteractive_NoFlagsDefaultsToGitHub confirms the
-// non-interactive happy path still creates a GitHub repo when the user
-// didn't set any explicit flag (the confirm prompt is only interactive).
-func TestRunGitHubBootstrap_NonInteractive_NoFlagsDefaultsToGitHub(t *testing.T) {
+// TestRunGitHubBootstrap_NonInteractive_NoFlagsStaysLocal confirms that a
+// non-interactive bootstrap with no explicit GitHub signal stays local-only:
+// it does not probe gh, create a repo, or push. Creating and pushing are
+// explicit opt-ins (--repo-*, --push, --yes, or an interactive "yes").
+func TestRunGitHubBootstrap_NonInteractive_NoFlagsStaysLocal(t *testing.T) {
 	dir := t.TempDir()
 	restoreCwd(t, dir)
 
 	r := newFakeRunner()
 	r.setIdentityConfigured()
-	r.set("gh", []string{"--version"}, "gh", nil)
-	r.set("gh", []string{"auth", "status"}, "ok", nil)
-	r.set("gh", []string{"api", "user", "--jq", ".login"}, "octocat\n", nil)
-	r.set("gh", []string{"api", "user/orgs", "--jq", ".[].login"}, "", nil)
-	// Default folder slug derived from t.TempDir().
-	suggested := slugifyRepoName(filepath.Base(dir))
-	r.set("gh", []string{"repo", "view", "octocat/" + suggested, "--json", "name"}, "", errors.New("not found"))
 	r.set("git", []string{"init"}, "", nil)
 
 	state, err := runGitHubBootstrapInitWith(context.Background(), io.Discard, io.Discard, GitHubBootstrapOptions{InitRepo: true}, r)
 	if err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
-	if !state.useGitHub {
-		t.Fatal("non-interactive bootstrap should default to using GitHub")
+	if state.useGitHub {
+		t.Fatal("non-interactive bootstrap with no explicit signal must stay local-only")
+	}
+	if state.push {
+		t.Fatal("push must be false when staying local-only")
+	}
+	// gh must never be probed when no GitHub repo was requested.
+	if r.hasCall(func(c fakeCall) bool { return c.name == "gh" }) {
+		t.Fatal("must not invoke gh when no GitHub repo was requested")
+	}
+}
+
+// TestRunGitHubBootstrap_RepoFlagsCreateButDoNotPush confirms that repo flags
+// opt into creating the GitHub repo but NOT into pushing. Non-interactively,
+// the repo is created and origin configured, but nothing is pushed unless
+// --push or --yes is also given; the user is told how to publish manually.
+func TestRunGitHubBootstrap_RepoFlagsCreateButDoNotPush(t *testing.T) {
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+
+	r := newFakeRunner()
+	r.setIdentityConfigured()
+	r.set("gh", []string{"--version"}, "gh 2.81.0", nil)
+	r.set("gh", []string{"auth", "status"}, "Logged in", nil)
+	r.set("gh", []string{"api", "user", "--jq", ".login"}, "octocat\n", nil)
+	r.set("gh", []string{"api", "user/orgs", "--jq", ".[].login"}, "", nil)
+	r.set("gh", []string{"repo", "view", "octocat/create-only", "--json", "name"}, "", errors.New("not found"))
+	r.set("git", []string{"init"}, "", nil)
+	r.set("git", []string{"add", "-A"}, "", nil)
+	r.set("git", []string{"status", "--porcelain"}, " M f\n", nil)
+	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "Seed"}, "", nil)
+	r.set("gh", []string{
+		"repo", "create", "octocat/create-only",
+		"--private",
+		"--source=.",
+		"--remote=origin",
+	}, "", nil)
+
+	opts := GitHubBootstrapOptions{
+		InitRepo:             true,
+		RepoName:             "create-only",
+		RepoVisibility:       "private",
+		InitialCommitMessage: "Seed",
+	}
+	var out bytes.Buffer
+	if err := runGitHubBootstrapWith(context.Background(), &out, io.Discard, opts, r); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+
+	if !r.hasCall(argsMatch("gh", []string{"repo", "create"})) {
+		t.Fatal("expected gh repo create when repo flags are given")
+	}
+	if r.hasCall(argsMatch("git", []string{"push"})) {
+		t.Fatal("must not push without --push or --yes")
+	}
+	if !strings.Contains(out.String(), "Skipped push") {
+		t.Fatalf("expected 'Skipped push' guidance, got: %s", out.String())
 	}
 }
 
@@ -648,6 +700,7 @@ func TestRunGitHubBootstrap_InitBeforeFinalize(t *testing.T) {
 		RepoName:             "phased",
 		RepoVisibility:       "private",
 		InitialCommitMessage: "First",
+		Push:                 true,
 	}
 
 	// Phase 1: init. This must NOT call git add/commit/ gh repo create.
@@ -976,6 +1029,23 @@ func TestErrSentinels_DistinctPrePostInit(t *testing.T) {
 	}
 }
 
+func TestEnableCmd_PushNoGitHubMutuallyExclusive(t *testing.T) {
+	setupTestRepo(t)
+
+	cmd := newEnableCmd()
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--push", "--no-github"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when both --push and --no-github are set")
+	}
+	if !strings.Contains(err.Error(), "push") || !strings.Contains(err.Error(), "no-github") {
+		t.Fatalf("expected error to mention both flags, got: %v", err)
+	}
+}
+
 func TestEnableCmd_InitCommitMessageFlagsMutuallyExclusive(t *testing.T) {
 	setupTestRepo(t)
 
@@ -1007,6 +1077,141 @@ func TestEnableCmd_InitRepoFlagsMutuallyExclusive(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "init-repo") || !strings.Contains(err.Error(), "no-init-repo") {
 		t.Fatalf("expected error to mention both flags, got: %v", err)
+	}
+}
+
+// withInteractivePromptStdin forces interactive, accessible (text-based)
+// prompt mode and feeds input to os.Stdin for the duration of the test, so a
+// huh prompt reads a scripted answer instead of opening /dev/tty or blocking
+// on a real terminal. ENTIRE_TEST_TTY makes CanPromptInteractively report
+// true; ACCESSIBLE makes the form read os.Stdin rather than dial the terminal.
+func withInteractivePromptStdin(t *testing.T, input string) {
+	t.Helper()
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	t.Setenv("ACCESSIBLE", "1")
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pr.Close() })
+	go func() {
+		pw.WriteString(input) //nolint:errcheck // test helper
+		pw.Close()
+	}()
+	old := os.Stdin
+	os.Stdin = pr
+	t.Cleanup(func() { os.Stdin = old })
+}
+
+// TestConfirmInitRepo_DefaultsToNo verifies that pressing Enter (empty
+// input) at the init-repo prompt declines. `entire enable` is often run
+// reflexively, so a stray run in a non-repo directory must not initialize
+// a repo on the user's behalf. Regression guard for issue #1717.
+func TestConfirmInitRepo_DefaultsToNo(t *testing.T) {
+	withInteractivePromptStdin(t, "\n")
+
+	proceed, err := confirmInitRepo(io.Discard, t.TempDir(), GitHubBootstrapOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if proceed {
+		t.Fatal("confirmInitRepo should default to No (decline) on empty input")
+	}
+}
+
+// TestConfirmInitRepo_ExplicitYesProceeds verifies an explicit "y" still
+// opts in, so the safer default doesn't block intentional use.
+func TestConfirmInitRepo_ExplicitYesProceeds(t *testing.T) {
+	withInteractivePromptStdin(t, "y\n")
+
+	proceed, err := confirmInitRepo(io.Discard, t.TempDir(), GitHubBootstrapOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !proceed {
+		t.Fatal("confirmInitRepo should proceed when the user explicitly answers yes")
+	}
+}
+
+// TestConfirmCreateGitHubRepo_DefaultsToNo verifies that pressing Enter at
+// the GitHub-repo prompt declines. Creating and pushing a remote repository
+// publishes the directory's contents, so it must never happen just because
+// the user pressed Enter. Regression guard for issue #1717.
+func TestConfirmCreateGitHubRepo_DefaultsToNo(t *testing.T) {
+	withInteractivePromptStdin(t, "\n")
+
+	confirmed, err := confirmCreateGitHubRepo(t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if confirmed {
+		t.Fatal("confirmCreateGitHubRepo should default to No on empty input")
+	}
+}
+
+// TestConfirmPushToRemote_DefaultsToNo verifies that pressing Enter at the
+// push prompt declines. Pushing publishes the directory's contents, so it
+// must never happen just because the user pressed Enter, even after they
+// opted into creating the repo. Regression guard for issue #1717.
+func TestConfirmPushToRemote_DefaultsToNo(t *testing.T) {
+	withInteractivePromptStdin(t, "\n")
+
+	confirmed, err := confirmPushToRemote("octocat/example")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if confirmed {
+		t.Fatal("confirmPushToRemote should default to No on empty input")
+	}
+}
+
+// TestRunGitHubBootstrapFinalize_HonorsPushFalse verifies that finalize
+// respects state.push == false: the GitHub repo is still created and origin
+// configured, but nothing is pushed and the user is told how to publish
+// manually. The push *decision* (default No on Enter) is covered separately
+// by TestConfirmPushToRemote_DefaultsToNo; this test covers finalize honoring
+// that decision.
+func TestRunGitHubBootstrapFinalize_HonorsPushFalse(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	r := newFakeRunner()
+	r.set("git", []string{"add", "-A"}, "", nil)
+	r.set("git", []string{"status", "--porcelain"}, " M f\n", nil)
+	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "Seed"}, "", nil)
+	r.set("gh", []string{
+		"repo", "create", "octocat/no-push",
+		"--private",
+		"--source=.",
+		"--remote=origin",
+	}, "", nil)
+
+	s := &bootstrapState{
+		runner:     r,
+		cwd:        dir,
+		useGitHub:  true,
+		fullName:   "octocat/no-push",
+		visibility: "private",
+		commit:     true,
+		message:    "Seed",
+		push:       false,
+	}
+
+	var out bytes.Buffer
+	if err := runGitHubBootstrapFinalize(context.Background(), &out, s); err != nil {
+		t.Fatalf("finalize failed: %v", err)
+	}
+
+	// The repo is still created (create guard was accepted)...
+	if !r.hasCall(argsMatch("gh", []string{"repo", "create"})) {
+		t.Fatal("expected gh repo create to run")
+	}
+	// ...but the push guard was declined, so nothing is pushed.
+	if r.hasCall(argsMatch("git", []string{"push"})) {
+		t.Fatal("git push must not run when the push guard was declined")
+	}
+	if !strings.Contains(out.String(), "Skipped push") {
+		t.Fatalf("expected 'Skipped push' guidance in output, got: %s", out.String())
 	}
 }
 
@@ -1105,26 +1310,9 @@ func TestResolveRepoName_YesRepoExistsWithTTY_FallsBackToPrompt(t *testing.T) {
 	// When --yes is set, the name is taken, and a TTY is available,
 	// resolveRepoName should print a conflict message and fall through
 	// to the interactive prompt. We verify the conflict message was
-	// printed (proving the fallback path was taken).
-	t.Setenv("ENTIRE_TEST_TTY", "1")
-
-	// Force accessible (text-based) mode so the huh form reads from
-	// os.Stdin instead of trying to open /dev/tty via bubbletea.
-	// Pipe a unique name so the form completes instead of blocking.
-	t.Setenv("ACCESSIBLE", "1")
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { pr.Close() })
-	go func() {
-		// The form reads one line; provide a unique name so it exits the loop.
-		pw.WriteString("unique-test-repo\n") //nolint:errcheck // test helper
-		pw.Close()
-	}()
-	oldStdin := os.Stdin
-	os.Stdin = pr
-	t.Cleanup(func() { os.Stdin = oldStdin })
+	// printed (proving the fallback path was taken). Pipe a unique name so
+	// the form completes with it instead of blocking.
+	withInteractivePromptStdin(t, "unique-test-repo\n")
 
 	dir := t.TempDir()
 	restoreCwd(t, dir)

@@ -12,7 +12,6 @@ import (
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/mdrender"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
@@ -47,7 +46,7 @@ func runReviewFindings(ctx context.Context, cmd *cobra.Command, handle string, s
 		fmt.Fprintln(cmd.OutOrStdout(), "No local review findings found.")
 		return nil
 	}
-	if interactive.IsTerminalWriter(cmd.OutOrStdout()) && interactive.CanPromptInteractively() {
+	if reviewCommandIsInteractive(cmd) {
 		manifest, pickErr := promptForReviewManifest(ctx, manifests)
 		if pickErr != nil {
 			return pickErr

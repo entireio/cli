@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
 	"github.com/spf13/cobra"
 )
 
@@ -327,11 +328,26 @@ func persistLogin(outW io.Writer, baseURL, token, refreshToken string) error {
 	// single store every consumer (control plane, data API, git remote
 	// helper, entiredb's CLIs) resolves against.
 	if _, err := auth.RecordLoginContext(token, refreshToken, true); err != nil {
-		return fmt.Errorf("save login: %w", err)
+		return fmt.Errorf("save login: %w", withHeadlessStoreHint(err))
 	}
 
 	fmt.Fprintln(outW, "✓ Login complete.")
 	return nil
+}
+
+// withHeadlessStoreHint appends file-token-store guidance to a credential
+// store write failure. The default backend is the OS keyring, which locked
+// or keyring-less machines (CI, containers, minimal server VMs) can't use —
+// the raw store error gives those users no way forward (#1036). The hint is
+// skipped when ENTIRE_TOKEN_STORE=file is already set (suggesting it again
+// would be nonsense) and for failures the file store wouldn't help with.
+func withHeadlessStoreHint(err error) error {
+	if !errors.Is(err, auth.ErrCredentialStoreWrite) || tokenstore.FileBackendSelected() {
+		return err
+	}
+
+	return fmt.Errorf("%w\n\nIf this machine has no usable OS keyring (headless server, container, CI), store tokens in a file instead:\n\n  %s=file entire login\n\nTokens are then written with 0600 permissions to %s (override the location with %s)",
+		err, tokenstore.BackendEnvVar, tokenstore.FileBackendPath(), tokenstore.PathEnvVar)
 }
 
 // validateReceivedToken runs minimum-trust checks on the access token

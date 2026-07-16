@@ -105,11 +105,13 @@ type condenseOpts struct {
 	allAgentFiles    map[string]struct{} // Union of all sessions' FilesTouched for cross-session exclusion (nil = single-session)
 }
 
-// redactSessionJSONLBytes runs the 7-layer redaction pipeline over a
-// session transcript at post-commit condensation. OPF is intentionally
-// NOT included here — it runs exclusively in the pre-push rewrite path
+// redactSessionJSONLBytes runs the regex-only redaction pipeline (the
+// eight always-on/opt-in layers) over a session transcript at
+// post-commit condensation. OPF is intentionally NOT included here —
+// it runs exclusively in the pre-push rewrite path
 // (strategy/manual_commit_opf_rewrite.go), which re-redacts the
-// 7-layer blobs and produces 8-layer commits before the push.
+// regex-only blobs and produces OPF-applied (9-layer) commits before
+// the push.
 //
 // Exposed as a var so tests can inject deterministic success/error
 // returns. The signature still takes a context so the var can be
@@ -263,10 +265,11 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// Backfill session state token usage from the freshly-extracted transcript.
 	// Copilot CLI writes session.shutdown after the hooks return, so by condensation
 	// time we can recover the authoritative full-session total from the transcript
-	// while keeping checkpoint metadata scoped to CheckpointTranscriptStart.
-	if backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, sessionData.Transcript, state.ModelName, sessionData.TokenUsage); backfillUsage != nil {
-		state.TokenUsage = backfillUsage
-	}
+	// while keeping checkpoint metadata scoped to CheckpointTranscriptStart. The
+	// recompute drops SubagentTokens (subagentsDir=""); the helper preserves the
+	// cumulative subagent total across the backfill so resetCheckpointWindow's
+	// baseline does not regress to nil (finding 019f5ebf-a57e).
+	applyBackfilledSessionTokenUsage(ctx, ag, state, sessionData.Transcript, sessionData.TokenUsage)
 
 	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.CheckpointTokenUsage) {
 		sessionData.TokenUsage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
@@ -359,7 +362,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		summary = generateSummary(ctx, redactedTranscript, sessionData.FilesTouched, state)
 	}
 
-	// Post-commit emits 7-layer-only blobs. OPF runs later in the
+	// Post-commit emits regex-only blobs. OPF runs later in the
 	// pre-push rewrite path, never here.
 	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(sessionData.SkillEvents, state.TurnID))
 
@@ -860,6 +863,36 @@ func backfillModelAndReprice(ctx context.Context, ag agent.Agent, sessionData *E
 	sessionData.ModelUsage = buckets
 }
 
+// applyBackfilledSessionTokenUsage overwrites state.TokenUsage with the
+// transcript-recomputed session total (see sessionStateBackfillTokenUsage) when
+// one is available, preserving the cumulative subagent total across the backfill.
+//
+// The recompute runs with subagentsDir="" (see extractSessionData), so the
+// backfilled usage never carries SubagentTokens, whereas state.TokenUsage holds
+// the authoritative cumulative subagent total accumulated by SaveStep.
+// resetCheckpointWindow captures the next window's baseline from
+// state.TokenUsage.SubagentTokens after CondenseSession returns, so letting the
+// backfill drop it would make the baseline nil and the next checkpoint re-report
+// the full cumulative subagent total. The cumulative is folded onto a copy so it
+// is never mixed into checkpointUsage, which is the checkpoint-scoped value
+// written to metadata.
+func applyBackfilledSessionTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte, checkpointUsage *agent.TokenUsage) {
+	backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, transcript, state.ModelName, checkpointUsage)
+	if backfillUsage == nil {
+		return
+	}
+	var priorSubagentTokens *agent.TokenUsage
+	if state.TokenUsage != nil {
+		priorSubagentTokens = state.TokenUsage.SubagentTokens
+	}
+	if backfillUsage.SubagentTokens == nil && priorSubagentTokens != nil {
+		preserved := *backfillUsage
+		preserved.SubagentTokens = priorSubagentTokens
+		backfillUsage = &preserved
+	}
+	state.TokenUsage = backfillUsage
+}
+
 // sessionStateBackfillTokenUsage returns the best session-level token usage to
 // persist in session state after condensation.
 func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentType types.AgentType, transcript []byte, sessionModel string, checkpointUsage *agent.TokenUsage) *agent.TokenUsage {
@@ -1338,9 +1371,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 			slog.Int("checkpoints_condensed", result.CheckpointsCount),
 		)
 
-		state.StepCount = 0
-		state.CheckpointTokenUsage = nil
-		state.ModelUsage = nil
+		resetCheckpointWindow(state)
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
 		state.CheckpointTranscriptSize = int64(len(result.Transcript))
 		state.Phase = session.PhaseIdle
@@ -1458,9 +1489,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			return nil
 		}
 
-		state.StepCount = 0
-		state.CheckpointTokenUsage = nil
-		state.ModelUsage = nil
+		resetCheckpointWindow(state)
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
 		state.LastCheckpointID = checkpointID
 		state.LastCheckpointCommitHash = state.BaseCommit

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/denisbrodbeck/machineid"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/posthog/posthog-go"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -85,6 +86,13 @@ func BuildEventPayload(cmd *cobra.Command, agent string, isEntireEnabled bool, v
 	}
 }
 
+// spawnDetachedAnalytics sends the payload from a detached `entire
+// __send_analytics` child so the network call never blocks the CLI. The empty
+// dir keeps the child out of the parent's working directory.
+func spawnDetachedAnalytics(payloadJSON string) {
+	execx.SpawnDetached("", "__send_analytics", payloadJSON)
+}
+
 // TrackCommandDetached tracks a command execution by spawning a detached subprocess.
 // This returns immediately without blocking the CLI.
 func TrackCommandDetached(cmd *cobra.Command, agent string, isEntireEnabled bool, version string) {
@@ -155,36 +163,6 @@ func TrackPluginDetached(pluginName string, isEntireEnabled bool, version string
 	if payloadJSON, err := json.Marshal(payload); err == nil {
 		spawnDetachedAnalytics(string(payloadJSON))
 	}
-}
-
-// spawnDetachedAnalytics spawns the hidden __send_analytics worker as a
-// detached background process so analytics never block the CLI. It resolves the
-// running executable and delegates to the platform-specific SpawnDetached.
-// Analytics carry no working-directory dependency, so it passes an empty dir to
-// keep the platform default ("/" on Unix, the temp dir on Windows).
-func spawnDetachedAnalytics(payloadJSON string) {
-	executable, err := os.Executable()
-	if err != nil {
-		return
-	}
-	//nolint:errcheck // Best effort telemetry - failure to spawn is non-fatal
-	_ = SpawnDetached("", executable, "__send_analytics", payloadJSON)
-}
-
-// resolveDetachedDir returns dir when it is a usable working directory for a
-// detached child, else fallback. An empty dir, or one that no longer exists
-// (e.g. a deleted project directory), yields the platform fallback so the spawn
-// never fails on a stale cwd. Callers that have no working-directory dependency
-// (analytics) pass "" to get the platform default; the pricing refresh passes
-// the project directory so the worker resolves project-level settings.
-func resolveDetachedDir(dir, fallback string) string {
-	if dir == "" {
-		return fallback
-	}
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		return fallback
-	}
-	return dir
 }
 
 // SendEvent processes an event payload in the detached subprocess.

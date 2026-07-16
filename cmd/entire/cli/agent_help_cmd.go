@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
 )
@@ -68,15 +69,72 @@ high-level map of when to use entire and which subcommand; pass a command path
 // agentHelpRepoContext resolves the origin remote ONCE and derives both the repo
 // line (forge/owner/repo, or "" when it can't be determined — no origin /
 // detached HEAD — so the renderer degrades gracefully) and whether trails are
-// enabled for that scope. Previously the repo line and the trails check resolved
-// origin independently, costing two git subprocesses per `entire agent-help` run.
+// enabled for that scope. Unlike the prompt-path gate, agent-help is an explicit
+// command and can afford to refresh an absent or stale enablement decision rather
+// than incorrectly treating an unknown cache entry as "trails unavailable".
 func agentHelpRepoContext(ctx context.Context) (repoLine string, trailsEnabled bool) {
+	return agentHelpRepoContextWithRefresh(ctx, refreshAgentHelpTrailsEnabledCacheIfStaleForScope)
+}
+
+// refreshAgentHelpTrailsEnabledCacheIfStaleForScope refreshes synchronously
+// because agent-help is an explicit command whose output must reflect the
+// current availability decision. SessionStart uses the detached
+// refreshTrailsEnabledCacheIfStaleForScope path instead to avoid hook latency.
+func refreshAgentHelpTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEnablementScope) error {
+	if cachedTrailsEnablementForScope(ctx, scope, time.Now()) != trailEnablementCacheUnknown {
+		return nil
+	}
+	if !scope.Supported {
+		return saveTrailsEnabledForScope(ctx, scope, false, time.Now())
+	}
+	client, err := NewAuthenticatedAPIClient(ctx, false)
+	if err != nil {
+		return err
+	}
+	_, err = refreshTrailsEnabledCacheForScope(ctx, client, scope)
+	return err
+}
+
+// agentHelpRepoContextWithRefresh keeps the refresh dependency explicit so the
+// cache-miss behavior can be tested without authenticating against a real API.
+func agentHelpRepoContextWithRefresh(
+	ctx context.Context,
+	refresh func(context.Context, trailEnablementScope) error,
+) (repoLine string, trailsEnabled bool) {
 	scope, err := currentTrailEnablementScope(ctx)
 	if err != nil {
 		return "", false
 	}
 	if scope.Forge != "" && scope.Owner != "" && scope.Repo != "" {
 		repoLine = scope.RepoKey
+	}
+
+	now := time.Now()
+	if decision := cachedTrailsEnablementForScope(ctx, scope, now); decision != trailEnablementCacheUnknown {
+		return repoLine, decision == trailEnablementCacheEnabled
+	}
+
+	// ResolveDataAPIToken performs data-host discovery before it can reject a
+	// missing login. The scope already carries the locally resolved auth identity,
+	// so avoid making an unauthenticated first run wait on a network request that
+	// cannot produce an enabled decision.
+	if scope.AuthKey == "" {
+		return repoLine, false
+	}
+	if recentAgentHelpTrailsRefreshFailure(ctx, scope, now) {
+		return repoLine, false
+	}
+
+	refreshCtx, cancel := context.WithTimeout(ctx, trailEnablementRefreshTimeout)
+	defer cancel()
+	if err := refresh(refreshCtx, scope); err != nil {
+		// A separate short backoff keeps an offline authenticated user from paying
+		// this timeout on every agent-help invocation. It must not alter the shared
+		// enablement decision, which SessionStart uses for context injection.
+		if cacheErr := saveAgentHelpTrailsRefreshFailure(ctx, scope, time.Now()); cacheErr != nil {
+			logging.Debug(ctx, "failed to save agent-help trails refresh backoff", "error", cacheErr)
+		}
+		return repoLine, false
 	}
 	return repoLine, cachedTrailsEnablementForScope(ctx, scope, time.Now()) == trailEnablementCacheEnabled
 }

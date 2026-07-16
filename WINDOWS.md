@@ -80,7 +80,7 @@ After building, verify these work on a Windows machine:
 2. `entire.exe enable` — in a git repo with an agent installed
 3. Start an agent session, make file changes
 4. `git add . && git commit -m "test"` — hooks should fire (prepare-commit-msg, post-commit)
-5. `entire.exe rewind --list` — should show checkpoint(s)
+5. `entire.exe checkpoint list --pending --json` — should show checkpoint(s)
 6. `entire.exe explain` — pager should use `more` by default
 
 ## Architecture Notes

@@ -120,3 +120,16 @@ func TestTrailCheckoutRejectsArgWithTrailFlag(t *testing.T) {
 		t.Fatalf("error = %q, want it to mention 'cannot combine'", err)
 	}
 }
+
+func TestTrailCheckoutHasWorktreeFlag(t *testing.T) {
+	t.Parallel()
+
+	cmd := newTrailCheckoutCmd()
+	flag := cmd.Flags().Lookup("worktree")
+	if flag == nil {
+		t.Fatal("worktree flag not registered")
+	}
+	if flag.Value.Type() != "bool" {
+		t.Fatalf("worktree flag type = %q, want bool", flag.Value.Type())
+	}
+}

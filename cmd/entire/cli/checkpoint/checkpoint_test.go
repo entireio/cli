@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode" // register claude-code so its .claude protected dir is discoverable
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -101,6 +103,99 @@ func TestCopyMetadataDir_SkipsSymlinks(t *testing.T) {
 	if len(entries) != 1 {
 		t.Errorf("expected 1 entry, got %d", len(entries))
 	}
+}
+
+// fakePluginAgent is a minimal agent stub used to prove that protected dirs
+// and files reported by an external-plugin-style agent (via the AllProtectedDirs
+// / AllProtectedFiles union) are honored by the first-checkpoint path, not just
+// the built-in claude-code .claude dir.
+type fakePluginAgent struct{}
+
+var (
+	_ agent.Agent                  = (*fakePluginAgent)(nil)
+	_ agent.ProtectedFilesProvider = (*fakePluginAgent)(nil)
+)
+
+func (fakePluginAgent) Name() types.AgentName                { return "terminalhire-plugin" }
+func (fakePluginAgent) Type() types.AgentType                { return "TerminalHire" }
+func (fakePluginAgent) Description() string                  { return "fake external plugin for tests" }
+func (fakePluginAgent) IsPreview() bool                      { return true }
+func (fakePluginAgent) ProtectedDirs() []string              { return []string{".terminalhire"} }
+func (fakePluginAgent) ProtectedFiles() []string             { return []string{".terminalhirerc"} }
+func (fakePluginAgent) GetSessionID(*agent.HookInput) string { return "" }
+
+func (fakePluginAgent) DetectPresence(context.Context) (bool, error) { return false, nil }
+func (fakePluginAgent) ReadTranscript(string) ([]byte, error)        { return nil, nil }
+func (fakePluginAgent) ChunkTranscript(_ context.Context, c []byte, _ int) ([][]byte, error) {
+	return [][]byte{c}, nil
+}
+func (fakePluginAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
+	var out []byte
+	for _, c := range chunks {
+		out = append(out, c...)
+	}
+	return out, nil
+}
+func (fakePluginAgent) GetSessionDir(string) (string, error)                      { return "", nil }
+func (fakePluginAgent) ResolveSessionFile(dir, sid string) string                 { return dir + "/" + sid }
+func (fakePluginAgent) ReadSession(*agent.HookInput) (*agent.AgentSession, error) { return nil, nil } //nolint:nilnil // test stub
+func (fakePluginAgent) WriteSession(context.Context, *agent.AgentSession) error   { return nil }
+func (fakePluginAgent) FormatResumeCommand(string) string                         { return "" }
+
+// TestCollectChangedFiles_ExcludesProtectedDirs verifies that the
+// first-checkpoint path keeps agent-protected dirs (e.g. .claude) and the
+// .entire infrastructure dir out of the checkpoint snapshot, while ordinary
+// untracked files are still captured. Regression for protected-dir content
+// leaking into the shadow tree on session start.
+func TestCollectChangedFiles_ExcludesProtectedDirs(t *testing.T) {
+	t.Parallel()
+
+	// Register an external-plugin-style agent so its protected dir/file join the
+	// AllProtectedDirs/AllProtectedFiles union alongside the built-in .claude.
+	// Registration is additive and concurrency-safe; no test asserts the exact set.
+	agent.Register("terminalhire-plugin", func() agent.Agent { return fakePluginAgent{} })
+
+	tempDir := t.TempDir()
+	// Resolve symlinks so the repo root matches git's resolved path.
+	// On macOS, t.TempDir() returns /var/... but git resolves to /private/var/...
+	tempDir, err := filepath.EvalSymlinks(tempDir)
+	require.NoError(t, err)
+
+	testutil.InitRepo(t, tempDir)
+	testutil.WriteFile(t, tempDir, "base.txt", "base")
+	testutil.GitAdd(t, tempDir, "base.txt")
+	testutil.GitCommit(t, tempDir, "init")
+
+	// Disable any global core.excludesFile so a developer/CI-runner gitignore
+	// convention (e.g. one that ignores .claude) can't mask the leak. The fix
+	// must exclude protected dirs on its own, independent of gitignore state.
+	cfgCmd := exec.CommandContext(context.Background(), "git", "config", "core.excludesFile", os.DevNull)
+	cfgCmd.Dir = tempDir
+	require.NoError(t, cfgCmd.Run())
+
+	// Planted untracked, non-gitignored files.
+	testutil.WriteFile(t, tempDir, ".claude/marker.txt", "MARKER-secret")         // built-in agent-protected dir
+	testutil.WriteFile(t, tempDir, ".terminalhire/profile.json", "MARKER-plugin") // plugin-protected dir
+	testutil.WriteFile(t, tempDir, ".terminalhirerc", "MARKER-plugin-file")       // plugin-protected file
+	testutil.WriteFile(t, tempDir, ".entire/state.json", "{}")                    // infrastructure
+	testutil.WriteFile(t, tempDir, "src/keep.txt", "user work")                   // ordinary
+
+	repo, err := git.PlainOpen(tempDir)
+	require.NoError(t, err)
+
+	result, err := collectChangedFiles(context.Background(), repo)
+	require.NoError(t, err)
+
+	require.NotContains(t, result.Changed, ".claude/marker.txt",
+		"built-in agent protected dir content must not be captured into the checkpoint")
+	require.NotContains(t, result.Changed, ".terminalhire/profile.json",
+		"external-plugin protected dir content must not be captured into the checkpoint")
+	require.NotContains(t, result.Changed, ".terminalhirerc",
+		"external-plugin protected file must not be captured into the checkpoint")
+	require.NotContains(t, result.Changed, ".entire/state.json",
+		"infrastructure dir must not be captured into the checkpoint")
+	require.Contains(t, result.Changed, "src/keep.txt",
+		"ordinary untracked files must still be captured")
 }
 
 // TestWriteCommitted_AgentField verifies that the Agent field is written
@@ -4695,7 +4790,7 @@ func TestCheckpointSummary_HasReview(t *testing.T) {
 // Summary.Intent and ReviewPrompt that previously bypassed redaction because
 // the dispatcher only matched .jsonl. The PR 1236 fix extended the JSON-aware
 // branch to .json. We assert via a low-entropy AWS-key shaped secret (catches
-// the 7-layer pipeline) so the test stays deterministic without the OPF binary.
+// the regex-only pipeline) so the test stays deterministic without the OPF binary.
 func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
 	t.Parallel()
 

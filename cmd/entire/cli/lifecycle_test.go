@@ -2,16 +2,21 @@ package cli
 
 import (
 	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/review"
@@ -2228,5 +2233,241 @@ func TestPromptWindowStaleHookDoesNotResetEarly(t *testing.T) {
 	}
 	if got := writeCheckpoint(s); got != 3 {
 		t.Fatalf("back-to-back checkpoint B after stale hook = %d, want 3", got)
+	}
+}
+
+// TestHandleLifecycleSessionStart_NoSynchronousNetworkForTrailEnablement
+// guards against SessionStart hooks stalling agent startup: the
+// trails-enablement cache refresh must be handed off to a detached subprocess,
+// never performed inline on the SessionStart hook path. A slow/unreachable API
+// host previously added up to trailEnablementSessionStartRefreshTimeout (1s) of
+// synchronous latency to every session start once the hourly cache went stale.
+//
+// The deterministic guarantee is the spawn seam: SessionStart must invoke the
+// detached-refresh spawn exactly once and return without doing the network work
+// itself. As a production-shaped backstop the API base points at a blackholed
+// https host that accepts the TCP connection but never answers — so a
+// regression that dials inline both contacts that host (dialed > 0) and burns
+// the ~1s session-start budget instead of returning immediately. (Plain http
+// would be rejected by api.RequireSecureURL before any dial, so the host must
+// be https to actually exercise the synchronous-dial path.)
+func TestHandleLifecycleSessionStart_NoSynchronousNetworkForTrailEnablement(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
+
+	// Blackhole https host: accept connections but never complete the TLS
+	// handshake or respond, so an inline dial stalls until a timeout fires
+	// (mirrors the unreachable-host case that motivated the detached refresh)
+	// rather than failing fast.
+	var dialed int32
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			atomic.AddInt32(&dialed, 1)
+			_ = conn // hold open; never respond
+		}
+	}()
+	t.Setenv("ENTIRE_API_BASE_URL", "https://"+ln.Addr().String())
+
+	var spawnCount int32
+	prevSpawn := trailRefreshSpawn
+	trailRefreshSpawn = func(worktreeRoot string) {
+		atomic.AddInt32(&spawnCount, 1)
+		if worktreeRoot == "" {
+			t.Error("expected non-empty worktree root passed to trail refresh spawn")
+		}
+	}
+	t.Cleanup(func() { trailRefreshSpawn = prevSpawn })
+
+	ag := newMockHookResponseAgent()
+	event := &agent.Event{
+		Type:      agent.SessionStart,
+		SessionID: "test-no-sync-trail-dial",
+		Timestamp: time.Now(),
+	}
+
+	start := time.Now()
+	err = handleLifecycleSessionStart(context.Background(), ag, event)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	// Deterministic guarantee: the network-capable refresh is delegated to the
+	// detached spawn exactly once, never run inline.
+	if got := atomic.LoadInt32(&spawnCount); got != 1 {
+		t.Fatalf("expected exactly one detached trail-enablement refresh spawn, got %d", got)
+	}
+	// Backstops: SessionStart neither contacted the API host nor blocked.
+	if got := atomic.LoadInt32(&dialed); got != 0 {
+		t.Fatalf("SessionStart dialed the trails-enablement API synchronously; the refresh must run out of process")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("handleLifecycleSessionStart took %v; trails-enablement refresh must be detached, not synchronous", elapsed)
+	}
+}
+
+// TestRunTrailEnablementRefresh_BoundedByTimeoutAgainstUnresponsiveHost
+// verifies the deferred refresh work still completes (or at least
+// gives up) within its own bounded timeout when the API host never
+// responds — the network work that used to block SessionStart must still
+// happen, just out of the hook's critical path, and it must not hang forever.
+func TestRunTrailEnablementRefresh_BoundedByTimeoutAgainstUnresponsiveHost(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	var accepted int32
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			atomic.AddInt32(&accepted, 1)
+			// Accept the connection but never write anything back (no TLS
+			// handshake, no HTTP response) — simulates a blackholed/firewalled
+			// host, which is what triggered the original 1s stall per call.
+			_ = conn
+		}
+	}()
+	t.Setenv("ENTIRE_API_BASE_URL", "https://"+ln.Addr().String())
+
+	start := time.Now()
+	refreshErr := runTrailEnablementRefresh(context.Background())
+	elapsed := time.Since(start)
+
+	// Best-effort: network failure must not surface as a hard error.
+	require.NoError(t, refreshErr)
+	if elapsed > trailEnablementRefreshTimeout+2*time.Second {
+		t.Fatalf("runTrailEnablementRefresh took %v, expected to give up within roughly %v", elapsed, trailEnablementRefreshTimeout)
+	}
+	// Prove the test actually exercised the network path rather than passing
+	// via an early return (e.g. scope resolution or auth failing before any
+	// dial): the blackholed listener must have accepted at least one
+	// connection attempt.
+	if got := atomic.LoadInt32(&accepted); got == 0 {
+		t.Fatalf("expected at least one dial attempt against the unresponsive host, got %d", got)
+	}
+}
+
+// TestNewRefreshTrailEnablementCmd_APIFailureExitsZero guards against the
+// detached __refresh_trail_enablement subprocess exiting non-zero on a
+// transient network/API failure. The refresh is best-effort cache warming
+// with stdout/stderr discarded (see newRefreshTrailEnablementCmd) — there is
+// no one watching the exit code, so a failing TrailsEnabled call must be
+// logged (already covered by TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile-
+// style tests) and swallowed, never propagated as a command error, mirroring
+// __send_analytics.
+func TestNewRefreshTrailEnablementCmd_APIFailureExitsZero(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	prevClient := trailRefreshAPIClient
+	trailRefreshAPIClient = func(context.Context, bool) (*api.Client, error) {
+		return api.NewClientWithBaseURL("test-token", srv.URL), nil
+	}
+	t.Cleanup(func() { trailRefreshAPIClient = prevClient })
+
+	cmd := newRefreshTrailEnablementCmd()
+	cmd.SetArgs([]string{})
+	require.NoError(t, cmd.ExecuteContext(context.Background()),
+		"detached refresh command must exit 0 even when the API call fails (best-effort cache warming)")
+}
+
+// TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile guards
+// diagnosability: the detached __refresh_trail_enablement child runs with
+// stdout/stderr discarded, so a failing background refresh must still leave a
+// trail in .entire/logs/entire.log instead of vanishing. The command runs in a
+// repo with no origin remote, so the scope resolves-and-fails locally (no
+// network) and that failure has to be logged to the repo's log file.
+func TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile(t *testing.T) {
+	setupStopTestRepo(t)
+	t.Setenv("ENTIRE_LOG_LEVEL", "debug")
+
+	cmd := newRefreshTrailEnablementCmd()
+	cmd.SetArgs([]string{})
+	require.NoError(t, cmd.ExecuteContext(context.Background()))
+
+	root, err := paths.WorktreeRoot(context.Background())
+	require.NoError(t, err)
+	logData, err := os.ReadFile(filepath.Join(root, ".entire", "logs", "entire.log"))
+	require.NoError(t, err)
+	require.Contains(t, string(logData), "trails enablement refresh skipped: scope unresolved",
+		"background refresh failure must be diagnosable in .entire/logs/entire.log")
+}
+
+// TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree guards the file-init
+// against running outside a resolvable worktree. logging.Init falls back to the
+// current directory when paths.WorktreeRoot fails, so the command must guard on
+// WorktreeRoot (as resume/rewind/reset/explain do) or a child whose worktree was
+// removed/relocated between spawn and exec would MkdirAll a stray .entire/logs/
+// wherever it happens to be running.
+func TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree(t *testing.T) {
+	dir := t.TempDir() // a plain temp dir, not a git worktree
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	t.Setenv("ENTIRE_LOG_LEVEL", "debug")
+
+	cmd := newRefreshTrailEnablementCmd()
+	cmd.SetArgs([]string{})
+	require.NoError(t, cmd.ExecuteContext(context.Background()))
+
+	_, statErr := os.Stat(filepath.Join(dir, ".entire", "logs"))
+	require.True(t, os.IsNotExist(statErr),
+		"must not create a stray .entire/logs outside a resolvable worktree")
+}
+
+// TestTrailRefreshRecentlySpawned_ThrottlesWithinWindow verifies the spawn-side
+// guard: within trailRefreshSpawnThrottle of a recorded spawn,
+// further spawns are suppressed; once the window passes a fresh spawn is allowed
+// and re-recorded. Without this, an unreachable host — which never writes the
+// cache, so the hourly TTL never starts — would fork a refresh child on every
+// SessionStart.
+func TestTrailRefreshRecentlySpawned_ThrottlesWithinWindow(t *testing.T) {
+	commonDir := t.TempDir()
+	now := time.Now()
+
+	require.False(t, trailRefreshRecentlySpawned(commonDir, now),
+		"first call records the spawn and is not throttled")
+	require.True(t, trailRefreshRecentlySpawned(commonDir, now.Add(time.Second)),
+		"a second attempt within the window is throttled")
+	require.False(t, trailRefreshRecentlySpawned(commonDir, now.Add(trailRefreshSpawnThrottle)),
+		"at the window boundary the spawn is allowed and re-recorded")
+	require.True(t, trailRefreshRecentlySpawned(commonDir, now.Add(trailRefreshSpawnThrottle+time.Second)),
+		"an attempt within the window of the re-recorded spawn is throttled")
+}
+
+// TestSpawnDetachedTrailEnablementRefresh_CollapsesBurst verifies the throttle is
+// actually wired into the spawn path: a burst of SessionStart-driven attempts for
+// the same repo forks a single child, not one per hook.
+func TestSpawnDetachedTrailEnablementRefresh_CollapsesBurst(t *testing.T) {
+	setupStopTestRepo(t)
+
+	var spawnCount int32
+	prevSpawn := trailRefreshSpawn
+	trailRefreshSpawn = func(string) { atomic.AddInt32(&spawnCount, 1) }
+	t.Cleanup(func() { trailRefreshSpawn = prevSpawn })
+
+	spawnDetachedTrailEnablementRefresh(context.Background())
+	spawnDetachedTrailEnablementRefresh(context.Background())
+	spawnDetachedTrailEnablementRefresh(context.Background())
+
+	if got := atomic.LoadInt32(&spawnCount); got != 1 {
+		t.Fatalf("expected the burst to collapse to a single detached spawn, got %d", got)
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
@@ -107,9 +108,17 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		return nil
 	}
 
-	// Skip if Entire is not enabled
-	enabled, err := IsEnabled(cmd.Context())
-	if err == nil && !enabled {
+	// Skip if Entire is not set up and enabled. This must fail closed: any
+	// settings read error (missing file, corrupted JSON, transient I/O
+	// failure) is treated as disabled so a hook never silently falls through
+	// to full lifecycle work just because settings couldn't be read. Using
+	// IsEnabled here previously failed OPEN on error (`err == nil && !enabled`
+	// only short-circuits when the read succeeded), which meant a corrupted
+	// or unreadable settings file made every hook invocation pay the full
+	// dispatch cost instead of exiting fast (#524).
+	// settings.IsSetUpAndEnabled is the same fail-closed gate the git hooks
+	// use (see PersistentPreRunE in hooks_git_cmd.go).
+	if !settings.IsSetUpAndEnabled(cmd.Context()) {
 		return nil
 	}
 

@@ -1407,9 +1407,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	newHead := head.Hash().String()
 	state.BaseCommit = newHead
 	state.RealignAttributionBase(newHead)
-	state.StepCount = 0
-	state.CheckpointTokenUsage = nil
-	state.ModelUsage = nil
+	resetCheckpointWindow(state)
 	state.CheckpointTranscriptStart = result.TotalTranscriptLines
 	state.CheckpointTranscriptSize = int64(len(result.Transcript))
 
@@ -2843,9 +2841,9 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// (attribution, files touched, prompts). Hooks run without user interaction
 	// so there is no retry path — preserving partial metadata is better than
 	// losing everything. Persisting an unredacted transcript would be worse.
-	// Run the 7-layer pipeline over the transcript — OPF runs later in
-	// the pre-push rewrite path, which re-redacts these 7-layer blobs
-	// and produces 8-layer commits before the push goes out.
+	// Run the regex-only pipeline over the transcript — OPF runs later in
+	// the pre-push rewrite path, which re-redacts these regex-only blobs
+	// and produces OPF-applied (9-layer) commits before the push goes out.
 	// Externalize inline images BEFORE redaction, mirroring CondenseSession, so the
 	// finalized (authoritative, full-session) transcript keeps its placeholders and
 	// matching assets instead of re-inlining what condensation lifted out. Opt-in;
@@ -2896,7 +2894,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		redactedTranscript = redact.RedactedBytes{}
 	}
 
-	// Post-commit emits 7-layer-only blobs; the writer joins + redacts
+	// Post-commit emits regex-only blobs; the writer joins + redacts
 	// via checkpoint.redactedJoinedPrompts. OPF runs later, once per
 	// push, in the pre-push rewrite path.
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})

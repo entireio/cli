@@ -791,3 +791,486 @@ func envToMap(env []string) map[string]string {
 	}
 	return m
 }
+
+// gitConfigBool reads a local git config key and reports whether it is set to a
+// true value. Missing keys and read errors report false.
+func gitConfigBool(ctx context.Context, dir, key string) bool {
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get", "--type=bool", key)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "true"
+}
+
+// TestFetch_FilteredURLFetchMarksNewRemoteSkipped verifies that when a filtered
+// fetch from a URL creates a new URL-keyed remote section, that section is
+// excluded from `git fetch --all` / `git remote update` — otherwise every
+// checkpoint URL ever fetched from lingers as a phantom remote that bulk
+// fetches keep dialing.
+func TestFetch_FilteredURLFetchMarksNewRemoteSkipped(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	originBare := filepath.Join(tmpDir, "origin.git")
+	checkpointBare := filepath.Join(tmpDir, "checkpoints.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	cloneDir := filepath.Join(tmpDir, "clone")
+
+	testutil.InitRepo(t, seedDir)
+	testutil.WriteFile(t, seedDir, "f.txt", "init")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "init")
+
+	// Separate origin and checkpoint repos, mirroring the real setup where
+	// checkpoints are fetched by URL from a repo that is not origin.
+	runIsolatedGit(ctx, t, "", "init", "--bare", originBare)
+	runIsolatedGit(ctx, t, "", "init", "--bare", checkpointBare)
+	runIsolatedGit(ctx, t, checkpointBare, "config", "uploadpack.allowFilter", "true")
+	runIsolatedGit(ctx, t, seedDir, "push", originBare, "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+originBare, cloneDir)
+
+	// A commit only in the checkpoint repo so the filtered fetch has
+	// something to transfer.
+	testutil.WriteFile(t, seedDir, "f.txt", "init\nnext\n")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "next")
+	runIsolatedGit(ctx, t, seedDir, "push", checkpointBare, "HEAD:refs/heads/main")
+
+	// Filtered fetches read .entire settings from the CWD repo.
+	testutil.WriteFile(
+		t,
+		cloneDir,
+		".entire/settings.json",
+		`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
+	)
+	t.Chdir(cloneDir)
+
+	fetchURL := "file://" + checkpointBare
+	out, err := Fetch(ctx, FetchOptions{
+		Remote:   fetchURL,
+		RefSpecs: []string{"+refs/heads/main:refs/entire-fetch-tmp/main"},
+		NoTags:   true,
+		Dir:      cloneDir,
+	})
+	require.NoError(t, err, "fetch output: %s", out)
+
+	// Sanity: git recorded the URL-keyed promisor entry for the filtered fetch.
+	require.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".promisor"),
+		"expected git to record a promisor entry for the filtered URL fetch")
+
+	assert.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"),
+		"URL-keyed promisor entry should be excluded from git fetch --all")
+
+	// git fetch --all must no longer dial the phantom entry: with the
+	// checkpoint repo gone, --all only succeeds if the URL-keyed entry is
+	// skipped (origin is still reachable).
+	require.NoError(t, os.RemoveAll(checkpointBare))
+	runIsolatedGit(ctx, t, cloneDir, "fetch", "--all", "--no-auto-gc")
+}
+
+// TestFetch_FailedFilteredFetchStillStampsNewRemote guards the resume
+// regression: git writes remote.<url>.promisor eagerly during connection
+// setup, so a filtered fetch that then fails (e.g. a missing ref) still leaves
+// the phantom remote behind. The stamp must land anyway — otherwise the section
+// exists on the next attempt, never looks new again, and lingers unstamped.
+func TestFetch_FailedFilteredFetchStillStampsNewRemote(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	originBare := filepath.Join(tmpDir, "origin.git")
+	checkpointBare := filepath.Join(tmpDir, "checkpoints.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	cloneDir := filepath.Join(tmpDir, "clone")
+
+	testutil.InitRepo(t, seedDir)
+	testutil.WriteFile(t, seedDir, "f.txt", "init")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "init")
+
+	runIsolatedGit(ctx, t, "", "init", "--bare", originBare)
+	runIsolatedGit(ctx, t, "", "init", "--bare", checkpointBare)
+	runIsolatedGit(ctx, t, checkpointBare, "config", "uploadpack.allowFilter", "true")
+	runIsolatedGit(ctx, t, seedDir, "push", originBare, "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+originBare, cloneDir)
+
+	testutil.WriteFile(
+		t,
+		cloneDir,
+		".entire/settings.json",
+		`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
+	)
+	t.Chdir(cloneDir)
+
+	fetchURL := "file://" + checkpointBare
+	// Fetch a ref that does not exist on the checkpoint remote: the command
+	// fails, but git has already recorded the URL-keyed promisor section.
+	_, err := Fetch(ctx, FetchOptions{
+		Remote:   fetchURL,
+		RefSpecs: []string{"+refs/heads/does-not-exist:refs/entire-fetch-tmp/x"},
+		NoTags:   true,
+		Dir:      cloneDir,
+	})
+	require.Error(t, err, "fetch of a missing ref should fail")
+
+	require.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".promisor"),
+		"git records the promisor section even when the fetch fails")
+	assert.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"),
+		"a phantom remote left by a failed fetch must still be stamped")
+}
+
+// TestFetch_UnfilteredFetchDoesNotCreateConfigSection verifies the stamp is
+// gated on a filtered fetch: a plain (unfiltered) URL fetch records no
+// URL-keyed section, so we must not invent a remote.<url> config section.
+func TestFetch_UnfilteredFetchDoesNotCreateConfigSection(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "bare.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	cloneDir := filepath.Join(tmpDir, "clone")
+
+	testutil.InitRepo(t, seedDir)
+	testutil.WriteFile(t, seedDir, "f.txt", "init")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "init")
+
+	runIsolatedGit(ctx, t, "", "init", "--bare", bareDir)
+	runIsolatedGit(ctx, t, seedDir, "remote", "add", "origin", bareDir)
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+bareDir, cloneDir)
+
+	testutil.WriteFile(
+		t,
+		cloneDir,
+		".entire/settings.json",
+		`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
+	)
+	t.Chdir(cloneDir)
+
+	fetchURL := "file://" + bareDir
+	out, err := Fetch(ctx, FetchOptions{
+		Remote:   fetchURL,
+		RefSpecs: []string{"+refs/heads/main:refs/remotes/origin/main"},
+		NoTags:   true,
+		NoFilter: true,
+		Dir:      cloneDir,
+	})
+	require.NoError(t, err, "fetch output: %s", out)
+
+	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".promisor"))
+	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"))
+}
+
+// TestFetch_ExistingURLRemoteNotReStamped verifies we only stamp remotes we
+// create: a filtered fetch from a URL that already has a remote.<url> section
+// must leave that section as-is rather than rewriting the user's git config.
+func TestFetch_ExistingURLRemoteNotReStamped(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	originBare := filepath.Join(tmpDir, "origin.git")
+	checkpointBare := filepath.Join(tmpDir, "checkpoints.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	cloneDir := filepath.Join(tmpDir, "clone")
+
+	testutil.InitRepo(t, seedDir)
+	testutil.WriteFile(t, seedDir, "f.txt", "init")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "init")
+
+	runIsolatedGit(ctx, t, "", "init", "--bare", originBare)
+	runIsolatedGit(ctx, t, "", "init", "--bare", checkpointBare)
+	runIsolatedGit(ctx, t, checkpointBare, "config", "uploadpack.allowFilter", "true")
+	runIsolatedGit(ctx, t, seedDir, "push", originBare, "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+originBare, cloneDir)
+
+	testutil.WriteFile(t, seedDir, "f.txt", "init\nnext\n")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "next")
+	runIsolatedGit(ctx, t, seedDir, "push", checkpointBare, "HEAD:refs/heads/main")
+
+	testutil.WriteFile(
+		t,
+		cloneDir,
+		".entire/settings.json",
+		`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
+	)
+	t.Chdir(cloneDir)
+
+	fetchURL := "file://" + checkpointBare
+	// Simulate a pre-existing URL-keyed remote (e.g. a phantom left by an older
+	// CLI). Its presence means the section already exists before our fetch.
+	runIsolatedGit(ctx, t, cloneDir, "config", "--local", "remote."+fetchURL+".promisor", "true")
+
+	out, err := Fetch(ctx, FetchOptions{
+		Remote:   fetchURL,
+		RefSpecs: []string{"+refs/heads/main:refs/entire-fetch-tmp/main"},
+		NoTags:   true,
+		Dir:      cloneDir,
+	})
+	require.NoError(t, err, "fetch output: %s", out)
+
+	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"),
+		"a remote that already existed must not be stamped")
+}
+
+// TestMarkRemoteSkipped_SetsSkipFetchAll verifies the helper stamps skipFetchAll.
+func TestMarkRemoteSkipped_SetsSkipFetchAll(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	const url = "https://example.com/org/checkpoints.git"
+	markRemoteSkipped(ctx, repoDir, url)
+
+	assert.True(t, gitConfigBool(ctx, repoDir, "remote."+url+".skipFetchAll"))
+}
+
+// TestGitRemoteSectionExists reports true only once a remote.<url>.* key is set.
+func TestGitRemoteSectionExists(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	const url = "https://example.com/org/checkpoints.git"
+	assert.False(t, gitRemoteSectionExists(ctx, repoDir, url))
+
+	runIsolatedGit(ctx, t, repoDir, "config", "--local", "remote."+url+".promisor", "true")
+	assert.True(t, gitRemoteSectionExists(ctx, repoDir, url))
+}
+
+// TestGitRemoteSectionExists_ExactSubsectionMatch verifies the check compares
+// the whole URL subsection, not a prefix: a longer URL that shares a prefix
+// (e.g. ".../repo.git") must not make a shorter one (".../repo") look present.
+func TestGitRemoteSectionExists_ExactSubsectionMatch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	const longURL = "https://example.com/org/repo.git"
+	const shortURL = "https://example.com/org/repo"
+	runIsolatedGit(ctx, t, repoDir, "config", "--local", "remote."+longURL+".promisor", "true")
+
+	assert.True(t, gitRemoteSectionExists(ctx, repoDir, longURL),
+		"the exact URL section is present")
+	assert.False(t, gitRemoteSectionExists(ctx, repoDir, shortURL),
+		"a prefix of an existing URL section must not count as present")
+}
+
+// TestStampNewlyCreatedRemote_StampsUnderCancelledContext guards the timed-out
+// fetch case: git records the promisor section before the fetch times out, so
+// the stamp must still land even though the fetch context is already cancelled.
+func TestStampNewlyCreatedRemote_StampsUnderCancelledContext(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	const url = "https://example.com/org/checkpoints.git"
+	// Simulate git having recorded the promisor section during a fetch that
+	// then timed out.
+	runIsolatedGit(context.Background(), t, repoDir, "config", "--local", "remote."+url+".promisor", "true")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // parent context already done, as after a timed-out fetch
+
+	stampNewlyCreatedRemote(ctx, repoDir, url)
+
+	assert.True(t, gitConfigBool(context.Background(), repoDir, "remote."+url+".skipFetchAll"),
+		"stamp must land even though the parent context is cancelled")
+}
+
+// isolatedSSHEnv returns a hermetic env slice for withBatchModeSSH tests: a
+// fresh HOME with no .gitconfig and system/global config lookups disabled, so
+// the effective ssh command resolution isn't polluted by the host machine's
+// real git config. extra entries (e.g. GIT_SSH_COMMAND, GIT_SSH, or a
+// GIT_CONFIG_GLOBAL pointing at a fixture config) are appended on top.
+func isolatedSSHEnv(t *testing.T, extra ...string) []string {
+	t.Helper()
+	env := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"GIT_CONFIG_NOSYSTEM=1",
+	}
+	return append(env, extra...)
+}
+
+func TestWithBatchModeSSH(t *testing.T) {
+	t.Parallel()
+
+	// gitConfigFile writes a minimal gitconfig with core.sshCommand set and
+	// returns a GIT_CONFIG_GLOBAL env entry pointing at it.
+	gitConfigFile := func(t *testing.T, sshCommand string) string {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "gitconfig")
+		content := fmt.Sprintf("[core]\n\tsshCommand = %s\n", sshCommand)
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+		return "GIT_CONFIG_GLOBAL=" + path
+	}
+
+	tests := []struct {
+		name string
+		in   func(t *testing.T) []string
+		want string
+	}{
+		{
+			name: "no existing GIT_SSH_COMMAND or config defaults to ssh",
+			in:   func(t *testing.T) []string { return isolatedSSHEnv(t) },
+			want: "ssh -o BatchMode=yes",
+		},
+		{
+			name: "preserves and extends a custom ssh command",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh -i /home/me/.ssh/id")
+			},
+			want: "ssh -i /home/me/.ssh/id -o BatchMode=yes",
+		},
+		{
+			name: "GIT_SSH_COMMAND with explicit BatchMode=yes is left untouched",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
+			},
+			want: "ssh -o BatchMode=yes",
+		},
+		{
+			name: "GIT_SSH_COMMAND with explicit BatchMode=no is respected, not overridden",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh -o BatchMode=no")
+			},
+			want: "ssh -o BatchMode=no",
+		},
+		{
+			name: "blank GIT_SSH_COMMAND falls back to ssh",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=   ")
+			},
+			want: "ssh -o BatchMode=yes",
+		},
+		{
+			name: "core.sshCommand git config is used as the base when env is unset",
+			in: func(t *testing.T) []string {
+				cfg := gitConfigFile(t, "ssh -i /home/me/.ssh/work_key")
+				return isolatedSSHEnv(t, cfg)
+			},
+			want: "ssh -i /home/me/.ssh/work_key -o BatchMode=yes",
+		},
+		{
+			name: "GIT_SSH_COMMAND env takes precedence over core.sshCommand config",
+			in: func(t *testing.T) []string {
+				cfg := gitConfigFile(t, "ssh -i /home/me/.ssh/work_key")
+				return isolatedSSHEnv(t, cfg, "GIT_SSH_COMMAND=ssh -i /home/me/.ssh/personal_key")
+			},
+			want: "ssh -i /home/me/.ssh/personal_key -o BatchMode=yes",
+		},
+		{
+			name: "GIT_SSH is used only when neither env GIT_SSH_COMMAND nor config are set",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH=/usr/local/bin/custom-ssh")
+			},
+			want: "/usr/local/bin/custom-ssh -o BatchMode=yes",
+		},
+		{
+			name: "unrelated substring containing BatchMode-like text does not count as explicit",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, `GIT_SSH_COMMAND=ssh -o ProxyCommand="connect -H proxy NoBatchModeHereEither"`)
+			},
+			want: `ssh -o ProxyCommand="connect -H proxy NoBatchModeHereEither" -o BatchMode=yes`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out := withBatchModeSSH(context.Background(), tt.in(t))
+			got, ok := envToMap(out)["GIT_SSH_COMMAND"]
+			assert.True(t, ok, "GIT_SSH_COMMAND should be set")
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestWithBatchModeSSH_PreservesOtherVarsWithoutDuplicating(t *testing.T) {
+	t.Parallel()
+
+	env := isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh")
+	env = append(env, "SOME_OTHER_VAR=value")
+	out := withBatchModeSSH(context.Background(), env)
+
+	count := 0
+	for _, e := range out {
+		if strings.HasPrefix(e, "GIT_SSH_COMMAND=") {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "should not duplicate GIT_SSH_COMMAND")
+
+	m := envToMap(out)
+	assert.Equal(t, "value", m["SOME_OTHER_VAR"])
+	assert.Equal(t, "ssh -o BatchMode=yes", m["GIT_SSH_COMMAND"])
+}
+
+// TestNewCommand_NonInteractiveSSH verifies that a checkpoint git command built
+// under a non-interactive context carries GIT_SSH_COMMAND with BatchMode=yes, so
+// an SSH push cannot hang on a passphrase prompt (issue #1523). Without the
+// marker, the command is left untouched so foreground commands keep interactive
+// prompting.
+func TestNewCommand_NonInteractiveSSH(t *testing.T) {
+	// Not parallel: manipulates the checkpoint token env var.
+	t.Setenv(CheckpointTokenEnvVar, "") // ensure SSH/no-token path
+
+	t.Run("marked context adds BatchMode", func(t *testing.T) {
+		ctx := WithNonInteractiveSSH(context.Background())
+		cmd := newCommand(ctx, "push", "--no-verify", "origin", "entire/checkpoints/v1")
+		sshCmd, ok := envToMap(cmd.Env)["GIT_SSH_COMMAND"]
+		assert.True(t, ok, "non-interactive command must set GIT_SSH_COMMAND")
+		assert.Contains(t, sshCmd, "BatchMode=yes")
+	})
+
+	t.Run("unmarked context leaves env untouched", func(t *testing.T) {
+		cmd := newCommand(context.Background(), "push", "--no-verify", "origin", "entire/checkpoints/v1")
+		// No token and no marker: newCommand should not populate cmd.Env, so no
+		// BatchMode is injected and the process inherits the parent environment.
+		assert.Nil(t, cmd.Env, "unmarked command should not set a custom env")
+	})
+}
+
+func TestLooksLikeSSHAuthFailure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"git push: Permission denied (publickey).", true},
+		{"Permission denied (publickey,password).", true},
+		{"ERROR: Permission denied (publickey).\r\nfatal: Could not read from remote repository.", true},
+		{"fatal: Could not read from remote repository.", false}, // generic transport epilogue, not auth
+		{"ssh: connect to host example.com port 22: Connection refused\nfatal: Could not read from remote repository.", false},
+		{"enter passphrase for key '/home/me/.ssh/id_rsa':", false},
+		{"non-fast-forward", false},
+		{"Connection timed out", false},
+		{"", false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, LooksLikeSSHAuthFailure(tt.in))
+		})
+	}
+}
+
+func TestIsNonInteractiveSSH(t *testing.T) {
+	t.Parallel()
+	assert.False(t, IsNonInteractiveSSH(context.Background()))
+	assert.True(t, IsNonInteractiveSSH(WithNonInteractiveSSH(context.Background())))
+}

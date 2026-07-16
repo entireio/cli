@@ -292,6 +292,28 @@
         ],
         "type": "object"
       },
+      "CompleteOnboardingOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CompleteOnboardingOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "needsOnboarding": {
+            "description": "Always false after onboarding completion is recorded.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "needsOnboarding"
+        ],
+        "type": "object"
+      },
       "CreateBindingInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -870,7 +892,7 @@
             "type": "string"
           },
           "needsOnboarding": {
-            "description": "True when the account has no mirrored repo yet and should be sent through onboarding.",
+            "description": "True until the account completes web onboarding at least once.",
             "type": "boolean"
           }
         },
@@ -1597,6 +1619,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "repos": {
@@ -2410,6 +2436,13 @@
             },
             "type": "array"
           },
+          "primaries": {
+            "$ref": "#/components/schemas/RepoPrimaries"
+          },
+          "stars": {
+            "format": "int64",
+            "type": "integer"
+          },
           "visibility": {
             "type": "string"
           }
@@ -2461,6 +2494,22 @@
           "clusterSlug",
           "mirror",
           "status"
+        ],
+        "type": "object"
+      },
+      "RepoPrimaries": {
+        "additionalProperties": true,
+        "properties": {
+          "git_data": {
+            "type": "string"
+          },
+          "processing": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "git_data",
+          "processing"
         ],
         "type": "object"
       },
@@ -3789,7 +3838,96 @@
             "sessionAuth": []
           }
         ],
-        "summary": "Report whether the calling account still needs to onboard (has no mirror yet)",
+        "summary": "Report whether the calling account still needs to complete onboarding",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/me/onboarding/complete": {
+      "post": {
+        "operationId": "completeOnboarding",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompleteOnboardingOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Record that the calling account completed web onboarding",
         "tags": [
           "identity"
         ]
@@ -6738,6 +6876,29 @@
         "operationId": "listRepos",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "description": "onboarded (default): repos in Entire; all: also include onboardable GitHub candidates.",
             "explode": false,
             "in": "query",
@@ -6749,6 +6910,16 @@
                 "onboarded",
                 "all"
               ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: exact-match full_name (owner/repo, case-insensitive). Returns that repo's zero-or-one entries; pagination and scope are ignored.",
+            "explode": false,
+            "in": "query",
+            "name": "filter",
+            "schema": {
+              "description": "Optional: exact-match full_name (owner/repo, case-insensitive). Returns that repo's zero-or-one entries; pagination and scope are ignored.",
               "type": "string"
             }
           }

@@ -18,12 +18,12 @@ import (
 
 // TestWriteCommitted_DoesNotEmitOPFAppliedTrailer is the regression guard
 // for the architectural promise: standard post-commit condensation writes
-// 7-layer-only blobs and MUST NOT mark them with the Entire-OPF-Applied
+// regex-only blobs and MUST NOT mark them with the Entire-OPF-Applied
 // trailer. The trailer is emitted exclusively by the pre-push rewrite
 // path; if a future change accidentally added it to the standard writer,
 // the pre-push rewrite would skip those commits (HasOPFApplied true →
-// reparent-only, no actual OPF run) and ship 7-layer content as if it
-// were 8-layer. This test pins down that contract.
+// reparent-only, no actual OPF run) and ship regex-only content as if it
+// were OPF-applied. This test pins down that contract.
 func TestWriteCommitted_DoesNotEmitOPFAppliedTrailer(t *testing.T) {
 	t.Parallel()
 

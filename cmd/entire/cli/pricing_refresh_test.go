@@ -56,10 +56,9 @@ func TestSpawnDetachedRefreshUsesProjectDir(t *testing.T) {
 	var gotDir string
 	spawned := false
 	orig := detachedSpawn
-	detachedSpawn = func(dir, _ string, _ ...string) error {
+	detachedSpawn = func(dir string, _ ...string) {
 		gotDir = dir
 		spawned = true
-		return nil
 	}
 	t.Cleanup(func() { detachedSpawn = orig })
 
