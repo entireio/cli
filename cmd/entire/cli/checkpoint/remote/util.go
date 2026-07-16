@@ -127,18 +127,38 @@ func FetchURL(ctx context.Context, opts ...FetchURLOptions) (string, error) {
 	return checkpointURL, nil
 }
 
+// ForkOwnerMismatchError reports that a checkpoint_remote is configured but the
+// push remote's owner differs from the checkpoint target's owner — i.e. the user
+// is pushing from a fork. Callers must NOT fall back to pushing checkpoints to
+// the push remote (the fork): that could publish session transcripts to a public
+// repository. The push should be skipped and the user told how to opt in.
+type ForkOwnerMismatchError struct {
+	PushOwner   string // owner of the push remote (the fork)
+	TargetOwner string // owner of the configured checkpoint target
+	TargetRepo  string // full "owner/repo" of the configured checkpoint target
+}
+
+func (e *ForkOwnerMismatchError) Error() string {
+	return fmt.Sprintf(
+		"checkpoints not pushed: push remote is a fork (owner %q differs from checkpoint target owner %q)",
+		e.PushOwner, e.TargetOwner,
+	)
+}
+
 // PushURL returns the effective checkpoint push URL for the current repository.
 // Unlike FetchURL:
 //   - it derives protocol from the requested push remote, not always origin
-//   - it skips checkpoint remote use when the push remote owner differs
-//     from the configured checkpoint remote owner
+//   - when the push remote owner differs from the configured checkpoint target
+//     owner (a fork), it returns a *ForkOwnerMismatchError instead of a URL, so
+//     the caller skips the push rather than leaking checkpoints to the fork
 //
 // If ENTIRE_CHECKPOINT_TOKEN is set, HTTPS is forced so the token can be used
 // even when the push remote is configured via SSH.
 //
 // The boolean return value reports whether a dedicated checkpoint_remote is
-// configured and should be used for push. When false, the returned URL is the
-// repository's origin URL as a fallback.
+// configured and should be used for push. When false (and err is nil), the
+// returned URL is the repository's origin URL as a benign fallback (no
+// checkpoint_remote configured, or a non-fork derivation failure).
 func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 	originURL := ""
 	if resolvedOriginURL, err := GetRemoteURL(ctx, originRemote); err == nil {
@@ -212,11 +232,16 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 
 	checkpointOwner := config.Owner()
 	if pushInfo.Owner != "" && checkpointOwner != "" && !strings.EqualFold(pushInfo.Owner, checkpointOwner) {
-		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
-		if fallbackErr != nil {
-			return "", false, fmt.Errorf("no push URL found: %w", fallbackErr)
+		// The push remote is a fork: its owner differs from the configured
+		// checkpoint target owner. Report this distinctly rather than falling
+		// back to the push remote (the fork) — pushing checkpoints there could
+		// publish session transcripts to a public repository. The caller skips
+		// the push and tells the user how to opt in. See ForkOwnerMismatchError.
+		return "", false, &ForkOwnerMismatchError{
+			PushOwner:   pushInfo.Owner,
+			TargetOwner: checkpointOwner,
+			TargetRepo:  config.Repo,
 		}
-		return fallbackURL, false, nil
 	}
 
 	if withToken && pushInfo.Protocol == ProtocolEntire {

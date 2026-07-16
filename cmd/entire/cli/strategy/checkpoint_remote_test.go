@@ -330,10 +330,15 @@ func TestResolvePushSettings_ForkDetection(t *testing.T) {
 	t.Chdir(localDir)
 
 	ps := resolvePushSettings(ctx, "origin")
-	// Should fall back to origin since the remote owner differs (alice != org).
+	// A configured private checkpoint target + a fork push remote (alice != org)
+	// must NOT silently fall back to pushing checkpoints to the fork. The push is
+	// skipped so session transcripts are never published to the fork.
+	assert.True(t, ps.skipCheckpointPush, "fork push must be skipped, not redirected to origin")
 	assert.False(t, ps.hasCheckpointURL())
-	assert.Equal(t, "origin", ps.pushTarget())
 	assert.False(t, ps.pushDisabled)
+	require.NotNil(t, ps.forkMismatch)
+	assert.Equal(t, "alice", ps.forkMismatch.PushOwner)
+	assert.Equal(t, "org", ps.forkMismatch.TargetOwner)
 }
 
 // Not parallel: uses t.Chdir()
@@ -576,9 +581,10 @@ func TestFetchURL_IgnoresOwnerMismatchCheck(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "git@github.com:org/checkpoints.git", url)
 
-	// Contrast: push settings should reject the same config
+	// Contrast: push settings should reject the same config and skip the push
 	ps := resolvePushSettings(ctx, "origin")
 	assert.False(t, ps.hasCheckpointURL(), "resolvePushSettings should reject an origin with a different owner")
+	assert.True(t, ps.skipCheckpointPush, "resolvePushSettings should skip pushing for a fork owner mismatch")
 }
 
 // Not parallel: uses t.Chdir()

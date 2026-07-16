@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -28,6 +29,15 @@ type pushSettings struct {
 	checkpointURL string
 	// pushDisabled is true if push_sessions is explicitly set to false.
 	pushDisabled bool
+	// skipCheckpointPush is true when a checkpoint_remote is configured but the
+	// push remote is a fork (different owner). Pushing would otherwise fall back
+	// to the fork, risking public exposure of session transcripts, so the push
+	// is skipped and the user is warned. Distinct from pushDisabled (an explicit
+	// opt-out) and from an empty checkpointURL (a benign origin fallback when no
+	// checkpoint target is configured). forkMismatch carries the details for the
+	// warning.
+	skipCheckpointPush bool
+	forkMismatch       *remote.ForkOwnerMismatchError
 }
 
 // pushTarget returns the target to use for git push/fetch commands for checkpoint branches.
@@ -68,6 +78,14 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 		return ps
 	}
 	checkpointURL, enabled, err := remote.PushURL(ctx, pushRemoteName)
+	var forkErr *remote.ForkOwnerMismatchError
+	if errors.As(err, &forkErr) {
+		// Fork push remote with a configured private target: skip the push rather
+		// than fall back to the fork (which could publish transcripts publicly).
+		ps.skipCheckpointPush = true
+		ps.forkMismatch = forkErr
+		return ps
+	}
 	if err != nil {
 		logging.Warn(ctx, "checkpoint-remote: could not derive URL from push remote",
 			slog.String("remote", pushRemoteName),

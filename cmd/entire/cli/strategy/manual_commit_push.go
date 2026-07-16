@@ -75,6 +75,15 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 		return nil
 	}
 
+	// Fork push remote + a configured private checkpoint target: skip the push
+	// rather than fall back to the fork, which could publish session transcripts
+	// to a public repository. Warn once (git shows stderr during pre-push) with
+	// the opt-in instructions. Covers both storage backends since it precedes them.
+	if ps.skipCheckpointPush {
+		warnForkCheckpointSkip(ps)
+		return nil
+	}
+
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
 	// instead of the single v1 branch. Those refs live under refs/entire/, not
 	// refs/heads/, so a forge can never pick them as a repository's default
@@ -175,6 +184,34 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 
 	cleanupPushedShadowBranches(ctx)
 	return nil
+}
+
+// warnForkCheckpointSkip prints a one-time, user-facing explanation that
+// checkpoints were skipped because the push remote is a fork, plus the two ways
+// to opt in. Written to stderr, which git surfaces during the pre-push hook.
+func warnForkCheckpointSkip(ps pushSettings) {
+	if msg := forkCheckpointSkipMessage(ps.forkMismatch); msg != "" {
+		fmt.Fprint(os.Stderr, msg)
+	}
+}
+
+// forkCheckpointSkipMessage builds the user-facing skip explanation. Returns the
+// empty string when fm is nil so callers can skip printing entirely.
+func forkCheckpointSkipMessage(fm *checkpointremote.ForkOwnerMismatchError) string {
+	if fm == nil {
+		return ""
+	}
+	return fmt.Sprintf(
+		"[entire] Checkpoints were NOT pushed.\n"+
+			"This repo sends checkpoints to a private target (%s), but your push remote is a\n"+
+			"fork (owner %q). Pushing to your fork could publish session transcripts, so the\n"+
+			"push was skipped.\n"+
+			"\n"+
+			"To re-enable, edit %s and either:\n"+
+			"  • point checkpoint_remote at your own private repo (owner %q), or\n"+
+			"  • set \"checkpoint_remote\": null to accept your fork as the target (it may be public).\n",
+		fm.TargetRepo, fm.PushOwner, settings.EntireSettingsLocalFile, fm.PushOwner,
+	)
 }
 
 // deferCheckpointPushOnEmptyRemote reports whether publication of the git-branch
@@ -301,6 +338,12 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	ps := resolvePushSettings(ctx, remote)
 	if ps.pushDisabled {
 		return 0, true, nil
+	}
+	if ps.skipCheckpointPush {
+		// Fork push remote + a configured private target: refuse to push to the
+		// fork (which could publish transcripts). Surface it as an error here —
+		// unlike the fail-soft pre-push path, this is a foreground command.
+		return 0, false, ps.forkMismatch
 	}
 	syncCheckpointPolicyForPrePush(ctx, repo, ps)
 	if !checkpointPolicyAllowsGitHook(ctx, repo) {

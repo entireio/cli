@@ -5,10 +5,30 @@ import (
 	"os/exec"
 	"testing"
 
+	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestForkCheckpointSkipMessage(t *testing.T) {
+	t.Parallel()
+
+	assert.Empty(t, forkCheckpointSkipMessage(nil), "nil mismatch must produce no message")
+
+	msg := forkCheckpointSkipMessage(&checkpointremote.ForkOwnerMismatchError{
+		PushOwner:   "alice",
+		TargetOwner: "acme",
+		TargetRepo:  "acme/checkpoints",
+	})
+	assert.Contains(t, msg, "NOT pushed", "must state checkpoints were not pushed")
+	assert.Contains(t, msg, "acme/checkpoints", "must name the configured private target")
+	assert.Contains(t, msg, `"alice"`, "must name the fork owner")
+	assert.Contains(t, msg, ".entire/settings.local.json", "must point at the local settings file")
+	assert.Contains(t, msg, `"checkpoint_remote": null`, "must show the clear-target escape hatch")
+	assert.Contains(t, msg, "point checkpoint_remote at your own private repo", "must show the repoint escape hatch")
+}
 
 // TestDeferCheckpointPushOnEmptyRemote_UsesLocalTrackingRefs verifies the guard
 // decides purely from local remote-tracking refs, with no network access: a

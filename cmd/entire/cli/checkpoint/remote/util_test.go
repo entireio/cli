@@ -2,6 +2,7 @@ package remote
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -222,15 +223,17 @@ func TestFetchURL_EdgeCases(t *testing.T) {
 
 func TestPushURL(t *testing.T) {
 	tests := []struct {
-		name         string
-		originURL    string
-		pushRemote   string
-		pushURL      string
-		settingsJSON string
-		token        string
-		wantURL      string
-		wantEnabled  bool
-		wantErr      bool
+		name            string
+		originURL       string
+		pushRemote      string
+		pushURL         string
+		settingsJSON    string
+		token           string
+		wantURL         string
+		wantEnabled     bool
+		wantErr         bool
+		wantForkPushOwn string // expected ForkOwnerMismatchError.PushOwner; "" means no fork error expected
+		wantForkTgtOwn  string // expected ForkOwnerMismatchError.TargetOwner
 	}{
 		{
 			name:         "no checkpoint remote falls back to origin https url and reports disabled",
@@ -310,12 +313,12 @@ func TestPushURL(t *testing.T) {
 			wantEnabled:  true,
 		},
 		{
-			name:         "different push remote owner disables checkpoint push url",
-			originURL:    "https://github.com/fork/app.git",
-			pushRemote:   "origin",
-			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
-			wantURL:      "https://github.com/fork/app.git",
-			wantEnabled:  false,
+			name:            "different push remote owner reports a fork owner mismatch",
+			originURL:       "https://github.com/fork/app.git",
+			pushRemote:      "origin",
+			settingsJSON:    `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantForkPushOwn: "fork",
+			wantForkTgtOwn:  "acme",
 		},
 		{
 			name:         "entire:// origin derives mirror checkpoint url on same cluster",
@@ -334,12 +337,12 @@ func TestPushURL(t *testing.T) {
 			wantEnabled:  true,
 		},
 		{
-			name:         "entire:// origin with different owner disables checkpoint push url",
-			originURL:    "entire://app.entire.io/gh/fork/app",
-			pushRemote:   "origin",
-			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
-			wantURL:      "entire://app.entire.io/gh/fork/app",
-			wantEnabled:  false,
+			name:            "entire:// origin with different owner reports a fork owner mismatch",
+			originURL:       "entire://app.entire.io/gh/fork/app",
+			pushRemote:      "origin",
+			settingsJSON:    `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantForkPushOwn: "fork",
+			wantForkTgtOwn:  "acme",
 		},
 		{
 			name:         "file:// origin routes to provider checkpoint url (ssh default)",
@@ -401,6 +404,19 @@ func TestPushURL(t *testing.T) {
 			}
 
 			gotURL, gotEnabled, err := PushURL(context.Background(), tt.pushRemote)
+			if tt.wantForkPushOwn != "" {
+				var forkErr *ForkOwnerMismatchError
+				if !errors.As(err, &forkErr) {
+					t.Fatalf("PushURL() error = %v, want *ForkOwnerMismatchError", err)
+				}
+				if forkErr.PushOwner != tt.wantForkPushOwn {
+					t.Fatalf("ForkOwnerMismatchError.PushOwner = %q, want %q", forkErr.PushOwner, tt.wantForkPushOwn)
+				}
+				if forkErr.TargetOwner != tt.wantForkTgtOwn {
+					t.Fatalf("ForkOwnerMismatchError.TargetOwner = %q, want %q", forkErr.TargetOwner, tt.wantForkTgtOwn)
+				}
+				return
+			}
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("PushURL() error = nil, want error")

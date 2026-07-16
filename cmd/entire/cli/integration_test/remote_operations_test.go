@@ -221,9 +221,10 @@ func TestPrePush_CheckpointURLDerivationFailureFallsBackToOrigin(t *testing.T) {
 
 		// Configure checkpoint_remote with a different owner than origin.
 		// Since our bare remote is a local path (not a URL), resolvePushSettings cannot
-		// parse it via remote.ParseURL and falls back to origin. The unit test
-		// TestResolvePushSettings_ForkDetection in checkpoint_remote_test.go validates
-		// the exact fork detection logic with real URL parsing.
+		// parse it via remote.ParseURL and falls back to origin — a benign derivation
+		// failure, NOT the fork owner-mismatch branch (which requires a parseable URL
+		// and is skipped, not fallen back). The fork owner-mismatch logic is unit-tested
+		// in checkpoint_remote_test.go:TestResolvePushSettings_ForkDetection.
 		env.PatchSettings(map[string]any{
 			"strategy_options": map[string]any{
 				"checkpoint_remote": map[string]any{
