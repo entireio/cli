@@ -75,6 +75,15 @@ func TestLegacyFallbackTranscriptPath(t *testing.T) {
 			metadataDir: ".entire",
 			want:        "",
 		},
+		{
+			// Containment is a fail-closed allow gate: it must stay case-SENSITIVE
+			// on every OS. A case variant names a different on-disk dir on a
+			// case-sensitive volume (which exists under GOOS=darwin), so folding it
+			// in would fail open. Must return "" regardless of platform.
+			name:        "case-variant of metadata dir fails closed on all OSes",
+			metadataDir: ".Entire/metadata/sess-123",
+			want:        "",
+		},
 	}
 
 	for _, tt := range tests {

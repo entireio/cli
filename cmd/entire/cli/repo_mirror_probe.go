@@ -68,11 +68,19 @@ func parseGitHubURL(rawURL string) (owner, repo string, err error) {
 var mirrorPollInterval = 2 * time.Second
 
 // maxConsecutivePollErrors bounds how many back-to-back GetMirror failures the
-// clone wait tolerates before giving up. A brief network/API glitch during a
-// long initial clone shouldn't fail the create, but a persistent error
-// (deleted mirror, revoked auth) should surface rather than spin to the
-// deadline. The counter resets on any successful poll.
-const maxConsecutivePollErrors = 5
+// clone wait tolerates before giving up. Two failure modes share this budget: a
+// brief network/API glitch during a long clone, and — the common one — the
+// stale-read window right after create, where the control plane returns 404
+// "mirror not found" because the just-written repo#list grant / placement row
+// isn't yet visible to the region's minimize_latency + follower reads (~4.8s
+// nominal, but it spikes under concurrent multi-region creates). At the 2s
+// cadence, 15 tolerated errors ≈ 30s — enough to ride out that window, while a
+// genuinely persistent error (deleted mirror, revoked auth) still surfaces well
+// before the 30m --wait-timeout. This is a stopgap: the durable fix is
+// server-side, making GetMirror check the grant fully-consistent and read the
+// row from the CRDB leaseholder so a fresh mirror is visible on the first poll.
+// The counter resets on any successful poll.
+const maxConsecutivePollErrors = 15
 
 var (
 	// errMirrorCloneFailed reports the mirror's initial clone reached the

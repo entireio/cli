@@ -2,7 +2,9 @@ package strategy
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,6 +15,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -199,6 +202,113 @@ func TestPushCheckpointRefWithRecovery_MergesDivergedRef(t *testing.T) {
 	files := remoteRefFiles(t, bareDir, ref)
 	assert.Contains(t, files, "b.txt", "remote-only change must be preserved (not overwritten)")
 	assert.Contains(t, files, "c.txt", "local-only change must be replayed on top")
+}
+
+// enqueueRefs seeds the repo's push queue with the given refs.
+func enqueueRefs(t *testing.T, repo *git.Repository, refs []plumbing.ReferenceName) *checkpoint.PushQueue {
+	t.Helper()
+	queue, err := checkpoint.PushQueueForRepo(context.Background(), repo)
+	require.NoError(t, err)
+	for _, ref := range refs {
+		require.NoError(t, queue.Enqueue(ref))
+	}
+	return queue
+}
+
+func TestPushQueuedCheckpointRefs(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+	assert.False(t, pushDisabled)
+	assert.Equal(t, len(refs), pushed)
+
+	for _, ref := range refs {
+		assert.NotEmpty(t, remoteRefHash(t, bareDir, ref), "ref should be on the remote")
+	}
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "pushed refs are removed from the queue")
+}
+
+func TestPushQueuedCheckpointRefs_PushDisabled(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	// push_sessions disabled: the push is a no-op, and the caller must be able
+	// to tell that apart from an empty queue (pushed==0 with pushing enabled).
+	require.NoError(t, os.MkdirAll(filepath.Join(workDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(workDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"push_sessions": false}}`),
+		0o600,
+	))
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+	assert.True(t, pushDisabled, "push_sessions=false must be reported as disabled")
+	assert.Equal(t, 0, pushed)
+
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining, "disabled push leaves refs queued")
+}
+
+func TestPushQueuedCheckpointRefs_PolicyBlocked(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	writeUnsupportedCheckpointPolicy(t, repo)
+	queue := enqueueRefs(t, repo, refs)
+
+	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.ErrorContains(t, err, "checkpoint policy")
+	assert.Equal(t, 0, pushed)
+
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining, "blocked push leaves refs queued")
+
+	lsCmd := exec.CommandContext(context.Background(), "git", "ls-remote", bareDir)
+	lsCmd.Env = testutil.GitIsolatedEnv()
+	out, err := lsCmd.CombinedOutput()
+	require.NoError(t, err, "ls-remote failed: %s", out)
+	for _, ref := range refs {
+		assert.NotContains(t, string(out), ref.String(), "blocked push must not reach the remote")
+	}
+}
+
+func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
+	workDir, _, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	badTarget := filepath.Join(t.TempDir(), "missing.git")
+	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, badTarget)
+	require.ErrorContains(t, err, "failed to push")
+	assert.Equal(t, 0, pushed)
+
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining, "failed push leaves refs queued")
 }
 
 // remoteRefFiles lists the files in the tree a ref points at on the bare remote.

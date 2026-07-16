@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
@@ -89,8 +90,10 @@ func run(args []string) int {
 	case parsedURL.Scheme != "entire":
 		fmt.Fprintf(os.Stderr, "fatal: unsupported URL scheme %q (expected 'entire')\n", parsedURL.Scheme)
 		return 128
-	case parsedURL.Host == "":
-		fmt.Fprintf(os.Stderr, "fatal: missing host in URL %q\n", rawURL)
+	case parsedURL.Host == "" || gitremote.IsSupportedForge(parsedURL.Host):
+		// Cluster host absent (empty, or a forge id in its slot);
+		// missingClusterHostMessage renders the actionable hint.
+		fmt.Fprint(os.Stderr, missingClusterHostMessage(parsedURL, rawURL))
 		return 128
 	}
 
@@ -208,6 +211,37 @@ func fatalMessage(err error, parsedURL *url.URL) string {
 		}
 	}
 	return fmt.Sprintf("fatal: %v\n", err)
+}
+
+// missingClusterHostMessage renders the stderr "fatal: …" line for an entire://
+// URL that omits its cluster host. Two shapes reach here: a forge id typed
+// where the host belongs (entire://gh/owner/repo, Host="gh") and an empty host
+// (entire:///gh/owner/repo, Host=""). When the reconstructed shorthand is a
+// complete forge/owner/repo triple that `entire repo clone` can resolve, it
+// points at the interactive picker; a partial path (entire://gh,
+// entire://gh/owner) or a non-forge segment falls back to the plain
+// missing-host error rather than suggesting a clone command that would reject
+// the ref. Kept pure so it's unit-testable.
+func missingClusterHostMessage(parsedURL *url.URL, rawURL string) string {
+	// Reconstruct the forge/owner/repo shorthand the user likely intended: a
+	// forge id in the host slot sits in front of the path; an empty host
+	// already has it there.
+	shorthand := strings.TrimPrefix(parsedURL.Path, "/")
+	if parsedURL.Host != "" {
+		shorthand = parsedURL.Host + "/" + shorthand
+	}
+	// Only point at `entire repo clone` for a complete forge/owner/repo triple
+	// (the shape parseMirrorCloneRef accepts); anything shorter would relocate
+	// the failure into a clone command that rejects the ref.
+	seg := strings.Split(strings.Trim(shorthand, "/"), "/")
+	if len(seg) != 3 || seg[0] == "" || seg[1] == "" || seg[2] == "" || !gitremote.IsSupportedForge(seg[0]) {
+		return fmt.Sprintf("fatal: missing host in URL %q\n", rawURL)
+	}
+	return fmt.Sprintf(
+		"fatal: entire:// URL is missing its cluster host (%q is a forge id, not a host).\n"+
+			"The full form is entire://<cluster-host>/%s/<owner>/<repo>.\n"+
+			"To pick a mirror interactively, run:\n\n    entire repo clone /%s\n",
+		seg[0], seg[0], strings.Join(seg, "/"))
 }
 
 // loadedVersion populates the build info and returns the resolved version.

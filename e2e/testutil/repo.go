@@ -199,6 +199,30 @@ func PushCheckpointRefs(t *testing.T, dir string) {
 	Git(t, dir, "push", "origin", checkpointRefV1+":"+checkpointRefV1)
 }
 
+// AssertCheckpointsOnRemote asserts that the backend-appropriate committed
+// checkpoint refs are present on the bare remote at bareDir: the
+// entire/checkpoints/v1 branch (git-branch) or at least one
+// refs/entire/checkpoints/* ref (git-refs). Use it in remote e2e tests to verify
+// the real pre-push hook synced checkpoints WITHOUT an explicit PushCheckpointRefs.
+func AssertCheckpointsOnRemote(t *testing.T, _ *RepoState, bareDir string) {
+	t.Helper()
+
+	if UsingGitRefs() {
+		out, err := GitOutputErr(bareDir, "for-each-ref", "--format=%(refname)", checkpointRefPrefix)
+		if err != nil {
+			t.Errorf("listing %s* refs on remote %s failed: %v", checkpointRefPrefix, bareDir, err)
+			return
+		}
+		if strings.TrimSpace(out) == "" {
+			t.Errorf("expected at least one %s* ref on remote %s, found none", checkpointRefPrefix, bareDir)
+		}
+		return
+	}
+	if _, err := GitOutputErr(bareDir, "rev-parse", "--verify", "refs/heads/"+checkpointRefV1); err != nil {
+		t.Errorf("expected %s branch on remote %s: %v", checkpointRefV1, bareDir, err)
+	}
+}
+
 func setupGeminiTestHome(t *testing.T, repoDir string) {
 	t.Helper()
 

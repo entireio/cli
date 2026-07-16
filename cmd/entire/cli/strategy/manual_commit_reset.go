@@ -4,18 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v6/plumbing"
 )
-
-// isAccessibleMode returns true if accessibility mode should be enabled.
-// This checks the ACCESSIBLE environment variable.
-func isAccessibleMode() bool {
-	return os.Getenv("ACCESSIBLE") != ""
-}
 
 // Reset deletes the shadow branch and session state for the current HEAD.
 // This allows starting fresh without existing checkpoints.

@@ -122,10 +122,10 @@ func TestCodexReviewer_BuiltinReviewExpandsToScopedExecPrompt(t *testing.T) {
 
 	prompt := readCodexCmdStdin(t, cmd)
 	if strings.Contains(prompt, "/review") {
-		t.Fatalf("builtin review prompt should not include raw /review:\n%s", prompt)
+		t.Fatalf("slash-form skill must be rewritten to codex's $ form:\n%s", prompt)
 	}
 	for _, wantText := range []string{
-		"Review the current branch changes and report actionable findings.",
+		"$review",
 		"Focus on auth regressions.",
 		"Scope: review the commits unique to this branch vs main, plus any uncommitted changes in the working tree. Ignore code outside this scope.",
 		"Commits in scope (newest first):",
@@ -346,7 +346,10 @@ func TestParseCodexOutput_StreamsEventsBeforeEOF(t *testing.T) {
 }
 
 func TestParseCodexOutput_NoTurnCompletedMeansFailed(t *testing.T) {
-	t.Parallel()
+	// Cannot t.Parallel — uses t.Setenv. The thread.started envelope
+	// launches the rollout tailer; without the session-dir override it
+	// would glob the real ~/.codex/sessions.
+	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", t.TempDir())
 	// A truncated session: thread starts and an item completes, but no
 	// `turn.completed` envelope ever arrives. The parser must surface
 	// this as Finished{Success: false}.
@@ -428,6 +431,60 @@ func TestParseCodexOutput_NestedErrorMessage(t *testing.T) {
 	}
 }
 
+// TestParseCodexOutput_EmitsTokensAtEveryTurnCompleted locks the live-token
+// contract for codex: its --json output carries `usage` on every
+// `turn.completed` envelope, and the parser emits Tokens at each turn
+// boundary so multi-turn reviews show iterative updates. Captured by
+// running real codex-cli 0.130.0 — no item.* envelope ever carried a
+// usage field, so emission stays anchored to turn.completed.
+func TestParseCodexOutput_EmitsTokensAtEveryTurnCompleted(t *testing.T) {
+	// Cannot t.Parallel — uses t.Setenv. The thread.started envelope
+	// launches the rollout tailer; without the session-dir override it
+	// would glob the real ~/.codex/sessions, and a matching rollout could
+	// inject Tokens into the exact-count assertions below.
+	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", t.TempDir())
+	// Synthetic multi-turn stream (real envelope shapes, invented usage
+	// numbers) with a turn.completed at every turn boundary and NO rollout
+	// file — the no-tailer fallback path. The parser emits each turn's
+	// usage as it arrives. NOTE: turn.completed usage is treated as
+	// per-turn scale (see the parser doc); exec-mode reviews are single
+	// turn in practice, where per-turn and cumulative are identical, so
+	// multi-turn fallback totals are a documented approximation (the last
+	// turn's usage), not a verified cumulative sum.
+	input := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"tid-1"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}`,
+		`{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"ls","aggregated_output":"a\nb\nc","exit_code":0,"status":"completed"}}`,
+		`{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Found three files."}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":34317,"cached_input_tokens":19712,"output_tokens":240,"reasoning_output_tokens":114}}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"cat a","aggregated_output":"","exit_code":null,"status":"in_progress"}}`,
+		`{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"cat a","aggregated_output":"hello","exit_code":0,"status":"completed"}}`,
+		`{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Done."}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":35820,"cached_input_tokens":20114,"output_tokens":401,"reasoning_output_tokens":160}}`,
+		"",
+	}, "\n")
+
+	var tokens []reviewtypes.Tokens
+	for ev := range parseCodexOutput(strings.NewReader(input)) {
+		if tk, ok := ev.(reviewtypes.Tokens); ok {
+			tokens = append(tokens, tk)
+		}
+	}
+
+	if len(tokens) != 2 {
+		t.Fatalf("Tokens count = %d, want exactly 2 (one per turn.completed); got events: %+v",
+			len(tokens), tokens)
+	}
+	if tokens[0].In != 34317 || tokens[0].Out != 240 {
+		t.Errorf("tokens[0] = %+v, want {In:34317, Out:240}", tokens[0])
+	}
+	if tokens[1].In != 35820 || tokens[1].Out != 401 {
+		t.Errorf("tokens[1] = %+v, want {In:35820, Out:401}", tokens[1])
+	}
+}
+
 func collectCodexEvents(ch <-chan reviewtypes.Event) []reviewtypes.Event {
 	var events []reviewtypes.Event
 	for ev := range ch {
@@ -462,4 +519,50 @@ func envToMap(env []string) map[string]string {
 		m[e[:idx]] = e[idx+1:]
 	}
 	return m
+}
+
+// TestBuildCodexReviewCmd_SkillsPassNativelyNotParaphrased locks the fix for
+// codex skill invocation: configured skills reach codex in its native $name
+// form so codex's skill system loads the real SKILL.md, instead of /review
+// being silently REPLACED with a generic 28-word paraphrase (which meant the
+// configured skill never ran — the codex sibling of the claude -p
+// slash-expansion bug).
+func TestBuildCodexReviewCmd_SkillsPassNativelyNotParaphrased(t *testing.T) {
+	t.Parallel()
+	cmd := buildCodexReviewCmd(context.Background(), reviewtypes.RunConfig{
+		Skills: []string{"/review", "/pr-review-toolkit:review-pr", "plain instruction line"},
+	})
+	stdin, err := io.ReadAll(cmd.Stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := string(stdin)
+	for _, want := range []string{"$review", "$pr-review-toolkit:review-pr", "plain instruction line"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing native skill invocation %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "Review the current branch changes and report actionable findings") {
+		t.Errorf("prompt still contains the generic paraphrase:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "/review\n") || strings.HasSuffix(prompt, "/review") {
+		t.Errorf("slash-form skill leaked through untransformed:\n%s", prompt)
+	}
+}
+
+// TestBuildCodexReviewCmd_PromptOverrideVerbatim ensures the $-form transform
+// never touches a verbatim prompt override.
+func TestBuildCodexReviewCmd_PromptOverrideVerbatim(t *testing.T) {
+	t.Parallel()
+	cmd := buildCodexReviewCmd(context.Background(), reviewtypes.RunConfig{
+		Skills:         []string{"/review"},
+		PromptOverride: "/review exactly as written",
+	})
+	stdin, err := io.ReadAll(cmd.Stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(stdin); got != "/review exactly as written" {
+		t.Errorf("PromptOverride modified: %q", got)
+	}
 }

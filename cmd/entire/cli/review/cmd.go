@@ -134,11 +134,13 @@ Flags:
   --models       list the models each agent advertises (optionally --agent NAME)
   --profile NAME select a profile (also accepted as positional arg)
   --prompt TEXT  add one-off per-run instructions for this invocation
-  --timeout DUR  max time each reviewer may run before it's cancelled and marked
-                 failed; also bounds the consolidating judge, whose timeout or
-                 error fails the review with no verdict (default 20m; 0 disables
-                 both bounds). A timed-out reviewer's siblings and the judge
-                 still proceed.
+  --timeout DUR  optional hard cap on each reviewer before it's cancelled and
+                 marked failed. No default — reviewers run until they finish,
+                 like a directly-invoked skill. A positive value also bounds
+                 the consolidating judge, which otherwise keeps its own 20m
+                 default (the judge is never unbounded; its timeout or error
+                 fails the review with no verdict). A timed-out reviewer's
+                 siblings and the judge still proceed.
   --base REF     scope against REF instead of mainline. Useful for stacked
                  PRs where the base is the parent feature branch, not main.
                  Default: first existing of origin/HEAD, origin/main,
@@ -208,7 +210,7 @@ To tag an already-finished session as a review, use
 				}, deps)
 			}
 			if edit {
-				if !interactive.IsTerminalWriter(cmd.OutOrStdout()) || !interactive.CanPromptInteractively() {
+				if !reviewCommandIsInteractive(cmd) {
 					err := errors.New("--edit requires an interactive terminal")
 					cmd.SilenceUsage = true
 					fmt.Fprintln(cmd.ErrOrStderr(), "--edit requires an interactive terminal.")
@@ -223,13 +225,12 @@ To tag an already-finished session as a review, use
 			if findings {
 				return runReviewFindings(ctx, cmd, positionalArg, deps.NewSilentError)
 			}
-			// Map the flag to the RunConfig timeout convention: a non-positive
-			// value (the user passed --timeout 0) means "disable", encoded as the
-			// negative sentinel, which disables BOTH the per-reviewer bound and the
-			// judge's deadline. A positive value passes through and bounds both.
-			// (The flag's default is nonzero, so 0 only appears on --timeout 0.)
-			timeoutArg := resolveReviewerTimeoutArg(reviewTimeout)
-			return runReview(ctx, cmd, agentOverride, modelOverride, baseOverride, profileName, perRunPrompt, timeoutArg, deps)
+			// The flag flows through unmapped: RunConfig.ReviewerTimeout is
+			// two-state (positive = hard cap, anything else = no cap), so the
+			// default 0, an explicit --timeout 0, and a negative all mean
+			// "reviewers run until done". The judge derives its own bound via
+			// judgeTimeoutArg and is never uncapped.
+			return runReview(ctx, cmd, agentOverride, modelOverride, baseOverride, profileName, perRunPrompt, reviewTimeout, deps)
 		},
 	}
 	cmd.Flags().BoolVar(&configure, "configure", false, "set up a review profile; shows available agents and accepts --set-* flags for non-interactive config")
@@ -250,7 +251,7 @@ To tag an already-finished session as a review, use
 	cmd.Flags().StringVar(&profileOverride, "profile", "", "review profile to run (default: review_default_profile or general)")
 	cmd.Flags().StringVar(&perRunPrompt, "prompt", "", "one-off instructions appended to this review run")
 	cmd.Flags().StringVar(&baseOverride, "base", "", "git ref to scope the review against (default: origin/HEAD → origin/main → origin/master → main → master)")
-	cmd.Flags().DurationVar(&reviewTimeout, "timeout", defaultReviewerTimeout, "max time each reviewer may run before it is cancelled and marked failed; also bounds the consolidating judge, whose timeout or error fails the review (0 disables both)")
+	cmd.Flags().DurationVar(&reviewTimeout, "timeout", 0, "optional hard cap per reviewer (default: none — reviewers run until they finish, like a skill invoked directly in a session). When set, it also bounds the consolidating judge; unset, the judge keeps its own 20m default")
 	// The listing modes and the action modes each select a distinct command
 	// behavior; combining them silently runs one and drops the rest, so reject
 	// the combination up front with a clear cobra error.
@@ -267,6 +268,41 @@ type reviewConfigureOptions struct {
 	Task   string   // profile task text (--set-task)
 	Models []string // per-reviewer "agent=model" entries (--set-model)
 	Slots  []string // reviewer slots as "agent[=model]" entries (--set-slot)
+}
+
+// reviewCommandIsInteractive requires the exact stdin consumed by huh and
+// Bubble Tea, plus stdout, to be terminals. CanPromptInteractively adds the
+// independent policy gate for tests, CI, and agent subprocess sentinels; a
+// controlling /dev/tty alone is insufficient because stdin may still be piped.
+func reviewCommandIsInteractive(cmd *cobra.Command) bool {
+	hardDisabled := reviewInteractivityHardDisabled(
+		os.Getenv(interactive.EnvTestTTY),
+		os.Getenv("CI"),
+		interactive.UnderTest(),
+	)
+	return reviewTTYIsInteractive(
+		interactive.IsTerminalReader(cmd.InOrStdin()),
+		interactive.IsTerminalWriter(cmd.OutOrStdout()),
+		interactive.CanPromptInteractively(),
+		hardDisabled,
+	)
+}
+
+func reviewInteractivityHardDisabled(testTTY, ci string, underTest bool) bool {
+	// Match CanPromptInteractively's precedence: ENTIRE_TEST_TTY=1 may opt an
+	// in-process test into interaction, while tests without that explicit
+	// override must never read from a developer's real terminal.
+	if testTTY != "" {
+		return testTTY != "1"
+	}
+	return underTest || (ci != "" && ci != "false")
+}
+
+func reviewTTYIsInteractive(stdinTTY, stdoutTTY, canPrompt, hardDisabled bool) bool {
+	// Real stdio terminals are necessary but not sufficient: agent shells can
+	// allocate a PTY while advertising that no human is available through the
+	// sentinels enforced by CanPromptInteractively.
+	return !hardDisabled && stdinTTY && stdoutTTY && canPrompt
 }
 
 func (o reviewConfigureOptions) scripted() bool {
@@ -328,7 +364,7 @@ func runReviewConfigure(ctx context.Context, cmd *cobra.Command, profileOverride
 	// duplicate the catalog here. Pass the raw --profile value (empty when not
 	// given) so the guided setup runs the "what kind of review?" type picker
 	// instead of being silently defaulted to the general profile.
-	if interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively() {
+	if reviewCommandIsInteractive(cmd) {
 		name, profile, setupErr := RunReviewGuidedSetup(ctx, out, installed, deps.ReviewerFor, strings.TrimSpace(profileOverride), false, s)
 		if setupErr != nil {
 			return handlePickerError(cmd, silentErr, setupErr)
@@ -712,16 +748,14 @@ func reviewAgentNames(deps Deps) []string {
 	return names
 }
 
-// resolveReviewerTimeoutArg maps the --timeout flag value to the RunConfig
-// timeout convention used by reviewerTimeout and the judge's providerContext: a
-// non-positive value (the user passed --timeout 0) becomes the negative
-// "disabled" sentinel; a positive value passes through unchanged. The flag's
-// default is nonzero, so 0 only reaches here when the user explicitly set it.
-func resolveReviewerTimeoutArg(flagValue time.Duration) time.Duration {
-	if flagValue <= 0 {
-		return -1
-	}
-	return flagValue
+// judgeTimeoutArg maps the reviewer --timeout value to the judge's
+// ProviderTimeout. The judge is a single text-generation call with no event
+// stream, so unlike reviewers it always keeps a bound: an explicit positive
+// --timeout governs it, anything else (unset, 0, or a negative like
+// `--timeout -5m`) maps to 0 so the synthesis default (20m) applies — a
+// reviewer-side "no cap" must never leak through as "judge unbounded".
+func judgeTimeoutArg(reviewerArg time.Duration) time.Duration {
+	return max(reviewerArg, 0)
 }
 
 // runReview executes the main review flow.
@@ -756,7 +790,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	applyLegacyReviewProfileFallback(s)
 
 	profileOverride = strings.TrimSpace(profileOverride)
-	interactiveTTY := interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively()
+	interactiveTTY := reviewCommandIsInteractive(cmd)
 
 	// Bare `entire review` never auto-runs a profile. Without a TTY we cannot
 	// prompt, so list the profiles (or point at setup) and require an explicit
@@ -785,7 +819,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 		// Non-interactive first run writes the shared project settings; interactive
 		// setup asks the user where to save below.
 		saveScope := reviewScopeProject
-		guidedSetup := interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively()
+		guidedSetup := interactiveTTY
 		if guidedSetup {
 			var setupErr error
 			profileForSetup, profile, setupErr = RunReviewGuidedSetup(ctx, out, installed, deps.ReviewerFor, profileForSetup, true, s)
@@ -943,12 +977,12 @@ func nonLaunchableEligibleNames(profile settings.ReviewProfileConfig, eligible [
 // (true, nil). In a non-interactive context it cannot prompt, so it proceeds
 // (the user explicitly invoked `entire review`) after printing a note rather
 // than blocking on a confirm form that would error out.
-func confirmReReviewOrProceed(ctx context.Context, out io.Writer, deps Deps) (bool, error) {
+func confirmReReviewOrProceed(ctx context.Context, out io.Writer, deps Deps, canPrompt bool) (bool, error) {
 	reviewed, meta := deps.HeadHasReviewCheckpoint(ctx)
 	if !reviewed {
 		return true, nil
 	}
-	if !interactive.CanPromptInteractively() {
+	if !canPrompt {
 		fmt.Fprintf(out, "Note: HEAD was already reviewed (%s); re-running.\n", meta)
 		return true, nil
 	}
@@ -1010,7 +1044,8 @@ func runSingleAgentPath(
 	}
 
 	// 4. Re-run guard: check if HEAD's checkpoint already has a review.
-	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps); guardErr != nil {
+	canPrompt := reviewCommandIsInteractive(cmd)
+	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps, canPrompt); guardErr != nil {
 		fmt.Fprintln(out, "prompt cancelled")
 		return silentErr(guardErr)
 	} else if !proceed {
@@ -1064,10 +1099,9 @@ func runSingleAgentPath(
 	defer cancelRun()
 
 	runCfg.EnrichSummary = reviewSummaryTokenEnricher(worktreeRoot, headSHA)
-	canPrompt := interactive.CanPromptInteractively()
 	sinks := composeSingleAgentSinks(singleAgentSinkInputs{
 		out:       out,
-		isTTY:     interactive.IsTerminalWriter(out) && canPrompt,
+		isTTY:     canPrompt,
 		canPrompt: canPrompt,
 		agentName: displayName,
 		cancelRun: cancelRun,
@@ -1154,7 +1188,8 @@ func runMultiAgentPath(
 		return fmt.Errorf("resolve HEAD: %w", shaErr)
 	}
 
-	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps); guardErr != nil {
+	canPrompt := reviewCommandIsInteractive(cmd)
+	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps, canPrompt); guardErr != nil {
 		fmt.Fprintln(out, "prompt cancelled")
 		return deps.NewSilentError(guardErr)
 	} else if !proceed {
@@ -1172,6 +1207,7 @@ func runMultiAgentPath(
 		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
 	}
 	reviewers := make([]reviewtypes.AgentReviewer, 0, len(launchableEligible))
+	var excludedWorkers []string
 	for _, choice := range launchableEligible {
 		workerName := choice.Name
 		agentCfg := profile.Agents[workerName]
@@ -1182,9 +1218,14 @@ func runMultiAgentPath(
 				return fmt.Errorf("resolve agent %s: %w", agentName, agErr)
 			}
 			if err := VerifyConfiguredSkillsInstalled(ctx, ag, agentCfg); err != nil {
-				cmd.SilenceUsage = true
-				fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-				return deps.NewSilentError(err)
+				// One worker's stale config must not hold the whole crew
+				// hostage (e.g. codex's legacy auto-preselected "/review",
+				// orphaned when its curated builtin was removed). Exclude
+				// the worker loudly and let the remaining reviewers run;
+				// the all-excluded case fails below.
+				excludedWorkers = append(excludedWorkers, workerName)
+				fmt.Fprintf(cmd.ErrOrStderr(), "skipping reviewer %s: %s\n", workerName, err.Error())
+				continue
 			}
 		}
 		reviewer := deps.ReviewerFor(agentName)
@@ -1206,6 +1247,14 @@ func runMultiAgentPath(
 		})
 	}
 
+	if len(reviewers) == 0 {
+		cmd.SilenceUsage = true
+		err := fmt.Errorf("no runnable reviewers: every configured worker failed skill validation (%s); run `entire review --edit` to reconfigure",
+			strings.Join(excludedWorkers, ", "))
+		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
+		return deps.NewSilentError(err)
+	}
+
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
@@ -1222,7 +1271,7 @@ func runMultiAgentPath(
 	masterLabel := judgeLabel(judge)
 	sinks := composeMultiAgentSinks(multiAgentSinkInputs{
 		out:               out,
-		isTTY:             interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively(),
+		isTTY:             canPrompt,
 		agentNames:        agentNames,
 		cancelRun:         cancelRun,
 		runContext:        runCtx,
@@ -1231,7 +1280,7 @@ func runMultiAgentPath(
 		profileName:       profileName,
 		task:              profile.Task,
 		masterName:        masterLabel,
-		judgeTimeout:      timeout,
+		judgeTimeout:      judgeTimeoutArg(timeout),
 		onSynthesisResult: func(result string) {
 			aggregateOutput = result
 		},
@@ -1296,11 +1345,10 @@ func handlePickerError(cmd *cobra.Command, silentErr func(error) error, pickErr 
 // instead of monkey-patching interactive helpers at run time.
 //
 // isTTY here means "the TUI sink is safe to compose" — production callers
-// AND IsTerminalWriter(out) with CanPromptInteractively() before passing
-// it in, since the TUI both writes ANSI to stdout AND reads keypresses
-// from stdin. A terminal-stdout-but-non-interactive-stdin scenario (an
-// agent host like Claude Code invoking `entire review`) must NOT use the
-// TUI — its dismissal loop would block forever.
+// use reviewCommandIsInteractive before passing it in, since the TUI both
+// writes ANSI to stdout and reads keypresses from stdin. A terminal stdout
+// with non-interactive stdin must not use the TUI; its dismissal loop would
+// block forever.
 type multiAgentSinkInputs struct {
 	out               io.Writer
 	isTTY             bool

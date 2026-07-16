@@ -9,14 +9,12 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// newProjectCmd is the hidden `entire project` command group: create, list,
-// get, and delete projects on the Entire control plane. Surfaced via `entire
-// labs`.
+// newProjectCmd is the `entire project` command group: create, list,
+// get, and delete projects on the Entire control plane.
 func newProjectCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "project",
-		Short:  "Manage Entire projects",
-		Hidden: true,
+		Use:   "project",
+		Short: "Manage Entire projects",
 	}
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newProjectCreateCmd())
@@ -89,6 +87,7 @@ func newProjectCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&ownerType, "owner-type", "org", "Owner kind: org or account")
 	cmd.Flags().StringVar(&region, "region", "", "Jurisdiction slug (defaults to the server's home jurisdiction)")
 	markRequired(cmd, "owner")
+	addJSONFlag(cmd)
 	return cmd
 }
 
@@ -157,11 +156,12 @@ func newProjectListCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&name, "name", "", "Filter by exact project name")
 	cmd.Flags().StringVar(&org, "org", "", "List projects owned by this org (name or ULID)")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newProjectGetCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "get <project>",
 		Short: "Show a project by name or ULID",
 		Args:  cobra.ExactArgs(1),
@@ -175,6 +175,8 @@ func newProjectGetCmd() *cobra.Command {
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }
 
 func newProjectDeleteCmd() *cobra.Command {

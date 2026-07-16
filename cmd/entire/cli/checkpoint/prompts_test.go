@@ -28,8 +28,9 @@ func TestSplitPromptContent_EmptyContent(t *testing.T) {
 }
 
 // TestRedactedJoinedPrompts_AppliesSafetyNet verifies the helper joins
-// prompts with the canonical separator and runs them through the 7-layer
-// pipeline. OPF runs only in the pre-push rewrite path, never here.
+// prompts with the canonical separator and runs them through the
+// regex-only pipeline. OPF runs only in the pre-push rewrite path, never
+// here.
 func TestRedactedJoinedPrompts_AppliesSafetyNet(t *testing.T) {
 	t.Parallel()
 	got := RedactedJoinedPrompts([]string{"hello", "world"})

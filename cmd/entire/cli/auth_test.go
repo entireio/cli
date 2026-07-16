@@ -431,3 +431,28 @@ func TestAuthCmd_TopLevelLoginAndLogoutStillRegistered(t *testing.T) {
 		}
 	}
 }
+
+// The Token: provenance line must reflect the configured credential backend:
+// with ENTIRE_TOKEN_STORE=file the token lives in a JSON file, not the OS
+// keychain, and claiming otherwise misleads exactly the headless users the
+// file backend exists for (#1036).
+func TestRunAuthStatus_FileTokenStoreProvenance(t *testing.T) {
+	// Not parallel: t.Setenv.
+	t.Setenv("ENTIRE_TOKEN_STORE", "file")
+	t.Setenv("ENTIRE_TOKEN_STORE_PATH", "/ci/secrets/tokens.json")
+
+	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "core"}
+	listSessions := func(context.Context, string, string) ([]api.AuthSession, error) { return nil, nil }
+
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, okProfile, listSessions, target); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "stored in file /ci/secrets/tokens.json") {
+		t.Fatalf("output = %q, want the file-backend provenance line", got)
+	}
+	if strings.Contains(got, "OS keychain") {
+		t.Fatalf("output = %q, must not claim the OS keychain when the file backend is configured", got)
+	}
+}

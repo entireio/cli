@@ -188,6 +188,20 @@ type TranscriptPreparer interface {
 	PrepareTranscript(ctx context.Context, sessionRef string) error
 }
 
+// SidecarImageProvider is implemented by agents that keep images OUTSIDE the
+// transcript Entire condenses — e.g. Cursor stores pasted images in a per-session
+// SQLite blob store, not the JSONL transcript. The strategy layer calls this
+// during condensation/finalize to capture those images as checkpoint assets so
+// they're preserved with the session. Best-effort: returns nil (no error) when
+// the sidecar store is unavailable or unreadable.
+type SidecarImageProvider interface {
+	Agent
+
+	// SidecarImages returns images stored outside the transcript for the session
+	// identified by sessionRef (the transcript path).
+	SidecarImages(ctx context.Context, sessionRef string) ([]CompactedTranscriptAsset, error)
+}
+
 // TokenCalculator provides token usage calculation for a session.
 // The framework calls this during step save and checkpoint if implemented.
 type TokenCalculator interface {
@@ -347,6 +361,24 @@ type SubagentAwareExtractor interface {
 	ExtractAllModifiedFiles(transcriptData []byte, fromOffset int, subagentsDir string) ([]string, error)
 
 	// CalculateTotalTokenUsage computes token usage including all spawned subagents.
-	// The subagentsDir parameter specifies where subagent transcripts are stored.
+	// The subagentsDir parameter specifies where subagent transcripts are stored
+	// (an empty subagentsDir skips subagent accounting and leaves SubagentTokens nil).
+	//
+	// CONTRACT — the returned SubagentTokens is a CUMULATIVE-SINCE-SESSION-START
+	// snapshot, NOT a delta scoped to fromOffset like the main-agent fields
+	// (InputTokens/OutputTokens/...). Implementations MUST discover spawned agent
+	// IDs from the FULL transcript prefix [0,end) — so a subagent spawned before
+	// fromOffset is still found (#329) — and re-read each subagent transcript from
+	// line 0 on every call. Consequently a subagent's full total repeats on every
+	// call after it is first discovered.
+	//
+	// Callers that accumulate across checkpoints/turns therefore MUST NOT sum
+	// SubagentTokens across calls: replace the running total with the latest
+	// snapshot, and rescope any window delta by subtracting a previously captured
+	// baseline (see accumulateTokenUsage / resetCheckpointWindow and
+	// session.State.SubagentTokensBaseline in cmd/entire/cli/strategy, and
+	// rescopeSubagentTokensToDeltas in cmd/entire/cli/agentimport for the import
+	// path). An implementation that instead returned per-window deltas would
+	// silently break that accounting with no compile-time or test signal.
 	CalculateTotalTokenUsage(transcriptData []byte, fromOffset int, subagentsDir string) (*TokenUsage, error)
 }

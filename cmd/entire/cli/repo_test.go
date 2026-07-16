@@ -105,7 +105,7 @@ func TestRepoDetailRow(t *testing.T) {
 			OwningProjectId: "01KS6KFJR2XS6PZ188MVYE07AP",
 			ClusterHost:     coreapi.NewOptString("aws-us-east-2.entire.io"),
 			Path:            coreapi.NewOptString("acme/web"),
-			State:           coreapi.NewOptRepoState(coreapi.RepoStateActive),
+			State:           coreapi.NewOptString("active"),
 		})
 		if len(row) != len(repoDetailColumns) {
 			t.Fatalf("row has %d cells, want %d (one per column)", len(row), len(repoDetailColumns))

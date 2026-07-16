@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -21,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trail"
 
 	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
@@ -251,33 +251,52 @@ func resolveTrailBySelector(ctx context.Context, client *api.Client, forge, owne
 }
 
 func printTrailDetails(w io.Writer, m *trail.Metadata, webURL, bodyText string) {
-	fmt.Fprintf(w, "Trail: %s\n", m.Title)
+	// Color the same fields as the list view (STATUS/PHASE/AUTHOR); everything
+	// else stays plain. Values are pre-colored, so alignment is unaffected.
+	styles := newStatusStyles(w)
+	status := string(m.Status)
+	if style, ok := trailStatusColor(styles, m.Status); ok {
+		status = styles.render(style, status)
+	}
+	author := m.AuthorLogin()
+	if styles.colorEnabled && author != "" {
+		author = styles.render(styles.cyan, author)
+	}
+
+	// Field labels and the title line render yellow (matching the list header).
+	label := func(s string) string { return styles.render(styles.yellow, s) }
+
+	fmt.Fprintf(w, "%s\n", styles.render(styles.yellow, "Trail: "+m.Title))
 	if m.Number > 0 {
-		fmt.Fprintf(w, "  Number:  %d\n", m.Number)
+		fmt.Fprintf(w, "  %s%d\n", label("Number:  "), m.Number)
 	}
 	if !m.TrailID.IsEmpty() {
-		fmt.Fprintf(w, "  ID:      %s\n", m.TrailID)
+		fmt.Fprintf(w, "  %s%s\n", label("ID:      "), m.TrailID)
 	}
-	fmt.Fprintf(w, "  Branch:  %s\n", m.Branch)
-	fmt.Fprintf(w, "  Base:    %s\n", m.Base)
-	fmt.Fprintf(w, "  Status:  %s\n", m.Status)
-	fmt.Fprintf(w, "  Author:  %s\n", m.AuthorLogin())
+	fmt.Fprintf(w, "  %s%s\n", label("Branch:  "), m.Branch)
+	fmt.Fprintf(w, "  %s%s\n", label("Base:    "), m.Base)
+	fmt.Fprintf(w, "  %s%s\n", label("Status:  "), status)
+	fmt.Fprintf(w, "  %s%s\n", label("Author:  "), author)
 	if strings.TrimSpace(m.Phase) != "" {
-		fmt.Fprintf(w, "  Phase:   %s\n", trailPhaseDisplay(m.Phase))
+		phase := trailPhaseDisplay(m.Phase)
+		if styles.colorEnabled {
+			phase = styles.render(styles.yellow, phase)
+		}
+		fmt.Fprintf(w, "  %s%s\n", label("Phase:   "), phase)
 	}
 	if webURL != "" {
-		fmt.Fprintf(w, "  URL:     %s\n", webURL)
+		fmt.Fprintf(w, "  %s%s\n", label("URL:     "), webURL)
 	}
 	if len(m.Labels) > 0 {
-		fmt.Fprintf(w, "  Labels:  %s\n", strings.Join(m.Labels, ", "))
+		fmt.Fprintf(w, "  %s%s\n", label("Labels:  "), strings.Join(m.Labels, ", "))
 	}
 	if len(m.Assignees) > 0 {
-		fmt.Fprintf(w, "  Assignees: %s\n", strings.Join(m.Assignees, ", "))
+		fmt.Fprintf(w, "  %s%s\n", label("Assignees: "), strings.Join(m.Assignees, ", "))
 	}
-	fmt.Fprintf(w, "  Created: %s\n", m.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
-	fmt.Fprintf(w, "  Updated: %s\n", m.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"))
+	fmt.Fprintf(w, "  %s%s\n", label("Created: "), m.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
+	fmt.Fprintf(w, "  %s%s\n", label("Updated: "), m.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"))
 	if strings.TrimSpace(bodyText) != "" {
-		fmt.Fprintf(w, "\nDescription:\n%s\n", bodyText)
+		fmt.Fprintf(w, "\n%s\n%s\n", label("Description:"), bodyText)
 	}
 }
 
@@ -627,27 +646,29 @@ func printTrailListHeader(w io.Writer, opts trailListDisplayOptions, count int) 
 }
 
 func printTrailRows(w io.Writer, trails []*trail.Metadata, showAuthor, showStatus bool) {
-	// tabwriter aligns by display columns instead of bytes, so multi-byte
-	// branch names or logins don't throw off the table.
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	styles := newStatusStyles(w)
 	showPhase := trailListHasPhase(trails)
 	showURL := trailListHasURL(trails)
-	columns := []string{"NUM", "BRANCH", "TITLE"}
+
+	// The leading two-space indent is folded into the first column so the shared
+	// table renderer (columnWidths/writeTableRow) reproduces the list's layout.
+	headers := []string{"  NUM", "BRANCH", "TITLE"}
 	if showStatus {
-		columns = append(columns, "STATUS")
+		headers = append(headers, "STATUS")
 	}
 	if showPhase {
-		columns = append(columns, "PHASE")
+		headers = append(headers, "PHASE")
 	}
 	if showAuthor {
-		columns = append(columns, "AUTHOR")
+		headers = append(headers, "AUTHOR")
 	}
-	columns = append(columns, "UPDATED")
+	headers = append(headers, "UPDATED")
 	if showURL {
-		columns = append(columns, "URL")
+		headers = append(headers, "URL")
 	}
-	fmt.Fprintln(tw, "  "+strings.Join(columns, "\t"))
-	for _, t := range trails {
+
+	rows := make([][]string, len(trails))
+	for i, t := range trails {
 		number := "-"
 		if t.Number > 0 {
 			number = strconv.Itoa(t.Number)
@@ -656,23 +677,50 @@ func printTrailRows(w io.Writer, trails []*trail.Metadata, showAuthor, showStatu
 		if title == "" {
 			title = "(untitled)"
 		}
-		fields := []string{number, t.Branch, title}
+		fields := []string{"  " + number, t.Branch, title}
+		// Cells are pre-colored here; columnWidths/writeTableRow measure width
+		// with lipgloss.Width (ANSI-agnostic), so color never shifts columns.
 		if showStatus {
-			fields = append(fields, trailStatusDisplay(t.Status))
+			status := trailStatusDisplay(t.Status)
+			if style, ok := trailStatusColor(styles, t.Status); ok {
+				status = styles.render(style, status)
+			}
+			fields = append(fields, status)
 		}
 		if showPhase {
-			fields = append(fields, trailPhaseDisplay(t.Phase))
+			phase := trailPhaseDisplay(t.Phase)
+			if styles.colorEnabled && phase != "-" {
+				phase = styles.render(styles.yellow, phase)
+			}
+			fields = append(fields, phase)
 		}
 		if showAuthor {
-			fields = append(fields, t.AuthorLogin())
+			author := t.AuthorLogin()
+			if styles.colorEnabled && author != "" {
+				author = styles.render(styles.cyan, author)
+			}
+			fields = append(fields, author)
 		}
 		fields = append(fields, timeAgo(t.UpdatedAt))
 		if showURL {
 			fields = append(fields, t.URL)
 		}
-		fmt.Fprintln(tw, "  "+strings.Join(fields, "\t"))
+		rows[i] = fields
 	}
-	_ = tw.Flush()
+
+	widths := columnWidths(headers, rows)
+	var b strings.Builder
+	// Header row is yellow; data cells are already pre-colored, so they pass
+	// through a disabled style. tblSt only supplies the color-enabled gate for
+	// the header style.
+	tblSt := newTableStyles(w)
+	headerStyle := func(int) lipgloss.Style { return styles.yellow }
+	plain := func(int) lipgloss.Style { return lipgloss.Style{} }
+	writeTableRow(&b, headers, widths, headerStyle, tblSt)
+	for _, r := range rows {
+		writeTableRow(&b, r, widths, plain, tableStyles{})
+	}
+	fmt.Fprint(w, b.String())
 }
 
 func trailListHasPhase(trails []*trail.Metadata) bool {
@@ -719,6 +767,25 @@ func trailStatusListTitle(statuses []trail.Status) string {
 
 func trailStatusDisplay(status trail.Status) string {
 	return strings.ReplaceAll(string(status), "_", " ")
+}
+
+// trailStatusColor returns the style for a trail status: open green, merged
+// magenta, closed red. draft (the in-progress/building state) and any unknown
+// status stay uncolored. The colors avoid AUTHOR's cyan and PHASE's yellow so
+// the columns stay distinguishable.
+func trailStatusColor(styles statusStyles, status trail.Status) (lipgloss.Style, bool) {
+	switch status {
+	case trail.StatusOpen:
+		return styles.green, true
+	case trail.StatusMerged:
+		return styles.magenta, true
+	case trail.StatusClosed:
+		return styles.red, true
+	case trail.StatusDraft:
+		return lipgloss.Style{}, false
+	default:
+		return lipgloss.Style{}, false
+	}
 }
 
 // trailCountDisplay renders a count as "shown/total" when --limit truncated
@@ -1227,6 +1294,7 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 func newTrailCheckoutCmd() *cobra.Command {
 	var trailSelector string
 	var force bool
+	var worktree bool
 
 	cmd := &cobra.Command{
 		Use:   "checkout [<trail>]",
@@ -1236,6 +1304,13 @@ func newTrailCheckoutCmd() *cobra.Command {
 The trail may be given as the first argument or via --trail, as a number, id, or
 branch. Without one, the trail for the current branch is used. The trail's branch
 is checked out, fetching it from origin first when it only exists there.
+
+With --worktree, the branch is checked out into a git worktree under
+.entire/worktrees at the repo root instead of switching this checkout, and the
+command prints a cd command for the new worktree. Gitignored files matching
+.worktreeinclude patterns are copied into the worktree. When stdout is not a
+terminal, only the worktree path is printed, so scripts can use
+cd "$(entire trail checkout <trail> --worktree)".
 
 This must be run from within a clone of the repository the trail belongs to; the
 trail is looked up against that repository's origin remote.`,
@@ -1251,17 +1326,23 @@ trail is looked up against that repository's origin remote.`,
 			if err := ensureNoTrailRepoOverride(cmd, "trail checkout"); err != nil {
 				return err
 			}
-			return runTrailCheckout(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), selector, force)
+			return runTrailCheckout(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), selector, trailCheckoutOptions{Force: force, Worktree: worktree})
 		},
 	}
 
 	cmd.Flags().StringVar(&trailSelector, "trail", "", "Trail to check out (number, id, or branch; defaults to the current branch's trail)")
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip the prompt before fetching a remote-only branch")
+	cmd.Flags().BoolVar(&worktree, "worktree", false, "Check out the trail branch in a worktree under .entire/worktrees instead of switching this checkout")
 
 	return cmd
 }
 
-func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector string, force bool) error {
+type trailCheckoutOptions struct {
+	Force    bool
+	Worktree bool
+}
+
+func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector string, opts trailCheckoutOptions) error {
 	// checkout rejects --repo (it operates on the local clone), so the enablement
 	// cache always tracks the local origin here.
 	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, "", func(ctx context.Context, client *api.Client) error {
@@ -1280,6 +1361,11 @@ func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool,
 			return fmt.Errorf("%s has no branch to check out", describeTrailRef(found))
 		}
 
+		if opts.Worktree {
+			fmt.Fprintf(errW, "Checking out %s in a worktree\n", describeTrailRef(found))
+			return checkoutTrailWorktree(ctx, w, errW, branch, opts.Force, found.Number)
+		}
+
 		currentBranch, _ := GetCurrentBranch(ctx) //nolint:errcheck // best-effort; a detached HEAD just means "not already on the branch"
 		if currentBranch == branch {
 			fmt.Fprintf(w, "Already on branch %s for %s.\n", branch, describeTrailRef(found))
@@ -1290,7 +1376,7 @@ func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool,
 		// switchToBranchForResume handles local vs. remote-only branches, the
 		// uncommitted-changes guard, and the fetch prompt; reuse it rather than
 		// re-deriving that logic here.
-		proceed, err := switchToBranchForResume(ctx, w, errW, branch, force)
+		proceed, err := switchToBranchForResume(ctx, w, errW, branch, opts.Force)
 		if err != nil {
 			return err
 		}

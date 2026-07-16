@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -51,6 +52,31 @@ const MaxCommitTraversalDepth = 1000
 var errStop = errors.New("stop iteration")
 
 var errNoMergeBase = errors.New("no merge base")
+
+// checkpointRemoteBootstrapContextKey gates whether EnsurePrimaryRef is
+// allowed to perform a network fetch against a configured checkpoint_remote
+// (see bootstrapPrimaryFromCheckpointRemote). Unset/false in ctx means "no".
+type checkpointRemoteBootstrapContextKey struct{}
+
+// WithCheckpointRemoteBootstrap marks ctx as permitting EnsurePrimaryRef to
+// fetch a missing primary metadata ref from a configured checkpoint_remote.
+// This must only be set on explicit, user-initiated setup flows (`entire
+// enable`, agent add/setup) — never on the per-turn hook hot path. EnsureSetup
+// runs synchronously on every TurnStart hook and hook execution has a hard
+// timeout; without this guard a slow/unreachable checkpoint remote would
+// repeat an expensive fetch on every turn instead of self-healing once via
+// the empty-orphan fallback.
+func WithCheckpointRemoteBootstrap(ctx context.Context) context.Context {
+	return context.WithValue(ctx, checkpointRemoteBootstrapContextKey{}, true)
+}
+
+// checkpointRemoteBootstrapAllowed reports whether ctx was marked via
+// WithCheckpointRemoteBootstrap.
+func checkpointRemoteBootstrapAllowed(ctx context.Context) bool {
+	v := ctx.Value(checkpointRemoteBootstrapContextKey{})
+	allowed, ok := v.(bool)
+	return ok && allowed
+}
 
 // IsEmptyRepository returns true if the repository has no commits yet.
 // After git-init, HEAD points to an unborn branch (e.g., refs/heads/main)
@@ -352,7 +378,7 @@ const (
 // registered agent config directories.
 func isProtectedPath(relPath string) bool {
 	for _, dir := range protectedDirs() {
-		if paths.IsSubpath(dir, relPath) {
+		if paths.IsProtectedSubpath(dir, relPath) {
 			return true
 		}
 	}
@@ -442,7 +468,7 @@ func EnsureRedactionConfigured() {
 			})
 		}
 
-		// OpenAI Privacy Filter (opt-in 8th layer).
+		// OpenAI Privacy Filter (opt-in 9th layer).
 		if s.Redaction != nil && s.Redaction.OpenAIPrivacyFilter != nil {
 			opf := s.Redaction.OpenAIPrivacyFilter
 			redact.ConfigurePrivacyFilter(redact.OPFConfig{
@@ -464,15 +490,70 @@ func resolveAgentType(ctxAgentType types.AgentType, state *SessionState) types.A
 	return ctxAgentType
 }
 
-// EnsurePrimaryRef creates or updates the local primary metadata ref. If
-// Primary is in Push (i.e. origin tracks it) and the local ref is missing or
-// empty, creates/updates the local ref from origin's remote-tracking ref.
-// Otherwise creates an empty orphan.
+// EnsurePrimaryRef creates or updates the local primary metadata ref.
+//
+// A configured checkpoint_remote is the authoritative checkpoint store: when one
+// is set the local ref is only ever sourced from it, never from origin's
+// (possibly stale) tracking ref (issue #1374). Without a checkpoint_remote,
+// origin holds the store — when Primary is in Push and the local ref is missing
+// or un-initialized, the local ref is created/updated from origin's
+// remote-tracking ref. Otherwise an empty orphan is created.
 func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
+	// Rebind settings/remote resolution to the repository being modified rather
+	// than the ambient working directory, so the "is a checkpoint_remote
+	// configured" decision (and any fetch below) targets repo even when a caller
+	// passes a handle for a repo that is not CWD. EnsureSetup opens repo from CWD
+	// and tests t.Chdir into it, so in normal use this is a no-op.
+	if root, rootErr := getRepoPath(repo); rootErr == nil {
+		ctx = settings.WithWorktreeRoot(ctx, root)
+	}
+
 	refs := checkpoint.ResolveRefs(ctx)
 	primaryName := refs.Primary.Short()
 
-	// Origin only tracks Primary when Primary is in Push.
+	localRef, localErr := repo.Reference(refs.Primary, true)
+	if localErr != nil && !errors.Is(localErr, plumbing.ErrReferenceNotFound) {
+		return fmt.Errorf("failed to check metadata ref: %w", localErr)
+	}
+	localExists := localErr == nil
+
+	// A configured checkpoint_remote is the authoritative checkpoint store and
+	// takes precedence over origin's (possibly stale) primary tracking ref. When
+	// it is configured we never seed from origin: a machine migrated from
+	// origin-hosted checkpoints to a dedicated checkpoint_remote must not replay
+	// origin's stale checkpoints into it (issue #1374). The network fetch is
+	// additionally gated on an explicit enable flow (WithCheckpointRemoteBootstrap):
+	// the per-turn hook hot path stays network-free and self-heals via the
+	// empty-orphan fallback.
+	if remote.Configured(ctx) {
+		if localExists {
+			// Heal an un-initialized orphan (empty, or vercel.json-only on a
+			// vercel-enabled repo) from the checkpoint remote. Whatever the
+			// outcome, never fall through to origin.
+			healed, err := healPrimaryFromCheckpointRemote(ctx, repo, localRef, refs.Primary)
+			if err != nil {
+				return err
+			}
+			if healed {
+				fmt.Fprintf(os.Stderr, "✓ Updated local ref '%s' from checkpoint remote\n", primaryName)
+			}
+			return nil
+		}
+		// Local ref missing — fetch the real branch before creating a fresh
+		// orphan: an orphan would diverge from it, hide existing checkpoints, and
+		// be rejected non-fast-forward on later syncs.
+		if bootstrapPrimaryFromCheckpointRemote(ctx, repo, refs.Primary) {
+			fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from checkpoint remote\n", primaryName)
+			return nil
+		}
+		// Nothing usable on the checkpoint remote (fetch skipped/failed or the
+		// remote has no data) — create a fresh orphan that future pushes publish
+		// there. Still never origin.
+		return createOrphanMetadataRef(ctx, repo, refs)
+	}
+
+	// No checkpoint_remote configured — origin holds the checkpoint store. Origin
+	// only tracks Primary when Primary is in Push.
 	var remoteRef *plumbing.Reference
 	if refs.PrimaryFetchableFromOrigin() {
 		var remoteErr error
@@ -482,17 +563,15 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 		}
 	}
 
-	// Check if local ref already exists
-	localRef, err := repo.Reference(refs.Primary, true)
-	if err == nil {
+	if localExists {
 		if remoteRef != nil && localRef.Hash() != remoteRef.Hash() {
 			// Local and remote exist but differ — determine relationship
-			isEmpty, checkErr := isEmptyMetadataBranch(repo, localRef)
+			hasData, checkErr := metadataBranchHasData(repo, localRef)
 			if checkErr != nil {
 				return fmt.Errorf("failed to check metadata ref contents: %w", checkErr)
 			}
-			if isEmpty {
-				// Empty orphan — just point to remote
+			if !hasData {
+				// Un-initialized orphan — just point to remote
 				if setErr := setRefHash(repo, refs.Primary, remoteRef.Hash()); setErr != nil {
 					return fmt.Errorf("failed to update metadata ref from remote: %w", setErr)
 				}
@@ -509,11 +588,8 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 		}
 		return nil
 	}
-	if !errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return fmt.Errorf("failed to check metadata ref: %w", err)
-	}
 
-	// Local ref doesn't exist — create from remote if available
+	// Local ref doesn't exist — create from origin if available.
 	if remoteRef != nil {
 		if err := setRefHash(repo, refs.Primary, remoteRef.Hash()); err != nil {
 			return fmt.Errorf("failed to create metadata ref from remote: %w", err)
@@ -522,7 +598,14 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 		return nil
 	}
 
-	// No local ref and nothing to bootstrap from — create empty orphan
+	// No local or origin ref — create an empty orphan.
+	return createOrphanMetadataRef(ctx, repo, refs)
+}
+
+// createOrphanMetadataRef creates the local primary metadata ref as a fresh empty
+// orphan commit (plus any merged vercel config). Used when no metadata ref can be
+// sourced from origin or a checkpoint_remote.
+func createOrphanMetadataRef(ctx context.Context, repo *git.Repository, refs checkpoint.PersistentRefs) error {
 	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
 	obj := repo.Storer.NewEncodedObject()
 	if err := emptyTree.Encode(obj); err != nil {
@@ -575,14 +658,188 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 		return fmt.Errorf("failed to create metadata ref: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "  ✓ Created orphan ref %s for session metadata\n", primaryName)
+	fmt.Fprintf(os.Stderr, "  ✓ Created orphan ref %s for session metadata\n", refs.Primary.Short())
 	return nil
 }
 
-// isEmptyMetadataBranch returns true if the branch ref points to a commit with an empty tree.
-// Only checks the tip commit — if a data commit sits on top of an empty orphan, this returns
-// false, which is correct: the bug this detects creates a single empty orphan as the tip.
-func isEmptyMetadataBranch(repo *git.Repository, ref *plumbing.Reference) (bool, error) {
+// bootstrapPrimaryFromCheckpointRemote tries to populate a missing local primary
+// metadata ref from a configured checkpoint_remote before the caller falls back
+// to creating an empty orphan. When a separate checkpoint_remote already holds
+// the real entire/checkpoints/v1 branch (the common second-device case), a fresh
+// local orphan would diverge from it — hiding existing checkpoints and causing
+// non-fast-forward rejections on the next fetch.
+//
+// All resolution is pinned to repo's worktree (settings, origin URL, fetch
+// working directory, ref promotion) so the decision depends on the repository
+// being ensured rather than the ambient working directory.
+//
+// It returns true only when the fetch succeeds and the local primary ref now
+// points at the remote branch. Every failure is non-fatal and returns false so
+// the caller creates the empty orphan: `entire enable` must never break on a
+// missing checkpoint remote, an unresolvable URL, or a network/auth error.
+func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Repository, primary plumbing.ReferenceName) bool {
+	if !checkpointRemoteBootstrapAllowed(ctx) {
+		// Not an explicit setup flow (e.g. the per-turn hook hot path via
+		// EnsureSetup). Never fetch here: hook execution has a hard timeout,
+		// and a slow/unreachable checkpoint remote must not stall every turn.
+		// Fall back to the empty orphan, which self-heals immediately.
+		logging.Debug(ctx, "checkpoint-remote: skipping bootstrap fetch outside explicit enable flow")
+		return false
+	}
+
+	worktreeRoot, err := getRepoPath(repo)
+	if err != nil {
+		logging.Debug(ctx, "checkpoint-remote: cannot resolve worktree root for enable bootstrap",
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+	// Pin settings/remote resolution to this repo's worktree.
+	ctx = settings.WithWorktreeRoot(ctx, worktreeRoot)
+
+	// Resolve and verify the checkpoint fetch URL. resolveCheckpointFetchURL
+	// rejects remote.FetchURL's silent origin fallback, so bootstrap never adopts
+	// origin's data when the derived URL doesn't actually target the configured
+	// checkpoint repo (issue #1374).
+	url, ok := resolveCheckpointFetchURL(ctx, worktreeRoot)
+	if !ok {
+		return false
+	}
+
+	branchName := primary.Short()
+	tmpRefName := plumbing.ReferenceName(FetchTmpRefPrefix + branchName)
+	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true); err != nil {
+		logging.Debug(ctx, "checkpoint-remote: enable bootstrap fetch failed; creating empty orphan",
+			slog.String("url", remote.RedactURL(url)),
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
+
+	tmpRef, err := repo.Reference(tmpRefName, true)
+	if err != nil {
+		logging.Debug(ctx, "checkpoint-remote: fetched metadata ref missing after enable bootstrap",
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+	if err := SafelyAdvanceLocalRef(ctx, repo, primary, tmpRef.Hash()); err != nil {
+		logging.Debug(ctx, "checkpoint-remote: could not advance local metadata ref on enable bootstrap",
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+	logging.Info(ctx, "checkpoint-remote: bootstrapped metadata branch on enable",
+		slog.String("ref", primary.String()),
+	)
+	return true
+}
+
+// healPrimaryFromCheckpointRemote replaces a local primary metadata ref that holds
+// no checkpoint data — an empty orphan, or a vercel.json-only orphan on a
+// vercel-enabled repo — with the real branch fetched from a configured
+// checkpoint_remote. It repairs second-device repos left with an un-initialized
+// orphan disjoint from the remote history (issue #1374).
+//
+// The network fetch is gated on an explicit enable flow
+// (WithCheckpointRemoteBootstrap); the per-turn hook hot path stays network-free.
+// Returns true only when the local ref was replaced with real remote data. A
+// local branch that already carries checkpoints, a non-enable context, an
+// unresolvable URL, or a fetch that yields no usable data all return (false, nil)
+// so the caller keeps the local ref as-is.
+func healPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Repository, localRef *plumbing.Reference, primary plumbing.ReferenceName) (bool, error) {
+	hasData, err := metadataBranchHasData(repo, localRef)
+	if err != nil {
+		return false, fmt.Errorf("failed to check metadata branch contents: %w", err)
+	}
+	if hasData {
+		return false, nil
+	}
+	if !checkpointRemoteBootstrapAllowed(ctx) {
+		// Not an explicit setup flow (e.g. the per-turn hook hot path). Never
+		// fetch here: the local orphan self-heals on the next explicit enable.
+		logging.Debug(ctx, "checkpoint-remote: skipping empty-orphan heal outside explicit enable flow")
+		return false, nil
+	}
+	return healEmptyOrphanFromCheckpointRemote(ctx, repo, primary)
+}
+
+// healEmptyOrphanFromCheckpointRemote fetches the metadata branch from the
+// configured checkpoint_remote and force-sets the local ref to the fetched tip.
+// It deliberately bypasses SafelyAdvanceLocalRef: the local orphan is disconnected
+// from the real branch, so a safe advance would cherry-pick the orphan commit onto
+// the fetched tip and leave a stray empty commit. Discarding the data-free orphan
+// is always correct here. Fetch failures and a data-free fetched branch are
+// non-fatal and return (false, nil) so the caller keeps the local orphan.
+func healEmptyOrphanFromCheckpointRemote(ctx context.Context, repo *git.Repository, primary plumbing.ReferenceName) (bool, error) {
+	if !primary.IsBranch() {
+		return false, nil
+	}
+	worktreeRoot, err := getRepoPath(repo)
+	if err != nil {
+		logging.Debug(ctx, "checkpoint-remote: cannot resolve worktree root for empty-orphan heal",
+			slog.String("error", err.Error()),
+		)
+		return false, nil
+	}
+	// Pin settings/remote resolution to this repo's worktree.
+	ctx = settings.WithWorktreeRoot(ctx, worktreeRoot)
+
+	url, ok := resolveCheckpointFetchURL(ctx, worktreeRoot)
+	if !ok {
+		return false, nil
+	}
+
+	tmpRefName := plumbing.ReferenceName(FetchTmpRefPrefix + primary.Short())
+	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
+
+	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true); err != nil {
+		logging.Debug(ctx, "checkpoint-remote: empty-orphan heal fetch failed; keeping local orphan",
+			slog.String("url", remote.RedactURL(url)),
+			slog.String("error", err.Error()),
+		)
+		return false, nil
+	}
+
+	fetchedRef, err := repo.Reference(tmpRefName, true)
+	if err != nil {
+		return false, nil
+	}
+	fetchedHasData, err := metadataBranchHasData(repo, fetchedRef)
+	if err != nil || !fetchedHasData {
+		return false, nil
+	}
+
+	// Force-set the local ref to the fetched tip, discarding the data-free orphan.
+	if err := setRefHash(repo, primary, fetchedRef.Hash()); err != nil {
+		return false, fmt.Errorf("failed to replace empty orphan metadata ref: %w", err)
+	}
+	logging.Info(ctx, "checkpoint-remote: healed empty orphan metadata branch from checkpoint remote",
+		slog.String("ref", primary.String()),
+	)
+	return true, nil
+}
+
+// metadataBranchInitFiles are the root-level files that orphan initialization may
+// write into an otherwise-empty metadata branch (currently only the Vercel
+// config). A branch containing nothing but these holds no checkpoint data.
+var metadataBranchInitFiles = map[string]bool{
+	vercelconfig.FileName: true, // "vercel.json"
+}
+
+// metadataBranchHasData reports whether the branch tip tree contains anything
+// beyond orphan-initialization artifacts. It returns false for an empty tree, or
+// a tree holding only init files such as vercel.json — the un-initialized-orphan
+// state that is safe to adopt from the authoritative remote — and true for any
+// other content (checkpoint shards or pre-existing files).
+//
+// A literal empty-tree check missed vercel.json-only orphans on vercel-enabled
+// second devices, leaving them unhealed (issue #1374). Ignoring only the known
+// init files (rather than treating "no shards" as empty) avoids clobbering a
+// branch that carries other real content. Only the tip commit is inspected — the
+// bug this detects creates a single un-initialized orphan as the tip.
+func metadataBranchHasData(repo *git.Repository, ref *plumbing.Reference) (bool, error) {
 	commit, err := repo.CommitObject(ref.Hash())
 	if err != nil {
 		return false, fmt.Errorf("failed to get commit: %w", err)
@@ -591,7 +848,12 @@ func isEmptyMetadataBranch(repo *git.Repository, ref *plumbing.Reference) (bool,
 	if err != nil {
 		return false, fmt.Errorf("failed to get tree: %w", err)
 	}
-	return len(tree.Entries) == 0, nil
+	for _, entry := range tree.Entries {
+		if !metadataBranchInitFiles[entry.Name] {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // GetMetadataRefTree returns the tree object at the given committed-metadata ref.

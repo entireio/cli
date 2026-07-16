@@ -101,6 +101,12 @@ func TestAlternates_RelativeObjectAlternate_CheckpointSync(t *testing.T) {
 	testutil.Git(t, work, "update-ref", "refs/heads/entire/checkpoints/v1", k2)
 	testutil.Git(t, work, "remote", "add", "origin", originBare)
 
+	// The remote already carries the v1 branch (seeded above). In a real repo
+	// that means we hold a remote-tracking ref for it, so record one here: the
+	// first-user-branch guard treats a remote with tracking refs as established
+	// (non-empty) and runs the sync instead of deferring the push.
+	testutil.Git(t, work, "update-ref", "refs/remotes/origin/entire/checkpoints/v1", r1)
+
 	// Drive the real pre-push hook: non-ff vs the remote forces the sync/rebase
 	// path that reads the alternate-resident checkpoint commits via go-git.
 	cmd := exec.Command(entire.BinPath(), "hooks", "git", "pre-push", "origin")

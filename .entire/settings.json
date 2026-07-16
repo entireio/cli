@@ -8,5 +8,8 @@
     },
     "filtered_fetches": true
   },
-  "strategy": "manual-commit"
+  "strategy": "manual-commit",
+  "checkpoints": {
+    "primary": { "type": "git-refs" }
+  }
 }

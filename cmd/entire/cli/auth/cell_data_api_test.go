@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -173,6 +174,12 @@ func TestTargetJurisdictionRejectsBadLabel(t *testing.T) {
 	if got, err := targetJurisdiction(&CellTarget{Jurisdiction: "eu"}, good); err != nil || got != "eu" {
 		t.Fatalf("targetJurisdiction(target=eu) = %q, %v; want eu, nil", got, err)
 	}
+	// An uppercase JWT claim is case-folded rather than rejected by the strict
+	// lowercase label check.
+	upper := makeJWT(t, fmt.Sprintf(`{"home_jurisdiction":"US","exp":%d}`, time.Now().Add(time.Hour).Unix()))
+	if got, err := targetJurisdiction(nil, upper); err != nil || got != "us" {
+		t.Fatalf("targetJurisdiction(US) = %q, %v; want us, nil", got, err)
+	}
 }
 
 func TestNewEntireAPICellClient_RoutesThroughHomeCell(t *testing.T) {
@@ -323,6 +330,26 @@ func TestResolveTargetCellBaseURL(t *testing.T) {
 	if got, err := resolveTargetCellBaseURL(ctx, &CellTarget{BaseURL: "https://eu.api.entire.io/"}, "https://entire.io", "eu", "https://eu.auth.entire.io", "login", nil); err != nil || got != "https://eu.api.entire.io" {
 		t.Fatalf("target override: got %q, %v", got, err)
 	}
+	// A loopback origin with an explicitly pinned jurisdiction stays verbatim:
+	// local dev serves a single cell with no jurisdiction catalog to consult.
+	if got, err := resolveTargetCellBaseURL(ctx, &CellTarget{Jurisdiction: "us"}, "http://127.0.0.1:8099", "us", "http://127.0.0.1:9000", "login", nil); err != nil || got != "http://127.0.0.1:8099" {
+		t.Fatalf("loopback + explicit jurisdiction: got %q, %v", got, err)
+	}
+	// A non-loopback DIRECT cell origin with an explicitly pinned jurisdiction
+	// must NOT be dialed verbatim (it may name a different jurisdiction's cell):
+	// resolve the pinned jurisdiction's own cell from the catalog instead.
+	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != clustersAPIPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"clusters":[{"jurisdiction":"eu","isDefault":true,"apiUrl":"https://eu.api.entire.io"}]}`)
+	}))
+	defer catalog.Close()
+	if got, err := resolveTargetCellBaseURL(ctx, &CellTarget{Jurisdiction: "eu"}, "https://aws-us-east-2.api.entire.io", "eu", catalog.URL, "login", catalog.Client()); err != nil || got != "https://eu.api.entire.io" {
+		t.Fatalf("direct cell + explicit jurisdiction: got %q, %v (want catalog-resolved eu cell)", got, err)
+	}
 }
 
 // TestNewEntireAPICellClient_TargetRoutesToRepoCell proves the repo-scoped path:
@@ -396,43 +423,31 @@ func TestNewEntireAPICellClient_TargetRoutesToRepoCell(t *testing.T) {
 	}
 }
 
-// TestJurisdictionToken_StoredContext exercises the exported token-only path off
-// a stored login context: it must return the exchanged identity token and mint
-// it with scope=openid, the jurisdiction audience, and the login JWT as
-// subject_token. Not parallel: manipulates env + token store.
+// TestJurisdictionToken_StoredContext proves the stored path mints from the
+// ACTIVE login context (like plain `entire auth token`), deriving the
+// environment from that context's core rather than the data host. No
+// ENTIRE_API_BASE_URL is set, so the default (entire.io) data host must NOT
+// influence the result — only the active context does. Not parallel: manipulates
+// env + token store.
 func TestJurisdictionToken_StoredContext(t *testing.T) {
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	t.Setenv("ENTIRE_API_BASE_URL", "https://entire.io")
+	configDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", configDir)
+	t.Setenv("ENTIRE_API_BASE_URL", "")
+	t.Setenv("ENTIRE_API_AUDIENCE_TEMPLATE", "")
+	t.Setenv("ENTIRE_CORE_BASE_URL_TEMPLATE", "")
 	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
 	t.Cleanup(restore)
 
-	var gotAudience, gotScope, gotSubject, gotGrant string
-	coreSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != oauthTokenPath {
-			http.NotFound(w, r)
-			return
-		}
-		_ = r.ParseForm() //nolint:errcheck // test handler
-		gotAudience = r.FormValue("audience")
-		gotScope = r.FormValue("scope")
-		gotSubject = r.FormValue("subject_token")
-		gotGrant = r.FormValue("grant_type")
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"access_token":"cell-identity-token","token_type":"Bearer","expires_in":3600}`)
-	}))
-	defer coreSrv.Close()
-
-	svc := tokenstore.CoreKeyringService(coreSrv.URL)
-	loginJWT := makeJWT(t, fmt.Sprintf(`{"iss":%q,"home_jurisdiction":"us","exp":%d}`, coreSrv.URL, time.Now().Add(2*time.Hour).Unix()))
+	const core = "https://us.auth.entire.io"
+	svc := tokenstore.CoreKeyringService(core)
+	loginJWT := makeJWT(t, fmt.Sprintf(`{"iss":%q,"home_jurisdiction":"us","exp":%d}`, core, time.Now().Add(2*time.Hour).Unix()))
 	if err := tokenstore.Set(svc, "me", tokenstore.EncodeTokenWithExpiration(loginJWT, 7200)); err != nil {
 		t.Fatalf("seed token: %v", err)
 	}
-	ctxObj := &contexts.Context{Name: "me@core", CoreURL: coreSrv.URL, Handle: "me", KeychainService: svc}
+	writeActiveContext(t, configDir, "me@entire", core, "me", svc)
 
-	t.Cleanup(SetResolveContextForCellAPIForTest(t, func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
-		return ctxObj, nil
-	}))
-	t.Cleanup(SetCellExchangeTransportForTest(t, coreSrv.Client().Transport))
+	ct := &captureTransport{token: "cell-identity-token"}
+	t.Cleanup(SetCellExchangeTransportForTest(t, ct))
 
 	token, err := JurisdictionToken(context.Background(), false, "us")
 	if err != nil {
@@ -441,17 +456,71 @@ func TestJurisdictionToken_StoredContext(t *testing.T) {
 	if token != "cell-identity-token" {
 		t.Fatalf("token = %q, want cell-identity-token", token)
 	}
-	if gotAudience != usEntireAudience {
-		t.Errorf("audience = %q, want https://us.entire.io", gotAudience)
+	if got := ct.form.Get("audience"); got != usEntireAudience {
+		t.Errorf("audience = %q, want %s", got, usEntireAudience)
 	}
-	if gotScope != JurisdictionIdentityScope {
-		t.Errorf("scope = %q, want %q", gotScope, JurisdictionIdentityScope)
+	if got := ct.form.Get("scope"); got != JurisdictionIdentityScope {
+		t.Errorf("scope = %q, want %q", got, JurisdictionIdentityScope)
 	}
-	if gotSubject != loginJWT {
-		t.Errorf("subject_token = %q, want the login JWT", gotSubject)
+	if got := ct.form.Get("subject_token"); got != loginJWT {
+		t.Errorf("subject_token = %q, want the login JWT", got)
 	}
-	if gotGrant != "urn:ietf:params:oauth:grant-type:token-exchange" {
-		t.Errorf("grant_type = %q, want token-exchange", gotGrant)
+	if got := ct.form.Get("grant_type"); got != "urn:ietf:params:oauth:grant-type:token-exchange" {
+		t.Errorf("grant_type = %q, want token-exchange", got)
+	}
+}
+
+// TestJurisdictionToken_StoredContextFollowsActiveContext is the regression for
+// the reported bug: with two contexts (prod entire.io + staging partial.to) and
+// partial.to ACTIVE, `auth token --jurisdiction us` must mint a partial.to token
+// — not switch to entire.io because the default data host trusts the prod
+// context. The exchange audience/subject/core all follow the active partial.to
+// context.
+func TestJurisdictionToken_StoredContextFollowsActiveContext(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", configDir)
+	t.Setenv("ENTIRE_API_BASE_URL", "") // default entire.io data host must not win
+	t.Setenv("ENTIRE_API_AUDIENCE_TEMPLATE", "")
+	t.Setenv("ENTIRE_CORE_BASE_URL_TEMPLATE", "")
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	const prodCore = "https://us.auth.entire.io"
+	const stagingCore = "https://us.auth.partial.to"
+	prodSvc := tokenstore.CoreKeyringService(prodCore)
+	stagingSvc := tokenstore.CoreKeyringService(stagingCore)
+	prodJWT := makeJWT(t, fmt.Sprintf(`{"iss":%q,"home_jurisdiction":"us","exp":%d}`, prodCore, time.Now().Add(2*time.Hour).Unix()))
+	stagingJWT := makeJWT(t, fmt.Sprintf(`{"iss":%q,"home_jurisdiction":"us","exp":%d}`, stagingCore, time.Now().Add(2*time.Hour).Unix()))
+	for _, s := range []struct{ svc, jwt string }{{prodSvc, prodJWT}, {stagingSvc, stagingJWT}} {
+		if err := tokenstore.Set(s.svc, "me", tokenstore.EncodeTokenWithExpiration(s.jwt, 7200)); err != nil {
+			t.Fatalf("seed token: %v", err)
+		}
+	}
+	prodCtx := &contexts.Context{Name: "me@entire", CoreURL: prodCore, Handle: "me", KeychainService: prodSvc}
+	stagingCtx := &contexts.Context{Name: "me@partial", CoreURL: stagingCore, Handle: "me", KeychainService: stagingSvc}
+	// partial.to is the ACTIVE context.
+	if err := contexts.Save(configDir, &contexts.File{CurrentContext: stagingCtx.Name, Contexts: []*contexts.Context{prodCtx, stagingCtx}}); err != nil {
+		t.Fatalf("save contexts: %v", err)
+	}
+
+	ct := &captureTransport{token: "partial-identity-token"}
+	t.Cleanup(SetCellExchangeTransportForTest(t, ct))
+
+	token, err := JurisdictionToken(context.Background(), false, "us")
+	if err != nil {
+		t.Fatalf("JurisdictionToken: %v", err)
+	}
+	if token != "partial-identity-token" {
+		t.Fatalf("token = %q, want partial-identity-token", token)
+	}
+	if got := ct.form.Get("audience"); got != "https://us.partial.to" {
+		t.Errorf("audience = %q, want https://us.partial.to (active partial.to context, not entire.io)", got)
+	}
+	if got := ct.form.Get("subject_token"); got != stagingJWT {
+		t.Errorf("subject_token = %q, want the partial.to login JWT", got)
+	}
+	if got := ct.url; got != stagingCore+oauthTokenPath {
+		t.Errorf("exchange URL = %q, want %s%s", got, stagingCore, oauthTokenPath)
 	}
 }
 
@@ -534,5 +603,134 @@ func TestJurisdictionToken_EnvToken(t *testing.T) {
 	}
 	if got := rt.form.Get("audience"); got != usEntireAudience {
 		t.Errorf("home-fallback audience = %q, want https://us.entire.io", got)
+	}
+}
+
+// TestCellClientFactory_ReusesTokenPerJurisdiction pins the factory's core
+// contract: identity tokens are per-jurisdiction, not per-cell, so building
+// clients for several cells must mint one token per distinct jurisdiction and
+// reuse it across cells. Not parallel: manipulates env + token store.
+func TestCellClientFactory_ReusesTokenPerJurisdiction(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv("ENTIRE_API_BASE_URL", "https://entire.io")
+	t.Setenv("ENTIRE_API_AUDIENCE_TEMPLATE", "")
+	t.Setenv("ENTIRE_CORE_BASE_URL_TEMPLATE", "")
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	var exchangeCount int
+	var audiences []string
+	coreSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != oauthTokenPath {
+			http.NotFound(w, r)
+			return
+		}
+		_ = r.ParseForm() //nolint:errcheck // test handler
+		exchangeCount++
+		audiences = append(audiences, r.FormValue("audience"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"access_token":"identity-token-%d","token_type":"Bearer","expires_in":3600}`, exchangeCount)
+	}))
+	defer coreSrv.Close()
+
+	svc := tokenstore.CoreKeyringService(coreSrv.URL)
+	loginJWT := makeJWT(t, fmt.Sprintf(`{"iss":%q,"home_jurisdiction":"us","exp":%d}`, coreSrv.URL, time.Now().Add(2*time.Hour).Unix()))
+	if err := tokenstore.Set(svc, "me", tokenstore.EncodeTokenWithExpiration(loginJWT, 7200)); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	ctxObj := &contexts.Context{Name: "me@core", CoreURL: coreSrv.URL, Handle: "me", KeychainService: svc}
+	t.Cleanup(SetResolveContextForCellAPIForTest(t, func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
+		return ctxObj, nil
+	}))
+	t.Cleanup(SetCellExchangeTransportForTest(t, coreSrv.Client().Transport))
+
+	factory, err := NewEntireAPICellClientFactory(context.Background(), false)
+	if err != nil {
+		t.Fatalf("NewEntireAPICellClientFactory: %v", err)
+	}
+
+	// Two eu cells then one us cell: two exchanges total, the eu token reused
+	// for the second eu cell.
+	for _, target := range []*CellTarget{
+		{BaseURL: "https://cell-a.api.example", Jurisdiction: "eu"},
+		{BaseURL: "https://cell-b.api.example", Jurisdiction: "eu"},
+		{BaseURL: "https://cell-c.api.example", Jurisdiction: "us"},
+	} {
+		if _, err := factory.ClientFor(context.Background(), target); err != nil {
+			t.Fatalf("ClientFor(%s): %v", target.BaseURL, err)
+		}
+	}
+	if exchangeCount != 2 {
+		t.Fatalf("exchange count = %d, want 2 (one per distinct jurisdiction)", exchangeCount)
+	}
+	if got, want := strings.Join(audiences, ","), "https://eu.entire.io,"+usEntireAudience; got != want {
+		t.Fatalf("exchange audiences = %q, want %q", got, want)
+	}
+}
+
+// TestCellClientFactory_SingleFlightsConcurrentMints pins the per-jurisdiction
+// locking: concurrent ClientFor calls for the same jurisdiction produce exactly
+// one exchange (the rest wait on the slot and reuse the result), not one each.
+// Not parallel: manipulates env + token store.
+func TestCellClientFactory_SingleFlightsConcurrentMints(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv("ENTIRE_API_BASE_URL", "https://entire.io")
+	t.Setenv("ENTIRE_API_AUDIENCE_TEMPLATE", "")
+	t.Setenv("ENTIRE_CORE_BASE_URL_TEMPLATE", "")
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	var mu sync.Mutex
+	exchangeCount := 0
+	coreSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != oauthTokenPath {
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		exchangeCount++
+		mu.Unlock()
+		time.Sleep(30 * time.Millisecond) // widen the window concurrent callers could race into
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"access_token":"identity-token","token_type":"Bearer","expires_in":3600}`)
+	}))
+	defer coreSrv.Close()
+
+	svc := tokenstore.CoreKeyringService(coreSrv.URL)
+	loginJWT := makeJWT(t, fmt.Sprintf(`{"iss":%q,"home_jurisdiction":"us","exp":%d}`, coreSrv.URL, time.Now().Add(2*time.Hour).Unix()))
+	if err := tokenstore.Set(svc, "me", tokenstore.EncodeTokenWithExpiration(loginJWT, 7200)); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	ctxObj := &contexts.Context{Name: "me@core", CoreURL: coreSrv.URL, Handle: "me", KeychainService: svc}
+	t.Cleanup(SetResolveContextForCellAPIForTest(t, func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
+		return ctxObj, nil
+	}))
+	t.Cleanup(SetCellExchangeTransportForTest(t, coreSrv.Client().Transport))
+
+	factory, err := NewEntireAPICellClientFactory(context.Background(), false)
+	if err != nil {
+		t.Fatalf("NewEntireAPICellClientFactory: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = factory.ClientFor(context.Background(), &CellTarget{
+				BaseURL:      fmt.Sprintf("https://cell-%d.api.example", i),
+				Jurisdiction: "eu",
+			})
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("ClientFor[%d]: %v", i, err)
+		}
+	}
+	if exchangeCount != 1 {
+		t.Fatalf("exchange count = %d, want 1 (same jurisdiction single-flighted)", exchangeCount)
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 )
 
 // Checkpoint storage backends the e2e suite can run against. Selected per-run by
@@ -37,20 +39,10 @@ func envIsGitRefs(key string) bool {
 // guard on this to skip under git-refs.
 func UsingGitRefs() bool { return checkpointStoreMode() == storeModeGitRefs }
 
-// checkpointShard returns the two-char ref shard for a checkpoint ID, matching
-// cmd/entire/cli/checkpoint/id.ShardFor: the last two chars, for both legacy
-// 12-hex IDs and 26-char ULIDs.
-func checkpointShard(id string) string {
-	if len(id) < 2 {
-		return id
-	}
-	return id[len(id)-2:]
-}
-
 // checkpointRefName returns refs/entire/checkpoints/<shard>/<id> for the git-refs
-// store.
-func checkpointRefName(id string) string {
-	return checkpointRefPrefix + checkpointShard(id) + "/" + id
+// store, using the production shard computation (id.ShardFor).
+func checkpointRefName(checkpointID string) string {
+	return checkpointRefPrefix + id.CheckpointID(checkpointID).ShardFor() + "/" + checkpointID
 }
 
 // checkpointBlobSpec returns the `git show` spec (ref:path) for a path relative

@@ -36,23 +36,36 @@ func GetWorktreeID(worktreePath string) (string, error) {
 	}
 
 	gitdir := strings.TrimPrefix(line, "gitdir: ")
+	if worktreeID, found := parseWorktreeID(gitdir); found {
+		return worktreeID, nil
+	}
+
+	return "", fmt.Errorf("unexpected gitdir format (no worktrees): %s", gitdir)
+}
+
+func parseWorktreeID(gitdir string) (string, bool) {
+	gitdir = strings.TrimSuffix(strings.ReplaceAll(gitdir, "\\", "/"), "/")
+
+	// Submodule gitdirs live under .git/modules/<path>. If that submodule
+	// repository has its own linked worktree, the gitdir ends with
+	// .git/modules/<path>/worktrees/<id>. A /worktrees/ segment before the
+	// final /modules/ belongs to the superproject's worktree, not the submodule.
+	if modulesIndex := strings.LastIndex(gitdir, "/modules/"); modulesIndex >= 0 {
+		afterModules := gitdir[modulesIndex+len("/modules/"):]
+		if _, worktreeID, found := strings.Cut(afterModules, "/worktrees/"); found {
+			return strings.TrimSuffix(worktreeID, "/"), true
+		}
+		return "", true
+	}
 
 	// Extract worktree name from path like /repo/.git/worktrees/<name>
 	// or /repo/.bare/worktrees/<name> (bare repo + worktree layout).
 	// The path after the marker is the worktree identifier.
-	var worktreeID string
-	var found bool
 	for _, marker := range []string{".git/worktrees/", ".bare/worktrees/"} {
-		_, worktreeID, found = strings.Cut(gitdir, marker)
-		if found {
-			break
+		if _, worktreeID, found := strings.Cut(gitdir, marker); found {
+			return strings.TrimSuffix(worktreeID, "/"), true
 		}
 	}
-	if !found {
-		return "", fmt.Errorf("unexpected gitdir format (no worktrees): %s", gitdir)
-	}
-	// Remove trailing slashes if any
-	worktreeID = strings.TrimSuffix(worktreeID, "/")
 
-	return worktreeID, nil
+	return "", false
 }

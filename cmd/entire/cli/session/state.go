@@ -86,6 +86,16 @@ func (k Kind) IsInvestigate() bool {
 	return k == KindAgentInvestigate
 }
 
+// IsImported reports whether this Kind is a read-only session reconstructed by
+// `entire import` from a pre-existing transcript. Imported sessions are exempt
+// from lifecycle management (staleness, orphan cleanup) and are not
+// resumable/rewindable. Centralized here so those call sites don't couple to
+// the string literal across packages.
+func (k Kind) IsImported() bool {
+	// See IsReview for why this is an equality check rather than a switch.
+	return k == KindImported
+}
+
 // State represents the state of an active session.
 // This is stored in .git/entire-sessions/<session-id>.json
 type State struct {
@@ -266,12 +276,38 @@ type State struct {
 	// Set from hook data when the agent provides it.
 	ModelName string `json:"model_name,omitempty"`
 
-	// Token usage tracking (accumulated across all checkpoints in this session)
+	// Token usage tracking (accumulated across all checkpoints in this session).
+	//
+	// DECISION: SubagentTokens is "latest snapshot wins", not summed. Subagent
+	// usage arrives as a cumulative-since-session-start total (each subagent
+	// transcript is re-read from line 0 every call), so accumulateTokenUsage
+	// replaces rather than adds it (see cmd/entire/cli/strategy). Tradeoff: if
+	// the main transcript resets or rotates mid-session (compaction writing a
+	// fresh file, or a resume that truncates), a subsequent snapshot can be
+	// SMALLER than a previous one, so this session-wide total regresses
+	// (undercounts) for the rest of the session. This is accepted: undercounting
+	// after a transcript reset is preferable to the multiplicative overcount the
+	// summing approach produced, and the alternative (a session-wide high-water
+	// mark) would mask genuine subagent-transcript cleanup. Checkpoint deltas do
+	// not share this exposure — CheckpointTokenUsage.SubagentTokens is derived as
+	// (this total - SubagentTokensBaseline) and floored at 0 by clampSubtract, so
+	// a shrunk snapshot yields 0, never a negative or stale delta.
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
 
 	// CheckpointTokenUsage tracks hook-provided token usage since the last condensation.
 	// This is checkpoint-scoped; TokenUsage remains the session-wide total.
 	CheckpointTokenUsage *agent.TokenUsage `json:"checkpoint_token_usage,omitempty"`
+
+	// SubagentTokensBaseline is a snapshot of TokenUsage.SubagentTokens captured
+	// at the last condensation reset. Subagent token usage is always re-read
+	// from the start of each subagent transcript (agent IDs are discovered from
+	// the full main transcript so subagents spawned before the checkpoint
+	// window are still found), so it arrives as a cumulative-since-session-start
+	// total rather than a per-checkpoint delta. This baseline lets
+	// CheckpointTokenUsage.SubagentTokens be rescoped to "since last
+	// condensation" via SubtractTokenUsage instead of re-adding the same
+	// cumulative total on every checkpoint.
+	SubagentTokensBaseline *agent.TokenUsage `json:"subagent_tokens_baseline,omitempty"`
 
 	// SkillEvents records explicit native skill signals observed during this session.
 	// Stored as sidecar metadata so consumers can collapse skill-related transcript events
@@ -419,6 +455,21 @@ func (s *State) ClearLegacyTranscriptOffsets() {
 	s.TranscriptLinesAtStart = 0
 }
 
+// RebaselineSubagentTokens snapshots the current cumulative subagent total
+// (TokenUsage.SubagentTokens) into SubagentTokensBaseline so the next checkpoint
+// window's CheckpointTokenUsage.SubagentTokens is rescoped to "since this
+// re-baseline" rather than re-reporting the full cumulative subagent total.
+//
+// The invariant is: every site that starts a fresh checkpoint window by clearing
+// CheckpointTokenUsage MUST also re-baseline. Callers: the condensation reset
+// helper (resetCheckpointWindow) and cross-repo session adoption, which likewise
+// opens a fresh target-local window. Sharing this here keeps the two in step.
+func (s *State) RebaselineSubagentTokens() {
+	if s.TokenUsage != nil {
+		s.SubagentTokensBaseline = s.TokenUsage.SubagentTokens
+	}
+}
+
 // RealignAttributionBase sets AttributionBaseCommit to newBase and clears any
 // bookkeeping whose meaning depends on attribution being diverged from the
 // shadow-branch base. Call this every time a code path intentionally brings
@@ -473,6 +524,13 @@ func (s *State) OwnerExited() bool {
 }
 
 func (s *State) IsStale() bool {
+	// Imported sessions are historical, read-only records reconstructed from
+	// pre-existing transcripts; their timestamps are always old by nature.
+	// Never auto-purge them or they'd vanish from `entire session list` on the
+	// first read after import.
+	if s.Kind.IsImported() {
+		return false
+	}
 	var since time.Duration
 	if s.LastInteractionTime != nil {
 		since = time.Since(*s.LastInteractionTime)

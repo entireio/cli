@@ -117,7 +117,7 @@ func keyringProviderName() string {
 	switch runtime.GOOS {
 	case "darwin":
 		return "macOS Keychain"
-	case "windows":
+	case goosWindows:
 		return "Windows Credential Manager"
 	case "linux", "freebsd", "openbsd", "netbsd", "dragonfly":
 		return "Secret Service (D-Bus)"

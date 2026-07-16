@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cp "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/redact"
 )
@@ -43,7 +44,16 @@ type Turn struct {
 	UUID               string
 	Prompt, Model      string
 	CreatedAt          time.Time
-	Tokens             *types.TokenUsage
+	// Tokens is this turn's token usage. Every field is a per-turn delta:
+	// main-agent fields are scoped to the turn's [LineStart, LineEnd) slice by
+	// the token helpers, and SubagentTokens is rescoped from the cumulative
+	// snapshot those helpers return to a per-turn increment by
+	// rescopeSubagentTokensToDeltas (see linesplit.go). That invariant lets
+	// callers sum turns freely: writeSessionState sums them for the session
+	// total and each imported checkpoint stores its own turn's delta, so a
+	// subagent's tokens are counted exactly once rather than re-added on every
+	// turn after it is discovered.
+	Tokens *types.TokenUsage
 }
 
 // Importer is the per-agent seam: it locates an agent's transcripts for a repo
@@ -166,8 +176,89 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 			existing[cid.String()] = true
 			res.TurnsImported++
 		}
+
+		// Track A: surface this session in `entire session list`. Best-effort —
+		// the read-only checkpoints above are the primary artifact, so a
+		// state-write failure must not abort the import.
+		if !opts.DryRun {
+			if serr := writeSessionState(ctx, imp, sf, turns); serr != nil {
+				logging.Debug(ctx, "import: failed to write imported session state",
+					"sessionID", sf.SessionID, "error", serr.Error())
+			}
+		}
 	}
 	return res, nil
+}
+
+// writeSessionState upserts a local session.State so an imported session shows
+// up in `entire session list`. It is Kind-gated (KindImported), never sets
+// BaseCommit (imports are commit-less and must not be pinned to HEAD), and uses
+// the transcript's own timestamps — the forward-compat contract that keeps a
+// later commit-SHA link purely additive. It never clobbers a live or
+// manually-attached session that happens to share the ID.
+func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns []Turn) error {
+	if len(turns) == 0 {
+		return nil
+	}
+	store, err := session.NewStateStore(ctx)
+	if err != nil {
+		return fmt.Errorf("open session state store: %w", err)
+	}
+	if existing, lerr := store.Load(ctx, sf.SessionID); lerr == nil && existing != nil &&
+		!existing.Kind.IsImported() {
+		return nil // don't overwrite a real (live/attached) session
+	}
+
+	var started, ended time.Time
+	var tokens *types.TokenUsage
+	model := ""
+	for _, turn := range turns {
+		if !turn.CreatedAt.IsZero() {
+			if started.IsZero() || turn.CreatedAt.Before(started) {
+				started = turn.CreatedAt
+			}
+			if turn.CreatedAt.After(ended) {
+				ended = turn.CreatedAt
+			}
+		}
+		if turn.Model != "" {
+			model = turn.Model
+		}
+		// turn.Tokens holds per-turn deltas for every field, including
+		// SubagentTokens (rescoped from a cumulative snapshot in
+		// rescopeSubagentTokensToDeltas — see the Turn.Tokens doc). Summing
+		// them therefore yields the correct session total: main-agent fields
+		// add up, and the subagent deltas sum back to the final cumulative
+		// subagent snapshot exactly once instead of being multiplied by the
+		// number of turns after each subagent was first discovered.
+		tokens = types.AddTokenUsage(tokens, turn.Tokens)
+	}
+	if started.IsZero() {
+		// No usable per-turn timestamps (some Codex lines): fall back to the
+		// transcript file mtime so the row still sorts sensibly. Never "now".
+		if fi, statErr := os.Stat(sf.Path); statErr == nil {
+			started = fi.ModTime()
+			ended = started
+		}
+	}
+	state := &session.State{
+		SessionID:           sf.SessionID,
+		Kind:                session.KindImported,
+		AgentType:           imp.AgentType(),
+		ModelName:           model,
+		StartedAt:           started,
+		EndedAt:             &ended,
+		Phase:               session.PhaseEnded,
+		LastInteractionTime: &ended,
+		StepCount:           len(turns),
+		TokenUsage:          tokens,
+		LastPrompt:          session.TruncatePromptForStorage(turns[len(turns)-1].Prompt),
+		LastCheckpointID:    DeriveCheckpointID(sf.SessionID, turns[len(turns)-1].UUID),
+	}
+	if err := store.Save(ctx, state); err != nil {
+		return fmt.Errorf("save imported session state %s: %w", sf.SessionID, err)
+	}
+	return nil
 }
 
 func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.CheckpointID, sf SessionFile, red redact.RedactedBytes, turn Turn) error {

@@ -18,6 +18,11 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+      # betterleaks >=1.6.0 has a data race in internal/exprruntime
+      # (concurrent DetectString), see betterleaks/betterleaks#224.
+      # Pinned to 1.5.0 until fixed upstream.
+      - dependency-name: "github.com/betterleaks/betterleaks"
+        versions: [">=1.6.0"]
 
   # Maintain dependencies for GitHub Actions
   - package-ecosystem: "github-actions"

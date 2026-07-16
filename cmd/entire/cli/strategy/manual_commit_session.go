@@ -89,6 +89,15 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 			continue
 		}
 
+		// Imported sessions are read-only historical records: no shadow branch
+		// and (by design) no BaseCommit. Keep them regardless of the
+		// shadow-branch orphan check below. Gate on Kind, not on commit
+		// presence, so this stays correct once imports are linked to a commit.
+		if state.Kind.IsImported() {
+			states = append(states, state)
+			continue
+		}
+
 		// Skip and cleanup orphaned sessions whose shadow branch no longer exists.
 		// Keep active sessions (shadow branch may not be created yet) and sessions
 		// with LastCheckpointID (needed for checkpoint ID reuse on subsequent commits).

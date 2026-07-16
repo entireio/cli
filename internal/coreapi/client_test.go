@@ -248,3 +248,48 @@ func TestBearerOnlySource_NoCookieOnTheWire(t *testing.T) {
 		t.Errorf("outbound Cookie header = %q, want empty (bearer-only contract)", cookieHeader)
 	}
 }
+
+// TestListProjectRepos_UnknownEnumValuesPassThrough locks in the forward-compat
+// contract for the display-only read-model enums loosened in
+// spec/normalize.go's loosenReadModelEnums: Repo.state, Repo.visibility, and
+// Repo.objectFormat are plain strings on the client, so a value the server adds
+// later (a new lifecycle state, a new visibility) must decode and pass through
+// verbatim rather than fail the whole `repo list` request in ogen's Validate().
+// Before loosening, these were strict enums whose Validate() aborted the entire
+// response on the first unknown value.
+func TestListProjectRepos_UnknownEnumValuesPassThrough(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Values the current spec's enums did NOT allow.
+		if _, err := w.Write([]byte(`{"repos":[{"id":"01H000000000000000000000A1","owningProjectId":"01H000000000000000000000P1","name":"demo","state":"archiving","visibility":"internal","objectFormat":"sha512"}]}`)); err != nil {
+			t.Errorf("writing test response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(srv.URL, bearerOnlySource{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	out, err := c.ListProjectRepos(context.Background(), ListProjectReposParams{ProjectId: "01H000000000000000000000P1"})
+	if err != nil {
+		t.Fatalf("ListProjectRepos with unknown enum values must not fail (forward-compat), got: %v", err)
+	}
+	if len(out.Repos) != 1 {
+		t.Fatalf("Repos len = %d, want 1", len(out.Repos))
+	}
+	repo := out.Repos[0]
+	if got := repo.State.Or(""); got != "archiving" {
+		t.Errorf("State = %q, want the unknown value %q passed through verbatim", got, "archiving")
+	}
+	if got := repo.Visibility.Or(""); got != "internal" {
+		t.Errorf("Visibility = %q, want the unknown value %q passed through verbatim", got, "internal")
+	}
+	if got := repo.ObjectFormat.Or(""); got != "sha512" {
+		t.Errorf("ObjectFormat = %q, want the unknown value %q passed through verbatim", got, "sha512")
+	}
+}

@@ -501,6 +501,56 @@ sequenceDiagram
 
 ---
 
+## Scenario 8: git-refs Backend — Condensation and Push
+
+All scenarios above describe the default **git-branch** backend, which condenses to the single `entire/checkpoints/v1` branch. When the primary backend is **git-refs**, the session/timing/overlap logic is **identical** — the only differences are *where* condensation writes and *how* the result is pushed. Everything about when a checkpoint is created, what it contains, and content-aware carry-forward is unchanged.
+
+Two differences:
+
+1. **Condensation target.** Instead of splicing the checkpoint subtree under `<id[:2]>/<id[2:]>/` on the `v1` branch, git-refs commits that same subtree as the tree root of a per-checkpoint ref, `refs/entire/checkpoints/<shard>/<id>` (orphan commit on first write, parented on later backfills). The ref is then recorded in a **push-discovery queue** rather than advancing a shared branch tip.
+2. **Push mechanism.** Pre-push drains the queue and pushes exactly the changed refs, fast-forward-only, instead of pushing one branch.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant G as Git Hooks
+    participant SB as Shadow Branch
+    participant R as refs/entire/checkpoints/*
+    participant PQ as Push Queue
+    participant Rem as Remote
+
+    U->>G: git commit -a
+    Note over G: PrepareCommitMsg (adds Entire-Checkpoint trailer)
+    Note over G: PostCommit hook
+    G->>SB: Read accumulated shadow state
+    G->>R: Commit checkpoint subtree at refs/.../<shard>/<id>
+    G->>PQ: Enqueue the ref (best-effort)
+    G->>SB: Delete shadow branch
+
+    Note over U: Later...
+    U->>G: git push
+    Note over G: PrePush hook (PrimaryIsRefs → refs path)
+    G->>PQ: Drain queued refs
+    G->>Rem: Batch-push refs (fast-forward-only)
+    alt push accepted
+        G->>PQ: Remove pushed refs
+    else non-fast-forward (diverged)
+        G->>Rem: Fetch ref + replay local commits, retry (still non-force)
+        G->>PQ: Remove only refs that landed
+    end
+```
+
+### Key Points
+- Condensation writes one commit per checkpoint under `refs/entire/checkpoints/<shard>/<id>`; there is no shared branch tip to serialize on.
+- Enqueue is best-effort — a checkpoint that lands locally but fails to enqueue is still correct locally and re-enqueues on its next write.
+- Pushes are never forced; a diverged ref is recovered by fetch + replay so the remote commit is preserved as an ancestor.
+- Failed or interrupted pushes leave refs queued for the next pre-push — the queue degrades toward "will retry", never toward silent loss.
+- Reads route by ID kind across both backends, so a repo mid-migration reads hex (branch) and ULID (refs) checkpoints transparently.
+
+See [Ref-Based Checkpoint Backend](ref-checkpoint-backend.md) for the full backend design (sharding, read routing, configuration, and rollout).
+
+---
+
 ## Summary Table
 
 | Scenario | When Checkpoint Created | Checkpoint Contains | Key Mechanism |
@@ -512,6 +562,7 @@ sequenceDiagram
 | 5. Partial commit + stash + new prompt + commit new | PostCommit (IDLE) | Full transcript (both prompts) | FilesTouched accumulation, stashed files "fall out" |
 | 6. Stash + new prompt + unstash + commit all | PostCommit (IDLE) | All files + full transcript | Shadow branch accumulation |
 | 7. Partial staging with `git add -p` | Each PostCommit (IDLE) | Full transcript per checkpoint | Content-aware carry-forward (hash comparison) |
+| 8. git-refs backend | Same timing as 1–7 (backend-orthogonal) | Same as 1–7 | Condense to `refs/entire/checkpoints/<shard>/<id>` + push-queue drain at pre-push |
 
 ---
 

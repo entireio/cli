@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"golang.org/x/term"
 )
 
@@ -63,16 +64,16 @@ func newActivityStyles(w io.Writer) activityStyles {
 	if useColor {
 		s.bold = lipgloss.NewStyle().Bold(true)
 		s.dim = lipgloss.NewStyle().Faint(true)
-		s.label = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true)
+		s.label = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Bold(true)
 		s.value = lipgloss.NewStyle().Bold(true)
-		s.unit = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-		s.desc = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-		s.repoNm = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
-		s.commitH = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+		s.unit = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
+		s.desc = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
+		s.repoNm = lipgloss.NewStyle() // default fg: inverts with terminal theme
+		s.commitH = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
 		s.commitM = lipgloss.NewStyle().Bold(true)
-		s.add = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-		s.del = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-		s.muted = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+		s.add = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Success))
+		s.del = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Error))
+		s.muted = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
 	}
 
 	return s
@@ -95,12 +96,17 @@ func (s activityStyles) renderAgent(agentID, text string) string {
 
 type agentDisplay struct {
 	Label string
-	Color string // ANSI 256 color code
+	Color string // agent brand color (hex); lipgloss resolves to the terminal's profile
 	Char  rune   // block character for bar charts
 }
 
-// Agent colors match the dark-mode CSS variables from entire.io (Tailwind 400-level).
-// Lipgloss resolves hex to the best representation for the terminal's color profile.
+// Agent colors are the per-agent brand colors from entire.io (dark-mode CSS
+// variables, Tailwind 400-level). This is a deliberate exception to the CLI's
+// base16 palette: there are more agents than base16 has distinct hues, so
+// collapsing them onto ANSI slots makes neighboring agents indistinguishable
+// in bar charts and legends. We keep the hex values so each agent stays
+// recognizable; lipgloss resolves them to the best representation for the
+// terminal's color profile. The non-brand "unknown" fallback uses muted gray.
 var agentDisplayMap = map[string]agentDisplay{
 	"claude":   {Label: "Claude Code", Color: "#fb923c", Char: '▓'}, // orange-400
 	"gemini":   {Label: "Gemini", Color: "#60a5fa", Char: '▓'},      // blue-400
@@ -112,7 +118,7 @@ var agentDisplayMap = map[string]agentDisplay{
 	"cursor":   {Label: "Cursor", Color: "#38bdf8", Char: '▓'},      // sky-400
 	"droid":    {Label: "Droid", Color: "#f472b6", Char: '▓'},       // pink-400
 	"kiro":     {Label: "Kiro", Color: "#c084fc", Char: '▓'},        // purple-400
-	"unknown":  {Label: "Unknown", Color: "245", Char: '░'},
+	"unknown":  {Label: "Unknown", Color: palette.Muted, Char: '░'},
 }
 
 var agentOrder = []string{
@@ -120,7 +126,10 @@ var agentOrder = []string{
 	"copilot", "pi", "cursor", "droid", "kiro", "unknown",
 }
 
-func renderActivity(w io.Writer, sty activityStyles, stats contributionStats, repos []repoContribution, hourly []hourlyPoint, days []commitDay) {
+// renderActivityHeader renders the stat cards, contribution heatmap, and repo
+// chart — the sections common to both the sessions and commits views. The
+// caller renders the recent-list section (sessions or commits) after it.
+func renderActivityHeader(w io.Writer, sty activityStyles, stats contributionStats, repos []repoContribution, hourly []hourlyPoint) {
 	fmt.Fprintln(w)
 	renderStatCards(w, sty, stats)
 	fmt.Fprintln(w)
@@ -128,7 +137,6 @@ func renderActivity(w io.Writer, sty activityStyles, stats contributionStats, re
 	fmt.Fprintln(w)
 	renderRepoChart(w, sty, repos)
 	fmt.Fprintln(w)
-	renderCommitList(w, sty, days)
 }
 
 func renderStatCards(w io.Writer, sty activityStyles, stats contributionStats) {
@@ -522,6 +530,116 @@ func renderCommitListN(w io.Writer, sty activityStyles, days []commitDay, maxDay
 		}
 		fmt.Fprintln(w)
 	}
+}
+
+// sessionTitleMaxRunes caps the display-name *content* at 120 runes, matching
+// entire.io's Overview row (`displayName.slice(0, 120) + "…"`): the ellipsis is
+// appended as an overflow marker on top of the 120, so the rendered title can
+// be 121 runes — this is a content cap, not a hard total-length cap. On a real
+// terminal the width-based truncation below usually shortens it further first.
+const sessionTitleMaxRunes = 120
+
+func renderSessionList(w io.Writer, sty activityStyles, days []sessionDay) {
+	renderSessionListN(w, sty, days, 3)
+}
+
+// renderSessionListN renders the recent-session feed grouped by day (newest
+// first), mirroring the entire.io Overview list: a per-day header with a
+// session count, then one row per session. maxDays <= 0 renders every day.
+func renderSessionListN(w io.Writer, sty activityStyles, days []sessionDay, maxDays int) {
+	if len(days) == 0 {
+		return
+	}
+	if maxDays <= 0 || maxDays > len(days) {
+		maxDays = len(days)
+	}
+
+	for _, day := range days[:maxDays] {
+		displayDate := formatCommitDate(day.Date)
+		sessionWord := "sessions"
+		if len(day.Sessions) == 1 {
+			sessionWord = strings.TrimSuffix(sessionWord, "s")
+		}
+
+		fmt.Fprintf(w, "%s  %s\n",
+			sty.render(sty.bold, displayDate),
+			sty.render(sty.muted, fmt.Sprintf("%d %s", len(day.Sessions), sessionWord)))
+
+		for _, s := range day.Sessions {
+			renderSessionRow(w, sty, s)
+		}
+		fmt.Fprintln(w)
+	}
+}
+
+// renderSessionRow renders one session: title  repo  [public]  agent  …  model  checkpoints.
+// Left side is the session's display name, repo, an optional public tag, and
+// the agent badge; right side (right-aligned) is the friendly model label and
+// checkpoint count. Fields mirror the entire.io Overview row.
+func renderSessionRow(w io.Writer, sty activityStyles, s userSession) {
+	agentID := agentUnknown
+	if s.Agent != nil && *s.Agent != "" {
+		agentID = normalizeAgentString(*s.Agent)
+	}
+	agentLabel := agentDisplayMap[agentID].Label
+
+	title := strings.TrimSpace(s.DisplayName)
+	if title == "" {
+		title = "(untitled session)"
+	}
+	if runes := []rune(title); len(runes) > sessionTitleMaxRunes {
+		title = string(runes[:sessionTitleMaxRunes]) + "…"
+	}
+
+	model := ""
+	if s.Model != nil {
+		model = formatModel(*s.Model)
+	}
+
+	cpStr := fmt.Sprintf("%d checkpoints", s.CheckpointCount)
+	if s.CheckpointCount == 1 {
+		cpStr = "1 checkpoint"
+	}
+
+	// Right side: [model  ]checkpoints, right-aligned.
+	rightSide := sty.render(sty.muted, cpStr)
+	rightPlain := cpStr
+	if model != "" {
+		rightSide = sty.render(sty.muted, model) + sty.render(sty.dim, "  ") + rightSide
+		rightPlain = model + "  " + cpStr
+	}
+
+	// Public tag (rare from the entire-api cell, which reports isPublic=false).
+	publicRendered, publicPlain := "", ""
+	if s.IsPublic {
+		publicRendered = "  " + sty.render(sty.add, "public")
+		publicPlain = "  public"
+	}
+
+	buildLeft := func(t string) (rendered, plain string) {
+		rendered = sty.render(sty.commitM, t) + " " +
+			sty.render(sty.muted, s.RepoFullName) + publicRendered +
+			"  " + sty.renderAgent(agentID, agentLabel)
+		plain = t + " " + s.RepoFullName + publicPlain + "  " + agentLabel
+		return rendered, plain
+	}
+	left, leftPlain := buildLeft(title)
+
+	// Truncate the title if the row would exceed the terminal width.
+	maxTitle := sty.width - (lipgloss.Width(leftPlain) - lipgloss.Width(title)) - lipgloss.Width(rightPlain) - 2
+	if maxTitle < 10 {
+		maxTitle = 10
+	}
+	if lipgloss.Width(title) > maxTitle {
+		title = truncateDisplayWidth(title, maxTitle, "…")
+		left, leftPlain = buildLeft(title)
+	}
+
+	gap := sty.width - lipgloss.Width(leftPlain) - lipgloss.Width(rightPlain)
+	if gap < 2 {
+		gap = 2
+	}
+	fmt.Fprintf(w, "%s%s%s\n", left, strings.Repeat(" ", gap), rightSide)
 }
 
 func uniqueCommitAgents(c userCommit) []string {

@@ -25,6 +25,7 @@ With Entire, you can:
 - [Key Concepts](#key-concepts)
   - [How It Works](#how-it-works)
   - [Strategy](#strategy)
+- [Headless & CI Authentication](#headless--ci-authentication)
 - [Local Device Auth Testing](#local-device-auth-testing)
 - [Commands Reference](#commands-reference)
 - [Configuration](#configuration)
@@ -206,6 +207,44 @@ Entire works seamlessly with [git worktrees](https://git-scm.com/docs/git-worktr
 
 Multiple AI sessions can run on the same commit. If you start a second session while another has uncommitted work, Entire warns you and tracks them separately. Both sessions' checkpoints are preserved and can be rewound independently.
 
+## Headless & CI Authentication
+
+By default `entire login` stores tokens in the OS keyring (macOS Keychain,
+Linux Secret Service, Windows Credential Manager). Machines without a usable
+keyring — headless servers, containers, minimal VMs, CI runners — have two
+supported paths:
+
+### Interactive login on a headless machine
+
+Use the file-backed token store. The device-auth flow already works without a
+local browser (the CLI prints an approval URL you can open on any machine);
+only token storage needs the override:
+
+```bash
+ENTIRE_TOKEN_STORE=file entire login
+```
+
+Tokens are written with `0600` permissions to `tokens.json` in your Entire
+config directory (`~/.config/entire` by default). Override the location with
+`ENTIRE_TOKEN_STORE_PATH`. Set `ENTIRE_TOKEN_STORE=file` persistently (e.g. in
+your shell profile) so later commands read from the same store.
+
+### Non-interactive automation (CI, workload identity)
+
+Skip login and storage entirely by injecting a token per invocation:
+
+```bash
+ENTIRE_TOKEN=<login-or-sa-session-JWT> entire ...
+```
+
+`ENTIRE_TOKEN` bypasses stored credentials; the CLI derives the control-plane
+endpoint from the token itself. Nothing is written to disk. This is the right
+path for CI pipelines and service accounts.
+
+> **Seeing `save login` / `failed to unlock correct collection` errors from
+> `entire login`?** That's the OS keyring being unavailable — use one of the
+> two paths above.
+
 ## Local Device Auth Testing
 
 If you're working on the CLI device auth flow against a local `entire.io` checkout:
@@ -250,6 +289,10 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | `entire checkpoint explain` | Explain a session, commit, or checkpoint                                               |
 | `entire checkpoint rewind` | Rewind to a previous checkpoint (deprecated, will be removed in a future release)       |
 | `entire login`   | Authenticate the CLI with Entire device auth                                                      |
+| `entire org`     | Manage Entire organizations (create, list, get, delete)                                           |
+| `entire project` | Manage Entire projects (create, list, get, delete)                                                |
+| `entire repo`    | Manage Entire repositories (create, list, get, delete, clone, mirror, visibility)                 |
+| `entire grant`   | Manage access grants and org membership (org, project, repo)                                      |
 | `entire session` | View and manage agent sessions tracked by Entire                                                  |
 | `entire session resume`    | Switch to a branch, restore latest checkpointed session metadata, and show command(s) |
 | `entire session attach`    | Attach to a previously detached session                                                |

@@ -41,8 +41,8 @@ func TestOrgCreate_HumanByDefault(t *testing.T) {
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestOrgCreate_JSONOnRequest(t *testing.T) {
 	srv := newCreateOrgServer(t)
-	// org create's --json is persistent on the group root, so drive the
-	// full group command with "create" as a subcommand arg.
+	// Drive the full group command so the test covers Cobra's command-tree
+	// wiring as well as the leaf's local --json flag.
 	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "create", "acme", "--json")
 	require.NoError(t, err)
 	require.Contains(t, out, `"name": "acme"`)

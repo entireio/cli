@@ -22,12 +22,22 @@ This repo contains the CLI for Entire.
 
 ### Command Layout
 
-The visible CLI is organized around five noun groups plus a small set of
+The visible CLI is organized around a set of noun groups plus a small set of
 top-level verbs. The groups are the canonical home for each verb; legacy
 top-level shortcuts remain functional but hidden, and emit a deprecation hint
 pointing at the canonical group form. Newer experimental command families are
-discoverable through `entire labs` and may remain hidden from root help while
-their canonical paths are still runnable.
+discoverable through `entire labs` and their canonical paths are always
+runnable.
+
+Experimental commands are gated by a build-time visibility flag (the
+`cmd/entire/cli/experimental` package): they are shown — grouped under an
+"Experimental commands:" help section — in developer and nightly builds, and
+hidden in stable release builds. Visibility is toggled by `experimental.Visible`
+(default `"true"`), which GoReleaser stamps `"false"` only on stable tags
+(`.Prerelease` empty); nightly (`vX.Y.Z-nightly.*`) and local builds leave it at
+the default. Register a command as experimental with `experimental.Register(parent,
+child)` instead of `parent.AddCommand(child)`. Gating only controls visibility —
+the commands are always runnable in every build.
 
 - `session` (alias: `sessions`): `list`, `info`, `tokens`, `stop`, `attach`, `adopt`, `resume`, `current`.
   `resume` with a branch arg switches to it and resumes its session; with no arg
@@ -58,14 +68,34 @@ their canonical paths are still runnable.
   takes `--everywhere` (revoke every session on the active core, not just the
   current one) and `--all-contexts` (log out of every saved login)
 - `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
+- `org`: control-plane organization management — `create`, `list`, `get`, `delete`
+- `project`: control-plane project management — `create`, `list`, `get`, `delete`
+- `repo`: control-plane repository lifecycle — `create`, `list`, `get`, `delete`,
+  `clone`, plus the `mirror` and `visibility` subtrees. Git content operations
+  (log, diff, …) are intentionally out of scope.
+- `grant`: manage access grants and org membership — `org`, `project`, and `repo`
+  each support `add` / `list` / `remove`
 
-Experimental command families advertised through `entire labs`:
-
-- `tokens`: `profile` (hidden from root help while token diagnostics mature)
+Experimental commands (gated by the build-time visibility flag above — visible
+and grouped under "Experimental commands:" in developer/nightly builds, hidden
+in stable releases, always runnable): `tokens`, `import`, `review`,
+`investigate`, `blame`, `why`, the top-level `search` shortcut, `experts`,
+`runner`, and `checkpoint policy`. `tokens` is also advertised through `entire
+labs`. The canonical `checkpoint search` is not gated and stays visible.
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
-`configure`, `agent-help`.
+`configure`, `agent-help`, `api`.
+
+`api` is an authenticated passthrough to Entire's HTTP APIs (gh-style): it
+attaches the right bearer and dials the right host so callers don't plumb auth
+themselves. `--to core` (default) hits the control plane; `--to cell` hits an
+entire-api cell. `--jurisdiction <slug>` (e.g. `us`, `eu`) targets a specific
+jurisdiction's cell instead of the caller's home cell and implies `--to cell`
+(cell routing + identity-token exchange live in `auth.NewEntireAPICellClient`
+via `auth.CellTarget`). `{owner}`/`{repo}`/`{repo_id}` in the path are filled
+from the current repo's origin remote. It is visible in `entire help` and
+`entire agent-help`, so agents discover it as the supported way to call the API.
 
 `agent-help` renders machine-readable, agent-facing usage live from the Cobra
 command tree (so it always matches the installed binary): bare prints a
@@ -74,7 +104,10 @@ one command's current flags; `--json` emits structured output. It is the single
 source of truth the first-turn context injection and the `--agent-help-skill`
 skill point agents at, instead of enumerating a surface that goes stale.
 Hidden commands opt into being advertised here by setting
-`Annotations[agentHelpAnnotation] = "true"` (e.g. `trail`).
+`Annotations[agentHelpAnnotation] = "true"` (e.g. `trail`). Because `agent-help`
+renders live and lists non-hidden commands, the experimental commands appear in
+`agent-help` in developer/nightly builds and are absent in stable releases — the
+advertised surface is build-dependent, matching what `entire help` shows.
 No-channel agents (Cursor, Copilot CLI, Factory Droid, MCP hosts — no
 context-injection channel and no agent-help skill template) reach it without an
 active push. All of them can discover it passively: it is visible in `entire
@@ -90,7 +123,9 @@ Hidden top-level shortcuts (functional, emit a one-line deprecation hint):
 `resume` → `session resume`, `attach` → `session attach`, `explain` →
 `checkpoint explain`, `trace` → `doctor trace`.
 Cobra-native aliases (no hint): `sessions` → `session`, `cp`/`checkpoints` →
-`checkpoint`. The `search` top-level remains hidden without a hint.
+`checkpoint`. The `search` top-level is experimental (see the visibility gate
+above), so it follows the build-dependent visibility rather than being
+unconditionally hidden.
 
 Deprecated top-level commands (functional, print a cobra deprecation message):
 `reset` → `clean`, and `rewind` (no replacement, announces removal — same
@@ -506,6 +541,35 @@ env-token-first precedence itself — see `resolveAuthStatusTarget` /
 deliberate exception: it manages a *stored* login session, which an ephemeral
 env token has none of, so it stays on the active context.
 
+### Entire-API Cell Routing (which cell does a data-plane request go to?)
+
+The data plane (entire-api) is deployed per jurisdiction; a repo placement
+lives in exactly one cell, user `/me/*` activity is consolidated in the
+caller's home cell, and no server-side cross-cell aggregator exists. The CLI
+therefore has exactly three routing shapes, mirroring the entire.io BFF:
+
+- **Repo-scoped → one cell**: `resolveRepoCellTarget` (`cell_target.go`) maps
+  a repo (ULID or owner/repo) to the cell hosting it via mirrors + the cluster
+  catalog. Best-effort: any failure returns nil and the auth layer falls back
+  to home-jurisdiction routing. Used by experts
+  (`NewAuthenticatedEntireAPICellClient` in `api_client.go`).
+- **User-scoped `/me` → home cell, never fan out**:
+  `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the
+  `home_jurisdiction` JWT claim; activity/recap use it with a data-API
+  fallback (`runAuthenticatedActivityAPI` in `entireapi_client.go`).
+- **Repo-set queries → fan out and merge client-side**: `cell_fanout.go` —
+  `groupReposByCell` (repo index → per-cell groups; the catalog join key is
+  `ClusterSlug`↔`Cluster.Slug`, NOT the cell name, which the catalog does not
+  expose), `resolveCellBaseURLs`, and `fanOutCells` (parallel per-cell calls,
+  per-cell timeout, partial failures isolated per slot). Merge semantics stay
+  with the command.
+
+Token rule: identity tokens are **per-jurisdiction, not per-cell**. Multi-cell
+callers must build one `auth.CellClientFactory`
+(`NewEntireAPICellClientFactory`) per operation — it resolves the login
+subject once and mints at most one token per jurisdiction. `fanOutCells` does
+this automatically; do not call `NewEntireAPICellClient` in a loop.
+
 ### Session Strategy (`cmd/entire/cli/strategy/`)
 
 The CLI uses a manual-commit strategy for managing session data and checkpoints. The strategy implements the `Strategy` interface defined in `strategy.go`.
@@ -537,7 +601,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - **Shadow branch migration** - if user does stash/pull/rebase (HEAD changes without commit), shadow branch is automatically moved to new base commit
 - **Orphaned branch cleanup** - if a shadow branch exists without a corresponding session state file, it is automatically reset when a new session starts
 - PrePush hook can push `entire/checkpoints/v1` branch alongside user pushes
-- **OPF (OpenAI Privacy Filter) runs at pre-push, not post-commit**: when `redaction.openai_privacy_filter.enabled` is true, the PrePush hook re-redacts unpushed `entire/checkpoints/v1` commits with the OPF 8th layer, builds new commits carrying an `Entire-OPF-Applied: true` trailer, and atomically updates the local v1 ref before pushing. Per-commit condensation stays on the fast 7-layer pipeline. See `strategy/manual_commit_opf_rewrite.go` and `docs/security-and-privacy.md` for the full flow, including divergence detection, bootstrap caps, and CAS-on-conflict semantics.
+- **OPF (OpenAI Privacy Filter) runs at pre-push, not post-commit**: when `redaction.openai_privacy_filter.enabled` is true, the PrePush hook re-redacts unpushed `entire/checkpoints/v1` commits with the OPF 9th layer, builds new commits carrying an `Entire-OPF-Applied: true` trailer, and atomically updates the local v1 ref before pushing. Per-commit condensation stays on the fast 8-layer pipeline. See `strategy/manual_commit_opf_rewrite.go` and `docs/security-and-privacy.md` for the full flow, including divergence detection, bootstrap caps, and CAS-on-conflict semantics.
 - Safe to use on main/master since it never modifies commit history
 
 #### Key Files
@@ -558,6 +622,7 @@ The phase state machine, metadata directory layout, sharded checkpoint format, m
 
 - [Sessions and Checkpoints](docs/architecture/sessions-and-checkpoints.md) - domain model, storage layout, checkpoint ID linking, commit trailers, package structure
 - [Checkpoint Scenarios](docs/architecture/checkpoint-scenarios.md) - phase state machine and worked condensation scenarios
+- [Ref-Based Checkpoint Backend](docs/architecture/ref-checkpoint-backend.md) - git-refs backend: primary/mirror taxonomy, ref layout + sharding, push-discovery queue, read routing, config + rollout
 
 #### When Modifying the Strategy
 

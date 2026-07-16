@@ -32,10 +32,12 @@ func (claudeImporter) Discover(repoRoot, overridePath string, now time.Time, ses
 	return discoverSessionFiles(dir, now, sessionFilter, jsonlSessionResolver(".jsonl", identitySessionID))
 }
 
-// SplitTurns produces one Turn per user-prompt line. Token usage for each turn
-// is computed on the slice [LineStart, LineEnd) so turns don't double-count
-// later turns. tool_result lines (Type == "user" but no text content) do not
-// start a turn.
+// SplitTurns produces one Turn per user-prompt line. Main-agent token usage for
+// each turn is computed on the slice [LineStart, LineEnd) so turns don't
+// double-count later turns; subagent token usage is discovered from the full
+// prefix and rescoped to a per-turn delta by splitLineTurns (see
+// rescopeSubagentTokensToDeltas). tool_result lines (Type == "user" but no text
+// content) do not start a turn.
 func (claudeImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
 	subagentsDir := filepath.Join(filepath.Dir(sf.Path), sf.SessionID, "subagents")
 	ag := &claudecode.ClaudeCodeAgent{}

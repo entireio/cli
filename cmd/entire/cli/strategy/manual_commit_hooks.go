@@ -1407,8 +1407,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	newHead := head.Hash().String()
 	state.BaseCommit = newHead
 	state.RealignAttributionBase(newHead)
-	state.StepCount = 0
-	state.CheckpointTokenUsage = nil
+	resetCheckpointWindow(state)
 	state.CheckpointTranscriptStart = result.TotalTranscriptLines
 	state.CheckpointTranscriptSize = int64(len(result.Transcript))
 
@@ -2843,9 +2842,48 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// (attribution, files touched, prompts). Hooks run without user interaction
 	// so there is no retry path — preserving partial metadata is better than
 	// losing everything. Persisting an unredacted transcript would be worse.
-	// Run the 7-layer pipeline over the transcript — OPF runs later in
-	// the pre-push rewrite path, which re-redacts these 7-layer blobs
-	// and produces 8-layer commits before the push goes out.
+	// Run the regex-only pipeline over the transcript — OPF runs later in
+	// the pre-push rewrite path, which re-redacts these regex-only blobs
+	// and produces OPF-applied (9-layer) commits before the push goes out.
+	// Externalize inline images BEFORE redaction, mirroring CondenseSession, so the
+	// finalized (authoritative, full-session) transcript keeps its placeholders and
+	// matching assets instead of re-inlining what condensation lifted out. Opt-in;
+	// a no-codec agent or a transcript with no images is a no-op.
+	var finalizeAssets []checkpoint.TranscriptAsset
+	// Whether externalization actually RAN at finalize. When it did not (flag
+	// off here even though it may have been on at condensation — e.g. an
+	// ENTIRE_EXTERNALIZE_IMAGES env override not inherited by the hook
+	// process, or settings toggled mid-session), an empty finalizeAssets means
+	// "extraction didn't run", NOT "the transcript has no images" — clearing
+	// the previously-stored assets would permanently lose them (the re-inlined
+	// base64 is destroyed by redaction below).
+	externalizationRan := false
+	if settings.IsImageExternalizationEnabled(ctx) {
+		rewritten, assets, exErr := extractSessionImages(state.AgentType, fullTranscript)
+		if exErr != nil {
+			logging.Warn(logCtx, "finalize: image externalization failed; leaving transcript inline",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", exErr.Error()),
+			)
+		} else {
+			fullTranscript = rewritten
+			finalizeAssets = assets
+			externalizationRan = true
+		}
+	}
+	// Re-capture sidecar images (e.g. Cursor's SQLite store) so a finalize that
+	// rewrites the transcript re-writes them too. When the full transcript differs
+	// from the stored (mid-turn) one, writeAssets clears the whole assets/ folder
+	// and re-writes only these assets — omitting the sidecar images here would drop
+	// what CondenseSession captured. Content-hash names make this idempotent with
+	// condensation's write; when the transcript is unchanged, writeAssets is not
+	// called and condensation's assets are left intact.
+	finalizeAssets = append(finalizeAssets, sidecarSessionImages(ctx, logCtx, ag, state)...)
+	// Sidecar capture is best-effort: a transient miss here (sqlite3 locked/timed
+	// out) yields no assets. For a sidecar-capable agent, preserve the assets a
+	// prior condensation stored rather than letting an empty set clear them.
+	_, sidecarCapable := agent.AsSidecarImageProvider(ag)
+
 	_, redactSpan := perf.Start(logCtx, "redact_transcript")
 	redactedTranscript, redactErr := redact.JSONLBytes(fullTranscript)
 	redactSpan.End()
@@ -2857,7 +2895,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		redactedTranscript = redact.RedactedBytes{}
 	}
 
-	// Post-commit emits 7-layer-only blobs; the writer joins + redacts
+	// Post-commit emits regex-only blobs; the writer joins + redacts
 	// via checkpoint.redactedJoinedPrompts. OPF runs later, once per
 	// push, in the pre-push rewrite path.
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
@@ -2884,13 +2922,15 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		}
 
 		updateOpts := checkpoint.UpdateOptions{
-			CheckpointID:     cpID,
-			SessionID:        state.SessionID,
-			Transcript:       redactedTranscript,
-			Prompts:          prompts,
-			Agent:            state.AgentType,
-			SkillEvents:      skillEvents,
-			PrecomputedBlobs: precomputed,
+			CheckpointID:            cpID,
+			SessionID:               state.SessionID,
+			Transcript:              redactedTranscript,
+			Assets:                  finalizeAssets,
+			PreserveAssetsWhenEmpty: sidecarCapable || !externalizationRan,
+			Prompts:                 prompts,
+			Agent:                   state.AgentType,
+			SkillEvents:             skillEvents,
+			PrecomputedBlobs:        precomputed,
 		}
 
 		updateErr := store.Write(ctx, checkpoint.SessionTranscript(updateOpts))

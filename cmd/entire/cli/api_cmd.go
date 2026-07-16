@@ -24,8 +24,16 @@ import (
 
 const apiMaxResponseBytes = 32 << 20 // 32 MiB cap on a printed response body.
 
+// The two --to backends: the control plane (core) and a per-jurisdiction
+// entire-api cell.
+const (
+	apiTargetCore = "core"
+	apiTargetCell = "cell"
+)
+
 type apiFlags struct {
 	to           string
+	jurisdiction string
 	method       string
 	rawFields    []string
 	typedFields  []string
@@ -45,6 +53,8 @@ func newAPICmd() *cobra.Command {
 			"chosen backend, so you don't have to plumb auth yourself:\n\n" +
 			"  --to core   the control plane (default): orgs, repos, mirrors, clusters, /me\n" +
 			"  --to cell   your home entire-api cell: /me/* activity, repo aggregates\n\n" +
+			"Use --jurisdiction <slug> (e.g. us, eu) to reach a specific jurisdiction's\n" +
+			"entire-api cell instead of your home one; it implies --to cell.\n\n" +
 			"<path> is the full path on that host, e.g. /api/v1/clusters. These\n" +
 			"placeholders are filled from the current repo's origin remote:\n" +
 			"  {owner} {repo}   the GitHub owner / repo\n" +
@@ -52,14 +62,16 @@ func newAPICmd() *cobra.Command {
 			"The method is GET unless a field/body is given (then POST); override with -X.",
 		Example: "  entire api /api/v1/clusters\n" +
 			"  entire api --to cell /api/v1/me/activity\n" +
+			"  entire api --jurisdiction eu /api/v1/me/activity\n" +
 			"  entire api --to cell \"/api/v1/me/recap?repo={repo_id}\"\n" +
 			"  entire api -X POST /api/v1/projects -f name=demo",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAPI(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], f)
+			return runAPI(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], f, cmd.Flags().Changed("to"))
 		},
 	}
-	cmd.Flags().StringVar(&f.to, "to", "core", "which backend to call: core or cell")
+	cmd.Flags().StringVar(&f.to, "to", apiTargetCore, "which backend to call: core or cell")
+	cmd.Flags().StringVarP(&f.jurisdiction, "jurisdiction", "j", "", "target a specific jurisdiction's cell (e.g. us, eu) instead of your home cell; implies --to cell")
 	cmd.Flags().StringVarP(&f.method, "method", "X", "", "HTTP method (default GET, or POST when a field/body is given)")
 	cmd.Flags().StringArrayVarP(&f.rawFields, "raw-field", "f", nil, "add a string parameter in key=value format (repeatable)")
 	cmd.Flags().StringArrayVarP(&f.typedFields, "field", "F", nil, "add a typed parameter in key=value format; true/false/null/numbers are converted (repeatable)")
@@ -70,10 +82,15 @@ func newAPICmd() *cobra.Command {
 	return cmd
 }
 
-func runAPI(ctx context.Context, w, errW io.Writer, rawPath string, f *apiFlags) error {
+func runAPI(ctx context.Context, w, errW io.Writer, rawPath string, f *apiFlags, toExplicit bool) error {
 	insecure := applyInsecureHTTPAuth(f.insecureHTTP)
 
-	client, err := resolveAPIClient(ctx, f.to, insecure)
+	to, jurisdiction, err := resolveAPITarget(f, toExplicit)
+	if err != nil {
+		return err
+	}
+
+	client, err := resolveAPIClient(ctx, to, jurisdiction, insecure)
 	if err != nil {
 		return err
 	}
@@ -110,12 +127,34 @@ func runAPI(ctx context.Context, w, errW io.Writer, rawPath string, f *apiFlags)
 	return writeAPIResponse(w, errW, resp, f.include)
 }
 
+// resolveAPITarget applies the --jurisdiction/--to interplay. --jurisdiction
+// selects a specific jurisdiction's entire-api cell, so it implies --to cell;
+// combining it with an explicit --to core is a contradiction and is rejected.
+// The returned jurisdiction is normalized to a bare lowercase slug (e.g. "US"
+// or " us " -> "us"); NewEntireAPICellClient validates it as a DNS label.
+func resolveAPITarget(f *apiFlags, toExplicit bool) (to, jurisdiction string, err error) {
+	to = f.to
+	jurisdiction = strings.ToLower(strings.TrimSpace(f.jurisdiction))
+	if jurisdiction == "" {
+		return to, "", nil
+	}
+	switch {
+	case !toExplicit:
+		to = apiTargetCell // --jurisdiction targets a cell; imply it over the default core.
+	case strings.ToLower(strings.TrimSpace(f.to)) != apiTargetCell:
+		return "", "", fmt.Errorf("--jurisdiction targets a cell; use --to cell (not --to %s)", f.to)
+	}
+	return to, jurisdiction, nil
+}
+
 // resolveAPIClient builds an authenticated client for the chosen backend. Both
 // return an *api.Client whose base URL is the backend origin, so <path> is the
-// full path (e.g. /api/v1/…) against that host.
-func resolveAPIClient(ctx context.Context, to string, insecure bool) (*api.Client, error) {
+// full path (e.g. /api/v1/…) against that host. jurisdiction, when non-empty,
+// pins the entire-api cell to that jurisdiction (cell path only; resolveAPITarget
+// guarantees it is empty for core).
+func resolveAPIClient(ctx context.Context, to, jurisdiction string, insecure bool) (*api.Client, error) {
 	switch strings.ToLower(strings.TrimSpace(to)) {
-	case "", "core":
+	case "", apiTargetCore:
 		target, err := resolveAuthStatusTarget(ctx, auth.Contexts, auth.RefreshedLoginToken)
 		if err != nil {
 			return nil, err
@@ -131,8 +170,12 @@ func resolveAPIClient(ctx context.Context, to string, insecure bool) (*api.Clien
 			}
 		}
 		return api.NewClientWithBaseURL(target.token, target.coreURL), nil
-	case "cell":
-		client, err := auth.NewEntireAPICellClient(ctx, insecure, nil)
+	case apiTargetCell:
+		var target *auth.CellTarget
+		if jurisdiction != "" {
+			target = &auth.CellTarget{Jurisdiction: jurisdiction}
+		}
+		client, err := auth.NewEntireAPICellClient(ctx, insecure, target)
 		if err != nil {
 			return nil, err //nolint:wrapcheck // NewEntireAPICellClient already returns contextual auth errors
 		}

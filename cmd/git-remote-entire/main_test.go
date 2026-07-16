@@ -173,6 +173,98 @@ func TestFatalMessage(t *testing.T) {
 	}
 }
 
+func TestMissingClusterHostMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		rawURL      string
+		contains    []string
+		notContains []string
+	}{
+		{
+			// The motivating case: forge id typed where the cluster host belongs.
+			name:     "forge id in host slot points at repo clone",
+			rawURL:   "entire://gh/entire.io/cli",
+			contains: []string{"missing its cluster host", `"gh" is a forge id`, "entire repo clone /gh/entire.io/cli"},
+		},
+		{
+			// Empty host but the path already reads as a forge shorthand.
+			name:     "empty host with forge path points at repo clone",
+			rawURL:   "entire:///gh/entire.io/cli",
+			contains: []string{"missing its cluster host", "entire repo clone /gh/entire.io/cli"},
+		},
+		{
+			// Empty host, leading segment is not a known forge → generic error.
+			name:        "empty host with non-forge path falls back",
+			rawURL:      "entire:///not-a-forge/owner/repo",
+			contains:    []string{`fatal: missing host in URL "entire:///not-a-forge/owner/repo"`},
+			notContains: []string{"entire repo clone"},
+		},
+		{
+			name:        "bare scheme falls back",
+			rawURL:      "entire://",
+			contains:    []string{`fatal: missing host in URL "entire://"`},
+			notContains: []string{"entire repo clone"},
+		},
+		{
+			// Not enough path to form owner/repo → not worth pointing at clone.
+			name:        "empty host single-segment path falls back",
+			rawURL:      "entire:///gh",
+			contains:    []string{`fatal: missing host in URL "entire:///gh"`},
+			notContains: []string{"entire repo clone"},
+		},
+		{
+			// Forge in host slot but no owner/repo — the shorthand `/gh` would be
+			// rejected by `entire repo clone`, so fall back rather than suggest it.
+			name:        "forge in host slot without path falls back",
+			rawURL:      "entire://gh",
+			contains:    []string{`fatal: missing host in URL "entire://gh"`},
+			notContains: []string{"entire repo clone"},
+		},
+		{
+			// Forge in host slot with owner but no repo — incomplete triple.
+			name:        "forge in host slot with owner only falls back",
+			rawURL:      "entire://gh/owner",
+			contains:    []string{`fatal: missing host in URL "entire://gh/owner"`},
+			notContains: []string{"entire repo clone"},
+		},
+		{
+			// Empty host, forge + owner but no repo — incomplete triple.
+			name:        "empty host forge and owner only falls back",
+			rawURL:      "entire:///gh/owner",
+			contains:    []string{`fatal: missing host in URL "entire:///gh/owner"`},
+			notContains: []string{"entire repo clone"},
+		},
+		{
+			// Too many segments — not the gh/<owner>/<repo> shape either.
+			name:        "forge in host slot with extra path segment falls back",
+			rawURL:      "entire://gh/owner/repo/extra",
+			contains:    []string{`fatal: missing host in URL "entire://gh/owner/repo/extra"`},
+			notContains: []string{"entire repo clone"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			parsed, err := url.Parse(tc.rawURL)
+			if err != nil {
+				t.Fatalf("parse %q: %v", tc.rawURL, err)
+			}
+			got := missingClusterHostMessage(parsed, tc.rawURL)
+			for _, sub := range tc.contains {
+				if !strings.Contains(got, sub) {
+					t.Errorf("missingClusterHostMessage(%q) = %q, missing %q", tc.rawURL, got, sub)
+				}
+			}
+			for _, sub := range tc.notContains {
+				if strings.Contains(got, sub) {
+					t.Errorf("missingClusterHostMessage(%q) = %q, should not contain %q", tc.rawURL, got, sub)
+				}
+			}
+		})
+	}
+}
+
 func TestCoreTrusted(t *testing.T) {
 	t.Parallel()
 	trusted := []string{"https://core.us.entire.io", "https://core.eu.entire.io/"}
