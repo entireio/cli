@@ -249,6 +249,9 @@ func TestResolveRemoteRepo(t *testing.T) {
 	}
 }
 
+// A repo without the requested remote must yield the ErrRemoteNotFound
+// sentinel (git exit status 2), so callers can treat "no remote" as a settled
+// state distinct from git failing for another reason.
 // Not parallel: uses t.Chdir()
 func TestResolveRemoteRepo_MissingRemote(t *testing.T) {
 	repoDir := t.TempDir()
@@ -256,5 +259,5 @@ func TestResolveRemoteRepo_MissingRemote(t *testing.T) {
 	t.Chdir(repoDir)
 
 	_, _, _, err := ResolveRemoteRepo(context.Background(), "origin")
-	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrRemoteNotFound)
 }

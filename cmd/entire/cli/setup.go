@@ -879,7 +879,22 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 					}
 					if err := runGitHubBootstrapFinalize(ctx, cmd.OutOrStdout(), bootstrap); err != nil {
 						runErr = err
+						return
 					}
+					// The connect ladder runs only now, after finalize created
+					// the origin remote: probed any earlier, the mirror rung
+					// can only report "couldn't check" and the mirror offer
+					// can never fire on a first enable (the setup paths skip
+					// their in-flow ladder while a bootstrap is pending). A
+					// bootstrapped repo is always a first run; nil importScope
+					// means every agent whose hooks were just installed.
+					printBootstrapSection(cmd.OutOrStdout(), "Connecting to entire.io")
+					runEnableOnboarding(ctx, cmd.OutOrStdout(), enableOnboardingOpts{
+						assumeYes:   opts.Yes,
+						neverPrompt: agentName != "",
+						firstRun:    true,
+					})
+					fmt.Fprintln(cmd.OutOrStdout(), "\nDone.")
 				}()
 			}
 
@@ -1320,14 +1335,17 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Connect rungs (login, mirror, import): one consent prompt covering
 	// whatever is missing, then the setup checklist. Also the resume path —
-	// re-running enable re-offers only rungs that are still missing. Runs
-	// before the bootstrap early-return below: a just-bootstrapped repo is
-	// exactly where the login/mirror/import offers matter most.
-	runEnableOnboarding(ctx, w, enableOnboardingOpts{
-		assumeYes:   opts.Yes,
-		firstRun:    firstRun,
-		importScope: agents,
-	})
+	// re-running enable re-offers only rungs that are still missing. While a
+	// bootstrap is pending (SuppressDoneMessage) the ladder is deferred to
+	// the enable RunE, which runs it after the GitHub publish step so the
+	// mirror rung can see the origin remote the finalize creates.
+	if !opts.SuppressDoneMessage {
+		runEnableOnboarding(ctx, w, enableOnboardingOpts{
+			assumeYes:   opts.Yes,
+			firstRun:    firstRun,
+			importScope: agents,
+		})
+	}
 
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary after
@@ -1927,14 +1945,17 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	// documented as non-interactive, so prompting is always suppressed here;
 	// --yes additionally auto-imports on first run (local-only, scoped to the
 	// targeted agent), matching the enable-time import contract. The
-	// checklist hints carry the rest. Runs before the bootstrap early-return
-	// so bootstrapped repos get the ladder too.
-	runEnableOnboarding(ctx, w, enableOnboardingOpts{
-		assumeYes:   opts.Yes,
-		neverPrompt: true,
-		firstRun:    firstRun,
-		importScope: []agent.Agent{ag},
-	})
+	// checklist hints carry the rest. While a bootstrap is pending
+	// (SuppressDoneMessage) the ladder is deferred to the enable RunE, after
+	// the GitHub publish step that creates the origin remote.
+	if !opts.SuppressDoneMessage {
+		runEnableOnboarding(ctx, w, enableOnboardingOpts{
+			assumeYes:   opts.Yes,
+			neverPrompt: true,
+			firstRun:    firstRun,
+			importScope: []agent.Agent{ag},
+		})
+	}
 
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary.

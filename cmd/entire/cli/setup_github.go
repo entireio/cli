@@ -330,8 +330,9 @@ func runGitHubBootstrapFinalize(ctx context.Context, w io.Writer, s *bootstrapSt
 			fmt.Fprintln(w, "    git push -u origin HEAD")
 		}
 	}
-
-	fmt.Fprintln(w, "\nDone.")
+	// No completion line here: the enable flow runs the connect ladder after
+	// this publish step (the mirror rung needs the origin remote created
+	// above) and prints the final "Done." itself.
 	return nil
 }
 

@@ -94,6 +94,12 @@ func GetRemoteURL(ctx context.Context, remoteName string) (string, error) {
 	return GetRemoteURLInDir(ctx, "", remoteName)
 }
 
+// ErrRemoteNotFound reports that the repository exists but has no remote with
+// the requested name (git remote get-url exit status 2) — a settled state
+// callers may treat as "nothing to resolve", unlike git failing for another
+// reason (not a repository, canceled context, ...).
+var ErrRemoteNotFound = errors.New("remote not found")
+
 // GetRemoteURLInDir returns the URL configured for the named git remote in dir.
 func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", remoteName)
@@ -102,6 +108,10 @@ func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, err
 	}
 	output, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 && ctx.Err() == nil {
+			return "", fmt.Errorf("remote %q: %w", remoteName, ErrRemoteNotFound)
+		}
 		return "", fmt.Errorf("remote %q not found", remoteName)
 	}
 	return strings.TrimSpace(string(output)), nil

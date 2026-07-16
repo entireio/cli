@@ -399,6 +399,12 @@ func mirrorRung(deps onboardingRungDeps) onboarding.Rung {
 		Title: "Repo mirrored",
 		Check: func(ctx context.Context) onboarding.Check {
 			forge, owner, repo, err := deps.resolveOrigin(ctx)
+			if errors.Is(err, gitremote.ErrRemoteNotFound) {
+				// No origin remote is a settled fact about the repo (a
+				// local-only bootstrap, say), not a failed check — render it
+				// like a non-GitHub origin instead of "couldn't check".
+				return onboarding.Check{State: onboarding.StateNotApplicable, Detail: "no origin remote"}
+			}
 			if err != nil {
 				// A resolution failure (git exec error, canceled context) is
 				// not the same fact as "this repo isn't on GitHub".

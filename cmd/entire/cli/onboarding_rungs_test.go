@@ -14,6 +14,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/onboarding"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/internal/coreapi"
@@ -186,11 +187,29 @@ func TestMirrorRung_NotApplicableWithoutGitHubOrigin(t *testing.T) {
 	}
 }
 
-// gitremote returns a distinguishable "no remote" answer as (forge "", nil
-// error) via empty forge with an error mentioning the missing remote; a repo
-// genuinely without a GitHub origin is NotApplicable, but a resolution
-// FAILURE (git exec error, canceled context) must not masquerade as a
-// permanent "no GitHub origin".
+// A repo with no origin remote at all (a local-only bootstrap, say) is a
+// settled fact — the rung reads "no origin remote", not "couldn't check" with
+// a retry hint that can never resolve anything.
+func TestMirrorRung_NotApplicableWithoutAnyRemote(t *testing.T) {
+	t.Parallel()
+	deps := onboardingRungDeps{
+		resolveOrigin: func(context.Context) (forge, owner, repo string, err error) {
+			return "", "", "", fmt.Errorf("get remote URL for %q: %w", "origin", gitremote.ErrRemoteNotFound)
+		},
+	}
+
+	check := mirrorRung(deps).Check(context.Background())
+
+	if check.State != onboarding.StateNotApplicable {
+		t.Errorf("State = %v, want StateNotApplicable when there is no origin remote", check.State)
+	}
+	if check.Detail != "no origin remote" {
+		t.Errorf("Detail = %q, want %q", check.Detail, "no origin remote")
+	}
+}
+
+// A resolution FAILURE (git exec error, canceled context) must not masquerade
+// as a permanent "no GitHub origin".
 func TestMirrorRung_UnknownWhenOriginResolutionFails(t *testing.T) {
 	t.Parallel()
 	deps := onboardingRungDeps{

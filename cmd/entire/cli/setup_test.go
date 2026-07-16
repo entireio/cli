@@ -3929,6 +3929,60 @@ func TestEnableCmd_ReenableDisabledRepo_RunsOnboardingLadder(t *testing.T) {
 	}
 }
 
+// A bootstrapped enable must run the connect ladder only after the publish
+// phase (initial commit + optional GitHub repo) — that step is what creates
+// the origin remote, so a ladder run any earlier can only report the mirror
+// rung as "couldn't check" and the mirror offer can never fire on the very
+// first enable. Not parallel: chdir + env isolation.
+func TestEnableCmd_Bootstrap_RunsLadderAfterPublish(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	gitcfg := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(gitcfg, []byte("[user]\n\tname = Test\n\temail = t@example.com\n[commit]\n\tgpgsign = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", gitcfg)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+
+	var stdout, stderr bytes.Buffer
+	var atLadder string
+	var got *enableOnboardingOpts
+	prev := runEnableOnboarding
+	runEnableOnboarding = func(_ context.Context, _ io.Writer, o enableOnboardingOpts) {
+		atLadder = stdout.String()
+		got = &o
+	}
+	t.Cleanup(func() { runEnableOnboarding = prev })
+
+	cmd := newEnableCmd()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	// The --agent variant keeps the test hermetic: --yes select-all would also
+	// pick up external agents other tests registered in the process-global
+	// registry (whose temp-dir binaries are gone). The bootstrap defer under
+	// test is shared by the bare-wizard and --agent paths.
+	cmd.SetArgs([]string{"--agent", "claude-code", "--init-repo", "--no-github", "--yes"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable error = %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	if got == nil {
+		t.Fatalf("bootstrapped enable must run the onboarding ladder; output:\n%s", stdout.String())
+	}
+	if !strings.Contains(atLadder, "Created initial commit") {
+		t.Errorf("ladder ran before the publish phase; output at ladder time:\n%s", atLadder)
+	}
+	if !got.firstRun {
+		t.Error("a bootstrapped repo is always a first run (gates --yes auto-import)")
+	}
+	if !got.neverPrompt {
+		t.Error("--agent enable must suppress onboarding prompts in the deferred ladder too")
+	}
+	if !strings.HasSuffix(strings.TrimSpace(stdout.String()), "Done.") {
+		t.Errorf("enable should close with Done. after the ladder, got:\n%s", stdout.String())
+	}
+}
+
 // The --agent path is documented as non-interactive ("Enables non-interactive
 // mode"); the onboarding ladder must run there with prompting suppressed
 // regardless of --yes, or CI on a TTY runner hangs on the consent prompt.
@@ -3995,10 +4049,12 @@ func TestRunEnableInteractive_FirstRun_RunsOnboardingLadder(t *testing.T) {
 	}
 }
 
-// The bootstrap flow (--init-repo / non-git dir) suppresses the "Ready."
-// message but must still get the onboarding ladder — a just-bootstrapped
-// GitHub repo is exactly where login/mirror/import matter most.
-func TestRunEnableInteractive_BootstrapPathRunsOnboardingLadder(t *testing.T) {
+// While a bootstrap is pending (SuppressDoneMessage), the setup flow must NOT
+// run the ladder in-flow: the origin remote doesn't exist until the deferred
+// publish phase, so an early ladder can only report the mirror rung as
+// "couldn't check" and the mirror offer can never fire. The enable RunE runs
+// the ladder after the publish instead (TestEnableCmd_Bootstrap_RunsLadderAfterPublish).
+func TestRunEnableInteractive_BootstrapDefersOnboardingLadder(t *testing.T) {
 	setupTestRepo(t)
 
 	ladderRan := false
@@ -4016,7 +4072,7 @@ func TestRunEnableInteractive_BootstrapPathRunsOnboardingLadder(t *testing.T) {
 		t.Fatalf("runEnableInteractive() error = %v", err)
 	}
 
-	if !ladderRan {
-		t.Error("bootstrap enable (SuppressDoneMessage) must still run the onboarding ladder")
+	if ladderRan {
+		t.Error("bootstrap enable must defer the onboarding ladder to after the publish phase")
 	}
 }
