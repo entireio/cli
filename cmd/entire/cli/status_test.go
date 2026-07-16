@@ -337,12 +337,15 @@ func TestRunStatus_BothProjectAndLocal(t *testing.T) {
 
 	output := stdout.String()
 	// Should show effective status first (local overrides project)
-	if !strings.Contains(output, "Disabled") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show effective 'Disabled' with 'manual-commit', got: %s", output)
+	if !strings.Contains(output, "Disabled") {
+		t.Errorf("Expected output to show effective 'Disabled', got: %s", output)
+	}
+	if strings.Contains(output, "manual-commit") {
+		t.Errorf("The strategy name is jargon and must not appear in status, got: %s", output)
 	}
 	// Should show both settings separately
-	if !strings.Contains(output, "Project") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show Project with manual-commit, got: %s", output)
+	if !strings.Contains(output, "Project") {
+		t.Errorf("Expected output to show Project row, got: %s", output)
 	}
 	if !strings.Contains(output, "Local") || !strings.Contains(output, "disabled") {
 		t.Errorf("Expected output to show Local with disabled, got: %s", output)
@@ -364,12 +367,15 @@ func TestRunStatus_BothProjectAndLocal_Short(t *testing.T) {
 
 	output := stdout.String()
 	// Should show merged/effective state (local overrides project)
-	if !strings.Contains(output, "Disabled") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show 'Disabled' with 'manual-commit', got: %s", output)
+	if !strings.Contains(output, "Disabled") {
+		t.Errorf("Expected output to show 'Disabled', got: %s", output)
+	}
+	if strings.Contains(output, "manual-commit") {
+		t.Errorf("The strategy name is jargon and must not appear in status, got: %s", output)
 	}
 }
 
-func TestRunStatus_ShowsManualCommitStrategy(t *testing.T) {
+func TestRunStatus_HidesStrategyName(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": false}`)
 
@@ -379,9 +385,10 @@ func TestRunStatus_ShowsManualCommitStrategy(t *testing.T) {
 	}
 
 	output := stdout.String()
-	// Should show effective status first
-	if !strings.Contains(output, "Disabled") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show effective 'Disabled' with 'manual-commit', got: %s", output)
+	// Should show effective status first; the strategy name is jargon
+	// (manual-commit is the only strategy) and must not appear.
+	if !strings.Contains(output, "Disabled") || strings.Contains(output, "manual-commit") {
+		t.Errorf("Expected 'Disabled' without 'manual-commit', got: %s", output)
 	}
 	// Should show per-file details
 	if !strings.Contains(output, "Project") || !strings.Contains(output, "disabled") {
@@ -1234,8 +1241,8 @@ func TestFormatSettingsStatusShort_Enabled(t *testing.T) {
 	if !strings.Contains(result, "Enabled") {
 		t.Errorf("Expected 'Enabled' in output, got: %q", result)
 	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
+	if strings.Contains(result, "manual-commit") {
+		t.Errorf("The strategy name must not appear, got: %q", result)
 	}
 }
 
@@ -1256,8 +1263,8 @@ func TestFormatSettingsStatusShort_Disabled(t *testing.T) {
 	if !strings.Contains(result, "Disabled") {
 		t.Errorf("Expected 'Disabled' in output, got: %q", result)
 	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
+	if strings.Contains(result, "manual-commit") {
+		t.Errorf("The strategy name must not appear, got: %q", result)
 	}
 }
 
@@ -1449,8 +1456,8 @@ func TestFormatSettingsStatus_Project(t *testing.T) {
 	if !strings.Contains(result, "enabled") {
 		t.Errorf("Expected 'enabled' in output, got: %q", result)
 	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
+	if strings.Contains(result, "manual-commit") {
+		t.Errorf("The strategy name must not appear, got: %q", result)
 	}
 }
 
@@ -1471,8 +1478,8 @@ func TestFormatSettingsStatus_LocalDisabled(t *testing.T) {
 	if !strings.Contains(result, "disabled") {
 		t.Errorf("Expected 'disabled' in output, got: %q", result)
 	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
+	if strings.Contains(result, "manual-commit") {
+		t.Errorf("The strategy name must not appear, got: %q", result)
 	}
 }
 
