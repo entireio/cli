@@ -53,10 +53,11 @@ var (
 	// boundary, so APP_DB_PASSWORD matches via the leading `_` but mydbpassword
 	// does not.
 	credentialValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + dbPasswordKeyShape + `)\s*=\s*(?P<value>"[^"]*"|'[^']*'|[^\s,;&]+)`)
-	// secretValuePattern targets single-line shell/env assignments. Requiring
-	// `=` avoids prose, rejecting an initial `=` avoids equality expressions,
-	// and newline-free quote branches keep a match inside one command.
-	secretValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + secretValueKeyShape + `)[ \t]*=[ \t]*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&=` + "`" + `][^\s,;&]*)`)
+	// credentialAssignmentPattern captures a bounded key candidate and lets the
+	// shared key classifier decide whether it is sensitive. Requiring `=` avoids
+	// prose, rejecting an initial `=` avoids equality expressions, and newline-
+	// free quote branches keep a match inside one command.
+	credentialAssignmentPattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=[ \t]*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&=` + "`" + `][^\s,;&]*)`)
 	// shellStdinSecretPattern matches a printf literal piped into a
 	// secret-management command (`printf 'v' | mycli secrets put KEY`). Named
 	// captures keep the literal and key contracts stable; bounded, newline-free
@@ -428,10 +429,23 @@ func detectShellStdinSecrets(s string) []taggedRegion {
 	if !strings.ContainsRune(s, '|') {
 		return nil
 	}
-	valueGroup := shellStdinSecretPattern.SubexpIndex("value")
-	keyGroup := shellStdinSecretPattern.SubexpIndex("key")
+	return detectCredentialKeyCaptures(s, shellStdinSecretPattern)
+}
+
+func detectCredentialValues(s string) []taggedRegion {
+	if !strings.ContainsRune(s, '=') {
+		return nil
+	}
+	regions := detectNonPlaceholderCaptures(s, credentialValuePattern)
+	regions = append(regions, detectCredentialKeyCaptures(s, credentialAssignmentPattern)...)
+	return regions
+}
+
+func detectCredentialKeyCaptures(s string, pattern *regexp.Regexp) []taggedRegion {
+	valueGroup := pattern.SubexpIndex("value")
+	keyGroup := pattern.SubexpIndex("key")
 	var regions []taggedRegion
-	for _, match := range shellStdinSecretPattern.FindAllStringSubmatchIndex(s, -1) {
+	for _, match := range pattern.FindAllStringSubmatchIndex(s, -1) {
 		keyStart, keyEnd, ok := captureRange(match, keyGroup)
 		if !ok || !isCredentialJSONSecretKey(s[keyStart:keyEnd], false) {
 			continue
@@ -440,15 +454,6 @@ func detectShellStdinSecrets(s string) []taggedRegion {
 			regions = append(regions, captured)
 		}
 	}
-	return regions
-}
-
-func detectCredentialValues(s string) []taggedRegion {
-	if !strings.ContainsRune(s, '=') {
-		return nil
-	}
-	regions := detectNonPlaceholderCaptures(s, credentialValuePattern)
-	regions = append(regions, detectNonPlaceholderCaptures(s, secretValuePattern)...)
 	return regions
 }
 

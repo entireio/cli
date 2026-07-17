@@ -1974,6 +1974,16 @@ func TestString_CredentialWordInIdentifierKeyStillRedacts(t *testing.T) {
 			want:  "REDACTED",
 		},
 		{
+			name:  "token-flavored id key with low-entropy value",
+			input: "api_token_id=correct-horse-battery",
+			want:  "api_token_id=REDACTED",
+		},
+		{
+			name:  "access-key id with low-entropy value",
+			input: "aws_access_key_id=correct-horse-battery",
+			want:  "aws_access_key_id=REDACTED",
+		},
+		{
 			name:  "pure identifier keys still suppress the combined-entropy FP",
 			input: "GOOGLE_ADSENSE_ACCOUNT=pub-1234567890123456",
 			want:  "GOOGLE_ADSENSE_ACCOUNT=pub-1234567890123456",
