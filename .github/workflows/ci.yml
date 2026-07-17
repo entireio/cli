@@ -17,7 +17,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gnome-keyring
           echo 'somecredstorepass' | gnome-keyring-daemon --unlock
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
       - name: Core Tests
         env:
           GO_TEST_PARALLEL: "16"
@@ -38,7 +38,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gnome-keyring
           echo 'somecredstorepass' | gnome-keyring-daemon --unlock
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
       - name: Integration Tests
         env:
           GO_TEST_PARALLEL: "16"
@@ -61,7 +61,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gnome-keyring
           echo 'somecredstorepass' | gnome-keyring-daemon --unlock
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
       - name: E2E Canary
         env:
           E2E_CHECKPOINT_STORE: ${{ matrix.checkpoint_store }}

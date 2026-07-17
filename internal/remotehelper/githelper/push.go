@@ -38,10 +38,15 @@ import (
 //  4. Read send-pack stdout as a receive-pack request body (refs +
 //     capabilities + flush, then PACK data for non-delete updates).
 //  5. POST it to /git-receive-pack, stream response back into
-//     send-pack stdin.
+//     send-pack stdin. On --dry-run (or an all-rejected batch)
+//     send-pack emits no request at all — like remote-curl's
+//     rpc_service we skip the POST entirely.
 //  6. Send-pack writes a trailing flush + helper-status lines to
 //     stdout; we discard the flush and relay helper-status to git,
 //     then append the blank line that terminates the status batch.
+//     When no request was sent there is no trailing flush either
+//     (send-pack guards it with cmds_sent) — stdout continues
+//     straight into the status lines.
 func handlePush(ctx context.Context, t Transport, adv *refAdvCache, firstLine string, opts *Options, stdin *bufio.Reader, stdout io.Writer) error {
 	refspecs, err := readPushBatch(firstLine, stdin)
 	if err != nil {
@@ -123,39 +128,54 @@ func handlePush(ctx context.Context, t Transport, adv *refAdvCache, firstLine st
 		killAndWaitSendPack(sp, "after reading send-pack request failed")
 		return fmt.Errorf("reading send-pack request: %w", err)
 	}
-	amendedBody, err := gitproto.AppendAgentToReceivePackRequest(requestBody.Bytes(), Agent)
-	if err != nil {
-		close(respCh)
-		killAndWaitSendPack(sp, "after amending receive-pack agent failed")
-		return fmt.Errorf("amending receive-pack agent: %w", err)
-	}
+	// A dry-run push — or a batch where send-pack rejected every update
+	// client-side — produces no receive-pack request: send-pack guards
+	// the entire request emission with !args->dry_run / cmds_sent, so
+	// the outer flush ReadSendPackRequest just consumed is the ONLY
+	// flush on its stdout, and the next bytes are the helper-status
+	// lines themselves. Mirror remote-curl.c:rpc_service, which breaks
+	// without calling post_rpc when the first packet is a flush: skip
+	// the POST (the server deliberately 400s zero-byte receive-pack
+	// bodies) and skip the trailing-flush drain (the flush at
+	// send-pack.c:759 is guarded by cmds_sent; reading 4 more bytes
+	// here would eat "ok r" from the first status line).
+	if requestBody.Len() == 0 {
+		close(respCh) // feeder sees closed channel, reports nil, closes spIn
+	} else {
+		amendedBody, err := gitproto.AppendAgentToReceivePackRequest(requestBody.Bytes(), Agent)
+		if err != nil {
+			close(respCh)
+			killAndWaitSendPack(sp, "after amending receive-pack agent failed")
+			return fmt.Errorf("amending receive-pack agent: %w", err)
+		}
 
-	resp, err := t.ServiceRPC(ctx, serviceReceivePack, bytes.NewReader(amendedBody))
-	if err != nil {
+		resp, err := t.ServiceRPC(ctx, serviceReceivePack, bytes.NewReader(amendedBody))
+		if err != nil {
+			close(respCh)
+			killAndWaitSendPack(sp, "after posting receive-pack failed")
+			return fmt.Errorf("posting receive-pack: %w", err)
+		}
+		respCh <- resp
 		close(respCh)
-		killAndWaitSendPack(sp, "after posting receive-pack failed")
-		return fmt.Errorf("posting receive-pack: %w", err)
-	}
-	respCh <- resp
-	close(respCh)
 
-	// Send-pack's stdout sequence after we write the response:
-	//   <0000>                       <- packet_flush(out) at send-pack.c:759
-	//   ok refs/heads/...            <- print_helper_status (plain text)
-	//   error refs/...
-	// Drain the trailing flush so git sees only the newline-delimited
-	// status lines that transport-helper.c:push_update_refs_status
-	// expects.
-	//
-	// resp is closed by the feeder goroutine (above), not here — closing
-	// while io.Copy is mid-read aborts the body Read with "use of closed
-	// network connection" and turns successful pushes into fatal errors.
-	flushBuf := make([]byte, 4)
-	if _, err := io.ReadFull(spOutReader, flushBuf); err != nil {
-		return fmt.Errorf("reading send-pack trailing flush: %w", err)
-	}
-	if string(flushBuf) != "0000" {
-		return fmt.Errorf("expected trailing flush from send-pack, got %q", flushBuf)
+		// Send-pack's stdout sequence after we write the response:
+		//   <0000>                       <- packet_flush(out) at send-pack.c:759
+		//   ok refs/heads/...            <- print_helper_status (plain text)
+		//   error refs/...
+		// Drain the trailing flush so git sees only the newline-delimited
+		// status lines that transport-helper.c:push_update_refs_status
+		// expects.
+		//
+		// resp is closed by the feeder goroutine (above), not here — closing
+		// while io.Copy is mid-read aborts the body Read with "use of closed
+		// network connection" and turns successful pushes into fatal errors.
+		flushBuf := make([]byte, 4)
+		if _, err := io.ReadFull(spOutReader, flushBuf); err != nil {
+			return fmt.Errorf("reading send-pack trailing flush: %w", err)
+		}
+		if string(flushBuf) != "0000" {
+			return fmt.Errorf("expected trailing flush from send-pack, got %q", flushBuf)
+		}
 	}
 
 	helperStatus, err := io.ReadAll(spOutReader)

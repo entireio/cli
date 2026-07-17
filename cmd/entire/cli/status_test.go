@@ -325,8 +325,8 @@ func TestRunStatus_LocalSettingsOnly(t *testing.T) {
 
 func TestRunStatus_BothProjectAndLocal(t *testing.T) {
 	setupTestRepo(t)
-	// Project: enabled=true, strategy=manual-commit
-	// Local: enabled=false, strategy=manual-commit
+	// Project: enabled=true
+	// Local: enabled=false
 	// Detailed mode shows effective status first, then each file separately
 	writeSettings(t, `{"enabled": true}`)
 	writeLocalSettings(t, `{"enabled": false}`)
@@ -338,12 +338,12 @@ func TestRunStatus_BothProjectAndLocal(t *testing.T) {
 
 	output := stdout.String()
 	// Should show effective status first (local overrides project)
-	if !strings.Contains(output, "Disabled") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show effective 'Disabled' with 'manual-commit', got: %s", output)
+	if !strings.Contains(output, "Disabled") {
+		t.Errorf("Expected output to show effective 'Disabled', got: %s", output)
 	}
 	// Should show both settings separately
-	if !strings.Contains(output, "Project") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show Project with manual-commit, got: %s", output)
+	if !strings.Contains(output, "Project") || !strings.Contains(output, "enabled") {
+		t.Errorf("Expected output to show Project with enabled, got: %s", output)
 	}
 	if !strings.Contains(output, "Local") || !strings.Contains(output, "disabled") {
 		t.Errorf("Expected output to show Local with disabled, got: %s", output)
@@ -352,8 +352,8 @@ func TestRunStatus_BothProjectAndLocal(t *testing.T) {
 
 func TestRunStatus_BothProjectAndLocal_Short(t *testing.T) {
 	setupTestRepo(t)
-	// Project: enabled=true, strategy=manual-commit
-	// Local: enabled=false, strategy=manual-commit
+	// Project: enabled=true
+	// Local: enabled=false
 	// Short mode shows merged/effective settings
 	writeSettings(t, `{"enabled": true}`)
 	writeLocalSettings(t, `{"enabled": false}`)
@@ -365,28 +365,8 @@ func TestRunStatus_BothProjectAndLocal_Short(t *testing.T) {
 
 	output := stdout.String()
 	// Should show merged/effective state (local overrides project)
-	if !strings.Contains(output, "Disabled") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show 'Disabled' with 'manual-commit', got: %s", output)
-	}
-}
-
-func TestRunStatus_ShowsManualCommitStrategy(t *testing.T) {
-	setupTestRepo(t)
-	writeSettings(t, `{"enabled": false}`)
-
-	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, true, false); err != nil {
-		t.Fatalf("runStatus() error = %v", err)
-	}
-
-	output := stdout.String()
-	// Should show effective status first
-	if !strings.Contains(output, "Disabled") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show effective 'Disabled' with 'manual-commit', got: %s", output)
-	}
-	// Should show per-file details
-	if !strings.Contains(output, "Project") || !strings.Contains(output, "disabled") {
-		t.Errorf("Expected output to show 'Project' and 'disabled', got: %s", output)
+	if !strings.Contains(output, "Disabled") {
+		t.Errorf("Expected output to show 'Disabled', got: %s", output)
 	}
 }
 
@@ -1223,8 +1203,7 @@ func TestFormatSettingsStatusShort_Enabled(t *testing.T) {
 
 	sty := statusStyles{colorEnabled: false, width: 60}
 	s := &EntireSettings{
-		Enabled:  true,
-		Strategy: "manual-commit",
+		Enabled: true,
 	}
 
 	result := formatSettingsStatusShort(context.Background(), s, sty)
@@ -1235,9 +1214,6 @@ func TestFormatSettingsStatusShort_Enabled(t *testing.T) {
 	if !strings.Contains(result, "Enabled") {
 		t.Errorf("Expected 'Enabled' in output, got: %q", result)
 	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
-	}
 }
 
 func TestFormatSettingsStatusShort_Disabled(t *testing.T) {
@@ -1245,8 +1221,7 @@ func TestFormatSettingsStatusShort_Disabled(t *testing.T) {
 
 	sty := statusStyles{colorEnabled: false, width: 60}
 	s := &EntireSettings{
-		Enabled:  false,
-		Strategy: "manual-commit",
+		Enabled: false,
 	}
 
 	result := formatSettingsStatusShort(context.Background(), s, sty)
@@ -1256,9 +1231,6 @@ func TestFormatSettingsStatusShort_Disabled(t *testing.T) {
 	}
 	if !strings.Contains(result, "Disabled") {
 		t.Errorf("Expected 'Disabled' in output, got: %q", result)
-	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
 	}
 }
 
@@ -1438,8 +1410,7 @@ func TestFormatSettingsStatus_Project(t *testing.T) {
 
 	sty := statusStyles{colorEnabled: false, width: 60}
 	s := &EntireSettings{
-		Enabled:  true,
-		Strategy: "manual-commit",
+		Enabled: true,
 	}
 
 	result := formatSettingsStatus("Project", s, sty)
@@ -1450,9 +1421,6 @@ func TestFormatSettingsStatus_Project(t *testing.T) {
 	if !strings.Contains(result, "enabled") {
 		t.Errorf("Expected 'enabled' in output, got: %q", result)
 	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
-	}
 }
 
 func TestFormatSettingsStatus_LocalDisabled(t *testing.T) {
@@ -1460,8 +1428,7 @@ func TestFormatSettingsStatus_LocalDisabled(t *testing.T) {
 
 	sty := statusStyles{colorEnabled: false, width: 60}
 	s := &EntireSettings{
-		Enabled:  false,
-		Strategy: "manual-commit",
+		Enabled: false,
 	}
 
 	result := formatSettingsStatus("Local", s, sty)
@@ -1471,9 +1438,6 @@ func TestFormatSettingsStatus_LocalDisabled(t *testing.T) {
 	}
 	if !strings.Contains(result, "disabled") {
 		t.Errorf("Expected 'disabled' in output, got: %q", result)
-	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
 	}
 }
 
@@ -1703,8 +1667,7 @@ func TestFormatSettingsStatus_Separators(t *testing.T) {
 
 	sty := statusStyles{colorEnabled: false, width: 60}
 	s := &EntireSettings{
-		Enabled:  true,
-		Strategy: "manual-commit",
+		Enabled: true,
 	}
 
 	result := formatSettingsStatus("Project", s, sty)

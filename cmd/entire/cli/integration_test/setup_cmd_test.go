@@ -209,10 +209,10 @@ func TestEnableDefaultStrategy(t *testing.T) {
 		t.Error("Expected enabled to be true")
 	}
 
-	// Verify status shows manual-commit (the only strategy)
+	// Verify status shows the enabled state
 	stdout = env.RunCLI("status")
-	if !strings.Contains(stdout, "manual-commit") {
-		t.Errorf("Expected status to show 'manual-commit', got: %s", stdout)
+	if !strings.Contains(stdout, "Enabled") {
+		t.Errorf("Expected status to show 'Enabled', got: %s", stdout)
 	}
 }
 

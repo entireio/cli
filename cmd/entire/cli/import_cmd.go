@@ -79,6 +79,10 @@ fails even with --dry-run.`, imp.AgentType()),
 			}
 			fmt.Fprintf(c.OutOrStdout(), "%s %d turn(s) from %d session(s) (%d already imported).\n",
 				verb, res.TurnsImported, res.SessionsScanned, res.TurnsSkipped)
+			// A dry run writes nothing locally, so there is nothing to sync.
+			if !dryRun {
+				warnIfImportNotSynced(c.OutOrStdout(), res.TurnsImported > 0 || res.TurnsSkipped > 0)
+			}
 			return nil
 		},
 	}

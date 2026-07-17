@@ -18,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
-	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
@@ -163,10 +162,9 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 }
 
 // formatSettingsStatusShort formats a short settings status line.
-// Output format: "● Enabled · manual-commit · branch main" or "○ Disabled"
+// Output format: "● Enabled · branch main" or "○ Disabled · branch main"
+// (the branch segment is appended whenever it can be resolved).
 func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statusStyles) string {
-	displayName := strategy.StrategyNameManualCommit
-
 	var b strings.Builder
 
 	if s.Enabled {
@@ -178,9 +176,6 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		b.WriteString(" ")
 		b.WriteString(sty.render(sty.bold, "Disabled"))
 	}
-
-	b.WriteString(sty.render(sty.dim, " · "))
-	b.WriteString(displayName)
 
 	// Resolve branch from repo root
 	if repoRoot, err := paths.WorktreeRoot(ctx); err == nil {
@@ -225,10 +220,8 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 }
 
 // formatSettingsStatus formats a settings status line with source prefix.
-// Output format: "Project · enabled · manual-commit" or "Local · disabled"
+// Output format: "Project · enabled" or "Local · disabled"
 func formatSettingsStatus(prefix string, s *EntireSettings, sty statusStyles) string {
-	displayName := strategy.StrategyNameManualCommit
-
 	var b strings.Builder
 	b.WriteString(sty.render(sty.bold, prefix))
 	b.WriteString(sty.render(sty.dim, " · "))
@@ -238,9 +231,6 @@ func formatSettingsStatus(prefix string, s *EntireSettings, sty statusStyles) st
 	} else {
 		b.WriteString("disabled")
 	}
-
-	b.WriteString(sty.render(sty.dim, " · "))
-	b.WriteString(displayName)
 
 	return b.String()
 }

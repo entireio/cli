@@ -38,7 +38,7 @@ const (
 )
 
 func TestNewTrailCreateRequestUsesLinkBranchAction(t *testing.T) {
-	req := newTrailCreateRequest("title", "body", "feature/x", "main", "open")
+	req := newTrailCreateRequest("title", "body", "feature/x", "main", "open", "", "", nil)
 
 	require.Equal(t, api.TrailCreateRequest{
 		Title:        "title",
@@ -51,7 +51,7 @@ func TestNewTrailCreateRequestUsesLinkBranchAction(t *testing.T) {
 }
 
 func TestNewTrailCreateRequestCanBeBranchless(t *testing.T) {
-	req := newTrailCreateRequest("title", "body", "", "main", "open")
+	req := newTrailCreateRequest("title", "body", "", "main", "open", "", "", nil)
 
 	require.Equal(t, api.TrailCreateRequest{
 		Title:  "title",
@@ -1448,5 +1448,152 @@ func TestFetchCurrentUserLoginWrapsGhError(t *testing.T) {
 	// Surface the hint about the --author <login> fallback.
 	if !strings.Contains(err.Error(), "--author <login>") {
 		t.Fatalf("error should mention the --author fallback hint, got: %v", err)
+	}
+}
+
+func TestMergeStringSetAddsAndRemoves(t *testing.T) {
+	t.Parallel()
+	got := mergeStringSet([]string{"a", "b"}, []string{"c", "a"}, []string{"b"})
+	want := []string{"a", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestBuildTrailUpdateRequestAssigneesReviewersTypePriority(t *testing.T) {
+	t.Parallel()
+	current := &api.TrailResource{
+		Assignees:          []string{"alice"},
+		RequestedReviewers: []string{"bob"},
+	}
+	req := buildTrailUpdateRequest(current, trailUpdateInputs{
+		AssigneeAdd:     []string{"carol"},
+		ReviewerRemove:  []string{"bob"},
+		Type:            string(trail.TypeBug),
+		TypeChanged:     true,
+		Priority:        string(trail.PriorityHigh),
+		PriorityChanged: true,
+	})
+	if req.Assignees == nil || len(*req.Assignees) != 2 {
+		t.Fatalf("Assignees = %v, want [alice carol]", req.Assignees)
+	}
+	if req.RequestedReviewers == nil || len(*req.RequestedReviewers) != 0 {
+		t.Fatalf("RequestedReviewers = %v, want []", req.RequestedReviewers)
+	}
+	if req.Type == nil || *req.Type != string(trail.TypeBug) {
+		t.Fatalf("Type = %v, want bug", req.Type)
+	}
+	if req.Priority == nil || *req.Priority != string(trail.PriorityHigh) {
+		t.Fatalf("Priority = %v, want high", req.Priority)
+	}
+}
+
+func TestValidateTrailUpdateFieldsRejectsInvalidTypePriority(t *testing.T) {
+	t.Parallel()
+	if err := validateTrailUpdateFields(trailUpdateInputs{TypeChanged: true, Type: "epic"}); err == nil {
+		t.Error("expected invalid type to be rejected")
+	}
+	if err := validateTrailUpdateFields(trailUpdateInputs{PriorityChanged: true, Priority: "critical"}); err == nil {
+		t.Error("expected invalid priority to be rejected")
+	}
+	if err := validateTrailUpdateFields(trailUpdateInputs{TypeChanged: true, Type: "bug", PriorityChanged: true, Priority: "low"}); err != nil {
+		t.Errorf("valid type/priority rejected: %v", err)
+	}
+}
+
+func TestSplitTrailUpdateSeparatesBodyFromMetadata(t *testing.T) {
+	t.Parallel()
+	body := "new body"
+	title := "new title"
+	full := api.TrailUpdateRequest{Body: &body, Title: &title}
+	meta, hasMeta, bodyReq := splitTrailUpdate(full)
+	if !hasMeta || meta.Title == nil || *meta.Title != "new title" {
+		t.Fatalf("meta = %#v, hasMeta = %v, want title-only metadata", meta, hasMeta)
+	}
+	if meta.Body != nil {
+		t.Fatal("metadata request must not carry body")
+	}
+	if bodyReq == nil || bodyReq.Body == nil || *bodyReq.Body != "new body" {
+		t.Fatalf("bodyReq = %#v, want body-only request", bodyReq)
+	}
+
+	_, hasMeta2, bodyReq2 := splitTrailUpdate(api.TrailUpdateRequest{Body: &body})
+	if hasMeta2 {
+		t.Error("body-only update must not produce a metadata request")
+	}
+	if bodyReq2 == nil {
+		t.Error("body-only update must produce a body request")
+	}
+}
+
+func TestTrailUpdateCmdHasCollaborationFlags(t *testing.T) {
+	t.Parallel()
+	cmd := newTrailUpdateCmd()
+	for _, name := range []string{"add-assignee", "remove-assignee", "add-reviewer", "remove-reviewer", "type", "priority"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Errorf("trail update missing --%s flag", name)
+		}
+	}
+}
+
+func TestPrintTrailDetailsShowsTypePriorityReviewers(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	printTrailDetails(&out, &trail.Metadata{
+		Title:     "T",
+		Branch:    "b",
+		Base:      "main",
+		Status:    trail.StatusOpen,
+		Type:      trail.TypeBug,
+		Priority:  trail.PriorityHigh,
+		Reviewers: []trail.Reviewer{{Login: "rev1", Status: trail.ReviewerApproved}},
+	}, "", "")
+	s := out.String()
+	for _, want := range []string{"Type:", "bug", "Priority:", "high", "Reviewers:", "rev1", "approved"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("output missing %q:\n%s", want, s)
+		}
+	}
+}
+
+func TestTrailCreateCmdHasMetadataFlags(t *testing.T) {
+	t.Parallel()
+	cmd := newTrailCreateCmd()
+	for _, name := range []string{"type", "priority", "add-assignee"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Errorf("trail create missing --%s flag", name)
+		}
+	}
+}
+
+func TestNewTrailCreateRequestCarriesMetadata(t *testing.T) {
+	t.Parallel()
+	req := newTrailCreateRequest("Title", "body", "b", "main", "open", string(trail.TypeBug), string(trail.PriorityHigh), []string{"alice"})
+	if req.Type != string(trail.TypeBug) || req.Priority != string(trail.PriorityHigh) {
+		t.Fatalf("type/priority = %q/%q, want bug/high", req.Type, req.Priority)
+	}
+	if len(req.Assignees) != 1 || req.Assignees[0] != "alice" {
+		t.Fatalf("assignees = %v, want [alice]", req.Assignees)
+	}
+}
+
+func TestBuildTrailUpdateRequestTrimsTypeAndPriority(t *testing.T) {
+	t.Parallel()
+	req := buildTrailUpdateRequest(&api.TrailResource{}, trailUpdateInputs{
+		Type:            "  bug  ",
+		TypeChanged:     true,
+		Priority:        "  high ",
+		PriorityChanged: true,
+	})
+	if req.Type == nil || *req.Type != string(trail.TypeBug) {
+		t.Fatalf("Type on wire = %v, want trimmed bug", req.Type)
+	}
+	if req.Priority == nil || *req.Priority != string(trail.PriorityHigh) {
+		t.Fatalf("Priority on wire = %v, want trimmed high", req.Priority)
 	}
 }

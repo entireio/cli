@@ -63,6 +63,7 @@ const (
 	PatchRepoCIWebhookOperation            OperationName = "PatchRepoCIWebhook"
 	RemoveOrgMemberOperation               OperationName = "RemoveOrgMember"
 	ResolveHandleOperation                 OperationName = "ResolveHandle"
+	ResolveMirrorPlacementsOperation       OperationName = "ResolveMirrorPlacements"
 	RevokeProjectAccessOperation           OperationName = "RevokeProjectAccess"
 	RevokeProjectAccessByProviderOperation OperationName = "RevokeProjectAccessByProvider"
 	RevokeRepoAccessOperation              OperationName = "RevokeRepoAccess"
