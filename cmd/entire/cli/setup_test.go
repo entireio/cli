@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -4075,4 +4076,83 @@ func TestRunEnableInteractive_BootstrapDefersOnboardingLadder(t *testing.T) {
 	if ladderRan {
 		t.Error("bootstrap enable must defer the onboarding ladder to after the publish phase")
 	}
+}
+
+// First-time setups get the git-refs checkpoint backend written explicitly
+// into the new settings.json — new users must not answer a storage-topology
+// question (the old wizard prompt), and the explicit write is what keeps the
+// choice durable. The config-less runtime default (git-branch, see
+// checkpoint.resolvePrimaryType) is deliberately untouched so repos set up
+// before this change keep their behavior.
+func TestRunEnableInteractive_FirstRunDefaultsToGitRefs(t *testing.T) {
+	enable := func(t *testing.T, opts EnableOptions) *settings.CheckpointsConfig {
+		t.Helper()
+		ag, err := agent.Get(types.AgentName("claude-code"))
+		if err != nil {
+			t.Fatalf("agent.Get(claude-code) error = %v", err)
+		}
+		var buf bytes.Buffer
+		if err := runEnableInteractive(context.Background(), &buf, []agent.Agent{ag}, opts); err != nil {
+			t.Fatalf("runEnableInteractive() error = %v", err)
+		}
+		s, err := settings.Load(context.Background())
+		if err != nil {
+			t.Fatalf("settings.Load() error = %v", err)
+		}
+		return s.Checkpoints
+	}
+
+	t.Run("first run writes git-refs explicitly", func(t *testing.T) {
+		setupTestRepo(t)
+		cfg := enable(t, EnableOptions{Yes: true, Telemetry: true})
+		if cfg == nil || cfg.Primary.Type != checkpoint.BackendTypeGitRefs {
+			t.Errorf("Checkpoints = %+v, want explicit git-refs primary", cfg)
+		}
+	})
+
+	t.Run("explicit --checkpoint-backend branch wins", func(t *testing.T) {
+		setupTestRepo(t)
+		cfg := enable(t, EnableOptions{Yes: true, Telemetry: true, CheckpointBackend: "branch"})
+		if cfg == nil || cfg.Primary.Type != checkpoint.BackendTypeGitBranch {
+			t.Errorf("Checkpoints = %+v, want explicit git-branch primary", cfg)
+		}
+	})
+
+	t.Run("env override suppresses the first-run default", func(t *testing.T) {
+		setupTestRepo(t)
+		// ENTIRE_CHECKPOINTS_PRIMARY fully replaces the settings block, so
+		// writing the refs default under it would persist config diverging
+		// from the backend actually in use (and break harnesses pinning
+		// git-branch via the env).
+		t.Setenv(settings.EnvCheckpointsPrimary, "git-branch")
+		cfg := enable(t, EnableOptions{Yes: true, Telemetry: true})
+		if cfg != nil {
+			t.Errorf("Checkpoints = %+v, want none written under the env override", cfg)
+		}
+	})
+
+	t.Run("non-interactive first run without --yes takes the recommendation", func(t *testing.T) {
+		// The most common real path: a headless first run without --yes
+		// (go test => CanPromptInteractively false). The storage prompt must
+		// be skipped and the recommendation written — every other first-run
+		// subtest passes Yes: true, so this is the only coverage of the
+		// !opts.Yes non-TTY branch. Telemetry: false dodges the telemetry
+		// prompt, which (pre-existing) has no headless guard.
+		setupTestRepo(t)
+		cfg := enable(t, EnableOptions{Telemetry: false})
+		if cfg == nil || cfg.Primary.Type != checkpoint.BackendTypeGitRefs {
+			t.Errorf("Checkpoints = %+v, want the git-refs recommendation", cfg)
+		}
+	})
+
+	t.Run("re-run of an existing config-less repo stays config-less", func(t *testing.T) {
+		setupTestRepo(t)
+		// A repo set up before this change: settings.json exists, no
+		// checkpoints block. Re-running setup must not inject git-refs.
+		writeSettings(t, testSettingsEnabled)
+		cfg := enable(t, EnableOptions{Yes: true, Telemetry: true})
+		if cfg != nil {
+			t.Errorf("Checkpoints = %+v, want none added on a pre-existing setup", cfg)
+		}
+	})
 }
