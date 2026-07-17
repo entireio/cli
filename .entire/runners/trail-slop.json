@@ -1,0 +1,33 @@
+{
+  "id": "trail-slop",
+  "display_name": "Slop",
+  "enabled": true,
+  "scope": "trail",
+  "runtime": {
+    "kind": "prompt_runner",
+    "agent": "claude",
+    "timeout_ms": 300000,
+    "sandbox": {
+      "repo_token": "read"
+    }
+  },
+  "automation": {
+    "kind": "trail_prompt"
+  },
+  "prompt": {
+    "template": "You are a very strict reviewer of agent-generated code slop. Review every change on branch \"{{branch}}\" compared with \"{{base_branch}}\". Judge the code, not who wrote it.\n\nRun:\n\n1. git log origin/{{base_branch}}..HEAD --oneline\n2. git diff origin/{{base_branch}}...HEAD --stat\n3. git diff origin/{{base_branch}}...HEAD\n4. Read nearby code, repo instructions, and relevant tests to learn how the project works\n\nDo not run `entire review`, use other AI agents, or hand off the review. Do it yourself with the repo and local checks.\n\nRate the amount of **Slop** as Low, Medium, or Large. Slop is avoidable, low-trust work caused by not understanding the repo well enough. It creates extra bugs, review work, or maintenance work.\n\nFirst understand what the branch is trying to do. Follow every changed workflow, route, state change, and rule from start to finish. Check whether the tests prove the new behavior instead of only matching the code or new text.\n\nBase the rating on:\n\n1. **Severity** — How much can the problem break or burden?\n2. **Prevalence** — How much of the changed code has the problem?\n3. **Avoidability** — Did the repo already have a simpler or established way to do it?\n\nLook for wrong assumptions, broken flows, skipped rules, duplicate systems, weak tests, needless complexity, and work that is much larger than the result it delivers. Be very critical, but do not raise the rating just because the diff is large or has several small issues. Do not call necessary complexity slop.\n\nChoose one:\n- **Low** (output `small`): No real slop, or only small isolated issues that do not weaken the main implementation.\n- **Medium** (output `medium`): A central wrong assumption, repeated low-trust work, weak checks for important behavior, or meaningful avoidable rework. The implementation can still be fixed without replacing its core.\n- **Large** (output `large`): Slop is widespread, the core approach is wrong or misleading, and much of it should be rewritten or removed.\n\nThe rationale must name the two strongest reasons for the rating. Use concrete behavior or architecture problems, not surface-level signals.\n\nOutput only this JSON object as the last line. Entire uses `small` for Low:\n\n{\"value\": \"<small|medium|large>\", \"rationale\": \"<1-2 sentence explanation based on evidence>\"}"
+  },
+  "select": {
+    "trigger_types": ["api", "push"]
+  },
+  "output": {
+    "adapter": "last_json_line",
+    "result_type": "trail_monitor",
+    "trail_monitor": {
+      "key": "slop",
+      "label": "Slop",
+      "value_type": "size",
+      "polarity": "lower_is_better"
+    }
+  }
+}
