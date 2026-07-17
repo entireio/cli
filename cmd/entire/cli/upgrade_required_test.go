@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -74,68 +75,44 @@ func TestOfferCLIUpgrade_NonInteractivePrintsUpdateAndRerunCommands(t *testing.T
 	}
 }
 
-func TestOfferCLIUpgrade_ConfirmYesRunsInstallerAndRerunsCommand(t *testing.T) {
+func TestOfferCLIUpgrade_ConfirmYesRunsSharedUpdateFlow(t *testing.T) {
 	t.Parallel()
 
-	var installed []string
-	var rerunArgv [][]string
+	type updateCall struct {
+		cmdStr string
+		argv   []string
+	}
+	var calls []updateCall
 	var out bytes.Buffer
 	offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
 		canPrompt: func() bool { return true },
 		confirm:   func(context.Context, string) (bool, error) { return true, nil },
-		runInstaller: func(_ context.Context, cmdStr string) error {
-			installed = append(installed, cmdStr)
-			return nil
-		},
-		reexec: func(_ context.Context, argv []string) error {
-			rerunArgv = append(rerunArgv, argv)
-			return nil
+		runUpdate: func(_ context.Context, _ io.Writer, cmdStr string, argv []string) {
+			calls = append(calls, updateCall{cmdStr: cmdStr, argv: argv})
 		},
 	})
 
 	want := versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version)
-	if len(installed) != 1 || installed[0] != want {
-		t.Fatalf("installer calls = %v, want exactly [%q]", installed, want)
+	if len(calls) != 1 {
+		t.Fatalf("runUpdate calls = %d, want exactly 1", len(calls))
 	}
-	if len(rerunArgv) != 1 || strings.Join(rerunArgv[0], " ") != strings.Join(loginArgv(), " ") {
-		t.Fatalf("reexec argv = %v, want the original invocation %v", rerunArgv, loginArgv())
+	if calls[0].cmdStr != want {
+		t.Errorf("runUpdate command = %q, want %q", calls[0].cmdStr, want)
 	}
-	got := out.String()
-	if !strings.Contains(got, "Update complete") {
-		t.Errorf("missing completion message:\n%s", got)
-	}
-	if !strings.Contains(got, "entire login --device") {
-		t.Errorf("missing rerun command line:\n%s", got)
-	}
-}
-
-func TestOfferCLIUpgrade_ReexecFailurePrintsRerunCommand(t *testing.T) {
-	t.Parallel()
-
-	var out bytes.Buffer
-	offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
-		canPrompt:    func() bool { return true },
-		confirm:      func(context.Context, string) (bool, error) { return true, nil },
-		runInstaller: func(context.Context, string) error { return nil },
-		reexec:       func(context.Context, []string) error { return errors.New("exec format error") },
-	})
-
-	got := out.String()
-	if !strings.Contains(got, "entire login --device") {
-		t.Errorf("missing manual rerun command after failed re-exec:\n%s", got)
+	if strings.Join(calls[0].argv, " ") != strings.Join(loginArgv(), " ") {
+		t.Errorf("runUpdate argv = %v, want the original invocation %v", calls[0].argv, loginArgv())
 	}
 }
 
 func TestOfferCLIUpgrade_RerunGuardExplainsStaleBinary(t *testing.T) {
 	// t.Setenv forbids t.Parallel.
-	t.Setenv(envUpgradeRerun, "1")
+	t.Setenv("ENTIRE_UPGRADE_RERUN", "1")
 
 	var out bytes.Buffer
 	handled := offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
 		canPrompt: func() bool { t.Error("prompt must be suppressed on a post-update rerun"); return true },
-		runInstaller: func(context.Context, string) error {
-			t.Error("installer must not run again on a post-update rerun")
-			return nil
+		runUpdate: func(context.Context, io.Writer, string, []string) {
+			t.Error("update must not run again on a post-update rerun")
 		},
 	})
 
@@ -161,9 +138,8 @@ func TestOfferCLIUpgrade_ConfirmNoPrintsCommands(t *testing.T) {
 	offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
 		canPrompt: func() bool { return true },
 		confirm:   func(context.Context, string) (bool, error) { return false, nil },
-		runInstaller: func(context.Context, string) error {
-			t.Error("installer must not run when declined")
-			return nil
+		runUpdate: func(context.Context, io.Writer, string, []string) {
+			t.Error("update must not run when declined")
 		},
 	})
 
@@ -173,39 +149,5 @@ func TestOfferCLIUpgrade_ConfirmNoPrintsCommands(t *testing.T) {
 	}
 	if !strings.Contains(got, "entire login --device") {
 		t.Errorf("missing failed command to rerun:\n%s", got)
-	}
-}
-
-func TestOfferCLIUpgrade_InstallerFailurePrintsRetryCommand(t *testing.T) {
-	t.Parallel()
-
-	var out bytes.Buffer
-	offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
-		canPrompt:    func() bool { return true },
-		confirm:      func(context.Context, string) (bool, error) { return true, nil },
-		runInstaller: func(context.Context, string) error { return errors.New("brew exploded") },
-	})
-
-	got := out.String()
-	if !strings.Contains(got, "Update failed") {
-		t.Errorf("missing failure message:\n%s", got)
-	}
-	if want := versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version); !strings.Contains(got, want) {
-		t.Errorf("missing retry command %q:\n%s", want, got)
-	}
-}
-
-func TestRerunCommandLine(t *testing.T) {
-	t.Parallel()
-
-	got := rerunCommandLine([]string{"/usr/local/bin/entire", "api", "/me", "--to", "cell"})
-	if got != "entire api /me --to cell" {
-		t.Errorf("got %q, want %q", got, "entire api /me --to cell")
-	}
-	if got := rerunCommandLine([]string{"entire", "dispatch", "fix the thing"}); got != `entire dispatch "fix the thing"` {
-		t.Errorf("got %q, want quoted arg", got)
-	}
-	if got := rerunCommandLine(nil); got != "" {
-		t.Errorf("got %q, want empty for nil argv", got)
 	}
 }

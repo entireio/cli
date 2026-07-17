@@ -417,13 +417,6 @@ func UpdateCommandForCurrentBinary(currentVersion string) string {
 	return updateCommand(currentVersion)
 }
 
-// CanAutoInstall reports whether UpdateCommandForCurrentBinary returns a
-// runnable installer command rather than a downloads-page URL, i.e.
-// whether it is safe to offer executing it.
-func CanAutoInstall() bool {
-	return canAutoInstall()
-}
-
 // printNotification prints the version update notification to the user.
 func printNotification(w io.Writer, current, latest string) {
 	fmt.Fprintf(w, "\nUpdate available! %s -> %s\nRelease notes: %s\n",
