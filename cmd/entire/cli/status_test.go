@@ -2111,8 +2111,8 @@ func TestRunStatusJSON_IncludesSetupStates(t *testing.T) {
 	writeSettings(t, testSettingsEnabled)
 	stubOnboardingResults(t, []onboarding.Result{
 		{Rung: onboarding.Rung{Key: onboarding.KeyHooks, Title: "Agent hooks"}, Check: onboarding.Check{State: onboarding.StateDone}},
-		{Rung: onboarding.Rung{Key: onboarding.KeyAuth, Title: "Logged in"}, Check: onboarding.Check{State: onboarding.StateMissing}},
-		{Rung: onboarding.Rung{Key: onboarding.KeyMirror, Title: "Repo mirrored"}, Check: onboarding.Check{State: onboarding.StateBlocked}},
+		{Rung: onboarding.Rung{Key: onboarding.KeyAuth, Title: "Logged in"}, Check: onboarding.Check{State: onboarding.StateMissing, Hint: "entire auth login"}},
+		{Rung: onboarding.Rung{Key: onboarding.KeyMirror, Title: "Repo mirrored"}, Check: onboarding.Check{State: onboarding.StateBlocked, Detail: "needs login", Hint: "entire auth login"}},
 	})
 
 	var stdout bytes.Buffer
@@ -2121,15 +2121,19 @@ func TestRunStatusJSON_IncludesSetupStates(t *testing.T) {
 	}
 
 	var parsed struct {
-		Setup map[string]string `json:"setup"`
+		Setup map[string]setupRungJSON `json:"setup"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &parsed); err != nil {
 		t.Fatalf("unmarshal status JSON: %v\noutput: %s", err, stdout.String())
 	}
-	want := map[string]string{"hooks": "done", "auth": "missing", "mirror": "blocked"}
-	for key, state := range want {
-		if parsed.Setup[key] != state {
-			t.Errorf("setup[%q] = %q, want %q", key, parsed.Setup[key], state)
+	want := map[string]setupRungJSON{
+		"hooks":  {State: "done"},
+		"auth":   {State: "missing", Hint: "entire auth login"},
+		"mirror": {State: "blocked", Detail: "needs login", Hint: "entire auth login"},
+	}
+	for key, rung := range want {
+		if parsed.Setup[key] != rung {
+			t.Errorf("setup[%q] = %+v, want %+v", key, parsed.Setup[key], rung)
 		}
 	}
 }

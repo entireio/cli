@@ -291,6 +291,73 @@ func TestCreateAndAwaitMirror_EmptyUpstreamCacheWaitsForSuspensionRead(t *testin
 	})
 }
 
+// A clone that fails after registration must not leave a green probe-cache
+// entry — the checklist would show ✓ for the cache TTL while the mirror never
+// became usable. A confirmed-ready clone and a --no-wait registration (where
+// there is genuinely nothing more to know yet) still write through.
+//
+// Not parallel: redirects the probe cache and shortens the poll interval.
+func TestCreateAndAwaitMirror_CacheWaitsForCloneOutcome(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	prev := mirrorPollInterval
+	mirrorPollInterval = time.Millisecond
+	t.Cleanup(func() { mirrorPollInterval = prev })
+	ctx := t.Context()
+
+	serve := func(t *testing.T, status coreapi.MirrorStatus) *coreapi.Client {
+		t.Helper()
+		created := &coreapi.CreatedMirror{Created: true, MirrorId: "m1"}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == mirrorsAPIPath:
+				w.WriteHeader(http.StatusCreated)
+				if err := printJSON(w, created); err != nil {
+					t.Errorf("encode created response: %v", err)
+				}
+			case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/mirrors/"):
+				m := &coreapi.Mirror{}
+				m.Status = coreapi.NewOptMirrorStatus(status)
+				if err := printJSON(w, m); err != nil {
+					t.Errorf("encode mirror response: %v", err)
+				}
+			default:
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := coreapi.NewWithBearer(srv.URL, "tok")
+		require.NoError(t, err)
+		return c
+	}
+
+	t.Run("failed clone is not cached as mirrored", func(t *testing.T) {
+		c := serve(t, coreapi.MirrorStatusFailed)
+		_, err := createAndAwaitMirror(ctx, c, "fail", "r", "c", false, time.Second, nil, nil)
+		require.ErrorIs(t, err, errMirrorCloneFailed)
+		_, _, ok := defaultMirrorProbeCache().get(mirrorProbeKey("fail/r"), time.Now())
+		require.False(t, ok, "a failed clone must not write through to the probe cache")
+	})
+
+	t.Run("ready clone is cached", func(t *testing.T) {
+		c := serve(t, coreapi.MirrorStatusReady)
+		_, err := createAndAwaitMirror(ctx, c, "ok2", "r", "c", false, time.Second, nil, nil)
+		require.NoError(t, err)
+		probe, _, ok := defaultMirrorProbeCache().get(mirrorProbeKey("ok2/r"), time.Now())
+		require.True(t, ok, "a ready clone should be cached")
+		require.True(t, probe.Mirrored)
+	})
+
+	t.Run("no-wait registration is cached", func(t *testing.T) {
+		c := serve(t, coreapi.MirrorStatusReady)
+		_, err := createAndAwaitMirror(ctx, c, "nw", "r", "c", true, time.Second, nil, nil)
+		require.NoError(t, err)
+		_, _, ok := defaultMirrorProbeCache().get(mirrorProbeKey("nw/r"), time.Now())
+		require.True(t, ok, "a no-wait registration should be cached")
+	})
+}
+
 func countEq(xs []string, want string) int {
 	n := 0
 	for _, x := range xs {

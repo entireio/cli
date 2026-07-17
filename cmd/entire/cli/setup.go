@@ -845,6 +845,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 			// the initial commit captures the .entire/, .claude/, hooks, and
 			// settings files that setup writes.
 			var bootstrap *bootstrapState
+			loggingReady := false
 			if _, err := paths.WorktreeRoot(ctx); err != nil {
 				bootstrapOpts.Yes = opts.Yes
 				state, bootstrapErr := runGitHubBootstrapInit(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), bootstrapOpts)
@@ -869,6 +870,15 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				}
 				// Visual separator between bootstrap init and agent setup.
 				printBootstrapSection(cmd.OutOrStdout(), "Enabling Entire")
+				// Logging must initialize BEFORE the finalize defer below is
+				// registered: defers run LIFO, so Close (registered here,
+				// first) runs after the deferred ladder — whose probe/offer
+				// warnings would otherwise be written to a closed log file
+				// and silently dropped. Safe at this point: phase 1 just
+				// created the repo, so Init can't leave a stray .entire/ in
+				// a folder whose bootstrap was declined.
+				defer initEnableLogging(ctx)()
+				loggingReady = true
 				// On the way out (if setup succeeded), create the initial
 				// commit and push to the GitHub repo. If setup returned an
 				// error, skip the finalize — the user can fix the issue and
@@ -898,14 +908,12 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				}()
 			}
 
-			// Operational logging (ladder probes, offer failures) belongs in
-			// .entire/logs — without Init the logging package falls back to
-			// slog's stderr default and WARN lines leak verbatim into
-			// enable's output. After the bootstrap block, so a declined
-			// bootstrap doesn't leave a stray .entire/ in a non-repo folder.
-			logging.SetLogLevelGetter(GetLogLevel)
-			if lerr := logging.Init(ctx, ""); lerr == nil {
-				defer logging.Close()
+			// After the bootstrap block, so a declined bootstrap doesn't
+			// leave a stray .entire/ in a non-repo folder; the bootstrap
+			// path initialized logging inside the block instead (before its
+			// finalize defer — see the LIFO note there).
+			if !loggingReady {
+				defer initEnableLogging(ctx)()
 			}
 
 			if err := validateSetupFlags(opts.UseLocalSettings, opts.UseProjectSettings); err != nil {
@@ -1400,6 +1408,21 @@ func printEnabledStatus(ctx context.Context, w io.Writer) {
 		fmt.Fprintf(w, "Agents: %s\n", strings.Join(displayNames, ", "))
 	}
 	fmt.Fprintln(w, "\nTo add more agents, run `entire agent add <name>`.")
+}
+
+// initEnableLogging routes enable's operational logging (ladder probes,
+// offer failures) into .entire/logs — without Init the logging package falls
+// back to slog's stderr default and WARN lines leak verbatim into enable's
+// output. It initializes immediately and returns the close func (a no-op
+// when Init failed) so callers control defer ordering — the bootstrap path
+// must register the close BEFORE its finalize defer (LIFO), or the deferred
+// ladder logs to an already-closed file.
+func initEnableLogging(ctx context.Context) func() {
+	logging.SetLogLevelGetter(GetLogLevel)
+	if err := logging.Init(ctx, ""); err != nil {
+		return func() {}
+	}
+	return logging.Close
 }
 
 // runEnable flips the enabled flag to true in the scope chosen by the caller

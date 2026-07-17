@@ -446,22 +446,33 @@ func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, c
 		healMirrorProbeCache(owner, repo)
 		return outcome, nil
 	}
-	healMirrorProbeCache(owner, repo)
 	if noWait {
+		// Placement registered, clone continuing server-side — nothing more
+		// to learn now, so record the serving placement.
+		healMirrorProbeCache(owner, repo)
 		return outcome, nil
 	}
 	status, werr := awaitMirrorReady(ctx, c, created.MirrorId, timeout, onStatus)
 	outcome.status = status
 	outcome.polled = true
+	// Write through only on a confirmed-ready clone: caching at create time
+	// would keep the checklist green for the cache TTL even when the clone
+	// failed moments later. A timeout leaves the cache alone — the next live
+	// probe reads the truth.
+	if werr == nil && status == coreapi.MirrorStatusReady {
+		healMirrorProbeCache(owner, repo)
+	}
 	return outcome, werr
 }
 
 // healMirrorProbeCache records a serving placement in the onboarding probe
 // cache — the setup checklist's own hint is `entire repo mirror create
 // <slug>`, and a cached "not mirrored" must not survive the prescribed
-// remediation. A suspended placement never serves, so callers write through
-// only after every suspension signal is checked (CreateMirror's Suspended
-// flag, plus the GetMirror read for existing empty-upstream placements).
+// remediation. Callers write through only once the placement's outcome is
+// settled enough to trust for a TTL: after every suspension signal is
+// checked (CreateMirror's Suspended flag, plus the GetMirror read for
+// existing empty-upstream placements), and — when a clone is awaited — only
+// on a confirmed-ready status, never before a clone that may still fail.
 func healMirrorProbeCache(owner, repo string) {
 	slugOwner, slugRepo := githubSlug(owner, repo)
 	defaultMirrorProbeCache().put(mirrorProbeKey(slugOwner+"/"+slugRepo), mirrorProbeResult{Mirrored: true}, time.Now())

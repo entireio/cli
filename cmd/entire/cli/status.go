@@ -603,10 +603,24 @@ type statusJSON struct {
 	// success path (mirrors writeAgentHelpHint, which only renders when set up).
 	AgentHelp string `json:"agent_help,omitempty"`
 	// Setup maps each onboarding rung (hooks, auth, mirror, import) to its
-	// state: done, missing, blocked, unknown, or not_applicable. Present only
-	// when enabled — same gate as the human checklist.
-	Setup map[string]string `json:"setup,omitempty"`
-	Error string            `json:"error,omitempty"`
+	// state plus the same detail and remediation command the human checklist
+	// shows — the state name alone isn't actionable for a non-interactive
+	// agent (Agent-Safe CLI Fallbacks). Present only when enabled — same gate
+	// as the human checklist.
+	Setup map[string]setupRungJSON `json:"setup,omitempty"`
+	Error string                   `json:"error,omitempty"`
+}
+
+// setupRungJSON is one onboarding rung in `entire status --json`.
+type setupRungJSON struct {
+	// State: done, missing, blocked, unknown, or not_applicable.
+	State string `json:"state"`
+	// Detail mirrors the human checklist row's annotation, e.g.
+	// "2 claude-code sessions found, not imported".
+	Detail string `json:"detail,omitempty"`
+	// Hint is the remediation command for this rung, e.g.
+	// "entire repo mirror create github.com/owner/repo".
+	Hint string `json:"hint,omitempty"`
 }
 
 type sessionBriefJSON struct {
@@ -664,9 +678,13 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		}
 
 		if results := onboardingStatusResults(ctx); len(results) > 0 {
-			result.Setup = make(map[string]string, len(results))
+			result.Setup = make(map[string]setupRungJSON, len(results))
 			for _, r := range results {
-				result.Setup[r.Rung.Key] = r.Check.State.String()
+				result.Setup[r.Rung.Key] = setupRungJSON{
+					State:  r.Check.State.String(),
+					Detail: r.Check.Detail,
+					Hint:   r.Check.Hint,
+				}
 			}
 		}
 
