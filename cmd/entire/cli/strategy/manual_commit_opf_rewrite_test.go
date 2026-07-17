@@ -110,6 +110,11 @@ func configureFakeOPF(t *testing.T, rt testOPFRuntime) {
 // setupV1Repo creates a repo + one v1 checkpoint with "PERSONABC" in
 // both the transcript and prompt. Returns the repo and the v1 tip.
 func setupV1Repo(t *testing.T) (*git.Repository, plumbing.Hash) {
+	_, repo, tip := setupV1RepoInDir(t)
+	return repo, tip
+}
+
+func setupV1RepoInDir(t *testing.T) (string, *git.Repository, plumbing.Hash) {
 	t.Helper()
 	tempDir := t.TempDir()
 	testutil.InitRepo(t, tempDir)
@@ -127,7 +132,7 @@ func setupV1Repo(t *testing.T) (*git.Repository, plumbing.Hash) {
 	require.NoError(t, err)
 
 	tip := addV1Checkpoint(t, repo, "a1b2c3d4e5f6", "test-session", "Hello, PERSONABC asked", "Look up PERSONABC")
-	return repo, tip
+	return tempDir, repo, tip
 }
 
 func addV1Checkpoint(t *testing.T, repo *git.Repository, cpIDString, sessionID, transcript, prompt string) plumbing.Hash {
@@ -229,6 +234,34 @@ func TestRewriteUnpushedV1WithOPF_HappyPath_RewritesAndTagsApplied(t *testing.T)
 		}
 		return nil
 	}))
+}
+
+func TestPrePushFromGitHook_DeferralStillRunsOPF(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+
+	dir, repo, originalTip := setupV1RepoInDir(t)
+	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	_, err := git.PlainInit(remoteDir, true)
+	require.NoError(t, err)
+	_, err = repo.CreateRemote(&gitconfig.RemoteConfig{Name: "origin", URLs: []string{remoteDir}})
+	require.NoError(t, err)
+
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	// The empty remote defers Entire's automatic metadata push. The OPF rewrite
+	// still must run because the user's outer git push may include v1 directly.
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	require.NotEqual(t, originalTip, ref.Hash(), "OPF rewrite must advance the local v1 ref before deferral")
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	require.True(t, trailers.HasOPFApplied(commit.Message))
+	require.Equal(t, 1, fake.batchCallCount())
 }
 
 func TestRewriteUnpushedV1WithOPF_MultiCommitTipCarriesPriorRedactedShards(t *testing.T) {
@@ -656,8 +689,8 @@ func TestOPFRewrite_PreservesAssetsSubtreeVerbatim(t *testing.T) {
 
 // Fail-closed regression: when the OPF runtime fails and the breaker
 // trips, the rewrite must NOT CAS the ref. Otherwise the new commits
-// would carry Entire-OPF-Applied: true while their content is 7-layer
-// only, and future pushes would skip them — silently shipping unredacted
+// would carry Entire-OPF-Applied: true while their content is regex-only,
+// and future pushes would skip them — silently shipping unredacted
 // content to the remote.
 func TestRewriteUnpushedV1WithOPF_BreakerTrippedMidRewrite_AbortsBeforeCAS(t *testing.T) {
 	configureFakeOPF(t, &fakeRuntimeAlwaysFails{})

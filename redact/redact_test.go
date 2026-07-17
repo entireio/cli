@@ -355,16 +355,29 @@ func supabasePublishablePrefix() string { return "sb" + "_publishable_" }
 
 // TestString_SupabaseProviderTokens covers issue #1716: Supabase sb_secret_
 // API keys and sbp_ personal access tokens are low-entropy and, captured in
-// isolation, are missed by the entropy layer (threshold 4.5) and by the
-// betterleaks Supabase rule (a composite rule that only fires when a
-// *.supabase.co URL is co-present). The deterministic provider-prefix layer
-// must catch them regardless of entropy or the surrounding variable name.
+// isolation, are missed by the entropy layer (threshold 4.5). betterleaks
+// coverage differs per prefix: its sb_secret_ rule is a composite rule that
+// only fires when a *.supabase.co URL is co-present, so a bare sb_secret_
+// value never reaches its filter at all; its sbp_ rule fires standalone but
+// requires an exact 40-character lowercase body, so bodies of another length
+// (like the probe values below) never match its regex regardless of entropy.
+// The deterministic provider-prefix layer must catch both regardless of
+// entropy, body length, or the surrounding variable name.
 func TestString_SupabaseProviderTokens(t *testing.T) {
 	t.Parallel()
 
 	secret := supabaseSecretPrefix() + "probe_20260710_7f91c2d8e4a6b3f0" // entropy 4.199
 	realSecret := supabaseSecretPrefix() + "9uM4GhB0STF5R4K3HxQtlg_bzWW6DRj"
 	sbpToken := supabasePersonalPrefix() + "test_probe_20260710_test_probe_2026071"
+	// Real Supabase key bodies are base64url, which includes '-'. No other
+	// fixture in this test contains a hyphen, so the charset's '-' member is
+	// otherwise unpinned: narrowing [A-Za-z0-9_-] / [a-z0-9_-] to drop the
+	// hyphen would still pass every other case here while silently truncating
+	// (not merely shrinking) the match at the first hyphen in a real key,
+	// leaking the remainder raw — the #1716 failure mode recurring via an
+	// innocent charset "tidy-up".
+	secretWithHyphen := supabaseSecretPrefix() + "probe-20260710-7f91c2d8e4a6b3f0"
+	sbpTokenWithHyphen := supabasePersonalPrefix() + "probe-20260710-7f91c2d8e4a6b3f0"
 
 	// Both probe values sit below the entropy threshold, proving entropy-only
 	// detection would miss them (the issue reports entropy 4.199 for sb_secret_).
@@ -415,9 +428,67 @@ func TestString_SupabaseProviderTokens(t *testing.T) {
 			want:  `SUPABASE_SERVICE_ROLE_KEY="REDACTED"`,
 		},
 		{
-			name:  "sbp_ personal access token (low entropy, betterleaks misses)",
+			name:  "sbp_ personal access token (38-char body, betterleaks' rule requires exactly 40)",
 			input: "SUPABASE_ACCESS_TOKEN=" + sbpToken,
 			want:  "SUPABASE_ACCESS_TOKEN=REDACTED",
+		},
+		{
+			name:  "sb_secret_ body with an early hyphen (real base64url shape)",
+			input: secretWithHyphen,
+			want:  "REDACTED",
+		},
+		{
+			name:  "sbp_ body with an early hyphen (real base64url shape)",
+			input: sbpTokenWithHyphen,
+			want:  "REDACTED",
+		},
+	})
+}
+
+// TestString_SupabaseProviderTokenLengthBoundaries pins the {20,} body-length
+// floor shared by both provider patterns as an explicit boundary rather than
+// an emergent property of an unrelated fixture: a body of exactly 20 chars
+// must redact, and a body of exactly 19 chars must be preserved. Before this
+// test, the floor was pinned only accidentally — via key_rotation_handler
+// (sb_secret_) happening to have a 20-char body, with no equivalent coverage
+// for sbp_ at all. Each case fails if either pattern's minimum is tightened
+// to {21,}.
+func TestString_SupabaseProviderTokenLengthBoundaries(t *testing.T) {
+	t.Parallel()
+
+	const (
+		body20 = "boundary_probe_2026x" // exactly 20 chars
+		body19 = "boundary_probe_2026"  // exactly 19 chars
+	)
+	if len(body20) != 20 || len(body19) != 19 {
+		t.Fatalf("fixture bodies are %d/%d chars, want 20/19", len(body20), len(body19))
+	}
+
+	secret20 := supabaseSecretPrefix() + body20
+	secret19 := supabaseSecretPrefix() + body19
+	sbp20 := supabasePersonalPrefix() + body20
+	sbp19 := supabasePersonalPrefix() + body19
+
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "sb_secret_ with exactly 20-char body redacts",
+			input: secret20,
+			want:  "REDACTED",
+		},
+		{
+			name:  "sb_secret_ with exactly 19-char body is preserved",
+			input: secret19,
+			want:  secret19,
+		},
+		{
+			name:  "sbp_ with exactly 20-char body redacts",
+			input: sbp20,
+			want:  "REDACTED",
+		},
+		{
+			name:  "sbp_ with exactly 19-char body is preserved",
+			input: sbp19,
+			want:  sbp19,
 		},
 	})
 }
