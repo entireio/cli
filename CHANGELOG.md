@@ -955,3 +955,5 @@ Thanks to @fakepixels, @jaydenfyi, and @kserra1 for contributing to this release
 ## [0.4.2] - 2026-02-10
 
 <!-- Previous release -->
+
+<!-- transcript-deletion repro probe (safe to delete) -->
