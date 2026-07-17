@@ -74,10 +74,11 @@ func TestOfferCLIUpgrade_NonInteractivePrintsUpdateAndRerunCommands(t *testing.T
 	}
 }
 
-func TestOfferCLIUpgrade_ConfirmYesRunsInstaller(t *testing.T) {
+func TestOfferCLIUpgrade_ConfirmYesRunsInstallerAndRerunsCommand(t *testing.T) {
 	t.Parallel()
 
 	var installed []string
+	var rerunArgv [][]string
 	var out bytes.Buffer
 	offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
 		canPrompt: func() bool { return true },
@@ -86,18 +87,52 @@ func TestOfferCLIUpgrade_ConfirmYesRunsInstaller(t *testing.T) {
 			installed = append(installed, cmdStr)
 			return nil
 		},
+		reexec: func(_ context.Context, argv []string) error {
+			rerunArgv = append(rerunArgv, argv)
+			return nil
+		},
 	})
 
 	want := versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version)
 	if len(installed) != 1 || installed[0] != want {
 		t.Fatalf("installer calls = %v, want exactly [%q]", installed, want)
 	}
+	if len(rerunArgv) != 1 || strings.Join(rerunArgv[0], " ") != strings.Join(loginArgv(), " ") {
+		t.Fatalf("reexec argv = %v, want the original invocation %v", rerunArgv, loginArgv())
+	}
 	got := out.String()
 	if !strings.Contains(got, "Update complete") {
 		t.Errorf("missing completion message:\n%s", got)
 	}
 	if !strings.Contains(got, "entire login --device") {
-		t.Errorf("missing rerun command after update:\n%s", got)
+		t.Errorf("missing rerun command line:\n%s", got)
+	}
+}
+
+func TestOfferCLIUpgrade_ReexecFailurePrintsRerunCommand(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
+		canPrompt:    func() bool { return true },
+		confirm:      func(context.Context, string) (bool, error) { return true, nil },
+		runInstaller: func(context.Context, string) error { return nil },
+		reexec:       func(context.Context, []string) error { return errors.New("exec format error") },
+	})
+
+	got := out.String()
+	if !strings.Contains(got, "entire login --device") {
+		t.Errorf("missing manual rerun command after failed re-exec:\n%s", got)
+	}
+}
+
+func TestUpgradePromptAllowed_RerunGuardBlocksSecondPrompt(t *testing.T) {
+	// t.Setenv forbids t.Parallel.
+	t.Setenv(envUpgradeRerun, "1")
+	t.Setenv("ENTIRE_TEST_TTY", "1") // force the interactive probe on; the guard must still win
+
+	if upgradePromptAllowed(&bytes.Buffer{}) {
+		t.Error("prompt must be suppressed on a post-update rerun to avoid an update loop")
 	}
 }
 

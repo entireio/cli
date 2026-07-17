@@ -2,9 +2,11 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -33,14 +35,23 @@ func IsCLIUpgradeRequired(err error) bool {
 	return err != nil && strings.Contains(err.Error(), cliUpgradeRequiredCode)
 }
 
+// envUpgradeRerun marks a process re-executed after a successful
+// cli_upgrade_required update. If that rerun fails the same way (the
+// installer updated a different binary than the one running), the prompt
+// is suppressed and the commands are printed instead — otherwise an
+// ineffective update would loop forever.
+const envUpgradeRerun = "ENTIRE_UPGRADE_RERUN"
+
 // upgradeOfferDeps carries the environment-dependent pieces of
-// offerCLIUpgrade so tests can drive both branches without a TTY or a
-// real installer. Zero-value fields are safe: nil confirm declines and
-// nil runInstaller is never reached without confirm.
+// offerCLIUpgrade so tests can drive both branches without a TTY, a
+// real installer, or replacing the test process. Zero-value fields are
+// safe: nil confirm declines, and nil runInstaller/reexec are never
+// reached without confirm.
 type upgradeOfferDeps struct {
 	canPrompt    func() bool
 	confirm      func(ctx context.Context, updateCmd string) (bool, error)
 	runInstaller func(ctx context.Context, cmdStr string) error
+	reexec       func(ctx context.Context, argv []string) error
 }
 
 // OfferCLIUpgradeIfRequired handles a cli_upgrade_required failure in
@@ -48,10 +59,12 @@ type upgradeOfferDeps struct {
 // messaging (main.go then skips printing err — the raw OAuth chain adds
 // nothing the guidance doesn't say), false when err doesn't carry the
 // code. On an interactive terminal it offers to run the updater right
-// away (same installer the version-check prompt uses); otherwise — no
-// TTY, ENTIRE_NO_AUTO_UPDATE set, declined, or no runnable installer for
-// this platform — it prints the update command and the failed command so
-// the user can run both. argv is the failed invocation's os.Args.
+// away (same installer the version-check prompt uses) and, on success,
+// re-executes the original command with the freshly installed binary;
+// otherwise — no TTY, ENTIRE_NO_AUTO_UPDATE set, declined, or no
+// runnable installer for this platform — it prints the update command
+// and the failed command so the user can run both. argv is the failed
+// invocation's os.Args.
 //
 // The code can surface from any auth-server OAuth flow — login (device
 // and browser), the refresh grant under every authenticated command, and
@@ -59,15 +72,23 @@ type upgradeOfferDeps struct {
 // error-print arm rather than any single command.
 func OfferCLIUpgradeIfRequired(ctx context.Context, w io.Writer, err error, argv []string) bool {
 	return offerCLIUpgrade(ctx, w, err, argv, upgradeOfferDeps{
-		canPrompt: func() bool {
-			return os.Getenv(versioncheck.EnvNoAutoUpdate) == "" &&
-				versioncheck.CanAutoInstall() &&
-				interactive.CanPromptInteractively() &&
-				interactive.IsTerminalWriter(w)
-		},
+		canPrompt:    func() bool { return upgradePromptAllowed(w) },
 		confirm:      confirmCLIUpgrade,
 		runInstaller: versioncheck.RunUpdateInstaller,
+		reexec:       reexecCommand,
 	})
+}
+
+// upgradePromptAllowed reports whether the interactive update offer may
+// be shown: never on a post-update rerun (loop guard), never with the
+// auto-update kill switch set, and only with a runnable installer on an
+// interactive terminal.
+func upgradePromptAllowed(w io.Writer) bool {
+	return os.Getenv(envUpgradeRerun) == "" &&
+		os.Getenv(versioncheck.EnvNoAutoUpdate) == "" &&
+		versioncheck.CanAutoInstall() &&
+		interactive.CanPromptInteractively() &&
+		interactive.IsTerminalWriter(w)
 }
 
 func offerCLIUpgrade(ctx context.Context, w io.Writer, err error, argv []string, deps upgradeOfferDeps) bool {
@@ -95,8 +116,43 @@ func offerCLIUpgrade(ctx context.Context, w io.Writer, err error, argv []string,
 		fmt.Fprintf(w, "Update failed: %v\nTry again later running:\n  %s\n", installErr, updateCmd)
 		return true
 	}
-	fmt.Fprintf(w, "Update complete. Rerun the command:\n\n  %s\n", rerun)
+	fmt.Fprintf(w, "Update complete. Rerunning the command:\n\n  %s\n\n", rerun)
+	if execErr := deps.reexec(ctx, argv); execErr != nil {
+		fmt.Fprintf(w, "Could not rerun automatically (%v). Rerun the command:\n\n  %s\n", execErr, rerun)
+	}
 	return true
+}
+
+// reexecCommand reruns the original invocation with the freshly
+// installed binary: argv[0] is re-resolved (through PATH when bare, or
+// the same path the installer just replaced) and the child inherits the
+// terminal, so interactive flows like the login prompts still work. The
+// envUpgradeRerun marker suppresses a second update offer if the rerun
+// fails the same way. On success this does not return — the process
+// exits with the child's exit code. A spawn-and-exit is used instead of
+// syscall.Exec so the one code path covers Windows too.
+func reexecCommand(ctx context.Context, argv []string) error {
+	if len(argv) == 0 {
+		return errors.New("original command unknown")
+	}
+	path, err := exec.LookPath(argv[0])
+	if err != nil {
+		return fmt.Errorf("locate %s: %w", argv[0], err)
+	}
+	cmd := exec.CommandContext(ctx, path, argv[1:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), envUpgradeRerun+"=1")
+	if runErr := cmd.Run(); runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			os.Exit(exitErr.ExitCode())
+		}
+		return fmt.Errorf("rerun command: %w", runErr)
+	}
+	os.Exit(0)
+	return nil
 }
 
 // printCLIUpgradeCommands prints the non-interactive guidance block: the
