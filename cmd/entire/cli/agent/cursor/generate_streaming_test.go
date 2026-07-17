@@ -111,6 +111,28 @@ func TestParseCursorStream_EmptyResultText(t *testing.T) {
 	}
 }
 
+func TestParseCursorStream_RunningEstimateIncludesFirstDelta(t *testing.T) {
+	t.Parallel()
+
+	stream := `{"type":"system","subtype":"init"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"1234"}]},"timestamp_ms":1}
+{"type":"assistant","message":{"content":[{"type":"text","text":"5678"}]},"timestamp_ms":2}
+{"type":"result","subtype":"success","result":"12345678"}
+`
+	var generating agent.GenerationProgress
+	_, err := parseCursorStream(strings.NewReader(stream), func(progress agent.GenerationProgress) {
+		if progress.Phase == agent.PhaseGenerating {
+			generating = progress
+		}
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if generating.OutputTokens != 2 {
+		t.Fatalf("running estimate = %d, want 2 from all 8 streamed characters", generating.OutputTokens)
+	}
+}
+
 func TestCursorGenerateTextStreaming_Success(t *testing.T) {
 	t.Parallel()
 

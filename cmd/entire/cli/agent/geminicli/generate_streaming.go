@@ -97,7 +97,9 @@ func parseGeminiStream(stdout io.Reader, progress agent.ProgressFn) (string, err
 		case "result":
 			stats = ev.Stats
 			if ev.Status == "error" {
-				return "", fmt.Errorf("gemini stream error: %s", agent.SafeErrorMessage(line))
+				return "", agent.MarkProviderStreamError( //nolint:wrapcheck // private transport marker preserves the decoded provider error chain
+					fmt.Errorf("gemini stream error: %s", agent.SafeErrorMessage(line)),
+				)
 			}
 		}
 	}
@@ -149,6 +151,7 @@ func (g *GeminiCLIAgent) GenerateTextStreaming(
 	result, err := tmpl.Generate(ctx, prompt, model, progress)
 	if err != nil {
 		if errors.Is(err, agent.ErrUnrecognizedStreamingFlag) {
+			agent.ReportStreamingMode(progress, false)
 			return g.GenerateText(ctx, prompt, model)
 		}
 		return "", fmt.Errorf("gemini streaming generate: %w", err)

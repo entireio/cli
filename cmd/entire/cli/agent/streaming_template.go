@@ -55,6 +55,32 @@ var ErrTemplateMisconfigured = errors.New("streaming template misconfigured")
 // implement a fallback should errors.Is this to detect.
 var ErrUnrecognizedStreamingFlag = errors.New("CLI rejected streaming flag")
 
+// providerStreamError marks a parser error decoded from an explicit provider
+// error event. The private wrapper is only transport metadata: callers still
+// observe and match the original error through Unwrap.
+type providerStreamError struct {
+	err error
+}
+
+func (e *providerStreamError) Error() string { return e.err.Error() }
+func (e *providerStreamError) Unwrap() error { return e.err }
+
+// MarkProviderStreamError marks an error decoded from an explicit provider
+// stream event. It lets the subprocess template preserve that error when the
+// context completes concurrently, without mistaking EOF/parser failures
+// caused by killing the subprocess for provider failures.
+func MarkProviderStreamError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &providerStreamError{err: err}
+}
+
+func isProviderStreamError(err error) bool {
+	var marked *providerStreamError
+	return errors.As(err, &marked)
+}
+
 // Generate runs one streaming generation and returns the final result text.
 //
 // Error shapes by failure point:
@@ -111,9 +137,20 @@ func (t *StreamingGeneratorTemplate) Generate(
 			slog.String("error", drainErr.Error()))
 	}
 	waitErr := cmd.Wait()
+	stderrStr := strings.TrimSpace(stderr.String())
+
+	// An explicit provider error decoded from stdout is authoritative even if
+	// the context completes concurrently. Unmarked parser failures can be a
+	// consequence of killing the subprocess, so context still wins for those.
+	if isProviderStreamError(parseErr) {
+		return "", &TextGenerationError{
+			Err:         fmt.Errorf("%s stream failed: %w", t.AgentName, parseErr),
+			Stderr:      stderrStr,
+			StdoutBytes: counter.n,
+		}
+	}
 
 	if ctx.Err() != nil {
-		stderrStr := strings.TrimSpace(stderr.String())
 		return "", &TextGenerationError{
 			Err:         ctx.Err(),
 			Stderr:      stderrStr,
@@ -125,11 +162,10 @@ func (t *StreamingGeneratorTemplate) Generate(
 		return result, nil
 	}
 
-	stderrStr := strings.TrimSpace(stderr.String())
 	if waitErr != nil && t.LooksLikeUnrecognizedFlag != nil && t.LooksLikeUnrecognizedFlag(stderrStr) {
+		attrs := streamingFallbackLogAttrs(t.AgentName, stderrStr)
 		logging.Warn(ctx, "CLI rejected streaming flags; caller should fall back to non-streaming",
-			slog.String("agent", t.AgentName),
-			slog.String("stderr", stderrStr))
+			attrs[0], attrs[1])
 		return "", ErrUnrecognizedStreamingFlag
 	}
 
@@ -141,6 +177,13 @@ func (t *StreamingGeneratorTemplate) Generate(
 		Err:         fmt.Errorf("%s stream failed: %w", t.AgentName, wrappedErr),
 		Stderr:      stderrStr,
 		StdoutBytes: counter.n,
+	}
+}
+
+func streamingFallbackLogAttrs(agentName, stderr string) []slog.Attr {
+	return []slog.Attr{
+		slog.String("agent", agentName),
+		slog.Int("stderr_bytes", len(stderr)),
 	}
 }
 

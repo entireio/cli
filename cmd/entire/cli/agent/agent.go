@@ -255,12 +255,25 @@ const (
 // GenerationProgress reports a snapshot of streaming text generation progress.
 // Fields not relevant to the current Phase may be zero-valued.
 type GenerationProgress struct {
+	// StreamingMode reports an execution-mode transition independently of
+	// provider stream events. This lets callers distinguish a stream that
+	// stalls before its first event from a non-streaming compatibility fallback.
+	StreamingMode     *bool
 	Phase             ProgressPhase
 	OutputTokens      int // running estimate during PhaseGenerating; final at PhaseDone
 	InputTokens       int // populated at PhaseFirstToken
 	CachedInputTokens int // populated at PhaseFirstToken
 	TTFTms            int // time-to-first-token, populated at PhaseFirstToken
 	DurationMs        int // populated at PhaseDone (final result event)
+}
+
+// ReportStreamingMode notifies progress observers which generation path is
+// executing. It is intentionally separate from ProgressPhase because a
+// provider may never emit a stream event at all.
+func ReportStreamingMode(progress ProgressFn, streaming bool) {
+	if progress != nil {
+		progress(GenerationProgress{StreamingMode: &streaming})
+	}
 }
 
 // ProgressFn receives streaming progress updates. It must not block — invoke it

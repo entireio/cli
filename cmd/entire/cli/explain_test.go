@@ -18,6 +18,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	agenttestutil "github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -932,6 +934,68 @@ func TestGenerateCheckpointAISummary_NoTimeoutInheritsParent(t *testing.T) {
 	}
 }
 
+// Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
+func TestGenerateCheckpointAISummary_StreamingTimeoutBeforeFirstEvent(t *testing.T) {
+	tmpGenerator := generateTranscriptSummary
+	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })
+
+	generateTranscriptSummary = summarize.GenerateFromTranscript
+
+	streamer := &codex.CodexAgent{
+		CommandRunner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+			return exec.CommandContext(ctx, "sh", "-c", "sleep 10")
+		},
+	}
+	generator := &summarize.TextGeneratorAdapter{TextGenerator: streamer}
+	attempt := newSummaryAttempt("codex", 50*time.Millisecond)
+	progress := newSummaryProgressWriter(io.Discard, attempt)
+
+	_, err := generateCheckpointAISummary(
+		context.Background(), []byte(`{"type":"user","message":{"role":"user","content":"summarize"}}`+"\n"), nil, agent.AgentTypeClaudeCode,
+		generator, 50*time.Millisecond, progress.handle, attempt,
+	)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.True(t, attempt.streaming, "streaming mode must be known before the first provider event")
+	require.Empty(t, attempt.phasesReached)
+
+	label, _ := timeoutDiagnostic(err, attempt)
+	require.Contains(t, label, "never sent its request")
+}
+
+// Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
+func TestGenerateCheckpointAISummary_FallbackTimeoutUsesNonStreamingDiagnostic(t *testing.T) {
+	tmpGenerator := generateTranscriptSummary
+	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })
+
+	generateTranscriptSummary = summarize.GenerateFromTranscript
+
+	streamCall := agenttestutil.FakeStreamCmd("", "error: unknown flag: --json", 1)
+	calls := 0
+	streamer := &codex.CodexAgent{
+		CommandRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			calls++
+			if calls == 1 {
+				return streamCall(ctx, name, args...)
+			}
+			return exec.CommandContext(ctx, "sh", "-c", "sleep 10")
+		},
+	}
+	generator := &summarize.TextGeneratorAdapter{TextGenerator: streamer}
+	attempt := newSummaryAttempt("codex", 100*time.Millisecond)
+	progress := newSummaryProgressWriter(io.Discard, attempt)
+
+	_, err := generateCheckpointAISummary(
+		context.Background(), []byte(`{"type":"user","message":{"role":"user","content":"summarize"}}`+"\n"), nil, agent.AgentTypeClaudeCode,
+		generator, 100*time.Millisecond, progress.handle, attempt,
+	)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.False(t, attempt.streaming, "non-streaming fallback must replace the attempted streaming mode")
+	require.Equal(t, 2, calls)
+
+	label, _ := timeoutDiagnostic(err, attempt)
+	require.Contains(t, label, "produced no output")
+}
+
 // TestGenerateCheckpointAISummary_PreservesClaudeErrorWhenCtxIsDone guards
 // against the race where the underlying summarizer returns a typed
 // *ClaudeError AND the context happens to be done. Prior code checked
@@ -1157,6 +1221,67 @@ func TestGenerateCheckpointAISummary_ExplicitTimeoutNarrowsLongParent(t *testing
 	if remaining := gotDeadline.Sub(start); remaining < 30*time.Millisecond || remaining > 200*time.Millisecond {
 		t.Fatalf("deadline offset = %s, want around %s", remaining, explicitTimeout)
 	}
+}
+
+// Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
+func TestGenerateCheckpointAISummary_ExplicitTimeoutUsesShorterParentDeadline(t *testing.T) {
+	tmpGenerator := generateTranscriptSummary
+	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })
+
+	generateTranscriptSummary = func(
+		ctx context.Context,
+		_ redact.RedactedBytes,
+		_ []string,
+		_ types.AgentType,
+		_ summarize.Generator,
+		_ agent.ProgressFn,
+	) (*checkpoint.Summary, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	parentCtx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	attempt := newSummaryAttempt("codex", time.Minute)
+
+	_, err := generateCheckpointAISummary(
+		parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode,
+		nil, time.Minute, nil, attempt,
+	)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Greater(t, attempt.deadline, time.Duration(0))
+	require.Less(t, attempt.deadline, time.Second, "diagnostic must record the effective parent deadline")
+	require.Contains(t, err.Error(), formatSummaryTimeout(attempt.deadline))
+}
+
+// Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
+func TestGenerateCheckpointAISummary_ParentOnlyDeadlineStaysGeneric(t *testing.T) {
+	tmpGenerator := generateTranscriptSummary
+	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })
+
+	generateTranscriptSummary = func(
+		ctx context.Context,
+		_ redact.RedactedBytes,
+		_ []string,
+		_ types.AgentType,
+		_ summarize.Generator,
+		_ agent.ProgressFn,
+	) (*checkpoint.Summary, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	parentCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	attempt := newSummaryAttempt("codex", 0)
+
+	_, err := generateCheckpointAISummary(
+		parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode,
+		nil, 0, nil, attempt,
+	)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Zero(t, attempt.deadline)
+	require.NotContains(t, err.Error(), "after")
 }
 
 // Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
@@ -5978,10 +6103,14 @@ func TestSummaryProgressWriter_PopulatesAttempt(t *testing.T) {
 	attempt := newSummaryAttempt("claude-code", 30*time.Second)
 	pw := newSummaryProgressWriter(&bytes.Buffer{}, attempt)
 	pw.handle(agent.GenerationProgress{Phase: agent.PhaseConnecting})
+	if attempt.streaming {
+		t.Error("phase events must not infer the execution mode")
+	}
+	agent.ReportStreamingMode(pw.handle, true)
 	pw.handle(agent.GenerationProgress{Phase: agent.PhaseFirstToken})
 
 	if !attempt.streaming {
-		t.Error("expected attempt.streaming=true after any progress event")
+		t.Error("expected attempt.streaming=true after the streaming mode marker")
 	}
 	if !attempt.phasesReached[agent.PhaseConnecting] {
 		t.Error("expected PhaseConnecting recorded in attempt")

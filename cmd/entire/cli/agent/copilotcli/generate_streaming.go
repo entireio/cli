@@ -88,6 +88,7 @@ func parseCopilotStream(stdout io.Reader, progress agent.ProgressFn) (string, er
 			if ev.Data == nil || ev.Data.DeltaContent == "" {
 				continue
 			}
+			streamedChars += len(ev.Data.DeltaContent)
 			if !firstTokenFired {
 				firstTokenFired = true
 				// Copilot's delta events carry no TTFT, input-token, or
@@ -101,7 +102,6 @@ func parseCopilotStream(stdout io.Reader, progress agent.ProgressFn) (string, er
 				// counter ticks during streaming (matches Claude's pattern
 				// from PR #964). Authoritative output_tokens still arrives
 				// later via assistant.message events and overrides on Done.
-				streamedChars += len(ev.Data.DeltaContent)
 				dispatch(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: streamedChars / 4})
 			}
 			result.WriteString(ev.Data.DeltaContent)
@@ -123,11 +123,15 @@ func parseCopilotStream(stdout io.Reader, progress agent.ProgressFn) (string, er
 				// "unspecified error" rather than leaking the raw line (which
 				// may carry echoed user content or model fragments) into logs
 				// and *TextGenerationError.Stderr.
-				return "", fmt.Errorf("copilot stream error: non-zero exit code %d", ev.ExitCode)
+				return "", agent.MarkProviderStreamError( //nolint:wrapcheck // private transport marker preserves the decoded provider error chain
+					fmt.Errorf("copilot stream error: non-zero exit code %d", ev.ExitCode),
+				)
 			}
 
 		case "error":
-			return "", fmt.Errorf("copilot stream error: %s", agent.SafeErrorMessage(line))
+			return "", agent.MarkProviderStreamError( //nolint:wrapcheck // private transport marker preserves the decoded provider error chain
+				fmt.Errorf("copilot stream error: %s", agent.SafeErrorMessage(line)),
+			)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -176,6 +180,7 @@ func (c *CopilotCLIAgent) GenerateTextStreaming(
 	result, err := tmpl.Generate(ctx, prompt, model, progress)
 	if err != nil {
 		if errors.Is(err, agent.ErrUnrecognizedStreamingFlag) {
+			agent.ReportStreamingMode(progress, false)
 			return c.GenerateText(ctx, prompt, model)
 		}
 		return "", fmt.Errorf("copilot streaming generate: %w", err)

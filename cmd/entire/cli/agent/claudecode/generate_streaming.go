@@ -119,7 +119,9 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 		stderrStr := stderr.String()
 		if looksLikeUnrecognizedFlag(stderrStr) {
 			logging.Warn(ctx, "claude CLI rejected stream-json flags; falling back to non-streaming (no progress output)",
-				slog.String("stderr", strings.TrimSpace(stderrStr)))
+				slog.String("agent", "claude-code"),
+				slog.Int("stderr_bytes", len(strings.TrimSpace(stderrStr))))
+			agent.ReportStreamingMode(progress, false)
 			return c.GenerateText(ctx, prompt, model)
 		}
 		if stderrStr != "" {

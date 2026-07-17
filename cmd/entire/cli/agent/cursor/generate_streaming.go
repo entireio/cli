@@ -100,6 +100,7 @@ func parseCursorStream(stdout io.Reader, progress agent.ProgressFn) (string, err
 			if text == "" {
 				continue
 			}
+			streamedChars += len(text)
 			if !firstTokenFired {
 				firstTokenFired = true
 				// CacheReadTokens isn't known until the result event arrives;
@@ -107,7 +108,6 @@ func parseCursorStream(stdout io.Reader, progress agent.ProgressFn) (string, err
 				// expose cached/output/duration from result.usage.
 				dispatch(agent.GenerationProgress{Phase: agent.PhaseFirstToken})
 			} else {
-				streamedChars += len(text)
 				dispatch(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: streamedChars / 4})
 			}
 
@@ -123,7 +123,9 @@ func parseCursorStream(stdout io.Reader, progress agent.ProgressFn) (string, err
 				if detail == "" {
 					detail = "unspecified error"
 				}
-				return "", fmt.Errorf("cursor stream error: %s", detail)
+				return "", agent.MarkProviderStreamError( //nolint:wrapcheck // private transport marker preserves the decoded provider error chain
+					fmt.Errorf("cursor stream error: %s", detail),
+				)
 			}
 			resultText = ev.Result
 			usage = ev.Usage
@@ -174,6 +176,7 @@ func (c *CursorAgent) GenerateTextStreaming(
 	result, err := tmpl.Generate(ctx, prompt, model, progress)
 	if err != nil {
 		if errors.Is(err, agent.ErrUnrecognizedStreamingFlag) {
+			agent.ReportStreamingMode(progress, false)
 			return c.GenerateText(ctx, prompt, model)
 		}
 		return "", fmt.Errorf("cursor streaming generate: %w", err)

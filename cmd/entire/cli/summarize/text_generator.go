@@ -40,6 +40,7 @@ func (g *TextGeneratorAdapter) Generate(ctx context.Context, input Input) (*chec
 	// Prefer streaming when the underlying agent supports it. TextGenerator
 	// embeds Agent, so AsStreamingTextGenerator accepts it directly.
 	if streamer, ok := agent.AsStreamingTextGenerator(g.TextGenerator); ok {
+		agent.ReportStreamingMode(g.progress, true)
 		result, err := streamer.GenerateTextStreaming(ctx, prompt, g.Model, g.progress)
 		if err != nil {
 			return nil, err //nolint:wrapcheck // preserve *agent.TextGenerationError / *claudecode.ClaudeError for errors.As

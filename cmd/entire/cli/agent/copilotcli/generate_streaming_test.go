@@ -91,6 +91,28 @@ func TestParseCopilotStream_EmptyStream(t *testing.T) {
 	}
 }
 
+func TestParseCopilotStream_RunningEstimateIncludesFirstDelta(t *testing.T) {
+	t.Parallel()
+
+	stream := `{"type":"assistant.turn_start"}
+{"type":"assistant.message_delta","data":{"deltaContent":"1234"}}
+{"type":"assistant.message_delta","data":{"deltaContent":"5678"}}
+{"type":"result","exitCode":0}
+`
+	var generating agent.GenerationProgress
+	_, err := parseCopilotStream(strings.NewReader(stream), func(progress agent.GenerationProgress) {
+		if progress.Phase == agent.PhaseGenerating {
+			generating = progress
+		}
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if generating.OutputTokens != 2 {
+		t.Fatalf("running estimate = %d, want 2 from all 8 streamed characters", generating.OutputTokens)
+	}
+}
+
 func TestCopilotCLIGenerateTextStreaming_Success(t *testing.T) {
 	t.Parallel()
 

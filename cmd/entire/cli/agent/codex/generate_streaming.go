@@ -26,6 +26,7 @@ func parseCodexStream(stdout io.Reader, progress agent.ProgressFn) (string, erro
 		resultText      string
 		sawTurnComplete bool
 		usage           *codexStreamUsage
+		firstTokenFired bool
 		turnStartedAt   time.Time
 		turnDuration    time.Duration
 		malformed       int
@@ -58,13 +59,12 @@ func parseCodexStream(stdout io.Reader, progress agent.ProgressFn) (string, erro
 			dispatch(agent.GenerationProgress{Phase: agent.PhaseConnecting})
 
 		case "item.completed":
-			// Codex emits the full agent_message in one item; we capture
-			// the text but defer PhaseFirstToken until turn.completed so
-			// the cached_input_tokens usage clause can be attached. The
-			// CLI buffers and emits items in one chunk per turn, so there
-			// is no incremental "first token" signal to surface anyway.
 			if ev.Item != nil && ev.Item.Type == "agent_message" {
 				resultText = ev.Item.Text
+				if !firstTokenFired {
+					firstTokenFired = true
+					dispatch(agent.GenerationProgress{Phase: agent.PhaseFirstToken})
+				}
 			}
 
 		case "turn.completed":
@@ -75,7 +75,9 @@ func parseCodexStream(stdout io.Reader, progress agent.ProgressFn) (string, erro
 			}
 
 		case "turn.failed", "error":
-			return "", fmt.Errorf("codex turn failed: %s", agent.SafeErrorMessage(line))
+			return "", agent.MarkProviderStreamError( //nolint:wrapcheck // private transport marker preserves the decoded provider error chain
+				fmt.Errorf("codex turn failed: %s", agent.SafeErrorMessage(line)),
+			)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -91,13 +93,6 @@ func parseCodexStream(stdout io.Reader, progress agent.ProgressFn) (string, erro
 		return "", errors.New("codex stream produced no agent_message")
 	}
 	if progress != nil {
-		firstToken := agent.GenerationProgress{Phase: agent.PhaseFirstToken}
-		if usage != nil {
-			firstToken.InputTokens = usage.InputTokens
-			firstToken.CachedInputTokens = usage.CachedInputTokens
-		}
-		dispatch(firstToken)
-
 		done := agent.GenerationProgress{Phase: agent.PhaseDone}
 		if usage != nil {
 			done.OutputTokens = usage.OutputTokens
@@ -130,6 +125,7 @@ func (c *CodexAgent) GenerateTextStreaming(
 	result, err := tmpl.Generate(ctx, prompt, model, progress)
 	if err != nil {
 		if errors.Is(err, agent.ErrUnrecognizedStreamingFlag) {
+			agent.ReportStreamingMode(progress, false)
 			return c.GenerateText(ctx, prompt, model)
 		}
 		return "", fmt.Errorf("codex streaming generate: %w", err)

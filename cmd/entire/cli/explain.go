@@ -1057,6 +1057,9 @@ func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, f
 	if timeout > 0 {
 		runCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
+		if deadline, ok := runCtx.Deadline(); ok {
+			attempt.deadline = time.Until(deadline)
+		}
 	}
 
 	// scopedTranscript is either read from checkpoint storage (redacted on
@@ -1088,7 +1091,7 @@ func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, f
 		// timeout was actually the cause.
 		if errors.Is(err, context.DeadlineExceeded) {
 			if timeout > 0 {
-				return nil, fmt.Errorf("summary generation timed out after %s: %w", formatSummaryTimeout(timeout), context.DeadlineExceeded)
+				return nil, fmt.Errorf("summary generation timed out after %s: %w", formatSummaryTimeout(attempt.deadline), context.DeadlineExceeded)
 			}
 			return nil, fmt.Errorf("summary generation timed out (parent context deadline): %w", context.DeadlineExceeded)
 		}
@@ -1405,8 +1408,12 @@ func (s *summaryProgressWriter) shouldEmitGenerating(p agent.GenerationProgress)
 
 func (s *summaryProgressWriter) handle(p agent.GenerationProgress) {
 	if s.attempt != nil {
-		s.attempt.streaming = true
-		s.attempt.phasesReached[p.Phase] = true
+		if p.StreamingMode != nil {
+			s.attempt.streaming = *p.StreamingMode
+		}
+		if p.Phase != "" {
+			s.attempt.phasesReached[p.Phase] = true
+		}
 	}
 
 	switch p.Phase {

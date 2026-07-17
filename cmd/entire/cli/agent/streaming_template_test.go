@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
@@ -127,5 +128,54 @@ func TestStreamingGeneratorTemplate_Generate_ContextCancelled(t *testing.T) {
 	}
 	if !errors.Is(failure.Err, context.Canceled) {
 		t.Errorf("inner err = %v, want context.Canceled", failure.Err)
+	}
+}
+
+func TestStreamingGeneratorTemplate_Generate_ProviderErrorOutranksConcurrentCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	providerErr := errors.New("provider rejected the request")
+	tmpl := &agent.StreamingGeneratorTemplate{
+		AgentName: "fake",
+		BuildCmd: func(ctx context.Context, _, _ string) *exec.Cmd {
+			return testutil.FakeStreamCmd("provider error event\n", "", 0)(ctx, "fake", []string{}...)
+		},
+		Parser: func(stdout io.Reader, _ agent.ProgressFn) (string, error) {
+			_, _ = io.Copy(io.Discard, stdout) //nolint:errcheck // parser result is the behavior under test
+			cancel()
+			return "", agent.MarkProviderStreamError(providerErr)
+		},
+	}
+
+	_, err := tmpl.Generate(ctx, "prompt", "model", nil)
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("err = %v, want provider error", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, provider error must outrank concurrent cancellation", err)
+	}
+}
+
+func TestStreamingGeneratorTemplate_Generate_KillInducedParserFailureUsesContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	tmpl := &agent.StreamingGeneratorTemplate{
+		AgentName: "fake",
+		BuildCmd: func(ctx context.Context, _, _ string) *exec.Cmd {
+			return exec.CommandContext(ctx, "sh", "-c", "sleep 10")
+		},
+		Parser: func(stdout io.Reader, _ agent.ProgressFn) (string, error) {
+			_, _ = io.Copy(io.Discard, stdout) //nolint:errcheck // cancellation closes the subprocess pipe
+			return "", errors.New("stream ended without terminal event")
+		},
+	}
+
+	_, err := tmpl.Generate(ctx, "prompt", "model", nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context deadline sentinel", err)
 	}
 }

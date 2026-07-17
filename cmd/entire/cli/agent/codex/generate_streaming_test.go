@@ -76,6 +76,69 @@ func TestParseCodexStream_MissingTurnCompleted(t *testing.T) {
 	}
 }
 
+func TestParseCodexStream_TruncatedAfterAgentMessageEmitsFirstTokenOnly(t *testing.T) {
+	t.Parallel()
+
+	stream := `{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"partial"}}
+`
+	var events []agent.GenerationProgress
+	_, err := parseCodexStream(strings.NewReader(stream), func(progress agent.GenerationProgress) {
+		events = append(events, progress)
+	})
+	if err == nil {
+		t.Fatal("expected error when stream lacks turn.completed")
+	}
+
+	var firstToken, done int
+	for _, event := range events {
+		switch event.Phase {
+		case agent.PhaseFirstToken:
+			firstToken++
+		case agent.PhaseDone:
+			done++
+		case agent.PhaseConnecting, agent.PhaseGenerating:
+			// Other progress phases do not affect the first-token/terminal contract.
+		}
+	}
+	if firstToken != 1 {
+		t.Fatalf("PhaseFirstToken count = %d, want 1 when agent_message arrives", firstToken)
+	}
+	if done != 0 {
+		t.Fatalf("PhaseDone count = %d, want 0 without turn.completed", done)
+	}
+}
+
+func TestParseCodexStream_TerminalUsageIsAuthoritative(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join("testdata", "stream_success.jsonl"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	var firstToken, done agent.GenerationProgress
+	_, err = parseCodexStream(bytes.NewReader(data), func(progress agent.GenerationProgress) {
+		switch progress.Phase {
+		case agent.PhaseFirstToken:
+			firstToken = progress
+		case agent.PhaseDone:
+			done = progress
+		case agent.PhaseConnecting, agent.PhaseGenerating:
+			// Other progress phases carry no authoritative terminal usage.
+		}
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if firstToken.InputTokens != 0 || firstToken.CachedInputTokens != 0 || firstToken.OutputTokens != 0 {
+		t.Fatalf("first token must not predict terminal usage: %+v", firstToken)
+	}
+	if done.InputTokens != 9 || done.CachedInputTokens != 1234 || done.OutputTokens != 3 {
+		t.Fatalf("done usage = %+v, want authoritative terminal usage", done)
+	}
+}
+
 func TestCodexGenerateTextStreaming_Success(t *testing.T) {
 	t.Parallel()
 
