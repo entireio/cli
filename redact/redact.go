@@ -76,11 +76,13 @@ var (
 	credentialJSONKeyRegex  = regexp.MustCompile(`^` + dbPasswordKeyShape + `$`)
 	secretJSONKeyRegex      = regexp.MustCompile(`^` + secretValueKeyShape + `$`)
 	genericPasswordKeyRegex = regexp.MustCompile(`(?i)^(?:password|passwd|pwd)$`)
-	// credentialWordInKeyRE spots a credential-flavored word segment anywhere
-	// in a normalized key. Used by isNonSecretIdentifierAssignment: an
-	// id/account-suffixed key that also names a credential
+	// credentialWordInKeyRE spots a secret-bearing word segment anywhere in a
+	// normalized key. Generic credential nouns (auth, cred, credential, cert)
+	// stay ordinary identifiers unless paired with one of these secret shapes.
+	// Used by isNonSecretIdentifierAssignment: an id/account-suffixed key that
+	// also names a secret
 	// (aws_access_key_id, api_token_id) must never suppress redaction.
-	credentialWordInKeyRE = regexp.MustCompile(`(?:^|_)(?:key|token|secret|pass|passwd|password|pwd|credential|cred|auth|cert)(?:_|$)`)
+	credentialWordInKeyRE = regexp.MustCompile(`(?:^|_)(?:key|token|secret|pass|passwd|password|pwd)(?:_|$)`)
 )
 
 // entropyThreshold is the minimum Shannon entropy for a string to be considered

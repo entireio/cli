@@ -306,7 +306,7 @@ func TestJSONLContent_SkippedFieldValueCollision(t *testing.T) {
 
 func TestJSONLContent_CredentialIdentifierKeysStayScanned(t *testing.T) {
 	t.Parallel()
-	input := `{"aws_access_key_id":"AKIAIOSFODNN7EXAMPLE","api_token_id":"correct-horse-battery","AccessKeyId":"AKIAIOSFODNN7EXAMPLE","apiTokenId":"correct-horse-battery","session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0","tenantId":"tenant-123"}`
+	input := `{"aws_access_key_id":"AKIAIOSFODNN7EXAMPLE","api_token_id":"correct-horse-battery","AccessKeyId":"AKIAIOSFODNN7EXAMPLE","apiTokenId":"correct-horse-battery","session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0","tenantId":"tenant-123","auth_id":"auth-123","cred_id":"cred-123","cert_id":"cert-123","credential_id":"credential-123"}`
 
 	result, err := JSONLContent(input)
 	if err != nil {
@@ -319,6 +319,10 @@ func TestJSONLContent_CredentialIdentifierKeysStayScanned(t *testing.T) {
 		`"apiTokenId":"REDACTED"`,
 		`"session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0"`,
 		`"tenantId":"tenant-123"`,
+		`"auth_id":"auth-123"`,
+		`"cred_id":"cred-123"`,
+		`"cert_id":"cert-123"`,
+		`"credential_id":"credential-123"`,
 	} {
 		if !strings.Contains(result, want) {
 			t.Errorf("expected %s in output, got: %s", want, result)
@@ -1993,6 +1997,16 @@ func TestString_CredentialWordInIdentifierKeyStillRedacts(t *testing.T) {
 			input: "tenant_id=Kj8mN3pQ7rXw2Zv5Yb9c",
 			want:  "tenant_id=Kj8mN3pQ7rXw2Zv5Yb9c",
 		},
+	})
+}
+
+func TestString_OrdinaryCredentialNounIdentifiersPreserved(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{name: "authorization id", input: "auth_id=auth-123", want: "auth_id=auth-123"},
+		{name: "WebAuthn credential id abbreviation", input: "cred_id=Kj8mN3pQ7rXw2Zv5Yb9c", want: "cred_id=Kj8mN3pQ7rXw2Zv5Yb9c"},
+		{name: "certificate id", input: "cert_id=Kj8mN3pQ7rXw2Zv5Yb9c", want: "cert_id=Kj8mN3pQ7rXw2Zv5Yb9c"},
+		{name: "WebAuthn credential id", input: "credential_id=Kj8mN3pQ7rXw2Zv5Yb9c", want: "credential_id=Kj8mN3pQ7rXw2Zv5Yb9c"},
 	})
 }
 
