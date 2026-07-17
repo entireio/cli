@@ -435,7 +435,7 @@ func detectShellStdinSecrets(s string) []taggedRegion {
 	if !strings.ContainsRune(s, '|') {
 		return nil
 	}
-	return detectCredentialKeyCaptures(s, shellStdinSecretPattern, nil)
+	return detectCredentialKeyCaptures(s, shellStdinSecretPattern, true, nil)
 }
 
 func detectCredentialValues(s string) []taggedRegion {
@@ -443,13 +443,14 @@ func detectCredentialValues(s string) []taggedRegion {
 		return nil
 	}
 	regions := detectNonPlaceholderCaptures(s, credentialValuePattern)
-	regions = append(regions, detectCredentialKeyCaptures(s, credentialAssignmentPattern, shouldPreserveCredentialCodeAssignment)...)
+	regions = append(regions, detectCredentialKeyCaptures(s, credentialAssignmentPattern, false, shouldPreserveCredentialCodeAssignment)...)
 	return regions
 }
 
 func detectCredentialKeyCaptures(
 	s string,
 	pattern *regexp.Regexp,
+	genericPasswordContext bool,
 	shouldPreserve func(value, separator string) bool,
 ) []taggedRegion {
 	valueGroup := pattern.SubexpIndex("value")
@@ -457,7 +458,12 @@ func detectCredentialKeyCaptures(
 	var regions []taggedRegion
 	for _, match := range pattern.FindAllStringSubmatchIndex(s, -1) {
 		keyStart, keyEnd, ok := captureRange(match, keyGroup)
-		if !ok || !isCredentialJSONSecretKey(s[keyStart:keyEnd], false) {
+		if !ok {
+			continue
+		}
+		key := s[keyStart:keyEnd]
+		credentialContext := genericPasswordContext || key == "PASSWORD" || key == "PASSWD"
+		if !isCredentialJSONSecretKey(key, credentialContext) {
 			continue
 		}
 		if shouldPreserve != nil {
@@ -481,7 +487,15 @@ func shouldPreserveCredentialCodeAssignment(value, separator string) bool {
 	if equal <= 0 || equal >= len(separator)-1 {
 		return false
 	}
-	return value == "await" || credentialCodeCallPattern.MatchString(value) || credentialCodeRefPattern.MatchString(value)
+	return value == "await" || credentialCodeCallPattern.MatchString(value) || isCredentialCodeReference(value)
+}
+
+func isCredentialCodeReference(value string) bool {
+	if !credentialCodeRefPattern.MatchString(value) {
+		return false
+	}
+	memberStart := strings.LastIndexByte(value, '.') + 1
+	return isCredentialJSONSecretKey(value[memberStart:], false)
 }
 
 func detectNonPlaceholderCaptures(s string, pattern *regexp.Regexp) []taggedRegion {

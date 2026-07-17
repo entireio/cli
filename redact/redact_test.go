@@ -1899,6 +1899,27 @@ func TestString_ShellStdinSecretVerbMatrix(t *testing.T) {
 	}
 }
 
+func TestString_GenericPasswordCredentialContexts(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "uppercase password env assignment",
+			input: `PASSWORD=hunter2`,
+			want:  `PASSWORD=REDACTED`,
+		},
+		{
+			name:  "uppercase password shell-stdin key",
+			input: `printf 'hunter2' | examplectl secrets put PASSWORD`,
+			want:  `printf 'REDACTED' | examplectl secrets put PASSWORD`,
+		},
+		{
+			name:  "lowercase password shell-stdin key",
+			input: `printf 'hunter2' | examplectl secrets put password`,
+			want:  `printf 'REDACTED' | examplectl secrets put password`,
+		},
+	})
+}
+
 // Pins the {1,512} literal bound: an oversized "literal" is not eaten by the
 // shell-stdin layer — the bound is the layer's only span-size safety valve.
 func TestString_ShellStdinSecretLiteralBoundHolds(t *testing.T) {
@@ -1956,6 +1977,11 @@ func TestString_CorpusDerivedCodeContextGuards(t *testing.T) {
 			name:  "credential assignment from member reference is code",
 			input: `client_secret = config.client_secret`,
 			want:  `client_secret = config.client_secret`,
+		},
+		{
+			name:  "dotted credential literal is not a code reference",
+			input: `client_secret = alpha.bravo.charlie`,
+			want:  `client_secret = REDACTED`,
 		},
 		{
 			name:  "async credential assignment is code",
