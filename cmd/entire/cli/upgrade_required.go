@@ -43,20 +43,22 @@ type upgradeOfferDeps struct {
 	runInstaller func(ctx context.Context, cmdStr string) error
 }
 
-// OfferCLIUpgradeIfRequired handles a cli_upgrade_required failure after
-// main.go has printed the error itself. On an interactive terminal it
-// offers to run the updater right away (same installer the version-check
-// prompt uses); otherwise — no TTY, ENTIRE_NO_AUTO_UPDATE set, declined,
-// or no runnable installer for this platform — it prints the update
-// command and the failed command so the user can run both. argv is the
-// failed invocation's os.Args. No-op when err doesn't carry the code.
+// OfferCLIUpgradeIfRequired handles a cli_upgrade_required failure in
+// place of the raw error print: it reports true when it took over the
+// messaging (main.go then skips printing err — the raw OAuth chain adds
+// nothing the guidance doesn't say), false when err doesn't carry the
+// code. On an interactive terminal it offers to run the updater right
+// away (same installer the version-check prompt uses); otherwise — no
+// TTY, ENTIRE_NO_AUTO_UPDATE set, declined, or no runnable installer for
+// this platform — it prints the update command and the failed command so
+// the user can run both. argv is the failed invocation's os.Args.
 //
 // The code can surface from any auth-server OAuth flow — login (device
 // and browser), the refresh grant under every authenticated command, and
 // the RFC 8693 exchanges — which is why this hangs off main.go's central
 // error-print arm rather than any single command.
-func OfferCLIUpgradeIfRequired(ctx context.Context, w io.Writer, err error, argv []string) {
-	offerCLIUpgrade(ctx, w, err, argv, upgradeOfferDeps{
+func OfferCLIUpgradeIfRequired(ctx context.Context, w io.Writer, err error, argv []string) bool {
+	return offerCLIUpgrade(ctx, w, err, argv, upgradeOfferDeps{
 		canPrompt: func() bool {
 			return os.Getenv(versioncheck.EnvNoAutoUpdate) == "" &&
 				versioncheck.CanAutoInstall() &&
@@ -68,16 +70,16 @@ func OfferCLIUpgradeIfRequired(ctx context.Context, w io.Writer, err error, argv
 	})
 }
 
-func offerCLIUpgrade(ctx context.Context, w io.Writer, err error, argv []string, deps upgradeOfferDeps) {
+func offerCLIUpgrade(ctx context.Context, w io.Writer, err error, argv []string, deps upgradeOfferDeps) bool {
 	if !IsCLIUpgradeRequired(err) {
-		return
+		return false
 	}
 	updateCmd := versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version)
 	rerun := rerunCommandLine(argv)
 
 	if !deps.canPrompt() {
 		printCLIUpgradeCommands(w, updateCmd, rerun)
-		return
+		return true
 	}
 
 	confirmed, confirmErr := deps.confirm(ctx, updateCmd)
@@ -85,21 +87,22 @@ func offerCLIUpgrade(ctx context.Context, w io.Writer, err error, argv []string,
 		// Declined or the prompt itself failed/was aborted — leave the
 		// copyable commands either way.
 		printCLIUpgradeCommands(w, updateCmd, rerun)
-		return
+		return true
 	}
 
-	fmt.Fprintf(w, "\nUpdating Entire CLI: %s\n", updateCmd)
+	fmt.Fprintf(w, "Updating Entire CLI: %s\n", updateCmd)
 	if installErr := deps.runInstaller(ctx, updateCmd); installErr != nil {
 		fmt.Fprintf(w, "Update failed: %v\nTry again later running:\n  %s\n", installErr, updateCmd)
-		return
+		return true
 	}
 	fmt.Fprintf(w, "Update complete. Rerun the command:\n\n  %s\n", rerun)
+	return true
 }
 
 // printCLIUpgradeCommands prints the non-interactive guidance block: the
 // update command, then the command that failed, each ready to copy.
 func printCLIUpgradeCommands(w io.Writer, updateCmd, rerun string) {
-	fmt.Fprintf(w, "\n%s\n\n  %s\n", cliUnsupportedMsg, updateCmd)
+	fmt.Fprintf(w, "%s\n\n  %s\n", cliUnsupportedMsg, updateCmd)
 	if rerun != "" {
 		fmt.Fprintf(w, "\nThen rerun the command:\n\n  %s\n", rerun)
 	}

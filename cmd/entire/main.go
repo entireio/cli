@@ -123,14 +123,15 @@ func main() {
 			// deepest matched command, which is the one that failed.
 			showSuggestion(executed, err)
 		default:
-			fmt.Fprintln(rootCmd.OutOrStderr(), err)
 			// A server can reject any authenticated flow (login, token
-			// refresh, RFC 8693 exchange) because this build is too old;
-			// don't leave the bare cli_upgrade_required code as a dead
-			// end — offer the update interactively, or print the update
-			// and rerun commands. Handled here so every command gets it
-			// without wrapping its own errors.
-			cli.OfferCLIUpgradeIfRequired(ctx, rootCmd.OutOrStderr(), err, os.Args)
+			// refresh, RFC 8693 exchange) because this build is too old.
+			// The handler replaces the raw cli_upgrade_required error with
+			// actionable guidance — an interactive update offer, or the
+			// update + rerun commands. Handled here so every command gets
+			// it without wrapping its own errors.
+			if !cli.OfferCLIUpgradeIfRequired(ctx, rootCmd.OutOrStderr(), err, os.Args) {
+				fmt.Fprintln(rootCmd.OutOrStderr(), err)
+			}
 		}
 
 		cancel()

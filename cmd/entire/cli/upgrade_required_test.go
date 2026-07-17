@@ -37,9 +37,12 @@ func TestOfferCLIUpgrade_UnrelatedErrorPrintsNothing(t *testing.T) {
 	t.Parallel()
 
 	var out bytes.Buffer
-	offerCLIUpgrade(context.Background(), &out, errors.New("boom"), loginArgv(), upgradeOfferDeps{
+	handled := offerCLIUpgrade(context.Background(), &out, errors.New("boom"), loginArgv(), upgradeOfferDeps{
 		canPrompt: func() bool { t.Error("canPrompt must not be consulted"); return false },
 	})
+	if handled {
+		t.Error("handled = true, want false so main.go prints the error itself")
+	}
 	if out.Len() != 0 {
 		t.Fatalf("expected no output, got:\n%s", out.String())
 	}
@@ -49,10 +52,13 @@ func TestOfferCLIUpgrade_NonInteractivePrintsUpdateAndRerunCommands(t *testing.T
 	t.Parallel()
 
 	var out bytes.Buffer
-	offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
+	handled := offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
 		canPrompt: func() bool { return false },
 	})
 
+	if !handled {
+		t.Error("handled = false, want true so main.go skips the raw error")
+	}
 	got := out.String()
 	if !strings.Contains(got, "This Entire CLI version is no longer supported. Update it:") {
 		t.Errorf("missing unsupported-version message:\n%s", got)
