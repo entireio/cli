@@ -126,13 +126,31 @@ func TestOfferCLIUpgrade_ReexecFailurePrintsRerunCommand(t *testing.T) {
 	}
 }
 
-func TestUpgradePromptAllowed_RerunGuardBlocksSecondPrompt(t *testing.T) {
+func TestOfferCLIUpgrade_RerunGuardExplainsStaleBinary(t *testing.T) {
 	// t.Setenv forbids t.Parallel.
 	t.Setenv(envUpgradeRerun, "1")
-	t.Setenv("ENTIRE_TEST_TTY", "1") // force the interactive probe on; the guard must still win
 
-	if upgradePromptAllowed(&bytes.Buffer{}) {
-		t.Error("prompt must be suppressed on a post-update rerun to avoid an update loop")
+	var out bytes.Buffer
+	handled := offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
+		canPrompt: func() bool { t.Error("prompt must be suppressed on a post-update rerun"); return true },
+		runInstaller: func(context.Context, string) error {
+			t.Error("installer must not run again on a post-update rerun")
+			return nil
+		},
+	})
+
+	if !handled {
+		t.Error("handled = false, want true")
+	}
+	got := out.String()
+	if !strings.Contains(got, "still ran an unsupported binary (/usr/local/bin/entire)") {
+		t.Errorf("missing stale-binary explanation naming the binary:\n%s", got)
+	}
+	if !strings.Contains(got, "entire login --device") {
+		t.Errorf("missing rerun command:\n%s", got)
+	}
+	if strings.Contains(got, cliUnsupportedMsg) {
+		t.Errorf("must not tell the user to update again right after updating:\n%s", got)
 	}
 }
 

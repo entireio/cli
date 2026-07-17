@@ -80,12 +80,11 @@ func OfferCLIUpgradeIfRequired(ctx context.Context, w io.Writer, err error, argv
 }
 
 // upgradePromptAllowed reports whether the interactive update offer may
-// be shown: never on a post-update rerun (loop guard), never with the
-// auto-update kill switch set, and only with a runnable installer on an
-// interactive terminal.
+// be shown: never with the auto-update kill switch set, and only with a
+// runnable installer on an interactive terminal. (The post-update rerun
+// loop guard short-circuits in offerCLIUpgrade before this is consulted.)
 func upgradePromptAllowed(w io.Writer) bool {
-	return os.Getenv(envUpgradeRerun) == "" &&
-		os.Getenv(versioncheck.EnvNoAutoUpdate) == "" &&
+	return os.Getenv(versioncheck.EnvNoAutoUpdate) == "" &&
 		versioncheck.CanAutoInstall() &&
 		interactive.CanPromptInteractively() &&
 		interactive.IsTerminalWriter(w)
@@ -97,6 +96,19 @@ func offerCLIUpgrade(ctx context.Context, w io.Writer, err error, argv []string,
 	}
 	updateCmd := versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version)
 	rerun := rerunCommandLine(argv)
+
+	// Post-update rerun still rejected: the installer wrote somewhere
+	// other than the binary this invocation ran (e.g. a dev build outside
+	// the install manager's path). Saying "update it" again would be
+	// wrong — the update already happened; name the actual problem.
+	if os.Getenv(envUpgradeRerun) != "" {
+		binary := "this binary"
+		if len(argv) > 0 {
+			binary = argv[0]
+		}
+		fmt.Fprintf(w, "The update installed, but this command still ran an unsupported binary (%s).\nCheck that `entire` on your PATH points at the updated install, then rerun:\n\n  %s\n", binary, rerun)
+		return true
+	}
 
 	if !deps.canPrompt() {
 		printCLIUpgradeCommands(w, updateCmd, rerun)
