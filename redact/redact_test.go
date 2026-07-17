@@ -1938,6 +1938,31 @@ func TestString_CorpusDerivedCodeContextGuards(t *testing.T) {
 			want:  `ENTIRE_TOKEN="$(cat token)"`,
 		},
 		{
+			name:  "Python credential assignment from method call is code",
+			input: `access_token = self.refresh_token()`,
+			want:  `access_token = self.refresh_token()`,
+		},
+		{
+			name:  "credential assignment from function call is code",
+			input: `client_secret = fetch_secret()`,
+			want:  `client_secret = fetch_secret()`,
+		},
+		{
+			name:  "JavaScript credential assignment from function call is code",
+			input: `auth_token = getAuthToken()`,
+			want:  `auth_token = getAuthToken()`,
+		},
+		{
+			name:  "credential assignment from member reference is code",
+			input: `client_secret = config.client_secret`,
+			want:  `client_secret = config.client_secret`,
+		},
+		{
+			name:  "spaced credential assignment with a literal still redacts",
+			input: `client_secret = correct-horse-client`,
+			want:  `client_secret = REDACTED`,
+		},
+		{
 			name:  "uppercase bracketed placeholder preserved",
 			input: `subject_token = <ENTIRE_TOKEN>`,
 			want:  `subject_token = <ENTIRE_TOKEN>`,

@@ -58,6 +58,8 @@ var (
 	// prose, rejecting an initial `=` avoids equality expressions, and newline-
 	// free quote branches keep a match inside one command.
 	credentialAssignmentPattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=[ \t]*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&=` + "`" + `][^\s,;&]*)`)
+	credentialCodeCallPattern   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\([^()\r\n]*\)$`)
+	credentialCodeRefPattern    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$`)
 	// shellStdinSecretPattern matches a printf literal piped into a
 	// secret-management command (`printf 'v' | mycli secrets put KEY`). Named
 	// captures keep the literal and key contracts stable; bounded, newline-free
@@ -431,7 +433,7 @@ func detectShellStdinSecrets(s string) []taggedRegion {
 	if !strings.ContainsRune(s, '|') {
 		return nil
 	}
-	return detectCredentialKeyCaptures(s, shellStdinSecretPattern)
+	return detectCredentialKeyCaptures(s, shellStdinSecretPattern, nil)
 }
 
 func detectCredentialValues(s string) []taggedRegion {
@@ -439,11 +441,15 @@ func detectCredentialValues(s string) []taggedRegion {
 		return nil
 	}
 	regions := detectNonPlaceholderCaptures(s, credentialValuePattern)
-	regions = append(regions, detectCredentialKeyCaptures(s, credentialAssignmentPattern)...)
+	regions = append(regions, detectCredentialKeyCaptures(s, credentialAssignmentPattern, shouldPreserveCredentialCodeAssignment)...)
 	return regions
 }
 
-func detectCredentialKeyCaptures(s string, pattern *regexp.Regexp) []taggedRegion {
+func detectCredentialKeyCaptures(
+	s string,
+	pattern *regexp.Regexp,
+	shouldPreserve func(value, separator string) bool,
+) []taggedRegion {
 	valueGroup := pattern.SubexpIndex("value")
 	keyGroup := pattern.SubexpIndex("key")
 	var regions []taggedRegion
@@ -452,11 +458,28 @@ func detectCredentialKeyCaptures(s string, pattern *regexp.Regexp) []taggedRegio
 		if !ok || !isCredentialJSONSecretKey(s[keyStart:keyEnd], false) {
 			continue
 		}
+		if shouldPreserve != nil {
+			valueStart, valueEnd, valueOK := captureRange(match, valueGroup)
+			if valueOK && keyEnd <= valueStart && shouldPreserve(s[valueStart:valueEnd], s[keyEnd:valueStart]) {
+				continue
+			}
+		}
 		if captured, ok := nonPlaceholderCapture(s, match, valueGroup); ok {
 			regions = append(regions, captured)
 		}
 	}
 	return regions
+}
+
+// shouldPreserveCredentialCodeAssignment recognizes source expressions that
+// cannot be credential literals. Requiring whitespace on both sides of `=`
+// keeps compact shell/env assignments on the conservative redaction path.
+func shouldPreserveCredentialCodeAssignment(value, separator string) bool {
+	equal := strings.IndexByte(separator, '=')
+	if equal <= 0 || equal >= len(separator)-1 {
+		return false
+	}
+	return credentialCodeCallPattern.MatchString(value) || credentialCodeRefPattern.MatchString(value)
 }
 
 func detectNonPlaceholderCaptures(s string, pattern *regexp.Regexp) []taggedRegion {
