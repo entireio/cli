@@ -155,6 +155,11 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 
 	if effectiveSettings.Enabled {
 		writeActiveSessions(ctx, w, sty)
+		// Same setup checklist the short view shows — --detailed must not
+		// hide remaining onboarding steps.
+		if results := onboardingStatusResults(ctx); len(results) > 0 {
+			fmt.Fprint(w, renderOnboardingChecklist(results, sty))
+		}
 	}
 	writeAgentHelpHint(w, sty)
 

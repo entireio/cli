@@ -2025,6 +2025,26 @@ func TestRunStatus_ShowsSetupChecklistWhenIncomplete(t *testing.T) {
 	}
 }
 
+// --detailed must not hide remaining onboarding steps: the same rung
+// checklist the short view shows renders there too.
+func TestRunStatus_DetailedShowsSetupChecklist(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	stubOnboardingResults(t, []onboarding.Result{
+		{Rung: onboarding.Rung{Key: onboarding.KeyHooks, Title: "Agent hooks"}, Check: onboarding.Check{State: onboarding.StateDone, Detail: "Claude Code"}},
+		{Rung: onboarding.Rung{Key: onboarding.KeyAuth, Title: "Logged in"}, Check: onboarding.Check{State: onboarding.StateMissing, Hint: "entire auth login"}},
+	})
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, true, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	if out := stdout.String(); !strings.Contains(out, "Setup 1/2 complete") {
+		t.Errorf("expected setup checklist in detailed status, got: %s", out)
+	}
+}
+
 // Fully connected collapses to a single quiet line carrying the repo's
 // entire.io overview link. Not parallel: pins the web base via env.
 func TestRunStatus_CollapsedChecklistWhenConnected(t *testing.T) {
