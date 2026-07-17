@@ -19,6 +19,19 @@ import (
 // envKillSwitch disables the interactive update prompt regardless of TTY.
 const envKillSwitch = "ENTIRE_NO_AUTO_UPDATE"
 
+// EnvNoAutoUpdate is the exported name of the kill switch, for callers
+// outside this package that offer their own update prompts (the
+// cli_upgrade_required flow in package cli) and must honor the same knob.
+const EnvNoAutoUpdate = envKillSwitch
+
+// RunUpdateInstaller runs a self-update installer command returned by
+// UpdateCommandForCurrentBinary, streaming output to the terminal. Shared
+// by the interactive version-check prompt and the cli_upgrade_required
+// flow in package cli.
+func RunUpdateInstaller(ctx context.Context, cmdStr string) error {
+	return runInstaller(ctx, cmdStr)
+}
+
 // AutoUpdateAction describes the result of an update prompt.
 type AutoUpdateAction string
 
