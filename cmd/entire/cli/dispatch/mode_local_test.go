@@ -600,6 +600,68 @@ func TestLocalMode_ImplicitCurrentBranchOnDefaultBranchIncludesMergedWork(t *tes
 	}
 }
 
+// TestLocalMode_ImplicitCurrentBranchFeatureBranchNoOwnCommitsIncludesMergedWork
+// is the regression test for ENT-1201: dispatching from a feature-branch
+// worktree that has no commits of its own (a fresh worktree branched off the
+// up-to-date default branch, or a branch whose work has already merged into it)
+// must still surface the default branch's in-window merged work reachable from
+// HEAD. The bug: branchLocalRevRange returned <default>..HEAD for any
+// non-default branch, which is EMPTY here, so the reachable-trailer set was
+// empty and every merged checkpoint was dropped — the dispatch came back empty
+// even though HEAD clearly carried the work. ENT-1188 fixed this only for the
+// literal default branch (matched by name); this covers the general
+// empty-range case, which the common worktree workflow hits constantly.
+func TestLocalMode_ImplicitCurrentBranchFeatureBranchNoOwnCommitsIncludesMergedWork(t *testing.T) {
+	dir := t.TempDir()
+	stubGeneratedLocalDispatch(t)
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "seed.txt", "seed")
+	testutil.GitAdd(t, dir, "seed.txt")
+	testutil.GitCommit(t, dir, "initial")
+	addOriginRemote(t, dir)
+
+	// Merged feature-branch work now sitting ON the default branch, carrying a
+	// checkpoint trailer and reachable from HEAD. The checkpoint's own branch is
+	// the (merged) feature branch, not the default branch.
+	testutil.WriteFile(t, dir, "feature.md", "ship it")
+	testutil.GitAdd(t, dir, "feature.md")
+	commitWithMessage(t, dir, trailers.FormatCheckpoint("feature work", mustCheckpointID(t, testCheckpointID)))
+
+	createdAt := time.Now().UTC()
+	seedCommittedCheckpoint(t, dir, seededCheckpoint{
+		id:           testCheckpointID,
+		branch:       "already-merged-feature",
+		createdAt:    createdAt,
+		filesTouched: []string{"feature.md"},
+		outcome:      testLocalFallbackText,
+	})
+
+	// A fresh worktree branch off the default branch's tip: it shares HEAD with
+	// the default branch and has no commits of its own, so <default>..HEAD is
+	// empty. This is the standard `marvin wt new` / git-worktree setup.
+	testutil.GitCheckoutNewBranch(t, dir, "my-worktree-branch")
+
+	oldNow := nowUTC
+	nowUTC = func() time.Time { return createdAt.Add(time.Hour) }
+	t.Cleanup(func() { nowUTC = oldNow })
+
+	t.Chdir(dir)
+
+	got, err := Run(context.Background(), Options{
+		Mode:                  ModeLocal,
+		Since:                 "7d",
+		Branches:              []string{"my-worktree-branch"},
+		ImplicitCurrentBranch: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Repos) != 1 || len(got.Repos[0].Sections) == 0 || len(got.Repos[0].Sections[0].Bullets) == 0 ||
+		got.Repos[0].Sections[0].Bullets[0].Text != testLocalFallbackText {
+		t.Fatalf("merged work missing from feature-branch-with-no-own-commits dispatch: %+v", got)
+	}
+}
+
 // TestLocalMode_IncludesReachableCheckpointMissingFromLocalStore is the other
 // half of the ENT-1188 fix: dispatch --local must summarize work reachable from
 // HEAD by commit trailer even when the checkpoint itself is absent from the
