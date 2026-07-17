@@ -20,10 +20,10 @@ import (
 // this CLI build is older than the minimum version it accepts.
 const cliUpgradeRequiredCode = "cli_upgrade_required"
 
-// cliUnsupportedMsg leads every cli_upgrade_required guidance block; the
-// two indented lines that follow are the update command and the command
-// that failed, in the order the user should run them.
-const cliUnsupportedMsg = "This Entire CLI version is no longer supported. Update it, then rerun the command:"
+// cliUnsupportedMsg leads every cli_upgrade_required guidance block,
+// followed by the update command, then a "Then rerun the command:" block
+// with the command that failed.
+const cliUnsupportedMsg = "This Entire CLI version is no longer supported. Update it:"
 
 // IsCLIUpgradeRequired reports whether err carries the server's
 // cli_upgrade_required OAuth error code. auth-go surfaces the code as an
@@ -97,11 +97,11 @@ func offerCLIUpgrade(ctx context.Context, w io.Writer, err error, argv []string,
 }
 
 // printCLIUpgradeCommands prints the non-interactive guidance block: the
-// update command followed by the command that failed, ready to copy.
+// update command, then the command that failed, each ready to copy.
 func printCLIUpgradeCommands(w io.Writer, updateCmd, rerun string) {
 	fmt.Fprintf(w, "\n%s\n\n  %s\n", cliUnsupportedMsg, updateCmd)
 	if rerun != "" {
-		fmt.Fprintf(w, "  %s\n", rerun)
+		fmt.Fprintf(w, "\nThen rerun the command:\n\n  %s\n", rerun)
 	}
 }
 

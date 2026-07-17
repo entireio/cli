@@ -54,11 +54,14 @@ func TestOfferCLIUpgrade_NonInteractivePrintsUpdateAndRerunCommands(t *testing.T
 	})
 
 	got := out.String()
-	if !strings.Contains(got, "This Entire CLI version is no longer supported. Update it, then rerun the command:") {
+	if !strings.Contains(got, "This Entire CLI version is no longer supported. Update it:") {
 		t.Errorf("missing unsupported-version message:\n%s", got)
 	}
 	if want := versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version); !strings.Contains(got, want) {
 		t.Errorf("missing update command %q:\n%s", want, got)
+	}
+	if !strings.Contains(got, "Then rerun the command:") {
+		t.Errorf("missing rerun label:\n%s", got)
 	}
 	if !strings.Contains(got, "entire login --device") {
 		t.Errorf("missing failed command to rerun:\n%s", got)
@@ -106,7 +109,7 @@ func TestOfferCLIUpgrade_ConfirmNoPrintsCommands(t *testing.T) {
 	})
 
 	got := out.String()
-	if !strings.Contains(got, "This Entire CLI version is no longer supported. Update it, then rerun the command:") {
+	if !strings.Contains(got, "This Entire CLI version is no longer supported. Update it:") {
 		t.Errorf("missing unsupported-version message:\n%s", got)
 	}
 	if !strings.Contains(got, "entire login --device") {
