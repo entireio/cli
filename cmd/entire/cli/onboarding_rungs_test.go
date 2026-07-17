@@ -701,6 +701,40 @@ func TestImportScanFingerprint_ChangesWithInputs(t *testing.T) {
 	}
 }
 
+// A per-agent scan failure must not vanish: each agent is the sole source
+// for its own history, so a rung that would otherwise read Done (or "no
+// prior history found") degrades to Unknown naming the failed agent. Pending
+// imports from healthy agents stay actionable regardless.
+func TestImportRung_PartialScanFailureNeverClaimsDone(t *testing.T) {
+	t.Parallel()
+	check := func(statuses []agentImportStatus) onboarding.Check {
+		deps := onboardingRungDeps{
+			discoverImports: func(context.Context) ([]agentImportStatus, error) { return statuses, nil },
+		}
+		return importRung(deps).Check(context.Background())
+	}
+
+	imported := agentImportStatus{Agent: "claude-code", Sessions: 2, ImportedTurns: 2}
+	failed := agentImportStatus{Agent: "codex", ScanFailed: true}
+	pending := agentImportStatus{Agent: "cursor", Sessions: 1, UnimportedTurns: 3}
+
+	got := check([]agentImportStatus{imported, failed})
+	if got.State != onboarding.StateUnknown {
+		t.Errorf("imported+failed State = %v, want StateUnknown (not a false Done)", got.State)
+	}
+	if !strings.Contains(got.Detail, "codex") {
+		t.Errorf("Detail = %q, want the failed agent named", got.Detail)
+	}
+
+	if got := check([]agentImportStatus{failed, pending}); got.State != onboarding.StateMissing {
+		t.Errorf("failed+pending State = %v, want StateMissing (pending imports stay actionable)", got.State)
+	}
+
+	if got := check([]agentImportStatus{imported}); got.State != onboarding.StateDone {
+		t.Errorf("imported-only State = %v, want StateDone unchanged", got.State)
+	}
+}
+
 // One hint slot, several agents with pending history: naming only the first
 // agent's subcommand would read as "import resolved" after running it. The
 // hint points at the group command instead, which lists the per-agent

@@ -59,6 +59,10 @@ type agentImportStatus struct {
 	Sessions        int `json:"sessions"`
 	UnimportedTurns int `json:"unimported_turns"`
 	ImportedTurns   int `json:"imported_turns"`
+	// ScanFailed marks an agent whose dry-run scan errored: its history
+	// exists (files were discovered) but its counts are unknown. Never
+	// memoized — failed scans force cacheable=false.
+	ScanFailed bool `json:"scan_failed,omitempty"`
 }
 
 // newOnboardingRungDeps wires the rung probes to their real backends: agent
@@ -309,9 +313,13 @@ func discoverAgentImports(ctx context.Context) ([]agentImportStatus, error) {
 			RepoRoot: repoRoot, Now: now, DryRun: true,
 		})
 		if runErr != nil {
-			// Best-effort per agent, but a partial result must not be
-			// memoized — it would stay wrong until the fingerprint moves.
+			// Best-effort per agent, but neither memoized (a partial result
+			// would stay wrong until the fingerprint moves) nor silently
+			// dropped: each agent is the sole source for its own history, so
+			// a failed scan is recorded as such and the rung degrades
+			// honestly instead of reporting Done/Missing with an undercount.
 			logging.Warn(ctx, "onboarding: import dry-run failed", "agent", d.imp.Name(), "error", runErr)
+			statuses = append(statuses, agentImportStatus{Agent: d.imp.Name(), ScanFailed: true})
 			runFailures++
 			cacheable = false
 			continue
@@ -470,25 +478,42 @@ func importRung(deps onboardingRungDeps) onboarding.Rung {
 			}
 			totalSessions := 0
 			var unimported []agentImportStatus
+			var scanFailed []string
 			for _, s := range statuses {
+				if s.ScanFailed {
+					scanFailed = append(scanFailed, s.Agent)
+					continue
+				}
 				totalSessions += s.Sessions
 				if s.UnimportedTurns > 0 {
 					unimported = append(unimported, s)
 				}
 			}
+			if len(unimported) > 0 {
+				// Pending imports stay actionable even when another agent's
+				// scan failed — the offer is still worth running.
+				return onboarding.Check{
+					State:  onboarding.StateMissing,
+					Detail: unimportedDetail(unimported),
+					Hint:   importHint(unimported),
+				}
+			}
+			if len(scanFailed) > 0 {
+				// An agent with discovered history whose scan failed is the
+				// sole source for its own counts — claiming Done (or "no
+				// prior history") would overstate what is known.
+				return onboarding.Check{
+					State:  onboarding.StateUnknown,
+					Detail: strings.Join(scanFailed, ", ") + " history scan failed",
+					Hint:   "entire import",
+				}
+			}
 			if totalSessions == 0 {
 				return onboarding.Check{State: onboarding.StateNotApplicable, Detail: "no prior history found"}
 			}
-			if len(unimported) == 0 {
-				return onboarding.Check{
-					State:  onboarding.StateDone,
-					Detail: fmt.Sprintf("%d sessions imported", totalSessions),
-				}
-			}
 			return onboarding.Check{
-				State:  onboarding.StateMissing,
-				Detail: unimportedDetail(unimported),
-				Hint:   importHint(unimported),
+				State:  onboarding.StateDone,
+				Detail: fmt.Sprintf("%d sessions imported", totalSessions),
 			}
 		},
 	}
