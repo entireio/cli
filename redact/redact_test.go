@@ -1958,6 +1958,21 @@ func TestString_CorpusDerivedCodeContextGuards(t *testing.T) {
 			want:  `client_secret = config.client_secret`,
 		},
 		{
+			name:  "async credential assignment is code",
+			input: `installationToken = await getInstallationToken()`,
+			want:  `installationToken = await getInstallationToken()`,
+		},
+		{
+			name:  "Go template environment reference is a placeholder",
+			input: `telemetry.PostHogAPIKey={{.Env.POSTHOG_API_KEY}}`,
+			want:  `telemetry.PostHogAPIKey={{.Env.POSTHOG_API_KEY}}`,
+		},
+		{
+			name:  "printf formatting verb is a placeholder",
+			input: `GetToken = %v, from cache=%v`,
+			want:  `GetToken = %v, from cache=%v`,
+		},
+		{
 			name:  "spaced credential assignment with a literal still redacts",
 			input: `client_secret = correct-horse-client`,
 			want:  `client_secret = REDACTED`,

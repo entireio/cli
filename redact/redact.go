@@ -60,6 +60,8 @@ var (
 	credentialAssignmentPattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=[ \t]*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&=` + "`" + `][^\s,;&]*)`)
 	credentialCodeCallPattern   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\([^()\r\n]*\)$`)
 	credentialCodeRefPattern    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$`)
+	goTemplateReferencePattern  = regexp.MustCompile(`^\{\{[ \t]*\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+[ \t]*\}\}$`)
+	printfFormatVerbPattern     = regexp.MustCompile(`^%[-+#0 ]*(?:[0-9]+|\*)?(?:\.(?:[0-9]+|\*))?[A-Za-z]$`)
 	// shellStdinSecretPattern matches a printf literal piped into a
 	// secret-management command (`printf 'v' | mycli secrets put KEY`). Named
 	// captures keep the literal and key contracts stable; bounded, newline-free
@@ -479,7 +481,7 @@ func shouldPreserveCredentialCodeAssignment(value, separator string) bool {
 	if equal <= 0 || equal >= len(separator)-1 {
 		return false
 	}
-	return credentialCodeCallPattern.MatchString(value) || credentialCodeRefPattern.MatchString(value)
+	return value == "await" || credentialCodeCallPattern.MatchString(value) || credentialCodeRefPattern.MatchString(value)
 }
 
 func detectNonPlaceholderCaptures(s string, pattern *regexp.Regexp) []taggedRegion {
@@ -590,6 +592,9 @@ func isPlaceholderSecretValueQuoted(value string, singleQuoted bool) bool {
 			return true
 		}
 		if isShellVariableReference(trimmed) {
+			return true
+		}
+		if goTemplateReferencePattern.MatchString(trimmed) || printfFormatVerbPattern.MatchString(trimmed) {
 			return true
 		}
 	}
