@@ -47,6 +47,15 @@ func assertStringRedactionCases(t *testing.T, tests []stringRedactionCase) {
 	}
 }
 
+func mustJSONLContent(t *testing.T, input string) string {
+	t.Helper()
+	output, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("JSONLContent(%q): %v", input, err)
+	}
+	return output
+}
+
 func TestBytes_NoSecrets(t *testing.T) {
 	input := []byte("hello world, this is normal text")
 	result := Bytes(input)
@@ -124,10 +133,7 @@ func TestAlreadyRedacted(t *testing.T) {
 func TestJSONLContent_TopLevelArray(t *testing.T) {
 	// Top-level JSON arrays are valid JSONL and should be redacted.
 	input := `["` + highEntropySecret + `","normal text"]`
-	result, err := JSONLContent(input)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	result := mustJSONLContent(t, input)
 	expected := `["REDACTED","normal text"]`
 	if result != expected {
 		t.Errorf("got %q, want %q", result, expected)
@@ -136,10 +142,7 @@ func TestJSONLContent_TopLevelArray(t *testing.T) {
 
 func TestJSONLContent_TopLevelArrayNoSecrets(t *testing.T) {
 	input := `["hello","world"]`
-	result, err := JSONLContent(input)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	result := mustJSONLContent(t, input)
 	if result != input {
 		t.Errorf("expected unchanged input, got %q", result)
 	}
@@ -298,6 +301,28 @@ func TestJSONLContent_SkippedFieldValueCollision(t *testing.T) {
 	}
 	if !strings.Contains(result, `"content":"REDACTED"`) {
 		t.Fatalf("expected content field to be redacted, got: %s", result)
+	}
+}
+
+func TestJSONLContent_CredentialIdentifierKeysStayScanned(t *testing.T) {
+	t.Parallel()
+	input := `{"aws_access_key_id":"AKIAIOSFODNN7EXAMPLE","api_token_id":"correct-horse-battery","AccessKeyId":"AKIAIOSFODNN7EXAMPLE","apiTokenId":"correct-horse-battery","session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0","tenantId":"tenant-123"}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{
+		`"aws_access_key_id":"REDACTED"`,
+		`"api_token_id":"REDACTED"`,
+		`"AccessKeyId":"REDACTED"`,
+		`"apiTokenId":"REDACTED"`,
+		`"session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0"`,
+		`"tenantId":"tenant-123"`,
+	} {
+		if !strings.Contains(result, want) {
+			t.Errorf("expected %s in output, got: %s", want, result)
+		}
 	}
 }
 
@@ -1152,18 +1177,20 @@ func TestJSONLContent_NormalizedCredentialKeysRedacted(t *testing.T) {
 func TestJSONLContent_ShellStdinSecretCommandRedactsPrintfLiteral(t *testing.T) {
 	t.Parallel()
 	keyName := strings.Join([]string{"EXAMPLE", "API", "KEY"}, "_")
+	identifierKeyName := strings.Join([]string{"AWS", "ACCESS", "KEY", "ID"}, "_")
 	secret := "correct-horse-client"
-	input := `{"type":"user","message":{"content":[{"type":"tool_result","content":"tail -2 && printf '` + secret + `' | examplectl secret put ` + keyName + ` 2>&1 | tail -2"}]}}`
+	identifierSecret := "correct-horse-identifier"
+	input := `{"type":"user","message":{"content":[{"type":"tool_result","content":"tail -2 && printf '` + secret + `' | examplectl secret put ` + keyName + ` 2>&1 | tail -2\nprintf '` + identifierSecret + `' | examplectl secrets put ` + identifierKeyName + `"}]}}`
 
-	result, err := JSONLContent(input)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if strings.Contains(result, secret) {
+	result := mustJSONLContent(t, input)
+	if strings.Contains(result, secret) || strings.Contains(result, identifierSecret) {
 		t.Fatalf("expected shell stdin secret literal to be redacted, got: %s", result)
 	}
 	if !strings.Contains(result, "printf 'REDACTED' | examplectl secret put "+keyName) {
 		t.Fatalf("expected command context to be preserved, got: %s", result)
+	}
+	if !strings.Contains(result, "printf 'REDACTED' | examplectl secrets put "+identifierKeyName) {
+		t.Fatalf("expected credential identifier command context to be preserved, got: %s", result)
 	}
 }
 
@@ -1659,10 +1686,7 @@ func TestJSONLContent_AccountJSONKeysStayScanned(t *testing.T) {
 		`{"service_account":["` + highEntropySecret + `"]}`,
 	}
 	for _, in := range redactedCases {
-		out, err := JSONLContent(in)
-		if err != nil {
-			t.Fatalf("unexpected error for %q: %v", in, err)
-		}
+		out := mustJSONLContent(t, in)
 		if strings.Contains(out, highEntropySecret) {
 			t.Errorf("high-entropy secret in account field must redact, got: %s", out)
 		}
@@ -1673,10 +1697,7 @@ func TestJSONLContent_AccountJSONKeysStayScanned(t *testing.T) {
 		`{"aws_account":"123456789012"}`,
 	}
 	for _, in := range preservedCases {
-		out, err := JSONLContent(in)
-		if err != nil {
-			t.Fatalf("unexpected error for %q: %v", in, err)
-		}
+		out := mustJSONLContent(t, in)
 		if out != in {
 			t.Errorf("low-entropy account identifier must be preserved, got: %s", out)
 		}
@@ -1705,34 +1726,9 @@ func TestJSONLContent_NonSecretTokenPrefixesPreserved(t *testing.T) {
 		`{"sync_token":"sync-state-marker"}`,
 	}
 	for _, in := range cases {
-		out, err := JSONLContent(in)
-		if err != nil {
-			t.Fatalf("unexpected error for %q: %v", in, err)
-		}
+		out := mustJSONLContent(t, in)
 		if out != in {
 			t.Errorf("expected %q preserved (non-secret prefix), got: %s", in, out)
-		}
-	}
-}
-
-// Pins that prefixed `*_token` keys NOT in the non-secret allowlist still
-// redact — e.g. csrf_token, auth_token, oauth_token, refresh_token. Prevents
-// the allowlist from expanding to swallow real credential shapes.
-func TestJSONLContent_UnknownTokenPrefixesStillRedacted(t *testing.T) {
-	t.Parallel()
-	cases := []struct{ in, wantSub string }{
-		{`{"csrf_token":"abc-csrf-real-secret"}`, `"csrf_token":"REDACTED"`},
-		{`{"auth_token":"abc-auth-real-secret"}`, `"auth_token":"REDACTED"`},
-		{`{"oauth_token":"abc-oauth-real-secret"}`, `"oauth_token":"REDACTED"`},
-		{`{"random_token":"abc-random-real-secret"}`, `"random_token":"REDACTED"`},
-	}
-	for _, c := range cases {
-		out, err := JSONLContent(c.in)
-		if err != nil {
-			t.Fatalf("unexpected error for %q: %v", c.in, err)
-		}
-		if !strings.Contains(out, c.wantSub) {
-			t.Errorf("input %q: expected %q in output, got: %s", c.in, c.wantSub, out)
 		}
 	}
 }
@@ -1748,10 +1744,7 @@ func TestJSONLContent_BareTokenSecretJSONKeysPreserved(t *testing.T) {
 		`{"secret":"abc-def-ghi-not-a-secret-debug-id"}`,
 	}
 	for _, in := range cases {
-		out, err := JSONLContent(in)
-		if err != nil {
-			t.Fatalf("unexpected error for %q: %v", in, err)
-		}
+		out := mustJSONLContent(t, in)
 		if out != in {
 			t.Errorf("expected %q preserved (bare token/secret keys are not credentials), got: %s", in, out)
 		}
@@ -1765,15 +1758,14 @@ func TestJSONLContent_PrefixedTokenSecretJSONKeysRedacted(t *testing.T) {
 	cases := []struct{ in, wantSub string }{
 		{`{"csrf_token":"abc-csrf-real-secret"}`, `"csrf_token":"REDACTED"`},
 		{`{"auth_token":"abc-auth-real-secret"}`, `"auth_token":"REDACTED"`},
+		{`{"oauth_token":"abc-oauth-real-secret"}`, `"oauth_token":"REDACTED"`},
+		{`{"random_token":"abc-random-real-secret"}`, `"random_token":"REDACTED"`},
 		{`{"api_key":"abc-api-real-secret"}`, `"api_key":"REDACTED"`},
 		{`{"client_secret":"abc-client-real-secret"}`, `"client_secret":"REDACTED"`},
 		{`{"refresh_token":"abc-refresh-real-secret"}`, `"refresh_token":"REDACTED"`},
 	}
 	for _, c := range cases {
-		out, err := JSONLContent(c.in)
-		if err != nil {
-			t.Fatalf("unexpected error for %q: %v", c.in, err)
-		}
+		out := mustJSONLContent(t, c.in)
 		if !strings.Contains(out, c.wantSub) {
 			t.Errorf("input %q: expected %q in output, got: %s", c.in, c.wantSub, out)
 		}
@@ -1812,10 +1804,7 @@ func TestJSONLContent_RotationSecretKeysRedacted(t *testing.T) {
 		`{"cancel_secret":"deadbeefcafef00ddeadbeefcafef00d"}`,
 	}
 	for _, in := range cases {
-		out, err := JSONLContent(in)
-		if err != nil {
-			t.Fatalf("unexpected error for %q: %v", in, err)
-		}
+		out := mustJSONLContent(t, in)
 		if !strings.Contains(out, RedactedPlaceholder) {
 			t.Errorf("rotation-style secret must redact (hex defeats the entropy fallback), got: %s", out)
 		}
@@ -1885,10 +1874,7 @@ func TestString_NoSeparatorCredentialKeysRedacted(t *testing.T) {
 
 func TestJSONLContent_NoSeparatorCredentialJSONKeyRedacted(t *testing.T) {
 	t.Parallel()
-	out, err := JSONLContent(`{"clientsecret":"correct-horse-battery"}`)
-	if err != nil {
-		t.Fatal(err)
-	}
+	out := mustJSONLContent(t, `{"clientsecret":"correct-horse-battery"}`)
 	if !strings.Contains(out, RedactedPlaceholder) {
 		t.Fatalf("separator-less credential JSON key must redact, got: %s", out)
 	}
@@ -2011,10 +1997,7 @@ func TestJSONLContent_CompoundNonSecretTokenKeys(t *testing.T) {
 		`{"next_sync_token":"sync-state-marker"}`,
 	}
 	for _, in := range preserved {
-		out, err := JSONLContent(in)
-		if err != nil {
-			t.Fatal(err)
-		}
+		out := mustJSONLContent(t, in)
 		if out != in {
 			t.Errorf("compound allowlisted token key must be preserved, got: %s", out)
 		}
@@ -2024,10 +2007,7 @@ func TestJSONLContent_CompoundNonSecretTokenKeys(t *testing.T) {
 		`{"session_next_token":"opaque-value-here"}`,
 	}
 	for _, in := range redacted {
-		out, err := JSONLContent(in)
-		if err != nil {
-			t.Fatal(err)
-		}
+		out := mustJSONLContent(t, in)
 		if !strings.Contains(out, RedactedPlaceholder) {
 			t.Errorf("token key with non-allowlisted segment must redact, got: %s", out)
 		}
