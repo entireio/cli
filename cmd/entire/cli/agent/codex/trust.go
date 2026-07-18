@@ -4,14 +4,16 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 // HookTrustGaps returns the snake_case event labels declared in
 // <repoRoot>/.codex/hooks.json that don't have a matching
-// `[hooks.state."<hooks.json>:<event>:0:0"]` entry in the user's Codex
-// config.toml — i.e. events the local user hasn't approved yet.
+// `[hooks.state.<"hooks.json:event:0:0">]` entry (any TOML key quoting)
+// in the user's Codex config.toml — i.e. events the local user hasn't
+// approved yet.
 //
 // This is the structural form of the trust check: we don't recompute
 // Codex's hook hash, we only look at key presence. That misses the
@@ -20,24 +22,29 @@ import (
 // to surface fresh additions like "you trusted three hooks last month
 // but a new PostToolUse arrived" inside our SessionStart welcome.
 //
-// Returns nil when:
-//   - .codex/hooks.json doesn't exist (entire isn't installed in this repo)
-//   - The user's config.toml can't be read
-//   - Every declared event already has a state entry
-func HookTrustGaps(repoRoot string) []string {
+// The bool reports whether the check was actually performed. It is
+// false — with nil gaps — when hooks.json is missing/malformed or the
+// user's config.toml can't be read or parsed as TOML: "can't tell"
+// cases where the caller must not claim the hooks were verified.
+// Callers that only warn on gaps (the SessionStart banner) can ignore
+// it; doctor uses it to say "not verified" instead of "OK".
+func HookTrustGaps(repoRoot string) ([]string, bool) {
 	hooksJSONPath := filepath.Join(repoRoot, ".codex", "hooks.json")
 	declared, ok := declaredCodexEvents(hooksJSONPath)
-	if !ok || len(declared) == 0 {
-		return nil
+	if !ok {
+		return nil, false
+	}
+	if len(declared) == 0 {
+		return nil, true
 	}
 
 	configPath := codexConfigPath()
 	if configPath == "" {
-		return nil
+		return nil, false
 	}
 	trusted, ok := readCodexTrustedKeys(configPath)
 	if !ok {
-		return nil
+		return nil, false
 	}
 
 	var gaps []string
@@ -49,7 +56,7 @@ func HookTrustGaps(repoRoot string) []string {
 			gaps = append(gaps, ev)
 		}
 	}
-	return gaps
+	return gaps, true
 }
 
 func codexConfigPath() string {
@@ -124,20 +131,40 @@ func MissingEntireHooks(repoRoot string) []string {
 	return missing
 }
 
-// codexTrustStateHeaderRegex matches `[hooks.state."<key>"]` headers in
-// the user's Codex config.toml. Quote-only — Codex's own writer emits
-// quoted keys (codex-rs/tui/src/app/background_requests.rs:874), and
-// looser parsing would invite false matches in user-edited configs.
-var codexTrustStateHeaderRegex = regexp.MustCompile(`(?m)^\[hooks\.state\."([^"]+)"\]`)
-
+// readCodexTrustedKeys parses the user's Codex config.toml and returns
+// the set of keys under the `hooks.state` table. The parse is
+// structural (not a header regex): Codex's writer has emitted both
+// basic (double-quoted) and literal (single-quoted) TOML keys — on
+// Windows the backslashes in the hooks.json path make literal quoting
+// the natural serialization — and a real TOML parse handles every
+// quoting form, unescaping basic strings so keys compare cleanly
+// against filepath.Join output (issue #1761).
+//
+// Returns ok=false when the file is missing or not valid TOML — "can't
+// tell" cases where callers must stay silent rather than flag every
+// hook as untrusted. A parseable config without a hooks.state table
+// returns an empty set with ok=true: that's a real "nothing approved
+// yet" state and the gap warning should fire.
 func readCodexTrustedKeys(configPath string) (map[string]struct{}, bool) {
 	data, err := os.ReadFile(configPath) //nolint:gosec // path resolved from CODEX_HOME or HOME
 	if err != nil {
 		return nil, false
 	}
+	var config map[string]any
+	if err := toml.Unmarshal(data, &config); err != nil {
+		return nil, false
+	}
 	keys := make(map[string]struct{})
-	for _, m := range codexTrustStateHeaderRegex.FindAllStringSubmatch(string(data), -1) {
-		keys[m[1]] = struct{}{}
+	hooks, ok := config["hooks"].(map[string]any)
+	if !ok {
+		return keys, true
+	}
+	state, ok := hooks["state"].(map[string]any)
+	if !ok {
+		return keys, true
+	}
+	for k := range state {
+		keys[k] = struct{}{}
 	}
 	return keys, true
 }
