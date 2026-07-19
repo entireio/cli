@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/trail"
 )
 
 // TestTrailResourceDecodesServerURL covers the wire-compatibility matrix for the
@@ -57,5 +59,26 @@ func TestTrailResourceToMetadataUsesID(t *testing.T) {
 	// don't silently drop it.
 	if metadata.URL != "https://entire.io/gh/o/r/trails/9" {
 		t.Fatalf("metadata URL = %q, want propagated server url", metadata.URL)
+	}
+}
+
+func TestToMetadataMapsTypePriorityReviewers(t *testing.T) {
+	t.Parallel()
+	login := "octocat"
+	r := &TrailResource{
+		Type:      "bug",
+		Priority:  "high",
+		Reviewers: []trail.Reviewer{{Login: "rev1", Status: trail.ReviewerApproved}},
+		Author:    &trail.Author{ID: "1", Login: &login},
+	}
+	m := r.ToMetadata()
+	if m.Type != trail.TypeBug {
+		t.Errorf("Type = %q, want bug", m.Type)
+	}
+	if m.Priority != trail.PriorityHigh {
+		t.Errorf("Priority = %q, want high", m.Priority)
+	}
+	if len(m.Reviewers) != 1 || m.Reviewers[0].Login != "rev1" {
+		t.Errorf("Reviewers = %#v, want one rev1", m.Reviewers)
 	}
 }

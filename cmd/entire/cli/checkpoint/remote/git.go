@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +34,169 @@ const stampConfigTimeout = 10 * time.Second
 const CheckpointTokenEnvVar = "ENTIRE_CHECKPOINT_TOKEN"
 
 var sshTokenWarningOnce sync.Once //nolint:gochecknoglobals // intentional per-process gate
+
+// nonInteractiveSSHKey marks a context whose checkpoint git subprocesses must
+// never block on an interactive SSH prompt (e.g. a key passphrase when no
+// ssh-agent is running).
+type nonInteractiveSSHKey struct{}
+
+// WithNonInteractiveSSH marks ctx so every checkpoint git command spawned under
+// it runs SSH with BatchMode=yes, failing fast instead of hanging on an
+// interactive prompt. Set this at best-effort, non-interactive entry points such
+// as the git pre-push hook: a blocked passphrase prompt there would hang the
+// user's own `git push` until the checkpoint push budget kills it, with no way
+// to type the passphrase. Foreground commands (resume, explain) leave it unset
+// so they can still prompt.
+//
+// BatchMode tradeoffs (issue #1523):
+//   - Passphrase-protected keys with no ssh-agent: fail fast (desired).
+//   - Touch-only security keys (sk-, user-presence only): still work — touch is
+//     not a terminal passphrase read.
+//   - PIN-protected FIDO2 keys (verify-required): PIN entry goes through ssh's
+//     passphrase reader, so BatchMode suppresses it and the push fails. Load the
+//     key into ssh-agent beforehand, or set an explicit BatchMode=no via
+//     GIT_SSH_COMMAND / core.sshCommand (respected; we do not override it).
+func WithNonInteractiveSSH(ctx context.Context) context.Context {
+	return context.WithValue(ctx, nonInteractiveSSHKey{}, true)
+}
+
+// IsNonInteractiveSSH reports whether ctx was marked with WithNonInteractiveSSH.
+func IsNonInteractiveSSH(ctx context.Context) bool {
+	return nonInteractiveSSHFromContext(ctx)
+}
+
+func nonInteractiveSSHFromContext(ctx context.Context) bool {
+	v, ok := ctx.Value(nonInteractiveSSHKey{}).(bool)
+	return ok && v
+}
+
+// LooksLikeSSHAuthFailure reports whether errText looks like an SSH
+// authentication failure (passphrase/PIN unavailable under BatchMode, missing
+// agent identity, publickey rejection, etc.). Used to print an actionable
+// ssh-agent hint from the pre-push checkpoint path.
+func LooksLikeSSHAuthFailure(errText string) bool {
+	if errText == "" {
+		return false
+	}
+	lower := strings.ToLower(errText)
+	// Keep needles auth-specific. Do not match git's generic
+	// "Could not read from remote repository" epilogue — that also appears on
+	// network failures where an ssh-agent hint would be wrong. Real auth
+	// failures always include a Permission denied / auth-methods line too.
+	needles := []string{
+		"permission denied (publickey)",
+		"permission denied (keyboard-interactive",
+		"permission denied (password)",
+		"too many authentication failures",
+		"no more authentication methods to try",
+	}
+	for _, n := range needles {
+		if strings.Contains(lower, n) {
+			return true
+		}
+	}
+	// Generic publickey denial without the parenthetical form.
+	if strings.Contains(lower, "permission denied") && strings.Contains(lower, "publickey") {
+		return true
+	}
+	return false
+}
+
+// batchModeOptionRe matches an explicit BatchMode ssh option (e.g.
+// "-o BatchMode=yes" or "BatchMode=no"), case-insensitively. Anchored with \b
+// so it doesn't false-positive on unrelated text that merely contains
+// "BatchMode" as a substring of a longer token.
+var batchModeOptionRe = regexp.MustCompile(`(?i)\bBatchMode\s*=\s*\S+`)
+
+// hasExplicitBatchMode reports whether sshCmd already sets a BatchMode option,
+// with any value. A user-supplied BatchMode=no is a deliberate choice and must
+// be respected, not silently overridden to yes.
+func hasExplicitBatchMode(sshCmd string) bool {
+	return batchModeOptionRe.MatchString(sshCmd)
+}
+
+// envLookup returns the value of the last occurrence of key in env (matching
+// exec.Cmd's last-wins semantics for duplicate entries) and whether it was
+// found.
+func envLookup(env []string, key string) (string, bool) {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if v, ok := strings.CutPrefix(env[i], prefix); ok {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// gitConfigSSHCommand looks up core.sshCommand via `git config`, run with env
+// so the lookup honors any HOME/GIT_CONFIG_* overrides present in env (e.g. in
+// tests). Returns "" if unset or the lookup fails.
+func gitConfigSSHCommand(ctx context.Context, env []string) string {
+	cmd := exec.CommandContext(ctx, "git", "config", "--get", "core.sshCommand")
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// effectiveSSHCommand resolves the ssh invocation git itself would use, in
+// git's own precedence order: the GIT_SSH_COMMAND environment variable, then
+// the core.sshCommand git config value, then the GIT_SSH environment
+// variable, falling back to plain "ssh" when none are set.
+func effectiveSSHCommand(ctx context.Context, env []string) string {
+	if v, ok := envLookup(env, "GIT_SSH_COMMAND"); ok {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	if v := gitConfigSSHCommand(ctx, env); v != "" {
+		return v
+	}
+	if v, ok := envLookup(env, "GIT_SSH"); ok {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return "ssh"
+}
+
+// withBatchModeSSH returns env with GIT_SSH_COMMAND set so ssh runs with
+// BatchMode=yes. The base ssh invocation is resolved via effectiveSSHCommand
+// (env GIT_SSH_COMMAND > core.sshCommand > GIT_SSH > plain "ssh") so a custom
+// ssh command configured via core.sshCommand isn't silently discarded. The
+// flag is only appended when BatchMode isn't already explicitly set — an
+// existing BatchMode=no is a deliberate user choice and is left untouched —
+// so the result is idempotent.
+func withBatchModeSSH(ctx context.Context, env []string) []string {
+	const key = "GIT_SSH_COMMAND="
+	base := effectiveSSHCommand(ctx, env)
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if strings.HasPrefix(e, key) {
+			continue
+		}
+		out = append(out, e)
+	}
+	if !hasExplicitBatchMode(base) {
+		base += " -o BatchMode=yes"
+	}
+	return append(out, key+base)
+}
+
+// applyNonInteractiveSSH sets BatchMode SSH on cmd when ctx is marked
+// non-interactive (see WithNonInteractiveSSH). No-op otherwise, so foreground
+// commands keep their interactive prompt behavior.
+func applyNonInteractiveSSH(ctx context.Context, cmd *exec.Cmd) {
+	if !nonInteractiveSSHFromContext(ctx) {
+		return
+	}
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = withBatchModeSSH(ctx, cmd.Env)
+}
 
 // FetchOptions configures a git fetch operation.
 type FetchOptions struct {
@@ -374,6 +539,11 @@ func newCommand(ctx context.Context, args ...string) *exec.Cmd {
 		c := exec.CommandContext(ctx, "git", finalArgs...)
 		c.Stdin = nil // Disconnect stdin to prevent hanging in hook context
 		terminateOnCancel(c)
+		// Fail fast on interactive SSH prompts (e.g. a key passphrase with no
+		// ssh-agent) when the caller marked ctx non-interactive. HTTPS token
+		// auth rebuilds cmd.Env below (SSH is not used there), so this only
+		// takes effect on the SSH/no-token paths that actually run ssh.
+		applyNonInteractiveSSH(ctx, c)
 		return c
 	}
 

@@ -720,9 +720,10 @@ type RewindPoint struct {
 func (env *TestEnv) GetRewindPoints() []RewindPoint {
 	env.T.Helper()
 
-	// Run rewind --list using the shared binary. Parse stdout only — the
-	// deprecated command prints a notice on stderr that would break the JSON.
-	cmd := exec.Command(getTestBinary(), "checkpoint", "rewind", "--list")
+	// Run `checkpoint list --pending --json` using the shared binary. This is
+	// the drop-in replacement for the deprecated `rewind --list` bridge; the JSON shape is
+	// identical. Parse stdout only — any notice goes to stderr.
+	cmd := exec.Command(getTestBinary(), "checkpoint", "list", "--pending", "--json")
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
 
@@ -730,7 +731,7 @@ func (env *TestEnv) GetRewindPoints() []RewindPoint {
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
-		env.T.Fatalf("rewind --list failed: %v\nOutput: %s\nStderr: %s", err, output, stderr.String())
+		env.T.Fatalf("checkpoint list --pending --json failed: %v\nOutput: %s\nStderr: %s", err, output, stderr.String())
 	}
 
 	// Parse JSON output
@@ -1804,6 +1805,25 @@ func (env *TestEnv) SetupBareRemote() string {
 // multiple remotes.
 func (env *TestEnv) SetupNamedBareRemote(remoteName string) string {
 	env.T.Helper()
+	bareDir := env.SetupEmptyNamedBareRemote(remoteName)
+
+	// Push HEAD to the remote.
+	cmd := exec.CommandContext(env.T.Context(), "git", "push", "--no-verify", "-u", remoteName, "HEAD")
+	cmd.Dir = env.RepoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		env.T.Fatalf("failed to push to %s: %v\n%s", remoteName, err, output)
+	}
+
+	env.setGitConfigBaseline()
+
+	return bareDir
+}
+
+// SetupEmptyNamedBareRemote creates a bare git repository and adds it as a
+// remote without pushing a branch. Use this to exercise first-push behavior.
+func (env *TestEnv) SetupEmptyNamedBareRemote(remoteName string) string {
+	env.T.Helper()
 
 	ctx := env.T.Context()
 
@@ -1826,14 +1846,6 @@ func (env *TestEnv) SetupNamedBareRemote(remoteName string) string {
 	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		env.T.Fatalf("failed to add remote %s: %v\n%s", remoteName, err, output)
-	}
-
-	// Push HEAD to the remote
-	cmd = exec.CommandContext(ctx, "git", "push", "--no-verify", "-u", remoteName, "HEAD")
-	cmd.Dir = env.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		env.T.Fatalf("failed to push to %s: %v\n%s", remoteName, err, output)
 	}
 
 	env.setGitConfigBaseline()

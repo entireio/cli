@@ -448,7 +448,7 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 		}
 	}
 
-	// Replace prompts with 7-layer-redacted content.
+	// Replace prompts with regex-only-redacted content.
 	if len(opts.Prompts) > 0 {
 		promptContent := RedactedJoinedPrompts(opts.Prompts)
 		blobHash, err := CreateBlobFromContent(s.repo, []byte(promptContent))
@@ -715,7 +715,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 	}
 	filePaths.AssetsManifest = manifestPath
 
-	// Write prompts via the 7-layer pipeline. OPF runs only in the
+	// Write prompts via the regex-only pipeline. OPF runs only in the
 	// pre-push rewrite path (manual_commit_opf_rewrite.go).
 	if len(opts.Prompts) > 0 {
 		promptContent := RedactedJoinedPrompts(opts.Prompts)
@@ -2254,12 +2254,13 @@ func (s *treeWriter) copyMetadataDir(ctx context.Context, metadataDir, sessionDi
 			return fmt.Errorf("path traversal detected: %s", relPath)
 		}
 
-		// Create blob from file with 7-layer secrets redaction.
-		// Post-commit emits 7-layer-only blobs; the pre-push rewrite
+		// Create blob from file with regex-only secrets redaction (the
+		// eight always-on/opt-in layers).
+		// Post-commit emits regex-only blobs; the pre-push rewrite
 		// (strategy/manual_commit_opf_rewrite.go) walks the resulting
 		// tree, re-redacts these blobs with OPF when enabled, and
-		// rewrites entire/checkpoints/v1 into 8-layer commits before
-		// they leave the local machine.
+		// rewrites entire/checkpoints/v1 into OPF-applied (9-layer)
+		// commits before they leave the local machine.
 		blobHash, mode, err := createRedactedBlobFromFile(ctx, s.repo, path, relPath)
 		if err != nil {
 			return fmt.Errorf("failed to create blob for %s: %w", path, err)
@@ -2281,12 +2282,13 @@ func (s *treeWriter) copyMetadataDir(ctx context.Context, metadataDir, sessionDi
 	return nil
 }
 
-// createRedactedBlobFromFile reads a file, applies the 7-layer redaction
-// pipeline, and creates a git blob. Used by committed-checkpoint writes
-// at post-commit time. The OpenAI Privacy Filter is intentionally NOT
-// run here — OPF lives in the pre-push rewrite path
-// (strategy/manual_commit_opf_rewrite.go), which re-redacts the 7-layer
-// blobs into 8-layer commits before they leave the local machine.
+// createRedactedBlobFromFile reads a file, applies the regex-only redaction
+// pipeline (the eight always-on/opt-in layers), and creates a git blob. Used
+// by committed-checkpoint writes at post-commit time. The OpenAI Privacy
+// Filter is intentionally NOT run here — OPF lives in the pre-push rewrite
+// path (strategy/manual_commit_opf_rewrite.go), which re-redacts the
+// regex-only blobs into OPF-applied (9-layer) commits before they leave the
+// local machine.
 // JSONL files get JSONL-aware redaction; all other files get plain byte redaction.
 func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, filePath, treePath string) (plumbing.Hash, filemode.FileMode, error) {
 	info, err := os.Stat(filePath)
@@ -2328,8 +2330,8 @@ func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, fileP
 // JSON-shaped files (.jsonl or .json) get JSON-aware redaction (falling
 // back to plain bytes on parse failure so regex/credential layers
 // still apply); other files get plain byte redaction. When
-// usePrivacyFilter is true the full 8-layer pipeline (including OPF)
-// runs; otherwise the 7-layer pipeline.
+// usePrivacyFilter is true the full 9-layer pipeline (the eight regex
+// layers plus OPF) runs; otherwise just the eight regex layers.
 //
 // .json is handled alongside .jsonl because checkpoint metadata files
 // (metadata.json, per-session metadata.json) carry free-form fields

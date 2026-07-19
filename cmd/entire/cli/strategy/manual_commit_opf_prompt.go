@@ -21,8 +21,8 @@ import (
 type OPFDecision int
 
 const (
-	OPFRun   OPFDecision = iota // run the rewrite, push 8-layer
-	OPFSkip                     // skip the rewrite, push 7-layer
+	OPFRun   OPFDecision = iota // run the rewrite, push OPF-applied (9-layer)
+	OPFSkip                     // skip the rewrite, push regex-only (8-layer)
 	OPFAbort                    // cancel the push entirely (Ctrl-C / non-TTY abort)
 )
 

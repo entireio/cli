@@ -887,3 +887,78 @@ func TestExtractAllModifiedFiles_SubagentOnlyChanges(t *testing.T) {
 		t.Errorf("missing expected file %q", f)
 	}
 }
+
+// Regression for #329: a subagent spawned BEFORE the checkpoint's startLine
+// must still be discovered, because it can keep modifying files in later turns.
+// The Task spawn/result live in lines before startLine; only the full transcript
+// scan finds them.
+func TestExtractAllModifiedFiles_FindsSubagentSpawnedBeforeStartLine(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	subagentsDir := tmpDir + "/tasks/toolu_task1"
+	c := &ClaudeCodeAgent{}
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatalf("failed to create subagents dir: %v", err)
+	}
+
+	transcriptData := buildJSONL(
+		makeTaskToolUseLine(t, "a1", "toolu_taskA"),        // line 0 (before startLine)
+		makeTaskResultLine(t, "uA", "toolu_taskA", "subA"), // line 1 (before startLine)
+		makeWriteToolLine(t, "a2", "/repo/main.go"),        // line 2 (>= startLine)
+	)
+	writeJSONLFile(t, subagentsDir+"/agent-subA.jsonl",
+		makeWriteToolLine(t, "sa1", "/repo/helper.go"),
+	)
+
+	files, err := c.ExtractAllModifiedFiles(transcriptData, 2, subagentsDir)
+	if err != nil {
+		t.Fatalf("ExtractAllModifiedFiles() error: %v", err)
+	}
+
+	got := make(map[string]bool, len(files))
+	for _, f := range files {
+		got[f] = true
+	}
+	if !got["/repo/main.go"] {
+		t.Errorf("missing main-agent file /repo/main.go: %v", files)
+	}
+	if !got["/repo/helper.go"] {
+		t.Errorf("subagent spawned before startLine was not discovered; missing /repo/helper.go: %v", files)
+	}
+}
+
+// Regression for #329: subagent token usage must be counted even when the
+// subagent was spawned before the checkpoint's startLine.
+func TestCalculateTotalTokenUsage_CountsSubagentSpawnedBeforeStartLine(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	subagentsDir := tmpDir + "/tasks/toolu_task1"
+	c := &ClaudeCodeAgent{}
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatalf("failed to create subagents dir: %v", err)
+	}
+
+	// Subagent spawned in lines 0-1 (before startLine=2); main usage on line 2.
+	transcriptData := buildJSONL(
+		makeTaskToolUseLine(t, "a1", "toolu_taskB"),
+		makeTaskResultLine(t, "uB", "toolu_taskB", "subB"),
+		`{"type":"assistant","uuid":"a2","message":{"id":"m2","usage":{"input_tokens":300,"output_tokens":150}}}`,
+	)
+	writeJSONLFile(t, subagentsDir+"/agent-subB.jsonl",
+		`{"type":"assistant","uuid":"sa1","message":{"id":"sm1","usage":{"input_tokens":50,"output_tokens":25}}}`,
+	)
+
+	usage, err := c.CalculateTotalTokenUsage(transcriptData, 2, subagentsDir)
+	if err != nil {
+		t.Fatalf("CalculateTotalTokenUsage() error: %v", err)
+	}
+	if usage.SubagentTokens == nil {
+		t.Fatal("subagent spawned before startLine was not counted (SubagentTokens is nil)")
+	}
+	if usage.SubagentTokens.InputTokens != 50 || usage.SubagentTokens.OutputTokens != 25 {
+		t.Errorf("subagent tokens = input %d output %d, want input 50 output 25",
+			usage.SubagentTokens.InputTokens, usage.SubagentTokens.OutputTokens)
+	}
+}

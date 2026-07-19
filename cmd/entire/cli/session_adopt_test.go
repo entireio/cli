@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -1098,6 +1099,66 @@ func TestSessionAdopt_ClearsLegacyTranscriptOffsets(t *testing.T) {
 	}
 	if bytes.Contains(encoded, []byte("transcript_lines_at_start")) {
 		t.Fatalf("adopted state JSON contains transcript_lines_at_start: %s", encoded)
+	}
+}
+
+// TestSessionAdopt_RebaselinesSubagentTokens pins finding 019f5ebf-dc42: cross-repo
+// adoption opens a fresh target-local checkpoint window (StepCount=0,
+// CheckpointTokenUsage=nil), but the cloned TokenUsage carries the SOURCE
+// session's full cumulative subagent total. If SubagentTokensBaseline is not
+// re-baselined to that cumulative, the first post-adopt checkpoint subtracts a
+// stale/nil baseline and over-reports the source session's subagent usage.
+func TestSessionAdopt_RebaselinesSubagentTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		sourceBaseline *agent.TokenUsage
+	}{
+		// Source never condensed: baseline is nil, so the first adopted
+		// checkpoint would report the entire cumulative subagent total.
+		{name: "never-condensed-source", sourceBaseline: nil},
+		// Source condensed at an earlier window: its baseline is stale relative
+		// to the current cumulative and must not carry into the target window.
+		{name: "previously-condensed-source", sourceBaseline: &agent.TokenUsage{InputTokens: 200, OutputTokens: 100, APICallCount: 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			targetRepo := setupAdoptRepo(t)
+			testutil.WriteFile(t, targetRepo, "feature.txt", "agent change\n")
+			t.Chdir(targetRepo)
+
+			adopted, _, err := buildAdoptedSessionState(context.Background(), &session.State{
+				SessionID:    "test-adopt-subagent-baseline-" + tc.name,
+				AgentType:    agent.AgentTypeClaudeCode,
+				StartedAt:    time.Now().Add(-5 * time.Minute),
+				Phase:        session.PhaseActive,
+				BaseCommit:   "source-head",
+				WorktreePath: "/source/repo",
+				TokenUsage: &agent.TokenUsage{
+					InputTokens:    1000,
+					OutputTokens:   500,
+					APICallCount:   10,
+					SubagentTokens: &agent.TokenUsage{InputTokens: 500, OutputTokens: 250, APICallCount: 5},
+				},
+				SubagentTokensBaseline: tc.sourceBaseline,
+			})
+			if err != nil {
+				t.Fatalf("buildAdoptedSessionState failed: %v", err)
+			}
+
+			if adopted.SubagentTokensBaseline == nil {
+				t.Fatal("adopted SubagentTokensBaseline = nil, want re-baselined to the cumulative subagent total")
+			}
+			if adopted.SubagentTokensBaseline.InputTokens != 500 || adopted.SubagentTokensBaseline.OutputTokens != 250 {
+				t.Fatalf("adopted SubagentTokensBaseline = %#v, want cumulative subagent total 500/250",
+					adopted.SubagentTokensBaseline)
+			}
+
+			// The first post-adopt checkpoint delta (cumulative - baseline) must be
+			// zero: adoption should count only target-side subagent growth.
+			delta := types.SubtractTokenUsage(adopted.TokenUsage.SubagentTokens, adopted.SubagentTokensBaseline)
+			if delta.InputTokens != 0 || delta.OutputTokens != 0 || delta.APICallCount != 0 {
+				t.Fatalf("first post-adopt subagent delta = %#v, want zero", delta)
+			}
+		})
 	}
 }
 

@@ -88,7 +88,7 @@ func pushCheckpointRefWithRecovery(ctx context.Context, target string, ref plumb
 	if err := batchPushRefs(ctx, target, []plumbing.ReferenceName{ref}); err == nil {
 		return nil
 	}
-	if err := fetchAndRebaseRefCommon(ctx, target, ref); err != nil {
+	if err := fetchAndRebaseRefCommon(ctx, target, ref, io.Discard); err != nil {
 		return fmt.Errorf("sync diverged checkpoint ref %s: %w", ref, err)
 	}
 	return batchPushRefs(ctx, target, []plumbing.ReferenceName{ref})
@@ -177,13 +177,28 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) e
 		return nil
 	}
 
+	// Protected refs cannot be fixed by syncing and retrying.
 	var protectedErr *protectedRefError
 	if errors.As(err, &protectedErr) {
 		printProtectedRefBlock(w, refLabel, target)
 		return nil
 	}
 
+	// Non-interactive SSH (pre-push BatchMode): auth failures cannot be fixed by
+	// fetch+rebase, and retrying would just reprint the same opaque error.
+	// Surface an actionable ssh-agent hint and skip recovery (issue #1523).
+	if nonInteractiveSSHAuthFailure(ctx, err) {
+		fmt.Fprintf(w, "[entire] Warning: couldn't push %s: %v\n", refLabel, err)
+		printNonInteractiveSSHAuthHint()
+		printCheckpointRemoteHint(target)
+		return nil
+	}
+
 	writePushConflictLine(w, pushStart)
+
+	// Push failed — try to fetch and rebase.
+	// Spanned (with the network fetch as a child) so the trace distinguishes
+	// "the raw push is slow" from "we keep hitting contention and re-syncing".
 	fmt.Fprintf(w, "%s Syncing with remote...\n", styles.dim("[entire]"))
 
 	frCtx, fetchRebaseSpan := perf.Start(ctx, "fetch_and_rebase")
@@ -192,8 +207,11 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) e
 	fetchRebaseSpan.End()
 	if syncErr != nil {
 		fmt.Fprintf(w, "[entire] Warning: couldn't sync %s: %v\n", refLabel, syncErr)
+		if nonInteractiveSSHAuthFailure(ctx, syncErr) {
+			printNonInteractiveSSHAuthHint()
+		}
 		printCheckpointRemoteHint(target)
-		return nil
+		return nil // Don't fail the main push
 	}
 
 	fmt.Fprintf(w, "%s Pushing %s to %s...\n", styles.dim("[entire]"), refLabel, displayTarget)
@@ -201,6 +219,9 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) e
 
 	if result, err := tryPushRefCommon(ctx, target, ref); err != nil {
 		fmt.Fprintf(w, "[entire] Warning: failed to push %s after sync: %v\n", refLabel, err)
+		if nonInteractiveSSHAuthFailure(ctx, err) {
+			printNonInteractiveSSHAuthHint()
+		}
 		printCheckpointRemoteHint(target)
 	} else {
 		writePushFinishLine(ctx, w, result, retryStart, target)
@@ -218,6 +239,13 @@ func refDisplayName(ref plumbing.ReferenceName) string {
 	return ref.String()
 }
 
+// nonInteractiveSSHAuthFailure reports whether err is an SSH auth-shaped
+// failure under a BatchMode (non-interactive) context. Used to print the
+// actionable ssh-agent hint and skip useless recovery retries.
+func nonInteractiveSSHAuthFailure(ctx context.Context, err error) bool {
+	return err != nil && remote.IsNonInteractiveSSH(ctx) && remote.LooksLikeSSHAuthFailure(err.Error())
+}
+
 // printCheckpointRemoteHint prints a hint when a push to a checkpoint URL fails.
 // Only prints when the target is a URL (not the user's default remote).
 func printCheckpointRemoteHint(target string) {
@@ -226,6 +254,20 @@ func printCheckpointRemoteHint(target string) {
 	}
 	fmt.Fprintln(os.Stderr, "[entire] A checkpoint remote is configured in Entire settings (.entire/settings.json or .entire/settings.local.json) but could not be reached.")
 	fmt.Fprintln(os.Stderr, "[entire] Checkpoints are saved locally but not synced. Ensure you have access to the checkpoint remote.")
+}
+
+// sshAuthHintOnce ensures the ssh-agent hint prints at most once per process
+// (pre-push can push multiple refs).
+var sshAuthHintOnce sync.Once
+
+// printNonInteractiveSSHAuthHint tells the user how to unblock checkpoint pushes
+// that failed because SSH needed interactive auth under BatchMode (issue #1523).
+func printNonInteractiveSSHAuthHint() {
+	sshAuthHintOnce.Do(func() {
+		fmt.Fprintln(os.Stderr, "[entire] Checkpoint push skipped: SSH needs interactive auth (passphrase/PIN) and cannot prompt during git hooks.")
+		fmt.Fprintln(os.Stderr, "[entire] Load your key into ssh-agent (`ssh-add`), then push again. Checkpoints are saved locally until then.")
+		fmt.Fprintln(os.Stderr, "[entire] PIN-protected security keys: unlock/add them to the agent first. To allow prompts in this path, set GIT_SSH_COMMAND (or core.sshCommand) with an explicit BatchMode=no.")
+	})
 }
 
 // settingsHintOnce ensures the settings commit hint prints at most once per process.
@@ -618,4 +660,29 @@ func collectCommitsSince(ctx context.Context, repo *git.Repository, repoPath str
 	}
 
 	return commits, nil
+}
+
+// startProgressDots prints dots to w every second until the returned stop function
+// is called. The stop function prints the given suffix and a newline.
+func startProgressDots(w io.Writer) func(suffix string) {
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				fmt.Fprint(w, ".")
+			}
+		}
+	}()
+	return func(suffix string) {
+		close(done)
+		<-stopped // Wait for goroutine to finish before writing suffix
+		fmt.Fprintln(w, suffix)
+	}
 }

@@ -5,19 +5,37 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/gofrs/flock"
 )
 
+// goosWindows is runtime.GOOS on Windows, where unix permission bits don't
+// exist (Go reports synthetic modes) so permission checks are skipped.
+const goosWindows = "windows"
+
+// loosePermsWarnW receives the loose-permissions warning. Package-level so
+// tests can capture it; production always writes to stderr (matching the
+// unlock warning in withFileLock).
+var loosePermsWarnW io.Writer = os.Stderr
+
 // fileStore persists credentials as a JSON file on disk.
 // The file format is: { "service": { "user": "password" } }
 type fileStore struct {
 	path string
 	mu   sync.Mutex
+	// warnedLoosePerms dedupes the loose-permissions warning to once per
+	// store instance — effectively once per CLI invocation, since
+	// currentBackend caches a single fileStore for the process. Like the
+	// rest of the store's state it relies on mu, which every production
+	// caller of load (Get/Set/Delete) holds; tests that call load directly
+	// are single-goroutine.
+	warnedLoosePerms bool
 }
 
 // withFileLock runs fn while holding an exclusive flock on f.path + ".lock".
@@ -48,6 +66,21 @@ func (f *fileStore) withFileLock(fn func() error) error {
 }
 
 func (f *fileStore) load() (map[string]map[string]string, error) {
+	// The file holds bearer tokens; warn (once per store) when it is
+	// readable or writable by group/others. Deliberately a warning, not a
+	// refusal: externally provisioned files (CI secret mounts, read-only
+	// volumes) often carry modes the user cannot change, a hard refusal
+	// would also block the login rewrite that restores 0600, and diagnostic
+	// commands must keep working so the user can see their auth state.
+	// Files written by save() are always 0600, so this only fires on files
+	// created or chmod-ed outside this store. Windows has no unix permission
+	// bits — Go reports synthetic modes there — so the check is unix-only.
+	if runtime.GOOS != goosWindows && !f.warnedLoosePerms {
+		if info, statErr := os.Stat(f.path); statErr == nil && info.Mode().Perm()&0o077 != 0 {
+			f.warnedLoosePerms = true
+			fmt.Fprintf(loosePermsWarnW, "Warning: token store %s is accessible by group/others (mode %04o) and holds bearer tokens; run: chmod 0600 %s\n", f.path, info.Mode().Perm(), f.path)
+		}
+	}
 	data, err := os.ReadFile(f.path)
 	if err != nil {
 		if os.IsNotExist(err) {

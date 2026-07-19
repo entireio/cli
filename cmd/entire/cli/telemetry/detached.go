@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/denisbrodbeck/machineid"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/posthog/posthog-go"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -83,6 +84,13 @@ func BuildEventPayload(cmd *cobra.Command, agent string, isEntireEnabled bool, v
 		Properties: properties,
 		Timestamp:  time.Now(),
 	}
+}
+
+// spawnDetachedAnalytics sends the payload from a detached `entire
+// __send_analytics` child so the network call never blocks the CLI. The empty
+// dir keeps the child out of the parent's working directory.
+func spawnDetachedAnalytics(payloadJSON string) {
+	execx.SpawnDetached("", "__send_analytics", payloadJSON)
 }
 
 // TrackCommandDetached tracks a command execution by spawning a detached subprocess.
