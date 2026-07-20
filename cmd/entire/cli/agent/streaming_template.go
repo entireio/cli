@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
@@ -66,9 +67,10 @@ func (e *providerStreamError) Error() string { return e.err.Error() }
 func (e *providerStreamError) Unwrap() error { return e.err }
 
 // MarkProviderStreamError marks an error decoded from an explicit provider
-// stream event. It lets the subprocess template preserve that error when the
-// context completes concurrently, without mistaking EOF/parser failures
-// caused by killing the subprocess for provider failures.
+// stream event. It lets the subprocess template distinguish decoded provider
+// failures from EOF/parser failures caused by killing the subprocess. A
+// semantically specific provider failure can then outrank a concurrent context
+// error while an unclassified provider failure preserves both causes.
 func MarkProviderStreamError(err error) error {
 	if err == nil {
 		return nil
@@ -86,8 +88,8 @@ func isProviderStreamError(err error) bool {
 // Error shapes by failure point:
 //   - Pre-subprocess (StdoutPipe failure): plain wrapped error, since no
 //     stderr/stdout exists yet to diagnose with.
-//   - cmd.Start failure: wrapped error, or *TextGenerationError when ctx is
-//     already cancelled at that point.
+//   - cmd.Start failure: *TextGenerationError with provider metadata, including
+//     CLIMissing classification when the executable cannot be found.
 //   - Anything after Start (parse error, non-zero exit, ctx cancellation):
 //     *TextGenerationError carrying captured stderr and the stdout byte
 //     count from countingReader, matching RunIsolatedTextGeneratorCLI's
@@ -115,14 +117,20 @@ func (t *StreamingGeneratorTemplate) Generate(
 	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
-		if ctx.Err() != nil {
-			return "", &TextGenerationError{
-				Err:         ctx.Err(),
-				Stderr:      strings.TrimSpace(stderr.String()),
-				StdoutBytes: 0,
-			}
+		provider := types.AgentName(t.AgentName)
+		capturedStderr := strings.TrimSpace(stderr.String())
+		kind := TextGenerationErrorUnknown
+		message := fmt.Sprintf("%s stream start: %v", t.AgentName, err)
+		var execErr *exec.Error
+		if errors.As(err, &execErr) {
+			kind = TextGenerationErrorCLIMissing
+			message = fmt.Sprintf("%s not found: %v", streamingProviderLabel(provider, t.AgentName), err)
 		}
-		return "", fmt.Errorf("%s stream start: %w", t.AgentName, err)
+		cause := err
+		if kind == TextGenerationErrorUnknown && ctx.Err() != nil {
+			cause = errors.Join(err, ctx.Err())
+		}
+		return "", newTextGenerationError(provider, kind, message, cause, capturedStderr, 0, -1)
 	}
 
 	counter := &countingReader{r: stdout}
@@ -150,32 +158,7 @@ func (t *StreamingGeneratorTemplate) Generate(
 	}
 	waitErr := cmd.Wait()
 	stderrStr := strings.TrimSpace(stderr.String())
-
-	// An explicit provider error decoded from stdout is authoritative even if
-	// the context completes concurrently. Unmarked parser failures can be a
-	// consequence of killing the subprocess, so context still wins for those.
-	if isProviderStreamError(parseErr) {
-		return "", &TextGenerationError{
-			Err:         fmt.Errorf("%s stream failed: %w", t.AgentName, parseErr),
-			Stderr:      stderrStr,
-			StdoutBytes: counter.n,
-		}
-	}
-
-	if ctx.Err() != nil {
-		return "", &TextGenerationError{
-			Err:         ctx.Err(),
-			Stderr:      stderrStr,
-			StdoutBytes: counter.n,
-		}
-	}
-
-	if parseErr == nil && waitErr == nil {
-		if doneProgress != nil {
-			progress(*doneProgress)
-		}
-		return result, nil
-	}
+	provider := types.AgentName(t.AgentName)
 
 	if waitErr != nil && t.LooksLikeUnrecognizedFlag != nil && t.LooksLikeUnrecognizedFlag(stderrStr) {
 		attrs := streamingFallbackLogAttrs(t.AgentName, stderrStr)
@@ -184,15 +167,88 @@ func (t *StreamingGeneratorTemplate) Generate(
 		return "", ErrUnrecognizedStreamingFlag
 	}
 
-	wrappedErr := waitErr
-	if wrappedErr == nil {
-		wrappedErr = parseErr
+	if parseErr == nil && waitErr == nil {
+		if doneProgress != nil {
+			progress(*doneProgress)
+		}
+		return result, nil
 	}
-	return "", &TextGenerationError{
-		Err:         fmt.Errorf("%s stream failed: %w", t.AgentName, wrappedErr),
-		Stderr:      stderrStr,
-		StdoutBytes: counter.n,
+	cause := streamingFailureCause(parseErr, waitErr)
+
+	// A semantically specific provider error decoded from stdout is authoritative
+	// even if the context completes concurrently. Unknown provider/parser errors
+	// can be consequences of a killed subprocess, so context remains discoverable.
+	if isProviderStreamError(parseErr) {
+		kind := classifyStreamingFailure(provider, stderrStr, parseErr)
+		if kind != TextGenerationErrorUnknown || ctx.Err() == nil {
+			message := parseErr.Error()
+			return "", newTextGenerationError(
+				provider, kind, message, fmt.Errorf("%s stream failed: %w", t.AgentName, cause),
+				stderrStr, counter.n, streamingExitCode(waitErr),
+			)
+		}
 	}
+
+	kind := classifyStreamingFailure(provider, stderrStr, cause)
+	if kind == TextGenerationErrorUnknown && ctx.Err() != nil {
+		cause = errors.Join(cause, ctx.Err())
+	}
+	message := streamingFailureMessage(provider, t.AgentName, stderrStr, cause)
+	return "", newTextGenerationError(
+		provider, kind, message, fmt.Errorf("%s stream failed: %w", t.AgentName, cause),
+		stderrStr, counter.n, streamingExitCode(waitErr),
+	)
+}
+
+func streamingFailureMessage(
+	provider types.AgentName,
+	fallback string,
+	stderr string,
+	cause error,
+) string {
+	if stderr != "" {
+		return stderr
+	}
+	return fmt.Sprintf("%s stream failed: %v", streamingProviderLabel(provider, fallback), cause)
+}
+
+func streamingFailureCause(parseErr, waitErr error) error {
+	if parseErr == nil {
+		return waitErr
+	}
+	if waitErr == nil {
+		return parseErr
+	}
+	return errors.Join(parseErr, waitErr)
+}
+
+func classifyStreamingFailure(provider types.AgentName, stderr string, cause error) TextGenerationErrorKind {
+	detail := stderr
+	if cause != nil {
+		if detail != "" {
+			detail += "\n"
+		}
+		detail += cause.Error()
+	}
+	return classifyTextGenerationFailure(provider, detail)
+}
+
+func streamingExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
+func streamingProviderLabel(provider types.AgentName, fallback string) string {
+	if label := SummaryProviderErrorLabel(provider); label != "" {
+		return label
+	}
+	return fallback
 }
 
 func streamingFallbackLogAttrs(agentName, stderr string) []slog.Attr {
