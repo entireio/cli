@@ -19,13 +19,9 @@ func (g *GeminiCLIAgent) GenerateText(ctx context.Context, prompt string, model 
 		args = append(args, "--model", model)
 	}
 
-	result, capturedStderr, stdoutBytes, err := agent.RunIsolatedTextGeneratorCLI(ctx, g.CommandRunner, "gemini", "gemini", args, prompt)
+	result, err := agent.RunIsolatedTextGeneratorCLI(ctx, g.CommandRunner, agent.AgentNameGemini, args, prompt)
 	if err != nil {
-		return "", &agent.TextGenerationError{
-			Err:         fmt.Errorf("gemini text generation failed: %w", err),
-			Stderr:      capturedStderr,
-			StdoutBytes: stdoutBytes,
-		}
+		return "", fmt.Errorf("gemini text generation failed: %w", err)
 	}
 	return result, nil
 }

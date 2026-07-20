@@ -60,7 +60,7 @@ func runWindowsWrapper(t *testing.T, wrapper string, entirePresent bool) (string
 // (and propagates its exit code) when entire is present, and is skipped with a
 // 0 exit when entire is absent, for both the silent and JSON-warning forms.
 func TestWindowsWrappers_Execution(t *testing.T) {
-	if runtime.GOOS != windowsOS {
+	if runtime.GOOS != hookWrapperOSWindows {
 		t.Skip("cmd.exe wrapper execution test runs only on Windows")
 	}
 	// No t.Parallel(): t.Setenv("PATH") forbids it.

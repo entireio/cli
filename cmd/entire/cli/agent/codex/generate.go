@@ -15,13 +15,9 @@ func (c *CodexAgent) GenerateText(ctx context.Context, prompt string, model stri
 	}
 	args = append(args, "-")
 
-	result, capturedStderr, stdoutBytes, err := agent.RunIsolatedTextGeneratorCLI(ctx, c.CommandRunner, "codex", "codex", args, prompt)
+	result, err := agent.RunIsolatedTextGeneratorCLI(ctx, c.CommandRunner, agent.AgentNameCodex, args, prompt)
 	if err != nil {
-		return "", &agent.TextGenerationError{
-			Err:         fmt.Errorf("codex text generation failed: %w", err),
-			Stderr:      capturedStderr,
-			StdoutBytes: stdoutBytes,
-		}
+		return "", fmt.Errorf("codex text generation failed: %w", err)
 	}
 	return result, nil
 }

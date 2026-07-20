@@ -19,13 +19,9 @@ func (c *CursorAgent) GenerateText(ctx context.Context, prompt string, model str
 		args = append(args, "--model", model)
 	}
 
-	result, capturedStderr, stdoutBytes, err := agent.RunIsolatedTextGeneratorCLI(ctx, c.CommandRunner, "agent", "cursor", args, prompt)
+	result, err := agent.RunIsolatedTextGeneratorCLI(ctx, c.CommandRunner, agent.AgentNameCursor, args, prompt)
 	if err != nil {
-		return "", &agent.TextGenerationError{
-			Err:         fmt.Errorf("cursor text generation failed: %w", err),
-			Stderr:      capturedStderr,
-			StdoutBytes: stdoutBytes,
-		}
+		return "", fmt.Errorf("cursor text generation failed: %w", err)
 	}
 	return result, nil
 }

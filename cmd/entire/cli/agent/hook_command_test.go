@@ -20,9 +20,9 @@ func TestUseWindowsProductionHooks(t *testing.T) {
 		want     bool
 	}{
 		{"non-windows never uses windows wrappers", "linux", false, shBroken, false},
-		{"localDev never uses windows wrappers", windowsOS, true, shBroken, false},
-		{"windows with working sh keeps sh wrappers", windowsOS, false, shWorks, false},
-		{"windows without working sh uses windows wrappers", windowsOS, false, shBroken, true},
+		{"localDev never uses windows wrappers", hookWrapperOSWindows, true, shBroken, false},
+		{"windows with working sh keeps sh wrappers", hookWrapperOSWindows, false, shWorks, false},
+		{"windows without working sh uses windows wrappers", hookWrapperOSWindows, false, shBroken, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

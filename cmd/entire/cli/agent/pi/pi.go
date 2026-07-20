@@ -43,7 +43,9 @@ func init() {
 // PiAgent implements agent.Agent for the pi coding agent.
 //
 //nolint:revive // PiAgent is clearer than Agent in this context
-type PiAgent struct{}
+type PiAgent struct {
+	CommandRunner agent.TextCommandRunner
+}
 
 // NewPiAgent returns a new Pi agent instance.
 func NewPiAgent() agent.Agent {
