@@ -8,6 +8,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Shared hooks.json fixtures. The two-event form exercises the
+// trusted/untrusted split; the one-event form is for tests where only
+// config.toml parsing behavior matters.
+const (
+	hooksJSONSessionStartAndPostToolUse = `{
+  "hooks": {
+    "SessionStart": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":30}]}],
+    "PostToolUse": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":30}]}]
+  }
+}`
+	hooksJSONSessionStartOnly = `{"hooks":{"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"x","timeout":30}]}]}}`
+)
+
 // writeTrustFixture sets up the .codex/hooks.json fixture and points
 // CODEX_HOME at an isolated temp directory so HookTrustGaps resolves
 // the user config without touching ~/.codex on the dev machine. Tests
@@ -55,19 +68,15 @@ trusted_hash = "sha256:ccc"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte(configTOML), 0o600))
 
-	gaps := HookTrustGaps(repoRoot)
+	gaps, ok := HookTrustGaps(repoRoot)
+	require.True(t, ok)
 	require.Equal(t, []string{"post_tool_use"}, gaps)
 }
 
 // TestHookTrustGaps_NoGapsWhenAllTrusted returns nil when every declared
 // event has a state entry, even if extra entries exist for other paths.
 func TestHookTrustGaps_NoGapsWhenAllTrusted(t *testing.T) {
-	hooksJSON := `{
-  "hooks": {
-    "SessionStart": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":30}]}],
-    "PostToolUse": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":30}]}]
-  }
-}`
+	hooksJSON := hooksJSONSessionStartAndPostToolUse
 	repoRoot, hooksPath := writeTrustFixture(t, hooksJSON)
 
 	// Trust both, plus an unrelated entry from another repo to make sure
@@ -83,7 +92,8 @@ trusted_hash = "sha256:ccc"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte(configTOML), 0o600))
 
-	gaps := HookTrustGaps(repoRoot)
+	gaps, ok := HookTrustGaps(repoRoot)
+	require.True(t, ok)
 	require.Empty(t, gaps)
 }
 
@@ -92,7 +102,9 @@ trusted_hash = "sha256:ccc"
 func TestHookTrustGaps_NilWhenHooksJSONMissing(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("CODEX_HOME", tmp)
-	require.Nil(t, HookTrustGaps(tmp))
+	gaps, ok := HookTrustGaps(tmp)
+	require.Nil(t, gaps)
+	require.False(t, ok)
 }
 
 // TestHookTrustGaps_NilWhenConfigUnreadable — first-run users have no
@@ -100,7 +112,7 @@ func TestHookTrustGaps_NilWhenHooksJSONMissing(t *testing.T) {
 // our partial detection staying quiet is the right behavior; we'd
 // otherwise duplicate the warning.
 func TestHookTrustGaps_NilWhenConfigUnreadable(t *testing.T) {
-	hooksJSON := `{"hooks":{"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"x","timeout":30}]}]}}`
+	hooksJSON := hooksJSONSessionStartOnly
 	tmp := t.TempDir()
 	codexHome := filepath.Join(tmp, "codex-home")
 	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "repo", ".codex"), 0o750))
@@ -108,7 +120,9 @@ func TestHookTrustGaps_NilWhenConfigUnreadable(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(tmp, "repo", ".codex", "hooks.json"), []byte(hooksJSON), 0o600))
 	t.Setenv("CODEX_HOME", codexHome)
 
-	require.Nil(t, HookTrustGaps(filepath.Join(tmp, "repo")))
+	gaps, ok := HookTrustGaps(filepath.Join(tmp, "repo"))
+	require.Nil(t, gaps)
+	require.False(t, ok)
 }
 
 // TestMissingEntireHooks_FlagsStaleFile — user enabled Codex on an
@@ -173,5 +187,151 @@ func TestHookTrustGaps_HandlesNonzeroHandlerIndex(t *testing.T) {
 trusted_hash = "sha256:aaa"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte(configTOML), 0o600))
-	require.Empty(t, HookTrustGaps(repoRoot))
+	gaps, ok := HookTrustGaps(repoRoot)
+	require.True(t, ok)
+	require.Empty(t, gaps)
+}
+
+// TestHookTrustGaps_SingleQuotedStateKeys — current Codex serializes
+// state keys as TOML literal (single-quoted) strings, the natural form
+// on Windows where backslashes need no escaping. The trust check must
+// recognize them the same as double-quoted keys (issue #1761).
+func TestHookTrustGaps_SingleQuotedStateKeys(t *testing.T) {
+	hooksJSON := hooksJSONSessionStartAndPostToolUse
+	repoRoot, hooksPath := writeTrustFixture(t, hooksJSON)
+
+	configTOML := `[hooks.state.'` + hooksPath + `:session_start:0:0']
+trusted_hash = "sha256:aaa"
+
+[hooks.state.'` + hooksPath + `:post_tool_use:0:0']
+trusted_hash = "sha256:bbb"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte(configTOML), 0o600))
+
+	gaps, ok := HookTrustGaps(repoRoot)
+	require.True(t, ok)
+	require.Empty(t, gaps)
+}
+
+// TestHookTrustGaps_SingleQuotedFlagsMissingEvent — literal-quoted keys
+// must not only count as trust; a genuinely missing event must still be
+// flagged when the other entries are single-quoted.
+func TestHookTrustGaps_SingleQuotedFlagsMissingEvent(t *testing.T) {
+	hooksJSON := hooksJSONSessionStartAndPostToolUse
+	repoRoot, hooksPath := writeTrustFixture(t, hooksJSON)
+
+	configTOML := `[hooks.state.'` + hooksPath + `:session_start:0:0']
+trusted_hash = "sha256:aaa"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte(configTOML), 0o600))
+
+	gaps, ok := HookTrustGaps(repoRoot)
+	require.True(t, ok)
+	require.Equal(t, []string{"post_tool_use"}, gaps)
+}
+
+// TestHookTrustGaps_MalformedConfigStaysSilent — a config.toml that
+// isn't valid TOML is a "can't tell" case, not a "nothing trusted"
+// case. The old regex scraper degraded it to zero trusted keys and
+// flagged every hook; structural parsing must report ok=false instead
+// (same contract as an unreadable file) so doctor can say "not
+// verified" rather than claiming OK.
+func TestHookTrustGaps_MalformedConfigStaysSilent(t *testing.T) {
+	hooksJSON := hooksJSONSessionStartOnly
+	repoRoot, _ := writeTrustFixture(t, hooksJSON)
+	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte("[hooks.state.\"unterminated\n"), 0o600))
+	gaps, ok := HookTrustGaps(repoRoot)
+	require.Nil(t, gaps)
+	require.False(t, ok)
+}
+
+// TestHookTrustGaps_ConfigWithoutStateSection — a parseable config that
+// simply has no hooks.state table is the genuine "fresh clone, nothing
+// approved yet" state: the gap warning must fire.
+func TestHookTrustGaps_ConfigWithoutStateSection(t *testing.T) {
+	hooksJSON := hooksJSONSessionStartOnly
+	repoRoot, _ := writeTrustFixture(t, hooksJSON)
+	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte("model = \"gpt-5\"\n"), 0o600))
+	gaps, ok := HookTrustGaps(repoRoot)
+	require.True(t, ok)
+	require.Equal(t, []string{"session_start"}, gaps)
+}
+
+// The readCodexTrustedKeys tests below hardcode Windows-shaped keys.
+// Full-flow HookTrustGaps tests can't exercise backslash paths on a
+// POSIX dev machine (filepath.Join emits "/"), but key parsing is
+// OS-independent — this is exactly the layer issue #1761 lives in.
+
+// TestReadCodexTrustedKeys_WindowsLiteralKeys — the reported bug: a
+// literal (single-quoted) key holding a Windows path must come back
+// verbatim, backslashes intact.
+func TestReadCodexTrustedKeys_WindowsLiteralKeys(t *testing.T) {
+	t.Parallel()
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configTOML := `[hooks.state.'C:\repo\.codex\hooks.json:session_start:0:0']
+trusted_hash = "sha256:aaa"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configTOML), 0o600))
+
+	keys, ok := readCodexTrustedKeys(configPath)
+	require.True(t, ok)
+	require.Contains(t, keys, `C:\repo\.codex\hooks.json:session_start:0:0`)
+}
+
+// TestReadCodexTrustedKeys_WindowsBasicEscapedKeys — the latent second
+// bug from issue #1761: a basic (double-quoted) key holding a Windows
+// path carries escaped backslashes in the raw file. The parser must
+// unescape them so the key compares equal to filepath.Join output. The
+// old regex captured the raw `C:\\repo\\...` text and could never
+// match.
+func TestReadCodexTrustedKeys_WindowsBasicEscapedKeys(t *testing.T) {
+	t.Parallel()
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configTOML := `[hooks.state."C:\\repo\\.codex\\hooks.json:stop:0:0"]
+trusted_hash = "sha256:bbb"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configTOML), 0o600))
+
+	keys, ok := readCodexTrustedKeys(configPath)
+	require.True(t, ok)
+	require.Contains(t, keys, `C:\repo\.codex\hooks.json:stop:0:0`)
+}
+
+// TestReadCodexTrustedKeys_DottedAssignmentForm — trust entries written
+// as dotted-key assignments under a [hooks.state] table instead of one
+// header per entry are the same data in valid TOML; structural parsing
+// handles the shape the old header regex could never see.
+func TestReadCodexTrustedKeys_DottedAssignmentForm(t *testing.T) {
+	t.Parallel()
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configTOML := `[hooks.state]
+'C:\repo\.codex\hooks.json:post_tool_use:0:0'.trusted_hash = "sha256:ccc"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configTOML), 0o600))
+
+	keys, ok := readCodexTrustedKeys(configPath)
+	require.True(t, ok)
+	require.Contains(t, keys, `C:\repo\.codex\hooks.json:post_tool_use:0:0`)
+}
+
+// TestReadCodexTrustedKeys_UnrelatedSectionsIgnored — keys elsewhere in
+// the config (top-level settings, other tables) must not leak into the
+// trusted set.
+func TestReadCodexTrustedKeys_UnrelatedSectionsIgnored(t *testing.T) {
+	t.Parallel()
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configTOML := `model = "gpt-5"
+
+[projects."/some/repo"]
+trust_level = "trusted"
+
+[hooks.state."/repo/.codex/hooks.json:stop:0:0"]
+trusted_hash = "sha256:ddd"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configTOML), 0o600))
+
+	keys, ok := readCodexTrustedKeys(configPath)
+	require.True(t, ok)
+	require.Len(t, keys, 1)
+	require.Contains(t, keys, "/repo/.codex/hooks.json:stop:0:0")
 }

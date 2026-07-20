@@ -550,6 +550,34 @@ trusted_hash = "sha256:ccc"
 	require.NotContains(t, out, "Codex hook trust: REVIEW NEEDED")
 }
 
+// TestCheckCodexHookTrust_NotVerifiedWhenConfigUnparseable — a
+// config.toml that fails TOML parsing (e.g. a duplicate key from a bad
+// manual edit) is a "can't tell" case. Doctor must not render it as a
+// verified "✓ OK", and must not flag the hooks as untrusted either —
+// Codex's own startup warning covers real trust problems.
+func TestCheckCodexHookTrust_NotVerifiedWhenConfigUnparseable(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	codexDir := filepath.Join(dir, ".codex")
+	require.NoError(t, os.MkdirAll(codexDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(codexDir, "hooks.json"), []byte(canonicalCodexHooksJSON()), 0o600))
+
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	require.NoError(t, os.MkdirAll(codexHome, 0o750))
+	malformedTOML := "model = \"gpt-5\"\nmodel = \"duplicate key fails the parse\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(malformedTOML), 0o600))
+	t.Setenv("CODEX_HOME", codexHome)
+
+	cmd, stdout := newTestCmd(t)
+	checkCodexHookTrust(cmd)
+
+	out := stdout.String()
+	require.Contains(t, out, "Codex hook trust: NOT VERIFIED")
+	require.NotContains(t, out, "✓ Codex hook trust: OK")
+	require.NotContains(t, out, "REVIEW NEEDED")
+}
+
 // TestConfirmDoctorFix_CancelledContext verifies that a cancelled command
 // context makes the confirm prompt return (false, nil) rather than surfacing a
 // wrapped error — doctor fixes are skipped cleanly on interrupt.

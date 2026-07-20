@@ -448,10 +448,17 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 
 	w := cmd.OutOrStdout()
 	missing := codex.MissingEntireHooks(repoRoot)
-	gaps := codex.HookTrustGaps(repoRoot)
+	gaps, checked := codex.HookTrustGaps(repoRoot)
 
 	if len(missing) == 0 && len(gaps) == 0 {
-		fmt.Fprintln(w, "✓ Codex hook trust: OK")
+		// checked=false is "can't tell" (unreadable/unparseable hooks.json
+		// or config.toml), which must not render as a verified OK.
+		if checked {
+			fmt.Fprintln(w, "✓ Codex hook trust: OK")
+		} else {
+			fmt.Fprintln(w, "Codex hook trust: NOT VERIFIED")
+			fmt.Fprintln(w, "  Could not read hook approvals from Codex's config.toml.")
+		}
 		return
 	}
 
