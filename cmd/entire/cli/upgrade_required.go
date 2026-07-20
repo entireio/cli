@@ -37,26 +37,31 @@ func IsCLIUpgradeRequired(err error) bool {
 type upgradeOfferDeps struct {
 	canPrompt func() bool
 	confirm   func(ctx context.Context, updateCmd string) (bool, error)
-	runUpdate func(ctx context.Context, w io.Writer, cmdStr string, argv []string)
+	runUpdate func(ctx context.Context, w io.Writer, cmdStr string, argv []string) (exitCode int, rerun bool)
 }
 
 // OfferCLIUpgradeIfRequired handles a cli_upgrade_required failure in
-// place of the raw error print: it reports true when it took over the
-// messaging (main.go then skips printing err — the raw OAuth chain adds
-// nothing the guidance doesn't say), false when err doesn't carry the
-// code. On an interactive terminal it offers to run the updater right
-// away and, on success, re-executes the original command with the
+// place of the raw error print: handled reports true when it took over
+// the messaging (main.go then skips printing err — the raw OAuth chain
+// adds nothing the guidance doesn't say), false when err doesn't carry
+// the code. On an interactive terminal it offers to run the updater
+// right away and, on success, re-executes the original command with the
 // freshly installed binary (the shared versioncheck.RunUpdate tail, also
 // used by the version-check prompt); otherwise — no TTY,
 // ENTIRE_NO_AUTO_UPDATE set, declined, or no runnable installer for this
 // platform — it prints the update command and the failed command so the
 // user can run both. argv is the failed invocation's os.Args.
 //
+// When handled, exitCode is what the process should exit with: the rerun
+// child's exit code when the update ran and the command was re-executed
+// (0 when the retry succeeded), 1 on every other leaf. The exit itself
+// stays with main so its cleanup still runs.
+//
 // The code can surface from any auth-server OAuth flow — login (device
 // and browser), the refresh grant under every authenticated command, and
 // the RFC 8693 exchanges — which is why this hangs off main.go's central
 // error-print arm rather than any single command.
-func OfferCLIUpgradeIfRequired(ctx context.Context, w io.Writer, err error, argv []string) bool {
+func OfferCLIUpgradeIfRequired(ctx context.Context, w io.Writer, err error, argv []string) (handled bool, exitCode int) {
 	return offerCLIUpgrade(ctx, w, err, argv, upgradeOfferDeps{
 		canPrompt: func() bool { return versioncheck.PromptAllowed(w) },
 		confirm:   confirmCLIUpgrade,
@@ -64,9 +69,9 @@ func OfferCLIUpgradeIfRequired(ctx context.Context, w io.Writer, err error, argv
 	})
 }
 
-func offerCLIUpgrade(ctx context.Context, w io.Writer, err error, argv []string, deps upgradeOfferDeps) bool {
+func offerCLIUpgrade(ctx context.Context, w io.Writer, err error, argv []string, deps upgradeOfferDeps) (handled bool, exitCode int) {
 	if !IsCLIUpgradeRequired(err) {
-		return false
+		return false, 1
 	}
 	updateCmd := versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version)
 	rerun := versioncheck.RerunCommandLine(argv)
@@ -83,12 +88,12 @@ func offerCLIUpgrade(ctx context.Context, w io.Writer, err error, argv []string,
 			binary = argv[0]
 		}
 		fmt.Fprintf(w, "The update installed, but this command still ran an unsupported binary (%s).\nCheck that `entire` on your PATH points at the updated install, then rerun:\n\n  %s\n", binary, rerun)
-		return true
+		return true, 1
 	}
 
 	if !deps.canPrompt() {
 		printCLIUpgradeCommands(w, updateCmd, rerun)
-		return true
+		return true, 1
 	}
 
 	confirmed, confirmErr := deps.confirm(ctx, updateCmd)
@@ -96,11 +101,13 @@ func offerCLIUpgrade(ctx context.Context, w io.Writer, err error, argv []string,
 		// Declined or the prompt itself failed/was aborted — leave the
 		// copyable commands either way.
 		printCLIUpgradeCommands(w, updateCmd, rerun)
-		return true
+		return true, 1
 	}
 
-	deps.runUpdate(ctx, w, updateCmd, argv)
-	return true
+	if code, rerunRan := deps.runUpdate(ctx, w, updateCmd, argv); rerunRan {
+		return true, code
+	}
+	return true, 1
 }
 
 // printCLIUpgradeCommands prints the non-interactive guidance block: the

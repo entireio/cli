@@ -87,6 +87,7 @@ func main() {
 	executed, err := rootCmd.ExecuteContextC(ctx)
 	if err != nil {
 		var silent *cli.SilentError
+		exitCode := 1
 
 		switch {
 		case errors.Is(err, context.Canceled) && procsignal.Load() != nil:
@@ -128,14 +129,20 @@ func main() {
 			// The handler replaces the raw cli_upgrade_required error with
 			// actionable guidance — an interactive update offer, or the
 			// update + rerun commands. Handled here so every command gets
-			// it without wrapping its own errors.
-			if !cli.OfferCLIUpgradeIfRequired(ctx, rootCmd.OutOrStderr(), err, os.Args) {
+			// it without wrapping its own errors. When the update ran and
+			// the original command was re-executed, code is the rerun
+			// child's exit code (0 when the retry succeeded); on every
+			// other leaf it stays 1.
+			handled, code := cli.OfferCLIUpgradeIfRequired(ctx, rootCmd.OutOrStderr(), err, os.Args)
+			if handled {
+				exitCode = code
+			} else {
 				fmt.Fprintln(rootCmd.OutOrStderr(), err)
 			}
 		}
 
 		cancel()
-		os.Exit(1)
+		os.Exit(exitCode)
 	}
 	if cli.ShouldCheckCheckpointPolicyWarning(executed) {
 		cli.WarnCheckpointPolicyIfNeeded(ctx, rootCmd.ErrOrStderr(), versioninfo.Version)

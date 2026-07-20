@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 )
@@ -56,23 +58,30 @@ func PromptAllowed(w io.Writer) bool {
 // command already completed — re-executing would run it twice); a non-nil
 // argv is re-executed with the freshly installed binary (the
 // cli_upgrade_required trigger fires after the command failed, so the
-// rerun is a retry). On a successful re-exec the process exits with the
-// child's exit code and this function does not return.
-func RunUpdate(ctx context.Context, w io.Writer, cmdStr string, argv []string) {
+// rerun is a retry). rerun=true means the original command was re-executed
+// and exitCode is the child's exit code (128+signum when a signal killed
+// it) for the caller to propagate; rerun=false means nothing was rerun —
+// nil argv, installer failure, or spawn failure — and the caller keeps its
+// own exit path. RunUpdate never terminates the process itself, so
+// callers' cleanup still runs.
+func RunUpdate(ctx context.Context, w io.Writer, cmdStr string, argv []string) (exitCode int, rerun bool) {
 	fmt.Fprintf(w, "\nUpdating Entire CLI: %s\n", cmdStr)
 	if err := runInstaller(ctx, cmdStr); err != nil {
 		fmt.Fprintf(w, "Update failed: %v\nTry again later running:\n  %s\n", err, cmdStr)
-		return
+		return 0, false
 	}
 	if len(argv) == 0 {
 		fmt.Fprintln(w, "Update complete. Re-run entire to use the new version.")
-		return
+		return 0, false
 	}
-	rerun := RerunCommandLine(argv)
-	fmt.Fprintf(w, "Update complete. Rerunning the command:\n\n  %s\n\n", rerun)
-	if err := reexec(ctx, argv); err != nil {
-		fmt.Fprintf(w, "Could not rerun automatically (%v). Rerun the command:\n\n  %s\n", err, rerun)
+	rerunLine := RerunCommandLine(argv)
+	fmt.Fprintf(w, "Update complete. Rerunning the command:\n\n  %s\n\n", rerunLine)
+	code, err := reexec(ctx, argv)
+	if err != nil {
+		fmt.Fprintf(w, "Could not rerun automatically (%v). Rerun the command:\n\n  %s\n", err, rerunLine)
+		return 0, false
 	}
+	return code, true
 }
 
 // realReexecCommand reruns the original invocation with the freshly
@@ -80,30 +89,44 @@ func RunUpdate(ctx context.Context, w io.Writer, cmdStr string, argv []string) {
 // the same path the installer just replaced) and the child inherits the
 // terminal, so interactive flows like the login prompts still work. The
 // envUpgradeRerun marker suppresses further update prompts if the rerun
-// fails the same way. On success this does not return — the process
-// exits with the child's exit code. A spawn-and-exit is used instead of
-// syscall.Exec so the one code path covers Windows too.
-func realReexecCommand(ctx context.Context, argv []string) error {
+// fails the same way. It returns the child's exit code — 128+signum when
+// a signal killed the child, matching the shell convention — or an error
+// when the child could not be spawned at all. A spawn-and-wait is used
+// instead of syscall.Exec so the one code path covers Windows too.
+func realReexecCommand(ctx context.Context, argv []string) (int, error) {
 	if len(argv) == 0 {
-		return errors.New("original command unknown")
+		return 0, errors.New("original command unknown")
 	}
 	path, err := exec.LookPath(argv[0])
 	if err != nil {
-		return fmt.Errorf("locate %s: %w", argv[0], err)
+		return 0, fmt.Errorf("locate %s: %w", argv[0], err)
 	}
 	cmd := exec.CommandContext(ctx, path, argv[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = append(os.Environ(), envUpgradeRerun+"=1")
-	if runErr := cmd.Run(); runErr != nil {
-		if exitErr, ok := errors.AsType[*exec.ExitError](runErr); ok {
-			os.Exit(exitErr.ExitCode())
-		}
-		return fmt.Errorf("rerun command: %w", runErr)
+	// On ctx cancel (the parent's signal handler fired) forward an
+	// interrupt instead of the default SIGKILL so the child can unwind
+	// cleanly; WaitDelay hard-kills a child that ignores it. On Windows
+	// Signal(os.Interrupt) is unsupported and the WaitDelay kill applies.
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = 5 * time.Second
+	runErr := cmd.Run()
+	if runErr == nil {
+		return 0, nil
 	}
-	os.Exit(0)
-	return nil
+	exitErr, ok := errors.AsType[*exec.ExitError](runErr)
+	if !ok {
+		return 0, fmt.Errorf("rerun command: %w", runErr)
+	}
+	if code := exitErr.ExitCode(); code >= 0 {
+		return code, nil
+	}
+	if ws, wsOK := exitErr.Sys().(syscall.WaitStatus); wsOK && ws.Signaled() {
+		return 128 + int(ws.Signal()), nil
+	}
+	return 1, nil
 }
 
 // RerunCommandLine reconstructs an invocation for display: argv[0]

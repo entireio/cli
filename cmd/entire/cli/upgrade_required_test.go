@@ -38,7 +38,7 @@ func TestOfferCLIUpgrade_UnrelatedErrorPrintsNothing(t *testing.T) {
 	t.Parallel()
 
 	var out bytes.Buffer
-	handled := offerCLIUpgrade(context.Background(), &out, errors.New("boom"), loginArgv(), upgradeOfferDeps{
+	handled, _ := offerCLIUpgrade(context.Background(), &out, errors.New("boom"), loginArgv(), upgradeOfferDeps{
 		canPrompt: func() bool { t.Error("canPrompt must not be consulted"); return false },
 	})
 	if handled {
@@ -53,12 +53,15 @@ func TestOfferCLIUpgrade_NonInteractivePrintsUpdateAndRerunCommands(t *testing.T
 	t.Parallel()
 
 	var out bytes.Buffer
-	handled := offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
+	handled, exitCode := offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
 		canPrompt: func() bool { return false },
 	})
 
 	if !handled {
 		t.Error("handled = false, want true so main.go skips the raw error")
+	}
+	if exitCode != 1 {
+		t.Errorf("exitCode = %d, want 1 on the guidance-only leaf", exitCode)
 	}
 	got := out.String()
 	if !strings.Contains(got, "This Entire CLI version is no longer supported. Update it:") {
@@ -84,11 +87,12 @@ func TestOfferCLIUpgrade_ConfirmYesRunsSharedUpdateFlow(t *testing.T) {
 	}
 	var calls []updateCall
 	var out bytes.Buffer
-	offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
+	_, exitCode := offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
 		canPrompt: func() bool { return true },
 		confirm:   func(context.Context, string) (bool, error) { return true, nil },
-		runUpdate: func(_ context.Context, _ io.Writer, cmdStr string, argv []string) {
+		runUpdate: func(_ context.Context, _ io.Writer, cmdStr string, argv []string) (int, bool) {
 			calls = append(calls, updateCall{cmdStr: cmdStr, argv: argv})
+			return 3, true
 		},
 	})
 
@@ -102,6 +106,9 @@ func TestOfferCLIUpgrade_ConfirmYesRunsSharedUpdateFlow(t *testing.T) {
 	if strings.Join(calls[0].argv, " ") != strings.Join(loginArgv(), " ") {
 		t.Errorf("runUpdate argv = %v, want the original invocation %v", calls[0].argv, loginArgv())
 	}
+	if exitCode != 3 {
+		t.Errorf("exitCode = %d, want the rerun child's exit code 3", exitCode)
+	}
 }
 
 func TestOfferCLIUpgrade_RerunGuardExplainsStaleBinary(t *testing.T) {
@@ -109,10 +116,11 @@ func TestOfferCLIUpgrade_RerunGuardExplainsStaleBinary(t *testing.T) {
 	t.Setenv("ENTIRE_UPGRADE_RERUN", "1")
 
 	var out bytes.Buffer
-	handled := offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
+	handled, _ := offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
 		canPrompt: func() bool { t.Error("prompt must be suppressed on a post-update rerun"); return true },
-		runUpdate: func(context.Context, io.Writer, string, []string) {
+		runUpdate: func(context.Context, io.Writer, string, []string) (int, bool) {
 			t.Error("update must not run again on a post-update rerun")
+			return 0, false
 		},
 	})
 
@@ -135,11 +143,12 @@ func TestOfferCLIUpgrade_ConfirmNoPrintsCommands(t *testing.T) {
 	t.Parallel()
 
 	var out bytes.Buffer
-	offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
+	_, _ = offerCLIUpgrade(context.Background(), &out, upgradeErr(), loginArgv(), upgradeOfferDeps{
 		canPrompt: func() bool { return true },
 		confirm:   func(context.Context, string) (bool, error) { return false, nil },
-		runUpdate: func(context.Context, io.Writer, string, []string) {
+		runUpdate: func(context.Context, io.Writer, string, []string) (int, bool) {
 			t.Error("update must not run when declined")
+			return 0, false
 		},
 	})
 
