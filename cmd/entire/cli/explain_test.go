@@ -140,6 +140,213 @@ func TestFormatCheckpointSummaryError_CLIMissing(t *testing.T) {
 	}
 }
 
+func TestFormatCheckpointSummaryError_NonClaudeProviderMatrix(t *testing.T) {
+	t.Parallel()
+
+	providers := []struct {
+		name  types.AgentName
+		label string
+	}{
+		{name: agent.AgentNameCodex, label: "Codex"},
+		{name: agent.AgentNameGemini, label: "Gemini"},
+		{name: agent.AgentNameCursor, label: "Cursor"},
+		{name: agent.AgentNameCopilotCLI, label: "Copilot CLI"},
+		{name: agent.AgentNamePi, label: "Pi"},
+	}
+	kinds := []struct {
+		name      string
+		kind      agent.TextGenerationErrorKind
+		label     string
+		rows      []explainRow
+		errSuffix string
+	}{
+		{
+			name:      "auth",
+			kind:      agent.TextGenerationErrorAuth,
+			label:     " authentication failed",
+			rows:      []explainRow{{Label: "message", Value: "provider detail"}},
+			errSuffix: " authentication failed: provider detail",
+		},
+		{
+			name:      "rate limit",
+			kind:      agent.TextGenerationErrorRateLimit,
+			label:     " rejected the summary request due to rate limits or quota",
+			rows:      []explainRow{{Label: "message", Value: "provider detail"}},
+			errSuffix: " rejected the summary request due to rate limits or quota: provider detail",
+		},
+		{
+			name:      "config",
+			kind:      agent.TextGenerationErrorConfig,
+			label:     " rejected the summary request",
+			rows:      []explainRow{{Label: "message", Value: "provider detail"}},
+			errSuffix: " rejected the summary request: provider detail",
+		},
+		{
+			name:      "CLI missing",
+			kind:      agent.TextGenerationErrorCLIMissing,
+			label:     " CLI is not installed or not on PATH",
+			errSuffix: " CLI is not installed or not on PATH",
+		},
+		{
+			name:      "unknown",
+			kind:      agent.TextGenerationErrorUnknown,
+			label:     " failed to generate the summary",
+			rows:      []explainRow{{Label: "detail", Value: "provider detail"}},
+			errSuffix: " failed to generate the summary: provider detail",
+		},
+	}
+
+	for _, provider := range providers {
+		for _, kind := range kinds {
+			t.Run(string(provider.name)+"/"+kind.name, func(t *testing.T) {
+				t.Parallel()
+
+				message := "provider detail"
+				if kind.kind == agent.TextGenerationErrorCLIMissing {
+					message = ""
+				}
+				failure := &agent.TextGenerationError{
+					Err:      errors.New("provider cause"),
+					Provider: provider.name,
+					Kind:     kind.kind,
+					Message:  message,
+				}
+				wantLabel := provider.label + kind.label
+				wantErr := provider.label + kind.errSuffix
+				if kind.kind == agent.TextGenerationErrorCLIMissing && strings.HasSuffix(provider.label, " CLI") {
+					wantLabel = provider.label + " is not installed or not on PATH"
+					wantErr = wantLabel
+				}
+				label, rows, err := formatCheckpointSummaryError(failure, newSummaryAttempt(provider.name, 0))
+				require.Equal(t, wantLabel, label)
+				require.Equal(t, kind.rows, rows)
+				require.EqualError(t, err, wantErr)
+			})
+		}
+	}
+}
+
+func TestFormatCheckpointSummaryError_TextGenerationErrorPrecedence(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		failure   *agent.TextGenerationError
+		wantLabel string
+	}{
+		{
+			name: "specific auth outranks wrapped deadline",
+			failure: &agent.TextGenerationError{
+				Err:      context.DeadlineExceeded,
+				Provider: agent.AgentNameCodex,
+				Kind:     agent.TextGenerationErrorAuth,
+				Message:  "HTTP 401 Unauthorized",
+			},
+			wantLabel: "Codex authentication failed",
+		},
+		{
+			name: "unknown wrapped deadline uses timeout",
+			failure: &agent.TextGenerationError{
+				Err:      context.DeadlineExceeded,
+				Provider: agent.AgentNameCodex,
+				Kind:     agent.TextGenerationErrorUnknown,
+			},
+			wantLabel: "Timed out after 5m0s: provider produced no output",
+		},
+		{
+			name: "unknown wrapped cancellation uses cancellation",
+			failure: &agent.TextGenerationError{
+				Err:      context.Canceled,
+				Provider: agent.AgentNameCodex,
+				Kind:     agent.TextGenerationErrorUnknown,
+			},
+			wantLabel: "Summary generation canceled",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			label, _, err := formatCheckpointSummaryError(test.failure, newSummaryAttempt(agent.AgentNameCodex, 5*time.Minute))
+			require.Equal(t, test.wantLabel, label)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestFormatCheckpointSummaryError_PreservesProviderCause(t *testing.T) {
+	t.Parallel()
+
+	failure := &agent.TextGenerationError{
+		Err:      context.DeadlineExceeded,
+		Provider: agent.AgentNameCodex,
+		Kind:     agent.TextGenerationErrorAuth,
+		Message:  "HTTP 401 Unauthorized",
+	}
+	_, _, err := formatCheckpointSummaryError(failure, newSummaryAttempt(agent.AgentNameCodex, 0))
+
+	var got *agent.TextGenerationError
+	require.ErrorAs(t, err, &got)
+	require.Same(t, failure, got)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestFormatCheckpointSummaryError_UnknownProviderDetails(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		failure  *agent.TextGenerationError
+		attempt  *summaryAttempt
+		wantRows []explainRow
+		wantErr  string
+	}{
+		{
+			name: "exit code only",
+			failure: &agent.TextGenerationError{
+				Provider: agent.AgentNameCodex,
+				Kind:     agent.TextGenerationErrorUnknown,
+				ExitCode: 17,
+			},
+			attempt:  newSummaryAttempt(agent.AgentNameCodex, 0),
+			wantRows: []explainRow{{Label: "detail", Value: "Codex CLI exited with code 17"}},
+			wantErr:  "Codex failed to generate the summary: Codex CLI exited with code 17",
+		},
+		{
+			name: "original cause only",
+			failure: &agent.TextGenerationError{
+				Err:      errors.New("transport exploded"),
+				Provider: agent.AgentNameCodex,
+				Kind:     agent.TextGenerationErrorUnknown,
+			},
+			attempt:  newSummaryAttempt(agent.AgentNameCodex, 0),
+			wantRows: []explainRow{{Label: "detail", Value: "transport exploded"}},
+			wantErr:  "Codex failed to generate the summary: transport exploded",
+		},
+		{
+			name: "legacy empty provider falls back to attempt",
+			failure: &agent.TextGenerationError{
+				Err:     errors.New("legacy failure"),
+				Kind:    agent.TextGenerationErrorUnknown,
+				Message: "legacy failure",
+			},
+			attempt:  newSummaryAttempt(agent.AgentNamePi, 0),
+			wantRows: []explainRow{{Label: "detail", Value: "legacy failure"}},
+			wantErr:  "Pi failed to generate the summary: legacy failure",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			label, rows, err := formatCheckpointSummaryError(test.failure, test.attempt)
+			require.Equal(t, strings.Split(test.wantErr, ":")[0], label)
+			require.Equal(t, test.wantRows, rows)
+			require.EqualError(t, err, test.wantErr)
+		})
+	}
+}
+
 // TestFormatCheckpointSummaryError_TypedBranchesHandleEmptyMessage guards against
 // the null-result-envelope regression: Claude can emit is_error:true with a real
 // HTTP status (401/429/4xx) but result:null, producing a ClaudeError with Message="".
@@ -1141,6 +1348,52 @@ func TestGenerateCheckpointSummary_AdvancesV1Metadata(t *testing.T) {
 	v1After, err := fixture.repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.NoError(t, err)
 	require.NotEqual(t, fixture.v1Hash, v1After.Hash(), "v1 metadata branch must advance after UpdateSummary")
+}
+
+func TestGenerateCheckpointSummary_MissingConfiguredProvider(t *testing.T) {
+	fixture := setupGenerateSummaryFixture(t)
+
+	originalLoad := loadSummarySettings
+	originalGet := getSummaryAgent
+	originalCLI := isSummaryCLIAvailable
+	t.Cleanup(func() {
+		loadSummarySettings = originalLoad
+		getSummaryAgent = originalGet
+		isSummaryCLIAvailable = originalCLI
+	})
+	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
+		return &settings.EntireSettings{
+			Enabled: true,
+			SummaryGeneration: &settings.SummaryGenerationSettings{
+				Provider: string(agent.AgentNameCodex),
+			},
+		}, nil
+	}
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		return &stubTextAgent{name: name, kind: agent.AgentTypeCodex}, nil
+	}
+	isSummaryCLIAvailable = func(types.AgentName) bool { return false }
+
+	var stdout, stderr bytes.Buffer
+	err := generateCheckpointSummary(
+		fixture.ctx,
+		&stdout,
+		&stderr,
+		fixture.store,
+		fixture.cpID,
+		fixture.cpSummary,
+		fixture.content,
+		false,
+		0,
+	)
+	var silentErr *SilentError
+	require.ErrorAs(t, err, &silentErr)
+	var providerFailure *agent.TextGenerationError
+	require.ErrorAs(t, err, &providerFailure)
+	require.Equal(t, agent.AgentNameCodex, providerFailure.Provider)
+	require.Equal(t, agent.TextGenerationErrorCLIMissing, providerFailure.Kind)
+	require.Contains(t, stderr.String(), "Codex CLI is not installed or not on PATH")
+	require.NotContains(t, stderr.String(), "failed to resolve summary provider:")
 }
 
 func TestRunExplainGenerateBlocksWhenPolicyWriteUnsupported(t *testing.T) {

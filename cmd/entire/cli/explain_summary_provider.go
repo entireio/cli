@@ -204,7 +204,13 @@ func ensureSummaryProviderPresent(_ context.Context, name types.AgentName) error
 		return fmt.Errorf("agent %s does not support summary generation", name)
 	}
 	if !isSummaryProviderAvailable(name, ag) {
-		return fmt.Errorf("summary provider %q is configured but its CLI binary is not on PATH; install it or update summary_generation.provider in settings", name)
+		cause := fmt.Errorf("summary provider %q is configured but its CLI binary is not on PATH", name)
+		return &agent.TextGenerationError{
+			Err:      cause,
+			Provider: name,
+			Kind:     agent.TextGenerationErrorCLIMissing,
+			Message:  cause.Error(),
+		}
 	}
 	return nil
 }

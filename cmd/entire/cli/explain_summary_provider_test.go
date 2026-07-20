@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/stretchr/testify/require"
 )
 
 func rowsContain(rows []explainRow, label, value string) bool {
@@ -303,6 +304,31 @@ func TestResolveCheckpointSummaryProvider_ConfiguredProviderNotInstalledReturnsE
 	if !strings.Contains(err.Error(), "not on PATH") {
 		t.Fatalf("unexpected error text: %v", err)
 	}
+}
+
+func TestEnsureSummaryProviderPresent_MissingCLIIsTyped(t *testing.T) {
+	// Cannot use t.Parallel() because package-level lookup functions are stubbed.
+	originalGet := getSummaryAgent
+	originalCLI := isSummaryCLIAvailable
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		isSummaryCLIAvailable = originalCLI
+	})
+
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		return &stubTextAgent{name: name, kind: agent.AgentTypeCodex}, nil
+	}
+	isSummaryCLIAvailable = func(types.AgentName) bool { return false }
+
+	err := ensureSummaryProviderPresent(context.Background(), agent.AgentNameCodex)
+	var failure *agent.TextGenerationError
+	require.ErrorAs(t, err, &failure)
+	require.Equal(t, agent.AgentNameCodex, failure.Provider)
+	require.Equal(t, agent.TextGenerationErrorCLIMissing, failure.Kind)
+	require.Error(t, failure.Err)
+	require.Empty(t, failure.Stderr)
+	require.Zero(t, failure.StdoutBytes)
+	require.Zero(t, failure.ExitCode)
 }
 
 func TestResolveCheckpointSummaryProvider_ConfiguredExternalProvider(t *testing.T) {

@@ -919,6 +919,12 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store che
 	}
 	provider, err := resolveCheckpointSummaryProvider(ctx, w)
 	if err != nil {
+		var providerFailure *agent.TextGenerationError
+		if errors.As(err, &providerFailure) {
+			attempt := newSummaryAttempt(providerFailure.Provider, 0)
+			label, rows, structured := formatCheckpointSummaryError(err, attempt)
+			return renderExplainFailure(errW, label, rows, structured)
+		}
 		return fmt.Errorf("failed to resolve summary provider: %w", err)
 	}
 	scopedTranscript = maybeCompactExternalTranscript(ctx, scopedTranscript, content.Metadata.Agent)
@@ -944,9 +950,7 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store che
 	if err != nil {
 		progressWriter.Flush()
 		label, rows, structured := formatCheckpointSummaryError(err, attempt)
-		styles := newStatusStyles(errW)
-		fmt.Fprint(errW, styles.renderFailure(label, rows))
-		return NewSilentError(structured)
+		return renderExplainFailure(errW, label, rows, structured)
 	}
 	elapsed := time.Since(start)
 
@@ -1111,6 +1115,7 @@ func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, f
 // letting the caller still return a *SilentError for main.go's exit handling.
 func formatCheckpointSummaryError(err error, attempt *summaryAttempt) (string, []explainRow, error) {
 	var claudeErr *claudecode.ClaudeError
+	var providerErr *agent.TextGenerationError
 	switch {
 	case errors.As(err, &claudeErr):
 		switch claudeErr.Kind { //nolint:exhaustive // ClaudeErrorUnknown handled by default
@@ -1152,6 +1157,8 @@ func formatCheckpointSummaryError(err error, attempt *summaryAttempt) (string, [
 			}
 			return label, rows, fmt.Errorf("Claude failed to generate the summary%s", suffix) //nolint:staticcheck // ST1005
 		}
+	case errors.As(err, &providerErr) && providerErr.Kind != agent.TextGenerationErrorUnknown:
+		return formatProviderSummaryError(providerErr, attempt)
 	case errors.Is(err, context.DeadlineExceeded):
 		label, rows := timeoutDiagnostic(err, attempt)
 		structured := errors.New("summary generation timed out")
@@ -1161,8 +1168,87 @@ func formatCheckpointSummaryError(err error, attempt *summaryAttempt) (string, [
 		return label, rows, structured
 	case errors.Is(err, context.Canceled):
 		return "Summary generation canceled", nil, errors.New("summary generation canceled")
+	case providerErr != nil:
+		return formatProviderSummaryError(providerErr, attempt)
 	default:
 		return "Failed to generate summary", []explainRow{{Label: "detail", Value: err.Error()}}, fmt.Errorf("failed to generate summary: %w", err)
+	}
+}
+
+func formatProviderSummaryError(failure *agent.TextGenerationError, attempt *summaryAttempt) (string, []explainRow, error) {
+	displayName := summaryProviderErrorLabel(failure.Provider, attempt)
+	if failure.Kind == agent.TextGenerationErrorCLIMissing {
+		label := displayName + " CLI is not installed or not on PATH"
+		if strings.HasSuffix(displayName, " CLI") {
+			label = displayName + " is not installed or not on PATH"
+		}
+		return label, nil, newFormattedProviderError(label, failure)
+	}
+
+	label := displayName + " failed to generate the summary"
+	switch failure.Kind { //nolint:exhaustive // Unknown and future kinds use the generic provider label.
+	case agent.TextGenerationErrorAuth:
+		label = displayName + " authentication failed"
+	case agent.TextGenerationErrorRateLimit:
+		label = displayName + " rejected the summary request due to rate limits or quota"
+	case agent.TextGenerationErrorConfig:
+		label = displayName + " rejected the summary request"
+	}
+
+	if failure.Kind != agent.TextGenerationErrorUnknown {
+		if failure.Message == "" {
+			return label, nil, newFormattedProviderError(label, failure)
+		}
+		return label,
+			[]explainRow{{Label: "message", Value: failure.Message}},
+			newFormattedProviderError(fmt.Sprintf("%s: %s", label, failure.Message), failure)
+	}
+
+	detail := providerFailureDetail(failure, displayName)
+	return label,
+		[]explainRow{{Label: "detail", Value: detail}},
+		newFormattedProviderError(fmt.Sprintf("%s: %s", label, detail), failure)
+}
+
+type formattedProviderError struct {
+	message string
+	cause   error
+}
+
+func (e *formattedProviderError) Error() string { return e.message }
+func (e *formattedProviderError) Unwrap() error { return e.cause }
+
+func newFormattedProviderError(message string, cause error) error {
+	return &formattedProviderError{message: message, cause: cause}
+}
+
+func summaryProviderErrorLabel(provider types.AgentName, attempt *summaryAttempt) string {
+	if provider == "" && attempt != nil {
+		provider = attempt.provider
+	}
+	if label := agent.SummaryProviderErrorLabel(provider); label != "" {
+		return label
+	}
+	if provider != "" {
+		return string(provider)
+	}
+	return "Provider"
+}
+
+func providerFailureDetail(failure *agent.TextGenerationError, displayName string) string {
+	switch {
+	case failure.Message != "":
+		return failure.Message
+	case strings.TrimSpace(failure.Stderr) != "":
+		return strings.TrimSpace(failure.Stderr)
+	case failure.Err != nil:
+		return failure.Err.Error()
+	case failure.ExitCode > 0:
+		return fmt.Sprintf("%s CLI exited with code %d", displayName, failure.ExitCode)
+	case failure.ExitCode < 0:
+		return displayName + " CLI terminated abnormally — no exit code captured"
+	default:
+		return "no diagnostic detail available from " + displayName + " CLI"
 	}
 }
 
