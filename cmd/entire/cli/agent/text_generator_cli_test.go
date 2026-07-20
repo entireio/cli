@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -475,9 +476,9 @@ func requireTextGenerationError(t *testing.T, err error) *agent.TextGenerationEr
 
 func countConcreteTextGenerationErrors(err error) int {
 	count := 0
+	targetType := reflect.TypeFor[*agent.TextGenerationError]()
 	for err != nil {
-		textGenerationError := &agent.TextGenerationError{}
-		if errors.As(err, &textGenerationError) {
+		if reflect.TypeOf(err) == targetType {
 			count++
 		}
 		err = errors.Unwrap(err)

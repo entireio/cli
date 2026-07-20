@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -109,9 +110,9 @@ func TestPiAgentGenerateText_ClassifiesFallbackFailures(t *testing.T) {
 
 func countPiTextGenerationErrors(err error) int {
 	count := 0
+	targetType := reflect.TypeFor[*agent.TextGenerationError]()
 	for err != nil {
-		textGenerationError := &agent.TextGenerationError{}
-		if errors.As(err, &textGenerationError) {
+		if reflect.TypeOf(err) == targetType {
 			count++
 		}
 		err = errors.Unwrap(err)
