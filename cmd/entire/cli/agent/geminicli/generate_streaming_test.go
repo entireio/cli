@@ -84,9 +84,15 @@ func TestGeminiCLIGenerateTextStreaming_Success(t *testing.T) {
 		t.Fatalf("read fixture: %v", err)
 	}
 
-	g := &GeminiCLIAgent{
-		CommandRunner: testutil.FakeStreamCmd(string(fixture), "", 0),
-	}
+	fake := testutil.FakeStreamCmd(string(fixture), "", 0)
+	var commandName string
+	var commandArgs []string
+	var command *exec.Cmd
+	g := &GeminiCLIAgent{CommandRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		commandName, commandArgs = name, append([]string(nil), args...)
+		command = fake(ctx, name, args...)
+		return command
+	}}
 
 	var phases []agent.ProgressPhase
 	result, err := g.GenerateTextStreaming(context.Background(), "test prompt", "haiku", func(p agent.GenerationProgress) {
@@ -101,6 +107,13 @@ func TestGeminiCLIGenerateTextStreaming_Success(t *testing.T) {
 	// Expect Connecting, FirstToken, Generating (at least once), Done.
 	if len(phases) < 4 {
 		t.Errorf("phases = %v (count %d), want >= 4 (Connecting, FirstToken, Generating+, Done)", phases, len(phases))
+	}
+	if commandName != string(agent.AgentNameGemini) || strings.Join(commandArgs, " ") != "--output-format stream-json -p   --model haiku" {
+		t.Errorf("command = %q %v, want Gemini streaming argv", commandName, commandArgs)
+	}
+	stdin, stdinErr := testutil.ReadCommandStdin(command)
+	if stdinErr != nil || stdin != "test prompt" {
+		t.Errorf("stdin = %q, err = %v; want exact prompt", stdin, stdinErr)
 	}
 }
 

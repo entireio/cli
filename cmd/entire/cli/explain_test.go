@@ -943,7 +943,7 @@ func TestGenerateCheckpointAISummary_StreamingTimeoutBeforeFirstEvent(t *testing
 
 	streamer := &codex.CodexAgent{
 		CommandRunner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-			return exec.CommandContext(ctx, "sh", "-c", "sleep 10")
+			return agenttestutil.BlockingCmd(ctx)
 		},
 	}
 	generator := &summarize.TextGeneratorAdapter{TextGenerator: streamer}
@@ -977,7 +977,7 @@ func TestGenerateCheckpointAISummary_FallbackTimeoutUsesNonStreamingDiagnostic(t
 			if calls == 1 {
 				return streamCall(ctx, name, args...)
 			}
-			return exec.CommandContext(ctx, "sh", "-c", "sleep 10")
+			return agenttestutil.BlockingCmd(ctx)
 		},
 	}
 	generator := &summarize.TextGeneratorAdapter{TextGenerator: streamer}

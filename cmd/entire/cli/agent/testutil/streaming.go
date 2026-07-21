@@ -5,16 +5,26 @@ package testutil
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
+	"time"
 )
 
-const fakeStreamMarkerArg = "__entire_test_fake_stream_process__"
+const (
+	fakeStreamMarkerArg     = "__entire_test_fake_stream_process__"
+	blockingStreamMarkerArg = "__entire_test_blocking_stream_process__"
+)
 
 func init() { //nolint:gochecknoinits // child test binaries must intercept before testing.Main runs
 	args := os.Args
+	if len(args) > 0 && args[len(args)-1] == blockingStreamMarkerArg {
+		time.Sleep(time.Hour)
+		os.Exit(0)
+	}
 	if len(args) < 5 || args[len(args)-4] != fakeStreamMarkerArg {
 		return
 	}
@@ -26,6 +36,32 @@ func init() { //nolint:gochecknoinits // child test binaries must intercept befo
 		os.Exit(125)
 	}
 	os.Exit(exitCode)
+}
+
+// BlockingCmd returns a portable current-test-binary subprocess that remains
+// alive until its context is canceled.
+func BlockingCmd(ctx context.Context) *exec.Cmd {
+	return exec.CommandContext(ctx, os.Args[0], "-test.run=^$", "--", blockingStreamMarkerArg)
+}
+
+// ReadCommandStdin rewinds and reads a command's seekable stdin after a fake
+// subprocess run so tests can pin the exact prompt transport contract.
+func ReadCommandStdin(cmd *exec.Cmd) (string, error) {
+	if cmd == nil || cmd.Stdin == nil {
+		return "", errors.New("command stdin is nil")
+	}
+	seeker, ok := cmd.Stdin.(io.ReadSeeker)
+	if !ok {
+		return "", fmt.Errorf("command stdin %T is not seekable", cmd.Stdin)
+	}
+	if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+		return "", fmt.Errorf("rewind command stdin: %w", err)
+	}
+	data, err := io.ReadAll(seeker)
+	if err != nil {
+		return "", fmt.Errorf("read command stdin: %w", err)
+	}
+	return string(data), nil
 }
 
 func writeDecodedFixture(output *os.File, encoded string) {

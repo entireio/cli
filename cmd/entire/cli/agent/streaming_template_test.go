@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +105,48 @@ func TestStreamingGeneratorTemplate_Generate_NonZeroExitWrapsError(t *testing.T)
 	}
 }
 
+func TestStreamingGeneratorTemplate_Generate_DoneRequiresSuccessfulProcessExit(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name     string
+		exitCode int
+		wantDone bool
+	}{
+		{name: "success", exitCode: 0, wantDone: true},
+		{name: "non-zero exit", exitCode: 23, wantDone: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var phases []agent.ProgressPhase
+			tmpl := &agent.StreamingGeneratorTemplate{
+				AgentName: string(agent.AgentNameCodex),
+				BuildCmd: func(context.Context, string, string) *exec.Cmd {
+					return testutil.FakeStreamCmd("complete", "", test.exitCode)(context.Background(), "fake")
+				},
+				Parser: func(stdout io.Reader, progress agent.ProgressFn) (string, error) {
+					result, err := io.ReadAll(stdout)
+					progress(agent.GenerationProgress{Phase: agent.PhaseDone})
+					return string(result), err
+				},
+			}
+
+			_, err := tmpl.Generate(context.Background(), "prompt", "model", func(p agent.GenerationProgress) {
+				phases = append(phases, p.Phase)
+			})
+			if test.exitCode == 0 && err != nil {
+				t.Fatalf("Generate() error = %v, want success", err)
+			}
+			if test.exitCode != 0 && err == nil {
+				t.Fatal("Generate() error = nil, want process failure")
+			}
+			if gotDone := slices.Contains(phases, agent.PhaseDone); gotDone != test.wantDone {
+				t.Errorf("PhaseDone observed = %v, want %v (phases: %v)", gotDone, test.wantDone, phases)
+			}
+		})
+	}
+}
+
 func TestStreamingGeneratorTemplate_Generate_ContextCancelled(t *testing.T) {
 	t.Parallel()
 
@@ -166,7 +209,7 @@ func TestStreamingGeneratorTemplate_Generate_KillInducedParserFailureUsesContext
 	tmpl := &agent.StreamingGeneratorTemplate{
 		AgentName: "fake",
 		BuildCmd: func(ctx context.Context, _, _ string) *exec.Cmd {
-			return exec.CommandContext(ctx, "sh", "-c", "sleep 10")
+			return testutil.BlockingCmd(ctx)
 		},
 		Parser: func(stdout io.Reader, _ agent.ProgressFn) (string, error) {
 			_, _ = io.Copy(io.Discard, stdout) //nolint:errcheck // cancellation closes the subprocess pipe

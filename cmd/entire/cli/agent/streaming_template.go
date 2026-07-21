@@ -126,7 +126,19 @@ func (t *StreamingGeneratorTemplate) Generate(
 	}
 
 	counter := &countingReader{r: stdout}
-	result, parseErr := t.Parser(counter, progress)
+	var doneProgress *GenerationProgress
+	parserProgress := progress
+	if progress != nil {
+		parserProgress = func(event GenerationProgress) {
+			if event.Phase == PhaseDone {
+				done := event
+				doneProgress = &done
+				return
+			}
+			progress(event)
+		}
+	}
+	result, parseErr := t.Parser(counter, parserProgress)
 
 	// Drain through the counter so StdoutBytes reflects the full subprocess
 	// output even when the parser exited early (e.g. on a recognized
@@ -159,6 +171,9 @@ func (t *StreamingGeneratorTemplate) Generate(
 	}
 
 	if parseErr == nil && waitErr == nil {
+		if doneProgress != nil {
+			progress(*doneProgress)
+		}
 		return result, nil
 	}
 

@@ -141,12 +141,18 @@ func TestCursorGenerateTextStreaming_Success(t *testing.T) {
 		t.Fatalf("read fixture: %v", err)
 	}
 
-	c := &CursorAgent{
-		CommandRunner: testutil.FakeStreamCmd(string(fixture), "", 0),
-	}
+	fake := testutil.FakeStreamCmd(string(fixture), "", 0)
+	var commandName string
+	var commandArgs []string
+	var command *exec.Cmd
+	c := &CursorAgent{CommandRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		commandName, commandArgs = name, append([]string(nil), args...)
+		command = fake(ctx, name, args...)
+		return command
+	}}
 
 	var phases []agent.ProgressPhase
-	result, err := c.GenerateTextStreaming(context.Background(), "test prompt", "", func(p agent.GenerationProgress) {
+	result, err := c.GenerateTextStreaming(context.Background(), "test prompt", "test-model", func(p agent.GenerationProgress) {
 		phases = append(phases, p.Phase)
 	})
 	if err != nil {
@@ -158,6 +164,15 @@ func TestCursorGenerateTextStreaming_Success(t *testing.T) {
 	// Expect Connecting, FirstToken, Generating (>=1), Done.
 	if len(phases) < 4 {
 		t.Errorf("phases = %v (count %d), want >= 4 (Connecting, FirstToken, Generating+, Done)", phases, len(phases))
+	}
+	joinedArgs := strings.Join(commandArgs, " ")
+	wantArgs := "--print --force --trust --workspace " + os.TempDir() + " --output-format stream-json --stream-partial-output --model test-model"
+	if commandName != "agent" || joinedArgs != wantArgs {
+		t.Errorf("command = %q %v, want Cursor isolated streaming argv", commandName, commandArgs)
+	}
+	stdin, stdinErr := testutil.ReadCommandStdin(command)
+	if stdinErr != nil || stdin != "test prompt" {
+		t.Errorf("stdin = %q, err = %v; want exact prompt", stdin, stdinErr)
 	}
 }
 

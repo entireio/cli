@@ -8,6 +8,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/redact"
 )
 
 type mockTextGenerator struct {
@@ -45,6 +46,23 @@ type errorTextGenerator struct {
 	mockTextGenerator
 
 	err error
+}
+
+type streamingMockTextGenerator struct {
+	mockTextGenerator
+
+	err error
+}
+
+func (m *streamingMockTextGenerator) GenerateTextStreaming(
+	_ context.Context,
+	prompt, model string,
+	progress agent.ProgressFn,
+) (string, error) {
+	m.prompt = prompt
+	m.model = model
+	progress(agent.GenerationProgress{Phase: agent.PhaseDone})
+	return m.result, m.err
 }
 
 func (e *errorTextGenerator) GenerateText(context.Context, string, string) (string, error) {
@@ -127,5 +145,32 @@ func TestTextGeneratorAdapter_Generate(t *testing.T) {
 	}
 	if !strings.Contains(mock.prompt, "Fix the bug") {
 		t.Fatalf("prompt did not include condensed transcript: %q", mock.prompt)
+	}
+}
+
+func TestGenerateFromTranscript_DoesNotStoreCallScopedProgress(t *testing.T) {
+	t.Parallel()
+
+	mock := &streamingMockTextGenerator{mockTextGenerator: mockTextGenerator{
+		result: `{"intent":"Intent","outcome":"Outcome","learnings":{"repo":[],"code":[],"workflow":[]},"friction":[],"open_items":[]}`,
+	}}
+	adapter := &TextGeneratorAdapter{TextGenerator: mock}
+	transcript := redact.AlreadyRedacted([]byte(
+		`{"type":"user","message":{"content":"call-scoped progress"}}` + "\n" +
+			`{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}`,
+	))
+	progressCalled := false
+
+	_, err := GenerateFromTranscript(context.Background(), transcript, nil, "", adapter, func(agent.GenerationProgress) {
+		progressCalled = true
+	})
+	if err != nil {
+		t.Fatalf("GenerateFromTranscript() error = %v", err)
+	}
+	if !progressCalled {
+		t.Fatal("progress callback was not invoked")
+	}
+	if adapter.progress != nil {
+		t.Fatal("GenerateFromTranscript stored call-scoped progress on reusable adapter")
 	}
 }

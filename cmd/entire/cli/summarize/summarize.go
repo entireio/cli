@@ -70,9 +70,13 @@ func GenerateFromTranscript(
 	// progress field — type-assert each shape and set it.
 	switch g := generator.(type) {
 	case *ClaudeGenerator:
-		g.progress = progress
+		callGenerator := *g
+		callGenerator.progress = progress
+		generator = &callGenerator
 	case *TextGeneratorAdapter:
-		g.progress = progress
+		callGenerator := *g
+		callGenerator.progress = progress
+		generator = &callGenerator
 	}
 
 	summary, err := generator.Generate(ctx, input)

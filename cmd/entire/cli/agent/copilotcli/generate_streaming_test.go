@@ -82,6 +82,18 @@ func TestParseCopilotStream_ErrorEnvelope(t *testing.T) {
 	}
 }
 
+func TestParseCopilotStream_NonZeroResult(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseCopilotStream(strings.NewReader(`{"type":"result","exitCode":17}`+"\n"), nil)
+	if err == nil {
+		t.Fatal("expected error from non-zero result event")
+	}
+	if !strings.Contains(err.Error(), "non-zero exit code 17") {
+		t.Errorf("error = %q, want decoded result exit code", err)
+	}
+}
+
 func TestParseCopilotStream_EmptyStream(t *testing.T) {
 	t.Parallel()
 
@@ -121,9 +133,15 @@ func TestCopilotCLIGenerateTextStreaming_Success(t *testing.T) {
 		t.Fatalf("read fixture: %v", err)
 	}
 
-	c := &CopilotCLIAgent{
-		CommandRunner: testutil.FakeStreamCmd(string(fixture), "", 0),
-	}
+	fake := testutil.FakeStreamCmd(string(fixture), "", 0)
+	var commandName string
+	var commandArgs []string
+	var command *exec.Cmd
+	c := &CopilotCLIAgent{CommandRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		commandName, commandArgs = name, append([]string(nil), args...)
+		command = fake(ctx, name, args...)
+		return command
+	}}
 
 	var phases []agent.ProgressPhase
 	result, err := c.GenerateTextStreaming(context.Background(), "test prompt", "haiku", func(p agent.GenerationProgress) {
@@ -138,6 +156,13 @@ func TestCopilotCLIGenerateTextStreaming_Success(t *testing.T) {
 	// Expect Connecting, FirstToken, Generating (>=1), Done.
 	if len(phases) < 4 {
 		t.Errorf("phases = %v (count %d), want >= 4 (Connecting, FirstToken, Generating+, Done)", phases, len(phases))
+	}
+	if commandName != "copilot" || strings.Join(commandArgs, " ") != "--output-format json --stream on --allow-all-tools --disable-builtin-mcps --model haiku" {
+		t.Errorf("command = %q %v, want Copilot streaming argv", commandName, commandArgs)
+	}
+	stdin, stdinErr := testutil.ReadCommandStdin(command)
+	if stdinErr != nil || stdin != "test prompt" {
+		t.Errorf("stdin = %q, err = %v; want exact prompt", stdin, stdinErr)
 	}
 }
 

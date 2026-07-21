@@ -147,9 +147,15 @@ func TestCodexGenerateTextStreaming_Success(t *testing.T) {
 		t.Fatalf("read fixture: %v", err)
 	}
 
-	c := &CodexAgent{
-		CommandRunner: testutil.FakeStreamCmd(string(fixture), "", 0),
-	}
+	fake := testutil.FakeStreamCmd(string(fixture), "", 0)
+	var commandName string
+	var commandArgs []string
+	var command *exec.Cmd
+	c := &CodexAgent{CommandRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		commandName, commandArgs = name, append([]string(nil), args...)
+		command = fake(ctx, name, args...)
+		return command
+	}}
 
 	var phases []agent.ProgressPhase
 	result, err := c.GenerateTextStreaming(context.Background(), "test prompt", "haiku", func(p agent.GenerationProgress) {
@@ -163,6 +169,13 @@ func TestCodexGenerateTextStreaming_Success(t *testing.T) {
 	}
 	if len(phases) != 3 {
 		t.Errorf("phases = %v (count %d), want 3 (Connecting, FirstToken, Done)", phases, len(phases))
+	}
+	if commandName != "codex" || strings.Join(commandArgs, " ") != "exec --skip-git-repo-check --json --model haiku -" {
+		t.Errorf("command = %q %v, want codex streaming argv", commandName, commandArgs)
+	}
+	stdin, stdinErr := testutil.ReadCommandStdin(command)
+	if stdinErr != nil || stdin != "test prompt" {
+		t.Errorf("stdin = %q, err = %v; want exact prompt", stdin, stdinErr)
 	}
 }
 
