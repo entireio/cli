@@ -30,10 +30,11 @@ const maxSiblingAutoAdoptScan = 32
 //  2. Immediate sibling repos under the parent directory (seeded / microservices)
 //
 // A candidate is accepted only when exactly one match remains after filtering
-// for recent ACTIVE sessions whose FilesTouched overlaps the staged commit
-// paths. Matching process owner is used only to disambiguate multiple overlap
-// candidates — never as a sole reason to adopt (avoids retiring a live session
-// on an unrelated commit). Ambiguity skips.
+// for recent ACTIVE sessions that (a) share the committing process owner and
+// (b) have FilesTouched overlapping the staged commit paths. Owner match is
+// required so an unrelated sibling touching the same relative filename
+// (README.md, package.json, …) cannot silently steal/retire another repo's
+// live session on a human commit. Overlap alone is never enough. Ambiguity skips.
 //
 // Best-effort: never returns an error to the git hook caller.
 func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
@@ -151,7 +152,7 @@ func collectRegistryAutoAdoptCandidates(
 			out = append(out, cand)
 		}
 	}
-	return selectAutoAdoptCandidates(out)
+	return out
 }
 
 func collectSiblingAutoAdoptCandidates(
@@ -203,7 +204,7 @@ func collectSiblingAutoAdoptCandidates(
 			}
 		}
 	}
-	return selectAutoAdoptCandidates(out)
+	return out
 }
 
 func candidateFromSource(
@@ -239,13 +240,17 @@ func candidateFromLoaded(
 		// Prefer the recorded worktree path when validating source ownership.
 		worktree = state.WorktreePath
 	}
-	// Overlap is required: without it we refuse to retire a live session for a
-	// commit that does not claim the session's touched files.
+	// Both owner match and FilesTouched overlap are required. Overlap alone
+	// would let unrelated sibling repos steal via common relative names;
+	// owner alone would retire a session on an unrelated commit.
 	overlapMatch := filesTouchedOverlap(state.FilesTouched, staged)
 	if !overlapMatch {
 		return autoAdoptCandidate{}, false
 	}
 	ownerMatch := hasOwner && ownerMatches(state.Owner, owner)
+	if !ownerMatch {
+		return autoAdoptCandidate{}, false
+	}
 	return autoAdoptCandidate{
 		SessionID:    state.SessionID,
 		WorktreePath: worktree,
@@ -256,22 +261,6 @@ func candidateFromLoaded(
 	}, true
 }
 
-func selectAutoAdoptCandidates(candidates []autoAdoptCandidate) []autoAdoptCandidate {
-	if len(candidates) <= 1 {
-		return candidates
-	}
-	var ownerMatches []autoAdoptCandidate
-	for _, c := range candidates {
-		if c.OwnerMatch {
-			ownerMatches = append(ownerMatches, c)
-		}
-	}
-	if len(ownerMatches) > 0 {
-		return ownerMatches
-	}
-	return candidates
-}
-
 func isRecentLiveEntry(entry session.LiveSessionEntry) bool {
 	if entry.Phase != session.PhaseActive {
 		return false
@@ -279,7 +268,8 @@ func isRecentLiveEntry(entry session.LiveSessionEntry) bool {
 	if entry.LastInteractionTime == nil {
 		return false
 	}
-	return time.Since(*entry.LastInteractionTime) <= adoptRecentWindow
+	// LiveSessionMaxAge matches adoptRecentWindow; registry TTL sweep uses the same bound.
+	return time.Since(*entry.LastInteractionTime) <= session.LiveSessionMaxAge
 }
 
 func ownerMatches(recorded *proclive.Identity, current proclive.Identity) bool {

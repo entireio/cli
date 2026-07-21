@@ -100,3 +100,48 @@ func TestShouldRegisterLive_RejectsTombstone(t *testing.T) {
 		t.Fatal("tombstoned session must not register")
 	}
 }
+
+func TestRegisterLiveSession_NilStateNoPanic(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if err := RegisterLiveSession(nil, "/tmp/git"); err != nil {
+		t.Fatalf("RegisterLiveSession(nil) = %v, want nil", err)
+	}
+}
+
+func TestListLiveSessions_SweepsExpiredEntries(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	stale := time.Now().Add(-LiveSessionMaxAge - time.Hour)
+	fresh := time.Now()
+	staleState := &State{
+		SessionID:           "live-reg-stale-001",
+		AgentType:           agent.AgentTypeClaudeCode,
+		Phase:               PhaseActive,
+		WorktreePath:        "/tmp/repo-stale",
+		LastInteractionTime: &stale,
+		FilesTouched:        []string{"a.txt"},
+	}
+	freshState := &State{
+		SessionID:           "live-reg-fresh-001",
+		AgentType:           agent.AgentTypeClaudeCode,
+		Phase:               PhaseActive,
+		WorktreePath:        "/tmp/repo-fresh",
+		LastInteractionTime: &fresh,
+		FilesTouched:        []string{"b.txt"},
+	}
+	commonDir := filepath.Join(t.TempDir(), ".git")
+	if err := RegisterLiveSession(staleState, commonDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterLiveSession(freshState, commonDir); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := ListLiveSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].SessionID != freshState.SessionID {
+		t.Fatalf("expected only fresh entry after TTL sweep, got %+v", entries)
+	}
+}

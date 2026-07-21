@@ -17,16 +17,18 @@ import (
 
 func TestAutoAdopt_PrepareCommitMsg_CrossCommonDirSibling(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
 
 	base := t.TempDir()
 	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
 	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
 
 	sessionID := "test-auto-adopt-sibling-001"
-	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"feature.txt"})
+	// Distinctive path + matching owner: intentional multi-repo adopt.
+	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"services/billing/handler.go"}, true)
 
-	testutil.WriteFile(t, targetRepo, "feature.txt", "agent change\n")
-	testutil.GitAdd(t, targetRepo, "feature.txt")
+	testutil.WriteFile(t, targetRepo, "services/billing/handler.go", "agent change\n")
+	testutil.GitAdd(t, targetRepo, "services/billing/handler.go")
 	t.Chdir(targetRepo)
 
 	tryAutoAdoptCrossCommonDirSession(context.Background())
@@ -59,15 +61,42 @@ func TestAutoAdopt_PrepareCommitMsg_CrossCommonDirSibling(t *testing.T) {
 	}
 }
 
+func TestAutoAdopt_SkipsUnrelatedSiblingSameRelativePath(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+
+	// Same relative filename as the steal case (README.md) but no owner match.
+	seedAutoAdoptSourceSession(t, sourceRepo, "test-auto-adopt-steal-readme", []string{"README.md"}, false)
+
+	testutil.WriteFile(t, targetRepo, "README.md", "unrelated human edit\n")
+	testutil.GitAdd(t, targetRepo, "README.md")
+	t.Chdir(targetRepo)
+
+	tryAutoAdoptCrossCommonDirSession(context.Background())
+
+	targetStore := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	adopted, err := targetStore.Load(context.Background(), "test-auto-adopt-steal-readme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted != nil {
+		t.Fatal("same relative path without owner match must not steal sibling session")
+	}
+}
+
 func TestAutoAdopt_PrepareCommitMsg_ViaLiveRegistry(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
 
 	// Non-sibling temp dirs: only the live registry can discover the source.
 	sourceRepo := setupAdoptRepo(t)
 	targetRepo := setupAdoptRepo(t)
 
 	sessionID := "test-auto-adopt-registry-001"
-	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"feature.txt"})
+	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"feature.txt"}, true)
 
 	testutil.WriteFile(t, targetRepo, "feature.txt", "agent change\n")
 	testutil.GitAdd(t, targetRepo, "feature.txt")
@@ -102,14 +131,15 @@ func TestAutoAdopt_PrepareCommitMsg_ViaLiveRegistry(t *testing.T) {
 
 func TestAutoAdopt_SkipsWhenAmbiguous(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
 
 	base := t.TempDir()
 	sourceA := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
 	sourceC := setupAdoptRepoAt(t, filepath.Join(base, "repo-c"))
 	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
 
-	seedAutoAdoptSourceSession(t, sourceA, "test-auto-adopt-ambig-a", []string{"feature.txt"})
-	seedAutoAdoptSourceSession(t, sourceC, "test-auto-adopt-ambig-c", []string{"feature.txt"})
+	seedAutoAdoptSourceSession(t, sourceA, "test-auto-adopt-ambig-a", []string{"feature.txt"}, true)
+	seedAutoAdoptSourceSession(t, sourceC, "test-auto-adopt-ambig-c", []string{"feature.txt"}, true)
 
 	testutil.WriteFile(t, targetRepo, "feature.txt", "agent change\n")
 	testutil.GitAdd(t, targetRepo, "feature.txt")
@@ -129,12 +159,13 @@ func TestAutoAdopt_SkipsWhenAmbiguous(t *testing.T) {
 
 func TestAutoAdopt_SkipsWithoutFilesTouchedOverlap(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
 
 	base := t.TempDir()
 	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
 	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
 
-	seedAutoAdoptSourceSession(t, sourceRepo, "test-auto-adopt-no-overlap", []string{"other.txt"})
+	seedAutoAdoptSourceSession(t, sourceRepo, "test-auto-adopt-no-overlap", []string{"other.txt"}, true)
 
 	testutil.WriteFile(t, targetRepo, "feature.txt", "agent change\n")
 	testutil.GitAdd(t, targetRepo, "feature.txt")
@@ -148,18 +179,19 @@ func TestAutoAdopt_SkipsWithoutFilesTouchedOverlap(t *testing.T) {
 		t.Fatal(err)
 	}
 	if adopted != nil {
-		t.Fatal("must not auto-adopt without FilesTouched overlap or owner match")
+		t.Fatal("must not auto-adopt without FilesTouched overlap")
 	}
 }
 
 func TestAutoAdopt_SkipsWhenLocalActiveSessionExists(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
 
 	base := t.TempDir()
 	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
 	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
 
-	seedAutoAdoptSourceSession(t, sourceRepo, "test-auto-adopt-remote", []string{"feature.txt"})
+	seedAutoAdoptSourceSession(t, sourceRepo, "test-auto-adopt-remote", []string{"feature.txt"}, true)
 
 	localID := "test-auto-adopt-local"
 	lastInteraction := time.Now().Add(-1 * time.Minute)
@@ -210,7 +242,7 @@ func setupAdoptRepoAt(t *testing.T, repoDir string) string {
 	return realRepoDir
 }
 
-func seedAutoAdoptSourceSession(t *testing.T, sourceRepo, sessionID string, filesTouched []string) {
+func seedAutoAdoptSourceSession(t *testing.T, sourceRepo, sessionID string, filesTouched []string, withOwner bool) {
 	t.Helper()
 
 	transcriptPath := claudeAdoptTranscriptPath(t, sourceRepo, sessionID)
@@ -222,6 +254,14 @@ func seedAutoAdoptSourceSession(t *testing.T, sourceRepo, sessionID string, file
 	}
 
 	lastInteraction := time.Now().Add(-1 * time.Minute)
+	var owner *proclive.Identity
+	if withOwner {
+		id, ok := proclive.ResolveOwner()
+		if !ok {
+			t.Fatal("withOwner requested but ResolveOwner failed")
+		}
+		owner = &id
+	}
 	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
 	if err := sourceStore.Save(context.Background(), &session.State{
 		SessionID:             sessionID,
@@ -236,33 +276,29 @@ func seedAutoAdoptSourceSession(t *testing.T, sourceRepo, sessionID string, file
 		LastPrompt:            "cross-repo work",
 		FilesTouched:          filesTouched,
 		StepCount:             1,
+		Owner:                 owner,
 	}); err != nil {
 		t.Fatal(err)
 	}
 }
 
+func requireResolveOwner(t *testing.T) {
+	t.Helper()
+	if _, ok := proclive.ResolveOwner(); !ok {
+		t.Skip("ResolveOwner unavailable on this platform")
+	}
+}
+
 func TestAutoAdopt_SkipsOwnerMatchWithoutOverlap(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
 
 	base := t.TempDir()
 	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
 	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
 
-	// FilesTouched does not overlap staged feature.txt.
-	seedAutoAdoptSourceSession(t, sourceRepo, "test-auto-adopt-owner-only", []string{"other.txt"})
-
-	// Inject a fake owner matching ResolveOwner if available; overlap still required.
-	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
-	state, err := sourceStore.Load(context.Background(), "test-auto-adopt-owner-only")
-	if err != nil || state == nil {
-		t.Fatal(err)
-	}
-	if owner, ok := proclive.ResolveOwner(); ok {
-		state.Owner = &owner
-		if err := sourceStore.Save(context.Background(), state); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// Owner matches but FilesTouched does not overlap staged feature.txt.
+	seedAutoAdoptSourceSession(t, sourceRepo, "test-auto-adopt-owner-only", []string{"other.txt"}, true)
 
 	testutil.WriteFile(t, targetRepo, "feature.txt", "agent change\n")
 	testutil.GitAdd(t, targetRepo, "feature.txt")

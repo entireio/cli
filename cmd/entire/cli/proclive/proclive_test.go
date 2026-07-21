@@ -42,7 +42,7 @@ func TestCheck_HostMismatchIsUnknown(t *testing.T) {
 
 func TestIsTransient(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"entire", "sh", "bash", "ZSH", " dash ", "Fish", "go"} {
+	for _, name := range []string{"entire", "sh", "bash", "ZSH", " dash ", "Fish", "go", "git", "Git.exe"} {
 		if !isTransient(name) {
 			t.Errorf("isTransient(%q) = false, want true", name)
 		}

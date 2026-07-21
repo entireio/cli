@@ -221,7 +221,14 @@ func newHooksGitPrepareCommitMsgCmd() *cobra.Command {
 			}
 			// When an ACTIVE agent session lives in another git common dir,
 			// adopt it into this repo before trailer insertion (#1439).
-			tryAutoAdoptCrossCommonDirSession(g.ctx)
+			// Skip the same sources PrepareCommitMsg skips (merge/squash):
+			// adopting there would retire a live session with no trailer written.
+			switch source {
+			case "merge", "squash":
+				// no auto-adopt
+			default:
+				tryAutoAdoptCrossCommonDirSession(g.ctx)
+			}
 			hookErr := g.strategy.PrepareCommitMsg(g.ctx, commitMsgFile, source)
 			g.logCompleted(hookErr)
 
