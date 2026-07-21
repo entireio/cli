@@ -143,10 +143,22 @@ jobs:
     uses: ./.github/workflows/e2e-windows.yml
     secrets: inherit
 
+  # Cover the git-refs checkpoint backend — the default for fresh `entire enable`
+  # setups — which the matrix above does not exercise (it pins git-branch). Agent
+  # (claude-code) and backend (git-refs) are fixed by the reusable workflow's
+  # input defaults, so this leg always covers exactly one agent on one backend.
+  e2e-git-refs:
+    uses: ./.github/workflows/e2e-checkpoint-store.yml
+    permissions:
+      actions: read
+      contents: read
+      copilot-requests: write
+    secrets: inherit
+
   notify-slack:
     runs-on: ubuntu-latest
-    needs: [e2e-tests, e2e-windows]
-    if: ${{ always() && (needs.e2e-tests.result == 'failure' || needs.e2e-windows.result == 'failure') && github.event_name == 'push' }}
+    needs: [e2e-tests, e2e-windows, e2e-git-refs]
+    if: ${{ always() && (needs.e2e-tests.result == 'failure' || needs.e2e-windows.result == 'failure' || needs.e2e-git-refs.result == 'failure') && github.event_name == 'push' }}
     steps:
       # Classify the failed jobs into two severities:
       #   RED    — a "reliable" agent (or Windows) failed. These pass on every

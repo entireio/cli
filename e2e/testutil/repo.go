@@ -169,7 +169,27 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 		}
 	})
 
+	// Under the git-refs backend, checkpoints live in per-checkpoint refs and
+	// nothing should ever create the entire/checkpoints/v1 metadata branch. A v1
+	// branch appearing means some flow seeded it despite git-refs being primary
+	// (the enable-time regression this guards against). Registered last so it
+	// runs before the repo dir is removed (cleanups are LIFO).
+	if UsingGitRefs() {
+		t.Cleanup(func() { assertNoCheckpointV1Branch(t, dir) })
+	}
+
 	return state
+}
+
+// assertNoCheckpointV1Branch fails the test if a local entire/checkpoints/v1
+// branch exists in dir. Only meaningful under the git-refs backend; git-branch
+// legitimately creates v1.
+func assertNoCheckpointV1Branch(t *testing.T, dir string) {
+	t.Helper()
+	hash := strings.TrimSpace(gitOutputSafe(dir, "rev-parse", "--verify", "--quiet", "refs/heads/"+checkpointRefV1))
+	if hash != "" {
+		t.Errorf("git-refs backend: unexpected %s branch was created (%s); no flow should seed v1 under git-refs", checkpointRefV1, hash)
+	}
 }
 
 func checkpointReadRef() string {

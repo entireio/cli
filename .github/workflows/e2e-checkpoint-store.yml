@@ -26,6 +26,25 @@ on:
         options:
           - git-branch
           - git-refs
+  # Reusable entry point so e2e.yml can run a fixed agent/backend leg (e.g.
+  # claude-code against git-refs) as part of the on-push matrix. The `inputs`
+  # context is shared by workflow_dispatch and workflow_call, so the jobs below
+  # read `inputs.*` for both triggers.
+  workflow_call:
+    inputs:
+      agent:
+        # Fixed to claude-code by default: the on-push leg in e2e.yml relies on
+        # this and passes no agent, so that leg always covers exactly one agent.
+        # A future caller may still override it explicitly.
+        description: "Agent to run"
+        required: false
+        type: string
+        default: "claude-code"
+      checkpoint_store:
+        description: "Checkpoint storage backend to run the suite against"
+        required: false
+        type: string
+        default: "git-refs"
 
 jobs:
   # Build the agent matrix dynamically: a single selected agent, or all of them
@@ -38,9 +57,10 @@ jobs:
       - id: set
         # Pass the input through env rather than interpolating it into the script:
         # `type: choice` only constrains the UI, so a REST-API dispatch could inject
-        # shell metacharacters here otherwise.
+        # shell metacharacters here otherwise. `inputs.agent` covers both the
+        # workflow_dispatch and workflow_call triggers.
         env:
-          AGENT_INPUT: ${{ github.event.inputs.agent }}
+          AGENT_INPUT: ${{ inputs.agent }}
         run: |
           input="$AGENT_INPUT"
           if [ -n "$input" ]; then
