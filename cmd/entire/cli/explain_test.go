@@ -267,9 +267,14 @@ func TestFormatCheckpointSummaryError_TextGenerationErrorPrecedence(t *testing.T
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			label, _, err := formatCheckpointSummaryError(test.failure, newSummaryAttempt(agent.AgentNameCodex, 5*time.Minute))
+			label, rows, structured := formatCheckpointSummaryError(test.failure, newSummaryAttempt(agent.AgentNameCodex, 5*time.Minute))
 			require.Equal(t, test.wantLabel, label)
-			require.Error(t, err)
+			var output bytes.Buffer
+			err := renderExplainFailure(&output, label, rows, structured)
+			require.ErrorIs(t, err, test.failure.Err)
+			var got *agent.TextGenerationError
+			require.ErrorAs(t, err, &got)
+			require.Same(t, test.failure, got)
 		})
 	}
 }
@@ -1182,7 +1187,7 @@ func TestGenerateCheckpointAISummary_FallbackTimeoutUsesNonStreamingDiagnostic(t
 		CommandRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
 			calls++
 			if calls == 1 {
-				return streamCall(ctx, name, args...)
+				return streamCall(context.Background(), name, args...)
 			}
 			return agenttestutil.BlockingCmd(ctx)
 		},

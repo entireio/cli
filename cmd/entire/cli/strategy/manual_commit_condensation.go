@@ -625,14 +625,45 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 	// scopedTranscript is sliced from redactedTranscript, which was redacted earlier in CondenseSession.
 	summary, err := summarize.GenerateFromTranscript(summarizeCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, state.AgentType, generator, nil) // no progress in the auto-summary hot path
 	if err != nil {
-		logging.Warn(summarizeCtx, "summary generation failed",
-			slog.String("session_id", state.SessionID),
-			slog.String("error", err.Error()))
+		attrs := []any{slog.String("session_id", state.SessionID)}
+		attrs = append(attrs, summaryGenerationFailureLogAttrs(err)...)
+		logging.Warn(summarizeCtx, "summary generation failed", attrs...)
 		return nil
 	}
 	logging.Info(summarizeCtx, "summary generated",
 		slog.String("session_id", state.SessionID))
 	return summary
+}
+
+func summaryGenerationFailureLogAttrs(err error) []any {
+	var failure *agent.TextGenerationError
+	if errors.As(err, &failure) {
+		kind := "unknown"
+		switch failure.Kind { //nolint:exhaustive // Unknown is the safe default.
+		case agent.TextGenerationErrorAuth:
+			kind = "auth"
+		case agent.TextGenerationErrorRateLimit:
+			kind = "rate_limit"
+		case agent.TextGenerationErrorConfig:
+			kind = "config"
+		case agent.TextGenerationErrorCLIMissing:
+			kind = "cli_missing"
+		}
+		return []any{
+			slog.String("failure_kind", kind),
+			slog.String("provider", string(failure.Provider)),
+			slog.Int("exit_code", failure.ExitCode),
+			slog.Int("stdout_bytes", failure.StdoutBytes),
+			slog.Int("stderr_bytes", len(failure.Stderr)),
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return []any{slog.String("failure_kind", "deadline")}
+	}
+	if errors.Is(err, context.Canceled) {
+		return []any{slog.String("failure_kind", "canceled")}
+	}
+	return []any{slog.String("failure_kind", "other")}
 }
 
 // buildSummaryGenerator returns a Generator based on the configured summary provider.

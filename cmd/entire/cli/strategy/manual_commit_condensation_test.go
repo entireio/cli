@@ -3,6 +3,8 @@ package strategy
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +30,26 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/pi"
 )
+
+func TestSummaryGenerationFailureLogAttrsExcludeProviderContent(t *testing.T) {
+	t.Parallel()
+
+	const secret = "user prompt must not enter persistent logs"
+	failure := &agent.TextGenerationError{
+		Err:         errors.New(secret),
+		Stderr:      secret,
+		StdoutBytes: 42,
+		Provider:    agent.AgentNameCodex,
+		Kind:        agent.TextGenerationErrorAuth,
+		Message:     secret,
+		ExitCode:    7,
+	}
+
+	attrs := fmt.Sprint(summaryGenerationFailureLogAttrs(failure))
+	require.NotContains(t, attrs, secret)
+	require.Contains(t, attrs, "codex")
+	require.Contains(t, attrs, "auth")
+}
 
 // calculateTokenUsage is a test helper that looks up an agent by type and
 // calculates token usage from pre-loaded transcript bytes.

@@ -1161,13 +1161,13 @@ func formatCheckpointSummaryError(err error, attempt *summaryAttempt) (string, [
 		return formatProviderSummaryError(providerErr, attempt)
 	case errors.Is(err, context.DeadlineExceeded):
 		label, rows := timeoutDiagnostic(err, attempt)
-		structured := errors.New("summary generation timed out")
+		message := "summary generation timed out"
 		if attempt.deadline > 0 {
-			structured = fmt.Errorf("summary generation did not return within the %s safety deadline", formatSummaryTimeout(attempt.deadline))
+			message = fmt.Sprintf("summary generation did not return within the %s safety deadline", formatSummaryTimeout(attempt.deadline))
 		}
-		return label, rows, structured
+		return label, rows, newFormattedProviderError(message, err)
 	case errors.Is(err, context.Canceled):
-		return "Summary generation canceled", nil, errors.New("summary generation canceled")
+		return "Summary generation canceled", nil, newFormattedProviderError("summary generation canceled", err)
 	case providerErr != nil:
 		return formatProviderSummaryError(providerErr, attempt)
 	default:
