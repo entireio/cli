@@ -10,8 +10,6 @@ import (
 	"strings"
 	"sync"
 	"unicode"
-
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 )
 
 // Directory constants
@@ -52,15 +50,6 @@ const MetadataBranchName = "entire/checkpoints/v1"
 // TrailsBranchName is the orphan branch used to store trail metadata.
 // Trails are branch-centric work tracking abstractions that link to checkpoints by branch name.
 const TrailsBranchName = "entire/trails/v1"
-
-// CheckpointPath returns the sharded storage path for a checkpoint ID.
-// Uses first 2 characters as shard (256 buckets), remaining as folder name.
-// Example: "a3b2c4d5e6f7" -> "a3/b2c4d5e6f7"
-//
-// Deprecated: Use checkpointID.Path() directly instead.
-func CheckpointPath(checkpointID id.CheckpointID) string {
-	return checkpointID.Path()
-}
 
 // worktreeRootCache caches the worktree root to avoid repeated git commands.
 // The cache is keyed by the current working directory to handle directory changes.

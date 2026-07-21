@@ -538,6 +538,122 @@ func TestLocalMode_ImplicitCurrentBranchExcludesDefaultBranchHistory(t *testing.
 	}
 }
 
+// TestLocalMode_ImplicitCurrentBranchOnDefaultBranchIncludesMergedWork is the
+// regression test for ENT-1188: on the default branch there is no parent
+// history to exclude, so work done on feature branches and merged into it
+// (summary.Branch is the feature branch, but the checkpoint trailer is
+// reachable from the default branch's HEAD) must appear in the dispatch.
+// Before the fix, branchLocalRevRange returned <default>..HEAD, which is empty
+// on an up-to-date default branch, so every such checkpoint was dropped and
+// the dispatch came back empty.
+func TestLocalMode_ImplicitCurrentBranchOnDefaultBranchIncludesMergedWork(t *testing.T) {
+	dir := t.TempDir()
+	stubGeneratedLocalDispatch(t)
+	testutil.InitRepo(t, dir)
+	addOriginRemote(t, dir)
+
+	// A single commit on the default branch carrying a checkpoint trailer,
+	// simulating merged feature-branch work now reachable from HEAD.
+	testutil.WriteFile(t, dir, "feature.md", "ship it")
+	testutil.GitAdd(t, dir, "feature.md")
+	commitWithMessage(t, dir, trailers.FormatCheckpoint("feature work", mustCheckpointID(t, testCheckpointID)))
+
+	createdAt := time.Now().UTC()
+	seedCommittedCheckpoint(t, dir, seededCheckpoint{
+		id:           testCheckpointID,
+		branch:       "my-feature",
+		createdAt:    createdAt,
+		filesTouched: []string{"feature.md"},
+		outcome:      testLocalFallbackText,
+	})
+
+	// Resolve the actual default branch name (go-git's PlainInit default) so
+	// the test does not hard-code master vs main.
+	repo, err := git.PlainOpenWithOptions(dir, &git.PlainOpenOptions{DetectDotGit: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultBranch := head.Name().Short()
+
+	oldNow := nowUTC
+	nowUTC = func() time.Time { return createdAt.Add(time.Hour) }
+	t.Cleanup(func() { nowUTC = oldNow })
+
+	t.Chdir(dir)
+
+	got, err := Run(context.Background(), Options{
+		Mode:                  ModeLocal,
+		Since:                 "7d",
+		Branches:              []string{defaultBranch},
+		ImplicitCurrentBranch: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Repos) != 1 || len(got.Repos[0].Sections) == 0 || len(got.Repos[0].Sections[0].Bullets) == 0 ||
+		got.Repos[0].Sections[0].Bullets[0].Text != testLocalFallbackText {
+		t.Fatalf("merged feature-branch work missing from default-branch dispatch: %+v", got)
+	}
+}
+
+// TestLocalMode_IncludesReachableCheckpointMissingFromLocalStore is the other
+// half of the ENT-1188 fix: dispatch --local must summarize work reachable from
+// HEAD by commit trailer even when the checkpoint itself is absent from the
+// local checkout (the common case — checkpoints are pushed to the remote from
+// other worktrees and never fetched into this checkout). The commit subject is
+// always available from git log, so the bullet falls back to it without any
+// (slow) per-checkpoint network fetch. Before the fix, enumeration relied on
+// store.List, which only sees local checkpoints, so this work was invisible.
+func TestLocalMode_IncludesReachableCheckpointMissingFromLocalStore(t *testing.T) {
+	dir := t.TempDir()
+	stubGeneratedLocalDispatch(t)
+	testutil.InitRepo(t, dir)
+	addOriginRemote(t, dir)
+
+	// A commit on the default branch carrying a checkpoint trailer, but the
+	// checkpoint is intentionally NOT seeded into the local store.
+	const subject = "landed remote work"
+	testutil.WriteFile(t, dir, "feature.md", "ship it")
+	testutil.GitAdd(t, dir, "feature.md")
+	commitWithMessage(t, dir, trailers.FormatCheckpoint(subject, mustCheckpointID(t, testCheckpointID)))
+
+	repo, err := git.PlainOpenWithOptions(dir, &git.PlainOpenOptions{DetectDotGit: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultBranch := head.Name().Short()
+
+	oldNow := nowUTC
+	nowUTC = func() time.Time { return time.Now().UTC().Add(time.Hour) }
+	t.Cleanup(func() { nowUTC = oldNow })
+
+	t.Chdir(dir)
+
+	got, err := Run(context.Background(), Options{
+		Mode:                  ModeLocal,
+		Since:                 "7d",
+		Branches:              []string{defaultBranch},
+		ImplicitCurrentBranch: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Repos) != 1 || len(got.Repos[0].Sections) == 0 || len(got.Repos[0].Sections[0].Bullets) == 0 {
+		t.Fatalf("reachable-but-unfetched checkpoint missing from dispatch: %+v", got)
+	}
+	if got.Repos[0].Sections[0].Bullets[0].Text != subject {
+		t.Fatalf("expected bullet from commit subject %q, got %q", subject, got.Repos[0].Sections[0].Bullets[0].Text)
+	}
+}
+
 func TestLocalMode_AllBranchesRestrictsToLocalBranches(t *testing.T) {
 	dir := t.TempDir()
 	stubGeneratedLocalDispatch(t)
@@ -685,7 +801,7 @@ func TestReachableCheckpointIDsInRange_LimitsLogToWindowAndCheckpointTrailers(t 
 	script := "#!/bin/sh\n" +
 		"if [ \"$3\" = \"log\" ]; then\n" +
 		"  printf '%s\\n' \"$@\" > \"$TEST_GIT_ARGS_FILE\"\n" +
-		"  printf 'subject\\n\\nEntire-Checkpoint: " + testCheckpointID + "\\000'\n" +
+		"  printf '2026-04-02T10:00:00Z\\000subject\\n\\nEntire-Checkpoint: " + testCheckpointID + "\\000\\000'\n" +
 		"  exit 0\n" +
 		"fi\n" +
 		"exit 1\n"
@@ -697,7 +813,8 @@ func TestReachableCheckpointIDsInRange_LimitsLogToWindowAndCheckpointTrailers(t 
 	t.Setenv("TEST_GIT_ARGS_FILE", argsFile)
 
 	since := time.Date(2026, 4, 1, 12, 30, 0, 0, time.UTC)
-	reachable, err := reachableCheckpointIDsInRange(context.Background(), "/tmp/repo", "origin/main..HEAD", since)
+	until := time.Date(2026, 5, 1, 12, 30, 0, 0, time.UTC)
+	reachable, err := reachableCheckpointIDsInRange(context.Background(), "/tmp/repo", "origin/main..HEAD", since, until)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -716,8 +833,77 @@ func TestReachableCheckpointIDsInRange_LimitsLogToWindowAndCheckpointTrailers(t 
 	if !strings.Contains(args, "--since=2026-04-01T12:30:00Z") {
 		t.Fatalf("expected git log to bound history by since window, got args %q", args)
 	}
+	if !strings.Contains(args, "--until=2026-05-01T12:30:00Z") {
+		t.Fatalf("expected git log to bound history by until window, got args %q", args)
+	}
 	if !strings.Contains(args, "origin/main..HEAD") {
 		t.Fatalf("expected git log to use the supplied rev range, got args %q", args)
+	}
+}
+
+// TestReachableCheckpointIDsInRange_KeepsInWindowTimeDespiteLaterCommit is the
+// regression test for the bugbot finding: a checkpoint referenced by both an
+// in-window commit and a later out-of-window commit must record its in-window
+// time so the caller's [since, until) check does not drop it.
+func TestReachableCheckpointIDsInRange_KeepsInWindowTimeDespiteLaterCommit(t *testing.T) {
+	tmpDir := t.TempDir()
+	gitPath := filepath.Join(tmpDir, "git")
+
+	// git log emits newest-first: the out-of-window commit (after until) comes
+	// before the in-window commit, both referencing the same checkpoint. Only
+	// the in-window one should be recorded.
+	script := "#!/bin/sh\n" +
+		"if [ \"$3\" = \"log\" ]; then\n" +
+		"  printf '2026-06-15T10:00:00Z\\000later subject\\n\\nEntire-Checkpoint: " + testCheckpointID + "\\000\\000'\n" +
+		"  printf '2026-04-10T10:00:00Z\\000in-window subject\\n\\nEntire-Checkpoint: " + testCheckpointID + "\\000\\000'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(gitPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	since := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	reachable, err := reachableCheckpointIDsInRange(context.Background(), "/tmp/repo", "HEAD", since, until)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := reachable[testCheckpointID]
+	if !ok {
+		t.Fatalf("expected checkpoint %s to be reachable via its in-window commit, got %v", testCheckpointID, reachable)
+	}
+	want := time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("expected in-window commit time %s, got %s (later out-of-window commit leaked)", want, got)
+	}
+}
+
+// TestSortCandidatesByRecency covers the trail-review finding: because the
+// trailer fallback pass ranges over a map, candidates must be sorted before
+// returning so dispatch output is stable across runs. Newest first, ties broken
+// by checkpoint ID.
+func TestSortCandidatesByRecency(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	candidates := []candidate{
+		{CheckpointID: "ccc", CreatedAt: base},
+		{CheckpointID: "aaa", CreatedAt: base.Add(2 * time.Hour)},
+		{CheckpointID: "bbb", CreatedAt: base}, // same time as ccc → tiebreak by ID
+		{CheckpointID: "zzz", CreatedAt: base.Add(time.Hour)},
+	}
+	sortCandidatesByRecency(candidates)
+
+	got := make([]string, len(candidates))
+	for i, c := range candidates {
+		got[i] = c.CheckpointID
+	}
+	want := []string{"aaa", "zzz", "bbb", "ccc"} // newest first; bbb < ccc for the tie
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sortCandidatesByRecency order = %v, want %v", got, want)
+		}
 	}
 }
 

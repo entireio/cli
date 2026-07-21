@@ -16,14 +16,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
-	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 
-	"charm.land/huh/v2"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
@@ -1000,83 +997,4 @@ func ClassifyTimestamps(localTime, checkpointTime time.Time) SessionRestoreStatu
 		return StatusCheckpointNewer
 	}
 	return StatusUnchanged
-}
-
-// StatusToText returns a human-readable status string.
-func StatusToText(status SessionRestoreStatus) string {
-	switch status {
-	case StatusNew:
-		return "(new)"
-	case StatusUnchanged:
-		return "(unchanged)"
-	case StatusCheckpointNewer:
-		return "(checkpoint is newer)"
-	case StatusLocalNewer:
-		return "(local is newer)" // shouldn't appear in non-conflict list
-	default:
-		return ""
-	}
-}
-
-// PromptOverwriteNewerLogs asks the user for confirmation to overwrite local
-// session logs that have newer timestamps than the checkpoint versions.
-func PromptOverwriteNewerLogs(errW io.Writer, sessions []SessionRestoreInfo) (bool, error) {
-	if !interactive.CanPromptInteractively() {
-		return false, errors.New("cannot prompt to overwrite local session logs in non-interactive mode; rerun with --force to overwrite or use a TTY to confirm")
-	}
-
-	// Separate conflicting and non-conflicting sessions
-	var conflicting, nonConflicting []SessionRestoreInfo
-	for _, s := range sessions {
-		if s.Status == StatusLocalNewer {
-			conflicting = append(conflicting, s)
-		} else {
-			nonConflicting = append(nonConflicting, s)
-		}
-	}
-
-	fmt.Fprintf(errW, "\nWarning: Local session log(s) have newer entries than the checkpoint:\n")
-	for _, info := range conflicting {
-		// Show prompt if available, otherwise fall back to session ID
-		if info.Prompt != "" {
-			fmt.Fprintf(errW, "  \"%s\"\n", info.Prompt)
-		} else {
-			fmt.Fprintf(errW, "  Session: %s\n", info.SessionID)
-		}
-		fmt.Fprintf(errW, "    Local last entry:      %s\n", info.LocalTime.Local().Format("2006-01-02 15:04:05"))
-		fmt.Fprintf(errW, "    Checkpoint last entry: %s\n", info.CheckpointTime.Local().Format("2006-01-02 15:04:05"))
-	}
-
-	// Show non-conflicting sessions with their status
-	if len(nonConflicting) > 0 {
-		fmt.Fprintf(errW, "\nThese other session(s) will also be restored:\n")
-		for _, info := range nonConflicting {
-			statusText := StatusToText(info.Status)
-			if info.Prompt != "" {
-				fmt.Fprintf(errW, "  \"%s\" %s\n", info.Prompt, statusText)
-			} else {
-				fmt.Fprintf(errW, "  Session: %s %s\n", info.SessionID, statusText)
-			}
-		}
-	}
-
-	fmt.Fprintf(errW, "\nOverwriting will lose the newer local entries.\n\n")
-
-	var confirmed bool
-	form := uiform.New(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Overwrite local session logs with checkpoint versions?").
-				Value(&confirmed),
-		),
-	)
-
-	if err := form.Run(); err != nil {
-		if errors.Is(err, huh.ErrUserAborted) {
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to get confirmation: %w", err)
-	}
-
-	return confirmed, nil
 }

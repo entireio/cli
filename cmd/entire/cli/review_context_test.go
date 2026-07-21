@@ -58,8 +58,8 @@ func TestReviewCheckpointContext_IncludesSummaryAndPromptFallback(t *testing.T) 
 		"summary: add checkpoint context to review prompts; review prompt sees checkpoint summaries; open: cover prompt fallback",
 		promptCheckpointID,
 		"prompt: Implement prompt fallback when summaries are missing",
-		"entire explain <id>",
-		"entire explain <id> --raw-transcript",
+		"entire checkpoint explain <id>",
+		"entire checkpoint explain <id> --raw-transcript",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("review checkpoint context missing %q:\n%s", want, got)

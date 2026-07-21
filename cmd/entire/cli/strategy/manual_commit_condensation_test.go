@@ -291,6 +291,26 @@ func TestSessionStateBackfillModel_PiReadsModelFromTranscript(t *testing.T) {
 	require.Equal(t, "gpt-5.5", model)
 }
 
+func TestSessionStateBackfillModel_ClaudeCodeReadsModelFromTranscript(t *testing.T) {
+	t.Parallel()
+
+	// Claude Code reports the model only on the SessionStart hook payload. When
+	// that never fired (hooks installed mid-session, a resumed session, or a
+	// cleared model hint) the model would otherwise be empty and checkpoints fall
+	// back to "Unknown" attribution (issue #1804). The transcript still records
+	// it on message.model, so backfill recovers it at condensation time.
+	transcript := []byte(strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"cc-uuid","model":"claude-opus-4-8[1m]"}`,
+		`{"type":"assistant","message":{"model":"claude-opus-4-8","id":"m1","role":"assistant","content":[]}}`,
+	}, "\n") + "\n")
+
+	ag, err := agent.GetByAgentType(agent.AgentTypeClaudeCode)
+	require.NoError(t, err)
+
+	model := sessionStateBackfillModel(context.Background(), ag, transcript)
+	require.Equal(t, "claude-opus-4-8", model)
+}
+
 func TestSessionStateBackfillModel_EmptyTranscript(t *testing.T) {
 	t.Parallel()
 

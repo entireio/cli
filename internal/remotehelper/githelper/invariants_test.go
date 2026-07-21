@@ -21,13 +21,43 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+// wrappedSendPackRequest returns the stateless-rpc outer framing
+// `git send-pack --stateless-rpc` emits for a minimal one-command
+// receive-pack request: one outer packet wrapping the inner pkt-line
+// stream, then the outer flush. The command line omits the
+// NUL-separated capability list a real send-pack appends so the
+// result stays shell-safe for printf stubs; handlePush only relays
+// the body, and AppendAgentToReceivePackRequest leaves lines without
+// a NUL unchanged.
+func wrappedSendPackRequest(oldSHA, newSHA, ref string) string {
+	inner := pktLine(oldSHA+" "+newSHA+" "+ref+" report-status\n") + "0000"
+	return fmt.Sprintf("%04x%s0000", len(inner)+4, inner)
+}
+
+// pushFakeTransport returns a fakeTransport advertising oldSHA at
+// testRefMain for receive-pack and answering any service RPC with an
+// empty body.
+func pushFakeTransport(oldSHA string) *fakeTransport {
+	return &fakeTransport{
+		infoRefsResp: func() (io.ReadCloser, error) {
+			return stringRC(serviceAnnouncement(serviceReceivePack,
+				oldSHA+" "+testRefMain+"\x00 report-status\n")), nil
+		},
+		serviceRPCResp: func(string, []byte) (io.ReadCloser, error) {
+			return stringRC(""), nil
+		},
+	}
+}
 
 // TestInvariant_NoSpuriousAckOnTransportError: the server's POST
 // fails before any response body is written. Helper output MUST
@@ -186,18 +216,10 @@ func TestInvariant_AckOnlyAfterFullResponse(t *testing.T) {
 	newSHA := strings.Repeat("b", 40)
 	ref := testRefMain
 
-	ft := &fakeTransport{
-		infoRefsResp: func() (io.ReadCloser, error) {
-			return stringRC(serviceAnnouncement(serviceReceivePack,
-				oldSHA+" "+ref+"\x00 report-status\n")), nil
-		},
-		serviceRPCResp: func(string, []byte) (io.ReadCloser, error) {
-			// Empty response body — server processed the push but
-			// returned no report-status. Helper must surface this
-			// as "no acknowledgement" rather than synthesise one.
-			return stringRC(""), nil
-		},
-	}
+	// The empty ServiceRPC response body means the server processed the
+	// push but returned no report-status. Helper must surface this as
+	// "no acknowledgement" rather than synthesise one.
+	ft := pushFakeTransport(oldSHA)
 
 	cmd := oldSHA + " " + newSHA + " " + ref + "\x00 report-status\n"
 	var stdin bytes.Buffer
@@ -276,26 +298,28 @@ func TestInvariant_PartialRefBatchAllOrNothing(t *testing.T) {
 // reason and leaves the user with bare "send-pack exited with error".
 //
 // A shell stub on PATH plays the role of `git send-pack`: it emits the
-// minimal wire shape handlePush expects (empty wrapped request, then
-// trailing flush + helper-status), and exits 1.
+// wire shape of a server-side rejection (a request WAS sent, so the
+// wrapped request and the cmds_sent-guarded trailing flush are both
+// present before the helper-status), and exits 1.
 func TestInvariant_HelperStatusSurfacedOnSendPackError(t *testing.T) {
 	// No t.Parallel(): t.Setenv("PATH", ...) mutates process-global state.
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == goosWindows {
 		t.Skip("shell-script PATH stub is POSIX-only")
 	}
 
 	ref := testRefMain
+	oldSHA := strings.Repeat("a", 40)
+	newSHA := strings.Repeat("b", 40)
 	helperStatusLine := "error " + ref + " remote rejected: branch protection violation\n"
 
-	// Stub git: emits the outer flush that terminates an empty
-	// send-pack request, drains stdin (refspecs + advertisement +
-	// receive-pack response), then emits the trailing flush +
-	// helper-status line, then exits 1. The exit code mirrors
-	// send-pack's behaviour on per-ref rejection.
+	// Stub git: emits a wrapped one-command request + outer flush,
+	// drains stdin (refspecs + advertisement + receive-pack response),
+	// then emits the trailing flush + helper-status line, then exits 1.
+	// The exit code mirrors send-pack's behaviour on per-ref rejection.
 	stubDir := t.TempDir()
 	stubPath := filepath.Join(stubDir, "git")
 	stub := "#!/bin/sh\n" +
-		"printf '0000'\n" +
+		"printf '%s' '" + wrappedSendPackRequest(oldSHA, newSHA, ref) + "'\n" +
 		"cat > /dev/null\n" +
 		"printf '0000" + helperStatusLine + "'\n" +
 		"exit 1\n"
@@ -304,17 +328,7 @@ func TestInvariant_HelperStatusSurfacedOnSendPackError(t *testing.T) {
 	}
 	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	oldSHA := strings.Repeat("a", 40)
-
-	ft := &fakeTransport{
-		infoRefsResp: func() (io.ReadCloser, error) {
-			return stringRC(serviceAnnouncement(serviceReceivePack,
-				oldSHA+" "+ref+"\x00 report-status\n")), nil
-		},
-		serviceRPCResp: func(string, []byte) (io.ReadCloser, error) {
-			return stringRC(""), nil
-		},
-	}
+	ft := pushFakeTransport(oldSHA)
 
 	// handlePush takes the first "push" line plus a bufio.Reader for
 	// the rest of the batch; readPushBatch terminates on the blank
@@ -346,17 +360,20 @@ func TestInvariant_HelperStatusSurfacedOnSendPackError(t *testing.T) {
 // that phantom ref out of send-pack's view.
 func TestInvariant_PushReusesListForPushAdvertisement(t *testing.T) {
 	// No t.Parallel(): t.Setenv("PATH", ...) mutates process-global state.
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == goosWindows {
 		t.Skip("shell-script PATH stub is POSIX-only")
 	}
 
 	ref := testRefMain
 	oldSHA := strings.Repeat("a", 40)
 
-	// Stub git send-pack: emit the empty-request terminator, drain stdin,
-	// then the trailing flush + a plain "ok" helper-status, exit 0.
+	// Stub git send-pack: emit a wrapped one-command request + outer
+	// flush, drain stdin, then the trailing flush + a plain "ok"
+	// helper-status, exit 0.
 	stubDir := t.TempDir()
-	stub := "#!/bin/sh\nprintf '0000'\ncat > /dev/null\nprintf '0000ok " + ref + "\\n'\nexit 0\n"
+	stub := "#!/bin/sh\n" +
+		"printf '%s' '" + wrappedSendPackRequest(oldSHA, strings.Repeat("b", 40), ref) + "'\n" +
+		"cat > /dev/null\nprintf '0000ok " + ref + "\\n'\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(stubDir, "git"), []byte(stub), 0o755); err != nil {
 		t.Fatalf("writing stub git: %v", err)
 	}
@@ -390,5 +407,147 @@ func TestInvariant_PushReusesListForPushAdvertisement(t *testing.T) {
 
 	if receivePackCalls != 1 {
 		t.Fatalf("receive-pack info/refs fetched %d times; want 1 (push must reuse the list-for-push advertisement)", receivePackCalls)
+	}
+}
+
+// TestInvariant_DryRunPushSkipsReceivePackPOST pins the fix for ENT-1199.
+// On `git push --dry-run`, stateless-rpc send-pack emits no receive-pack
+// request at all — the whole request emission is guarded by !args->dry_run,
+// so its stdout is just the outer flush followed directly by helper-status
+// lines (the trailing flush at send-pack.c:759 is guarded by cmds_sent).
+// The helper must mirror remote-curl.c:rpc_service, which breaks without
+// calling post_rpc when the first packet is a flush: no POST (the server
+// deliberately 400s zero-byte receive-pack bodies), no trailing-flush
+// drain (reading 4 more bytes would eat "ok r" from the status line).
+func TestInvariant_DryRunPushSkipsReceivePackPOST(t *testing.T) {
+	// No t.Parallel(): t.Setenv("PATH", ...) mutates process-global state.
+	if runtime.GOOS == goosWindows {
+		t.Skip("shell-script PATH stub is POSIX-only")
+	}
+
+	ref := testRefMain
+	oldSHA := strings.Repeat("a", 40)
+
+	// Stub git send-pack in dry-run shape: outer flush terminating the
+	// (empty) request, drain stdin, then helper-status with NO trailing
+	// flush, exit 0.
+	stubDir := t.TempDir()
+	stub := "#!/bin/sh\n" +
+		"printf '0000'\n" +
+		"cat > /dev/null\n" +
+		"printf 'ok " + ref + "\\n'\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "git"), []byte(stub), 0o755); err != nil {
+		t.Fatalf("writing stub git: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ft := pushFakeTransport(oldSHA)
+
+	firstLine := "push " + oldSHA + ":" + ref
+	stdin := bufio.NewReader(strings.NewReader("\n"))
+
+	var stdout bytes.Buffer
+	err := handlePush(context.Background(), ft, &refAdvCache{}, firstLine, &Options{dryRun: true}, stdin, &stdout)
+	if err != nil {
+		t.Fatalf("handlePush: %v", err)
+	}
+	if len(ft.rpcCalls) != 0 {
+		t.Errorf("expected no receive-pack POST on dry run, got %d", len(ft.rpcCalls))
+	}
+	if want := "ok " + ref + "\n\n"; stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+// TestInvariant_DryRunPushRealSendPack drives handlePush with the REAL
+// git binary — no shell stub — so the wire-shape assumption behind the
+// dry-run skip (send-pack emits no request and no trailing flush when
+// cmds_sent is 0) is pinned against the installed git, not our model
+// of it. A fast-forward update refs/heads/<old> → HEAD is pushed with
+// --dry-run; the helper must complete without POSTing and relay the
+// "ok" helper-status line.
+func TestInvariant_DryRunPushRealSendPack(t *testing.T) {
+	// No t.Parallel(): t.Chdir mutates process-global state (send-pack
+	// resolves the repo from CWD).
+	repo := t.TempDir()
+	gitRun := func(args ...string) string {
+		t.Helper()
+		base := []string{"-C", repo,
+			"-c", "user.name=test", "-c", "user.email=test@example.com",
+			"-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"}
+		out, err := exec.CommandContext(context.Background(), "git", append(base, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	gitRun("init", "-q")
+	gitRun("commit", "--allow-empty", "-m", "one")
+	oldSHA := gitRun("rev-parse", "HEAD")
+	gitRun("commit", "--allow-empty", "-m", "two")
+	t.Chdir(repo)
+
+	ft := pushFakeTransport(oldSHA)
+
+	firstLine := "push " + testRefMain + ":" + testRefMain
+	stdin := bufio.NewReader(strings.NewReader("\n"))
+
+	var stdout bytes.Buffer
+	err := handlePush(context.Background(), ft, &refAdvCache{}, firstLine, &Options{dryRun: true}, stdin, &stdout)
+	if err != nil {
+		t.Fatalf("handlePush: %v", err)
+	}
+	if len(ft.rpcCalls) != 0 {
+		t.Errorf("expected no receive-pack POST on dry run, got %d", len(ft.rpcCalls))
+	}
+	if want := "ok " + testRefMain + "\n\n"; stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+// TestInvariant_AllRejectedPushSkipsReceivePackPOST: same empty-request
+// wire shape as a dry run, but produced by a batch where send-pack
+// rejected every update client-side (e.g. non-fast-forward without
+// force) — cmds_sent stays 0, nothing is emitted, and the helper-status
+// `error` lines follow the outer flush directly. The helper must skip
+// the POST, relay the error lines, and surface send-pack's exit error.
+func TestInvariant_AllRejectedPushSkipsReceivePackPOST(t *testing.T) {
+	// No t.Parallel(): t.Setenv("PATH", ...) mutates process-global state.
+	if runtime.GOOS == goosWindows {
+		t.Skip("shell-script PATH stub is POSIX-only")
+	}
+
+	ref := testRefMain
+	oldSHA := strings.Repeat("a", 40)
+	helperStatusLine := "error " + ref + " non-fast-forward\n"
+
+	stubDir := t.TempDir()
+	stub := "#!/bin/sh\n" +
+		"printf '0000'\n" +
+		"cat > /dev/null\n" +
+		"printf '" + helperStatusLine + "'\n" +
+		"exit 1\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "git"), []byte(stub), 0o755); err != nil {
+		t.Fatalf("writing stub git: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ft := pushFakeTransport(oldSHA)
+
+	firstLine := "push " + oldSHA + ":" + ref
+	stdin := bufio.NewReader(strings.NewReader("\n"))
+
+	var stdout bytes.Buffer
+	err := handlePush(context.Background(), ft, &refAdvCache{}, firstLine, &Options{}, stdin, &stdout)
+	if err == nil {
+		t.Fatal("expected error from send-pack exit 1")
+	}
+	if len(ft.rpcCalls) != 0 {
+		t.Errorf("expected no receive-pack POST for all-rejected batch, got %d", len(ft.rpcCalls))
+	}
+	if !strings.Contains(stdout.String(), helperStatusLine) {
+		t.Errorf("stdout missing helper-status line; got %q, want substring %q",
+			stdout.String(), helperStatusLine)
 	}
 }

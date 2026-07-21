@@ -59,7 +59,7 @@ func TestShadowStrategy_OneCheckpointPerCommit(t *testing.T) {
 	t.Logf("First commit checkpoint ID: %s", firstCheckpointID)
 
 	// Verify checkpoint exists on entire/checkpoints/v1
-	checkpointPath := paths.CheckpointPath(id.MustCheckpointID(firstCheckpointID))
+	checkpointPath := id.MustCheckpointID(firstCheckpointID).Path()
 	if !env.FileExistsInBranch(paths.MetadataBranchName, checkpointPath+"/"+paths.MetadataFileName) {
 		t.Errorf("Checkpoint metadata should exist at %s on %s branch",
 			checkpointPath, paths.MetadataBranchName)
@@ -305,7 +305,7 @@ func TestShadowStrategy_ShadowBranchCleanedUpAfterCondensation(t *testing.T) {
 
 	// Verify data exists on entire/checkpoints/v1
 	checkpointID := env.GetLatestCheckpointID()
-	checkpointPath := paths.CheckpointPath(id.MustCheckpointID(checkpointID))
+	checkpointPath := id.MustCheckpointID(checkpointID).Path()
 	if !env.FileExistsInBranch(paths.MetadataBranchName, checkpointPath+"/"+paths.MetadataFileName) {
 		t.Error("Checkpoint metadata should exist on entire/checkpoints/v1 branch")
 	}

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
 const testOwner = "entirehq"
@@ -132,83 +132,7 @@ func TestParseGitHubRemote_EntireMirror(t *testing.T) {
 
 // -- Search() tests --
 
-func TestSearch_URLConstruction(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "ghp_test123",
-		Owner:       "myowner",
-		Repo:        "myrepo",
-		Query:       "find bugs",
-		Limit:       10,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if capturedReq.URL.Path != "/search/v1/search" {
-		t.Errorf("path = %s, want /search/v1/search", capturedReq.URL.Path)
-	}
-	if capturedReq.URL.Query().Get("q") != "find bugs" {
-		t.Errorf("q = %s, want 'find bugs'", capturedReq.URL.Query().Get("q"))
-	}
-	if capturedReq.URL.Query().Get("repo") != "myowner/myrepo" {
-		t.Errorf("repo = %s, want 'myowner/myrepo'", capturedReq.URL.Query().Get("repo"))
-	}
-	// types param should NOT be set — the CLI now requests all types
-	if capturedReq.URL.Query().Has("types") {
-		t.Errorf("types param should not be set, got %q", capturedReq.URL.Query().Get("types"))
-	}
-	if capturedReq.URL.Query().Get("limit") != "10" {
-		t.Errorf("limit = %s, want '10'", capturedReq.URL.Query().Get("limit"))
-	}
-	if capturedReq.Header.Get("Authorization") != "Bearer ghp_test123" {
-		t.Errorf("auth header = %s, want 'Bearer ghp_test123'", capturedReq.Header.Get("Authorization"))
-	}
-	if want := versioninfo.UserAgent(); capturedReq.Header.Get("User-Agent") != want {
-		t.Errorf("user-agent = %s, want %q", capturedReq.Header.Get("User-Agent"), want)
-	}
-}
-
-func TestSearch_ZeroLimitOmitsParam(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if capturedReq.URL.Query().Has("limit") {
-		t.Error("limit param should be omitted when zero")
-	}
-}
-
-func TestSearch_ErrorJSON(t *testing.T) {
+func TestCellV4_ErrorJSON(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -218,13 +142,7 @@ func TestSearch_ErrorJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "bad",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
+	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
 	if err == nil {
 		t.Fatal("expected error for 401")
 	}
@@ -233,7 +151,7 @@ func TestSearch_ErrorJSON(t *testing.T) {
 	}
 }
 
-func TestSearch_ErrorRawBody(t *testing.T) {
+func TestCellV4_ErrorRawBody(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -242,13 +160,7 @@ func TestSearch_ErrorRawBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
+	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
 	if err == nil {
 		t.Fatal("expected error for 502")
 	}
@@ -257,7 +169,7 @@ func TestSearch_ErrorRawBody(t *testing.T) {
 	}
 }
 
-func TestSearch_HTMLResponseNon200(t *testing.T) {
+func TestCellV4_HTMLResponseNon200(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -266,13 +178,7 @@ func TestSearch_HTMLResponseNon200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
+	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
 	if err == nil {
 		t.Fatal("expected error for HTML response")
 	}
@@ -282,7 +188,7 @@ func TestSearch_HTMLResponseNon200(t *testing.T) {
 	}
 }
 
-func TestSearch_HTMLResponseOn200(t *testing.T) {
+func TestCellV4_HTMLResponseOn200(t *testing.T) {
 	t.Parallel()
 
 	htmlBody := "<!DOCTYPE html><html><body>Website</body></html>"
@@ -291,13 +197,7 @@ func TestSearch_HTMLResponseOn200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
+	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
 	if err == nil {
 		t.Fatal("expected error for HTML response on 200")
 	}
@@ -306,7 +206,7 @@ func TestSearch_HTMLResponseOn200(t *testing.T) {
 	}
 }
 
-func TestSearch_ErrorFieldOn200(t *testing.T) {
+func TestCellV4_ErrorFieldOn200(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -315,13 +215,7 @@ func TestSearch_ErrorFieldOn200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
+	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
 	if err == nil {
 		t.Fatal("expected error when server returns 200 with error field")
 	}
@@ -330,7 +224,7 @@ func TestSearch_ErrorFieldOn200(t *testing.T) {
 	}
 }
 
-func TestSearch_SuccessWithResults(t *testing.T) {
+func TestCellV4_SuccessWithResults(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -338,13 +232,7 @@ func TestSearch_SuccessWithResults(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "test",
-	})
+	resp, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "test"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +254,7 @@ func TestSearch_SuccessWithResults(t *testing.T) {
 	}
 }
 
-func TestSearch_SuccessWithMultipleTypes(t *testing.T) {
+func TestCellV4_SuccessWithMultipleTypes(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -374,13 +262,7 @@ func TestSearch_SuccessWithMultipleTypes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "auth",
-	})
+	resp, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "auth"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,293 +455,6 @@ func TestSearch_ResultJSONRoundTrip(t *testing.T) {
 	}
 	if decoded.Meta.Score != 0.5 {
 		t.Errorf("decoded score = %f", decoded.Meta.Score)
-	}
-}
-
-func TestSearch_FilterParams(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-		Author:      testAuthor,
-		Date:        testDateWeek,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if capturedReq.URL.Query().Get("author") != testAuthor {
-		t.Errorf("author = %s, want %q", capturedReq.URL.Query().Get("author"), testAuthor)
-	}
-	if capturedReq.URL.Query().Get("date") != testDateWeek {
-		t.Errorf("date = %s, want 'week'", capturedReq.URL.Query().Get("date"))
-	}
-}
-
-func TestSearch_ExplicitRepoParam(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "default-owner",
-		Repo:        "default-repo",
-		Query:       "q",
-		Repos:       []string{"owner-one/repo-a"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got := capturedReq.URL.Query()["repo"]; len(got) != 1 || got[0] != "owner-one/repo-a" {
-		t.Errorf("repo params = %v, want %v", got, []string{"owner-one/repo-a"})
-	}
-}
-
-func TestSearch_DefaultRepoParam(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "default-owner",
-		Repo:        "default-repo",
-		Query:       "q",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got := capturedReq.URL.Query()["repo"]; len(got) != 1 || got[0] != "default-owner/default-repo" {
-		t.Errorf("repo params = %v, want %v", got, []string{"default-owner/default-repo"})
-	}
-}
-
-func TestSearch_AllReposFilterOmitsRepoParam(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "default-owner",
-		Repo:        "default-repo",
-		Query:       "q",
-		Repos:       []string{AllReposFilter},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got := capturedReq.URL.Query()["repo"]; len(got) != 0 {
-		t.Errorf("repo params = %v, want omitted for all-repos search", got)
-	}
-}
-
-func TestSearch_AllReposFlagOmitsRepoParam(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "default-owner",
-		Repo:        "default-repo",
-		Query:       "q",
-		AllRepos:    true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got := capturedReq.URL.Query()["repo"]; len(got) != 0 {
-		t.Errorf("repo params = %v, want omitted for AllRepos=true", got)
-	}
-}
-
-func TestSearch_ExplicitRepoWinsOverAllRepos(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	// --all-repos alongside an explicit owner/name filter must scope to the
-	// explicit repo (the more specific filter wins), not search all repos.
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "default-owner",
-		Repo:        "default-repo",
-		Query:       "q",
-		AllRepos:    true,
-		Repos:       []string{"owner/explicit"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got := capturedReq.URL.Query()["repo"]; len(got) != 1 || got[0] != "owner/explicit" {
-		t.Errorf("repo params = %v, want [owner/explicit]", got)
-	}
-}
-
-func TestSearch_MultipleExplicitReposRejected(t *testing.T) {
-	t.Parallel()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  "http://example.com",
-		GitHubToken: "tok",
-		Owner:       "default-owner",
-		Repo:        "default-repo",
-		Query:       "q",
-		Repos:       []string{"owner-one/repo-a", "owner-two/repo-b"},
-	})
-	if err == nil {
-		t.Fatal("expected error for multiple explicit repo filters")
-	}
-	if got := err.Error(); got != "only one explicit repo filter is currently supported" {
-		t.Errorf("error = %q", got)
-	}
-}
-
-func TestSearch_PageParam(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 2}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-		Page:        2,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if capturedReq.URL.Query().Get("page") != "2" {
-		t.Errorf("page = %s, want '2'", capturedReq.URL.Query().Get("page"))
-	}
-}
-
-func TestSearch_ZeroPageOmitsParam(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if capturedReq.URL.Query().Has("page") {
-		t.Error("page param should be omitted when zero")
-	}
-}
-
-func TestSearch_EmptyFiltersOmitParams(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if capturedReq.URL.Query().Has("author") {
-		t.Error("author param should be omitted when empty")
-	}
-	if capturedReq.URL.Query().Has("date") {
-		t.Error("date param should be omitted when empty")
 	}
 }
 

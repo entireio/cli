@@ -153,11 +153,6 @@ func FormatSourceRef(branch, commitHash string) string {
 	return fmt.Sprintf("%s@%s", branch, shortHash)
 }
 
-// FormatMetadata creates a commit message with metadata trailer.
-func FormatMetadata(message, metadataDir string) string {
-	return fmt.Sprintf("%s\n\n%s: %s\n", message, MetadataTrailerKey, metadataDir)
-}
-
 // FormatShadowCommit creates a commit message for manual-commit strategy checkpoints.
 // Includes Entire-Metadata, Entire-Session, and Entire-Strategy trailers.
 func FormatShadowCommit(message, metadataDir, sessionID string) string {

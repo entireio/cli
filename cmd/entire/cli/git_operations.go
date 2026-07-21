@@ -488,7 +488,9 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
 	}); err != nil {
-		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, fetchTarget, err)
+		// Redact: fetchTarget can be a remote URL with embedded credentials
+		// (CI origin URLs), and this error is logged and shown to users.
+		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, remote.RedactURL(fetchTarget), err)
 	}
 	return nil
 }

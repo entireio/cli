@@ -43,34 +43,45 @@ With Entire, you can:
 
 ## Quick Start
 
+### macOS and Linux
+
+Install with Homebrew:
+
 ```bash
-# To use Homebrew, first tap:
 brew tap entireio/tap
 brew trust entireio/tap
+brew install --cask entire            # stable
+# brew install --cask entire@nightly  # or nightly
+```
 
-# Install stable via Homebrew
-brew install --cask entire
+Or with the install script:
 
-# Or install nightly via Homebrew
-brew install --cask entire@nightly
+```bash
+curl -fsSL https://entire.io/install.sh | bash                          # stable
+# curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly  # or nightly
+```
 
-# Or install stable via install.sh
-curl -fsSL https://entire.io/install.sh | bash
+### Windows
 
-# Or install nightly via install.sh
-curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly
+Install with Scoop:
 
-# Or install stable via Scoop (Windows)
+```powershell
 scoop bucket add entire https://github.com/entireio/scoop-bucket.git
 scoop install entire/cli
+```
 
-# Or install via Go (development/manual setup)
+### Go (development/manual setup)
+
+```bash
 go install github.com/entireio/cli/cmd/entire@latest
 
-# Linux: Add Go binaries to PATH (add to ~/.zshrc or ~/.bashrc if not already configured)
+# Add Go binaries to PATH (add to ~/.zshrc or ~/.bashrc if not already configured)
 export PATH="$HOME/go/bin:$PATH"
+```
 
-# Enable in your project
+### Enable in your project
+
+```bash
 cd your-project && entire enable
 
 # Check status

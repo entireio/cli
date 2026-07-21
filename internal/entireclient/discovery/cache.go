@@ -44,19 +44,11 @@ func LoadCache(cacheDir string) (ClusterCache, error) {
 	return readCacheNoLock(filepath.Join(cacheDir, cacheFileName))
 }
 
-// SaveCache writes the cache to disk atomically under an exclusive flock.
-func SaveCache(cacheDir string, cache ClusterCache) error {
-	return withCacheFileLock(cacheDir, cacheFileName, func(path string) error {
-		return writeCacheNoLock(path, cache)
-	})
-}
-
 // ModifyCache atomically applies fn to the node cache under a single
 // exclusive flock — load, mutate, and write all happen with the lock held.
-// Use this for any read-modify-write sequence; LoadCache followed by
-// SaveCache releases the lock between them and races concurrent writers
-// (e.g. two parallel clone/fetch/push processes updating nodes.json), losing
-// each other's entries.
+// Use this for any read-modify-write sequence, so concurrent writers
+// (e.g. two parallel clone/fetch/push processes updating nodes.json) can't
+// lose each other's entries.
 func ModifyCache(cacheDir string, fn func(ClusterCache) error) error {
 	return modifyCacheFile(cacheDir, cacheFileName, readCacheNoLock, writeCacheNoLock, fn)
 }

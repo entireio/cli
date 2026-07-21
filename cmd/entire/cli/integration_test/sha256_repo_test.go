@@ -29,11 +29,15 @@ func TestSHA256Repository_EnableAndFirstCheckpoint(t *testing.T) {
 	gitOutput(t, env.RepoDir, "add", "README.md")
 	gitOutput(t, env.RepoDir, "commit", "-m", "Initial SHA-256 commit")
 
+	// Pin the git-branch backend: this test asserts the v1-branch condensation
+	// flow in a SHA-256 repo, and first-run enable now defaults new setups to
+	// git-refs.
 	output := env.RunCLI(
 		"enable",
 		"--no-github",
 		"--agent", "claude-code",
 		"--telemetry=false",
+		"--checkpoint-backend", "branch",
 	)
 	if !strings.Contains(output, paths.MetadataBranchName) {
 		t.Fatalf("expected enable to create %s branch, got output:\n%s", paths.MetadataBranchName, output)

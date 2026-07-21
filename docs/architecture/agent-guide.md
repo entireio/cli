@@ -890,7 +890,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 
 ### go-git v5 Bugs
 
-**Do NOT use go-git v5 for `checkout` or `reset --hard` operations.** go-git v5 has a bug where `worktree.Reset()` with `HardReset` and `worktree.Checkout()` incorrectly delete untracked directories even when listed in `.gitignore`. This would destroy `.entire/` and agent config directories. Use the git CLI instead. See `CLAUDE.md` for details and `hard_reset_test.go` for regression tests.
+**Do NOT use go-git v5 for `checkout` or `reset --hard` operations.** go-git v5 has a bug where `worktree.Reset()` with `HardReset` and `worktree.Checkout()` incorrectly delete untracked directories even when listed in `.gitignore`. This would destroy `.entire/` and agent config directories. Use the git CLI instead. See `CLAUDE.md` for details.
 
 ### Repo Root vs Current Working Directory
 

@@ -286,40 +286,6 @@ func setRefHash(repo *git.Repository, refName plumbing.ReferenceName, hash plumb
 	return nil
 }
 
-// IsAncestorOf checks if commit is an ancestor of (or equal to) target.
-// Returns true if target can reach commit by following parent links.
-// Limits search to MaxCommitTraversalDepth commits to avoid excessive traversal.
-func IsAncestorOf(ctx context.Context, repo *git.Repository, commit, target plumbing.Hash) bool {
-	if commit == target {
-		return true
-	}
-
-	iter, err := repo.Log(&git.LogOptions{From: target})
-	if err != nil {
-		return false
-	}
-	defer iter.Close()
-
-	found := false
-	count := 0
-	_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Best-effort search, errors are non-fatal
-		if err := ctx.Err(); err != nil {
-			return err //nolint:wrapcheck // Propagating context cancellation
-		}
-		count++
-		if count > MaxCommitTraversalDepth {
-			return errStop
-		}
-		if c.Hash == commit {
-			found = true
-			return errStop
-		}
-		return nil
-	})
-
-	return found
-}
-
 // ListCheckpoints returns all checkpoints from committed checkpoint storage.
 func ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
 	repo, err := OpenRepository(ctx)
@@ -498,6 +464,17 @@ func resolveAgentType(ctxAgentType types.AgentType, state *SessionState) types.A
 // origin holds the store — when Primary is in Push and the local ref is missing
 // or un-initialized, the local ref is created/updated from origin's
 // remote-tracking ref. Otherwise an empty orphan is created.
+// primaryIsGitRefs reports whether the configured primary checkpoint backend is
+// git-refs. Resolution is fail-soft: any config-load error is treated as the
+// default git-branch backend (returns false), preserving legacy behavior.
+func primaryIsGitRefs(ctx context.Context) bool {
+	cfg, err := settings.LoadCheckpointsConfig(ctx)
+	if err != nil {
+		return false
+	}
+	return checkpoint.PrimaryIsRefs(cfg)
+}
+
 func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 	// Rebind settings/remote resolution to the repository being modified rather
 	// than the ambient working directory, so the "is a checkpoint_remote
@@ -510,6 +487,17 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 
 	refs := checkpoint.ResolveRefs(ctx)
 	primaryName := refs.Primary.Short()
+
+	// Under the git-refs primary backend, checkpoints are written to
+	// per-checkpoint refs and nothing is ever written to the v1 metadata
+	// branch. Seeding an empty orphan v1 here would leave a vestigial,
+	// never-written branch — the surprise a user hit when `entire enable`
+	// selected git-refs yet still created entire/checkpoints/v1. We still adopt
+	// real v1 data that already exists on origin or a checkpoint_remote below
+	// (so legacy checkpoints stay readable); we only suppress the empty-orphan
+	// fallback. Resolution is fail-soft: an unreadable config keeps the legacy
+	// git-branch seeding behavior.
+	skipEmptyOrphan := primaryIsGitRefs(ctx)
 
 	localRef, localErr := repo.Reference(refs.Primary, true)
 	if localErr != nil && !errors.Is(localErr, plumbing.ErrReferenceNotFound) {
@@ -549,6 +537,9 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 		// Nothing usable on the checkpoint remote (fetch skipped/failed or the
 		// remote has no data) — create a fresh orphan that future pushes publish
 		// there. Still never origin.
+		if skipEmptyOrphan {
+			return nil
+		}
 		return createOrphanMetadataRef(ctx, repo, refs)
 	}
 
@@ -599,6 +590,9 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 	}
 
 	// No local or origin ref — create an empty orphan.
+	if skipEmptyOrphan {
+		return nil
+	}
 	return createOrphanMetadataRef(ctx, repo, refs)
 }
 
@@ -1527,25 +1521,6 @@ func branchExistsCLI(ctx context.Context, branchName string) error {
 		return fmt.Errorf("branch %s not found: %w", branchName, err)
 	}
 	return nil
-}
-
-// HardResetWithProtection performs a git reset --hard to the specified commit.
-// Uses the git CLI instead of go-git because go-git's HardReset incorrectly
-// deletes untracked directories (like .entire/) even when they're in .gitignore.
-// Returns the short commit ID (7 chars) on success for display purposes.
-func HardResetWithProtection(ctx context.Context, commitHash plumbing.Hash) (shortID string, err error) {
-	hashStr := commitHash.String()
-	cmd := exec.CommandContext(ctx, "git", "reset", "--hard", hashStr)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("reset failed: %s: %w", strings.TrimSpace(string(output)), err)
-	}
-
-	// Return short commit ID for display
-	shortID = hashStr
-	if len(shortID) > 7 {
-		shortID = shortID[:7]
-	}
-	return shortID, nil
 }
 
 // collectUntrackedFiles collects untracked files in the working directory that are
