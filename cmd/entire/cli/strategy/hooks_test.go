@@ -1752,16 +1752,22 @@ func TestGenerateChainedContent(t *testing.T) {
 		t.Error("chained content should resolve hook directory from $0")
 	}
 
-	// Should check file presence (not -x) so mode-0644 husky hooks still chain
-	expectedCheck := `[ -f "$_entire_hook_dir/pre-push` + backupSuffix + `" ]`
-	if !strings.Contains(result, expectedCheck) {
-		t.Errorf("chained content should check -f on backup, got:\n%s", result)
+	// Executable backups run directly (preserve shebang); non-exec fall back to sh -e.
+	expectedExecCheck := `[ -x "$_entire_hook_dir/pre-push` + backupSuffix + `" ]`
+	if !strings.Contains(result, expectedExecCheck) {
+		t.Errorf("chained content should check -x on backup, got:\n%s", result)
 	}
-
-	// Should run backup via sh -e (husky-compatible) with all arguments
-	expectedExec := `sh -e "$_entire_hook_dir/pre-push` + backupSuffix + `" "$@"`
-	if !strings.Contains(result, expectedExec) {
-		t.Errorf("chained content should sh -e backup with $@, got:\n%s", result)
+	expectedDirect := `"$_entire_hook_dir/pre-push` + backupSuffix + `" "$@"`
+	if !strings.Contains(result, expectedDirect) {
+		t.Errorf("chained content should direct-exec executable backup, got:\n%s", result)
+	}
+	expectedFileCheck := `elif [ -f "$_entire_hook_dir/pre-push` + backupSuffix + `" ]`
+	if !strings.Contains(result, expectedFileCheck) {
+		t.Errorf("chained content should fall back to -f for non-exec backups, got:\n%s", result)
+	}
+	expectedSh := `sh -e "$_entire_hook_dir/pre-push` + backupSuffix + `" "$@"`
+	if !strings.Contains(result, expectedSh) {
+		t.Errorf("chained content should sh -e non-exec backup with $@, got:\n%s", result)
 	}
 }
 
@@ -1780,8 +1786,14 @@ func TestGenerateChainedContent_PostRewritePreservesStdinForBackup(t *testing.T)
 	if !strings.Contains(result, `entire hooks git post-rewrite "$1" < "$_entire_stdin" 2>/dev/null || true`) {
 		t.Fatalf("post-rewrite chained content should replay stdin into Entire handler, got:\n%s", result)
 	}
+	if !strings.Contains(result, `[ -x "$_entire_hook_dir/post-rewrite`+backupSuffix+`" ]`) {
+		t.Fatalf("post-rewrite chained content should check -x on backup, got:\n%s", result)
+	}
+	if !strings.Contains(result, `"$_entire_hook_dir/post-rewrite`+backupSuffix+`" "$@" < "$_entire_stdin"`) {
+		t.Fatalf("post-rewrite chained content should direct-exec executable backup with stdin, got:\n%s", result)
+	}
 	if !strings.Contains(result, `sh -e "$_entire_hook_dir/post-rewrite`+backupSuffix+`" "$@" < "$_entire_stdin"`) {
-		t.Fatalf("post-rewrite chained content should sh -e replay stdin into backup hook, got:\n%s", result)
+		t.Fatalf("post-rewrite chained content should sh -e replay stdin into non-exec backup, got:\n%s", result)
 	}
 }
 
@@ -2005,6 +2017,36 @@ func TestGenerateChainedContent_RunsMode0644Backup(t *testing.T) {
 	}
 	if _, err := os.Stat(sentinel); err != nil {
 		t.Fatalf("mode-0644 backup should have run via sh -e: %v", err)
+	}
+}
+
+func TestGenerateChainedContent_RunsExecutableShebangBackup(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	backupName := "pre-push" + backupSuffix
+	backupPath := filepath.Join(tmp, backupName)
+	sentinel := filepath.Join(tmp, "ran")
+	// Non-shell shebang: must be direct-exec'd, not forced through `sh -e`.
+	backupBody := "#!/usr/bin/env python3\nopen(r'" + sentinel + "', 'w').close()\n"
+	if err := os.WriteFile(backupPath, []byte(backupBody), 0o755); err != nil {
+		t.Fatalf("write backup: %v", err)
+	}
+
+	base := "#!/bin/sh\n# Entire CLI hooks\ntrue\n"
+	script := generateChainedContent(base, "pre-push")
+	scriptPath := filepath.Join(tmp, "pre-push")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write chained hook: %v", err)
+	}
+
+	cmd := exec.CommandContext(context.Background(), "sh", scriptPath)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("chained hook failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("executable shebang backup should have run via direct exec: %v", err)
 	}
 }
 

@@ -680,8 +680,9 @@ func removeEntireHooksFromDir(dir string) (int, error) {
 // generateChainedContent appends a chain call to the base hook content,
 // so the pre-existing hook (backed up to .pre-entire) is called after our hook.
 //
-// Uses `[ -f ]` + `sh -e` (husky's pattern) rather than `[ -x ]` + direct exec:
-// husky user hooks are often mode 0644 and are still run via `sh -e`.
+// Executable backups are run directly so shebang interpreters (Python, Node,
+// …) keep working. Non-executable backups (common for husky mode-0644 hooks)
+// fall back to `sh -e`, matching husky's own runner.
 func generateChainedContent(baseContent, hookName string) string {
 	if hookName == "post-rewrite" {
 		return generatePostRewriteChainedContent(baseContent)
@@ -689,10 +690,12 @@ func generateChainedContent(baseContent, hookName string) string {
 
 	return baseContent + fmt.Sprintf(`%s
 _entire_hook_dir="$(dirname "$0")"
-if [ -f "$_entire_hook_dir/%s%s" ]; then
+if [ -x "$_entire_hook_dir/%s%s" ]; then
+    "$_entire_hook_dir/%s%s" "$@"
+elif [ -f "$_entire_hook_dir/%s%s" ]; then
     sh -e "$_entire_hook_dir/%s%s" "$@"
 fi
-`, chainComment, hookName, backupSuffix, hookName, backupSuffix)
+`, chainComment, hookName, backupSuffix, hookName, backupSuffix, hookName, backupSuffix, hookName, backupSuffix)
 }
 
 func generatePostRewriteChainedContent(baseContent string) string {
@@ -711,10 +714,12 @@ trap 'rm -f "$_entire_stdin"' EXIT
 	return replayPrefix + body + fmt.Sprintf(`
 %s
 _entire_hook_dir="$(dirname "$0")"
-if [ -f "$_entire_hook_dir/post-rewrite%s" ]; then
+if [ -x "$_entire_hook_dir/post-rewrite%s" ]; then
+    "$_entire_hook_dir/post-rewrite%s" "$@" < "$_entire_stdin"
+elif [ -f "$_entire_hook_dir/post-rewrite%s" ]; then
     sh -e "$_entire_hook_dir/post-rewrite%s" "$@" < "$_entire_stdin"
 fi
-`, chainComment, backupSuffix, backupSuffix)
+`, chainComment, backupSuffix, backupSuffix, backupSuffix, backupSuffix)
 }
 
 // hookCmdPrefix returns the command prefix for hook scripts and warning messages.
