@@ -1166,10 +1166,10 @@ func TestAttach_ReviewWithExistingCheckpointErrors(t *testing.T) {
 }
 
 // Explicit-target mode: the platform review-provenance flow supplies a
-// server-minted checkpoint ID and the reviewed commit's SHA. The attach must
-// create that checkpoint bound to the commit via metadata (commit_sha), even
-// when HEAD carries no Entire-Checkpoint trailer, and must never amend HEAD.
-func TestAttach_ReviewExplicitTargetCreatesShaBoundCheckpoint(t *testing.T) {
+// server-minted checkpoint ID. The attach must create that checkpoint even
+// when HEAD carries no Entire-Checkpoint trailer, must never amend HEAD, and
+// records no commit SHA (the association is the caller's concern).
+func TestAttach_ReviewExplicitTargetCreatesCheckpoint(t *testing.T) {
 	setupAttachTestRepo(t)
 	// A reachable origin with no metadata branch is the normal first-checkpoint
 	// case and must be accepted as a genuinely new explicit target.
@@ -1255,7 +1255,7 @@ func TestAttach_ReviewExplicitTargetCreatesShaBoundCheckpoint(t *testing.T) {
 		t.Errorf("session metadata Kind = %q, want agent_review", metadata.Kind)
 	}
 
-	// The commit-SHA-bound review checkpoint is not the session's code
+	// The explicit-target review checkpoint is not the session's code
 	// checkpoint. Preserve the session-stop checkpoint and leave its empty base
 	// untouched so amend hooks and resume/session output never treat targetID as
 	// trailer-linked session state.

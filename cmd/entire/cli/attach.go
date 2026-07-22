@@ -855,8 +855,9 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	// Trailer-linked attaches establish the session's code-checkpoint linkage:
 	// BaseCommit lets later commits/amends recognize the session, and
 	// LastCheckpointID is the trailer the amend hook restores. An explicit-target
-	// review checkpoint is instead bound through commit_sha metadata and must not
-	// replace the session's own checkpoint/base or appear in resume/session output.
+	// checkpoint's commit association is managed externally by the caller, so it
+	// must not replace the session's own checkpoint/base or appear in
+	// resume/session output.
 	if !opts.explicitTarget() {
 		if state.BaseCommit == "" {
 			if head, headErr := repo.Head(); headErr == nil {
