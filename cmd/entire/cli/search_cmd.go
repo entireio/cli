@@ -197,33 +197,22 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				return fmt.Errorf("parsing remote URL: %w", err)
 			}
 
-			serviceURL := os.Getenv("ENTIRE_SEARCH_URL")
-			if serviceURL == "" {
-				// Search lives on the data API host. Fall back to
-				// api.BaseURL() so ENTIRE_API_BASE_URL applies; the search
-				// package's DefaultServiceURL is only consulted by callers
-				// that bypass this entry point.
-				serviceURL = api.BaseURL()
-			}
-
-			ghToken, err := resolveSearchToken(ctx, serviceURL, insecureHTTPAuth)
-			if err != nil {
-				return err
-			}
+			// Semantic search goes to the v4 query-serve path (entire-api
+			// cell gateway) via newSemanticSearcher, which fans out across
+			// cells and mints per-cell identity tokens itself (ENT-1055).
+			searcher := newSemanticSearcher(insecureHTTPAuth)
 
 			searchCfg := search.Config{
-				ServiceURL:  serviceURL,
-				GitHubToken: ghToken,
-				Owner:       owner,
-				Repo:        repoName,
-				Repos:       repos,
-				AllRepos:    allRepos,
-				Query:       query,
-				Limit:       limitFlag,
-				Page:        pageFlag,
-				Author:      authorFlag,
-				Date:        dateFlag,
-				Branch:      branchFlag,
+				Owner:    owner,
+				Repo:     repoName,
+				Repos:    repos,
+				AllRepos: allRepos,
+				Query:    query,
+				Limit:    limitFlag,
+				Page:     pageFlag,
+				Author:   authorFlag,
+				Date:     dateFlag,
+				Branch:   branchFlag,
 			}
 
 			// Use wildcard query when only filters are provided
@@ -236,6 +225,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				searchCfg.Limit = search.DefaultLimit
 				styles := newStatusStyles(w)
 				model := newSearchModel(nil, "", 0, searchCfg, styles, buildCodeSearchOpts(ctx, owner, repoName, nil, false, insecureHTTPAuth))
+				model.semanticSearch = searcher
 				model.mode = modeSearch
 				model.input.Focus()
 				model.codeLoading = false // don't fetch until a query is entered
@@ -254,9 +244,12 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			searchCfg.Limit = search.DefaultLimit
 			searchCfg.Page = 0 // let API default to page 1
 
-			resp, err := search.Search(ctx, searchCfg)
+			resp, err := searcher(ctx, searchCfg)
 			if err != nil {
 				return fmt.Errorf("search failed: %w", err)
+			}
+			for _, warning := range resp.Warnings {
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+warning)
 			}
 
 			// JSON output: explicit flag or piped/redirected stdout
@@ -294,6 +287,8 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				}
 			}
 			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles, codeOpts)
+			model.semanticSearch = searcher
+			model.warning = strings.Join(resp.Warnings, "; ")
 			p := tea.NewProgram(model)
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("TUI error: %w", err)
@@ -320,27 +315,6 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	cmd.RegisterFlagCompletionFunc("repo", completeRepoFlag) //nolint:errcheck,gosec // only fails if the flag isn't defined; defined directly above
 
 	return cmd
-}
-
-// resolveSearchToken returns a bearer scoped to the search service host.
-// In split-host deployments this triggers an RFC 8693 exchange so the bearer
-// carries the data-API audience rather than the auth-host one; single-host
-// setups hit the same-host shortcut and return the core token unchanged.
-// insecureHTTPAuth opts into non-loopback http:// resources at the
-// tokenmanager layer, matching the per-command --insecure-http-auth pattern
-// used by NewAuthenticatedAPIClient and newRecapClient.
-func resolveSearchToken(ctx context.Context, serviceURL string, insecureHTTPAuth bool) (string, error) {
-	if insecureHTTPAuth {
-		auth.EnableInsecureHTTP()
-	}
-	token, err := auth.ResolveDataAPIToken(ctx, serviceURL)
-	if errors.Is(err, auth.ErrNotLoggedIn) {
-		return "", errors.New("not authenticated. Run 'entire login' to authenticate")
-	}
-	if err != nil {
-		return "", fmt.Errorf("reading credentials: %w", err)
-	}
-	return token, nil
 }
 
 // completeRepoFlag returns shell-completion suggestions for the search
@@ -517,7 +491,7 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 	coreClient, err := coreapi.New()
 	if err != nil {
 		if errors.Is(err, auth.ErrNotLoggedIn) {
-			return nil, errors.New("not authenticated. Run 'entire login' to authenticate")
+			return nil, loginHintErr(err)
 		}
 		return nil, fmt.Errorf("resolving control-plane client: %w", err)
 	}
@@ -581,7 +555,7 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 	})
 	if err != nil {
 		if errors.Is(err, auth.ErrNotLoggedIn) {
-			return nil, errors.New("not authenticated. Run 'entire login' to authenticate")
+			return nil, loginHintErr(err)
 		}
 		return nil, fmt.Errorf("code search: %w", err)
 	}

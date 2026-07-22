@@ -66,14 +66,14 @@ func TestSetupClaudeHooks_AddsAllRequiredHooks(t *testing.T) {
 	if len(settings.Hooks.UserPromptSubmit) == 0 {
 		t.Error("UserPromptSubmit hook should exist")
 	}
-	if !hasHookWithMatcher(settings.Hooks.PreToolUse, "Task") {
-		t.Error("PreToolUse[Task] hook should exist")
+	if !hasHookWithMatcher(settings.Hooks.PreToolUse, "Agent") {
+		t.Error("PreToolUse[Agent] hook should exist")
 	}
-	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "Task") {
-		t.Error("PostToolUse[Task] hook should exist")
+	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "Agent") {
+		t.Error("PostToolUse[Agent] hook should exist")
 	}
-	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "TodoWrite") {
-		t.Error("PostToolUse[TodoWrite] hook should exist")
+	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate") {
+		t.Error("PostToolUse[TaskCreate|TaskUpdate] hook should exist")
 	}
 
 }
@@ -146,15 +146,15 @@ func TestSetupClaudeHooks_PreservesExistingSettings(t *testing.T) {
 		t.Error("existing CustomTool hook should be preserved")
 	}
 
-	// User's Task hook should be preserved alongside our hook
+	// User's own Task hook should be preserved (enable never removes non-Entire hooks)
 	taskHooks := getAllHookCommands(settings.Hooks.PreToolUse, "Task")
 	if !containsCommand(taskHooks, "echo user-task-hook") {
 		t.Errorf("user's Task hook should be preserved, got: %v", taskHooks)
 	}
 
-	// Our hooks should also be added
-	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "Task") {
-		t.Error("PostToolUse[Task] hook should be added")
+	// Our hooks should be added under the current subagent matcher
+	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "Agent") {
+		t.Error("PostToolUse[Agent] hook should be added")
 	}
 }
 

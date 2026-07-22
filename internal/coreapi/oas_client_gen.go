@@ -363,6 +363,12 @@ type Invoker interface {
 	//
 	// GET /identity/handles/{provider}/{handle}
 	ResolveHandle(ctx context.Context, params ResolveHandleParams) (*ResolvedIdentity, error)
+	// ResolveMirrorPlacements invokes resolveMirrorPlacements operation.
+	//
+	// Resolve the pullable cluster placements of a mirrored upstream (clone discovery).
+	//
+	// GET /mirrors/placements
+	ResolveMirrorPlacements(ctx context.Context, params ResolveMirrorPlacementsParams) (*ResolvePlacementsOutputBody, error)
 	// RevokeProjectAccess invokes revokeProjectAccess operation.
 	//
 	// Revoke project access by grantee id.
@@ -6714,6 +6720,133 @@ func (c *Client) sendResolveHandle(ctx context.Context, params ResolveHandlePara
 	defer body.Close()
 
 	result, err := decodeResolveHandleResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ResolveMirrorPlacements invokes resolveMirrorPlacements operation.
+//
+// Resolve the pullable cluster placements of a mirrored upstream (clone discovery).
+//
+// GET /mirrors/placements
+func (c *Client) ResolveMirrorPlacements(ctx context.Context, params ResolveMirrorPlacementsParams) (*ResolvePlacementsOutputBody, error) {
+	res, err := c.sendResolveMirrorPlacements(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendResolveMirrorPlacements(ctx context.Context, params ResolveMirrorPlacementsParams) (res *ResolvePlacementsOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/mirrors/placements"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "provider" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "provider",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			return e.EncodeValue(conv.StringToString(string(params.Provider)))
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "owner" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "owner",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			return e.EncodeValue(conv.StringToString(params.Owner))
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "repo" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "repo",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			return e.EncodeValue(conv.StringToString(params.Repo))
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ResolveMirrorPlacementsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ResolveMirrorPlacementsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeResolveMirrorPlacementsResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

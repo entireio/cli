@@ -476,6 +476,109 @@ func TestRunExplainAuto_CommitWithoutTrailer(t *testing.T) {
 	}
 }
 
+// TestShouldFallBackToCommitResolution pins runExplainAuto's fallback
+// decision: commit resolution may run ONLY when the positional target matched
+// no committed or temporary checkpoint. A failure from a step AFTER a
+// successful match that merely wraps checkpoint.ErrCheckpointNotFound (in the
+// field: "failed to save summary: checkpoint not found", from a summary
+// backfill against a backend missing the checkpoint) must NOT trigger the
+// fallback — it was masked as `no checkpoint or commit found matching ...`
+// for a checkpoint the same command had just resolved.
+func TestShouldFallBackToCommitResolution(t *testing.T) {
+	runExplainAutoTestRepo(t)
+
+	// A genuine target miss, produced by the real checkpoint path.
+	var out, errOut bytes.Buffer
+	missErr := runExplainCheckpoint(context.Background(), &out, &errOut, "abababababab", false, false, false, false, false, false, false, 0)
+	require.Error(t, missErr)
+	require.True(t, shouldFallBackToCommitResolution(missErr),
+		"a genuine target miss must fall back to commit resolution")
+	require.ErrorIs(t, missErr, checkpoint.ErrCheckpointNotFound,
+		"the target-miss error must keep wrapping the public sentinel")
+
+	// A post-resolution failure that wraps the same sentinel must not.
+	saveErr := fmt.Errorf("failed to save summary: %w", checkpoint.ErrCheckpointNotFound)
+	require.False(t, shouldFallBackToCommitResolution(saveErr),
+		"a post-resolution failure wrapping ErrCheckpointNotFound must surface verbatim, not be masked by the commit fallback")
+
+	require.False(t, shouldFallBackToCommitResolution(errors.New("network down")),
+		"unrelated errors never fall back")
+}
+
+// TestRunExplainAuto_PostResolutionErrorSurfacesVerbatim guards the adjacent
+// contract end-to-end, for both the read-only and --generate entry points:
+// when the target RESOLVES via the committed-checkpoint prefix match but a
+// later read step fails hard, runExplainAuto must surface that failure —
+// naming the resolved checkpoint — instead of running the commit fallback.
+// The fault injector is the pinned "a ULID is never read from the branch"
+// routing contract: the checkpoint is listed (List unions both backends) but
+// its read routes to refs only, where the on-demand ref fetch fails hard in a
+// repo with no reachable remote.
+func TestRunExplainAuto_PostResolutionErrorSurfacesVerbatim(t *testing.T) {
+	for _, generate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("generate=%v", generate), func(t *testing.T) {
+			repo, _ := runExplainAutoTestRepo(t)
+			ctx := context.Background()
+
+			ulidID := id.MustCheckpointID("01KVBJCWYA4YW6J5M9GP655HZN")
+			require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).Write(ctx, checkpoint.Session{
+				CheckpointID: ulidID,
+				SessionID:    "session-stray-ulid",
+				Strategy:     "manual-commit",
+				Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n")),
+				AuthorName:   "Test",
+				AuthorEmail:  "test@example.com",
+			}))
+
+			var out, errOut bytes.Buffer
+			err := runExplainAuto(ctx, &out, &errOut, ulidID.String(), true, false, false, false, generate, false, false, 0)
+
+			require.Error(t, err)
+			require.ErrorContains(t, err, "failed to read checkpoint",
+				"the post-resolution failure must surface as-is")
+			require.ErrorContains(t, err, ulidID.String(),
+				"the error must name the checkpoint the target resolved to")
+			require.NotContains(t, err.Error(), "no checkpoint or commit found",
+				"a post-resolution failure must not be masked by the commit fallback")
+			require.False(t, shouldFallBackToCommitResolution(err),
+				"a post-resolution failure must not classify as a target miss")
+		})
+	}
+}
+
+// TestRunExplainAuto_TrailerReferencedCheckpointMissing: when the positional
+// target is a commit whose Entire-Checkpoint trailer references a checkpoint
+// that no longer resolves, the error must name the commit and the trailer
+// linkage — the user typed a commit SHA and would otherwise see "checkpoint
+// not found: <id>" for an ID they never entered.
+func TestRunExplainAuto_TrailerReferencedCheckpointMissing(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	ctx := context.Background()
+
+	cpID := id.MustCheckpointID("deadbeefcafe")
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	tmpDir := wt.Filesystem().Root()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "feature.txt"), []byte("feature"), 0o644))
+	_, err = wt.Add("feature.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit(trailers.AppendCheckpointTrailer("Implement feature", cpID.String()), &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	var out, errOut bytes.Buffer
+	err = runExplainAuto(ctx, &out, &errOut, commitHash.String(), true, false, false, false, false, false, false, 0)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, checkpoint.ErrCheckpointNotFound)
+	require.ErrorContains(t, err, cpID.String())
+	require.ErrorContains(t, err, commitHash.String()[:7],
+		"the error must name the commit the user actually typed")
+	require.ErrorContains(t, err, "Entire-Checkpoint trailer",
+		"the error must explain how the commit led to the checkpoint")
+}
+
 // TestRunExplainCheckpoint_NotFoundSentinels verifies the typed-error
 // contract runExplainAuto depends on: non-matching targets return an error
 // wrapping checkpoint.ErrCheckpointNotFound (for errors.Is detection),
@@ -578,6 +681,9 @@ func TestRunExplainAuto_TemporaryCheckpointRendersIdentityBullet(t *testing.T) {
 	}
 	if !strings.Contains(output, "Temporary checkpoints can be summarized after commit") {
 		t.Errorf("expected 'after commit' affordance in temporary output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "entire checkpoint explain --generate") {
+		t.Errorf("expected canonical `entire checkpoint explain --generate` hint in temporary output, got:\n%s", output)
 	}
 }
 
@@ -1406,7 +1512,7 @@ func TestExplainCommit_WithMetadataTrailerButNoCheckpoint(t *testing.T) {
 
 	// Commit with Entire-Metadata trailer (no Entire-Checkpoint)
 	metadataDir := ".entire/metadata/" + sessionID
-	commitMessage := trailers.FormatMetadata("Add new feature", metadataDir)
+	commitMessage := fmt.Sprintf("Add new feature\n\n%s: %s\n", trailers.MetadataTrailerKey, metadataDir)
 	commitHash, err := w.Commit(commitMessage, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  "Test",
@@ -2427,8 +2533,8 @@ func TestFormatCheckpointOutput_Short(t *testing.T) {
 	if !strings.Contains(output, "## Summary") {
 		t.Errorf("expected '## Summary' heading in no-color output, got:\n%s", output)
 	}
-	if !strings.Contains(output, "entire explain --generate") {
-		t.Errorf("expected --generate hint in summary affordance, got:\n%s", output)
+	if !strings.Contains(output, "entire checkpoint explain --generate") {
+		t.Errorf("expected canonical `entire checkpoint explain --generate` hint in summary affordance, got:\n%s", output)
 	}
 	// Should NOT show full file list in default mode
 	if strings.Contains(output, "main.go") {
@@ -3655,71 +3761,6 @@ func TestGetReachableTemporaryCheckpoints_FiltersByWorktree(t *testing.T) {
 	if !foundLocal {
 		t.Errorf("expected local worktree checkpoint (session %s), got: %+v", sessionIDLocal, points)
 	}
-}
-
-func TestIsAncestorOf(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize git repo
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create first commit
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("v1"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	commit1, err := w.Commit("first commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
-	})
-	if err != nil {
-		t.Fatalf("failed to create first commit: %v", err)
-	}
-
-	// Create second commit
-	if err := os.WriteFile(testFile, []byte("v2"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	commit2, err := w.Commit("second commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
-	})
-	if err != nil {
-		t.Fatalf("failed to create second commit: %v", err)
-	}
-
-	t.Run("commit is ancestor of later commit", func(t *testing.T) {
-		// commit1 should be an ancestor of commit2
-		if !strategy.IsAncestorOf(context.Background(), repo, commit1, commit2) {
-			t.Error("expected commit1 to be ancestor of commit2")
-		}
-	})
-
-	t.Run("commit is not ancestor of earlier commit", func(t *testing.T) {
-		// commit2 should NOT be an ancestor of commit1
-		if strategy.IsAncestorOf(context.Background(), repo, commit2, commit1) {
-			t.Error("expected commit2 to NOT be ancestor of commit1")
-		}
-	})
-
-	t.Run("commit is ancestor of itself", func(t *testing.T) {
-		// A commit should be considered an ancestor of itself
-		if !strategy.IsAncestorOf(context.Background(), repo, commit1, commit1) {
-			t.Error("expected commit to be ancestor of itself")
-		}
-	})
 }
 
 func TestGetBranchCheckpoints_OnFeatureBranch(t *testing.T) {
@@ -5697,13 +5738,13 @@ func TestExtractIntent_TruncatesLongPrompts(t *testing.T) {
 
 func TestBuildNoSummaryMarkdown_IntentAndAffordance(t *testing.T) {
 	t.Parallel()
-	got := buildNoSummaryMarkdown("add explain --generate flag", nil, "Run `entire explain --generate abc`.")
+	got := buildNoSummaryMarkdown("add explain --generate flag", nil, "Run `entire checkpoint explain --generate abc`.")
 	if !strings.Contains(got, "## Intent\n\nadd explain --generate flag\n") {
 		t.Fatalf("missing intent section:\n%s", got)
 	}
 	// escapeSummaryText replaces every backtick with U+2018 (‘), so both
-	// backticks in "Run `entire explain --generate abc`." map to ‘.
-	if !strings.Contains(got, "## Summary\n\n*Run ‘entire explain --generate abc‘.*\n") {
+	// backticks in "Run `entire checkpoint explain --generate abc`." map to ‘.
+	if !strings.Contains(got, "## Summary\n\n*Run ‘entire checkpoint explain --generate abc‘.*\n") {
 		t.Fatalf("missing italic summary affordance:\n%s", got)
 	}
 	if strings.Contains(got, "## Files") {

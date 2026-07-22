@@ -760,7 +760,7 @@ func checkRemoteMetadata(
 
 	if !refs.ReadBootstrappableFromOrigin() {
 		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but metadata is not available in %s.\n", checkpointID, refs.Read)
-		fmt.Fprintf(errW, "This ref is local-only. Try: entire explain %s\n", checkpointID)
+		fmt.Fprintf(errW, "This ref is local-only. Try: entire checkpoint explain %s\n", checkpointID)
 		return nil, nil
 	}
 
@@ -967,20 +967,6 @@ func displayRestoredSessions(w io.Writer, sessions []strategy.RestoredSession) e
 		printSessionCommand(w, sessionAgent.FormatResumeCommand(sess.SessionID), sess.Prompt, isMulti, i == len(sessions)-1)
 	}
 
-	return nil
-}
-
-// resumeSingleSession restores a single session (fallback when multi-session restore fails).
-// By default it never overwrites an existing local session log — if one is present it is
-// kept and only the resume command is printed; --force overwrites it from the checkpoint.
-// A missing local log is always restored from the checkpoint.
-func resumeSingleSession(ctx context.Context, w, _ io.Writer, ag agent.Agent, sessionID string, checkpointID id.CheckpointID, repoRoot string, force bool) error {
-	session, ok, err := restoreSingleSession(ctx, w, ag, sessionID, checkpointID, repoRoot, force)
-	if err != nil || !ok {
-		return err
-	}
-	fmt.Fprintf(w, "\nTo continue this session:\n")
-	fmt.Fprintf(w, "  %s\n", ag.FormatResumeCommand(session.SessionID))
 	return nil
 }
 

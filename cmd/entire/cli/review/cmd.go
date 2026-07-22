@@ -147,7 +147,7 @@ Flags:
                  origin/master, main, master.
 
 To tag an already-finished session as a review, use
-'entire attach --review <id>'.`,
+'entire session attach --review <id>'.`,
 		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) > 1 {
 				return fmt.Errorf("accepts at most one argument, received %d", len(args))

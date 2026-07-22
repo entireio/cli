@@ -76,18 +76,6 @@ func TestIsTrailerLine(t *testing.T) {
 	}
 }
 
-func TestFormatMetadata(t *testing.T) {
-	message := "Update authentication logic"
-	metadataDir := ".entire/metadata/2025-01-28-abc123"
-
-	expected := "Update authentication logic\n\nEntire-Metadata: .entire/metadata/2025-01-28-abc123\n"
-	got := FormatMetadata(message, metadataDir)
-
-	if got != expected {
-		t.Errorf("FormatMetadata() = %q, want %q", got, expected)
-	}
-}
-
 func TestParseMetadata(t *testing.T) {
 	tests := []struct {
 		name      string

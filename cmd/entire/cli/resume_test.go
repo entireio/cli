@@ -914,10 +914,10 @@ func TestResumeFromCurrentBranch_MultipleCheckpointsSaysLatest(t *testing.T) {
 // session ID that flows into path construction (in production this comes from the
 // remote checkpoint metadata via readCheckpointInfoFromStore). A "../"-laden ID
 // resolves to a path outside the agent's session directory. Before the fix,
-// resumeSingleSession would resolve the path, write the attacker-controlled
+// restoreSingleSession would resolve the path, write the attacker-controlled
 // transcript there, and overwrite the sentinel — RCE if the target is e.g. a
 // shell init file. The fix must reject the ID and write nothing.
-func TestResumeSingleSession_RejectsPathTraversalSessionID(t *testing.T) {
+func TestRestoreSingleSession_RejectsPathTraversalSessionID(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
@@ -966,13 +966,13 @@ func TestResumeSingleSession_RejectsPathTraversalSessionID(t *testing.T) {
 
 	maliciousSessionID := "../victim/secret"
 
-	var stdout, stderr bytes.Buffer
-	err := resumeSingleSession(ctx, &stdout, &stderr, ag, maliciousSessionID, cpID, tmpDir, true)
+	var stdout bytes.Buffer
+	_, _, err := restoreSingleSession(ctx, &stdout, ag, maliciousSessionID, cpID, tmpDir, true)
 	if err == nil {
-		t.Fatalf("resumeSingleSession() with traversal session ID = nil error, want rejection\nstdout: %s", stdout.String())
+		t.Fatalf("restoreSingleSession() with traversal session ID = nil error, want rejection\nstdout: %s", stdout.String())
 	}
 	if ag.writtenSession != nil {
-		t.Fatalf("resumeSingleSession() wrote a session despite malicious ID: ref=%s", ag.writtenSession.SessionRef)
+		t.Fatalf("restoreSingleSession() wrote a session despite malicious ID: ref=%s", ag.writtenSession.SessionRef)
 	}
 	got, readErr := os.ReadFile(sentinel)
 	if readErr != nil {

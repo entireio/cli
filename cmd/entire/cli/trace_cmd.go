@@ -23,9 +23,9 @@ Traces are emitted at DEBUG log level. To enable them, either:
   - Add "log_level": "DEBUG" to .entire/settings.json
 
 Examples:
-  entire trace                     Show the most recent hook trace
-  entire trace --last 5            Show the last 5 hook traces
-  entire trace --hook post-commit  Show only post-commit hook traces`,
+  entire doctor trace                     Show the most recent hook trace
+  entire doctor trace --last 5            Show the last 5 hook traces
+  entire doctor trace --hook post-commit  Show only post-commit hook traces`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if last < 1 {
 				return fmt.Errorf("--last must be at least 1, got %d", last)

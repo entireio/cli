@@ -511,7 +511,10 @@ func TestInvestigate_IssueLink_ResolvesViaFakeGh(t *testing.T) {
 // Mirrors enableReviewAgent.
 func enableInvestigateAgent(t *testing.T, env *TestEnv, name string) {
 	t.Helper()
-	env.RunCLI("enable", "--agent", name, "--telemetry=false")
+	// Pin the git-branch backend, matching enableReviewAgent: this file's
+	// helpers read checkpoint content from the v1 metadata branch, and
+	// first-run enable now defaults new setups to git-refs.
+	env.RunCLI("enable", "--agent", name, "--telemetry=false", "--checkpoint-backend", "branch")
 }
 
 // SimulateUserPromptSubmitWithInvestigateEnvVars fires UserPromptSubmit with

@@ -1416,10 +1416,11 @@ func TestAttachCmd_ReviewDoesNotInferSkillsFromConfig(t *testing.T) {
 `)
 
 	// Seed review config — the spawn-path default. Attach must ignore this.
-	if err := settings.SaveClonePreferences(context.Background(), &settings.ClonePreferences{
-		Review: map[string]settings.ReviewConfig{
+	if err := settings.ModifyClonePreferences(context.Background(), func(p *settings.ClonePreferences) error {
+		p.Review = map[string]settings.ReviewConfig{ //nolint:staticcheck // deliberately seeds the legacy field: attach must ignore it
 			"claude-code": {Skills: []string{"/pr-review-toolkit:review-pr"}},
-		},
+		}
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -2842,6 +2842,54 @@
           "memberships"
         ],
         "type": "object"
+      },
+      "ResolvePlacementsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResolvePlacementsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "placements": {
+            "items": {
+              "$ref": "#/components/schemas/ResolvedPlacement"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "placements"
+        ],
+        "type": "object"
+      },
+      "ResolvedPlacement": {
+        "additionalProperties": true,
+        "properties": {
+          "cell": {
+            "description": "Physical cell the mirror's cluster runs in, e.g. aws-us-east-2.",
+            "type": "string"
+          },
+          "clusterHost": {
+            "description": "Public host of the cluster serving this mirror.",
+            "type": "string"
+          },
+          "jurisdiction": {
+            "type": "string"
+          },
+          "mirrorId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mirrorId",
+          "clusterHost"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -9943,6 +9991,123 @@
         "summary": "Get the server version and mode",
         "tags": [
           "meta"
+        ]
+      }
+    },
+    "/mirrors/placements": {
+      "get": {
+        "operationId": "resolveMirrorPlacements",
+        "parameters": [
+          {
+            "explode": false,
+            "in": "query",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "enum": [
+                "github"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Upstream owner login (case-insensitive).",
+            "explode": false,
+            "in": "query",
+            "name": "owner",
+            "required": true,
+            "schema": {
+              "description": "Upstream owner login (case-insensitive).",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Upstream repo name (case-insensitive).",
+            "explode": false,
+            "in": "query",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "description": "Upstream repo name (case-insensitive).",
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolvePlacementsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Resolve the pullable cluster placements of a mirrored upstream (clone discovery)",
+        "tags": [
+          "mirrors"
         ]
       }
     }

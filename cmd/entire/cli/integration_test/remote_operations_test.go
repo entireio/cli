@@ -735,16 +735,6 @@ func TestResume_FetchesPrimaryBranchFullyWithFilteredFetches(t *testing.T) {
 // Helpers
 // =============================================================================
 
-// fileExistsOnRemoteBranch checks if a file exists in the metadata branch tree on a bare remote.
-func fileExistsOnRemoteBranch(t *testing.T, bareDir, filePath string) bool {
-	t.Helper()
-
-	cmd := exec.CommandContext(t.Context(), "git", "cat-file", "-t", paths.MetadataBranchName+":"+filePath)
-	cmd.Dir = bareDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	return cmd.Run() == nil
-}
-
 // getRemoteBranchHash returns the commit hash of a branch on a bare remote.
 func getRemoteBranchHash(t *testing.T, bareDir, branchName string) string {
 	t.Helper()

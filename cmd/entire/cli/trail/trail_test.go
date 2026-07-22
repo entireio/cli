@@ -90,3 +90,48 @@ func TestHumanizeBranchName(t *testing.T) {
 		})
 	}
 }
+
+func TestType_IsValid(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		typ   Type
+		valid bool
+	}{
+		{TypeBug, true}, {TypeFeature, true}, {TypeTask, true},
+		{"", false}, {"epic", false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.typ), func(t *testing.T) {
+			t.Parallel()
+			if got := tt.typ.IsValid(); got != tt.valid {
+				t.Errorf("Type(%q).IsValid() = %v, want %v", tt.typ, got, tt.valid)
+			}
+		})
+	}
+	if len(ValidTypes()) != 3 {
+		t.Errorf("ValidTypes() len = %d, want 3", len(ValidTypes()))
+	}
+}
+
+func TestPriority_IsValid(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		p     Priority
+		valid bool
+	}{
+		{PriorityUrgent, true}, {PriorityHigh, true}, {PriorityMedium, true},
+		{PriorityLow, true}, {PriorityNone, true},
+		{"", false}, {"critical", false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.p), func(t *testing.T) {
+			t.Parallel()
+			if got := tt.p.IsValid(); got != tt.valid {
+				t.Errorf("Priority(%q).IsValid() = %v, want %v", tt.p, got, tt.valid)
+			}
+		})
+	}
+	if len(ValidPriorities()) != 5 {
+		t.Errorf("ValidPriorities() len = %d, want 5", len(ValidPriorities()))
+	}
+}

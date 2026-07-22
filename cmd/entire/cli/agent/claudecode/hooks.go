@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -25,6 +26,24 @@ const (
 	HookNamePreTask          = "pre-task"
 	HookNamePostTask         = "post-task"
 	HookNamePostTodo         = "post-todo"
+)
+
+// Claude Code tool-name matchers for Entire's PreToolUse/PostToolUse hooks.
+//
+// The subagent dispatch tool is "Agent" (Claude Code never exposed a tool named
+// "Task"), and the "TodoWrite" tool was disabled by default in v2.1.142 in favor
+// of the Task* tools. "TaskCreate|TaskUpdate" is a matcher list of exact tool
+// names (Claude Code treats a matcher containing only letters/digits/_/-/spaces/
+// ,/| as exact strings, not a regex). See:
+//   - https://code.claude.com/docs/en/tools-reference.md (Agent, TodoWrite entries)
+//   - https://code.claude.com/docs/en/hooks.md (matcher evaluation rules)
+//
+// Configs written by older CLI versions used the outdated matchers "Task" and
+// "TodoWrite", where the hooks silently never fired. Those are not rewritten in
+// place on a normal `entire enable`; run with --force to strip and reinstall.
+const (
+	subagentToolMatcher = "Agent"
+	taskToolMatcher     = "TaskCreate|TaskUpdate"
 )
 
 // ClaudeSettingsFileName is the settings file used by Claude Code.
@@ -166,16 +185,16 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 		userPromptSubmit = addHookToMatcher(userPromptSubmit, "", userPromptSubmitCmd)
 		count++
 	}
-	if !hookCommandExistsWithMatcher(preToolUse, "Task", preTaskCmd) {
-		preToolUse = addHookToMatcher(preToolUse, "Task", preTaskCmd)
+	if !hookCommandExistsWithMatcher(preToolUse, subagentToolMatcher, preTaskCmd) {
+		preToolUse = addHookToMatcher(preToolUse, subagentToolMatcher, preTaskCmd)
 		count++
 	}
-	if !hookCommandExistsWithMatcher(postToolUse, "Task", postTaskCmd) {
-		postToolUse = addHookToMatcher(postToolUse, "Task", postTaskCmd)
+	if !hookCommandExistsWithMatcher(postToolUse, subagentToolMatcher, postTaskCmd) {
+		postToolUse = addHookToMatcher(postToolUse, subagentToolMatcher, postTaskCmd)
 		count++
 	}
-	if !hookCommandExistsWithMatcher(postToolUse, "TodoWrite", postTodoCmd) {
-		postToolUse = addHookToMatcher(postToolUse, "TodoWrite", postTodoCmd)
+	if !hookCommandExistsWithMatcher(postToolUse, taskToolMatcher, postTodoCmd) {
+		postToolUse = addHookToMatcher(postToolUse, taskToolMatcher, postTodoCmd)
 		count++
 	}
 
@@ -382,8 +401,9 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	return nil
 }
 
-// AreHooksInstalled checks if Entire hooks are installed.
-func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) bool {
+// loadClaudeSettings reads and parses .claude/settings.json from the repo root.
+// Returns ok=false when the file is missing or unparseable.
+func loadClaudeSettings(ctx context.Context) (ClaudeSettings, bool) {
 	// Use repo root to find .claude directory when run from a subdirectory
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -392,16 +412,59 @@ func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) bool {
 	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
-		return false
+		return ClaudeSettings{}, false
 	}
 
 	var settings ClaudeSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
+		return ClaudeSettings{}, false
+	}
+	return settings, true
+}
+
+// AreHooksInstalled checks if Entire hooks are installed.
+func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) bool {
+	settings, ok := loadClaudeSettings(ctx)
+	if !ok {
 		return false
 	}
-
 	// Check for at least one of our hooks (new, wrapped, or legacy format)
 	return hasEntireHook(settings.Hooks.Stop)
+}
+
+// HookConfigState describes how Entire's Claude Code hooks compare to what
+// InstallHooks would write today.
+type HookConfigState int
+
+const (
+	// HooksAbsent means Entire hooks are not installed in this repo.
+	HooksAbsent HookConfigState = iota
+	// HooksCurrent means the installed hooks match the current config.
+	HooksCurrent
+	// HooksOutdated means Entire hooks are installed but the current tool-use
+	// matchers no longer carry them (e.g. an older CLI wrote them under the now
+	// non-firing "Task"/"TodoWrite" matchers). Fix: `entire enable --force`.
+	HooksOutdated
+)
+
+// CheckHookConfig reports whether Entire's Claude Code hooks are absent,
+// current, or outdated. It is a read-only diagnostic used by `entire status`
+// and `entire doctor`; it never modifies settings. Outdated is detected on the
+// positive spec: Entire is installed (Stop hook present) yet one of the current
+// tool-use matchers does not carry its Entire hook.
+func CheckHookConfig(ctx context.Context) HookConfigState {
+	settings, ok := loadClaudeSettings(ctx)
+	if !ok || !hasEntireHook(settings.Hooks.Stop) {
+		return HooksAbsent
+	}
+	subagentTools := splitMatcherTools(subagentToolMatcher)
+	taskTools := splitMatcherTools(taskToolMatcher)
+	if !hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
+		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, subagentTools) ||
+		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, taskTools) {
+		return HooksOutdated
+	}
+	return HooksCurrent
 }
 
 // Helper functions for hook management
@@ -419,6 +482,47 @@ func hookCommandExists(matchers []ClaudeHookMatcher, command string) bool {
 
 func hasEntireHook(matchers []ClaudeHookMatcher) bool {
 	for _, matcher := range matchers {
+		for _, hook := range matcher.Hooks {
+			if isEntireHook(hook.Command) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// splitMatcherTools splits a Claude Code tool matcher into its exact tool
+// names. Matchers that InstallHooks writes are `|`-separated lists (Claude Code
+// also accepts `,`); whitespace around separators is ignored. Returns the tools
+// in order, dropping empties.
+func splitMatcherTools(matcher string) []string {
+	parts := strings.FieldsFunc(matcher, func(r rune) bool { return r == '|' || r == ',' })
+	tools := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			tools = append(tools, t)
+		}
+	}
+	return tools
+}
+
+// hasEntireHookCoveringTools reports whether an Entire hook is installed under a
+// matcher that covers every tool in want. A widened matcher still counts: a
+// matcher of "TaskCreate|TaskUpdate|TaskGet" covers {TaskCreate, TaskUpdate},
+// so users who broaden a matcher aren't falsely flagged as outdated.
+func hasEntireHookCoveringTools(matchers []ClaudeHookMatcher, want []string) bool {
+	for _, matcher := range matchers {
+		have := splitMatcherTools(matcher.Matcher)
+		coversAll := true
+		for _, w := range want {
+			if !slices.Contains(have, w) {
+				coversAll = false
+				break
+			}
+		}
+		if !coversAll {
+			continue
+		}
 		for _, hook := range matcher.Hooks {
 			if isEntireHook(hook.Command) {
 				return true
@@ -500,7 +604,7 @@ func removeEntireHooks(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
 }
 
 // removeEntireHooksFromMatchers removes Entire hooks from tool-use matchers (PreToolUse, PostToolUse)
-// This handles the nested structure where hooks are grouped by tool matcher (e.g., "Task", "TodoWrite")
+// This handles the nested structure where hooks are grouped by tool matcher (e.g., "Agent", "TaskCreate|TaskUpdate")
 func removeEntireHooksFromMatchers(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
 	// Same logic as removeEntireHooks - both work on the same structure
 	return removeEntireHooks(matchers)

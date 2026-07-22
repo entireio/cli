@@ -40,12 +40,6 @@ const (
 	CoreKeyringPrefix    = "entire-core:" // entire-core control-plane tokens
 )
 
-// ClusterKeyringService returns the service name for tokens issued by an
-// entiredb cluster. host is typically the cluster's entry domain.
-func ClusterKeyringService(host string) string {
-	return ClusterKeyringPrefix + host
-}
-
 // CoreKeyringService returns the service name for tokens issued by
 // entire-core. coreURL is the base URL of the issuer; trailing slashes
 // are normalized away so callers don't have to.
@@ -60,19 +54,6 @@ func CoreKeyringService(coreURL string) string {
 // access token at (service, user).
 func RefreshService(service string) string {
 	return service + ":refresh"
-}
-
-// KeyringServiceForIssuerKey infers the right service prefix from a
-// raw issuer key (entire-core URL or entiredb cluster host). URL-shaped
-// keys (anything beginning with a scheme) are treated as entire-core
-// issuers; bare hostnames as cluster issuers. Used by callers that
-// derive a service name without already having a *contexts.Context in
-// hand (tests, entiredb's pre-resolution code paths).
-func KeyringServiceForIssuerKey(key string) string {
-	if strings.HasPrefix(key, "http://") || strings.HasPrefix(key, "https://") {
-		return CoreKeyringService(key)
-	}
-	return ClusterKeyringService(key)
 }
 
 // backendMu guards `resolved` and `backend`. It serializes the production

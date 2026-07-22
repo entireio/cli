@@ -174,21 +174,6 @@ func (s *StateStore) Load(ctx context.Context, runID string) (*RunState, error) 
 	return &st, nil
 }
 
-// Clear removes the persisted state for runID. Missing files are treated as a
-// successful clear (no-op).
-func (s *StateStore) Clear(ctx context.Context, runID string) error {
-	_ = ctx // Reserved for future use
-
-	if err := validateRunID(runID); err != nil {
-		return fmt.Errorf("invalid run ID: %w", err)
-	}
-
-	if err := os.Remove(s.runStatePath(runID)); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove run state file: %w", err)
-	}
-	return nil
-}
-
 // runStatePath returns the on-disk path for runID's state file.
 func (s *StateStore) runStatePath(runID string) string {
 	return filepath.Join(s.RunDir(runID), stateFileName)

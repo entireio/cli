@@ -11,12 +11,6 @@ import (
 	"os/exec"
 )
 
-// Interactive returns an *exec.Cmd that inherits the parent's controlling TTY.
-// Equivalent to exec.CommandContext; provided for symmetry and intent clarity.
-func Interactive(ctx context.Context, name string, args ...string) *exec.Cmd {
-	return exec.CommandContext(ctx, name, args...)
-}
-
 // NonInteractive returns an *exec.Cmd detached from the parent's controlling
 // TTY. In the child, /dev/tty cannot be opened, so
 // interactive.CanPromptInteractively() returns false — no env var required.

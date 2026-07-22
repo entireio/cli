@@ -253,9 +253,9 @@ By default, shows checkpoints on the current branch. Pass a checkpoint ID or
 commit SHA as a positional argument to explain a specific item, or use flags.
 
 Viewing specific items:
-  entire explain <id-or-sha>           Auto-detects checkpoint ID or commit SHA
-  entire explain --checkpoint <id>     Force interpretation as checkpoint ID
-  entire explain --commit <ref>        Force interpretation as commit ref
+  entire checkpoint explain <id-or-sha>           Auto-detects checkpoint ID or commit SHA
+  entire checkpoint explain --checkpoint <id>     Force interpretation as checkpoint ID
+  entire checkpoint explain --commit <ref>        Force interpretation as commit ref
 
 Filtering the list view:
   --session      Filter checkpoints by session ID (or prefix)
@@ -452,12 +452,36 @@ func runExplain(ctx context.Context, w, errW io.Writer, sessionID, commitRef, ch
 	return runExplainBranchWithFilter(ctx, w, errW, noPager, sessionID)
 }
 
+// explainTargetNotFoundError reports that the requested checkpoint target
+// matched no committed or temporary checkpoint. It unwraps to
+// checkpoint.ErrCheckpointNotFound so callers' errors.Is contracts keep
+// working, while runExplainAuto can distinguish this resolution miss from a
+// failure AFTER a successful match that happens to wrap the same sentinel
+// (e.g. "failed to save summary: checkpoint not found" from a backfill
+// against a backend missing the checkpoint) — those must surface verbatim,
+// not be masked by the commit fallback's "no checkpoint or commit found".
+type explainTargetNotFoundError struct{ target string }
+
+func (e *explainTargetNotFoundError) Error() string {
+	return fmt.Sprintf("%s: %s", checkpoint.ErrCheckpointNotFound, e.target)
+}
+
+func (e *explainTargetNotFoundError) Unwrap() error { return checkpoint.ErrCheckpointNotFound }
+
+// shouldFallBackToCommitResolution reports whether the checkpoint path's error
+// means "the target matched nothing", the only outcome that may fall through
+// to git commit resolution.
+func shouldFallBackToCommitResolution(err error) bool {
+	var targetMiss *explainTargetNotFoundError
+	return errors.As(err, &targetMiss)
+}
+
 // runExplainAuto resolves a positional target as either a checkpoint ID
 // (or prefix) or a git commit ref. Ordering: checkpoint path first (which
 // also handles shadow-branch temp checkpoints), falling back to commit
-// resolution only on checkpoint.ErrCheckpointNotFound. --generate runs
-// an ambiguity pre-check to avoid writing a summary to the wrong
-// checkpoint on short-prefix collisions.
+// resolution only on the target-miss error (explainTargetNotFoundError).
+// --generate runs an ambiguity pre-check to avoid writing a summary to the
+// wrong checkpoint on short-prefix collisions.
 func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool, summaryTimeoutSeconds int) error {
 	stop := startSpinner(errW, "Loading checkpoints")
 	lookup, lookupErr := newExplainCheckpointLookup(ctx)
@@ -475,11 +499,15 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 		return nil
 	}
 	// Fall back to commit resolution ONLY when nothing (committed or temp)
-	// matched the target. errCannotGenerateTemporaryCheckpoint signals that
-	// we DID match a temp checkpoint but --generate is unsupported for it;
-	// falling back to commit in that case would produce a misleading
+	// matched the target. Errors from steps AFTER a successful match — even
+	// ones wrapping checkpoint.ErrCheckpointNotFound, like a summary backfill
+	// failing against a backend missing the checkpoint — surface verbatim;
+	// falling back would misreport them as "no checkpoint or commit found"
+	// for a target that DID resolve. errCannotGenerateTemporaryCheckpoint
+	// likewise signals we matched a temp checkpoint but --generate is
+	// unsupported for it; a commit fallback there would produce a misleading
 	// "no trailer" error for the shadow-branch commit.
-	if !errors.Is(checkpointErr, checkpoint.ErrCheckpointNotFound) {
+	if !shouldFallBackToCommitResolution(checkpointErr) {
 		return checkpointErr
 	}
 	logging.Debug(ctx, "explain auto: checkpoint lookup failed, trying commit fallback",
@@ -520,7 +548,12 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 		slog.String("target", target),
 		slog.String("commit", abbreviateCommitHash(lookup.repo, hash)),
 		slog.String("checkpoint_id", cpID.String()))
-	return runExplainCheckpointWithLookup(ctx, w, errW, cpID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, lookup, nil, summaryTimeoutSeconds)
+	if err := runExplainCheckpointWithLookup(ctx, w, errW, cpID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, lookup, nil, summaryTimeoutSeconds); err != nil {
+		// The user typed a commit, not this checkpoint ID — without the
+		// trailer linkage the error reads as if they asked for an unknown ID.
+		return fmt.Errorf("commit %s references checkpoint %s via its Entire-Checkpoint trailer: %w", abbreviateCommitHash(lookup.repo, hash), cpID, err)
+	}
+	return nil
 }
 
 // runExplainAutoAmbiguityGuard refuses --generate when the positional
@@ -608,7 +641,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		// Check temp checkpoints BEFORE returning errCannotGenerateTemporaryCheckpoint
 		// so runExplainAuto can distinguish:
 		//   - target matched a real temp checkpoint (sentinel returned, no fallback)
-		//   - target matched nothing (ErrCheckpointNotFound, safe to fall back to commit)
+		//   - target matched nothing (explainTargetNotFoundError, safe to fall back to commit)
 		// Previously the --generate path bailed before checking temp checkpoints,
 		// which made runExplainAuto fall back to commit resolution for temp
 		// checkpoint SHAs and produce a misleading "no trailer" error.
@@ -632,7 +665,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 			outputExplainContent(w, output, noPager)
 			return nil
 		}
-		return fmt.Errorf("%w: %s", checkpoint.ErrCheckpointNotFound, checkpointIDPrefix)
+		return &explainTargetNotFoundError{target: checkpointIDPrefix}
 	case 1:
 		fullCheckpointID = matches[0]
 	default:
@@ -657,7 +690,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	if generate {
 		summary, summaryErr := checkpoint.ReadCheckpoint(ctx, lookup.store, fullCheckpointID)
 		if summaryErr != nil {
-			return fmt.Errorf("failed to read checkpoint: %w", summaryErr)
+			return fmt.Errorf("failed to read checkpoint %s: %w", fullCheckpointID, summaryErr)
 		}
 		if summary.Imported {
 			return fmt.Errorf("cannot generate a summary for imported checkpoint %s: imported history is read-only", fullCheckpointID)
@@ -704,7 +737,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		content, err = checkpoint.ReadLatestSessionContent(ctx, lookup.store, fullCheckpointID, summary)
 		if err != nil {
 			stopLoad(false)
-			return fmt.Errorf("failed to reload checkpoint: %w", err)
+			return fmt.Errorf("failed to reload checkpoint %s: %w", fullCheckpointID, err)
 		}
 	}
 
@@ -756,11 +789,11 @@ func loadCheckpointForExplain(ctx context.Context, lookup *explainCheckpointLook
 	store := lookup.store
 	summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read checkpoint: %w", err)
+		return nil, nil, fmt.Errorf("failed to read checkpoint %s: %w", cpID, err)
 	}
 	content, contentErr := checkpoint.ReadLatestSessionContent(ctx, store, cpID, summary)
 	if contentErr != nil {
-		return nil, nil, fmt.Errorf("failed to read checkpoint content: %w", contentErr)
+		return nil, nil, fmt.Errorf("failed to read checkpoint content for %s: %w", cpID, contentErr)
 	}
 	return summary, content, nil
 }
@@ -903,7 +936,7 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store che
 	if content.Metadata.Summary != nil && !force {
 		return renderExplainFailure(errW, "Summary already exists", []explainRow{
 			{Label: "id", Value: checkpointID.String()},
-			{Label: "try", Value: fmt.Sprintf("entire explain --generate --force %s", checkpointID)},
+			{Label: "try", Value: fmt.Sprintf("entire checkpoint explain --generate --force %s", checkpointID)},
 		}, fmt.Errorf("checkpoint %s already has a summary", checkpointID))
 	}
 
@@ -1208,7 +1241,9 @@ func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *gi
 	// This ensures we find checkpoints even if HEAD has advanced since the session started
 	tempCheckpoints, err := store.ListAllCheckpoints(ctx, "", branchCheckpointsLimit)
 	if err != nil {
-		return "", false, nil //nolint:nilerr // best-effort: caller falls back to ErrCheckpointNotFound when no temp checkpoint is found
+		logging.Debug(ctx, "explain: listing temporary checkpoints failed; treating as no temp match",
+			slog.String("error", err.Error()))
+		return "", false, nil
 	}
 
 	// Find checkpoints matching the SHA prefix - check for ambiguity
@@ -1246,12 +1281,20 @@ func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *gi
 	// Get shadow commit and tree to read metadata
 	shadowCommit, commitErr := repo.CommitObject(tc.CommitHash)
 	if commitErr != nil {
-		return "", false, nil //nolint:nilerr // best-effort: missing shadow commit is treated as not-found
+		// The prefix DID match this temp checkpoint; record why it still
+		// reads as not-found (pruned/gc'd shadow objects, IO errors).
+		logging.Debug(ctx, "explain: temp checkpoint matched but shadow commit unreadable; treating as not-found",
+			slog.String("commit", tc.CommitHash.String()),
+			slog.String("error", commitErr.Error()))
+		return "", false, nil
 	}
 
 	shadowTree, treeErr := shadowCommit.Tree()
 	if treeErr != nil {
-		return "", false, nil //nolint:nilerr // best-effort: missing shadow tree is treated as not-found
+		logging.Debug(ctx, "explain: temp checkpoint matched but shadow tree unreadable; treating as not-found",
+			slog.String("commit", tc.CommitHash.String()),
+			slog.String("error", treeErr.Error()))
+		return "", false, nil
 	}
 
 	// Read agent type from shadow branch metadata (stored during checkpoint creation)
@@ -1289,7 +1332,7 @@ func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *gi
 	sb.WriteString(styles.renderIdentity(label, "", rows))
 
 	intent := extractIntent(nil, sessionPrompt)
-	hint := "Not generated. Temporary checkpoints can be summarized after commit. Run `entire explain --generate` on the resulting commit."
+	hint := "Not generated. Temporary checkpoints can be summarized after commit. Run `entire checkpoint explain --generate` on the resulting commit."
 	sb.WriteString(renderExplainBody(w, buildNoSummaryMarkdown(intent, nil, hint)))
 
 	// Transcript section: full shows entire session, verbose shows checkpoint scope
@@ -1661,7 +1704,7 @@ func formatCheckpointOutput(ctx context.Context, summary *checkpoint.CheckpointS
 			files = meta.FilesTouched
 		}
 
-		hint := fmt.Sprintf("Not generated yet. Run `entire explain --generate %s` to create an AI summary.", checkpointID)
+		hint := fmt.Sprintf("Not generated yet. Run `entire checkpoint explain --generate %s` to create an AI summary.", checkpointID)
 		if summary != nil && summary.Imported {
 			// Imported history is read-only; --generate is refused for it, so
 			// don't point users at a command that will error out.

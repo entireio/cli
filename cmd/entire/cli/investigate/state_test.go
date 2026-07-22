@@ -141,41 +141,6 @@ func TestStateStore_LoadMissingDirectoryReturnsNilNil(t *testing.T) {
 	}
 }
 
-func TestStateStore_Clear(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	store := NewStateStoreWithDir(dir)
-	now := time.Now().UTC()
-	st := &RunState{
-		RunID:       "abcdef012345",
-		Topic:       "topic",
-		StartingSHA: "sha",
-		StartedAt:   now,
-		UpdatedAt:   now,
-	}
-	if err := store.Save(context.Background(), st); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := store.Clear(context.Background(), st.RunID); err != nil {
-		t.Fatalf("Clear: %v", err)
-	}
-	// Idempotent — clearing a missing run is a no-op.
-	if err := store.Clear(context.Background(), st.RunID); err != nil {
-		t.Fatalf("second Clear: %v", err)
-	}
-	// And Load now returns (nil, nil).
-	got, err := store.Load(context.Background(), st.RunID)
-	if err != nil {
-		t.Fatalf("Load after clear: %v", err)
-	}
-	if got != nil {
-		t.Errorf("expected nil after clear, got %+v", got)
-	}
-}
-
-// TestValidateRunID covers the path-traversal-resistant input validation:
-// only 12 lowercase hex characters are allowed.
 func TestValidateRunID(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -232,9 +197,6 @@ func TestStateStore_RejectsInvalidRunID(t *testing.T) {
 		}
 		if _, err := store.Load(ctx, runID); err == nil {
 			t.Errorf("Load(%q): expected error, got nil", runID)
-		}
-		if err := store.Clear(ctx, runID); err == nil {
-			t.Errorf("Clear(%q): expected error, got nil", runID)
 		}
 	}
 }

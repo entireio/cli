@@ -164,7 +164,7 @@ The switch is a **primary flip**, not a dual-write phase. There is no "run both 
 
 | State | `primary` | Behavior |
 |-------|-----------|----------|
-| **Default** (today) | `git-branch` | Hex checkpoints on the `v1` branch; unchanged legacy behavior |
+| **Config-less fallback** | `git-branch` | Hex checkpoints on the `v1` branch; unchanged legacy behavior for repos set up before the git-refs default (new setups write an explicit primary — `git-refs` as the recommended pick unless the setup question chose branch) |
 | **Refs-only** | `git-refs` | New checkpoints are ULIDs written as per-checkpoint refs; pre-existing hex/`v1` checkpoints stay readable via the read-routing fallback |
 
 ## Checkpoint version and policy
