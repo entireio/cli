@@ -42,6 +42,7 @@ func TestIssue411_EndedToIdle_PrepareCommitMsgAddsTrailer(t *testing.T) {
 	require.NoError(t, out.Err)
 	state, err = env.GetSessionState(sess.ID)
 	require.NoError(t, err)
+	require.NotNil(t, state)
 	require.Equal(t, session.PhaseIdle, state.Phase)
 	require.Nil(t, state.EndedAt)
 
