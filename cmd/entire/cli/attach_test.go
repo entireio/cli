@@ -1171,6 +1171,7 @@ func TestAttach_ReviewWithExistingCheckpointErrors(t *testing.T) {
 // when HEAD carries no Entire-Checkpoint trailer, and must never amend HEAD.
 func TestAttach_ReviewExplicitTargetCreatesShaBoundCheckpoint(t *testing.T) {
 	setupAttachTestRepo(t)
+	setupAttachCheckpointOrigin(t)
 
 	repoRoot := mustGetwd(t)
 	repo, err := git.PlainOpen(repoRoot)
@@ -1220,7 +1221,6 @@ func TestAttach_ReviewExplicitTargetCreatesShaBoundCheckpoint(t *testing.T) {
 		Review:               true,
 		ReviewSkillsOverride: []string{"/review"},
 		CheckpointID:         targetID,
-		CommitSHA:            headSHA,
 	}
 	var out bytes.Buffer
 	if err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, opts); err != nil {
@@ -1236,9 +1236,6 @@ func TestAttach_ReviewExplicitTargetCreatesShaBoundCheckpoint(t *testing.T) {
 	if summary == nil {
 		t.Fatalf("checkpoint %s not created", targetID)
 	}
-	if summary.CommitSHA != headSHA {
-		t.Errorf("summary.CommitSHA = %q, want %q", summary.CommitSHA, headSHA)
-	}
 	if !summary.HasReview {
 		t.Error("summary.HasReview should be true")
 	}
@@ -1251,9 +1248,6 @@ func TestAttach_ReviewExplicitTargetCreatesShaBoundCheckpoint(t *testing.T) {
 	}
 	if metadata.SessionID != sessionID {
 		t.Errorf("session metadata SessionID = %q, want %q", metadata.SessionID, sessionID)
-	}
-	if metadata.CommitSHA != headSHA {
-		t.Errorf("session metadata CommitSHA = %q, want %q", metadata.CommitSHA, headSHA)
 	}
 	if metadata.Kind != string(session.KindAgentReview) {
 		t.Errorf("session metadata Kind = %q, want agent_review", metadata.Kind)
@@ -1313,42 +1307,12 @@ func TestAttach_ReviewExplicitTargetCreatesShaBoundCheckpoint(t *testing.T) {
 	}
 }
 
-// A well-formed --commit-sha that names no commit in the repository must be
-// rejected: silently recording it would produce provenance pointing at nothing.
-func TestAttach_ExplicitTargetRejectsUnknownCommit(t *testing.T) {
-	setupAttachTestRepo(t)
-
-	sessionID := "review-session-unknown-commit"
-	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"please review"},"uuid":"u1"}
-`)
-
-	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
-		Force:        true,
-		Review:       true,
-		CheckpointID: id.CheckpointID("aabbccddeeff"),
-		CommitSHA:    strings.Repeat("deadbeef", 5),
-	})
-	if err == nil || !strings.Contains(err.Error(), "does not name a commit") {
-		t.Fatalf("expected unknown-commit rejection, got: %v", err)
-	}
-}
-
 // An explicit-target ID that already exists with OTHER content must be
 // refused, never modified: the ID is the caller's identity contract, and
 // appending to or rebuilding an existing checkpoint would corrupt it.
 func TestAttach_ExplicitTargetRefusesExistingCheckpointWithoutSession(t *testing.T) {
 	setupAttachTestRepo(t)
-
-	repoRoot := mustGetwd(t)
-	repo, err := git.PlainOpen(repoRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	headSHA, err := repo.Head()
-	if err != nil {
-		t.Fatal(err)
-	}
+	setupAttachCheckpointOrigin(t)
 
 	targetID := id.CheckpointID("aabbccddeeff")
 	firstSession := "review-session-original"
@@ -1359,7 +1323,6 @@ func TestAttach_ExplicitTargetRefusesExistingCheckpointWithoutSession(t *testing
 		Force:        true,
 		Review:       true,
 		CheckpointID: targetID,
-		CommitSHA:    headSHA.Hash().String(),
 	}); err != nil {
 		t.Fatalf("first explicit-target attach failed: %v", err)
 	}
@@ -1368,19 +1331,18 @@ func TestAttach_ExplicitTargetRefusesExistingCheckpointWithoutSession(t *testing
 	setupClaudeTranscript(t, secondSession, `{"type":"user","message":{"role":"user","content":"second"},"uuid":"u1"}
 `)
 	out.Reset()
-	err = runAttach(context.Background(), &out, &out, secondSession, agent.AgentNameClaudeCode, attachOptions{
+	err := runAttach(context.Background(), &out, &out, secondSession, agent.AgentNameClaudeCode, attachOptions{
 		Force:        true,
 		Review:       true,
 		CheckpointID: targetID,
-		CommitSHA:    headSHA.Hash().String(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "refusing to modify an existing checkpoint") {
 		t.Fatalf("expected collision refusal, got: %v", err)
 	}
 }
 
-// The explicit-target flags are a unit: both must be supplied, only with
-// --review, and the commit SHA must be a full 40-hex value.
+// The explicit-target flag only makes sense for reviews and must be a valid
+// checkpoint ID.
 func TestAttach_ExplicitTargetFlagValidation(t *testing.T) {
 	setupAttachTestRepo(t)
 
@@ -1393,17 +1355,13 @@ func TestAttach_ExplicitTargetFlagValidation(t *testing.T) {
 		return cmd.Execute()
 	}
 
-	fullSHA := strings.Repeat("ab", 20)
 	cases := []struct {
 		name string
 		args []string
 		want string
 	}{
-		{"checkpoint-id without commit-sha", []string{"s1", "--review", "--checkpoint-id", "aabbccddeeff"}, "must be used together"},
-		{"commit-sha without checkpoint-id", []string{"s1", "--review", "--commit-sha", fullSHA}, "must be used together"},
-		{"without review", []string{"s1", "--checkpoint-id", "aabbccddeeff", "--commit-sha", fullSHA}, "require --review"},
-		{"bad checkpoint id", []string{"s1", "--review", "--checkpoint-id", "not/valid", "--commit-sha", fullSHA}, "invalid --checkpoint-id"},
-		{"short commit sha", []string{"s1", "--review", "--checkpoint-id", "aabbccddeeff", "--commit-sha", "abc123"}, "invalid --commit-sha"},
+		{"without review", []string{"s1", "--checkpoint-id", "aabbccddeeff"}, "requires --review"},
+		{"bad checkpoint id", []string{"s1", "--review", "--checkpoint-id", "not/valid"}, "invalid --checkpoint-id"},
 	}
 	for _, tc := range cases {
 		err := run(tc.args...)
@@ -1998,6 +1956,34 @@ func setupAttachTestRepo(t *testing.T) {
 	testutil.GitCommit(t, tmpDir, "init")
 	t.Chdir(tmpDir)
 	enableEntire(t, tmpDir)
+}
+
+// setupAttachCheckpointOrigin gives explicit-target tests a reachable metadata
+// branch whose successful refresh proves a requested checkpoint ID is absent.
+// Fetch failures are intentionally fatal for this mode, so a repository with no
+// origin cannot exercise the safe "genuinely new ID" path.
+func setupAttachCheckpointOrigin(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	repoRoot := mustGetwd(t)
+	repo, err := git.PlainOpen(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := cpkg.ResolveRefs(ctx)
+	if err := strategy.EnsurePrimaryRef(ctx, repo); err != nil {
+		_ = repo.Close()
+		t.Fatalf("ensure local metadata ref: %v", err)
+	}
+	if err := repo.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	runGit(t, repoRoot, "init", "--bare", remoteDir)
+	runGit(t, repoRoot, "remote", "add", "origin", remoteDir)
+	refspec := refs.Primary.String() + ":" + refs.Primary.String()
+	runGit(t, repoRoot, "push", "origin", refspec)
 }
 
 // setupClaudeTranscript creates a fake Claude transcript file.

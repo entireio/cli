@@ -760,7 +760,6 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		Summary:                     RedactSummary(opts.Summary),
 		CLIVersion:                  versioninfo.Version,
 		Kind:                        opts.Kind,
-		CommitSHA:                   opts.CommitSHA,
 		ReviewSkills:                opts.ReviewSkills,
 		ReviewPrompt:                opts.ReviewPrompt,
 		InvestigateRunID:            opts.InvestigateRunID,
@@ -801,7 +800,6 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 	// was imported (Kind == "imported"). Compared as a literal because the
 	// session package imports checkpoint, so we can't reference its constant.
 	imported := opts.Kind == "imported"
-	commitSHA := opts.CommitSHA
 	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
 	if entry, exists := entries[rootMetadataPath]; exists {
 		existingSummary, readErr := s.readSummaryFromBlob(entry.Hash)
@@ -817,9 +815,6 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 			}
 			if !imported {
 				imported = existingSummary.Imported
-			}
-			if commitSHA == "" {
-				commitSHA = existingSummary.CommitSHA
 			}
 		}
 	}
@@ -837,7 +832,6 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 		HasReview:           hasReview,
 		HasInvestigation:    hasInvestigation,
 		Imported:            imported,
-		CommitSHA:           commitSHA,
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")

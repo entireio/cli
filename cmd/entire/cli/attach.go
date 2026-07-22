@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"time"
 
@@ -32,13 +31,9 @@ import (
 
 	"charm.land/huh/v2"
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/spf13/cobra"
 )
-
-// fullCommitSHARegex matches a full 40-hex git commit SHA (lowercased input).
-var fullCommitSHARegex = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // attachOptions carries optional flags for runAttach. Force is the original
 // flag; Review opts the attach into recording the session as an
@@ -62,17 +57,15 @@ type attachOptions struct {
 	// CheckpointID, when non-empty, is the explicit target checkpoint ID to
 	// create instead of resolving one from HEAD's Entire-Checkpoint trailer.
 	// Used by platform review-provenance publication, where the server mints
-	// the ID. Requires Review and CommitSHA; the explicit-target mode never
-	// amends HEAD (the binding is the recorded CommitSHA, not a trailer).
+	// the ID and owns the checkpoint↔commit association externally (commit
+	// SHAs are rewritable history, so no SHA is baked into checkpoint
+	// metadata). Requires Review; explicit-target mode never amends HEAD.
 	CheckpointID id.CheckpointID
-	// CommitSHA, when non-empty, is the full SHA of the user-code commit this
-	// attach is bound to. Recorded in the checkpoint metadata (commit_sha) in
-	// place of a commit-message trailer. Requires Review and CheckpointID.
-	CommitSHA string
 }
 
 // explicitTarget reports whether this attach targets a caller-supplied
-// checkpoint ID bound to a commit SHA (no trailer resolution, no HEAD amend).
+// checkpoint ID (no trailer resolution, no HEAD amend; the commit
+// association is the caller's concern).
 func (opts attachOptions) explicitTarget() bool {
 	return !opts.CheckpointID.IsEmpty()
 }
@@ -99,7 +92,6 @@ func newAttachCmd() *cobra.Command {
 		reviewFlag       bool
 		skillsFlag       []string
 		checkpointIDFlag string
-		commitSHAFlag    string
 	)
 	cmd := &cobra.Command{
 		Use:   "attach <session-id>",
@@ -138,26 +130,20 @@ the transcript and prints the detected agent name.`,
 				Review:               reviewFlag,
 				ReviewSkillsOverride: skillsFlag,
 			}
-			// Explicit-target mode: a server-minted checkpoint ID bound to a
-			// commit SHA, with no trailer resolution and no HEAD amend. Both
-			// flags travel together and only make sense for reviews.
-			if checkpointIDFlag != "" || commitSHAFlag != "" {
-				if checkpointIDFlag == "" || commitSHAFlag == "" {
-					return errors.New("--checkpoint-id and --commit-sha must be used together")
-				}
+			// Explicit-target mode: a server-minted checkpoint ID with no
+			// trailer resolution and no HEAD amend. Only meaningful for
+			// reviews; the checkpoint↔commit association is managed by the
+			// caller (commit SHAs are rewritable history, so none is baked
+			// into checkpoint metadata).
+			if checkpointIDFlag != "" {
 				if !reviewFlag {
-					return errors.New("--checkpoint-id/--commit-sha require --review")
+					return errors.New("--checkpoint-id requires --review")
 				}
 				cpID, idErr := id.NewCheckpointID(checkpointIDFlag)
 				if idErr != nil {
 					return fmt.Errorf("invalid --checkpoint-id: %w", idErr)
 				}
-				normalizedSHA := strings.ToLower(commitSHAFlag)
-				if !fullCommitSHARegex.MatchString(normalizedSHA) {
-					return fmt.Errorf("invalid --commit-sha (want full 40-hex SHA): %s", commitSHAFlag)
-				}
 				opts.CheckpointID = cpID
-				opts.CommitSHA = normalizedSHA
 			}
 			// When tagging as a review, consume any pending-review marker left
 			// by `entire review` for an agent it could not launch itself: adopt
@@ -193,8 +179,7 @@ the transcript and prints the detected agent name.`,
 	cmd.Flags().StringVarP(&agentFlag, "agent", "a", string(agent.DefaultAgentName), "Agent that created the session (see 'entire agent list' for registered agents, including external)")
 	cmd.Flags().BoolVar(&reviewFlag, "review", false, "Tag the attached session as an agent review")
 	cmd.Flags().StringSliceVar(&skillsFlag, "skills", nil, "Optional: declare which review skills were run in this session. Only used with --review")
-	cmd.Flags().StringVar(&checkpointIDFlag, "checkpoint-id", "", "Explicit checkpoint ID to create for this attach (requires --review and --commit-sha; skips trailer resolution and never amends HEAD)")
-	cmd.Flags().StringVar(&commitSHAFlag, "commit-sha", "", "Full SHA of the commit this attach is bound to, recorded as commit_sha in the checkpoint metadata (requires --review and --checkpoint-id)")
+	cmd.Flags().StringVar(&checkpointIDFlag, "checkpoint-id", "", "Explicit checkpoint ID to create for this attach (requires --review; skips trailer resolution and never amends HEAD)")
 	return cmd
 }
 
@@ -280,19 +265,6 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	headCommit, err := getHeadCommit(repo)
 	if err != nil {
 		return err
-	}
-
-	// The recorded commit binding must name a real commit: --commit-sha is
-	// only shape-validated at the flag layer, and silently persisting a SHA
-	// this repository has never seen would produce provenance pointing at
-	// nothing.
-	if opts.explicitTarget() {
-		if _, chkErr := repo.CommitObject(plumbing.NewHash(opts.CommitSHA)); chkErr != nil {
-			return fmt.Errorf(
-				"--commit-sha %s does not name a commit in this repository: %w",
-				opts.CommitSHA, chkErr,
-			)
-		}
 	}
 
 	// If session already has a checkpoint, just offer to link it.
@@ -413,7 +385,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	// retries whole scripts), refuse (ID exists with other content — never
 	// modify an existing checkpoint), or proceed (genuinely new).
 	if opts.explicitTarget() {
-		freshRepo, present, freshErr := ensureExplicitCheckpointFreshness(ctx, logCtx, repo, refs, checkpointID)
+		freshRepo, present, freshErr := ensureExplicitCheckpointFreshness(ctx, repo, refs, checkpointID)
 		if freshRepo != nil && freshRepo != repo {
 			oldRepo := repo
 			repo = freshRepo
@@ -479,9 +451,6 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		writeOpts.ReviewPrompt = reviewPromptForAttach(meta, opts)
 		writeOpts.HasReview = true
 	}
-	if opts.explicitTarget() {
-		writeOpts.CommitSHA = opts.CommitSHA
-	}
 
 	if err := store.Write(ctx, cpkg.Session(writeOpts)); err != nil {
 		return fmt.Errorf("failed to write checkpoint: %w", err)
@@ -500,10 +469,9 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	}
 
 	fmt.Fprintf(w, "  Created checkpoint %s\n", checkpointID)
-	// Explicit-target attaches are bound to their commit via the recorded
-	// commit_sha, not a commit-message trailer — never amend HEAD.
+	// Explicit-target attaches never amend HEAD: the checkpoint↔commit
+	// association is managed by the caller, not a commit-message trailer.
 	if opts.explicitTarget() {
-		fmt.Fprintf(w, "  Bound to commit %s\n", opts.CommitSHA)
 		return nil
 	}
 	amendOrPrintTrailer(logCtx, w, errW, headCommit, checkpointID.String(), opts.Force)
@@ -673,9 +641,9 @@ func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository
 // after the refresh is NOT an error — an explicit-target ID is normally brand
 // new; the refresh exists so a retry from a fresh clone sees the earlier
 // attempt instead of rebuilding the ID as an orphan that would clobber it on
-// push. Fetch failures degrade to "not present" with a warning, matching
-// ensureCheckpointAvailable's tolerance for offline operation.
-func ensureExplicitCheckpointFreshness(ctx, logCtx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID) (*git.Repository, bool, error) {
+// push. A fetch failure is indistinguishable from a missing remote ref, so it
+// must fail closed rather than author a possibly-colliding checkpoint locally.
+func ensureExplicitCheckpointFreshness(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID) (*git.Repository, bool, error) {
 	cfg, err := settings.LoadCheckpointsConfig(ctx)
 	if err != nil {
 		return repo, false, fmt.Errorf("resolve checkpoints config: %w", err)
@@ -692,10 +660,7 @@ func ensureExplicitCheckpointFreshness(ctx, logCtx context.Context, repo *git.Re
 
 	freshRepo, fetchErr := refreshCheckpoint(ctx, checkpointID, primaryIsRefs)
 	if fetchErr != nil {
-		logging.Warn(logCtx, "failed to refresh explicit checkpoint before attach; treating as new",
-			slog.String("checkpoint_id", checkpointID.String()),
-			slog.String("error", fetchErr.Error()))
-		return repo, false, nil
+		return repo, false, fmt.Errorf("failed to refresh explicit checkpoint %s before attach: %w", checkpointID, fetchErr)
 	}
 	present, readErr = checkpointPresentLocally(ctx, freshRepo, refs, checkpointID, primaryIsRefs)
 	if readErr != nil {
