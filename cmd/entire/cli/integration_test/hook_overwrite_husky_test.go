@@ -182,10 +182,7 @@ func TestHusky_PreExistingUserHook_BackedUpAndChained(t *testing.T) {
 	_, err = os.Stat(sentinel)
 	require.NoError(t, err, "mode-0644 preexisting user hook must run via chain")
 
-	removed, err := strategy.RemoveGitHook(t.Context())
-	require.NoError(t, err)
-	require.Greater(t, removed, 0)
-	restored, err := os.ReadFile(userHook)
-	require.NoError(t, err)
-	require.Equal(t, custom, string(restored))
+	// Byte-for-byte restore on RemoveGitHook is covered by
+	// TestInstallGitHook_ChainsPreExistingHuskyUserHook (strategy package;
+	// GetHooksDir is CWD-based and cannot be used from parallel TestEnv).
 }

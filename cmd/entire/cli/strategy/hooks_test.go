@@ -1455,7 +1455,9 @@ func TestGitHookCommitMsg_MissingEntireStillRunsChainedHook(t *testing.T) {
 	}
 
 	cmd := exec.CommandContext(context.Background(), shPath, hookPath, msgFile)
-	cmd.Env = envWithPath(binDir)
+	// Keep real `sh` on PATH: chained backups run via `sh -e` (husky semantics).
+	// Fake dirname still wins so $_entire_hook_dir resolves inside tempDir.
+	cmd.Env = envWithPath(binDir + string(os.PathListSeparator) + filepath.Dir(shPath))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("chained commit-msg hook should allow commit when entire is missing: %v\n%s", err, output)
