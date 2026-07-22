@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
@@ -286,26 +287,15 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		reviewSkills = resolveReviewSkills(opts.ReviewSkillsOverride)
 	}
 
-	transcriptData, err := ag.ReadTranscript(transcriptPath)
+	transcriptData, storedTranscript, err := readAttachTranscript(logCtx, ag, transcriptPath)
 	if err != nil {
-		return fmt.Errorf("failed to read transcript: %w", err)
+		return err
 	}
-
-	// Normalize Gemini transcripts for storage.
-	storedTranscript := transcriptData
-	if ag.Type() == agent.AgentTypeGemini {
-		if normalized, normErr := geminicli.NormalizeTranscript(transcriptData); normErr == nil {
-			storedTranscript = normalized
-		} else {
-			logging.Warn(logCtx, "failed to normalize Gemini transcript, storing raw", "error", normErr)
-		}
-	}
-
 	meta := extractTranscriptMetadata(transcriptData)
 	warnEmptyTranscriptMetadata(errW, ag.Name(), meta, opts)
+	tokenUsage := agent.CalculateTokenUsage(logCtx, ag, transcriptData, 0, "")
 
-	// Determine checkpoint ID: an explicit target uses the caller-supplied ID
-	// (new by construction, bound to opts.CommitSHA); otherwise reuse HEAD's
+	// Explicit targets use the caller-supplied ID; otherwise reuse HEAD's
 	// trailer if present or generate a fresh ID.
 	var checkpointID id.CheckpointID
 	var isExistingCheckpoint bool
@@ -343,6 +333,12 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		}
 	}
 
+	saveState := func() {
+		if err := saveAttachSessionState(logCtx, repo, existingState, sessionID, ag.Type(), transcriptPath, checkpointID, meta, tokenUsage, opts, reviewSkills); err != nil {
+			logging.Warn(logCtx, "failed to save session state", "error", err)
+		}
+	}
+
 	if opts.explicitTarget() {
 		freshRepo, alreadyAttached, expErr := prepareExplicitTarget(ctx, logCtx, w, repo, refs, checkpointID, sessionID)
 		if freshRepo != repo {
@@ -357,6 +353,10 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 			return expErr
 		}
 		if alreadyAttached {
+			// The checkpoint write may have succeeded on an earlier attempt while
+			// its best-effort state save failed. Repair local state on every
+			// idempotent retry before returning success.
+			saveState()
 			return nil
 		}
 	}
@@ -365,8 +365,6 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	if err != nil {
 		return fmt.Errorf("failed to get git author: %w", err)
 	}
-
-	tokenUsage := agent.CalculateTokenUsage(logCtx, ag, transcriptData, 0, "")
 
 	_, redactSpan := perf.Start(ctx, "redact_transcript")
 	redactedTranscript, redactErr := redact.JSONLBytes(storedTranscript)
@@ -400,9 +398,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	}
 
 	// Create or update session state.
-	if err := saveAttachSessionState(logCtx, repo, existingState, sessionID, ag.Type(), transcriptPath, checkpointID, meta, tokenUsage, opts, reviewSkills); err != nil {
-		logging.Warn(logCtx, "failed to save session state", "error", err)
-	}
+	saveState()
 
 	fmt.Fprintf(w, "Attached session %s\n", sessionID)
 	printAttachFooter(w, meta, tokenUsage)
@@ -578,6 +574,24 @@ func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository
 	return repo, missingCheckpointError(logCtx, checkpointID, primaryIsRefs)
 }
 
+// readAttachTranscript reads the session transcript, normalizing Gemini
+// transcripts for storage (raw is kept when normalization fails).
+func readAttachTranscript(logCtx context.Context, ag agent.Agent, transcriptPath string) ([]byte, []byte, error) {
+	transcriptData, err := ag.ReadTranscript(transcriptPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read transcript: %w", err)
+	}
+	storedTranscript := transcriptData
+	if ag.Type() == agent.AgentTypeGemini {
+		if normalized, normErr := geminicli.NormalizeTranscript(transcriptData); normErr == nil {
+			storedTranscript = normalized
+		} else {
+			logging.Warn(logCtx, "failed to normalize Gemini transcript, storing raw", "error", normErr)
+		}
+	}
+	return transcriptData, storedTranscript, nil
+}
+
 // linkExistingSessionCheckpoint handles a session whose state already records
 // a checkpoint: reviews are refused (review-upgrade of an existing checkpoint
 // is unsupported), otherwise the existing checkpoint is offered as a trailer
@@ -655,8 +669,8 @@ func prepareExplicitTarget(ctx, logCtx context.Context, w io.Writer, repo *git.R
 // after the refresh is NOT an error — an explicit-target ID is normally brand
 // new; the refresh exists so a retry from a fresh clone sees the earlier
 // attempt instead of rebuilding the ID as an orphan that would clobber it on
-// push. For git-refs, an explicitly missing remote source ref proves the ID is
-// new and is safe to proceed; transport/auth/unknown failures still fail closed.
+// push. An explicitly missing remote source ref/branch proves the ID is new and
+// is safe to proceed; transport/auth/unknown failures still fail closed.
 func ensureExplicitCheckpointFreshness(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID) (*git.Repository, bool, error) {
 	cfg, err := settings.LoadCheckpointsConfig(ctx)
 	if err != nil {
@@ -672,6 +686,16 @@ func ensureExplicitCheckpointFreshness(ctx context.Context, repo *git.Repository
 		return repo, true, nil
 	}
 
+	if !primaryIsRefs {
+		remotePresent, probeErr := explicitTargetMetadataBranchPresent(ctx, refs)
+		if probeErr != nil {
+			return repo, false, fmt.Errorf("failed to probe explicit checkpoint metadata branch before attach: %w", probeErr)
+		}
+		if !remotePresent {
+			return repo, false, nil
+		}
+	}
+
 	freshRepo, fetchErr := refreshCheckpoint(ctx, checkpointID, primaryIsRefs)
 	if fetchErr != nil {
 		if primaryIsRefs && errors.Is(fetchErr, errCheckpointRefNotFound) {
@@ -684,6 +708,21 @@ func ensureExplicitCheckpointFreshness(ctx context.Context, repo *git.Repository
 		return freshRepo, false, fmt.Errorf("failed to read checkpoint %s after refresh: %w", checkpointID, readErr)
 	}
 	return freshRepo, present, nil
+}
+
+// explicitTargetMetadataBranchPresent distinguishes a genuinely unpublished v1
+// branch from an inconclusive fetch failure. `git ls-remote` succeeds with empty
+// output when the branch is absent, while transport/auth failures return errors.
+func explicitTargetMetadataBranchPresent(ctx context.Context, refs cpkg.PersistentRefs) (bool, error) {
+	fetchTarget, err := checkpointremote.FetchURL(ctx)
+	if err != nil {
+		return false, fmt.Errorf("resolve checkpoint fetch target: %w", err)
+	}
+	output, err := checkpointremote.LsRemoteInDir(ctx, "", fetchTarget, refs.Primary.String())
+	if err != nil {
+		return false, fmt.Errorf("list metadata branch on %s: %w", checkpointremote.RedactURL(fetchTarget), err)
+	}
+	return strings.TrimSpace(string(output)) != "", nil
 }
 
 // refreshCheckpoint fetches the checkpoint referenced by HEAD from the remote and

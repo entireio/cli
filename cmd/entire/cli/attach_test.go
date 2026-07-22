@@ -1171,7 +1171,9 @@ func TestAttach_ReviewWithExistingCheckpointErrors(t *testing.T) {
 // when HEAD carries no Entire-Checkpoint trailer, and must never amend HEAD.
 func TestAttach_ReviewExplicitTargetCreatesShaBoundCheckpoint(t *testing.T) {
 	setupAttachTestRepo(t)
-	setupAttachCheckpointOrigin(t)
+	// A reachable origin with no metadata branch is the normal first-checkpoint
+	// case and must be accepted as a genuinely new explicit target.
+	setupAttachBareOrigin(t)
 
 	repoRoot := mustGetwd(t)
 	repo, err := git.PlainOpen(repoRoot)
@@ -1304,6 +1306,107 @@ func TestAttach_ReviewExplicitTargetCreatesShaBoundCheckpoint(t *testing.T) {
 	}
 	if len(summary.Sessions) != 1 {
 		t.Errorf("retry duplicated the session: %d sessions, want 1", len(summary.Sessions))
+	}
+}
+
+// An idempotent retry must repair session state as well as avoid duplicating
+// checkpoint data. This models a first attach whose checkpoint write succeeded
+// but whose best-effort state save failed.
+func TestAttach_ExplicitTargetRetryRepairsMissingSessionState(t *testing.T) {
+	setupAttachTestRepo(t)
+	setupAttachCheckpointOrigin(t)
+
+	repoRoot := mustGetwd(t)
+	sessionID := "review-session-retry-state-repair"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"review retry state"},"uuid":"u1"}
+`)
+	targetID := id.CheckpointID("aabbccddeeff")
+	opts := attachOptions{
+		Force:                true,
+		Review:               true,
+		ReviewSkillsOverride: []string{"/security-review"},
+		ReviewPromptOverride: "review the target commit for security regressions",
+		CheckpointID:         targetID,
+	}
+
+	var out bytes.Buffer
+	if err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, opts); err != nil {
+		t.Fatalf("first explicit-target attach failed: %v", err)
+	}
+	stateFile := filepath.Join(repoRoot, ".git", "entire-sessions", sessionID+".json")
+	if err := os.Remove(stateFile); err != nil {
+		t.Fatalf("remove state to simulate failed first save: %v", err)
+	}
+
+	out.Reset()
+	if err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, opts); err != nil {
+		t.Fatalf("idempotent retry failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "already attached") {
+		t.Fatalf("retry did not take idempotent path: %q", out.String())
+	}
+
+	stateStore, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := stateStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil {
+		t.Fatal("retry did not recreate session state")
+	}
+	if state.AgentType != agent.AgentTypeClaudeCode {
+		t.Errorf("AgentType = %q, want %q", state.AgentType, agent.AgentTypeClaudeCode)
+	}
+	if state.Kind != session.KindAgentReview {
+		t.Errorf("Kind = %q, want %q", state.Kind, session.KindAgentReview)
+	}
+	if !reflect.DeepEqual(state.ReviewSkills, opts.ReviewSkillsOverride) {
+		t.Errorf("ReviewSkills = %v, want %v", state.ReviewSkills, opts.ReviewSkillsOverride)
+	}
+	if state.ReviewPrompt != opts.ReviewPromptOverride {
+		t.Errorf("ReviewPrompt = %q, want %q", state.ReviewPrompt, opts.ReviewPromptOverride)
+	}
+	if !state.LastCheckpointID.IsEmpty() || state.BaseCommit != "" {
+		t.Errorf("retry incorrectly trailer-linked explicit checkpoint: LastCheckpointID=%s BaseCommit=%q", state.LastCheckpointID, state.BaseCommit)
+	}
+}
+
+// A missing metadata branch on a reachable origin is safe, but a failed branch
+// probe is inconclusive and must not create a local v1 orphan under the supplied
+// checkpoint ID.
+func TestAttach_ExplicitTargetGitBranchRejectsProbeFailure(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	repoRoot := mustGetwd(t)
+	runGit(t, repoRoot, "remote", "add", "origin", filepath.Join(t.TempDir(), "missing.git"))
+	sessionID := "review-session-broken-metadata-remote"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"review retry"},"uuid":"u1"}
+`)
+	targetID := id.CheckpointID("aabbccddeeff")
+
+	var out bytes.Buffer
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
+		Force:        true,
+		Review:       true,
+		CheckpointID: targetID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to probe explicit checkpoint metadata branch") {
+		t.Fatalf("expected inconclusive metadata probe to fail closed, got: %v", err)
+	}
+
+	stateStore, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := stateStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != nil {
+		t.Fatalf("session state was written after an inconclusive metadata probe: %+v", state)
 	}
 }
 
