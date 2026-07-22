@@ -15,12 +15,24 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 // maxSiblingAutoAdoptScan caps how many sibling directories prepare-commit-msg will
 // inspect when the live-session registry has no unique candidate. Keeps the
 // hook bounded on large parent directories.
 const maxSiblingAutoAdoptScan = 32
+
+// shouldTryAutoAdoptOnPrepareCommitMsg reports whether prepare-commit-msg should
+// attempt cross-common-dir auto-adopt. Matches ManualCommitStrategy.PrepareCommitMsg
+// skip conditions so we never retire a live session when no trailer would be written.
+func shouldTryAutoAdoptOnPrepareCommitMsg(ctx context.Context, source string) bool {
+	switch source {
+	case "merge", "squash":
+		return false
+	}
+	return !strategy.IsGitSequenceOperation(ctx)
+}
 
 // tryAutoAdoptCrossCommonDirSession adopts a unique ACTIVE session from another
 // git common dir into the current worktree when it is safe to do so.

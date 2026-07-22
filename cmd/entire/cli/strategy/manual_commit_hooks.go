@@ -306,7 +306,7 @@ func stripCheckpointTrailer(message string) string {
 	return strings.Join(result, "\n")
 }
 
-// isGitSequenceOperation checks if git is currently in the middle of a rebase,
+// IsGitSequenceOperation checks if git is currently in the middle of a rebase,
 // cherry-pick, or revert operation. During these operations, commits are being
 // replayed and should not be linked to agent sessions.
 //
@@ -314,7 +314,7 @@ func stripCheckpointTrailer(message string) string {
 //   - rebase: .git/rebase-merge/ or .git/rebase-apply/ directories
 //   - cherry-pick: .git/CHERRY_PICK_HEAD file
 //   - revert: .git/REVERT_HEAD file
-func isGitSequenceOperation(ctx context.Context) bool {
+func IsGitSequenceOperation(ctx context.Context) bool {
 	// Get git directory (handles worktrees and relative paths correctly)
 	gitDir, err := GetGitDir(ctx)
 	if err != nil {
@@ -359,7 +359,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 	// Skip during rebase, cherry-pick, or revert operations
 	// These are replaying existing commits and should not be linked to agent sessions
-	if isGitSequenceOperation(ctx) {
+	if IsGitSequenceOperation(ctx) {
 		logging.Debug(logCtx, "prepare-commit-msg: skipped during git sequence operation",
 			slog.String("strategy", "manual-commit"),
 			slog.String("source", source),
@@ -936,7 +936,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	}
 
 	// Build transition context
-	isRebase := isGitSequenceOperation(ctx)
+	isRebase := IsGitSequenceOperation(ctx)
 	transitionCtx := session.TransitionContext{
 		IsRebaseInProgress: isRebase,
 	}

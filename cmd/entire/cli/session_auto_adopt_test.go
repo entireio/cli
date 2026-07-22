@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -313,5 +314,71 @@ func TestAutoAdopt_SkipsOwnerMatchWithoutOverlap(t *testing.T) {
 	}
 	if adopted != nil {
 		t.Fatal("owner match without FilesTouched overlap must not auto-adopt")
+	}
+}
+
+// shouldTryAutoAdoptOnPrepareCommitMsg uses t.Chdir(), so no t.Parallel().
+func TestShouldTryAutoAdoptOnPrepareCommitMsg(t *testing.T) {
+	repo := setupAdoptRepoAt(t, filepath.Join(t.TempDir(), "repo"))
+	t.Chdir(repo)
+
+	if !shouldTryAutoAdoptOnPrepareCommitMsg(context.Background(), "") {
+		t.Fatal("empty source in clean repo should allow auto-adopt")
+	}
+	if !shouldTryAutoAdoptOnPrepareCommitMsg(context.Background(), "message") {
+		t.Fatal("message source in clean repo should allow auto-adopt")
+	}
+	if shouldTryAutoAdoptOnPrepareCommitMsg(context.Background(), "merge") {
+		t.Fatal("merge source must skip auto-adopt")
+	}
+	if shouldTryAutoAdoptOnPrepareCommitMsg(context.Background(), "squash") {
+		t.Fatal("squash source must skip auto-adopt")
+	}
+
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "rebase-merge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if shouldTryAutoAdoptOnPrepareCommitMsg(context.Background(), "") {
+		t.Fatal("rebase sequence must skip auto-adopt even for empty source")
+	}
+	if shouldTryAutoAdoptOnPrepareCommitMsg(context.Background(), "message") {
+		t.Fatal("rebase sequence must skip auto-adopt for message source")
+	}
+}
+
+func TestClearInvalidAdoptTranscript_WarnsAndClears(t *testing.T) {
+	// Redirects os.Stderr; not parallel-safe.
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() {
+		os.Stderr = oldStderr
+		_ = w.Close()
+		_ = r.Close()
+	})
+
+	state := &session.State{
+		SessionID:      "test-clear-invalid-transcript",
+		AgentType:      agent.AgentTypeClaudeCode,
+		TranscriptPath: "/tmp/not-an-agent-transcript.jsonl",
+	}
+	clearInvalidAdoptTranscript(context.Background(), state, t.TempDir())
+	_ = w.Close()
+	os.Stderr = oldStderr
+
+	var buf strings.Builder
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+
+	if state.TranscriptPath != "" {
+		t.Fatalf("TranscriptPath = %q, want cleared", state.TranscriptPath)
+	}
+	if !strings.Contains(buf.String(), "lost its transcript pointer") {
+		t.Fatalf("stderr = %q, want transcript-pointer warning", buf.String())
 	}
 }

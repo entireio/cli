@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -171,7 +174,7 @@ func adoptFromExternalSessionStore(
 			return err
 		}
 		if opts.SkipTranscriptValidation {
-			clearInvalidAdoptTranscript(next, sourceWorktree)
+			clearInvalidAdoptTranscript(ctx, next, sourceWorktree)
 		}
 		existing, err := targetStore.Load(ctx, next.SessionID)
 		if err != nil {
@@ -288,11 +291,22 @@ func validateAdoptSourceTranscript(source *session.State, sourceWorktree string)
 	return nil
 }
 
-func clearInvalidAdoptTranscript(state *session.State, sourceWorktree string) {
+// clearInvalidAdoptTranscript wipes a transcript pointer that would fail
+// validateAdoptSourceTranscript. Used by auto-adopt (SkipTranscriptValidation)
+// so a missing/unowned path does not block adoption; surfaces a warning so the
+// user can see continuity was degraded until the next agent turn re-resolves it.
+func clearInvalidAdoptTranscript(ctx context.Context, state *session.State, sourceWorktree string) {
 	if state == nil || strings.TrimSpace(state.TranscriptPath) == "" {
 		return
 	}
 	if err := validateAdoptSourceTranscript(state, sourceWorktree); err != nil {
+		logCtx := logging.WithComponent(ctx, "session")
+		logging.Warn(logCtx, "adopt: clearing invalid transcript path",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()),
+		)
+		fmt.Fprintf(os.Stderr, "[entire] Warning: adopted session %s lost its transcript pointer (%v); it will be re-resolved on the next agent turn.\n",
+			shortSessionID(state.SessionID), err)
 		state.TranscriptPath = ""
 	}
 }

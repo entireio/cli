@@ -425,13 +425,13 @@ func initHooksWorktreeRepo(t *testing.T) (string, string) {
 	return mainRepo, worktreeDir
 }
 
-// isGitSequenceOperation tests use t.Chdir() so cannot call t.Parallel().
+// IsGitSequenceOperation tests use t.Chdir() so cannot call t.Parallel().
 
 func TestIsGitSequenceOperation_NoOperation(t *testing.T) {
 	initHooksTestRepo(t)
 
-	if isGitSequenceOperation(context.Background()) {
-		t.Error("isGitSequenceOperation(context.Background()) = true, want false for clean repo")
+	if IsGitSequenceOperation(context.Background()) {
+		t.Error("IsGitSequenceOperation(context.Background()) = true, want false for clean repo")
 	}
 }
 
@@ -442,8 +442,8 @@ func TestIsGitSequenceOperation_RebaseMerge(t *testing.T) {
 		t.Fatalf("failed to create rebase-merge dir: %v", err)
 	}
 
-	if !isGitSequenceOperation(context.Background()) {
-		t.Error("isGitSequenceOperation(context.Background()) = false, want true during rebase-merge")
+	if !IsGitSequenceOperation(context.Background()) {
+		t.Error("IsGitSequenceOperation(context.Background()) = false, want true during rebase-merge")
 	}
 }
 
@@ -454,8 +454,8 @@ func TestIsGitSequenceOperation_RebaseApply(t *testing.T) {
 		t.Fatalf("failed to create rebase-apply dir: %v", err)
 	}
 
-	if !isGitSequenceOperation(context.Background()) {
-		t.Error("isGitSequenceOperation(context.Background()) = false, want true during rebase-apply")
+	if !IsGitSequenceOperation(context.Background()) {
+		t.Error("IsGitSequenceOperation(context.Background()) = false, want true during rebase-apply")
 	}
 }
 
@@ -466,8 +466,8 @@ func TestIsGitSequenceOperation_CherryPick(t *testing.T) {
 		t.Fatalf("failed to create CHERRY_PICK_HEAD: %v", err)
 	}
 
-	if !isGitSequenceOperation(context.Background()) {
-		t.Error("isGitSequenceOperation(context.Background()) = false, want true during cherry-pick")
+	if !IsGitSequenceOperation(context.Background()) {
+		t.Error("IsGitSequenceOperation(context.Background()) = false, want true during cherry-pick")
 	}
 }
 
@@ -478,8 +478,8 @@ func TestIsGitSequenceOperation_Revert(t *testing.T) {
 		t.Fatalf("failed to create REVERT_HEAD: %v", err)
 	}
 
-	if !isGitSequenceOperation(context.Background()) {
-		t.Error("isGitSequenceOperation(context.Background()) = false, want true during revert")
+	if !IsGitSequenceOperation(context.Background()) {
+		t.Error("IsGitSequenceOperation(context.Background()) = false, want true during revert")
 	}
 }
 
@@ -549,8 +549,8 @@ func TestIsGitSequenceOperation_Worktree(t *testing.T) {
 	t.Chdir(worktreeDir)
 
 	// Should not detect sequence operation in clean worktree
-	if isGitSequenceOperation(context.Background()) {
-		t.Error("isGitSequenceOperation(context.Background()) = true in clean worktree, want false")
+	if IsGitSequenceOperation(context.Background()) {
+		t.Error("IsGitSequenceOperation(context.Background()) = true in clean worktree, want false")
 	}
 
 	// Get the worktree's git dir and simulate rebase state there
@@ -568,8 +568,8 @@ func TestIsGitSequenceOperation_Worktree(t *testing.T) {
 	}
 
 	// Now should detect sequence operation
-	if !isGitSequenceOperation(context.Background()) {
-		t.Error("isGitSequenceOperation(context.Background()) = false in worktree during rebase, want true")
+	if !IsGitSequenceOperation(context.Background()) {
+		t.Error("IsGitSequenceOperation(context.Background()) = false in worktree during rebase, want true")
 	}
 }
 
