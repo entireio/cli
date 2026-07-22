@@ -267,26 +267,8 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		return err
 	}
 
-	// If session already has a checkpoint, just offer to link it.
-	// Explicit-target mode is exempt: it authors a separate new checkpoint
-	// under the caller-supplied ID, so the session's own checkpoint (e.g.
-	// from the session-stop hook's eager condense) is irrelevant.
-	if existingState != nil && !existingState.LastCheckpointID.IsEmpty() && !opts.explicitTarget() {
-		// Review-upgrade isn't supported yet: the existing checkpoint's
-		// metadata tree would need to be rewritten with Kind/ReviewSkills/
-		// ReviewPrompt set, and a new commit pushed onto entire/checkpoints/v1.
-		// Error out with a concrete message rather than silently linking the
-		// checkpoint without the review metadata.
-		if opts.Review {
-			return fmt.Errorf(
-				"session %s already has checkpoint %s; rewriting an existing checkpoint as a review is not supported yet",
-				sessionID, existingState.LastCheckpointID.String(),
-			)
-		}
-		cpID := existingState.LastCheckpointID.String()
-		fmt.Fprintf(w, "Session %s already has checkpoint %s\n", sessionID, cpID)
-		amendOrPrintTrailer(logCtx, w, errW, headCommit, cpID, opts.Force)
-		return nil
+	if handled, err := linkExistingSessionCheckpoint(logCtx, w, errW, headCommit, sessionID, existingState, opts); handled || err != nil {
+		return err
 	}
 
 	if err := ensureCheckpointPolicyAllowsCheckpointData(ctx, repo); err != nil {
@@ -355,66 +337,27 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		return err
 	}
 
-	// Defense-in-depth guard: the earlier existingState.LastCheckpointID
-	// check only fires when the session's state file records its
-	// checkpoint. A session already stored in the HEAD checkpoint but
-	// whose state is missing/stale (state file deleted, never written,
-	// condensed without LastCheckpointID update, or pulled from a remote
-	// that wasn't reflected locally) would bypass that guard.
-	// findSessionIndex matches by SessionID — without this check, a
-	// review-attach on such a session silently overwrites the existing
-	// session's metadata in the checkpoint.
 	if opts.Review && isExistingCheckpoint {
-		exists, readErr := checkpointHasSessionMetadata(ctx, repo, refs, checkpointID, sessionID)
-		if readErr != nil {
-			return fmt.Errorf("failed to check checkpoint %s for session %s: %w", checkpointID.String(), sessionID, readErr)
-		}
-		if exists {
-			return fmt.Errorf(
-				"session %s is already recorded in checkpoint %s; rewriting an existing checkpoint as a review is not supported yet",
-				sessionID, checkpointID.String(),
-			)
+		if err := rejectReviewOnRecordedSession(ctx, repo, refs, checkpointID, sessionID); err != nil {
+			return err
 		}
 	}
 
-	// Explicit-target IDs are usually new — but "usually" is not "always": a
-	// retried attach from a fresh clone would not have the earlier attempt's
-	// data locally, and treating the ID as brand-new would rebuild it as an
-	// orphan that clobbers the original on push. Refresh remote state for the
-	// ID first, then either no-op (same session already recorded — the caller
-	// retries whole scripts), refuse (ID exists with other content — never
-	// modify an existing checkpoint), or proceed (genuinely new).
 	if opts.explicitTarget() {
-		freshRepo, present, freshErr := ensureExplicitCheckpointFreshness(ctx, repo, refs, checkpointID)
-		if freshRepo != nil && freshRepo != repo {
-			oldRepo := repo
+		freshRepo, alreadyAttached, expErr := prepareExplicitTarget(ctx, logCtx, w, repo, refs, checkpointID, sessionID)
+		if freshRepo != repo {
 			repo = freshRepo
-			if closeErr := oldRepo.Close(); closeErr != nil {
-				logging.Warn(logCtx, "failed to close stale repository handle after explicit checkpoint refresh",
-					slog.String("error", closeErr.Error()))
-			}
 			// The store handle wraps the stale repo; reopen against the fresh one.
 			store, err = openAttachStore(ctx, repo, refs)
 			if err != nil {
 				return err
 			}
 		}
-		if freshErr != nil {
-			return freshErr
+		if expErr != nil {
+			return expErr
 		}
-		if present {
-			exists, readErr := checkpointHasSessionMetadata(ctx, repo, refs, checkpointID, sessionID)
-			if readErr != nil {
-				return fmt.Errorf("failed to check checkpoint %s for session %s: %w", checkpointID.String(), sessionID, readErr)
-			}
-			if exists {
-				fmt.Fprintf(w, "Session %s already attached to checkpoint %s\n", sessionID, checkpointID.String())
-				return nil
-			}
-			return fmt.Errorf(
-				"checkpoint %s already exists without session %s; refusing to modify an existing checkpoint",
-				checkpointID.String(), sessionID,
-			)
+		if alreadyAttached {
+			return nil
 		}
 	}
 
@@ -633,6 +576,77 @@ func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository
 	}
 
 	return repo, missingCheckpointError(logCtx, checkpointID, primaryIsRefs)
+}
+
+// linkExistingSessionCheckpoint handles a session whose state already records
+// a checkpoint: reviews are refused (review-upgrade of an existing checkpoint
+// is unsupported), otherwise the existing checkpoint is offered as a trailer
+// link. Explicit-target mode is exempt — it authors a separate new checkpoint,
+// so the session's own checkpoint (e.g. from the session-stop hook's eager
+// condense) is irrelevant. Returns handled=true when the attach is done.
+func linkExistingSessionCheckpoint(logCtx context.Context, w, errW io.Writer, headCommit *object.Commit, sessionID string, existingState *session.State, opts attachOptions) (bool, error) {
+	if existingState == nil || existingState.LastCheckpointID.IsEmpty() || opts.explicitTarget() {
+		return false, nil
+	}
+	if opts.Review {
+		return true, fmt.Errorf(
+			"session %s already has checkpoint %s; rewriting an existing checkpoint as a review is not supported yet",
+			sessionID, existingState.LastCheckpointID.String(),
+		)
+	}
+	cpID := existingState.LastCheckpointID.String()
+	fmt.Fprintf(w, "Session %s already has checkpoint %s\n", sessionID, cpID)
+	amendOrPrintTrailer(logCtx, w, errW, headCommit, cpID, opts.Force)
+	return true, nil
+}
+
+// rejectReviewOnRecordedSession refuses a review-attach when the session is
+// already stored in the target checkpoint even though its state file did not
+// say so (missing/stale state) — findSessionIndex matches by SessionID, so
+// proceeding would silently overwrite the existing session's metadata.
+func rejectReviewOnRecordedSession(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID, sessionID string) error {
+	exists, readErr := checkpointHasSessionMetadata(ctx, repo, refs, checkpointID, sessionID)
+	if readErr != nil {
+		return fmt.Errorf("failed to check checkpoint %s for session %s: %w", checkpointID.String(), sessionID, readErr)
+	}
+	if exists {
+		return fmt.Errorf(
+			"session %s is already recorded in checkpoint %s; rewriting an existing checkpoint as a review is not supported yet",
+			sessionID, checkpointID.String(),
+		)
+	}
+	return nil
+}
+
+// prepareExplicitTarget refreshes remote state for an explicit-target ID and
+// decides how the attach proceeds: attach anew, no-op (this session is already
+// recorded under the ID — retries are idempotent), or refuse (the ID exists
+// with other content and must never be modified). Returns the possibly
+// refreshed repo; the stale handle is closed here.
+func prepareExplicitTarget(ctx, logCtx context.Context, w io.Writer, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID, sessionID string) (*git.Repository, bool, error) {
+	freshRepo, present, err := ensureExplicitCheckpointFreshness(ctx, repo, refs, checkpointID)
+	if freshRepo != nil && freshRepo != repo {
+		if closeErr := repo.Close(); closeErr != nil {
+			logging.Warn(logCtx, "failed to close stale repository handle after explicit checkpoint refresh",
+				slog.String("error", closeErr.Error()))
+		}
+		repo = freshRepo
+	}
+	if err != nil || !present {
+		return repo, false, err
+	}
+	exists, readErr := checkpointHasSessionMetadata(ctx, repo, refs, checkpointID, sessionID)
+	if readErr != nil {
+		return repo, false, fmt.Errorf("failed to check checkpoint %s for session %s: %w", checkpointID.String(), sessionID, readErr)
+	}
+	if exists {
+		fmt.Fprintf(w, "Session %s already attached to checkpoint %s\n", sessionID, checkpointID.String())
+		return repo, true, nil
+	}
+	return repo, false, fmt.Errorf(
+		"checkpoint %s already exists without session %s; refusing to modify an existing checkpoint",
+		checkpointID.String(), sessionID,
+	)
 }
 
 // ensureExplicitCheckpointFreshness surfaces any remote copy of an

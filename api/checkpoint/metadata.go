@@ -149,7 +149,6 @@ type WriteOptions struct {
 	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
 	Kind string
 
-
 	// ReviewSkills is the snapshot of skills used (only meaningful when Kind is a review kind).
 	// May be empty when a review is attached post-hoc without declared skills.
 	ReviewSkills []string
@@ -394,7 +393,6 @@ type Metadata struct {
 	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
 	Kind string `json:"kind,omitempty"`
 
-
 	// ReviewSkills lists the review skills that were run (only set when Kind is a review kind).
 	// May be empty when a review was attached post-hoc without declared skills.
 	ReviewSkills []string `json:"review_skills,omitempty"`
@@ -505,7 +503,6 @@ type CheckpointSummary struct {
 	// agent history (a session with Kind == "imported"): read-only and
 	// commit-less.
 	Imported bool `json:"imported,omitempty"`
-
 }
 
 // SessionMetrics contains hook-provided session metrics from agents that report
