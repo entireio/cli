@@ -236,23 +236,35 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		return err
 	}
 
+	// Determine checkpoint ID: reuse from HEAD if one exists, otherwise generate new.
+	checkpointID, isExistingCheckpoint := resolveCheckpointID(ctx, headCommit)
+
 	// If session already has a checkpoint, just offer to link it.
 	if existingState != nil && !existingState.LastCheckpointID.IsEmpty() {
-		// Review-upgrade isn't supported yet: the existing checkpoint's
-		// metadata tree would need to be rewritten with Kind/ReviewSkills/
-		// ReviewPrompt set, and a new commit pushed onto entire/checkpoints/v1.
-		// Error out with a concrete message rather than silently linking the
-		// checkpoint without the review metadata.
 		if opts.Review {
-			return fmt.Errorf(
-				"session %s already has checkpoint %s; rewriting an existing checkpoint as a review is not supported yet",
-				sessionID, existingState.LastCheckpointID.String(),
-			)
+			// A reviewer session can arrive here already holding its own
+			// checkpoint: the session-stop hook eagerly condenses ended
+			// sessions and records the minted ID in LastCheckpointID. When
+			// HEAD carries a different, pre-existing checkpoint, recording
+			// the session there as a review is the normal append path, so
+			// fall through. Rewriting the session's OWN checkpoint as a
+			// review (review-upgrade) would require rewriting its metadata
+			// tree with Kind/ReviewSkills/ReviewPrompt and pushing a new
+			// commit onto entire/checkpoints/v1 — still unsupported, so
+			// error with a concrete message rather than silently linking
+			// the checkpoint without the review metadata.
+			if !isExistingCheckpoint || checkpointID == existingState.LastCheckpointID {
+				return fmt.Errorf(
+					"session %s already has checkpoint %s; rewriting an existing checkpoint as a review is not supported yet",
+					sessionID, existingState.LastCheckpointID.String(),
+				)
+			}
+		} else {
+			cpID := existingState.LastCheckpointID.String()
+			fmt.Fprintf(w, "Session %s already has checkpoint %s\n", sessionID, cpID)
+			amendOrPrintTrailer(logCtx, w, errW, headCommit, cpID, opts.Force)
+			return nil
 		}
-		cpID := existingState.LastCheckpointID.String()
-		fmt.Fprintf(w, "Session %s already has checkpoint %s\n", sessionID, cpID)
-		amendOrPrintTrailer(logCtx, w, errW, headCommit, cpID, opts.Force)
-		return nil
 	}
 
 	if err := ensureCheckpointPolicyAllowsCheckpointData(ctx, repo); err != nil {
@@ -287,9 +299,6 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 
 	meta := extractTranscriptMetadata(transcriptData)
 	warnEmptyTranscriptMetadata(errW, ag.Name(), meta, opts)
-
-	// Determine checkpoint ID: reuse from HEAD if one exists, otherwise generate new.
-	checkpointID, isExistingCheckpoint := resolveCheckpointID(ctx, headCommit)
 
 	// If HEAD references an existing checkpoint, make sure we have it locally
 	// before writing — otherwise we'd create a fresh session 0 under the same

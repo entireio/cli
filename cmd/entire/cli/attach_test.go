@@ -1165,6 +1165,107 @@ func TestAttach_ReviewWithExistingCheckpointErrors(t *testing.T) {
 	}
 }
 
+// Reproduces the review-runner sandbox failure: the reviewer session's
+// session-stop hook eagerly condensed it into its OWN checkpoint
+// (LastCheckpointID set), while HEAD carries the different, pre-existing
+// checkpoint of the code under review. Review-attach must append the
+// reviewer session to HEAD's checkpoint instead of refusing with
+// "already has checkpoint".
+func TestAttach_ReviewProceedsWhenSessionCheckpointDiffersFromHead(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	// First session: a normal attach creates HEAD's checkpoint and amends the
+	// Entire-Checkpoint trailer onto HEAD.
+	firstSessionID := "first-session-under-review"
+	setupClaudeTranscript(t, firstSessionID, `{"type":"user","message":{"role":"user","content":"first"},"uuid":"u1"}
+`)
+	var out bytes.Buffer
+	if err := runAttach(context.Background(), &out, &out, firstSessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+		t.Fatalf("first attach failed: %v", err)
+	}
+
+	repoRoot := mustGetwd(t)
+	repo, err := git.PlainOpen(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headRef, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	headCommit, err := repo.CommitObject(headRef.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	headCheckpoints := trailers.ParseAllCheckpoints(headCommit.Message)
+	if len(headCheckpoints) != 1 {
+		t.Fatalf("expected one Entire-Checkpoint trailer after first attach; got %v", headCheckpoints)
+	}
+	headCheckpointID := headCheckpoints[0]
+
+	// Reviewer session: transcript plus pre-existing state whose
+	// LastCheckpointID points at a different checkpoint of its own — what the
+	// eager condense on session stop leaves behind.
+	reviewSessionID := "review-session-self-condensed"
+	setupClaudeTranscript(t, reviewSessionID, `{"type":"user","message":{"role":"user","content":"please review"},"uuid":"u1"}
+`)
+	ownCheckpointID, err := cpkg.GenerateCheckpointID(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ownCheckpointID == headCheckpointID {
+		t.Fatal("test requires distinct checkpoint IDs")
+	}
+	stateStore, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Save(context.Background(), &session.State{
+		SessionID:        reviewSessionID,
+		StartedAt:        time.Now(),
+		WorktreePath:     repoRoot,
+		AgentType:        agent.AgentTypeClaudeCode,
+		LastCheckpointID: ownCheckpointID,
+	}); err != nil {
+		t.Fatalf("seed session state: %v", err)
+	}
+
+	out.Reset()
+	if err := runAttach(context.Background(), &out, &out, reviewSessionID, agent.AgentNameClaudeCode, attachOptions{
+		Force:                true,
+		Review:               true,
+		ReviewSkillsOverride: []string{"/review"},
+	}); err != nil {
+		t.Fatalf("review attach should proceed when HEAD's checkpoint differs from the session's own: %v", err)
+	}
+
+	// The reviewer session must now be recorded on HEAD's checkpoint.
+	cpStore := cpkg.NewGitStore(repo, cpkg.DefaultV1Refs())
+	summary, err := cpStore.Read(context.Background(), headCheckpointID)
+	if err != nil {
+		t.Fatalf("Read(%s): %v", headCheckpointID, err)
+	}
+	if summary == nil {
+		t.Fatalf("checkpoint %s summary nil after review attach", headCheckpointID)
+	}
+	if len(summary.Sessions) != 2 {
+		t.Fatalf("checkpoint has %d sessions, want 2 (reviewed session + reviewer session)", len(summary.Sessions))
+	}
+	foundReview := false
+	for i := range summary.Sessions {
+		metadata, metaErr := cpStore.ReadSessionMetadata(context.Background(), headCheckpointID, i)
+		if metaErr != nil {
+			t.Fatalf("ReadSessionMetadata(%d): %v", i, metaErr)
+		}
+		if metadata != nil && metadata.SessionID == reviewSessionID {
+			foundReview = true
+		}
+	}
+	if !foundReview {
+		t.Errorf("reviewer session %q not recorded on HEAD checkpoint %s", reviewSessionID, headCheckpointID)
+	}
+}
+
 // Regression for the second "review-attach overwrote the session on the
 // checkpoint" report: a DIFFERENT session ID (not present in the existing
 // checkpoint) must APPEND at the next-available index, not overwrite
