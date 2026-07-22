@@ -13,8 +13,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// huskyHScript is the husky v9 `_/h` dispatcher: git runs `.husky/_/<hook>`,
-// which sources this script, which then executes `.husky/<hook>` if present.
+// huskyHScript is the core of the husky v9 `_/h` dispatcher (HUSKY=0 opt-out,
+// ~/.config/husky/init.sh sourcing, and node_modules/.bin PATH prepend trimmed).
+// Git runs `.husky/_/<hook>`, which sources this script, which then executes
+// `.husky/<hook>` if present via `sh -e`.
 const huskyHScript = `#!/usr/bin/env sh
 n=$(basename "$0")
 s=$(dirname "$(dirname "$0")")/$n
@@ -130,4 +132,60 @@ func commitViaGit(t *testing.T, env *TestEnv, message string) {
 	)
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "git commit %q failed: %s", message, out)
+}
+
+// TestHusky_PreExistingUserHook_BackedUpAndChained covers tracked `.husky/`
+// territory: a pre-existing mode-0644 user hook is renamed to `.pre-entire`,
+// Entire's wrapper is installed, and the backup still runs (via sh -e) on commit.
+// RemoveGitHook restores the original script.
+func TestHusky_PreExistingUserHook_BackedUpAndChained(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	_, userDir := seedHuskyLayout(t, env)
+
+	sentinel := filepath.Join(env.RepoDir, "user-hook-ran")
+	custom := "#!/bin/sh\ntouch \"" + sentinel + "\"\n"
+	userHook := filepath.Join(userDir, "prepare-commit-msg")
+	require.NoError(t, os.WriteFile(userHook, []byte(custom), 0o644))
+
+	env.WriteSettings(map[string]any{
+		"enabled":                true,
+		"absolute_git_hook_path": true,
+		"strategy_options":       map[string]any{"filtered_fetches": true, "commit_linking": "always"},
+	})
+
+	sess := env.NewSession()
+	err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(
+		sess.ID, "Touch preexisting husky hook", sess.TranscriptPath)
+	require.NoError(t, err)
+
+	backupPath := userHook + ".pre-entire"
+	backupData, err := os.ReadFile(backupPath)
+	require.NoError(t, err, "preexisting user hook should be backed up to .pre-entire")
+	require.Equal(t, custom, string(backupData))
+
+	installed, err := os.ReadFile(userHook)
+	require.NoError(t, err)
+	require.Contains(t, string(installed), "Entire CLI hooks")
+	require.Contains(t, string(installed), "sh -e")
+
+	env.WriteFile("chain.go", "package main\n")
+	sess.CreateTranscript("Touch preexisting husky hook", []FileChange{
+		{Path: "chain.go", Content: "package main\n"},
+	})
+	env.GitAdd("chain.go")
+	commitViaGit(t, env, "Exercise chained husky user hook")
+
+	cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+	require.NotEmpty(t, cpID, "Entire prepare-commit-msg should still add trailer")
+	_, err = os.Stat(sentinel)
+	require.NoError(t, err, "mode-0644 preexisting user hook must run via chain")
+
+	removed, err := strategy.RemoveGitHook(t.Context())
+	require.NoError(t, err)
+	require.Greater(t, removed, 0)
+	restored, err := os.ReadFile(userHook)
+	require.NoError(t, err)
+	require.Equal(t, custom, string(restored))
 }

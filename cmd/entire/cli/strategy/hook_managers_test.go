@@ -462,7 +462,7 @@ func TestCheckAndWarnHookManagers_NoManagers(t *testing.T) {
 	initHooksTestRepo(t)
 
 	var buf bytes.Buffer
-	CheckAndWarnHookManagers(context.Background(), &buf, false, false)
+	CheckAndWarnHookManagers(context.Background(), &buf, false, false, false)
 
 	if buf.Len() != 0 {
 		t.Errorf("expected no output, got %q", buf.String())
@@ -488,10 +488,30 @@ func TestCheckAndWarnHookManagers_WithHusky(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	CheckAndWarnHookManagers(context.Background(), &buf, false, false)
+	CheckAndWarnHookManagers(context.Background(), &buf, false, false, true)
 
 	output := buf.String()
 	if !strings.Contains(output, "Note: Husky detected") {
 		t.Errorf("expected husky note output, got %q", output)
+	}
+	if !strings.Contains(output, "never replaced with Entire hooks") {
+		t.Errorf("expected husky-safe wording, got %q", output)
+	}
+}
+
+func TestCheckAndWarnHookManagers_HuskyUnsafeWarns(t *testing.T) {
+	// Needs t.Chdir (via initHooksTestRepo), cannot be parallel
+	tmpDir, _ := initHooksTestRepo(t)
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".husky"), 0o755); err != nil {
+		t.Fatalf("failed to create .husky/: %v", err)
+	}
+
+	var buf bytes.Buffer
+	CheckAndWarnHookManagers(context.Background(), &buf, false, false, false)
+
+	output := buf.String()
+	if !strings.Contains(output, "Warning: Husky detected") {
+		t.Errorf("expected husky warning when huskySafeInstall=false, got %q", output)
 	}
 }

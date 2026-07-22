@@ -83,7 +83,7 @@ func hookManagerWarning(managers []hookManager, cmdPrefix string, huskySafe bool
 				fmt.Fprintf(&b, "\n")
 				fmt.Fprintf(&b, "  Entire installs git hooks into the husky user-hook directory\n")
 				fmt.Fprintf(&b, "  (parent of core.hooksPath), which survives husky/npm prepare.\n")
-				fmt.Fprintf(&b, "  Regenerable `_` stubs are left alone.\n")
+				fmt.Fprintf(&b, "  Regenerable `_` stubs are never replaced with Entire hooks.\n")
 				fmt.Fprintf(&b, "\n")
 				continue
 			}
@@ -135,7 +135,9 @@ func extractCommandLine(hookContent string) string {
 // to w if any are found.
 // localDev controls whether the warning references "go run" or the "entire" binary.
 // absolutePath embeds the full binary path for GUI git clients.
-func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, localDev, absolutePath bool) {
+// huskySafeInstall must match InstallGitHook's second return value so the Husky
+// advisory cannot disagree with where hooks were just installed.
+func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, localDev, absolutePath, huskySafeInstall bool) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return
@@ -151,11 +153,7 @@ func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, localDev, absolu
 		// Best-effort: hook manager warnings are advisory, skip on resolution failure
 		return
 	}
-	huskySafe := false
-	if hooksDir, hooksErr := getHooksDirInPath(ctx, repoRoot); hooksErr == nil {
-		huskySafe = huskyUserHooksDir(hooksDir) != ""
-	}
-	warning := hookManagerWarning(managers, cmdPrefix, huskySafe)
+	warning := hookManagerWarning(managers, cmdPrefix, huskySafeInstall)
 	if warning != "" {
 		fmt.Fprintln(w)
 		fmt.Fprint(w, warning)

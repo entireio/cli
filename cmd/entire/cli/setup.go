@@ -315,10 +315,11 @@ func updateGlobalSettings(ctx context.Context, cmd *cobra.Command, w io.Writer, 
 	}
 
 	if cmd.Flags().Changed(flagForce) || cmd.Flags().Changed(flagAbsoluteGitHookPath) || cmd.Flags().Changed(flagLocalDev) {
-		if _, err := strategy.InstallGitHook(ctx, true, s.LocalDev, s.AbsoluteGitHookPath); err != nil {
+		_, huskySafe, err := strategy.InstallGitHook(ctx, true, s.LocalDev, s.AbsoluteGitHookPath)
+		if err != nil {
 			return fmt.Errorf("failed to reinstall git hook: %w", err)
 		}
-		strategy.CheckAndWarnHookManagers(ctx, w, s.LocalDev, s.AbsoluteGitHookPath)
+		strategy.CheckAndWarnHookManagers(ctx, w, s.LocalDev, s.AbsoluteGitHookPath, huskySafe)
 		fmt.Fprintln(w, "  ✓ Reinstalled git hook")
 	}
 
@@ -1274,10 +1275,11 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Use settings values (merged from existing config + flags) for hook installation
 	// This ensures re-running `entire enable` without flags preserves existing settings
-	if _, err := strategy.InstallGitHook(ctx, true, settings.LocalDev, settings.AbsoluteGitHookPath); err != nil {
+	_, huskySafe, err := strategy.InstallGitHook(ctx, true, settings.LocalDev, settings.AbsoluteGitHookPath)
+	if err != nil {
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
-	strategy.CheckAndWarnHookManagers(ctx, w, settings.LocalDev, settings.AbsoluteGitHookPath)
+	strategy.CheckAndWarnHookManagers(ctx, w, settings.LocalDev, settings.AbsoluteGitHookPath, huskySafe)
 	fmt.Fprintln(w, "  ✓ Installed hooks")
 
 	configDisplay := configDisplayProject
@@ -1949,10 +1951,11 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	hookLocalDev := mergedSettings.LocalDev || opts.LocalDev
 	hookAbsoluteGitHookPath := mergedSettings.AbsoluteGitHookPath || opts.AbsoluteGitHookPath
 
-	if _, err := strategy.InstallGitHook(ctx, true, hookLocalDev, hookAbsoluteGitHookPath); err != nil {
+	_, huskySafe, err := strategy.InstallGitHook(ctx, true, hookLocalDev, hookAbsoluteGitHookPath)
+	if err != nil {
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
-	strategy.CheckAndWarnHookManagers(ctx, w, hookLocalDev, hookAbsoluteGitHookPath)
+	strategy.CheckAndWarnHookManagers(ctx, w, hookLocalDev, hookAbsoluteGitHookPath, huskySafe)
 
 	if installedHooks == 0 {
 		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())

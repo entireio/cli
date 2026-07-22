@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -19,6 +20,10 @@ const entireHookMarker = "Entire CLI hooks"
 
 const backupSuffix = ".pre-entire"
 const chainComment = "# Chain: run pre-existing hook"
+
+// preEntireExcludePattern keeps hook backups out of accidental `git add -A`
+// commits (critical for husky-safe installs into tracked user-hook dirs).
+const preEntireExcludePattern = "**/*" + backupSuffix
 const missingEntireGitHookWarning = "[entire] Entire CLI is enabled but not installed or not on PATH. Skipping Entire Git hook; continuing. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
 
 // localDevHookCmdPrefix is the command prefix used for git hooks in local
@@ -139,10 +144,15 @@ func getHooksDirInPath(ctx context.Context, dir string) (string, error) {
 	return filepath.Clean(hooksDir), nil
 }
 
-// huskyForwardingStub is the husky v9 stub content written into core.hooksPath
-// (`_/prepare-commit-msg`, etc.). Git executes these; they source `_/h`, which
+// huskyForwardingStub matches the husky v9 stub written into core.hooksPath
+// (`_/prepare-commit-msg`, etc.), modulo a trailing newline we keep for
+// readability. Real husky omits that newline; both forms source `_/h`, which
 // runs the sibling user hook in the parent directory.
 const huskyForwardingStub = "#!/usr/bin/env sh\n. \"$(dirname \"$0\")/h\"\n"
+
+// huskyStubDispatchMarker is the sourcing line husky stubs use to reach `_/h`.
+// Detection requires this (not merely "exists and lacks Entire marker").
+const huskyStubDispatchMarker = `. "$(dirname "$0")/h"`
 
 // huskyUserHooksDir returns the user-owned Husky hooks directory when hooksDir
 // is a regenerable husky `_` directory (core.hooksPath) AND husky's dispatcher
@@ -152,6 +162,10 @@ const huskyForwardingStub = "#!/usr/bin/env sh\n. \"$(dirname \"$0\")/h\"\n"
 // that directory on `husky` / npm prepare. User hook scripts live in the parent
 // and are invoked by the stubs in `_` via `h` — those user scripts survive
 // husky reinstall (see https://github.com/entireio/cli/issues/784).
+//
+// Hooks installed in the parent run through husky's dispatcher: HUSKY=0 skips
+// them, ~/.config/husky/init.sh is sourced first, node_modules/.bin is
+// prepended to PATH, and execution is under `sh -e`.
 //
 // The dispatcher check is required: git only executes files under
 // core.hooksPath. Redirecting to the parent without husky's forwarding layout
@@ -197,7 +211,9 @@ func IsGitHookInstalledInDir(ctx context.Context, repoDir string) bool {
 
 // isGitHookInstalledForHooksDir reports whether Entire's managed hooks are
 // installed in the effective install directory, and (for husky-safe installs)
-// that forwarding stubs still exist under core.hooksPath so git can reach them.
+// that each regenerable `_` stub still sources `_/h` (husky's forwarder). A
+// non-Entire file that does not source `h` is treated as not installed so
+// EnsureSetup can heal.
 func isGitHookInstalledForHooksDir(hooksDir string) bool {
 	installDir := hookInstallDir(hooksDir)
 	if !isGitHookInstalledInHooksDir(installDir) {
@@ -209,15 +225,19 @@ func isGitHookInstalledForHooksDir(hooksDir string) bool {
 	return true
 }
 
-// huskyForwardingStubsPresent reports whether each managed hook has a
-// non-Entire stub in the husky-owned hooks directory (so git → `_` → parent).
+// huskyForwardingStubsPresent reports whether each managed hook under the
+// husky-owned directory is a non-Entire stub that sources `_/h`.
 func huskyForwardingStubsPresent(hooksDir string) bool {
 	for _, hook := range gitHookNames {
 		data, err := os.ReadFile(filepath.Join(hooksDir, hook)) //nolint:gosec // path from constants
 		if err != nil {
 			return false
 		}
-		if strings.Contains(string(data), entireHookMarker) {
+		content := string(data)
+		if strings.Contains(content, entireHookMarker) {
+			return false
+		}
+		if !strings.Contains(content, huskyStubDispatchMarker) {
 			return false
 		}
 	}
@@ -358,23 +378,33 @@ func isWindowsAbsoluteHookCommand(cmdPrefix string) bool {
 // When core.hooksPath is Husky's .husky/_ directory, hooks are written to the
 // parent `.husky/` user-hook directory (which husky's stubs invoke) rather than
 // into `_`, so `npm install` / `husky` prepare cannot clobber them mid-turn.
-func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (int, error) {
+//
+// For husky-safe installs the parent user-hook directory is often tracked
+// (unlike regenerable `_`). Existing non-Entire scripts there are renamed to
+// `<hook>.pre-entire` and chained after Entire's wrapper.
+//
+// The second return value is true when install targeted a husky user-hook
+// directory (parent of core.hooksPath=`_/`). Callers that print husky advisories
+// should use that flag so the message cannot disagree with where hooks landed.
+func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (int, bool, error) {
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	installDir := hookInstallDir(hooksDir)
+	huskySafe := installDir != hooksDir
 
 	if err := os.MkdirAll(installDir, 0o755); err != nil { //nolint:gosec // Git hooks require executable permissions
-		return 0, fmt.Errorf("failed to create hooks directory: %w", err)
+		return 0, huskySafe, fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
 	cmdPrefix, err := hookCmdPrefix(localDev, absolutePath)
 	if err != nil {
-		return 0, err
+		return 0, huskySafe, err
 	}
 	specs := buildHookSpecs(cmdPrefix)
 	installedCount := 0
+	backedUpUserHook := false
 
 	for _, spec := range specs {
 		hookPath := filepath.Join(installDir, spec.name)
@@ -386,11 +416,13 @@ func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (i
 		if existingErr == nil && !strings.Contains(string(existing), entireHookMarker) {
 			if !backupExists {
 				if err := os.Rename(hookPath, backupPath); err != nil {
-					return installedCount, fmt.Errorf("failed to back up %s: %w", spec.name, err)
+					return installedCount, huskySafe, fmt.Errorf("failed to back up %s: %w", spec.name, err)
 				}
 				fmt.Fprintf(os.Stderr, "[entire] Backed up existing %s to %s%s\n", spec.name, spec.name, backupSuffix)
+				backedUpUserHook = true
 			} else {
 				fmt.Fprintf(os.Stderr, "[entire] Warning: replacing %s (backup %s%s already exists from a previous install)\n", spec.name, spec.name, backupSuffix)
+				backedUpUserHook = true
 			}
 			backupExists = true
 		}
@@ -403,7 +435,7 @@ func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (i
 
 		written, err := writeHookFile(hookPath, content)
 		if err != nil {
-			return installedCount, fmt.Errorf("failed to install %s hook: %w", spec.name, err)
+			return installedCount, huskySafe, fmt.Errorf("failed to install %s hook: %w", spec.name, err)
 		}
 		if written {
 			installedCount++
@@ -414,21 +446,73 @@ func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (i
 	// husky-owned `_` and ensure forwarding stubs exist so git can reach the
 	// parent user hooks. Doing this after install avoids a window with zero
 	// Entire hooks.
-	if installDir != hooksDir {
+	if huskySafe {
 		if err := migrateEntireHooksFromHuskyOwnedDir(hooksDir); err != nil {
-			return installedCount, fmt.Errorf("failed to migrate hooks out of husky-owned directory: %w", err)
+			return installedCount, huskySafe, fmt.Errorf("failed to migrate hooks out of husky-owned directory: %w", err)
+		}
+		// Keep .pre-entire backups out of accidental commits when we shadow
+		// tracked user hooks under the husky parent directory.
+		if backedUpUserHook {
+			if exclErr := ensurePreEntireExcluded(ctx); exclErr != nil {
+				fmt.Fprintf(os.Stderr, "[entire] Warning: could not exclude %s backups from git: %v\n", backupSuffix, exclErr)
+			}
+			fmt.Fprintf(os.Stderr, "[entire] Note: existing hooks in %s were backed up to *%s and chained; commit the Entire wrappers intentionally and keep backups local\n", filepath.Base(installDir), backupSuffix)
 		}
 	}
 
 	if !silent {
-		fmt.Println("✓ Installed git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)")
+		fmt.Println("✓ Installed git hooks (prepare-commit-msg, commit-msg, post-commit, post-rewrite, pre-push)")
 		fmt.Println("  Hooks delegate to the current strategy at runtime")
-		if installDir != hooksDir {
-			fmt.Println("  Installed into .husky/ (survives husky/npm prepare)")
+		if huskySafe {
+			relInstall := installDir
+			if root, rootErr := paths.WorktreeRoot(ctx); rootErr == nil {
+				if rel, relErr := filepath.Rel(root, installDir); relErr == nil {
+					relInstall = rel
+				}
+			}
+			fmt.Printf("  Installed into %s/ (survives husky/npm prepare)\n", filepath.ToSlash(relInstall))
 		}
 	}
 
-	return installedCount, nil
+	return installedCount, huskySafe, nil
+}
+
+// ensurePreEntireExcluded appends preEntireExcludePattern to .git/info/exclude
+// so husky-safe backups are not half-committed beside Entire wrappers.
+func ensurePreEntireExcluded(ctx context.Context) error {
+	gitDir, err := GetGitDir(ctx)
+	if err != nil {
+		return err
+	}
+	infoDir := filepath.Join(gitDir, "info")
+	if err := os.MkdirAll(infoDir, 0o755); err != nil { //nolint:gosec // matches git's info dir mode
+		return fmt.Errorf("create git info dir: %w", err)
+	}
+	excludePath := filepath.Join(infoDir, "exclude")
+	existing, err := os.ReadFile(excludePath) //nolint:gosec // path from git dir
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read git exclude: %w", err)
+	}
+	content := string(existing)
+	for _, line := range strings.Split(content, "\n") {
+		if strings.TrimSpace(line) == preEntireExcludePattern {
+			return nil
+		}
+	}
+	var b strings.Builder
+	b.WriteString(content)
+	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
+		b.WriteByte('\n')
+	}
+	if !strings.Contains(content, "# Entire CLI") {
+		b.WriteString("# Entire CLI\n")
+	}
+	b.WriteString(preEntireExcludePattern)
+	b.WriteByte('\n')
+	if err := os.WriteFile(excludePath, []byte(b.String()), 0o644); err != nil { //nolint:gosec // git exclude is not executable
+		return fmt.Errorf("write git exclude: %w", err)
+	}
+	return nil
 }
 
 // writeHookFile writes a hook file if it doesn't exist or has different content.
@@ -451,8 +535,10 @@ func writeHookFile(path, content string) (bool, error) {
 // If a .pre-entire backup exists, it is restored.
 // Returns the number of hooks removed.
 //
-// For Husky setups, removals target `.husky/` (user hooks). Any legacy Entire
-// wrappers left in the regenerable `.husky/_` directory are also cleaned up.
+// For Husky setups, removals target the user-hook directory. Legacy Entire
+// wrappers in regenerable `_` are scrubbed (restore backup or replace with a
+// stub) but missing stubs are not backfilled — disable must not recreate
+// husky's regenerable layout.
 func RemoveGitHook(ctx context.Context) (int, error) {
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
@@ -470,9 +556,11 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 	// `_`), still scrub Entire wrappers from the parent user-hook directory so
 	// disable does not leave orphan Entire scripts behind.
 	if installDir != hooksDir {
-		if cleanErr := migrateEntireHooksFromHuskyOwnedDir(hooksDir); cleanErr != nil {
+		scrubbed, cleanErr := scrubEntireHooksFromHuskyOwnedDir(hooksDir)
+		if cleanErr != nil {
 			return removed, cleanErr
 		}
+		removed += scrubbed
 	} else if filepath.Base(hooksDir) == "_" {
 		parentRemoved, parentErr := removeEntireHooksFromDir(filepath.Dir(hooksDir))
 		if parentErr != nil {
@@ -488,6 +576,21 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 // writing a standard husky forwarding stub when no backup exists. Also fills
 // in any missing managed stubs so git can reach parent user hooks.
 func migrateEntireHooksFromHuskyOwnedDir(hooksDir string) error {
+	_, err := rewriteHuskyOwnedHooks(hooksDir, true)
+	return err
+}
+
+// scrubEntireHooksFromHuskyOwnedDir removes Entire wrappers from the husky-owned
+// `_` directory without creating stubs for hooks that were already absent.
+// Returns how many Entire wrappers were restored or replaced.
+func scrubEntireHooksFromHuskyOwnedDir(hooksDir string) (int, error) {
+	return rewriteHuskyOwnedHooks(hooksDir, false)
+}
+
+// rewriteHuskyOwnedHooks migrates (backfillMissing=true) or scrubs
+// (backfillMissing=false) Entire wrappers under the husky-owned hooks directory.
+func rewriteHuskyOwnedHooks(hooksDir string, backfillMissing bool) (int, error) {
+	changed := 0
 	for _, hook := range gitHookNames {
 		hookPath := filepath.Join(hooksDir, hook)
 		backupPath := hookPath + backupSuffix
@@ -498,22 +601,30 @@ func migrateEntireHooksFromHuskyOwnedDir(hooksDir string) error {
 		switch {
 		case hookIsOurs && fileExists(backupPath):
 			if err := os.Remove(hookPath); err != nil {
-				return fmt.Errorf("remove legacy %s: %w", hook, err)
+				return changed, fmt.Errorf("remove legacy %s: %w", hookPath, err)
 			}
 			if err := os.Rename(backupPath, hookPath); err != nil {
-				return fmt.Errorf("restore %s%s: %w", hook, backupSuffix, err)
+				return changed, fmt.Errorf("restore %s%s: %w", hookPath, backupSuffix, err)
 			}
+			changed++
 		case hookIsOurs:
 			if err := writeHookFileForced(hookPath, huskyForwardingStub); err != nil {
-				return fmt.Errorf("replace legacy %s with husky stub: %w", hook, err)
+				return changed, fmt.Errorf("replace legacy %s with husky stub: %w", hookPath, err)
 			}
+			changed++
 		case errors.Is(err, os.ErrNotExist):
-			if err := writeHookFileForced(hookPath, huskyForwardingStub); err != nil {
-				return fmt.Errorf("write missing husky stub %s: %w", hook, err)
+			if !backfillMissing {
+				continue
 			}
+			if err := writeHookFileForced(hookPath, huskyForwardingStub); err != nil {
+				return changed, fmt.Errorf("write missing husky stub %s: %w", hookPath, err)
+			}
+			changed++
+		case err != nil:
+			return changed, fmt.Errorf("read husky-owned hook %s: %w", hookPath, err)
 		}
 	}
-	return nil
+	return changed, nil
 }
 
 // writeHookFileForced writes content to path unconditionally (used for husky stubs).
@@ -568,6 +679,9 @@ func removeEntireHooksFromDir(dir string) (int, error) {
 
 // generateChainedContent appends a chain call to the base hook content,
 // so the pre-existing hook (backed up to .pre-entire) is called after our hook.
+//
+// Uses `[ -f ]` + `sh -e` (husky's pattern) rather than `[ -x ]` + direct exec:
+// husky user hooks are often mode 0644 and are still run via `sh -e`.
 func generateChainedContent(baseContent, hookName string) string {
 	if hookName == "post-rewrite" {
 		return generatePostRewriteChainedContent(baseContent)
@@ -575,8 +689,8 @@ func generateChainedContent(baseContent, hookName string) string {
 
 	return baseContent + fmt.Sprintf(`%s
 _entire_hook_dir="$(dirname "$0")"
-if [ -x "$_entire_hook_dir/%s%s" ]; then
-    "$_entire_hook_dir/%s%s" "$@"
+if [ -f "$_entire_hook_dir/%s%s" ]; then
+    sh -e "$_entire_hook_dir/%s%s" "$@"
 fi
 `, chainComment, hookName, backupSuffix, hookName, backupSuffix)
 }
@@ -597,8 +711,8 @@ trap 'rm -f "$_entire_stdin"' EXIT
 	return replayPrefix + body + fmt.Sprintf(`
 %s
 _entire_hook_dir="$(dirname "$0")"
-if [ -x "$_entire_hook_dir/post-rewrite%s" ]; then
-    "$_entire_hook_dir/post-rewrite%s" "$@" < "$_entire_stdin"
+if [ -f "$_entire_hook_dir/post-rewrite%s" ]; then
+    sh -e "$_entire_hook_dir/post-rewrite%s" "$@" < "$_entire_stdin"
 fi
 `, chainComment, backupSuffix, backupSuffix)
 }

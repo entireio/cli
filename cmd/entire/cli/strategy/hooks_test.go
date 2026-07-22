@@ -319,7 +319,7 @@ func TestInstallGitHook_WorktreeInstallsInCommonHooks(t *testing.T) {
 	t.Chdir(worktreeDir)
 	paths.ClearWorktreeRootCache()
 
-	count, err := InstallGitHook(context.Background(), true, false, false)
+	count, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() in worktree failed: %v", err)
 	}
@@ -577,7 +577,7 @@ func TestInstallGitHook_Idempotent(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
 	// First install should install hooks
-	firstCount, err := InstallGitHook(context.Background(), true, false, false)
+	firstCount, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("First InstallGitHook() error = %v", err)
 	}
@@ -599,7 +599,7 @@ func TestInstallGitHook_Idempotent(t *testing.T) {
 	}
 
 	// Second install should return 0 (all hooks already up to date)
-	secondCount, err := InstallGitHook(context.Background(), true, false, false)
+	secondCount, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("Second InstallGitHook() error = %v", err)
 	}
@@ -623,7 +623,7 @@ func TestInstallGitHook_LocalDevCommandPrefix(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
 	// Install with localDev=true
-	count, err := InstallGitHook(context.Background(), true, true, false)
+	count, _, err := InstallGitHook(context.Background(), true, true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook(localDev=true) error = %v", err)
 	}
@@ -646,7 +646,7 @@ func TestInstallGitHook_LocalDevCommandPrefix(t *testing.T) {
 	}
 
 	// Reinstall with localDev=false — hooks should update to use "entire" prefix
-	count, err = InstallGitHook(context.Background(), true, false, false)
+	count, _, err = InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook(localDev=false) error = %v", err)
 	}
@@ -754,7 +754,7 @@ func TestInstallGitHook_AbsoluteGitHookPath(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
 	// Install with absolutePath=true
-	count, err := InstallGitHook(context.Background(), true, false, true)
+	count, _, err := InstallGitHook(context.Background(), true, false, true)
 	if err != nil {
 		t.Fatalf("InstallGitHook(absolutePath=true) error = %v", err)
 	}
@@ -869,7 +869,7 @@ func TestInstallGitHook_CoreHooksPathRelative(t *testing.T) {
 	huskyOwnedDir := filepath.Join(tmpDir, ".husky", "_")
 	seedHuskyOwnedDir(t, huskyOwnedDir)
 
-	count, err := InstallGitHook(context.Background(), true, false, false)
+	count, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -927,7 +927,7 @@ func TestInstallGitHook_HuskyPrepareDoesNotClobberUserHooks(t *testing.T) {
 	huskyOwnedDir := filepath.Join(tmpDir, ".husky", "_")
 	seedHuskyOwnedDir(t, huskyOwnedDir)
 
-	if _, err := InstallGitHook(context.Background(), true, false, false); err != nil {
+	if _, _, err := InstallGitHook(context.Background(), true, false, false); err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
 	if !IsGitHookInstalledInDir(context.Background(), tmpDir) {
@@ -981,7 +981,7 @@ func TestInstallGitHook_MigratesLegacyEntireHooksFromHuskyOwnedDir(t *testing.T)
 		t.Fatalf("write husky dispatcher: %v", err)
 	}
 
-	if _, err := InstallGitHook(context.Background(), true, false, false); err != nil {
+	if _, _, err := InstallGitHook(context.Background(), true, false, false); err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
 
@@ -1031,7 +1031,7 @@ func TestInstallGitHook_MigratesLegacyEntireHooksWithoutBackupWritesStub(t *test
 		}
 	}
 
-	if _, err := InstallGitHook(context.Background(), true, false, false); err != nil {
+	if _, _, err := InstallGitHook(context.Background(), true, false, false); err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
 	if !IsGitHookInstalledInDir(context.Background(), tmpDir) {
@@ -1077,7 +1077,7 @@ func TestRemoveGitHook_CoreHooksPathRelative(t *testing.T) {
 	}
 	seedHuskyOwnedDir(t, filepath.Join(tmpDir, ".husky", "_"))
 
-	installCount, err := InstallGitHook(context.Background(), true, false, false)
+	installCount, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1173,7 +1173,7 @@ func TestRemoveGitHook_RemovesInstalledHooks(t *testing.T) {
 	tmpDir, _ := initHooksTestRepo(t)
 
 	// Install hooks first
-	installCount, err := InstallGitHook(context.Background(), true, false, false)
+	installCount, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1273,7 +1273,7 @@ func TestInstallGitHook_BacksUpCustomHook(t *testing.T) {
 		t.Fatalf("failed to create custom hook: %v", err)
 	}
 
-	count, err := InstallGitHook(context.Background(), true, false, false)
+	count, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1320,7 +1320,7 @@ func TestManagedGitHookNames_IncludesPostRewrite(t *testing.T) {
 func TestInstallGitHook_InstallsPostRewrite(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
-	count, err := InstallGitHook(context.Background(), true, false, false)
+	count, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1515,7 +1515,7 @@ func TestInstallGitHook_DoesNotOverwriteExistingBackup(t *testing.T) {
 		t.Fatalf("failed to create second custom hook: %v", err)
 	}
 
-	_, err := InstallGitHook(context.Background(), true, false, false)
+	_, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1551,7 +1551,7 @@ func TestInstallGitHook_IdempotentWithChaining(t *testing.T) {
 		t.Fatalf("failed to create custom hook: %v", err)
 	}
 
-	firstCount, err := InstallGitHook(context.Background(), true, false, false)
+	firstCount, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("first InstallGitHook() error = %v", err)
 	}
@@ -1560,7 +1560,7 @@ func TestInstallGitHook_IdempotentWithChaining(t *testing.T) {
 	}
 
 	// Re-install should return 0 (idempotent)
-	secondCount, err := InstallGitHook(context.Background(), true, false, false)
+	secondCount, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("second InstallGitHook() error = %v", err)
 	}
@@ -1572,7 +1572,7 @@ func TestInstallGitHook_IdempotentWithChaining(t *testing.T) {
 func TestInstallGitHook_NoBackupWhenNoExistingHook(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
-	_, err := InstallGitHook(context.Background(), true, false, false)
+	_, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1610,7 +1610,7 @@ func TestInstallGitHook_MixedHooks(t *testing.T) {
 		}
 	}
 
-	_, err := InstallGitHook(context.Background(), true, false, false)
+	_, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1659,7 +1659,7 @@ func TestRemoveGitHook_RestoresBackup(t *testing.T) {
 		t.Fatalf("failed to create custom hook: %v", err)
 	}
 
-	_, err := InstallGitHook(context.Background(), true, false, false)
+	_, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1698,7 +1698,7 @@ func TestRemoveGitHook_RestoresBackupWhenHookAlreadyGone(t *testing.T) {
 		t.Fatalf("failed to create custom hook: %v", err)
 	}
 
-	_, err := InstallGitHook(context.Background(), true, false, false)
+	_, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1750,16 +1750,16 @@ func TestGenerateChainedContent(t *testing.T) {
 		t.Error("chained content should resolve hook directory from $0")
 	}
 
-	// Should check executable permission on backup
-	expectedCheck := `[ -x "$_entire_hook_dir/pre-push` + backupSuffix + `" ]`
+	// Should check file presence (not -x) so mode-0644 husky hooks still chain
+	expectedCheck := `[ -f "$_entire_hook_dir/pre-push` + backupSuffix + `" ]`
 	if !strings.Contains(result, expectedCheck) {
-		t.Errorf("chained content should check -x on backup, got:\n%s", result)
+		t.Errorf("chained content should check -f on backup, got:\n%s", result)
 	}
 
-	// Should forward all arguments with "$@"
-	expectedExec := `"$_entire_hook_dir/pre-push` + backupSuffix + `" "$@"`
+	// Should run backup via sh -e (husky-compatible) with all arguments
+	expectedExec := `sh -e "$_entire_hook_dir/pre-push` + backupSuffix + `" "$@"`
 	if !strings.Contains(result, expectedExec) {
-		t.Errorf("chained content should execute backup with $@, got:\n%s", result)
+		t.Errorf("chained content should sh -e backup with $@, got:\n%s", result)
 	}
 }
 
@@ -1778,8 +1778,8 @@ func TestGenerateChainedContent_PostRewritePreservesStdinForBackup(t *testing.T)
 	if !strings.Contains(result, `entire hooks git post-rewrite "$1" < "$_entire_stdin" 2>/dev/null || true`) {
 		t.Fatalf("post-rewrite chained content should replay stdin into Entire handler, got:\n%s", result)
 	}
-	if !strings.Contains(result, `"$_entire_hook_dir/post-rewrite`+backupSuffix+`" "$@" < "$_entire_stdin"`) {
-		t.Fatalf("post-rewrite chained content should replay stdin into backup hook, got:\n%s", result)
+	if !strings.Contains(result, `sh -e "$_entire_hook_dir/post-rewrite`+backupSuffix+`" "$@" < "$_entire_stdin"`) {
+		t.Fatalf("post-rewrite chained content should sh -e replay stdin into backup hook, got:\n%s", result)
 	}
 }
 
@@ -1794,7 +1794,7 @@ func TestInstallGitHook_InstallRemoveReinstall(t *testing.T) {
 	}
 
 	// Install: should back up and chain
-	count, err := InstallGitHook(context.Background(), true, false, false)
+	count, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("first install error: %v", err)
 	}
@@ -1823,7 +1823,7 @@ func TestInstallGitHook_InstallRemoveReinstall(t *testing.T) {
 	}
 
 	// Reinstall: should back up again and chain
-	count, err = InstallGitHook(context.Background(), true, false, false)
+	count, _, err = InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("reinstall error: %v", err)
 	}
@@ -1856,7 +1856,7 @@ func TestRemoveGitHook_DoesNotOverwriteReplacedHook(t *testing.T) {
 	}
 
 	// entire enable: backs up A, installs our hook with chain
-	_, err := InstallGitHook(context.Background(), true, false, false)
+	_, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1897,7 +1897,7 @@ func TestRemoveGitHook_PermissionDenied(t *testing.T) {
 	tmpDir, _ := initHooksTestRepo(t)
 
 	// Install hooks first
-	_, err := InstallGitHook(context.Background(), true, false, false)
+	_, _, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1975,4 +1975,309 @@ func TestResolveHookExePath(t *testing.T) {
 			t.Errorf("error should mention symlink resolution, got: %v", err)
 		}
 	})
+}
+
+func TestGenerateChainedContent_RunsMode0644Backup(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	backupName := "pre-push" + backupSuffix
+	backupPath := filepath.Join(tmp, backupName)
+	sentinel := filepath.Join(tmp, "ran")
+	backupBody := "#!/bin/sh\ntouch \"" + sentinel + "\"\n"
+	if err := os.WriteFile(backupPath, []byte(backupBody), 0o644); err != nil {
+		t.Fatalf("write backup: %v", err)
+	}
+
+	base := "#!/bin/sh\n# Entire CLI hooks\ntrue\n"
+	script := generateChainedContent(base, "pre-push")
+	scriptPath := filepath.Join(tmp, "pre-push")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write chained hook: %v", err)
+	}
+
+	cmd := exec.CommandContext(context.Background(), "sh", scriptPath)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("chained hook failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("mode-0644 backup should have run via sh -e: %v", err)
+	}
+}
+
+func TestMigrateEntireHooksFromHuskyOwnedDir_ReadErrorIsLoud(t *testing.T) {
+	t.Parallel()
+
+	owned := t.TempDir()
+	// Make prepare-commit-msg a directory so ReadFile fails with a non-ErrNotExist error.
+	blocked := filepath.Join(owned, "prepare-commit-msg")
+	if err := os.Mkdir(blocked, 0o755); err != nil {
+		t.Fatalf("mkdir blocked hook path: %v", err)
+	}
+	err := migrateEntireHooksFromHuskyOwnedDir(owned)
+	if err == nil {
+		t.Fatal("expected loud error when husky-owned hook path is unreadable")
+	}
+	if !strings.Contains(err.Error(), blocked) {
+		t.Errorf("error should include path %q, got: %v", blocked, err)
+	}
+}
+
+func TestHuskyForwardingStubsPresent_RequiresDispatchSource(t *testing.T) {
+	tmpDir, _ := initHooksTestRepo(t)
+	ctx := context.Background()
+
+	cmd := exec.CommandContext(ctx, "git", "config", "core.hooksPath", ".husky/_")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath: %v", err)
+	}
+	huskyOwnedDir := filepath.Join(tmpDir, ".husky", "_")
+	seedHuskyOwnedDir(t, huskyOwnedDir)
+
+	if _, _, err := InstallGitHook(context.Background(), true, false, false); err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+	if !IsGitHookInstalledInDir(context.Background(), tmpDir) {
+		t.Fatal("hooks should be installed")
+	}
+
+	// Replace one stub with a non-Entire file that does not source `_/h`.
+	badStub := filepath.Join(huskyOwnedDir, "pre-push")
+	if err := os.WriteFile(badStub, []byte("#!/bin/sh\necho noop\n"), 0o755); err != nil {
+		t.Fatalf("write bad stub: %v", err)
+	}
+	if IsGitHookInstalledInDir(context.Background(), tmpDir) {
+		t.Fatal("missing husky dispatch source should report hooks not installed so EnsureSetup can heal")
+	}
+}
+
+func TestRemoveGitHook_DoesNotBackfillMissingHuskyStubs(t *testing.T) {
+	tmpDir, _ := initHooksTestRepo(t)
+	ctx := context.Background()
+
+	cmd := exec.CommandContext(ctx, "git", "config", "core.hooksPath", ".husky/_")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath: %v", err)
+	}
+	huskyOwnedDir := filepath.Join(tmpDir, ".husky", "_")
+	seedHuskyOwnedDir(t, huskyOwnedDir)
+
+	if _, _, err := InstallGitHook(context.Background(), true, false, false); err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+
+	missing := filepath.Join(huskyOwnedDir, "pre-push")
+	if err := os.Remove(missing); err != nil {
+		t.Fatalf("remove stub: %v", err)
+	}
+
+	removed, err := RemoveGitHook(context.Background())
+	if err != nil {
+		t.Fatalf("RemoveGitHook() error = %v", err)
+	}
+	if removed == 0 {
+		t.Fatal("RemoveGitHook() should count removed Entire user hooks")
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatal("disable must not backfill missing husky stubs under `_`")
+	}
+}
+
+func TestInstallGitHook_HealsMissingHuskyStub(t *testing.T) {
+	tmpDir, _ := initHooksTestRepo(t)
+	ctx := context.Background()
+
+	cmd := exec.CommandContext(ctx, "git", "config", "core.hooksPath", ".husky/_")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath: %v", err)
+	}
+	huskyOwnedDir := filepath.Join(tmpDir, ".husky", "_")
+	seedHuskyOwnedDir(t, huskyOwnedDir)
+
+	if _, _, err := InstallGitHook(context.Background(), true, false, false); err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+	missing := filepath.Join(huskyOwnedDir, "pre-push")
+	if err := os.Remove(missing); err != nil {
+		t.Fatalf("remove stub: %v", err)
+	}
+	if IsGitHookInstalledInDir(context.Background(), tmpDir) {
+		t.Fatal("missing stub should make IsGitHookInstalledInDir false")
+	}
+	if _, _, err := InstallGitHook(context.Background(), true, false, false); err != nil {
+		t.Fatalf("reinstall error: %v", err)
+	}
+	data, err := os.ReadFile(missing)
+	if err != nil {
+		t.Fatalf("stub should be healed: %v", err)
+	}
+	if string(data) != huskyForwardingStub {
+		t.Errorf("healed stub = %q, want huskyForwardingStub", data)
+	}
+	if !IsGitHookInstalledInDir(context.Background(), tmpDir) {
+		t.Fatal("hooks should be installed after stub heal")
+	}
+}
+
+func TestRemoveGitHook_DispatcherDeletedScrubsParentUserHooks(t *testing.T) {
+	tmpDir, _ := initHooksTestRepo(t)
+	ctx := context.Background()
+
+	cmd := exec.CommandContext(ctx, "git", "config", "core.hooksPath", ".husky/_")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath: %v", err)
+	}
+	huskyOwnedDir := filepath.Join(tmpDir, ".husky", "_")
+	seedHuskyOwnedDir(t, huskyOwnedDir)
+
+	if _, _, err := InstallGitHook(context.Background(), true, false, false); err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+	userHook := filepath.Join(tmpDir, ".husky", "prepare-commit-msg")
+	if data, err := os.ReadFile(userHook); err != nil || !strings.Contains(string(data), entireHookMarker) {
+		t.Fatalf("expected Entire user hook before dispatcher delete: %v", err)
+	}
+
+	// Delete dispatcher so hookInstallDir falls back to `_` and removal
+	// scrubs orphan Entire wrappers from the parent user-hook directory.
+	if err := os.Remove(filepath.Join(huskyOwnedDir, "h")); err != nil {
+		t.Fatalf("remove dispatcher: %v", err)
+	}
+
+	removed, err := RemoveGitHook(context.Background())
+	if err != nil {
+		t.Fatalf("RemoveGitHook() error = %v", err)
+	}
+	if removed == 0 {
+		t.Fatal("should scrub orphan Entire wrappers from parent .husky/")
+	}
+	if data, err := os.ReadFile(userHook); err == nil && strings.Contains(string(data), entireHookMarker) {
+		t.Fatal("orphan Entire user hook must be removed when dispatcher is gone")
+	}
+}
+
+func TestMigrateEntireHooksFromHuskyOwnedDir_MixedLegacyState(t *testing.T) {
+	t.Parallel()
+
+	owned := t.TempDir()
+	withBackup := "prepare-commit-msg"
+	withoutBackup := "commit-msg"
+	alreadyStub := "post-commit"
+	missing := "pre-push"
+
+	legacy := "#!/bin/sh\n# " + entireHookMarker + "\nentire hooks git x\n"
+	if err := os.WriteFile(filepath.Join(owned, withBackup), []byte(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(owned, withBackup+backupSuffix), []byte(huskyForwardingStub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(owned, withoutBackup), []byte(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(owned, alreadyStub), []byte(huskyForwardingStub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// post-rewrite left as another missing hook besides pre-push
+	_ = missing
+
+	if err := migrateEntireHooksFromHuskyOwnedDir(owned); err != nil {
+		t.Fatalf("migrate mixed state: %v", err)
+	}
+
+	restored, err := os.ReadFile(filepath.Join(owned, withBackup))
+	if err != nil || string(restored) != huskyForwardingStub {
+		t.Fatalf("with-backup should restore stub, got %q err=%v", restored, err)
+	}
+	replaced, err := os.ReadFile(filepath.Join(owned, withoutBackup))
+	if err != nil || string(replaced) != huskyForwardingStub {
+		t.Fatalf("without-backup should become stub, got %q err=%v", replaced, err)
+	}
+	unchanged, err := os.ReadFile(filepath.Join(owned, alreadyStub))
+	if err != nil || string(unchanged) != huskyForwardingStub {
+		t.Fatalf("already-stub should remain, got %q err=%v", unchanged, err)
+	}
+	for _, hook := range []string{missing, "post-rewrite"} {
+		healed, err := os.ReadFile(filepath.Join(owned, hook))
+		if err != nil || string(healed) != huskyForwardingStub {
+			t.Fatalf("missing %s should be backfilled, got %q err=%v", hook, healed, err)
+		}
+	}
+}
+
+func TestInstallGitHook_ChainsPreExistingHuskyUserHook(t *testing.T) {
+	tmpDir, _ := initHooksTestRepo(t)
+	ctx := context.Background()
+
+	cmd := exec.CommandContext(ctx, "git", "config", "core.hooksPath", ".husky/_")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath: %v", err)
+	}
+	huskyOwnedDir := filepath.Join(tmpDir, ".husky", "_")
+	seedHuskyOwnedDir(t, huskyOwnedDir)
+
+	userHook := filepath.Join(tmpDir, ".husky", "prepare-commit-msg")
+	custom := "#!/bin/sh\necho 'preexisting user hook'\n"
+	if err := os.MkdirAll(filepath.Dir(userHook), 0o755); err != nil {
+		t.Fatalf("mkdir .husky: %v", err)
+	}
+	if err := os.WriteFile(userHook, []byte(custom), 0o644); err != nil {
+		t.Fatalf("write preexisting user hook: %v", err)
+	}
+
+	if _, huskySafe, err := InstallGitHook(context.Background(), true, false, false); err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	} else if !huskySafe {
+		t.Fatal("expected husky-safe install")
+	}
+
+	backupPath := userHook + backupSuffix
+	data, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("expected .pre-entire backup of tracked user hook: %v", err)
+	}
+	if string(data) != custom {
+		t.Errorf("backup = %q, want %q", data, custom)
+	}
+	installed, err := os.ReadFile(userHook)
+	if err != nil {
+		t.Fatalf("read installed user hook: %v", err)
+	}
+	content := string(installed)
+	if !strings.Contains(content, entireHookMarker) {
+		t.Error("installed hook should contain Entire marker")
+	}
+	if !strings.Contains(content, chainComment) || !strings.Contains(content, `sh -e`) {
+		t.Errorf("installed hook should chain preexisting backup via sh -e, got:\n%s", content)
+	}
+
+	removed, err := RemoveGitHook(context.Background())
+	if err != nil {
+		t.Fatalf("RemoveGitHook() error = %v", err)
+	}
+	if removed == 0 {
+		t.Fatal("RemoveGitHook() should remove Entire wrappers")
+	}
+	restored, err := os.ReadFile(userHook)
+	if err != nil {
+		t.Fatalf("expected restored user hook: %v", err)
+	}
+	if string(restored) != custom {
+		t.Errorf("restored hook = %q, want %q", restored, custom)
+	}
+
+	excludePath := filepath.Join(tmpDir, ".git", "info", "exclude")
+	excludeData, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("expected .git/info/exclude after husky-safe backup: %v", err)
+	}
+	if !strings.Contains(string(excludeData), preEntireExcludePattern) {
+		t.Errorf("exclude should contain %q, got %q", preEntireExcludePattern, excludeData)
+	}
 }
