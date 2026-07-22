@@ -49,10 +49,10 @@ func shouldTryAutoAdoptOnPrepareCommitMsg(ctx context.Context, source string) bo
 //
 // A candidate is accepted only when exactly one match remains after filtering
 // for recent ACTIVE sessions that (a) share the committing process owner and
-// (b) have FilesTouched overlapping the staged commit paths. Registry entries
-// also require sibling proximity so a shared long-lived owner (tmux/IDE) plus a
-// coincidental relative path (README.md, go.mod, …) cannot steal across
-// unrelated repos. Idle sessions are never auto-adopted. Ambiguity skips.
+// (b) have FilesTouched overlapping the staged commit paths on a
+// non-boilerplate relative path (README.md / go.mod / package.json / … alone
+// never count). Registry entries also require sibling proximity. Idle sessions
+// are never auto-adopted. Ambiguity skips.
 //
 // Best-effort: never returns an error to the git hook caller.
 func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
@@ -284,9 +284,9 @@ func candidateFromLoaded(
 	if state.WorktreePath != "" && !sameAdoptPath(state.WorktreePath, worktree) {
 		return autoAdoptCandidate{}, false
 	}
-	// Both owner match and FilesTouched overlap are required. Overlap alone
-	// would let unrelated sibling repos steal via common relative names;
-	// owner alone would retire a session on an unrelated commit.
+	// Both owner match and distinctive FilesTouched overlap are required.
+	// Boilerplate-only overlap (README.md, go.mod, …) is ignored even when
+	// the owner matches — those names collide across unrelated siblings.
 	overlapMatch := filesTouchedOverlap(state.FilesTouched, staged)
 	if !overlapMatch {
 		return autoAdoptCandidate{}, false
@@ -362,6 +362,53 @@ func ownerMatches(recorded *proclive.Identity, current proclive.Identity) bool {
 	return true
 }
 
+// autoAdoptBoilerplateBasenames are relative-path basenames that commonly exist
+// in every sibling repo. A match on these alone is not evidence the agent was
+// working on the commit's real change set.
+var autoAdoptBoilerplateBasenames = map[string]struct{}{
+	"readme":              {},
+	"readme.md":           {},
+	"readme.rst":          {},
+	"readme.txt":          {},
+	"license":             {},
+	"license.md":          {},
+	"copying":             {},
+	"changelog.md":        {},
+	"contributing.md":     {},
+	"codeowners":          {},
+	".gitignore":          {},
+	".gitattributes":      {},
+	".editorconfig":       {},
+	".env":                {},
+	".env.example":        {},
+	".nvmrc":              {},
+	".node-version":       {},
+	"go.mod":              {},
+	"go.sum":              {},
+	"package.json":        {},
+	"package-lock.json":   {},
+	"yarn.lock":           {},
+	"pnpm-lock.yaml":      {},
+	"cargo.toml":          {},
+	"cargo.lock":          {},
+	"gemfile":             {},
+	"gemfile.lock":        {},
+	"makefile":            {},
+	"dockerfile":          {},
+	"docker-compose.yml":  {},
+	"docker-compose.yaml": {},
+	"tsconfig.json":       {},
+	"jsconfig.json":       {},
+	"pyproject.toml":      {},
+	"requirements.txt":    {},
+	"setup.py":            {},
+	"setup.cfg":           {},
+	"pipfile":             {},
+	"pipfile.lock":        {},
+	"composer.json":       {},
+	"composer.lock":       {},
+}
+
 func filesTouchedOverlap(touched, staged []string) bool {
 	if len(touched) == 0 || len(staged) == 0 {
 		return false
@@ -372,11 +419,21 @@ func filesTouchedOverlap(touched, staged []string) bool {
 	}
 	for _, f := range touched {
 		key := filepath.ToSlash(filepath.Clean(f))
-		if _, ok := stagedSet[key]; ok {
-			return true
+		if _, ok := stagedSet[key]; !ok {
+			continue
 		}
+		if isAutoAdoptBoilerplatePath(key) {
+			continue
+		}
+		return true
 	}
 	return false
+}
+
+func isAutoAdoptBoilerplatePath(rel string) bool {
+	base := strings.ToLower(filepath.Base(rel))
+	_, ok := autoAdoptBoilerplateBasenames[base]
+	return ok
 }
 
 func stagedFilesForAutoAdopt(ctx context.Context, repoRoot string) ([]string, error) {

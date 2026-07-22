@@ -88,6 +88,50 @@ func TestAutoAdopt_SkipsUnrelatedSiblingSameRelativePath(t *testing.T) {
 	}
 }
 
+func TestAutoAdopt_SkipsBoilerplateOverlapEvenWithOwner(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+
+	// Owner matches + README.md overlap must NOT auto-adopt (boilerplate).
+	seedAutoAdoptSourceSession(t, sourceRepo, "test-auto-adopt-boilerplate", []string{"README.md", "go.mod"}, true)
+
+	testutil.WriteFile(t, targetRepo, "README.md", "unrelated human edit\n")
+	testutil.GitAdd(t, targetRepo, "README.md")
+	t.Chdir(targetRepo)
+
+	tryAutoAdoptCrossCommonDirSession(context.Background())
+
+	targetStore := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	adopted, err := targetStore.Load(context.Background(), "test-auto-adopt-boilerplate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted != nil {
+		t.Fatal("boilerplate-only FilesTouched overlap must not auto-adopt even with owner match")
+	}
+}
+
+func TestFilesTouchedOverlap_IgnoresBoilerplate(t *testing.T) {
+	t.Parallel()
+
+	if filesTouchedOverlap([]string{"README.md"}, []string{"README.md"}) {
+		t.Fatal("README.md alone must not count as overlap")
+	}
+	if filesTouchedOverlap([]string{"go.mod", "package.json"}, []string{"go.mod"}) {
+		t.Fatal("go.mod alone must not count as overlap")
+	}
+	if !filesTouchedOverlap([]string{"README.md", "services/billing/handler.go"}, []string{"services/billing/handler.go"}) {
+		t.Fatal("distinctive path overlap must count even alongside boilerplate")
+	}
+	if !filesTouchedOverlap([]string{"internal/foo.go"}, []string{"internal/foo.go"}) {
+		t.Fatal("non-boilerplate path must count")
+	}
+}
+
 func TestAutoAdopt_PrepareCommitMsg_ViaLiveRegistry(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	requireResolveOwner(t)
