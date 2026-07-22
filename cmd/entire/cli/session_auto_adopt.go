@@ -207,6 +207,12 @@ func collectSiblingAutoAdoptCandidates(
 		if sameAdoptPath(sibling, targetWorktree) {
 			continue
 		}
+		// Cheap pre-filter: skip non-repos before shelling out to git rev-parse.
+		// Ordinary human commits hit this path often; sibling trees are full of
+		// non-git dirs (node_modules, build outputs, …).
+		if !siblingLooksLikeGitWorktree(sibling) {
+			continue
+		}
 		scanned++
 
 		store, worktree, commonDir, err := stateStoreForWorktree(ctx, sibling)
@@ -300,6 +306,13 @@ func isRecentLiveEntry(entry session.LiveSessionEntry) bool {
 	}
 	// LiveSessionMaxAge matches adoptRecentWindow; registry TTL sweep uses the same bound.
 	return time.Since(*entry.LastInteractionTime) <= session.LiveSessionMaxAge
+}
+
+// siblingLooksLikeGitWorktree reports whether dir has a .git entry (directory,
+// gitfile, or symlink) so we can skip non-repos before spawning git.
+func siblingLooksLikeGitWorktree(dir string) bool {
+	_, err := os.Lstat(filepath.Join(dir, ".git"))
+	return err == nil
 }
 
 // autoAdoptSiblingProximity reports whether source and target worktrees share a

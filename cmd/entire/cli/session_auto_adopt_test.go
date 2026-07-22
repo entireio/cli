@@ -208,6 +208,38 @@ func TestAutoAdoptSiblingProximity(t *testing.T) {
 	}
 }
 
+func TestSiblingLooksLikeGitWorktree(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	plain := filepath.Join(base, "plain")
+	if err := os.Mkdir(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if siblingLooksLikeGitWorktree(plain) {
+		t.Fatal("dir without .git must not look like a worktree")
+	}
+
+	withDir := filepath.Join(base, "with-dir")
+	if err := os.MkdirAll(filepath.Join(withDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !siblingLooksLikeGitWorktree(withDir) {
+		t.Fatal(".git directory must look like a worktree")
+	}
+
+	withFile := filepath.Join(base, "with-file")
+	if err := os.Mkdir(withFile, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(withFile, ".git"), []byte("gitdir: ../with-dir/.git\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !siblingLooksLikeGitWorktree(withFile) {
+		t.Fatal(".git gitfile must look like a worktree")
+	}
+}
+
 func TestAutoAdopt_SkipsWhenAmbiguous(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	requireResolveOwner(t)
