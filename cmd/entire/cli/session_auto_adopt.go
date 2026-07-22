@@ -336,6 +336,11 @@ func ownerMatches(recorded *proclive.Identity, current proclive.Identity) bool {
 	if recorded.PID != current.PID || recorded.Start != current.Start {
 		return false
 	}
+	// Boot mismatch means a reboot; Start is only unique within a single boot
+	// (same guard as proclive.Check).
+	if recorded.Boot != "" && current.Boot != "" && recorded.Boot != current.Boot {
+		return false
+	}
 	if recorded.Host != "" && current.Host != "" && recorded.Host != current.Host {
 		return false
 	}

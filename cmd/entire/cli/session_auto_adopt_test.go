@@ -208,6 +208,24 @@ func TestAutoAdoptSiblingProximity(t *testing.T) {
 	}
 }
 
+func TestOwnerMatches_RejectsBootMismatch(t *testing.T) {
+	t.Parallel()
+
+	recorded := &proclive.Identity{PID: 42, Start: "tick", Boot: "boot-a", Host: "host"}
+	current := proclive.Identity{PID: 42, Start: "tick", Boot: "boot-b", Host: "host"}
+	if ownerMatches(recorded, current) {
+		t.Fatal("Boot mismatch must reject owner match (post-reboot PID reuse)")
+	}
+	current.Boot = "boot-a"
+	if !ownerMatches(recorded, current) {
+		t.Fatal("matching Boot should allow owner match")
+	}
+	// Empty Boot on either side is best-effort (legacy / unknown); don't fail closed.
+	if !ownerMatches(recorded, proclive.Identity{PID: 42, Start: "tick", Host: "host"}) {
+		t.Fatal("empty current Boot should not reject when PID+Start match")
+	}
+}
+
 func TestSiblingLooksLikeGitWorktree(t *testing.T) {
 	t.Parallel()
 
