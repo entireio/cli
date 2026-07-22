@@ -258,6 +258,25 @@ func TestSiblingLooksLikeGitWorktree(t *testing.T) {
 	}
 }
 
+func TestSiblingLooksLikeEntireRepo(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	plain := filepath.Join(base, "plain")
+	if err := os.MkdirAll(filepath.Join(plain, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if siblingLooksLikeEntireRepo(plain) {
+		t.Fatal("git repo without .entire must not look Entire-enabled")
+	}
+	if err := os.Mkdir(filepath.Join(plain, ".entire"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !siblingLooksLikeEntireRepo(plain) {
+		t.Fatal(".entire directory must look Entire-enabled")
+	}
+}
+
 func TestAutoAdopt_SkipsWhenAmbiguous(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	requireResolveOwner(t)

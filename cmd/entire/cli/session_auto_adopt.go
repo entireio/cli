@@ -78,7 +78,15 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 	if err != nil {
 		staged = nil
 	}
+	// Owner + staged overlap are both required for every candidate. Bail before
+	// any registry/sibling I/O when either is missing (ordinary human commits).
+	if len(staged) == 0 {
+		return
+	}
 	owner, hasOwner := proclive.ResolveOwner()
+	if !hasOwner {
+		return
+	}
 
 	candidates := collectRegistryAutoAdoptCandidates(ctx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
 	if len(candidates) == 0 {
@@ -207,10 +215,10 @@ func collectSiblingAutoAdoptCandidates(
 		if sameAdoptPath(sibling, targetWorktree) {
 			continue
 		}
-		// Cheap pre-filter: skip non-repos before shelling out to git rev-parse.
-		// Ordinary human commits hit this path often; sibling trees are full of
-		// non-git dirs (node_modules, build outputs, …).
-		if !siblingLooksLikeGitWorktree(sibling) {
+		// Cheap pre-filters before shelling out to git rev-parse:
+		//  1. .git entry (skip node_modules / build outputs)
+		//  2. .entire/ (skip git repos that don't use Entire — no sessions to adopt)
+		if !siblingLooksLikeGitWorktree(sibling) || !siblingLooksLikeEntireRepo(sibling) {
 			continue
 		}
 		scanned++
@@ -312,6 +320,13 @@ func isRecentLiveEntry(entry session.LiveSessionEntry) bool {
 // gitfile, or symlink) so we can skip non-repos before spawning git.
 func siblingLooksLikeGitWorktree(dir string) bool {
 	_, err := os.Lstat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+// siblingLooksLikeEntireRepo reports whether dir has a .entire/ directory
+// (written by `entire enable`). Non-Entire siblings have nothing to adopt.
+func siblingLooksLikeEntireRepo(dir string) bool {
+	_, err := os.Lstat(filepath.Join(dir, ".entire"))
 	return err == nil
 }
 
