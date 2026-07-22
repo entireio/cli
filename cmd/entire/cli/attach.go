@@ -655,8 +655,8 @@ func prepareExplicitTarget(ctx, logCtx context.Context, w io.Writer, repo *git.R
 // after the refresh is NOT an error — an explicit-target ID is normally brand
 // new; the refresh exists so a retry from a fresh clone sees the earlier
 // attempt instead of rebuilding the ID as an orphan that would clobber it on
-// push. A fetch failure is indistinguishable from a missing remote ref, so it
-// must fail closed rather than author a possibly-colliding checkpoint locally.
+// push. For git-refs, an explicitly missing remote source ref proves the ID is
+// new and is safe to proceed; transport/auth/unknown failures still fail closed.
 func ensureExplicitCheckpointFreshness(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID) (*git.Repository, bool, error) {
 	cfg, err := settings.LoadCheckpointsConfig(ctx)
 	if err != nil {
@@ -674,6 +674,9 @@ func ensureExplicitCheckpointFreshness(ctx context.Context, repo *git.Repository
 
 	freshRepo, fetchErr := refreshCheckpoint(ctx, checkpointID, primaryIsRefs)
 	if fetchErr != nil {
+		if primaryIsRefs && errors.Is(fetchErr, errCheckpointRefNotFound) {
+			return repo, false, nil
+		}
 		return repo, false, fmt.Errorf("failed to refresh explicit checkpoint %s before attach: %w", checkpointID, fetchErr)
 	}
 	present, readErr = checkpointPresentLocally(ctx, freshRepo, refs, checkpointID, primaryIsRefs)

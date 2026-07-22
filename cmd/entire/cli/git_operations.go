@@ -473,27 +473,40 @@ func resolveCheckpointFetchTarget(ctx context.Context) string {
 	return "origin"
 }
 
+var errCheckpointRefNotFound = errors.New("checkpoint ref not found on remote")
+
 // FetchCheckpointRef fetches a single per-checkpoint ref (refs/entire/checkpoints/
 // <shard>/<id>) from the checkpoint remote into the local ref of the same name,
 // so the git-refs store can resolve a checkpoint written on another machine.
-// A fetch failure cannot distinguish a missing ref from transport/auth errors;
-// callers must decide whether their operation can safely proceed without it.
+// It returns errCheckpointRefNotFound only when git explicitly reports that the
+// requested source ref does not exist; transport, authentication, and all other
+// failures remain distinct errors so callers can fail closed.
 func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
 	fetchTarget := resolveCheckpointFetchTarget(ctx)
 	refSpec := "+" + ref.String() + ":" + ref.String()
-	if _, err := remote.Fetch(ctx, remote.FetchOptions{
+	output, err := remote.Fetch(ctx, remote.FetchOptions{
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
-	}); err != nil {
-		// Redact: fetchTarget can be a remote URL with embedded credentials
-		// (CI origin URLs), and this error is logged and shown to users.
-		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, remote.RedactURL(fetchTarget), err)
+	})
+	if err == nil {
+		return nil
 	}
-	return nil
+	if checkpointRefMissingFromFetchOutput(output) {
+		return fmt.Errorf("%w: %s", errCheckpointRefNotFound, ref)
+	}
+	// formatFilteredFetchError redacts credential-bearing fetch URLs before
+	// including git's output in the surfaced error.
+	return formatFilteredFetchError("fetch checkpoint ref "+ref.String(), fetchTarget, output, err)
+}
+
+func checkpointRefMissingFromFetchOutput(output []byte) bool {
+	msg := strings.ToLower(string(output))
+	return strings.Contains(msg, "couldn't find remote ref") ||
+		strings.Contains(msg, "could not find remote ref")
 }
 
 // FetchBlobsByHash fetches specific blob objects from the remote by their SHA-1 hashes.

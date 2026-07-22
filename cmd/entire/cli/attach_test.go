@@ -1307,6 +1307,86 @@ func TestAttach_ReviewExplicitTargetCreatesShaBoundCheckpoint(t *testing.T) {
 	}
 }
 
+// Under git-refs, a brand-new explicit-target ID has no source ref on the
+// remote. Git reports that as a failed fetch; attach must recognize this
+// specific absence as the safe, normal create path.
+func TestAttach_ExplicitTargetGitRefsAllowsMissingRemoteRef(t *testing.T) {
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+	setupAttachTestRepo(t)
+	setupAttachBareOrigin(t)
+
+	ctx := context.Background()
+	targetID, err := cpkg.GenerateCheckpointID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "review-session-new-git-ref"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"review new ref"},"uuid":"u1"}
+`)
+
+	var out bytes.Buffer
+	if err := runAttach(ctx, &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
+		Force:        true,
+		Review:       true,
+		CheckpointID: targetID,
+	}); err != nil {
+		t.Fatalf("explicit-target attach with absent remote ref failed: %v", err)
+	}
+
+	repo, err := git.PlainOpen(mustGetwd(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refName, err := cpkg.RefName(targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Reference(refName, true); err != nil {
+		t.Fatalf("new explicit checkpoint ref %s was not created: %v", refName, err)
+	}
+}
+
+// Missing-ref errors are the only safe fetch failure. A transport or remote
+// configuration failure remains inconclusive and must abort without creating
+// the caller-supplied checkpoint ID.
+func TestAttach_ExplicitTargetGitRefsRejectsOtherFetchFailures(t *testing.T) {
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+	setupAttachTestRepo(t)
+
+	repoRoot := mustGetwd(t)
+	runGit(t, repoRoot, "remote", "add", "origin", filepath.Join(t.TempDir(), "missing.git"))
+	ctx := context.Background()
+	targetID, err := cpkg.GenerateCheckpointID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "review-session-broken-git-ref-remote"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"review retry"},"uuid":"u1"}
+`)
+
+	var out bytes.Buffer
+	err = runAttach(ctx, &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
+		Force:        true,
+		Review:       true,
+		CheckpointID: targetID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to refresh explicit checkpoint") {
+		t.Fatalf("expected inconclusive fetch to fail closed, got: %v", err)
+	}
+
+	repo, err := git.PlainOpen(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refName, err := cpkg.RefName(targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Reference(refName, true); err == nil {
+		t.Fatalf("checkpoint ref %s was created after an inconclusive fetch", refName)
+	}
+}
+
 // An explicit-target ID that already exists with OTHER content must be
 // refused, never modified: the ID is the caller's identity contract, and
 // appending to or rebuilding an existing checkpoint would corrupt it.
@@ -1960,8 +2040,7 @@ func setupAttachTestRepo(t *testing.T) {
 
 // setupAttachCheckpointOrigin gives explicit-target tests a reachable metadata
 // branch whose successful refresh proves a requested checkpoint ID is absent.
-// Fetch failures are intentionally fatal for this mode, so a repository with no
-// origin cannot exercise the safe "genuinely new ID" path.
+// This is the git-branch equivalent of git-refs' explicitly missing source ref.
 func setupAttachCheckpointOrigin(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
@@ -1979,11 +2058,20 @@ func setupAttachCheckpointOrigin(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	setupAttachBareOrigin(t)
+	refspec := refs.Primary.String() + ":" + refs.Primary.String()
+	runGit(t, repoRoot, "push", "origin", refspec)
+}
+
+// setupAttachBareOrigin adds an empty, reachable bare origin. A fetch for a
+// checkpoint ref against it fails specifically because the source ref is
+// absent, not because the transport or remote is broken.
+func setupAttachBareOrigin(t *testing.T) {
+	t.Helper()
+	repoRoot := mustGetwd(t)
 	remoteDir := filepath.Join(t.TempDir(), "origin.git")
 	runGit(t, repoRoot, "init", "--bare", remoteDir)
 	runGit(t, repoRoot, "remote", "add", "origin", remoteDir)
-	refspec := refs.Primary.String() + ":" + refs.Primary.String()
-	runGit(t, repoRoot, "push", "origin", refspec)
 }
 
 // setupClaudeTranscript creates a fake Claude transcript file.
