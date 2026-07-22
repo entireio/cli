@@ -43,15 +43,16 @@ func shouldTryAutoAdoptOnPrepareCommitMsg(ctx context.Context, source string) bo
 // git common dir into the current worktree when it is safe to do so.
 //
 // Discovery order:
-//  1. Live-session registry (written on ACTIVE StateStore.Save)
+//  1. Live-session registry (written on ACTIVE StateStore.Save), limited to
+//     worktrees that share the target's parent directory (same proximity as #2)
 //  2. Immediate sibling repos under the parent directory (seeded / microservices)
 //
 // A candidate is accepted only when exactly one match remains after filtering
 // for recent ACTIVE sessions that (a) share the committing process owner and
-// (b) have FilesTouched overlapping the staged commit paths. Owner match is
-// required so an unrelated sibling touching the same relative filename
-// (README.md, package.json, …) cannot silently steal/retire another repo's
-// live session on a human commit. Overlap alone is never enough. Ambiguity skips.
+// (b) have FilesTouched overlapping the staged commit paths. Registry entries
+// also require sibling proximity so a shared long-lived owner (tmux/IDE) plus a
+// coincidental relative path (README.md, go.mod, …) cannot steal across
+// unrelated repos. Idle sessions are never auto-adopted. Ambiguity skips.
 //
 // Best-effort: never returns an error to the git hook caller.
 func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
@@ -79,7 +80,7 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 	}
 	owner, hasOwner := proclive.ResolveOwner()
 
-	candidates := collectRegistryAutoAdoptCandidates(ctx, targetCommonDir, staged, owner, hasOwner)
+	candidates := collectRegistryAutoAdoptCandidates(ctx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
 	if len(candidates) == 0 {
 		candidates = collectSiblingAutoAdoptCandidates(ctx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
 	}
@@ -146,7 +147,7 @@ func hasLocalActiveSession(ctx context.Context, store *session.StateStore) bool 
 
 func collectRegistryAutoAdoptCandidates(
 	ctx context.Context,
-	targetCommonDir string,
+	targetWorktree, targetCommonDir string,
 	staged []string,
 	owner proclive.Identity,
 	hasOwner bool,
@@ -162,6 +163,11 @@ func collectRegistryAutoAdoptCandidates(
 			continue
 		}
 		if !isRecentLiveEntry(entry) {
+			continue
+		}
+		// Same parent-dir proximity as the sibling scan. Without this, a shared
+		// owner (tmux/IDE) + common relative filename can steal across unrelated repos.
+		if !autoAdoptSiblingProximity(entry.WorktreePath, targetWorktree) {
 			continue
 		}
 		cand, ok := candidateFromSource(ctx, entry.WorktreePath, entry.SessionID, staged, owner, hasOwner)
@@ -253,6 +259,11 @@ func candidateFromLoaded(
 	if !isRecentAdoptCandidate(state) {
 		return autoAdoptCandidate{}, false
 	}
+	// Auto-adopt is ACTIVE-only (matches live-registry prefilter and the feature doc).
+	// Idle is adoptable manually but must not be silently relocated on a commit hook.
+	if state.Phase != session.PhaseActive {
+		return autoAdoptCandidate{}, false
+	}
 	// Reject stale WorktreePath mismatches. Overriding worktree with
 	// state.WorktreePath would make sessionBelongsToSourceWorktree a tautology
 	// (comparing the recorded path against itself) and miss the ownership check.
@@ -289,6 +300,20 @@ func isRecentLiveEntry(entry session.LiveSessionEntry) bool {
 	}
 	// LiveSessionMaxAge matches adoptRecentWindow; registry TTL sweep uses the same bound.
 	return time.Since(*entry.LastInteractionTime) <= session.LiveSessionMaxAge
+}
+
+// autoAdoptSiblingProximity reports whether source and target worktrees share a
+// parent directory (the same bound used by collectSiblingAutoAdoptCandidates).
+func autoAdoptSiblingProximity(sourceWorktree, targetWorktree string) bool {
+	if sourceWorktree == "" || targetWorktree == "" {
+		return false
+	}
+	srcParent := filepath.Dir(sourceWorktree)
+	tgtParent := filepath.Dir(targetWorktree)
+	if srcParent == "" || tgtParent == "" || srcParent == sourceWorktree || tgtParent == targetWorktree {
+		return false
+	}
+	return sameAdoptPath(srcParent, tgtParent)
 }
 
 func ownerMatches(recorded *proclive.Identity, current proclive.Identity) bool {

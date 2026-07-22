@@ -92,9 +92,10 @@ func TestAutoAdopt_PrepareCommitMsg_ViaLiveRegistry(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	requireResolveOwner(t)
 
-	// Non-sibling temp dirs: only the live registry can discover the source.
-	sourceRepo := setupAdoptRepo(t)
-	targetRepo := setupAdoptRepo(t)
+	// Sibling dirs under one parent: registry discover + proximity both apply.
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
 
 	sessionID := "test-auto-adopt-registry-001"
 	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"feature.txt"}, true)
@@ -127,6 +128,83 @@ func TestAutoAdopt_PrepareCommitMsg_ViaLiveRegistry(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "Entire-Checkpoint:") {
 		t.Fatalf("commit message = %q, want Entire-Checkpoint trailer", string(content))
+	}
+}
+
+func TestAutoAdopt_SkipsDistantRegistryEntry(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
+
+	// Nest under distinct parents — bare t.TempDir() siblings share a parent on macOS.
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(t.TempDir(), "src-nest", "repo"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(t.TempDir(), "dst-nest", "repo"))
+
+	sessionID := "test-auto-adopt-distant-registry"
+	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"README.md"}, true)
+
+	testutil.WriteFile(t, targetRepo, "README.md", "unrelated human edit\n")
+	testutil.GitAdd(t, targetRepo, "README.md")
+	t.Chdir(targetRepo)
+
+	tryAutoAdoptCrossCommonDirSession(context.Background())
+
+	targetStore := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	adopted, err := targetStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted != nil {
+		t.Fatal("distant registry entry must not auto-adopt even with owner+overlap")
+	}
+}
+
+func TestAutoAdopt_SkipsIdleSibling(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+
+	sessionID := "test-auto-adopt-idle-sibling"
+	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"feature.txt"}, true)
+
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	state, err := sourceStore.Load(context.Background(), sessionID)
+	if err != nil || state == nil {
+		t.Fatalf("load source: %v", err)
+	}
+	state.Phase = session.PhaseIdle
+	if err := sourceStore.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	testutil.WriteFile(t, targetRepo, "feature.txt", "agent change\n")
+	testutil.GitAdd(t, targetRepo, "feature.txt")
+	t.Chdir(targetRepo)
+
+	tryAutoAdoptCrossCommonDirSession(context.Background())
+
+	targetStore := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	adopted, err := targetStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted != nil {
+		t.Fatal("Idle sibling must not be auto-adopted")
+	}
+}
+
+func TestAutoAdoptSiblingProximity(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	a := filepath.Join(base, "a")
+	b := filepath.Join(base, "b")
+	if !autoAdoptSiblingProximity(a, b) {
+		t.Fatal("siblings under same parent should match")
+	}
+	if autoAdoptSiblingProximity(a, filepath.Join(t.TempDir(), "other")) {
+		t.Fatal("distinct parents must not match")
 	}
 }
 
@@ -363,6 +441,25 @@ func TestCandidateFromLoaded_RejectsWorktreePathMismatch(t *testing.T) {
 	_, ok := candidateFromLoaded(nil, "/scanned/worktree", "/common", state, []string{"feature.txt"}, proclive.Identity{}, false)
 	if ok {
 		t.Fatal("stale WorktreePath mismatch must reject candidate")
+	}
+}
+
+func TestCandidateFromLoaded_RejectsIdle(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	owner := proclive.Identity{PID: 1, Start: "s"}
+	state := &session.State{
+		SessionID:           "idle",
+		Phase:               session.PhaseIdle,
+		LastInteractionTime: &now,
+		WorktreePath:        "/scanned/worktree",
+		FilesTouched:        []string{"feature.txt"},
+		Owner:               &owner,
+	}
+	_, ok := candidateFromLoaded(nil, "/scanned/worktree", "/common", state, []string{"feature.txt"}, owner, true)
+	if ok {
+		t.Fatal("Idle session must not be an auto-adopt candidate")
 	}
 }
 
