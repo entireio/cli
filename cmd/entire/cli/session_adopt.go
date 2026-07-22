@@ -18,6 +18,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -305,10 +306,26 @@ func clearInvalidAdoptTranscript(ctx context.Context, state *session.State, sour
 			slog.String("session_id", state.SessionID),
 			slog.String("error", err.Error()),
 		)
-		fmt.Fprintf(os.Stderr, "[entire] Warning: adopted session %s lost its transcript pointer (%v); it will be re-resolved on the next agent turn.\n",
-			shortSessionID(state.SessionID), err)
+		writeAdoptUserWarning(fmt.Sprintf(
+			"[entire] Warning: adopted session %s lost its transcript pointer (%v); it will be re-resolved on the next agent turn.\n",
+			shortSessionID(state.SessionID), err,
+		))
 		state.TranscriptPath = ""
 	}
+}
+
+// writeAdoptUserWarning surfaces a hook-path warning to the user. prepare-commit-msg
+// redirects stderr to /dev/null (strategy/hooks.go), so prefer the controlling TTY
+// (same pattern as askConfirmTTY). Falls back to stderr for CLI adopt / tests.
+func writeAdoptUserWarning(msg string) {
+	if !interactive.UnderTest() {
+		if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
+			_, _ = fmt.Fprint(tty, msg)
+			_ = tty.Close()
+			return
+		}
+	}
+	fmt.Fprint(os.Stderr, msg)
 }
 
 func stateStoreForWorktree(ctx context.Context, worktreePath string) (*session.StateStore, string, string, error) {
