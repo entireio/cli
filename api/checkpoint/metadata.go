@@ -149,6 +149,12 @@ type WriteOptions struct {
 	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
 	Kind string
 
+	// CommitSHA is the full SHA of the user-code commit this checkpoint is
+	// bound to, for checkpoints attached to a commit without an
+	// Entire-Checkpoint trailer (e.g. platform-published review provenance
+	// keyed by the reviewed commit). Empty for trailer-linked checkpoints.
+	CommitSHA string
+
 	// ReviewSkills is the snapshot of skills used (only meaningful when Kind is a review kind).
 	// May be empty when a review is attached post-hoc without declared skills.
 	ReviewSkills []string
@@ -393,6 +399,12 @@ type Metadata struct {
 	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
 	Kind string `json:"kind,omitempty"`
 
+	// CommitSHA is the full SHA of the user-code commit this checkpoint is
+	// bound to, for checkpoints attached without an Entire-Checkpoint
+	// trailer (e.g. platform-published review provenance). Empty for
+	// trailer-linked checkpoints.
+	CommitSHA string `json:"commit_sha,omitempty"`
+
 	// ReviewSkills lists the review skills that were run (only set when Kind is a review kind).
 	// May be empty when a review was attached post-hoc without declared skills.
 	ReviewSkills []string `json:"review_skills,omitempty"`
@@ -503,6 +515,12 @@ type CheckpointSummary struct {
 	// agent history (a session with Kind == "imported"): read-only and
 	// commit-less.
 	Imported bool `json:"imported,omitempty"`
+
+	// CommitSHA is the full SHA of the user-code commit this checkpoint is
+	// bound to, for checkpoints attached without an Entire-Checkpoint
+	// trailer (e.g. platform-published review provenance). Empty for
+	// trailer-linked checkpoints.
+	CommitSHA string `json:"commit_sha,omitempty"`
 }
 
 // SessionMetrics contains hook-provided session metrics from agents that report

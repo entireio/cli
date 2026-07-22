@@ -1165,6 +1165,167 @@ func TestAttach_ReviewWithExistingCheckpointErrors(t *testing.T) {
 	}
 }
 
+// Explicit-target mode: the platform review-provenance flow supplies a
+// server-minted checkpoint ID and the reviewed commit's SHA. The attach must
+// create that checkpoint bound to the commit via metadata (commit_sha), even
+// when HEAD carries no Entire-Checkpoint trailer, and must never amend HEAD.
+func TestAttach_ReviewExplicitTargetCreatesShaBoundCheckpoint(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	repoRoot := mustGetwd(t)
+	repo, err := git.PlainOpen(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headRef, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	headSHA := headRef.Hash().String()
+	headCommit, err := repo.CommitObject(headRef.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trailers.ParseAllCheckpoints(headCommit.Message)) != 0 {
+		t.Fatal("test requires a HEAD without an Entire-Checkpoint trailer")
+	}
+	originalMessage := headCommit.Message
+
+	sessionID := "review-session-explicit-target"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"please review"},"uuid":"u1"}
+`)
+	// Simulate the session-stop hook's eager condense: the reviewer session
+	// already holds its own checkpoint. Explicit-target mode must not refuse.
+	ownCheckpointID, err := cpkg.GenerateCheckpointID(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Save(context.Background(), &session.State{
+		SessionID:        sessionID,
+		StartedAt:        time.Now(),
+		WorktreePath:     repoRoot,
+		AgentType:        agent.AgentTypeClaudeCode,
+		LastCheckpointID: ownCheckpointID,
+	}); err != nil {
+		t.Fatalf("seed session state: %v", err)
+	}
+
+	targetID := id.CheckpointID("aabbccddeeff")
+	opts := attachOptions{
+		Force:                true,
+		Review:               true,
+		ReviewSkillsOverride: []string{"/review"},
+		CheckpointID:         targetID,
+		CommitSHA:            headSHA,
+	}
+	var out bytes.Buffer
+	if err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, opts); err != nil {
+		t.Fatalf("explicit-target review attach failed: %v", err)
+	}
+
+	// Checkpoint exists at the supplied ID with the commit binding recorded.
+	store := cpkg.NewGitStore(repo, cpkg.DefaultV1Refs())
+	summary, err := store.Read(context.Background(), targetID)
+	if err != nil {
+		t.Fatalf("Read(%s): %v", targetID, err)
+	}
+	if summary == nil {
+		t.Fatalf("checkpoint %s not created", targetID)
+	}
+	if summary.CommitSHA != headSHA {
+		t.Errorf("summary.CommitSHA = %q, want %q", summary.CommitSHA, headSHA)
+	}
+	if !summary.HasReview {
+		t.Error("summary.HasReview should be true")
+	}
+	if len(summary.Sessions) != 1 {
+		t.Fatalf("checkpoint has %d sessions, want 1", len(summary.Sessions))
+	}
+	metadata, err := store.ReadSessionMetadata(context.Background(), targetID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionMetadata: %v", err)
+	}
+	if metadata.SessionID != sessionID {
+		t.Errorf("session metadata SessionID = %q, want %q", metadata.SessionID, sessionID)
+	}
+	if metadata.CommitSHA != headSHA {
+		t.Errorf("session metadata CommitSHA = %q, want %q", metadata.CommitSHA, headSHA)
+	}
+	if metadata.Kind != string(session.KindAgentReview) {
+		t.Errorf("session metadata Kind = %q, want agent_review", metadata.Kind)
+	}
+
+	// HEAD must be untouched: same commit, no trailer appended.
+	newHeadRef, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newHeadRef.Hash().String() != headSHA {
+		t.Errorf("HEAD moved from %s to %s; explicit-target attach must not amend", headSHA, newHeadRef.Hash())
+	}
+	newHeadCommit, err := repo.CommitObject(newHeadRef.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newHeadCommit.Message != originalMessage {
+		t.Error("HEAD commit message changed; explicit-target attach must not amend")
+	}
+
+	// Retried attach with the same target is an idempotent no-op success.
+	out.Reset()
+	if err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, opts); err != nil {
+		t.Fatalf("retried explicit-target attach should be a no-op success: %v", err)
+	}
+	if !strings.Contains(out.String(), "already attached") {
+		t.Errorf("expected idempotent no-op message, got: %q", out.String())
+	}
+	summary, err = store.Read(context.Background(), targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Sessions) != 1 {
+		t.Errorf("retry duplicated the session: %d sessions, want 1", len(summary.Sessions))
+	}
+}
+
+// The explicit-target flags are a unit: both must be supplied, only with
+// --review, and the commit SHA must be a full 40-hex value.
+func TestAttach_ExplicitTargetFlagValidation(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	run := func(args ...string) error {
+		cmd := newAttachCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs(args)
+		return cmd.Execute()
+	}
+
+	fullSHA := strings.Repeat("ab", 20)
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"checkpoint-id without commit-sha", []string{"s1", "--review", "--checkpoint-id", "aabbccddeeff"}, "must be used together"},
+		{"commit-sha without checkpoint-id", []string{"s1", "--review", "--commit-sha", fullSHA}, "must be used together"},
+		{"without review", []string{"s1", "--checkpoint-id", "aabbccddeeff", "--commit-sha", fullSHA}, "require --review"},
+		{"bad checkpoint id", []string{"s1", "--review", "--checkpoint-id", "not/valid", "--commit-sha", fullSHA}, "invalid --checkpoint-id"},
+		{"short commit sha", []string{"s1", "--review", "--checkpoint-id", "aabbccddeeff", "--commit-sha", "abc123"}, "invalid --commit-sha"},
+	}
+	for _, tc := range cases {
+		err := run(tc.args...)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: got %v, want error containing %q", tc.name, err, tc.want)
+		}
+	}
+}
+
 // Regression for the second "review-attach overwrote the session on the
 // checkpoint" report: a DIFFERENT session ID (not present in the existing
 // checkpoint) must APPEND at the next-available index, not overwrite
