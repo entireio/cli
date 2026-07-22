@@ -1259,6 +1259,27 @@ func TestAttach_ReviewExplicitTargetCreatesShaBoundCheckpoint(t *testing.T) {
 		t.Errorf("session metadata Kind = %q, want agent_review", metadata.Kind)
 	}
 
+	// The commit-SHA-bound review checkpoint is not the session's code
+	// checkpoint. Preserve the session-stop checkpoint and leave its empty base
+	// untouched so amend hooks and resume/session output never treat targetID as
+	// trailer-linked session state.
+	attachedState, err := stateStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("load attached session state: %v", err)
+	}
+	if attachedState == nil {
+		t.Fatal("attached session state is missing")
+	}
+	if attachedState.LastCheckpointID != ownCheckpointID {
+		t.Errorf("LastCheckpointID = %s, want original session checkpoint %s", attachedState.LastCheckpointID, ownCheckpointID)
+	}
+	if attachedState.BaseCommit != "" {
+		t.Errorf("BaseCommit = %q, want empty; explicit-target attach must not bind session state to HEAD", attachedState.BaseCommit)
+	}
+	if attachedState.AttributionBaseCommit != "" {
+		t.Errorf("AttributionBaseCommit = %q, want empty; explicit-target attach must not bind attribution state to HEAD", attachedState.AttributionBaseCommit)
+	}
+
 	// HEAD must be untouched: same commit, no trailer appended.
 	newHeadRef, err := repo.Head()
 	if err != nil {
@@ -1289,6 +1310,72 @@ func TestAttach_ReviewExplicitTargetCreatesShaBoundCheckpoint(t *testing.T) {
 	}
 	if len(summary.Sessions) != 1 {
 		t.Errorf("retry duplicated the session: %d sessions, want 1", len(summary.Sessions))
+	}
+}
+
+// A well-formed --commit-sha that names no commit in the repository must be
+// rejected: silently recording it would produce provenance pointing at nothing.
+func TestAttach_ExplicitTargetRejectsUnknownCommit(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	sessionID := "review-session-unknown-commit"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"please review"},"uuid":"u1"}
+`)
+
+	var out bytes.Buffer
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{
+		Force:        true,
+		Review:       true,
+		CheckpointID: id.CheckpointID("aabbccddeeff"),
+		CommitSHA:    strings.Repeat("deadbeef", 5),
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not name a commit") {
+		t.Fatalf("expected unknown-commit rejection, got: %v", err)
+	}
+}
+
+// An explicit-target ID that already exists with OTHER content must be
+// refused, never modified: the ID is the caller's identity contract, and
+// appending to or rebuilding an existing checkpoint would corrupt it.
+func TestAttach_ExplicitTargetRefusesExistingCheckpointWithoutSession(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	repoRoot := mustGetwd(t)
+	repo, err := git.PlainOpen(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headSHA, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	targetID := id.CheckpointID("aabbccddeeff")
+	firstSession := "review-session-original"
+	setupClaudeTranscript(t, firstSession, `{"type":"user","message":{"role":"user","content":"first"},"uuid":"u1"}
+`)
+	var out bytes.Buffer
+	if err := runAttach(context.Background(), &out, &out, firstSession, agent.AgentNameClaudeCode, attachOptions{
+		Force:        true,
+		Review:       true,
+		CheckpointID: targetID,
+		CommitSHA:    headSHA.Hash().String(),
+	}); err != nil {
+		t.Fatalf("first explicit-target attach failed: %v", err)
+	}
+
+	secondSession := "review-session-collision"
+	setupClaudeTranscript(t, secondSession, `{"type":"user","message":{"role":"user","content":"second"},"uuid":"u1"}
+`)
+	out.Reset()
+	err = runAttach(context.Background(), &out, &out, secondSession, agent.AgentNameClaudeCode, attachOptions{
+		Force:        true,
+		Review:       true,
+		CheckpointID: targetID,
+		CommitSHA:    headSHA.Hash().String(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing to modify an existing checkpoint") {
+		t.Fatalf("expected collision refusal, got: %v", err)
 	}
 }
 

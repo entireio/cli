@@ -32,6 +32,7 @@ import (
 
 	"charm.land/huh/v2"
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/spf13/cobra"
 )
@@ -281,6 +282,19 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		return err
 	}
 
+	// The recorded commit binding must name a real commit: --commit-sha is
+	// only shape-validated at the flag layer, and silently persisting a SHA
+	// this repository has never seen would produce provenance pointing at
+	// nothing.
+	if opts.explicitTarget() {
+		if _, chkErr := repo.CommitObject(plumbing.NewHash(opts.CommitSHA)); chkErr != nil {
+			return fmt.Errorf(
+				"--commit-sha %s does not name a commit in this repository: %w",
+				opts.CommitSHA, chkErr,
+			)
+		}
+	}
+
 	// If session already has a checkpoint, just offer to link it.
 	// Explicit-target mode is exempt: it authors a separate new checkpoint
 	// under the caller-supplied ID, so the session's own checkpoint (e.g.
@@ -391,17 +405,44 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		}
 	}
 
-	// Explicit-target idempotency: a retried attach with the same server-minted
-	// checkpoint ID and session is a no-op success, not an error — the caller
-	// (platform provenance publication) retries the whole script.
+	// Explicit-target IDs are usually new — but "usually" is not "always": a
+	// retried attach from a fresh clone would not have the earlier attempt's
+	// data locally, and treating the ID as brand-new would rebuild it as an
+	// orphan that clobbers the original on push. Refresh remote state for the
+	// ID first, then either no-op (same session already recorded — the caller
+	// retries whole scripts), refuse (ID exists with other content — never
+	// modify an existing checkpoint), or proceed (genuinely new).
 	if opts.explicitTarget() {
-		exists, readErr := checkpointHasSessionMetadata(ctx, repo, refs, checkpointID, sessionID)
-		if readErr != nil {
-			return fmt.Errorf("failed to check checkpoint %s for session %s: %w", checkpointID.String(), sessionID, readErr)
+		freshRepo, present, freshErr := ensureExplicitCheckpointFreshness(ctx, logCtx, repo, refs, checkpointID)
+		if freshRepo != nil && freshRepo != repo {
+			oldRepo := repo
+			repo = freshRepo
+			if closeErr := oldRepo.Close(); closeErr != nil {
+				logging.Warn(logCtx, "failed to close stale repository handle after explicit checkpoint refresh",
+					slog.String("error", closeErr.Error()))
+			}
+			// The store handle wraps the stale repo; reopen against the fresh one.
+			store, err = openAttachStore(ctx, repo, refs)
+			if err != nil {
+				return err
+			}
 		}
-		if exists {
-			fmt.Fprintf(w, "Session %s already attached to checkpoint %s\n", sessionID, checkpointID.String())
-			return nil
+		if freshErr != nil {
+			return freshErr
+		}
+		if present {
+			exists, readErr := checkpointHasSessionMetadata(ctx, repo, refs, checkpointID, sessionID)
+			if readErr != nil {
+				return fmt.Errorf("failed to check checkpoint %s for session %s: %w", checkpointID.String(), sessionID, readErr)
+			}
+			if exists {
+				fmt.Fprintf(w, "Session %s already attached to checkpoint %s\n", sessionID, checkpointID.String())
+				return nil
+			}
+			return fmt.Errorf(
+				"checkpoint %s already exists without session %s; refusing to modify an existing checkpoint",
+				checkpointID.String(), sessionID,
+			)
 		}
 	}
 
@@ -626,6 +667,43 @@ func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository
 	return repo, missingCheckpointError(logCtx, checkpointID, primaryIsRefs)
 }
 
+// ensureExplicitCheckpointFreshness surfaces any remote copy of an
+// explicit-target checkpoint ID locally and reports whether the checkpoint
+// exists. Unlike ensureCheckpointAvailable, a checkpoint that is still missing
+// after the refresh is NOT an error — an explicit-target ID is normally brand
+// new; the refresh exists so a retry from a fresh clone sees the earlier
+// attempt instead of rebuilding the ID as an orphan that would clobber it on
+// push. Fetch failures degrade to "not present" with a warning, matching
+// ensureCheckpointAvailable's tolerance for offline operation.
+func ensureExplicitCheckpointFreshness(ctx, logCtx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID) (*git.Repository, bool, error) {
+	cfg, err := settings.LoadCheckpointsConfig(ctx)
+	if err != nil {
+		return repo, false, fmt.Errorf("resolve checkpoints config: %w", err)
+	}
+	primaryIsRefs := cpkg.PrimaryIsRefs(cfg)
+
+	present, readErr := checkpointPresentLocally(ctx, repo, refs, checkpointID, primaryIsRefs)
+	if readErr != nil {
+		return repo, false, fmt.Errorf("failed to read checkpoint %s: %w", checkpointID, readErr)
+	}
+	if present {
+		return repo, true, nil
+	}
+
+	freshRepo, fetchErr := refreshCheckpoint(ctx, checkpointID, primaryIsRefs)
+	if fetchErr != nil {
+		logging.Warn(logCtx, "failed to refresh explicit checkpoint before attach; treating as new",
+			slog.String("checkpoint_id", checkpointID.String()),
+			slog.String("error", fetchErr.Error()))
+		return repo, false, nil
+	}
+	present, readErr = checkpointPresentLocally(ctx, freshRepo, refs, checkpointID, primaryIsRefs)
+	if readErr != nil {
+		return freshRepo, false, fmt.Errorf("failed to read checkpoint %s after refresh: %w", checkpointID, readErr)
+	}
+	return freshRepo, present, nil
+}
+
 // refreshCheckpoint fetches the checkpoint referenced by HEAD from the remote and
 // returns a freshly-opened repo so go-git sees the newly-fetched refs/packfiles.
 // The fetch is backend-aware: git-refs fetches just this checkpoint's ref, while
@@ -753,21 +831,26 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 		}
 	}
 
-	// Populate BaseCommit from HEAD if not already set, so the session becomes
-	// active and future commits in the same session receive Entire-Checkpoint trailers.
-	if state.BaseCommit == "" {
-		if head, headErr := repo.Head(); headErr == nil {
-			headHash := head.Hash().String()
-			state.BaseCommit = headHash
-			state.AttributionBaseCommit = headHash
+	// Trailer-linked attaches establish the session's code-checkpoint linkage:
+	// BaseCommit lets later commits/amends recognize the session, and
+	// LastCheckpointID is the trailer the amend hook restores. An explicit-target
+	// review checkpoint is instead bound through commit_sha metadata and must not
+	// replace the session's own checkpoint/base or appear in resume/session output.
+	if !opts.explicitTarget() {
+		if state.BaseCommit == "" {
+			if head, headErr := repo.Head(); headErr == nil {
+				headHash := head.Hash().String()
+				state.BaseCommit = headHash
+				state.AttributionBaseCommit = headHash
+			}
 		}
+		state.LastCheckpointID = checkpointID
 	}
 
 	state.CLIVersion = versioninfo.Version
 	state.AttachedManually = true
 	state.AgentType = agentType
 	state.TranscriptPath = transcriptPath
-	state.LastCheckpointID = checkpointID
 	// Only transition to Ended if the session is not already active — avoid
 	// breaking an ongoing session whose BaseCommit has just been restored above.
 	if !state.Phase.IsActive() {
