@@ -35,6 +35,7 @@ func TestIssue411_EndedToIdle_PrepareCommitMsgAddsTrailer(t *testing.T) {
 	require.NoError(t, env.SimulateSessionEnd(sess.ID))
 	state, err = env.GetSessionState(sess.ID)
 	require.NoError(t, err)
+	require.NotNil(t, state)
 	require.Equal(t, session.PhaseEnded, state.Phase)
 
 	// Reported trigger: SessionStart after ENDED (ended → idle).
