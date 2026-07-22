@@ -23,12 +23,17 @@ import (
 // hook bounded on large parent directories.
 const maxSiblingAutoAdoptScan = 32
 
+// prepareCommitMsgSourceAmend is git's prepare-commit-msg source for `git commit --amend`.
+const prepareCommitMsgSourceAmend = "commit"
+
 // shouldTryAutoAdoptOnPrepareCommitMsg reports whether prepare-commit-msg should
 // attempt cross-common-dir auto-adopt. Matches ManualCommitStrategy.PrepareCommitMsg
 // skip conditions so we never retire a live session when no trailer would be written.
+// Amend (source "commit"): handleAmendCommitMsg only restores an existing trailer /
+// HEAD LastCheckpointID match and will not write a trailer for a freshly adopted session.
 func shouldTryAutoAdoptOnPrepareCommitMsg(ctx context.Context, source string) bool {
 	switch source {
-	case "merge", "squash":
+	case "merge", "squash", prepareCommitMsgSourceAmend:
 		return false
 	}
 	return !strategy.IsGitSequenceOperation(ctx)
@@ -248,9 +253,11 @@ func candidateFromLoaded(
 	if !isRecentAdoptCandidate(state) {
 		return autoAdoptCandidate{}, false
 	}
+	// Reject stale WorktreePath mismatches. Overriding worktree with
+	// state.WorktreePath would make sessionBelongsToSourceWorktree a tautology
+	// (comparing the recorded path against itself) and miss the ownership check.
 	if state.WorktreePath != "" && !sameAdoptPath(state.WorktreePath, worktree) {
-		// Prefer the recorded worktree path when validating source ownership.
-		worktree = state.WorktreePath
+		return autoAdoptCandidate{}, false
 	}
 	// Both owner match and FilesTouched overlap are required. Overlap alone
 	// would let unrelated sibling repos steal via common relative names;

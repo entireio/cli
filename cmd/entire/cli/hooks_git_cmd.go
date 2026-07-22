@@ -221,9 +221,9 @@ func newHooksGitPrepareCommitMsgCmd() *cobra.Command {
 			}
 			// When an ACTIVE agent session lives in another git common dir,
 			// adopt it into this repo before trailer insertion (#1439).
-			// Skip the same cases PrepareCommitMsg skips (merge/squash and
-			// rebase/cherry-pick/revert): adopting there would retire a live
-			// session with no trailer written.
+			// Skip the same cases PrepareCommitMsg skips (merge/squash/amend
+			// and rebase/cherry-pick/revert): adopting there would retire a
+			// live session with no trailer written.
 			if shouldTryAutoAdoptOnPrepareCommitMsg(g.ctx, source) {
 				tryAutoAdoptCrossCommonDirSession(g.ctx)
 			}

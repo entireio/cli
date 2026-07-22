@@ -334,6 +334,9 @@ func TestShouldTryAutoAdoptOnPrepareCommitMsg(t *testing.T) {
 	if shouldTryAutoAdoptOnPrepareCommitMsg(context.Background(), "squash") {
 		t.Fatal("squash source must skip auto-adopt")
 	}
+	if shouldTryAutoAdoptOnPrepareCommitMsg(context.Background(), prepareCommitMsgSourceAmend) {
+		t.Fatal("amend (source=commit) must skip auto-adopt")
+	}
 
 	if err := os.MkdirAll(filepath.Join(repo, ".git", "rebase-merge"), 0o755); err != nil {
 		t.Fatal(err)
@@ -343,6 +346,23 @@ func TestShouldTryAutoAdoptOnPrepareCommitMsg(t *testing.T) {
 	}
 	if shouldTryAutoAdoptOnPrepareCommitMsg(context.Background(), "message") {
 		t.Fatal("rebase sequence must skip auto-adopt for message source")
+	}
+}
+
+func TestCandidateFromLoaded_RejectsWorktreePathMismatch(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	state := &session.State{
+		SessionID:           "mismatch",
+		Phase:               session.PhaseActive,
+		LastInteractionTime: &now,
+		WorktreePath:        "/other/worktree",
+		FilesTouched:        []string{"feature.txt"},
+	}
+	_, ok := candidateFromLoaded(nil, "/scanned/worktree", "/common", state, []string{"feature.txt"}, proclive.Identity{}, false)
+	if ok {
+		t.Fatal("stale WorktreePath mismatch must reject candidate")
 	}
 }
 
