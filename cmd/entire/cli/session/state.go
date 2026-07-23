@@ -309,6 +309,14 @@ type State struct {
 	// cumulative total on every checkpoint.
 	SubagentTokensBaseline *agent.TokenUsage `json:"subagent_tokens_baseline,omitempty"`
 
+	// CumulativeTokenBaseline caches the last cumulative token snapshot for agents
+	// that report CUMULATIVE token counts (Codex), so turn-end token calc scans
+	// only the transcript lines added since the last checkpoint instead of the
+	// whole rollout (O(session) per hook → O(session^2) across a session). nil
+	// until the first checkpoint that observes token data, or after a transcript
+	// reset — both fall back to a one-time full scan.
+	CumulativeTokenBaseline *agent.CumulativeTokenSnapshot `json:"cumulative_token_baseline,omitempty"`
+
 	// SkillEvents records explicit native skill signals observed during this session.
 	// Stored as sidecar metadata so consumers can collapse skill-related transcript events
 	// without mutating the raw agent transcript.

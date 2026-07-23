@@ -14,12 +14,15 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 // Compile-time interface assertions.
 var (
 	_ agent.TranscriptAnalyzer          = (*CodexAgent)(nil)
 	_ agent.TokenCalculator             = (*CodexAgent)(nil)
+	_ agent.IncrementalTokenCalculator  = (*CodexAgent)(nil)
+	_ agent.SubagentAwareExtractor      = (*CodexAgent)(nil)
 	_ agent.PromptExtractor             = (*CodexAgent)(nil)
 	_ agent.RestoredSessionPathResolver = (*CodexAgent)(nil)
 )
@@ -266,13 +269,63 @@ func classifyApplyPatchPaths(input string) (added, modified, deleted []string) {
 // CalculateTokenUsage computes token usage from the transcript starting at the given line offset.
 // Codex reports cumulative total_token_usage, so we compute the delta between the last
 // token_count at/before the offset and the last token_count after the offset.
+//
+// This full-scan form parses every line from 0; prefer CalculateTokenUsageIncremental
+// on the turn-end hot path, which parses only lines added since the last checkpoint.
 func (c *CodexAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) (*agent.TokenUsage, error) {
-	var baselineUsage *tokenUsageData // last token_count at or before offset
-	var lastUsage *tokenUsageData     // last token_count after offset
-	apiCalls := 0
-	lineNum := 0
+	usage, _ := scanTokenDelta(transcriptData, 0, fromOffset, nil)
+	return usage, nil
+}
 
-	for _, lineData := range splitJSONL(transcriptData) {
+// CalculateTokenUsageIncremental computes the same delta as CalculateTokenUsage but,
+// given the cumulative baseline persisted at the previous checkpoint, scans only the
+// transcript lines added since then. Codex rollouts are append-only with no token_count
+// events between turns, so the persisted snapshot remains a valid pre-offset baseline
+// and history need not be re-parsed. Falls back to a full scan on cold start (prior nil)
+// or when the transcript shrank/reset (prior.LineCount > fromOffset).
+func (c *CodexAgent) CalculateTokenUsageIncremental(transcriptData []byte, fromOffset int, prior *agent.CumulativeTokenSnapshot) (*agent.TokenUsage, *agent.CumulativeTokenSnapshot, error) {
+	startLine := 0
+	var seed *tokenUsageData
+	if prior != nil && prior.LineCount <= fromOffset {
+		startLine = prior.LineCount
+		seed = &tokenUsageData{
+			InputTokens:       prior.InputTokens,
+			CachedInputTokens: prior.CachedInputTokens,
+			OutputTokens:      prior.OutputTokens,
+		}
+	}
+
+	scanData := transcriptData
+	if startLine > 0 {
+		scanData = transcript.SliceFromLine(transcriptData, startLine)
+	}
+
+	usage, latest := scanTokenDelta(scanData, startLine, fromOffset, seed)
+
+	// Persist the final cumulative snapshot at the current transcript length so
+	// the next checkpoint can baseline off it without rescanning history.
+	next := &agent.CumulativeTokenSnapshot{LineCount: startLine + len(splitJSONL(scanData))}
+	if latest != nil {
+		next.InputTokens = latest.InputTokens
+		next.CachedInputTokens = latest.CachedInputTokens
+		next.OutputTokens = latest.OutputTokens
+	}
+	return usage, next, nil
+}
+
+// scanTokenDelta scans token_count events in data, numbering lines starting at
+// startLineNum+1 (the absolute line number of data's first line). seed is the
+// cumulative baseline as of startLineNum (nil for a from-scratch scan). It returns
+// the checkpoint delta (nil when no token_count exists after fromOffset, matching the
+// original behavior) and the last cumulative snapshot observed (seed if none seen).
+func scanTokenDelta(data []byte, startLineNum, fromOffset int, seed *tokenUsageData) (usage *agent.TokenUsage, latest *tokenUsageData) {
+	baselineUsage := seed         // last token_count at or before offset
+	latest = seed                 // last token_count seen overall (for the next baseline)
+	var lastUsage *tokenUsageData // last token_count after offset
+	apiCalls := 0
+	lineNum := startLineNum
+
+	for _, lineData := range splitJSONL(data) {
 		lineNum++
 
 		var line rolloutLine
@@ -294,6 +347,7 @@ func (c *CodexAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) 
 			continue
 		}
 
+		latest = info.TotalTokenUsage
 		if lineNum <= fromOffset {
 			baselineUsage = info.TotalTokenUsage
 		} else {
@@ -303,10 +357,10 @@ func (c *CodexAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) 
 	}
 
 	if lastUsage == nil {
-		return nil, nil //nolint:nilnil // no usage data found
+		return nil, latest
 	}
 
-	// Subtract baseline to get the delta for this checkpoint range
+	// Subtract baseline to get the delta for this checkpoint range.
 	inputTokens := lastUsage.InputTokens
 	cacheReadTokens := lastUsage.CachedInputTokens
 	outputTokens := lastUsage.OutputTokens
@@ -316,17 +370,46 @@ func (c *CodexAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) 
 		outputTokens -= baselineUsage.OutputTokens
 	}
 
-	freshInputTokens := inputTokens - cacheReadTokens
-	if freshInputTokens < 0 {
-		freshInputTokens = 0
-	}
+	freshInputTokens := max(inputTokens-cacheReadTokens, 0)
 
 	return &agent.TokenUsage{
 		InputTokens:     freshInputTokens,
 		CacheReadTokens: cacheReadTokens,
 		OutputTokens:    outputTokens,
 		APICallCount:    apiCalls,
-	}, nil
+	}, latest
+}
+
+// ExtractAllModifiedFiles implements agent.SubagentAwareExtractor for Codex. Codex
+// has no subagents, so subagentsDir is ignored; the value of implementing this
+// interface is that the turn-end pipeline extracts modified files from the in-memory
+// transcript bytes it already holds, instead of falling back to a second full-file
+// disk read via ExtractModifiedFilesFromOffset.
+func (c *CodexAgent) ExtractAllModifiedFiles(transcriptData []byte, fromOffset int, _ string) ([]string, error) {
+	seen := make(map[string]struct{})
+	var files []string
+	lineNum := 0
+	for _, lineData := range splitJSONL(transcriptData) {
+		lineNum++
+		if lineNum <= fromOffset {
+			continue
+		}
+		for _, f := range extractFilesFromLine(lineData) {
+			if _, ok := seen[f]; !ok {
+				seen[f] = struct{}{}
+				files = append(files, f)
+			}
+		}
+	}
+	return files, nil
+}
+
+// CalculateTotalTokenUsage implements agent.SubagentAwareExtractor. Codex has no
+// subagents, so this is just the main-transcript delta. The turn-end pipeline uses
+// CalculateTokenUsageIncremental directly (it needs session state for the baseline);
+// this exists to satisfy the interface and as a stateless fallback.
+func (c *CodexAgent) CalculateTotalTokenUsage(transcriptData []byte, fromOffset int, _ string) (*agent.TokenUsage, error) {
+	return c.CalculateTokenUsage(transcriptData, fromOffset)
 }
 
 // ExtractPrompts returns user prompts from the transcript starting at the given offset.

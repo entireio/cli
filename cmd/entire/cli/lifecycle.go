@@ -922,8 +922,17 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// back to transcript-based computation, preferring SubagentAwareExtractor
 	// to include subagent tokens.
 	tokenUsage := event.TokenUsage
+	var nextTokenBaseline *agent.CumulativeTokenSnapshot
 	if tokenUsage == nil {
-		tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
+		if inc, ok := agent.AsIncrementalTokenCalculator(ag); ok {
+			// Cumulative-count agents (Codex): parse only lines added since the
+			// last checkpoint, baselining off the persisted cumulative snapshot.
+			// nextTokenBaseline is persisted AFTER SaveStep (below), since SaveStep
+			// may reinitialize session state.
+			tokenUsage, nextTokenBaseline = computeIncrementalTokenUsage(ctx, logCtx, inc, sessionID, transcriptData, transcriptLinesAtStart)
+		} else {
+			tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
+		}
 	}
 
 	// Build fully-populated step context and delegate to strategy
@@ -946,6 +955,20 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 	if err := strat.SaveStep(ctx, stepCtx); err != nil {
 		return fmt.Errorf("failed to save step: %w", err)
+	}
+
+	// Persist the cumulative token baseline after SaveStep (SaveStep may
+	// reinitialize session state, which would drop an earlier update). The next
+	// checkpoint reads this to scan only newly added transcript lines.
+	if nextTokenBaseline != nil {
+		mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+			state.CumulativeTokenBaseline = nextTokenBaseline
+			return nil
+		})
+		if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+			logging.Warn(logCtx, "failed to persist cumulative token baseline",
+				slog.String("error", mutErr.Error()))
+		}
 	}
 
 	// Update session state with backfilled prompt after SaveStep.
@@ -973,6 +996,26 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 
 	return nil
+}
+
+// computeIncrementalTokenUsage computes the checkpoint token delta for a
+// cumulative-count agent (Codex) by scanning only the transcript lines added
+// since the last checkpoint. It reads the persisted cumulative baseline from
+// session state and returns both the delta and the fresh baseline to persist
+// after SaveStep. On any failure it returns (nil, nil); a nil prior baseline
+// makes the calculator fall back to a one-time full scan.
+func computeIncrementalTokenUsage(ctx, logCtx context.Context, inc agent.IncrementalTokenCalculator, sessionID string, transcriptData []byte, fromOffset int) (*agent.TokenUsage, *agent.CumulativeTokenSnapshot) {
+	var prior *agent.CumulativeTokenSnapshot
+	if st, err := strategy.LoadSessionState(ctx, sessionID); err == nil && st != nil {
+		prior = st.CumulativeTokenBaseline
+	}
+	usage, next, err := inc.CalculateTokenUsageIncremental(transcriptData, fromOffset, prior)
+	if err != nil {
+		logging.Debug(logCtx, "incremental token calculation failed",
+			slog.String("error", err.Error()))
+		return nil, nil
+	}
+	return usage, next
 }
 
 // handleLifecycleCompaction handles context compaction: saves current progress

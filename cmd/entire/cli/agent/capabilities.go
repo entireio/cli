@@ -127,6 +127,14 @@ func AsSubagentAwareExtractor(ag Agent) (SubagentAwareExtractor, bool) {
 	return declaredCapability[SubagentAwareExtractor](ag, func(c DeclaredCaps) bool { return c.SubagentAwareExtractor })
 }
 
+// AsIncrementalTokenCalculator returns the agent as IncrementalTokenCalculator
+// if it implements the interface. Incremental token calculation is a built-in
+// optimization (for agents with cumulative-count transcripts like Codex) with
+// no external-protocol equivalent, so it resolves by type assertion alone.
+func AsIncrementalTokenCalculator(ag Agent) (IncrementalTokenCalculator, bool) {
+	return builtinCapability[IncrementalTokenCalculator](ag)
+}
+
 // AsSessionBaseDirProvider returns the agent as SessionBaseDirProvider if it implements
 // the interface. No capability declaration is needed since this is a built-in-only feature
 // (external agents use the agent binary's own session resolution).
