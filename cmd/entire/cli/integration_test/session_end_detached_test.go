@@ -11,10 +11,10 @@ import (
 
 // TestSessionEnd_DetachedCondense exercises the production SessionEnd flow:
 // the hook marks the session ENDED inline (fast enough for agents' short
-// SessionEnd budgets — Claude Code cancels the hook after ~1.5s) and hands
-// the eager condense to a detached __condense_session child that survives
-// the hook process being killed. The ENDED mark must be observable as soon
-// as the hook returns; the condense lands asynchronously.
+// SessionEnd budgets — see spawnDetachedSessionEndCondense) and hands the
+// eager condense to a detached __condense_session child that survives the
+// hook process being killed. The ENDED mark must be observable as soon as
+// the hook returns; the condense lands asynchronously.
 func TestSessionEnd_DetachedCondense(t *testing.T) {
 	t.Parallel()
 
@@ -70,6 +70,9 @@ func TestSessionEnd_DetachedCondense(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
+			if state == nil {
+				t.Fatal("detached condense did not complete within 15s and session state vanished")
+			}
 			t.Fatalf("detached condense did not mark session FullyCondensed within 15s (phase=%s)", state.Phase)
 		}
 		time.Sleep(100 * time.Millisecond)

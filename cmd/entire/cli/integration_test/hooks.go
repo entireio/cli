@@ -229,8 +229,9 @@ func (r *HookRunner) runHookInRepoDir(hookName string, inputJSON []byte) error {
 }
 
 // runHookInRepoDirWithExtraEnv is like runHookInRepoDir but appends additional
-// env vars to the subprocess environment. Used by review-env adoption tests that
-// need ENTIRE_REVIEW_* vars present in the hook child process.
+// env vars to the subprocess environment, for tests that need extra or
+// overriding env vars in the hook child process (exec.Cmd keeps the last
+// value for a duplicated key, so appending overrides).
 func (r *HookRunner) runHookInRepoDirWithExtraEnv(hookName string, inputJSON []byte, extraEnv []string) error {
 	// Run using the shared test binary
 	// Command structure: entire hooks claude-code <hook-name>

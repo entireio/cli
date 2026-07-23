@@ -50,9 +50,13 @@ func TestShouldCheckCheckpointPolicyWarning(t *testing.T) {
 	refreshTrailEnablement := &cobra.Command{Use: "__refresh_trail_enablement", Hidden: true}
 	root.AddCommand(refreshTrailEnablement)
 
+	condenseSession := &cobra.Command{Use: "__condense_session", Hidden: true}
+	root.AddCommand(condenseSession)
+
 	require.True(t, ShouldCheckCheckpointPolicyWarning(visible))
 	require.True(t, ShouldCheckCheckpointPolicyWarning(hiddenAlias))
 	require.False(t, ShouldCheckCheckpointPolicyWarning(gitHook))
 	require.False(t, ShouldCheckCheckpointPolicyWarning(sendAnalytics))
 	require.False(t, ShouldCheckCheckpointPolicyWarning(refreshTrailEnablement))
+	require.False(t, ShouldCheckCheckpointPolicyWarning(condenseSession))
 }

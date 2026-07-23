@@ -1301,6 +1301,21 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	var shadowBranchName string
 	var didCondense bool
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		// Only ENDED sessions are eligible. The detached session-end child can
+		// lose a race with a same-ID resume (ENDED → IDLE/ACTIVE revival is a
+		// legal transition), and condensing a revived session would wipe its
+		// in-flight prompt attribution, reset the checkpoint window mid-turn,
+		// and leave a stale FullyCondensed=true that makes PostCommit skip the
+		// session's next end. Re-checking under the state lock closes that
+		// window for every caller.
+		if state.Phase != session.PhaseEnded {
+			logging.Info(logCtx, "eager condense: session no longer ended, skipping",
+				slog.String("session_id", sessionID),
+				slog.String("phase", string(state.Phase)),
+			)
+			return ErrMutationSkip
+		}
+
 		// Sessions with FilesTouched must be processed by PostCommit for
 		// carry-forward tracking — each user commit that overlaps with
 		// tracked files gets its own checkpoint. Eagerly condensing here

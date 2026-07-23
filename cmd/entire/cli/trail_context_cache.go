@@ -325,7 +325,9 @@ var trailRefreshSpawn = spawnDetachedTrailRefreshProcess
 // worktree root because the refresh resolves the origin remote and
 // git-common-dir for cache storage from its working directory.
 func spawnDetachedTrailRefreshProcess(worktreeRoot string) {
-	execx.SpawnDetached(worktreeRoot, "__refresh_trail_enablement")
+	// A failed spawn just means the cache stays unknown and the next
+	// SessionStart tries again — nothing here to react to.
+	_ = execx.SpawnDetached(worktreeRoot, "__refresh_trail_enablement") //nolint:errcheck // advisory refresh, retried next SessionStart
 }
 
 // trailRefreshSpawnThrottle bounds how often SessionStart forks a detached

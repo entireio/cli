@@ -750,6 +750,82 @@ func TestEntireDevScript_ExitsZeroWhenNothingAvailable(t *testing.T) {
 	}
 }
 
+// TestEntireDevScript_RunsCachedBinaryAndPassesExitStatus verifies the launch
+// contract of the cached-binary flow: the CLI's own exit status and output
+// pass through verbatim (the script must not mask failures as its own or
+// swallow successes into a fallback), on repeat invocations too. (The speed
+// property — rebuilding onto the same output path skips the full relink — is
+// a go toolchain behavior we don't assert on; go rewrites the output file
+// even when nothing changed, so file metadata can't witness the reuse.)
+func TestEntireDevScript_RunsCachedBinaryAndPassesExitStatus(t *testing.T) {
+	t.Parallel()
+
+	shPath := requireShell(t)
+
+	root := t.TempDir()
+	scriptPath := filepath.Join(root, "scripts", "entire-dev")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatalf("failed to create scripts dir: %v", err)
+	}
+	if err := os.WriteFile(scriptPath, []byte(readEntireDevScript(t)), 0o755); err != nil {
+		t.Fatalf("failed to write script: %v", err)
+	}
+
+	// Buildable fake CLI: echoes its args and exits 3, so both the output and
+	// the non-zero status must survive the launcher.
+	mainDir := filepath.Join(root, "cmd", "entire")
+	if err := os.MkdirAll(mainDir, 0o755); err != nil {
+		t.Fatalf("failed to create cmd/entire: %v", err)
+	}
+	mainGo := "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"strings\"\n)\n\nfunc main() {\n\tfmt.Println(strings.Join(os.Args[1:], \" \"))\n\tos.Exit(3)\n}\n"
+	if err := os.WriteFile(filepath.Join(mainDir, "main.go"), []byte(mainGo), 0o644); err != nil {
+		t.Fatalf("failed to write main.go: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fake\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatalf("failed to write go.mod: %v", err)
+	}
+	// Pre-create the cache dir so the test doesn't depend on mkdir being on
+	// the deliberately minimal PATH.
+	if err := os.MkdirAll(filepath.Join(root, ".entire", "tmp"), 0o755); err != nil {
+		t.Fatalf("failed to create cache dir: %v", err)
+	}
+
+	run := func() (string, int) {
+		t.Helper()
+		cmd := exec.CommandContext(context.Background(), shPath, scriptPath, "hooks", "git", "post-commit")
+		cmd.Env = envWithPath(goBinDir(t))
+		out, err := cmd.CombinedOutput()
+		var exitErr *exec.ExitError
+		switch {
+		case err == nil:
+			return string(out), 0
+		case errors.As(err, &exitErr):
+			return string(out), exitErr.ExitCode()
+		default:
+			t.Fatalf("script failed to run: %v\n%s", err, out)
+			return "", 0
+		}
+	}
+
+	out, code := run()
+	if code != 3 {
+		t.Fatalf("exit status must pass through verbatim, want 3 got %d\noutput:\n%s", code, out)
+	}
+	if !strings.Contains(out, "hooks git post-commit") {
+		t.Fatalf("args must be forwarded to the cached binary verbatim, got:\n%s", out)
+	}
+
+	bin := filepath.Join(root, ".entire", "tmp", "entire-dev-bin")
+	if _, err := os.Stat(bin); err != nil {
+		t.Fatalf("cached binary missing after first run: %v", err)
+	}
+
+	out, code = run()
+	if code != 3 || !strings.Contains(out, "hooks git post-commit") {
+		t.Fatalf("second run must behave identically, got status %d output:\n%s", code, out)
+	}
+}
+
 func TestInstallGitHook_AbsoluteGitHookPath(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 

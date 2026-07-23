@@ -403,6 +403,35 @@ func TestCondenseAndMarkFullyCondensed_Guards(t *testing.T) {
 		assert.Equal(t, session.PhaseEnded, state.Phase)
 	})
 
+	t.Run("reactivated session is a no-op", func(t *testing.T) {
+		// The detached session-end child can lose a race with a same-ID
+		// resume; condensing a revived session would wipe its in-flight
+		// attribution and leave a sticky FullyCondensed=true that makes
+		// PostCommit skip the session's next end.
+		dir := setupGitRepo(t)
+		t.Chdir(dir)
+
+		s := &ManualCommitStrategy{}
+		require.NoError(t, s.InitializeSession(context.Background(), "test-session", "Claude Code", "", "", ""))
+
+		state, err := s.loadSessionState(context.Background(), "test-session")
+		require.NoError(t, err)
+		state.Phase = session.PhaseActive // revived after the ENDED mark
+		state.StepCount = 3
+		state.FilesTouched = nil
+		require.NoError(t, s.saveSessionState(context.Background(), state))
+
+		require.NoError(t, s.CondenseAndMarkFullyCondensed(context.Background(), "test-session"))
+
+		state, err = s.loadSessionState(context.Background(), "test-session")
+		require.NoError(t, err)
+		require.NotNil(t, state)
+		assert.False(t, state.FullyCondensed,
+			"a session that is no longer ENDED must not be condensed")
+		assert.Equal(t, 3, state.StepCount, "pending steps must be left for PostCommit")
+		assert.Equal(t, session.PhaseActive, state.Phase)
+	})
+
 	t.Run("with FilesTouched is a no-op", func(t *testing.T) {
 		dir := setupGitRepo(t)
 		t.Chdir(dir)

@@ -3,11 +3,13 @@
 #
 # In local-dev mode, Entire hooks invoke the CLI built straight from source.
 # The binary is cached under .entire/tmp/ (ignored via the committed
-# .entire/.gitignore) and "go build" only relinks it when the source changed,
-# so an up-to-date tree costs one staleness check instead of a full link.
-# This matters for hooks with a tight deadline — Claude Code gives SessionEnd
-# hooks only ~1.5s before cancelling them, which the previous
-# probe-then-"go run" flow (a full link per invocation) could not meet.
+# .entire/.gitignore): rebuilding onto the same output path lets go skip the
+# full relink when the source is unchanged (measured ~0.5s vs ~1.3s — note
+# go still rewrites the output file either way). This matters for hooks with
+# a tight deadline — agents cancel SessionEnd hooks after a short (~1-2s)
+# budget (see spawnDetachedSessionEndCondense in
+# cmd/entire/cli/session_end_condense.go), which the previous
+# probe-then-"go run" flow (two full links per invocation) could not meet.
 #
 # When the tree does not compile (for example while an agent is resolving a
 # merge conflict) the build fails and this launcher falls back to an "entire"
@@ -39,27 +41,56 @@ root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 # Build the whole cmd/entire package, not just main.go: package main is
 # split across multiple files (e.g. the git-remote-entire dispatch in
 # remotehelper.go), and naming a single file would leave the others out and
-# fail to compile.
-pkg="$root/cmd/entire"
+# fail to compile. The path is relative and paired with "go build -C $root":
+# an absolute package path would be resolved against the *caller's* module
+# (go interprets directory arguments relative to the current module), which
+# breaks when the hook is invoked from outside this repo.
+pkg="./cmd/entire"
 
 # Build (incrementally) into the per-worktree cache and run the result.
 # "entire clean" may remove .entire/tmp/, which just costs one rebuild.
-# Concurrent hook invocations can race the rebuild of a stale binary; a
-# failed build here simply falls through to the PATH binary.
+# Because go rewrites the output in place on every build, a concurrent
+# invocation can be mid-rewrite while this one launches (handled below via
+# the 126/127 fallback), and a still-running detached child of a previous
+# hook can be killed on macOS when its executable is rewritten under it —
+# fail-open either way (PostCommit retries any lost condense).
+# Build stderr goes to a log file, not the hook's stderr: compiler spew would
+# pollute agent-visible output, but discarding it entirely would leave
+# "build failed" undiagnosable.
 bin="$root/.entire/tmp/entire-dev-bin"
-if command -v go >/dev/null 2>&1 &&
-	mkdir -p "${bin%/*}" 2>/dev/null &&
-	go build -o "$bin" "$pkg" >/dev/null 2>&1; then
-	exec "$bin" "$@"
+if command -v go >/dev/null 2>&1; then
+	# mkdir may be absent from a minimal hook PATH; if the cache dir can't be
+	# created, go build fails to write its output and we fall back below.
+	mkdir -p "${bin%/*}" 2>/dev/null || true
+	buildlog="${bin%/*}/entire-dev-build.log"
+	[ -d "${bin%/*}" ] || buildlog=/dev/null
+	if go build -C "$root" -o "$bin" "$pkg" >/dev/null 2>"$buildlog"; then
+		# Run without exec: a concurrent invocation can be rewriting $bin
+		# (go's output install is not atomic on every filesystem), and a
+		# failed exec would abort this shell without reaching the fallbacks
+		# below, breaking the never-block contract. Launch failures surface
+		# as 126/127; anything else is the CLI's own exit status and is
+		# passed through.
+		status=0
+		"$bin" "$@" || status=$?
+		if [ "$status" -ne 126 ] && [ "$status" -ne 127 ]; then
+			exit "$status"
+		fi
+		log "cached binary failed to launch (status $status, concurrent rebuild?)"
+	else
+		log "go build failed (details: $buildlog)"
+	fi
+else
+	log "go not found on PATH"
 fi
 
-# The tree does not build (or Go is unavailable): fall back to the installed
-# binary so hooks keep working while the source is broken.
+# The tree does not build (or the cached binary couldn't run): fall back to
+# the installed binary so hooks keep working while the source is broken.
 if command -v entire >/dev/null 2>&1; then
-	log "project isn't compiling; falling back to the entire binary on PATH"
+	log "falling back to the entire binary on PATH ($(command -v entire))"
 	exec entire "$@"
 fi
 
 # Nothing to run: do not block the surrounding operation.
-log "project isn't compiling and no entire binary on PATH; skipping hook"
+log "no entire binary on PATH; skipping hook"
 exit 0

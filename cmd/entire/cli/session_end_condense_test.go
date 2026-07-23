@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,15 +14,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// spawnCall records one request to the detached-condense spawn seam.
+type spawnCall struct {
+	worktreeRoot string
+	sessionID    string
+}
+
 // swapSessionEndCondenseSpawn replaces the detached-condense spawn seam with a
 // recorder and restores it on cleanup. Tests using it must not run in parallel
 // (package-level seam).
-func swapSessionEndCondenseSpawn(t *testing.T) *[]string {
+func swapSessionEndCondenseSpawn(t *testing.T) *[]spawnCall {
 	t.Helper()
-	var spawned []string
+	var spawned []spawnCall
 	orig := sessionEndCondenseSpawn
-	sessionEndCondenseSpawn = func(_, sessionID string) {
-		spawned = append(spawned, sessionID)
+	sessionEndCondenseSpawn = func(worktreeRoot, sessionID string) error {
+		spawned = append(spawned, spawnCall{worktreeRoot: worktreeRoot, sessionID: sessionID})
+		return nil
 	}
 	t.Cleanup(func() { sessionEndCondenseSpawn = orig })
 	return &spawned
@@ -60,8 +68,32 @@ func TestHandleLifecycleSessionEnd_SpawnsDetachedCondense(t *testing.T) {
 		"session must be marked ENDED synchronously")
 	assert.False(t, loaded.FullyCondensed,
 		"condense must not run inline on the hook path")
-	assert.Equal(t, []string{sessionID}, *spawned,
+	require.Len(t, *spawned, 1,
 		"exactly one detached condense must be requested for the ended session")
+	assert.Equal(t, sessionID, (*spawned)[0].sessionID)
+	// The child resolves the repo and session store from its working
+	// directory, so spawning anywhere but the worktree root would make the
+	// condense a silent no-op in the wrong place.
+	wantRoot, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	gotRoot, err := filepath.EvalSymlinks((*spawned)[0].worktreeRoot)
+	require.NoError(t, err)
+	assert.Equal(t, wantRoot, gotRoot, "child must be spawned from the worktree root")
+}
+
+// TestHandleLifecycleSessionEnd_NoRepoFallsBackToSync verifies that when the
+// worktree root can't be resolved there is nowhere to run the child, so the
+// handler takes the synchronous endSessionNow path instead of spawning —
+// dropping the condense silently would regress #591.
+func TestHandleLifecycleSessionEnd_NoRepoFallsBackToSync(t *testing.T) {
+	t.Chdir(t.TempDir()) // plain directory, not a git repo
+
+	spawned := swapSessionEndCondenseSpawn(t)
+
+	event := &agent.Event{Type: agent.SessionEnd, SessionID: "some-session"}
+	require.NoError(t, handleLifecycleSessionEnd(context.Background(), newMockAgent(), event))
+
+	assert.Empty(t, *spawned, "no detached condense without a resolvable worktree root")
 }
 
 // TestHandleLifecycleSessionEnd_SyncEnvCondensesInline verifies the

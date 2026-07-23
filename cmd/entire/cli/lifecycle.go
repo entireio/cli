@@ -1020,43 +1020,62 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 	// the transcript to extract file changes. Cleanup is handled by
 	// `entire clean` or when the session state is fully removed.
 
-	// Agents give SessionEnd hooks a short budget and never wait for them on
-	// exit (Claude Code cancels after ~1.5s), so only the fast ENDED mark runs
-	// inline; the eager condense — transcript reads plus git tree building —
-	// is handed to a detached child that survives the hook being killed.
-	// ENTIRE_SESSION_END_SYNC keeps the inline sequence (integration tests
-	// use it for determinism), as does a worktree root that can't be resolved
-	// (nowhere to run the child; dropping the condense would regress #591).
-	worktreeRoot, rootErr := paths.WorktreeRoot(ctx)
+	// Agents give SessionEnd hooks a short budget and do not wait for them on
+	// exit (see spawnDetachedSessionEndCondense for the observed figure), so
+	// only the fast ENDED mark runs inline; the eager condense — transcript
+	// reads plus git tree building — is handed to a detached child that
+	// survives the hook being killed. ENTIRE_SESSION_END_SYNC keeps the
+	// inline sequence (integration tests use it for determinism), as does a
+	// worktree root that can't be resolved (nowhere to run the child;
+	// dropping the condense would regress #591).
+	//
+	// The graceful half of that cancellation is a SIGTERM, which cancels the
+	// root context (see main.go) — the very signal this teardown must
+	// survive. Run the short, bounded finalization on a cancellation-immune
+	// context so the ENDED mark can't be aborted mid-write; a force-quit
+	// (second signal → SIGKILL) still terminates the process outright.
+	endCtx := context.WithoutCancel(ctx)
+	worktreeRoot, rootErr := paths.WorktreeRoot(endCtx)
 	if os.Getenv(envSessionEndSyncCondense) != "" || rootErr != nil {
-		if _, err := endSessionNow(ctx, event, event.SessionID, nil); err != nil {
+		if _, err := endSessionNow(endCtx, event, event.SessionID, nil); err != nil {
 			logging.Warn(logCtx, "failed to mark session ended",
 				slog.String("error", err.Error()))
 		}
 		return nil
 	}
 
-	ended, err := markSessionEnded(ctx, event, event.SessionID, nil)
+	ended, err := markSessionEnded(endCtx, event, event.SessionID, nil)
 	if err != nil {
 		logging.Warn(logCtx, "failed to mark session ended",
 			slog.String("error", err.Error()))
 		return nil
 	}
 	if ended {
-		sessionEndCondenseSpawn(worktreeRoot, event.SessionID)
+		logging.Info(logCtx, "handing session-end condense to detached child",
+			slog.String("session_id", event.SessionID))
+		if spawnErr := sessionEndCondenseSpawn(worktreeRoot, event.SessionID); spawnErr != nil {
+			// Fail-open, but never silent: the session is ENDED with its
+			// condense outstanding, and PostCommit (next commit) or `entire
+			// doctor` are the remaining retry surfaces.
+			logging.Warn(logCtx, "failed to spawn detached session-end condense",
+				slog.String("session_id", event.SessionID),
+				slog.String("error", spawnErr.Error()))
+		}
 	}
 
 	return nil
 }
 
-// endSessionNow runs the canonical "this session is over" sequence: it marks the
-// session ended (firing the SessionStop transition → PhaseEnded + EndedAt) and
-// eagerly condenses its pending work so PostCommit need not. This prevents
+// endSessionNow runs the synchronous "this session is over" sequence: it marks
+// the session ended (firing the SessionStop transition → PhaseEnded + EndedAt)
+// and eagerly condenses its pending work so PostCommit need not. This prevents
 // zombie ENDED sessions from accumulating and causing O(N) overhead on every
-// future commit (GitHub issue #591). It is used by the exited-session sweep
-// (finalizeExitedSessions) and by the SessionEnd hook's synchronous fallback
-// (handleLifecycleSessionEnd, which normally detaches the condense instead),
-// so the two stay in lockstep.
+// future commit (GitHub issue #591). Callers: the exited-session sweep
+// (finalizeExitedSessions — status/doctor have no hook budget, so condensing
+// inline is fine there) and the SessionEnd hook's rarely-taken sync fallback.
+// The normal hook path deliberately does NOT use this sequence: it calls
+// markSessionEnded inline and hands the condense to a detached child — see
+// handleLifecycleSessionEnd.
 //
 // The condense is fail-open (PostCommit retries on the next commit); an error
 // marking the session ended is returned so callers can react, and skips the

@@ -90,7 +90,8 @@ func BuildEventPayload(cmd *cobra.Command, agent string, isEntireEnabled bool, v
 // __send_analytics` child so the network call never blocks the CLI. The empty
 // dir keeps the child out of the parent's working directory.
 func spawnDetachedAnalytics(payloadJSON string) {
-	execx.SpawnDetached("", "__send_analytics", payloadJSON)
+	// Analytics are strictly best-effort; a lost event is not worth logging.
+	_ = execx.SpawnDetached("", "__send_analytics", payloadJSON) //nolint:errcheck // fire-and-forget analytics
 }
 
 // TrackCommandDetached tracks a command execution by spawning a detached subprocess.

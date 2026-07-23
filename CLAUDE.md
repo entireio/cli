@@ -132,8 +132,9 @@ Deprecated top-level commands (functional, print a cobra deprecation message):
 deprecation as `checkpoint rewind`).
 
 Hidden infrastructure commands: `hooks`, `trail`,
-`curl-bash-post-install`, `__send_analytics`, `mcp` (MCP stdio server for
-MCP-host agents).
+`curl-bash-post-install`, `__send_analytics`, `__refresh_trail_enablement`,
+`__condense_session` (detached session-end condense child), `mcp` (MCP stdio
+server for MCP-host agents).
 
 The `hideAsAlias(cmd, canonical)` helper in `cmd/entire/cli/aliascmd.go`
 marks a command Hidden and sets cobra's `Deprecated` field so the hint
