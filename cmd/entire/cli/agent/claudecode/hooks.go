@@ -31,10 +31,13 @@ const (
 // Claude Code tool-name matchers for Entire's PreToolUse/PostToolUse hooks.
 //
 // The subagent dispatch tool is "Agent" (Claude Code never exposed a tool named
-// "Task"), and the "TodoWrite" tool was disabled by default in v2.1.142 in favor
-// of the Task* tools. "TaskCreate|TaskUpdate" is a matcher list of exact tool
-// names (Claude Code treats a matcher containing only letters/digits/_/-/spaces/
-// ,/| as exact strings, not a regex). See:
+// "Task"). The todo matcher lists both generations of todo tools: "TodoWrite"
+// was the only todo tool before v2.1.142 (disabled by default since, but still
+// present) and "TaskCreate|TaskUpdate" replaced it — the settings file is
+// checked into repos, so it must fire on whatever Claude Code version a
+// teammate runs. Matchers are lists of exact tool names (Claude Code treats a
+// matcher containing only letters/digits/_/-/spaces/,/| as exact strings, not
+// a regex), so the extra names cost nothing on versions that lack them. See:
 //   - https://code.claude.com/docs/en/tools-reference.md (Agent, TodoWrite entries)
 //   - https://code.claude.com/docs/en/hooks.md (matcher evaluation rules)
 //
@@ -43,7 +46,7 @@ const (
 // place on a normal `entire enable`; run with --force to strip and reinstall.
 const (
 	subagentToolMatcher = "Agent"
-	taskToolMatcher     = "TaskCreate|TaskUpdate"
+	taskToolMatcher     = "TodoWrite|TaskCreate|TaskUpdate"
 )
 
 // ClaudeSettingsFileName is the settings file used by Claude Code.

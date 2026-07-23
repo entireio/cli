@@ -548,7 +548,7 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 		}
 		assertHookExists(t, matchers, "Write", "echo user wrote file", "user Write hook")
 		assertHookExists(t, matchers, "Agent", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "Entire Agent (subagent) hook")
-		assertHookExists(t, matchers, "TaskCreate|TaskUpdate", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "Entire task-list hook")
+		assertHookExists(t, matchers, "TodoWrite|TaskCreate|TaskUpdate", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "Entire task-list hook")
 	})
 }
 
@@ -707,10 +707,13 @@ func TestUninstallHooks_PreservesUnknownHookTypes(t *testing.T) {
 }
 
 // TestInstallHooks_UsesCurrentToolMatchers pins the tool-use matchers to Claude
-// Code's current tool names. The subagent tool is "Agent" (there was never a
-// "Task" tool) and "TodoWrite" was deprecated for TaskCreate/TaskUpdate; a bad
-// matcher is a silent no-op in Claude Code, so this is the only guard against
-// the hooks silently ceasing to fire. See:
+// Code's tool names. The subagent tool is "Agent" (there was never a "Task"
+// tool). The todo matcher carries both generations of todo tools: "TodoWrite"
+// (the only todo tool before v2.1.142, still present after) and
+// "TaskCreate|TaskUpdate" (its replacements) — the settings file is checked
+// into repos and read by whatever Claude Code version a teammate runs, and a
+// bad matcher is a silent no-op in Claude Code, so this is the only guard
+// against the hooks silently ceasing to fire. See:
 //   - https://code.claude.com/docs/en/tools-reference.md
 //   - https://code.claude.com/docs/en/hooks.md
 func TestInstallHooks_UsesCurrentToolMatchers(t *testing.T) {
@@ -727,7 +730,7 @@ func TestInstallHooks_UsesCurrentToolMatchers(t *testing.T) {
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task"), "pre-task subagent hook")
 	assertHookExists(t, settings.Hooks.PostToolUse, "Agent",
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "post-task subagent hook")
-	assertHookExists(t, settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate",
+	assertHookExists(t, settings.Hooks.PostToolUse, "TodoWrite|TaskCreate|TaskUpdate",
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "post-todo task-list hook")
 }
 
@@ -789,21 +792,49 @@ func TestCheckHookConfig_SupersetMatchersAreCurrent(t *testing.T) {
 	pre := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
 	post := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
 	todo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
-	// "Agent|Foo" still covers Agent; "TaskCreate|TaskUpdate|TaskGet" still
-	// covers TaskCreate and TaskUpdate.
+	// "Agent|Foo" still covers Agent; "TodoWrite|TaskCreate|TaskUpdate|TaskGet"
+	// still covers TodoWrite, TaskCreate, and TaskUpdate.
 	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
   "hooks": {
     "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
     "PreToolUse": [{"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q}]}],
     "PostToolUse": [
       {"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q}]},
-      {"matcher": "TaskCreate|TaskUpdate|TaskGet", "hooks": [{"type": "command", "command": %q}]}
+      {"matcher": "TodoWrite|TaskCreate|TaskUpdate|TaskGet", "hooks": [{"type": "command", "command": %q}]}
     ]
   }
 }`, stop, pre, post, todo))
 
 	if got := CheckHookConfig(context.Background()); got != HooksCurrent {
 		t.Errorf("CheckHookConfig() = %v, want HooksCurrent (superset matcher)", got)
+	}
+}
+
+// TestCheckHookConfig_MissingTodoWriteIsOutdated verifies that a config written
+// by the CLI generation that installed "TaskCreate|TaskUpdate" (without
+// TodoWrite) is flagged outdated: on Claude Code versions before v2.1.142 the
+// todo tool is TodoWrite, so that matcher silently misses every todo write.
+func TestCheckHookConfig_MissingTodoWriteIsOutdated(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	stop := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	pre := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
+	post := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+	todo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
+    "PreToolUse": [{"matcher": "Agent", "hooks": [{"type": "command", "command": %q}]}],
+    "PostToolUse": [
+      {"matcher": "Agent", "hooks": [{"type": "command", "command": %q}]},
+      {"matcher": "TaskCreate|TaskUpdate", "hooks": [{"type": "command", "command": %q}]}
+    ]
+  }
+}`, stop, pre, post, todo))
+
+	if got := CheckHookConfig(context.Background()); got != HooksOutdated {
+		t.Errorf("CheckHookConfig() = %v, want HooksOutdated (todo matcher missing TodoWrite)", got)
 	}
 }
 
@@ -836,7 +867,7 @@ func TestInstallHooks_Force_ReinstallsStaleToolMatchers(t *testing.T) {
 	// Reinstalled under the current matchers.
 	assertHookExists(t, settings.Hooks.PostToolUse, "Agent",
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "post-task hook")
-	assertHookExists(t, settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate",
+	assertHookExists(t, settings.Hooks.PostToolUse, "TodoWrite|TaskCreate|TaskUpdate",
 		staleTodo, "post-todo hook")
 	// The stale matchers no longer carry an Entire hook.
 	for _, m := range settings.Hooks.PostToolUse {
