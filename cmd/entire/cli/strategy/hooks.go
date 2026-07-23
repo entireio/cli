@@ -734,18 +734,24 @@ func removeEntireHooksFromDir(dir string) (int, error) {
 // Executable backups are run directly so shebang interpreters (Python, Node,
 // …) keep working. Non-executable backups (common for husky mode-0644 hooks)
 // fall back to `sh -e`, matching husky's own runner.
+//
+// Entire's exit status is preserved: a successful backup must not mask a
+// failing pre-push (OPF abort). A failing backup still fails the hook.
 func generateChainedContent(baseContent, hookName string) string {
 	if hookName == "post-rewrite" {
 		return generatePostRewriteChainedContent(baseContent)
 	}
 
-	return baseContent + fmt.Sprintf(`%s
+	return baseContent + fmt.Sprintf(`
+_entire_status=$?
+%s
 _entire_hook_dir="$(dirname "$0")"
 if [ -x "$_entire_hook_dir/%s%s" ]; then
-    "$_entire_hook_dir/%s%s" "$@"
+    "$_entire_hook_dir/%s%s" "$@" || exit $?
 elif [ -f "$_entire_hook_dir/%s%s" ]; then
-    sh -e "$_entire_hook_dir/%s%s" "$@"
+    sh -e "$_entire_hook_dir/%s%s" "$@" || exit $?
 fi
+exit $_entire_status
 `, chainComment, hookName, backupSuffix, hookName, backupSuffix, hookName, backupSuffix, hookName, backupSuffix)
 }
 
@@ -763,13 +769,15 @@ trap 'rm -f "$_entire_stdin"' EXIT
 	body = strings.Replace(body, original, replacement, 1)
 
 	return replayPrefix + body + fmt.Sprintf(`
+_entire_status=$?
 %s
 _entire_hook_dir="$(dirname "$0")"
 if [ -x "$_entire_hook_dir/post-rewrite%s" ]; then
-    "$_entire_hook_dir/post-rewrite%s" "$@" < "$_entire_stdin"
+    "$_entire_hook_dir/post-rewrite%s" "$@" < "$_entire_stdin" || exit $?
 elif [ -f "$_entire_hook_dir/post-rewrite%s" ]; then
-    sh -e "$_entire_hook_dir/post-rewrite%s" "$@" < "$_entire_stdin"
+    sh -e "$_entire_hook_dir/post-rewrite%s" "$@" < "$_entire_stdin" || exit $?
 fi
+exit $_entire_status
 `, chainComment, backupSuffix, backupSuffix, backupSuffix, backupSuffix)
 }
 

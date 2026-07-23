@@ -1757,7 +1757,7 @@ func TestGenerateChainedContent(t *testing.T) {
 	if !strings.Contains(result, expectedExecCheck) {
 		t.Errorf("chained content should check -x on backup, got:\n%s", result)
 	}
-	expectedDirect := `"$_entire_hook_dir/pre-push` + backupSuffix + `" "$@"`
+	expectedDirect := `"$_entire_hook_dir/pre-push` + backupSuffix + `" "$@" || exit $?`
 	if !strings.Contains(result, expectedDirect) {
 		t.Errorf("chained content should direct-exec executable backup, got:\n%s", result)
 	}
@@ -1765,9 +1765,12 @@ func TestGenerateChainedContent(t *testing.T) {
 	if !strings.Contains(result, expectedFileCheck) {
 		t.Errorf("chained content should fall back to -f for non-exec backups, got:\n%s", result)
 	}
-	expectedSh := `sh -e "$_entire_hook_dir/pre-push` + backupSuffix + `" "$@"`
+	expectedSh := `sh -e "$_entire_hook_dir/pre-push` + backupSuffix + `" "$@" || exit $?`
 	if !strings.Contains(result, expectedSh) {
 		t.Errorf("chained content should sh -e non-exec backup with $@, got:\n%s", result)
+	}
+	if !strings.Contains(result, "_entire_status=$?") || !strings.Contains(result, "exit $_entire_status") {
+		t.Errorf("chained content must preserve Entire exit status, got:\n%s", result)
 	}
 }
 
@@ -1789,11 +1792,14 @@ func TestGenerateChainedContent_PostRewritePreservesStdinForBackup(t *testing.T)
 	if !strings.Contains(result, `[ -x "$_entire_hook_dir/post-rewrite`+backupSuffix+`" ]`) {
 		t.Fatalf("post-rewrite chained content should check -x on backup, got:\n%s", result)
 	}
-	if !strings.Contains(result, `"$_entire_hook_dir/post-rewrite`+backupSuffix+`" "$@" < "$_entire_stdin"`) {
+	if !strings.Contains(result, `"$_entire_hook_dir/post-rewrite`+backupSuffix+`" "$@" < "$_entire_stdin" || exit $?`) {
 		t.Fatalf("post-rewrite chained content should direct-exec executable backup with stdin, got:\n%s", result)
 	}
-	if !strings.Contains(result, `sh -e "$_entire_hook_dir/post-rewrite`+backupSuffix+`" "$@" < "$_entire_stdin"`) {
+	if !strings.Contains(result, `sh -e "$_entire_hook_dir/post-rewrite`+backupSuffix+`" "$@" < "$_entire_stdin" || exit $?`) {
 		t.Fatalf("post-rewrite chained content should sh -e replay stdin into non-exec backup, got:\n%s", result)
+	}
+	if !strings.Contains(result, "exit $_entire_status") {
+		t.Fatalf("post-rewrite chained content must preserve Entire exit status, got:\n%s", result)
 	}
 }
 
@@ -1989,6 +1995,36 @@ func TestResolveHookExePath(t *testing.T) {
 			t.Errorf("error should mention symlink resolution, got: %v", err)
 		}
 	})
+}
+
+func TestGenerateChainedContent_PreservesEntireExitStatus(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	backupName := "pre-push" + backupSuffix
+	backupPath := filepath.Join(tmp, backupName)
+	// Successful backup must not mask Entire's failure (OPF abort).
+	if err := os.WriteFile(backupPath, []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+		t.Fatalf("write backup: %v", err)
+	}
+
+	base := "#!/bin/sh\n# Entire CLI hooks\nfalse\n"
+	script := generateChainedContent(base, "pre-push")
+	scriptPath := filepath.Join(tmp, "pre-push")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write chained hook: %v", err)
+	}
+
+	cmd := exec.CommandContext(context.Background(), "sh", scriptPath)
+	cmd.Dir = tmp
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("chained pre-push must exit non-zero when Entire fails even if backup succeeds")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() == 0 {
+		t.Fatalf("want non-zero exit, got %v", err)
+	}
 }
 
 func TestGenerateChainedContent_RunsMode0644Backup(t *testing.T) {
