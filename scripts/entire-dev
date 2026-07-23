@@ -1,18 +1,23 @@
 #!/bin/sh
 # Entire CLI local-development hook launcher.
 #
-# In local-dev mode, Entire hooks invoke the CLI straight from source via
-# "go run", which recompiles on demand. When the tree does not compile (for
-# example while an agent is resolving a merge conflict) "go run" fails and the
-# hook would silently do nothing. This launcher first checks that the tree
-# builds; if it does it runs the freshly compiled CLI, otherwise it falls back
-# to an "entire" binary on PATH. If neither is available it exits 0 so it never
-# blocks the surrounding git or agent operation.
+# In local-dev mode, Entire hooks invoke the CLI built straight from source.
+# The binary is cached under .entire/tmp/ (ignored via the committed
+# .entire/.gitignore) and "go build" only relinks it when the source changed,
+# so an up-to-date tree costs one staleness check instead of a full link.
+# This matters for hooks with a tight deadline — Claude Code gives SessionEnd
+# hooks only ~1.5s before cancelling them, which the previous
+# probe-then-"go run" flow (a full link per invocation) could not meet.
+#
+# When the tree does not compile (for example while an agent is resolving a
+# merge conflict) the build fails and this launcher falls back to an "entire"
+# binary on PATH. If neither is available it exits 0 so it never blocks the
+# surrounding git or agent operation.
 #
 # Usage: scripts/entire-dev <entire args...>
 #
-# All local-dev hooks delegate here so the build-probe-and-fallback logic lives
-# in one place rather than being duplicated across generated hook commands.
+# All local-dev hooks delegate here so the build-and-fallback logic lives in
+# one place rather than being duplicated across generated hook commands.
 
 set -eu
 
@@ -31,16 +36,21 @@ case "$0" in
 	*) script_dir=. ;;
 esac
 root=$(CDPATH= cd -- "$script_dir/.." && pwd)
-# Build/run the whole cmd/entire package, not just main.go: package main is
+# Build the whole cmd/entire package, not just main.go: package main is
 # split across multiple files (e.g. the git-remote-entire dispatch in
 # remotehelper.go), and naming a single file would leave the others out and
 # fail to compile.
 pkg="$root/cmd/entire"
 
-# Run freshly compiled code when the tree builds. The build probe populates the
-# build cache, so the subsequent "go run" does not recompile from scratch.
-if command -v go >/dev/null 2>&1 && go build -o /dev/null "$pkg" >/dev/null 2>&1; then
-	exec go run "$pkg" "$@"
+# Build (incrementally) into the per-worktree cache and run the result.
+# "entire clean" may remove .entire/tmp/, which just costs one rebuild.
+# Concurrent hook invocations can race the rebuild of a stale binary; a
+# failed build here simply falls through to the PATH binary.
+bin="$root/.entire/tmp/entire-dev-bin"
+if command -v go >/dev/null 2>&1 &&
+	mkdir -p "${bin%/*}" 2>/dev/null &&
+	go build -o "$bin" "$pkg" >/dev/null 2>&1; then
+	exec "$bin" "$@"
 fi
 
 # The tree does not build (or Go is unavailable): fall back to the installed
