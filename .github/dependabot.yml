@@ -30,3 +30,11 @@ updates:
     schedule:
       interval: "daily"
     open-pull-requests-limit: 5
+    groups:
+      # CodeQL subactions (init, analyze, ...) share one monorepo release and
+      # must move together — a version mismatch fails the CodeQL job with
+      # "Loaded a configuration file for version X, but running version Y".
+      # Grouping bundles every github/codeql-action/* bump into one PR.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
