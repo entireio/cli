@@ -23,6 +23,15 @@ import (
 // hook bounded on large parent directories.
 const maxSiblingAutoAdoptScan = 32
 
+// Time bounds for prepare-commit-msg auto-adopt. Sibling git rev-parse calls
+// use CommandContext; without a deadline a hung network mount could block
+// `git commit` indefinitely.
+const (
+	autoAdoptSiblingScanTimeout = 2 * time.Second
+	autoAdoptGitResolveTimeout  = 500 * time.Millisecond
+	autoAdoptStagedFilesTimeout = 1 * time.Second
+)
+
 // prepareCommitMsgSourceAmend is git's prepare-commit-msg source for `git commit --amend`.
 const prepareCommitMsgSourceAmend = "commit"
 
@@ -74,7 +83,9 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 		return
 	}
 
-	staged, err := stagedFilesForAutoAdopt(ctx, targetWorktree)
+	stagedCtx, stagedCancel := context.WithTimeout(ctx, autoAdoptStagedFilesTimeout)
+	staged, err := stagedFilesForAutoAdopt(stagedCtx, targetWorktree)
+	stagedCancel()
 	if err != nil {
 		staged = nil
 	}
@@ -90,7 +101,9 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 
 	candidates := collectRegistryAutoAdoptCandidates(ctx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
 	if len(candidates) == 0 {
-		candidates = collectSiblingAutoAdoptCandidates(ctx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
+		scanCtx, scanCancel := context.WithTimeout(ctx, autoAdoptSiblingScanTimeout)
+		candidates = collectSiblingAutoAdoptCandidates(scanCtx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
+		scanCancel()
 	}
 	if len(candidates) != 1 {
 		if len(candidates) > 1 {
@@ -223,7 +236,9 @@ func collectSiblingAutoAdoptCandidates(
 		}
 		scanned++
 
-		store, worktree, commonDir, err := stateStoreForWorktree(ctx, sibling)
+		resolveCtx, resolveCancel := context.WithTimeout(ctx, autoAdoptGitResolveTimeout)
+		store, worktree, commonDir, err := stateStoreForWorktree(resolveCtx, sibling)
+		resolveCancel()
 		if err != nil || sameAdoptStore(commonDir, targetCommonDir) {
 			continue
 		}

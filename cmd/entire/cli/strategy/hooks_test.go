@@ -672,9 +672,9 @@ func TestInstallGitHook_LocalDevCommandPrefix(t *testing.T) {
 func TestGitHookCommand_LocalDevDelegatesToScript(t *testing.T) {
 	t.Parallel()
 
-	command := gitHookCommand(localDevHookCmdPrefix, `prepare-commit-msg "$1" "$2" || true`, false)
+	command := gitHookCommand(localDevHookCmdPrefix, `prepare-commit-msg "$1" "$2" 2>/dev/null || true`, false)
 
-	want := localDevHookCmdPrefix + ` hooks git prepare-commit-msg "$1" "$2" || true`
+	want := localDevHookCmdPrefix + ` hooks git prepare-commit-msg "$1" "$2" 2>/dev/null || true`
 	if command != want {
 		t.Fatalf("local-dev git hook should delegate to the script verbatim:\ngot:  %s\nwant: %s", command, want)
 	}
@@ -683,15 +683,12 @@ func TestGitHookCommand_LocalDevDelegatesToScript(t *testing.T) {
 	}
 }
 
-func TestBuildHookSpecs_PrepareCommitMsgKeepsStderr(t *testing.T) {
+func TestBuildHookSpecs_PrepareCommitMsgSwallowsStderr(t *testing.T) {
 	t.Parallel()
 
 	hook := findHookSpec(t, buildHookSpecs("entire"), "prepare-commit-msg")
-	if strings.Contains(hook.content, "2>/dev/null") {
-		t.Fatalf("prepare-commit-msg must keep stderr for user-facing warnings, got:\n%s", hook.content)
-	}
-	if !strings.Contains(hook.content, `prepare-commit-msg "$1" "$2" || true`) {
-		t.Fatalf("prepare-commit-msg should swallow exit code only, got:\n%s", hook.content)
+	if !strings.Contains(hook.content, `prepare-commit-msg "$1" "$2" 2>/dev/null || true`) {
+		t.Fatalf("prepare-commit-msg should swallow stderr (logging fallbacks) and exit code, got:\n%s", hook.content)
 	}
 }
 
