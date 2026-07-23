@@ -2095,6 +2095,21 @@ func TestHuskyForwardingStubsPresent_RequiresDispatchSource(t *testing.T) {
 	if IsGitHookInstalledInDir(context.Background(), tmpDir) {
 		t.Fatal("missing husky dispatch source should report hooks not installed so EnsureSetup can heal")
 	}
+
+	// Reinstall must heal the non-forwarding stub so IsGitHookInstalled recovers.
+	if _, _, err := InstallGitHook(context.Background(), true, false, false); err != nil {
+		t.Fatalf("reinstall to heal stub: %v", err)
+	}
+	if !IsGitHookInstalledInDir(context.Background(), tmpDir) {
+		t.Fatal("reinstall should replace non-forwarding husky stubs and report installed")
+	}
+	healed, err := os.ReadFile(badStub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(healed), huskyStubDispatchMarker) {
+		t.Fatalf("healed stub should source _/h, got:\n%s", healed)
+	}
 }
 
 func TestRemoveGitHook_DoesNotBackfillMissingHuskyStubs(t *testing.T) {
@@ -2323,5 +2338,57 @@ func TestInstallGitHook_ChainsPreExistingHuskyUserHook(t *testing.T) {
 	}
 	if !strings.Contains(string(excludeData), preEntireExcludePattern) {
 		t.Errorf("exclude should contain %q, got %q", preEntireExcludePattern, excludeData)
+	}
+}
+
+func TestEnsurePreEntireExcluded_LinkedWorktreeUsesCommonExclude(t *testing.T) {
+	mainRepo, worktreeDir := initHooksWorktreeRepo(t)
+	t.Chdir(worktreeDir)
+	paths.ClearWorktreeRootCache()
+
+	// Create a backup path that check-ignore will evaluate from the worktree.
+	huskyParent := filepath.Join(mainRepo, ".husky")
+	if err := os.MkdirAll(huskyParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	backupRel := filepath.ToSlash(filepath.Join(".husky", "prepare-commit-msg"+backupSuffix))
+	backupAbs := filepath.Join(mainRepo, ".husky", "prepare-commit-msg"+backupSuffix)
+	if err := os.WriteFile(backupAbs, []byte("#!/bin/sh\necho backup\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensurePreEntireExcluded(context.Background()); err != nil {
+		t.Fatalf("ensurePreEntireExcluded from linked worktree: %v", err)
+	}
+
+	commonExclude := filepath.Join(mainRepo, ".git", "info", "exclude")
+	data, err := os.ReadFile(commonExclude)
+	if err != nil {
+		t.Fatalf("common-dir exclude missing: %v", err)
+	}
+	if !strings.Contains(string(data), preEntireExcludePattern) {
+		t.Fatalf("common exclude should contain %q, got %q", preEntireExcludePattern, data)
+	}
+
+	resolved, err := gitInfoExcludePath(context.Background())
+	if err != nil {
+		t.Fatalf("gitInfoExcludePath: %v", err)
+	}
+	commonResolved, err := filepath.EvalSymlinks(commonExclude)
+	if err != nil {
+		commonResolved = filepath.Clean(commonExclude)
+	}
+	resolvedEval, err := filepath.EvalSymlinks(resolved)
+	if err != nil {
+		resolvedEval = filepath.Clean(resolved)
+	}
+	if resolvedEval != commonResolved {
+		t.Fatalf("gitInfoExcludePath from worktree = %q, want common exclude %q", resolvedEval, commonResolved)
+	}
+
+	check := exec.CommandContext(context.Background(), "git", "check-ignore", "-q", backupRel)
+	check.Dir = worktreeDir
+	if err := check.Run(); err != nil {
+		t.Fatalf("git check-ignore from linked worktree should match %s: %v", backupRel, err)
 	}
 }

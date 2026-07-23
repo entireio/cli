@@ -451,11 +451,14 @@ func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (i
 			return installedCount, huskySafe, fmt.Errorf("failed to migrate hooks out of husky-owned directory: %w", err)
 		}
 		// Keep .pre-entire backups out of accidental commits when we shadow
-		// tracked user hooks under the husky parent directory.
-		if backedUpUserHook {
+		// tracked user hooks under the husky parent directory. Heal exclude
+		// whenever any backup is present (not only on this invocation).
+		if backedUpUserHook || huskyUserDirHasPreEntireBackups(installDir) {
 			if exclErr := ensurePreEntireExcluded(ctx); exclErr != nil {
 				fmt.Fprintf(os.Stderr, "[entire] Warning: could not exclude %s backups from git: %v\n", backupSuffix, exclErr)
 			}
+		}
+		if backedUpUserHook {
 			fmt.Fprintf(os.Stderr, "[entire] Note: existing hooks in %s were backed up to *%s and chained; commit the Entire wrappers intentionally and keep backups local\n", filepath.Base(installDir), backupSuffix)
 		}
 	}
@@ -477,19 +480,20 @@ func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (i
 	return installedCount, huskySafe, nil
 }
 
-// ensurePreEntireExcluded appends preEntireExcludePattern to .git/info/exclude
-// so husky-safe backups are not half-committed beside Entire wrappers.
+// ensurePreEntireExcluded appends preEntireExcludePattern to info/exclude in the
+// shared git common dir so husky-safe backups are not half-committed beside
+// Entire wrappers. Uses `git rev-parse --git-path info/exclude` so linked
+// worktrees write into the common exclude (not .git/worktrees/<name>/info/).
 func ensurePreEntireExcluded(ctx context.Context) error {
-	gitDir, err := GetGitDir(ctx)
+	excludePath, err := gitInfoExcludePath(ctx)
 	if err != nil {
 		return err
 	}
-	infoDir := filepath.Join(gitDir, "info")
+	infoDir := filepath.Dir(excludePath)
 	if err := os.MkdirAll(infoDir, 0o755); err != nil { //nolint:gosec // matches git's info dir mode
 		return fmt.Errorf("create git info dir: %w", err)
 	}
-	excludePath := filepath.Join(infoDir, "exclude")
-	existing, err := os.ReadFile(excludePath) //nolint:gosec // path from git dir
+	existing, err := os.ReadFile(excludePath) //nolint:gosec // path from git
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read git exclude: %w", err)
 	}
@@ -513,6 +517,38 @@ func ensurePreEntireExcluded(ctx context.Context) error {
 		return fmt.Errorf("write git exclude: %w", err)
 	}
 	return nil
+}
+
+// gitInfoExcludePath resolves the repo's info/exclude path via git so linked
+// worktrees share the common-dir exclude file.
+func gitInfoExcludePath(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-path", "info/exclude")
+	cmd.Dir = "."
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("resolve git info/exclude path: %w", err)
+	}
+	path := strings.TrimSpace(string(out))
+	if path == "" {
+		return "", errors.New("resolve git info/exclude path: empty")
+	}
+	if !filepath.IsAbs(path) {
+		abs, absErr := filepath.Abs(path)
+		if absErr != nil {
+			return "", fmt.Errorf("absolutize info/exclude path: %w", absErr)
+		}
+		path = abs
+	}
+	return filepath.Clean(path), nil
+}
+
+func huskyUserDirHasPreEntireBackups(installDir string) bool {
+	for _, hook := range gitHookNames {
+		if fileExists(filepath.Join(installDir, hook+backupSuffix)) {
+			return true
+		}
+	}
+	return false
 }
 
 // writeHookFile writes a hook file if it doesn't exist or has different content.
@@ -589,6 +625,9 @@ func scrubEntireHooksFromHuskyOwnedDir(hooksDir string) (int, error) {
 
 // rewriteHuskyOwnedHooks migrates (backfillMissing=true) or scrubs
 // (backfillMissing=false) Entire wrappers under the husky-owned hooks directory.
+// When backfillMissing is true, non-forwarding files in `_` are replaced with
+// huskyForwardingStub so EnsureSetup can heal broken stubs (IsGitHookInstalled
+// treats those as not installed).
 func rewriteHuskyOwnedHooks(hooksDir string, backfillMissing bool) (int, error) {
 	changed := 0
 	for _, hook := range gitHookNames {
@@ -622,6 +661,18 @@ func rewriteHuskyOwnedHooks(hooksDir string, backfillMissing bool) (int, error) 
 			changed++
 		case err != nil:
 			return changed, fmt.Errorf("read husky-owned hook %s: %w", hookPath, err)
+		default:
+			// Existing non-Entire file under husky-owned `_`.
+			if !backfillMissing {
+				continue
+			}
+			if strings.Contains(string(data), huskyStubDispatchMarker) {
+				continue // already a valid forwarding stub
+			}
+			if err := writeHookFileForced(hookPath, huskyForwardingStub); err != nil {
+				return changed, fmt.Errorf("replace non-forwarding husky stub %s: %w", hookPath, err)
+			}
+			changed++
 		}
 	}
 	return changed, nil
