@@ -450,9 +450,10 @@ func entireTrailContextInjection(scope trailEnablementScope) string {
 }
 
 // emitContextInjection writes ag's native context-injection payload to stdout
-// when ag injects at event.Type, trails are enabled for the repo on the API,
-// and this session has not been injected yet. Best-effort: an injection failure
-// never fails the hook.
+// when ag injects at event.Type and trails are enabled for the repo on the API.
+// By default a session is injected at most once; agents implementing
+// RepeatContextInjector get the payload re-emitted on every matching event
+// instead. Best-effort: an injection failure never fails the hook.
 func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) {
 	injector, ok := agent.AsContextInjector(ag)
 	if !ok || injector.InjectionEvent() != event.Type || event.SessionID == "" {
@@ -467,6 +468,12 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 			slog.String("error", scopeErr.Error()))
 		return
 	}
+
+	if agent.ReinjectsEachTurn(ag) {
+		emitRepeatContextInjection(ctx, logCtx, injector, event, scope, scopeOK)
+		return
+	}
+
 	decision := trailEnablementCacheUnknown
 	mutated := false
 	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
@@ -503,6 +510,41 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 		return
 	}
 
+	writeContextInjection(logCtx, injector, scope)
+}
+
+// emitRepeatContextInjection is the RepeatContextInjector arm of
+// emitContextInjection: it re-evaluates the (cached) trails-enablement decision
+// and re-emits the payload on every matching event, persisting nothing —
+// ContextInjectionDecided would permanently suppress re-emission, which is
+// exactly what a repeat injector cannot afford.
+func emitRepeatContextInjection(ctx context.Context, logCtx context.Context, injector agent.ContextInjector, event *agent.Event, scope trailEnablementScope, scopeOK bool) {
+	if !scopeOK {
+		return
+	}
+	state, err := strategy.LoadSessionState(ctx, event.SessionID)
+	if err != nil {
+		if !errors.Is(err, strategy.ErrStateNotFound) {
+			logging.Warn(logCtx, "failed to load session state for context injection",
+				slog.String("error", err.Error()))
+		}
+		return
+	}
+	// Review/investigate sessions are task-specific and don't need the branch
+	// trail pointer.
+	if state.Kind != "" {
+		return
+	}
+	if cachedTrailsEnablementForScope(ctx, scope, time.Now()) != trailEnablementCacheEnabled {
+		return
+	}
+
+	writeContextInjection(logCtx, injector, scope)
+}
+
+// writeContextInjection renders the trail context for scope in injector's
+// native format and writes it to the hook's stdout. Best-effort.
+func writeContextInjection(logCtx context.Context, injector agent.ContextInjector, scope trailEnablementScope) {
 	payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: entireTrailContextInjection(scope)})
 	if err != nil {
 		logging.Warn(logCtx, "failed to render context injection",

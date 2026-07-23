@@ -1217,6 +1217,84 @@ func addGitHubOriginForLifecycleTest(t *testing.T, repoDir string) {
 	require.NoError(t, cmd.Run())
 }
 
+type mockRepeatContextInjectorAgent struct {
+	mockContextInjectorAgent
+
+	renderCalls int
+}
+
+var _ agent.RepeatContextInjector = (*mockRepeatContextInjectorAgent)(nil)
+
+func (m *mockRepeatContextInjectorAgent) RenderContextInjection(agent.ContextInjection) ([]byte, error) {
+	m.renderCalls++
+	return nil, nil
+}
+
+func (m *mockRepeatContextInjectorAgent) ReinjectsEachTurn() bool { return true }
+
+// TestHandleLifecycleTurnStart_RepeatInjectorReemitsEachTurn verifies that an
+// agent opting into repeat injection gets the payload re-rendered on every
+// turn-start (its transport holds the injection in process memory that a
+// restart or session resume wipes) and that no once-per-session decision is
+// persisted, so nothing ever suppresses a later re-emission.
+func TestHandleLifecycleTurnStart_RepeatInjectorReemitsEachTurn(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir().
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	addGitHubOriginForLifecycleTest(t, tmpDir)
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	require.NoError(t, saveTrailsEnabledForRepo(context.Background(), true))
+
+	ag := &mockRepeatContextInjectorAgent{mockContextInjectorAgent: mockContextInjectorAgent{mockLifecycleAgent: *newMockAgent()}}
+	sessionID := "test-trail-inject-repeat"
+	scope, err := currentTrailEnablementScope(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, saveTrailEnablementScopeHint(context.Background(), sessionID, scope))
+
+	for turn := range 2 {
+		event := &agent.Event{Type: agent.TurnStart, SessionID: sessionID, Prompt: "hello", Timestamp: time.Now()}
+		require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, event))
+		require.Equal(t, turn+1, ag.renderCalls, "repeat injector must render on every turn-start")
+	}
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.False(t, state.ContextInjectionDecided, "repeat injection must not persist a once-per-session decision")
+}
+
+// TestHandleLifecycleTurnStart_RepeatInjectorSkipsWhenDisabled verifies the
+// repeat path still honors the trails-enablement decision.
+func TestHandleLifecycleTurnStart_RepeatInjectorSkipsWhenDisabled(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir().
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	addGitHubOriginForLifecycleTest(t, tmpDir)
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	require.NoError(t, saveTrailsEnabledForRepo(context.Background(), false))
+
+	ag := &mockRepeatContextInjectorAgent{mockContextInjectorAgent: mockContextInjectorAgent{mockLifecycleAgent: *newMockAgent()}}
+	sessionID := "test-trail-inject-repeat-off"
+	scope, err := currentTrailEnablementScope(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, saveTrailEnablementScopeHint(context.Background(), sessionID, scope))
+	event := &agent.Event{Type: agent.TurnStart, SessionID: sessionID, Prompt: "hello", Timestamp: time.Now()}
+
+	require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, event))
+
+	require.Zero(t, ag.renderCalls, "disabled trails must not render an injection")
+}
+
 func TestHandleLifecycleTurnStart_ContextInjectionUnknownCacheDoesNotMarkDecided(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir().
 	tmpDir := t.TempDir()

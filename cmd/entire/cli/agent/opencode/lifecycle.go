@@ -20,7 +20,14 @@ import (
 var runOpenCodeExportToFileFn = runOpenCodeExportToFile
 
 // Compile-time assertion that OpenCode can inject context into the model.
-var _ agent.ContextInjector = (*OpenCodeAgent)(nil)
+var _ agent.RepeatContextInjector = (*OpenCodeAgent)(nil)
+
+// ReinjectsEachTurn reports that the injection must be re-emitted on every
+// turn-start: the plugin holds it in process memory, which an OpenCode restart
+// or session resume wipes with no way to ask for it again, and its
+// chat.system.transform replaces the previous payload, so re-emission is
+// idempotent.
+func (a *OpenCodeAgent) ReinjectsEachTurn() bool { return true }
 
 // InjectionEvent reports that OpenCode injects model context at TurnStart. The
 // embedded plugin reads the turn-start hook's stdout and applies the injection

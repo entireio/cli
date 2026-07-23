@@ -51,6 +51,28 @@ func AsContextInjector(ag Agent) (ContextInjector, bool) {
 	return ci, ok
 }
 
+// RepeatContextInjector is a ContextInjector whose transport applies each
+// emitted payload idempotently (the latest one replaces the previous), so the
+// dispatcher re-emits the injection at every injection event instead of once
+// per session. Implement it when the agent-side holder of the injection is
+// process memory that does not survive an agent restart or a session resume —
+// a once-per-session emission would leave such a session without its context
+// for good (e.g. the OpenCode plugin).
+type RepeatContextInjector interface {
+	ContextInjector
+
+	// ReinjectsEachTurn reports whether the dispatcher should re-emit the
+	// injection on every injection event for this agent.
+	ReinjectsEachTurn() bool
+}
+
+// ReinjectsEachTurn reports whether ag wants the context injection re-emitted
+// on every injection event.
+func ReinjectsEachTurn(ag Agent) bool {
+	r, ok := ag.(RepeatContextInjector)
+	return ok && r.ReinjectsEachTurn()
+}
+
 // RenderAdditionalContextHookOutput renders the Claude-Code-style hook output
 // that injects text into the model's context window:
 //
