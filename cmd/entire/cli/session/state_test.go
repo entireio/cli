@@ -546,10 +546,8 @@ func TestGetGitCommonDir_ReturnsValidPath(t *testing.T) {
 	commonDir, err := getGitCommonDir(context.Background())
 	require.NoError(t, err)
 
-	// getGitCommonDir returns a relative path from cwd; resolve it to absolute for comparison
-	absCommonDir, err := filepath.Abs(commonDir)
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(dir, ".git"), absCommonDir)
+	assert.True(t, filepath.IsAbs(commonDir), "getGitCommonDir must return an absolute path, got %q", commonDir)
+	assert.Equal(t, filepath.Join(dir, ".git"), commonDir)
 
 	// The path should actually exist
 	info, err := os.Stat(commonDir)
@@ -612,19 +610,15 @@ func TestGetGitCommonDir_InvalidatesOnCwdChange(t *testing.T) {
 	t.Chdir(dir1)
 	first, err := getGitCommonDir(context.Background())
 	require.NoError(t, err)
-	absFirst, err := filepath.Abs(first)
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(dir1, ".git"), absFirst)
+	assert.Equal(t, filepath.Join(dir1, ".git"), first)
 
 	// Change to dir2 — cache should miss and resolve to dir2's .git
 	t.Chdir(dir2)
 	second, err := getGitCommonDir(context.Background())
 	require.NoError(t, err)
-	absSecond, err := filepath.Abs(second)
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(dir2, ".git"), absSecond)
+	assert.Equal(t, filepath.Join(dir2, ".git"), second)
 
-	assert.NotEqual(t, absFirst, absSecond)
+	assert.NotEqual(t, first, second)
 }
 
 func TestGetGitCommonDir_ErrorOutsideRepo(t *testing.T) {

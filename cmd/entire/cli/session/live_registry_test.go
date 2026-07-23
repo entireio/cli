@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -105,6 +106,50 @@ func TestRegisterLiveSession_NilStateNoPanic(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	if err := RegisterLiveSession(nil, "/tmp/git"); err != nil {
 		t.Fatalf("RegisterLiveSession(nil) = %v, want nil", err)
+	}
+}
+
+func TestRegisterLiveSession_AbsolutizesRelativeCommonDir(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	repo := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
+
+	now := time.Now()
+	state := &State{
+		SessionID:           "live-reg-rel-001",
+		AgentType:           agent.AgentTypeClaudeCode,
+		Phase:               PhaseActive,
+		WorktreePath:        repo,
+		LastInteractionTime: &now,
+		FilesTouched:        []string{"feature.txt"},
+	}
+	if err := RegisterLiveSession(state, ".git"); err != nil {
+		t.Fatalf("RegisterLiveSession: %v", err)
+	}
+
+	// Reinterpret from a different CWD — persisted CommonDir must stay absolute.
+	t.Chdir(t.TempDir())
+	entries, err := ListLiveSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len=%d, want 1", len(entries))
+	}
+	want, err := filepath.Abs(filepath.Join(repo, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = filepath.Clean(want)
+	if entries[0].CommonDir != want {
+		t.Fatalf("CommonDir = %q, want absolute %q", entries[0].CommonDir, want)
+	}
+	if !filepath.IsAbs(entries[0].CommonDir) {
+		t.Fatalf("CommonDir must be absolute, got %q", entries[0].CommonDir)
 	}
 }
 

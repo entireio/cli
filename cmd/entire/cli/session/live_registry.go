@@ -66,10 +66,16 @@ func RegisterLiveSession(state *State, commonDir string) error {
 	if commonDir == "" {
 		return errors.New("common dir is required")
 	}
+	// Persist an absolute common dir. Relative values like ".git" resolve against
+	// the reader's CWD and falsely match unrelated repos in sameAdoptStore.
+	if abs, err := filepath.Abs(commonDir); err == nil {
+		commonDir = abs
+	}
+	commonDir = filepath.Clean(commonDir)
 
 	entry := LiveSessionEntry{
 		SessionID:           state.SessionID,
-		CommonDir:           filepath.Clean(commonDir),
+		CommonDir:           commonDir,
 		WorktreePath:        state.WorktreePath,
 		AgentType:           state.AgentType,
 		Phase:               state.Phase,

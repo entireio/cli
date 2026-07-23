@@ -830,12 +830,14 @@ func getGitCommonDir(ctx context.Context) (string, error) {
 
 	commonDir := strings.TrimSpace(string(output))
 
-	// git rev-parse --git-common-dir returns relative paths from the working directory,
-	// so we need to make it absolute if it isn't already
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(".", commonDir)
+	// git rev-parse --git-common-dir often returns a CWD-relative path (e.g. ".git").
+	// Absolutize before caching/persisting so cross-process consumers (live-session
+	// registry) don't reinterpret ".git" against a different CWD.
+	abs, absErr := filepath.Abs(commonDir)
+	if absErr != nil {
+		return "", fmt.Errorf("absolutize git common dir %q: %w", commonDir, absErr)
 	}
-	commonDir = filepath.Clean(commonDir)
+	commonDir = filepath.Clean(abs)
 
 	gitCommonDirMu.Lock()
 	gitCommonDirCache = commonDir
