@@ -78,6 +78,12 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
     }
   }
 
+  // MAX_INJECTED_CONTEXT_LENGTH caps the accepted inject_context payload. The
+  // envelope Entire emits is a short pointer (well under 1 KB); anything larger
+  // is malformed or hostile hook output, and an accepted payload is appended to
+  // every LLM call's system prompt for the rest of the session.
+  const MAX_INJECTED_CONTEXT_LENGTH = 16384
+
   // parseInjectedContext scans a hook's stdout for Entire's injection envelope
   // ({"inject_context":"..."}) and returns the text to inject, or null.
   function parseInjectedContext(stdout: string): string | null {
@@ -87,7 +93,11 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
       if (!trimmed.startsWith("{")) continue
       try {
         const parsed = JSON.parse(trimmed) as { inject_context?: unknown }
-        if (typeof parsed.inject_context === "string" && parsed.inject_context.length > 0) {
+        if (
+          typeof parsed.inject_context === "string" &&
+          parsed.inject_context.length > 0 &&
+          parsed.inject_context.length <= MAX_INJECTED_CONTEXT_LENGTH
+        ) {
           return parsed.inject_context
         }
       } catch {

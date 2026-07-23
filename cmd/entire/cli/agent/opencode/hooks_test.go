@@ -197,6 +197,15 @@ func TestInstallHooks_AppliesContextInjection(t *testing.T) {
 	if !strings.Contains(content, `inject_context`) {
 		t.Fatal("plugin file should parse the inject_context envelope")
 	}
+	// The payload is appended to every LLM call's system prompt for the rest of
+	// the session, so an unbounded envelope (malformed or hostile hook output)
+	// would tax every call. Oversized payloads must be rejected, not truncated.
+	if !strings.Contains(content, `MAX_INJECTED_CONTEXT_LENGTH`) {
+		t.Fatal("plugin file should cap the accepted inject_context size")
+	}
+	if !strings.Contains(content, `parsed.inject_context.length <= MAX_INJECTED_CONTEXT_LENGTH`) {
+		t.Fatal("plugin file should reject inject_context payloads above the size cap")
+	}
 	if !strings.Contains(content, `"experimental.chat.system.transform"`) {
 		t.Fatal("plugin file should apply injection via experimental.chat.system.transform")
 	}
