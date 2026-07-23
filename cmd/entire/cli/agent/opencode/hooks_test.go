@@ -154,14 +154,22 @@ func TestInstallHooks_TurnStartUsesSyncHook(t *testing.T) {
 	}
 
 	content := string(data)
-	// turn-start is dispatched via fireTurnStart, which fires synchronously
-	// (Bun.spawnSync) so session state is ready before any mid-turn commit, and
-	// also captures the hook's stdout to apply Entire's one-time context injection.
+	// turn-start is dispatched via fireTurnStart, which delegates to the
+	// synchronous callHookSync (Bun.spawnSync) so session state is ready before
+	// any mid-turn commit, and parses the hook's stdout to capture Entire's
+	// context injection. One spawn helper serves all sync hooks — a second
+	// spawn implementation would silently drift from fixes applied to the first.
 	if !strings.Contains(content, `fireTurnStart({`) {
 		t.Fatal("plugin file should dispatch turn-start via fireTurnStart")
 	}
-	if !strings.Contains(content, `const proc = Bun.spawnSync(hookCmd("turn-start"), {`) {
-		t.Fatal("fireTurnStart should dispatch turn-start synchronously via Bun.spawnSync")
+	if !strings.Contains(content, `parseInjectedContext(callHookSync("turn-start", payload))`) {
+		t.Fatal("fireTurnStart should delegate to callHookSync and parse its stdout")
+	}
+	if !strings.Contains(content, `const proc = Bun.spawnSync(hookCmd(hookName), {`) {
+		t.Fatal("callHookSync should dispatch synchronously via Bun.spawnSync")
+	}
+	if strings.Count(content, "Bun.spawnSync(") != 1 {
+		t.Fatal("plugin file should have exactly one Bun.spawnSync call site (callHookSync)")
 	}
 	if strings.Contains(content, `await callHook("turn-start", {`) {
 		t.Fatal("plugin file should not dispatch turn-start via async callHook")
@@ -287,6 +295,16 @@ func TestInstallHooks_MessageUpdatedFallsBackToTurnStart(t *testing.T) {
 	}
 	if !strings.Contains(content, `prompt: "",`) {
 		t.Fatal("plugin file should send an empty prompt for fallback turn-start")
+	}
+	// message.updated carries no prompt text, and it always wins the race with
+	// message.part.updated (the part handler needs messageStore, which only the
+	// message handler populates). Without a re-fire, every turn-start would
+	// reach the CLI with an empty prompt and prompt.txt would never be written.
+	if !strings.Contains(content, `promptlessTurnStarts`) {
+		t.Fatal("plugin file should track turn-starts fired without a prompt")
+	}
+	if !strings.Contains(content, `promptlessTurnStarts.has(msg.id) && part.text`) {
+		t.Fatal("plugin file should re-fire turn-start with the real prompt once the text part arrives")
 	}
 }
 

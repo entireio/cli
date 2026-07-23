@@ -8,6 +8,10 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
   const ENTIRE_CMD = '__ENTIRE_CMD__'
   // Track seen user messages to fire turn-start only once per message
   const seenUserMessages = new Set<string>()
+  // User messages whose turn-start fired before any text part arrived (the
+  // message.updated fallback sends an empty prompt). When the first text part
+  // shows up, turn-start is re-fired with the real prompt so the CLI records it.
+  const promptlessTurnStarts = new Set<string>()
   // Track current session ID for message events (which don't include sessionID)
   let currentSessionID: string | null = null
   // Track the model used by the most recent assistant message
@@ -55,18 +59,22 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
    * or process exit. `turn-start` must finish initializing session state before a
    * fast mid-turn commit can hit git hooks, and `turn-end` / `session-end` must
    * finish before `opencode run` tears down its event loop.
+   * Returns the hook's stdout ("" on failure) so callers can parse response
+   * envelopes such as the turn-start context injection.
    */
-  function callHookSync(hookName: string, payload: Record<string, unknown>) {
+  function callHookSync(hookName: string, payload: Record<string, unknown>): string {
     try {
       const json = JSON.stringify(payload)
-      Bun.spawnSync(hookCmd(hookName), {
+      const proc = Bun.spawnSync(hookCmd(hookName), {
         cwd: directory,
         stdin: new TextEncoder().encode(json + "\n"),
-        stdout: "ignore",
+        stdout: "pipe",
         stderr: "ignore",
       })
+      return proc.stdout ? proc.stdout.toString() : ""
     } catch {
       // Silently ignore — plugin failures must not crash OpenCode
+      return ""
     }
   }
 
@@ -91,23 +99,12 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
 
   // fireTurnStart fires turn-start synchronously (state must be ready before
   // mid-turn commits) and stashes any model-context injection emitted on stdout
-  // for experimental.chat.system.transform to apply. Entire emits the injection
-  // at most once per session, so pendingInjection is set on the first turn only.
+  // for experimental.chat.system.transform to apply. Entire re-emits the
+  // injection on every turn-start while enabled (the latest payload wins), so a
+  // plugin restart or session resume repopulates it on the next turn.
   function fireTurnStart(payload: Record<string, unknown>) {
-    try {
-      const json = JSON.stringify(payload)
-      const proc = Bun.spawnSync(hookCmd("turn-start"), {
-        cwd: directory,
-        stdin: new TextEncoder().encode(json + "\n"),
-        stdout: "pipe",
-        stderr: "ignore",
-      })
-      const out = proc.stdout ? proc.stdout.toString() : ""
-      const injected = parseInjectedContext(out)
-      if (injected) pendingInjection = injected
-    } catch {
-      // Silently ignore — plugin failures must not crash OpenCode
-    }
+    const injected = parseInjectedContext(callHookSync("turn-start", payload))
+    if (injected) pendingInjection = injected
   }
 
   function resetSessionTracking(sessionID: string) {
@@ -115,6 +112,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
       return false
     }
     seenUserMessages.clear()
+    promptlessTurnStarts.clear()
     messageStore.clear()
     currentModel = null
     currentSessionID = sessionID
@@ -188,10 +186,13 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             // Fallback: some opencode run flows commit before any message.part.updated
             // event is delivered for the user's prompt. Start the turn from the
             // user message itself so git hooks see an ACTIVE session in time.
+            // The message event carries no prompt text; the part handler
+            // re-fires with the real prompt once the text part arrives.
             if (msg.role === "user" && !seenUserMessages.has(msg.id)) {
               seenUserMessages.add(msg.id)
               const sessionID = msg.sessionID ?? currentSessionID
               if (sessionID) {
+                promptlessTurnStarts.add(msg.id)
                 fireTurnStart({
                   session_id: sessionID,
                   prompt: "",
@@ -208,13 +209,26 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
 
             // Fire turn-start on the first text part of a new user message
             const msg = messageStore.get(part.messageID)
-            if (msg?.role === "user" && part.type === "text" && !seenUserMessages.has(msg.id)) {
-              seenUserMessages.add(msg.id)
+            if (msg?.role === "user" && part.type === "text") {
               const sessionID = msg.sessionID ?? currentSessionID
-              if (sessionID) {
+              if (!seenUserMessages.has(msg.id)) {
+                seenUserMessages.add(msg.id)
+                if (sessionID) {
+                  fireTurnStart({
+                    session_id: sessionID,
+                    prompt: part.text ?? "",
+                    model: currentModel ?? "",
+                  })
+                }
+              } else if (promptlessTurnStarts.has(msg.id) && part.text && sessionID) {
+                // The fallback above already started this turn without the
+                // prompt. Re-fire with the real text: the CLI treats a repeated
+                // turn-start for the same turn as a repair (active-to-active
+                // transition), and this is the only fire that records the prompt.
+                promptlessTurnStarts.delete(msg.id)
                 fireTurnStart({
                   session_id: sessionID,
-                  prompt: part.text ?? "",
+                  prompt: part.text,
                   model: currentModel ?? "",
                 })
               }
@@ -251,6 +265,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             const session = (event as any).properties?.info
             if (!session?.id) break
             seenUserMessages.clear()
+            promptlessTurnStarts.clear()
             messageStore.clear()
             currentSessionID = null
             pendingInjection = null
@@ -268,6 +283,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             if (!currentSessionID) break
             const sessionID = currentSessionID
             seenUserMessages.clear()
+            promptlessTurnStarts.clear()
             messageStore.clear()
             currentSessionID = null
             pendingInjection = null
