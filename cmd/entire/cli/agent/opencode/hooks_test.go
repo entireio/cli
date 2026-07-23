@@ -192,8 +192,33 @@ func TestInstallHooks_AppliesContextInjection(t *testing.T) {
 	if !strings.Contains(content, `"experimental.chat.system.transform"`) {
 		t.Fatal("plugin file should apply injection via experimental.chat.system.transform")
 	}
+	// Some provider backends only accept a single system message, so the
+	// injection must be appended to the first system entry rather than pushed
+	// as a second one; push remains only as a fallback for an empty array.
+	if !strings.Contains(content, `output.system[0] += "\n\n" + pendingInjection`) {
+		t.Fatal("plugin file should append the injection to the first system message")
+	}
 	if !strings.Contains(content, `output.system.push(pendingInjection)`) {
-		t.Fatal("plugin file should push the injection onto the system prompt")
+		t.Fatal("plugin file should keep push as a fallback for an empty system array")
+	}
+	if !strings.Contains(content, `if (output.system.length > 0)`) {
+		t.Fatal("plugin file should only push when the system array is empty")
+	}
+	// The transform also fires for side LLM calls (session title generation,
+	// agent generation), which race the main call. The injection must not be
+	// consumed by whichever call fires first: the transform must re-apply it
+	// for the session's lifetime instead of clearing it, and skip calls that
+	// carry a different session ID.
+	_, transformBody, found := strings.Cut(content, `"experimental.chat.system.transform"`)
+	if !found {
+		t.Fatal("plugin file missing the chat system transform")
+	}
+	transformBody, _, _ = strings.Cut(transformBody, "event:")
+	if strings.Contains(transformBody, `pendingInjection = null`) {
+		t.Fatal("transform must not clear pendingInjection — a side LLM call (e.g. title generation) would consume it and starve the main agent")
+	}
+	if !strings.Contains(transformBody, `input.sessionID !== currentSessionID`) {
+		t.Fatal("transform should skip LLM calls for a different session")
 	}
 	// Every session-reset site must clear the stashed injection so a session
 	// change cannot leak the prior session's context into the next session.

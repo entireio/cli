@@ -14,8 +14,9 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
   let currentModel: string | null = null
   // In-memory store for message metadata (role, tokens, etc.)
   const messageStore = new Map<string, any>()
-  // One-time model-context injection captured from the turn-start hook's stdout,
-  // applied on the next LLM call via experimental.chat.system.transform.
+  // Model-context injection captured from the turn-start hook's stdout,
+  // applied to every LLM call for the session via
+  // experimental.chat.system.transform and cleared on session change.
   let pendingInjection: string | null = null
 
   /**
@@ -124,12 +125,25 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
   }
 
   return {
-    // Apply the one-time Entire context injection captured at turn-start by
-    // appending it to the system prompt for this LLM call.
-    "experimental.chat.system.transform": async (_input: unknown, output: { system: string[] }) => {
-      if (pendingInjection && Array.isArray(output.system)) {
+    // Apply the Entire context injection captured at turn-start by appending
+    // it to the system prompt. OpenCode rebuilds the system prompt for every
+    // LLM call and this hook also fires for side calls (session title
+    // generation, agent generation) that race the main agent's call, so the
+    // injection is re-applied for the session's lifetime rather than cleared
+    // on first use — a consume-once injection could be eaten by a side call
+    // and never reach the main agent. Session resets clear it. Calls that
+    // carry a different session ID are skipped; calls without one (older
+    // OpenCode versions, agent generation) still receive it. Some provider
+    // backends only honor a single system message, so append to the first
+    // entry instead of pushing a second one; push only when the array is
+    // empty.
+    "experimental.chat.system.transform": async (input: { sessionID?: string } | undefined, output: { system: string[] }) => {
+      if (!pendingInjection || !Array.isArray(output.system)) return
+      if (input?.sessionID && currentSessionID && input.sessionID !== currentSessionID) return
+      if (output.system.length > 0) {
+        output.system[0] += "\n\n" + pendingInjection
+      } else {
         output.system.push(pendingInjection)
-        pendingInjection = null
       }
     },
     event: async ({ event }) => {
