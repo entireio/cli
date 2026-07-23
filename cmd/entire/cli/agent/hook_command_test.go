@@ -2,6 +2,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -54,6 +58,52 @@ func TestWrapProductionJSONWarningHookCommand(t *testing.T) {
 	}
 	if want := "exec entire hooks claude-code session-start"; !strings.Contains(command, want) {
 		t.Fatalf("claude wrapper missing exec target, got %q", command)
+	}
+}
+
+// TestWrapProductionJSONWarningHookCommand_WarningDecodesWithRealNewlines runs
+// the wrapped command end-to-end with `entire` absent from PATH and decodes
+// stdout the way the agent does. The warning travels through three encoding
+// layers — JSON payload, %q shell quoting, and the settings file's own JSON —
+// and an escaping slip at any layer turns the multi-line warning into literal
+// backslash-n characters, so the assertion is on the fully decoded string.
+func TestWrapProductionJSONWarningHookCommand_WarningDecodesWithRealNewlines(t *testing.T) {
+	t.Parallel()
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not available on this platform")
+	}
+
+	// A PATH with only sh on it, so `command -v entire` fails even on machines
+	// that have the CLI installed.
+	binDir := t.TempDir()
+	if symErr := os.Symlink(shPath, filepath.Join(binDir, "sh")); symErr != nil {
+		t.Skipf("cannot symlink sh: %v", symErr)
+	}
+
+	command := WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", WarningFormatMultiLine)
+
+	cmd := exec.CommandContext(context.Background(), shPath, "-c", command)
+	cmd.Env = []string{"PATH=" + binDir}
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("wrapped command failed: %v (stdout %q)", err, out)
+	}
+
+	var resp struct {
+		SystemMessage string `json:"systemMessage"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v (stdout %q)", err, out)
+	}
+	if want := MissingEntireWarning(WarningFormatMultiLine); resp.SystemMessage != want {
+		t.Fatalf("decoded systemMessage = %q, want %q", resp.SystemMessage, want)
+	}
+	if !strings.Contains(resp.SystemMessage, "\n") {
+		t.Fatal("decoded systemMessage lost its real newlines")
+	}
+	if strings.Contains(resp.SystemMessage, `\n`) {
+		t.Fatal("decoded systemMessage contains literal backslash-n — over-escaped")
 	}
 }
 
