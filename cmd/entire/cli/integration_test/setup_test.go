@@ -46,6 +46,12 @@ func TestMain(m *testing.M) {
 		"ENTIRE_TEST_AUTH_STORE_FILE": filepath.Join(tmpDir, "entire-auth-tokens.json"),
 		"GIT_TERMINAL_PROMPT":         "0",
 		testutil.EnvGitHermetic:       "1",
+		// Keep session-end deterministic: the hook normally hands the eager
+		// condense to a detached child (so agents' short SessionEnd budgets
+		// can't kill it), which would race the assertions that follow
+		// SimulateSessionEnd in these tests. The detached flow has its own
+		// dedicated test that overrides this back to empty.
+		"ENTIRE_SESSION_END_SYNC": "1",
 	}
 	for k, v := range isolation {
 		if err := os.Setenv(k, v); err != nil {

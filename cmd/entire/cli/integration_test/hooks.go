@@ -115,6 +115,10 @@ func (r *HookRunner) SimulateStop(sessionID, transcriptPath string) error {
 
 // SimulateSessionEnd simulates the Claude Code session-end hook.
 // This transitions a session from IDLE (or ACTIVE) to ENDED phase.
+// The eager condense runs inline (TestMain sets ENTIRE_SESSION_END_SYNC
+// process-wide) so assertions that follow are deterministic; use
+// SimulateSessionEndDetached to exercise the production detached-condense
+// flow.
 func (r *HookRunner) SimulateSessionEnd(sessionID string) error {
 	r.T.Helper()
 
@@ -124,6 +128,27 @@ func (r *HookRunner) SimulateSessionEnd(sessionID string) error {
 	}
 
 	return r.runHookWithInput("session-end", input)
+}
+
+// SimulateSessionEndDetached simulates the Claude Code session-end hook with
+// the production behavior: the ENDED mark happens inline and the eager
+// condense is handed to a detached __condense_session child. Callers must
+// poll for the condense outcome.
+func (r *HookRunner) SimulateSessionEndDetached(sessionID string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": "",
+	}
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("failed to marshal hook input: %w", err)
+	}
+
+	// Override TestMain's process-wide sync forcing back to empty; exec.Cmd
+	// deduplicates the env slice keeping the last value for each key.
+	return r.runHookInRepoDirWithExtraEnv("session-end", inputJSON, []string{"ENTIRE_SESSION_END_SYNC="})
 }
 
 // PreTaskInput contains the input for PreToolUse[Task] hook.
@@ -348,6 +373,13 @@ func (env *TestEnv) SimulateSessionEnd(sessionID string) error {
 	env.T.Helper()
 	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
 	return runner.SimulateSessionEnd(sessionID)
+}
+
+// SimulateSessionEndDetached is a convenience method on TestEnv.
+func (env *TestEnv) SimulateSessionEndDetached(sessionID string) error {
+	env.T.Helper()
+	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	return runner.SimulateSessionEndDetached(sessionID)
 }
 
 // SimulatePreTask is a convenience method on TestEnv.

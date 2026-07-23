@@ -1020,9 +1020,30 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 	// the transcript to extract file changes. Cleanup is handled by
 	// `entire clean` or when the session state is fully removed.
 
-	if _, err := endSessionNow(ctx, event, event.SessionID, nil); err != nil {
+	// Agents give SessionEnd hooks a short budget and never wait for them on
+	// exit (Claude Code cancels after ~1.5s), so only the fast ENDED mark runs
+	// inline; the eager condense — transcript reads plus git tree building —
+	// is handed to a detached child that survives the hook being killed.
+	// ENTIRE_SESSION_END_SYNC keeps the inline sequence (integration tests
+	// use it for determinism), as does a worktree root that can't be resolved
+	// (nowhere to run the child; dropping the condense would regress #591).
+	worktreeRoot, rootErr := paths.WorktreeRoot(ctx)
+	if os.Getenv(envSessionEndSyncCondense) != "" || rootErr != nil {
+		if _, err := endSessionNow(ctx, event, event.SessionID, nil); err != nil {
+			logging.Warn(logCtx, "failed to mark session ended",
+				slog.String("error", err.Error()))
+		}
+		return nil
+	}
+
+	ended, err := markSessionEnded(ctx, event, event.SessionID, nil)
+	if err != nil {
 		logging.Warn(logCtx, "failed to mark session ended",
 			slog.String("error", err.Error()))
+		return nil
+	}
+	if ended {
+		sessionEndCondenseSpawn(worktreeRoot, event.SessionID)
 	}
 
 	return nil
@@ -1032,9 +1053,10 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 // session ended (firing the SessionStop transition → PhaseEnded + EndedAt) and
 // eagerly condenses its pending work so PostCommit need not. This prevents
 // zombie ENDED sessions from accumulating and causing O(N) overhead on every
-// future commit (GitHub issue #591). It is shared by the SessionStop hook
-// (handleLifecycleSessionEnd) and the exited-session sweep
-// (finalizeExitedSessions), so the two stay in lockstep.
+// future commit (GitHub issue #591). It is used by the exited-session sweep
+// (finalizeExitedSessions) and by the SessionEnd hook's synchronous fallback
+// (handleLifecycleSessionEnd, which normally detaches the condense instead),
+// so the two stay in lockstep.
 //
 // The condense is fail-open (PostCommit retries on the next commit); an error
 // marking the session ended is returned so callers can react, and skips the
