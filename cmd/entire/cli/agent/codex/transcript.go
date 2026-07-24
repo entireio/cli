@@ -386,14 +386,15 @@ func scanTokenDelta(data []byte, startLineNum, fromOffset int, seed *tokenUsageD
 // transcript bytes it already holds, instead of falling back to a second full-file
 // disk read via ExtractModifiedFilesFromOffset.
 func (c *CodexAgent) ExtractAllModifiedFiles(transcriptData []byte, fromOffset int, _ string) ([]string, error) {
+	// Slice to the lines added since fromOffset before splitting, so per-turn work
+	// scales with the delta rather than the whole session.
+	data := transcriptData
+	if fromOffset > 0 {
+		data = transcript.SliceFromLine(transcriptData, fromOffset)
+	}
 	seen := make(map[string]struct{})
 	var files []string
-	lineNum := 0
-	for _, lineData := range splitJSONL(transcriptData) {
-		lineNum++
-		if lineNum <= fromOffset {
-			continue
-		}
+	for _, lineData := range splitJSONL(data) {
 		for _, f := range extractFilesFromLine(lineData) {
 			if _, ok := seen[f]; !ok {
 				seen[f] = struct{}{}

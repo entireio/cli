@@ -1011,9 +1011,18 @@ func computeIncrementalTokenUsage(ctx, logCtx context.Context, inc agent.Increme
 	}
 	usage, next, err := inc.CalculateTokenUsageIncremental(transcriptData, fromOffset, prior)
 	if err != nil {
-		logging.Debug(logCtx, "incremental token calculation failed",
+		// Fall back to the full-scan path so a checkpoint's token usage is not
+		// silently dropped; skip persisting a baseline so the next hook re-derives
+		// one from a clean full scan.
+		logging.Debug(logCtx, "incremental token calculation failed, falling back to full scan",
 			slog.String("error", err.Error()))
-		return nil, nil
+		fallback, fbErr := inc.CalculateTokenUsage(transcriptData, fromOffset)
+		if fbErr != nil {
+			logging.Debug(logCtx, "full-scan token calculation also failed",
+				slog.String("error", fbErr.Error()))
+			return nil, nil
+		}
+		return fallback, nil
 	}
 	return usage, next
 }
