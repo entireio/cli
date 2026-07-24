@@ -51,7 +51,9 @@ func IsSummaryCLIAvailable(name types.AgentName) bool {
 //   - Non-zero exit returns (ExecResult, *exec.ExitError) with ExitCode set
 //     from the ExitError.
 //   - Binary-not-found returns (empty ExecResult, *exec.Error wrapping
-//     exec.ErrNotFound). Callers use isExecNotFoundErr to detect.
+//     exec.ErrNotFound). Callers use IsExecNotFoundErr to detect. Note a
+//     path-containing argv skips LookPath and yields *fs.PathError/ENOENT
+//     instead, which IsExecNotFoundErr also matches.
 //   - Context cancellation returns (partial ExecResult, ctx.Err() in chain).
 //     Stdout/Stderr reflect whatever was captured before the subprocess died.
 func RunIsolatedTextGeneratorCLIRaw(ctx context.Context, runner TextCommandRunner, binary string, args []string, stdin string) (ExecResult, error) {

@@ -44,7 +44,7 @@ func parseGenerateTextResponse(stdout []byte) (string, *responseEnvelope, error)
 		}
 		// Mirror the object-path behavior: is_error:true with null result is
 		// a structured failure whose envelope (IsError, APIErrorStatus) must
-		// reach parseClaudeEnvelope for classification.
+		// reach classifyClaudeEnvelope for classification.
 		if responses[i].IsError {
 			return "", &responses[i], nil
 		}

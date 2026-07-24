@@ -49,11 +49,12 @@ func kindPrefix(k agent.TextGenErrorKind, displayName string) string {
 }
 
 // syntheticFallback holds a generic remediation line per-provider per-kind.
-// It is applied only when the provider is in
-// providersNeedingSynthesizedRemediation AND the envelope-derived Message is
-// absent (so we have nothing better to show), OR — for Claude — in addition
-// to Message (preserving 963's established remediation wording, now
-// rendered as a lowercase "try" row in the failure block).
+// It is applied when EITHER the envelope-derived Message is absent — for any
+// provider, so we have nothing better to show — OR the provider is in
+// providersNeedingSynthesizedRemediation (Claude only), in which case it is
+// added in addition to a present Message, preserving 963's established
+// remediation wording, now rendered as a lowercase "try" row in the failure
+// block.
 //
 // Non-Claude entries are deliberately generic ("Check your X CLI
 // authentication") rather than inventing CLI-specific subcommands: the
@@ -100,10 +101,10 @@ var syntheticFallback = map[types.AgentName]map[agent.TextGenErrorKind]string{
 // Claude is the only such provider today: its structured envelope surfaces
 // a terse API error (e.g. "Invalid API key") without telling the user what
 // to do about it, so 963's user-facing output appended "Run `claude login`
-// and retry". Non-Claude CLIs (codex, gemini, cursor, copilot) emit full
-// human-readable remediation in their own stderr output, which we capture
-// verbatim into Message — synthesizing another remediation line on top
-// would produce noisy or contradictory output.
+// and retry". Every other provider surfaces its own CLI stderr verbatim in
+// Message — synthesizing another remediation line on top would produce noisy
+// or contradictory output. (Deliberately not an enumerated provider list: one
+// would rot on the next agent added.)
 var providersNeedingSynthesizedRemediation = map[types.AgentName]bool{
 	agent.AgentNameClaudeCode: true,
 }

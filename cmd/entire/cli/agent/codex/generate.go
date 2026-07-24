@@ -14,5 +14,5 @@ func (c *CodexAgent) GenerateText(ctx context.Context, prompt, model string) (st
 	}
 	args = append(args, "-")
 	res, runErr := agent.RunIsolatedTextGeneratorCLIRaw(ctx, c.CommandRunner, "codex", args, prompt)
-	return agent.HandleTextGenResult(res, runErr, agent.AgentNameCodex, "codex CLI returned empty output", nil) //nolint:wrapcheck // preserve *agent.TextGenError / ctx sentinel for errors.As at the explain layer
+	return agent.HandleTextGenResult(res, runErr, agent.AgentNameCodex, "codex CLI returned empty output", nil) //nolint:wrapcheck // return unwrapped: the explain layer renders label+message from the typed error, so a wrap prefix would leak into user output. errors.As (*TextGenError) / errors.Is (ctx sentinel) must reach it unflattened.
 }
