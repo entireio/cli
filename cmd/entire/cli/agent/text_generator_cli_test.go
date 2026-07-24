@@ -14,12 +14,21 @@ const windowsOS = "windows"
 
 func TestRunIsolatedTextGeneratorCLIRaw_Success(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == windowsOS {
+		// `echo` is a cmd.exe builtin on Windows, not an executable on PATH,
+		// so exec.LookPath cannot resolve it.
+		t.Skip("POSIX echo")
+	}
 	res, err := RunIsolatedTextGeneratorCLIRaw(context.Background(), nil, "echo", []string{"hello"}, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(string(res.Stdout), "hello") {
-		t.Errorf("Stdout = %q; want to contain 'hello'", res.Stdout)
+	// Pin the raw bytes, trailing newline included: RunIsolated...Raw must not
+	// trim. Trimming is HandleTextGenResult's job (see
+	// TestHandleTextGenResult_TrimsStdout), and Claude's envelope parser needs
+	// the unmodified stdout.
+	if string(res.Stdout) != "hello\n" {
+		t.Errorf("Stdout = %q; want %q", res.Stdout, "hello\n")
 	}
 	if res.ExitCode != 0 {
 		t.Errorf("ExitCode = %d; want 0", res.ExitCode)
@@ -96,8 +105,13 @@ func TestRunIsolatedTextGeneratorCLIRaw_CanceledContextPreservesSentinel(t *test
 	}
 	// The caller's Classifier passes ctx errors through; the helper must not
 	// wrap them in a way that defeats errors.Is.
-	if !errors.Is(err, context.Canceled) && !errors.Is(ctx.Err(), context.Canceled) {
-		t.Fatalf("want context.Canceled in chain; got %v", err)
+	//
+	// Assert against err ONLY. A previous version also accepted
+	// errors.Is(ctx.Err(), context.Canceled), which is unconditionally true
+	// here (cmd.Run returns after cancel() fires), so the whole assertion
+	// could never fail and the sentinel-preservation contract was unpinned.
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled in err chain; got %v", err)
 	}
 }
 
