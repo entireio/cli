@@ -101,32 +101,60 @@ func IsExecNotFoundErr(err error) bool {
 	return errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist)
 }
 
-// http4xxPattern matches a standalone 4xx HTTP status code, bounded by word
-// breaks on both sides. This avoids the false positives that plain
-// strings.Contains hits: port numbers ("port 14010" contains "401"),
-// timestamps ("took 429ms" contains "429"), request IDs, byte counts, etc.
-// The \b boundaries require a non-word character (or string edge) on either
-// side — so "401 Unauthorized" / "status 401" / "HTTP 401:" all match, while
-// "14010" / "429ms" / "status429" do not.
-var http4xxPattern = regexp.MustCompile(`\b4\d{2}\b`)
+// http4xxPattern matches a 4xx HTTP status code that appears in an actual
+// HTTP-status context, via one of two alternatives:
+//
+//	(a) preceded by a status-ish keyword within a few non-word characters —
+//	    "HTTP 401", "HTTP/1.1 401", "status: 401", "status=401", "code 401",
+//	    "ERROR: 401".
+//	(b) followed by its canonical reason phrase — "401 Unauthorized",
+//	    "429 Too Many Requests".
+//
+// Requiring lexical context (rather than just digit isolation) is what makes
+// this safe. Word boundaries alone are NOT sufficient, because the digits in
+// real CLI stderr are usually adjacent to ':' and '.', which are themselves
+// non-word characters — so `\b4\d{2}\b` happily matches a stack frame
+// ("at foo.js:401:12"), a decimal ("took 2.403 seconds"), a source line
+// ("main.go:404 +0x1f") and a bare count ("build 404 finished"), and reports
+// them as authentication or config failures. Gemini, Copilot and Cursor are
+// Node CLIs whose crash output is exactly "file.js:LINE:COL" frames, so that
+// false-positive class was the common case, not an edge case.
+//
+// The status is captured in whichever of the two groups matched.
+var http4xxPattern = regexp.MustCompile(`(?i)` +
+	`\b(?:https?(?:/[\d.]+)?|status(?:\s*code)?|code|err(?:or)?)\b\W{0,3}(4\d{2})\b` +
+	`|` +
+	`\b(4\d{2})\s+(?:unauthorized|forbidden|too\s+many\s+requests|bad\s+request` +
+	`|not\s+found|payment\s+required|request\s+timeout|conflict|gone` +
+	`|payload\s+too\s+large|unprocessable|rate\s*limit)`)
 
 // ClassifyStderrHTTPStatus scans stderr for an HTTP status code and returns
 // the matching error Kind. Most CLIs pass through their upstream API's HTTP
 // status on failure, so this is the load-bearing classification signal.
 // Returns TextGenErrorUnknown when no recognized status is present.
 //
-// When multiple 4xx codes appear in stderr, the first (leftmost) match wins —
-// this matches the typical "HTTP error: 401 Unauthorized\ndetail: ..." pattern
-// where the leading status is the primary failure.
+// Pass the FULL stderr, not a truncated copy: truncation is a display concern
+// and applying it first would hide a status line that appears after the cap
+// (CLIs commonly emit a banner or stack preamble before the real error).
+//
+// When several statuses appear, the first RECOGNIZED one wins — not merely the
+// leftmost match. A leading status this function does not map (e.g. 413) must
+// not consume the scan and mask a later 401.
 func ClassifyStderrHTTPStatus(stderr string) TextGenErrorKind {
-	match := http4xxPattern.FindString(stderr)
-	switch match {
-	case "401", "403":
-		return TextGenErrorAuth
-	case "429":
-		return TextGenErrorRateLimit
-	case "400", "404":
-		return TextGenErrorConfig
+	for _, m := range http4xxPattern.FindAllStringSubmatch(stderr, -1) {
+		// Exactly one of the two capture groups is populated per match.
+		status := m[1]
+		if status == "" {
+			status = m[2]
+		}
+		switch status {
+		case "401", "403":
+			return TextGenErrorAuth
+		case "429":
+			return TextGenErrorRateLimit
+		case "400", "404":
+			return TextGenErrorConfig
+		}
 	}
 	return TextGenErrorUnknown
 }
@@ -135,13 +163,17 @@ func ClassifyStderrHTTPStatus(stderr string) TextGenErrorKind {
 // call into (trimmed stdout, err). On success returns (output, nil). On
 // failure returns ("", *TextGenError) or ("", ctx sentinel).
 //
+// On a failed run, Message is the first non-empty of stderr, stdout, and
+// runErr.Error() — so it is never empty — and both classification and
+// extraClassify see that full text before it is truncated for display.
+//
 // extraClassify is an optional per-agent hook invoked only when the shared
 // HTTP-status baseline returned Unknown — used by agents whose stderr carries
 // auth/rate-limit signals without an HTTP status (e.g. gemini). Pass nil to
 // skip.
 //
 // emptyMsg populates TextGenError.Message when the subprocess exits 0 with no
-// stdout.
+// stdout (whitespace-only stdout counts as empty).
 //
 // Claude does not use this helper — its envelope-first classification order
 // differs and is inlined in claudecode.GenerateText.
@@ -156,17 +188,35 @@ func HandleTextGenResult(res ExecResult, runErr error, provider types.AgentName,
 		if IsExecNotFoundErr(runErr) {
 			return "", &TextGenError{Kind: TextGenErrorCLIMissing, Provider: provider, Cause: runErr}
 		}
-		stderr := TruncateStderr(string(res.Stderr))
-		kind := ClassifyStderrHTTPStatus(stderr)
+		// Prefer stderr, fall back to stdout, then to the run error itself, so
+		// Message is never empty. codex/cursor/copilot are stdout-primary
+		// tools that print diagnostics there and exit non-zero; reading only
+		// stderr renders "(no diagnostic detail available from X CLI)" while
+		// the real text sits unused in res.Stdout. The run error is the last
+		// resort — it is the only thing that describes a launch failure
+		// (permission denied, exec format error), which produces no output at
+		// all and is not a "binary missing" case.
+		raw := strings.TrimSpace(string(res.Stderr))
+		if raw == "" {
+			raw = strings.TrimSpace(string(res.Stdout))
+		}
+		if raw == "" {
+			raw = runErr.Error()
+		}
+		// Classify against the FULL text, then truncate only for display.
+		// Truncating first would drop a status line (or a provider phrase)
+		// sitting past the 500-byte cap, which is exactly where it lands when
+		// the CLI prints a banner or stack preamble ahead of the real error.
+		kind := ClassifyStderrHTTPStatus(raw)
 		if kind == TextGenErrorUnknown && extraClassify != nil {
-			if k := extraClassify(stderr); k != TextGenErrorUnknown {
+			if k := extraClassify(raw); k != TextGenErrorUnknown {
 				kind = k
 			}
 		}
 		return "", &TextGenError{
 			Kind:     kind,
 			Provider: provider,
-			Message:  stderr,
+			Message:  TruncateStderr(raw),
 			ExitCode: res.ExitCode,
 			Cause:    runErr,
 		}

@@ -19,16 +19,21 @@ func (g *GeminiCLIAgent) GenerateText(ctx context.Context, prompt, model string)
 		args = append(args, "--model", model)
 	}
 	res, runErr := agent.RunIsolatedTextGeneratorCLIRaw(ctx, g.CommandRunner, "gemini", args, prompt)
-	return agent.HandleTextGenResult(res, runErr, agent.AgentNameGemini, "gemini CLI returned empty output", classifyGeminiAuthPhrase) //nolint:wrapcheck // preserve *agent.TextGenError / ctx sentinel for errors.As at the explain layer
+	return agent.HandleTextGenResult(res, runErr, agent.AgentNameGemini, "gemini CLI returned empty output", classifyGeminiAuthPhrase) //nolint:wrapcheck // return unwrapped: the explain layer renders label+message from the typed error, so a wrap prefix would leak into user output. errors.As (*TextGenError) / errors.Is (ctx sentinel) must reach it unflattened.
 }
 
 // classifyGeminiAuthPhrase is the extraClassify hook for gemini-cli: its
-// auth-failure stderr (from the 2026-04-20 research pass) does NOT contain an
-// HTTP status, so the shared baseline misses it. These phrases are verbatim
-// from the captured fixture.
+// auth-failure stderr exits non-zero with no HTTP status, so the shared
+// baseline misses it. The phrase is verbatim from observed stderr.
+//
+// Deliberately does NOT match a bare "GEMINI_API_KEY" mention. The env var name
+// also appears in quota messages ("Quota exceeded for GEMINI_API_KEY") and
+// deprecation notices, so matching it alone reports a working credential as an
+// auth failure — the speculative-phrase failure mode this hook exists to avoid.
+// "Please set an Auth method" is specific to the real failure and already
+// covers the captured fixture, which contains both strings.
 func classifyGeminiAuthPhrase(stderr string) agent.TextGenErrorKind {
-	lower := strings.ToLower(stderr)
-	if strings.Contains(lower, "please set an auth method") || strings.Contains(lower, "gemini_api_key") {
+	if strings.Contains(strings.ToLower(stderr), "please set an auth method") {
 		return agent.TextGenErrorAuth
 	}
 	return agent.TextGenErrorUnknown

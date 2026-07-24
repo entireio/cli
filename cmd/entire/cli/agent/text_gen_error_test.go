@@ -10,6 +10,92 @@ import (
 	"unicode/utf8"
 )
 
+// TestHandleTextGenResult_TrimsStdout pins that the helper — not the subprocess
+// runner — is what trims stdout. RunIsolatedTextGeneratorCLIRaw must return raw
+// bytes (Claude's envelope parser needs them unmodified), so the trim has to
+// happen here or trailing whitespace reaches parseSummaryText.
+func TestHandleTextGenResult_TrimsStdout(t *testing.T) {
+	t.Parallel()
+	res := ExecResult{Stdout: []byte("  hello world\n\n")}
+	out, err := HandleTextGenResult(res, nil, AgentNameCodex, "empty", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != "hello world" {
+		t.Errorf("out = %q; want %q", out, "hello world")
+	}
+}
+
+// TestHandleTextGenResult_WhitespaceOnlyStdoutIsEmpty pins that whitespace-only
+// stdout counts as empty rather than being passed downstream as a "summary".
+func TestHandleTextGenResult_WhitespaceOnlyStdoutIsEmpty(t *testing.T) {
+	t.Parallel()
+	res := ExecResult{Stdout: []byte("   \n\t\n")}
+	_, err := HandleTextGenResult(res, nil, AgentNameCodex, "codex CLI returned empty output", nil)
+	var tge *TextGenError
+	if !errors.As(err, &tge) {
+		t.Fatalf("err = %v; want *TextGenError", err)
+	}
+	if tge.Message != "codex CLI returned empty output" {
+		t.Errorf("Message = %q; want the emptyMsg", tge.Message)
+	}
+}
+
+// TestHandleTextGenResult_ClassifiesFullStderr pins that classification runs on
+// the whole stderr, not the 500-byte-truncated Message. A CLI that prints a
+// banner or stack preamble puts the real status line past the cap.
+func TestHandleTextGenResult_ClassifiesFullStderr(t *testing.T) {
+	t.Parallel()
+	noise := strings.Repeat("at someFrame (/a/b/c.js)\n", 30) // ~750 bytes
+	res := ExecResult{
+		Stderr:   []byte(noise + "ERROR: 401 Unauthorized"),
+		ExitCode: 1,
+	}
+	_, err := HandleTextGenResult(res, errors.New("exit status 1"), AgentNameCodex, "empty", nil)
+	var tge *TextGenError
+	if !errors.As(err, &tge) {
+		t.Fatalf("err = %v; want *TextGenError", err)
+	}
+	if tge.Kind != TextGenErrorAuth {
+		t.Errorf("Kind = %q; want auth (status sits past the Message cap)", tge.Kind)
+	}
+	if len(tge.Message) > stderrMessageMaxLen {
+		t.Errorf("Message len = %d; want <= %d (display is still capped)", len(tge.Message), stderrMessageMaxLen)
+	}
+}
+
+// TestHandleTextGenResult_MessageNeverEmptyOnFailure pins the three-tier
+// fallback restored after the PR #1005 review: stderr, then stdout, then the run
+// error. Without it a stdout-primary CLI (codex/cursor/copilot) or a launch
+// failure renders "(no diagnostic detail available)" while the real text is
+// sitting unused in the ExecResult.
+func TestHandleTextGenResult_MessageNeverEmptyOnFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		res  ExecResult
+		want string
+	}{
+		{"stderr preferred", ExecResult{Stderr: []byte("from stderr"), Stdout: []byte("from stdout")}, "from stderr"},
+		{"falls back to stdout", ExecResult{Stdout: []byte("quota exhausted")}, "quota exhausted"},
+		{"falls back to run error", ExecResult{}, "fork/exec: permission denied"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runErr := errors.New("fork/exec: permission denied")
+			_, err := HandleTextGenResult(tc.res, runErr, AgentNameCodex, "empty", nil)
+			var tge *TextGenError
+			if !errors.As(err, &tge) {
+				t.Fatalf("err = %v; want *TextGenError", err)
+			}
+			if tge.Message != tc.want {
+				t.Errorf("Message = %q; want %q", tge.Message, tc.want)
+			}
+		})
+	}
+}
+
 func TestTextGenError_ErrorIncludesKindAndMessage(t *testing.T) {
 	t.Parallel()
 	e := &TextGenError{Kind: TextGenErrorAuth, Provider: AgentNameClaudeCode, Message: "Invalid API key"}
@@ -86,7 +172,31 @@ func TestClassifyStderrHTTPStatus(t *testing.T) {
 		{"byte count containing 400 is NOT config", "wrote 14000 bytes then stalled", TextGenErrorUnknown},
 		{"id containing 404 is NOT config", "trace-id=404a9f", TextGenErrorUnknown},
 		{"timestamp minute containing 401 is NOT auth", "2026-04-21T14:01:23Z connection reset", TextGenErrorUnknown},
-		{"leftmost 4xx wins when multiple codes appear", "HTTP 401 Unauthorized; retry window 429", TextGenErrorAuth},
+		{"first RECOGNIZED code wins", "HTTP 401 Unauthorized; retry window 429", TextGenErrorAuth},
+
+		// Second round of PR #1005 review guards. Word boundaries alone were
+		// NOT sufficient: ':' and '.' are themselves non-word characters, so
+		// `\b4\d{2}\b` matched stack frames, decimals and bare counts. Gemini,
+		// Copilot and Cursor are Node CLIs whose crash output is
+		// "file.js:LINE:COL", so this was the common case, not an edge case.
+		// Classification now requires an actual HTTP-status context.
+		{"node stack frame line:col is NOT auth", "at Socket.emit (node:events:401:20)", TextGenErrorUnknown},
+		{"js bundle frame is NOT rate_limit", "at Object.<anonymous> (/x/dist/index.js:429:15)", TextGenErrorUnknown},
+		{"go panic source line is NOT config", "panic: index out of range\n\tmain.go:404 +0x1f", TextGenErrorUnknown},
+		{"decimal fraction is NOT auth", "request took 2.403 seconds", TextGenErrorUnknown},
+		{"decimal fraction with unit is NOT rate_limit", "completed in 0.429 s", TextGenErrorUnknown},
+		{"bare delimited count is NOT config", "v1.2 build 404 finished", TextGenErrorUnknown},
+		{"log line number is NOT rate_limit", "parse failed at line 429", TextGenErrorUnknown},
+
+		// An unrecognized leading 4xx must not consume the scan and mask a
+		// later recognized one.
+		{"unmapped leading 413 does not mask a later 401", "HTTP 413 Payload Too Large\nHTTP 401 Unauthorized", TextGenErrorAuth},
+
+		// Keyword-prefixed and reason-phrase forms must still classify.
+		{"status= form", "status=403 returned by upstream", TextGenErrorAuth},
+		{"status colon form", "status: 429", TextGenErrorRateLimit},
+		{"HTTP/1.1 form", "HTTP/1.1 400 Bad Request", TextGenErrorConfig},
+		{"reason phrase without keyword", "429 Too Many Requests", TextGenErrorRateLimit},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

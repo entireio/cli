@@ -1,8 +1,6 @@
 package claudecode
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -17,29 +15,37 @@ import (
 //   - nil: no envelope to classify. Reached when stdout is empty (subprocess
 //     produced no output — e.g. CLIMissing or SIGKILL before any writes), when
 //     the envelope parsed cleanly with is_error:false (success path), or when
-//     stdout was partial non-JSON AND runErr is a ctx sentinel (so the caller
-//     can surface the ctx sentinel unwrapped).
+//     stdout was non-JSON AND runErr is non-nil (so the caller can classify
+//     the run error — a ctx sentinel, or stderr, whichever applies).
 //   - non-nil: structured failure — either an is_error:true envelope
 //     classified by api_error_status / auth-phrase heuristic, or a malformed-
-//     JSON case (stdout non-empty but unparseable, runErr not a ctx sentinel).
+//     JSON case on an otherwise successful run (stdout non-empty but
+//     unparseable while runErr is nil).
 //
-// runErr is consulted only to suppress parse-failure classification when the
-// subprocess was cancelled mid-write. A complete is_error envelope still wins
-// over a ctx sentinel — that is 963's intentional ordering: if Claude managed
-// to emit a structured diagnostic, that is more actionable than "cancelled".
+// runErr is consulted to suppress parse-failure classification whenever the
+// subprocess also failed, because in that case the run error is strictly more
+// informative than "the bytes on stdout were not JSON":
+//   - ctx sentinel  → caller surfaces "canceled"/"timed out" unwrapped.
+//   - any other err → caller classifies stderr, so a genuine "401
+//     Unauthorized" on stderr is reported as an auth failure instead of being
+//     masked by a JSON-parse complaint. (Claude can emit a node warning or a
+//     progress line on stdout and still fail with a real error on stderr.)
+//
+// A complete is_error envelope still wins over a ctx sentinel — that is 963's
+// intentional ordering: if Claude managed to emit a structured diagnostic,
+// that is more actionable than "cancelled".
 func classifyClaudeEnvelope(stdout []byte, runErr error) *agent.TextGenError {
 	if len(stdout) == 0 {
 		return nil
 	}
 	result, envelope, parseErr := parseGenerateTextResponse(stdout)
 	if parseErr != nil {
-		// Partial stdout from a cancelled subprocess: defer to the ctx
-		// sentinel path so the user sees "canceled" instead of "failed to
-		// parse claude CLI response". A complete is_error envelope below
-		// would still preempt ctx (that is the success of this function,
-		// not its failure).
-		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
-			return nil
+		// The run itself failed: defer to the caller's runErr handling (ctx
+		// sentinel, or stderr classification). A complete is_error envelope
+		// below would still preempt ctx (that is the success of this
+		// function, not its failure).
+		if runErr != nil {
+			return nil //nolint:nilerr // deliberate: parseErr is less informative than runErr, whose stderr the caller classifies
 		}
 		return &agent.TextGenError{
 			Kind:     agent.TextGenErrorUnknown,
