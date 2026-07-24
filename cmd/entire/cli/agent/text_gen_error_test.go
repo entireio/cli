@@ -108,6 +108,30 @@ func TestTextGenError_ErrorIncludesKindAndMessage(t *testing.T) {
 	}
 }
 
+// TestTextGenError_ErrorFallsBackToCause pins the CLIMissing message for the
+// consumers that print Error() directly (dispatch, review synthesis, runner
+// setup) instead of going through renderTextGenError. Those constructions set
+// no Message, so without the Cause fallback the user sees only
+// "codex CLI error (kind=cli_missing)" — jargon that names no binary. For
+// Cursor this is also the only place the real binary name (`agent`) appears.
+func TestTextGenError_ErrorFallsBackToCause(t *testing.T) {
+	t.Parallel()
+	cause := &exec.Error{Name: "codex", Err: exec.ErrNotFound}
+	e := &TextGenError{Kind: TextGenErrorCLIMissing, Provider: AgentNameCodex, Cause: cause}
+	got := e.Error()
+	if !strings.Contains(got, "executable file not found") {
+		t.Errorf("Error() = %q; want the cause's actionable text", got)
+	}
+	if !strings.Contains(got, "codex") {
+		t.Errorf("Error() = %q; want the binary name to appear", got)
+	}
+	// Message still wins when present — the cause must not be appended twice.
+	withMsg := &TextGenError{Kind: TextGenErrorAuth, Provider: AgentNameCodex, Message: "401 Unauthorized", Cause: cause}
+	if strings.Contains(withMsg.Error(), "executable file not found") {
+		t.Errorf("Error() = %q; Message must take precedence over Cause", withMsg.Error())
+	}
+}
+
 func TestTextGenError_UnwrapReturnsCause(t *testing.T) {
 	t.Parallel()
 	cause := errors.New("underlying")

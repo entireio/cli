@@ -34,7 +34,17 @@ const (
 )
 
 // TextGenError is the shared typed error every summary provider's GenerateText
-// returns on failure. APIStatus and ExitCode use 0 for "not applicable".
+// returns on failure, except context cancellation/deadline, which pass through
+// as bare sentinels (wrapped for evidence — see HandleTextGenResult).
+//
+// APIStatus is 0 when no HTTP status was observed (there is no HTTP 0).
+// ExitCode is 0 both when the subprocess genuinely exited 0 — Claude's primary
+// failure mode is exit 0 with is_error:true — and when no exit code was
+// captured; the two are not distinguished because no consumer needs to.
+//
+// Message is user-facing: it is rendered verbatim by the explain layer, and is
+// populated from third-party CLI stderr, so it must stay whitespace-trimmed,
+// length-capped and valid UTF-8 (see TruncateStderr).
 type TextGenError struct {
 	Kind      TextGenErrorKind
 	Provider  types.AgentName
@@ -44,14 +54,30 @@ type TextGenError struct {
 	Cause     error
 }
 
+// Error renders the error for consumers that print it directly rather than
+// going through the explain layer's renderTextGenError — `entire dispatch`,
+// `entire review`'s synthesis sink, and runner setup. Those surfaces have no
+// access to the (unexported, package cli) renderer, so this string is what
+// their users actually see.
+//
+// Cause is included when Message is empty, which is the CLIMissing shape:
+// those constructions deliberately set no Message, so without this the user
+// would get only "codex CLI error (kind=cli_missing)" — internal jargon that
+// names no binary. Falling back to Cause restores the actionable text
+// (`exec: "codex": executable file not found in $PATH`), and for Cursor it is
+// the only place the real binary name (`agent`, not `cursor`) appears.
 func (e *TextGenError) Error() string {
-	if e.Message == "" {
+	detail := e.Message
+	if detail == "" && e.Cause != nil {
+		detail = e.Cause.Error()
+	}
+	if detail == "" {
 		if e.ExitCode != 0 {
 			return fmt.Sprintf("%s CLI error (kind=%s, exit=%d)", e.Provider, e.Kind, e.ExitCode)
 		}
 		return fmt.Sprintf("%s CLI error (kind=%s)", e.Provider, e.Kind)
 	}
-	return fmt.Sprintf("%s CLI error (kind=%s): %s", e.Provider, e.Kind, e.Message)
+	return fmt.Sprintf("%s CLI error (kind=%s): %s", e.Provider, e.Kind, detail)
 }
 
 func (e *TextGenError) Unwrap() error { return e.Cause }
