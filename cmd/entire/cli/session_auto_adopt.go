@@ -32,6 +32,12 @@ const (
 	autoAdoptDiscoveryTimeout   = 2 * time.Second
 	autoAdoptGitResolveTimeout  = 500 * time.Millisecond
 	autoAdoptStagedFilesTimeout = 1 * time.Second
+	// autoAdoptAdoptTimeout bounds adoptFromExternalSessionStore, which takes
+	// a cross-process session-state flock (strategy.WithSessionStateLocks).
+	// Without a deadline, a lock held by another process (or a hung
+	// concurrent hook) could block git commit indefinitely — the same
+	// failure mode the timeouts above already guard against for discovery.
+	autoAdoptAdoptTimeout = 2 * time.Second
 )
 
 // prepareCommitMsgSourceAmend is git's prepare-commit-msg source for `git commit --amend`.
@@ -132,8 +138,9 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 		slog.String("to_worktree", targetWorktree),
 	)
 
+	adoptCtx, adoptCancel := context.WithTimeout(ctx, autoAdoptAdoptTimeout)
 	_, _, adoptErr := adoptFromExternalSessionStore(
-		ctx,
+		adoptCtx,
 		source.Store,
 		source.WorktreePath,
 		source.CommonDir,
@@ -142,6 +149,7 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 		source.SessionID,
 		adoptOptions{Force: true, SkipTranscriptValidation: true},
 	)
+	adoptCancel()
 	if adoptErr != nil {
 		logging.Debug(logCtx, "auto-adopt: adopt failed",
 			slog.String("session_id", source.SessionID),
