@@ -18,16 +18,18 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
-// maxSiblingAutoAdoptScan caps how many sibling directories prepare-commit-msg will
-// inspect when the live-session registry has no unique candidate. Keeps the
-// hook bounded on large parent directories.
-const maxSiblingAutoAdoptScan = 32
-
-// Time bounds for prepare-commit-msg auto-adopt. Sibling git rev-parse calls
-// use CommandContext; without a deadline a hung network mount could block
-// `git commit` indefinitely.
+// Caps how many worktrees prepare-commit-msg will resolve via git when hunting
+// auto-adopt candidates (registry entries or sibling dirs).
 const (
-	autoAdoptSiblingScanTimeout = 2 * time.Second
+	maxSiblingAutoAdoptScan  = 32
+	maxRegistryAutoAdoptScan = 32
+)
+
+// Time bounds for prepare-commit-msg auto-adopt. Git rev-parse calls use
+// CommandContext; without a deadline a hung/stale worktree path (registry or
+// sibling) could block `git commit` indefinitely.
+const (
+	autoAdoptDiscoveryTimeout   = 2 * time.Second
 	autoAdoptGitResolveTimeout  = 500 * time.Millisecond
 	autoAdoptStagedFilesTimeout = 1 * time.Second
 )
@@ -75,7 +77,9 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 	if err != nil || targetWorktree == "" {
 		return
 	}
-	targetStore, _, targetCommonDir, err := stateStoreForWorktree(ctx, targetWorktree)
+	targetCtx, targetCancel := context.WithTimeout(ctx, autoAdoptGitResolveTimeout)
+	targetStore, _, targetCommonDir, err := stateStoreForWorktree(targetCtx, targetWorktree)
+	targetCancel()
 	if err != nil {
 		return
 	}
@@ -99,9 +103,11 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 		return
 	}
 
-	candidates := collectRegistryAutoAdoptCandidates(ctx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
+	regCtx, regCancel := context.WithTimeout(ctx, autoAdoptDiscoveryTimeout)
+	candidates := collectRegistryAutoAdoptCandidates(regCtx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
+	regCancel()
 	if len(candidates) == 0 {
-		scanCtx, scanCancel := context.WithTimeout(ctx, autoAdoptSiblingScanTimeout)
+		scanCtx, scanCancel := context.WithTimeout(ctx, autoAdoptDiscoveryTimeout)
 		candidates = collectSiblingAutoAdoptCandidates(scanCtx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
 		scanCancel()
 	}
@@ -179,7 +185,11 @@ func collectRegistryAutoAdoptCandidates(
 	}
 
 	var out []autoAdoptCandidate
+	resolved := 0
 	for _, entry := range entries {
+		if ctx.Err() != nil || resolved >= maxRegistryAutoAdoptScan {
+			break
+		}
 		if sameAdoptStore(entry.CommonDir, targetCommonDir) {
 			continue
 		}
@@ -191,7 +201,10 @@ func collectRegistryAutoAdoptCandidates(
 		if !autoAdoptSiblingProximity(entry.WorktreePath, targetWorktree) {
 			continue
 		}
-		cand, ok := candidateFromSource(ctx, entry.WorktreePath, entry.SessionID, staged, owner, hasOwner)
+		resolved++
+		resolveCtx, resolveCancel := context.WithTimeout(ctx, autoAdoptGitResolveTimeout)
+		cand, ok := candidateFromSource(resolveCtx, entry.WorktreePath, entry.SessionID, staged, owner, hasOwner)
+		resolveCancel()
 		if ok {
 			out = append(out, cand)
 		}
@@ -218,7 +231,7 @@ func collectSiblingAutoAdoptCandidates(
 	var out []autoAdoptCandidate
 	scanned := 0
 	for _, entry := range entries {
-		if scanned >= maxSiblingAutoAdoptScan {
+		if ctx.Err() != nil || scanned >= maxSiblingAutoAdoptScan {
 			break
 		}
 		if !entry.IsDir() {
