@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
+	"time"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -15,6 +17,17 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
+
+// ListHydrationTimeout is the per-ref budget for hydrating names-only List stubs
+// during user-facing enumeration (after the display-limit truncate). Shorter than
+// the default on-demand fetch budget so a stuck remote cannot turn list/explain
+// into many minutes of sequential ref fetches.
+const ListHydrationTimeout = 15 * time.Second
+
+// ListHydrationPassTimeout bounds the entire List/explain stub-hydration pass.
+// Without this, a slow remote can burn stub_count * ListHydrationTimeout
+// (limit defaults to 100 and is user-settable via --limit).
+const ListHydrationPassTimeout = 30 * time.Second
 
 var (
 	_ PersistentStore = (*gitRefsStore)(nil)
@@ -32,8 +45,9 @@ var (
 type gitRefsStore struct {
 	*treeWriter
 
-	blobFetcher BlobFetchFunc
-	refFetcher  RefFetchFunc
+	blobFetcher     BlobFetchFunc
+	refFetcher      RefFetchFunc
+	remoteRefLister RemoteRefListFunc
 }
 
 // newGitRefsStore constructs the per-checkpoint-ref store for a repository.
@@ -50,6 +64,38 @@ func (s *gitRefsStore) SetBlobFetcher(f BlobFetchFunc) {
 // a checkpoint written on another machine). nil leaves reads local-only.
 func (s *gitRefsStore) SetRefFetcher(f RefFetchFunc) {
 	s.refFetcher = f
+}
+
+// SetRemoteRefLister configures remote checkpoint-ref enumeration for List (see
+// RemoteRefListFunc). It only takes effect when List is called on a context
+// marked by WithRemoteListDiscovery, so the per-turn hook hot path — which
+// lists local refs without opting in — never triggers a network round trip. nil
+// leaves List local-only.
+func (s *gitRefsStore) SetRemoteRefLister(f RemoteRefListFunc) {
+	s.remoteRefLister = f
+}
+
+// remoteListDiscoveryKey marks a context as permitting List to enumerate the
+// checkpoint remote. It is an unexported key type so only this package can set
+// or read the marker.
+type remoteListDiscoveryKey struct{}
+
+// WithRemoteListDiscovery marks ctx to allow gitRefsStore.List to enumerate
+// checkpoint refs on the configured checkpoint remote (see RemoteRefListFunc)
+// and surface not-yet-local checkpoints. Set it only on explicit, user-facing
+// enumeration flows (e.g. `entire checkpoint list` / the branch `explain`
+// view), never on the per-turn commit hook: routine local listings must stay
+// network-free. Without this marker List is local-only regardless of whether a
+// remote lister is configured.
+func WithRemoteListDiscovery(ctx context.Context) context.Context {
+	return context.WithValue(ctx, remoteListDiscoveryKey{}, true)
+}
+
+// remoteListDiscoveryEnabled reports whether ctx was marked via
+// WithRemoteListDiscovery.
+func remoteListDiscoveryEnabled(ctx context.Context) bool {
+	v, ok := ctx.Value(remoteListDiscoveryKey{}).(bool)
+	return ok && v
 }
 
 // Write dispatches a persistent write request to the matching ref operation,
@@ -357,8 +403,17 @@ func (s *gitRefsStore) ReadSessionContent(ctx context.Context, checkpointID id.C
 }
 
 // List enumerates local checkpoint refs and reads each root summary, sorted most
-// recent first. Storage-level listing is local-refs-only for now (no remote
-// enumeration), matching the issue's first-version scope.
+// recent first.
+//
+// When the context opts in (WithRemoteListDiscovery) and a remote ref lister is
+// configured, it additionally discovers checkpoints that exist on the
+// checkpoint remote but have no local ref yet — the "second device sees zero
+// checkpoints" case. Discovery is names-only (an ls-remote of
+// refs/entire/checkpoints/*, no object transfer): each remote-only checkpoint is
+// listed from its ref name alone and hydrated lazily on a later read via the
+// on-demand ref fetch. Remote enumeration is best-effort and additive — a
+// failure logs and leaves the local results intact rather than failing the
+// whole listing.
 func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err //nolint:wrapcheck // Propagating context cancellation
@@ -371,6 +426,7 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 	defer refs.Close()
 
 	var checkpoints []CheckpointInfo
+	seen := make(map[id.CheckpointID]struct{})
 	err = refs.ForEach(func(ref *plumbing.Reference) error {
 		cid, ok := ParseRef(ref.Name())
 		if !ok {
@@ -385,14 +441,153 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 			return nil //nolint:nilerr // skip unreadable refs, keep listing
 		}
 		checkpoints = append(checkpoints, readCommittedInfoFromCheckpointTree(cid, tree))
+		seen[cid] = struct{}{}
 		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("iterate checkpoint refs: %w", err)
 	}
 
+	if s.remoteRefLister != nil && remoteListDiscoveryEnabled(ctx) {
+		checkpoints = s.appendRemoteDiscovered(ctx, checkpoints, seen)
+	}
+
 	sortCheckpointInfosByRecency(checkpoints)
 	return checkpoints, nil
+}
+
+// appendRemoteDiscovered enumerates checkpoint refs on the configured checkpoint
+// remote and appends any that are not present locally (tracked in seen) as
+// not-yet-hydrated CheckpointInfos. It never fetches objects: the ref name
+// yields the checkpoint ID, and a ULID ID yields its creation time, so a
+// discovered checkpoint sorts and displays correctly before its first read
+// hydrates the rest. Best-effort: an enumeration failure logs, warns on stderr,
+// and returns the unchanged local list.
+func (s *gitRefsStore) appendRemoteDiscovered(ctx context.Context, checkpoints []CheckpointInfo, seen map[id.CheckpointID]struct{}) []CheckpointInfo {
+	remoteRefs, err := s.remoteRefLister(ctx)
+	if err != nil {
+		logging.Warn(ctx, "git-refs: remote checkpoint enumeration failed; listing local refs only",
+			slog.String("error", err.Error()))
+		// Match WarnIfMetadataDisconnected: opted-in discovery failing must be
+		// visible on stderr — logging.Warn alone lands only in .entire/logs/.
+		fmt.Fprintln(os.Stderr, "[entire] Warning: could not reach checkpoint remote; showing local checkpoints only.")
+		return checkpoints
+	}
+	for _, refName := range remoteRefs {
+		cid, ok := ParseRef(refName)
+		if !ok {
+			continue
+		}
+		if _, dup := seen[cid]; dup {
+			continue
+		}
+		seen[cid] = struct{}{}
+		checkpoints = append(checkpoints, remoteDiscoveredInfo(cid))
+	}
+	return checkpoints
+}
+
+// remoteDiscoveredInfo builds the minimal CheckpointInfo for a checkpoint known
+// only by its remote ref name. Its contents are not fetched here (that happens
+// lazily on read); CreatedAt is recovered from the ULID timestamp so the entry
+// sorts by real creation time, and is left zero for a (rare) legacy-hex ref.
+// ListedStub marks the entry so hydration can distinguish it from a local ref
+// whose root metadata was unreadable (same zero SessionID/SessionCount shape).
+func remoteDiscoveredInfo(cid id.CheckpointID) CheckpointInfo {
+	info := CheckpointInfo{CheckpointID: cid, ListedStub: true}
+	if createdAt, ok := cid.Time(); ok {
+		info.CreatedAt = createdAt
+	}
+	return info
+}
+
+// listedCheckpointNeedsHydration reports whether info is a names-only List stub
+// that still needs a hydrate attempt. It keys off ListedStub (set by
+// remoteDiscoveredInfo), not SessionID/SessionCount zero-ness: a local ref whose
+// root metadata.json is missing/unreadable has the same zero fields but must not
+// be treated as a stub (hydration can never fix it and would re-fetch forever).
+// Callers that need session identity for filtering or display should
+// HydrateListedCheckpointInfo first.
+func listedCheckpointNeedsHydration(info CheckpointInfo) bool {
+	return info.ListedStub && !info.CheckpointID.IsEmpty()
+}
+
+// HydrateListedCheckpointInfo fills SessionID/Agent/etc for a List entry that
+// was discovered by name only. It reads the checkpoint (triggering an on-demand
+// ref fetch when configured) and mirrors the fields List populates for local
+// refs via readCommittedInfoFromCheckpointTree, with one deliberate CreatedAt
+// divergence: the local List path assigns info.CreatedAt = meta.CreatedAt
+// unconditionally, while hydration only overwrites when meta.CreatedAt is
+// non-zero (keeping the ULID-derived time from remoteDiscoveredInfo).
+//
+// Best-effort / fail-once: on Read or last-session metadata failure it logs Warn,
+// clears ListedStub so callers do not re-fetch, and returns the original stub
+// fields (never a half-hydrated SessionCount-without-SessionID that would poison
+// a committedByID cache and still look "done").
+func HydrateListedCheckpointInfo(ctx context.Context, store interface {
+	Read(ctx context.Context, checkpointID id.CheckpointID) (*CheckpointSummary, error)
+	ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*Metadata, error)
+}, info CheckpointInfo) CheckpointInfo {
+	if !listedCheckpointNeedsHydration(info) {
+		return info
+	}
+	summary, err := store.Read(ctx, info.CheckpointID)
+	if err != nil || summary == nil {
+		logging.Warn(ctx, "git-refs: failed to hydrate remote-discovered checkpoint; leaving stub without session metadata",
+			slog.String("checkpoint_id", info.CheckpointID.String()),
+			slog.String("error", errString(err)))
+		info.ListedStub = false // fail-once: do not re-fetch on every list
+		return info
+	}
+
+	out := info
+	out.ListedStub = false
+	out.CheckpointsCount = summary.CheckpointsCount
+	out.FilesTouched = summary.FilesTouched
+	out.SessionCount = len(summary.Sessions)
+	out.Imported = summary.Imported
+	out.SessionIDs = nil
+	lastMetaOK := len(summary.Sessions) == 0
+	for i := range summary.Sessions {
+		meta, metaErr := store.ReadSessionMetadata(ctx, info.CheckpointID, i)
+		if metaErr != nil || meta == nil {
+			logging.Warn(ctx, "git-refs: failed to read session metadata while hydrating remote-discovered checkpoint",
+				slog.String("checkpoint_id", info.CheckpointID.String()),
+				slog.Int("session_index", i),
+				slog.String("error", errString(metaErr)))
+			continue
+		}
+		if meta.SessionID != "" {
+			out.SessionIDs = append(out.SessionIDs, meta.SessionID)
+		}
+		if i == len(summary.Sessions)-1 {
+			out.Agent = meta.Agent
+			out.SessionID = meta.SessionID
+			if !meta.CreatedAt.IsZero() {
+				out.CreatedAt = meta.CreatedAt
+			}
+			out.IsTask = meta.IsTask
+			out.ToolUseID = meta.ToolUseID
+			lastMetaOK = true
+		}
+	}
+	if !lastMetaOK {
+		// Avoid caching SessionCount>0 with empty SessionID: that shape no longer
+		// needs hydration under the old zero-field heuristic and would poison
+		// committedByID / --session filters. Fail-once on the original stub.
+		logging.Warn(ctx, "git-refs: remote-discovered checkpoint hydration incomplete; leaving stub without session metadata",
+			slog.String("checkpoint_id", info.CheckpointID.String()))
+		info.ListedStub = false
+		return info
+	}
+	return out
+}
+
+func errString(err error) string {
+	if err == nil {
+		return "nil result"
+	}
+	return err.Error()
 }
 
 // GetCheckpointAuthor returns the author of the checkpoint ref's tip commit (the

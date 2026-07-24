@@ -1479,7 +1479,12 @@ func (s *ManualCommitStrategy) postCommitUpdateBaseCommitOnly(ctx context.Contex
 		return // Silent failure — hooks must be resilient
 	}
 
-	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
+	// Exact matches only: this path rewrites BaseCommit, which must track the
+	// HEAD of the session's own worktree. A trailer-less commit here says
+	// nothing about HEAD movement in a sibling worktree, and rewriting a
+	// fallback-matched session's base would orphan its shadow branch
+	// (shadow branches are keyed by BaseCommit + WorktreeID).
+	sessions, err := s.findExactSessionsForWorktree(ctx, worktreePath)
 	if err != nil || len(sessions) == 0 {
 		return
 	}

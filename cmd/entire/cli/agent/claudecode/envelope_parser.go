@@ -56,9 +56,35 @@ func classifyClaudeEnvelope(stdout []byte, runErr error) *agent.TextGenError {
 	if envelope == nil || !envelope.IsError {
 		return nil
 	}
+	return classifyEnvelopeFields(result, envelope.APIErrorStatus)
+}
+
+var envelopeAuthPhrases = []string{"invalid api key", "not logged in"}
+
+func containsAuthPhrase(s string) bool {
+	lower := strings.ToLower(s)
+	for _, p := range envelopeAuthPhrases {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyEnvelopeFields maps an is_error result envelope's fields to a typed
+// *agent.TextGenError. Shared by both Claude code paths so they cannot drift:
+// the non-streaming path reaches it via classifyClaudeEnvelope, the streaming
+// path via envelopeErrorMessage. Without a single implementation, users lose
+// the specific remediation hints on whichever path forgot to classify.
+//
+// APIStatus is 0 when the envelope carried no api_error_status (there is no
+// HTTP 0). ExitCode is left unset: envelope errors arrive on stdout while the
+// CLI itself exits 0, and the non-streaming caller stamps the real exit code
+// afterwards when there was one.
+func classifyEnvelopeFields(result string, apiErrorStatus *int) *agent.TextGenError {
 	apiStatus := 0
-	if envelope.APIErrorStatus != nil {
-		apiStatus = *envelope.APIErrorStatus
+	if apiErrorStatus != nil {
+		apiStatus = *apiErrorStatus
 	}
 	e := &agent.TextGenError{
 		Provider:  agent.AgentNameClaudeCode,
@@ -75,22 +101,10 @@ func classifyClaudeEnvelope(stdout []byte, runErr error) *agent.TextGenError {
 	case apiStatus == 0 && containsAuthPhrase(result):
 		// Last-resort heuristic for envelopes that carry is_error:true
 		// without a structured api_error_status. Small, evidence-based list
-		// from 963.
+		// from #963.
 		e.Kind = agent.TextGenErrorAuth
 	default:
 		e.Kind = agent.TextGenErrorUnknown
 	}
 	return e
-}
-
-var envelopeAuthPhrases = []string{"invalid api key", "not logged in"}
-
-func containsAuthPhrase(s string) bool {
-	lower := strings.ToLower(s)
-	for _, p := range envelopeAuthPhrases {
-		if strings.Contains(lower, p) {
-			return true
-		}
-	}
-	return false
 }

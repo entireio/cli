@@ -221,6 +221,7 @@ func runSelectedImports(ctx context.Context, w io.Writer, repoRoot string, selec
 	// import_cmd.go; without it only always-on secret scanning would run.
 	strategy.EnsureRedactionConfigured()
 
+	var importedLocalHistory bool
 	for _, e := range selected {
 		res, err := agentimport.Run(ctx, repo, e.imp, agentimport.Options{
 			RepoRoot: repoRoot,
@@ -231,9 +232,15 @@ func runSelectedImports(ctx context.Context, w io.Writer, repoRoot string, selec
 			fmt.Fprintf(w, "Note: could not import %s history: %v\n", e.displayName, err)
 			continue
 		}
+		if res.TurnsImported > 0 || res.TurnsSkipped > 0 {
+			importedLocalHistory = true
+		}
 		fmt.Fprintf(w, "Imported %d turn(s) from %d session(s) (%d already imported).\n",
 			res.TurnsImported, res.SessionsScanned, res.TurnsSkipped)
 	}
+	// Enable often runs before the user has logged in; surface once that a
+	// logged-out import stays local and won't reach the dashboard (issue #1773).
+	warnIfImportNotSynced(w, importedLocalHistory)
 }
 
 // pluralSessions renders a session count with correct pluralization.

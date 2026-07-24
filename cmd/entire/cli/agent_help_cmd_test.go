@@ -384,6 +384,38 @@ func TestRenderAgentHelpCommand_ShowsFlagsAndSubcommands(t *testing.T) {
 	}
 }
 
+// A command's Example field must reach agents in both output modes: agent-help
+// is the only surface agents read, and an example is what removes arg-format
+// guesswork (e.g. <file>:<line>).
+func TestRenderAgentHelpCommand_RendersExample(t *testing.T) {
+	t.Parallel()
+
+	cmd := &cobra.Command{
+		Use:     "why <file>[:line]",
+		Short:   "Show why a line exists",
+		Example: "  entire why src/auth.go:42 --json",
+	}
+
+	text := renderAgentHelpCommand(cmd, agentHelpTestRepo, true)
+	if !strings.Contains(text, "Examples:") || !strings.Contains(text, "entire why src/auth.go:42 --json") {
+		t.Fatalf("text agent-help must render the example:\n%s", text)
+	}
+
+	root := &cobra.Command{Use: "entire"}
+	root.AddCommand(cmd)
+	jsonOut, err := renderAgentHelpJSON(root, cmd, agentHelpTestRepo, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc agentHelpJSON
+	if err := json.Unmarshal([]byte(jsonOut), &doc); err != nil {
+		t.Fatalf("json agent-help must parse: %v\n%s", err, jsonOut)
+	}
+	if doc.Example != "entire why src/auth.go:42 --json" {
+		t.Fatalf("json agent-help must carry the trimmed example, got %q", doc.Example)
+	}
+}
+
 // The top-level rendering lists the live command map (including the revealed
 // trail command), states the auto-detected repo, and carries the standing rule.
 func TestRenderAgentHelpTop_ListsCommandsRepoAndRule(t *testing.T) {

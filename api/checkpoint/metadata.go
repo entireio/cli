@@ -37,6 +37,16 @@ type WriteOptions struct {
 	// Branch is the branch name where the checkpoint was created (empty if detached HEAD)
 	Branch string
 
+	// CommitSHA links this checkpoint to an existing commit without a trailer.
+	// It is an anchor — "imported at this point in time" — not attribution.
+	// Currently set only by `entire import`: imported history has no
+	// Entire-Checkpoint trailer (we never rewrite existing commits), so import
+	// stamps the resolved anchor commit here (the default branch head when
+	// resolvable; see resolveImportLinkCommitSHA for the fallback order).
+	// Empty for all other writers. This comment is the canonical description;
+	// Metadata.CommitSHA and CheckpointSummary.CommitSHA point back here.
+	CommitSHA string
+
 	// Transcript is the session transcript content (full.jsonl).
 	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
 	Transcript redact.RedactedBytes
@@ -293,6 +303,14 @@ type CheckpointInfo struct {
 	// Imported is true when this checkpoint was imported from pre-existing
 	// agent history (Kind == "imported"): read-only and commit-less.
 	Imported bool
+
+	// ListedStub is true for names-only remote-discovery List entries that still
+	// need hydration (or have not yet failed a hydration attempt). It is cleared
+	// after a successful hydrate and also after a failed attempt (fail-once), so
+	// callers do not re-fetch forever. A local ref whose root metadata was
+	// unreadable has the same zero SessionID/SessionCount shape but ListedStub
+	// false — do not treat field zero-ness alone as stub-ness.
+	ListedStub bool `json:"-"`
 }
 
 // SessionContent contains the actual content for a session.
@@ -316,13 +334,17 @@ type SessionContent struct {
 
 // Metadata contains the metadata stored in metadata.json for each checkpoint.
 type Metadata struct {
-	CLIVersion       string          `json:"cli_version,omitempty"`
-	CheckpointID     id.CheckpointID `json:"checkpoint_id"`
-	SessionID        string          `json:"session_id"`
-	Strategy         string          `json:"strategy"`
-	CreatedAt        time.Time       `json:"created_at"`
-	Branch           string          `json:"branch,omitempty"` // Branch where checkpoint was created (empty if detached HEAD)
-	CheckpointsCount int             `json:"checkpoints_count"`
+	CLIVersion   string          `json:"cli_version,omitempty"`
+	CheckpointID id.CheckpointID `json:"checkpoint_id"`
+	SessionID    string          `json:"session_id"`
+	Strategy     string          `json:"strategy"`
+	CreatedAt    time.Time       `json:"created_at"`
+	Branch       string          `json:"branch,omitempty"` // Branch where checkpoint was created (empty if detached HEAD)
+	// CommitSHA anchors an imported checkpoint to an existing commit; empty for
+	// non-imported checkpoints, which link via the Entire-Checkpoint trailer.
+	// See WriteOptions.CommitSHA for the full semantics.
+	CommitSHA        string `json:"commit_sha,omitempty"`
+	CheckpointsCount int    `json:"checkpoints_count"`
 	// SaveStepCount is the number of SaveStep-recorded steps for this session.
 	// Honest "real checkpoint work happened" signal (0 = commit-only/fallback
 	// session), kept separate from the displayed CheckpointsCount prompt count.
@@ -474,10 +496,12 @@ type SessionFilePaths struct {
 //
 //nolint:revive // Named CheckpointSummary to avoid conflict with existing Summary struct
 type CheckpointSummary struct {
-	CLIVersion          string             `json:"cli_version,omitempty"`
-	CheckpointID        id.CheckpointID    `json:"checkpoint_id"`
-	Strategy            string             `json:"strategy"`
-	Branch              string             `json:"branch,omitempty"`
+	CLIVersion   string          `json:"cli_version,omitempty"`
+	CheckpointID id.CheckpointID `json:"checkpoint_id"`
+	Strategy     string          `json:"strategy"`
+	Branch       string          `json:"branch,omitempty"`
+	// CommitSHA: import-only anchor; see WriteOptions.CommitSHA.
+	CommitSHA           string             `json:"commit_sha,omitempty"`
 	CheckpointsCount    int                `json:"checkpoints_count"`
 	FilesTouched        []string           `json:"files_touched"`
 	Sessions            []SessionFilePaths `json:"sessions"`

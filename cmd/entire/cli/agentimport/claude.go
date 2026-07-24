@@ -57,11 +57,12 @@ func (claudeImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
 				return nil, nil
 			}
 			return &Turn{
-				UUID:      rec.UUID,
-				Prompt:    transcript.ExtractUserContent(rec.Message),
-				Model:     modelInRange(rawLines, start, end),
-				CreatedAt: parseTimestamp(rec.Timestamp),
-				Tokens:    tokens,
+				UUID:       rec.UUID,
+				Prompt:     transcript.ExtractUserContent(rec.Message),
+				Model:      modelInRange(rawLines, start, end),
+				CreatedAt:  parseTimestamp(rec.Timestamp),
+				Tokens:     tokens,
+				CommitSHAs: commitSHAsInRange(rawLines, start, end),
 			}, nil
 		})
 }
@@ -96,6 +97,35 @@ func modelInRange(rawLines [][]byte, start, end int) string {
 		}
 	}
 	return ""
+}
+
+// commitSHAsInRange returns the commit SHAs recorded by gitOperation
+// tool-result records within [start, end), in order. Only kind "committed"
+// is collected — other kinds (or commit-less gitOperation records like
+// push/branch/pr) are ignored. SHAs may be abbreviated; resolution happens
+// in Run.
+func commitSHAsInRange(rawLines [][]byte, start, end int) []string {
+	var shas []string
+	for i := start; i < end && i < len(rawLines); i++ {
+		var rec struct {
+			ToolUseResult struct {
+				GitOperation struct {
+					Commit struct {
+						SHA  string `json:"sha"`
+						Kind string `json:"kind"`
+					} `json:"commit"`
+				} `json:"gitOperation"`
+			} `json:"toolUseResult"`
+		}
+		if err := json.Unmarshal(rawLines[i], &rec); err != nil {
+			continue
+		}
+		c := rec.ToolUseResult.GitOperation.Commit
+		if c.SHA != "" && c.Kind == "committed" {
+			shas = append(shas, c.SHA)
+		}
+	}
+	return shas
 }
 
 // isUserPromptLine reports whether a raw JSONL line is a genuine user-prompt

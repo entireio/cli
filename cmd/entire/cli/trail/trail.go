@@ -73,6 +73,54 @@ type Reviewer struct {
 	Status ReviewerStatus `json:"status"`
 }
 
+// Type represents the category of a trail. Mirrors VALID_TRAIL_TYPES server-side.
+type Type string
+
+const (
+	TypeBug     Type = "bug"
+	TypeFeature Type = "feature"
+	TypeTask    Type = "task"
+)
+
+// ValidTypes returns all valid trail types.
+func ValidTypes() []Type { return []Type{TypeBug, TypeFeature, TypeTask} }
+
+// IsValid reports whether t is a recognized trail type.
+func (t Type) IsValid() bool {
+	for _, vt := range ValidTypes() {
+		if t == vt {
+			return true
+		}
+	}
+	return false
+}
+
+// Priority represents a trail's priority. Mirrors VALID_PRIORITIES server-side.
+type Priority string
+
+const (
+	PriorityUrgent Priority = "urgent"
+	PriorityHigh   Priority = "high"
+	PriorityMedium Priority = "medium"
+	PriorityLow    Priority = "low"
+	PriorityNone   Priority = "none"
+)
+
+// ValidPriorities returns all valid priorities in descending urgency order.
+func ValidPriorities() []Priority {
+	return []Priority{PriorityUrgent, PriorityHigh, PriorityMedium, PriorityLow, PriorityNone}
+}
+
+// IsValid reports whether p is a recognized priority.
+func (p Priority) IsValid() bool {
+	for _, vp := range ValidPriorities() {
+		if p == vp {
+			return true
+		}
+	}
+	return false
+}
+
 // Author identifies the user who created a trail.
 // On the wire the whole object may be null when the original author can no
 // longer be resolved (e.g. the GitHub user no longer exists), and login may
@@ -96,6 +144,9 @@ type Metadata struct {
 	Author    *Author    `json:"author"`
 	Assignees []string   `json:"assignees"`
 	Labels    []string   `json:"labels"`
+	Type      Type       `json:"type,omitempty"`
+	Priority  Priority   `json:"priority,omitempty"`
+	Reviewers []Reviewer `json:"reviewers,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
 	MergedAt  *time.Time `json:"merged_at"`

@@ -117,6 +117,9 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
     messageStore.clear()
     currentModel = null
     currentSessionID = sessionID
+    // Drop any turn-start injection captured for the prior session so it
+    // can't leak into the new session's system prompt.
+    pendingInjection = null
     return true
   }
 
@@ -236,6 +239,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             seenUserMessages.clear()
             messageStore.clear()
             currentSessionID = null
+            pendingInjection = null
             // Use sync variant: session-end may fire during shutdown.
             callHookSync("session-end", {
               session_id: session.id,
@@ -252,6 +256,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             seenUserMessages.clear()
             messageStore.clear()
             currentSessionID = null
+            pendingInjection = null
             // Use sync variant: this is the last event before process exit.
             callHookSync("session-end", {
               session_id: sessionID,

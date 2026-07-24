@@ -25,10 +25,16 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/entireclient/httputil"
-	"github.com/entireio/cli/internal/entireclient/repocreds"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 	"github.com/entireio/cli/internal/remotehelper/debuglog"
 )
+
+// tokenSafetyMargin is subtracted from the server's expires_in so this process
+// rotates the jurisdiction token before actual expiry. One minute covers clock
+// skew and gives slow downstream RPCs a fresh token. Matches
+// admincreds.safetyMargin so the cred caches don't diverge on freshness
+// semantics.
+const tokenSafetyMargin = time.Minute
 
 // jurisdictionKeyringService is the keychain service name for jurisdiction
 // tokens, keyed by audience so tokens for different jurisdictions
@@ -129,7 +135,7 @@ func (s *jurisdictionTokenSource) Token(ctx context.Context) (string, error) {
 			if token, expiresAt := tokenstore.DecodeTokenWithExpiration(encoded); token != "" && !tokenstore.IsTokenExpiredOrExpiring(expiresAt) {
 				debuglog.Printf("jurisdiction token from keychain (aud=%s, expires %s)", s.audience, expiresAt.Format(time.RFC3339))
 				s.token = token
-				s.expiresAt = expiresAt.Add(-repocreds.SafetyMargin)
+				s.expiresAt = expiresAt.Add(-tokenSafetyMargin)
 				return token, nil
 			}
 		}
@@ -146,7 +152,7 @@ func (s *jurisdictionTokenSource) Token(ctx context.Context) (string, error) {
 	}
 
 	s.token = token
-	margin := min(repocreds.SafetyMargin, ttl/2)
+	margin := min(tokenSafetyMargin, ttl/2)
 	s.expiresAt = time.Now().Add(ttl - margin)
 	if s.persist {
 		if err := tokenstore.Set(jurisdictionKeyringService(s.audience), s.handle, tokenstore.EncodeTokenWithExpiration(token, int64(ttl/time.Second))); err != nil {

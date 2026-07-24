@@ -592,10 +592,11 @@ func TestLoadSessionState_DeletesStaleSession(t *testing.T) {
 	}
 
 	// Verify file exists before load
-	stateFile, err := sessionStateFile(context.Background(), "stale-load-test")
+	stateDir, err := getSessionStateDir(context.Background())
 	if err != nil {
-		t.Fatalf("sessionStateFile() error = %v", err)
+		t.Fatalf("getSessionStateDir() error = %v", err)
 	}
+	stateFile := filepath.Join(stateDir, "stale-load-test.json")
 	if _, err := os.Stat(stateFile); err != nil {
 		t.Fatalf("state file should exist before load: %v", err)
 	}

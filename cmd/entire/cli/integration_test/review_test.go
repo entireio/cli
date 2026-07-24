@@ -290,7 +290,10 @@ func envWithOverrides(base []string, overrides ...string) []string {
 
 func enableReviewAgent(t *testing.T, env *TestEnv, name string) {
 	t.Helper()
-	env.RunCLI("enable", "--agent", name, "--telemetry=false")
+	// Pin the git-branch backend: readCheckpointSummary/readSessionMetadata
+	// resolve checkpoint content from the v1 metadata branch, and first-run
+	// enable now defaults new setups to git-refs.
+	env.RunCLI("enable", "--agent", name, "--telemetry=false", "--checkpoint-backend", "branch")
 }
 
 func readCheckpointSummary(t *testing.T, env *TestEnv, checkpointID string) checkpoint.CheckpointSummary {

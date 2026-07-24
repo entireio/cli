@@ -76,6 +76,46 @@ func applyCheckpointBackendFlag(s *EntireSettings, backend string) error {
 	return nil
 }
 
+// checkpointBackendChoices returns the storage picker's options — git-refs
+// first, labeled recommended — and the recommended value the caller
+// pre-selects.
+// Split from promptCheckpointBackend so the ordering/labeling contract is
+// unit-testable without a TTY.
+func checkpointBackendChoices() (opts []huh.Option[string], recommended string) {
+	return []huh.Option[string]{
+		huh.NewOption("Refs — one git ref per checkpoint (recommended)", checkpoint.BackendTypeGitRefs),
+		huh.NewOption("Branch — one shared branch, entire/checkpoints/v1", checkpoint.BackendTypeGitBranch),
+	}, checkpoint.BackendTypeGitRefs
+}
+
+// promptCheckpointBackend asks the user to choose a checkpoint storage backend
+// during first-time interactive setup, with the git-refs backend pre-selected
+// as the recommendation — most users should just press Enter. It returns the
+// chosen canonical backend type; cancellation (Ctrl+C or a cancelled ctx)
+// prints a cancellation note and returns "" (a soft skip, nil error, like
+// other setup prompts) so the caller falls through to the recommended
+// default. Callers must gate this on
+// an interactive terminal (and skip it when ENTIRE_CHECKPOINTS_PRIMARY is
+// active — the env fully replaces settings, so an answer could not take
+// effect and would only write diverging config).
+func promptCheckpointBackend(ctx context.Context, w io.Writer) (string, error) {
+	opts, recommended := checkpointBackendChoices()
+	choice := recommended
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Checkpoint storage").
+				Description("How Entire stores committed session checkpoints in your repo.").
+				Options(opts...).
+				Value(&choice),
+		),
+	)
+	if err := form.RunWithContext(ctx); err != nil {
+		return "", handleFormCancellation(w, "Checkpoint storage selection", err)
+	}
+	return choice, nil
+}
+
 // updateCheckpointBackend persists opts.CheckpointBackend to the target settings
 // file. Used by `entire configure` and by `entire enable` on repos that are
 // already set up (both operate on an on-disk file rather than the in-memory
@@ -105,37 +145,4 @@ func updateCheckpointBackend(ctx context.Context, w io.Writer, opts EnableOption
 
 	fmt.Fprintf(w, "✓ Checkpoint backend set to %s (%s)\n", typ, configDisplay)
 	return nil
-}
-
-// promptCheckpointBackend asks the user to choose a checkpoint storage backend
-// during first-time interactive setup. The default is the git-branch backend;
-// the git-refs backend is offered as the selectable alternative. It returns the
-// canonical backend type, or "" when the user kept the default (or cancelled) so
-// the caller can skip writing a redundant config block. Callers must gate this
-// on an interactive terminal.
-//
-// Cancellation (Ctrl+C or a cancelled ctx) is treated like keeping the default:
-// it prints a "cancelled" line and returns ("", nil) so enable continues with
-// the default backend, matching the optional-prompt behavior elsewhere in setup.
-func promptCheckpointBackend(ctx context.Context, w io.Writer) (string, error) {
-	choice := checkpoint.BackendTypeGitBranch
-	form := NewAccessibleForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Checkpoint storage backend").
-				Description("How Entire stores committed session checkpoints in your repo.").
-				Options(
-					huh.NewOption("Branch — one shared branch, entire/checkpoints/v1 (default)", checkpoint.BackendTypeGitBranch),
-					huh.NewOption("Refs — one git ref per checkpoint", checkpoint.BackendTypeGitRefs),
-				).
-				Value(&choice),
-		),
-	)
-	if err := form.RunWithContext(ctx); err != nil {
-		return "", handleFormCancellation(w, "Checkpoint backend selection", err)
-	}
-	if choice == checkpoint.BackendTypeGitBranch {
-		return "", nil
-	}
-	return choice, nil
 }

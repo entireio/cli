@@ -479,9 +479,7 @@ worktree.Reset(&git.ResetOptions{
 cmd := exec.CommandContext(ctx, "git", "reset", "--hard", hash.String())
 ```
 
-See `HardResetWithProtection()` in `common.go` and `CheckoutBranch()` in `git_operations.go` for examples.
-
-Regression tests in `hard_reset_test.go` verify this behavior - if go-git v6 fixes this issue, those tests can be used to validate switching back.
+See `CheckoutBranch()` in `git_operations.go` for an example.
 
 #### Repo Root vs Current Working Directory
 

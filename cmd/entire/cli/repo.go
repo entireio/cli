@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -152,32 +153,113 @@ func newRepoCreateCmd() *cobra.Command {
 }
 
 func newRepoListCmd() *cobra.Command {
+	var limit, pageSize int
+	var all, noPager bool
+	var pageToken string
 	cmd := &cobra.Command{
 		Use:   "list <project>",
 		Short: "List repositories in a project",
-		Long:  "List repositories in a project, addressed by name or ULID.",
-		Args:  cobra.ExactArgs(1),
+		Long: "List repositories in a project, addressed by name or ULID.\n\n" +
+			"By default at most " + strconv.Itoa(coreListFetchBudget) + " repositories are fetched; when the project " +
+			"has more, a note on stderr says so — pass --all to fetch everything, or " +
+			"--limit N for exactly the first N (rows come in server order; this list " +
+			"has no local filters or sort).\n\n" +
+			"For manual paging, --page-size/--page-token fetch exactly one page and " +
+			"report the cursor to resume from (--json wraps rows in an {items, " +
+			"nextPageToken} envelope).",
+		Args: cobra.ExactArgs(1),
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			if limit < 0 {
+				return fmt.Errorf("--limit must be zero or positive, got %d", limit)
+			}
+			return validatePageSize(cmd, pageSize)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreList(cmd, "No repositories found in this project.", repoColumns, repoRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Repo, error) {
-				projID, err := resolveProjectRef(ctx, c, args[0])
-				if err != nil {
-					return nil, err
-				}
-				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Repo, string, error) {
-					params := coreapi.ListProjectReposParams{ProjectId: projID}
-					if cursor != "" {
-						params.PageToken = coreapi.NewOptString(cursor)
-					}
-					out, err := c.ListProjectRepos(ctx, params)
+			// Decide color against the real output writer before
+			// flushThroughPager swaps stdout for a buffer that never looks
+			// like a TTY; the buffered render passes the pre-styled cells
+			// through unchanged (see preStyleTable).
+			headers, row := preStyleTable(cmd.OutOrStdout(), repoColumns, repoRow)
+			if pageModeRequested(cmd) {
+				return flushThroughPager(cmd, noPager, func() error {
+					return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+						projID, err := resolveProjectRef(ctx, c, args[0])
+						if err != nil {
+							return err
+						}
+						params := coreapi.ListProjectReposParams{ProjectId: projID}
+						if pageToken != "" {
+							params.PageToken = coreapi.NewOptString(pageToken)
+						}
+						if pageSize > 0 {
+							params.PageSize = coreapi.NewOptInt32(int32(pageSize)) //nolint:gosec // G115: validatePageSize bounds it
+						}
+						out, err := c.ListProjectRepos(ctx, params)
+						if err != nil {
+							return err
+						}
+						return renderCoreListPage(cmd, "No repositories found in this project.", headers, row, out.Repos, out.NextPageToken.Or(""))
+					})
+				})
+			}
+			return flushThroughPager(cmd, noPager, func() error {
+				return runCoreList(cmd, "No repositories found in this project.", headers, row, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Repo, error) {
+					projID, err := resolveProjectRef(ctx, c, args[0])
 					if err != nil {
-						return nil, "", err
+						return nil, err
 					}
-					return out.Repos, out.NextPageToken.Or(""), nil
+					// Rows render in server order with no local filters or
+					// sort, so --limit bounds the fetch directly; without it
+					// the default budget bounds the walk instead.
+					budget := coreListFetchBudget
+					switch {
+					case all:
+						budget = 0 // unbounded
+					case limit > 0:
+						budget = limit
+					}
+					repos, partial, err := fetchPagesBounded(ctx, budget, func(ctx context.Context, cursor string) ([]coreapi.Repo, string, error) {
+						params := coreapi.ListProjectReposParams{ProjectId: projID}
+						if cursor != "" {
+							params.PageToken = coreapi.NewOptString(cursor)
+						}
+						out, err := c.ListProjectRepos(ctx, params)
+						if err != nil {
+							return nil, "", err
+						}
+						return out.Repos, out.NextPageToken.Or(""), nil
+					})
+					if err != nil {
+						return nil, err
+					}
+					// An explicit --limit is not a surprise, so only the
+					// default budget's stop is disclosed. Printed for --json
+					// too: a script acting on silently partial data is the
+					// worst outcome, and stderr never corrupts the stdout JSON.
+					if partial && limit == 0 {
+						fmt.Fprintf(cmd.ErrOrStderr(),
+							"Note: the project has more repositories; showing the first %d fetched — pass --all to fetch everything.\n",
+							len(repos))
+					}
+					if limit > 0 && len(repos) > limit {
+						repos = repos[:limit] // trim a page overshoot
+					}
+					return repos, nil
 				})
 			})
 		},
 	}
+	cmd.Flags().IntVar(&limit, "limit", 0, "Fetch and show only the first N repositories (0 uses the default fetch budget)")
+	cmd.Flags().BoolVar(&all, "all", false, "Fetch every repository instead of the first "+strconv.Itoa(coreListFetchBudget)+" (slower on large projects)")
+	cmd.Flags().BoolVar(&noPager, "no-pager", false, "Print directly to stdout instead of a pager for long output")
+	pageModeFlags(cmd, &pageSize, &pageToken)
 	addJSONFlag(cmd)
+	setFlagGroup(cmd, flagGroupNavigation, "all", "limit", "page-size", "page-token")
+	setFlagGroup(cmd, flagGroupFormatting, "json", "no-pager")
+	useGroupedFlagHelp(cmd,
+		flagGroup{name: flagGroupNavigation},
+		flagGroup{name: flagGroupFormatting},
+	)
 	return cmd
 }
 

@@ -194,6 +194,37 @@ func TestKindRoutingStore_ListDedupesAcrossBackends(t *testing.T) {
 	assert.Equal(t, 1, count, "a checkpoint present in both backends should appear once")
 }
 
+// TestKindRoutingStore_ListSurfacesRemoteDiscovery proves the git-refs remote
+// discovery flows through the routing store: the routing List delegates to the
+// refs store with the caller's context, so a WithRemoteListDiscovery context
+// makes a checkpoint present only on the remote appear in the unioned list.
+func TestKindRoutingStore_ListSurfacesRemoteDiscovery(t *testing.T) {
+	t.Parallel()
+	_, repo, _ := newTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	refs := newGitRefsStore(repo)
+
+	localULID := id.MustCheckpointID(routingSampleULID)
+	writeRoutingCheckpoint(t, refs, localULID, "ulid-in-refs")
+
+	// A different ULID that lives only on the remote (no local ref).
+	remoteOnly := id.MustCheckpointID("01KVBJCWYA4YW6J5M9GP655HYY")
+	refs.SetRemoteRefLister(func(context.Context) ([]plumbing.ReferenceName, error) {
+		return []plumbing.ReferenceName{mustRefName(t, remoteOnly)}, nil
+	})
+
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+
+	infos, err := router.List(WithRemoteListDiscovery(context.Background()))
+	require.NoError(t, err)
+	seen := make(map[id.CheckpointID]struct{}, len(infos))
+	for _, info := range infos {
+		seen[info.CheckpointID] = struct{}{}
+	}
+	assert.Contains(t, seen, localULID, "local refs checkpoint is listed")
+	assert.Contains(t, seen, remoteOnly, "remote-only checkpoint is discovered through the routing store")
+}
+
 func TestKindRoutingStore_GetCheckpointAuthorRoutes(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

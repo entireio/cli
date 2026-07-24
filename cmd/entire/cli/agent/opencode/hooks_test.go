@@ -195,6 +195,23 @@ func TestInstallHooks_AppliesContextInjection(t *testing.T) {
 	if !strings.Contains(content, `output.system.push(pendingInjection)`) {
 		t.Fatal("plugin file should push the injection onto the system prompt")
 	}
+	// Every session-reset site must clear the stashed injection so a session
+	// change cannot leak the prior session's context into the next session.
+	resetSites := []struct{ name, start, end string }{
+		{"resetSessionTracking", "function resetSessionTracking", "return true"},
+		{"session.deleted", `case "session.deleted"`, `callHookSync("session-end"`},
+		{"server.instance.disposed", `case "server.instance.disposed"`, `callHookSync("session-end"`},
+	}
+	for _, site := range resetSites {
+		_, after, found := strings.Cut(content, site.start)
+		if !found {
+			t.Fatalf("plugin file missing reset site %q", site.name)
+		}
+		body, _, _ := strings.Cut(after, site.end)
+		if !strings.Contains(body, `pendingInjection = null`) {
+			t.Fatalf("%s should clear pendingInjection to avoid cross-session leakage", site.name)
+		}
+	}
 }
 
 func TestInstallHooks_MessageUpdatedFallsBackToSessionStart(t *testing.T) {

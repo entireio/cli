@@ -2,7 +2,12 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -148,20 +153,153 @@ func countWarnableStaleEndedSessions(repo *git.Repository, sessions []*SessionSt
 	return n
 }
 
+// findExactSessionsForWorktree returns sessions recorded for exactly this
+// worktree path, with no sibling/parent fallback. Callers that mutate
+// worktree-coupled state (e.g. BaseCommit, which must only follow the HEAD of
+// the session's own worktree) must use this instead of
+// findSessionsForWorktree.
+func (s *ManualCommitStrategy) findExactSessionsForWorktree(ctx context.Context, worktreePath string) ([]*SessionState, error) {
+	allStates, err := s.listAllSessionStates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return exactWorktreeMatches(allStates, worktreePath), nil
+}
+
+func exactWorktreeMatches(states []*SessionState, worktreePath string) []*SessionState {
+	var exact []*SessionState
+	for _, state := range states {
+		if state.WorktreePath == worktreePath {
+			exact = append(exact, state)
+		}
+	}
+	return exact
+}
+
 // findSessionsForWorktree finds all sessions for the given worktree path.
+// Exact WorktreePath matches win; otherwise sessions recorded in another
+// worktree of the same repository (shared git common dir) are matched, as long
+// as all candidates come from a single worktree.
 func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, worktreePath string) ([]*SessionState, error) {
 	allStates, err := s.listAllSessionStates(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	var matching []*SessionState
+	if exact := exactWorktreeMatches(allStates, worktreePath); len(exact) > 0 {
+		return exact, nil
+	}
+
+	worktreeCommonDir, err := gitCommonDirForWorktree(ctx, worktreePath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve common dir for fallback session matching: %w", err)
+	}
+
+	var parentWorktreeMatches []*SessionState
+	var commonDirMatches []*SessionState
+	commonDirByPath := make(map[string]string)
 	for _, state := range allStates {
-		if state.WorktreePath == worktreePath {
-			matching = append(matching, state)
+		if state.WorktreePath == "" {
+			continue
+		}
+
+		stateCommonDir, seen := commonDirByPath[state.WorktreePath]
+		if !seen {
+			stateCommonDir = gitCommonDirForWorktreeOrEmpty(ctx, state.WorktreePath)
+			commonDirByPath[state.WorktreePath] = stateCommonDir
+		}
+		if stateCommonDir == "" || stateCommonDir != worktreeCommonDir {
+			continue
+		}
+
+		if isNestedWorktreeOfRecordedRepo(state.WorktreePath, worktreePath) {
+			parentWorktreeMatches = append(parentWorktreeMatches, state)
+			continue
+		}
+
+		commonDirMatches = append(commonDirMatches, state)
+	}
+
+	if len(parentWorktreeMatches) > 0 {
+		return sessionsFromSingleWorktree(parentWorktreeMatches), nil
+	}
+	return sessionsFromSingleWorktree(commonDirMatches), nil
+}
+
+// sessionsFromSingleWorktree returns the candidates only when they were all
+// recorded in the same worktree. Multiple sessions in one worktree is the
+// supported concurrent-session case (matching exact-match semantics);
+// candidates spanning distinct worktrees are ambiguous, so no fallback match
+// is made rather than guessing which worktree the commit belongs to.
+func sessionsFromSingleWorktree(candidates []*SessionState) []*SessionState {
+	if len(candidates) == 0 {
+		return nil
+	}
+	first := candidates[0].WorktreePath
+	for _, state := range candidates[1:] {
+		if state.WorktreePath != first {
+			return nil
 		}
 	}
-	return matching, nil
+	return candidates
+}
+
+func gitCommonDirForWorktreeOrEmpty(ctx context.Context, worktreePath string) string {
+	commonDir, err := gitCommonDirForWorktree(ctx, worktreePath)
+	if err != nil {
+		return ""
+	}
+	return commonDir
+}
+
+func gitCommonDirForWorktree(ctx context.Context, worktreePath string) (string, error) {
+	if worktreePath == "" {
+		return "", errors.New("empty worktree path")
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "rev-parse", "--git-common-dir")
+	cmd.Env = gitEnvWithoutRepoOverrides()
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get git common dir for %s: %w", worktreePath, err)
+	}
+
+	commonDir := strings.TrimSpace(string(output))
+	if commonDir == "" {
+		return "", fmt.Errorf("empty git common dir for %s", worktreePath)
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(worktreePath, commonDir)
+	}
+	commonDir = filepath.Clean(commonDir)
+	if resolved, err := filepath.EvalSymlinks(commonDir); err == nil {
+		commonDir = resolved
+	}
+	return commonDir, nil
+}
+
+// gitEnvWithoutRepoOverrides returns the current environment minus git's
+// repo-selector variables. Git hooks run with GIT_DIR (and sometimes
+// GIT_WORK_TREE / GIT_INDEX_FILE) exported for the hook's own repo; inheriting
+// them would make `git -C <other-worktree>` resolve against the hook's repo
+// instead of the requested path.
+func gitEnvWithoutRepoOverrides() []string {
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GIT_DIR=") ||
+			strings.HasPrefix(kv, "GIT_WORK_TREE=") ||
+			strings.HasPrefix(kv, "GIT_INDEX_FILE=") {
+			continue
+		}
+		filtered = append(filtered, kv)
+	}
+	return filtered
+}
+
+func isNestedWorktreeOfRecordedRepo(recordedWorktreePath, commitWorktreePath string) bool {
+	nestedWorktreesDir := filepath.Join(filepath.Clean(recordedWorktreePath), ".worktrees")
+	return paths.IsSubpath(nestedWorktreesDir, filepath.Clean(commitWorktreePath))
 }
 
 type rewritePair struct {

@@ -149,7 +149,7 @@ func (s *ManualCommitStrategy) CondenseSession(
 | Persistent (git-branch) | `entire/checkpoints/v1` branch, sharded `<id[:2]>/<id[2:]>/` | Metadata + commit reference |
 | Persistent (git-refs) | `refs/entire/checkpoints/<shard>/<id>`, one ref per checkpoint | Metadata + commit reference |
 
-The persistent store is pluggable: `git-branch` (the default) stores every committed checkpoint as a subtree of a single `entire/checkpoints/v1` branch, while `git-refs` stores one ref per checkpoint. Both are git-backed and share the same checkpoint tree layout; they differ only in where that tree is committed. This document describes the git-branch layout; for the ref-based backend — its ref naming, sharding, push/fetch model, read routing, and configuration — see [Ref-Based Checkpoint Backend](ref-checkpoint-backend.md).
+The persistent store is pluggable: `git-branch` stores every committed checkpoint as a subtree of a single `entire/checkpoints/v1` branch, while `git-refs` stores one ref per checkpoint. New setups write an explicit backend choice via `entire enable` (`git-refs` recommended and pre-selected); a repo with no checkpoints config still resolves to `git-branch` (the config-less fallback), so pre-existing repos keep their behavior. Both are git-backed and share the same checkpoint tree layout; they differ only in where that tree is committed. This document describes the git-branch layout; for the ref-based backend — its ref naming, sharding, push/fetch model, read routing, and configuration — see [Ref-Based Checkpoint Backend](ref-checkpoint-backend.md).
 
 ### Session State
 
@@ -304,6 +304,21 @@ When condensing multiple concurrent sessions:
 - New `session_id` values are appended at the next index, so higher-numbered folders correspond to more recently introduced sessions, not necessarily the chronologically latest activity
 - `sessions` array in `CheckpointSummary` maps each session to its file paths
 - `files_touched` is merged from all sessions
+
+Checkpoints written by `entire import <agent>` additionally carry a `commit_sha`
+(omitempty) on both the session `Metadata` and the root `CheckpointSummary`,
+set to the default branch's head at import time — origin's tip is preferred
+(the commit the server already knows about), falling back to the local branch
+tip, then HEAD, then empty when nothing resolves. When the transcript itself
+records the commit(s) a turn made (Claude Code `gitOperation` records), the
+turn's checkpoint instead anchors to the last such commit that resolves and is
+reachable from the resolved link anchor (the default-branch head when
+resolvable) — see `turnAnchorResolver` (`agentimport/turn_anchor.go`);
+otherwise (older transcripts, or a recorded commit that's been
+squashed/rebased away) it falls back to the default-branch head as described
+above. It is a best-effort anchor for UI display only, not
+an attribution signal, and pre-existing imported checkpoints are not
+backfilled with it.
 
 ### Checkpoint Policy
 

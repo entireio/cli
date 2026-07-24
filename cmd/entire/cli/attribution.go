@@ -149,10 +149,11 @@ func newBlameCmd() *cobra.Command {
 		// Hidden from `entire help` while the feature is still maturing —
 		// advertised under `entire labs`, and `entire blame` / `entire blame
 		// --help` keep working normally.
-		Hidden: true,
-		Short:  "Show which lines came from Entire checkpoints",
-		Long:   "Show git-blame-style line attribution enriched with Entire checkpoint metadata.\n\nLimit to a line or range with <file>:12, <file>:12-20, or the --line flag.",
-		Args:   cobra.ExactArgs(1),
+		Hidden:  true,
+		Short:   "Show which lines came from Entire checkpoints",
+		Long:    "Show git-blame-style line attribution enriched with Entire checkpoint metadata.\n\nLimit to a line or range with <file>:12, <file>:12-20, or the --line flag.",
+		Example: "  entire blame src/auth.go\n  entire blame src/auth.go:10-40 --json",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAttributionBlame(cmd.Context(), cmd.OutOrStdout(), args[0], attributionBlameOptions{
 				LineFlag: lineFlag,
@@ -177,10 +178,11 @@ func newWhyCmd() *cobra.Command {
 		// Hidden from `entire help` while the feature is still maturing —
 		// advertised under `entire labs`, and `entire why` / `entire why
 		// --help` keep working normally.
-		Hidden: true,
-		Short:  "Show why a line exists",
-		Long:   "Explain the commit, checkpoint, prompt, and session behind a file or line.\n\nTarget a specific line with <file>:12 or the --line flag.",
-		Args:   cobra.ExactArgs(1),
+		Hidden:  true,
+		Short:   "Show why a line exists",
+		Long:    "Explain the commit, checkpoint, prompt, and session behind a file or line.\n\nTarget a specific line with <file>:12 or the --line flag.",
+		Example: "  entire why src/auth.go:42\n  entire why src/auth.go:42 --json",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAttributionWhy(cmd.Context(), cmd.OutOrStdout(), args[0], attributionWhyOptions{
 				LineFlag: lineFlag,

@@ -44,10 +44,16 @@ func TestMain(m *testing.M) {
 	// Select the checkpoint storage backend for the whole suite. E2E_CHECKPOINT_STORE
 	// (e.g. "git-refs") maps to the ENTIRE_CHECKPOINTS_PRIMARY override the spawned
 	// binary honors, so every condensation/read/push in the run exercises that
-	// backend. Unset or "git-branch" leaves the default branch backend in place.
-	if store := os.Getenv("E2E_CHECKPOINT_STORE"); store != "" && store != "git-branch" {
-		os.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", store)
+	// backend. Unset pins git-branch: the harness's backend-aware assertions
+	// (testutil.checkpointStoreMode) default to the v1 branch while first-run
+	// enable now defaults new setups to git-refs — without the pin the binary
+	// writes refs and every branch-shaped assertion times out. The env also
+	// suppresses that first-run settings write.
+	store := os.Getenv("E2E_CHECKPOINT_STORE")
+	if store == "" {
+		store = "git-branch"
 	}
+	os.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", store)
 
 	// Resolve the entire binary (set by mise run build via E2E_ENTIRE_BIN).
 	entireBin := entire.BinPath()

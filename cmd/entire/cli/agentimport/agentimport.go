@@ -54,6 +54,13 @@ type Turn struct {
 	// subagent's tokens are counted exactly once rather than re-added on every
 	// turn after it is discovered.
 	Tokens *types.TokenUsage
+	// CommitSHAs are the commit SHAs (possibly abbreviated) this turn's
+	// transcript records creating, in transcript order. Extraction is
+	// per-importer (see commitSHAsInRange for Claude Code). Callers must
+	// resolve them against the repo before use. Nil when the transcript
+	// records no commits (including agents that don't extract them); the
+	// anchor then falls back to Options.LinkCommitSHA.
+	CommitSHAs []string
 }
 
 // Importer is the per-agent seam: it locates an agent's transcripts for a repo
@@ -98,6 +105,14 @@ type Options struct {
 	SessionFilter []string
 	Now           time.Time
 	DryRun        bool
+
+	// LinkCommitSHA, when non-empty, is the fallback anchor written to each
+	// imported checkpoint's metadata as commit_sha — the commit the UI shows
+	// imported sessions against. The caller resolves it (default branch head
+	// when resolvable; see resolveImportLinkCommitSHA); Run does not. A turn
+	// whose transcript records a resolvable commit that is an ancestor of this
+	// fallback anchors to that real commit instead (see turnAnchorResolver).
+	LinkCommitSHA string
 }
 
 // Result summarizes an import run.
@@ -136,6 +151,17 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		}
 	}
 
+	// One resolver per Run: it lazily walks and memoizes opts.LinkCommitSHA's
+	// ancestor set the first time a turn actually carries a candidate, so a
+	// whole import run pays for at most one history walk, not one per turn.
+	anchorResolver := newTurnAnchorResolver(repo, opts.LinkCommitSHA, opts.Now)
+
+	// Resolve the importer's git identity once per run (not per turn):
+	// checkpoint commits otherwise carry an empty author, which the
+	// GitHub->mirror ingestion path falls back to when it has no pusher
+	// identity for imported sessions, leaving them unattributed.
+	authorName, authorEmail := cp.GetGitAuthorFromRepo(repo)
+
 	for _, sf := range files {
 		res.SessionsScanned++
 		full, readErr := os.ReadFile(sf.Path)
@@ -170,7 +196,12 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 				red = r
 				redacted = true
 			}
-			if err := writeTurn(ctx, stores, imp, cid, sf, red, turn); err != nil {
+			anchor, fromCandidate := anchorResolver.resolve(ctx, turn.CommitSHAs)
+			if len(turn.CommitSHAs) > 0 && !fromCandidate {
+				logging.Debug(ctx, "import: turn anchor fell back",
+					"sessionID", sf.SessionID, "turnUUID", turn.UUID, "candidates", len(turn.CommitSHAs))
+			}
+			if err := writeTurn(ctx, stores, imp, cid, sf, red, turn, anchor, authorName, authorEmail); err != nil {
 				return res, err
 			}
 			existing[cid.String()] = true
@@ -261,7 +292,7 @@ func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns 
 	return nil
 }
 
-func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.CheckpointID, sf SessionFile, red redact.RedactedBytes, turn Turn) error {
+func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.CheckpointID, sf SessionFile, red redact.RedactedBytes, turn Turn, anchorCommitSHA, authorName, authorEmail string) error {
 	if err := stores.Persistent.Write(ctx, cp.Session(cp.WriteOptions{
 		CheckpointID:              cid,
 		SessionID:                 sf.SessionID,
@@ -275,6 +306,9 @@ func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.Chec
 		CheckpointsCount:          1,
 		CheckpointTranscriptStart: turn.LineStart,
 		TokenUsage:                turn.Tokens,
+		CommitSHA:                 anchorCommitSHA,
+		AuthorName:                authorName,
+		AuthorEmail:               authorEmail,
 	})); err != nil {
 		return fmt.Errorf("write imported checkpoint %s: %w", cid, err)
 	}

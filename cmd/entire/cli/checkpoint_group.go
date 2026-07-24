@@ -50,6 +50,9 @@ Examples:
 func newCheckpointSearchCmd() *cobra.Command {
 	cmd := newSearchCmd()
 	cmd.Hidden = false
+	// newSearchCmd's examples use the `entire search` prefix for that top-level
+	// alias; under the canonical `checkpoint` group they must match this path.
+	cmd.Example = "  entire checkpoint search \"retry backoff\" --json\n  entire checkpoint search \"auth timeout author:alice date:week\"\n  entire checkpoint search --code \"parseToken\""
 	return cmd
 }
 

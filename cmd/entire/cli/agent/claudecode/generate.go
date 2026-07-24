@@ -2,12 +2,137 @@ package claudecode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
+
+// buildGenerateArgs assembles the claude CLI argv for a --print text-generation
+// call.
+//
+// The subprocess must stay isolated from the user's project/local AND user
+// settings: loading them would fire user-level hooks and, worse, honor
+// user-level tool permissions (e.g. permissions.defaultMode=bypassPermissions),
+// which would let prompt-injection in the untrusted dispatch data drive tool
+// execution. So we pass --setting-sources "" (load nothing).
+//
+// The one thing we genuinely need from the user settings is auth. Users on API
+// billing configure it with `apiKeyHelper` (a command that prints the key),
+// which lives in user settings and is therefore dropped by --setting-sources "".
+// Rather than load the whole settings file back (and re-inherit hooks and
+// permissions), we extract only apiKeyHelper and re-inject it via a --settings
+// file (settingsPath), so auth works while nothing else from the user's settings
+// is loaded.
+//
+// The injected settings are passed as a file path, not an inline JSON string:
+// apiKeyHelper can embed a literal key, and an inline value would land in the
+// process argv (visible via ps / /proc/<pid>/cmdline / EDR tooling). The file is
+// written 0600 (see writeAuthSettingsFile), matching settings.json's protection.
+//
+// Auth methods that do not live in user settings — an exported ANTHROPIC_API_KEY
+// (survives StripGitEnv) and keychain/subscription credentials — keep working
+// without any injection (settingsPath == "").
+func buildGenerateArgs(model, settingsPath string) []string {
+	args := []string{
+		"--print", "--output-format", "json",
+		"--model", model,
+		"--setting-sources", "",
+	}
+	if settingsPath != "" {
+		args = append(args, "--settings", settingsPath)
+	}
+	return args
+}
+
+// buildStreamingGenerateArgs is buildGenerateArgs for the stream-json path,
+// with the same isolation and auth-injection contract (see buildGenerateArgs).
+// --include-partial-messages enables the per-token stream_event envelopes
+// that PhaseFirstToken and PhaseGenerating are dispatched from, and
+// --verbose is required by the claude CLI for stream-json output.
+func buildStreamingGenerateArgs(model, settingsPath string) []string {
+	args := []string{
+		"--print",
+		"--output-format", "stream-json",
+		"--include-partial-messages",
+		"--verbose",
+		"--model", model,
+		"--setting-sources", "",
+	}
+	if settingsPath != "" {
+		args = append(args, "--settings", settingsPath)
+	}
+	return args
+}
+
+// writeAuthSettingsFile writes a minimal claude settings file containing only
+// the given apiKeyHelper and returns its path plus a cleanup func. The file is
+// created 0600 so the (possibly key-bearing) helper is no more exposed than the
+// user's own settings.json. Returns ("", nil, nil) when apiKeyHelper is empty.
+func writeAuthSettingsFile(apiKeyHelper string) (string, func(), error) {
+	if strings.TrimSpace(apiKeyHelper) == "" {
+		return "", nil, nil
+	}
+	data, err := json.Marshal(map[string]string{"apiKeyHelper": apiKeyHelper})
+	if err != nil {
+		return "", nil, fmt.Errorf("marshal auth settings: %w", err)
+	}
+	f, err := os.CreateTemp("", "entire-claude-auth-*.json") // 0600 by default
+	if err != nil {
+		return "", nil, fmt.Errorf("create auth settings file: %w", err)
+	}
+	path := f.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("write auth settings file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("close auth settings file: %w", err)
+	}
+	return path, cleanup, nil
+}
+
+// userClaudeSettingsPath resolves the user's claude settings.json the same way
+// the claude CLI does: $CLAUDE_CONFIG_DIR/settings.json when set, otherwise
+// ~/.claude/settings.json.
+func userClaudeSettingsPath() (string, error) {
+	if dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); dir != "" {
+		return filepath.Join(dir, "settings.json"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".claude", "settings.json"), nil
+}
+
+// readUserAPIKeyHelper returns the apiKeyHelper field from the user's claude
+// settings, or "" if absent. Best-effort: a missing file or malformed JSON
+// yields "" so we fall back to env/keychain auth rather than failing.
+func readUserAPIKeyHelper() string {
+	path, err := userClaudeSettingsPath()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // path is the user's own claude config, not attacker-controlled
+	if err != nil {
+		return ""
+	}
+	var settings struct {
+		APIKeyHelper string `json:"apiKeyHelper"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(settings.APIKeyHelper)
+}
 
 // GenerateText sends a prompt to the Claude CLI and returns the raw text response.
 // Implements the agent.TextGenerator interface.
@@ -32,31 +157,53 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 	if model == "" {
 		model = "haiku"
 	}
-	args := []string{
-		"--print", "--output-format", "json",
-		"--model", model, "--setting-sources", "",
+
+	// Run isolated from all setting sources (see buildGenerateArgs), re-injecting
+	// only the user's apiKeyHelper (via a 0600 file, never argv) so API-billing
+	// auth keeps working without re-inheriting user hooks or tool permissions.
+	// Best-effort: if extracting/writing the helper fails, fall back to running
+	// without it (env/keychain auth still work) rather than failing the call.
+	settingsPath, cleanup, settingsErr := writeAuthSettingsFile(readUserAPIKeyHelper())
+	if settingsErr != nil {
+		settingsPath = ""
 	}
-	res, runErr := agent.RunIsolatedTextGeneratorCLIRaw(ctx, c.CommandRunner, "claude", args, prompt)
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	res, runErr := agent.RunIsolatedTextGeneratorCLIRaw(ctx, c.CommandRunner, "claude", buildGenerateArgs(model, settingsPath), prompt)
+
+	// withEvidence attaches the captured subprocess output the explain layer's
+	// timeout diagnostic reads, matching agent.HandleTextGenResult. Classification
+	// (*TextGenError) and evidence (*TextGenerationError) are complementary: both
+	// have to survive, so the typed error is wrapped rather than replaced.
+	withEvidence := func(err error) error {
+		return &agent.TextGenerationError{
+			Err:         err,
+			Stderr:      agent.TruncateStderr(string(res.Stderr)),
+			StdoutBytes: len(res.Stdout),
+		}
+	}
 
 	if env := classifyClaudeEnvelope(res.Stdout, runErr); env != nil {
 		env.ExitCode = res.ExitCode
 		env.Cause = runErr
-		return "", env
+		return "", withEvidence(env)
 	}
 
 	if runErr != nil {
 		if errors.Is(runErr, context.Canceled) {
-			return "", context.Canceled
+			return "", withEvidence(context.Canceled)
 		}
 		if errors.Is(runErr, context.DeadlineExceeded) {
-			return "", context.DeadlineExceeded
+			return "", withEvidence(context.DeadlineExceeded)
 		}
 		if agent.IsExecNotFoundErr(runErr) {
-			return "", &agent.TextGenError{
+			return "", withEvidence(&agent.TextGenError{
 				Kind:     agent.TextGenErrorCLIMissing,
 				Provider: agent.AgentNameClaudeCode,
 				Cause:    runErr,
-			}
+			})
 		}
 		// Prefer stderr, fall back to stdout, then to the run error, so Message
 		// is never empty — a launch failure (permission denied, exec format
@@ -79,22 +226,22 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 			// text and raw stderr).
 			kind = agent.TextGenErrorAuth
 		}
-		return "", &agent.TextGenError{
+		return "", withEvidence(&agent.TextGenError{
 			Kind:     kind,
 			Provider: agent.AgentNameClaudeCode,
 			Message:  agent.TruncateStderr(raw),
 			ExitCode: res.ExitCode,
 			Cause:    runErr,
-		}
+		})
 	}
 
 	// Success path. Envelope was nil (stdout empty) or envelope.IsError was false.
 	if len(res.Stdout) == 0 {
-		return "", &agent.TextGenError{
+		return "", withEvidence(&agent.TextGenError{
 			Kind:     agent.TextGenErrorUnknown,
 			Provider: agent.AgentNameClaudeCode,
 			Message:  "claude CLI returned empty output",
-		}
+		})
 	}
 	result, _, parseErr := parseGenerateTextResponse(res.Stdout)
 	if parseErr != nil {

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -128,4 +129,24 @@ func TestUpdateCheckpointBackend_InvalidValue(t *testing.T) {
 	err := updateCheckpointBackend(context.Background(), io.Discard, EnableOptions{CheckpointBackend: "bogus"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), flagCheckpointBackend)
+}
+
+// The storage picker's contract from the team decision: the question stays,
+// but git-refs is listed first and pre-selected as the recommendation —
+// "default" wording is gone, one Enter accepts refs.
+func TestCheckpointBackendChoices_RefsRecommendedFirst(t *testing.T) {
+	t.Parallel()
+	opts, recommended := checkpointBackendChoices()
+	if recommended != checkpoint.BackendTypeGitRefs {
+		t.Errorf("recommended = %q, want git-refs pre-selected", recommended)
+	}
+	if len(opts) != 2 || opts[0].Value != checkpoint.BackendTypeGitRefs {
+		t.Fatalf("options = %+v, want refs listed first", opts)
+	}
+	if !strings.Contains(opts[0].Key, "(recommended)") {
+		t.Errorf("refs label = %q, want '(recommended)' suffix", opts[0].Key)
+	}
+	if strings.Contains(opts[0].Key+opts[1].Key, "default") {
+		t.Errorf("labels must not say 'default' (team decision: recommended, not default): %q / %q", opts[0].Key, opts[1].Key)
+	}
 }

@@ -160,8 +160,24 @@ func ClassifyStderrHTTPStatus(stderr string) TextGenErrorKind {
 }
 
 // HandleTextGenResult converts the outcome of a RunIsolatedTextGeneratorCLIRaw
-// call into (trimmed stdout, err). On success returns (output, nil). On
-// failure returns ("", *TextGenError) or ("", ctx sentinel).
+// call into (trimmed stdout, err). On success returns (output, nil).
+//
+// On failure it returns a *TextGenerationError whose Err is either a ctx
+// sentinel or a *TextGenError. The two error types are complementary, not
+// alternatives, and both must survive to the explain layer:
+//
+//   - *TextGenError answers "what kind of failure was this?" and drives the
+//     user-facing label and remediation (renderTextGenError).
+//   - *TextGenerationError answers "what did the subprocess emit before it
+//     died?" and drives the timeout diagnostic ("provider produced no output"
+//     vs "was generating output when killed"). That evidence is the only
+//     signal available on the ctx path, where classification is meaningless.
+//
+// Wrapping preserves both: errors.As finds *TextGenError through the wrapper,
+// errors.Is finds the ctx sentinel, and errors.As finds *TextGenerationError
+// for the evidence. Returning a bare sentinel here would silently regress the
+// timeout diagnostic, and returning a bare *TextGenError would drop the
+// stdout-byte count.
 //
 // On a failed run, Message is the first non-empty of stderr, stdout, and
 // runErr.Error() — so it is never empty — and both classification and
@@ -178,15 +194,24 @@ func ClassifyStderrHTTPStatus(stderr string) TextGenErrorKind {
 // Claude does not use this helper — its envelope-first classification order
 // differs and is inlined in claudecode.GenerateText.
 func HandleTextGenResult(res ExecResult, runErr error, provider types.AgentName, emptyMsg string, extraClassify func(stderr string) TextGenErrorKind) (string, error) {
+	// withEvidence attaches the captured subprocess output that the explain
+	// layer's timeout diagnostic reads. Applied to every failure return.
+	withEvidence := func(err error) error {
+		return &TextGenerationError{
+			Err:         err,
+			Stderr:      TruncateStderr(string(res.Stderr)),
+			StdoutBytes: len(res.Stdout),
+		}
+	}
 	if runErr != nil {
 		if errors.Is(runErr, context.Canceled) {
-			return "", context.Canceled
+			return "", withEvidence(context.Canceled)
 		}
 		if errors.Is(runErr, context.DeadlineExceeded) {
-			return "", context.DeadlineExceeded
+			return "", withEvidence(context.DeadlineExceeded)
 		}
 		if IsExecNotFoundErr(runErr) {
-			return "", &TextGenError{Kind: TextGenErrorCLIMissing, Provider: provider, Cause: runErr}
+			return "", withEvidence(&TextGenError{Kind: TextGenErrorCLIMissing, Provider: provider, Cause: runErr})
 		}
 		// Prefer stderr, fall back to stdout, then to the run error itself, so
 		// Message is never empty. codex/cursor/copilot are stdout-primary
@@ -213,21 +238,21 @@ func HandleTextGenResult(res ExecResult, runErr error, provider types.AgentName,
 				kind = k
 			}
 		}
-		return "", &TextGenError{
+		return "", withEvidence(&TextGenError{
 			Kind:     kind,
 			Provider: provider,
 			Message:  TruncateStderr(raw),
 			ExitCode: res.ExitCode,
 			Cause:    runErr,
-		}
+		})
 	}
 	out := strings.TrimSpace(string(res.Stdout))
 	if out == "" {
-		return "", &TextGenError{
+		return "", withEvidence(&TextGenError{
 			Kind:     TextGenErrorUnknown,
 			Provider: provider,
 			Message:  emptyMsg,
-		}
+		})
 	}
 	return out, nil
 }

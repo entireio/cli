@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -112,6 +113,73 @@ func TestRunIsolatedTextGeneratorCLIRaw_CanceledContextPreservesSentinel(t *test
 	// could never fail and the sentinel-preservation contract was unpinned.
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("want context.Canceled in err chain; got %v", err)
+	}
+}
+
+// TestHandleTextGenResult_DeadlineCarriesPartialOutput pins the composition of
+// the two error types: on a timeout the ctx sentinel must survive for errors.Is
+// AND the captured evidence must survive for errors.As, so explain's timeout
+// diagnostic can say "was generating output when killed" with the real stderr
+// instead of guessing.
+//
+// This is the regression guard for the #964/#1005 reconciliation. Returning a
+// bare sentinel from HandleTextGenResult loses the evidence; returning a bare
+// *TextGenError loses the sentinel. Both failures are silent — the diagnostic
+// simply degrades to its no-information branch.
+func TestHandleTextGenResult_DeadlineCarriesPartialOutput(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == windowsOS {
+		t.Skip("uses POSIX shell command")
+	}
+
+	// The CLI produces output on both streams, then stalls until the deadline
+	// kills it.
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c",
+			"echo 'partial output'; echo 'stalled talking to API' >&2; exec sleep 10")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	res, runErr := RunIsolatedTextGeneratorCLIRaw(ctx, runner, "sh", nil, "")
+	_, err := HandleTextGenResult(res, runErr, AgentNameCodex, "empty", nil)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("errors.Is lost the ctx sentinel: %T %v", err, err)
+	}
+	var failure *TextGenerationError
+	if !errors.As(err, &failure) {
+		t.Fatalf("errors.As lost the evidence carrier: %T %v", err, err)
+	}
+	if failure.Stderr != "stalled talking to API" {
+		t.Errorf("Stderr = %q, want the stderr written before the kill", failure.Stderr)
+	}
+	if failure.StdoutBytes == 0 {
+		t.Error("StdoutBytes = 0, want the partial stdout to be counted")
+	}
+}
+
+func TestTextGenerationError_PreservesSentinelAndPayload(t *testing.T) {
+	t.Parallel()
+
+	err := &TextGenerationError{Err: context.DeadlineExceeded, Stderr: "stalled", StdoutBytes: 42}
+
+	// The explain layer routes timeouts with errors.Is and recovers the
+	// evidence with errors.As; both must survive additional wrapping.
+	wrapped := fmt.Errorf("summary generation failed: %w", err)
+	if !errors.Is(wrapped, context.DeadlineExceeded) {
+		t.Fatal("context.DeadlineExceeded sentinel must survive TextGenerationError.Unwrap")
+	}
+	var genErr *TextGenerationError
+	if !errors.As(wrapped, &genErr) {
+		t.Fatal("errors.As must recover *TextGenerationError through wrapping")
+	}
+	if genErr.Stderr != "stalled" {
+		t.Fatalf("Stderr = %q, want %q", genErr.Stderr, "stalled")
+	}
+	if genErr.StdoutBytes != 42 {
+		t.Fatalf("StdoutBytes = %d, want 42", genErr.StdoutBytes)
 	}
 }
 

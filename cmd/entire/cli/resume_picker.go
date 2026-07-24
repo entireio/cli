@@ -107,7 +107,7 @@ func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error 
 			huh.NewSelect[string]().
 				Title("Resume a session").
 				Description("Checks out the branch, restores the session log, and offers to start the agent.\n" +
-					"Lists sessions from this machine — to resume a branch from origin, run: entire resume <branch>").
+					"Lists sessions from this machine — to resume a branch from origin, run: entire session resume <branch>").
 				Options(options...).
 				Value(&selected),
 		),

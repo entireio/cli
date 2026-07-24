@@ -1,12 +1,52 @@
 package id
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
+	"time"
+
+	ulid "github.com/oklog/ulid/v2"
 )
 
 // A representative ULID (Crockford base32, 26 chars) used across tests.
 const sampleULID = "01KVBJCWYA4YW6J5M9GP655HZN"
+
+func TestCheckpointID_Time(t *testing.T) {
+	t.Parallel()
+
+	// A ULID minted from a known instant recovers that instant (millisecond
+	// precision), so remote-ref discovery can sort/display a checkpoint by its
+	// real creation time from the ref name alone — no store read.
+	want := time.UnixMilli(1700000000000).UTC()
+	// Deterministic entropy (zeros); Time() only reads the timestamp prefix.
+	minted := ulid.MustNew(ulid.Timestamp(want), bytes.NewReader(make([]byte, 16)))
+	got, ok := CheckpointID(minted.String()).Time()
+	if !ok {
+		t.Fatalf("Time() ok = false for a valid ULID %q", minted)
+	}
+	if !got.Equal(want) {
+		t.Errorf("Time() = %v, want %v", got, want)
+	}
+
+	// The canonical sample ULID also yields a non-zero time.
+	if ts, ok := CheckpointID(sampleULID).Time(); !ok || ts.IsZero() {
+		t.Errorf("Time() for sample ULID = (%v, %v), want a non-zero time", ts, ok)
+	}
+
+	// A legacy hex ID carries no timestamp.
+	if _, ok := CheckpointID("a1b2c3d4e5f6").Time(); ok {
+		t.Errorf("Time() ok = true for a legacy hex ID; want false")
+	}
+
+	// Non-ID / empty strings report no time.
+	if _, ok := CheckpointID("").Time(); ok {
+		t.Errorf("Time() ok = true for empty ID; want false")
+	}
+	if _, ok := CheckpointID("not-an-id").Time(); ok {
+		t.Errorf("Time() ok = true for a non-ID string; want false")
+	}
+}
 
 func TestGenerateULID(t *testing.T) {
 	t.Parallel()
