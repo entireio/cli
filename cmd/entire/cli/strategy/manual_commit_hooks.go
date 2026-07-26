@@ -354,6 +354,80 @@ func isGitSequenceOperation(ctx context.Context) bool {
 //   - "commit": amend operation - preserves existing trailer or restores from LastCheckpointID
 //
 
+// warnIfUnlinkedWithLiveSibling handles the #1852 case where the current commit
+// could not be linked to any session in this worktree, yet a live agent session
+// is running in another worktree of the same repo — the silent-unlink scenario.
+// It logs a WARN (with the offending worktrees and the adopt remedy) and returns
+// true when such a session exists, false otherwise. Split out of PrepareCommitMsg
+// to keep that hook entrypoint within the maintainability budget.
+func (s *ManualCommitStrategy) warnIfUnlinkedWithLiveSibling(logCtx context.Context, worktreePath, source string) bool {
+	elsewhere := s.liveSessionsInOtherWorktrees(logCtx, worktreePath)
+	if len(elsewhere) == 0 {
+		return false
+	}
+	worktrees := uniqueWorktreePaths(elsewhere)
+	// Name a concrete session in the remedy. The bare `adopt --from <path>` form
+	// relies on adoption's auto-detect, which only considers sessions within
+	// adoptRecentWindow (12h) — narrower than this warning's 24h liveness window
+	// — and also fails when a worktree has multiple sessions. Passing the exact
+	// session ID bypasses auto-detect entirely, so the suggested command always
+	// runs. Pick the most-recently-active session, matching what auto-detect
+	// would have chosen.
+	primary := mostRecentlyActiveSession(elsewhere)
+
+	// Structured record for the .entire/logs file (diagnostics / grep).
+	logging.Warn(logCtx, "prepare-commit-msg: commit left unlinked; live agent session(s) exist in other worktree(s) of this repo",
+		slog.String("strategy", "manual-commit"),
+		slog.String("source", source),
+		slog.String("worktree", worktreePath),
+		slog.Int("live_sessions_elsewhere", len(elsewhere)),
+		slog.String("session_worktrees", strings.Join(worktrees, ", ")),
+		slog.String("suggested_session", primary.SessionID),
+	)
+
+	// logging.Warn only reaches the internal log file, so on its own it leaves
+	// the #1852 silent-unlink case silent to the person running `git commit`.
+	// Surface a concise notice on stderrWriter too — the same user-facing hook
+	// channel warnIfAttributionDiverged and warnStaleEndedSessions use.
+	fmt.Fprint(stderrWriter, formatUnlinkedCommitNotice(worktrees, primary.SessionID, primary.WorktreePath))
+	return true
+}
+
+// mostRecentlyActiveSession returns the session with the newest last-seen time
+// (LastInteractionTime, falling back to StartedAt), matching how adoption
+// auto-selects a source session. Returns nil for an empty slice.
+func mostRecentlyActiveSession(states []*SessionState) *SessionState {
+	var best *SessionState
+	for _, st := range states {
+		if best == nil || sessionLastSeen(st).After(sessionLastSeen(best)) {
+			best = st
+		}
+	}
+	return best
+}
+
+func sessionLastSeen(state *SessionState) time.Time {
+	if state.LastInteractionTime != nil {
+		return *state.LastInteractionTime
+	}
+	return state.StartedAt
+}
+
+// formatUnlinkedCommitNotice builds the user-facing stderr message for the
+// #1852 silent-unlink case, naming a concrete session so the suggested command
+// is directly runnable. Returns "" when any component is missing, so a misuse
+// degrades to no output rather than emitting a broken command.
+func formatUnlinkedCommitNotice(worktrees []string, sessionID, sessionWorktree string) string {
+	if len(worktrees) == 0 || sessionID == "" || sessionWorktree == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"entire: this commit was not linked to a checkpoint (live agent session in %s).\n"+
+			"  run 'entire session adopt %s --from %s --yes' to link this worktree.\n",
+		strings.Join(worktrees, ", "), sessionID, sessionWorktree,
+	)
+}
+
 func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFile string, source string) error {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
@@ -408,6 +482,16 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	if err != nil || len(sessions) == 0 {
 		findSessionsSpan.RecordError(err)
 		findSessionsSpan.End()
+
+		// #1852: When no session matches this worktree but a live agent session
+		// exists in another worktree of the same repo, the commit is left
+		// silently unlinked (94% of commits in one reported case). Surface that
+		// specific, actionable case at WARN instead of swallowing it at DEBUG.
+		// Skipped when listing errored, since we cannot trust the session view.
+		if err == nil && s.warnIfUnlinkedWithLiveSibling(logCtx, worktreePath, source) {
+			return nil
+		}
+
 		// No active sessions or error listing - silently skip (hooks must be resilient)
 		logging.Debug(logCtx, "prepare-commit-msg: no active sessions",
 			slog.String("strategy", "manual-commit"),

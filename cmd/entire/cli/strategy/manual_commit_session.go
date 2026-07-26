@@ -176,6 +176,68 @@ func exactWorktreeMatches(states []*SessionState, worktreePath string) []*Sessio
 	return exact
 }
 
+// liveSessionsInOtherWorktrees returns non-ended sessions that were recorded in
+// a worktree other than worktreePath. The session store is already scoped to
+// this repository's git common dir, so every candidate belongs to the same
+// repo. This detects the silent no-trailer case in #1852: a commit here that
+// cannot be linked even though an agent session is live in a sibling worktree.
+// It is best-effort context for a warning, so a listing error yields nil rather
+// than propagating — the hook must stay resilient.
+func (s *ManualCommitStrategy) liveSessionsInOtherWorktrees(ctx context.Context, worktreePath string) []*SessionState {
+	allStates, err := s.listAllSessionStates(ctx)
+	if err != nil {
+		return nil
+	}
+	var live []*SessionState
+	for _, state := range allStates {
+		if isLiveSessionInOtherWorktree(state, worktreePath) {
+			live = append(live, state)
+		}
+	}
+	return live
+}
+
+// isLiveSessionInOtherWorktree reports whether state is a still-open session
+// bound to a worktree other than worktreePath, i.e. one that would plausibly
+// have owned the current commit's checkpoint had matching succeeded.
+func isLiveSessionInOtherWorktree(state *SessionState, worktreePath string) bool {
+	if state == nil || state.WorktreePath == "" || state.WorktreePath == worktreePath {
+		return false
+	}
+	// Adopted-away tombstones and read-only imported sessions never produce
+	// trailers, so they are not evidence of a missed link.
+	if state.AdoptedIntoWorktreePath != "" || state.Kind.IsImported() {
+		return false
+	}
+	// Must be adoptable, mirroring isAdoptableSourceSession in session_adopt.go:
+	// not ended and not fully condensed. This keeps the warning consistent with
+	// the `entire session adopt` remedy it prints — we only flag sessions the
+	// user could actually adopt.
+	if state.Phase == session.PhaseEnded || state.EndedAt != nil || state.FullyCondensed {
+		return false
+	}
+	// And recently interacted with. A crashed agent can leave an ACTIVE/IDLE
+	// session that never transitions to ENDED; without the recency guard it
+	// would trigger this warning on every commit indefinitely. Mirrors the
+	// staleness guard used for active-session detection elsewhere in this file.
+	return isRecentInteraction(state.LastInteractionTime)
+}
+
+// uniqueWorktreePaths returns the distinct WorktreePath values of states, in
+// first-seen order, for compact logging.
+func uniqueWorktreePaths(states []*SessionState) []string {
+	seen := make(map[string]struct{}, len(states))
+	var paths []string
+	for _, state := range states {
+		if _, ok := seen[state.WorktreePath]; ok {
+			continue
+		}
+		seen[state.WorktreePath] = struct{}{}
+		paths = append(paths, state.WorktreePath)
+	}
+	return paths
+}
+
 // findSessionsForWorktree finds all sessions for the given worktree path.
 // Exact WorktreePath matches win; otherwise sessions recorded in another
 // worktree of the same repository (shared git common dir) are matched, as long
