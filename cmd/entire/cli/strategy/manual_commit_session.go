@@ -257,6 +257,68 @@ func warnAmbiguousWorktreeSessions(ctx context.Context, worktreePath string, can
 		slog.Int("candidate_sessions", len(candidates)),
 		slog.Any("candidate_worktrees", worktrees),
 	)
+
+	// logging.Warn only reaches the internal .entire/logs file, so on its own it
+	// leaves the #1852 case silent to the person running `git commit`. Surface a
+	// notice on stderrWriter too — the same user-facing hook channel
+	// warnIfAttributionDiverged and warnStaleEndedSessions use — with a runnable
+	// remedy. The command names a concrete session ID (the bare `--from <path>`
+	// form relies on adoption's 12h auto-detect, which errors here) and passes
+	// --yes (required for same-repo adoption).
+	fmt.Fprint(stderrWriter, formatAmbiguousWorktreeNotice(worktrees, mostRecentlyAdoptableSession(candidates)))
+}
+
+// mostRecentlyAdoptableSession returns the newest-by-last-seen candidate that
+// `entire session adopt` would accept (not ended, not fully condensed), or nil
+// if none qualify. Mirrors isAdoptableSourceSession in session_adopt.go so the
+// remedy we print is one adoption will actually run.
+func mostRecentlyAdoptableSession(candidates []*SessionState) *SessionState {
+	var best *SessionState
+	for _, state := range candidates {
+		if state == nil || state.Phase == session.PhaseEnded || state.EndedAt != nil || state.FullyCondensed {
+			continue
+		}
+		if best == nil || ambiguousSessionLastSeen(state).After(ambiguousSessionLastSeen(best)) {
+			best = state
+		}
+	}
+	return best
+}
+
+func ambiguousSessionLastSeen(state *SessionState) time.Time {
+	if state.LastInteractionTime != nil {
+		return *state.LastInteractionTime
+	}
+	return state.StartedAt
+}
+
+// formatAmbiguousWorktreeNotice builds the user-facing stderr message. It always
+// reports the ambiguity; when an adoptable session exists it appends a directly
+// runnable adopt command. Returns "" when there are no worktrees to report.
+func formatAmbiguousWorktreeNotice(worktrees []string, primary *SessionState) string {
+	if len(worktrees) == 0 {
+		return ""
+	}
+	notice := fmt.Sprintf(
+		"entire: this commit was not linked to a checkpoint (live agent sessions span multiple worktrees: %s).\n",
+		strings.Join(worktrees, ", "),
+	)
+	if primary != nil && primary.SessionID != "" && primary.WorktreePath != "" {
+		// Shell-quote the worktree path: it can contain spaces or shell
+		// metacharacters, so an unquoted --from value would word-split or
+		// misbehave when the user copy-pastes this command.
+		notice += fmt.Sprintf(
+			"  to link one explicitly, run: entire session adopt %s --from %s --yes\n",
+			primary.SessionID, shellSingleQuote(primary.WorktreePath),
+		)
+	}
+	return notice
+}
+
+// shellSingleQuote wraps s in single quotes so it pastes into a POSIX shell as a
+// single literal argument, escaping any embedded single quotes.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // sessionsFromSingleWorktree returns the candidates only when they were all
