@@ -56,6 +56,9 @@ const (
 	// AnthropicCacheWriteMultiplier is the multiple of the input price charged
 	// for cache-write tokens when a model omits an explicit cache-write rate.
 	AnthropicCacheWriteMultiplier = 1.25
+	// AnthropicCacheWrite1hMultiplier is the multiple of the input price charged
+	// for 1-hour-TTL cache-write tokens (vs 1.25x for the 5-minute default).
+	AnthropicCacheWrite1hMultiplier = 2.0
 )
 
 // LoadTable parses every embedded pricing file, validates each entry, then
@@ -258,9 +261,22 @@ func Estimate(r ModelRate, u types.TokenUsage) float64 {
 		cwRate = *r.CacheWritePerMTok
 	}
 
+	cw1hRate := cwRate
+	if isAnthropic && r.CacheWritePerMTok == nil {
+		cw1hRate = AnthropicCacheWrite1hMultiplier * r.InputPerMTok
+	}
+	cw1h := u.CacheCreation1hTokens
+	if cw1h < 0 {
+		cw1h = 0
+	}
+	if cw1h > u.CacheCreationTokens {
+		cw1h = u.CacheCreationTokens
+	}
+	cw5m := u.CacheCreationTokens - cw1h
+
 	input := float64(u.InputTokens) * r.InputPerMTok
 	cacheRead := float64(u.CacheReadTokens) * crRate
-	cacheWrite := float64(u.CacheCreationTokens) * cwRate
+	cacheWrite := float64(cw5m)*cwRate + float64(cw1h)*cw1hRate
 	output := float64(u.OutputTokens) * r.OutputPerMTok
 
 	return (input + cacheRead + cacheWrite + output) / 1e6

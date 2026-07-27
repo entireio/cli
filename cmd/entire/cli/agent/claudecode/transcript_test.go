@@ -340,6 +340,44 @@ func TestCalculateTokenUsage_StreamingDeduplication(t *testing.T) {
 	}
 }
 
+func TestCalculateTokenUsage_CacheCreation1hSplit(t *testing.T) {
+	t.Parallel()
+
+	// Each assistant row carries the per-TTL split under message.usage.cache_creation.
+	// The 1h portion must land in CacheCreation1hTokens in BOTH the flat total and
+	// the per-model bucket; CacheCreationTokens stays the full cache_creation total.
+	data := buildJSONL(
+		`{"type":"assistant","uuid":"a1","message":{"id":"msg_001","model":"claude-opus-4-8","usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_creation":{"ephemeral_1h_input_tokens":40,"ephemeral_5m_input_tokens":60},"cache_read_input_tokens":0,"output_tokens":5}}}`,
+		`{"type":"assistant","uuid":"a2","message":{"id":"msg_002","model":"claude-opus-4-8","usage":{"input_tokens":5,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":50,"ephemeral_5m_input_tokens":150},"cache_read_input_tokens":0,"output_tokens":7}}}`,
+	)
+
+	c := &ClaudeCodeAgent{}
+
+	// Flat path.
+	flat, err := c.CalculateTokenUsage(data, 0)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsage error: %v", err)
+	}
+	if flat.CacheCreationTokens != 300 {
+		t.Errorf("flat CacheCreationTokens = %d, want 300", flat.CacheCreationTokens)
+	}
+	if flat.CacheCreation1hTokens != 90 { // 40 + 50
+		t.Errorf("flat CacheCreation1hTokens = %d, want 90", flat.CacheCreation1hTokens)
+	}
+
+	// Per-model path (single model here -> one bucket).
+	buckets, err := c.CalculateModelUsage(data, 0)
+	if err != nil {
+		t.Fatalf("CalculateModelUsage error: %v", err)
+	}
+	if len(buckets) != 1 {
+		t.Fatalf("buckets = %d, want 1", len(buckets))
+	}
+	if buckets[0].TokenUsage.CacheCreation1hTokens != 90 {
+		t.Errorf("bucket CacheCreation1hTokens = %d, want 90", buckets[0].TokenUsage.CacheCreation1hTokens)
+	}
+}
+
 func TestCalculateModelUsage_TwoModelsWithStreamingDedup(t *testing.T) {
 	t.Parallel()
 

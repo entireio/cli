@@ -19,6 +19,10 @@ type TokenUsage struct {
 	InputTokens int `json:"input_tokens"`
 	// CacheCreationTokens is tokens written to cache (billable at cache write rate)
 	CacheCreationTokens int `json:"cache_creation_tokens"`
+	// CacheCreation1hTokens is the subset of CacheCreationTokens written with a
+	// 1-hour TTL, billed at 2x input (vs 1.25x for the 5-minute default). Tracked
+	// separately so Estimate prices the 1h premium. 0 means all writes are 5-minute.
+	CacheCreation1hTokens int `json:"cache_creation_1h_tokens,omitempty"`
 	// CacheReadTokens is tokens read from cache (discounted rate)
 	CacheReadTokens int `json:"cache_read_tokens"`
 	// OutputTokens is the number of output tokens generated
@@ -144,6 +148,7 @@ func AddTokenUsage(a, b *TokenUsage) *TokenUsage {
 	if a != nil {
 		sum.InputTokens = a.InputTokens
 		sum.CacheCreationTokens = a.CacheCreationTokens
+		sum.CacheCreation1hTokens = a.CacheCreation1hTokens
 		sum.CacheReadTokens = a.CacheReadTokens
 		sum.OutputTokens = a.OutputTokens
 		sum.APICallCount = a.APICallCount
@@ -152,6 +157,7 @@ func AddTokenUsage(a, b *TokenUsage) *TokenUsage {
 	if b != nil {
 		sum.InputTokens += b.InputTokens
 		sum.CacheCreationTokens += b.CacheCreationTokens
+		sum.CacheCreation1hTokens += b.CacheCreation1hTokens
 		sum.CacheReadTokens += b.CacheReadTokens
 		sum.OutputTokens += b.OutputTokens
 		sum.APICallCount += b.APICallCount

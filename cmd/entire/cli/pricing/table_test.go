@@ -285,6 +285,51 @@ func TestEstimate_ExplicitCacheRatesOverrideMultipliers(t *testing.T) {
 	assert.InDelta(t, 25.0, Estimate(r, u), 1e-9)
 }
 
+func TestEstimate_CacheWrite1hPremium(t *testing.T) {
+	t.Parallel()
+
+	// Anthropic model, $1/MTok input so cache-write numbers read directly:
+	// 5-minute writes bill at 1.25x ($1.25/MTok), 1-hour writes at 2x ($2.00/MTok).
+	anthropic := ModelRate{
+		ID:            modelOpus48,
+		Provider:      "anthropic",
+		InputPerMTok:  1,
+		OutputPerMTok: 1,
+	}
+
+	// All 1M writes are 1-hour-TTL -> 1M * 2.0 = 2.00.
+	assert.InDelta(t, 2.0, Estimate(anthropic, types.TokenUsage{
+		CacheCreationTokens:   1_000_000,
+		CacheCreation1hTokens: 1_000_000,
+	}), 1e-9)
+
+	// Mixed: 600k 5-minute (1.25x) + 400k 1-hour (2.0x) = 0.75 + 0.80 = 1.55.
+	assert.InDelta(t, 1.55, Estimate(anthropic, types.TokenUsage{
+		CacheCreationTokens:   1_000_000,
+		CacheCreation1hTokens: 400_000,
+	}), 1e-9)
+
+	// Back-compat: no 1h portion -> all writes bill at the 1.25x default = 1.25.
+	assert.InDelta(t, 1.25, Estimate(anthropic, types.TokenUsage{
+		CacheCreationTokens: 1_000_000,
+	}), 1e-9)
+
+	// An explicit cache-write rate is honored for BOTH portions: there is no
+	// separate 1h rate, so the 1h subset does NOT get the 2x premium. $3/MTok
+	// explicit -> 1M * 3 = 3.00 even though the whole write is 1-hour-TTL.
+	explicit := ModelRate{
+		ID:                modelOpus48,
+		Provider:          "anthropic",
+		InputPerMTok:      1,
+		OutputPerMTok:     1,
+		CacheWritePerMTok: floatPtr(3),
+	}
+	assert.InDelta(t, 3.0, Estimate(explicit, types.TokenUsage{
+		CacheCreationTokens:   1_000_000,
+		CacheCreation1hTokens: 1_000_000,
+	}), 1e-9)
+}
+
 func TestLoadTable_OverrideReplacesByID(t *testing.T) {
 	t.Parallel()
 

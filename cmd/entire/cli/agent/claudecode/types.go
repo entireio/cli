@@ -89,10 +89,20 @@ type messageUsage struct {
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	OutputTokens             int `json:"output_tokens"`
+	// CacheCreation carries the per-TTL split of CacheCreationInputTokens.
+	// 1-hour-TTL writes bill at 2x input (vs 1.25x for 5-minute), so the 1h
+	// portion is tracked for accurate pricing. Fields sum to CacheCreationInputTokens.
+	CacheCreation cacheCreationBreakdown `json:"cache_creation"`
 	// Speed distinguishes fast-mode turns ("fast") from standard turns
 	// ("standard" or ""). Fast-mode turns bill at a premium, so per-model
 	// attribution routes them to the model's "-fast" pricing variant.
 	Speed string `json:"speed"`
+}
+
+// cacheCreationBreakdown is the per-TTL split of cache_creation_input_tokens.
+type cacheCreationBreakdown struct {
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
 }
 
 // messageWithUsage represents an assistant message with usage data.

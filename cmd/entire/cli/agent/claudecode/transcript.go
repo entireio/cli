@@ -176,6 +176,7 @@ func CalculateTokenUsage(transcript []TranscriptLine) *agent.TokenUsage {
 	for _, u := range usageByMessageID {
 		usage.InputTokens += u.InputTokens
 		usage.CacheCreationTokens += u.CacheCreationInputTokens
+		usage.CacheCreation1hTokens += u.CacheCreation.Ephemeral1hInputTokens
 		usage.CacheReadTokens += u.CacheReadInputTokens
 		usage.OutputTokens += u.OutputTokens
 	}
@@ -275,6 +276,7 @@ func (c *ClaudeCodeAgent) CalculateModelUsage(transcriptData []byte, fromOffset 
 		}
 		u.InputTokens += row.usage.InputTokens
 		u.CacheCreationTokens += row.usage.CacheCreationInputTokens
+		u.CacheCreation1hTokens += row.usage.CacheCreation.Ephemeral1hInputTokens
 		u.CacheReadTokens += row.usage.CacheReadInputTokens
 		u.OutputTokens += row.usage.OutputTokens
 		u.APICallCount++

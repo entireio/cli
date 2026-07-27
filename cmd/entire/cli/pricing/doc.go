@@ -40,12 +40,14 @@
 //     other provider a missing cache rate falls back to the full input rate (1.0x),
 //     billing cached tokens as normal input so an estimate never silently
 //     undercharges; the non-Anthropic embedded tables set explicit cache rates,
-//     so that fallback is only a safety net. The 1.25x write multiplier itself
-//     assumes the 5-minute-TTL premium; a 1-hour-TTL cache write actually bills
-//     2x input, so Anthropic estimates undercount when 1h writes are present. This
-//     is a known under-estimate until per-TTL buckets are parsed; Claude Code
-//     transcripts report cache_creation.ephemeral_1h_input_tokens and
-//     ephemeral_5m_input_tokens separately.
+//     so that fallback is only a safety net. Cache writes are priced per TTL: the
+//     1.25x multiplier applies to the 5-minute-TTL default, while 1-hour-TTL writes
+//     bill at 2x input (AnthropicCacheWrite1hMultiplier). Claude Code transcripts
+//     split the two via cache_creation.ephemeral_1h_input_tokens /
+//     ephemeral_5m_input_tokens; the 1h portion is parsed into
+//     TokenUsage.CacheCreation1hTokens and priced at 2x, so the earlier
+//     1h under-estimate is resolved. A model carrying an explicit cache-write rate
+//     uses that rate for both portions (there is no separate 1h rate).
 //
 //   - Fast mode: turns billed at the fast-mode premium (usage.speed == "fast")
 //     are priced here at standard rates — another known under-estimate — because
