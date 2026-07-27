@@ -19,6 +19,9 @@ func setupHooksTestRepo(t *testing.T) string {
 	return tmpDir
 }
 
+// installedHookCount is the number of hook entries Entire installs for Devin.
+const installedHookCount = 5
+
 func readHooksFile(t *testing.T, repoDir string) map[string]json.RawMessage {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(repoDir, ".devin", HooksFileName))
@@ -40,12 +43,12 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallHooks: %v", err)
 	}
-	if count != len(managedHookEvents) {
-		t.Errorf("count = %d, want %d", count, len(managedHookEvents))
+	if count != installedHookCount {
+		t.Errorf("count = %d, want %d", count, installedHookCount)
 	}
 
 	rawHooks := readHooksFile(t, repoDir)
-	for _, event := range []string{hookEventSessionStart, hookEventSessionEnd, hookEventStop, hookEventUserPromptSubmit, hookEventPostToolUse} {
+	for _, event := range []string{"SessionStart", "SessionEnd", "Stop", "UserPromptSubmit", "PostToolUse"} {
 		if _, ok := rawHooks[event]; !ok {
 			t.Errorf("hooks file missing event %q", event)
 		}
@@ -53,7 +56,7 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 
 	// The PostToolUse entry must be scoped to file-modification tools.
 	var postToolUse []HookMatcher
-	if err := json.Unmarshal(rawHooks[hookEventPostToolUse], &postToolUse); err != nil {
+	if err := json.Unmarshal(rawHooks["PostToolUse"], &postToolUse); err != nil {
 		t.Fatalf("parse PostToolUse: %v", err)
 	}
 	if len(postToolUse) != 1 || postToolUse[0].Matcher != fileModificationToolsMatcher {
@@ -62,7 +65,7 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 
 	// Commands must be production-wrapped entire hook invocations.
 	var stop []HookMatcher
-	if err := json.Unmarshal(rawHooks[hookEventStop], &stop); err != nil {
+	if err := json.Unmarshal(rawHooks["Stop"], &stop); err != nil {
 		t.Fatalf("parse Stop: %v", err)
 	}
 	if len(stop) != 1 || len(stop[0].Hooks) != 1 {
@@ -125,7 +128,7 @@ func TestInstallHooks_PreservesForeignHooks(t *testing.T) {
 	}
 
 	var stop []HookMatcher
-	if err := json.Unmarshal(rawHooks[hookEventStop], &stop); err != nil {
+	if err := json.Unmarshal(rawHooks["Stop"], &stop); err != nil {
 		t.Fatalf("parse Stop: %v", err)
 	}
 	foundForeign, foundEntire := false, false
@@ -169,13 +172,13 @@ func TestUninstallHooks_RemovesOnlyEntireHooks(t *testing.T) {
 
 	rawHooks := readHooksFile(t, repoDir)
 	var stop []HookMatcher
-	if err := json.Unmarshal(rawHooks[hookEventStop], &stop); err != nil {
+	if err := json.Unmarshal(rawHooks["Stop"], &stop); err != nil {
 		t.Fatalf("parse Stop: %v", err)
 	}
 	if len(stop) != 1 || stop[0].Hooks[0].Command != "./my-hook.sh" {
 		t.Errorf("foreign Stop hook not preserved after uninstall: %+v", stop)
 	}
-	if _, ok := rawHooks[hookEventSessionStart]; ok {
+	if _, ok := rawHooks["SessionStart"]; ok {
 		t.Error("SessionStart still present after uninstall (should be removed when empty)")
 	}
 }
@@ -201,13 +204,13 @@ func TestInstallHooks_Force(t *testing.T) {
 	if err != nil {
 		t.Fatalf("force InstallHooks: %v", err)
 	}
-	if count != len(managedHookEvents) {
-		t.Errorf("force install count = %d, want %d", count, len(managedHookEvents))
+	if count != installedHookCount {
+		t.Errorf("force install count = %d, want %d", count, installedHookCount)
 	}
 
 	rawHooks := readHooksFile(t, ".")
 	var stop []HookMatcher
-	if err := json.Unmarshal(rawHooks[hookEventStop], &stop); err != nil {
+	if err := json.Unmarshal(rawHooks["Stop"], &stop); err != nil {
 		t.Fatalf("parse Stop: %v", err)
 	}
 	total := 0
