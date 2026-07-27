@@ -71,12 +71,14 @@ func UnderTest() bool {
 //   - GEMINI_CLI=1: Gemini CLI shell tool (https://geminicli.com/docs/tools/shell/)
 //   - COPILOT_CLI=1: Copilot CLI hook subprocesses (v0.0.421+)
 //   - PI_CODING_AGENT=true: Pi Coding Agent shell tool
+//   - DEVIN_PROJECT_DIR: Devin CLI hook subprocesses (set to the project root)
 //   - GIT_TERMINAL_PROMPT=0: caller (CI, Factory AI Droid, etc.) asked git
 //     to stop prompting; respect it from git-hook context too.
 func isAgentSubprocessEnv() bool {
 	return os.Getenv("GEMINI_CLI") != "" ||
 		os.Getenv("COPILOT_CLI") != "" ||
 		os.Getenv("PI_CODING_AGENT") != "" ||
+		os.Getenv("DEVIN_PROJECT_DIR") != "" ||
 		os.Getenv("GIT_TERMINAL_PROMPT") == "0"
 }
 

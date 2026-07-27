@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/devin"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
@@ -107,4 +108,70 @@ func TestExecuteAgentHook_SkipsWhenTranscriptPathBelongsToOtherAgent(t *testing.
 	hintPath := filepath.Join(cwd, ".git", "entire-sessions", "abc-session.agent")
 	_, hintErr := os.Stat(hintPath)
 	require.True(t, os.IsNotExist(hintErr), "agent hint must not be written when the hook is forwarded (got: %v)", hintErr)
+}
+
+// TestShouldSkipDevinCrossFiredHook verifies the environment-based guard for
+// claude-code hooks that Devin CLI cross-fires via its .claude/settings.json
+// compatibility loading. Devin payloads carry no transcript_path, so the
+// transcript-ownership guard cannot catch them; DEVIN_PROJECT_DIR (set by
+// Devin in every hook process, never by real Claude Code) is the signal.
+func TestShouldSkipDevinCrossFiredHook(t *testing.T) {
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+	t.Setenv(devin.ProjectDirEnv, "/some/project")
+	require.True(t, shouldSkipDevinCrossFiredHook(agent.AgentNameClaudeCode),
+		"claude-code hook with DEVIN_PROJECT_DIR set must be skipped")
+	require.False(t, shouldSkipDevinCrossFiredHook(agent.AgentNameDevin),
+		"devin's own hooks must not be skipped")
+
+	// A real Claude Code session sets CLAUDE_PROJECT_DIR for its hooks — even
+	// nested inside a Devin environment it must keep checkpointing.
+	t.Setenv("CLAUDE_PROJECT_DIR", "/some/project")
+	require.False(t, shouldSkipDevinCrossFiredHook(agent.AgentNameClaudeCode),
+		"claude-code hook with CLAUDE_PROJECT_DIR set must dispatch normally")
+
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+	t.Setenv(devin.ProjectDirEnv, "")
+	require.False(t, shouldSkipDevinCrossFiredHook(agent.AgentNameClaudeCode),
+		"claude-code hook without DEVIN_PROJECT_DIR must dispatch normally")
+}
+
+// TestExecuteAgentHook_SkipsClaudeHookCrossFiredByDevin runs the full hook
+// execution path the way Devin invokes it: a claude-code hook command, a
+// Devin-shaped payload (word-pair session ID, no transcript_path), and
+// DEVIN_PROJECT_DIR in the environment. No session state may be created.
+func TestExecuteAgentHook_SkipsClaudeHookCrossFiredByDevin(t *testing.T) {
+	setupStopTestRepo(t)
+
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(cwd, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(cwd, ".entire", "settings.json"),
+		[]byte(`{"enabled":true}`),
+		0o644,
+	))
+
+	t.Setenv(devin.ProjectDirEnv, cwd)
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+
+	payload, err := json.Marshal(map[string]string{
+		"hook_event_name": "SessionStart",
+		"source":          "startup",
+		"session_id":      "snowy-efraasia",
+	})
+	require.NoError(t, err)
+
+	cmd := &cobra.Command{}
+	cmd.SetIn(bytes.NewReader(payload))
+	cmd.SetContext(context.Background())
+
+	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, "session-start", false))
+
+	statePath := filepath.Join(cwd, ".git", "entire-sessions", "snowy-efraasia.json")
+	_, statErr := os.Stat(statePath)
+	require.True(t, os.IsNotExist(statErr), "session state must not be created for a Devin cross-fired hook (got: %v)", statErr)
+
+	hintPath := filepath.Join(cwd, ".git", "entire-sessions", "snowy-efraasia.agent")
+	_, hintErr := os.Stat(hintPath)
+	require.True(t, os.IsNotExist(hintErr), "agent hint must not be written for a Devin cross-fired hook (got: %v)", hintErr)
 }

@@ -130,6 +130,17 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	// Initialize logging context with agent name
 	ctx := logging.WithAgent(logging.WithComponent(cmd.Context(), "hooks"), agentName)
 
+	// Cross-agent guard: Devin CLI loads .claude/settings.json hooks by
+	// default, so claude-code hook commands fire from Devin sessions with
+	// Devin payloads. The environment identifies the true origin — skip so
+	// the session is handled only by the devin agent's own hooks.
+	if shouldSkipDevinCrossFiredHook(agentName) {
+		logging.Debug(ctx, "skipping claude-code hook cross-fired by Devin CLI",
+			slog.String("hook", hookName),
+		)
+		return nil
+	}
+
 	// Strategy name for logging
 	strategyName := strategy.StrategyNameManualCommit
 

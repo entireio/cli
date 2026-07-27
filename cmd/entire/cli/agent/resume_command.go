@@ -38,6 +38,14 @@ func ResumeCommandSpecFor(name types.AgentName, sessionID string) (ForegroundCom
 			return ForegroundCommandSpec{}, false
 		}
 		return ForegroundCommandSpec{Binary: "copilot", Args: []string{"--resume", sessionID}}, true
+	case AgentNameDevin:
+		if sessionID == "" {
+			return ForegroundCommandSpec{Binary: "devin", Args: []string{"-c"}}, true
+		}
+		if !isLaunchableResumeSessionID(sessionID) {
+			return ForegroundCommandSpec{}, false
+		}
+		return ForegroundCommandSpec{Binary: "devin", Args: []string{"-r", sessionID}}, true
 	case AgentNameFactoryAIDroid:
 		if !isLaunchableResumeSessionID(sessionID) {
 			return ForegroundCommandSpec{}, false

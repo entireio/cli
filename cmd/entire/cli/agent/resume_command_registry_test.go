@@ -8,6 +8,7 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/copilotcli"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/devin"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/opencode"
@@ -23,6 +24,7 @@ func TestResumeCommandSpecMatchesFormattedResumeCommand(t *testing.T) {
 		agent.AgentNameClaudeCode,
 		agent.AgentNameCodex,
 		agent.AgentNameCopilotCLI,
+		agent.AgentNameDevin,
 		agent.AgentNameFactoryAIDroid,
 		agent.AgentNameGemini,
 		agent.AgentNameOpenCode,

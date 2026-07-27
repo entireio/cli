@@ -311,7 +311,7 @@ table.
 
 | Flag                                        | Description                                                                                                       |
 | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `--agent <name>`                            | AI agent to install hooks for: `claude-code`, `codex`, `gemini`, `opencode`, `cursor`, `factoryai-droid`, or `copilot-cli` |
+| `--agent <name>`                            | AI agent to install hooks for: `claude-code`, `codex`, `gemini`, `opencode`, `cursor`, `factoryai-droid`, `copilot-cli`, or `devin` |
 | `--force`, `-f`                             | Force reinstall hooks (removes existing Entire hooks first)                                                       |
 | `--local`                                   | Write settings to `settings.local.json` instead of `settings.json`                                                |
 | `--project`                                 | Write settings to `settings.json` even if it already exists                                                       |
@@ -414,6 +414,7 @@ Each agent stores its hook configuration in its own directory. When you run `ent
 | Codex            | `.codex/hooks.json`           | JSON hooks config |
 | Copilot CLI      | `.github/hooks/entire.json`   | JSON hooks config |
 | Cursor           | `.cursor/hooks.json`          | JSON hooks config |
+| Devin CLI        | `.devin/hooks.v1.json`        | JSON hooks config |
 | Factory AI Droid | `.factory/settings.json`      | JSON hooks config |
 | Gemini CLI       | `.gemini/settings.json`       | JSON hooks config |
 | OpenCode         | `.opencode/plugins/entire.ts` | TypeScript plugin |
@@ -495,6 +496,7 @@ Local settings override project settings field-by-field. When you run `entire st
 - Entire supports Cursor IDE and Cursor Agent CLI tool, but `entire rewind` is not available at this time. Other commands (`doctor`, `status` etc.) work the same as all other agents.
 - Entire supports Copilot CLI, but not Copilot in VS Code, in other IDEs, or on github.com.
 - Entire supports Pi coding agent (Preview). Pi uses a TypeScript extension instead of a JSON hook config. Subagent capture is not currently available.
+- Entire supports Devin CLI (Preview) — the terminal agent, not Devin cloud sessions or Devin Desktop. Devin writes its session transcript when a session ends, so checkpoints made mid-session may carry a placeholder transcript that is completed once the session exits. Subagent capture and `entire rewind` of conversation state are not currently available.
 
 ## Security & Privacy
 
