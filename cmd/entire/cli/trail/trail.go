@@ -150,6 +150,10 @@ type Metadata struct {
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
 	MergedAt  *time.Time `json:"merged_at"`
+	// RepoFullName / IsPrivate are set only for account-scoped listings
+	// (entire trail list --all), where rows span multiple repos.
+	RepoFullName string `json:"repo_full_name,omitempty"`
+	IsPrivate    bool   `json:"is_private,omitempty"`
 }
 
 // AuthorLogin returns the trail author's login, or an empty string if the

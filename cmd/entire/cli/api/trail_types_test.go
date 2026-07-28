@@ -82,3 +82,12 @@ func TestToMetadataMapsTypePriorityReviewers(t *testing.T) {
 		t.Errorf("Reviewers = %#v, want one rev1", m.Reviewers)
 	}
 }
+
+func TestToMetadataCopiesRepoIdentity(t *testing.T) {
+	t.Parallel()
+	r := TrailResource{Number: 3, RepoFullName: "acme/app", IsPrivate: true}
+	m := r.ToMetadata()
+	if m.RepoFullName != "acme/app" || !m.IsPrivate {
+		t.Errorf("ToMetadata repo identity = (%q,%v), want (acme/app,true)", m.RepoFullName, m.IsPrivate)
+	}
+}

@@ -47,6 +47,11 @@ type TrailResource struct {
 	UnresolvedCount    int        `json:"unresolved_count,omitempty"`
 	CheckpointCount    int        `json:"checkpoint_count,omitempty"`
 	CommitsAhead       int        `json:"commits_ahead,omitempty"`
+	// RepoFullName / IsPrivate label a trail with its repo. The repo-scoped
+	// list omits them; /api/v1/me/trails (account-scoped) populates them so a
+	// cross-repo listing can show which repo each trail belongs to.
+	RepoFullName string `json:"repo_full_name,omitempty"`
+	IsPrivate    bool   `json:"is_private,omitempty"`
 	// BodyDocument carries the trail's description (collaborative editor doc).
 	// The list endpoint omits it; the detail endpoint populates it.
 	BodyDocument *TrailBodyDocument `json:"body_document,omitempty"`
@@ -61,24 +66,26 @@ type TrailBodyDocument struct {
 // ToMetadata converts a TrailResource to a trail.Metadata for display.
 func (r *TrailResource) ToMetadata() *trail.Metadata {
 	m := &trail.Metadata{
-		Number:    r.Number,
-		TrailID:   trail.ID(r.ID),
-		URL:       r.URL,
-		Branch:    r.Branch,
-		Base:      r.Base,
-		Title:     r.Title,
-		Body:      r.Body,
-		Status:    trail.Status(r.Status),
-		Phase:     r.Phase,
-		Author:    r.Author,
-		Assignees: r.Assignees,
-		Labels:    r.Labels,
-		Type:      trail.Type(r.Type),
-		Priority:  trail.Priority(r.Priority),
-		Reviewers: r.Reviewers,
-		CreatedAt: r.CreatedAt,
-		UpdatedAt: r.UpdatedAt,
-		MergedAt:  r.MergedAt,
+		Number:       r.Number,
+		TrailID:      trail.ID(r.ID),
+		URL:          r.URL,
+		Branch:       r.Branch,
+		Base:         r.Base,
+		Title:        r.Title,
+		Body:         r.Body,
+		Status:       trail.Status(r.Status),
+		Phase:        r.Phase,
+		Author:       r.Author,
+		Assignees:    r.Assignees,
+		Labels:       r.Labels,
+		Type:         trail.Type(r.Type),
+		Priority:     trail.Priority(r.Priority),
+		Reviewers:    r.Reviewers,
+		CreatedAt:    r.CreatedAt,
+		UpdatedAt:    r.UpdatedAt,
+		MergedAt:     r.MergedAt,
+		RepoFullName: r.RepoFullName,
+		IsPrivate:    r.IsPrivate,
 	}
 	if m.Assignees == nil {
 		m.Assignees = []string{}
