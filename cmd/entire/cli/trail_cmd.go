@@ -143,8 +143,11 @@ type trailListOptions struct {
 	Limit        int
 	InsecureHTTP bool
 	// Repo is an optional --repo override (forge/owner/repo or a clone URL);
-	// empty means derive the repo from the origin remote.
+	// empty means derive the repo from the origin remote. For list it may be a
+	// comma-separated set that narrows the account-wide view.
 	Repo string
+	// All forces the account-wide listing (/me/trails) even inside a repo.
+	All bool
 }
 
 func newTrailShowCmd() *cobra.Command {
@@ -177,49 +180,131 @@ Otherwise, <trail> may be a trail number, id, or branch in the target repo.`,
 
 // runTrailShow shows one trail, defaulting to the current branch's trail.
 func runTrailShow(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector, repoOverride, branchOverride string) error {
+	// Repo-less: no --repo and no resolvable origin → resolve via the account
+	// index (/me/trails) using a globally-unique selector, then show against the
+	// resolved repo through the same detail path. In-repo and --repo are
+	// unchanged.
+	if repoOverride == "" {
+		if _, _, _, rerr := resolveTrailRemote(ctx); rerr != nil {
+			return runAuthenticatedActivityAPI(ctx, errW, insecureHTTP, func(ctx context.Context, client *api.Client) error {
+				found, forge, owner, repo, err := resolveTrailFromAccountIndex(ctx, client, selector)
+				if err != nil {
+					return err
+				}
+				return showResolvedTrail(ctx, w, errW, client, found, forge, owner, repo)
+			})
+		}
+	}
+
 	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, repoOverride, func(ctx context.Context, client *api.Client) error {
 		forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, repoOverride)
 		if err != nil {
 			return err
 		}
-
 		found, err := resolveTrailBySelector(ctx, client, forge, owner, repo, selector, branchOverride)
 		if err != nil {
 			return err
 		}
-
-		// Enrich the list result with the detail endpoint, which carries the
-		// rendered description (trail.body_document.text_snapshot) the list
-		// omits, and surface a browser URL. The detail fetch is best-effort:
-		// the core metadata already came from the list, so a detail failure
-		// falls back to the list body with a warning rather than failing.
-		m := found.ToMetadata()
-		webURL := trailDisplayURL(*found, forge, owner, repo)
-		// Seed the description from the list body so a failed (or skipped)
-		// detail fetch still shows something; a successful detail fetch
-		// supersedes it with the richer body_document text below.
-		bodyText := found.Body
-		descriptionLoaded := strings.TrimSpace(found.Body) != ""
-		if found.Number > 0 {
-			if bt, derr := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number); derr == nil {
-				// A successful fetch means we authoritatively consulted the
-				// description, but it only supersedes the seeded list body when
-				// it actually carries text: an older/partial server that omits
-				// body_document returns "" here and must not blank out a list
-				// body that is present.
-				descriptionLoaded = true
-				if strings.TrimSpace(bt) != "" {
-					bodyText = bt
-				}
-			} else {
-				// Best-effort: warn but still render metadata + URL (and the
-				// list body) rather than failing the whole command.
-				fmt.Fprintf(errW, "Warning: could not load trail description: %v\n", derr)
-			}
-		}
-		printTrailDetails(w, m, webURL, trailDescriptionForDisplay(bodyText, descriptionLoaded))
-		return nil
+		return showResolvedTrail(ctx, w, errW, client, found, forge, owner, repo)
 	})
+}
+
+// showResolvedTrail enriches an already-resolved trail with the detail endpoint
+// (best-effort) and prints it. Shared by the repo-scoped and account-index show
+// paths. The detail fetch carries the rendered description
+// (trail.body_document.text_snapshot) the list omits; a detail failure falls
+// back to the list body with a warning rather than failing the command.
+func showResolvedTrail(ctx context.Context, w, errW io.Writer, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
+	m := found.ToMetadata()
+	webURL := trailDisplayURL(*found, forge, owner, repo)
+	// Seed the description from the list body so a failed (or skipped) detail
+	// fetch still shows something; a successful detail fetch supersedes it with
+	// the richer body_document text below.
+	bodyText := found.Body
+	descriptionLoaded := strings.TrimSpace(found.Body) != ""
+	if found.Number > 0 {
+		if bt, derr := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number); derr == nil {
+			// A successful fetch means we authoritatively consulted the
+			// description, but it only supersedes the seeded list body when it
+			// actually carries text: an older/partial server that omits
+			// body_document returns "" here and must not blank out a present body.
+			descriptionLoaded = true
+			if strings.TrimSpace(bt) != "" {
+				bodyText = bt
+			}
+		} else {
+			// Best-effort: warn but still render metadata + URL (and the list
+			// body) rather than failing the whole command.
+			fmt.Fprintf(errW, "Warning: could not load trail description: %v\n", derr)
+		}
+	}
+	printTrailDetails(w, m, webURL, trailDescriptionForDisplay(bodyText, descriptionLoaded))
+	return nil
+}
+
+// resolveTrailFromAccountIndex finds a trail across the caller's repos via
+// /api/v1/me/trails when no repo is checked out. selector must be globally
+// unique: a trail id (matches TrailResource.ID) or "owner/repo#number". It
+// returns the trail plus its forge/owner/repo (forge is gh — the only forge
+// Entire trails support today), derived from RepoFullName.
+func resolveTrailFromAccountIndex(ctx context.Context, client *api.Client, selector string) (*api.TrailResource, string, string, string, error) {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return nil, "", "", "", errors.New("a trail id or owner/repo#number is required when not inside a repo\nhint: run 'entire trail list' to find one, or cd into the repo")
+	}
+	wantOwnerRepo, wantNumber, hasNumber := parseOwnerRepoNumber(selector)
+
+	resp, err := client.Get(ctx, "/api/v1/me/trails"+meTrailsQuery(nil, "", nil, trailListServerMaxLimit))
+	if err != nil {
+		return nil, "", "", "", fmt.Errorf("list trails: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return nil, "", "", "", err
+	}
+	var listResp api.TrailListResponse
+	if err := api.DecodeJSON(resp, &listResp); err != nil {
+		return nil, "", "", "", fmt.Errorf("decode trail list: %w", err)
+	}
+
+	for i := range listResp.Trails {
+		tr := listResp.Trails[i]
+		match := tr.ID == selector
+		if !match && hasNumber {
+			match = tr.RepoFullName == wantOwnerRepo && tr.Number == wantNumber
+		}
+		if !match {
+			continue
+		}
+		owner, repo, ok := splitOwnerRepo(tr.RepoFullName)
+		if !ok {
+			return nil, "", "", "", fmt.Errorf("trail %q has no resolvable repo (%q)", selector, tr.RepoFullName)
+		}
+		return &tr, "gh", owner, repo, nil
+	}
+	return nil, "", "", "", fmt.Errorf("no trail %q found across your repositories (run 'entire trail list --all')", selector)
+}
+
+// parseOwnerRepoNumber parses "owner/repo#123" into ("owner/repo", 123, true).
+func parseOwnerRepoNumber(selector string) (ownerRepo string, number int, ok bool) {
+	at := strings.LastIndex(selector, "#")
+	if at <= 0 || at == len(selector)-1 {
+		return "", 0, false
+	}
+	n, err := strconv.Atoi(selector[at+1:])
+	if err != nil || n <= 0 {
+		return "", 0, false
+	}
+	return selector[:at], n, true
+}
+
+// splitOwnerRepo splits "owner/repo" into its parts.
+func splitOwnerRepo(fullName string) (owner, repo string, ok bool) {
+	parts := strings.Split(fullName, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 // resolveTrailBySelector resolves a trail by an optional selector (trail
@@ -409,6 +494,8 @@ func newTrailListCmd() *cobra.Command {
 		},
 	}
 
+	cmd.Flags().BoolVar(&opts.All, "all", false,
+		"List trails across all your repositories (account-wide), not just this repo")
 	cmd.Flags().StringVar(&opts.Author, "author", "",
 		"Filter by author login (case-insensitive); use '"+trailListAuthorMe+"' for yourself (requires gh CLI); omit for any author")
 	cmd.Flags().StringVar(&opts.Status, "status", defaultTrailListStatus,
@@ -424,9 +511,62 @@ func runTrailListAll(ctx context.Context, w, errW io.Writer, opts trailListOptio
 	if err != nil {
 		return err
 	}
+	repos := splitRepoList(opts.Repo)
+
+	_, _, _, rerr := resolveTrailRemote(ctx)
+	originResolvable := rerr == nil
+
+	if decideTrailListRoute(opts.All, repos, originResolvable) == routeAccountWide {
+		return runAuthenticatedActivityAPI(ctx, errW, opts.InsecureHTTP, func(ctx context.Context, client *api.Client) error {
+			return runTrailListAccountWideWithClient(ctx, w, client, opts, statusFilters, repos)
+		})
+	}
+
+	// Repo-scoped: exactly one repo (or a resolvable origin). Preserve today's
+	// behavior, including the single --repo string the existing path parses.
 	return runAuthenticatedTrailAPI(ctx, errW, opts.InsecureHTTP, opts.Repo, func(ctx context.Context, client *api.Client) error {
 		return runTrailListAllWithClient(ctx, w, client, opts, statusFilters)
 	})
+}
+
+type trailListRoute int
+
+const (
+	routeRepoScoped trailListRoute = iota
+	routeAccountWide
+)
+
+// decideTrailListRoute picks the listing path. Exactly one repo (or a resolvable
+// origin) with no --all stays repo-scoped (cross-cell safe, unchanged today);
+// zero/multiple repos, --all, or an unresolvable origin go account-wide.
+func decideTrailListRoute(all bool, repos []string, originResolvable bool) trailListRoute {
+	switch {
+	case all, len(repos) > 1:
+		return routeAccountWide
+	case len(repos) == 1:
+		return routeRepoScoped
+	case originResolvable:
+		return routeRepoScoped
+	default:
+		return routeAccountWide
+	}
+}
+
+// splitRepoList parses a comma-separated --repo value into trimmed, non-empty
+// specs. The trail root registers --repo as a single string; list accepts a
+// comma list so it can narrow the account-wide view to several repos.
+func splitRepoList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(raw, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func validateTrailListOptions(opts trailListOptions) ([]trail.Status, error) {
@@ -511,6 +651,84 @@ func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Cli
 		fmt.Fprintf(w, "Note: --limit %d exceeds the server maximum of %d trails per request.\n", opts.Limit, trailListServerMaxLimit)
 	}
 
+	return nil
+}
+
+// meTrailsQuery builds the query for GET /api/v1/me/trails. Empty statusFilters
+// omit the status param (all statuses); author is passed through verbatim ("me"
+// is resolved to the caller server-side, so no gh lookup here); each repo is a
+// repeated repo= param the server intersects with the caller's member set.
+func meTrailsQuery(statusFilters []trail.Status, author string, repos []string, limit int) string {
+	q := url.Values{}
+	if len(statusFilters) > 0 {
+		parts := make([]string, len(statusFilters))
+		for i, s := range statusFilters {
+			parts[i] = string(s)
+		}
+		q.Set("status", strings.Join(parts, ","))
+	}
+	if author != "" {
+		q.Set("author", author)
+	}
+	for _, r := range repos {
+		if r = strings.TrimSpace(r); r != "" {
+			q.Add("repo", r)
+		}
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	return "?" + q.Encode()
+}
+
+// runTrailListAccountWideWithClient lists trails across all repos the caller is
+// a member of via /api/v1/me/trails, optionally narrowed by repos. Unlike the
+// repo-scoped path it resolves no origin/forge — the server enumerates repos —
+// and each row carries its own repo (rendered as the REPO column).
+func runTrailListAccountWideWithClient(ctx context.Context, w io.Writer, client *api.Client, opts trailListOptions, statusFilters []trail.Status, repos []string) error {
+	resp, err := client.Get(ctx, "/api/v1/me/trails"+meTrailsQuery(statusFilters, opts.Author, repos, opts.Limit))
+	if err != nil {
+		return fmt.Errorf("failed to list trails: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return err
+	}
+
+	var listResp api.TrailListResponse
+	if err := api.DecodeJSON(resp, &listResp); err != nil {
+		return fmt.Errorf("failed to decode trail list: %w", err)
+	}
+
+	trails := make([]*trail.Metadata, 0, len(listResp.Trails))
+	for i := range listResp.Trails {
+		trails = append(trails, listResp.Trails[i].ToMetadata())
+	}
+
+	totalMatched := listResp.Total
+	if totalMatched < len(trails) {
+		totalMatched = len(trails)
+	}
+
+	if opts.JSON {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(trails); err != nil {
+			return fmt.Errorf("failed to encode JSON: %w", err)
+		}
+		return nil
+	}
+
+	if len(trails) == 0 {
+		printTrailListEmpty(w, opts.Author, statusFilters)
+		return nil
+	}
+
+	printTrailList(w, trails, trailListDisplayOptions{
+		RequestedAuthor: opts.Author,
+		StatusFilters:   statusFilters,
+		TotalMatched:    totalMatched,
+	})
 	return nil
 }
 
@@ -664,10 +882,17 @@ func printTrailRows(w io.Writer, trails []*trail.Metadata, showAuthor, showStatu
 	styles := newStatusStyles(w)
 	showPhase := trailListHasPhase(trails)
 	showURL := trailListHasURL(trails)
+	// Only account-scoped listings (entire trail list --all) carry a repo name;
+	// the repo-scoped list is single-repo, so the REPO column stays hidden there.
+	showRepo := trailListHasRepo(trails)
 
 	// The leading two-space indent is folded into the first column so the shared
 	// table renderer (columnWidths/writeTableRow) reproduces the list's layout.
-	headers := []string{"  NUM", "BRANCH", "TITLE"}
+	headers := []string{"  NUM"}
+	if showRepo {
+		headers = append(headers, "REPO")
+	}
+	headers = append(headers, "BRANCH", "TITLE")
 	if showStatus {
 		headers = append(headers, "STATUS")
 	}
@@ -692,9 +917,17 @@ func printTrailRows(w io.Writer, trails []*trail.Metadata, showAuthor, showStatu
 		if title == "" {
 			title = "(untitled)"
 		}
-		fields := []string{"  " + number, t.Branch, title}
+		fields := []string{"  " + number}
 		// Cells are pre-colored here; columnWidths/writeTableRow measure width
 		// with lipgloss.Width (ANSI-agnostic), so color never shifts columns.
+		if showRepo {
+			repoCell := t.RepoFullName
+			if styles.colorEnabled && repoCell != "" {
+				repoCell = styles.render(styles.cyan, repoCell)
+			}
+			fields = append(fields, repoCell)
+		}
+		fields = append(fields, t.Branch, title)
 		if showStatus {
 			status := trailStatusDisplay(t.Status)
 			if style, ok := trailStatusColor(styles, t.Status); ok {
@@ -750,6 +983,17 @@ func trailListHasPhase(trails []*trail.Metadata) bool {
 func trailListHasURL(trails []*trail.Metadata) bool {
 	for _, t := range trails {
 		if t != nil && strings.TrimSpace(t.URL) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// trailListHasRepo reports whether any trail carries a repo full name (only
+// account-scoped listings do), so the REPO column shows only when meaningful.
+func trailListHasRepo(trails []*trail.Metadata) bool {
+	for _, t := range trails {
+		if t != nil && strings.TrimSpace(t.RepoFullName) != "" {
 			return true
 		}
 	}

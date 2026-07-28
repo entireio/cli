@@ -1670,3 +1670,181 @@ func TestBuildTrailUpdateRequestTrimsTypeAndPriority(t *testing.T) {
 		t.Fatalf("Priority on wire = %v, want trimmed high", req.Priority)
 	}
 }
+
+func TestPrintTrailRows_RepoColumnWhenPresent(t *testing.T) {
+	t.Parallel()
+	trails := []*trail.Metadata{
+		{Number: 1, Branch: "feat/a", Title: "A", Status: trail.StatusOpen, RepoFullName: "acme/app"},
+		{Number: 2, Branch: "feat/b", Title: "B", Status: trail.StatusOpen, RepoFullName: "acme/lib"},
+	}
+	var out bytes.Buffer
+	printTrailRows(&out, trails, false, true)
+	got := out.String()
+	if !strings.Contains(got, "REPO") {
+		t.Errorf("want REPO header, got:\n%s", got)
+	}
+	if !strings.Contains(got, "acme/app") || !strings.Contains(got, "acme/lib") {
+		t.Errorf("want repo names in rows, got:\n%s", got)
+	}
+}
+
+func TestPrintTrailRows_NoRepoColumnWhenAbsent(t *testing.T) {
+	t.Parallel()
+	trails := []*trail.Metadata{{Number: 1, Branch: "feat/a", Title: "A", Status: trail.StatusOpen}}
+	var out bytes.Buffer
+	printTrailRows(&out, trails, false, true)
+	if strings.Contains(out.String(), "REPO") {
+		t.Errorf("did not want REPO header, got:\n%s", out.String())
+	}
+}
+
+func TestRunTrailListAccountWide_RendersRepoColumn(t *testing.T) {
+	t.Parallel()
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.String()
+		resp := api.TrailListResponse{
+			Total: 2,
+			Trails: []api.TrailResource{
+				{Number: 7, Branch: "feat/a", Title: "A", Status: "open", RepoFullName: "acme/app"},
+				{Number: 3, Branch: "feat/b", Title: "B", Status: "open", RepoFullName: "acme/lib"},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	var out bytes.Buffer
+	err := runTrailListAccountWideWithClient(context.Background(), &out, client,
+		trailListOptions{Status: "open", Limit: 50}, []trail.Status{trail.StatusOpen}, nil)
+	if err != nil {
+		t.Fatalf("account-wide list: %v", err)
+	}
+	if !strings.HasPrefix(gotPath, "/api/v1/me/trails") {
+		t.Errorf("path = %q, want /api/v1/me/trails...", gotPath)
+	}
+	got := out.String()
+	if !strings.Contains(got, "acme/app") || !strings.Contains(got, "acme/lib") {
+		t.Errorf("want repo names in output, got:\n%s", got)
+	}
+}
+
+func TestMeTrailsQuery_EncodesFilters(t *testing.T) {
+	t.Parallel()
+	q := meTrailsQuery([]trail.Status{trail.StatusOpen}, "me", []string{"gh/acme/app", "gh/acme/lib"}, 50)
+	for _, want := range []string{"status=open", "author=me", "repo=gh%2Facme%2Fapp", "repo=gh%2Facme%2Flib", "limit=50"} {
+		if !strings.Contains(q, want) {
+			t.Errorf("query %q missing %q", q, want)
+		}
+	}
+}
+
+func TestDecideTrailListRoute(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		all              bool
+		repos            []string
+		originResolvable bool
+		want             trailListRoute
+	}{
+		{"in-repo default", false, nil, true, routeRepoScoped},
+		{"no origin falls back", false, nil, false, routeAccountWide},
+		{"single repo stays scoped", false, []string{"gh/acme/app"}, false, routeRepoScoped},
+		{"all forces account-wide", true, nil, true, routeAccountWide},
+		{"all with single repo is account-wide", true, []string{"gh/acme/app"}, true, routeAccountWide},
+		{"multiple repos are account-wide", false, []string{"gh/acme/app", "gh/acme/lib"}, true, routeAccountWide},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := decideTrailListRoute(tt.all, tt.repos, tt.originResolvable); got != tt.want {
+				t.Errorf("decideTrailListRoute(%v,%v,%v) = %v, want %v", tt.all, tt.repos, tt.originResolvable, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSplitRepoList(t *testing.T) {
+	t.Parallel()
+	got := splitRepoList(" gh/acme/app , , gh/acme/lib ")
+	if len(got) != 2 || got[0] != "gh/acme/app" || got[1] != "gh/acme/lib" {
+		t.Errorf("splitRepoList = %v, want [gh/acme/app gh/acme/lib]", got)
+	}
+	if len(splitRepoList("")) != 0 {
+		t.Errorf("empty splitRepoList should be empty")
+	}
+}
+
+// accountIndexTestOwner is the owner the account-index resolution tests expect;
+// hoisted to a constant so the literal isn't repeated across assertions.
+const accountIndexTestOwner = "acme"
+
+func TestResolveTrailFromAccountIndex_ByID(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := api.TrailListResponse{
+			Total: 2,
+			Trails: []api.TrailResource{
+				{ID: "trl_a", Number: 7, Branch: "feat/a", Status: "open", RepoFullName: "acme/app"},
+				{ID: "trl_b", Number: 3, Branch: "feat/b", Status: "open", RepoFullName: "acme/lib"},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+
+	found, forge, owner, repo, err := resolveTrailFromAccountIndex(context.Background(), client, "trl_b")
+	if err != nil {
+		t.Fatalf("resolve by id: %v", err)
+	}
+	if found == nil || found.ID != "trl_b" {
+		t.Fatalf("found = %#v, want trl_b", found)
+	}
+	if forge != "gh" || owner != accountIndexTestOwner || repo != "lib" {
+		t.Errorf("repo triple = %s/%s/%s, want gh/acme/lib", forge, owner, repo)
+	}
+}
+
+func TestResolveTrailFromAccountIndex_ByOwnerRepoNumber(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := api.TrailListResponse{Trails: []api.TrailResource{
+			{ID: "trl_a", Number: 7, RepoFullName: "acme/app"},
+			{ID: "trl_b", Number: 7, RepoFullName: "acme/lib"},
+		}}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+
+	found, _, owner, repo, err := resolveTrailFromAccountIndex(context.Background(), client, "acme/lib#7")
+	if err != nil {
+		t.Fatalf("resolve by owner/repo#number: %v", err)
+	}
+	if found.ID != "trl_b" || owner != accountIndexTestOwner || repo != "lib" {
+		t.Errorf("got %s %s/%s, want trl_b acme/lib", found.ID, owner, repo)
+	}
+}
+
+func TestResolveTrailFromAccountIndex_NotFound(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{}); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	if _, _, _, _, err := resolveTrailFromAccountIndex(context.Background(), client, "trl_missing"); err == nil {
+		t.Fatal("want error for missing trail, got nil")
+	}
+}
