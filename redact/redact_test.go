@@ -47,6 +47,15 @@ func assertStringRedactionCases(t *testing.T, tests []stringRedactionCase) {
 	}
 }
 
+func mustJSONLContent(t *testing.T, input string) string {
+	t.Helper()
+	output, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("JSONLContent(%q): %v", input, err)
+	}
+	return output
+}
+
 func TestBytes_NoSecrets(t *testing.T) {
 	input := []byte("hello world, this is normal text")
 	result := Bytes(input)
@@ -124,10 +133,7 @@ func TestAlreadyRedacted(t *testing.T) {
 func TestJSONLContent_TopLevelArray(t *testing.T) {
 	// Top-level JSON arrays are valid JSONL and should be redacted.
 	input := `["` + highEntropySecret + `","normal text"]`
-	result, err := JSONLContent(input)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	result := mustJSONLContent(t, input)
 	expected := `["REDACTED","normal text"]`
 	if result != expected {
 		t.Errorf("got %q, want %q", result, expected)
@@ -136,10 +142,7 @@ func TestJSONLContent_TopLevelArray(t *testing.T) {
 
 func TestJSONLContent_TopLevelArrayNoSecrets(t *testing.T) {
 	input := `["hello","world"]`
-	result, err := JSONLContent(input)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	result := mustJSONLContent(t, input)
 	if result != input {
 		t.Errorf("expected unchanged input, got %q", result)
 	}
@@ -224,6 +227,15 @@ func TestShouldSkipJSONLField(t *testing.T) {
 		{"ids", true},
 		{"session_ids", true},
 		{"userIds", true},
+		// Fields ending in "account" are deliberately NOT skipped: skipping
+		// bypasses every content layer and prunes subtrees, and
+		// "service_account" is the canonical GCP credential container whose
+		// nested private_key must stay scanned. Low-entropy account
+		// identifiers survive value-level scanning on their own.
+		{"account", false},
+		{"google_adsense_account", false},
+		{"aws_account", false},
+		{"service_account", false},
 		// Exact match "signature" should be skipped.
 		{"signature", true},
 		// Path-related fields should be skipped.
@@ -289,6 +301,32 @@ func TestJSONLContent_SkippedFieldValueCollision(t *testing.T) {
 	}
 	if !strings.Contains(result, `"content":"REDACTED"`) {
 		t.Fatalf("expected content field to be redacted, got: %s", result)
+	}
+}
+
+func TestJSONLContent_CredentialIdentifierKeysStayScanned(t *testing.T) {
+	t.Parallel()
+	input := `{"aws_access_key_id":"AKIAIOSFODNN7EXAMPLE","api_token_id":"correct-horse-battery","AccessKeyId":"AKIAIOSFODNN7EXAMPLE","apiTokenId":"correct-horse-battery","session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0","tenantId":"tenant-123","auth_id":"auth-123","cred_id":"cred-123","cert_id":"cert-123","credential_id":"credential-123"}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{
+		`"aws_access_key_id":"REDACTED"`,
+		`"api_token_id":"REDACTED"`,
+		`"AccessKeyId":"REDACTED"`,
+		`"apiTokenId":"REDACTED"`,
+		`"session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0"`,
+		`"tenantId":"tenant-123"`,
+		`"auth_id":"auth-123"`,
+		`"cred_id":"cred-123"`,
+		`"cert_id":"cert-123"`,
+		`"credential_id":"credential-123"`,
+	} {
+		if !strings.Contains(result, want) {
+			t.Errorf("expected %s in output, got: %s", want, result)
+		}
 	}
 }
 
@@ -863,6 +901,11 @@ func TestString_BoundedCredentialValueRedaction(t *testing.T) {
 			input: "DB__PASSWORD=secret123",
 			want:  "DB__PASSWORD=REDACTED",
 		},
+		{
+			name:  "github client secret env var",
+			input: "GITHUB_CLIENT_SECRET=correct-horse-client",
+			want:  "GITHUB_CLIENT_SECRET=REDACTED",
+		},
 	})
 }
 
@@ -953,6 +996,26 @@ func TestString_BoundedCredentialValueOverRedactionGuards(t *testing.T) {
 			name:  "placeholder literal is preserved",
 			input: "DB_PASSWORD=placeholder",
 			want:  "DB_PASSWORD=placeholder",
+		},
+		{
+			name:  "google adsense account is preserved as identifier",
+			input: "GOOGLE_ADSENSE_ACCOUNT=pub-1234567890123456",
+			want:  "GOOGLE_ADSENSE_ACCOUNT=pub-1234567890123456",
+		},
+		{
+			name:  "prose with token colon does not over-redact next word",
+			input: "Got the token: hunter2 don't merge yet",
+			want:  "Got the token: hunter2 don't merge yet",
+		},
+		{
+			name:  "prose with secret colon does not over-redact next word",
+			input: "secret: don't merge yet",
+			want:  "secret: don't merge yet",
+		},
+		{
+			name:  "prose with api_key colon does not over-redact next word",
+			input: "The api_key: was wrong, retry the request",
+			want:  "The api_key: was wrong, retry the request",
 		},
 	})
 }
@@ -1066,19 +1129,20 @@ func TestJSONLContent_DatabaseCredentialRedaction(t *testing.T) {
 
 func TestJSONLContent_StructuredCredentialFieldsRedacted(t *testing.T) {
 	t.Parallel()
-	input := `{"type":"assistant","env":{"DB_PASSWORD":"correct-horse-db","REDIS_PASSWORD":"${REDIS_PASSWORD}","note":"correct-horse-db"},"db":{"password":"correct-horse-db","host":"db.example.com","user":"svc"},"session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0"}`
+	input := `{"type":"assistant","env":{"DB_PASSWORD":"correct-horse-db","GITHUB_CLIENT_SECRET":"correct-horse-client","REDIS_PASSWORD":"${REDIS_PASSWORD}","note":"correct-horse-db"},"db":{"password":"correct-horse-db","host":"db.example.com","user":"svc"},"session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0"}`
 
 	result, err := JSONLContent(input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	for _, leaked := range []string{`"DB_PASSWORD":"correct-horse-db"`, `"password":"correct-horse-db"`} {
+	for _, leaked := range []string{`"DB_PASSWORD":"correct-horse-db"`, `"GITHUB_CLIENT_SECRET":"correct-horse-client"`, `"password":"correct-horse-db"`} {
 		if strings.Contains(result, leaked) {
 			t.Fatalf("expected structured credential field %q to be redacted, got: %s", leaked, result)
 		}
 	}
 	for _, preserved := range []string{
 		`"DB_PASSWORD":"REDACTED"`,
+		`"GITHUB_CLIENT_SECRET":"REDACTED"`,
 		`"REDIS_PASSWORD":"${REDIS_PASSWORD}"`,
 		`"password":"REDACTED"`,
 		`"host":"db.example.com"`,
@@ -1111,6 +1175,46 @@ func TestJSONLContent_NormalizedCredentialKeysRedacted(t *testing.T) {
 	}
 	if strings.Contains(result, `"DB Password":"correct-horse-db"`) {
 		t.Fatalf("expected normalized credential key to be redacted, got: %s", result)
+	}
+}
+
+func TestJSONLContent_ShellStdinSecretCommandRedactsPrintfLiteral(t *testing.T) {
+	t.Parallel()
+	keyName := strings.Join([]string{"EXAMPLE", "API", "KEY"}, "_")
+	identifierKeyName := strings.Join([]string{"AWS", "ACCESS", "KEY", "ID"}, "_")
+	secret := "correct-horse-client"
+	identifierSecret := "correct-horse-identifier"
+	input := `{"type":"user","message":{"content":[{"type":"tool_result","content":"tail -2 && printf '` + secret + `' | examplectl secret put ` + keyName + ` 2>&1 | tail -2\nprintf '` + identifierSecret + `' | examplectl secrets put ` + identifierKeyName + `"}]}}`
+
+	result := mustJSONLContent(t, input)
+	if strings.Contains(result, secret) || strings.Contains(result, identifierSecret) {
+		t.Fatalf("expected shell stdin secret literal to be redacted, got: %s", result)
+	}
+	if !strings.Contains(result, "printf 'REDACTED' | examplectl secret put "+keyName) {
+		t.Fatalf("expected command context to be preserved, got: %s", result)
+	}
+	if !strings.Contains(result, "printf 'REDACTED' | examplectl secrets put "+identifierKeyName) {
+		t.Fatalf("expected credential identifier command context to be preserved, got: %s", result)
+	}
+}
+
+func TestJSONLContent_ShellStdinSecretCommandOverRedactionGuards(t *testing.T) {
+	t.Parallel()
+	keyName := strings.Join([]string{"EXAMPLE", "API", "KEY"}, "_")
+	clientIDName := strings.Join([]string{"EXAMPLE", "CLIENT", "ID"}, "_")
+	input := `{"type":"user","message":{"content":[{"type":"tool_result","content":"printf 'example-client-id.apps.example.test' | examplectl secret put ` + clientIDName + `\nprintf \"$` + keyName + `\" | examplectl secret put ` + keyName + `"}]}}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, preserved := range []string{
+		"printf 'example-client-id.apps.example.test' | examplectl secret put " + clientIDName,
+		`printf \"$` + keyName + `\" | examplectl secret put ` + keyName,
+	} {
+		if !strings.Contains(result, preserved) {
+			t.Fatalf("expected %q to be preserved, got: %s", preserved, result)
+		}
 	}
 }
 
@@ -1569,6 +1673,109 @@ func TestString_RedactionIsIdempotent(t *testing.T) {
 	}
 }
 
+// Regression pins for the `*_account` skip-list hazard: account-named fields
+// must keep value-level scanning. A high-entropy or provider-shaped secret in
+// an account field (including the nested private_key of a GCP
+// service_account JSON, the canonical credential container) must redact,
+// while low-entropy account identifiers are preserved by the entropy
+// threshold on their own — which is what fixes the original
+// GOOGLE_ADSENSE_ACCOUNT over-redaction without a key-name bypass.
+func TestJSONLContent_AccountJSONKeysStayScanned(t *testing.T) {
+	t.Parallel()
+	redactedCases := []string{
+		`{"google_adsense_account":"` + highEntropySecret + `"}`,
+		`{"aws_account":"` + highEntropySecret + `"}`,
+		`{"service_account":"` + highEntropySecret + `"}`,
+		`{"service_account":{"private_key":"` + highEntropySecret + `"}}`,
+		`{"service_account":["` + highEntropySecret + `"]}`,
+	}
+	for _, in := range redactedCases {
+		out := mustJSONLContent(t, in)
+		if strings.Contains(out, highEntropySecret) {
+			t.Errorf("high-entropy secret in account field must redact, got: %s", out)
+		}
+	}
+
+	preservedCases := []string{
+		`{"google_adsense_account":"pub-1234567890123456"}`,
+		`{"aws_account":"123456789012"}`,
+	}
+	for _, in := range preservedCases {
+		out := mustJSONLContent(t, in)
+		if out != in {
+			t.Errorf("low-entropy account identifier must be preserved, got: %s", out)
+		}
+	}
+}
+
+// Pins that JSON keys with known non-secret prefixes (cancel/pagination/
+// continuation/idempotency/cursor/next/previous/page/sync) followed by
+// `_token` are NOT flat-redacted. These are routinely safe debug/pagination
+// identifiers. Real high-entropy credential-shaped values still get caught
+// by entropy + Betterleaks via the per-value String() call. The allowlist
+// deliberately does NOT extend to `_secret` keys — see
+// TestJSONLContent_RotationSecretKeysRedacted.
+func TestJSONLContent_NonSecretTokenPrefixesPreserved(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		`{"cancel_token":"abc-123-xyz-cancel-debug"}`,
+		`{"pagination_token":"page_500_offset_10000"}`,
+		`{"continuation_token":"foo_bar_baz_continuation_12345"}`,
+		`{"idempotency_token":"req-7f2a-deadbeef"}`,
+		`{"cursor_token":"opaque-cursor-value"}`,
+		`{"next_token":"page-2-marker"}`,
+		`{"previous_token":"page-1-marker"}`,
+		`{"prev_token":"page-1-marker"}`,
+		`{"page_token":"page-2-marker"}`,
+		`{"sync_token":"sync-state-marker"}`,
+	}
+	for _, in := range cases {
+		out := mustJSONLContent(t, in)
+		if out != in {
+			t.Errorf("expected %q preserved (non-secret prefix), got: %s", in, out)
+		}
+	}
+}
+
+// Pins that bare `{"token":"…"}` and `{"secret":"…"}` JSON fields are NOT
+// flat-redacted by the structural layer. Standalone `token`/`secret` keys
+// appear in many non-credential contexts (debug, request IDs, etc.); real
+// high-entropy values still get caught by entropy + Betterleaks.
+func TestJSONLContent_BareTokenSecretJSONKeysPreserved(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		`{"token":"abc-def-ghi-not-a-secret-debug-id"}`,
+		`{"secret":"abc-def-ghi-not-a-secret-debug-id"}`,
+	}
+	for _, in := range cases {
+		out := mustJSONLContent(t, in)
+		if out != in {
+			t.Errorf("expected %q preserved (bare token/secret keys are not credentials), got: %s", in, out)
+		}
+	}
+}
+
+// Pins that prefixed `*_token` / `*_secret` JSON fields continue to redact —
+// these are the structural credential shapes the layer targets.
+func TestJSONLContent_PrefixedTokenSecretJSONKeysRedacted(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ in, wantSub string }{
+		{`{"csrf_token":"abc-csrf-real-secret"}`, `"csrf_token":"REDACTED"`},
+		{`{"auth_token":"abc-auth-real-secret"}`, `"auth_token":"REDACTED"`},
+		{`{"oauth_token":"abc-oauth-real-secret"}`, `"oauth_token":"REDACTED"`},
+		{`{"random_token":"abc-random-real-secret"}`, `"random_token":"REDACTED"`},
+		{`{"api_key":"abc-api-real-secret"}`, `"api_key":"REDACTED"`},
+		{`{"client_secret":"abc-client-real-secret"}`, `"client_secret":"REDACTED"`},
+		{`{"refresh_token":"abc-refresh-real-secret"}`, `"refresh_token":"REDACTED"`},
+	}
+	for _, c := range cases {
+		out := mustJSONLContent(t, c.in)
+		if !strings.Contains(out, c.wantSub) {
+			t.Errorf("input %q: expected %q in output, got: %s", c.in, c.wantSub, out)
+		}
+	}
+}
+
 // Pins keyed-JSON replacement as (key, value) rather than (path, value): a
 // shared value under the same key name redacts in every context, not just
 // the credential one. Conservative on purpose — flag if changed.
@@ -1585,5 +1792,314 @@ func TestJSONLContent_CrossContextValueCollision(t *testing.T) {
 	}
 	if strings.Count(result, `"password":"REDACTED"`) != 2 {
 		t.Errorf("expected both password fields redacted, got: %s", result)
+	}
+}
+
+// Rotation-secret field names (previous_secret/next_secret/sync_secret) are
+// real webhook/HMAC rotation payload keys, and hex values can never trip the
+// entropy layer (16 symbols cap Shannon entropy at 4.0 < 4.5), so the
+// non-secret prefix allowlist must not extend to the `_secret` suffix.
+func TestJSONLContent_RotationSecretKeysRedacted(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		`{"previous_secret":"9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928"}`,
+		`{"next_secret":"deadbeefcafef00ddeadbeefcafef00d"}`,
+		`{"sync_secret":"0123456789abcdef0123456789abcdef"}`,
+		`{"cancel_secret":"deadbeefcafef00ddeadbeefcafef00d"}`,
+	}
+	for _, in := range cases {
+		out := mustJSONLContent(t, in)
+		if !strings.Contains(out, RedactedPlaceholder) {
+			t.Errorf("rotation-style secret must redact (hex defeats the entropy fallback), got: %s", out)
+		}
+	}
+}
+
+// A single-quoted shell value is a literal — `'$uperSecret123'` is a real
+// password convention ($ as leet S), never a variable expansion. The
+// shell-variable placeholder rule must only unredact unquoted or
+// double-quoted $-leading values.
+func TestString_SingleQuotedDollarPasswordRedacted(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "single-quoted $-leading password is a literal, not a var ref",
+			input: `DB_PASSWORD='$uperSecret123'`,
+			want:  `DB_PASSWORD='REDACTED'`,
+		},
+		{
+			name:  "single-quoted ${...} shape is also a literal",
+			input: `DB_PASSWORD='${notAVar}'`,
+			want:  `DB_PASSWORD='REDACTED'`,
+		},
+		{
+			name:  "unquoted $VAR stays a placeholder",
+			input: `DB_PASSWORD=$DB_PASS`,
+			want:  `DB_PASSWORD=$DB_PASS`,
+		},
+		{
+			name:  "double-quoted $VAR stays a placeholder",
+			input: `DB_PASSWORD="$DB_PASS"`,
+			want:  `DB_PASSWORD="$DB_PASS"`,
+		},
+	})
+}
+
+// Pins the high-entropy escape hatch inside isNonSecretIdentifierAssignment:
+// an identifier-named key carrying a genuinely random value must still
+// redact on the raw-text path. Removing the isHighEntropySecretCandidate
+// check silently reopens this leak.
+func TestString_IdentifierKeyWithHighEntropyValueStillRedacts(t *testing.T) {
+	t.Parallel()
+	in := "SERVICE_ACCOUNT=" + highEntropySecret
+	out := String(in)
+	if strings.Contains(out, highEntropySecret) {
+		t.Fatalf("high-entropy value under identifier-named key must redact, got: %s", out)
+	}
+}
+
+// Pins the zero-separator branch of secretValueKeyShape ([_-]*): separator-less
+// credential keys are matched by design in both the env-var and JSONL paths.
+func TestString_NoSeparatorCredentialKeysRedacted(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "APIKEY without separator",
+			input: `APIKEY=correct-horse-battery`,
+			want:  `APIKEY=REDACTED`,
+		},
+		{
+			name:  "clientsecret without separator",
+			input: `clientsecret=correct-horse-battery`,
+			want:  `clientsecret=REDACTED`,
+		},
+	})
+}
+
+func TestJSONLContent_NoSeparatorCredentialJSONKeyRedacted(t *testing.T) {
+	t.Parallel()
+	out := mustJSONLContent(t, `{"clientsecret":"correct-horse-battery"}`)
+	if !strings.Contains(out, RedactedPlaceholder) {
+		t.Fatalf("separator-less credential JSON key must redact, got: %s", out)
+	}
+}
+
+// Pins every verb and both noun forms of the shell-stdin pattern so no
+// alternative can be silently dropped.
+func TestString_ShellStdinSecretVerbMatrix(t *testing.T) {
+	t.Parallel()
+	for _, noun := range []string{"secret", "secrets"} {
+		for _, verb := range []string{"put", "set", "add", "create"} {
+			in := `printf 'literal-secret-value' | examplectl ` + noun + ` ` + verb + ` deploy_token`
+			out := String(in)
+			if strings.Contains(out, "literal-secret-value") {
+				t.Errorf("%s %s: literal not redacted: %s", noun, verb, out)
+			}
+		}
+	}
+}
+
+func TestString_GenericPasswordCredentialContexts(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "uppercase password env assignment",
+			input: `PASSWORD=hunter2`,
+			want:  `PASSWORD=REDACTED`,
+		},
+		{
+			name:  "uppercase password shell-stdin key",
+			input: `printf 'hunter2' | examplectl secrets put PASSWORD`,
+			want:  `printf 'REDACTED' | examplectl secrets put PASSWORD`,
+		},
+		{
+			name:  "lowercase password shell-stdin key",
+			input: `printf 'hunter2' | examplectl secrets put password`,
+			want:  `printf 'REDACTED' | examplectl secrets put password`,
+		},
+	})
+}
+
+// Pins the {1,512} literal bound: an oversized "literal" is not eaten by the
+// shell-stdin layer — the bound is the layer's only span-size safety valve.
+func TestString_ShellStdinSecretLiteralBoundHolds(t *testing.T) {
+	t.Parallel()
+	huge := strings.Repeat("m", 600)
+	in := `printf '` + huge + `' | examplectl secrets put deploy_token`
+	out := String(in)
+	if !strings.Contains(out, huge) {
+		t.Fatalf("oversized literal should not be redacted by the bounded shell-stdin layer, got: %s", out)
+	}
+}
+
+// Corpus-derived over-redaction guards: each case mangled a real transcript
+// (Go code, test output, or documentation) before the corresponding
+// constraint was added to secretValuePattern / the placeholder rules.
+func TestString_CorpusDerivedCodeContextGuards(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "Go equality comparison is not an assignment",
+			input: `if apiKey == "" { return nil }`,
+			want:  `if apiKey == "" { return nil }`,
+		},
+		{
+			name:  "test banner after a _token word across a newline is not an assignment",
+			input: "RUN TestProbe/cross_host_leaks_token\n=== RUN TestNext",
+			want:  "RUN TestProbe/cross_host_leaks_token\n=== RUN TestNext",
+		},
+		{
+			name:  "quoted value cannot span lines to a later quote",
+			input: "input: \"api_key=\" + highEntropySecretVar,\nname: \"AWS access key\",",
+			want:  "input: \"api_key=\" + highEntropySecretVar,\nname: \"AWS access key\",",
+		},
+		{
+			name:  "command substitution is a placeholder recipe, not a secret",
+			input: `ENTIRE_TOKEN="$(cat token)"`,
+			want:  `ENTIRE_TOKEN="$(cat token)"`,
+		},
+		{
+			name:  "Python credential assignment from method call is code",
+			input: `access_token = self.refresh_token()`,
+			want:  `access_token = self.refresh_token()`,
+		},
+		{
+			name:  "credential assignment from function call is code",
+			input: `client_secret = fetch_secret()`,
+			want:  `client_secret = fetch_secret()`,
+		},
+		{
+			name:  "JavaScript credential assignment from function call is code",
+			input: `auth_token = getAuthToken()`,
+			want:  `auth_token = getAuthToken()`,
+		},
+		{
+			name:  "credential assignment from member reference is code",
+			input: `client_secret = config.client_secret`,
+			want:  `client_secret = config.client_secret`,
+		},
+		{
+			name:  "dotted credential literal is not a code reference",
+			input: `client_secret = alpha.bravo.charlie`,
+			want:  `client_secret = REDACTED`,
+		},
+		{
+			name:  "async credential assignment is code",
+			input: `installationToken = await getInstallationToken()`,
+			want:  `installationToken = await getInstallationToken()`,
+		},
+		{
+			name:  "Go template environment reference is a placeholder",
+			input: `telemetry.PostHogAPIKey={{.Env.POSTHOG_API_KEY}}`,
+			want:  `telemetry.PostHogAPIKey={{.Env.POSTHOG_API_KEY}}`,
+		},
+		{
+			name:  "printf formatting verb is a placeholder",
+			input: `GetToken = %v, from cache=%v`,
+			want:  `GetToken = %v, from cache=%v`,
+		},
+		{
+			name:  "spaced credential assignment with a literal still redacts",
+			input: `client_secret = correct-horse-client`,
+			want:  `client_secret = REDACTED`,
+		},
+		{
+			name:  "uppercase bracketed placeholder preserved",
+			input: `subject_token = <ENTIRE_TOKEN>`,
+			want:  `subject_token = <ENTIRE_TOKEN>`,
+		},
+		{
+			name:  "base64 padding at value end still redacts",
+			input: `api_key=dGVzdHZhbHVlCg==`,
+			want:  `api_key=REDACTED`,
+		},
+	})
+}
+
+// Trail-finding regression: Shannon entropy is not monotonic under
+// concatenation, so key=value can clear the 4.5 threshold while the value
+// alone does not (aws_access_key_id=AKIA… is 4.50 combined, 3.68 alone) —
+// and betterleaks' AWS rule filters these moderate-entropy forms, so no
+// layer backstops the identifier guard. A credential word inside the key
+// must therefore disqualify suppression even under an _id/_account suffix.
+func TestString_CredentialWordInIdentifierKeyStillRedacts(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "aws access key id (canonical docs example value)",
+			input: "aws_access_key_id=AKIAIOSFODNN7EXAMPLE",
+			want:  "REDACTED",
+		},
+		{
+			// The regression window is mixed-case key=value forms: an
+			// all-uppercase key shares the value's character set and keeps
+			// combined entropy below 4.5 (leaks on main too — out of scope).
+			name:  "aws access key id (lowercase key, realistic value; combined 4.58)",
+			input: "aws_access_key_id=AKIAJ4X2QZKTPBWTNZRQ",
+			want:  "REDACTED",
+		},
+		{
+			name:  "token-flavored id key",
+			input: "api_token_id=Kj8mN3pQ7rXw2Zv5Yb9c",
+			want:  "REDACTED",
+		},
+		{
+			name:  "token-flavored id key with low-entropy value",
+			input: "api_token_id=correct-horse-battery",
+			want:  "api_token_id=REDACTED",
+		},
+		{
+			name:  "access-key id with low-entropy value",
+			input: "aws_access_key_id=correct-horse-battery",
+			want:  "aws_access_key_id=REDACTED",
+		},
+		{
+			name:  "pure identifier keys still suppress the combined-entropy FP",
+			input: "GOOGLE_ADSENSE_ACCOUNT=pub-1234567890123456",
+			want:  "GOOGLE_ADSENSE_ACCOUNT=pub-1234567890123456",
+		},
+		{
+			name:  "user id with random-looking value stays preserved (identifier semantics)",
+			input: "tenant_id=Kj8mN3pQ7rXw2Zv5Yb9c",
+			want:  "tenant_id=Kj8mN3pQ7rXw2Zv5Yb9c",
+		},
+	})
+}
+
+func TestString_OrdinaryCredentialNounIdentifiersPreserved(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{name: "authorization id", input: "auth_id=auth-123", want: "auth_id=auth-123"},
+		{name: "WebAuthn credential id abbreviation", input: "cred_id=Kj8mN3pQ7rXw2Zv5Yb9c", want: "cred_id=Kj8mN3pQ7rXw2Zv5Yb9c"},
+		{name: "certificate id", input: "cert_id=Kj8mN3pQ7rXw2Zv5Yb9c", want: "cert_id=Kj8mN3pQ7rXw2Zv5Yb9c"},
+		{name: "WebAuthn credential id", input: "credential_id=Kj8mN3pQ7rXw2Zv5Yb9c", want: "credential_id=Kj8mN3pQ7rXw2Zv5Yb9c"},
+	})
+}
+
+// Trail-finding regression: compound pagination keys whose every segment is
+// allowlisted (next_page_token) must stay readable, while a single
+// non-allowlisted segment (auth_page_token) still redacts.
+func TestJSONLContent_CompoundNonSecretTokenKeys(t *testing.T) {
+	t.Parallel()
+	preserved := []string{
+		`{"next_page_token":"page-2-opaque-marker"}`,
+		`{"prev_page_token":"page-1-opaque-marker"}`,
+		`{"next_sync_token":"sync-state-marker"}`,
+	}
+	for _, in := range preserved {
+		out := mustJSONLContent(t, in)
+		if out != in {
+			t.Errorf("compound allowlisted token key must be preserved, got: %s", out)
+		}
+	}
+	redacted := []string{
+		`{"auth_page_token":"opaque-value-here"}`,
+		`{"session_next_token":"opaque-value-here"}`,
+	}
+	for _, in := range redacted {
+		out := mustJSONLContent(t, in)
+		if !strings.Contains(out, RedactedPlaceholder) {
+			t.Errorf("token key with non-allowlisted segment must redact, got: %s", out)
+		}
 	}
 }

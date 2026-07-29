@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/betterleaks/betterleaks/detect"
 )
@@ -32,6 +33,16 @@ var credentialedURIPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]{1,31}://
 // compose both the env-var assignment regex and the JSON-key regex so the
 // vendor list stays in one place.
 const dbPasswordKeyShape = `(?:db|database|pg|postgres|postgresql|mysql|mariadb|redis|mongo|mongodb|sqlserver|mssql|jdbc)(?:[_-]+[a-z0-9]+)*[_-]*(?:password|passwd|pwd)` //nolint:gosec // regex literal, not a credential
+// secretValueKeyShape matches credential-style key names. Two alternation
+// branches:
+//  1. Explicit shapes (api_key, auth_token, client_secret, …) with an
+//     optional prefix.
+//  2. Bare `secret`/`token` ONLY when preceded by at least one prefix segment
+//     (e.g. csrf_token, auth_secret). Standalone `{"token":"…"}` /
+//     `{"secret":"…"}` JSON fields are intentionally NOT matched here —
+//     entropy + Betterleaks cover real high-entropy values, and bare
+//     `token`/`secret` keys appear in many non-credential contexts.
+const secretValueKeyShape = `(?:(?:[a-z0-9]+[_-]+)*(?:api[_-]*key|auth[_-]*token|access[_-]*token|refresh[_-]*token|client[_-]*secret|consumer[_-]*secret|secret[_-]*key|private[_-]*key|ssh[_-]*key)|(?:[a-z0-9]+[_-]+)+(?:secret|token))` //nolint:gosec // regex literal, not a credential
 
 var (
 	jdbcPattern          = regexp.MustCompile(`(?i)\bjdbc:[^\s"'<>` + "`" + `]+`)
@@ -41,7 +52,23 @@ var (
 	// credentialValuePattern requires the prefix to start at a non-alphanumeric
 	// boundary, so APP_DB_PASSWORD matches via the leading `_` but mydbpassword
 	// does not.
-	credentialValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + dbPasswordKeyShape + `)\s*=\s*("[^"]*"|'[^']*'|[^\s,;&]+)`)
+	credentialValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + dbPasswordKeyShape + `)\s*=\s*(?P<value>"[^"]*"|'[^']*'|[^\s,;&]+)`)
+	// credentialAssignmentPattern captures a bounded key candidate and lets the
+	// shared key classifier decide whether it is sensitive. Requiring `=` avoids
+	// prose, rejecting an initial `=` avoids equality expressions, and newline-
+	// free quote branches keep a match inside one command.
+	credentialAssignmentPattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=[ \t]*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&=` + "`" + `][^\s,;&]*)`)
+	credentialCodeCallPattern   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\([^()\r\n]*\)$`)
+	credentialCodeRefPattern    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$`)
+	goTemplateReferencePattern  = regexp.MustCompile(`^\{\{[ \t]*\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+[ \t]*\}\}$`)
+	printfFormatVerbPattern     = regexp.MustCompile(`^%[-+#0 ]*(?:[0-9]+|\*)?(?:\.(?:[0-9]+|\*))?[A-Za-z]$`)
+	// shellStdinSecretPattern matches a printf literal piped into a
+	// secret-management command (`printf 'v' | mycli secrets put KEY`). Named
+	// captures keep the literal and key contracts stable; bounded, newline-free
+	// spans prevent the match from consuming neighboring transcript entries.
+	shellStdinSecretPattern = regexp.MustCompile(
+		`(?i)\bprintf\s+(?:(?:%[A-Za-z]|'%-?[0-9.]*[A-Za-z](?:\\n)?'|"%-?[0-9.]*[A-Za-z](?:\\n)?")\s+)?(?P<value>"[^"\r\n]{1,512}"|'[^'\r\n]{1,512}'|[^\s|&;]{1,512})\s*\|\s*[^&;\r\n]{0,300}\bsecrets?\s+(?:put|set|add|create)\s+(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)\b`,
+	)
 
 	keywordHostPattern      = regexp.MustCompile(`(?i)(?:^|\s)host=`)
 	keywordUserPattern      = regexp.MustCompile(`(?i)(?:^|\s)user=`)
@@ -51,7 +78,15 @@ var (
 	// credentialJSONKeyRegex operates on output of normalizeCredentialJSONKey
 	// (already lowercased, `-`/` `/`.` → `_`), so the `(?i)` flag is unnecessary.
 	credentialJSONKeyRegex  = regexp.MustCompile(`^` + dbPasswordKeyShape + `$`)
+	secretJSONKeyRegex      = regexp.MustCompile(`^` + secretValueKeyShape + `$`)
 	genericPasswordKeyRegex = regexp.MustCompile(`(?i)^(?:password|passwd|pwd)$`)
+	// credentialWordInKeyRE spots a secret-bearing word segment anywhere in a
+	// normalized key. Generic credential nouns (auth, cred, credential, cert)
+	// stay ordinary identifiers unless paired with one of these secret shapes.
+	// Used by isNonSecretIdentifierAssignment: an id/account-suffixed key that
+	// also names a secret
+	// (aws_access_key_id, api_token_id) must never suppress redaction.
+	credentialWordInKeyRE = regexp.MustCompile(`(?:^|_)(?:key|token|secret|pass|passwd|password|pwd)(?:_|$)`)
 )
 
 // entropyThreshold is the minimum Shannon entropy for a string to be considered
@@ -62,6 +97,26 @@ const entropyThreshold = 4.5
 
 // RedactedPlaceholder is the replacement text used for redacted secrets.
 const RedactedPlaceholder = "REDACTED"
+
+// nonSecretTokenPrefixes lists key-name prefixes that, when followed by
+// `_token`, denote routinely-non-sensitive debug or pagination identifiers
+// (e.g. cancel_token, pagination_token). These are excluded from JSON-key
+// redaction so they remain readable in transcripts. Real high-entropy values
+// still get caught by the entropy detector / Betterleaks via the per-value
+// String() call in collectJSONLReplacements. See isKnownNonSecretTokenKey
+// for why `_secret` keys are deliberately not exempted.
+var nonSecretTokenPrefixes = map[string]struct{}{
+	"cancel":       {},
+	"continuation": {},
+	"cursor":       {},
+	"idempotency":  {},
+	"next":         {},
+	"page":         {},
+	"pagination":   {},
+	"prev":         {},
+	"previous":     {},
+	"sync":         {},
+}
 
 // placeholderSecretValues lists lowercase values that should be treated as
 // non-secrets when they appear as a credential value: prior redactions
@@ -164,15 +219,16 @@ var connectionStringRules = []connectionStringRule{
 //  4. Credentialed URIs: URLs containing userinfo passwords
 //  5. Database connection strings: JDBC, keyword DSNs, and semicolon strings
 //  6. User-defined custom rules: configured via ConfigureCustomRules
-//  7. Bounded credential key/value pairs: DB_PASSWORD=...
-//  8. PII detection: email, phone, address patterns (only when configured via ConfigurePII)
+//  7. Shell stdin literals piped into secret-management commands
+//  8. Bounded credential key/value pairs: DB_PASSWORD=..., GITHUB_CLIENT_SECRET=...
+//  9. PII detection: email, phone, address patterns (only when configured via ConfigurePII)
 //
 // A string is redacted if ANY method flags it.
 func String(s string) string {
 	return applyRegions(s, detectAllLayers(s))
 }
 
-// detectAllLayers runs the eight always-on/opt-in regex-based redaction
+// detectAllLayers runs the nine always-on/opt-in regex-based redaction
 // layers and returns their tagged regions. The OpenAI Privacy Filter
 // (the final, network-backed layer) is NOT included — callers that want it
 // append detectOPF spans to the result before passing to applyRegions. See
@@ -198,6 +254,10 @@ func detectAllLayers(s string) []taggedRegion {
 					continue
 				}
 			}
+		}
+
+		if isNonSecretIdentifierAssignment(s[start:end]) {
+			continue
 		}
 
 		if shannonEntropy(s[start:end]) > entropyThreshold {
@@ -240,10 +300,14 @@ func detectAllLayers(s string) []taggedRegion {
 	// 6. User-defined custom rules (secrets — only runs when configured).
 	regions = append(regions, detectCustomRules(getCustomRulesConfig(), s)...)
 
-	// 7. Bounded credential key/value detection (secrets — always on).
+	// 7. Shell stdin literals piped into secret-management commands
+	// (secrets — always on).
+	regions = append(regions, detectShellStdinSecrets(s)...)
+
+	// 8. Bounded credential key/value detection (secrets — always on).
 	regions = append(regions, detectCredentialValues(s)...)
 
-	// 8. PII detection (opt-in — only runs when configured).
+	// 9. PII detection (opt-in — only runs when configured).
 	regions = append(regions, detectPII(getPIIConfig(), s)...)
 
 	return regions
@@ -367,36 +431,126 @@ func hasSemicolonConnectionPassword(candidate string) bool {
 		hasNonPlaceholderPasswordAssignment(candidate)
 }
 
+func detectShellStdinSecrets(s string) []taggedRegion {
+	if !strings.ContainsRune(s, '|') {
+		return nil
+	}
+	return detectCredentialKeyCaptures(s, shellStdinSecretPattern, true, nil)
+}
+
 func detectCredentialValues(s string) []taggedRegion {
+	if !strings.ContainsRune(s, '=') {
+		return nil
+	}
+	regions := detectNonPlaceholderCaptures(s, credentialValuePattern)
+	regions = append(regions, detectCredentialKeyCaptures(s, credentialAssignmentPattern, false, shouldPreserveCredentialCodeAssignment)...)
+	return regions
+}
+
+func detectCredentialKeyCaptures(
+	s string,
+	pattern *regexp.Regexp,
+	genericPasswordContext bool,
+	shouldPreserve func(value, separator string) bool,
+) []taggedRegion {
+	valueGroup := pattern.SubexpIndex("value")
+	keyGroup := pattern.SubexpIndex("key")
 	var regions []taggedRegion
-	for _, loc := range credentialValuePattern.FindAllStringSubmatchIndex(s, -1) {
-		if len(loc) < 6 || loc[4] < 0 || loc[5] < 0 {
+	for _, match := range pattern.FindAllStringSubmatchIndex(s, -1) {
+		keyStart, keyEnd, ok := captureRange(match, keyGroup)
+		if !ok {
 			continue
 		}
-		start, end := unquoteRange(s, loc[4], loc[5])
-		if hasNonPlaceholderPasswordValue(s[start:end]) {
-			regions = append(regions, taggedRegion{region: region{start, end}})
+		key := s[keyStart:keyEnd]
+		credentialContext := genericPasswordContext || key == "PASSWORD" || key == "PASSWD"
+		if !isCredentialJSONSecretKey(key, credentialContext) {
+			continue
+		}
+		if shouldPreserve != nil {
+			valueStart, valueEnd, valueOK := captureRange(match, valueGroup)
+			if valueOK && keyEnd <= valueStart && shouldPreserve(s[valueStart:valueEnd], s[keyEnd:valueStart]) {
+				continue
+			}
+		}
+		if captured, ok := nonPlaceholderCapture(s, match, valueGroup); ok {
+			regions = append(regions, captured)
 		}
 	}
 	return regions
 }
 
-func unquoteRange(s string, start, end int) (int, int) {
+// shouldPreserveCredentialCodeAssignment recognizes source expressions that
+// cannot be credential literals. Requiring whitespace on both sides of `=`
+// keeps compact shell/env assignments on the conservative redaction path.
+func shouldPreserveCredentialCodeAssignment(value, separator string) bool {
+	equal := strings.IndexByte(separator, '=')
+	if equal <= 0 || equal >= len(separator)-1 {
+		return false
+	}
+	return value == "await" || credentialCodeCallPattern.MatchString(value) || isCredentialCodeReference(value)
+}
+
+func isCredentialCodeReference(value string) bool {
+	if !credentialCodeRefPattern.MatchString(value) {
+		return false
+	}
+	memberStart := strings.LastIndexByte(value, '.') + 1
+	return isCredentialJSONSecretKey(value[memberStart:], false)
+}
+
+func detectNonPlaceholderCaptures(s string, pattern *regexp.Regexp) []taggedRegion {
+	valueGroup := pattern.SubexpIndex("value")
+	var regions []taggedRegion
+	for _, match := range pattern.FindAllStringSubmatchIndex(s, -1) {
+		if captured, ok := nonPlaceholderCapture(s, match, valueGroup); ok {
+			regions = append(regions, captured)
+		}
+	}
+	return regions
+}
+
+func nonPlaceholderCapture(s string, match []int, captureGroup int) (taggedRegion, bool) {
+	start, end, ok := captureRange(match, captureGroup)
+	if !ok {
+		return taggedRegion{}, false
+	}
+	start, end, singleQuoted := unquoteRange(s, start, end)
+	if !hasNonPlaceholderQuotedPasswordValue(s[start:end], singleQuoted) {
+		return taggedRegion{}, false
+	}
+	return taggedRegion{region: region{start, end}}, true
+}
+
+func captureRange(match []int, captureGroup int) (int, int, bool) {
+	index := captureGroup * 2
+	if captureGroup < 0 || len(match) <= index+1 || match[index] < 0 || match[index+1] < 0 {
+		return 0, 0, false
+	}
+	return match[index], match[index+1], true
+}
+
+// unquoteRange narrows [start,end) past a matching pair of surrounding
+// quotes and reports whether those quotes were single quotes. Single-quoted
+// shell values are literals — `'$uperSecret123'` is a real password, never a
+// variable expansion — so callers must pass singleQuoted through to the
+// placeholder check to keep the shell-variable heuristic from unredacting
+// them.
+func unquoteRange(s string, start, end int) (int, int, bool) {
 	if end-start < 2 {
-		return start, end
+		return start, end, false
 	}
 	first, last := s[start], s[end-1]
 	if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
-		return start + 1, end - 1
+		return start + 1, end - 1, first == '\''
 	}
-	return start, end
+	return start, end, false
 }
 
 func hasNonPlaceholderPasswordAssignment(candidate string) bool {
 	for _, loc := range passwordAssignmentRegex.FindAllStringSubmatchIndex(candidate, -1) {
 		if len(loc) >= 4 && loc[2] >= 0 && loc[3] >= 0 {
-			start, end := unquoteRange(candidate, loc[2], loc[3])
-			if hasNonPlaceholderPasswordValue(candidate[start:end]) {
+			start, end, singleQuoted := unquoteRange(candidate, loc[2], loc[3])
+			if hasNonPlaceholderQuotedPasswordValue(candidate[start:end], singleQuoted) {
 				return true
 			}
 		}
@@ -405,11 +559,25 @@ func hasNonPlaceholderPasswordAssignment(candidate string) bool {
 }
 
 func hasNonPlaceholderPasswordValue(value string) bool {
-	return value != "" && !isPlaceholderSecretValue(value)
+	return hasNonPlaceholderQuotedPasswordValue(value, false)
 }
 
-func isPlaceholderSecretValue(value string) bool {
-	trimmed := strings.Trim(strings.TrimSpace(value), `"'`)
+// hasNonPlaceholderQuotedPasswordValue is the quote-aware variant:
+// singleQuoted marks values whose surrounding single quotes were stripped by
+// unquoteRange, which makes any $-leading content a literal, not a shell
+// expansion.
+func hasNonPlaceholderQuotedPasswordValue(value string, singleQuoted bool) bool {
+	return value != "" && !isPlaceholderSecretValueQuoted(value, singleQuoted)
+}
+
+func isPlaceholderSecretValueQuoted(value string, singleQuoted bool) bool {
+	trimmedSpace := strings.TrimSpace(value)
+	// Values that arrive still wearing their own single quotes are shell
+	// literals too (some callers match quoted forms without unquoting).
+	if len(trimmedSpace) >= 2 && trimmedSpace[0] == '\'' && trimmedSpace[len(trimmedSpace)-1] == '\'' {
+		singleQuoted = true
+	}
+	trimmed := strings.Trim(trimmedSpace, `"'`)
 	if trimmed == "" {
 		return true
 	}
@@ -417,8 +585,32 @@ func isPlaceholderSecretValue(value string) bool {
 		return true
 	}
 	normalized := strings.ToLower(trimmed)
-	if strings.HasPrefix(normalized, "${") && strings.HasSuffix(normalized, "}") {
-		return true
+	// Inside single quotes the shell performs no expansion: `'$uperSecret123'`
+	// and `'${looks_like_var}'` are literal passwords, so the
+	// variable-reference placeholder rules only apply to unquoted or
+	// double-quoted values.
+	if !singleQuoted {
+		if strings.HasPrefix(normalized, "${") && strings.HasSuffix(normalized, "}") {
+			return true
+		}
+		// Command substitutions (`TOKEN="$(cat token)"`) are how docs and
+		// scripts reference a secret without containing it — the value here
+		// is the recipe, not the secret.
+		if strings.HasPrefix(normalized, "$(") && strings.HasSuffix(normalized, ")") {
+			return true
+		}
+		// Documentation ellipsis placeholders: `ANTHROPIC_API_KEY=sk-ant-...`.
+		// Real key material never ends in literal dots; anything sensitive
+		// before the ellipsis is still covered by entropy/betterleaks.
+		if strings.HasSuffix(normalized, "...") {
+			return true
+		}
+		if isShellVariableReference(trimmed) {
+			return true
+		}
+		if goTemplateReferencePattern.MatchString(trimmed) || printfFormatVerbPattern.MatchString(trimmed) {
+			return true
+		}
 	}
 	if _, ok := placeholderSecretValues[normalized]; ok {
 		return true
@@ -426,11 +618,28 @@ func isPlaceholderSecretValue(value string) bool {
 	return isRepeatedCharPlaceholder(normalized)
 }
 
+func isShellVariableReference(s string) bool {
+	if len(s) < 2 || s[0] != '$' {
+		return false
+	}
+	if s[1] != '_' && (s[1] < 'A' || s[1] > 'Z') && (s[1] < 'a' || s[1] > 'z') {
+		return false
+	}
+	for i := 2; i < len(s); i++ {
+		c := s[i]
+		if c != '_' && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
+}
+
 // bracketedPlaceholderInteriorRE matches the inside of a "<…>" placeholder
-// shape: lowercase letters joined by `-` or `_`. Digits, mixed case, and
-// special chars are rejected so values like `<hunter2>` or `<RealPassword>`
-// still fall through to redaction.
-var bracketedPlaceholderInteriorRE = regexp.MustCompile(`^[a-z][a-z_-]*$`)
+// shape: all-lowercase or all-uppercase letters joined by `-` or `_`
+// (`<your-token>`, `<ENTIRE_TOKEN>`). Digits, mixed case, and special chars
+// are rejected so values like `<hunter2>` or `<RealPassword>` still fall
+// through to redaction.
+var bracketedPlaceholderInteriorRE = regexp.MustCompile(`^(?:[a-z][a-z_-]*|[A-Z][A-Z_-]*)$`)
 
 // isBracketedPlaceholder reports whether s is a "<name>" doc placeholder
 // (e.g. "<password>", "<your-db-password>"). The minimum total length of 5
@@ -466,10 +675,86 @@ func isRepeatedCharPlaceholder(s string) bool {
 
 func isCredentialJSONSecretKey(key string, credentialContext bool) bool {
 	normalized := normalizeCredentialJSONKey(key)
-	if credentialJSONKeyRegex.MatchString(normalized) {
+	if isKnownNonSecretTokenKey(normalized) {
+		return false
+	}
+	if isSensitiveNormalizedJSONValueKey(normalized) || isCredentialIdentifierKey(normalized) {
 		return true
 	}
 	return credentialContext && genericPasswordKeyRegex.MatchString(normalized)
+}
+
+// isKnownNonSecretTokenKey reports whether the normalized JSON key is
+// `<prefix>_token` where every `_`-separated segment of prefix is in
+// nonSecretTokenPrefixes — so compound pagination keys like
+// `next_page_token` qualify alongside `cancel_token` and
+// `pagination_token`, while any non-allowlisted segment
+// (`auth_page_token`, `csrf_token`) still redacts. Deliberately NOT
+// applied to `_secret` keys: `previous_secret`/`next_secret` are real
+// field names in webhook/HMAC secret-rotation payloads, and the entropy
+// fallback cannot catch them when hex-encoded (16 symbols cap Shannon
+// entropy at 4.0, below the 4.5 threshold).
+func isKnownNonSecretTokenKey(normalized string) bool {
+	prefix, ok := strings.CutSuffix(normalized, "_token")
+	if !ok || prefix == "" {
+		return false
+	}
+	for _, segment := range strings.Split(prefix, "_") {
+		if _, allowed := nonSecretTokenPrefixes[segment]; !allowed {
+			return false
+		}
+	}
+	return true
+}
+
+func isNonSecretIdentifierAssignment(candidate string) bool {
+	key, value, ok := strings.Cut(candidate, "=")
+	if !ok || key == "" || value == "" {
+		return false
+	}
+	normalized := normalizeCredentialJSONKey(key)
+	if isSensitiveNormalizedJSONValueKey(normalized) || genericPasswordKeyRegex.MatchString(normalized) {
+		return false
+	}
+	// A credential word anywhere in the key disqualifies suppression even
+	// under an id/account suffix: aws_access_key_id names a credential, not
+	// an identifier. This is the only reliable discriminator — Shannon
+	// entropy is not monotonic under concatenation, so a combined key=value
+	// can clear the 4.5 threshold while the value alone does not (e.g.
+	// aws_access_key_id=AKIA… scores 4.50 combined vs 3.68 for the value),
+	// and betterleaks' vendor rules filter the moderate-entropy forms too.
+	if isCredentialIdentifierKey(normalized) {
+		return false
+	}
+	if isHighEntropySecretCandidate(value) {
+		return false
+	}
+	return isIdentifierAssignmentKey(normalized)
+}
+
+func isIdentifierAssignmentKey(normalized string) bool {
+	return normalized == "id" ||
+		normalized == "account" ||
+		strings.HasSuffix(normalized, "_id") ||
+		strings.HasSuffix(normalized, "_account")
+}
+
+func isCredentialIdentifierKey(normalized string) bool {
+	return isIdentifierAssignmentKey(normalized) && credentialWordInKeyRE.MatchString(normalized)
+}
+
+func isHighEntropySecretCandidate(value string) bool {
+	for _, loc := range secretPattern.FindAllStringIndex(value, -1) {
+		if shannonEntropy(value[loc[0]:loc[1]]) > entropyThreshold {
+			return true
+		}
+	}
+	return false
+}
+
+func isSensitiveNormalizedJSONValueKey(normalized string) bool {
+	return credentialJSONKeyRegex.MatchString(normalized) ||
+		secretJSONKeyRegex.MatchString(normalized)
 }
 
 func isCredentialJSONObject(obj map[string]any) bool {
@@ -489,13 +774,50 @@ func isCredentialJSONObject(obj map[string]any) bool {
 }
 
 func normalizeCredentialJSONKey(key string) string {
-	key = strings.ToLower(strings.TrimSpace(key))
-	key = strings.ReplaceAll(key, "-", "_")
-	key = strings.ReplaceAll(key, " ", "_")
-	// Flattened-config exporters (Spring, dotnet, Hashicorp Vault) emit dotted keys
-	// like "db.password" or "mysql.root.password"; treat them like underscored.
-	key = strings.ReplaceAll(key, ".", "_")
-	return key
+	key = strings.TrimSpace(key)
+	needsNormalization := false
+	hasNonASCII := false
+	for i := range len(key) {
+		current := key[i]
+		if current >= utf8.RuneSelf {
+			hasNonASCII = true
+		}
+		if hasNonASCII || current >= 'A' && current <= 'Z' || current == '-' || current == ' ' || current == '.' {
+			needsNormalization = true
+			break
+		}
+	}
+	if !needsNormalization {
+		return key
+	}
+
+	var normalized strings.Builder
+	normalized.Grow(len(key))
+	for i := range len(key) {
+		current := key[i]
+		switch current {
+		case '-', ' ', '.':
+			normalized.WriteByte('_')
+			continue
+		}
+		if current >= 'A' && current <= 'Z' && i > 0 {
+			previousIsLower := key[i-1] >= 'a' && key[i-1] <= 'z'
+			nextIsLower := i+1 < len(key) && key[i+1] >= 'a' && key[i+1] <= 'z'
+			previousIsUpper := key[i-1] >= 'A' && key[i-1] <= 'Z'
+			if previousIsLower || (previousIsUpper && nextIsLower) {
+				normalized.WriteByte('_')
+			}
+		}
+		if current >= 'A' && current <= 'Z' {
+			current += 'a' - 'A'
+		}
+		normalized.WriteByte(current)
+	}
+	result := normalized.String()
+	if hasNonASCII {
+		return strings.ToLower(result)
+	}
+	return result
 }
 
 // Bytes is a convenience wrapper around String for []byte content.
@@ -624,7 +946,7 @@ func StringWithPrivacyFilter(ctx context.Context, s string) string {
 // JSONLContentWithPrivacyFilter augments JSONLContent with the OpenAI
 // Privacy Filter via batched inference. Walks the content twice: pass 1
 // collects unique prose-shaped leaves into a single RedactBatch call;
-// pass 2 applies the eight regex layers per leaf plus the cached OPF spans
+// pass 2 applies the nine regex layers per leaf plus the cached OPF spans
 // for that leaf. One OPF shell-out covers the whole transcript instead of
 // one per leaf — without batching, a typical 500-leaf transcript would
 // take many minutes per commit.
@@ -834,10 +1156,25 @@ func shouldSkipJSONLField(key string) bool {
 	}
 	lower := strings.ToLower(key)
 
+	// Credential-shaped identifier keys carry secrets despite their suffix.
+	// Keep them in the walker so structural key detection can redact even
+	// moderate-entropy values that the value-only scanners would miss.
+	if isCredentialIdentifierKey(normalizeCredentialJSONKey(key)) {
+		return false
+	}
+
 	// Skip ID fields
 	if strings.HasSuffix(lower, "id") || strings.HasSuffix(lower, "ids") {
 		return true
 	}
+
+	// Account fields (google_adsense_account, aws_account, ...) are
+	// deliberately NOT skipped here: shouldSkipJSONLField bypasses every
+	// content layer and prunes whole subtrees, and "service_account" is the
+	// canonical field name of the GCP credential container whose nested
+	// private_key must stay scanned. Low-entropy account identifiers survive
+	// value-level scanning on their own; the text-path false positive is
+	// handled by isNonSecretIdentifierAssignment instead.
 
 	// Skip common path and directory fields from agent transcripts.
 	// These appear frequently in tool calls and are structural, not secrets.
