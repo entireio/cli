@@ -153,10 +153,15 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 	}
 	payload := *parsed
 
+	identity := parsePiSessionIdentity(payload.SessionFile)
 	sessionID := payload.SessionID
 	if sessionID == "" {
-		sessionID = extractSessionIDFromPath(payload.SessionFile)
+		sessionID = identity.SessionID
 	}
+	// subagentID is non-empty only for Pi subagent runs, whose transcript path
+	// carries <parent>/<sub>/run-N identity that filepath.Base would otherwise
+	// collapse to the role-named "session" leaf (issue #1870).
+	subagentID := identity.SubagentID
 
 	now := time.Now()
 
@@ -170,6 +175,25 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 		}, nil
 
 	case HookNameBeforeAgentStart:
+		if subagentID != "" {
+			// A Pi subagent run is starting. Route it through the subagent
+			// mechanism (issue #1870) so pre-task state is captured and the run
+			// is attributed to the parent session rather than a phantom
+			// "session"-named session. No context injection: that is for the
+			// parent turn only.
+			return &agent.Event{
+				Type:       agent.SubagentStart,
+				SessionID:  sessionID,
+				SubagentID: subagentID,
+				ToolUseID:  subagentID,
+				// SessionRef is the parent conversation on both Pi subagent
+				// events (Start/End). The Start handler only logs it and
+				// snapshots pre-task git state, so the value is informational
+				// here; keeping it identical to End avoids a confusing mismatch.
+				SessionRef: derivePiParentTranscript(payload.SessionFile),
+				Timestamp:  now,
+			}, nil
+		}
 		// Pi emits before_agent_start with a fully-populated session ID, but
 		// we cache it anyway to support the agent_end fallback below.
 		if sessionID == "" {
@@ -192,6 +216,29 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 	case HookNameAgentEnd:
 		if sessionID == "" {
 			sessionID = readCachedSessionID(ctx)
+		}
+		if subagentID != "" {
+			// A Pi subagent run ended. Stage its transcript under the run's own
+			// identity (never the shared "session.json"), attach it to the
+			// parent session as a subagent transcript, and route as SubagentEnd
+			// so distinct runs no longer overwrite one another (issue #1870).
+			subagentRef := captureTranscript(ctx, subagentID, payload.SessionFile)
+			return &agent.Event{
+				Type:       agent.SubagentEnd,
+				SessionID:  sessionID,
+				SubagentID: subagentID,
+				ToolUseID:  subagentID,
+				// SessionRef points at the raw parent transcript, not the staged
+				// .entire/tmp/pi/<parentUUID>.json copy: the parent's agent_end
+				// (which stages that copy) fires last, after every subagent run,
+				// so the staged copy does not exist yet here. The raw path still
+				// exists mid-session and is read best-effort at checkpoint-write
+				// time, so the parent content lands in the shadow tree then.
+				SessionRef:             derivePiParentTranscript(payload.SessionFile),
+				SubagentTranscriptPath: subagentRef,
+				Model:                  extractModelFromPiSessionFile(subagentRef),
+				Timestamp:              now,
+			}, nil
 		}
 		// Capture the Pi JSONL into <repo>/.entire/tmp/pi/<id>.json so the
 		// strategy has a stable transcript reference even if the user later
@@ -360,17 +407,94 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 	return dst
 }
 
-// extractSessionIDFromPath extracts the UUID from a Pi session filename.
-// Pattern: <timestamp>_<uuid>.jsonl → returns <uuid>
-// Falls back to the basename without extension if the pattern doesn't match.
-func extractSessionIDFromPath(p string) string {
+// piSubagentLeaf is the fixed basename Pi gives every subagent run transcript.
+// The run's identity lives in the surrounding directory segments, not this
+// leaf — the bug in issue #1870 was collapsing the path to this literal.
+const piSubagentLeaf = "session.jsonl"
+
+// piSessionIdentity is the identity resolved from a Pi transcript path. For a
+// parent session, SessionID is the session UUID and SubagentID is empty. For a
+// subagent run, SessionID rolls up to the parent UUID and SubagentID names the
+// run (<sub>-run-N) so runs no longer collide on the role-named "session" leaf.
+type piSessionIdentity struct {
+	SessionID  string
+	SubagentID string
+}
+
+// parsePiSessionIdentity resolves a Pi session_file path into its identity.
+// Subagent runs live at <...>/<timestamp>_<uuid>/<sub>/run-N/session.jsonl;
+// parents at <...>/<timestamp>_<uuid>.jsonl.
+func parsePiSessionIdentity(p string) piSessionIdentity {
 	if p == "" {
-		return ""
+		return piSessionIdentity{}
 	}
-	base := filepath.Base(p)
+	if filepath.Base(p) == piSubagentLeaf {
+		if idty, ok := parsePiSubagentPath(p); ok {
+			return idty
+		}
+	}
+	return piSessionIdentity{SessionID: parsePiParentID(filepath.Base(p))}
+}
+
+// parsePiParentID extracts the UUID from a parent transcript basename
+// (<timestamp>_<uuid>.jsonl → <uuid>), falling back to the basename without
+// extension when there is no underscore to split on.
+func parsePiParentID(base string) string {
 	base = strings.TrimSuffix(base, ".jsonl")
 	if i := strings.LastIndex(base, "_"); i >= 0 {
 		return base[i+1:]
 	}
 	return base
+}
+
+// parsePiSubagentPath resolves <...>/<timestamp>_<uuid>/<sub>/run-N/session.jsonl
+// into the parent UUID and a distinct, path-safe run identity. ok is false when
+// the surrounding segments don't match that shape or yield unsafe identifiers,
+// so the caller falls back to parent-style parsing.
+func parsePiSubagentPath(p string) (piSessionIdentity, bool) {
+	runDir := filepath.Dir(p)                        // <...>/<seg>/<sub>/run-N
+	subDir := filepath.Dir(runDir)                   // <...>/<seg>/<sub>
+	parentSeg := filepath.Base(filepath.Dir(subDir)) // <timestamp>_<uuid>
+	run := filepath.Base(runDir)
+	sub := filepath.Base(subDir)
+	if run == "." || sub == "." || parentSeg == "." || parentSeg == string(filepath.Separator) {
+		return piSessionIdentity{}, false
+	}
+	parentID := parsePiParentID(parentSeg)
+	if parentID == "" || parentID == parentSeg {
+		// No <timestamp>_<uuid> underscore split — not the expected shape.
+		return piSessionIdentity{}, false
+	}
+	subagentID := sub + "-" + run
+	// subagentID feeds two consumers with different rules: the dispatcher
+	// (ValidateAgentID) and captureTranscript (the stricter ValidateSessionID,
+	// which also rejects a leading dash). Require both so an exotic <sub> dir
+	// can't parse-pass here and then silently fail to stage its transcript.
+	if validation.ValidateSessionID(parentID) != nil ||
+		validation.ValidateAgentID(subagentID) != nil ||
+		validation.ValidateSessionID(subagentID) != nil {
+		return piSessionIdentity{}, false
+	}
+	return piSessionIdentity{SessionID: parentID, SubagentID: subagentID}, true
+}
+
+// extractSessionIDFromPath returns the Pi session identity's session ID: the
+// parent UUID for both parent and subagent transcript paths.
+func extractSessionIDFromPath(p string) string {
+	return parsePiSessionIdentity(p).SessionID
+}
+
+// derivePiParentTranscript maps a subagent run path
+// <...>/<seg>/<sub>/run-N/session.jsonl to the parent transcript <...>/<seg>.jsonl,
+// so a subagent checkpoint can reference the parent conversation. Returns "" if
+// the path is not a subagent run.
+func derivePiParentTranscript(p string) string {
+	if p == "" || filepath.Base(p) != piSubagentLeaf {
+		return ""
+	}
+	parentSegDir := filepath.Dir(filepath.Dir(filepath.Dir(p))) // <...>/<seg>
+	if parentSegDir == "." || parentSegDir == string(filepath.Separator) {
+		return ""
+	}
+	return parentSegDir + ".jsonl"
 }

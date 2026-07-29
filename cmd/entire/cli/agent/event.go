@@ -111,6 +111,14 @@ type Event struct {
 	// SubagentID identifies the subagent instance (for SubagentEnd events).
 	SubagentID string
 
+	// SubagentTranscriptPath, when set, is the path to the subagent's own
+	// transcript file (SubagentEnd events). Agents that keep subagent
+	// transcripts at a location the framework cannot reconstruct from
+	// SessionRef + SubagentID (e.g. Pi, which stores each run under a nested
+	// <parent>/<sub>/run-N/ directory) set this directly; the SubagentEnd
+	// handler prefers it over the AgentTranscriptPath naming convention.
+	SubagentTranscriptPath string
+
 	// ToolInput is the raw tool input JSON (for subagent type/description extraction).
 	// Used when both SubagentType and TaskDescription are empty (agents that don't provide
 	// these fields directly parse them from ToolInput).

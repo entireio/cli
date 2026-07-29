@@ -181,6 +181,10 @@ func TestExtractSessionIDFromPath(t *testing.T) {
 		"abc-123.jsonl":                             "abc-123",
 		"/tmp/no-underscore-here.jsonl":             "no-underscore-here",
 		"/path/with/multiple_under_scores_id.jsonl": "id",
+		// Issue #1870: Pi subagent runs live at <ts>_<uuid>/<sub>/run-N/session.jsonl.
+		// The identity is the parent UUID, not the role-named "session" leaf.
+		"/s/slug/2026-07-29T00-36-01-991Z_019fab4c-c147-7b3a/d93a3451/run-0/session.jsonl": "019fab4c-c147-7b3a",
+		"/s/slug/2026-07-29T00-36-01-991Z_019fab4c-c147-7b3a/716671d6/run-2/session.jsonl": "019fab4c-c147-7b3a",
 	}
 	for in, want := range cases {
 		if got := extractSessionIDFromPath(in); got != want {

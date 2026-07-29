@@ -1081,11 +1081,16 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		event.SubagentType, event.TaskDescription = ParseSubagentTypeAndDescription(event.ToolInput)
 	}
 
-	// Determine subagent transcript path
-	transcriptDir := filepath.Dir(event.SessionRef)
+	// Determine subagent transcript path. An agent that stores per-subagent
+	// transcripts where the framework cannot reconstruct them from
+	// SessionRef + SubagentID (e.g. Pi's nested <parent>/<sub>/run-N layout,
+	// issue #1870) sets the path explicitly; otherwise fall back to the
+	// agent-<id>.jsonl convention beside the main transcript.
 	var subagentTranscriptPath string
-	if event.SubagentID != "" {
-		subagentTranscriptPath = AgentTranscriptPath(transcriptDir, event.SubagentID)
+	if event.SubagentTranscriptPath != "" {
+		subagentTranscriptPath = event.SubagentTranscriptPath
+	} else if event.SubagentID != "" {
+		subagentTranscriptPath = AgentTranscriptPath(filepath.Dir(event.SessionRef), event.SubagentID)
 		if !fileExists(subagentTranscriptPath) {
 			subagentTranscriptPath = ""
 		}
