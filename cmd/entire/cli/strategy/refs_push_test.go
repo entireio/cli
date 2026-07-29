@@ -224,10 +224,17 @@ func TestPushQueuedCheckpointRefs(t *testing.T) {
 	require.NoError(t, err)
 	queue := enqueueRefs(t, repo, refs)
 
+	restore := captureStderr(t)
 	pushed, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	output := restore()
 	require.NoError(t, err)
 	assert.False(t, pushDisabled)
 	assert.Equal(t, len(refs), pushed)
+	assert.Contains(t, output, "done (custom refs)")
+	assert.Contains(t, output, "refs/entire/checkpoints/*")
+	assert.Contains(t, output, "not branches")
+	assert.Contains(t, output, "Entire.io does not currently ingest or surface git-refs checkpoints")
+	assert.Contains(t, output, "git-branch backend")
 
 	for _, ref := range refs {
 		assert.NotEmpty(t, remoteRefHash(t, bareDir, ref), "ref should be on the remote")
@@ -302,13 +309,29 @@ func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
 	queue := enqueueRefs(t, repo, refs)
 
 	badTarget := filepath.Join(t.TempDir(), "missing.git")
+	restore := captureStderr(t)
 	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, badTarget)
+	output := restore()
 	require.ErrorContains(t, err, "failed to push")
 	assert.Equal(t, 0, pushed)
+	assert.NotContains(t, output, "Entire.io does not currently ingest",
+		"failed pushes must not claim the refs reached the remote")
 
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
 	assert.ElementsMatch(t, refs, remaining, "failed push leaves refs queued")
+}
+
+func TestPrintGitRefsPublicationWarning(t *testing.T) {
+	t.Parallel()
+
+	var output strings.Builder
+	printGitRefsPublicationWarning(&output)
+
+	assert.Contains(t, output.String(), "refs/entire/checkpoints/*")
+	assert.Contains(t, output.String(), "custom Git refs, not branches")
+	assert.Contains(t, output.String(), "Entire.io does not currently ingest or surface")
+	assert.Contains(t, output.String(), "git-branch backend")
 }
 
 // remoteRefFiles lists the files in the tree a ref points at on the bare remote.

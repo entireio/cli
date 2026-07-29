@@ -346,11 +346,12 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 	// Fast path: push all refs in one round-trip (fast-forward-only). If every
 	// ref was up to date or fast-forwarded, we're done.
 	if err := batchPushRefs(pushCtx, pushTarget, existing); err == nil {
-		stop(" done")
+		stop(" done (custom refs)")
 		if removeErr := queue.Remove(existing); removeErr != nil {
 			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 				slog.String("error", removeErr.Error()))
 		}
+		printGitRefsPublicationWarning(os.Stderr)
 		return len(existing), nil
 	}
 	stop("")
@@ -375,16 +376,27 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 		}
 		pushed = append(pushed, ref)
 	}
-	stop(fmt.Sprintf(" pushed %d of %d", len(pushed), len(existing)))
+	stop(fmt.Sprintf(" pushed %d of %d as custom refs", len(pushed), len(existing)))
 	if err := queue.Remove(pushed); err != nil {
 		logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 			slog.String("error", err.Error()))
+	}
+	if len(pushed) > 0 {
+		printGitRefsPublicationWarning(os.Stderr)
 	}
 	if firstErr != nil {
 		return len(pushed), fmt.Errorf("%d of %d checkpoint refs failed to push: %w",
 			len(existing)-len(pushed), len(existing), firstErr)
 	}
 	return len(pushed), nil
+}
+
+// printGitRefsPublicationWarning qualifies a successful git-refs push. The
+// remote accepted the data, but custom refs are not branches and the hosted
+// product does not currently ingest this namespace.
+func printGitRefsPublicationWarning(w io.Writer) {
+	fmt.Fprintln(w, "[entire] Warning: checkpoint data was pushed under refs/entire/checkpoints/* as custom Git refs, not branches; it will not appear in the remote's branch list.")
+	fmt.Fprintln(w, "[entire] Entire.io does not currently ingest or surface git-refs checkpoints. Use the git-branch backend for hosted publication.")
 }
 
 // cleanupPushedShadowBranches runs post-push shadow-branch cleanup. Failures are
