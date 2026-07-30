@@ -111,12 +111,19 @@ func RecordLoginContext(rawToken, refreshToken string, activate bool) (string, e
 	cfgDir := userdirs.Config()
 	if modErr := contexts.Modify(cfgDir, func(f *contexts.File) (bool, error) {
 		name = pickContextName(f, coreURL, handle)
-		f.Upsert(&contexts.Context{
+		next := &contexts.Context{
 			Name:            name,
 			CoreURL:         coreURL,
 			Handle:          handle,
 			KeychainService: keychainService,
-		})
+		}
+		// Upsert replaces the whole entry, so carry the audiences over: the
+		// jurisdiction tokens are keyed by audience + handle, not by login
+		// session, so they survive this re-login and must stay findable.
+		if prev := f.Find(name); prev != nil {
+			next.JurisdictionAudiences = prev.JurisdictionAudiences
+		}
+		f.Upsert(next)
 		if activate || f.CurrentContext == "" {
 			f.CurrentContext = name
 		}

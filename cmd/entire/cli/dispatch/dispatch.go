@@ -12,6 +12,10 @@ const (
 	ModeLocal
 )
 
+type TextGenerator interface {
+	GenerateText(ctx context.Context, prompt string, model string) (string, error)
+}
+
 func (m Mode) String() string {
 	switch m {
 	case ModeServer:
@@ -33,6 +37,9 @@ type Options struct {
 	ImplicitCurrentBranch bool
 	Voice                 string
 	InsecureHTTPAuth      bool
+	TextGenerator         TextGenerator
+	Model                 string
+	localPreflight        *localPreflight
 }
 
 // CloudRepoLimit caps how many repos the cloud mode may query in one request.

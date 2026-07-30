@@ -18,6 +18,7 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"         // register agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid" // register agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"      // register agent
+	piagent "github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -751,6 +752,37 @@ func TestExtractFirstPromptFromTranscript_JSONLFormat(t *testing.T) {
 	}
 }
 
+func TestExtractTranscriptMetadataForAgent_Pi(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"type":"session","version":3,"id":"pi-session","cwd":"/tmp/repo"}
+{"type":"message","id":"m1","parentId":null,"message":{"role":"user","content":[{"type":"text","text":"Review this trail"}]}}
+{"type":"message","id":"m2","parentId":"m1","message":{"role":"assistant","content":[{"type":"text","text":"Reviewing"}],"model":"gpt-5.6-sol"}}
+{"type":"message","id":"m3","parentId":"m2","message":{"role":"user","content":[{"type":"text","text":"Apply the fixes"}]}}
+{"type":"message","id":"m4","parentId":"m3","message":{"role":"assistant","content":[{"type":"text","text":"Done"}],"model":"gpt-5.6-sol"}}
+`)
+	path := filepath.Join(t.TempDir(), "pi-session.jsonl")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	generic := extractTranscriptMetadata(data)
+	if generic.FirstPrompt != "" || generic.TurnCount != 0 || generic.Model != "" {
+		t.Fatalf("generic parser unexpectedly understood native Pi transcript: %+v", generic)
+	}
+
+	got := extractTranscriptMetadataForAgent(piagent.NewPiAgent(), path, data)
+	if got.FirstPrompt != "Review this trail" {
+		t.Errorf("FirstPrompt = %q, want %q", got.FirstPrompt, "Review this trail")
+	}
+	if got.TurnCount != 2 {
+		t.Errorf("TurnCount = %d, want 2", got.TurnCount)
+	}
+	if got.Model != "gpt-5.6-sol" {
+		t.Errorf("Model = %q, want gpt-5.6-sol", got.Model)
+	}
+}
+
 func TestAttach_GeminiSubdirectorySession(t *testing.T) {
 	setupAttachTestRepo(t)
 
@@ -1416,10 +1448,11 @@ func TestAttachCmd_ReviewDoesNotInferSkillsFromConfig(t *testing.T) {
 `)
 
 	// Seed review config — the spawn-path default. Attach must ignore this.
-	if err := settings.SaveClonePreferences(context.Background(), &settings.ClonePreferences{
-		Review: map[string]settings.ReviewConfig{
+	if err := settings.ModifyClonePreferences(context.Background(), func(p *settings.ClonePreferences) error {
+		p.Review = map[string]settings.ReviewConfig{ //nolint:staticcheck // deliberately seeds the legacy field: attach must ignore it
 			"claude-code": {Skills: []string{"/pr-review-toolkit:review-pr"}},
-		},
+		}
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}

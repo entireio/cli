@@ -178,6 +178,9 @@ case "$1" in
     echo '{"present": true}'
     ;;
   generate-text)
+    if [ -n "$ENTIRE_TEST_EXTERNAL_MODEL_RECORD" ]; then
+      printf '%s\n%s\n' "$2" "$3" > "$ENTIRE_TEST_EXTERNAL_MODEL_RECORD"
+    fi
     echo '{"text":"{\"intent\":\"Intent\",\"outcome\":\"Outcome\",\"learnings\":{\"repo\":[],\"code\":[],\"workflow\":[]},\"friction\":[],\"open_items\":[]}"}'
     ;;
   *)

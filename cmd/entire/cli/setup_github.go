@@ -104,9 +104,19 @@ var ghRepoNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // allowed visibility values.
 const (
-	visibilityPublic   = "public"
-	visibilityPrivate  = "private"
-	visibilityInternal = "internal"
+	visibilityPublic            = "public"
+	visibilityPrivate           = "private"
+	visibilityInternal          = "internal"
+	defaultInitialCommitMessage = "Initial commit"
+)
+
+type bootstrapSetupChoice string
+
+const (
+	bootstrapSetupLocal   bootstrapSetupChoice = "local"
+	bootstrapSetupGitHub  bootstrapSetupChoice = "github"
+	bootstrapSetupCustom  bootstrapSetupChoice = "custom"
+	bootstrapSetupDecline bootstrapSetupChoice = "decline"
 )
 
 // bootstrapState carries pre-setup decisions into the post-setup finalize
@@ -146,13 +156,29 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 		return nil, fmt.Errorf("get working directory: %w", err)
 	}
 
-	// Step 1: confirm we should git init here.
-	proceed, err := confirmInitRepo(w, cwd, opts)
-	if err != nil {
-		return nil, err
-	}
-	if !proceed {
-		return nil, errBootstrapDeclined
+	// Step 1: decide whether to init here — and, on the bare interactive
+	// path, how: one select carries both the init consent and the setup
+	// preset, so the common flow costs a single answer. Explicit flags,
+	// --yes, and non-interactive runs keep the granular confirm + resolver
+	// contracts unchanged.
+	setupChoice := bootstrapSetupCustom
+	if shouldPromptBootstrapSetupChoice(opts) {
+		githubReady := ghAvailable(ctx, runner) && ghAuthenticated(ctx, runner)
+		setupChoice, err = promptBootstrapSetupChoice(w, cwd, githubReady)
+		if err != nil {
+			return nil, err
+		}
+		if setupChoice == bootstrapSetupDecline {
+			return nil, errBootstrapDeclined
+		}
+	} else {
+		proceed, confirmErr := confirmInitRepo(w, cwd, opts)
+		if confirmErr != nil {
+			return nil, confirmErr
+		}
+		if !proceed {
+			return nil, errBootstrapDeclined
+		}
 	}
 
 	// Step 2: git init.
@@ -165,13 +191,12 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 	paths.ClearWorktreeRootCache()
 	fmt.Fprintln(w, "  ✓ Initialized empty git repository")
 
-	// Step 3: decide whether to create a GitHub repo. Creating a remote is an
-	// explicit opt-in: it happens only on an explicit signal (repo flags,
-	// --push, or --yes) or an interactive "yes". A non-interactive run with no
-	// such signal stays local-only — we never create a repo on the user's
-	// behalf. --no-github always wins.
-	useGitHub := false
-	if !opts.NoGitHub {
+	// Creating a remote remains an explicit opt-in. Choosing the GitHub preset
+	// is that consent: its label states that the private repository will be
+	// created and the initial commit pushed. The local preset never creates or
+	// pushes a remote.
+	useGitHub := setupChoice == bootstrapSetupGitHub
+	if setupChoice == bootstrapSetupCustom && !opts.NoGitHub {
 		explicit := ghCreateRequested(opts)
 		// Only probe gh (and warn about a missing/unauthenticated CLI) when the
 		// user actually wants a GitHub repo — explicitly, or via the confirm
@@ -187,7 +212,6 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 			case explicit:
 				useGitHub = true
 			default:
-				// Interactive with no explicit signal: prompt, defaulting to No.
 				confirmed, err := confirmCreateGitHubRepo(cwd)
 				if err != nil {
 					return nil, err
@@ -201,7 +225,13 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 	// contiguous.
 	var fullName, visibility string
 	if useGitHub {
-		owner, name, vis, err := selectGitHubRepo(ctx, w, errW, runner, cwd, opts)
+		repoOpts := opts
+		if setupChoice == bootstrapSetupGitHub {
+			// The GitHub preset resolves the current user, folder-derived name,
+			// and private visibility without reopening the granular prompts.
+			repoOpts.Yes = true
+		}
+		owner, name, vis, err := selectGitHubRepo(ctx, w, errW, runner, cwd, repoOpts)
 		if err != nil {
 			return nil, err
 		}
@@ -216,9 +246,12 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 	// because gh may read local config; but we can skip the identity
 	// check when the user is fully opting out of both commit and
 	// remote to keep the flow minimal.
-	message, commit, err := resolveCommitMessage(opts)
-	if err != nil {
-		return nil, err
+	message, commit := defaultInitialCommitMessage, true
+	if setupChoice == bootstrapSetupCustom {
+		message, commit, err = resolveCommitMessage(opts)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if commit {
 		if err := ensureGitIdentity(ctx, w, errW, runner, cwd); err != nil {
@@ -234,6 +267,9 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 	push := false
 	if useGitHub && commit {
 		switch {
+		case setupChoice == bootstrapSetupGitHub:
+			// The preset label explicitly includes pushing the initial commit.
+			push = true
 		case opts.Yes || opts.Push:
 			push = true
 		case interactive.CanPromptInteractively():
@@ -255,17 +291,6 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 		message:    message,
 		push:       push,
 	}, nil
-}
-
-// runGitHubBootstrapWith runs the full bootstrap (init + finalize) in one
-// call, used by tests that don't need to assert phasing. The real caller
-// runs the two phases around agent setup.
-func runGitHubBootstrapWith(ctx context.Context, w, errW io.Writer, opts GitHubBootstrapOptions, runner bootstrapRunner) error {
-	state, err := runGitHubBootstrapInitWith(ctx, w, errW, opts, runner)
-	if err != nil {
-		return err
-	}
-	return runGitHubBootstrapFinalize(ctx, w, state)
 }
 
 // runGitHubBootstrapFinalize runs the post-setup half: stage + initial
@@ -439,6 +464,65 @@ func confirmInitRepo(_ io.Writer, cwd string, opts GitHubBootstrapOptions) (bool
 		return false, fmt.Errorf("init-repo prompt: %w", err)
 	}
 	return confirmed, nil
+}
+
+// shouldPromptBootstrapSetupChoice reports whether this is the bare
+// interactive bootstrap path. Any option that expresses a granular choice —
+// including --init-repo / --no-init-repo, which answer the init consent the
+// merged select carries — keeps the established flag behavior instead of
+// being overwritten by a preset.
+func shouldPromptBootstrapSetupChoice(opts GitHubBootstrapOptions) bool {
+	return interactive.CanPromptInteractively() &&
+		!opts.Yes &&
+		!opts.InitRepo &&
+		!opts.NoInitRepo &&
+		!opts.NoGitHub &&
+		!ghFlagsProvided(opts) &&
+		!opts.Push &&
+		opts.InitialCommitMessage == "" &&
+		!opts.SkipInitialCommit
+}
+
+// promptBootstrapSetupChoice merges the init consent and the common
+// bootstrap decisions into one select, so the bare interactive path costs a
+// single answer. It runs _before_ `git init`: declining — including Ctrl-C —
+// leaves the folder untouched. The selected commit is still deferred until
+// Entire has written its settings and agent configuration.
+//
+// The wrong-directory guard from the granular confirm (issue #1717) carries
+// over: the absolute path stays in the title (the accessible renderer drops
+// descriptions), and the menu makes the choice visible before Enter lands on
+// the recommended preset.
+func promptBootstrapSetupChoice(w io.Writer, cwd string, githubReady bool) (bootstrapSetupChoice, error) {
+	options := []huh.Option[bootstrapSetupChoice]{
+		huh.NewOption("Yes, with one initial commit (recommended)", bootstrapSetupLocal),
+	}
+	if githubReady {
+		options = append(options,
+			huh.NewOption("Yes, plus a private GitHub repository (pushed)", bootstrapSetupGitHub),
+		)
+	}
+	options = append(options,
+		huh.NewOption("Yes, customize...", bootstrapSetupCustom),
+		huh.NewOption("No", bootstrapSetupDecline),
+	)
+
+	choice := bootstrapSetupLocal
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewSelect[bootstrapSetupChoice]().
+				Title(fmt.Sprintf("No git repository in %q. Set one up?", cwd)).
+				Options(options...).
+				Value(&choice),
+		),
+	).WithOutput(w)
+	if err := form.Run(); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			return bootstrapSetupDecline, nil
+		}
+		return "", fmt.Errorf("git setup prompt: %w", err)
+	}
+	return choice, nil
 }
 
 // selectGitHubRepo gathers owner, repo name, and visibility, respecting
@@ -645,8 +729,6 @@ func resolveVisibility(owner, currentUser string, opts GitHubBootstrapOptions) (
 // the initial commit entirely; callers must skip `doInitialCommit` and
 // any subsequent push.
 func resolveCommitMessage(opts GitHubBootstrapOptions) (string, bool, error) {
-	const defaultMsg = "Initial commit"
-
 	if opts.SkipInitialCommit {
 		return "", false, nil
 	}
@@ -654,7 +736,7 @@ func resolveCommitMessage(opts GitHubBootstrapOptions) (string, bool, error) {
 		return opts.InitialCommitMessage, true, nil
 	}
 	if opts.Yes || !interactive.CanPromptInteractively() {
-		return defaultMsg, true, nil
+		return defaultInitialCommitMessage, true, nil
 	}
 
 	const (
@@ -686,7 +768,7 @@ func resolveCommitMessage(opts GitHubBootstrapOptions) (string, bool, error) {
 	case choiceSkip:
 		return "", false, nil
 	case choiceCustomize:
-		input := defaultMsg
+		input := defaultInitialCommitMessage
 		custom := NewAccessibleForm(
 			huh.NewGroup(
 				huh.NewInput().
@@ -701,11 +783,11 @@ func resolveCommitMessage(opts GitHubBootstrapOptions) (string, bool, error) {
 			return "", false, fmt.Errorf("commit message prompt: %w", err)
 		}
 		if strings.TrimSpace(input) == "" {
-			return defaultMsg, true, nil
+			return defaultInitialCommitMessage, true, nil
 		}
 		return input, true, nil
 	default:
-		return defaultMsg, true, nil
+		return defaultInitialCommitMessage, true, nil
 	}
 }
 

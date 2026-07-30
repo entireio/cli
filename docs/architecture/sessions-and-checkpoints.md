@@ -305,6 +305,21 @@ When condensing multiple concurrent sessions:
 - `sessions` array in `CheckpointSummary` maps each session to its file paths
 - `files_touched` is merged from all sessions
 
+Checkpoints written by `entire import <agent>` additionally carry a `commit_sha`
+(omitempty) on both the session `Metadata` and the root `CheckpointSummary`,
+set to the default branch's head at import time — origin's tip is preferred
+(the commit the server already knows about), falling back to the local branch
+tip, then HEAD, then empty when nothing resolves. When the transcript itself
+records the commit(s) a turn made (Claude Code `gitOperation` records), the
+turn's checkpoint instead anchors to the last such commit that resolves and is
+reachable from the resolved link anchor (the default-branch head when
+resolvable) — see `turnAnchorResolver` (`agentimport/turn_anchor.go`);
+otherwise (older transcripts, or a recorded commit that's been
+squashed/rebased away) it falls back to the default-branch head as described
+above. It is a best-effort anchor for UI display only, not
+an attribution signal, and pre-existing imported checkpoints are not
+backfilled with it.
+
 ### Checkpoint Policy
 
 Repo-wide checkpoint policy lives at `refs/entire/policies/checkpoint`. The ref

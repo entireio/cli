@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -198,6 +199,13 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 			b.WriteString(sty.render(sty.dim, "  Agents · "))
 
 			b.WriteString(strings.Join(displayNames, ", "))
+		}
+
+		// Warn when installed hooks are out of date (read-only; fix is manual).
+		if claudecode.CheckHookConfig(ctx) == claudecode.HooksOutdated {
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.yellow, "  ! Claude Code hooks out of date"))
+			b.WriteString(sty.render(sty.dim, " · run 'entire enable --force'"))
 		}
 	}
 
@@ -603,7 +611,10 @@ type statusJSON struct {
 	// agent (Agent-Safe CLI Fallbacks). Present only when enabled — same gate
 	// as the human checklist.
 	Setup map[string]setupRungJSON `json:"setup,omitempty"`
-	Error string                   `json:"error,omitempty"`
+	// HooksOutdated lists agents whose installed hook config is out of date and
+	// should be refreshed with `entire enable --force`.
+	HooksOutdated []string `json:"hooks_outdated,omitempty"`
+	Error         string   `json:"error,omitempty"`
 }
 
 // setupRungJSON is one onboarding rung in `entire status --json`.
@@ -681,6 +692,10 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 					Hint:   r.Check.Hint,
 				}
 			}
+		}
+
+		if claudecode.CheckHookConfig(ctx) == claudecode.HooksOutdated {
+			result.HooksOutdated = append(result.HooksOutdated, "claude-code")
 		}
 
 		if store, err := session.NewStateStore(ctx); err == nil {

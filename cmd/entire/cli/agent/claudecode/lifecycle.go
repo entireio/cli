@@ -20,6 +20,7 @@ var (
 	_ agent.TranscriptAnalyzer     = (*ClaudeCodeAgent)(nil)
 	_ agent.TranscriptPreparer     = (*ClaudeCodeAgent)(nil)
 	_ agent.TokenCalculator        = (*ClaudeCodeAgent)(nil)
+	_ agent.ModelExtractor         = (*ClaudeCodeAgent)(nil)
 	_ agent.SkillEventExtractor    = (*ClaudeCodeAgent)(nil)
 	_ agent.SubagentAwareExtractor = (*ClaudeCodeAgent)(nil)
 	_ agent.HookResponseWriter     = (*ClaudeCodeAgent)(nil)

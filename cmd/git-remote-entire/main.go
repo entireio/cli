@@ -355,7 +355,12 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 		return nil, missingJurisdictionAudienceErr(parsedURL.Host)
 	}
 	debuglog.Printf("auth: jurisdiction access token (aud=%s, core=%s)", audience, clusterCtx.CoreURL)
-	return newJurisdictionTokenSource(clusterCtx.CoreURL, audience, clusterAuth.JurisdictionCoreURL, clusterCtx.Handle, loginProvider, httpClient), nil
+	// Passing a recorder is what selects the keychain-persisted flavour; it
+	// keeps this context's audience list current so logout can clean up.
+	recordAudience := func(aud string) error {
+		return auth.RememberJurisdictionAudience(clusterCtx.Name, aud)
+	}
+	return newJurisdictionTokenSource(clusterCtx.CoreURL, audience, clusterAuth.JurisdictionCoreURL, clusterCtx.Handle, loginProvider, recordAudience, httpClient), nil
 }
 
 // resolveEnvTokenCreds builds the jurisdiction-token source for the

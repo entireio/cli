@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -234,5 +236,167 @@ func TestRunSelectedImports_UnsatisfiablePolicySkips(t *testing.T) {
 
 	if got := buf.String(); !strings.Contains(got, "skipping agent history import") {
 		t.Errorf("expected a skip note for an unsatisfiable checkpoint policy, got %q", got)
+	}
+}
+
+// fixedDiscoverImporter wraps a real agentimport.Importer but overrides
+// Discover to return a fixed, caller-supplied set of session files instead of
+// scanning the agent's real transcript directory. runSelectedImports (unlike
+// the standalone `entire import` command) has no --path flag to redirect
+// discovery, so this is the seam tests use to feed it a fixture.
+type fixedDiscoverImporter struct {
+	agentimport.Importer
+
+	sessions []agentimport.SessionFile
+}
+
+func (f fixedDiscoverImporter) Discover(string, string, time.Time, []string) ([]agentimport.SessionFile, error) {
+	return f.sessions, nil
+}
+
+// writeImportProgressFixtureSession writes a 2-turn Claude Code transcript
+// fixture, matching the format agentimport's claude importer parses.
+func writeImportProgressFixtureSession(t *testing.T, dir, name string) {
+	t.Helper()
+	content := strings.Join([]string{
+		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"output_tokens":5}}}`,
+		`{"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"second"}}`,
+	}, "\n") + "\n"
+	testutil.WriteFile(t, dir, name, content)
+}
+
+// TestRunSelectedImports_NonTTYProgressLines proves the wired-in progress
+// reporter, running against a plain (non-terminal) writer, prints exactly one
+// plain line per session — carrying the agent name, its position, and its
+// turn count — writes no ANSI escapes, and leaves the pre-existing final
+// summary line unchanged.
+func TestRunSelectedImports_NonTTYProgressLines(t *testing.T) {
+	// Not parallel: chdirs into a temp repo and performs real checkpoint writes.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "x")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+	ctx := context.Background()
+
+	sessionsDir := t.TempDir()
+	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl")
+	writeImportProgressFixtureSession(t, sessionsDir, "sess2.jsonl")
+
+	var claudeImp agentimport.Importer
+	for _, imp := range agentimport.All() {
+		if imp.Name() == testAgentName {
+			claudeImp = imp
+		}
+	}
+	if claudeImp == nil {
+		t.Fatal("claude-code importer not registered")
+	}
+	sessions, err := claudeImp.Discover(dir, sessionsDir, time.Now(), nil)
+	if err != nil {
+		t.Fatalf("discover fixture sessions: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("want 2 fixture sessions, got %d", len(sessions))
+	}
+	imp := fixedDiscoverImporter{Importer: claudeImp, sessions: sessions}
+	agentName := string(claudeImp.AgentType())
+
+	var buf bytes.Buffer
+	runSelectedImports(ctx, &buf, dir, []eligibleImport{{imp: imp, displayName: agentName}})
+	out := buf.String()
+
+	if strings.ContainsRune(out, '\x1b') {
+		t.Fatalf("output contains an ESC byte on a non-TTY writer: %q", out)
+	}
+
+	wantLines := []string{
+		fmt.Sprintf("Importing %s session 1/2 (2 turns)...", agentName),
+		fmt.Sprintf("Importing %s session 2/2 (2 turns)...", agentName),
+	}
+	for _, line := range wantLines {
+		if !strings.Contains(out, line) {
+			t.Errorf("missing progress line %q in output:\n%s", line, out)
+		}
+	}
+	if got := strings.Count(out, fmt.Sprintf("Importing %s session", agentName)); got != 2 {
+		t.Errorf("got %d progress lines, want exactly 2 (one per session):\n%s", got, out)
+	}
+
+	if want := "Imported 4 turn(s) from 2 session(s) (0 already imported).\n"; !strings.Contains(out, want) {
+		t.Errorf("final summary line missing or changed; want %q in:\n%s", want, out)
+	}
+}
+
+// TestRunSelectedImports_NonTTYProgressLines_Reimport proves a second,
+// idempotent pass over an already-imported corpus (every turn hits
+// agentimport's TurnSkipped path, not TurnWritten) still prints one plain
+// progress line per session and reports the correct "0 imported" summary —
+// the non-TTY side of the bug the P2 Codex's pre-push review caught. The TTY
+// side (a fully-skipped session must still sweep the spinner to turn M/M) is
+// covered at the agentimport layer by
+// TestRun_ReimportFiresTurnSkippedNotTurnWritten; the cli wiring it depends on
+// — newImportProgressReporter routing TurnSkipped and TurnWritten through one
+// shared advance path — has no direct test because the spinner branch only
+// runs against a real terminal.
+func TestRunSelectedImports_NonTTYProgressLines_Reimport(t *testing.T) {
+	// Not parallel: chdirs into a temp repo and performs real checkpoint writes.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "x")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+	ctx := context.Background()
+
+	sessionsDir := t.TempDir()
+	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl")
+	writeImportProgressFixtureSession(t, sessionsDir, "sess2.jsonl")
+
+	var claudeImp agentimport.Importer
+	for _, imp := range agentimport.All() {
+		if imp.Name() == testAgentName {
+			claudeImp = imp
+		}
+	}
+	if claudeImp == nil {
+		t.Fatal("claude-code importer not registered")
+	}
+	sessions, err := claudeImp.Discover(dir, sessionsDir, time.Now(), nil)
+	if err != nil {
+		t.Fatalf("discover fixture sessions: %v", err)
+	}
+	agentName := string(claudeImp.AgentType())
+	selected := []eligibleImport{{
+		imp:         fixedDiscoverImporter{Importer: claudeImp, sessions: sessions},
+		displayName: agentName,
+	}}
+
+	// First pass actually imports; discard its output.
+	runSelectedImports(ctx, io.Discard, dir, selected)
+
+	// Second pass: every turn is already imported, so agentimport.Run's loop
+	// only ever calls TurnSkipped for it — this is the scenario that used to
+	// leave a TTY reporter frozen at "turn 0/M".
+	var buf bytes.Buffer
+	runSelectedImports(ctx, &buf, dir, selected)
+	out := buf.String()
+
+	if strings.ContainsRune(out, '\x1b') {
+		t.Fatalf("re-import output contains an ESC byte on a non-TTY writer: %q", out)
+	}
+	wantLines := []string{
+		fmt.Sprintf("Importing %s session 1/2 (2 turns)...", agentName),
+		fmt.Sprintf("Importing %s session 2/2 (2 turns)...", agentName),
+	}
+	for _, line := range wantLines {
+		if !strings.Contains(out, line) {
+			t.Errorf("missing progress line %q in re-import output:\n%s", line, out)
+		}
+	}
+	if want := "Imported 0 turn(s) from 2 session(s) (4 already imported).\n"; !strings.Contains(out, want) {
+		t.Errorf("re-import summary line missing or wrong; want %q in:\n%s", want, out)
 	}
 }

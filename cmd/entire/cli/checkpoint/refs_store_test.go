@@ -118,6 +118,187 @@ func TestGitRefsStore_OnDemandRefFetch_FailurePropagates(t *testing.T) {
 	})
 }
 
+// TestGitRefsStore_ListRemoteDiscovery exercises the git-refs List remote-ref
+// discovery that fixes #1770: on a second device, a checkpoint written
+// elsewhere has no local ref, so a purely local List shows zero. With discovery
+// opted in (WithRemoteListDiscovery) and a remote lister configured, List
+// enumerates the checkpoint remote (names only) and surfaces the not-yet-local
+// checkpoint; a later read hydrates it.
+func TestGitRefsStore_ListRemoteDiscovery(t *testing.T) {
+	t.Parallel()
+
+	// A ULID that exists only "on the remote" (never written locally).
+	remoteOnly := id.CheckpointID("01KVBJCWYA4YW6J5M9GP655HZN")
+	remoteOnlyRef := mustRefName(t, remoteOnly)
+	//nolint:unparam // test fake mirrors RemoteRefListFunc's (…, error) signature; it always succeeds here.
+	lister := func(context.Context) ([]plumbing.ReferenceName, error) {
+		return []plumbing.ReferenceName{remoteOnlyRef}, nil
+	}
+
+	ids := func(infos []CheckpointInfo) map[id.CheckpointID]struct{} {
+		out := make(map[id.CheckpointID]struct{}, len(infos))
+		for _, info := range infos {
+			out[info.CheckpointID] = struct{}{}
+		}
+		return out
+	}
+
+	t.Run("discovers remote-only checkpoint when opted in", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+		store.SetRemoteRefLister(lister)
+
+		infos, err := store.List(WithRemoteListDiscovery(context.Background()))
+		require.NoError(t, err)
+		got := ids(infos)
+		assert.Contains(t, got, local, "local checkpoint still listed")
+		assert.Contains(t, got, remoteOnly, "remote-only checkpoint discovered via ls-remote")
+
+		// The discovered entry carries the ULID's embedded creation time, so it
+		// sorts by real recency without an object fetch.
+		for _, info := range infos {
+			if info.CheckpointID == remoteOnly {
+				assert.False(t, info.CreatedAt.IsZero(), "discovered ULID checkpoint should carry its embedded creation time")
+			}
+		}
+	})
+
+	t.Run("stays local-only without the discovery marker", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+		store.SetRemoteRefLister(lister)
+
+		infos, err := store.List(context.Background())
+		require.NoError(t, err)
+		got := ids(infos)
+		assert.Contains(t, got, local)
+		assert.NotContains(t, got, remoteOnly, "no enumeration without WithRemoteListDiscovery (keeps the hot path network-free)")
+	})
+
+	t.Run("stays local-only when no lister is configured", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+
+		infos, err := store.List(WithRemoteListDiscovery(context.Background()))
+		require.NoError(t, err)
+		got := ids(infos)
+		assert.Contains(t, got, local)
+		assert.NotContains(t, got, remoteOnly)
+	})
+
+	t.Run("does not duplicate a checkpoint already present locally", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+		// The lister also advertises the checkpoint that already exists locally.
+		store.SetRemoteRefLister(func(context.Context) ([]plumbing.ReferenceName, error) {
+			return []plumbing.ReferenceName{mustRefName(t, local), remoteOnlyRef}, nil
+		})
+
+		infos, err := store.List(WithRemoteListDiscovery(context.Background()))
+		require.NoError(t, err)
+		count := 0
+		for _, info := range infos {
+			if info.CheckpointID == local {
+				count++
+			}
+		}
+		assert.Equal(t, 1, count, "a locally-present checkpoint advertised by the remote is not duplicated")
+	})
+
+	t.Run("enumeration failure degrades to local-only", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+		store.SetRemoteRefLister(func(context.Context) ([]plumbing.ReferenceName, error) {
+			return nil, assert.AnError // e.g. offline / ls-remote failed
+		})
+
+		infos, err := store.List(WithRemoteListDiscovery(context.Background()))
+		require.NoError(t, err, "a remote enumeration failure must not fail the whole listing")
+		got := ids(infos)
+		assert.Contains(t, got, local, "local checkpoints remain listed when discovery fails")
+		assert.NotContains(t, got, remoteOnly)
+	})
+}
+
+// TestHydrateListedCheckpointInfo covers the trail-871 gap: a names-only List
+// stub has empty SessionID, so --session filters would silently drop it until
+// the checkpoint is read. HydrateListedCheckpointInfo fills session identity
+// from the store (triggering on-demand fetch when configured) so filters match.
+func TestHydrateListedCheckpointInfo(t *testing.T) {
+	t.Parallel()
+
+	store := newRefsStore(t)
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	refsWrite(t, store, cid, "session-from-device-a", "transcript")
+
+	stub := remoteDiscoveredInfo(cid)
+	require.True(t, listedCheckpointNeedsHydration(stub))
+	require.True(t, stub.ListedStub)
+	require.Empty(t, stub.SessionID)
+	require.Zero(t, stub.SessionCount)
+
+	hydrated := HydrateListedCheckpointInfo(context.Background(), store, stub)
+	assert.Equal(t, "session-from-device-a", hydrated.SessionID)
+	assert.Equal(t, 1, hydrated.SessionCount)
+	assert.Equal(t, []string{"session-from-device-a"}, hydrated.SessionIDs)
+	assert.False(t, listedCheckpointNeedsHydration(hydrated))
+	assert.False(t, hydrated.ListedStub)
+
+	// Already-hydrated infos are returned unchanged (no redundant reads needed
+	// for the session-filter path once collectCheckpoint has cached them).
+	again := HydrateListedCheckpointInfo(context.Background(), store, hydrated)
+	assert.Equal(t, hydrated, again)
+
+	// Missing checkpoint: fail-once clears ListedStub so callers do not re-fetch,
+	// but leaves SessionID empty so listing can still surface the ID.
+	missing := remoteDiscoveredInfo(id.CheckpointID("01KVBJCWYA4YW6J5M9GP655HZN"))
+	failed := HydrateListedCheckpointInfo(context.Background(), store, missing)
+	assert.Equal(t, missing.CheckpointID, failed.CheckpointID)
+	assert.Empty(t, failed.SessionID)
+	assert.False(t, failed.ListedStub, "failed hydration must clear ListedStub (fail-once)")
+	assert.False(t, listedCheckpointNeedsHydration(failed))
+}
+
+// TestHydrateListedCheckpointInfo_MatchesLocalList pins the field mapping shared
+// with readCommittedInfoFromCheckpointTree: hydrating a stub for a locally
+// present checkpoint must yield the same CheckpointInfo that List returns for
+// it. Deliberate CreatedAt divergence (documented on HydrateListedCheckpointInfo):
+// local List assigns meta.CreatedAt unconditionally; hydration only overwrites
+// when non-zero (keeping ULID-derived time). A normal refsWrite has non-zero
+// CreatedAt, so both paths agree here.
+func TestHydrateListedCheckpointInfo_MatchesLocalList(t *testing.T) {
+	t.Parallel()
+
+	store := newRefsStore(t)
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	refsWrite(t, store, cid, "session-from-device-a", "transcript")
+
+	infos, err := store.List(context.Background())
+	require.NoError(t, err)
+	var local CheckpointInfo
+	for _, info := range infos {
+		if info.CheckpointID == cid {
+			local = info
+			break
+		}
+	}
+	require.Equal(t, cid, local.CheckpointID)
+	require.False(t, local.ListedStub)
+
+	hydrated := HydrateListedCheckpointInfo(context.Background(), store, remoteDiscoveredInfo(cid))
+	assert.Equal(t, local, hydrated)
+}
+
 func TestGitRefsStore_WriteAllVariantsAndRead(t *testing.T) {
 	t.Parallel()
 	store := newRefsStore(t)

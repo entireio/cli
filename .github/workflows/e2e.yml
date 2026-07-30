@@ -63,14 +63,14 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Don't persist the (copilot-scoped) GITHUB_TOKEN in .git/config, where
           # an agent process running in the checkout could read it.
           persist-credentials: false
 
       - name: Setup mise
-        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
+        uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux

@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"charm.land/huh/v2"
@@ -200,30 +202,140 @@ func renderCoreList[T any](cmd *cobra.Command, empty string, headers []string, r
 	}
 }
 
+// coreListFetchBudget bounds how many entries a bounded list command fetches
+// by default. The control plane pages but cannot filter or sort these lists,
+// so without a bound every call would walk the entire collection — thousands
+// of requests on a large org. Commands that stop at the budget must disclose
+// the partial window on stderr and offer --all.
+const coreListFetchBudget = 1000
+
 // fetchAllPages drives a keyset-paginated list endpoint to completion: it
 // calls fetch with an empty cursor, then re-calls it with each returned
 // nextPageToken until the cursor comes back empty, concatenating every page.
 // The control plane caps the page size (and may cap it further than a caller
 // requests), so a single call only returns one page — list commands must loop
-// or they silently truncate. The next==cursor guard turns a misbehaving server
-// that fails to advance the cursor into an error instead of an infinite loop.
+// or they silently truncate.
 func fetchAllPages[T any](ctx context.Context, fetch func(ctx context.Context, cursor string) (items []T, next string, err error)) ([]T, error) {
+	items, _, err := fetchPagesBounded(ctx, 0, fetch)
+	return items, err
+}
+
+// fetchPagesBounded is fetchAllPages with a fetch budget: the cursor walk
+// stops once at least budget entries have been fetched (a page is never split,
+// so the result can overshoot by up to one page). partial reports that the
+// walk stopped with a cursor remaining — entries exist beyond the returned
+// slice and the caller must disclose that. budget <= 0 means unbounded. The
+// next==cursor guard turns a misbehaving server that fails to advance the
+// cursor into an error instead of an infinite loop.
+func fetchPagesBounded[T any](ctx context.Context, budget int, fetch func(ctx context.Context, cursor string) (items []T, next string, err error)) (items []T, partial bool, err error) {
 	var all []T
 	cursor := ""
 	for {
-		items, next, err := fetch(ctx, cursor)
+		page, next, err := fetch(ctx, cursor)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		all = append(all, items...)
+		all = append(all, page...)
 		if next == "" {
-			return all, nil
+			return all, false, nil
+		}
+		if budget > 0 && len(all) >= budget {
+			return all, true, nil
 		}
 		if next == cursor {
-			return nil, fmt.Errorf("pagination did not advance (cursor %q repeated)", next)
+			return nil, false, fmt.Errorf("pagination did not advance (cursor %q repeated)", next)
 		}
 		cursor = next
 	}
+}
+
+// listPage is the --json envelope for single-page (cursor passthrough) list
+// output: rows plus the cursor to resume from, omitted on the last page. Page
+// mode cannot emit the bare array the walk modes use — the caller needs the
+// cursor to continue, and stdout is the only machine-readable channel.
+type listPage[T any] struct {
+	Items         []T    `json:"items"`
+	NextPageToken string `json:"nextPageToken,omitempty"`
+}
+
+// renderCoreListPage renders one fetched page of a list command: --json emits
+// the listPage envelope; the table view prints the usual table, preceded by a
+// stderr resume hint carrying the cursor when more entries exist.
+func renderCoreListPage[T any](cmd *cobra.Command, empty string, headers []string, row func(T) []string, items []T, next string) error {
+	if jsonRequested(cmd) {
+		if items == nil {
+			items = []T{} // a nil slice encodes as null; scripts expect []
+		}
+		return printJSON(cmd.OutOrStdout(), listPage[T]{Items: items, NextPageToken: next})
+	}
+	if next != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "More entries available: resume with --page-token %s\n", next)
+	}
+	if len(items) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), empty)
+		return nil
+	}
+	return printTable(cmd.OutOrStdout(), headers, items, row)
+}
+
+// pageModeFlags wires the single-page cursor-passthrough flags onto a list
+// command and excludes them from the walk flags (--all, --limit): one call =
+// one request, so a walk bound makes no sense alongside them. Callers validate
+// pageSize positivity in PreRunE via validatePageSize.
+func pageModeFlags(cmd *cobra.Command, pageSize *int, pageToken *string) {
+	cmd.Flags().IntVar(pageSize, "page-size", 0, "Fetch a single page of at most N entries (1-"+strconv.Itoa(coreListPageSizeMax)+"; the server may cap N further) and print the resume cursor")
+	cmd.Flags().StringVar(pageToken, "page-token", "", "Fetch the single page at this cursor (from a previous run's nextPageToken)")
+	cmd.MarkFlagsMutuallyExclusive("page-size", "all")
+	cmd.MarkFlagsMutuallyExclusive("page-token", "all")
+	cmd.MarkFlagsMutuallyExclusive("page-size", "limit")
+	cmd.MarkFlagsMutuallyExclusive("page-token", "limit")
+}
+
+// pageModeRequested reports whether the caller opted into single-page mode:
+// either page flag was explicitly set. Checked by Changed, not value — a
+// script's resume loop naturally passes --page-token "" for its first page,
+// and a value check would silently reroute that call to the multi-page walk,
+// flipping the --json shape from the {items, nextPageToken} envelope to a
+// bare array (and the request count from one to many).
+func pageModeRequested(cmd *cobra.Command) bool {
+	return cmd.Flags().Changed("page-size") || cmd.Flags().Changed("page-token")
+}
+
+// coreListPageSizeMax mirrors the OpenAPI `maximum: 500` on the list
+// endpoints' pageSize param (see internal/coreapi/spec). The generated client
+// does not validate params, so without this local bound an oversized
+// --page-size goes on the wire and comes back as a server 4xx naming the wire
+// param instead of the flag.
+const coreListPageSizeMax = 500
+
+// validatePageSize rejects an explicitly set out-of-range --page-size; an
+// unset flag passes.
+func validatePageSize(cmd *cobra.Command, pageSize int) error {
+	if cmd.Flags().Changed("page-size") && (pageSize <= 0 || pageSize > coreListPageSizeMax) {
+		return fmt.Errorf("--page-size must be between 1 and %d, got %d", coreListPageSizeMax, pageSize)
+	}
+	return nil
+}
+
+// flushThroughPager runs run with the command's stdout captured, then flushes
+// the captured output — through a pager when stdout is a real terminal and the
+// content is taller than the screen (see outputWithPager), directly otherwise.
+// --json output never pages: a machine consumer driving a PTY would hang
+// waiting on the pager's keyboard, and JSON is not for reading. Output is
+// flushed even when run errors, so partial renders are not swallowed.
+func flushThroughPager(cmd *cobra.Command, noPager bool, run func() error) error {
+	finalOut := cmd.OutOrStdout()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	err := run()
+	cmd.SetOut(finalOut)
+	content := buf.String()
+	if noPager || jsonRequested(cmd) {
+		fmt.Fprint(finalOut, content)
+	} else {
+		outputWithPager(finalOut, content)
+	}
+	return err
 }
 
 // runCoreObject fetches a single value via fn and renders it as a vertical
@@ -320,6 +432,43 @@ func printTable[T any](w io.Writer, headers []string, items []T, row func(T) []s
 		return fmt.Errorf("render table: %w", err)
 	}
 	return nil
+}
+
+// preStyleTable pre-colors table headers and a row function against w's color
+// capability, so a command that renders its table into a pager buffer keeps
+// its color. printTable/renderCoreListPage decide color from the writer they
+// render into; under flushThroughPager that writer is an in-memory buffer,
+// which never looks like a TTY, so a straight render there is always plain.
+// Pre-styling against the real output writer here and letting the buffered
+// render pass the ANSI through unchanged (its own color gate is off, so it
+// never re-styles) restores it — the same approach the mirror-list view takes.
+// Identity (no wrapping) when color is off, so pipes, tests, and NO_COLOR see
+// bare text byte for byte.
+func preStyleTable[T any](w io.Writer, headers []string, row func(T) []string) ([]string, func(T) []string) {
+	return styleTableWith(newTableStyles(w), headers, row)
+}
+
+// styleTableWith is the pure core of preStyleTable: it applies st's header and
+// per-column styles to the headers and row cells, matching how printTable
+// colors a direct render. Split out from the writer-facing wrapper so the
+// enabled path is unit-testable without a real terminal. Identity when st is
+// disabled, so plain output stays byte-for-byte unchanged.
+func styleTableWith[T any](st tableStyles, headers []string, row func(T) []string) ([]string, func(T) []string) {
+	if !st.enabled {
+		return headers, row
+	}
+	styledHeaders := make([]string, len(headers))
+	for i, h := range headers {
+		styledHeaders[i] = st.style(st.header, h)
+	}
+	styledRow := func(t T) []string {
+		cells := row(t)
+		for i := range cells {
+			cells[i] = st.style(st.columnStyle(i), cells[i])
+		}
+		return cells
+	}
+	return styledHeaders, styledRow
 }
 
 // printFields writes a single record as aligned "FIELD  value" lines: the

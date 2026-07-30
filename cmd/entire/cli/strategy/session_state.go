@@ -74,15 +74,6 @@ func openSessionStateRootForRead(ctx context.Context) (*os.Root, error) {
 	return root, nil
 }
 
-// sessionStateFile returns the path to a session state file.
-func sessionStateFile(ctx context.Context, sessionID string) (string, error) {
-	stateDir, err := getSessionStateDir(ctx)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(stateDir, sessionID+".json"), nil
-}
-
 // LoadSessionState loads the session state for the given session ID.
 // Returns (nil, nil) when session file doesn't exist or session is stale (not an error condition).
 // Stale sessions are automatically deleted by the underlying StateStore.

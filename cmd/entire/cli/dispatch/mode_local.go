@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -35,7 +36,30 @@ var (
 	nowUTC = func() time.Time { return time.Now().UTC() }
 )
 
-func runLocal(ctx context.Context, opts Options) (*Dispatch, error) {
+type localPreflight struct {
+	normalizedSince time.Time
+	normalizedUntil time.Time
+	repoRoots       []string
+	sinceInput      string
+	untilInput      string
+	repoPathsInput  []string
+}
+
+func (p *localPreflight) matches(opts Options) bool {
+	return p != nil &&
+		p.sinceInput == opts.Since &&
+		p.untilInput == opts.Until &&
+		slices.Equal(p.repoPathsInput, opts.RepoPaths)
+}
+
+// PrepareLocal validates and resolves the inputs needed before local dispatch
+// generation can begin. The returned options can be passed to Run without
+// repeating time-window parsing or repository-root discovery.
+func PrepareLocal(ctx context.Context, opts Options) (Options, error) {
+	if opts.Mode != ModeLocal {
+		return Options{}, errors.New("local dispatch preflight requires local mode")
+	}
+
 	now := nowUTC()
 	sinceInput := strings.TrimSpace(opts.Since)
 	if sinceInput == "" {
@@ -43,28 +67,49 @@ func runLocal(ctx context.Context, opts Options) (*Dispatch, error) {
 	}
 	since, err := ParseSinceAtNow(sinceInput, now)
 	if err != nil {
-		return nil, err
+		return Options{}, err
 	}
 	until, err := ParseUntilAtNow(opts.Until, now)
 	if err != nil {
-		return nil, err
+		return Options{}, err
 	}
 	normalizedSince, normalizedUntil := NormalizeWindow(since, until)
 	if !normalizedSince.Before(normalizedUntil) {
-		return nil, errors.New("--since must be before --until")
+		return Options{}, errors.New("--since must be before --until")
 	}
 
 	repoRoots, err := resolveRepoRoots(ctx, opts.RepoPaths)
 	if err != nil {
-		return nil, err
+		return Options{}, err
 	}
+
+	opts.localPreflight = &localPreflight{
+		normalizedSince: normalizedSince,
+		normalizedUntil: normalizedUntil,
+		repoRoots:       repoRoots,
+		sinceInput:      opts.Since,
+		untilInput:      opts.Until,
+		repoPathsInput:  slices.Clone(opts.RepoPaths),
+	}
+	return opts, nil
+}
+
+func runLocal(ctx context.Context, opts Options) (*Dispatch, error) {
+	if !opts.localPreflight.matches(opts) {
+		prepared, err := PrepareLocal(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		opts = prepared
+	}
+	preflight := opts.localPreflight
 
 	allCandidates := make([]candidate, 0)
 	var candidatesMu sync.Mutex
 	group, groupCtx := errgroup.WithContext(ctx)
-	for _, repoRoot := range repoRoots {
+	for _, repoRoot := range preflight.repoRoots {
 		group.Go(func() error {
-			candidates, err := enumerateRepoCandidates(groupCtx, repoRoot, opts, normalizedSince, normalizedUntil)
+			candidates, err := enumerateRepoCandidates(groupCtx, repoRoot, opts, preflight.normalizedSince, preflight.normalizedUntil)
 			if err != nil {
 				return err
 			}
@@ -83,14 +128,14 @@ func runLocal(ctx context.Context, opts Options) (*Dispatch, error) {
 		CoveredRepos: coveredRepos(allCandidates),
 		Repos:        groupBulletsByRepo(fallback.Used),
 		Window: Window{
-			NormalizedSince:   normalizedSince,
-			NormalizedUntil:   normalizedUntil,
+			NormalizedSince:   preflight.normalizedSince,
+			NormalizedUntil:   preflight.normalizedUntil,
 			FirstCheckpointAt: firstAt(fallback.Used),
 			LastCheckpointAt:  lastAt(fallback.Used),
 		},
 	}
 
-	text, err := generateLocalDispatch(ctx, dispatch, opts.Voice)
+	text, err := generateLocalDispatch(ctx, dispatch, opts.Voice, opts.TextGenerator, opts.Model)
 	if err != nil {
 		return nil, err
 	}

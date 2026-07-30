@@ -2,8 +2,11 @@ package external
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -23,6 +26,11 @@ const (
 // discoveryTimeout caps the total time spent scanning $PATH for external agents.
 const discoveryTimeout = 10 * time.Second
 
+var (
+	statExternalAgent     = os.Stat       //nolint:gochecknoglobals // narrow test seam for stat failures
+	lookPathExternalAgent = exec.LookPath //nolint:gochecknoglobals // narrow test seam for lookup failures
+)
+
 // DiscoverAndRegister scans $PATH for executables matching "entire-agent-<name>",
 // calls their "info" subcommand, and registers them in the agent registry.
 // Binaries whose name conflicts with an already-registered agent are skipped.
@@ -41,6 +49,51 @@ func DiscoverAndRegister(ctx context.Context) {
 // the user explicitly chooses agents.
 func DiscoverAndRegisterAlways(ctx context.Context) {
 	discoverAndRegister(ctx)
+}
+
+// DiscoverAndRegisterNamedAlways discovers and registers only the external
+// agent binary matching name. It bypasses the external_agents setting for
+// explicit, one-invocation selections without executing unrelated plugins.
+func DiscoverAndRegisterNamedAlways(ctx context.Context, name types.AgentName) error {
+	return discoverAndRegisterNamed(ctx, name, discoveryTimeout)
+}
+
+func discoverAndRegisterNamed(ctx context.Context, name types.AgentName, timeout time.Duration) error {
+	if name == "" {
+		return nil
+	}
+	if strings.ContainsAny(string(name), `/\`) {
+		return fmt.Errorf("invalid external agent name %q: contains path separators", name)
+	}
+	if _, err := agent.Get(name); err == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("discovering external agent %q: %w", name, err)
+	}
+
+	binName := binaryPrefix + string(name)
+	binPath, err := lookPathExternalAgent(binName)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("looking up external agent %q binary %q: %w", name, binName, ctxErr)
+	}
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("looking up external agent %q binary %q: %w", name, binName, err)
+	}
+	registered, err := registerExternalAgent(ctx, binPath, name)
+	if err != nil {
+		return err
+	}
+	if !registered {
+		return fmt.Errorf("external agent %q binary %q was found but could not be registered", name, binPath)
+	}
+	return nil
 }
 
 // discoverAndRegister contains the shared scanning logic for external agent discovery.
@@ -93,42 +146,58 @@ func discoverAndRegister(ctx context.Context) {
 				continue
 			}
 
-			finfo, err := os.Stat(binPath) //nolint:gosec // PATH entries are trusted
-			if err != nil || finfo.IsDir() {
-				continue
-			}
-			// Check executable bit (on Unix; Windows doesn't set execute bits)
-			if runtime.GOOS != osWindows && finfo.Mode()&0o111 == 0 {
-				continue
-			}
-
-			ea, err := New(ctx, binPath)
+			registeredAgent, err := registerExternalAgent(ctx, binPath, agentName)
 			if err != nil {
-				logging.Debug(ctx, "skipping external agent (info failed)",
+				logging.Debug(ctx, "skipping external agent (registration failed)",
 					slog.String("binary", binPath),
+					slog.String("agent", string(agentName)),
 					slog.String("error", err.Error()))
 				continue
 			}
-
-			// Wrap with capability interfaces and register
-			wrapped, err := Wrap(ea)
-			if err != nil {
-				logging.Debug(ctx, "skipping external agent (wrap failed)",
-					slog.String("binary", binPath),
-					slog.String("error", err.Error()))
-				continue
+			if registeredAgent {
+				registered[agentName] = true
 			}
-			agent.Register(agentName, func() agent.Agent {
-				return wrapped
-			})
-			registered[agentName] = true
-
-			logging.Debug(ctx, "registered external agent",
-				slog.String("name", string(agentName)),
-				slog.String("type", string(ea.Type())),
-				slog.String("binary", binPath))
 		}
 	}
+}
+
+func registerExternalAgent(ctx context.Context, binPath string, name types.AgentName) (bool, error) {
+	finfo, err := statExternalAgent(binPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspecting external agent %q binary %q: %w", name, binPath, err)
+	}
+	if finfo.IsDir() {
+		return false, nil
+	}
+	// Check executable bit (on Unix; Windows doesn't set execute bits).
+	if runtime.GOOS != osWindows && finfo.Mode()&0o111 == 0 {
+		return false, nil
+	}
+
+	ea, err := New(ctx, binPath)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, fmt.Errorf("loading info for external agent %q from binary %q: %w: %w", name, binPath, ctxErr, err)
+		}
+		return false, fmt.Errorf("loading info for external agent %q from binary %q: %w", name, binPath, err)
+	}
+
+	wrapped, err := Wrap(ea)
+	if err != nil {
+		return false, fmt.Errorf("wrapping external agent %q from binary %q: %w", name, binPath, err)
+	}
+	agent.Register(name, func() agent.Agent {
+		return wrapped
+	})
+
+	logging.Debug(ctx, "registered external agent",
+		slog.String("name", string(name)),
+		slog.String("type", string(ea.Type())),
+		slog.String("binary", binPath))
+	return true, nil
 }
 
 // StripExeExt removes Windows executable extensions (.exe, .bat, .cmd, .com)

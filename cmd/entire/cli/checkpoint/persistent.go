@@ -739,6 +739,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		Strategy:                    opts.Strategy,
 		CreatedAt:                   checkpointCreatedAt(opts),
 		Branch:                      opts.Branch,
+		CommitSHA:                   opts.CommitSHA,
 		CheckpointsCount:            opts.CheckpointsCount,
 		SaveStepCount:               opts.SaveStepCount,
 		FilesTouched:                opts.FilesTouched,
@@ -800,6 +801,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 	// was imported (Kind == "imported"). Compared as a literal because the
 	// session package imports checkpoint, so we can't reference its constant.
 	imported := opts.Kind == "imported"
+	commitSHA := opts.CommitSHA
 	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
 	if entry, exists := entries[rootMetadataPath]; exists {
 		existingSummary, readErr := s.readSummaryFromBlob(entry.Hash)
@@ -816,6 +818,12 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 			if !imported {
 				imported = existingSummary.Imported
 			}
+			// A later write to the same checkpoint (e.g. a review session
+			// attached to it) carries no CommitSHA; the imported anchor
+			// must survive that rewrite rather than be cleared.
+			if commitSHA == "" {
+				commitSHA = existingSummary.CommitSHA
+			}
 		}
 	}
 
@@ -824,6 +832,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 		CLIVersion:          versioninfo.Version,
 		Strategy:            opts.Strategy,
 		Branch:              opts.Branch,
+		CommitSHA:           commitSHA,
 		CheckpointsCount:    checkpointsCount,
 		FilesTouched:        filesTouched,
 		Sessions:            sessions,

@@ -110,6 +110,38 @@ func TestBuildGenerateArgs_PassesSettingsAsPath(t *testing.T) {
 	}
 }
 
+func TestBuildStreamingGenerateArgs_KeepsIsolationAndAuthContract(t *testing.T) {
+	t.Parallel()
+	// The streaming argv must keep the same isolation (--setting-sources "")
+	// and auth-injection (--settings <path>) contract as buildGenerateArgs;
+	// dropping the injection silently breaks apiKeyHelper (API-billing) auth
+	// on every streaming call.
+	args := buildStreamingGenerateArgs("haiku", "")
+	got, ok := flagValue(args, "--setting-sources")
+	if !ok {
+		t.Fatalf("--setting-sources flag missing from args: %v", args)
+	}
+	if got != "" {
+		t.Fatalf("--setting-sources = %q, want %q (must load no sources)", got, "")
+	}
+	if got, ok := flagValue(args, "--output-format"); !ok || got != "stream-json" {
+		t.Fatalf("--output-format = %q, want stream-json: %v", got, args)
+	}
+	if _, ok := flagValue(args, "--settings"); ok {
+		t.Fatalf("--settings must be absent when there is no settings path: %v", args)
+	}
+
+	path := "/tmp/entire-claude-auth-123.json"
+	args = buildStreamingGenerateArgs("haiku", path)
+	got, ok = flagValue(args, "--settings")
+	if !ok {
+		t.Fatalf("--settings flag missing: %v", args)
+	}
+	if got != path {
+		t.Fatalf("--settings = %q, want the file path %q", got, path)
+	}
+}
+
 func TestWriteAuthSettingsFile_WritesOnlyAPIKeyHelper0600(t *testing.T) {
 	t.Parallel()
 	helper := `echo "sk-ant-secret"` // could embed a literal key

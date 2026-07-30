@@ -11,7 +11,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 
 export default function (pi: ExtensionAPI) {
-  const ENTIRE_CMD = "entire";
+  const ENTIRE_CMD = '"$(git rev-parse --show-toplevel)"/scripts/entire-dev';
   let pendingSkillEvents: Array<{ skill_name: string; invocation: string; timestamp: string }> = [];
 
   // fireHook pipes data to `entire hooks pi <hookName>` and resolves with the

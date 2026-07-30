@@ -30,7 +30,7 @@ func TestAttach_NewSession_NoHooks(t *testing.T) {
 	}
 
 	// Run attach
-	output := env.RunCLI("session", "attach", sessionID, "-a", "claude-code", "-f")
+	output := env.RunCLI("session", "attach", sessionID, "-a", agentClaudeCode, "-f")
 
 	// Verify output
 	if !strings.Contains(output, "Attached session") {
@@ -75,7 +75,7 @@ func TestAttach_ResearchSession_NoFileChanges(t *testing.T) {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	output := env.RunCLI("session", "attach", sessionID, "-a", "claude-code", "-f")
+	output := env.RunCLI("session", "attach", sessionID, "-a", agentClaudeCode, "-f")
 
 	if !strings.Contains(output, "Attached session") {
 		t.Errorf("expected 'Attached session' in output, got:\n%s", output)
@@ -130,7 +130,7 @@ func TestAttach_ExistingCheckpoint_AddSession(t *testing.T) {
 	}
 
 	// Attach the second session
-	output := env.RunCLI("session", "attach", session2ID, "-a", "claude-code")
+	output := env.RunCLI("session", "attach", session2ID, "-a", agentClaudeCode)
 
 	if !strings.Contains(output, "Attached session") {
 		t.Errorf("expected 'Attached session' in output, got:\n%s", output)
@@ -187,7 +187,7 @@ func TestAttach_AlreadyTracked_NoCheckpoint(t *testing.T) {
 	env.GitCommit("add research notes")
 
 	// Now attach — session state exists but has no checkpoint.
-	output := env.RunCLI("session", "attach", session1.ID, "-a", "claude-code", "-f")
+	output := env.RunCLI("session", "attach", session1.ID, "-a", agentClaudeCode, "-f")
 
 	if !strings.Contains(output, "Attached session") {
 		t.Errorf("expected 'Attached session' in output, got:\n%s", output)
@@ -243,7 +243,7 @@ func TestAttach_AlreadyTracked_HasCheckpoint(t *testing.T) {
 	}
 
 	// Re-attach the same session
-	output := env.RunCLI("session", "attach", session1.ID, "-a", "claude-code")
+	output := env.RunCLI("session", "attach", session1.ID, "-a", agentClaudeCode)
 
 	if !strings.Contains(output, "already has checkpoint") {
 		t.Errorf("expected 'already has checkpoint' in output, got:\n%s", output)
@@ -283,7 +283,7 @@ func TestAttach_DifferentWorkingDirectory(t *testing.T) {
 	// Set ENTIRE_TEST_CLAUDE_PROJECT_DIR to an empty dir so the primary lookup fails,
 	// and set HOME to fakeHome so the fallback search finds our transcript.
 	emptyProjectDir := t.TempDir()
-	cmd := exec.Command(getTestBinary(), "attach", sessionID, "-a", "claude-code", "-f")
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "attach", sessionID, "-a", agentClaudeCode, "-f")
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(env.cliEnv(),
 		"HOME="+fakeHome,
@@ -325,7 +325,7 @@ func TestAttach_CodexSessionTreeLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(getTestBinary(), "attach", sessionID, "-a", "codex", "-f")
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "attach", sessionID, "-a", "codex", "-f")
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(env.cliEnv(),
 		"ENTIRE_TEST_CODEX_SESSION_DIR="+codexDir,
@@ -358,7 +358,7 @@ func TestAttach_InvalidSessionID(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 
-	_, err := env.RunCLIWithError("session", "attach", "../path-traversal", "-a", "claude-code")
+	_, err := env.RunCLIWithError("session", "attach", "../path-traversal", "-a", agentClaudeCode)
 	if err == nil {
 		t.Error("expected error for invalid session ID")
 	}

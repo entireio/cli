@@ -669,15 +669,6 @@ func LoadClonePreferences(ctx context.Context) (*ClonePreferences, error) {
 	return loadClonePreferencesFromFile(path)
 }
 
-// SaveClonePreferences saves clone-local preferences to the git common dir.
-func SaveClonePreferences(ctx context.Context, prefs *ClonePreferences) error {
-	path, err := ClonePreferencesPath(ctx)
-	if err != nil {
-		return err
-	}
-	return saveClonePreferencesToFile(prefs, path)
-}
-
 // ModifyClonePreferences runs a read-modify-write under the preferences lock.
 func ModifyClonePreferences(ctx context.Context, fn func(*ClonePreferences) error) error {
 	path, err := ClonePreferencesPath(ctx)

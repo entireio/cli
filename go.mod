@@ -10,23 +10,22 @@ require (
 	charm.land/lipgloss/v2 v2.0.5
 	github.com/betterleaks/betterleaks v1.5.0
 	github.com/charmbracelet/x/ansi v0.11.7
-	github.com/creack/pty v1.1.24
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/entireio/auth-go v0.5.2
-	github.com/go-faster/errors v0.7.1
+	github.com/go-faster/errors v0.8.0
 	github.com/go-faster/jx v1.2.0
-	github.com/go-git/go-billy/v6 v6.0.0-alpha.1.0.20260519112248-0095b064a6c6
-	github.com/go-git/go-git/v6 v6.0.0-alpha.4.0.20260713100844-d5e9b9c7895b
+	github.com/go-git/go-billy/v6 v6.0.0-alpha.2
+	github.com/go-git/go-git/v6 v6.0.0-alpha.5
 	github.com/go-git/x/plugin/objectsigner/auto v0.1.1-0.20260624122410-382b2905c041
 	github.com/go-git/x/plugin/objectsigner/program v0.0.0-20260624122410-382b2905c041
 	github.com/gofrs/flock v0.13.0
 	github.com/google/uuid v1.6.0
-	github.com/mattn/go-isatty v0.0.23
-	github.com/mattn/go-runewidth v0.0.24
+	github.com/mattn/go-isatty v0.0.24
+	github.com/mattn/go-runewidth v0.0.27
 	github.com/muesli/termenv v0.16.0
 	github.com/ogen-go/ogen v1.23.0
-	github.com/oklog/ulid/v2 v2.1.1
-	github.com/posthog/posthog-go v1.19.0
+	github.com/oklog/ulid/v2 v2.1.2
+	github.com/posthog/posthog-go v1.22.0
 	github.com/sergi/go-diff v1.4.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10

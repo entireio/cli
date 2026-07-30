@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1713,6 +1714,44 @@ func TestRunStatusJSON_Enabled(t *testing.T) {
 	// footer, so the agent-help pointer must be present once entire is set up.
 	if result.AgentHelp != agentHelpCommand {
 		t.Errorf("Expected agent_help='entire agent-help', got %q", result.AgentHelp)
+	}
+}
+
+// TestRunStatusJSON_HooksOutdated — when Claude Code hooks are installed under
+// the outdated Task/TodoWrite matchers, `entire status --json` reports the agent
+// under hooks_outdated so scripts/agents can detect the drift.
+func TestRunStatusJSON_HooksOutdated(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	if err := os.MkdirAll(".claude", 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	stale := `{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "entire hooks claude-code stop"}]}],
+    "PreToolUse": [{"matcher": "Task", "hooks": [{"type": "command", "command": "entire hooks claude-code pre-task"}]}],
+    "PostToolUse": [
+      {"matcher": "Task", "hooks": [{"type": "command", "command": "entire hooks claude-code post-task"}]},
+      {"matcher": "TodoWrite", "hooks": [{"type": "command", "command": "entire hooks claude-code post-todo"}]}
+    ]
+  }
+}`
+	if err := os.WriteFile(".claude/settings.json", []byte(stale), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if !slices.Contains(result.HooksOutdated, "claude-code") {
+		t.Errorf("Expected hooks_outdated to contain 'claude-code', got %v", result.HooksOutdated)
 	}
 }
 

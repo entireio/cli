@@ -236,6 +236,49 @@ type TextGenerator interface {
 	GenerateText(ctx context.Context, prompt string, model string) (string, error)
 }
 
+// ProgressPhase identifies a coarse stage in streaming text generation.
+type ProgressPhase string
+
+const (
+	// PhaseConnecting is emitted once when the CLI signals it is making the upstream request.
+	PhaseConnecting ProgressPhase = "connecting"
+	// PhaseFirstToken is emitted once when the upstream responds with the first event,
+	// carrying TTFT and input/cache token counts.
+	PhaseFirstToken ProgressPhase = "first-token"
+	// PhaseGenerating is emitted repeatedly as text or thinking deltas arrive.
+	// OutputTokens carries a running estimate based on delta sizes.
+	PhaseGenerating ProgressPhase = "generating"
+	// PhaseDone is emitted once when the final result event is received without error.
+	PhaseDone ProgressPhase = "done"
+)
+
+// GenerationProgress reports a snapshot of streaming text generation progress.
+// Fields not relevant to the current Phase may be zero-valued.
+type GenerationProgress struct {
+	Phase             ProgressPhase
+	OutputTokens      int // running estimate during PhaseGenerating; final at PhaseDone
+	InputTokens       int // populated at PhaseFirstToken
+	CachedInputTokens int // populated at PhaseFirstToken
+	TTFTms            int // time-to-first-token, populated at PhaseFirstToken
+	DurationMs        int // populated at PhaseDone (final result event)
+}
+
+// ProgressFn receives streaming progress updates. It must not block — invoke it
+// from the same goroutine that reads the stream and keep handlers fast.
+type ProgressFn func(GenerationProgress)
+
+// StreamingTextGenerator is an optional interface for text generators whose
+// underlying CLI exposes a streaming output mode. Callers can use AsStreamingTextGenerator
+// to detect support and fall back to plain GenerateText when unavailable.
+type StreamingTextGenerator interface {
+	Agent
+
+	// GenerateTextStreaming invokes the agent's streaming text generation and
+	// calls progress for each phase update. progress may be nil to suppress
+	// reporting. The returned string is the final response text.
+	GenerateTextStreaming(ctx context.Context, prompt, model string, progress ProgressFn) (string, error)
+}
+
 // CompactedTranscript contains the result of transcript compaction into Entire
 // Transcript Format. Assets are accepted in the protocol shape for forward
 // compatibility but may not yet be persisted by all call sites.

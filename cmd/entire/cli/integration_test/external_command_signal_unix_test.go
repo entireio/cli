@@ -35,7 +35,7 @@ func TestExternalCommand_SigintReachesPlugin(t *testing.T) {
 			"i=0\nwhile [ $i -lt %d ]; do sleep 0.1; i=$((i+1)); done\nexit 0\n",
 		signalFile, readyFile, pluginLoopSeconds*10,
 	)
-	if err := os.WriteFile(filepath.Join(dir, "entire-trapint"), []byte(body), 0o755); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(filepath.Join(dir, "entire-trapint"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write plugin: %v", err)
 	}
 
@@ -50,8 +50,12 @@ func TestExternalCommand_SigintReachesPlugin(t *testing.T) {
 	}
 
 	if !waitForFile(readyFile, 3*time.Second) {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			t.Logf("kill process: %v", killErr)
+		}
+		if waitErr := cmd.Wait(); waitErr != nil {
+			t.Logf("wait after kill: %v", waitErr)
+		}
 		t.Fatalf("plugin never reached ready state\nparent stderr:\n%s", pStderr.String())
 	}
 
@@ -60,10 +64,14 @@ func TestExternalCommand_SigintReachesPlugin(t *testing.T) {
 	}
 
 	if !waitForFile(signalFile, 5*time.Second) {
-		_ = cmd.Wait()
+		if waitErr := cmd.Wait(); waitErr != nil {
+			t.Logf("wait after signal: %v", waitErr)
+		}
 		t.Fatalf("plugin never observed SIGINT — marker missing\nparent stderr:\n%s", pStderr.String())
 	}
-	_ = cmd.Wait()
+	if waitErr := cmd.Wait(); waitErr != nil {
+		t.Logf("wait: %v", waitErr)
+	}
 
 	contents, err := os.ReadFile(signalFile)
 	if err != nil {

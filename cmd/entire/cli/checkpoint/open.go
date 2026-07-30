@@ -24,6 +24,13 @@ type OpenOptions struct {
 	// reads local-only; ignored by the git-branch backend.
 	RefFetcher RefFetchFunc
 
+	// RemoteRefLister is the CLI-level checkpoint-ref enumerator, used by the
+	// git-refs backend's List to discover checkpoints present on the checkpoint
+	// remote but not yet local (see RemoteRefListFunc). It only fires on a
+	// context marked by WithRemoteListDiscovery. nil (or an unmarked context)
+	// leaves List local-only; ignored by the git-branch backend.
+	RemoteRefLister RemoteRefListFunc
+
 	// Refs overrides the default committed-ref topology. A non-nil value wins,
 	// e.g. attach pins reads to Primary via PrimaryAsRead().
 	Refs *PersistentRefs
@@ -62,7 +69,7 @@ type Stores struct {
 // default git-branch backend with no mirrors, preserving default behavior.
 func Open(ctx context.Context, repo *git.Repository, opts OpenOptions) (*Stores, error) {
 	refs := resolveOpenRefs(ctx, opts)
-	env := OpenEnv{Repo: repo, BlobFetcher: opts.BlobFetcher, RefFetcher: opts.RefFetcher, Refs: refs}
+	env := OpenEnv{Repo: repo, BlobFetcher: opts.BlobFetcher, RefFetcher: opts.RefFetcher, RemoteRefLister: opts.RemoteRefLister, Refs: refs}
 
 	cfg, err := settings.LoadCheckpointsConfig(ctx)
 	if err != nil {

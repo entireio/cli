@@ -591,6 +591,70 @@ func TestFetchTrailDescription_ReadsNestedBodyDocument(t *testing.T) {
 	}
 }
 
+func TestResolveTrailUpdateBody_PrefersDetailSnapshot(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := io.WriteString(w, `{"trail":{"number":42,"body_document":{"text_snapshot":"the real body"}},"checkpoints":[],"has_write_permission":true}`); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	// The list resource omits the description, so found.Body is empty. The
+	// seed must come from the detail endpoint, not the empty list body.
+	found := &api.TrailResource{Number: 42, Body: ""}
+	body, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	if err != nil {
+		t.Fatalf("resolveTrailUpdateBody: %v", err)
+	}
+	if body != "the real body" {
+		t.Fatalf("body = %q, want %q", body, "the real body")
+	}
+}
+
+func TestResolveTrailUpdateBody_FallsBackToListBody(t *testing.T) {
+	t.Parallel()
+	// Older/partial server: detail omits body_document (text_snapshot empty).
+	// The seed must fall back to the list body rather than blanking it.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := io.WriteString(w, `{"trail":{"number":42},"checkpoints":[],"has_write_permission":true}`); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	found := &api.TrailResource{Number: 42, Body: "list body"}
+	body, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	if err != nil {
+		t.Fatalf("resolveTrailUpdateBody: %v", err)
+	}
+	if body != "list body" {
+		t.Fatalf("body = %q, want %q", body, "list body")
+	}
+}
+
+func TestResolveTrailUpdateBody_ReturnsErrorOnFetchFailure(t *testing.T) {
+	t.Parallel()
+	// A detail-fetch failure must be surfaced (not swallowed) so the caller can
+	// warn: a blank baseline could otherwise silently overwrite an unseen body.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	found := &api.TrailResource{Number: 42, Body: "list body"}
+	body, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	if err == nil {
+		t.Fatal("expected error on fetch failure, got nil")
+	}
+	if body != "list body" {
+		t.Fatalf("body = %q, want fallback %q", body, "list body")
+	}
+}
+
 func TestResolveCreateBranch(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -819,7 +883,10 @@ func TestTrailEnablementCache_ReadsClonePreference(t *testing.T) {
 
 	currentAuthKey := prefs.TrailsEnabledAuthKey
 	prefs.TrailsEnabledAuthKey = currentAuthKey + "-other"
-	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+	if err := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
+		*p = *prefs
+		return nil
+	}); err != nil {
 		t.Fatalf("save auth-mismatched prefs: %v", err)
 	}
 	if trailsEnabledForCurrentRepo(ctx) {
@@ -828,13 +895,19 @@ func TestTrailEnablementCache_ReadsClonePreference(t *testing.T) {
 	prefs.TrailsEnabledAuthKey = currentAuthKey
 	fresh := time.Now()
 	prefs.TrailsEnabledCheckedAt = &fresh
-	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+	if err := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
+		*p = *prefs
+		return nil
+	}); err != nil {
 		t.Fatalf("restore auth-matched prefs: %v", err)
 	}
 
 	stale := time.Now().Add(-trailEnablementCacheTTL - time.Minute)
 	prefs.TrailsEnabledCheckedAt = &stale
-	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+	if err := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
+		*p = *prefs
+		return nil
+	}); err != nil {
 		t.Fatalf("save stale prefs: %v", err)
 	}
 	if trailsEnabledForCurrentRepo(ctx) {

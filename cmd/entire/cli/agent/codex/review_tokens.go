@@ -35,9 +35,10 @@ const (
 // token_count.total_token_usage is a running SESSION total (not per-turn
 // scale like turn.completed usage), so each emission is an absolute count —
 // matching consumers' overwrite-not-sum semantics. Duplicate totals are
-// suppressed so we only emit on real movement. emitted is set after the
-// first successful send; the parser uses it to suppress its per-turn-scale
-// stdout emissions so a single source stays authoritative.
+// suppressed so we only emit on real movement. emitted is set immediately
+// before each send (never after — see drain) so it is observable no later
+// than the Tokens event itself; the parser uses it to suppress its
+// per-turn-scale stdout emissions so a single source stays authoritative.
 //
 // Returns when stop is closed (the stdout stream ended) — after one final
 // catch-up drain of the file, so the last token_count codex wrote is not
@@ -126,11 +127,19 @@ func (t *rolloutTail) drain() error {
 					continue
 				}
 				t.lastIn, t.lastOut = in, outTok
+				// Set emitted BEFORE the send: the parser suppresses its
+				// per-turn-scale turn.completed Tokens once the tailer has
+				// emitted, so the flag must be observable no later than the
+				// Tokens event itself. Storing after the send leaves a window
+				// where a consumer sees the tailer's Tokens while emitted is
+				// still false, letting a concurrent turn.completed leak a
+				// per-turn value and flap the counter between scales.
+				//
 				// Unconditional send is safe: the parser waits for the
 				// tailer before closing the channel, and the run contract
 				// guarantees the consumer drains until close.
-				t.out <- reviewtypes.Tokens{In: in, Out: outTok}
 				t.emitted.Store(true)
+				t.out <- reviewtypes.Tokens{In: in, Out: outTok}
 			}
 		}
 		if readErr != nil {

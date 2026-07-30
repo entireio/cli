@@ -38,12 +38,12 @@ func TestHookOverwrite_MidTurnWipe_NextPromptRecovers(t *testing.T) {
 		sess.ID, "Create files A and B", sess.TranscriptPath)
 	require.NoError(t, err)
 
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 
 	sess.CreateTranscript("Create files A and B", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 	})
 
 	// First commit — hooks are intact, binary is invoked → trailer added
@@ -100,7 +100,7 @@ func TestHookOverwrite_MidTurnWipe_NextPromptRecovers(t *testing.T) {
 	for _, hookName := range strategy.ManagedGitHookNames() {
 		backupPath := filepath.Join(hooksDir, hookName+".pre-entire")
 		_, err := os.Stat(backupPath)
-		assert.NoError(t, err, "backup %s.pre-entire should exist after reinstall", hookName)
+		require.NoError(t, err, "backup %s.pre-entire should exist after reinstall", hookName)
 	}
 
 	// Third commit — hooks restored, agent commits (no TTY) → trailer added via fast path

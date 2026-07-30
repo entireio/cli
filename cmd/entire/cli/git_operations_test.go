@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/go-git/go-git/v6"
@@ -634,4 +636,153 @@ func gitOutput(t *testing.T, dir string, args ...string) string {
 func gitDefaultBranch(t *testing.T, dir string) string {
 	t.Helper()
 	return gitOutput(t, dir, "rev-parse", "--abbrev-ref", "HEAD")
+}
+
+// TestParseCheckpointRefNames verifies the ls-remote parser keeps only
+// checkpoint refs and ignores unrelated advertisement lines (HEAD, branches,
+// peeled tags) and blanks.
+func TestParseCheckpointRefNames(t *testing.T) {
+	t.Parallel()
+	const sha = "e9ed0bd3ad3b2071aefab6e6ad20527dc910957b"
+	output := []byte(strings.Join([]string{
+		sha + "\tHEAD",
+		sha + "\trefs/heads/main",
+		sha + "\trefs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN",
+		sha + "\trefs/entire/checkpoints/f6/a1b2c3d4e5f6",
+		sha + "\trefs/tags/v1.0.0",
+		sha + "\trefs/tags/v1.0.0^{}",
+		"",
+	}, "\n"))
+
+	names := parseCheckpointRefNames(output)
+	got := make([]string, len(names))
+	for i, n := range names {
+		got[i] = n.String()
+	}
+	assert.ElementsMatch(t, []string{
+		"refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN",
+		"refs/entire/checkpoints/f6/a1b2c3d4e5f6",
+	}, got)
+}
+
+// TestParseCheckpointRefNames_RealLsRemote exercises the parser against genuine
+// `git ls-remote 'refs/entire/checkpoints/*'` output from a local bare remote,
+// confirming the glob matches the nested <shard>/<id> refs and nothing else.
+func TestParseCheckpointRefNames_RealLsRemote(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	bareDir := t.TempDir()
+	gitRun(t, bareDir, "init", "--bare", "-q", bareDir)
+
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	testutil.WriteFile(t, workDir, "f.txt", "init")
+	testutil.GitAdd(t, workDir, "f.txt")
+	testutil.GitCommit(t, workDir, "init")
+	head := gitOutput(t, workDir, "rev-parse", "HEAD")
+	gitRun(t, workDir, "update-ref", "refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN", head)
+	gitRun(t, workDir, "update-ref", "refs/entire/checkpoints/f6/a1b2c3d4e5f6", head)
+	gitRun(t, workDir, "remote", "add", "origin", bareDir)
+	gitRun(t, workDir, "push", "-q", "origin", "refs/entire/checkpoints/*:refs/entire/checkpoints/*")
+
+	out, err := remote.LsRemoteInDir(ctx, workDir, bareDir, checkpoint.CheckpointRefPrefix+"*")
+	require.NoError(t, err)
+
+	names := parseCheckpointRefNames(out)
+	got := make([]string, len(names))
+	for i, n := range names {
+		got[i] = n.String()
+	}
+	assert.ElementsMatch(t, []string{
+		"refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN",
+		"refs/entire/checkpoints/f6/a1b2c3d4e5f6",
+	}, got)
+}
+
+// TestListCheckpointRefsOnRemote_NotConfigured proves the authority gate: with
+// no checkpoint_remote configured, enumeration is a no-op (nil, no error, no
+// network) so List stays local-only. Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_NotConfigured(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+
+	names, err := ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, names, "no checkpoint_remote configured must leave List local-only (no remote enumeration)")
+}
+
+// TestListCheckpointRefsOnRemote_ResolvesFromSubdir proves worktree pinning for
+// the configured path: settings + ls-remote run from the worktree root even when
+// process cwd is a subdirectory. Uses a local bare remote and an unknown
+// checkpoint_remote provider so FetchURL falls back to origin (offline).
+// Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_ResolvesFromSubdir(t *testing.T) {
+	bareDir := t.TempDir()
+	gitRun(t, bareDir, "init", "--bare", "-q", bareDir)
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	head := gitOutput(t, dir, "rev-parse", "HEAD")
+	ref := "refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN"
+	gitRun(t, dir, "update-ref", ref, head)
+	gitRun(t, dir, "remote", "add", "origin", bareDir)
+	gitRun(t, dir, "push", "-q", "origin", ref+":"+ref)
+
+	entireDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	// provider "local" is unknown to providerHost → FetchURL falls back to origin
+	// (the bare path) after file:// derivation fails — keeps this offline.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"local","repo":"org/checkpoints"}}}`),
+		0o644,
+	))
+
+	sub := filepath.Join(dir, "nested", "deep")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+	t.Chdir(sub)
+
+	names, err := ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err)
+	require.Len(t, names, 1)
+	assert.Equal(t, ref, names[0].String())
+}
+
+// TestListCheckpointRefsOnRemote_HonorsCanceledContext proves the discovery
+// timeout context reaches the git subprocess: an already-canceled ctx with a
+// configured checkpoint_remote must error (not hang / not silently succeed).
+// Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_HonorsCanceledContext(t *testing.T) {
+	bareDir := t.TempDir()
+	gitRun(t, bareDir, "init", "--bare", "-q", bareDir)
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	gitRun(t, dir, "remote", "add", "origin", bareDir)
+
+	entireDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"local","repo":"org/checkpoints"}}}`),
+		0o644,
+	))
+	t.Chdir(dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ListCheckpointRefsOnRemote(ctx)
+	require.Error(t, err, "canceled context must reach ls-remote (regression: deleting WithTimeout would still pass a constant-only test)")
 }

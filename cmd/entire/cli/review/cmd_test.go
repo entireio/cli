@@ -67,7 +67,10 @@ func seedReviewConfig(ctx context.Context, cfg map[string]settings.ReviewConfig)
 	prefs.ReviewProfiles = map[string]settings.ReviewProfileConfig{
 		review.DefaultProfileName: profile,
 	}
-	return settings.SaveClonePreferences(ctx, prefs)
+	return settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
+		*p = *prefs
+		return nil
+	})
 }
 
 func defaultTestJudge(cfg map[string]settings.ReviewConfig) string {

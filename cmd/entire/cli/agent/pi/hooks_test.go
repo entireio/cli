@@ -29,7 +29,7 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	}
 	body := string(data)
 
-	if !strings.Contains(body, `const ENTIRE_CMD = "entire"`) {
+	if !strings.Contains(body, `const ENTIRE_CMD = 'entire'`) {
 		t.Error("production ENTIRE_CMD missing")
 	}
 	if !strings.Contains(body, "hooks pi ") {
@@ -53,8 +53,13 @@ func TestInstallHooks_LocalDev(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `"$(git rev-parse --show-toplevel)"/scripts/entire-dev`) {
-		t.Error("local-dev extension should delegate to the entire-dev launcher via git rev-parse")
+	// Assert the exact, well-formed line. The launcher value carries its own
+	// shell quotes, so the template must wrap the placeholder in single quotes;
+	// wrapping in double quotes yields the malformed `""$(...)"/..."` (a broken
+	// JS string literal). A substring check alone would pass on that broken
+	// output, so pin the whole line.
+	if !strings.Contains(string(data), `const ENTIRE_CMD = '"$(git rev-parse --show-toplevel)"/scripts/entire-dev'`) {
+		t.Errorf("local-dev ENTIRE_CMD malformed; got:\n%s", data)
 	}
 }
 
