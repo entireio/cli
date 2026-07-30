@@ -75,7 +75,13 @@ func TestGenerateText_Matrix(t *testing.T) {
 	// A CLI that writes its diagnostic to stdout and exits non-zero. codex,
 	// cursor and copilot are all stdout-primary tools, so this shape is common.
 	stdoutOnly := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sh", "-c", `printf 'quota exhausted, add credits'; exit 1`)
+		return exec.CommandContext(ctx, "sh", "-c", `printf 'HTTP 429: quota exhausted, add credits'; exit 1`)
+	}
+	// stdout carrying the model's PROSE about an auth error, not a diagnostic.
+	// Must NOT classify — a summary that discusses a 401 is not a 401.
+	stdoutProse := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c",
+			`printf 'The user was debugging a 401 Unauthorized from the payments API.'; exit 1`)
 	}
 
 	for _, a := range agents {
@@ -125,6 +131,26 @@ func TestGenerateText_Matrix(t *testing.T) {
 			// diagnostic detail available)".
 			if !strings.Contains(tge.Message, "quota exhausted") {
 				t.Errorf("DiagnosticOnStdout: Message = %q; want the stdout diagnostic", tge.Message)
+			}
+			// And it must be CLASSIFIED, not just shown. codex/cursor/copilot
+			// are stdout-primary, so leaving these Unknown would mean three of
+			// six providers never get actionable messaging.
+			if tge.Kind != agent.TextGenErrorRateLimit {
+				t.Errorf("DiagnosticOnStdout: Kind = %q; want rate_limit from the stdout diagnostic", tge.Kind)
+			}
+		})
+		t.Run(a.name+"/ProseOnStdoutIsNotClassified", func(t *testing.T) {
+			t.Parallel()
+			_, err := a.make(stdoutProse).GenerateText(context.Background(), "prompt", "")
+			var tge *agent.TextGenError
+			if !errors.As(err, &tge) {
+				t.Fatalf("ProseOnStdout: err = %v; want *agent.TextGenError", err)
+			}
+			// The model describing a 401 is not the provider reporting one.
+			// Classifying prose attaches a confident, wrong remediation row —
+			// strictly worse than Unknown, which shows the text honestly.
+			if tge.Kind != agent.TextGenErrorUnknown {
+				t.Errorf("ProseOnStdout: Kind = %q; want unknown (prose is not a diagnosis)", tge.Kind)
 			}
 		})
 		t.Run(a.name+"/EmptyStdout", func(t *testing.T) {

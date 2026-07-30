@@ -221,12 +221,52 @@ func TestClassifyStderrHTTPStatus(t *testing.T) {
 		{"status colon form", "status: 429", TextGenErrorRateLimit},
 		{"HTTP/1.1 form", "HTTP/1.1 400 Bad Request", TextGenErrorConfig},
 		{"reason phrase without keyword", "429 Too Many Requests", TextGenErrorRateLimit},
+		{"json snake_case status_code", `{"status_code": 401, "detail": "bad token"}`, TextGenErrorAuth},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if got := ClassifyStderrHTTPStatus(tc.stderr); got != tc.want {
 				t.Errorf("ClassifyStderrHTTPStatus(%q) = %q; want %q", tc.stderr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClassifyDiagnosticHTTPStatus pins the strict scan used on stdout, where
+// the text may be the model's summary rather than a diagnostic. It accepts the
+// machine-shaped keyword form and rejects the prose form, because "the user hit
+// a 401 Unauthorized" is a description, not a diagnosis — classifying it would
+// attach a confident, wrong remediation row.
+//
+// Trail #193 finding 019fb411-d5a: skipping stdout entirely was the opposite
+// error, leaving codex/cursor/copilot (all stdout-primary) permanently Unknown.
+func TestClassifyDiagnosticHTTPStatus(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want TextGenErrorKind
+	}{
+		// Machine-shaped: classify.
+		{"HTTP keyword", "HTTP 429: quota exhausted", TextGenErrorRateLimit},
+		{"json snake_case", `{"status_code": 401}`, TextGenErrorAuth},
+		{"json camelCase", `{"statusCode":403}`, TextGenErrorAuth},
+		{"error keyword", "error: 403 returned by upstream", TextGenErrorAuth},
+		{"status colon", "status: 404", TextGenErrorConfig},
+
+		// Prose about a status: do NOT classify.
+		{"prose names a 401", "The user was debugging a 401 Unauthorized from the payments API.", TextGenErrorUnknown},
+		{"prose names a 429", "Fixed the 429 Too Many Requests retry loop in client.go", TextGenErrorUnknown},
+		{"prose names a 404", "Summary: resolved a 404 Not Found on /v1/users", TextGenErrorUnknown},
+		{"bare reason phrase", "401 Unauthorized", TextGenErrorUnknown},
+		{"empty", "", TextGenErrorUnknown},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ClassifyDiagnosticHTTPStatus(tc.in); got != tc.want {
+				t.Errorf("ClassifyDiagnosticHTTPStatus(%q) = %q; want %q", tc.in, got, tc.want)
 			}
 		})
 	}

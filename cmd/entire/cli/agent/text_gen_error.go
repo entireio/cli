@@ -147,12 +147,69 @@ func IsExecNotFoundErr(err error) bool {
 // false-positive class was the common case, not an edge case.
 //
 // The status is captured in whichever of the two groups matched.
-var http4xxPattern = regexp.MustCompile(`(?i)` +
-	`\b(?:https?(?:/[\d.]+)?|status(?:\s*code)?|code|err(?:or)?)\b\W{0,3}(4\d{2})\b` +
-	`|` +
-	`\b(4\d{2})\s+(?:unauthorized|forbidden|too\s+many\s+requests|bad\s+request` +
-	`|not\s+found|payment\s+required|request\s+timeout|conflict|gone` +
-	`|payload\s+too\s+large|unprocessable|rate\s*limit)`)
+//
+// The two alternatives differ in how safe they are on untrusted text, which
+// matters because stdout is classified too (see ClassifyDiagnosticHTTPStatus):
+// (a) is machine-shaped and essentially absent from prose, whereas (b) is
+// exactly how prose names a status ("we hit a 401 Unauthorized"). Keep them
+// separable.
+const (
+	// `status[_\s-]*code` (not just `status\s*code`) so the JSON form
+	// `{"status_code": 401}` matches: '_' is a word character, so a bare
+	// `\bstatus\b` fails on "status_code" — the exact shape Python- and
+	// Go-backed CLIs emit.
+	httpStatusKeywordAlt = `\b(?:https?(?:/[\d.]+)?|status(?:[_\s-]*code)?|code|err(?:or)?)\b\W{0,3}(4\d{2})\b`
+	httpStatusReasonAlt  = `\b(4\d{2})\s+(?:unauthorized|forbidden|too\s+many\s+requests|bad\s+request` +
+		`|not\s+found|payment\s+required|request\s+timeout|conflict|gone` +
+		`|payload\s+too\s+large|unprocessable|rate\s*limit)`
+)
+
+var (
+	http4xxPattern = regexp.MustCompile(`(?i)` + httpStatusKeywordAlt + `|` + httpStatusReasonAlt)
+	// httpStatusKeywordPattern is alternative (a) alone — for text that may be
+	// model output rather than diagnostics.
+	httpStatusKeywordPattern = regexp.MustCompile(`(?i)` + httpStatusKeywordAlt)
+)
+
+// classifyWith runs one pattern and returns the Kind of the first RECOGNIZED
+// status. Shared so the strict and permissive scans cannot drift.
+func classifyWith(re *regexp.Regexp, s string) TextGenErrorKind {
+	for _, m := range re.FindAllStringSubmatch(s, -1) {
+		// At most one capture group is populated per match.
+		status := ""
+		for _, g := range m[1:] {
+			if g != "" {
+				status = g
+				break
+			}
+		}
+		switch status {
+		case "401", "403":
+			return TextGenErrorAuth
+		case "429":
+			return TextGenErrorRateLimit
+		case "400", "404":
+			return TextGenErrorConfig
+		}
+	}
+	return TextGenErrorUnknown
+}
+
+// ClassifyDiagnosticHTTPStatus classifies text that is only *probably*
+// diagnostic — specifically a stdout-primary CLI's output on a non-zero exit
+// with empty stderr (codex, cursor, copilot all behave this way).
+//
+// It accepts only the keyword-anchored form ("HTTP 401", "status: 429",
+// `{"status_code": 401}`), never the reason-phrase form ("401 Unauthorized").
+// That asymmetry is the whole point: stdout on a summary call is usually the
+// model's prose summary of the user's transcript, and prose about a failed
+// request says "401 Unauthorized" while a machine diagnostic says "status 401".
+// Classifying the prose form would report a summary that merely *discusses* an
+// auth error as an auth error, attaching a confident and wrong remediation —
+// worse than Unknown, which at least shows the text honestly.
+func ClassifyDiagnosticHTTPStatus(stdout string) TextGenErrorKind {
+	return classifyWith(httpStatusKeywordPattern, stdout)
+}
 
 // ClassifyStderrHTTPStatus scans stderr for an HTTP status code and returns
 // the matching error Kind. Most CLIs pass through their upstream API's HTTP
@@ -167,22 +224,7 @@ var http4xxPattern = regexp.MustCompile(`(?i)` +
 // leftmost match. A leading status this function does not map (e.g. 413) must
 // not consume the scan and mask a later 401.
 func ClassifyStderrHTTPStatus(stderr string) TextGenErrorKind {
-	for _, m := range http4xxPattern.FindAllStringSubmatch(stderr, -1) {
-		// Exactly one of the two capture groups is populated per match.
-		status := m[1]
-		if status == "" {
-			status = m[2]
-		}
-		switch status {
-		case "401", "403":
-			return TextGenErrorAuth
-		case "429":
-			return TextGenErrorRateLimit
-		case "400", "404":
-			return TextGenErrorConfig
-		}
-	}
-	return TextGenErrorUnknown
+	return classifyWith(http4xxPattern, stderr)
 }
 
 // HandleTextGenResult converts the outcome of a RunIsolatedTextGeneratorCLIRaw
@@ -255,24 +297,27 @@ func HandleTextGenResult(res ExecResult, runErr error, provider types.AgentName,
 		if raw == "" {
 			raw = runErr.Error()
 		}
-		// Classify against stderr ONLY, and against the FULL stderr.
-		//
-		// Only-stderr: stdout for a summary call is the model's prose summary of
-		// the user's transcript, not diagnostic output. Classifying it means a
-		// summary that happens to discuss a 401 gets reported as "authentication
-		// failed" with a confident, wrong "check your CLI authentication" row —
-		// strictly worse than Unknown, which at least shows the raw text
-		// honestly. Stdout is still good enough to *show* (below); it is not
-		// evidence about why the process failed.
-		//
-		// Full-stderr: truncating first would drop a status line (or a provider
-		// phrase) sitting past the 500-byte cap, which is exactly where it lands
-		// when the CLI prints a banner or stack preamble ahead of the real error.
+		// Classify stderr with the full pattern, against the FULL text —
+		// truncating first would drop a status line (or a provider phrase)
+		// sitting past the 500-byte cap, which is exactly where it lands when
+		// the CLI prints a banner or stack preamble ahead of the real error.
 		kind := ClassifyStderrHTTPStatus(stderr)
 		if kind == TextGenErrorUnknown && extraClassify != nil {
 			if k := extraClassify(stderr); k != TextGenErrorUnknown {
 				kind = k
 			}
+		}
+		// Only when stderr said nothing at all, fall back to stdout — but with
+		// the strict keyword-only scan. codex/cursor/copilot are stdout-primary
+		// and put genuine auth/quota diagnostics there on a non-zero exit, so
+		// skipping stdout entirely leaves those three providers permanently
+		// Unknown and defeats the classification this type exists for. Scanning
+		// it permissively is the opposite failure: stdout here may instead be
+		// the model's prose summary, and "401 Unauthorized" inside a summary is
+		// a description, not a diagnosis. ClassifyDiagnosticHTTPStatus accepts
+		// only the machine-shaped form, which threads between the two.
+		if kind == TextGenErrorUnknown && stderr == "" {
+			kind = ClassifyDiagnosticHTTPStatus(strings.TrimSpace(string(res.Stdout)))
 		}
 		return "", withEvidence(&TextGenError{
 			Kind:     kind,
