@@ -2,6 +2,7 @@ package claudecode
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -110,6 +111,34 @@ func TestClassifyClaudeEnvelope_HTTPStatusMapping(t *testing.T) {
 			}
 			if env.Kind != tc.wantKind {
 				t.Errorf("status=%d Kind = %q; want %q", tc.status, env.Kind, tc.wantKind)
+			}
+		})
+	}
+}
+
+// TestEnvelopeAndStderrClassifiersAgree pins that Claude's two reporting
+// channels produce the same Kind for the same status.
+//
+// Claude surfaces an identical failure either as a structured
+// api_error_status in its JSON envelope or as a status in stderr text. Those
+// went through separate switches and drifted twice: 413/422 (Config via
+// envelope, Unknown via stderr) and then 402 (RateLimit via stderr, Config via
+// envelope, trail #193 finding 019fb568-645). Each time the user got different
+// remediation for the same problem depending on which channel Claude used.
+//
+// Both now delegate to agent.KindForHTTPStatus. This test is the guard that a
+// future edit re-introduces a switch in only one of them.
+func TestEnvelopeAndStderrClassifiersAgree(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{400, 401, 402, 403, 404, 408, 409, 413, 422, 429, 451} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			t.Parallel()
+			s := status
+			viaEnvelope := classifyEnvelopeFields("failure", &s).Kind
+			viaStderr := agent.ClassifyStderrHTTPStatus(fmt.Sprintf("HTTP %d: request failed", status))
+			if viaEnvelope != viaStderr {
+				t.Errorf("status %d: envelope says %q but stderr says %q — the same failure would get different remediation depending on how Claude reported it",
+					status, viaEnvelope, viaStderr)
 			}
 		})
 	}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -176,6 +177,33 @@ var (
 	httpStatusKeywordPattern = regexp.MustCompile(`(?i)` + httpStatusKeywordAlt + `|` + httpStatusParenAlt)
 )
 
+// KindForHTTPStatus is the single authoritative mapping from an HTTP status to
+// a TextGenErrorKind.
+//
+// Exported and shared deliberately. Claude reports the same failure two ways —
+// a structured api_error_status in its JSON envelope, or a status in stderr
+// text — and those went through separate switches that drifted twice: first
+// 413/422 (Config via envelope, Unknown via stderr), then 402 (RateLimit via
+// stderr, Config via envelope). Each time the user got different remediation
+// for an identical failure depending on which channel the provider happened to
+// use. A shared function makes that class of divergence unrepresentable, the
+// same reasoning that produced classifyEnvelopeFields.
+func KindForHTTPStatus(status int) TextGenErrorKind {
+	switch {
+	case status == 401, status == 403:
+		return TextGenErrorAuth
+	// 402 is quota/credit exhaustion — the same user action as a 429 ("wait or
+	// top up"), not a misconfiguration.
+	case status == 429, status == 402:
+		return TextGenErrorRateLimit
+	case status >= 400 && status < 500:
+		// Every other 4xx is a client-side request problem.
+		return TextGenErrorConfig
+	default:
+		return TextGenErrorUnknown
+	}
+}
+
 // classifyWith runs one pattern over s and returns the MOST SPECIFIC Kind found
 // anywhere in it. Shared so the strict and permissive scans cannot drift.
 //
@@ -202,21 +230,12 @@ func classifyWith(re *regexp.Regexp, s string) TextGenErrorKind {
 				break
 			}
 		}
-		var kind TextGenErrorKind
-		switch {
-		case status == "401", status == "403":
-			kind = TextGenErrorAuth
-		// 402 is quota/credit exhaustion — a "wait or top up" problem, the same
-		// user action as a 429, not a misconfiguration.
-		case status == "429", status == "402":
-			kind = TextGenErrorRateLimit
-		case len(status) == 3 && status[0] == '4':
-			// Every other 4xx is a client-side request problem. Mirrors
-			// classifyEnvelopeFields' `>= 400 && < 500 -> Config` arm; before,
-			// a 413 or 422 fell to Unknown here while the envelope path called
-			// the identical status Config.
-			kind = TextGenErrorConfig
-		default:
+		code, convErr := strconv.Atoi(status)
+		if convErr != nil {
+			continue
+		}
+		kind := KindForHTTPStatus(code)
+		if kind == TextGenErrorUnknown {
 			continue
 		}
 		if rank[kind] > rank[best] {

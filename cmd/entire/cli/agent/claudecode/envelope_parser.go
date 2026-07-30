@@ -96,20 +96,13 @@ func classifyEnvelopeFields(result string, apiErrorStatus *int) *agent.TextGenEr
 		Message:   agent.TruncateStderr(result),
 		APIStatus: apiStatus,
 	}
-	switch {
-	case apiStatus == 401, apiStatus == 403:
+	// Same mapping as the stderr/stdout classifier — see KindForHTTPStatus for
+	// why this is shared rather than duplicated.
+	e.Kind = agent.KindForHTTPStatus(apiStatus)
+	if e.Kind == agent.TextGenErrorUnknown && apiStatus == 0 && containsAuthPhrase(result) {
+		// Last-resort heuristic for envelopes that carry is_error:true without a
+		// structured api_error_status. Small, evidence-based list from #963.
 		e.Kind = agent.TextGenErrorAuth
-	case apiStatus == 429:
-		e.Kind = agent.TextGenErrorRateLimit
-	case apiStatus >= 400 && apiStatus < 500:
-		e.Kind = agent.TextGenErrorConfig
-	case apiStatus == 0 && containsAuthPhrase(result):
-		// Last-resort heuristic for envelopes that carry is_error:true
-		// without a structured api_error_status. Small, evidence-based list
-		// from #963.
-		e.Kind = agent.TextGenErrorAuth
-	default:
-		e.Kind = agent.TextGenErrorUnknown
 	}
 	return e
 }
