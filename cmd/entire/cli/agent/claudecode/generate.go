@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // buildGenerateArgs assembles the claude CLI argv for a --print text-generation
@@ -165,6 +167,14 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 	// without it (env/keychain auth still work) rather than failing the call.
 	settingsPath, cleanup, settingsErr := writeAuthSettingsFile(readUserAPIKeyHelper())
 	if settingsErr != nil {
+		// Leave a breadcrumb: this is the one downgrade the error surface
+		// cannot self-diagnose. An unwritable TMPDIR skips the injection, claude
+		// then genuinely fails auth, and the user is correctly told to run
+		// `claude login` — which will never help an API-billing user whose only
+		// credential is apiKeyHelper. Without this line the real cause appears
+		// nowhere, not even in .entire/logs/.
+		logging.Warn(ctx, "could not inject claude apiKeyHelper; falling back to env/keychain auth",
+			slog.String("error", settingsErr.Error()))
 		settingsPath = ""
 	}
 	if cleanup != nil {
@@ -187,7 +197,20 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 
 	if env := classifyClaudeEnvelope(res.Stdout, runErr); env != nil {
 		env.ExitCode = res.ExitCode
-		env.Cause = runErr
+		// Deliberately do NOT stamp a ctx sentinel into Cause. explain's
+		// generateCheckpointAISummary branches on errors.Is(err,
+		// DeadlineExceeded) BEFORE formatCheckpointSummaryError runs, and that
+		// branch returns a bare "timed out" error — dropping the classification
+		// entirely. Stamping the sentinel here would therefore turn a fully
+		// diagnosed auth failure into "Timed out after 30s" whenever the
+		// deadline fires during teardown, and no retry would ever fix it.
+		//
+		// This keeps main's documented invariant true: DeadlineExceeded is
+		// present in the chain only when the timeout was actually the cause. It
+		// also matches the streaming path, which sets no Cause at all.
+		if !errors.Is(runErr, context.Canceled) && !errors.Is(runErr, context.DeadlineExceeded) {
+			env.Cause = runErr
+		}
 		return "", withEvidence(env)
 	}
 
@@ -205,20 +228,25 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 				Cause:    runErr,
 			})
 		}
-		// Prefer stderr, fall back to stdout, then to the run error, so Message
-		// is never empty — a launch failure (permission denied, exec format
-		// error) produces no output and only runErr describes it. Classify
-		// against the FULL text and truncate only for display, so a status line
-		// or auth phrase past the 500-byte cap is still seen.
-		raw := strings.TrimSpace(string(res.Stderr))
+		// Message: prefer stderr, fall back to stdout, then to the run error, so
+		// it is never empty — a launch failure (permission denied, exec format
+		// error) produces no output and only runErr describes it.
+		stderr := strings.TrimSpace(string(res.Stderr))
+		raw := stderr
 		if raw == "" {
 			raw = strings.TrimSpace(string(res.Stdout))
 		}
 		if raw == "" {
 			raw = runErr.Error()
 		}
-		kind := agent.ClassifyStderrHTTPStatus(raw)
-		if kind == agent.TextGenErrorUnknown && containsAuthPhrase(raw) {
+		// Classification reads stderr ONLY, and the full stderr. Claude's stdout
+		// here is a partial envelope — the model's draft summary of the user's
+		// transcript — so classifying it would let a summary that merely
+		// discusses an invalid API key report itself as an auth failure. Full
+		// stderr because a status line or auth phrase can sit past the 500-byte
+		// display cap.
+		kind := agent.ClassifyStderrHTTPStatus(stderr)
+		if kind == agent.TextGenErrorUnknown && containsAuthPhrase(stderr) {
 			// Claude's CLI sometimes exits non-zero with auth failure text on
 			// stderr before any envelope is produced (e.g. "Invalid API key"
 			// with exit 2). Reuses containsAuthPhrase/envelopeAuthPhrases from

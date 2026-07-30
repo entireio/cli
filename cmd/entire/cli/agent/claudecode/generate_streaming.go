@@ -125,8 +125,13 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 			sentinel = context.DeadlineExceeded
 		}
 		return "", &agent.TextGenerationError{
-			Err:         sentinel,
-			Stderr:      strings.TrimSpace(stderr.String()),
+			Err: sentinel,
+			// Capped like every other evidence site. attempt.stderrCaptured is
+			// rendered straight into an explainRow with no truncation of its
+			// own, so an unbounded buffer (a CLI stuck in a retry loop spamming
+			// warnings for the whole timeout window) would bury the cause and
+			// try rows this PR formats.
+			Stderr:      agent.TruncateStderr(stderr.String()),
 			StdoutBytes: counted.n,
 		}
 	}

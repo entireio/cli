@@ -102,7 +102,7 @@ func (g *ClaudeGenerator) Generate(ctx context.Context, input Input) (*checkpoin
 	if streamer, ok := agent.AsStreamingTextGenerator(textGenerator); ok {
 		resultJSON, err := streamer.GenerateTextStreaming(ctx, prompt, model, g.progress)
 		if err != nil {
-			return nil, err //nolint:wrapcheck // preserve *ClaudeError for errors.As
+			return nil, err //nolint:wrapcheck // preserve *agent.TextGenError for errors.As
 		}
 		return parseSummaryText(resultJSON)
 	}

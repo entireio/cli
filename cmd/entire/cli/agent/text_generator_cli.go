@@ -15,7 +15,7 @@ import (
 // TextGenerator's error so the explain layer can build a meaningful
 // timeout diagnostic ("provider produced no output" vs "was generating
 // output when killed"). Wraps the original error so errors.As against
-// the inner type (e.g. *ClaudeError) keeps working.
+// the inner type (e.g. *TextGenError) keeps working.
 type TextGenerationError struct {
 	Err         error
 	Stderr      string

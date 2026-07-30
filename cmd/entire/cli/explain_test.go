@@ -1045,6 +1045,61 @@ func TestGenerateCheckpointAISummary_NoTimeoutInheritsParent(t *testing.T) {
 // "safety deadline" guidance instead of the auth/rate-limit message.
 //
 // Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
+// TestGenerateCheckpointAISummary_UnpacksEvidenceIntoAttempt pins the middle
+// link of the three-link evidence chain: producers wrap subprocess output in a
+// *agent.TextGenerationError, generateCheckpointAISummary unpacks it into
+// attempt, and timeoutDiagnostic renders it.
+//
+// The producers and the renderer were both tested; this middle link was not,
+// and its two assignment lines had coverage count 0. Deleting them left every
+// test in the repo green while, in production, every timeout fell into the
+// "provider produced no output" branch with a blank stderr row — the exact
+// degradation the two-error-type composition exists to prevent.
+//
+// Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
+func TestGenerateCheckpointAISummary_UnpacksEvidenceIntoAttempt(t *testing.T) {
+	tmpGenerator := generateTranscriptSummary
+	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })
+
+	generateTranscriptSummary = func(
+		context.Context,
+		redact.RedactedBytes,
+		[]string,
+		types.AgentType,
+		summarize.Generator,
+		agent.ProgressFn,
+	) (*checkpoint.Summary, error) {
+		return nil, &agent.TextGenerationError{
+			Err:         context.DeadlineExceeded,
+			Stderr:      "stalled talking to API",
+			StdoutBytes: 512,
+		}
+	}
+
+	attempt := newSummaryAttempt("claude-code", 30*time.Second)
+	_, err := generateCheckpointAISummary(context.Background(), []byte("transcript"), nil,
+		agent.AgentTypeClaudeCode, nil, 30*time.Second, nil, attempt)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+
+	if attempt.stderrCaptured != "stalled talking to API" {
+		t.Errorf("attempt.stderrCaptured = %q; want the producer's stderr", attempt.stderrCaptured)
+	}
+	if attempt.stdoutByteCount != 512 {
+		t.Errorf("attempt.stdoutByteCount = %d; want 512", attempt.stdoutByteCount)
+	}
+
+	// And the evidence must actually reach the rendered failure block.
+	label, rows, _ := formatCheckpointSummaryError(err, attempt) //nolint:errcheck // asserting on label/rows, not the structured error
+	if !strings.Contains(label, "generating output when killed") {
+		t.Errorf("label = %q; want the 'was generating output' branch (stdoutByteCount > 0)", label)
+	}
+	if !rowsHaveValue(rows, "stalled talking to API") {
+		t.Errorf("rows missing the captured stderr: %+v", rows)
+	}
+}
+
 func TestGenerateCheckpointAISummary_PreservesTextGenErrorWhenCtxIsDone(t *testing.T) {
 	tmpGenerator := generateTranscriptSummary
 	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })

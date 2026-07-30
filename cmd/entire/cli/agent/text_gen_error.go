@@ -247,20 +247,30 @@ func HandleTextGenResult(res ExecResult, runErr error, provider types.AgentName,
 		// resort — it is the only thing that describes a launch failure
 		// (permission denied, exec format error), which produces no output at
 		// all and is not a "binary missing" case.
-		raw := strings.TrimSpace(string(res.Stderr))
+		stderr := strings.TrimSpace(string(res.Stderr))
+		raw := stderr
 		if raw == "" {
 			raw = strings.TrimSpace(string(res.Stdout))
 		}
 		if raw == "" {
 			raw = runErr.Error()
 		}
-		// Classify against the FULL text, then truncate only for display.
-		// Truncating first would drop a status line (or a provider phrase)
-		// sitting past the 500-byte cap, which is exactly where it lands when
-		// the CLI prints a banner or stack preamble ahead of the real error.
-		kind := ClassifyStderrHTTPStatus(raw)
+		// Classify against stderr ONLY, and against the FULL stderr.
+		//
+		// Only-stderr: stdout for a summary call is the model's prose summary of
+		// the user's transcript, not diagnostic output. Classifying it means a
+		// summary that happens to discuss a 401 gets reported as "authentication
+		// failed" with a confident, wrong "check your CLI authentication" row —
+		// strictly worse than Unknown, which at least shows the raw text
+		// honestly. Stdout is still good enough to *show* (below); it is not
+		// evidence about why the process failed.
+		//
+		// Full-stderr: truncating first would drop a status line (or a provider
+		// phrase) sitting past the 500-byte cap, which is exactly where it lands
+		// when the CLI prints a banner or stack preamble ahead of the real error.
+		kind := ClassifyStderrHTTPStatus(stderr)
 		if kind == TextGenErrorUnknown && extraClassify != nil {
-			if k := extraClassify(raw); k != TextGenErrorUnknown {
+			if k := extraClassify(stderr); k != TextGenErrorUnknown {
 				kind = k
 			}
 		}

@@ -87,8 +87,13 @@ func classifyEnvelopeFields(result string, apiErrorStatus *int) *agent.TextGenEr
 		apiStatus = *apiErrorStatus
 	}
 	e := &agent.TextGenError{
-		Provider:  agent.AgentNameClaudeCode,
-		Message:   result,
+		Provider: agent.AgentNameClaudeCode,
+		// TruncateStderr, despite the name, is the shared Message sanitizer:
+		// trim + 500-byte cap + valid UTF-8. The envelope's result field is
+		// arbitrary CLI output (a multi-KB stack dump is a normal shape for
+		// tool/permission errors) and is rendered verbatim by the explain
+		// layer, so it needs the same treatment every other producer applies.
+		Message:   agent.TruncateStderr(result),
 		APIStatus: apiStatus,
 	}
 	switch {

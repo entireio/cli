@@ -219,6 +219,67 @@ func TestReadUserAPIKeyHelper_MissingFileReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestGenerateText_InjectsAPIKeyHelperIntoArgv pins the apiKeyHelper injection
+// through the REAL GenerateText argv, not just through buildGenerateArgs in
+// isolation. Without this, deleting the injection from GenerateText and passing
+// buildGenerateArgs(model, "") leaves every existing test green while
+// API-billing users silently lose auth on the non-streaming path — the exact
+// regression #964 was written to fix.
+//
+// Also pins the security-critical --setting-sources "" isolation end-to-end.
+//
+// t.Setenv: no t.Parallel.
+func TestGenerateText_InjectsAPIKeyHelperIntoArgv(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"),
+		[]byte(`{"apiKeyHelper":"echo test-key"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotArgs []string
+	ag := &ClaudeCodeAgent{
+		CommandRunner: func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+			gotArgs = args
+			return exec.CommandContext(ctx, "true")
+		},
+	}
+	_, _ = ag.GenerateText(context.Background(), "prompt", "haiku") //nolint:errcheck // asserting on captured argv, not the result
+
+	settings, ok := flagValue(gotArgs, "--settings")
+	if !ok {
+		t.Fatalf("--settings absent from GenerateText argv: %v", gotArgs)
+	}
+	if settings == "" || strings.Contains(settings, "{") {
+		t.Errorf("--settings = %q; want a file path, never inline JSON (argv is ps-visible)", settings)
+	}
+	src, ok := flagValue(gotArgs, "--setting-sources")
+	if !ok || src != "" {
+		t.Errorf("--setting-sources = %q (present=%v); want empty (load nothing)", src, ok)
+	}
+}
+
+// TestGenerateText_NoAPIKeyHelperOmitsSettings is the negative half: with no
+// apiKeyHelper configured we must not pass --settings at all.
+//
+// t.Setenv: no t.Parallel.
+func TestGenerateText_NoAPIKeyHelperOmitsSettings(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir()) // no settings.json inside
+
+	var gotArgs []string
+	ag := &ClaudeCodeAgent{
+		CommandRunner: func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+			gotArgs = args
+			return exec.CommandContext(ctx, "true")
+		},
+	}
+	_, _ = ag.GenerateText(context.Background(), "prompt", "haiku") //nolint:errcheck // asserting on captured argv, not the result
+
+	if v, ok := flagValue(gotArgs, "--settings"); ok {
+		t.Errorf("--settings = %q; must be absent with no apiKeyHelper", v)
+	}
+}
+
 func TestGenerateText_ArrayResponse(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == windowsOS {

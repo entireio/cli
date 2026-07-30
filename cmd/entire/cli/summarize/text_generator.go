@@ -42,7 +42,7 @@ func (g *TextGeneratorAdapter) Generate(ctx context.Context, input Input) (*chec
 	if streamer, ok := agent.AsStreamingTextGenerator(g.TextGenerator); ok {
 		result, err := streamer.GenerateTextStreaming(ctx, prompt, g.Model, g.progress)
 		if err != nil {
-			return nil, err //nolint:wrapcheck // preserve *agent.TextGenerationError / *claudecode.ClaudeError for errors.As
+			return nil, err //nolint:wrapcheck // preserve *agent.TextGenerationError / *agent.TextGenError for errors.As
 		}
 		return parseSummaryText(result)
 	}
