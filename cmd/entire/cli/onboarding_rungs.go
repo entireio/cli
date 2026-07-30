@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-git/go-git/v6"
@@ -122,31 +123,65 @@ type mirrorProbeResult struct {
 // different federations, and a mirror created on one is invisible to the
 // other — probing only one would leave the rung re-offering creation
 // forever. Errors matter only when every core is unreachable.
+//
+// The cores are probed concurrently, all under the caller's single deadline:
+// probing them in sequence let a hanging core exhaust the shared budget and
+// hand the next core an already-expired context, mis-reporting a healthy
+// mirror as unknown — the exact cross-federation case the multi-core probe
+// exists for. Fan-out keeps every core's window independent without growing
+// the caller's overall wall-clock cap.
 func probeMirrorAcross(ctx context.Context, clients []mirrorProbeClient, owner, repo string) (mirrorProbeResult, error) {
 	seen := map[string]bool{}
-	var lastErr error
-	answered := false
+	distinct := make([]mirrorProbeClient, 0, len(clients))
 	for _, client := range clients {
 		if client == nil || seen[client.CoreOrigin()] {
 			continue
 		}
 		seen[client.CoreOrigin()] = true
-		out, err := client.ListAvailableMirrors(ctx, coreapi.ListAvailableMirrorsParams{
-			Owner: coreapi.NewOptString(owner),
-		})
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		answered = true
-		for _, m := range out.Available {
-			if strings.EqualFold(m.Owner, owner) && strings.EqualFold(m.Repo, repo) &&
-				m.Status == coreapi.AvailableMirrorStatusMirrored {
-				return mirrorProbeResult{
-					Mirrored:  true,
-					Suspended: mirrorSuspendedOn(ctx, client, owner, repo),
-				}, nil
+		distinct = append(distinct, client)
+	}
+
+	type coreAnswer struct {
+		probe mirrorProbeResult
+		err   error
+	}
+	answers := make([]coreAnswer, len(distinct))
+	var wg sync.WaitGroup
+	for i, client := range distinct {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out, err := client.ListAvailableMirrors(ctx, coreapi.ListAvailableMirrorsParams{
+				Owner: coreapi.NewOptString(owner),
+			})
+			if err != nil {
+				answers[i] = coreAnswer{err: err}
+				return
 			}
+			for _, m := range out.Available {
+				if strings.EqualFold(m.Owner, owner) && strings.EqualFold(m.Repo, repo) &&
+					m.Status == coreapi.AvailableMirrorStatusMirrored {
+					answers[i] = coreAnswer{probe: mirrorProbeResult{
+						Mirrored:  true,
+						Suspended: mirrorSuspendedOn(ctx, client, owner, repo),
+					}}
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	var lastErr error
+	answered := false
+	for _, a := range answers {
+		switch {
+		case a.err != nil:
+			lastErr = a.err
+		case a.probe.Mirrored:
+			return a.probe, nil
+		default:
+			answered = true
 		}
 	}
 	if !answered {

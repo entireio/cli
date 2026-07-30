@@ -608,6 +608,53 @@ func TestProbeMirrorAcross_PartialFailureStillAnswers(t *testing.T) {
 	}
 }
 
+// hangingMirrorLister blocks every ListAvailableMirrors call until the
+// context is done, simulating a core that hangs rather than failing fast.
+type hangingMirrorLister struct {
+	*fakeMirrorLister
+}
+
+func (h *hangingMirrorLister) ListAvailableMirrors(ctx context.Context, _ coreapi.ListAvailableMirrorsParams) (*coreapi.ListAvailableMirrorsOutputBody, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// deadlineAwareMirrorLister answers like fakeMirrorLister but refuses an
+// already-expired context, like a real HTTP client.
+type deadlineAwareMirrorLister struct {
+	*fakeMirrorLister
+}
+
+func (d *deadlineAwareMirrorLister) ListAvailableMirrors(ctx context.Context, params coreapi.ListAvailableMirrorsParams) (*coreapi.ListAvailableMirrorsOutputBody, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return d.fakeMirrorLister.ListAvailableMirrors(ctx, params)
+}
+
+// A hanging core must not starve the others. The probe runs under one shared
+// deadline; probing sequentially let a hanging active core consume all of it
+// and hand the cluster core an already-expired context, mis-reporting a
+// healthy mirror as unknown (trail 742 finding 019fb390). The healthy fake
+// here refuses an expired context like a real HTTP client, so this test
+// fails against a sequential probe and pins the concurrent one.
+func TestProbeMirrorAcross_HangingCoreDoesNotStarveOthers(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	hanging := &hangingMirrorLister{&fakeMirrorLister{origin: "https://eu.core"}}
+	healthy := &deadlineAwareMirrorLister{&fakeMirrorLister{
+		origin:   "https://us.core",
+		mirrored: map[string]bool{"acme/api": true},
+	}}
+
+	probe, err := probeMirrorAcross(ctx, []mirrorProbeClient{hanging, healthy}, "acme", "api")
+	if err != nil || !probe.Mirrored {
+		t.Errorf("probeMirrorAcross = (%+v, %v), want mirrored despite the hanging core", probe, err)
+	}
+}
+
 // ListAvailableMirrors cannot express suspension — its status enum stops at
 // "mirrored" — so a suspended placement reads as mirrored there. The probe
 // must consult the mirrors themselves; otherwise the checklist shows a green
