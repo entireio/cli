@@ -80,11 +80,14 @@ fails even with --dry-run.`, imp.AgentType()),
 			linkCommitSHA := resolveImportLinkCommitSHA(repo)
 			logging.Debug(ctx, "import: resolved link commit", "commit_sha", linkCommitSHA)
 
+			progress, stopProgress := newImportProgressReporter(c.OutOrStdout(), string(imp.AgentType()))
 			res, err := agentimport.Run(ctx, repo, imp, agentimport.Options{
 				RepoRoot: repoRoot, OverridePath: pathFlag, SessionFilter: sessions,
 				Now: time.Now(), DryRun: dryRun,
 				LinkCommitSHA: linkCommitSHA,
+				Progress:      progress,
 			})
+			stopProgress(err == nil)
 			if err != nil {
 				return fmt.Errorf("import %s: %w", imp.Name(), err)
 			}

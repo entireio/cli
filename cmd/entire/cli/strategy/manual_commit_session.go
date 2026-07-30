@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
@@ -221,9 +223,40 @@ func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, work
 	}
 
 	if len(parentWorktreeMatches) > 0 {
-		return sessionsFromSingleWorktree(parentWorktreeMatches), nil
+		matches := sessionsFromSingleWorktree(parentWorktreeMatches)
+		if matches == nil {
+			warnAmbiguousWorktreeSessions(ctx, worktreePath, parentWorktreeMatches)
+		}
+		return matches, nil
 	}
-	return sessionsFromSingleWorktree(commonDirMatches), nil
+	matches := sessionsFromSingleWorktree(commonDirMatches)
+	if matches == nil && len(commonDirMatches) > 0 {
+		warnAmbiguousWorktreeSessions(ctx, worktreePath, commonDirMatches)
+	}
+	return matches, nil
+}
+
+// warnAmbiguousWorktreeSessions surfaces refused fallback matches: live
+// sessions exist in other worktrees of this repo, but they span multiple
+// worktrees so no automatic match is safe. Without this warning, commits made
+// here silently lose their Entire-Checkpoint linkage (#1852) with only a
+// DEBUG-level trace.
+func warnAmbiguousWorktreeSessions(ctx context.Context, worktreePath string, candidates []*SessionState) {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	seen := make(map[string]struct{}, len(candidates))
+	worktrees := make([]string, 0, len(candidates))
+	for _, state := range candidates {
+		if _, ok := seen[state.WorktreePath]; ok {
+			continue
+		}
+		seen[state.WorktreePath] = struct{}{}
+		worktrees = append(worktrees, state.WorktreePath)
+	}
+	logging.Warn(logCtx, "session matching: ambiguous sessions across worktrees; commit will not be linked",
+		slog.String("commit_worktree", worktreePath),
+		slog.Int("candidate_sessions", len(candidates)),
+		slog.Any("candidate_worktrees", worktrees),
+	)
 }
 
 // sessionsFromSingleWorktree returns the candidates only when they were all

@@ -27,7 +27,7 @@ func TestImportClaudeCode_EndToEnd(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(env.ClaudeProjectDir, sessionID+".jsonl"), []byte(content), 0o644))
 
 	// 1. Dry-run reports counts and writes nothing.
-	out := env.RunCLI("import", "claude-code", "--dry-run")
+	out := env.RunCLI("import", agentClaudeCode, "--dry-run")
 	require.Contains(t, out, "Would import 2", "dry-run should count 2 turns; got: %s", out)
 	require.NotContains(t, env.RunCLI("checkpoint", "list"), "[imported]", "dry-run must not write checkpoints")
 
@@ -39,7 +39,7 @@ func TestImportClaudeCode_EndToEnd(t *testing.T) {
 	env.GitCommit("diverge feature branch")
 
 	// 2. Real import writes the imported checkpoints (onto the v1 metadata branch).
-	out = env.RunCLI("import", "claude-code")
+	out = env.RunCLI("import", agentClaudeCode)
 	require.Contains(t, out, "Imported 2", "got: %s", out)
 
 	// 2b. Every imported checkpoint carries the default branch's tip as its
@@ -74,7 +74,7 @@ func TestImportClaudeCode_EndToEnd(t *testing.T) {
 	require.Contains(t, genOut, "imported history is read-only", "got: %s", genOut)
 
 	// 5. Re-running import is idempotent.
-	out = env.RunCLI("import", "claude-code")
+	out = env.RunCLI("import", agentClaudeCode)
 	require.Contains(t, out, "(2 already imported)", "re-run should skip already-imported turns; got: %s", out)
 
 	// 6. Rewinding to an imported checkpoint is refused with a clear message.

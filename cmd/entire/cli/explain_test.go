@@ -2382,6 +2382,20 @@ func TestRunExplainAuto_TemporaryVerboseCompactsScopedExternalNativeTranscript(t
 	require.NotContains(t, output, "(failed to parse transcript)")
 }
 
+func TestFormatTranscriptBytes_PiNativeJSONL(t *testing.T) {
+	t.Parallel()
+
+	piJSONL := []byte(`{"type":"session","version":3,"id":"pi-session","cwd":"/tmp/repo"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"2026-07-25T10:00:00Z","message":{"role":"user","content":[{"type":"text","text":"Review this trail"}]}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-07-25T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"The trail needs two fixes."}],"model":"gpt-5.6-sol"}}
+`)
+
+	output := formatTranscriptBytes(piJSONL, "", agent.AgentTypePi)
+	require.Contains(t, output, "[User] Review this trail")
+	require.Contains(t, output, "[Assistant] The trail needs two fixes.")
+	require.NotContains(t, output, "(failed to parse transcript)")
+}
+
 func TestRunExplainCheckpoint_FullFallsBackWhenExternalCompactionFails(t *testing.T) {
 	// Cannot use t.Parallel() because external agent discovery mutates the
 	// package-level agent registry and this test changes cwd/PATH.

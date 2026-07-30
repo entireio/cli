@@ -113,6 +113,10 @@ type Options struct {
 	// whose transcript records a resolvable commit that is an ancestor of this
 	// fallback anchors to that real commit instead (see turnAnchorResolver).
 	LinkCommitSHA string
+
+	// Progress, when non-nil, receives session/turn progress notifications
+	// as Run executes. Nil (the default) reports nothing.
+	Progress *Progress
 }
 
 // Result summarizes an import run.
@@ -120,6 +124,54 @@ type Result struct {
 	SessionsScanned int
 	TurnsImported   int
 	TurnsSkipped    int
+}
+
+// Progress reports observable events as Run walks sessions and writes turns.
+// It is UI-agnostic: Run never prints or logs on its behalf, so rendering
+// (a progress bar, log lines, a TUI) is entirely up to the caller. Every
+// field is optional, and a nil *Progress (the default) is a no-op — Run's
+// behavior is byte-identical whether or not one is supplied.
+//
+// Invariant: for every turn Run processes, exactly one of TurnWritten or
+// TurnSkipped fires — so summing both callbacks' calls across one session
+// always equals that session's turnCount (as reported by SessionStart).
+type Progress struct {
+	// SessionStart fires once per session, after its transcript has been
+	// split into turns and before any of them are written. sessionIndex is
+	// 0-based against sessionTotal, the number of sessions Discover
+	// returned; turnCount is the number of turns split from this session.
+	SessionStart func(sessionIndex, sessionTotal int, agentName, sessionID string, turnCount int)
+	// TurnWritten fires once per turn Run actually writes to the checkpoint
+	// store — never for a turn skipped as already-imported, nor under
+	// DryRun (see TurnSkipped for those). turnIndex is 0-based against
+	// turnCount, matching the turnCount reported by this turn's
+	// SessionStart call.
+	TurnWritten func(sessionIndex, turnIndex, turnCount int)
+	// TurnSkipped fires once per turn Run processes without writing: a turn
+	// already imported (idempotent re-run) or, under DryRun, every turn
+	// (dry runs never write). Index semantics match TurnWritten exactly.
+	TurnSkipped func(sessionIndex, turnIndex, turnCount int)
+}
+
+func (p *Progress) sessionStart(sessionIndex, sessionTotal int, agentName, sessionID string, turnCount int) {
+	if p == nil || p.SessionStart == nil {
+		return
+	}
+	p.SessionStart(sessionIndex, sessionTotal, agentName, sessionID, turnCount)
+}
+
+func (p *Progress) turnWritten(sessionIndex, turnIndex, turnCount int) {
+	if p == nil || p.TurnWritten == nil {
+		return
+	}
+	p.TurnWritten(sessionIndex, turnIndex, turnCount)
+}
+
+func (p *Progress) turnSkipped(sessionIndex, turnIndex, turnCount int) {
+	if p == nil || p.TurnSkipped == nil {
+		return
+	}
+	p.TurnSkipped(sessionIndex, turnIndex, turnCount)
 }
 
 // DeriveCheckpointID produces a stable 12-hex checkpoint ID for an imported
@@ -162,7 +214,7 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 	// identity for imported sessions, leaving them unattributed.
 	authorName, authorEmail := cp.GetGitAuthorFromRepo(repo)
 
-	for _, sf := range files {
+	for sessionIndex, sf := range files {
 		res.SessionsScanned++
 		full, readErr := os.ReadFile(sf.Path)
 		if readErr != nil {
@@ -172,20 +224,24 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		if splitErr != nil {
 			return res, fmt.Errorf("split %s session %s: %w", imp.Name(), sf.SessionID, splitErr)
 		}
+		opts.Progress.sessionStart(sessionIndex, len(files), string(imp.AgentType()), sf.SessionID, len(turns))
+
 		// Redact the session transcript once and reuse it for every turn's
 		// checkpoint (each turn stores the full session transcript with its own
 		// CheckpointTranscriptStart). Redacting per turn would be O(turns).
 		// Computed lazily so a fully-skipped or dry-run file pays nothing.
 		var red redact.RedactedBytes
 		redacted := false
-		for _, turn := range turns {
+		for turnIndex, turn := range turns {
 			cid := DeriveCheckpointID(sf.SessionID, turn.UUID)
 			if existing[cid.String()] {
 				res.TurnsSkipped++
+				opts.Progress.turnSkipped(sessionIndex, turnIndex, len(turns))
 				continue
 			}
 			if opts.DryRun {
 				res.TurnsImported++ // counts what would import
+				opts.Progress.turnSkipped(sessionIndex, turnIndex, len(turns))
 				continue
 			}
 			if !redacted {
@@ -206,6 +262,7 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 			}
 			existing[cid.String()] = true
 			res.TurnsImported++
+			opts.Progress.turnWritten(sessionIndex, turnIndex, len(turns))
 		}
 
 		// Track A: surface this session in `entire session list`. Best-effort —

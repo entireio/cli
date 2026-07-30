@@ -223,10 +223,13 @@ func runSelectedImports(ctx context.Context, w io.Writer, repoRoot string, selec
 
 	var importedLocalHistory bool
 	for _, e := range selected {
+		progress, stopProgress := newImportProgressReporter(w, e.displayName)
 		res, err := agentimport.Run(ctx, repo, e.imp, agentimport.Options{
 			RepoRoot: repoRoot,
 			Now:      time.Now(),
+			Progress: progress,
 		})
+		stopProgress(err == nil)
 		if err != nil {
 			logging.Warn(ctx, "session import failed", "agent", e.imp.Name(), "error", err)
 			fmt.Fprintf(w, "Note: could not import %s history: %v\n", e.displayName, err)

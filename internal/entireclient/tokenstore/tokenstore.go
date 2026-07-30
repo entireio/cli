@@ -10,9 +10,11 @@
 // directory — see internal/entireclient/userdirs).
 //
 // Service-name conventions:
-//   - "entire:<cluster-host>"        — entiredb cluster login tokens
-//   - "entire-core:<core-base-url>"  — entire-core control-plane tokens
-//   - "<service>:refresh"            — refresh-token entry paired with the
+//   - "entire:<cluster-host>"          — entiredb cluster login tokens
+//   - "entire-core:<core-base-url>"    — entire-core control-plane tokens
+//   - "entire-jurisdiction:<audience>" — jurisdiction (data-plane) access
+//     tokens, keyed by jurisdiction audience
+//   - "<service>:refresh"              — refresh-token entry paired with the
 //     corresponding access-token service
 package tokenstore
 
@@ -36,8 +38,9 @@ var ErrNotFound = keyring.ErrNotFound
 // at "entire-core:<base-url>" regardless of which CLI wrote it. Two CLIs
 // sharing this prefix on the same machine read each other's writes.
 const (
-	ClusterKeyringPrefix = "entire:"      // entiredb cluster-issued tokens
-	CoreKeyringPrefix    = "entire-core:" // entire-core control-plane tokens
+	ClusterKeyringPrefix      = "entire:"              // entiredb cluster-issued tokens
+	CoreKeyringPrefix         = "entire-core:"         // entire-core control-plane tokens
+	JurisdictionKeyringPrefix = "entire-jurisdiction:" // jurisdiction (data-plane) access tokens
 )
 
 // CoreKeyringService returns the service name for tokens issued by
@@ -45,6 +48,15 @@ const (
 // are normalized away so callers don't have to.
 func CoreKeyringService(coreURL string) string {
 	return CoreKeyringPrefix + strings.TrimRight(coreURL, "/")
+}
+
+// JurisdictionService returns the service name for a jurisdiction (data-plane)
+// access token, keyed by the jurisdiction audience so tokens for different
+// jurisdictions — and for prod vs staging — can't be confused. The account key
+// is the login context's handle. Trailing slashes are normalized away so
+// callers don't have to.
+func JurisdictionService(audience string) string {
+	return JurisdictionKeyringPrefix + strings.TrimRight(audience, "/")
 }
 
 // RefreshService returns the paired refresh-token service name for an

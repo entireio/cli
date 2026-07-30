@@ -19,6 +19,11 @@ import (
 
 const masterBranch = "master"
 
+const (
+	rubyHello = "def hello; end"
+	rubyPuts  = "puts 'Hello from session'"
+)
+
 // TestResume_SwitchBranchWithSession tests the resume command when switching to a branch
 // that has a commit with an Entire-Checkpoint trailer.
 func TestResume_SwitchBranchWithSession(t *testing.T) {
@@ -31,7 +36,7 @@ func TestResume_SwitchBranchWithSession(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	content := "puts 'Hello from session'"
+	content := rubyPuts
 	env.WriteFile("hello.rb", content)
 
 	session.CreateTranscript(
@@ -224,7 +229,7 @@ func TestResume_SessionLogAlreadyExists(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	content := "def hello; end"
+	content := rubyHello
 	env.WriteFile("hello.rb", content)
 
 	session.CreateTranscript(
@@ -288,7 +293,7 @@ func TestResume_MultipleSessionsOnBranch(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	content1 := "version 1"
+	content1 := contentV1
 	env.WriteFile("file.txt", content1)
 
 	session1.CreateTranscript(
@@ -305,7 +310,7 @@ func TestResume_MultipleSessionsOnBranch(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	content2 := "version 2"
+	content2 := contentV2
 	env.WriteFile("file.txt", content2)
 
 	session2.CreateTranscript(
@@ -414,7 +419,7 @@ func TestResume_AfterMergingMain(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	content := "puts 'Hello from session'"
+	content := rubyPuts
 	env.WriteFile("hello.rb", content)
 
 	session.CreateTranscript(
@@ -588,7 +593,7 @@ func TestResume_ExistingLocalLog_KeptByDefault(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	content := "def hello; end"
+	content := rubyHello
 	env.WriteFile("hello.rb", content)
 
 	session.CreateTranscript(
@@ -651,7 +656,7 @@ func TestResume_LocalLogNewerTimestamp_ForceOverwrites(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	content := "def hello; end"
+	content := rubyHello
 	env.WriteFile("hello.rb", content)
 
 	session.CreateTranscript(
@@ -715,7 +720,7 @@ func TestResume_ExistingLocalLog_KeptEvenWhenCheckpointNewer(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	content := "def hello; end"
+	content := rubyHello
 	env.WriteFile("hello.rb", content)
 
 	session.CreateTranscript(
@@ -777,7 +782,7 @@ func TestResume_MultiSessionMixedTimestamps(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	content1 := "def hello; end"
+	content1 := rubyHello
 	env.WriteFile("hello.rb", content1)
 
 	session1.CreateTranscript(
@@ -885,7 +890,7 @@ func TestResume_LocalLogNoTimestamp(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	content := "def hello; end"
+	content := rubyHello
 	env.WriteFile("hello.rb", content)
 
 	session.CreateTranscript(
@@ -1057,7 +1062,7 @@ func TestResume_RelocatedRepo(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	content := "puts 'Hello from session'"
+	content := rubyPuts
 	env.WriteFile("hello.rb", content)
 
 	session.CreateTranscript(

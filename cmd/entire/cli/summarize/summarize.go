@@ -161,6 +161,8 @@ func BuildCondensedTranscriptFromBytes(content redact.RedactedBytes, agentType t
 		return buildCondensedTranscriptFromOpenCode(content)
 	case agent.AgentTypeCodex:
 		return buildCondensedTranscriptFromCodex(content)
+	case agent.AgentTypePi:
+		return buildCondensedTranscriptFromPi(content)
 	case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeUnknown:
 		// Claude/cursor format - fall through to shared logic below
 	}
@@ -180,6 +182,24 @@ func BuildCondensedTranscriptFromBytes(content redact.RedactedBytes, agentType t
 		return compactEntries, nil
 	}
 	return entries, nil
+}
+
+// buildCondensedTranscriptFromPi accepts both native Pi v3 session JSONL and
+// already-compacted Pi JSONL. Check compact form first because feeding compact
+// lines back through Compact would treat them as generic Claude-style JSONL.
+func buildCondensedTranscriptFromPi(content redact.RedactedBytes) ([]Entry, error) {
+	if entries, err := buildCondensedTranscriptFromCompact(content); err == nil && len(entries) > 0 {
+		return entries, nil
+	}
+
+	compacted, err := compact.Compact(content, compact.MetadataFields{
+		Agent:      "pi",
+		CLIVersion: "summarize",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to compact Pi transcript: %w", err)
+	}
+	return buildCondensedTranscriptFromCompact(redact.AlreadyRedacted(compacted))
 }
 
 func buildCondensedTranscriptFromCompact(redacted redact.RedactedBytes) ([]Entry, error) {

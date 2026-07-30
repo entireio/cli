@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -321,6 +322,62 @@ func TestGitCommonDirForWorktree_IgnoresHookGitDirEnv(t *testing.T) {
 	commonDir, err := gitCommonDirForWorktree(ctx, mainDir)
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(mainDir, ".git"), commonDir)
+}
+
+func TestManualCommitStrategy_FindSessionsForWorktree_WarnsOnAmbiguousSiblingSessions(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	ctx := context.Background()
+	mainDir := setupSessionMatchRepo(t)
+	firstWorktree := resolvedRemovedTempDir(t)
+	secondWorktree := resolvedRemovedTempDir(t)
+	commitWorktree := resolvedRemovedTempDir(t)
+	createSessionMatchWorktree(t, mainDir, firstWorktree, "first")
+	t.Cleanup(func() { removeSessionMatchWorktree(mainDir, firstWorktree) })
+	createSessionMatchWorktree(t, mainDir, secondWorktree, "second")
+	t.Cleanup(func() { removeSessionMatchWorktree(mainDir, secondWorktree) })
+	createSessionMatchWorktree(t, mainDir, commitWorktree, "commit")
+	t.Cleanup(func() { removeSessionMatchWorktree(mainDir, commitWorktree) })
+
+	s := &ManualCommitStrategy{}
+	saveSessionMatchState(ctx, t, s, mainDir, &SessionState{
+		SessionID:    "first-session",
+		WorktreePath: firstWorktree,
+	})
+	saveSessionMatchState(ctx, t, s, mainDir, &SessionState{
+		SessionID:    "second-session",
+		WorktreePath: secondWorktree,
+	})
+
+	t.Chdir(commitWorktree)
+	clearSessionMatchCaches()
+	require.NoError(t, logging.Init(ctx, "warn-test-session"))
+	t.Cleanup(logging.Close)
+
+	finder := &ManualCommitStrategy{}
+	matching, err := finder.findSessionsForWorktree(ctx, commitWorktree)
+	require.NoError(t, err)
+	require.Empty(t, matching)
+
+	logging.Close()
+	logs := readSessionMatchLogs(t, commitWorktree)
+	require.Contains(t, logs, `"level":"WARN"`, "ambiguous sibling sessions must be surfaced at WARN, not DEBUG")
+	require.Contains(t, logs, "ambiguous sessions across worktrees")
+	require.Contains(t, logs, "candidate_worktrees")
+}
+
+func readSessionMatchLogs(t *testing.T, repoDir string) string {
+	t.Helper()
+
+	entries, err := filepath.Glob(filepath.Join(repoDir, ".entire", "logs", "*"))
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "expected a log file under .entire/logs")
+	var combined []byte
+	for _, entry := range entries {
+		content, err := os.ReadFile(entry)
+		require.NoError(t, err)
+		combined = append(combined, content...)
+	}
+	return string(combined)
 }
 
 func setupSessionMatchRepo(t *testing.T) string {

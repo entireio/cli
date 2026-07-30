@@ -36,13 +36,6 @@ import (
 // semantics.
 const tokenSafetyMargin = time.Minute
 
-// jurisdictionKeyringService is the keychain service name for jurisdiction
-// tokens, keyed by audience so tokens for different jurisdictions
-// (and prod vs staging) can't be confused. The account is the context handle.
-func jurisdictionKeyringService(audience string) string {
-	return "entire-jurisdiction:" + strings.TrimRight(audience, "/")
-}
-
 // jurisdictionTokenSource mints and reuses the jurisdiction token that
 // authenticates every git request: one token covers every repo the account
 // can reach. Tokens come from, in order: the in-process memo, the OS
@@ -69,19 +62,20 @@ type jurisdictionTokenSource struct {
 	exchangeHint string
 	// handle is the context's account handle — the keychain account key.
 	handle string
-	// persist mirrors the token through the OS keychain so later processes
-	// reuse it. Off for the ENTIRE_TOKEN path: CI runners have no keychain,
-	// so the in-process memo is the only reuse.
-	persist bool
-	login   func(context.Context) (string, error)
-	client  *http.Client
+	// recordAudience notes s.audience on the login context so `entire logout`
+	// can find the keychain slot. Non-nil also selects the persisted flavour:
+	// nil means in-process memo only (the ENTIRE_TOKEN path — CI runners are
+	// ephemeral), so "persists" and "is recordable" can't disagree.
+	recordAudience func(audience string) error
+	login          func(context.Context) (string, error)
+	client         *http.Client
 
 	mu        sync.Mutex
 	token     string
 	expiresAt time.Time
 }
 
-func newJurisdictionTokenSource(homeCoreURL, audience, jurisdictionCoreURL, handle string, login func(context.Context) (string, error), client *http.Client) *jurisdictionTokenSource {
+func newJurisdictionTokenSource(homeCoreURL, audience, jurisdictionCoreURL, handle string, login func(context.Context) (string, error), recordAudience func(audience string) error, client *http.Client) *jurisdictionTokenSource {
 	return &jurisdictionTokenSource{
 		// Both core URLs feed httputil.PostOAuthToken, which appends
 		// "/oauth/token" to the base verbatim — trim so a trailing slash
@@ -91,7 +85,7 @@ func newJurisdictionTokenSource(homeCoreURL, audience, jurisdictionCoreURL, hand
 		audience:            audience,
 		jurisdictionCoreURL: strings.TrimRight(jurisdictionCoreURL, "/"),
 		handle:              handle,
-		persist:             true,
+		recordAudience:      recordAudience,
 		login:               login,
 		client:              client,
 	}
@@ -121,8 +115,8 @@ func (s *jurisdictionTokenSource) Token(ctx context.Context) (string, error) {
 		return s.token, nil
 	}
 
-	if s.persist {
-		if encoded, err := tokenstore.Get(jurisdictionKeyringService(s.audience), s.handle); err == nil {
+	if s.persists() {
+		if encoded, err := tokenstore.Get(tokenstore.JurisdictionService(s.audience), s.handle); err == nil {
 			// The empty-token guard rejects a corrupted keychain entry that
 			// decodes to a valid timestamp but no token — otherwise it would
 			// produce bare "Bearer " headers until the entry expired.
@@ -154,14 +148,32 @@ func (s *jurisdictionTokenSource) Token(ctx context.Context) (string, error) {
 	s.token = token
 	margin := min(tokenSafetyMargin, ttl/2)
 	s.expiresAt = time.Now().Add(ttl - margin)
-	if s.persist {
-		if err := tokenstore.Set(jurisdictionKeyringService(s.audience), s.handle, tokenstore.EncodeTokenWithExpiration(token, int64(ttl/time.Second))); err != nil {
-			// Non-fatal: the token still serves this process; the next
-			// invocation just re-mints.
-			debuglog.Printf("jurisdiction token keychain write failed: %v", err)
-		}
+	if s.persists() {
+		s.persistToken(token, ttl)
 	}
 	return token, nil
+}
+
+// persists reports whether this source caches through the OS keychain; see the
+// recordAudience field.
+func (s *jurisdictionTokenSource) persists() bool { return s.recordAudience != nil }
+
+// persistToken mirrors a freshly minted token into the OS keychain so later
+// helper processes reuse it instead of paying the exchange per git command.
+//
+// The audience is recorded FIRST and a failed record skips the write: a
+// persisted-but-unrecorded token is a bearer `entire logout` can't find, while
+// skipping the write only costs one exchange per process. Both failures are
+// non-fatal — the minted token still serves this process.
+func (s *jurisdictionTokenSource) persistToken(token string, ttl time.Duration) {
+	if err := s.recordAudience(s.audience); err != nil {
+		debuglog.Printf("jurisdiction token not cached (aud=%s): recording the audience failed: %v", s.audience, err)
+		return
+	}
+	encoded := tokenstore.EncodeTokenWithExpiration(token, int64(ttl/time.Second))
+	if err := tokenstore.Set(tokenstore.JurisdictionService(s.audience), s.handle, encoded); err != nil {
+		debuglog.Printf("jurisdiction token keychain write failed: %v", err)
+	}
 }
 
 // Invalidate drops the memoized token and the persisted keychain entry, so
@@ -171,13 +183,16 @@ func (s *jurisdictionTokenSource) Token(ctx context.Context) (string, error) {
 // recorded expiry — up to the full 8h TTL — would keep every git command
 // failing. The in-flight command still fails; the next one self-heals.
 // The env-token flavour persists nothing, so only its memo is dropped.
+//
+// The recorded audience stays on the context: deleting an already-gone slot is
+// a no-op, and the next mint re-records it idempotently.
 func (s *jurisdictionTokenSource) Invalidate() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.token = ""
 	s.expiresAt = time.Time{}
-	if s.persist {
-		if err := tokenstore.Delete(jurisdictionKeyringService(s.audience), s.handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
+	if s.persists() {
+		if err := tokenstore.Delete(tokenstore.JurisdictionService(s.audience), s.handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
 			debuglog.Printf("jurisdiction token keychain delete failed: %v", err)
 		}
 	}

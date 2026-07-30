@@ -944,7 +944,31 @@ func TestBuildCondensedTranscriptFromBytes_OpenCodeInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestBuildCondensedTranscriptFromBytes_PiNativeJSONL(t *testing.T) {
+	t.Parallel()
+
+	piJSONL := `{"type":"session","version":3,"id":"pi-session","cwd":"/tmp/repo"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"2026-07-25T10:00:00Z","message":{"role":"user","content":[{"type":"text","text":"Review this trail"}]}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-07-25T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"The trail needs two fixes."}],"model":"gpt-5.6-sol"}}
+`
+
+	entries, err := BuildCondensedTranscriptFromBytes(redact.AlreadyRedacted([]byte(piJSONL)), agent.AgentTypePi)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	if entries[0].Type != EntryTypeUser || entries[0].Content != "Review this trail" {
+		t.Fatalf("unexpected first entry: %+v", entries[0])
+	}
+	if entries[1].Type != EntryTypeAssistant || entries[1].Content != "The trail needs two fixes." {
+		t.Fatalf("unexpected second entry: %+v", entries[1])
+	}
+}
+
 func TestBuildCondensedTranscriptFromBytes_CompactTranscriptFallback(t *testing.T) {
+	t.Parallel()
 	compactJSONL := `{"v":1,"agent":"pi","cli_version":"test","type":"user","ts":"2026-01-01T00:00:00Z","content":[{"text":"Create bye.txt"}]}
 {"v":1,"agent":"pi","cli_version":"test","type":"assistant","ts":"2026-01-01T00:00:01Z","content":[{"type":"tool_use","id":"tc1","name":"Write","input":{"path":"bye.txt"}},{"type":"text","text":"Created bye.txt"}]}
 `

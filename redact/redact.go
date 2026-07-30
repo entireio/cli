@@ -827,12 +827,19 @@ func collectJSONLReplacements(v any, redactor func(string) string) []jsonReplace
 }
 
 // shouldSkipJSONLField returns true if a JSON key should be excluded from scanning/redaction.
-// Skips "signature" (exact), ID fields (ending in "id"/"ids"), and common path/directory fields.
+// Skips signature fields (any key ending in "signature"), ID fields (ending in "id"/"ids"),
+// and common path/directory fields.
 func shouldSkipJSONLField(key string) bool {
-	if key == "signature" {
+	lower := strings.ToLower(key)
+
+	// Skip signature fields: cryptographic attestations, not secrets. Covers
+	// "signature" (Claude Code) and provider variants like "thinkingSignature"
+	// (Oh My Pi). Their values are high-entropy base64, so the entropy scanner
+	// would otherwise redact them — corrupting extended-thinking signatures and
+	// breaking transcript replay ("Invalid `signature` in `thinking` block").
+	if strings.HasSuffix(lower, "signature") {
 		return true
 	}
-	lower := strings.ToLower(key)
 
 	// Skip ID fields
 	if strings.HasSuffix(lower, "id") || strings.HasSuffix(lower, "ids") {

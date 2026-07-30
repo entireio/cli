@@ -231,7 +231,7 @@ func TestLogsOnlyRewind_DoesNotModifyWorkingDirectory(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	v1Content := "version 1"
+	v1Content := contentV1
 	env.WriteFile("file.txt", v1Content)
 	session1.CreateTranscript("Create file with version 1", []FileChange{{Path: "file.txt", Content: v1Content}})
 
@@ -255,7 +255,7 @@ func TestLogsOnlyRewind_DoesNotModifyWorkingDirectory(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	v2Content := "version 2"
+	v2Content := contentV2
 	env.WriteFile("file.txt", v2Content)
 	session2.CreateTranscript("Update file to version 2", []FileChange{{Path: "file.txt", Content: v2Content}})
 
