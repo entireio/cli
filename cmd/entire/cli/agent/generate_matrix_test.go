@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
@@ -60,6 +61,32 @@ func TestGenerateText_Matrix(t *testing.T) {
 		}},
 	}
 
+	// assertComposition pins the contract the #964/#1005 reconciliation created:
+	// one error must satisfy all three lookups. Classification (*TextGenError)
+	// drives the user-facing label; evidence (*TextGenerationError) drives the
+	// timeout diagnostic and is the only signal on the ctx path.
+	//
+	// Enforced here rather than left to review because dropping withEvidence
+	// from any single return degrades timeoutDiagnostic to its no-information
+	// branch, and every other assertion in this file would still pass.
+	assertComposition := func(t *testing.T, err error, wantKind agent.TextGenErrorKind, wantProvider types.AgentName) {
+		t.Helper()
+		var tge *agent.TextGenError
+		if !errors.As(err, &tge) {
+			t.Fatalf("errors.As(*TextGenError) failed: %T %v", err, err)
+		}
+		if tge.Kind != wantKind {
+			t.Errorf("Kind = %q; want %q", tge.Kind, wantKind)
+		}
+		if tge.Provider != wantProvider {
+			t.Errorf("Provider = %q; want %q", tge.Provider, wantProvider)
+		}
+		var failure *agent.TextGenerationError
+		if !errors.As(err, &failure) {
+			t.Errorf("errors.As(*TextGenerationError) failed — evidence lost, timeout diagnostic degrades silently: %T", err)
+		}
+	}
+
 	missing := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "/nonexistent/binary/that/does/not/exist")
 	}
@@ -77,6 +104,11 @@ func TestGenerateText_Matrix(t *testing.T) {
 	stdoutOnly := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "sh", "-c", `printf 'HTTP 429: quota exhausted, add credits'; exit 1`)
 	}
+	// Emits on both streams then stalls until the ctx kills it.
+	stall := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c",
+			"printf 'partial'; printf 'stalled talking to API' 1>&2; exec sleep 10")
+	}
 	// stdout carrying the model's PROSE about an auth error, not a diagnostic.
 	// Must NOT classify — a summary that discusses a 401 is not a 401.
 	stdoutProse := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
@@ -88,27 +120,14 @@ func TestGenerateText_Matrix(t *testing.T) {
 		t.Run(a.name+"/CLIMissing", func(t *testing.T) {
 			t.Parallel()
 			_, err := a.make(missing).GenerateText(context.Background(), "prompt", "")
-			var tge *agent.TextGenError
-			if !errors.As(err, &tge) {
-				t.Fatalf("CLIMissing: err = %v; want *agent.TextGenError", err)
-			}
-			if tge.Kind != agent.TextGenErrorCLIMissing {
-				t.Errorf("CLIMissing: Kind = %q; want cli_missing", tge.Kind)
-			}
-			if tge.Provider != a.provider {
-				t.Errorf("CLIMissing: Provider = %q; want %q", tge.Provider, a.provider)
-			}
+			assertComposition(t, err, agent.TextGenErrorCLIMissing, a.provider)
 		})
 		t.Run(a.name+"/AuthFrom401", func(t *testing.T) {
 			t.Parallel()
 			_, err := a.make(auth401).GenerateText(context.Background(), "prompt", "")
+			assertComposition(t, err, agent.TextGenErrorAuth, a.provider)
 			var tge *agent.TextGenError
-			if !errors.As(err, &tge) {
-				t.Fatalf("AuthFrom401: err = %v; want *agent.TextGenError", err)
-			}
-			if tge.Kind != agent.TextGenErrorAuth {
-				t.Errorf("AuthFrom401: Kind = %q; want auth", tge.Kind)
-			}
+			_ = errors.As(err, &tge)
 			// The CLI's own stderr must reach the user verbatim, and the real
 			// exit code must be carried — this is the whole point of the typed
 			// error for non-Claude providers.
@@ -165,6 +184,30 @@ func TestGenerateText_Matrix(t *testing.T) {
 			}
 			if tge.Message != a.emptyMsg {
 				t.Errorf("EmptyStdout: Message = %q; want %q", tge.Message, a.emptyMsg)
+			}
+		})
+		t.Run(a.name+"/CanceledCarriesSentinelAndEvidence", func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+			_, err := a.make(stall).GenerateText(ctx, "prompt", "")
+
+			// On the ctx path classification is meaningless, so the sentinel and
+			// the evidence are the entire payload. Returning a bare sentinel
+			// (which is what this code did before the reconciliation) loses the
+			// stderr the timeout diagnostic renders.
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("errors.Is(context.Canceled) failed: %T %v", err, err)
+			}
+			var failure *agent.TextGenerationError
+			if !errors.As(err, &failure) {
+				t.Fatalf("errors.As(*TextGenerationError) failed — evidence lost: %T", err)
+			}
+			if failure.Stderr != "stalled talking to API" {
+				t.Errorf("Stderr = %q; want the stderr captured before the kill", failure.Stderr)
+			}
+			if failure.StdoutBytes == 0 {
+				t.Error("StdoutBytes = 0; want the partial stdout counted")
 			}
 		})
 		t.Run(a.name+"/Success", func(t *testing.T) {
