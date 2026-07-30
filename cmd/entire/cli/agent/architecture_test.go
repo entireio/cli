@@ -163,7 +163,7 @@ func extractImports(t *testing.T, dir string) []string {
 	t.Helper()
 
 	fset := token.NewFileSet()
-
+	//nolint:staticcheck // ParseDir is deprecated in favor of go/packages, but we intentionally
 	// scan all files regardless of build tags to catch forbidden imports in test files too.
 	pkgs, err := parser.ParseDir(fset, dir, nil, parser.ImportsOnly)
 	if err != nil {
@@ -220,7 +220,7 @@ func hasInitWithRegister(t *testing.T, dir string) bool {
 	t.Helper()
 
 	fset := token.NewFileSet()
-
+	//nolint:staticcheck // See extractImports for rationale.
 	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
 		return !strings.HasSuffix(fi.Name(), "_test.go")
 	}, 0)

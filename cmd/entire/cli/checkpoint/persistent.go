@@ -2387,6 +2387,7 @@ func GetGitAuthorFromRepo(repo *git.Repository) (name, email string) {
 
 	// If not found in local config, try global config
 	if name == "" || email == "" {
+		//nolint:staticcheck // the v6 is not yet released, revisit once it is.
 		globalCfg, err := config.LoadConfig(config.GlobalScope)
 		if err == nil {
 			if name == "" {
