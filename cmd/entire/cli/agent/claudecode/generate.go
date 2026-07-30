@@ -271,14 +271,20 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 			Message:  "claude CLI returned empty output",
 		})
 	}
+	// classifyClaudeEnvelope already parsed these same bytes successfully — with
+	// runErr == nil it returns non-nil on any parse failure, so reaching here
+	// means the parse succeeded. The previous defensive branch here was
+	// unreachable and was the only failure return in this function not wrapped
+	// in withEvidence; parseGenerateTextResponse is pure, so the second call
+	// cannot disagree with the first.
 	result, _, parseErr := parseGenerateTextResponse(res.Stdout)
 	if parseErr != nil {
-		return "", &agent.TextGenError{
+		return "", withEvidence(&agent.TextGenError{
 			Kind:     agent.TextGenErrorUnknown,
 			Provider: agent.AgentNameClaudeCode,
-			Message:  fmt.Sprintf("unexpected parse failure on success path: %v", parseErr),
+			Message:  agent.TruncateStderr(fmt.Sprintf("failed to parse claude CLI response: %v", parseErr)),
 			Cause:    parseErr,
-		}
+		})
 	}
 	return result, nil
 }

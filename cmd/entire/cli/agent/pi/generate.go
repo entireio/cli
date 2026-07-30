@@ -20,6 +20,6 @@ func (a *PiAgent) GenerateText(ctx context.Context, prompt string, model string)
 	}
 	args = append(args, prompt)
 
-	res, runErr := agent.RunIsolatedTextGeneratorCLIRaw(ctx, nil, "pi", args, "")
+	res, runErr := agent.RunIsolatedTextGeneratorCLIRaw(ctx, a.CommandRunner, "pi", args, "")
 	return agent.HandleTextGenResult(res, runErr, agent.AgentNamePi, "pi CLI returned empty output", nil) //nolint:wrapcheck // return unwrapped: the explain layer renders label+message from the typed error, so a wrap prefix would leak into user output. errors.As (*TextGenError) / errors.Is (ctx sentinel) must reach it unflattened.
 }

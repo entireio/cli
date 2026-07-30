@@ -162,18 +162,37 @@ const (
 	httpStatusReasonAlt  = `\b(4\d{2})\s+(?:unauthorized|forbidden|too\s+many\s+requests|bad\s+request` +
 		`|not\s+found|payment\s+required|request\s+timeout|conflict|gone` +
 		`|payload\s+too\s+large|unprocessable|rate\s*limit)`
+	// (c) a reason phrase followed by a parenthesized status — "Unauthorized
+	// (401)", "rate limit exceeded (429)". Machine-shaped like (a): prose does
+	// not usually parenthesize the code, and the reason word is required.
+	httpStatusParenAlt = `\b(?:unauthorized|forbidden|too\s+many\s+requests|bad\s+request` +
+		`|not\s+found|payment\s+required|rate\s*limit(?:\s+exceeded)?|quota\s+exceeded)\b\W{0,4}\((4\d{2})\)`
 )
 
 var (
-	http4xxPattern = regexp.MustCompile(`(?i)` + httpStatusKeywordAlt + `|` + httpStatusReasonAlt)
+	http4xxPattern = regexp.MustCompile(`(?i)` + httpStatusKeywordAlt + `|` + httpStatusReasonAlt + `|` + httpStatusParenAlt)
 	// httpStatusKeywordPattern is alternative (a) alone — for text that may be
 	// model output rather than diagnostics.
-	httpStatusKeywordPattern = regexp.MustCompile(`(?i)` + httpStatusKeywordAlt)
+	httpStatusKeywordPattern = regexp.MustCompile(`(?i)` + httpStatusKeywordAlt + `|` + httpStatusParenAlt)
 )
 
-// classifyWith runs one pattern and returns the Kind of the first RECOGNIZED
-// status. Shared so the strict and permissive scans cannot drift.
+// classifyWith runs one pattern over s and returns the MOST SPECIFIC Kind found
+// anywhere in it. Shared so the strict and permissive scans cannot drift.
+//
+// Precedence is Auth > RateLimit > Config, not document order. Auth and
+// RateLimit carry specific remediations ("log in", "wait"); Config is the
+// catch-all for every other 4xx. So when stderr mentions several statuses —
+// common when a CLI retries and logs each attempt — the actionable one should
+// win regardless of position. Positional order was the earlier rule, and it
+// meant a leading 413 masked a later 401.
 func classifyWith(re *regexp.Regexp, s string) TextGenErrorKind {
+	best := TextGenErrorUnknown
+	rank := map[TextGenErrorKind]int{
+		TextGenErrorUnknown:   0,
+		TextGenErrorConfig:    1,
+		TextGenErrorRateLimit: 2,
+		TextGenErrorAuth:      3,
+	}
 	for _, m := range re.FindAllStringSubmatch(s, -1) {
 		// At most one capture group is populated per match.
 		status := ""
@@ -183,16 +202,31 @@ func classifyWith(re *regexp.Regexp, s string) TextGenErrorKind {
 				break
 			}
 		}
-		switch status {
-		case "401", "403":
-			return TextGenErrorAuth
-		case "429":
-			return TextGenErrorRateLimit
-		case "400", "404":
-			return TextGenErrorConfig
+		var kind TextGenErrorKind
+		switch {
+		case status == "401", status == "403":
+			kind = TextGenErrorAuth
+		// 402 is quota/credit exhaustion — a "wait or top up" problem, the same
+		// user action as a 429, not a misconfiguration.
+		case status == "429", status == "402":
+			kind = TextGenErrorRateLimit
+		case len(status) == 3 && status[0] == '4':
+			// Every other 4xx is a client-side request problem. Mirrors
+			// classifyEnvelopeFields' `>= 400 && < 500 -> Config` arm; before,
+			// a 413 or 422 fell to Unknown here while the envelope path called
+			// the identical status Config.
+			kind = TextGenErrorConfig
+		default:
+			continue
+		}
+		if rank[kind] > rank[best] {
+			best = kind
+			if best == TextGenErrorAuth {
+				return best // nothing outranks auth
+			}
 		}
 	}
-	return TextGenErrorUnknown
+	return best
 }
 
 // ClassifyDiagnosticHTTPStatus classifies text that is only *probably*

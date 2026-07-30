@@ -625,9 +625,25 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 	// scopedTranscript is sliced from redactedTranscript, which was redacted earlier in CondenseSession.
 	summary, err := summarize.GenerateFromTranscript(summarizeCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, state.AgentType, generator, nil) // no progress in the auto-summary hot path
 	if err != nil {
-		logging.Warn(summarizeCtx, "summary generation failed",
-			slog.String("session_id", state.SessionID),
-			slog.String("error", err.Error()))
+		// Log operational metadata only. TextGenError.Message can be provider
+		// stdout — the model's prose summary of the user's transcript — because
+		// stdout is the fallback when a stdout-primary CLI writes its diagnostic
+		// there. err.Error() embeds Message, so logging it verbatim would put
+		// user content in .entire/logs/. The typed fields carry everything
+		// needed for triage without it.
+		attrs := []any{slog.String("session_id", state.SessionID)}
+		var tge *agent.TextGenError
+		if errors.As(err, &tge) {
+			attrs = append(attrs,
+				slog.String("kind", string(tge.Kind)),
+				slog.String("provider", string(tge.Provider)),
+				slog.Int("api_status", tge.APIStatus),
+				slog.Int("exit_code", tge.ExitCode),
+				slog.Int("message_len", len(tge.Message)))
+		} else {
+			attrs = append(attrs, slog.String("error", err.Error()))
+		}
+		logging.Warn(summarizeCtx, "summary generation failed", attrs...)
 		return nil
 	}
 	logging.Info(summarizeCtx, "summary generated",

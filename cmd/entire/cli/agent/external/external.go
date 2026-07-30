@@ -374,14 +374,40 @@ func (e *Agent) CalculateTokenUsage(transcriptData []byte, fromOffset int) (*age
 
 // --- TextGenerator methods ---
 
+// GenerateText implements agent.TextGenerator for external plugins.
+//
+// Failures return *agent.TextGenError like every built-in provider. External
+// agents are selectable summary providers, so without this the explain layer's
+// errors.As would miss them and they would fall through to the generic
+// "Failed to generate summary" branch with no classification and no
+// remediation row — and agent.TextGenError's own doc claim ("every summary
+// provider") would be false.
+//
+// Provider is the plugin's dynamic name, so it cannot appear in the
+// compile-time display/remediation tables; displayNameFor falls back to the
+// registry key, which is the right answer for a third-party plugin.
 func (e *Agent) GenerateText(ctx context.Context, prompt string, model string) (string, error) {
 	stdout, err := e.run(ctx, []byte(prompt), "generate-text", "--model", model)
 	if err != nil {
-		return "", fmt.Errorf("generate-text: %w", err)
+		kind := agent.TextGenErrorUnknown
+		if agent.IsExecNotFoundErr(err) {
+			kind = agent.TextGenErrorCLIMissing
+		}
+		return "", &agent.TextGenError{
+			Kind:     kind,
+			Provider: e.Name(),
+			Message:  agent.TruncateStderr(err.Error()),
+			Cause:    err,
+		}
 	}
 	var resp GenerateTextResponse
 	if err := json.Unmarshal(stdout, &resp); err != nil {
-		return "", fmt.Errorf("generate-text: invalid JSON: %w", err)
+		return "", &agent.TextGenError{
+			Kind:     agent.TextGenErrorUnknown,
+			Provider: e.Name(),
+			Message:  agent.TruncateStderr(fmt.Sprintf("invalid JSON from generate-text: %v", err)),
+			Cause:    err,
+		}
 	}
 	return resp.Text, nil
 }

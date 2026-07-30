@@ -3,6 +3,7 @@ package pi
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -16,10 +17,24 @@ var _ agent.ModelLister = (*PiAgent)(nil)
 // Pi has a real enumeration command spanning every configured provider, so the
 // result reflects what this machine/account can actually use.
 func (a *PiAgent) ListModels(ctx context.Context) ([]agent.ModelInfo, error) {
-	res, runErr := agent.RunIsolatedTextGeneratorCLIRaw(ctx, nil, "pi", []string{"--list-models"}, "")
-	out, err := agent.HandleTextGenResult(res, runErr, agent.AgentNamePi, "pi --list-models returned empty output", nil)
-	if err != nil {
-		return nil, fmt.Errorf("pi --list-models: %w", err)
+	// Deliberately NOT HandleTextGenResult: that helper builds the summary-path
+	// error surface, so a model-listing failure would render as "Pi failed to
+	// generate the summary" if it ever reached formatCheckpointSummaryError.
+	// Listing models is a different operation and gets a plain error.
+	res, runErr := agent.RunIsolatedTextGeneratorCLIRaw(ctx, a.CommandRunner, "pi", []string{"--list-models"}, "")
+	if runErr != nil {
+		detail := strings.TrimSpace(string(res.Stderr))
+		if detail == "" {
+			detail = strings.TrimSpace(string(res.Stdout))
+		}
+		if detail == "" {
+			detail = runErr.Error()
+		}
+		return nil, fmt.Errorf("pi --list-models: %s", agent.TruncateStderr(detail))
+	}
+	out := strings.TrimSpace(string(res.Stdout))
+	if out == "" {
+		return nil, errors.New("pi --list-models returned empty output")
 	}
 	return parsePiModelList(out), nil
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/copilotcli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
 
@@ -27,9 +28,8 @@ const windowsOSTest = "windows"
 // Gemini's provider-specific phrase heuristic is covered separately in
 // geminicli/ since it is the only agent with an extraClassify hook.
 //
-// Pi is absent: PiAgent has no CommandRunner field and hardcodes nil in
-// RunIsolatedTextGeneratorCLIRaw, so its subprocess cannot be stubbed. Adding
-// that field would let pi join this table.
+// All five non-Claude summary providers are covered, pi included since it
+// gained a CommandRunner field.
 func TestGenerateText_Matrix(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == windowsOSTest {
@@ -58,6 +58,9 @@ func TestGenerateText_Matrix(t *testing.T) {
 		}},
 		{"geminicli", agent.AgentNameGemini, "gemini CLI returned empty output", func(r agent.TextCommandRunner) textGenerator {
 			return &geminicli.GeminiCLIAgent{CommandRunner: r}
+		}},
+		{"pi", agent.AgentNamePi, "pi CLI returned empty output", func(r agent.TextCommandRunner) textGenerator {
+			return &pi.PiAgent{CommandRunner: r}
 		}},
 	}
 

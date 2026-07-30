@@ -196,7 +196,7 @@ func TestClassifyStderrHTTPStatus(t *testing.T) {
 		{"byte count containing 400 is NOT config", "wrote 14000 bytes then stalled", TextGenErrorUnknown},
 		{"id containing 404 is NOT config", "trace-id=404a9f", TextGenErrorUnknown},
 		{"timestamp minute containing 401 is NOT auth", "2026-04-21T14:01:23Z connection reset", TextGenErrorUnknown},
-		{"first RECOGNIZED code wins", "HTTP 401 Unauthorized; retry window 429", TextGenErrorAuth},
+		{"most specific kind wins", "HTTP 401 Unauthorized; retry window 429", TextGenErrorAuth},
 
 		// Second round of PR #1005 review guards. Word boundaries alone were
 		// NOT sufficient: ':' and '.' are themselves non-word characters, so
@@ -212,9 +212,15 @@ func TestClassifyStderrHTTPStatus(t *testing.T) {
 		{"bare delimited count is NOT config", "v1.2 build 404 finished", TextGenErrorUnknown},
 		{"log line number is NOT rate_limit", "parse failed at line 429", TextGenErrorUnknown},
 
-		// An unrecognized leading 4xx must not consume the scan and mask a
-		// later recognized one.
-		{"unmapped leading 413 does not mask a later 401", "HTTP 413 Payload Too Large\nHTTP 401 Unauthorized", TextGenErrorAuth},
+		// Precedence is by specificity, not position: a leading Config-class
+		// status must not mask a later auth signal.
+		{"leading 413 does not mask a later 401", "HTTP 413 Payload Too Large\nHTTP 401 Unauthorized", TextGenErrorAuth},
+		{"leading 402 does not mask a later 401", "status 402 then HTTP 401", TextGenErrorAuth},
+		{"413 alone is config, not unknown", "HTTP 413 Payload Too Large", TextGenErrorConfig},
+		{"422 alone is config", "status: 422", TextGenErrorConfig},
+		{"402 is rate_limit, not config", "HTTP 402 Payment Required", TextGenErrorRateLimit},
+		{"parenthesized status classifies", "Unauthorized (401)", TextGenErrorAuth},
+		{"parenthesized rate limit", "rate limit exceeded (429)", TextGenErrorRateLimit},
 
 		// Keyword-prefixed and reason-phrase forms must still classify.
 		{"status= form", "status=403 returned by upstream", TextGenErrorAuth},

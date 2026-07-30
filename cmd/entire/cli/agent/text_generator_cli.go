@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -52,6 +53,23 @@ var summaryProviderBinaries = map[types.AgentName]string{
 // don't know" rather than guessing.
 func SummaryCLIBinaryName(name types.AgentName) string {
 	return summaryProviderBinaries[name]
+}
+
+// SummaryCapableAgents returns every agent with a registered summary CLI
+// binary, sorted for determinism.
+//
+// Exported so the explain layer can assert its display-name and remediation
+// tables cover the whole set. Those tables degrade silently when an agent is
+// missing — displayNameFor falls back to the raw registry key
+// ("copilot-cli authentication failed") and syntheticFallback yields no "try"
+// row — so the only way to catch a forgotten registration is to enumerate.
+func SummaryCapableAgents() []types.AgentName {
+	names := make([]types.AgentName, 0, len(summaryProviderBinaries))
+	for name := range summaryProviderBinaries {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return names[i] < names[j] })
+	return names
 }
 
 // IsSummaryCLIAvailable reports whether the CLI binary for a summary-capable

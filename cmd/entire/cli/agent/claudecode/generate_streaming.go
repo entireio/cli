@@ -58,13 +58,24 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", fmt.Errorf("claude stream stdout pipe: %w", err)
+		return "", streamFailure("", 0, 0, err, fmt.Sprintf("claude stream stdout pipe: %v", err))
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("claude stream start: %w", err)
+		// A missing/unexecutable binary must classify as CLIMissing so the user
+		// gets "not installed or not on PATH" rather than a raw exec error.
+		if agent.IsExecNotFoundErr(err) {
+			return "", &agent.TextGenerationError{
+				Err: &agent.TextGenError{
+					Kind:     agent.TextGenErrorCLIMissing,
+					Provider: agent.AgentNameClaudeCode,
+					Cause:    err,
+				},
+			}
+		}
+		return "", streamFailure("", 0, 0, err, fmt.Sprintf("claude stream start: %v", err))
 	}
 
 	// Count stdout bytes so the timeout diagnostic can distinguish "provider
@@ -86,7 +97,11 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 
 	// Specific envelope error outranks a generic ctx-cancel message.
 	if final != nil && final.IsError {
-		return "", envelopeErrorMessage(final)
+		return "", &agent.TextGenerationError{
+			Err:         envelopeErrorMessage(final),
+			Stderr:      agent.TruncateStderr(stderr.String()),
+			StdoutBytes: counted.n,
+		}
 	}
 
 	if final != nil {
@@ -95,14 +110,11 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 		// result envelope and cmd.Wait). A non-context process failure — the
 		// CLI exiting non-zero on its own — remains authoritative.
 		if waitErr != nil && !isContextKill(ctx, waitErr) {
-			stderrStr := strings.TrimSpace(stderr.String())
-			if stderrStr != "" {
-				return "", fmt.Errorf("claude stream failed: %s: %w", stderrStr, waitErr)
-			}
-			return "", fmt.Errorf("claude stream failed: %w", waitErr)
+			return "", streamFailure(stderr.String(), counted.n, exitCodeOf(waitErr), waitErr,
+				fmt.Sprintf("claude stream failed: %v", waitErr))
 		}
 		if final.Result == nil {
-			return "", errors.New("claude returned empty result")
+			return "", streamFailure(stderr.String(), counted.n, 0, nil, "claude returned empty result")
 		}
 		if progress != nil {
 			progress(agent.GenerationProgress{
@@ -144,16 +156,61 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 				slog.String("stderr", strings.TrimSpace(stderrStr)))
 			return c.GenerateText(ctx, prompt, model)
 		}
-		if stderrStr != "" {
-			return "", fmt.Errorf("claude stream failed: %s: %w", strings.TrimSpace(stderrStr), waitErr)
-		}
-		return "", fmt.Errorf("claude stream failed: %w", waitErr)
+		return "", streamFailure(stderrStr, counted.n, exitCodeOf(waitErr), waitErr,
+			fmt.Sprintf("claude stream failed: %v", waitErr))
 	}
 
 	if parseErr != nil {
-		return "", fmt.Errorf("claude stream parse: %w", parseErr)
+		return "", streamFailure(stderr.String(), counted.n, 0, parseErr,
+			fmt.Sprintf("claude stream parse: %v", parseErr))
 	}
-	return "", errors.New("claude exited without producing a result")
+	return "", streamFailure(stderr.String(), counted.n, 0, nil,
+		"claude exited without producing a result")
+}
+
+// streamFailure classifies a streaming failure the same way the non-streaming
+// path does — HTTP status on stderr, then Claude's auth-phrase fallback — and
+// attaches the captured evidence.
+//
+// Before this existed, nine of the ten failure returns in GenerateTextStreaming
+// were plain fmt.Errorf, so they reached the user through
+// formatCheckpointSummaryError's default branch as a raw Go error string with
+// no remediation row. That mattered more than it looked: TextGeneratorAdapter
+// prefers streaming, so this is the path `explain --generate` actually takes
+// for Claude. A stale key (claude exits 2, "Invalid API key" on stderr, no
+// envelope) got "claude stream failed: ... exit status 2" here while the
+// non-streaming fallback correctly said "Claude authentication failed".
+func streamFailure(stderrBuf string, stdoutBytes int, exitCode int, cause error, fallbackMsg string) error {
+	stderrStr := strings.TrimSpace(stderrBuf)
+	msg := stderrStr
+	if msg == "" {
+		msg = fallbackMsg
+	}
+	kind := agent.ClassifyStderrHTTPStatus(stderrStr)
+	if kind == agent.TextGenErrorUnknown && containsAuthPhrase(stderrStr) {
+		kind = agent.TextGenErrorAuth
+	}
+	return &agent.TextGenerationError{
+		Err: &agent.TextGenError{
+			Kind:     kind,
+			Provider: agent.AgentNameClaudeCode,
+			Message:  agent.TruncateStderr(msg),
+			ExitCode: exitCode,
+			Cause:    cause,
+		},
+		Stderr:      agent.TruncateStderr(stderrBuf),
+		StdoutBytes: stdoutBytes,
+	}
+}
+
+// exitCodeOf returns the process exit code from err, or 0 when err is not an
+// *exec.ExitError (a launch failure produces no exit code).
+func exitCodeOf(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return 0
 }
 
 // envelopeErrorMessage formats an is_error result envelope as a typed

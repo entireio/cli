@@ -43,7 +43,12 @@ func init() {
 // PiAgent implements agent.Agent for the pi coding agent.
 //
 //nolint:revive // PiAgent is clearer than Agent in this context
-type PiAgent struct{}
+type PiAgent struct {
+	// CommandRunner lets tests stub the pi subprocess. Nil means
+	// exec.CommandContext. Without this field pi could not join
+	// TestGenerateText_Matrix and its failure classification was unverified.
+	CommandRunner agent.TextCommandRunner
+}
 
 // NewPiAgent returns a new Pi agent instance.
 func NewPiAgent() agent.Agent {

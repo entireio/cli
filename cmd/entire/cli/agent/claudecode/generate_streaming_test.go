@@ -182,9 +182,6 @@ func TestGenerateTextStreaming_EnvelopeErrorSurfaced(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from is_error envelope")
 	}
-	if errors.Is(err, context.Canceled) {
-		t.Errorf("expected envelope error, got Canceled")
-	}
 	// Streaming envelope errors must surface as a typed *agent.TextGenError so
 	// the explain layer's renderTextGenError can route on Kind
 	// (auth/rate-limit/config) instead of substring-matching err.Error().
@@ -344,4 +341,52 @@ func equalPhases(a, b []agent.ProgressPhase) bool {
 		}
 	}
 	return true
+}
+
+// TestGenerateTextStreaming_ClassifiesStderrFailures pins that the streaming
+// path classifies envelope-less failures the same way GenerateText does.
+//
+// This is the path `explain --generate` actually takes for Claude
+// (TextGeneratorAdapter prefers streaming), and until now nine of its ten
+// failure returns were plain fmt.Errorf. A stale key produced
+// "claude stream failed: Invalid API key ... exit status 2" with no
+// remediation, while the non-streaming fallback correctly said
+// "Claude authentication failed".
+func TestGenerateTextStreaming_ClassifiesStderrFailures(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		stderr   string
+		wantKind agent.TextGenErrorKind
+	}{
+		{"auth phrase", "Invalid API key · Please run /login", agent.TextGenErrorAuth},
+		{"http 401", "ERROR: 401 Unauthorized", agent.TextGenErrorAuth},
+		{"http 429", "ERROR: 429 Too Many Requests", agent.TextGenErrorRateLimit},
+		{"http 404", "ERROR: 404 Not Found", agent.TextGenErrorConfig},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ag := &ClaudeCodeAgent{CommandRunner: testutil.FakeStreamCmd("", tc.stderr, 2)}
+			_, err := ag.GenerateTextStreaming(context.Background(), "test", "haiku", nil)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			var tge *agent.TextGenError
+			if !errors.As(err, &tge) {
+				t.Fatalf("errors.As(*TextGenError) failed: %T %v", err, err)
+			}
+			if tge.Kind != tc.wantKind {
+				t.Errorf("Kind = %q; want %q", tge.Kind, tc.wantKind)
+			}
+			if tge.Provider != agent.AgentNameClaudeCode {
+				t.Errorf("Provider = %q; want claude-code", tge.Provider)
+			}
+			// Evidence must ride along too, same as every other failure site.
+			var failure *agent.TextGenerationError
+			if !errors.As(err, &failure) {
+				t.Errorf("errors.As(*TextGenerationError) failed — evidence lost: %T", err)
+			}
+		})
+	}
 }

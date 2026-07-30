@@ -36,16 +36,23 @@ func displayNameFor(p types.AgentName) string {
 // separately by renderTextGenError because its message omits the prefix
 // entirely; Unknown falls through to the default branch.
 func kindPrefix(k agent.TextGenErrorKind, displayName string) string {
-	switch k { //nolint:exhaustive // CLIMissing handled separately, Unknown in default
+	// Every kind is enumerated deliberately, with no nolint:exhaustive waiver:
+	// adding a sixth Kind should fail lint HERE, at the place that has to decide
+	// what the user reads, rather than silently landing in a default branch and
+	// rendering the generic label. CLIMissing and Unknown are short-circuited by
+	// renderTextGenError before this is called, but naming them costs two lines
+	// and buys the exhaustiveness check.
+	switch k {
 	case agent.TextGenErrorAuth:
 		return displayName + " authentication failed"
 	case agent.TextGenErrorRateLimit:
 		return displayName + " rejected the summary request due to rate limits or quota"
 	case agent.TextGenErrorConfig:
 		return displayName + " rejected the summary request"
-	default:
+	case agent.TextGenErrorCLIMissing, agent.TextGenErrorUnknown:
 		return displayName + " failed to generate the summary"
 	}
+	return displayName + " failed to generate the summary"
 }
 
 // syntheticFallback holds a generic remediation line per-provider per-kind.
