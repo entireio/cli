@@ -655,6 +655,35 @@ func TestProbeMirrorAcross_HangingCoreDoesNotStarveOthers(t *testing.T) {
 	}
 }
 
+// The dual of the starvation case: once any core answers "mirrored", the
+// probe must return immediately instead of blocking until every other core's
+// call resolves (trail 742 finding 019fb42e). The hanging core here only
+// unblocks when the 3s deadline expires, so a probe that waits for all cores
+// takes the full 3s; the short-circuiting one returns in microseconds. The
+// 1.5s bound discriminates the two with CI-safe margin on both sides.
+func TestProbeMirrorAcross_MirroredAnswerReturnsWithoutWaitingForSlowCores(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	healthy := &fakeMirrorLister{
+		origin:   "https://us.core",
+		mirrored: map[string]bool{"acme/api": true},
+	}
+	hanging := &hangingMirrorLister{&fakeMirrorLister{origin: "https://eu.core"}}
+
+	start := time.Now()
+	probe, err := probeMirrorAcross(ctx, []mirrorProbeClient{healthy, hanging}, "acme", "api")
+	elapsed := time.Since(start)
+
+	if err != nil || !probe.Mirrored {
+		t.Fatalf("probeMirrorAcross = (%+v, %v), want mirrored", probe, err)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("probe took %v; a mirrored answer must not wait out the slow core's deadline", elapsed)
+	}
+}
+
 // ListAvailableMirrors cannot express suspension — its status enum stops at
 // "mirrored" — so a suspended placement reads as mirrored there. The probe
 // must consult the mirrors themselves; otherwise the checklist shows a green

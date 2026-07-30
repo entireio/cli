@@ -9,7 +9,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-git/go-git/v6"
@@ -129,7 +128,12 @@ type mirrorProbeResult struct {
 // hand the next core an already-expired context, mis-reporting a healthy
 // mirror as unknown — the exact cross-federation case the multi-core probe
 // exists for. Fan-out keeps every core's window independent without growing
-// the caller's overall wall-clock cap.
+// the caller's overall wall-clock cap, and the first mirrored answer returns
+// immediately — a hanging core must neither starve the others (finding
+// 019fb390) nor hold a ready answer hostage until the deadline (finding
+// 019fb42e). The results channel is buffered to len(cores), so stragglers
+// finish into the buffer after an early return and the caller's cancel
+// aborts their in-flight requests.
 func probeMirrorAcross(ctx context.Context, clients []mirrorProbeClient, owner, repo string) (mirrorProbeResult, error) {
 	seen := map[string]bool{}
 	distinct := make([]mirrorProbeClient, 0, len(clients))
@@ -145,36 +149,34 @@ func probeMirrorAcross(ctx context.Context, clients []mirrorProbeClient, owner, 
 		probe mirrorProbeResult
 		err   error
 	}
-	answers := make([]coreAnswer, len(distinct))
-	var wg sync.WaitGroup
-	for i, client := range distinct {
-		wg.Add(1)
+	results := make(chan coreAnswer, len(distinct))
+	for _, client := range distinct {
 		go func() {
-			defer wg.Done()
 			out, err := client.ListAvailableMirrors(ctx, coreapi.ListAvailableMirrorsParams{
 				Owner: coreapi.NewOptString(owner),
 			})
 			if err != nil {
-				answers[i] = coreAnswer{err: err}
+				results <- coreAnswer{err: err}
 				return
 			}
 			for _, m := range out.Available {
 				if strings.EqualFold(m.Owner, owner) && strings.EqualFold(m.Repo, repo) &&
 					m.Status == coreapi.AvailableMirrorStatusMirrored {
-					answers[i] = coreAnswer{probe: mirrorProbeResult{
+					results <- coreAnswer{probe: mirrorProbeResult{
 						Mirrored:  true,
 						Suspended: mirrorSuspendedOn(ctx, client, owner, repo),
 					}}
 					return
 				}
 			}
+			results <- coreAnswer{}
 		}()
 	}
-	wg.Wait()
 
 	var lastErr error
 	answered := false
-	for _, a := range answers {
+	for range distinct {
+		a := <-results
 		switch {
 		case a.err != nil:
 			lastErr = a.err
