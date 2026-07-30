@@ -158,10 +158,22 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 
 // envelopeErrorMessage formats an is_error result envelope as a typed
 // *agent.TextGenError so the explain layer's renderTextGenError maps it to
-// actionable user guidance (auth / rate-limit / config / cli-missing). Both
-// Claude paths go through classifyEnvelopeFields, so the streaming path cannot
-// drift from the non-streaming one and lose the specific remediation hints
-// (e.g. "run `claude login` and retry").
+// actionable user guidance (auth / rate-limit / config / cli-missing).
+//
+// Scope, precisely: both Claude paths share classifyEnvelopeFields, so they
+// cannot drift *on the envelope*. They are NOT at parity otherwise — the
+// non-streaming path additionally classifies stderr (HTTP status, then auth
+// phrase) for failures that produce no envelope, and this one does not. A
+// stale key that makes claude exit 2 with "Invalid API key" on stderr and no
+// envelope therefore reaches the user as an untyped "claude stream failed: …"
+// with no remediation row, whereas the non-streaming path names it an auth
+// failure.
+//
+// That asymmetry predates the TextGenError work (it is unchanged from the
+// pre-#1005 streaming path) and matters more than it looks: TextGeneratorAdapter
+// prefers streaming, so this is the path `explain --generate` actually takes for
+// Claude. Closing it means routing the returns around line 148 through the same
+// classification as generate.go's stderr block.
 //
 // No exit code is stamped: envelope errors arrive on stdout while the CLI
 // itself exits successfully — Claude's is_error envelope semantics distinguish
