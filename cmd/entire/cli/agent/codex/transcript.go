@@ -263,41 +263,76 @@ func classifyApplyPatchPaths(input string) (added, modified, deleted []string) {
 	return added, modified, deleted
 }
 
+// tokenCountMarker is the byte prefilter for the token-usage walk. Every
+// token_count event contains it, because it is the value of the event's own type
+// field, so a line without it can never be one.
+var tokenCountMarker = []byte("token_count")
+
 // CalculateTokenUsage computes token usage from the transcript starting at the given line offset.
 // Codex reports cumulative total_token_usage, so we compute the delta between the last
 // token_count at/before the offset and the last token_count after the offset.
 func (c *CodexAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) (*agent.TokenUsage, error) {
+	return calculateTokenUsage(transcriptData, fromOffset, nil)
+}
+
+// calculateTokenUsage walks the rollout once and unmarshals only the lines that
+// can carry a token_count event.
+//
+// PERF: the turn-end hook calls this with the whole cumulative rollout on every
+// turn, so anything done per line is paid again every turn. Unmarshalling each
+// line just to read its envelope type made that quadratic over a session:
+// rollouts embed large encrypted_content reasoning blobs, and
+// json.RawMessage.UnmarshalJSON copies every payload it decodes, so each hook
+// scanned, validated and heap-copied every blob in the session to throw it away
+// unread. Measured on a synthetic 500-turn rollout, that was ~59ms per hook
+// against ~2ms for the walk below.
+//
+// The byte prefilter cannot miss an event (see tokenCountMarker), and every line
+// it admits still goes through the full envelope check, so per-line decisions —
+// and therefore the numbers — are identical to unmarshalling everything. Lines
+// that merely mention token_count in their text are rejected there, exactly as
+// before; nothing is trusted on the strength of the byte match alone.
+//
+// onParse, when non-nil, is called once per line that reaches the unmarshal.
+// Tests use it to assert that work tracks the number of token_count events
+// rather than the size of the transcript.
+func calculateTokenUsage(transcriptData []byte, fromOffset int, onParse func()) (*agent.TokenUsage, error) {
 	var baselineUsage *tokenUsageData // last token_count at or before offset
 	var lastUsage *tokenUsageData     // last token_count after offset
 	apiCalls := 0
 	lineNum := 0
 
-	for _, lineData := range splitJSONL(transcriptData) {
+	for rest := transcriptData; len(rest) > 0; {
+		lineData := rest
+		if idx := bytes.IndexByte(rest, '\n'); idx >= 0 {
+			lineData, rest = rest[:idx], rest[idx+1:]
+		} else {
+			rest = nil
+		}
+
+		// splitJSONL skips whitespace-only lines, and the offsets handed to this
+		// function are in its coordinates, so the same lines must not be counted.
+		lineData = bytes.TrimSpace(lineData)
+		if len(lineData) == 0 {
+			continue
+		}
 		lineNum++
 
-		var line rolloutLine
-		if json.Unmarshal(lineData, &line) != nil {
+		if !bytes.Contains(lineData, tokenCountMarker) {
 			continue
 		}
-		if line.Type != "event_msg" {
-			continue
+		if onParse != nil {
+			onParse()
 		}
-		var evt eventMsgPayload
-		if json.Unmarshal(line.Payload, &evt) != nil {
-			continue
-		}
-		if evt.Type != "token_count" || len(evt.Info) == 0 {
-			continue
-		}
-		var info tokenCountInfo
-		if json.Unmarshal(evt.Info, &info) != nil || info.TotalTokenUsage == nil {
+		usage, ok := parseRolloutTokenUsage(lineData)
+		if !ok {
 			continue
 		}
 
 		if lineNum <= fromOffset {
-			baselineUsage = info.TotalTokenUsage
+			baselineUsage = usage
 		} else {
-			lastUsage = info.TotalTokenUsage
+			lastUsage = usage
 			apiCalls++
 		}
 	}
