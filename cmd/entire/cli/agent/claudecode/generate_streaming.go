@@ -172,14 +172,16 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 // path does — HTTP status on stderr, then Claude's auth-phrase fallback — and
 // attaches the captured evidence.
 //
-// Before this existed, nine of the ten failure returns in GenerateTextStreaming
-// were plain fmt.Errorf, so they reached the user through
-// formatCheckpointSummaryError's default branch as a raw Go error string with
-// no remediation row. That mattered more than it looked: TextGeneratorAdapter
-// prefers streaming, so this is the path `explain --generate` actually takes
-// for Claude. A stale key (claude exits 2, "Invalid API key" on stderr, no
-// envelope) got "claude stream failed: ... exit status 2" here while the
-// non-streaming fallback correctly said "Claude authentication failed".
+// EVERY failure return in GenerateTextStreaming goes through this or an
+// explicit *TextGenerationError — there are no bare fmt.Errorf failure returns
+// left in this file, and TestGenerateTextStreaming_ClassifiesStderrFailures
+// pins that for the auth-phrase, 401, 429 and 404 shapes.
+//
+// Why it matters: TextGeneratorAdapter prefers streaming, so this is the path
+// `explain --generate` actually takes for Claude. A stale key (claude exits 2,
+// "Invalid API key" on stderr, no envelope) must produce "Claude
+// authentication failed" with a remediation row, not a raw Go error string via
+// formatCheckpointSummaryError's default branch.
 func streamFailure(stderrBuf string, stdoutBytes int, exitCode int, cause error, fallbackMsg string) error {
 	stderrStr := strings.TrimSpace(stderrBuf)
 	msg := stderrStr

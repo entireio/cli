@@ -23,14 +23,19 @@ func (a *PiAgent) ListModels(ctx context.Context) ([]agent.ModelInfo, error) {
 	// Listing models is a different operation and gets a plain error.
 	res, runErr := agent.RunIsolatedTextGeneratorCLIRaw(ctx, a.CommandRunner, "pi", []string{"--list-models"}, "")
 	if runErr != nil {
+		// %w on runErr so callers can still reach the underlying error
+		// (exec.ErrNotFound in particular) via errors.Is/As — dropping the cause
+		// would make "is pi installed?" unanswerable programmatically. When the
+		// subprocess produced no output, runErr IS the whole story, so wrap it
+		// alone rather than interpolating its text and then wrapping it again.
 		detail := strings.TrimSpace(string(res.Stderr))
 		if detail == "" {
 			detail = strings.TrimSpace(string(res.Stdout))
 		}
 		if detail == "" {
-			detail = runErr.Error()
+			return nil, fmt.Errorf("pi --list-models: %w", runErr)
 		}
-		return nil, fmt.Errorf("pi --list-models: %s", agent.TruncateStderr(detail))
+		return nil, fmt.Errorf("pi --list-models: %s: %w", agent.TruncateStderr(detail), runErr)
 	}
 	out := strings.TrimSpace(string(res.Stdout))
 	if out == "" {
