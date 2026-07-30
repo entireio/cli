@@ -183,22 +183,34 @@ func pollForRollout(ctx context.Context, sessionDir, threadID string, stop <-cha
 	}
 }
 
-// parseRolloutTokenCount extracts cumulative input/output token totals from one
-// rollout JSONL line. ok is false for any line that isn't a token_count event
-// carrying total_token_usage. Reuses the rolloutLine/eventMsgPayload/
-// tokenCountInfo shapes from transcript.go so the two readers can't drift.
-func parseRolloutTokenCount(data []byte) (in, out int, ok bool) {
+// parseRolloutTokenUsage extracts the cumulative token totals from one rollout
+// JSONL line. ok is false for any line that isn't a token_count event carrying
+// total_token_usage. Uses the rolloutLine/eventMsgPayload/tokenCountInfo shapes
+// from transcript.go, and is the only reader of that envelope — both this
+// file's stream tailer and the turn-end token calculation go through it, so
+// they can't drift.
+func parseRolloutTokenUsage(data []byte) (*tokenUsageData, bool) {
 	var line rolloutLine
 	if json.Unmarshal(data, &line) != nil || line.Type != "event_msg" {
-		return 0, 0, false
+		return nil, false
 	}
 	var evt eventMsgPayload
 	if json.Unmarshal(line.Payload, &evt) != nil || evt.Type != "token_count" || len(evt.Info) == 0 {
-		return 0, 0, false
+		return nil, false
 	}
 	var info tokenCountInfo
 	if json.Unmarshal(evt.Info, &info) != nil || info.TotalTokenUsage == nil {
+		return nil, false
+	}
+	return info.TotalTokenUsage, true
+}
+
+// parseRolloutTokenCount reports just the input/output totals the review stream
+// tailer needs.
+func parseRolloutTokenCount(data []byte) (in, out int, ok bool) {
+	usage, ok := parseRolloutTokenUsage(data)
+	if !ok {
 		return 0, 0, false
 	}
-	return info.TotalTokenUsage.InputTokens, info.TotalTokenUsage.OutputTokens, true
+	return usage.InputTokens, usage.OutputTokens, true
 }
