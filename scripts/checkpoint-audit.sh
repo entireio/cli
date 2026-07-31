@@ -42,15 +42,21 @@ TOKEN="${ENTIRE_CHECKPOINT_TOKEN:-}"
 
 CHECKPOINT_URL="https://github.com/${CHECKPOINT_REPO}.git"
 
-REMOTE_IDS_FILE=$(mktemp)
-ROWS_FILE=$(mktemp)
+REMOTE_IDS_FILE=$(mktemp "${TMPDIR:-/tmp}/checkpoint-audit.XXXXXX")
+ROWS_FILE=$(mktemp "${TMPDIR:-/tmp}/checkpoint-audit.XXXXXX")
 trap 'rm -f "$REMOTE_IDS_FILE" "$ROWS_FILE"' EXIT
 
-# json_str emits a JSON string literal, escaping backslashes and double quotes.
-# Author names and subjects are single-line, so control-char escaping is not needed.
+# json_str emits a JSON string literal. Git commit subjects can legally contain
+# tabs and other control characters, so escape backslash, double quote, and the
+# C0 controls that would otherwise produce invalid JSON.
 json_str() {
   local s=${1//\\/\\\\}
   s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\b'/\\b}
+  s=${s//$'\f'/\\f}
   printf '"%s"' "$s"
 }
 
@@ -77,8 +83,14 @@ printf '%s\n' "$remote_refs" \
 remote_count=$(grep -c . "$REMOTE_IDS_FILE" || true)
 
 # 2. Candidate commits: every branch commit in the window (local heads + remotes),
-#    de-duplicated while preserving order.
-commits=$(git log --branches --remotes --since="$AUDIT_WINDOW" --format='%H' | awk '!seen[$0]++')
+#    de-duplicated while preserving order. A git-log failure (e.g. run outside a
+#    git repo) is a setup error, not "0 missing" — surface it as exit 2 rather
+#    than letting git's raw 128 escape.
+if ! commits=$(git log --branches --remotes --since="$AUDIT_WINDOW" --format='%H'); then
+  echo "::error::failed to enumerate commits (is this a git repository?)" >&2
+  exit 2
+fi
+commits=$(printf '%s\n' "$commits" | awk '!seen[$0]++')
 
 # 3. For each commit, diff its checkpoint trailers against the remote set.
 commit_count=0
@@ -100,11 +112,16 @@ while IFS= read -r sha; do
     short=${meta%%$'\x1f'*}; meta=${meta#*$'\x1f'}
     author=${meta%%$'\x1f'*}; meta=${meta#*$'\x1f'}
     cdate=${meta%%$'\x1f'*}; subject=${meta#*$'\x1f'}
+    # `|| true`: grep exits 1 when every branch is filtered out (or there are
+    # none), which would otherwise abort the whole run under `set -e`. Join with
+    # a single-char delimiter then expand to ", " — `paste -sd', '` treats the
+    # delimiter as a circular char list and would alternate "," and " ".
     branches=$(git branch -a --contains "$sha" --format='%(refname:short)' 2>/dev/null \
       | sed -e 's#^remotes/##' -e 's#^origin/##' \
       | grep -v '^entire/' \
       | awk 'NF && !s[$0]++' \
-      | paste -sd', ' -)
+      | paste -sd',' - \
+      | sed 's/,/, /g' || true)
     printf '%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\n' \
       "$cp" "$short" "$author" "${branches:-?}" "$cdate" "$subject" >> "$ROWS_FILE"
   done <<EOF

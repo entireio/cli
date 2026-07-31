@@ -1,5 +1,0 @@
-[
-  {"checkpoint":"01KYVVES1A3F6DT85KWNM01CXW","commit":"7d26969d4","author":"Victor Gutierrez Calderon","branches":"feat/push-progress-quiet","date":"2026-07-31T12:27:53+02:00","subject":"feat(push): pure reveal-threshold decision for pre-push progress"},
-  {"checkpoint":"01KYVVE0SJQC7MHKJKYK4QRSDJ","commit":"820de5985","author":"Victor Gutierrez Calderon","branches":"feat/status-mirror","date":"2026-07-31T11:54:54+02:00","subject":"feat(status): surface whether the current clone points at a mirror"},
-  {"checkpoint":"01KYSGR4W1ZATZRW47J510EZGJ","commit":"4e229c054","author":"Matthias Wenz","branches":"feat/repo-mirror-use,trail-resume-does-not-find-checkpoint","date":"2026-07-30T14:42:18+02:00","subject":"feat(repo): add `entire repo mirror use` to repoint a clone at a mirror"}
-]

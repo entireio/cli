@@ -30,12 +30,18 @@ jobs:
       - name: Fetch all branches
         run: git fetch --all --prune
 
+      # Capture the script's exit code (0 = all present, 1 = missing, 2 =
+      # remote/setup error) without failing the step, so the report, Slack, and
+      # gate steps below can distinguish "missing" from "could not run".
       - name: Run checkpoint audit
         id: audit
-        continue-on-error: true
         env:
           AUDIT_WINDOW: ${{ github.event.inputs.window || '24 hours ago' }}
-        run: scripts/checkpoint-audit.sh
+        run: |
+          set +e
+          scripts/checkpoint-audit.sh
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+          exit 0
 
       - name: Upload audit report
         if: always()
@@ -46,9 +52,23 @@ jobs:
             checkpoint-audit-report.md
             checkpoint-audit-report.json
           retention-days: 7
+          if-no-files-found: ignore
 
-      - name: Notify Slack of missing checkpoints
-        if: ${{ always() && steps.audit.outcome == 'failure' }}
+      # Distinct wording per outcome: exit 1 asserts missing checkpoints (a report
+      # artifact exists); exit 2 is a remote/setup failure with no report, so the
+      # alert must not claim checkpoints are missing (avoids false positives).
+      - name: Compose Slack message
+        id: msg
+        if: ${{ always() && steps.audit.outputs.code != '0' }}
+        run: |
+          if [ "${{ steps.audit.outputs.code }}" = "1" ]; then
+            echo 'text=:red_circle: *Checkpoint audit: missing checkpoints*\n\nOne or more commits reference a checkpoint that is not on the checkpoint remote. See the report artifact for the full table.' >> "$GITHUB_OUTPUT"
+          else
+            echo 'text=:red_circle: *Checkpoint audit failed to run*\n\nThe audit could not complete (remote or setup error); no report was produced. See the run log.' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Notify Slack
+        if: ${{ always() && steps.audit.outputs.code != '0' }}
         uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
         with:
           webhook: ${{ secrets.E2E_SLACK_WEBHOOK_URL }}
@@ -63,7 +83,7 @@ jobs:
                       "type": "section",
                       "text": {
                         "type": "mrkdwn",
-                        "text": ":red_circle: *Checkpoint audit found missing checkpoints*\n\nOne or more commits reference a checkpoint that is not on the checkpoint remote. See the report artifact for the full table.\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run details>"
+                        "text": "${{ steps.msg.outputs.text }}\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run details>"
                       }
                     }
                   ]
@@ -71,8 +91,8 @@ jobs:
               ]
             }
 
-      - name: Fail if checkpoints are missing
-        if: ${{ steps.audit.outcome == 'failure' }}
+      - name: Fail the job on audit error
+        if: ${{ steps.audit.outputs.code != '0' }}
         run: |
-          echo "::error::checkpoint audit reported missing checkpoints"
+          echo "::error::checkpoint audit exited ${{ steps.audit.outputs.code }} (1 = missing checkpoints, 2 = remote/setup error)"
           exit 1

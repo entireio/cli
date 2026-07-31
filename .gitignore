@@ -71,3 +71,7 @@ tmp/
 entire-external-cp-test/
 /skills/
 /git-remote-entire
+
+# Runtime output from scripts/checkpoint-audit.sh (never commit)
+checkpoint-audit-report.md
+checkpoint-audit-report.json
