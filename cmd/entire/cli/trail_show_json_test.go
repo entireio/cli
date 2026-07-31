@@ -25,9 +25,15 @@ func TestEncodeTrailShowJSON(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := encodeTrailShowJSON(&out, found, "https://app.entire.io/t/42", "Long form description")
+	err := encodeTrailShowJSON(&out, found, "https://app.entire.io/t/42", "Long form description with <code> & links")
 	if err != nil {
 		t.Fatalf("encodeTrailShowJSON() error = %v", err)
+	}
+
+	// User-authored description text must not be HTML-escaped (jsonutil
+	// convention): agents should read `<code> &` literally, not <.
+	if !strings.Contains(out.String(), "<code> & links") {
+		t.Errorf("output HTML-escapes the description: %s", out.String())
 	}
 
 	var payload map[string]any
@@ -38,7 +44,7 @@ func TestEncodeTrailShowJSON(t *testing.T) {
 		"number": float64(42),
 		"branch": "trail-resume",
 		"title":  "Improve trail resume",
-		"body":   "Long form description",
+		"body":   "Long form description with <code> & links",
 		"url":    "https://app.entire.io/t/42",
 		"status": "open",
 	} {

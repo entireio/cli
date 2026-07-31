@@ -236,6 +236,7 @@ func encodeTrailShowJSON(w io.Writer, found api.TrailResource, webURL, bodyText 
 		found.URL = webURL
 	}
 	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(found); err != nil {
 		return fmt.Errorf("encode trail JSON: %w", err)
