@@ -306,7 +306,7 @@ func stripCheckpointTrailer(message string) string {
 	return strings.Join(result, "\n")
 }
 
-// IsGitSequenceOperation checks if git is currently in the middle of a rebase,
+// isGitSequenceOperation checks if git is currently in the middle of a rebase,
 // cherry-pick, or revert operation. During these operations, commits are being
 // replayed and should not be linked to agent sessions.
 //
@@ -314,7 +314,7 @@ func stripCheckpointTrailer(message string) string {
 //   - rebase: .git/rebase-merge/ or .git/rebase-apply/ directories
 //   - cherry-pick: .git/CHERRY_PICK_HEAD file
 //   - revert: .git/REVERT_HEAD file
-func IsGitSequenceOperation(ctx context.Context) bool {
+func isGitSequenceOperation(ctx context.Context) bool {
 	// Get git directory (handles worktrees and relative paths correctly)
 	gitDir, err := GetGitDir(ctx)
 	if err != nil {
@@ -340,6 +340,22 @@ func IsGitSequenceOperation(ctx context.Context) bool {
 	return false
 }
 
+// SkipsPrepareCommitMsg reports whether prepare-commit-msg will NOT write a
+// fresh Entire-Checkpoint trailer for source: merge/squash auto-messages and
+// any commit replayed by a git sequence operation (rebase/cherry-pick/revert).
+// It is the single source of truth for that invariant, shared by
+// ManualCommitStrategy.PrepareCommitMsg and the cross-common-dir auto-adopt
+// gate so the two can never drift. Amend (source "commit") is deliberately NOT
+// covered here: PrepareCommitMsg handles it separately via handleAmendCommitMsg,
+// and auto-adopt applies its own amend guard.
+func SkipsPrepareCommitMsg(ctx context.Context, source string) bool {
+	switch source {
+	case "merge", "squash":
+		return true
+	}
+	return isGitSequenceOperation(ctx)
+}
+
 // PrepareCommitMsg is called by the git prepare-commit-msg hook.
 // Adds an Entire-Checkpoint trailer to the commit message with a stable checkpoint ID.
 // Only adds a trailer if there's actually new session content to condense.
@@ -357,21 +373,12 @@ func IsGitSequenceOperation(ctx context.Context) bool {
 func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFile string, source string) error {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
-	// Skip during rebase, cherry-pick, or revert operations
-	// These are replaying existing commits and should not be linked to agent sessions
-	if IsGitSequenceOperation(ctx) {
-		logging.Debug(logCtx, "prepare-commit-msg: skipped during git sequence operation",
-			slog.String("strategy", "manual-commit"),
-			slog.String("source", source),
-		)
-		return nil
-	}
-
-	// Skip for merge and squash sources
-	// These are auto-generated messages - not from Claude sessions
-	switch source {
-	case "merge", "squash":
-		logging.Debug(logCtx, "prepare-commit-msg: skipped for source",
+	// Skip merge/squash auto-messages and commits replayed by a git sequence
+	// operation (rebase, cherry-pick, revert). These carry no fresh agent
+	// session content and must not be linked. Shared with the auto-adopt gate
+	// via SkipsPrepareCommitMsg so the two never drift.
+	if SkipsPrepareCommitMsg(ctx, source) {
+		logging.Debug(logCtx, "prepare-commit-msg: skipped (merge/squash or git sequence operation)",
 			slog.String("strategy", "manual-commit"),
 			slog.String("source", source),
 		)
@@ -936,7 +943,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	}
 
 	// Build transition context
-	isRebase := IsGitSequenceOperation(ctx)
+	isRebase := isGitSequenceOperation(ctx)
 	transitionCtx := session.TransitionContext{
 		IsRebaseInProgress: isRebase,
 	}

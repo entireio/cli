@@ -36,7 +36,10 @@ type adoptOptions struct {
 	SkipTranscriptValidation bool
 }
 
-const adoptRecentWindow = 12 * time.Hour
+// adoptRecentWindow bounds how recently a session must have been active to be
+// an adopt candidate. Tied to the live-registry TTL so the two stay in lockstep
+// (an entry swept from the registry is also too old to adopt).
+const adoptRecentWindow = session.LiveSessionMaxAge
 
 func newAdoptCmd() *cobra.Command {
 	var opts adoptOptions

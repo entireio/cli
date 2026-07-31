@@ -49,11 +49,13 @@ const prepareCommitMsgSourceAmend = "commit"
 // Amend (source "commit"): handleAmendCommitMsg only restores an existing trailer /
 // HEAD LastCheckpointID match and will not write a trailer for a freshly adopted session.
 func shouldTryAutoAdoptOnPrepareCommitMsg(ctx context.Context, source string) bool {
-	switch source {
-	case "merge", "squash", prepareCommitMsgSourceAmend:
+	// Amend is auto-adopt's own extra guard: handleAmendCommitMsg only restores
+	// an existing trailer and never writes one for a freshly adopted session.
+	if source == prepareCommitMsgSourceAmend {
 		return false
 	}
-	return !strategy.IsGitSequenceOperation(ctx)
+	// Merge/squash and git sequence operations are the shared skip invariant.
+	return !strategy.SkipsPrepareCommitMsg(ctx, source)
 }
 
 // tryAutoAdoptCrossCommonDirSession adopts a unique ACTIVE session from another

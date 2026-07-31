@@ -41,8 +41,9 @@ func ShouldRegisterLive(state *State) bool {
 }
 
 // LiveSessionMaxAge is how long a live-session registry entry remains on disk
-// before ListLiveSessions sweeps it. Keep aligned with adoptRecentWindow in
-// the cli package (cross-common-dir auto-adopt eligibility).
+// before ListLiveSessions sweeps it. It is the single source of truth for the
+// cross-common-dir auto-adopt eligibility window: the cli package's
+// adoptRecentWindow is defined as this constant.
 const LiveSessionMaxAge = 12 * time.Hour
 
 // RegisterLiveSession writes or updates the cross-repo live-session pointer.
