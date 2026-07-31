@@ -33,6 +33,16 @@ func (e *ResumeNoCheckpointError) Error() string {
 	return fmt.Sprintf("no Entire checkpoint found on branch %q — nothing to resume; start a new agent session on this branch to create checkpoints", e.Branch)
 }
 
+// ResumeSessionNotFoundError reports that a requested --session id is not
+// among the sessions the checkpoint restore produced.
+type ResumeSessionNotFoundError struct {
+	SessionID string
+}
+
+func (e *ResumeSessionNotFoundError) Error() string {
+	return fmt.Sprintf("session %q was not found in the restored checkpoint", e.SessionID)
+}
+
 // ResumeMetadataUnavailableError reports that a checkpoint referenced by a
 // commit trailer exists but its metadata could not be read locally or fetched
 // from any remote.

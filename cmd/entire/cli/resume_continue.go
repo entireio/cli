@@ -53,7 +53,7 @@ func continueRestoredSessions(ctx context.Context, w io.Writer, sessions []strat
 	if opts.PreferredSessionID != "" {
 		session, ok := findTrailRestoredSession(sessions, opts.PreferredSessionID)
 		if !ok {
-			return fmt.Errorf("session %q was not found in the restored checkpoint", opts.PreferredSessionID)
+			return &ResumeSessionNotFoundError{SessionID: opts.PreferredSessionID}
 		}
 		return continueSelectedRestoredSession(ctx, w, session, opts.CanPrompt, promptStart, launch, display, opts.PrintSummary)
 	}

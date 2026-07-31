@@ -147,8 +147,8 @@ start the agent, with a picker when the checkpoint has multiple sessions.
 Non-interactive runs print the actions taken and end with the default
 session's resume command as the final line; --json replaces that output with a
 machine-readable action report. Use --session or --checkpoint to resume an
-exact session or checkpoint. The command exits non-zero whenever nothing was
-resumed.
+exact session or checkpoint. Non-interactive and --json runs exit non-zero
+whenever nothing was resumed; declining an interactive prompt exits zero.
 
 Use --no-resume to inspect the trail context (checkpoint sessions, findings,
 commands) without restoring or resuming anything; combine with --json for the

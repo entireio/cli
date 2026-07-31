@@ -106,8 +106,9 @@ func TestEnsurePreferredRestoredSession(t *testing.T) {
 	if err == nil {
 		t.Fatal("bogus preferred session: error = nil, want not-found error")
 	}
-	if !strings.Contains(err.Error(), "sess-bogus") || !strings.Contains(err.Error(), "not found") {
-		t.Errorf("error = %q, want it to name the missing session", err)
+	var notFound *ResumeSessionNotFoundError
+	if !errors.As(err, &notFound) || notFound.SessionID != "sess-bogus" {
+		t.Errorf("error = %v, want ResumeSessionNotFoundError naming sess-bogus", err)
 	}
 }
 
@@ -144,6 +145,14 @@ func TestTrailResumeReportErrorFrom(t *testing.T) {
 		reportErr := trailResumeReportErrorFrom(NewSilentError(&ResumeMetadataUnavailableError{CheckpointID: cpID}))
 		if reportErr == nil || reportErr.Type != "metadata_unavailable" || reportErr.CheckpointID != cpID.String() {
 			t.Errorf("report error = %+v, want metadata_unavailable with checkpoint id", reportErr)
+		}
+	})
+
+	t.Run("session not found", func(t *testing.T) {
+		t.Parallel()
+		reportErr := trailResumeReportErrorFrom(&ResumeSessionNotFoundError{SessionID: "sess-x"})
+		if reportErr == nil || reportErr.Type != "session_not_found" || reportErr.SessionID != "sess-x" {
+			t.Errorf("report error = %+v, want session_not_found with session id", reportErr)
 		}
 	})
 

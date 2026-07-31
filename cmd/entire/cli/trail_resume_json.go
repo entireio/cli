@@ -64,6 +64,7 @@ type trailResumeReportError struct {
 	Branch       string `json:"branch,omitempty"`
 	WorktreePath string `json:"worktree_path,omitempty"`
 	CheckpointID string `json:"checkpoint_id,omitempty"`
+	SessionID    string `json:"session_id,omitempty"`
 }
 
 // trailResumeReportErrorFrom maps a typed resume error to its JSON object,
@@ -92,6 +93,14 @@ func trailResumeReportErrorFrom(err error) *trailResumeReportError {
 			Type:         "metadata_unavailable",
 			Message:      unavailable.Error(),
 			CheckpointID: unavailable.CheckpointID.String(),
+		}
+	}
+	var sessionNotFound *ResumeSessionNotFoundError
+	if errors.As(err, &sessionNotFound) {
+		return &trailResumeReportError{
+			Type:      "session_not_found",
+			Message:   sessionNotFound.Error(),
+			SessionID: sessionNotFound.SessionID,
 		}
 	}
 	return nil
@@ -155,20 +164,25 @@ func runTrailResumeJSON(ctx context.Context, cmd *cobra.Command, found api.Trail
 	errW := cmd.ErrOrStderr()
 
 	var actions trailResumeReportActions
+	var restored []strategy.RestoredSession
 	emit := func(report trailResumeActionReport) error {
 		enc := json.NewEncoder(cmd.OutOrStdout())
+		enc.SetEscapeHTML(false)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(report); err != nil {
 			return fmt.Errorf("encode trail resume action report: %w", err)
 		}
 		return nil
 	}
+	// fail emits the report with whatever side effects already happened
+	// (branch switch, restored sessions) so a typed failure never hides real
+	// state changes from the caller.
 	fail := func(err error) error {
 		reportErr := trailResumeReportErrorFrom(err)
 		if reportErr == nil {
 			return err
 		}
-		report := buildTrailResumeActionReport(found, branch, actions, nil, "")
+		report := buildTrailResumeActionReport(found, branch, actions, restored, "")
 		report.Continuation = nil
 		report.Error = reportErr
 		if encodeErr := emit(report); encodeErr != nil {
@@ -177,15 +191,15 @@ func runTrailResumeJSON(ctx context.Context, cmd *cobra.Command, found api.Trail
 		return NewSilentError(err)
 	}
 
-	if err := ensureTrailResumeBranchAvailable(ctx, io.Discard, branch); err != nil {
+	if err := ensureTrailResumeBranchAvailable(ctx, errW, branch); err != nil {
 		return fail(err)
 	}
 
-	// Both are best-effort facts for the report: if the repo is unreadable the
-	// switch below fails and reports the real error.
+	// Best-effort fact for the report: on detached HEAD (or any read failure)
+	// there is no current branch, so a successful checkout below did switch.
 	currentBranch, branchErr := GetCurrentBranch(ctx)
 	if branchErr != nil {
-		currentBranch = branch
+		currentBranch = ""
 	}
 	existedLocally, existsErr := BranchExistsLocally(ctx, branch)
 	if existsErr != nil {
@@ -206,8 +220,9 @@ func runTrailResumeJSON(ctx context.Context, cmd *cobra.Command, found api.Trail
 	if err != nil {
 		return fail(err)
 	}
+	restored = sessions
 	if err := ensurePreferredRestoredSession(sessions, preferred); err != nil {
-		return err
+		return fail(err)
 	}
 
 	return emit(buildTrailResumeActionReport(found, branch, actions, sessions, preferred))
@@ -224,7 +239,7 @@ func ensurePreferredRestoredSession(sessions []strategy.RestoredSession, preferr
 	if _, ok := findTrailRestoredSession(sessions, preferredSessionID); ok {
 		return nil
 	}
-	return fmt.Errorf("session %q was not found in the restored checkpoint", preferredSessionID)
+	return &ResumeSessionNotFoundError{SessionID: preferredSessionID}
 }
 
 // trailResumeCheckpointBehindHead reports how many branch commits are newer
