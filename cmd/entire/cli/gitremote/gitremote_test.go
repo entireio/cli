@@ -258,3 +258,33 @@ func TestResolveRemoteRepo_MissingRemote(t *testing.T) {
 	_, _, _, err := ResolveRemoteRepo(context.Background(), "origin")
 	assert.Error(t, err)
 }
+
+func TestListRemotesInDir(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns configured remotes", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		testutil.InitRepo(t, dir)
+		for name, url := range map[string]string{
+			"origin":   "git@github.com:octocat/hello-world.git",
+			"upstream": "https://github.com/octocat/hello-world",
+		} {
+			cmd := exec.CommandContext(t.Context(), "git", "remote", "add", name, url)
+			cmd.Dir = dir
+			require.NoError(t, cmd.Run())
+		}
+		got, err := ListRemotesInDir(t.Context(), dir)
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{"origin", "upstream"}, got)
+	})
+
+	t.Run("empty for a repo with no remotes", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		testutil.InitRepo(t, dir)
+		got, err := ListRemotesInDir(t.Context(), dir)
+		require.NoError(t, err)
+		require.Empty(t, got)
+	})
+}

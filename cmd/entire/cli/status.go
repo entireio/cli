@@ -56,7 +56,8 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	}
 
 	// Check if we're in a git repository
-	if _, repoErr := paths.WorktreeRoot(ctx); repoErr != nil {
+	repoRoot, repoErr := paths.WorktreeRoot(ctx)
+	if repoErr != nil {
 		fmt.Fprintln(w, "✕ not a git repository")
 		return nil //nolint:nilerr // Not being in a git repo is a valid status, not an error
 	}
@@ -91,7 +92,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	sty := newStatusStyles(w)
 
 	if detailed {
-		return runStatusDetailed(ctx, w, sty, settingsPath, localSettingsPath, projectExists, localExists)
+		return runStatusDetailed(ctx, w, sty, repoRoot, settingsPath, localSettingsPath, projectExists, localExists)
 	}
 
 	// Short output: just show the effective/merged state
@@ -104,6 +105,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
+	writeMirrorStatus(ctx, w, repoRoot, sty)
 	writeAgentHelpHint(w, sty)
 
 	return nil
@@ -124,7 +126,7 @@ func writeAgentHelpHint(w io.Writer, sty statusStyles) {
 }
 
 // runStatusDetailed shows the effective status plus detailed status for each settings file.
-func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, settingsPath, localSettingsPath string, projectExists, localExists bool) error {
+func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, repoRoot, settingsPath, localSettingsPath string, projectExists, localExists bool) error {
 	// First show the effective/merged status
 	effectiveSettings, err := LoadEntireSettings(ctx)
 	if err != nil {
@@ -154,6 +156,7 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 	if effectiveSettings.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
+	writeMirrorStatus(ctx, w, repoRoot, sty)
 	writeAgentHelpHint(w, sty)
 
 	return nil
@@ -600,7 +603,10 @@ type statusJSON struct {
 	// HooksOutdated lists agents whose installed hook config is out of date and
 	// should be refreshed with `entire enable --force`.
 	HooksOutdated []string `json:"hooks_outdated,omitempty"`
-	Error         string   `json:"error,omitempty"`
+	// Mirror describes the Entire mirror this clone's git remote points at, or is
+	// omitted when the clone targets the forge directly.
+	Mirror *mirrorJSON `json:"mirror,omitempty"`
+	Error  string      `json:"error,omitempty"`
 }
 
 type sessionBriefJSON struct {
@@ -614,7 +620,8 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		return json.NewEncoder(w).Encode(v)
 	}
 
-	if _, err := paths.WorktreeRoot(ctx); err != nil {
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
 		return writeJSON(statusJSON{Error: "not a git repository"})
 	}
 
@@ -650,6 +657,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		Agents:         []string{},
 		ActiveSessions: []sessionBriefJSON{},
 		AgentHelp:      agentHelpCommand,
+		Mirror:         mirrorStatusJSON(ctx, repoRoot),
 	}
 
 	if s.Enabled {

@@ -94,6 +94,27 @@ func GetRemoteURL(ctx context.Context, remoteName string) (string, error) {
 	return GetRemoteURLInDir(ctx, "", remoteName)
 }
 
+// ListRemotesInDir returns the names of every git remote configured in dir
+// (dir "" means the current working directory). An empty slice, not an error,
+// is returned when the repo has no remotes.
+func ListRemotesInDir(ctx context.Context, dir string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "remote")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list git remotes: %w", err)
+	}
+	var names []string
+	for line := range strings.SplitSeq(strings.TrimSpace(string(output)), "\n") {
+		if name := strings.TrimSpace(line); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
 // GetRemoteURLInDir returns the URL configured for the named git remote in dir.
 func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", remoteName)

@@ -87,6 +87,26 @@ Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
 `configure`, `agent-help`, `api`.
 
+`status` also reports whether the current clone points at an Entire mirror. The
+"is it a mirror, and which cluster" half is read offline from the clone's git
+remote (an `entire://` URL); the mirror's live state (processing / ready /
+failed / suspended) is a best-effort, time-bounded control-plane lookup done
+only when a mirror remote is present *and* the caller is logged in — logged out,
+the state shows `unknown` with an `entire login` hint, and an ordinary
+(non-mirror) clone triggers no network at all. When the clone pulls directly
+from a mirrorable forge remote instead of a mirror, the human output prints a
+hint pointing at `entire repo mirror use` — which repoints the clone at an
+existing mirror, or tells the user to `mirror create` when there is none. The
+forge host named in the hint is read from the remote URL (so it is the real
+provider, e.g. `github.com`, not a hardcoded string), and the trigger gates on
+`gitremote.IsSupportedForge`, so it widens automatically if more forges become
+mirrorable (only GitHub today). The hint deliberately describes only the local
+fact (this clone isn't using a mirror); it does not claim the repo has no
+mirror, because that is a server-side fact `status` does not look up. Surfaced in the human output (short
+and `--detailed`) and as the `mirror` object in `status --json` (`null` when the
+clone isn't pointed at a mirror — the hint is human-output only). See
+`status_mirror.go`.
+
 `api` is an authenticated passthrough to Entire's HTTP APIs (gh-style): it
 attaches the right bearer and dials the right host so callers don't plumb auth
 themselves. `--to core` (default) hits the control plane; `--to cell` hits an
