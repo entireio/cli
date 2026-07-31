@@ -612,3 +612,36 @@ func TestClearInvalidAdoptTranscript_WarnsAndClears(t *testing.T) {
 		t.Fatalf("stderr = %q, want transcript-pointer warning", buf.String())
 	}
 }
+
+func TestStagedFilesForAutoAdopt_NonASCIIAndSpacedPaths(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, "init.txt", "init\n")
+	testutil.GitAdd(t, repoDir, "init.txt")
+	testutil.GitCommit(t, repoDir, "init")
+
+	// A non-ASCII name and a name with spaces: both are C-quoted by
+	// `git diff --cached --name-only` (core.quotepath default on) unless -z is
+	// used, so they would never match the UTF-8 paths in FilesTouched.
+	nonASCII := "services/café/handler.go"
+	spaced := "my dir/some file.go"
+	testutil.WriteFile(t, repoDir, nonASCII, "x\n")
+	testutil.WriteFile(t, repoDir, spaced, "y\n")
+	testutil.GitAdd(t, repoDir, nonASCII, spaced)
+
+	staged, err := stagedFilesForAutoAdopt(context.Background(), repoDir)
+	if err != nil {
+		t.Fatalf("stagedFilesForAutoAdopt: %v", err)
+	}
+	got := make(map[string]bool, len(staged))
+	for _, s := range staged {
+		got[s] = true
+	}
+	for _, want := range []string{nonASCII, spaced} {
+		if !got[want] {
+			t.Fatalf("staged = %v, want to contain %q (unquoted UTF-8)", staged, want)
+		}
+	}
+}

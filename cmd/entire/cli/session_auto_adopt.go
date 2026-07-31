@@ -494,21 +494,20 @@ func isAutoAdoptBoilerplatePath(rel string) bool {
 }
 
 func stagedFilesForAutoAdopt(ctx context.Context, repoRoot string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only")
+	// -z emits NUL-separated, unquoted paths. Without it git C-quotes non-ASCII
+	// names (core.quotepath defaults on, e.g. "caf\303\251.txt") which would
+	// never match the UTF-8 paths recorded in FilesTouched, so an agent working
+	// on a non-ASCII/spaced file would silently miss the overlap check.
+	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "-z")
 	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git diff --cached --name-only: %w", err)
-	}
-	trimmed := strings.TrimSpace(string(output))
-	trimmed = strings.ReplaceAll(trimmed, "\r\n", "\n")
-	if trimmed == "" {
-		return nil, nil
+		return nil, fmt.Errorf("git diff --cached --name-only -z: %w", err)
 	}
 	var staged []string
-	for _, line := range strings.Split(trimmed, "\n") {
-		if line != "" {
-			staged = append(staged, filepath.ToSlash(line))
+	for _, name := range strings.Split(string(output), "\x00") {
+		if name != "" {
+			staged = append(staged, filepath.ToSlash(name))
 		}
 	}
 	return staged, nil
