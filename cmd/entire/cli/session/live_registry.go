@@ -1,15 +1,18 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
@@ -154,6 +157,7 @@ func ListLiveSessions() ([]LiveSessionEntry, error) {
 	}
 	defer root.Close()
 
+	logCtx := logging.WithComponent(context.Background(), "session")
 	out := make([]LiveSessionEntry, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
@@ -163,12 +167,19 @@ func ListLiveSessions() ([]LiveSessionEntry, error) {
 		if err := validation.ValidateSessionID(sessionID); err != nil {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name())) //nolint:gosec // path under cache dir from ReadDir
+		// Read through the already-held os.Root so a symlink planted inside the
+		// registry dir cannot redirect the read outside it (os.ReadFile follows
+		// symlinks; osroot.ReadFile refuses to traverse them).
+		data, err := osroot.ReadFile(root, entry.Name())
 		if err != nil {
 			continue
 		}
 		var live LiveSessionEntry
 		if err := json.Unmarshal(data, &live); err != nil {
+			logging.Debug(logCtx, "live-registry: removing corrupt entry",
+				slog.String("entry", entry.Name()),
+				slog.String("error", err.Error()),
+			)
 			_ = osroot.Remove(root, entry.Name()) //nolint:errcheck // sweep corrupt pointer
 			continue
 		}
@@ -176,6 +187,9 @@ func ListLiveSessions() ([]LiveSessionEntry, error) {
 			live.SessionID = sessionID
 		}
 		if liveSessionExpired(live) {
+			logging.Debug(logCtx, "live-registry: sweeping expired entry",
+				slog.String("session_id", live.SessionID),
+			)
 			_ = osroot.Remove(root, entry.Name()) //nolint:errcheck // TTL sweep
 			continue
 		}
@@ -185,6 +199,9 @@ func ListLiveSessions() ([]LiveSessionEntry, error) {
 }
 
 func liveSessionExpired(entry LiveSessionEntry) bool {
+	// A nil LastInteractionTime is treated as expired: it means either a crashed
+	// half-written entry or a version-skew writer that stopped populating the
+	// field. Either way we sweep it rather than keep an entry we cannot age out.
 	if entry.LastInteractionTime == nil {
 		return true
 	}
