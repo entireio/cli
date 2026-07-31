@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -76,6 +77,18 @@ func shouldTryAutoAdoptOnPrepareCommitMsg(ctx context.Context, source string) bo
 // Best-effort: never returns an error to the git hook caller.
 func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 	logCtx := logging.WithComponent(ctx, "session")
+
+	// This runs inside prepare-commit-msg, whose stderr the hook swallows. A
+	// panic anywhere in the cross-common-dir adopt path would otherwise vanish
+	// with no record; recover and log it at Error so it is at least visible in
+	// .entire/logs. Never re-panic — a failed adopt must not break `git commit`.
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Error(logCtx, "auto-adopt: recovered from panic",
+				slog.Any("panic", r),
+			)
+		}
+	}()
 
 	if !targetIsEntireEnabled(ctx) {
 		return
@@ -153,10 +166,20 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 	)
 	adoptCancel()
 	if adoptErr != nil {
-		logging.Debug(logCtx, "auto-adopt: adopt failed",
-			slog.String("session_id", source.SessionID),
-			slog.String("error", adoptErr.Error()),
-		)
+		var rollbackFailed *adoptRollbackFailedError
+		if errors.As(adoptErr, &rollbackFailed) {
+			// Retire failed AND rollback failed: the session is now registered in
+			// both the source and target repos. This is corruption, not a miss.
+			logging.Error(logCtx, "auto-adopt: adopt left session registered in both repos",
+				slog.String("session_id", source.SessionID),
+				slog.String("error", adoptErr.Error()),
+			)
+		} else {
+			logging.Warn(logCtx, "auto-adopt: adopt failed",
+				slog.String("session_id", source.SessionID),
+				slog.String("error", adoptErr.Error()),
+			)
+		}
 	}
 }
 

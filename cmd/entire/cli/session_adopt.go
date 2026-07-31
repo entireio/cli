@@ -192,8 +192,12 @@ func adoptFromExternalSessionStore(
 		}
 		retired := retireAdoptedSourceSession(sourceState, next)
 		if err := sourceStore.Save(ctx, &retired); err != nil {
-			if rollbackErr := rollbackExternalAdoptTarget(ctx, targetStore, next.SessionID, existing); rollbackErr != nil {
-				return fmt.Errorf("retire source session state: %w; rollback adopted target session state: %w", err, rollbackErr)
+			// Roll back on a non-cancelable context: the caller's ctx may already
+			// be canceled/timed-out (auto-adopt bounds this whole path), and a
+			// rollback that inherits that cancellation would fail spuriously and
+			// leave the session registered in BOTH repos.
+			if rollbackErr := rollbackExternalAdoptTarget(context.WithoutCancel(ctx), targetStore, next.SessionID, existing); rollbackErr != nil {
+				return &adoptRollbackFailedError{retireErr: err, rollbackErr: rollbackErr}
 			}
 			return fmt.Errorf("retire source session state: %w", err)
 		}
@@ -205,6 +209,24 @@ func adoptFromExternalSessionStore(
 		return nil, nil, fmt.Errorf("adopt external session state: %w", err)
 	}
 	return adopted, filesTouched, nil
+}
+
+// adoptRollbackFailedError is returned when retiring the source session failed
+// AND the compensating rollback of the target also failed, leaving the session
+// registered in both repos. Callers (auto-adopt) surface this at Error — it is
+// the two-repos-active corruption case, not an ordinary miss.
+type adoptRollbackFailedError struct {
+	retireErr   error
+	rollbackErr error
+}
+
+func (e *adoptRollbackFailedError) Error() string {
+	return fmt.Sprintf("retire source session state: %v; rollback adopted target session state: %v",
+		e.retireErr, e.rollbackErr)
+}
+
+func (e *adoptRollbackFailedError) Unwrap() []error {
+	return []error{e.retireErr, e.rollbackErr}
 }
 
 func rollbackExternalAdoptTarget(ctx context.Context, targetStore *session.StateStore, sessionID string, previous *session.State) error {
