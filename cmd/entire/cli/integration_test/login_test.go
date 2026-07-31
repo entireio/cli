@@ -42,6 +42,7 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 
 	type state struct {
 		sync.Mutex
+
 		approved bool
 		polls    int
 	}
@@ -49,7 +50,7 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 	serverState := &state{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/device_authorization":
+		case r.Method == http.MethodPost && r.URL.Path == pathDeviceAuthorization:
 			writeJSON(t, w, http.StatusOK, map[string]any{
 				"device_code":               "device-123",
 				"user_code":                 "ABCD-EFGH",
@@ -58,7 +59,7 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 				"expires_in":                10,
 				"interval":                  1,
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
+		case r.Method == http.MethodPost && r.URL.Path == pathOAuthToken:
 			serverState.Lock()
 			serverState.polls++
 			approved := serverState.approved
@@ -92,7 +93,7 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 		t.Fatalf("approval URL = %q, want prefix %q", approvalURL, server.URL+"/")
 	}
 
-	approveReq, reqErr := http.NewRequest(http.MethodPost, approvalURL, http.NoBody)
+	approveReq, reqErr := http.NewRequestWithContext(t.Context(), http.MethodPost, approvalURL, http.NoBody)
 	if reqErr != nil {
 		t.Fatalf("create approve request: %v", reqErr)
 	}
@@ -140,7 +141,7 @@ func TestLogin_ExpiredFlow(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/device_authorization":
+		case r.Method == http.MethodPost && r.URL.Path == pathDeviceAuthorization:
 			writeJSON(t, w, http.StatusOK, map[string]any{
 				"device_code":               "device-expired",
 				"user_code":                 "WXYZ-0000",
@@ -149,7 +150,7 @@ func TestLogin_ExpiredFlow(t *testing.T) {
 				"expires_in":                10,
 				"interval":                  1,
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
+		case r.Method == http.MethodPost && r.URL.Path == pathOAuthToken:
 			writeJSON(t, w, http.StatusBadRequest, map[string]any{"error": "expired_token"})
 		default:
 			http.NotFound(w, r)
@@ -179,7 +180,7 @@ func TestLogin_DeniedFlow(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/device_authorization":
+		case r.Method == http.MethodPost && r.URL.Path == pathDeviceAuthorization:
 			writeJSON(t, w, http.StatusOK, map[string]any{
 				"device_code":               "device-denied",
 				"user_code":                 "QRST-9999",
@@ -188,7 +189,7 @@ func TestLogin_DeniedFlow(t *testing.T) {
 				"expires_in":                10,
 				"interval":                  1,
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
+		case r.Method == http.MethodPost && r.URL.Path == pathOAuthToken:
 			writeJSON(t, w, http.StatusBadRequest, map[string]any{"error": "access_denied"})
 		default:
 			http.NotFound(w, r)
@@ -223,7 +224,7 @@ func TestLogin_BrowserFlow_SavesToken(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/oauth/token" {
+		if r.Method == http.MethodPost && r.URL.Path == pathOAuthToken {
 			if err := r.ParseForm(); err != nil {
 				t.Errorf("parse token form: %v", err)
 			}

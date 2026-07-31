@@ -674,7 +674,7 @@ func (env *TestEnv) GetGitLog() []string {
 func (env *TestEnv) GitCheckoutNewBranch(branchName string) {
 	env.T.Helper()
 
-	cmd := exec.Command("git", "checkout", "-b", branchName)
+	cmd := exec.CommandContext(env.T.Context(), "git", "checkout", "-b", branchName)
 	cmd.Dir = env.RepoDir
 	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -723,7 +723,7 @@ func (env *TestEnv) GetRewindPoints() []RewindPoint {
 	// Run `checkpoint list --pending --json` using the shared binary. This is
 	// the drop-in replacement for the deprecated `rewind --list` bridge; the JSON shape is
 	// identical. Parse stdout only — any notice goes to stderr.
-	cmd := exec.Command(getTestBinary(), "checkpoint", "list", "--pending", "--json")
+	cmd := exec.CommandContext(env.T.Context(), getTestBinary(), "checkpoint", "list", "--pending", "--json")
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
 
@@ -752,7 +752,10 @@ func (env *TestEnv) GetRewindPoints() []RewindPoint {
 
 	points := make([]RewindPoint, len(jsonPoints))
 	for i, jp := range jsonPoints {
-		date, _ := time.Parse(time.RFC3339, jp.Date)
+		date, err := time.Parse(time.RFC3339, jp.Date)
+		if err != nil {
+			env.T.Fatalf("failed to parse rewind point date %q: %v", jp.Date, err)
+		}
 		points[i] = RewindPoint{
 			ID:               jp.ID,
 			Message:          jp.Message,
@@ -773,7 +776,7 @@ func (env *TestEnv) Rewind(commitID string) error {
 	env.T.Helper()
 
 	// Run rewind --to <commitID> using the shared binary
-	cmd := exec.Command(getTestBinary(), "checkpoint", "rewind", "--to", commitID)
+	cmd := exec.CommandContext(env.T.Context(), getTestBinary(), "checkpoint", "rewind", "--to", commitID)
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
 
@@ -792,7 +795,7 @@ func (env *TestEnv) RewindLogsOnly(commitID string) error {
 	env.T.Helper()
 
 	// Run rewind --to <commitID> --logs-only using the shared binary
-	cmd := exec.Command(getTestBinary(), "checkpoint", "rewind", "--to", commitID, "--logs-only")
+	cmd := exec.CommandContext(env.T.Context(), getTestBinary(), "checkpoint", "rewind", "--to", commitID, "--logs-only")
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
 
@@ -811,7 +814,7 @@ func (env *TestEnv) RewindReset(commitID string) error {
 	env.T.Helper()
 
 	// Run rewind --to <commitID> --reset using the shared binary
-	cmd := exec.Command(getTestBinary(), "checkpoint", "rewind", "--to", commitID, "--reset")
+	cmd := exec.CommandContext(env.T.Context(), getTestBinary(), "checkpoint", "rewind", "--to", commitID, "--reset")
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
 
@@ -1032,7 +1035,7 @@ func (env *TestEnv) prepareCommitMsgCmd(simulateTTY bool, hookArgs ...string) *e
 	args := append([]string{"hooks", "git", "prepare-commit-msg"}, hookArgs...)
 	var cmd *exec.Cmd
 	if simulateTTY {
-		cmd = exec.Command(getTestBinary(), args...)
+		cmd = exec.CommandContext(env.T.Context(), getTestBinary(), args...)
 		cmd.Env = env.gitHookEnv("ENTIRE_TEST_TTY=1")
 	} else {
 		cmd = execx.NonInteractive(context.Background(), getTestBinary(), args...)
@@ -1096,7 +1099,7 @@ func (env *TestEnv) gitCommitWithShadowHooks(message string, simulateTTY bool, f
 
 	// Run post-commit hook using the shared binary
 	// This triggers condensation if the commit has an Entire-Checkpoint trailer
-	postCmd := exec.Command(getTestBinary(), "hooks", "git", "post-commit")
+	postCmd := exec.CommandContext(env.T.Context(), getTestBinary(), "hooks", "git", "post-commit")
 	postCmd.Dir = env.RepoDir
 	postCmd.Env = env.gitHookEnv()
 	if output, err := postCmd.CombinedOutput(); err != nil {
@@ -1136,7 +1139,7 @@ func (env *TestEnv) GitCommitAmendWithShadowHooks(message string, files ...strin
 
 	// Run prepare-commit-msg hook with "commit" source (indicates amend).
 	// Set ENTIRE_TEST_TTY=1 to simulate human (amend is always a human operation).
-	prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "commit")
+	prepCmd := exec.CommandContext(env.T.Context(), getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "commit")
 	prepCmd.Dir = env.RepoDir
 	prepCmd.Env = env.gitHookEnv("ENTIRE_TEST_TTY=1")
 	if output, err := prepCmd.CombinedOutput(); err != nil {
@@ -1174,7 +1177,7 @@ func (env *TestEnv) GitCommitAmendWithShadowHooks(message string, files ...strin
 	}
 
 	// Run post-commit hook
-	postCmd := exec.Command(getTestBinary(), "hooks", "git", "post-commit")
+	postCmd := exec.CommandContext(env.T.Context(), getTestBinary(), "hooks", "git", "post-commit")
 	postCmd.Dir = env.RepoDir
 	postCmd.Env = env.gitHookEnv()
 	if output, err := postCmd.CombinedOutput(); err != nil {
@@ -1195,7 +1198,7 @@ func (env *TestEnv) GitPostRewriteWithShadowHooks(rewriteType string, mappings .
 		input.WriteByte('\n')
 	}
 
-	cmd := exec.Command(getTestBinary(), "hooks", "git", "post-rewrite", rewriteType)
+	cmd := exec.CommandContext(env.T.Context(), getTestBinary(), "hooks", "git", "post-rewrite", rewriteType)
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.gitHookEnv()
 	cmd.Stdin = strings.NewReader(input.String())
@@ -1224,7 +1227,7 @@ func (env *TestEnv) GitCommitWithTrailerRemoved(message string, files ...string)
 	// Run prepare-commit-msg hook using the shared binary.
 	// Set ENTIRE_TEST_TTY=1 to simulate human (this tests the editor flow where
 	// the user removes the trailer before committing).
-	prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile)
+	prepCmd := exec.CommandContext(env.T.Context(), getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile)
 	prepCmd.Dir = env.RepoDir
 	prepCmd.Env = env.gitHookEnv("ENTIRE_TEST_TTY=1")
 	if output, err := prepCmd.CombinedOutput(); err != nil {
@@ -1279,7 +1282,7 @@ func (env *TestEnv) GitCommitWithTrailerRemoved(message string, files ...string)
 	}
 
 	// Run post-commit hook - since trailer was removed, no condensation should happen
-	postCmd := exec.Command(getTestBinary(), "hooks", "git", "post-commit")
+	postCmd := exec.CommandContext(env.T.Context(), getTestBinary(), "hooks", "git", "post-commit")
 	postCmd.Dir = env.RepoDir
 	postCmd.Env = env.gitHookEnv()
 	if output, err := postCmd.CombinedOutput(); err != nil {
@@ -1292,7 +1295,7 @@ func (env *TestEnv) GitRm(paths ...string) {
 	env.T.Helper()
 
 	args := append([]string{"rm", "--"}, paths...)
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(env.T.Context(), "git", args...)
 	cmd.Dir = env.RepoDir
 	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -1354,7 +1357,7 @@ func (env *TestEnv) gitCommitStagedWithShadowHooks(message string, simulateTTY b
 	}
 
 	// Run post-commit hook
-	postCmd := exec.Command(getTestBinary(), "hooks", "git", "post-commit")
+	postCmd := exec.CommandContext(env.T.Context(), getTestBinary(), "hooks", "git", "post-commit")
 	postCmd.Dir = env.RepoDir
 	postCmd.Env = env.gitHookEnv()
 	if output, err := postCmd.CombinedOutput(); err != nil {
@@ -1378,13 +1381,15 @@ func (env *TestEnv) ListBranchesWithPrefix(prefix string) []string {
 	}
 
 	var branches []string
-	_ = refs.ForEach(func(ref *plumbing.Reference) error {
+	if err := refs.ForEach(func(ref *plumbing.Reference) error {
 		name := ref.Name().Short()
 		if len(name) >= len(prefix) && name[:len(prefix)] == prefix {
 			branches = append(branches, name)
 		}
 		return nil
-	})
+	}); err != nil {
+		env.T.Fatalf("failed to iterate references: %v", err)
+	}
 
 	return branches
 }
@@ -1716,9 +1721,7 @@ func (env *TestEnv) validateTranscriptJSONL(checkpointID string, expectedContent
 
 	// First try to parse as a single JSON document (OpenCode/Gemini format)
 	var jsonDoc any
-	if err := json.Unmarshal([]byte(content), &jsonDoc); err == nil {
-		// Valid JSON document - validation passed
-	} else {
+	if err := json.Unmarshal([]byte(content), &jsonDoc); err != nil {
 		// Fall back to JSONL validation (Claude Code format)
 		lines := strings.Split(content, "\n")
 		validLines := 0
@@ -1738,6 +1741,7 @@ func (env *TestEnv) validateTranscriptJSONL(checkpointID string, expectedContent
 			env.T.Error("Transcript is empty (no valid JSON content)")
 		}
 	}
+	// else: valid single JSON document — validation passed
 
 	// Validate expected content appears in transcript
 	for _, expected := range expectedContent {
@@ -1941,7 +1945,7 @@ func (env *TestEnv) PatchSettings(extra map[string]any) {
 	env.T.Helper()
 
 	settingsPath := filepath.Join(env.RepoDir, ".entire", paths.SettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // G304: path is constructed from test env, not user input
+	data, err := os.ReadFile(settingsPath)
 	if err != nil {
 		env.T.Fatalf("failed to read settings: %v", err)
 	}
@@ -1961,7 +1965,7 @@ func (env *TestEnv) PatchSettings(extra map[string]any) {
 	}
 	out = append(out, '\n')
 
-	if err := os.WriteFile(settingsPath, out, 0o644); err != nil { //nolint:gosec // G306: consistent with other settings writes in testenv.go
+	if err := os.WriteFile(settingsPath, out, 0o644); err != nil {
 		env.T.Fatalf("failed to write settings: %v", err)
 	}
 }
@@ -1997,7 +2001,7 @@ func (env *TestEnv) InstallRealPrePushHook() {
 	// Quote the binary path so a temp path containing spaces still execs.
 	script := fmt.Sprintf("#!/bin/sh\nexec %q hooks git pre-push \"$1\"\n", getTestBinary())
 	hookPath := filepath.Join(hooksDir, "pre-push")
-	if err := os.WriteFile(hookPath, []byte(script), 0o755); err != nil { //nolint:gosec // G306: hook scripts must be executable
+	if err := os.WriteFile(hookPath, []byte(script), 0o755); err != nil {
 		env.T.Fatalf("failed to write pre-push hook: %v", err)
 	}
 }
@@ -2036,14 +2040,6 @@ func (env *TestEnv) RunPrePush(remote string) {
 func (env *TestEnv) RunPrePushWithError(remote string) error {
 	env.T.Helper()
 	return env.runPrePush(remote, env.defaultPrePushStdin())
-}
-
-// RunPrePushWithStdin runs the pre-push hook feeding the given stdin verbatim.
-// Pass "" to exercise the real no-op case (a `git push` with nothing new to
-// push feeds the hook empty stdin).
-func (env *TestEnv) RunPrePushWithStdin(remote, stdin string) error {
-	env.T.Helper()
-	return env.runPrePush(remote, stdin)
 }
 
 func (env *TestEnv) runPrePush(remote, stdin string) error {

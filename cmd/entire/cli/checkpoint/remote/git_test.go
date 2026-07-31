@@ -1274,3 +1274,21 @@ func TestIsNonInteractiveSSH(t *testing.T) {
 	assert.False(t, IsNonInteractiveSSH(context.Background()))
 	assert.True(t, IsNonInteractiveSSH(WithNonInteractiveSSH(context.Background())))
 }
+
+func TestFormatGitCommandError_RedactsRemoteURL(t *testing.T) {
+	t.Parallel()
+
+	remote := "https://user:hunter2@github.com/org/repo.git"
+	// Output() populates ExitError.Stderr (Run() does not).
+	cmd := exec.CommandContext(context.Background(), "sh", "-c",
+		fmt.Sprintf(`printf 'fatal: repository "%s" not found\n' >&2; exit 128`, remote))
+	_, err := cmd.Output()
+	require.Error(t, err)
+
+	formatted := formatGitCommandError(context.Background(), err, remote)
+	require.Error(t, formatted)
+	msg := formatted.Error()
+	assert.NotContains(t, msg, "hunter2")
+	assert.NotContains(t, msg, "user:hunter2")
+	assert.Contains(t, msg, RedactURL(remote))
+}

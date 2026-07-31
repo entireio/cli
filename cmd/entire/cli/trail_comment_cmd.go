@@ -195,9 +195,11 @@ func printTrailThreadDetail(w io.Writer, out api.TrailThreadDetailResponse, json
 	}
 	fmt.Fprintf(w, "Thread %s [%s]: %s\n\n", t.ID, marker, t.Title)
 	for _, m := range out.Messages {
-		fmt.Fprintf(w, "%s  %s\n%s\n", m.Author, m.CreatedAt.Format(time.RFC3339), m.Body)
+		// The message ID is the argument `comment edit`/`delete` take, so it
+		// must be visible here (the only plain-text read that shows messages).
+		fmt.Fprintf(w, "%s  %s  %s\n%s\n", m.ID, m.Author, m.CreatedAt.Format(time.RFC3339), m.Body)
 		for _, r := range m.Replies {
-			fmt.Fprintf(w, "  ↳ %s  %s\n  %s\n", r.Author, r.CreatedAt.Format(time.RFC3339), r.Body)
+			fmt.Fprintf(w, "  ↳ %s  %s  %s\n  %s\n", r.ID, r.Author, r.CreatedAt.Format(time.RFC3339), r.Body)
 		}
 		fmt.Fprintln(w)
 	}
@@ -284,6 +286,7 @@ func newTrailCommentEditCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "edit <thread-id> <message-id>",
 		Short: "Edit a message in a discussion thread",
+		Long:  "Edit a message in a discussion thread.\n\nFind <thread-id> with 'entire trail comment list' and <message-id> with 'entire trail comment show <thread-id>'.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			threadID, messageID := args[0], args[1]
@@ -318,6 +321,7 @@ func newTrailCommentDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "delete <thread-id> <message-id>",
 		Short: "Delete a message from a discussion thread",
+		Long:  "Delete a message from a discussion thread.\n\nFind <thread-id> with 'entire trail comment list' and <message-id> with 'entire trail comment show <thread-id>'.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			threadID, messageID := args[0], args[1]

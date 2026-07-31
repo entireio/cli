@@ -147,7 +147,7 @@ func TestRapidSequentialCommits(t *testing.T) {
 
 		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			ref := fmt.Sprintf("HEAD~%d", i)
 			testutil.AssertHasCheckpointTrailer(t, s.Dir, ref)
 		}

@@ -35,8 +35,11 @@ func TestShadowStrategy_MidSessionCommit_FromTranscript(t *testing.T) {
 		"session_id":      session.ID,
 		"transcript_path": session.TranscriptPath,
 	}
-	inputJSON, _ := json.Marshal(input)
-	cmd := exec.Command(getTestBinary(), "hooks", "claude-code", "user-prompt-submit")
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("failed to marshal input: %v", err)
+	}
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", agentClaudeCode, "user-prompt-submit")
 	cmd.Dir = env.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = append(testutil.GitIsolatedEnv(),
@@ -148,8 +151,11 @@ func TestShadowStrategy_MidSessionCommit_NoTrailerForUnrelatedFile(t *testing.T)
 		"session_id":      session.ID,
 		"transcript_path": session.TranscriptPath,
 	}
-	inputJSON, _ := json.Marshal(input)
-	cmd := exec.Command(getTestBinary(), "hooks", "claude-code", "user-prompt-submit")
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("failed to marshal input: %v", err)
+	}
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", agentClaudeCode, "user-prompt-submit")
 	cmd.Dir = env.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = append(testutil.GitIsolatedEnv(),
@@ -232,8 +238,11 @@ func TestShadowStrategy_MidSessionCommit_FilesTouchedFallback(t *testing.T) {
 		"session_id":      session.ID,
 		"transcript_path": session.TranscriptPath,
 	}
-	inputJSON, _ := json.Marshal(input)
-	cmd := exec.Command(getTestBinary(), "hooks", "claude-code", "user-prompt-submit")
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("failed to marshal input: %v", err)
+	}
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", agentClaudeCode, "user-prompt-submit")
 	cmd.Dir = env.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = append(testutil.GitIsolatedEnv(),

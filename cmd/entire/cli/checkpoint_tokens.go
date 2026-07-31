@@ -84,7 +84,8 @@ from the checkpoint remote.
 
 Use --compare <checkpoint-id> to compare this checkpoint against a previous
 checkpoint and qualify observed token reduction or increase.`,
-		Args: cobra.ExactArgs(1),
+		Example: "  entire checkpoint tokens a1b2\n  entire checkpoint tokens a1b2 --compare c3d4\n  entire checkpoint tokens a1b2 --json",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if jsonFlag && agentBriefFlag {
 				return errors.New("--json and --agent-brief are mutually exclusive")

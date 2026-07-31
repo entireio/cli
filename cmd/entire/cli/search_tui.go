@@ -433,8 +433,8 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			return m, nil
 		}
 		// Checkpoint search: ParseSearchInput extracts author:/date:/branch:/repo:.
-		// ValidateRepoFilters only applies to checkpoint search (single repo limit);
-		// code search handles multiple repos via fan-out.
+		// ValidateRepoFilters only checks each repo value's shape; both semantic
+		// and code search accept multiple repos and fan out across cells.
 		parsed := search.ParseSearchInput(raw)
 		checkpointRepoErr := search.ValidateRepoFilters(parsed.Repos)
 

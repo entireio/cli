@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -56,7 +57,7 @@ func TestMain(m *testing.M) {
 	}
 
 	moduleRoot := findModuleRoot()
-	buildCmd := exec.Command("go", "build", "-o", testBinaryPath, ".")
+	buildCmd := exec.CommandContext(context.Background(), "go", "build", "-o", testBinaryPath, ".")
 	buildCmd.Dir = filepath.Join(moduleRoot, "cmd", "entire")
 
 	buildOutput, err := buildCmd.CombinedOutput()

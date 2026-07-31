@@ -1099,6 +1099,30 @@ func newTrailCreateRequest(title, body, branch, base, statusStr, typeStr, priori
 	return req
 }
 
+// resolveTrailUpdateBody returns the body text to seed the interactive update
+// form with. The list resource omits the description (it lives in
+// body_document, served only by the detail endpoint), so update must fetch the
+// detail body — otherwise the form prefills from the empty list body and a
+// user edit against that blank baseline can overwrite a description they never
+// saw. Best-effort: on a failed detail fetch it returns the list body plus the
+// error so the caller can warn (mirroring runTrailShow); an empty detail body
+// (older/partial server) falls back to the list body with no error.
+func resolveTrailUpdateBody(ctx context.Context, client *api.Client, forge, owner, repo string, found *api.TrailResource) (string, error) {
+	body := found.Body
+	if found.Number > 0 {
+		bt, err := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number)
+		if err != nil {
+			return body, err
+		}
+		// fetchTrailDescription already trims; a non-empty result supersedes
+		// the list body, an empty one (older/partial server) leaves it intact.
+		if bt != "" {
+			body = bt
+		}
+	}
+	return body, nil
+}
+
 func newTrailUpdateCmd() *cobra.Command {
 	var statusStr, title, body, branch, typeStr, priorityStr string
 	var labelAdd, labelRemove, assigneeAdd, assigneeRemove, reviewerAdd, reviewerRemove []string
@@ -1221,7 +1245,16 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 			}
 			statusStr = string(metadata.Status)
 			title = metadata.Title
-			body = metadata.Body
+			// The list resource omits the description; fetch the detail body so
+			// the form prefills with the current text and change detection below
+			// compares against the real server value. Warn on a fetch failure so
+			// a blank baseline doesn't silently overwrite an unseen description.
+			seedBody, bodyErr := resolveTrailUpdateBody(ctx, client, forge, owner, repoName, found)
+			if bodyErr != nil {
+				fmt.Fprintf(errW, "Warning: could not load current trail body: %v\n", bodyErr)
+			}
+			body = seedBody
+			origStatus, origTitle, origBody := statusStr, title, body
 
 			form := NewAccessibleForm(
 				huh.NewGroup(
@@ -1240,9 +1273,12 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 			if formErr := form.Run(); formErr != nil {
 				return handleFormCancellation(w, "Trail update", formErr)
 			}
-			inputs.StatusChanged = true
-			inputs.TitleChanged = true
-			inputs.BodyChanged = true
+			// Only mark a field changed when the user actually edited it, so an
+			// untouched body/title/status isn't needlessly PATCHed (a no-op body
+			// PATCH would otherwise rewrite the description on every update).
+			inputs.StatusChanged = statusStr != origStatus
+			inputs.TitleChanged = title != origTitle
+			inputs.BodyChanged = body != origBody
 		}
 
 		statusStr = strings.TrimSpace(statusStr)

@@ -52,7 +52,9 @@ func TestCodexResumeRestoredSessionWithSanitizedCompactedHistory(t *testing.T) {
 		require.NoError(t, err, "entire resume failed: %s", out)
 		require.Contains(t, out, "codex resume "+sessionID)
 
-		resumed, err := s.Agent.(*agents.Codex).ResumeSession(ctx, s.Dir, codexSession.Home(), sessionID)
+		codexAgent, ok := s.Agent.(*agents.Codex)
+		require.True(t, ok, "expected *agents.Codex agent, got %T", s.Agent)
+		resumed, err := codexAgent.ResumeSession(ctx, s.Dir, codexSession.Home(), sessionID)
 		require.NoError(t, err)
 		defer resumed.Close()
 

@@ -10,10 +10,10 @@ import (
 )
 
 func TestGenerateLocalDispatch_UsesVoiceAndBullets(t *testing.T) {
-	mock := &stubTextGenerator{text: "generated dispatch"}
-	oldFactory := dispatchTextGeneratorFactory
-	dispatchTextGeneratorFactory = func() (dispatchTextGenerator, error) { return mock, nil }
-	t.Cleanup(func() { dispatchTextGeneratorFactory = oldFactory })
+	t.Parallel()
+
+	mock := &stubTextGenerator{text: "  generated dispatch\n"}
+	var generator TextGenerator = mock
 
 	dispatch := &Dispatch{
 		Repos: []RepoGroup{{
@@ -27,12 +27,19 @@ func TestGenerateLocalDispatch_UsesVoiceAndBullets(t *testing.T) {
 		}},
 	}
 
-	got, err := generateLocalDispatch(context.Background(), dispatch, "marvin")
+	expectedPrompt, err := buildDispatchPrompt(dispatch, "marvin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := generateLocalDispatch(context.Background(), dispatch, "marvin", generator, "test-model")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != "generated dispatch" {
 		t.Fatalf("unexpected text: %q", got)
+	}
+	if mock.prompt != expectedPrompt {
+		t.Fatalf("unexpected prompt:\n%s\nwant:\n%s", mock.prompt, expectedPrompt)
 	}
 	if !strings.Contains(mock.prompt, "You write concise markdown engineering dispatches.") {
 		t.Fatalf("missing server instruction block in prompt: %s", mock.prompt)
@@ -52,9 +59,14 @@ func TestGenerateLocalDispatch_UsesVoiceAndBullets(t *testing.T) {
 	if !strings.Contains(mock.prompt, "Write the final dispatch in markdown.") {
 		t.Fatalf("missing final dispatch instruction in prompt: %s", mock.prompt)
 	}
+	if mock.model != "test-model" {
+		t.Fatalf("unexpected model: %q", mock.model)
+	}
 }
 
 func TestBuildDispatchPrompt_SanitizesVoiceAndEscapesPromptTags(t *testing.T) {
+	t.Parallel()
+
 	dispatch := &Dispatch{
 		CoveredRepos: []string{"entireio/cli"},
 		Repos: []RepoGroup{{
@@ -257,26 +269,43 @@ func TestMarshalDispatchPromptPayload_OmitsRepoURLWhenFullNameSanitized(t *testi
 }
 
 func TestGenerateLocalDispatch_PropagatesGeneratorError(t *testing.T) {
-	oldFactory := dispatchTextGeneratorFactory
-	dispatchTextGeneratorFactory = func() (dispatchTextGenerator, error) {
-		return &stubTextGenerator{err: errors.New("boom")}, nil
-	}
-	t.Cleanup(func() { dispatchTextGeneratorFactory = oldFactory })
+	t.Parallel()
 
-	_, err := generateLocalDispatch(context.Background(), &Dispatch{}, "")
-	if err == nil || !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("expected generator error, got %v", err)
+	providerErr := errors.New("boom")
+	_, err := generateLocalDispatch(
+		context.Background(),
+		&Dispatch{},
+		"",
+		&stubTextGenerator{err: providerErr},
+		"test-model",
+	)
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("expected wrapped provider error, got %v", err)
+	}
+	if err.Error() != "generate dispatch text: boom" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGenerateLocalDispatch_RejectsNilGenerator(t *testing.T) {
+	t.Parallel()
+
+	_, err := generateLocalDispatch(context.Background(), &Dispatch{}, "", nil, "test-model")
+	if err == nil || err.Error() != "local dispatch text generator is not configured" {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
 type stubTextGenerator struct {
 	prompt string
+	model  string
 	text   string
 	err    error
 }
 
-func (s *stubTextGenerator) GenerateText(_ context.Context, prompt string, _ string) (string, error) {
+func (s *stubTextGenerator) GenerateText(_ context.Context, prompt string, model string) (string, error) {
 	s.prompt = prompt
+	s.model = model
 	if s.err != nil {
 		return "", s.err
 	}

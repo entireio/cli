@@ -1,0 +1,3 @@
+{"type":"system","subtype":"status","status":"requesting","session_id":"test-session"}
+{"type":"stream_event","event":{"type":"message_start","message":{"usage":{"input_tokens":9}}},"ttft_ms":120,"session_id":"test-session"}
+{"type":"result","subtype":"error_during_execution","is_error":true,"api_error_status":404,"result":"Model not found","session_id":"test-session"}

@@ -161,7 +161,7 @@ func upsertEnv(env []string, pairs ...string) []string {
 			}
 		}
 		if !replaced {
-			out = append(out, entry)
+			out = append(out, entry) //nolint:makezero // out is fully populated by copy above; this appends only new keys
 		}
 	}
 	return out

@@ -18,7 +18,6 @@ const (
 	testSessionID = "2025-01-15-test-session"
 	testComponent = "hooks"
 	testAgent     = "claude-code"
-	levelINFO     = "INFO"
 )
 
 // testLogFilePath returns the expected log file path for a test temp directory.

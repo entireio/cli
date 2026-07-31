@@ -44,6 +44,17 @@ func isEntireCloneURL(ref string) bool {
 // its cluster host and owner/repo — the form `git clone` accepts, which the
 // mirror list API doesn't return. Shared by the mirror table view (mirrorRow)
 // and `repo clone` so the wire format lives in one place.
+//
+// HARDCODED ASSUMPTIONS (revisit if either stops holding):
+//   - The provider path segment is fixed to "gh". Mirrors are GitHub-only
+//     today; the list/index API (RepoPlacement) records no provider, so there
+//     is nothing to key off. If a non-GitHub provider ever lands, this must
+//     take a provider argument or the URL will lie.
+//   - This is a client-side RECONSTRUCTION, not the server's canonical URL.
+//     The list index gives only a cluster slug, so callers resolve slug->host
+//     (clusterHostBySlug, via a separate ListClusters call) before calling
+//     this. If /repos ever returns the clone URL (or host+provider) directly,
+//     drop this synthesis and that extra round-trip.
 func mirrorCloneURL(host, owner, repo string) string {
 	return fmt.Sprintf("%s%s/gh/%s/%s", entireCloneURLScheme, host, owner, repo)
 }

@@ -360,7 +360,7 @@ func TestResolveEnvTokenCreds_TrustedAudSucceeds(t *testing.T) {
 	if creds.audience != audience {
 		t.Errorf("audience = %q, want %q", creds.audience, audience)
 	}
-	if creds.persist {
+	if creds.persists() {
 		t.Error("env-token creds must not persist to the keychain")
 	}
 	if creds.exchangeHint != "" {

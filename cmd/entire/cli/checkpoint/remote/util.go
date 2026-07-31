@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 
@@ -39,6 +40,18 @@ type FetchURLOptions struct {
 // If ENTIRE_CHECKPOINT_TOKEN is set and a checkpoint remote is configured, HTTPS is
 // forced so the token can be used even when origin is configured via SSH.
 func FetchURL(ctx context.Context, opts ...FetchURLOptions) (string, error) {
+	url, _, err := fetchURLAuthoritative(ctx, opts...)
+	return url, err
+}
+
+// fetchURLAuthoritative is FetchURL plus whether the returned URL is
+// authoritative for checkpoint refs. It is false exactly when a
+// checkpoint_remote IS configured (or cannot be determined) but resolution
+// fell back to the origin URL — a remote that by construction does not host
+// the configured checkpoint refs. Callers that classify "ref absent on the
+// remote" (FetchCheckpointRef's ls-remote probe) must not treat emptiness on
+// a non-authoritative target as absence.
+func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string, bool, error) {
 	var opt FetchURLOptions
 	if len(opts) > 0 {
 		opt = opts[0]
@@ -69,17 +82,23 @@ func FetchURL(ctx context.Context, opts ...FetchURLOptions) (string, error) {
 	if err != nil {
 		if originURL != "" {
 			logFallback(ctx, "fetch", originURL, "load settings", err)
-			return originURL, nil
+			// Settings unreadable → checkpoint_remote unknown; conservative:
+			// do not certify origin as authoritative for checkpoint refs.
+			return originURL, false, nil
 		}
-		return "", fmt.Errorf("load settings: %w", err)
+		return "", false, fmt.Errorf("load settings: %w", err)
 	}
 
 	config := s.GetCheckpointRemote()
 	if config == nil {
 		if originURL == "" {
-			return "", fmt.Errorf("no fetch URL found: %w", originErr)
+			// Genuinely no remote to fetch checkpoints from: no origin remote and
+			// no configured checkpoint_remote. Tagged with the sentinel so callers
+			// classify a probe failure as absence rather than a real error.
+			return "", false, fmt.Errorf("no fetch URL found: %w: %w", originErr, errNoCheckpointRemoteConfigured)
 		}
-		return originURL, nil
+		// No checkpoint_remote configured: origin IS the checkpoint host.
+		return originURL, true, nil
 	}
 
 	if withToken {
@@ -90,25 +109,25 @@ func FetchURL(ctx context.Context, opts ...FetchURLOptions) (string, error) {
 				Host:     host,
 			}, config)
 			if err == nil {
-				return checkpointURL, nil
+				return checkpointURL, true, nil
 			}
 		}
 
 		// In token-based execution path, short-circuit to avoid additional
 		// change in protocol.
 		if originURL != "" {
-			return originURL, nil
+			return originURL, false, nil
 		}
 	}
 
 	if originURL == "" {
-		return "", fmt.Errorf("no fetch URL found: %w", originErr)
+		return "", false, fmt.Errorf("no fetch URL found: %w", originErr)
 	}
 
 	info, err := ParseURL(originURL)
 	if err != nil {
 		logFallback(ctx, "fetch", originURL, "parse origin remote URL", err)
-		return originURL, nil
+		return originURL, false, nil
 	}
 
 	checkpointURL, err := deriveCheckpointURLFromInfo(info, config)
@@ -117,14 +136,14 @@ func FetchURL(ctx context.Context, opts ...FetchURLOptions) (string, error) {
 		// or an entire:// mirror of a different forge than the configured
 		// provider). Honor the configured checkpoint_remote by targeting the
 		// provider's canonical host over HTTPS rather than falling back to origin.
-		if providerURL, ok := resolveProviderCheckpointURL(config, opt.WorktreeRoot); ok {
-			return providerURL, nil
+		if providerURL, ok := resolveProviderCheckpointURL(ctx, config, opt.WorktreeRoot); ok {
+			return providerURL, true, nil
 		}
 		logFallback(ctx, "fetch", originURL, "derive checkpoint remote URL", err)
-		return originURL, nil
+		return originURL, false, nil
 	}
 
-	return checkpointURL, nil
+	return checkpointURL, true, nil
 }
 
 // PushURL returns the effective checkpoint push URL for the current repository.
@@ -223,7 +242,7 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 		// The checkpoint token is an HTTPS credential for the provider host;
 		// it can't ride through the entire:// helper (which does its own
 		// auth). Route to the provider over HTTPS instead of the mirror.
-		if providerURL, ok := resolveProviderCheckpointURL(config, ""); ok {
+		if providerURL, ok := resolveProviderCheckpointURL(ctx, config, ""); ok {
 			return providerURL, true, nil
 		}
 	}
@@ -235,7 +254,7 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 		// configured provider). Honor the configured checkpoint_remote by
 		// targeting the provider's canonical host over HTTPS rather than
 		// misrouting checkpoints to the origin remote.
-		if providerURL, ok := resolveProviderCheckpointURL(config, ""); ok {
+		if providerURL, ok := resolveProviderCheckpointURL(ctx, config, ""); ok {
 			return providerURL, true, nil
 		}
 		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
@@ -340,8 +359,8 @@ func deriveCheckpointURLFromInfo(info *Info, config *settings.CheckpointRemoteCo
 //
 // Returns ok=false when no transport can be determined (unknown provider with no
 // usable signal), in which case the caller falls back to the origin remote.
-func resolveProviderCheckpointURL(config *settings.CheckpointRemoteConfig, dir string) (string, bool) {
-	repo, err := openRepoAt(dir)
+func resolveProviderCheckpointURL(ctx context.Context, config *settings.CheckpointRemoteConfig, dir string) (string, bool) {
+	repo, err := openRepoAt(ctx, dir)
 	if err != nil {
 		repo = nil // Fall back to env/provider-only signals.
 	}
@@ -384,12 +403,20 @@ func pickProviderTransport(repo *git.Repository, config *settings.CheckpointRemo
 }
 
 // openRepoAt opens the git repository at dir (current directory when dir is
-// empty), walking up to the enclosing .git directory.
-func openRepoAt(dir string) (*git.Repository, error) {
+// empty). It routes through gitrepo, the single reftable-aware opener, so a
+// reftable repository is opened via the git-CLI storer rather than rejected by
+// go-git's extension check. gitrepo.OpenCurrent resolves the worktree root from
+// the current directory (the walk-up equivalent of the previous DetectDotGit
+// open) when no explicit root is given.
+func openRepoAt(ctx context.Context, dir string) (*git.Repository, error) {
 	if dir == "" {
-		dir = "."
+		repo, err := gitrepo.OpenCurrent(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("open git repository: %w", err)
+		}
+		return repo, nil
 	}
-	repo, err := git.PlainOpenWithOptions(dir, &git.PlainOpenOptions{DetectDotGit: true})
+	repo, err := gitrepo.OpenPath(dir)
 	if err != nil {
 		return nil, fmt.Errorf("open git repository: %w", err)
 	}

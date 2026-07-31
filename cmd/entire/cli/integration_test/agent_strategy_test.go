@@ -20,7 +20,7 @@ func TestAgentStrategyComposition(t *testing.T) {
 
 	env := NewFeatureBranchEnv(t)
 	// Get agent and strategy
-	ag, err := agent.Get("claude-code")
+	ag, err := agent.Get(agentClaudeCode)
 	if err != nil {
 		t.Fatalf("Get(claude-code) error = %v", err)
 	}
@@ -79,8 +79,12 @@ func TestAgentSessionIDTransformation(t *testing.T) {
 	})
 
 	// Simulate hooks
-	env.SimulateUserPromptSubmit(session.ID)
-	env.SimulateStop(session.ID, transcriptPath)
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit error = %v", err)
+	}
+	if err := env.SimulateStop(session.ID, transcriptPath); err != nil {
+		t.Fatalf("SimulateStop error = %v", err)
+	}
 
 	// Get rewind points and verify we can rewind
 	points := env.GetRewindPoints()
@@ -99,7 +103,10 @@ func TestAgentTranscriptRestoration(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
-	ag, _ := agent.Get("claude-code")
+	ag, err := agent.Get(agentClaudeCode)
+	if err != nil {
+		t.Fatalf("Get(claude-code) error = %v", err)
+	}
 
 	// Create first session
 	session1 := env.NewSession()
@@ -108,8 +115,12 @@ func TestAgentTranscriptRestoration(t *testing.T) {
 		{Path: "file1.go", Content: "package main\n// file1 v1"},
 	})
 
-	env.SimulateUserPromptSubmit(session1.ID)
-	env.SimulateStop(session1.ID, transcript1)
+	if err := env.SimulateUserPromptSubmit(session1.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit error = %v", err)
+	}
+	if err := env.SimulateStop(session1.ID, transcript1); err != nil {
+		t.Fatalf("SimulateStop error = %v", err)
+	}
 
 	// Get checkpoint after first prompt
 	points1 := env.GetRewindPoints()
@@ -128,8 +139,12 @@ func TestAgentTranscriptRestoration(t *testing.T) {
 		{Path: "file2.go", Content: "package main\n// file2"},
 	})
 
-	env.SimulateUserPromptSubmit(session1.ID)
-	env.SimulateStop(session1.ID, transcript2)
+	if err := env.SimulateUserPromptSubmit(session1.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit error = %v", err)
+	}
+	if err := env.SimulateStop(session1.ID, transcript2); err != nil {
+		t.Fatalf("SimulateStop error = %v", err)
+	}
 
 	// Verify we have 2 checkpoints
 	points2 := env.GetRewindPoints()
@@ -169,7 +184,10 @@ func TestAgentGetSessionDir(t *testing.T) {
 	env := NewTestEnv(t)
 	env.InitRepo()
 
-	ag, _ := agent.Get("claude-code")
+	ag, err := agent.Get(agentClaudeCode)
+	if err != nil {
+		t.Fatalf("Get(claude-code) error = %v", err)
+	}
 
 	// With test override
 	sessionDir, err := ag.GetSessionDir(env.RepoDir)
@@ -190,7 +208,10 @@ func TestAgentGetSessionDir(t *testing.T) {
 func TestAgentFormatResumeCommand(t *testing.T) {
 	t.Parallel()
 
-	ag, _ := agent.Get("claude-code")
+	ag, err := agent.Get(agentClaudeCode)
+	if err != nil {
+		t.Fatalf("Get(claude-code) error = %v", err)
+	}
 
 	cmd := ag.FormatResumeCommand("test-session-123")
 	expected := "claude -r test-session-123"
@@ -208,7 +229,7 @@ func TestSetupAgentFlag(t *testing.T) {
 	env.InitRepo()
 
 	// Run enable with --agent flag
-	output := env.RunCLI("enable", "--agent", "claude-code")
+	output := env.RunCLI("enable", "--agent", agentClaudeCode)
 	if strings.Contains(output, "error") || strings.Contains(output, "Error") {
 		t.Fatalf("enable --agent claude-code failed\nOutput: %s", output)
 	}

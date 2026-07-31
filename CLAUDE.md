@@ -464,6 +464,31 @@ Don't use `fmt.Print*` for operational messages (checkpoint saves, hook invocati
 
 We use github.com/go-git/go-git for most git operations, but with important exceptions:
 
+#### Opening Repositories - Always Use `gitrepo`
+
+**Never call `git.Open`, `git.PlainOpen`, or `git.PlainOpenWithOptions` directly.
+`cmd/entire/cli/gitrepo` is the single source of truth for opening a
+repository.** Use `gitrepo.OpenCurrent(ctx)` for the current worktree or
+`gitrepo.OpenPath(root)` for a specific worktree root. Both funnel through
+`openPathWithAlternates`, which is the only place that opens a `*git.Repository`.
+
+Routing every open through `gitrepo` guarantees two behaviours no ad-hoc
+`git.PlainOpen` call gets right:
+
+- **Object alternates** are rewritten to absolute paths so shared clones resolve
+  their objects (`PlainOpen` cannot follow relative/absolute alternates).
+- **Reftable repositories** are detected and opened through the git-CLI-backed
+  reference storer (`reftableStorer`). A direct `git.PlainOpen` on a reftable
+  repo fails outright with `unknown extension: refstorage`, because go-git's
+  filesystem storer cannot read the reftable backend. The reftable storer also
+  re-approves the `objectformat` (sha1/sha256) and `worktreeconfig` extensions
+  that go-git verifies at open time.
+
+If a code path opens a repo with a bare go-git call, it silently breaks on
+reftable and sha256 repositories. Reviewers should flag any new
+`git.PlainOpen*`/`git.Open` outside `gitrepo`. Key files: `gitrepo/repository.go`
+(open entry points) and `gitrepo/reftable.go` (`reftableStorer`).
+
 #### go-git v5 Bugs - Use CLI Instead
 
 **Do NOT use go-git v5 for `checkout` or `reset --hard` operations.**

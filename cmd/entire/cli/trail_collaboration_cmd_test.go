@@ -1,9 +1,42 @@
 package cli
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/api"
 )
+
+func TestPrintTrailThreadDetail_ShowsMessageIDs(t *testing.T) {
+	t.Parallel()
+	// edit/delete take <thread-id> <message-id>; the text output must surface
+	// the message and reply IDs so they are discoverable without --json.
+	out := api.TrailThreadDetailResponse{
+		Thread: api.TrailThreadSummary{ID: "th1", Title: "Design"},
+		Messages: []api.TrailThreadMessage{{
+			ID:     "msg-abc",
+			Author: "alice",
+			Body:   "top message",
+			Replies: []api.TrailThreadReply{{
+				ID:     "rep-xyz",
+				Author: "bob",
+				Body:   "a reply",
+			}},
+		}},
+	}
+	var buf bytes.Buffer
+	if err := printTrailThreadDetail(&buf, out, false); err != nil {
+		t.Fatalf("printTrailThreadDetail: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "msg-abc") {
+		t.Errorf("output missing message ID %q:\n%s", "msg-abc", got)
+	}
+	if !strings.Contains(got, "rep-xyz") {
+		t.Errorf("output missing reply ID %q:\n%s", "rep-xyz", got)
+	}
+}
 
 func TestTrailThreadPathBuilders(t *testing.T) {
 	t.Parallel()

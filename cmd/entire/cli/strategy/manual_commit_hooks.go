@@ -21,6 +21,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/gitops"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
@@ -1070,7 +1071,12 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	repoDir string,
 ) error {
 	logCtx := logging.WithComponent(ctx, "attribution")
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	// RefFetcher: the attribution backfill's absence probe fetches a ref that
+	// exists remotely but not locally. Bounded budget + the store's failure
+	// memo keep a dead network from stalling the post-commit hook.
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		RefFetcher: remote.HookCheckpointRefFetcher(),
+	})
 	if err != nil {
 		return fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -1486,7 +1492,12 @@ func (s *ManualCommitStrategy) postCommitUpdateBaseCommitOnly(ctx context.Contex
 		return // Silent failure — hooks must be resilient
 	}
 
-	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
+	// Exact matches only: this path rewrites BaseCommit, which must track the
+	// HEAD of the session's own worktree. A trailer-less commit here says
+	// nothing about HEAD movement in a sibling worktree, and rewriting a
+	// fallback-matched session's base would orphan its shadow branch
+	// (shadow branches are keyed by BaseCommit + WorktreeID).
+	sessions, err := s.findExactSessionsForWorktree(ctx, worktreePath)
 	if err != nil || len(sessions) == 0 {
 		return
 	}
@@ -2904,7 +2915,13 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// Post-commit emits regex-only blobs; the writer joins + redacts
 	// via checkpoint.redactedJoinedPrompts. OPF runs later, once per
 	// push, in the pre-push rewrite path.
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	// RefFetcher: the transcript finalize targets existing checkpoints whose
+	// refs may live only on the remote (resumed/adopted multi-machine
+	// sessions). Bounded budget + the store's failure memo keep a dead
+	// network from stalling the stop hook N times.
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		RefFetcher: remote.HookCheckpointRefFetcher(),
+	})
 	if err != nil {
 		logging.Warn(logCtx, "finalize: failed to open checkpoint store",
 			slog.String("error", err.Error()),

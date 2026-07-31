@@ -60,6 +60,13 @@ const metadataDenyRule = "Read(./.entire/metadata/**)"
 // repository root when it runs hooks.
 const localDevHookCmdPrefix = "${CLAUDE_PROJECT_DIR}/scripts/entire-dev "
 
+// localDevSessionEndTimeoutSecs gives the local-dev SessionEnd hook an explicit
+// timeout (seconds) so Claude Code waits for it on exit instead of cancelling it
+// after its short default exit-grace, which the build-from-source dev launcher
+// (scripts/entire-dev) can exceed. Only set in local-dev mode; production leaves
+// Claude Code's default in place.
+const localDevSessionEndTimeoutSecs = 60
+
 // entireHookPrefixes are command prefixes that identify Entire hooks. The
 // "go run" prefix is retained so hooks installed by older versions are still
 // recognized for removal/upgrade.
@@ -168,33 +175,41 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 
 	count := 0
 
+	// The local-dev SessionEnd hook gets an explicit timeout so Claude Code
+	// waits for it on exit; every other hook (and all production hooks) keeps
+	// Claude Code's default.
+	sessionEndTimeoutSecs := 0
+	if localDev {
+		sessionEndTimeoutSecs = localDevSessionEndTimeoutSecs
+	}
+
 	// Add hooks if they don't exist
 	if !hookCommandExists(sessionStart, sessionStartCmd) {
-		sessionStart = addHookToMatcher(sessionStart, "", sessionStartCmd)
+		sessionStart = addHookToMatcher(sessionStart, "", sessionStartCmd, 0)
 		count++
 	}
 	if !hookCommandExists(sessionEnd, sessionEndCmd) {
-		sessionEnd = addHookToMatcher(sessionEnd, "", sessionEndCmd)
+		sessionEnd = addHookToMatcher(sessionEnd, "", sessionEndCmd, sessionEndTimeoutSecs)
 		count++
 	}
 	if !hookCommandExists(stop, stopCmd) {
-		stop = addHookToMatcher(stop, "", stopCmd)
+		stop = addHookToMatcher(stop, "", stopCmd, 0)
 		count++
 	}
 	if !hookCommandExists(userPromptSubmit, userPromptSubmitCmd) {
-		userPromptSubmit = addHookToMatcher(userPromptSubmit, "", userPromptSubmitCmd)
+		userPromptSubmit = addHookToMatcher(userPromptSubmit, "", userPromptSubmitCmd, 0)
 		count++
 	}
 	if !hookCommandExistsWithMatcher(preToolUse, subagentToolMatcher, preTaskCmd) {
-		preToolUse = addHookToMatcher(preToolUse, subagentToolMatcher, preTaskCmd)
+		preToolUse = addHookToMatcher(preToolUse, subagentToolMatcher, preTaskCmd, 0)
 		count++
 	}
 	if !hookCommandExistsWithMatcher(postToolUse, subagentToolMatcher, postTaskCmd) {
-		postToolUse = addHookToMatcher(postToolUse, subagentToolMatcher, postTaskCmd)
+		postToolUse = addHookToMatcher(postToolUse, subagentToolMatcher, postTaskCmd, 0)
 		count++
 	}
 	if !hookCommandExistsWithMatcher(postToolUse, taskToolMatcher, postTodoCmd) {
-		postToolUse = addHookToMatcher(postToolUse, taskToolMatcher, postTodoCmd)
+		postToolUse = addHookToMatcher(postToolUse, taskToolMatcher, postTodoCmd, 0)
 		count++
 	}
 
@@ -545,10 +560,11 @@ func hookCommandExistsWithMatcher(matchers []ClaudeHookMatcher, matcherName, com
 	return false
 }
 
-func addHookToMatcher(matchers []ClaudeHookMatcher, matcherName, command string) []ClaudeHookMatcher {
+func addHookToMatcher(matchers []ClaudeHookMatcher, matcherName, command string, timeoutSecs int) []ClaudeHookMatcher {
 	entry := ClaudeHookEntry{
 		Type:    "command",
 		Command: command,
+		Timeout: timeoutSecs,
 	}
 
 	// If no matcher name, add to a matcher with empty string

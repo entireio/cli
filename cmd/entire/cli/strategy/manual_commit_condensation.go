@@ -623,7 +623,7 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 
 	generator := buildSummaryGenerator(summarizeCtx)
 	// scopedTranscript is sliced from redactedTranscript, which was redacted earlier in CondenseSession.
-	summary, err := summarize.GenerateFromTranscript(summarizeCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, state.AgentType, generator)
+	summary, err := summarize.GenerateFromTranscript(summarizeCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, state.AgentType, generator, nil) // no progress in the auto-summary hot path
 	if err != nil {
 		logging.Warn(summarizeCtx, "summary generation failed",
 			slog.String("session_id", state.SessionID),

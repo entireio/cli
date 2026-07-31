@@ -467,6 +467,66 @@ func TestUninstallHooks_RemovesLocalDevHooks(t *testing.T) {
 	}
 }
 
+// TestInstallHooks_LocalDevSessionEndTimeout verifies the local-dev SessionEnd
+// hook carries an explicit timeout so Claude Code waits for it on exit instead
+// of cancelling it after its short default exit-grace. The timeout is scoped to
+// local-dev SessionEnd only: production and other local-dev hooks stay untimed.
+func TestInstallHooks_LocalDevSessionEndTimeout(t *testing.T) {
+	t.Run("local-dev SessionEnd gets the timeout", func(t *testing.T) {
+		tempDir := t.TempDir()
+		t.Chdir(tempDir)
+
+		agent := &ClaudeCodeAgent{}
+		if _, err := agent.InstallHooks(context.Background(), true, false); err != nil {
+			t.Fatalf("InstallHooks(localDev=true) error = %v", err)
+		}
+
+		settings := readClaudeSettings(t, tempDir)
+		if len(settings.Hooks.SessionEnd) == 0 || len(settings.Hooks.SessionEnd[0].Hooks) == 0 {
+			t.Fatal("expected a SessionEnd hook to be installed")
+		}
+		if got := settings.Hooks.SessionEnd[0].Hooks[0].Timeout; got != localDevSessionEndTimeoutSecs {
+			t.Errorf("local-dev SessionEnd timeout = %d, want %d", got, localDevSessionEndTimeoutSecs)
+		}
+
+		// Scoping: other local-dev hooks must not inherit the timeout.
+		if len(settings.Hooks.Stop) == 0 || len(settings.Hooks.Stop[0].Hooks) == 0 {
+			t.Fatal("expected a Stop hook to be installed")
+		}
+		if got := settings.Hooks.Stop[0].Hooks[0].Timeout; got != 0 {
+			t.Errorf("local-dev Stop timeout = %d, want 0 (timeout is SessionEnd-only)", got)
+		}
+	})
+
+	t.Run("production SessionEnd stays untimed", func(t *testing.T) {
+		tempDir := t.TempDir()
+		t.Chdir(tempDir)
+
+		agent := &ClaudeCodeAgent{}
+		if _, err := agent.InstallHooks(context.Background(), false, false); err != nil {
+			t.Fatalf("InstallHooks(localDev=false) error = %v", err)
+		}
+
+		settings := readClaudeSettings(t, tempDir)
+		if len(settings.Hooks.SessionEnd) == 0 || len(settings.Hooks.SessionEnd[0].Hooks) == 0 {
+			t.Fatal("expected a SessionEnd hook to be installed")
+		}
+		if got := settings.Hooks.SessionEnd[0].Hooks[0].Timeout; got != 0 {
+			t.Errorf("production SessionEnd timeout = %d, want 0 (dev-only)", got)
+		}
+
+		// Stronger than the parsed check: prove the field is omitted entirely
+		// (omitempty), not written as an explicit "timeout": 0.
+		raw, err := os.ReadFile(filepath.Join(tempDir, ".claude", "settings.json"))
+		if err != nil {
+			t.Fatalf("failed to read settings.json: %v", err)
+		}
+		if strings.Contains(string(raw), "timeout") {
+			t.Errorf("production settings.json must not contain any timeout field, got:\n%s", raw)
+		}
+	})
+}
+
 // readClaudeSettings reads and parses the Claude Code settings file
 func readClaudeSettings(t *testing.T, tempDir string) ClaudeSettings {
 	t.Helper()

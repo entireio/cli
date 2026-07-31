@@ -224,8 +224,10 @@ func TestShouldSkipJSONLField(t *testing.T) {
 		{"ids", true},
 		{"session_ids", true},
 		{"userIds", true},
-		// Exact match "signature" should be skipped.
+		// Signature fields should be skipped (any key ending in "signature").
 		{"signature", true},
+		{"thinkingSignature", true},
+		{"thinking_signature", true},
 		// Path-related fields should be skipped.
 		{"filePath", true},
 		{"file_path", true},
@@ -245,7 +247,7 @@ func TestShouldSkipJSONLField(t *testing.T) {
 		{"args", false},
 		{"video", false},      // ends in "o", not "id"
 		{"identify", false},   // ends in "ify", not "id"
-		{"signatures", false}, // not exact match "signature"
+		{"signatures", false}, // does not end in "signature"
 		{"signal_data", false},
 		{"consideration", false}, // contains "id" but doesn't end with it
 	}
@@ -289,6 +291,22 @@ func TestJSONLContent_SkippedFieldValueCollision(t *testing.T) {
 	}
 	if !strings.Contains(result, `"content":"REDACTED"`) {
 		t.Fatalf("expected content field to be redacted, got: %s", result)
+	}
+}
+
+func TestJSONLContent_PreservesThinkingSignature(t *testing.T) {
+	t.Parallel()
+	// Oh My Pi stores extended-thinking signatures under "thinkingSignature".
+	// Their base64 value is high-entropy; redacting it corrupts the signature and
+	// breaks replay with "Invalid `signature` in `thinking` block".
+	input := `{"type":"thinking","thinking":"plan","thinkingSignature":"` + highEntropySecret + `"}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result, `"thinkingSignature":"`+highEntropySecret+`"`) {
+		t.Fatalf("expected thinkingSignature to be preserved verbatim, got: %s", result)
 	}
 }
 

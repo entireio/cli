@@ -79,7 +79,7 @@ func TestFactoryCommittedCheckpointExcludesPreExistingUntrackedFiles(t *testing.
 	})
 }
 
-func waitForTaskRewindPoint(t *testing.T, dir string, timeout time.Duration) entire.RewindPoint {
+func waitForTaskRewindPoint(t *testing.T, dir string, timeout time.Duration) {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
@@ -92,11 +92,10 @@ func waitForTaskRewindPoint(t *testing.T, dir string, timeout time.Duration) ent
 			if point.ToolUseID == "" {
 				continue
 			}
-			return point
+			return
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 
 	t.Fatalf("expected task rewind point within %s", timeout)
-	return entire.RewindPoint{}
 }

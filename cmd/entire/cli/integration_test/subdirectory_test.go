@@ -40,7 +40,7 @@ func TestSubdirectory_EntireDirCreatedAtRepoRoot(t *testing.T) {
 		t.Fatalf("failed to marshal input: %v", err)
 	}
 
-	cmd := exec.Command(getTestBinary(), "hooks", "claude-code", "user-prompt-submit")
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", agentClaudeCode, "user-prompt-submit")
 	cmd.Dir = subdirPath // Run from subdirectory!
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = append(testutil.GitIsolatedEnv(),
@@ -105,9 +105,12 @@ func TestSubdirectory_SaveStepFromSubdir(t *testing.T) {
 		"session_id":      session.ID,
 		"transcript_path": "",
 	}
-	inputJSON, _ := json.Marshal(input)
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("failed to marshal input: %v", err)
+	}
 
-	cmd := exec.Command(getTestBinary(), "hooks", "claude-code", "user-prompt-submit")
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", agentClaudeCode, "user-prompt-submit")
 	cmd.Dir = subdirPath // Run from subdirectory
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = append(testutil.GitIsolatedEnv(),
@@ -122,9 +125,12 @@ func TestSubdirectory_SaveStepFromSubdir(t *testing.T) {
 		"session_id":      session.ID,
 		"transcript_path": session.TranscriptPath,
 	}
-	stopInputJSON, _ := json.Marshal(stopInput)
+	stopInputJSON, err := json.Marshal(stopInput)
+	if err != nil {
+		t.Fatalf("failed to marshal stop input: %v", err)
+	}
 
-	stopCmd := exec.Command(getTestBinary(), "hooks", "claude-code", "stop")
+	stopCmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", agentClaudeCode, "stop")
 	stopCmd.Dir = subdirPath // Run from subdirectory
 	stopCmd.Stdin = bytes.NewReader(stopInputJSON)
 	stopCmd.Env = append(testutil.GitIsolatedEnv(),

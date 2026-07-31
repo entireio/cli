@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	ulid "github.com/oklog/ulid/v2"
+
 	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
@@ -424,7 +426,7 @@ func ParseSearchInput(raw string) ParsedInput {
 		case strings.HasPrefix(tok, "branch:"):
 			p.Branch = strings.Trim(tok[len("branch:"):], "\"")
 		case strings.HasPrefix(tok, "repo:"):
-			p.Repos = appendUnique(p.Repos, parseListFilter(strings.TrimPrefix(tok, "repo:"))...)
+			p.Repos = AppendUnique(p.Repos, parseListFilter(strings.TrimPrefix(tok, "repo:"))...)
 		default:
 			queryParts = append(queryParts, tok)
 		}
@@ -490,32 +492,57 @@ func parseListFilter(raw string) []string {
 	return values
 }
 
-// ValidateRepoFilters ensures repo filters match backend semantics.
+// ValidateRepoFilters ensures each repo filter matches backend semantics.
+// Multiple explicit repo filters are accepted: the v4 query-serve path resolves
+// each and fans out across the cells hosting them, mirroring code search.
 func ValidateRepoFilters(repos []string) error {
-	if len(repos) > 1 {
-		return errors.New("only one explicit repo filter is currently supported")
-	}
-	if len(repos) == 1 && !isValidRepoFilter(repos[0]) {
-		return fmt.Errorf(
-			"invalid repo filter %q: expected owner/name or *; if you meant all repos, quote the asterisk: --repo '*'",
-			repos[0],
-		)
+	for _, repo := range repos {
+		if !isValidRepoFilter(repo) {
+			return fmt.Errorf(
+				"invalid repo filter %q: expected owner/name, gh/owner/repo, a repo ULID, or *; if you meant all repos, quote the asterisk: --repo '*'",
+				repo,
+			)
+		}
 	}
 	return nil
 }
 
+// isValidRepoFilter reports whether repo is a filter shape the search backends
+// can resolve. It accepts every form the CLI help advertises and that the
+// resolvers handle downstream — a bare owner/name slug, a prefixed path
+// (gh/owner/repo, et/proj/repo, git/owner/repo), a raw repo ULID, or the
+// all-repos wildcard — so validation never rejects a filter the semantic v4
+// lookup (lookupFilter) or code-search resolver (resolveRepoFilters) would
+// otherwise resolve. It still rejects obvious mistakes like a bare filename.
 func isValidRepoFilter(repo string) bool {
 	if repo == AllReposFilter {
 		return true
 	}
-	if strings.Contains(repo, " ") {
+	if repo == "" || strings.Contains(repo, " ") {
 		return false
 	}
+	// Raw repo ULID: the v4 route keys on ULIDs and lookupFilter matches a
+	// prefix-less token against repo IDs.
+	if _, err := ulid.Parse(repo); err == nil {
+		return true
+	}
+	// A slug or prefixed path: owner/name or <prefix>/owner/repo. Every
+	// path segment must be non-empty.
 	parts := strings.Split(repo, "/")
-	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
+	if len(parts) < 2 || len(parts) > 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+	}
+	return true
 }
 
-func appendUnique(existing []string, values ...string) []string {
+// AppendUnique appends values to existing, skipping any already present, and
+// returns the result. Order is preserved (first occurrence wins).
+func AppendUnique(existing []string, values ...string) []string {
 	if len(values) == 0 {
 		return existing
 	}

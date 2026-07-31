@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v6"
@@ -462,37 +463,89 @@ func FetchMetadataFromCheckpointRemote(ctx context.Context) error {
 }
 
 // resolveCheckpointFetchTarget returns the fetch target for checkpoint data.
-// It prefers the effective URL resolved by checkpoint/remote.FetchURL, which is
-// the source of truth for checkpoint fetch location. If URL resolution fails, it
-// falls back to the origin remote name so callers can still attempt a fetch.
+// Thin alias for remote.CheckpointFetchTarget (the single source of truth).
 func resolveCheckpointFetchTarget(ctx context.Context) string {
-	url, err := remote.FetchURL(ctx)
-	if err == nil && url != "" {
-		return url
-	}
-	return "origin"
+	return remote.CheckpointFetchTarget(ctx)
 }
 
-// FetchCheckpointRef fetches a single per-checkpoint ref (refs/entire/checkpoints/
-// <shard>/<id>) from the checkpoint remote into the local ref of the same name,
-// so the git-refs store can resolve a checkpoint written on another machine.
-// Best-effort: the caller treats a fetch failure as "checkpoint not found".
+// FetchCheckpointRef fetches a single per-checkpoint ref from the checkpoint
+// remote. Thin alias for remote.FetchCheckpointRef, kept so existing cli-side
+// call sites and OpenOptions wiring stay unchanged; see that function for the
+// absence-vs-failure contract (remote-lacks-ref wraps
+// plumbing.ErrReferenceNotFound; transport failures surface as-is).
 func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	return remote.FetchCheckpointRef(ctx, ref) //nolint:wrapcheck // thin alias; the remote error carries full context
+}
+
+// checkpointRefListTimeout bounds the names-only ls-remote used by user-facing
+// `entire checkpoint list` / branch explain. Kept short (not a full fetch
+// budget): discovery is best-effort and additive — on timeout or unreachable
+// remote the store falls back to local refs rather than stalling a previously
+// instant command for tens of seconds.
+const checkpointRefListTimeout = 5 * time.Second
+
+// ListCheckpointRefsOnRemote enumerates the per-checkpoint refs
+// (refs/entire/checkpoints/<shard>/<id>) present on the checkpoint remote, names
+// only, via a single `git ls-remote refs/entire/checkpoints/*` — no object
+// transfer. The git-refs store's List uses it to discover checkpoints written
+// on another machine that have no local ref yet, then hydrates each lazily on
+// read through FetchCheckpointRef.
+//
+// Scope (deliberately stricter than the on-demand read fetch):
+//   - no checkpoint_remote configured → (nil, nil), List stays local-only
+//     (unlike FetchCheckpointRef / remote.FetchURL, which fall back to origin);
+//   - with checkpoint_remote configured → queries the resolved checkpoint URL
+//     via remote.FetchURL (which can still fall through to origin in edge cases
+//     such as settings-load failure or an underivable checkpoint URL).
+//
+// Resolution and ls-remote are pinned to the worktree root (not process cwd) so
+// repo-local git config (url.*.insteadOf, credential helpers, remotes) applies.
+func ListCheckpointRefsOnRemote(ctx context.Context) ([]plumbing.ReferenceName, error) {
+	if !remote.Configured(ctx) {
+		return nil, nil
+	}
+
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve worktree root: %w", err)
+	}
+
+	url, err := remote.FetchURL(ctx, remote.FetchURLOptions{WorktreeRoot: worktreeRoot})
+	if err != nil {
+		return nil, fmt.Errorf("resolve checkpoint remote URL: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, checkpointRefListTimeout)
 	defer cancel()
 
-	fetchTarget := resolveCheckpointFetchTarget(ctx)
-	refSpec := "+" + ref.String() + ":" + ref.String()
-	if _, err := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refSpec},
-		NoTags:   true,
-	}); err != nil {
-		// Redact: fetchTarget can be a remote URL with embedded credentials
-		// (CI origin URLs), and this error is logged and shown to users.
-		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, remote.RedactURL(fetchTarget), err)
+	output, err := remote.LsRemoteInDir(ctx, worktreeRoot, url, checkpoint.CheckpointRefPrefix+"*")
+	if err != nil {
+		return nil, fmt.Errorf("ls-remote checkpoint refs from %s: %w", remote.RedactURL(url), err)
 	}
-	return nil
+	return parseCheckpointRefNames(output), nil
+}
+
+// parseCheckpointRefNames extracts the checkpoint ref names from `git ls-remote`
+// output. Each line is "<hash>\t<refname>"; only refs under CheckpointRefPrefix
+// are kept (the store re-validates each via ParseRef). Checkpoint refs point at
+// commits so no peeled (`^{}`) lines appear for them; refs/tags peeled lines
+// lack the checkpoint prefix and drop out here; any anomalous
+// refs/entire/checkpoints/...^{} name is rejected by ParseRef downstream (the
+// "{}" shard never matches ShardFor).
+func parseCheckpointRefNames(output []byte) []plumbing.ReferenceName {
+	var names []plumbing.ReferenceName
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		name := fields[1]
+		if !strings.HasPrefix(name, checkpoint.CheckpointRefPrefix) {
+			continue
+		}
+		names = append(names, plumbing.ReferenceName(name))
+	}
+	return names
 }
 
 // FetchBlobsByHash fetches specific blob objects from the remote by their SHA-1 hashes.
