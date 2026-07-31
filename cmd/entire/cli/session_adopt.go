@@ -339,9 +339,19 @@ func clearInvalidAdoptTranscript(ctx context.Context, state *session.State, sour
 	}
 }
 
-// writeAdoptUserWarning surfaces an intentional hook-path warning. prepare-commit-msg
-// redirects stderr to /dev/null (so logging fallbacks stay quiet); prefer /dev/tty
-// like askConfirmTTY. Falls back to stderr for CLI adopt / tests.
+// adoptWarningWriter is the fallback sink for writeAdoptUserWarning when no
+// /dev/tty is available. It exists so tests can capture the warning without
+// swapping the process-global os.Stderr.
+var adoptWarningWriter io.Writer = os.Stderr
+
+// writeAdoptUserWarning best-effort surfaces a transcript-continuity warning.
+// It is reached only via clearInvalidAdoptTranscript under SkipTranscriptValidation
+// — i.e. cross-common-dir auto-adopt, never manual `entire session adopt`. That
+// path runs inside prepare-commit-msg, whose stderr the git hook swallows
+// (2>/dev/null), so it tries /dev/tty first. But an agent committer has no
+// controlling terminal, and Windows has no /dev/tty, so the write is frequently
+// a no-op: the durable record is the logging.Warn that clearInvalidAdoptTranscript
+// writes to .entire/logs.
 func writeAdoptUserWarning(msg string) {
 	if !interactive.UnderTest() {
 		if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
@@ -350,7 +360,7 @@ func writeAdoptUserWarning(msg string) {
 			return
 		}
 	}
-	fmt.Fprint(os.Stderr, msg)
+	fmt.Fprint(adoptWarningWriter, msg)
 }
 
 func stateStoreForWorktree(ctx context.Context, worktreePath string) (*session.StateStore, string, string, error) {

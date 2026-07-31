@@ -1,8 +1,8 @@
 package cli
 
 import (
+	"bytes"
 	"context"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -644,18 +644,12 @@ func TestCandidateFromLoaded_RejectsIdle(t *testing.T) {
 }
 
 func TestClearInvalidAdoptTranscript_WarnsAndClears(t *testing.T) {
-	// Redirects os.Stderr; not parallel-safe.
-	oldStderr := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = w
-	t.Cleanup(func() {
-		os.Stderr = oldStderr
-		_ = w.Close()
-		_ = r.Close()
-	})
+	// Overrides the package-level adoptWarningWriter rather than swapping the
+	// process-global os.Stderr; not parallel-safe (shared package var).
+	var buf bytes.Buffer
+	oldWriter := adoptWarningWriter
+	adoptWarningWriter = &buf
+	t.Cleanup(func() { adoptWarningWriter = oldWriter })
 
 	state := &session.State{
 		SessionID:      "test-clear-invalid-transcript",
@@ -663,20 +657,12 @@ func TestClearInvalidAdoptTranscript_WarnsAndClears(t *testing.T) {
 		TranscriptPath: "/tmp/not-an-agent-transcript.jsonl",
 	}
 	clearInvalidAdoptTranscript(context.Background(), state, t.TempDir())
-	_ = w.Close()
-	os.Stderr = oldStderr
-
-	var buf strings.Builder
-	if _, err := io.Copy(&buf, r); err != nil {
-		t.Fatal(err)
-	}
-	_ = r.Close()
 
 	if state.TranscriptPath != "" {
 		t.Fatalf("TranscriptPath = %q, want cleared", state.TranscriptPath)
 	}
 	if !strings.Contains(buf.String(), "lost its transcript pointer") {
-		t.Fatalf("stderr = %q, want transcript-pointer warning", buf.String())
+		t.Fatalf("warning = %q, want transcript-pointer warning", buf.String())
 	}
 }
 

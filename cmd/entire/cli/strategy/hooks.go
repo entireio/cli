@@ -176,8 +176,10 @@ func isGitHookInstalledInHooksDir(hooksDir string) bool {
 // buildHookSpecs returns the hook specifications for all managed hooks.
 func buildHookSpecs(cmdPrefix string) []hookSpec {
 	// Swallow stderr: logging may fall back to os.Stderr when .entire/logs is
-	// unwritable. Intentional user warnings from this hook write to /dev/tty
-	// (see writeAdoptUserWarning) so they still surface.
+	// unwritable. The auto-adopt transcript-loss warning tries /dev/tty (see
+	// writeAdoptUserWarning), but that is best-effort — an agent committer has
+	// no controlling terminal and Windows has no /dev/tty, so the durable
+	// record is the logging.Warn written to .entire/logs.
 	prepareCommitMsgCmd := gitHookCommand(cmdPrefix, `prepare-commit-msg "$1" "$2" 2>/dev/null || true`, false)
 	commitMsgCmd := gitHookCommand(cmdPrefix, `commit-msg "$1" || true`, true)
 	postCommitCmd := gitHookCommand(cmdPrefix, `post-commit 2>/dev/null || true`, false)
