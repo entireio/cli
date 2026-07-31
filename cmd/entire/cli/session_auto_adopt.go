@@ -215,10 +215,17 @@ func unionAutoAdoptCandidates(sets ...[]autoAdoptCandidate) []autoAdoptCandidate
 func hasLocalActiveSession(ctx context.Context, store *session.StateStore) bool {
 	states, err := store.List(ctx)
 	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "session"),
+			"auto-adopt: local session list failed; failing closed",
+			slog.String("error", err.Error()),
+		)
 		return true // fail closed: do not steal when local store is unreadable
 	}
 	for _, state := range states {
-		if isAdoptableSourceSession(state) {
+		// Bound by the same recency window as the candidate guards. Without it a
+		// single months-old Idle state file would count as a local session and
+		// permanently disable cross-common-dir auto-adopt for the whole repo.
+		if isRecentAdoptCandidate(state) {
 			return true
 		}
 	}
