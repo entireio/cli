@@ -25,7 +25,7 @@ func TestEncodeTrailShowJSON(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := encodeTrailShowJSON(&out, found, "https://app.entire.io/t/42", "Long form description with <code> & links")
+	err := encodeTrailShowJSON(&out, found, "https://app.entire.io/t/42", "Long form description with <code> & links", true)
 	if err != nil {
 		t.Fatalf("encodeTrailShowJSON() error = %v", err)
 	}
@@ -41,16 +41,41 @@ func TestEncodeTrailShowJSON(t *testing.T) {
 		t.Fatalf("output is not valid JSON: %v\n%s", unmarshalErr, out.String())
 	}
 	for key, want := range map[string]any{
-		"number": float64(42),
-		"branch": "trail-resume",
-		"title":  "Improve trail resume",
-		"body":   "Long form description with <code> & links",
-		"url":    "https://app.entire.io/t/42",
-		"status": "open",
+		"number":             float64(42),
+		"branch":             "trail-resume",
+		"title":              "Improve trail resume",
+		"body":               "Long form description with <code> & links",
+		"url":                "https://app.entire.io/t/42",
+		"status":             "open",
+		"description_loaded": true,
 	} {
 		if payload[key] != want {
 			t.Errorf("payload[%q] = %v, want %v", key, payload[key], want)
 		}
+	}
+}
+
+// TestEncodeTrailShowJSONMarksUnloadedDescription pins the failed-fetch
+// distinction: an empty body with description_loaded=false means the
+// description could not be fetched, not that the trail has none — mirroring
+// the text path's trailDescriptionForDisplay behavior.
+func TestEncodeTrailShowJSONMarksUnloadedDescription(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	err := encodeTrailShowJSON(&out, api.TrailResource{Number: 7, Branch: "feat"}, "", "", false)
+	if err != nil {
+		t.Fatalf("encodeTrailShowJSON() error = %v", err)
+	}
+	var payload map[string]any
+	if unmarshalErr := json.Unmarshal(out.Bytes(), &payload); unmarshalErr != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", unmarshalErr, out.String())
+	}
+	if payload["description_loaded"] != false {
+		t.Errorf("payload[description_loaded] = %v, want false", payload["description_loaded"])
+	}
+	if payload["body"] != "" {
+		t.Errorf("payload[body] = %v, want empty", payload["body"])
 	}
 }
 

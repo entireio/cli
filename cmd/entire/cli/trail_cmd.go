@@ -220,7 +220,7 @@ func runTrailShow(ctx context.Context, w, errW io.Writer, insecureHTTP bool, sel
 			}
 		}
 		if jsonOut {
-			return encodeTrailShowJSON(w, *found, webURL, bodyText)
+			return encodeTrailShowJSON(w, *found, webURL, bodyText, descriptionLoaded)
 		}
 		printTrailDetails(w, m, webURL, trailDescriptionForDisplay(bodyText, descriptionLoaded))
 		return nil
@@ -229,16 +229,23 @@ func runTrailShow(ctx context.Context, w, errW io.Writer, insecureHTTP bool, sel
 
 // encodeTrailShowJSON emits the resolved trail as JSON, with the body carrying
 // the resolved description text and the URL carrying the browser link the
-// human output surfaces.
-func encodeTrailShowJSON(w io.Writer, found api.TrailResource, webURL, bodyText string) error {
+// human output surfaces. description_loaded distinguishes a genuinely empty
+// description (true, body "") from a failed description fetch (false) —
+// the same distinction the text path draws via trailDescriptionForDisplay.
+func encodeTrailShowJSON(w io.Writer, found api.TrailResource, webURL, bodyText string, descriptionLoaded bool) error {
 	found.Body = bodyText
 	if strings.TrimSpace(webURL) != "" {
 		found.URL = webURL
 	}
+	payload := struct {
+		api.TrailResource
+
+		DescriptionLoaded bool `json:"description_loaded"`
+	}{TrailResource: found, DescriptionLoaded: descriptionLoaded}
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(found); err != nil {
+	if err := enc.Encode(payload); err != nil {
 		return fmt.Errorf("encode trail JSON: %w", err)
 	}
 	return nil
