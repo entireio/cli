@@ -135,8 +135,20 @@ func statusLoggedIn() bool {
 	if strings.TrimSpace(os.Getenv(auth.EnvTokenVar)) != "" {
 		return true
 	}
-	_, err := auth.ResolveControlPlaneTarget()
-	return err == nil
+	// An active context in contexts.json is enough to know a login exists.
+	// auth.Contexts reads only that file — no keychain, no token-manager
+	// plumbing, no prompt — unlike ResolveControlPlaneTarget, which would build
+	// a keychain-backed refreshing token source this boolean does not need.
+	ctxs, current, err := auth.Contexts()
+	if err != nil || strings.TrimSpace(current) == "" {
+		return false
+	}
+	for _, c := range ctxs {
+		if c.Name == current && c.CoreURL != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveMirrorStatus enriches a locally-detected mirror clone with its live
