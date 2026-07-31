@@ -230,42 +230,57 @@ func runTrailResume(cmd *cobra.Command, opts trailResumeOptions) error {
 			return err
 		}
 
-		sessions, sessionsSkipped, sessionErr := resolveTrailResumeSessionContexts(ctx, branch)
-		sessions, sessionsSkipped, sessionsUnavailable := knownTrailResumeSessionsForContext(sessions, sessionsSkipped, sessionErr)
-		if sessionsUnavailable != "" {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load trail checkpoint sessions: %s\n", sessionsUnavailable)
-		}
-
-		findings, findingsErr := loadTrailResumeFindingsContext(ctx, client, found.ID)
-		if findingsErr != nil {
-			findings.Unavailable = findingsErr.Error()
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load trail findings: %v\n", findingsErr)
-		}
-
-		resumeCtx := buildTrailResumeContextForRepoWithSkipped(*found, sessions, sessionsUnavailable, sessionsSkipped, findings, owner+"/"+repo)
-		if opts.JSON {
-			return encodeTrailResumeContextJSON(cmd.OutOrStdout(), resumeCtx)
-		}
-
-		printTrailResumeContext(cmd.OutOrStdout(), resumeCtx)
+		// Inspection mode keeps the full context dump (sessions, findings,
+		// commands). The act path below skips those fetches entirely: findings
+		// are `trail finding`'s job, and the pre-restore checkpoint-session
+		// reads are only needed where they are consumed — the interactive
+		// picker and --session resolution.
 		if opts.NoResume {
+			sessions, sessionsSkipped, sessionErr := resolveTrailResumeSessionContexts(ctx, branch)
+			sessions, sessionsSkipped, sessionsUnavailable := knownTrailResumeSessionsForContext(sessions, sessionsSkipped, sessionErr)
+			if sessionsUnavailable != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load trail checkpoint sessions: %s\n", sessionsUnavailable)
+			}
+
+			findings, findingsErr := loadTrailResumeFindingsContext(ctx, client, found.ID)
+			if findingsErr != nil {
+				findings.Unavailable = findingsErr.Error()
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load trail findings: %v\n", findingsErr)
+			}
+
+			resumeCtx := buildTrailResumeContextForRepoWithSkipped(*found, sessions, sessionsUnavailable, sessionsSkipped, findings, owner+"/"+repo)
+			if opts.JSON {
+				return encodeTrailResumeContextJSON(cmd.OutOrStdout(), resumeCtx)
+			}
+			printTrailResumeContext(cmd.OutOrStdout(), resumeCtx)
 			return nil
 		}
+
+		printTrailResumeIdentity(cmd.OutOrStdout(), *found)
 
 		if opts.CheckpointID != "" {
 			return resumeTrailCheckpoint(ctx, cmd, branch, id.CheckpointID(opts.CheckpointID), "", opts.Force)
 		}
 
 		if opts.SessionID != "" {
-			sessionCtx, ok := findTrailResumeSession(resumeCtx.Sessions, opts.SessionID)
-			if ok {
+			// --session may target a checkpoint older than the latest; the
+			// pre-restore reads map the session id to its owning checkpoint.
+			sessions, _, sessionErr := resolveTrailResumeSessionContexts(ctx, branch)
+			if sessionErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load trail checkpoint sessions: %v\n", sessionErr)
+			} else if sessionCtx, ok := findTrailResumeSession(sessions, opts.SessionID); ok {
 				return resumeTrailCheckpoint(ctx, cmd, branch, id.CheckpointID(sessionCtx.CheckpointID), opts.SessionID, opts.Force)
 			}
 			return resumeTrailLatest(ctx, cmd, branch, opts.Force, opts.SessionID)
 		}
 
-		if interactive.CanPromptInteractively() && len(resumeCtx.Sessions) > 1 {
-			return runTrailResumePicker(ctx, cmd, branch, resumeCtx.Sessions, opts.Force)
+		if interactive.CanPromptInteractively() {
+			sessions, _, sessionErr := resolveTrailResumeSessionContexts(ctx, branch)
+			if sessionErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load trail checkpoint sessions: %v\n", sessionErr)
+			} else if len(sessions) > 1 {
+				return runTrailResumePicker(ctx, cmd, branch, sessions, opts.Force)
+			}
 		}
 
 		return resumeTrailLatest(ctx, cmd, branch, opts.Force, "")
@@ -361,14 +376,74 @@ func trailResumeCanPromptRestoredSessions(force bool) bool {
 
 func continueTrailRestoredSessions(ctx context.Context, cmd *cobra.Command, sessions []strategy.RestoredSession, preferredSessionID string, force bool) error {
 	w := cmd.OutOrStdout()
+	canPrompt := trailResumeCanPromptRestoredSessions(force)
+	// Interactive declines get the full per-session command menu they asked
+	// for; non-interactive runs get the slim continuation whose final line is
+	// the default session's resume command.
+	display := displayTrailResumeContinuation
+	if canPrompt {
+		display = displayTrailRestoredSessions
+	}
 	return continueRestoredSessions(ctx, w, sessions, restoredSessionContinueOptions{
-		CanPrompt:          trailResumeCanPromptRestoredSessions(force),
+		CanPrompt:          canPrompt,
 		PreferredSessionID: preferredSessionID,
 		PromptSession:      promptTrailRestoredSession,
 		Launch:             launchTrailRestoredSession,
-		Display:            displayTrailRestoredSessions,
+		Display:            display,
 		PrintSummary:       printTrailRestoredSessionSummary,
 	})
+}
+
+// printTrailResumeIdentity prints the one-line act-path header identifying
+// which trail is being resumed onto which branch.
+func printTrailResumeIdentity(w io.Writer, found api.TrailResource) {
+	ref := describeTrailResumeRef(found)
+	if title := strings.TrimSpace(found.Title); title != "" {
+		ref += " " + strconv.Quote(title)
+	}
+	fmt.Fprintf(w, "Resuming %s → branch %s\n", ref, strings.TrimSpace(found.Branch))
+}
+
+func describeTrailResumeRef(found api.TrailResource) string {
+	switch {
+	case found.Number > 0:
+		return fmt.Sprintf("trail #%d", found.Number)
+	case strings.TrimSpace(found.ID) != "":
+		return "trail " + strings.TrimSpace(found.ID)
+	default:
+		return "trail"
+	}
+}
+
+// displayTrailResumeContinuation is the non-interactive act-path display:
+// restore summary, a pointer to any other restored sessions (there is no
+// table to discover them from), and the default session's resume command as
+// the final stdout line so callers can lift it without parsing prose.
+func displayTrailResumeContinuation(w io.Writer, sessions []strategy.RestoredSession) error {
+	if len(sessions) == 0 {
+		return nil
+	}
+	choices := buildTrailResumeRestoredSessionChoices(sessions)
+	printTrailRestoredSessionSummary(w, sessions)
+	if len(choices) > 1 {
+		others := make([]string, 0, len(choices)-1)
+		for _, choice := range choices[1:] {
+			others = append(others, choice.SessionID)
+		}
+		plural := "s"
+		if len(others) == 1 {
+			plural = ""
+		}
+		fmt.Fprintf(w, "%d other session%s restored (%s); use --session <id> to choose\n",
+			len(others), plural, strings.Join(others, ", "))
+	}
+	defaultChoice := choices[0]
+	sessionAgent, err := strategy.ResolveAgentForRewind(defaultChoice.Session.Agent)
+	if err != nil {
+		return fmt.Errorf("failed to resolve agent for session %s: %w", defaultChoice.SessionID, err)
+	}
+	fmt.Fprintf(w, "\n%s\n", sessionAgent.FormatResumeCommand(defaultChoice.SessionID))
+	return nil
 }
 
 func printTrailRestoredSessionSummary(w io.Writer, sessions []strategy.RestoredSession) {
