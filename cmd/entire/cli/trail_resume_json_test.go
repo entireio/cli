@@ -112,6 +112,24 @@ func TestEnsurePreferredRestoredSession(t *testing.T) {
 	}
 }
 
+// TestEnsureTrailSessionsRestored pins the non-interactive zero-sessions
+// contract: nothing restored is a failure for scripted callers, but an
+// interactive zero means the user declined a prompt and stays exit 0.
+func TestEnsureTrailSessionsRestored(t *testing.T) {
+	t.Parallel()
+
+	sessions := []strategy.RestoredSession{{SessionID: "sess-a"}}
+	if err := ensureTrailSessionsRestored(sessions, false); err != nil {
+		t.Errorf("restored sessions: error = %v, want nil", err)
+	}
+	// go test is non-interactive: zero sessions must fail.
+	err := ensureTrailSessionsRestored(nil, false)
+	var noSessions *ResumeNoSessionsRestoredError
+	if !errors.As(err, &noSessions) {
+		t.Errorf("zero sessions non-interactive: error = %v, want ResumeNoSessionsRestoredError", err)
+	}
+}
+
 // TestTrailResumeReportErrorFrom pins the typed-error JSON contract: the enum
 // values and per-type fields, plus nil for untyped errors (which keep the
 // default empty-stdout stderr-text behavior).
@@ -153,6 +171,14 @@ func TestTrailResumeReportErrorFrom(t *testing.T) {
 		reportErr := trailResumeReportErrorFrom(&ResumeSessionNotFoundError{SessionID: "sess-x"})
 		if reportErr == nil || reportErr.Type != "session_not_found" || reportErr.SessionID != "sess-x" {
 			t.Errorf("report error = %+v, want session_not_found with session id", reportErr)
+		}
+	})
+
+	t.Run("no sessions restored", func(t *testing.T) {
+		t.Parallel()
+		reportErr := trailResumeReportErrorFrom(NewSilentError(&ResumeNoSessionsRestoredError{}))
+		if reportErr == nil || reportErr.Type != "no_sessions_restored" {
+			t.Errorf("report error = %+v, want no_sessions_restored", reportErr)
 		}
 	})
 

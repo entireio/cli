@@ -103,6 +103,13 @@ func trailResumeReportErrorFrom(err error) *trailResumeReportError {
 			SessionID: sessionNotFound.SessionID,
 		}
 	}
+	var noSessions *ResumeNoSessionsRestoredError
+	if errors.As(err, &noSessions) {
+		return &trailResumeReportError{
+			Type:    "no_sessions_restored",
+			Message: noSessions.Error(),
+		}
+	}
 	return nil
 }
 
@@ -214,13 +221,23 @@ func runTrailResumeJSON(ctx context.Context, cmd *cobra.Command, found api.Trail
 	}
 	actions.SwitchedBranch = currentBranch != branch
 	actions.FetchedBranch = !existedLocally
-	actions.CheckpointBehindHead = trailResumeCheckpointBehindHead(ctx, branch)
+	// behind-head describes the branch's LATEST checkpoint; --checkpoint and
+	// --session may resume an older one, for which the count would mislead.
+	if opts.CheckpointID == "" && opts.SessionID == "" {
+		actions.CheckpointBehindHead = trailResumeCheckpointBehindHead(ctx, branch)
+	}
 
 	sessions, preferred, err := restoreTrailSessionsForReport(ctx, errW, branch, opts)
 	if err != nil {
 		return fail(err)
 	}
 	restored = sessions
+	if len(sessions) == 0 {
+		// The checkpoint resolved but its restore produced nothing (e.g.
+		// session log content unavailable): success-with-empty-report would
+		// break the "non-zero whenever nothing was resumed" contract.
+		return fail(&ResumeNoSessionsRestoredError{})
+	}
 	if err := ensurePreferredRestoredSession(sessions, preferred); err != nil {
 		return fail(err)
 	}

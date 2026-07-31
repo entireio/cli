@@ -352,7 +352,20 @@ func resumeTrailLatest(ctx context.Context, cmd *cobra.Command, branch string, f
 	if err != nil {
 		return err
 	}
+	if err := ensureTrailSessionsRestored(sessions, force); err != nil {
+		return err
+	}
 	return continueTrailRestoredSessions(ctx, cmd, sessions, preferredSessionID, force)
+}
+
+// ensureTrailSessionsRestored enforces the non-interactive contract: zero
+// restored sessions is a failure ("nothing was resumed"), except when prompts
+// were possible — an interactive zero means the user declined, which exits 0.
+func ensureTrailSessionsRestored(sessions []strategy.RestoredSession, force bool) error {
+	if len(sessions) > 0 || trailResumeCanPromptRestoredSessions(force) {
+		return nil
+	}
+	return &ResumeNoSessionsRestoredError{}
 }
 
 func resumeTrailCheckpoint(ctx context.Context, cmd *cobra.Command, branch string, checkpointID id.CheckpointID, preferredSessionID string, force bool) error {
@@ -368,6 +381,9 @@ func resumeTrailCheckpoint(ctx context.Context, cmd *cobra.Command, branch strin
 	}
 	sessions, err := restoreByCheckpointID(ctx, w, errW, checkpointID, force)
 	if err != nil {
+		return err
+	}
+	if err := ensureTrailSessionsRestored(sessions, force); err != nil {
 		return err
 	}
 	return continueTrailRestoredSessions(ctx, cmd, sessions, preferredSessionID, force)

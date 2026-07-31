@@ -33,6 +33,15 @@ func (e *ResumeNoCheckpointError) Error() string {
 	return fmt.Sprintf("no Entire checkpoint found on branch %q — nothing to resume; start a new agent session on this branch to create checkpoints", e.Branch)
 }
 
+// ResumeNoSessionsRestoredError reports that the checkpoint was found but its
+// restore produced no sessions (e.g. session log content unavailable), so
+// there is nothing to continue.
+type ResumeNoSessionsRestoredError struct{}
+
+func (e *ResumeNoSessionsRestoredError) Error() string {
+	return "checkpoint restore produced no sessions (session logs unavailable) — nothing to resume"
+}
+
 // ResumeSessionNotFoundError reports that a requested --session id is not
 // among the sessions the checkpoint restore produced.
 type ResumeSessionNotFoundError struct {
