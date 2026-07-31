@@ -39,6 +39,12 @@ const (
 	// concurrent hook) could block git commit indefinitely — the same
 	// failure mode the timeouts above already guard against for discovery.
 	autoAdoptAdoptTimeout = 2 * time.Second
+	// autoAdoptOverallBudget caps the whole prepare-commit-msg attempt. The
+	// per-step timeouts above are worst-case and stack (target resolve + staged +
+	// registry + sibling + adopt ≈ 7.5s); wrapping the attempt in one budget
+	// bounds their sum so an ordinary human commit (the miss path) can add at
+	// most this much latency to git commit.
+	autoAdoptOverallBudget = 5 * time.Second
 )
 
 // prepareCommitMsgSourceAmend is git's prepare-commit-msg source for `git commit --amend`.
@@ -89,6 +95,12 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 			)
 		}
 	}()
+
+	// One overall wall-clock budget for the whole attempt. Every step below
+	// derives its own timeout from this context, so their worst-case sum can
+	// never exceed autoAdoptOverallBudget — a miss adds bounded latency to commit.
+	ctx, cancel := context.WithTimeout(ctx, autoAdoptOverallBudget)
+	defer cancel()
 
 	if !targetIsEntireEnabled(ctx) {
 		return
