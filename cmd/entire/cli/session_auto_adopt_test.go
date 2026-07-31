@@ -184,10 +184,13 @@ func TestAutoAdopt_SkipsDistantRegistryEntry(t *testing.T) {
 	targetRepo := setupAdoptRepoAt(t, filepath.Join(t.TempDir(), "dst-nest", "repo"))
 
 	sessionID := "test-auto-adopt-distant-registry"
-	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"README.md"}, true)
+	// Distinctive path + matching owner: overlap and owner both PASS, so the
+	// proximity guard is the only reason to reject. README.md (boilerplate) would
+	// have been rejected by the overlap guard first, never exercising proximity.
+	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"services/billing/handler.go"}, true)
 
-	testutil.WriteFile(t, targetRepo, "README.md", "unrelated human edit\n")
-	testutil.GitAdd(t, targetRepo, "README.md")
+	testutil.WriteFile(t, targetRepo, "services/billing/handler.go", "agent change\n")
+	testutil.GitAdd(t, targetRepo, "services/billing/handler.go")
 	t.Chdir(targetRepo)
 
 	tryAutoAdoptCrossCommonDirSession(context.Background())
@@ -505,6 +508,70 @@ func TestAutoAdopt_SkipsOwnerMatchWithoutOverlap(t *testing.T) {
 	}
 	if adopted != nil {
 		t.Fatal("owner match without FilesTouched overlap must not auto-adopt")
+	}
+}
+
+func TestAutoAdopt_SkipsOwnerMismatchDistinctivePath(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+
+	// Distinctive path overlaps AND the repos are siblings, so overlap and
+	// proximity both PASS. The source session records no owner, so the owner
+	// guard is the only reason to reject — proving it, not a boilerplate overlap.
+	seedAutoAdoptSourceSession(t, sourceRepo, "test-auto-adopt-owner-mismatch", []string{"services/billing/handler.go"}, false)
+
+	testutil.WriteFile(t, targetRepo, "services/billing/handler.go", "agent change\n")
+	testutil.GitAdd(t, targetRepo, "services/billing/handler.go")
+	t.Chdir(targetRepo)
+
+	tryAutoAdoptCrossCommonDirSession(context.Background())
+
+	targetStore := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	adopted, err := targetStore.Load(context.Background(), "test-auto-adopt-owner-mismatch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted != nil {
+		t.Fatal("distinctive-path overlap without owner match must not auto-adopt")
+	}
+}
+
+func TestCandidateFromLoaded_OwnerMismatchRejectsDistinctivePath(t *testing.T) {
+	t.Parallel()
+
+	current, ok := proclive.ResolveOwner()
+	if !ok {
+		t.Skip("ResolveOwner unavailable on this platform")
+	}
+
+	now := time.Now()
+	staged := []string{"services/billing/handler.go"}
+	newState := func(owner *proclive.Identity) *session.State {
+		return &session.State{
+			SessionID:           "cand-owner-unit",
+			Phase:               session.PhaseActive,
+			StartedAt:           now.Add(-time.Minute),
+			LastInteractionTime: &now,
+			FilesTouched:        []string{"services/billing/handler.go"},
+			Owner:               owner,
+		}
+	}
+
+	// Distinctive overlap present, but the recorded owner differs → rejected by
+	// the owner guard even though overlap passes.
+	mismatch := &proclive.Identity{PID: current.PID + 1, Start: "different", Host: current.Host, Boot: current.Boot}
+	if _, ok := candidateFromLoaded(nil, "", "", newState(mismatch), staged, current, true); ok {
+		t.Fatal("owner mismatch must reject a distinctive-path candidate")
+	}
+
+	// Positive control: only the owner changed — a matching owner is accepted.
+	matching := current
+	if _, ok := candidateFromLoaded(nil, "", "", newState(&matching), staged, current, true); !ok {
+		t.Fatal("matching owner with distinctive overlap must be accepted")
 	}
 }
 
