@@ -1,0 +1,85 @@
+name: Checkpoint Audit
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # 07:00 UTC daily (GitHub does not honor sub-daily cron reliably)
+  workflow_dispatch:
+    inputs:
+      window:
+        description: 'git --since window to audit'
+        default: '24 hours ago'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checkpoint-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate checkpoint-repo token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.HOMEBREW_TAP_APP_ID }}
+          private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: cli-checkpoints
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch all branches
+        run: git fetch --all --prune
+
+      - name: Run checkpoint audit
+        id: audit
+        continue-on-error: true
+        env:
+          ENTIRE_CHECKPOINT_TOKEN: ${{ steps.app-token.outputs.token }}
+          AUDIT_WINDOW: ${{ github.event.inputs.window || '24 hours ago' }}
+        run: scripts/checkpoint-audit.sh
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: checkpoint-audit-report
+          path: |
+            checkpoint-audit-report.md
+            checkpoint-audit-report.json
+          retention-days: 7
+
+      - name: Notify Slack of missing checkpoints
+        if: ${{ always() && steps.audit.outcome == 'failure' }}
+        uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
+        with:
+          webhook: ${{ secrets.E2E_SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "attachments": [
+                {
+                  "color": "#d50200",
+                  "blocks": [
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": ":red_circle: *Checkpoint audit found missing checkpoints*\n\nOne or more commits reference a checkpoint that is not on the checkpoint remote. See the report artifact for the full table.\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run details>"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+
+      - name: Fail if checkpoints are missing
+        if: ${{ steps.audit.outcome == 'failure' }}
+        run: |
+          echo "::error::checkpoint audit reported missing checkpoints"
+          exit 1
