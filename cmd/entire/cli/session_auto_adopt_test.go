@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -577,6 +578,221 @@ func TestAutoAdopt_PostCommitFinalizeRetiresSource(t *testing.T) {
 	}
 }
 
+// saveActiveSourceSession writes a minimal ACTIVE source session directly into a
+// repo's session store for the deferred cross-common-dir adopt/claim tests. The
+// deferred adopt path uses SkipTranscriptValidation, so no transcript is needed.
+func saveActiveSourceSession(t *testing.T, repo, sessionID string, claim *session.AdoptClaim) {
+	t.Helper()
+	lastInteraction := time.Now().Add(-1 * time.Minute)
+	store := session.NewStateStoreWithDir(filepath.Join(repo, ".git", session.SessionStateDirName))
+	if err := store.Save(context.Background(), &session.State{
+		SessionID:             sessionID,
+		AgentType:             agent.AgentTypeClaudeCode,
+		StartedAt:             time.Now().Add(-5 * time.Minute),
+		LastInteractionTime:   &lastInteraction,
+		Phase:                 session.PhaseActive,
+		BaseCommit:            testutil.GetHeadHash(t, repo),
+		AttributionBaseCommit: testutil.GetHeadHash(t, repo),
+		WorktreePath:          repo,
+		LastPrompt:            "cross-repo work",
+		AdoptClaim:            claim,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAdoptClaimBlocks pins the source-claim recency + ownership semantics: only
+// a FRESH claim held by a DIFFERENT target blocks a new deferred adoption.
+func TestAdoptClaimBlocks(t *testing.T) {
+	t.Parallel()
+	const target = "/repos/target/.git"
+	const other = "/repos/other/.git"
+	now := time.Now()
+	tests := []struct {
+		name  string
+		claim *session.AdoptClaim
+		want  bool
+	}{
+		{"nil claim", nil, false},
+		{"zero time", &session.AdoptClaim{ByCommonDir: other, At: time.Time{}}, false},
+		{"stale different target", &session.AdoptClaim{ByCommonDir: other, At: now.Add(-2 * adoptRecentWindow)}, false},
+		{"fresh same target idempotent", &session.AdoptClaim{ByCommonDir: target, At: now}, false},
+		{"fresh different target blocks", &session.AdoptClaim{ByCommonDir: other, At: now}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := adoptClaimBlocks(tt.claim, target); got != tt.want {
+				t.Fatalf("adoptClaimBlocks(%+v) = %v, want %v", tt.claim, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestAutoAdopt_ConcurrentClaimAdoptsExactlyOnce proves the cross-process mutual
+// exclusion the deferred-retire regression dropped: two targets that concurrently
+// discover the SAME unique live source session must not both register it. The
+// shared sourceCommonDir lock serializes the two deferred adopts; the winner
+// stamps a non-destructive claim on the source and the loser, re-reading the
+// source under the lock, observes the claim and refuses — so the session is
+// adopted exactly once instead of double-adopted into two repos.
+//
+// Uses t.Chdir(), so no t.Parallel().
+func TestAutoAdopt_ConcurrentClaimAdoptsExactlyOnce(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	target1 := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+	target2 := setupAdoptRepoAt(t, filepath.Join(base, "repo-c"))
+
+	sessionID := "test-auto-adopt-concurrent-claim"
+	saveActiveSourceSession(t, sourceRepo, sessionID, nil)
+
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	_, _, sourceCommonDir, err := stateStoreForWorktree(context.Background(), sourceRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First target adopts and wins the claim.
+	t.Chdir(target1)
+	target1Store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, target1CommonDir, err := stateStoreForWorktree(context.Background(), target1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferOpts := adoptOptions{Force: true, SkipTranscriptValidation: true, DeferSourceRetire: true}
+	adopted, _, err := adoptFromExternalSessionStore(
+		context.Background(), sourceStore, sourceRepo, sourceCommonDir,
+		target1Store, target1CommonDir, sessionID, deferOpts,
+	)
+	if err != nil {
+		t.Fatalf("first adopt failed: %v", err)
+	}
+	if adopted == nil || adopted.PendingSourceRetire == nil {
+		t.Fatal("first adopt must register the target with a PendingSourceRetire marker")
+	}
+
+	sourceAfter1, err := sourceStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourceAfter1.AdoptClaim == nil {
+		t.Fatal("winning adopt must stamp an AdoptClaim on the source")
+	}
+	if !sameAdoptStore(sourceAfter1.AdoptClaim.ByCommonDir, target1CommonDir) {
+		t.Fatalf("claim ByCommonDir = %q, want target1 %q", sourceAfter1.AdoptClaim.ByCommonDir, target1CommonDir)
+	}
+	if !isAdoptableSourceSession(sourceAfter1) {
+		t.Fatal("deferred adopt must leave the source ACTIVE (the claim is non-destructive)")
+	}
+
+	// Second target, discovering the SAME unique source, must observe the claim
+	// under the lock and refuse.
+	t.Chdir(target2)
+	target2Store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, target2CommonDir, err := stateStoreForWorktree(context.Background(), target2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = adoptFromExternalSessionStore(
+		context.Background(), sourceStore, sourceRepo, sourceCommonDir,
+		target2Store, target2CommonDir, sessionID, deferOpts,
+	)
+	if err == nil {
+		t.Fatal("second concurrent adopt succeeded; want a claim refusal (would be a double-adopt)")
+	}
+	var claimed *sourceClaimedError
+	if !errors.As(err, &claimed) {
+		t.Fatalf("second adopt error = %v, want sourceClaimedError", err)
+	}
+	if got, loadErr := target2Store.Load(context.Background(), sessionID); loadErr != nil {
+		t.Fatal(loadErr)
+	} else if got != nil {
+		t.Fatalf("second target registered the session %#v; want no adoption", got)
+	}
+
+	// The loser must not mutate the winner's claim.
+	sourceAfter2, err := sourceStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourceAfter2.AdoptClaim == nil || !sameAdoptStore(sourceAfter2.AdoptClaim.ByCommonDir, target1CommonDir) {
+		t.Fatalf("loser mutated the source claim: %#v", sourceAfter2.AdoptClaim)
+	}
+}
+
+// TestAutoAdopt_StaleClaimDoesNotBlockAdoption proves the recency bound: a claim
+// older than the adopt-recency window (an abandoned/aborted-commit claim) does
+// not pin the source — a later legitimate deferred adopt proceeds and replaces
+// the stale claim with its own fresh one.
+//
+// Uses t.Chdir(), so no t.Parallel().
+func TestAutoAdopt_StaleClaimDoesNotBlockAdoption(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+
+	sessionID := "test-auto-adopt-stale-claim"
+	staleClaim := &session.AdoptClaim{
+		ByCommonDir:    filepath.Join(base, "repo-abandoned", ".git"),
+		ByWorktreePath: filepath.Join(base, "repo-abandoned"),
+		At:             time.Now().Add(-2 * adoptRecentWindow),
+	}
+	saveActiveSourceSession(t, sourceRepo, sessionID, staleClaim)
+
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	_, _, sourceCommonDir, err := stateStoreForWorktree(context.Background(), sourceRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(targetRepo)
+	targetStore, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, targetCommonDir, err := stateStoreForWorktree(context.Background(), targetRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	adopted, _, err := adoptFromExternalSessionStore(
+		context.Background(), sourceStore, sourceRepo, sourceCommonDir,
+		targetStore, targetCommonDir, sessionID,
+		adoptOptions{Force: true, SkipTranscriptValidation: true, DeferSourceRetire: true},
+	)
+	if err != nil {
+		t.Fatalf("adopt blocked by a STALE claim: %v", err)
+	}
+	if adopted == nil || adopted.PendingSourceRetire == nil {
+		t.Fatal("adopt over a stale claim must still register the target with a PendingSourceRetire marker")
+	}
+
+	sourceAfter, err := sourceStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourceAfter.AdoptClaim == nil {
+		t.Fatal("adopt must stamp a fresh claim on the source")
+	}
+	if !sameAdoptStore(sourceAfter.AdoptClaim.ByCommonDir, targetCommonDir) {
+		t.Fatalf("claim ByCommonDir = %q, want target %q (stale claim not replaced)", sourceAfter.AdoptClaim.ByCommonDir, targetCommonDir)
+	}
+	if time.Since(sourceAfter.AdoptClaim.At) > adoptRecentWindow {
+		t.Fatal("refreshed claim must be within the adopt-recency window")
+	}
+}
+
 func setupAdoptRepoAt(t *testing.T, repoDir string) string {
 	t.Helper()
 	if err := os.MkdirAll(repoDir, 0o750); err != nil {
@@ -721,13 +937,13 @@ func TestCandidateFromLoaded_OwnerMismatchRejectsDistinctivePath(t *testing.T) {
 	// Distinctive overlap present, but the recorded owner differs → rejected by
 	// the owner guard even though overlap passes.
 	mismatch := &proclive.Identity{PID: current.PID + 1, Start: "different", Host: current.Host, Boot: current.Boot}
-	if _, ok := candidateFromLoaded(nil, "", "", newState(mismatch), staged, current, true); ok {
+	if _, ok := candidateFromLoaded(nil, "", "", "/target", newState(mismatch), staged, current, true); ok {
 		t.Fatal("owner mismatch must reject a distinctive-path candidate")
 	}
 
 	// Positive control: only the owner changed — a matching owner is accepted.
 	matching := current
-	if _, ok := candidateFromLoaded(nil, "", "", newState(&matching), staged, current, true); !ok {
+	if _, ok := candidateFromLoaded(nil, "", "", "/target", newState(&matching), staged, current, true); !ok {
 		t.Fatal("matching owner with distinctive overlap must be accepted")
 	}
 }
@@ -775,7 +991,7 @@ func TestCandidateFromLoaded_RejectsWorktreePathMismatch(t *testing.T) {
 		WorktreePath:        "/other/worktree",
 		FilesTouched:        []string{"feature.txt"},
 	}
-	_, ok := candidateFromLoaded(nil, "/scanned/worktree", "/common", state, []string{"feature.txt"}, proclive.Identity{}, false)
+	_, ok := candidateFromLoaded(nil, "/scanned/worktree", "/common", "/target", state, []string{"feature.txt"}, proclive.Identity{}, false)
 	if ok {
 		t.Fatal("stale WorktreePath mismatch must reject candidate")
 	}
@@ -794,9 +1010,39 @@ func TestCandidateFromLoaded_RejectsIdle(t *testing.T) {
 		FilesTouched:        []string{"feature.txt"},
 		Owner:               &owner,
 	}
-	_, ok := candidateFromLoaded(nil, "/scanned/worktree", "/common", state, []string{"feature.txt"}, owner, true)
+	_, ok := candidateFromLoaded(nil, "/scanned/worktree", "/common", "/target", state, []string{"feature.txt"}, owner, true)
 	if ok {
 		t.Fatal("Idle session must not be an auto-adopt candidate")
+	}
+}
+
+func TestCandidateFromLoaded_SkipsSourceClaimedByOtherTarget(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	owner := proclive.Identity{PID: 1, Start: "s"}
+	newState := func(claim *session.AdoptClaim) *session.State {
+		return &session.State{
+			SessionID:           "claimed",
+			Phase:               session.PhaseActive,
+			LastInteractionTime: &now,
+			WorktreePath:        "/scanned/worktree",
+			FilesTouched:        []string{"feature.txt"},
+			Owner:               &owner,
+			AdoptClaim:          claim,
+		}
+	}
+
+	// A fresh claim by a DIFFERENT target drops the source from discovery.
+	other := &session.AdoptClaim{ByCommonDir: "/other/.git", At: now}
+	if _, ok := candidateFromLoaded(nil, "/scanned/worktree", "/common", "/target/.git", newState(other), []string{"feature.txt"}, owner, true); ok {
+		t.Fatal("source claimed by a different target must be skipped")
+	}
+
+	// A claim by THIS target is idempotent — still adoptable (re-adopt).
+	same := &session.AdoptClaim{ByCommonDir: "/target/.git", At: now}
+	if _, ok := candidateFromLoaded(nil, "/scanned/worktree", "/common", "/target/.git", newState(same), []string{"feature.txt"}, owner, true); !ok {
+		t.Fatal("source claimed by this same target must remain adoptable")
 	}
 }
 

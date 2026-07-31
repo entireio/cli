@@ -143,6 +143,20 @@ type State struct {
 	// (finalizePendingSourceRetires). nil in the normal steady state.
 	PendingSourceRetire *PendingSourceRetire `json:"pending_source_retire,omitempty"`
 
+	// AdoptClaim is a non-destructive, in-flight cross-common-dir adoption
+	// marker written on the SOURCE session at prepare-commit-msg time when the
+	// destructive retire is deferred to post-commit (DeferSourceRetire). It is
+	// what restores the cross-process mutual exclusion the in-band tombstone used
+	// to provide: a second target that concurrently discovers the same unique
+	// candidate observes a FRESH claim by a different common dir and skips, so the
+	// session is never double-adopted. Unlike a tombstone it does NOT end the
+	// session — the source agent keeps checkpointing, preserving the abort-safety
+	// of the deferral. Superseded by finalizePendingSourceRetires' retire. A claim
+	// older than the adopt-recency window is ignored, so an abandoned claim (an
+	// aborted commit that never reached post-commit) self-heals and frees the
+	// source for a later legitimate adopt. nil in the normal steady state.
+	AdoptClaim *AdoptClaim `json:"adopt_claim,omitempty"`
+
 	// Branch is the git branch HEAD pointed at the last time this session took a
 	// turn. Captured on each turn start so it tracks branches created or renamed
 	// after the session began. Empty when HEAD was detached or for sessions
@@ -389,6 +403,22 @@ type PendingSourceRetire struct {
 	SourceCommonDir string `json:"source_common_dir"`
 	// SourceWorktreePath is the source worktree root (best-effort, for logging).
 	SourceWorktreePath string `json:"source_worktree_path,omitempty"`
+}
+
+// AdoptClaim stamps a source session as being adopted, in-flight, by a specific
+// target worktree while its destructive retire is deferred to post-commit. It is
+// the lightweight lock marker that a concurrent adopter must observe to avoid
+// double-adopting the same unique session across processes. See State.AdoptClaim.
+type AdoptClaim struct {
+	// ByCommonDir is the git common dir of the TARGET worktree that claimed this
+	// source. A claim by a *different* common dir blocks a new adoption; a
+	// re-claim by the same common dir is idempotent (re-adopt is fine).
+	ByCommonDir string `json:"by_common_dir"`
+	// ByWorktreePath is the target worktree root (best-effort, for logging).
+	ByWorktreePath string `json:"by_worktree_path,omitempty"`
+	// At is when the claim was written. A claim older than the adopt-recency
+	// window is treated as abandoned (aborted commit) and no longer blocks.
+	At time.Time `json:"at"`
 }
 
 // PromptAttribution captures line-level attribution data at the start of each prompt.

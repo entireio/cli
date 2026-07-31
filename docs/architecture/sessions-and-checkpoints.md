@@ -200,6 +200,19 @@ between the source retire and the marker clear self-heals on the next
 post-commit) and time-bounded. Manual `entire session adopt` retires
 immediately, in-band.
 
+Because the deferred split no longer tombstones the source at prepare time, the
+prepare phase also writes a lightweight, **non-destructive `AdoptClaim`** on the
+source (under the shared source-common-dir lock) recording which target common
+dir is adopting it. Two targets that concurrently discover the same unique
+candidate serialize on that lock; the loser re-reads the source under the lock,
+observes the winner's claim, and refuses — restoring the cross-process mutual
+exclusion the in-band tombstone used to provide, without ending the source (it
+keeps checkpointing). Unlike the tombstone the claim does not retire the session,
+so it is **recency-bounded** by the same `adoptRecentWindow`: an abandoned claim
+left by an aborted commit ages out and frees the source for a later legitimate
+adopt. `post-commit`'s retire supersedes the claim; a re-adopt by the same target
+is idempotent.
+
 Because this adoption is **automatic** and eventually retires the source session
 as a commit side effect, it fires only when every one of these adoption-safety
 invariants holds — any ambiguity or missing signal skips silently:

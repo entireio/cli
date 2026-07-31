@@ -171,6 +171,14 @@ func adoptFromExternalSessionStore(
 		if !isAdoptableSourceSession(sourceState) {
 			return fmt.Errorf("session %s is ended or fully condensed and cannot be adopted", sessionID)
 		}
+		// Cross-process mutual exclusion for the deferred (auto-adopt) path. The
+		// shared sourceCommonDir lock serializes two concurrent adopts of the same
+		// unique candidate; this makes the loser OBSERVE the winner's claim and
+		// refuse, so the session is adopted into exactly one repo. A stale claim
+		// (aborted commit) or a re-claim by this same target does not block.
+		if opts.DeferSourceRetire && adoptClaimBlocks(sourceState.AdoptClaim, targetCommonDir) {
+			return &sourceClaimedError{sessionID: sessionID, claimedBy: adoptClaimLabel(sourceState.AdoptClaim)}
+		}
 		if !sessionBelongsToSourceWorktree(sourceState, sourceWorktree, sourceWorktreeID) {
 			return fmt.Errorf("session %s belongs to %s, not %s",
 				sessionID, adoptSessionWorktreeLabel(sourceState), sourceWorktree)
@@ -209,7 +217,26 @@ func adoptFromExternalSessionStore(
 			return fmt.Errorf("save adopted session state: %w", err)
 		}
 		if opts.DeferSourceRetire {
-			// Non-destructive prepare phase: target registered, source untouched.
+			// Non-destructive prepare phase: stamp a claim on the SOURCE (under the
+			// shared source lock) so a concurrent adopt by a different target sees
+			// it and skips, then leave the source otherwise ACTIVE so it keeps
+			// checkpointing until post-commit finalizes the retire. The claim is
+			// recency-bounded, so an aborted commit (no post-commit) self-heals once
+			// it ages out.
+			sourceState.AdoptClaim = &session.AdoptClaim{
+				ByCommonDir:    targetCommonDir,
+				ByWorktreePath: next.WorktreePath,
+				At:             time.Now(),
+			}
+			if err := sourceStore.Save(ctx, sourceState); err != nil {
+				// Roll back the target registration so a failed claim never leaves a
+				// claimless double-adopt window. Use a non-cancelable context for the
+				// same reason the retire path does (the caller's ctx may be timed out).
+				if rollbackErr := rollbackExternalAdoptTarget(context.WithoutCancel(ctx), targetStore, next.SessionID, existing); rollbackErr != nil {
+					return &adoptRollbackFailedError{retireErr: err, rollbackErr: rollbackErr}
+				}
+				return fmt.Errorf("claim source session state: %w", err)
+			}
 			adopted = next
 			filesTouched = touched
 			return nil
@@ -276,6 +303,8 @@ func retireAdoptedSourceSession(source, target *session.State) session.State {
 	retired.FilesTouched = nil
 	retired.TurnID = ""
 	retired.TurnCheckpointIDs = nil
+	// The tombstone supersedes any in-flight adoption claim on the source.
+	retired.AdoptClaim = nil
 	retired.AdoptedIntoWorktreePath = target.WorktreePath
 	retired.AdoptedIntoWorktreeID = target.WorktreeID
 	return retired
@@ -515,6 +544,51 @@ func isAdoptableSourceSession(state *session.State) bool {
 		!state.FullyCondensed
 }
 
+// adoptClaimBlocks reports whether a source session's in-flight adoption claim
+// should block a NEW deferred adoption by targetCommonDir. A claim blocks only
+// when it is (a) present, (b) FRESH — within the adopt-recency window, so a stale
+// claim left by an aborted commit self-heals rather than pinning the source
+// forever — and (c) held by a DIFFERENT common dir, since a re-adopt by the same
+// target is idempotent. Reuses adoptRecentWindow (= session.LiveSessionMaxAge);
+// no separate TTL is introduced.
+func adoptClaimBlocks(claim *session.AdoptClaim, targetCommonDir string) bool {
+	if claim == nil || claim.At.IsZero() {
+		return false
+	}
+	if time.Since(claim.At) > adoptRecentWindow {
+		return false
+	}
+	return !sameAdoptStore(claim.ByCommonDir, targetCommonDir)
+}
+
+func adoptClaimLabel(claim *session.AdoptClaim) string {
+	if claim == nil {
+		return unknownPlaceholder
+	}
+	if claim.ByWorktreePath != "" {
+		return claim.ByWorktreePath
+	}
+	if claim.ByCommonDir != "" {
+		return claim.ByCommonDir
+	}
+	return unknownPlaceholder
+}
+
+// sourceClaimedError is returned by adoptFromExternalSessionStore when the source
+// session already carries a FRESH cross-common-dir adoption claim by a DIFFERENT
+// target — a concurrent commit is mid-adopt of the same unique session. It is a
+// benign "lost the race" outcome that preserves adopt-exactly-once, not
+// corruption, so auto-adopt logs it at Debug and moves on rather than warning.
+type sourceClaimedError struct {
+	sessionID string
+	claimedBy string
+}
+
+func (e *sourceClaimedError) Error() string {
+	return fmt.Sprintf("session %s is already claimed for cross-common-dir adoption by %s",
+		e.sessionID, e.claimedBy)
+}
+
 func sessionLastSeen(state *session.State) time.Time {
 	if state.LastInteractionTime != nil {
 		return *state.LastInteractionTime
@@ -570,6 +644,9 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	adopted.WorktreeID = worktreeID
 	adopted.AdoptedIntoWorktreePath = ""
 	adopted.AdoptedIntoWorktreeID = ""
+	// AdoptClaim is a source-side marker; the adopted (target) copy never carries
+	// one. The caller re-stamps it on the source under the shared lock.
+	adopted.AdoptClaim = nil
 	adopted.Branch = branch
 	adopted.LastInteractionTime = &now
 	adopted.Phase = session.PhaseActive
@@ -630,6 +707,10 @@ func cloneAdoptSourceState(source *session.State) session.State {
 	if source.PendingPromptAttribution != nil {
 		pending := clonePromptAttribution(*source.PendingPromptAttribution)
 		adopted.PendingPromptAttribution = &pending
+	}
+	if source.AdoptClaim != nil {
+		claim := *source.AdoptClaim
+		adopted.AdoptClaim = &claim
 	}
 	return adopted
 }

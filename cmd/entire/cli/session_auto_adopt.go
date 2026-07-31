@@ -188,14 +188,23 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 	adoptCancel()
 	if adoptErr != nil {
 		var rollbackFailed *adoptRollbackFailedError
-		if errors.As(adoptErr, &rollbackFailed) {
+		var claimed *sourceClaimedError
+		switch {
+		case errors.As(adoptErr, &rollbackFailed):
 			// Retire failed AND rollback failed: the session is now registered in
 			// both the source and target repos. This is corruption, not a miss.
 			logging.Error(logCtx, "auto-adopt: adopt left session registered in both repos",
 				slog.String("session_id", source.SessionID),
 				slog.String("error", adoptErr.Error()),
 			)
-		} else {
+		case errors.As(adoptErr, &claimed):
+			// Lost the concurrent-adopt race: another target claimed this source
+			// first, under the shared source lock. Adopt-exactly-once is preserved,
+			// so this is an expected skip, not a failure.
+			logging.Debug(logCtx, "auto-adopt: source already claimed by a concurrent adopt",
+				slog.String("session_id", source.SessionID),
+			)
+		default:
 			logging.Warn(logCtx, "auto-adopt: adopt failed",
 				slog.String("session_id", source.SessionID),
 				slog.String("error", adoptErr.Error()),
@@ -396,7 +405,7 @@ func collectRegistryAutoAdoptCandidates(
 		// alone therefore cannot steal across unrelated repos.
 		resolved++
 		resolveCtx, resolveCancel := context.WithTimeout(ctx, autoAdoptGitResolveTimeout)
-		cand, ok := candidateFromSource(resolveCtx, entry.WorktreePath, entry.SessionID, staged, owner, hasOwner)
+		cand, ok := candidateFromSource(resolveCtx, entry.WorktreePath, entry.SessionID, targetCommonDir, staged, owner, hasOwner)
 		resolveCancel()
 		if ok {
 			out = append(out, cand)
@@ -456,7 +465,7 @@ func collectSiblingAutoAdoptCandidates(
 			if !isRecentAdoptCandidate(state) {
 				continue
 			}
-			cand, ok := candidateFromLoaded(store, worktree, commonDir, state, staged, owner, hasOwner)
+			cand, ok := candidateFromLoaded(store, worktree, commonDir, targetCommonDir, state, staged, owner, hasOwner)
 			if ok {
 				out = append(out, cand)
 			}
@@ -468,6 +477,7 @@ func collectSiblingAutoAdoptCandidates(
 func candidateFromSource(
 	ctx context.Context,
 	sourceWorktree, sessionID string,
+	targetCommonDir string,
 	staged []string,
 	owner proclive.Identity,
 	hasOwner bool,
@@ -480,18 +490,27 @@ func candidateFromSource(
 	if err != nil || state == nil {
 		return autoAdoptCandidate{}, false
 	}
-	return candidateFromLoaded(store, worktree, commonDir, state, staged, owner, hasOwner)
+	return candidateFromLoaded(store, worktree, commonDir, targetCommonDir, state, staged, owner, hasOwner)
 }
 
 func candidateFromLoaded(
 	store *session.StateStore,
 	worktree, commonDir string,
+	targetCommonDir string,
 	state *session.State,
 	staged []string,
 	owner proclive.Identity,
 	hasOwner bool,
 ) (autoAdoptCandidate, bool) {
 	if !isRecentAdoptCandidate(state) {
+		return autoAdoptCandidate{}, false
+	}
+	// A source already carrying a FRESH adoption claim by a DIFFERENT target is
+	// mid-adopt by another commit; drop it so this commit does not double-adopt.
+	// Our own claim (same common dir) and a stale claim (aborted commit) do not
+	// exclude. This is the best-effort discovery-time skip; the authoritative
+	// serialization is the under-lock claim check in adoptFromExternalSessionStore.
+	if adoptClaimBlocks(state.AdoptClaim, targetCommonDir) {
 		return autoAdoptCandidate{}, false
 	}
 	// Auto-adopt is ACTIVE-only (matches the live-registry prefilter; see
