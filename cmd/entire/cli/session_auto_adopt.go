@@ -361,7 +361,9 @@ func candidateFromLoaded(
 	if !isRecentAdoptCandidate(state) {
 		return autoAdoptCandidate{}, false
 	}
-	// Auto-adopt is ACTIVE-only (matches live-registry prefilter and the feature doc).
+	// Auto-adopt is ACTIVE-only (matches the live-registry prefilter; see
+	// docs/architecture/sessions-and-checkpoints.md, "Automatic cross-common-dir
+	// adoption").
 	// Idle is adoptable manually but must not be silently relocated on a commit hook.
 	if state.Phase != session.PhaseActive {
 		return autoAdoptCandidate{}, false

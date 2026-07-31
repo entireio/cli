@@ -171,6 +171,52 @@ the session's branch/worktree/base metadata to the target, clears target-local
 checkpoint windows and checkpoint IDs, and snapshots the target's current file
 changes so the next commit can link to the adopted session.
 
+#### Automatic cross-common-dir adoption (#1439)
+
+Beyond the manual `entire session adopt`, the `prepare-commit-msg` hook can
+**automatically** adopt a unique ACTIVE session from another git common dir into
+the committing worktree. This covers the "agent started in repo A, then made and
+committed the change in sibling repo B" flow without the user running `adopt`.
+
+A best-effort cross-repo **live-session registry** makes discovery cheap. Every
+ACTIVE `StateStore.Save` writes a pointer file to
+`~/.cache/entire/live-sessions/<session-id>.json` (`$XDG_CACHE_HOME/entire/...`
+when set) recording the session's common dir, worktree path, phase, and last
+interaction time; the entry is removed when the session ends, is condensed, or is
+adopted away. Entries older than `LiveSessionMaxAge` (12h, the same window as
+adopt eligibility) are swept on read. The registry is keyed by session ID alone,
+so unregister is **scoped to the caller's common dir** — a cross-repo adopt
+retires the source session without deleting the target entry it just wrote.
+
+Because this adoption is **automatic and destructive** (it retires the source
+session as a commit side effect), it fires only when every one of these
+adoption-safety invariants holds — any ambiguity or missing signal skips
+silently:
+
+- **Enabled + writes a trailer**: the target repo has Entire enabled and the
+  commit is one `prepare-commit-msg` would write a fresh checkpoint trailer for
+  (not merge/squash, not a rebase/cherry-pick/revert replay, not an amend — see
+  `strategy.SkipsPrepareCommitMsg`).
+- **No recent local session**: the target worktree has no recent
+  ACTIVE/adoptable session of its own (a stale months-old idle state does not
+  count).
+- **Owner match**: the source session's recorded process owner matches the
+  committing process (same PID / start / boot / host).
+- **Non-boilerplate staged overlap**: at least one staged path (read
+  NUL-separated so non-ASCII names still match) is in the source session's
+  `FilesTouched` and is not a boilerplate basename (README, go.mod,
+  package.json, …) — those collide across unrelated siblings.
+- **Sibling proximity**: registry candidates must share the target's parent
+  directory (the immediate-sibling scan is inherently parent-scoped).
+- **Uniqueness**: the registry and sibling candidate sets are unioned (deduped
+  by session ID) and exactly one candidate must remain.
+
+Each discovery/adopt step is bounded by a timeout and the whole attempt by an
+overall wall-clock budget, so a miss adds only a small, capped latency to `git
+commit`. Adopt failures are logged at Warn (Error when a failed source-retire
+could not be rolled back, leaving the session registered in both repos); the
+adopt path is panic-guarded so a fault never breaks the commit.
+
 ### Temporary Checkpoints
 
 Branch: `entire/<commit[:7]>-<worktreeHash[:6]>`
