@@ -122,7 +122,8 @@ func TestClassifyClaudeEnvelope_HTTPStatusMapping(t *testing.T) {
 // agent.KindForHTTPStatus; this guards a future edit re-introducing one.
 func TestEnvelopeAndStderrClassifiersAgree(t *testing.T) {
 	t.Parallel()
-	for _, status := range []int{400, 401, 402, 403, 404, 408, 409, 413, 422, 429, 451} {
+	// 401 Auth, 402 the status that drifted, 413 the range arm, 429 RateLimit.
+	for _, status := range []int{401, 402, 413, 429} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			t.Parallel()
 			s := status

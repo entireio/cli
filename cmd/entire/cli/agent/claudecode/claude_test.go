@@ -252,24 +252,11 @@ func TestGenerateText_InjectsAPIKeyHelperIntoArgv(t *testing.T) {
 	if !ok || src != "" {
 		t.Errorf("--setting-sources = %q (present=%v); want empty (load nothing)", src, ok)
 	}
-}
 
-// TestGenerateText_NoAPIKeyHelperOmitsSettings is the negative half: with no
-// apiKeyHelper configured we must not pass --settings at all.
-//
-// t.Setenv: no t.Parallel.
-func TestGenerateText_NoAPIKeyHelperOmitsSettings(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir()) // no settings.json inside
-
-	var gotArgs []string
-	ag := &ClaudeCodeAgent{
-		CommandRunner: func(ctx context.Context, _ string, args ...string) *exec.Cmd {
-			gotArgs = args
-			return exec.CommandContext(ctx, "true")
-		},
-	}
+	// Negative half: with no apiKeyHelper configured, --settings must be absent.
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	gotArgs = nil
 	_, _ = ag.GenerateText(context.Background(), "prompt", "haiku") //nolint:errcheck // asserting on captured argv, not the result
-
 	if v, ok := flagValue(gotArgs, "--settings"); ok {
 		t.Errorf("--settings = %q; must be absent with no apiKeyHelper", v)
 	}

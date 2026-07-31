@@ -47,11 +47,11 @@ type matrixAgent struct {
 
 func matrixAgents() []matrixAgent {
 	return []matrixAgent{
-		{"cursor", agent.AgentNameCursor, "cursor CLI returned empty output", func(r agent.TextCommandRunner) matrixGenerator {
-			return &cursor.CursorAgent{CommandRunner: r}
-		}},
 		{"codex", agent.AgentNameCodex, "codex CLI returned empty output", func(r agent.TextCommandRunner) matrixGenerator {
 			return &codex.CodexAgent{CommandRunner: r}
+		}},
+		{"cursor", agent.AgentNameCursor, "cursor CLI returned empty output", func(r agent.TextCommandRunner) matrixGenerator {
+			return &cursor.CursorAgent{CommandRunner: r}
 		}},
 		{"copilotcli", agent.AgentNameCopilotCLI, "copilot CLI returned empty output", func(r agent.TextCommandRunner) matrixGenerator {
 			return &copilotcli.CopilotCLIAgent{CommandRunner: r}
@@ -216,27 +216,39 @@ func matrixSuccess(t *testing.T, a matrixAgent) {
 func TestGenerateText_Matrix(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == windowsOSTest {
-		// The fake runners shell out to POSIX `sh` and `true`.
 		t.Skip("POSIX shell")
 	}
+
+	// The five providers all delegate to the same agent.HandleTextGenResult;
+	// they differ only in binary, args and the Provider stamp. So the behavioural
+	// scenarios run once, against codex, and every provider gets a wiring check
+	// that it reaches the shared helper with its own identity. Running all seven
+	// against all five was testing one function five times.
 	scenarios := []struct {
 		name string
 		run  func(*testing.T, matrixAgent)
 	}{
-		{"CLIMissing", matrixCLIMissing},
 		{"AuthFrom401", matrixAuthFrom401},
 		{"DiagnosticOnStdout", matrixDiagnosticOnStdout},
 		{"ProseOnStdoutIsNotClassified", matrixProseOnStdout},
-		{"EmptyStdout", matrixEmptyStdout},
 		{"CanceledCarriesSentinelAndEvidence", matrixCanceled},
 		{"Success", matrixSuccess},
 	}
+	representative := matrixAgents()[0]
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			t.Parallel()
+			sc.run(t, representative)
+		})
+	}
+
+	// Per-provider wiring: CLIMissing pins the Provider stamp and the
+	// composition contract, EmptyStdout pins the per-provider emptyMsg.
 	for _, a := range matrixAgents() {
-		for _, sc := range scenarios {
-			t.Run(a.name+"/"+sc.name, func(t *testing.T) {
-				t.Parallel()
-				sc.run(t, a)
-			})
-		}
+		t.Run("wiring/"+a.name, func(t *testing.T) {
+			t.Parallel()
+			matrixCLIMissing(t, a)
+			matrixEmptyStdout(t, a)
+		})
 	}
 }

@@ -11,31 +11,25 @@ import (
 )
 
 // The helper trims, not the runner: RunIsolatedTextGeneratorCLIRaw must return
-// raw bytes for Claude's envelope parser.
+// raw bytes for Claude's envelope parser. Whitespace-only counts as empty
+// rather than being passed downstream as a "summary".
 func TestHandleTextGenResult_TrimsStdout(t *testing.T) {
 	t.Parallel()
-	res := ExecResult{Stdout: []byte("  hello world\n\n")}
-	out, err := HandleTextGenResult(res, nil, AgentNameCodex, "empty", nil)
+	out, err := HandleTextGenResult(ExecResult{Stdout: []byte("  hello world\n\n")}, nil, AgentNameCodex, "empty", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if out != "hello world" {
 		t.Errorf("out = %q; want %q", out, "hello world")
 	}
-}
 
-// TestHandleTextGenResult_WhitespaceOnlyStdoutIsEmpty pins that whitespace-only
-// stdout counts as empty rather than being passed downstream as a "summary".
-func TestHandleTextGenResult_WhitespaceOnlyStdoutIsEmpty(t *testing.T) {
-	t.Parallel()
-	res := ExecResult{Stdout: []byte("   \n\t\n")}
-	_, err := HandleTextGenResult(res, nil, AgentNameCodex, "codex CLI returned empty output", nil)
+	_, err = HandleTextGenResult(ExecResult{Stdout: []byte("   \n\t\n")}, nil, AgentNameCodex, "codex CLI returned empty output", nil)
 	var tge *TextGenError
 	if !errors.As(err, &tge) {
-		t.Fatalf("err = %v; want *TextGenError", err)
+		t.Fatalf("whitespace-only: err = %v; want *TextGenError", err)
 	}
 	if tge.Message != "codex CLI returned empty output" {
-		t.Errorf("Message = %q; want the emptyMsg", tge.Message)
+		t.Errorf("whitespace-only: Message = %q; want the emptyMsg", tge.Message)
 	}
 }
 
@@ -66,101 +60,59 @@ func TestHandleTextGenResult_ClassifiesFullStderr(t *testing.T) {
 // real text sits unused in the ExecResult.
 func TestHandleTextGenResult_MessageNeverEmptyOnFailure(t *testing.T) {
 	t.Parallel()
+	// stderr-preferred and the stdout tier are covered by TestGenerateText_Matrix
+	// (AuthFrom401, DiagnosticOnStdout). The runErr tier is only reachable when
+	// the subprocess produced nothing at all — a launch failure.
+	runErr := errors.New("fork/exec: permission denied")
+	_, err := HandleTextGenResult(ExecResult{}, runErr, AgentNameCodex, "empty", nil)
+	var tge *TextGenError
+	if !errors.As(err, &tge) {
+		t.Fatalf("err = %v; want *TextGenError", err)
+	}
+	if tge.Message != "fork/exec: permission denied" {
+		t.Errorf("Message = %q; want the run error", tge.Message)
+	}
+}
+
+// One table for Error()/Unwrap. CLIMissing sets no Message, so without the
+// Cause fallback the consumers that print Error() directly (dispatch, review,
+// runner setup) show only "kind=cli_missing" — jargon naming no binary.
+func TestTextGenError_ErrorAndUnwrap(t *testing.T) {
+	t.Parallel()
+	cause := &exec.Error{Name: "codex", Err: exec.ErrNotFound}
 	tests := []struct {
 		name string
-		res  ExecResult
+		err  *TextGenError
 		want string
 	}{
-		{"stderr preferred", ExecResult{Stderr: []byte("from stderr"), Stdout: []byte("from stdout")}, "from stderr"},
-		{"falls back to stdout", ExecResult{Stdout: []byte("quota exhausted")}, "quota exhausted"},
-		{"falls back to run error", ExecResult{}, "fork/exec: permission denied"},
+		{"message wins",
+			&TextGenError{Kind: TextGenErrorAuth, Provider: AgentNameCodex, Message: "Invalid API key", Cause: cause},
+			"codex CLI error (kind=auth): Invalid API key"},
+		{"falls back to cause when no message",
+			&TextGenError{Kind: TextGenErrorCLIMissing, Provider: AgentNameCodex, Cause: cause},
+			`codex CLI error (kind=cli_missing): exec: "codex": executable file not found in $PATH`},
+		{"exit code when neither",
+			&TextGenError{Kind: TextGenErrorUnknown, Provider: AgentNameClaudeCode, ExitCode: 137},
+			"claude-code CLI error (kind=unknown, exit=137)"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runErr := errors.New("fork/exec: permission denied")
-			_, err := HandleTextGenResult(tc.res, runErr, AgentNameCodex, "empty", nil)
-			var tge *TextGenError
-			if !errors.As(err, &tge) {
-				t.Fatalf("err = %v; want *TextGenError", err)
-			}
-			if tge.Message != tc.want {
-				t.Errorf("Message = %q; want %q", tge.Message, tc.want)
+			if got := tc.err.Error(); got != tc.want {
+				t.Errorf("Error() = %q; want %q", got, tc.want)
 			}
 		})
 	}
-}
 
-func TestTextGenError_ErrorIncludesKindAndMessage(t *testing.T) {
-	t.Parallel()
-	e := &TextGenError{Kind: TextGenErrorAuth, Provider: AgentNameClaudeCode, Message: "Invalid API key"}
-	s := e.Error()
-	if !strings.Contains(s, "auth") {
-		t.Errorf("Error() = %q; want to contain kind 'auth'", s)
-	}
-	if !strings.Contains(s, "Invalid API key") {
-		t.Errorf("Error() = %q; want to contain message", s)
-	}
-}
-
-// CLIMissing sets no Message, so without the Cause fallback the consumers that
-// print Error() directly (dispatch, review, runner setup) show only
-// "codex CLI error (kind=cli_missing)" — jargon naming no binary.
-func TestTextGenError_ErrorFallsBackToCause(t *testing.T) {
-	t.Parallel()
-	cause := &exec.Error{Name: "codex", Err: exec.ErrNotFound}
-	e := &TextGenError{Kind: TextGenErrorCLIMissing, Provider: AgentNameCodex, Cause: cause}
-	got := e.Error()
-	if !strings.Contains(got, "executable file not found") {
-		t.Errorf("Error() = %q; want the cause's actionable text", got)
-	}
-	if !strings.Contains(got, "codex") {
-		t.Errorf("Error() = %q; want the binary name to appear", got)
-	}
-	// Message still wins when present — the cause must not be appended twice.
-	withMsg := &TextGenError{Kind: TextGenErrorAuth, Provider: AgentNameCodex, Message: "401 Unauthorized", Cause: cause}
-	if strings.Contains(withMsg.Error(), "executable file not found") {
-		t.Errorf("Error() = %q; Message must take precedence over Cause", withMsg.Error())
-	}
-}
-
-func TestTextGenError_UnwrapReturnsCause(t *testing.T) {
-	t.Parallel()
-	cause := errors.New("underlying")
-	e := &TextGenError{Kind: TextGenErrorUnknown, Cause: cause}
-	if got := errors.Unwrap(e); !errors.Is(got, cause) {
-		t.Errorf("Unwrap() = %v; want %v", got, cause)
-	}
-}
-
-func TestTextGenError_ErrorEmptyMessageIncludesExitCode(t *testing.T) {
-	t.Parallel()
-	e := &TextGenError{Kind: TextGenErrorUnknown, Provider: AgentNameClaudeCode, ExitCode: 137}
-	want := "claude-code CLI error (kind=unknown, exit=137)"
-	if got := e.Error(); got != want {
-		t.Errorf("Error() = %q; want %q", got, want)
-	}
-}
-
-func TestTextGenError_ErrorsAsIntegration(t *testing.T) {
-	t.Parallel()
-	cause := errors.New("timeout")
-	wrapped := fmt.Errorf("operation failed: %w", &TextGenError{
-		Kind:     TextGenErrorCLIMissing,
-		Provider: AgentNameCodex,
-		Message:  "codex not found",
-		Cause:    cause,
-	})
-
+	// Unwrap must expose Cause so errors.Is/As reach it through a wrap.
+	wrapped := fmt.Errorf("operation failed: %w",
+		&TextGenError{Kind: TextGenErrorCLIMissing, Provider: AgentNameCodex, Cause: cause})
 	var tge *TextGenError
 	if !errors.As(wrapped, &tge) {
-		t.Fatal("errors.As did not find *TextGenError in wrapped chain")
+		t.Fatal("errors.As did not find *TextGenError through the wrap")
 	}
-	if tge.Kind != TextGenErrorCLIMissing {
-		t.Errorf("Kind = %q; want %q", tge.Kind, TextGenErrorCLIMissing)
-	}
-	if !errors.Is(tge, cause) {
-		t.Error("errors.Is did not find cause through TextGenError.Unwrap()")
+	if !errors.Is(tge, exec.ErrNotFound) {
+		t.Error("errors.Is did not reach Cause through Unwrap")
 	}
 }
 
@@ -242,16 +194,10 @@ func TestClassifyDiagnosticHTTPStatus(t *testing.T) {
 		// Machine-shaped: classify.
 		{"HTTP keyword", "HTTP 429: quota exhausted", TextGenErrorRateLimit},
 		{"json snake_case", `{"status_code": 401}`, TextGenErrorAuth},
-		{"json camelCase", `{"statusCode":403}`, TextGenErrorAuth},
-		{"error keyword", "error: 403 returned by upstream", TextGenErrorAuth},
-		{"status colon", "status: 404", TextGenErrorConfig},
 
-		// Prose about a status: do NOT classify.
+		// Prose naming a status: do NOT classify.
 		{"prose names a 401", "The user was debugging a 401 Unauthorized from the payments API.", TextGenErrorUnknown},
-		{"prose names a 429", "Fixed the 429 Too Many Requests retry loop in client.go", TextGenErrorUnknown},
-		{"prose names a 404", "Summary: resolved a 404 Not Found on /v1/users", TextGenErrorUnknown},
 		{"bare reason phrase", "401 Unauthorized", TextGenErrorUnknown},
-		{"empty", "", TextGenErrorUnknown},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

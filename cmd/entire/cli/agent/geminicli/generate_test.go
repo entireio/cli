@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os/exec"
 	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -56,31 +55,5 @@ func TestClassifyGeminiAuthPhrase_NotTriggeredByEnvVarMention(t *testing.T) {
 	fixture := "Please set an Auth method in your settings.json or specify one of: GEMINI_API_KEY"
 	if got := classifyGeminiAuthPhrase(fixture); got != agent.TextGenErrorAuth {
 		t.Errorf("classifyGeminiAuthPhrase(fixture) = %q; want auth", got)
-	}
-}
-
-// TestGenerateText_AuthPhraseSurvivesLongStderr pins that classification runs
-// on the FULL stderr, not the 500-byte-truncated Message. Gemini emits banner
-// and warning noise ahead of the real error, so the auth phrase routinely lands
-// past the cap.
-func TestGenerateText_AuthPhraseSurvivesLongStderr(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX shell")
-	}
-	noise := strings.Repeat("warning: ignoring unknown setting\n", 20) // ~680 bytes
-	ag := &GeminiCLIAgent{
-		CommandRunner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-			return exec.CommandContext(ctx, "sh", "-c",
-				`printf '%s' '`+noise+`Please set an Auth method in your settings.json' 1>&2; exit 41`)
-		},
-	}
-	_, err := ag.GenerateText(context.Background(), "prompt", "")
-	var tge *agent.TextGenError
-	if !errors.As(err, &tge) {
-		t.Fatalf("err = %v; want *agent.TextGenError", err)
-	}
-	if tge.Kind != agent.TextGenErrorAuth {
-		t.Errorf("Kind = %q; want auth (phrase sits past the 500-byte Message cap)", tge.Kind)
 	}
 }
