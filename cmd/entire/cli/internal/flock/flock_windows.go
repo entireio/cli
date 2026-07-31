@@ -12,10 +12,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// acquirePollInterval is how often AcquireContext retries a non-blocking
-// lock attempt while waiting for a contended lock to free up.
-const acquirePollInterval = 10 * time.Millisecond
-
 // Acquire takes an exclusive lock on path via Windows LockFileEx. The
 // returned release unlocks and closes the file. Callers must invoke release
 // exactly once.
@@ -33,10 +29,10 @@ func Acquire(path string) (release func(), err error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("lock flock: %w", err)
 	}
-	return func() {
+	return onceRelease(func() {
 		_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, overlapped)
 		_ = f.Close()
-	}, nil
+	}), nil
 }
 
 // AcquireContext behaves like Acquire, except the wait for a contended lock
@@ -45,9 +41,17 @@ func Acquire(path string) (release func(), err error) {
 // acquirePollInterval until either the lock is obtained or ctx is done, in
 // which case it returns ctx.Err(). Use this instead of Acquire whenever the
 // caller has a deadline that must bound lock acquisition.
+//
+// When ctx has no Done channel (Background/TODO) it can neither time out nor
+// be canceled, so AcquireContext falls back to the blocking Acquire rather
+// than spinning at acquirePollInterval forever. Cancelable contexts keep the
+// poll loop so cancellation is still observed.
 func AcquireContext(ctx context.Context, path string) (release func(), err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err //nolint:wrapcheck // canonical context cancellation
+	}
+	if ctx.Done() == nil {
+		return Acquire(path)
 	}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // caller is responsible for path validation
 	if err != nil {
@@ -61,10 +65,10 @@ func AcquireContext(ctx context.Context, path string) (release func(), err error
 		overlapped := new(windows.Overlapped)
 		lockErr := windows.LockFileEx(windows.Handle(f.Fd()), flags, 0, 1, 0, overlapped)
 		if lockErr == nil {
-			return func() {
+			return onceRelease(func() {
 				_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, overlapped)
 				_ = f.Close()
-			}, nil
+			}), nil
 		}
 		if !errors.Is(lockErr, windows.ERROR_LOCK_VIOLATION) && !errors.Is(lockErr, windows.ERROR_IO_PENDING) {
 			_ = f.Close()
