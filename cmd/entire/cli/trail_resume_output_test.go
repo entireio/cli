@@ -58,7 +58,7 @@ func TestDisplayTrailResumeContinuation_SingleSession(t *testing.T) {
 	session := strategy.RestoredSession{
 		SessionID:    "sess-solo",
 		Agent:        "Claude Code",
-		CheckpointID: "abc123def456",
+		CheckpointID: "cafe12cafe34",
 		Prompt:       "Implement auth",
 		CreatedAt:    time.Date(2026, 2, 2, 12, 0, 0, 0, time.UTC),
 	}
@@ -68,7 +68,7 @@ func TestDisplayTrailResumeContinuation_SingleSession(t *testing.T) {
 		t.Fatalf("displayTrailResumeContinuation() error = %v", err)
 	}
 
-	if !strings.Contains(out.String(), "✓ Restored checkpoint abc123def456 (1 session).") {
+	if !strings.Contains(out.String(), "✓ Restored checkpoint cafe12cafe34 (1 session).") {
 		t.Errorf("output = %q, want restore summary", out.String())
 	}
 	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
@@ -90,14 +90,14 @@ func TestDisplayTrailResumeContinuation_MultiSessionListsOthers(t *testing.T) {
 	work := strategy.RestoredSession{
 		SessionID:    "sess-work",
 		Agent:        "Claude Code",
-		CheckpointID: "abc123def456",
+		CheckpointID: "cafe12cafe34",
 		Prompt:       "Implement auth",
 		CreatedAt:    time.Date(2026, 2, 2, 12, 0, 0, 0, time.UTC),
 	}
 	review := strategy.RestoredSession{
 		SessionID:    "sess-review",
 		Agent:        "Claude Code",
-		CheckpointID: "abc123def456",
+		CheckpointID: "beef56beef78",
 		Prompt:       "Review the code changes on this branch",
 		CreatedAt:    time.Date(2026, 2, 2, 13, 0, 0, 0, time.UTC),
 		Kind:         "agent_review",
@@ -125,7 +125,7 @@ func TestContinueTrailRestoredSessionsNonInteractiveEndsWithContinuation(t *test
 	session := strategy.RestoredSession{
 		SessionID:    "sess-wire",
 		Agent:        "Claude Code",
-		CheckpointID: "abc123def456",
+		CheckpointID: "beef56beef78",
 		CreatedAt:    time.Date(2026, 2, 2, 12, 0, 0, 0, time.UTC),
 	}
 

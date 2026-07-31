@@ -141,12 +141,18 @@ func newTrailResumeCmd() *cobra.Command {
 The trail may be given as the first argument or via --trail, as a number, id, or
 branch. Without one, the trail for the current branch is used.
 
-By default, interactive terminals show the trail context, restore the checkpoint
-sessions on the trail branch, and ask whether Entire should start the agent. If
-there are multiple sessions in the checkpoint, you can choose which one to
-start. Non-interactive runs show the same context and print resume commands for
-the latest checkpoint on the trail branch. Use --session or --checkpoint to
-resume an exact session or checkpoint.
+Resuming switches to the trail branch, restores the latest checkpoint's agent
+session logs, and continues. Interactive terminals ask whether Entire should
+start the agent, with a picker when the checkpoint has multiple sessions.
+Non-interactive runs print the actions taken and end with the default
+session's resume command as the final line; --json replaces that output with a
+machine-readable action report. Use --session or --checkpoint to resume an
+exact session or checkpoint. The command exits non-zero whenever nothing was
+resumed.
+
+Use --no-resume to inspect the trail context (checkpoint sessions, findings,
+commands) without restoring or resuming anything; combine with --json for the
+full context as JSON.
 
 Use --repo to assert the GitHub repository for copied commands, and --branch
 with a trail number or id to assert the branch you expect the trail to be
@@ -173,7 +179,7 @@ resume stops before checking anything out.`,
 	cmd.Flags().StringVar(&opts.SessionID, "session", "", "Resume a specific known local session on the trail branch")
 	cmd.Flags().StringVar(&opts.CheckpointID, "checkpoint", "", "Resume a specific checkpoint on the trail branch")
 	cmd.Flags().BoolVarP(&opts.Force, "force", "f", false, "Skip prompts and overwrite existing session logs from checkpoints")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output trail resume context as JSON")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output JSON: an action report when resuming, or the full context with --no-resume")
 	cmd.Flags().BoolVar(&opts.NoResume, "no-resume", false, "Show trail resume context without restoring or resuming a session")
 
 	return cmd
@@ -182,9 +188,6 @@ resume stops before checking anything out.`,
 func validateTrailResumeOptions(opts trailResumeOptions) error {
 	if strings.TrimSpace(opts.SessionID) != "" && strings.TrimSpace(opts.CheckpointID) != "" {
 		return errors.New("cannot combine --session and --checkpoint")
-	}
-	if opts.JSON && !opts.NoResume {
-		return errors.New("--json can only be used with --no-resume")
 	}
 	if opts.NoResume && (strings.TrimSpace(opts.SessionID) != "" || strings.TrimSpace(opts.CheckpointID) != "") {
 		return errors.New("cannot combine --no-resume with --session or --checkpoint")
@@ -254,6 +257,10 @@ func runTrailResume(cmd *cobra.Command, opts trailResumeOptions) error {
 			}
 			printTrailResumeContext(cmd.OutOrStdout(), resumeCtx)
 			return nil
+		}
+
+		if opts.JSON {
+			return runTrailResumeJSON(ctx, cmd, *found, branch, opts)
 		}
 
 		printTrailResumeIdentity(cmd.OutOrStdout(), *found)

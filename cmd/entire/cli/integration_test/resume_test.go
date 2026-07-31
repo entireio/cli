@@ -707,6 +707,47 @@ func TestResume_LocalLogNewerTimestamp_ForceOverwrites(t *testing.T) {
 	}
 }
 
+// TestResume_RerunIsIdempotent verifies that resuming the same branch twice
+// succeeds both times: agents retry, so a repeated resume must be a clean
+// no-op success (already on the branch, existing restored log kept).
+func TestResume_RerunIsIdempotent(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	session := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	content := "def hello; end"
+	env.WriteFile("hello.rb", content)
+	session.CreateTranscript(
+		"Create hello method",
+		[]FileChange{{Path: "hello.rb", Content: content}},
+	)
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+	env.GitCommitWithShadowHooks("Create hello method", "hello.rb")
+
+	featureBranch := env.GetCurrentBranch()
+	env.GitCheckoutBranch(masterBranch)
+
+	output, err := env.RunResume(featureBranch)
+	if err != nil {
+		t.Fatalf("first resume failed: %v\nOutput: %s", err, output)
+	}
+
+	// Second run: already on the branch, log already restored. Must still
+	// succeed and keep the existing log (no --force given).
+	output, err = env.RunResume(featureBranch)
+	if err != nil {
+		t.Fatalf("second resume failed (must be an idempotent success): %v\nOutput: %s", err, output)
+	}
+	if !strings.Contains(output, "Keeping existing") {
+		t.Errorf("second resume should keep the existing restored log, got: %s", output)
+	}
+}
+
 // TestResume_ExistingLocalLog_KeptEvenWhenCheckpointNewer verifies that an
 // existing local log is kept without --force even when the checkpoint transcript
 // is newer than the local copy. "There is a local log" is what matters, not which

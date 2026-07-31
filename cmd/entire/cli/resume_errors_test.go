@@ -49,43 +49,46 @@ func TestResumeErrorsSurviveSilentErrorWrapping(t *testing.T) {
 
 	t.Run("worktree clash", func(t *testing.T) {
 		t.Parallel()
+		branch, wtPath := "feat-clash", "/work/other"
 		wrapped := fmt.Errorf("resume: %w", NewSilentError(&ResumeWorktreeClashError{
-			Branch:       "feat",
-			WorktreePath: "/work/other",
+			Branch:       branch,
+			WorktreePath: wtPath,
 		}))
 		var clash *ResumeWorktreeClashError
 		if !errors.As(wrapped, &clash) {
 			t.Fatalf("errors.As failed to recover ResumeWorktreeClashError from %v", wrapped)
 		}
-		if clash.Branch != "feat" || clash.WorktreePath != "/work/other" {
-			t.Errorf("recovered fields = %q, %q; want feat, /work/other", clash.Branch, clash.WorktreePath)
+		if clash.Branch != branch || clash.WorktreePath != wtPath {
+			t.Errorf("recovered fields = %q, %q; want %s, %s", clash.Branch, clash.WorktreePath, branch, wtPath)
 		}
-		if !strings.Contains(clash.Error(), "feat") || !strings.Contains(clash.Error(), "/work/other") {
+		if !strings.Contains(clash.Error(), branch) || !strings.Contains(clash.Error(), wtPath) {
 			t.Errorf("Error() = %q, want branch and worktree path", clash.Error())
 		}
 	})
 
 	t.Run("no checkpoint", func(t *testing.T) {
 		t.Parallel()
-		wrapped := fmt.Errorf("resume: %w", &ResumeNoCheckpointError{Branch: "feat"})
+		branch := "feat-nocp"
+		wrapped := fmt.Errorf("resume: %w", &ResumeNoCheckpointError{Branch: branch})
 		var noCheckpoint *ResumeNoCheckpointError
 		if !errors.As(wrapped, &noCheckpoint) {
 			t.Fatalf("errors.As failed to recover ResumeNoCheckpointError from %v", wrapped)
 		}
-		if noCheckpoint.Branch != "feat" {
-			t.Errorf("recovered Branch = %q, want feat", noCheckpoint.Branch)
+		if noCheckpoint.Branch != branch {
+			t.Errorf("recovered Branch = %q, want %s", noCheckpoint.Branch, branch)
 		}
 	})
 
 	t.Run("metadata unavailable", func(t *testing.T) {
 		t.Parallel()
-		wrapped := NewSilentError(&ResumeMetadataUnavailableError{CheckpointID: id.MustCheckpointID("abc123def456")})
+		cpID := id.MustCheckpointID("ddccbbaa0011")
+		wrapped := NewSilentError(&ResumeMetadataUnavailableError{CheckpointID: cpID})
 		var unavailable *ResumeMetadataUnavailableError
 		if !errors.As(wrapped, &unavailable) {
 			t.Fatalf("errors.As failed to recover ResumeMetadataUnavailableError from %v", wrapped)
 		}
-		if unavailable.CheckpointID.String() != "abc123def456" {
-			t.Errorf("recovered CheckpointID = %q, want abc123def456", unavailable.CheckpointID)
+		if unavailable.CheckpointID != cpID {
+			t.Errorf("recovered CheckpointID = %q, want %s", unavailable.CheckpointID, cpID)
 		}
 	})
 }
