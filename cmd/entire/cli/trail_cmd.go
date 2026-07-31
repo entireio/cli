@@ -149,6 +149,7 @@ type trailListOptions struct {
 
 func newTrailShowCmd() *cobra.Command {
 	var branch string
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "show [<trail>]",
 		Short: "Show a trail",
@@ -168,15 +169,16 @@ Otherwise, <trail> may be a trail number, id, or branch in the target repo.`,
 			if err := ensureTrailRepoHasTarget(cmd, selector != "" || trailBranchFlag(cmd) != "", "pass a trail selector or --branch"); err != nil {
 				return err
 			}
-			return runTrailShow(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), selector, trailRepoFlag(cmd), trailBranchFlag(cmd))
+			return runTrailShow(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), selector, trailRepoFlag(cmd), trailBranchFlag(cmd), jsonOut)
 		},
 	}
 	cmd.Flags().StringVar(&branch, "branch", "", "Show the trail for this branch instead of the current branch; cannot be combined with a trail selector")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output the trail as JSON, including the description")
 	return cmd
 }
 
 // runTrailShow shows one trail, defaulting to the current branch's trail.
-func runTrailShow(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector, repoOverride, branchOverride string) error {
+func runTrailShow(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector, repoOverride, branchOverride string, jsonOut bool) error {
 	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, repoOverride, func(ctx context.Context, client *api.Client) error {
 		forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, repoOverride)
 		if err != nil {
@@ -217,9 +219,28 @@ func runTrailShow(ctx context.Context, w, errW io.Writer, insecureHTTP bool, sel
 				fmt.Fprintf(errW, "Warning: could not load trail description: %v\n", derr)
 			}
 		}
+		if jsonOut {
+			return encodeTrailShowJSON(w, *found, webURL, bodyText)
+		}
 		printTrailDetails(w, m, webURL, trailDescriptionForDisplay(bodyText, descriptionLoaded))
 		return nil
 	})
+}
+
+// encodeTrailShowJSON emits the resolved trail as JSON, with the body carrying
+// the resolved description text and the URL carrying the browser link the
+// human output surfaces.
+func encodeTrailShowJSON(w io.Writer, found api.TrailResource, webURL, bodyText string) error {
+	found.Body = bodyText
+	if strings.TrimSpace(webURL) != "" {
+		found.URL = webURL
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(found); err != nil {
+		return fmt.Errorf("encode trail JSON: %w", err)
+	}
+	return nil
 }
 
 // resolveTrailBySelector resolves a trail by an optional selector (trail
