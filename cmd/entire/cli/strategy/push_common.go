@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/perf"
@@ -63,7 +64,9 @@ func batchPushRefs(ctx context.Context, target string, refs []plumbing.Reference
 	for _, ref := range refs {
 		refSpecs = append(refSpecs, ref.String()+":"+ref.String())
 	}
-	if _, err := remote.PushWithOptions(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs}); err != nil {
+	result, err := remote.PushWithOptions(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs})
+	logGitProgress(ctx, result.Stderr)
+	if err != nil {
 		return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
 	}
 	return nil
@@ -88,7 +91,7 @@ func pushCheckpointRefWithRecovery(ctx context.Context, target string, ref plumb
 	if err := batchPushRefs(ctx, target, []plumbing.ReferenceName{ref}); err == nil {
 		return nil
 	}
-	if err := fetchAndRebaseRefCommon(ctx, target, ref); err != nil {
+	if err := fetchAndRebaseRefCommon(ctx, target, ref, io.Discard); err != nil {
 		return fmt.Errorf("sync diverged checkpoint ref %s: %w", ref, err)
 	}
 	return batchPushRefs(ctx, target, []plumbing.ReferenceName{ref})
@@ -146,6 +149,22 @@ func displayPushTarget(target string) string {
 	return target
 }
 
+// pushProgressOutput returns the writer for checkpoint push progress lines
+// (the git-branch legacy backend's phased "Pushing/Syncing/done" output and
+// the session-tree summary). Always resolves os.Stderr at call time so tests
+// can redirect stderr. Resolves to io.Discard when stderr isn't a real
+// terminal so agents/CI on this legacy backend don't get spammed — mirrors
+// the git-refs default path's non-TTY silence. Actionable errors and hints
+// (protected-ref blocks, push/sync warnings, ssh-agent/checkpoint-remote
+// hints) must NOT be routed through this writer; they write to os.Stderr
+// directly so they still print on non-TTY.
+func pushProgressOutput() io.Writer {
+	if !interactive.IsTerminalWriter(os.Stderr) {
+		return io.Discard
+	}
+	return os.Stderr
+}
+
 // checkpointPushBudget is one shared deadline across the initial push,
 // fetch+rebase, and retry — per-attempt timeouts can stack to ~3x. var so tests
 // can shrink it.
@@ -157,21 +176,23 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) e
 	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
 	defer cancel()
 
+	w := pushProgressOutput()
+	styles := pushProgressStylesFor(w, false)
 	displayTarget := displayPushTarget(target)
 	refLabel := refDisplayName(ref)
 
-	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", refLabel, displayTarget)
-	stop := startProgressDots(os.Stderr)
+	fmt.Fprintf(w, "%s Pushing %s to %s...\n", styles.dim("[entire]"), refLabel, displayTarget)
+	pushStart := time.Now()
 
-	// Try pushing first
 	result, err := tryPushRefCommon(ctx, target, ref)
 	if err == nil {
-		finishPush(ctx, stop, result, target)
+		writePushFinishLine(ctx, w, result, pushStart, target)
 		return nil
 	}
-	stop("")
 
-	// Protected refs cannot be fixed by syncing and retrying.
+	// Protected refs cannot be fixed by syncing and retrying. This is an
+	// actionable error, not progress — always print it, even on non-TTY
+	// stderr, so it bypasses the gated pushProgressOutput() writer.
 	var protectedErr *protectedRefError
 	if errors.As(err, &protectedErr) {
 		printProtectedRefBlock(os.Stderr, refLabel, target)
@@ -181,6 +202,7 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) e
 	// Non-interactive SSH (pre-push BatchMode): auth failures cannot be fixed by
 	// fetch+rebase, and retrying would just reprint the same opaque error.
 	// Surface an actionable ssh-agent hint and skip recovery (issue #1523).
+	// Actionable warning/hint — bypass the gated writer, print unconditionally.
 	if nonInteractiveSSHAuthFailure(ctx, err) {
 		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't push %s: %v\n", refLabel, err)
 		printNonInteractiveSSHAuthHint()
@@ -188,18 +210,19 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) e
 		return nil
 	}
 
-	// Push failed - likely non-fast-forward. Try to fetch and rebase.
+	writePushConflictLine(w, pushStart)
+
+	// Push failed — try to fetch and rebase.
 	// Spanned (with the network fetch as a child) so the trace distinguishes
 	// "the raw push is slow" from "we keep hitting contention and re-syncing".
-	fmt.Fprintf(os.Stderr, "[entire] Syncing %s with remote...", refLabel)
-	stop = startProgressDots(os.Stderr)
+	fmt.Fprintf(w, "%s Syncing with remote...\n", styles.dim("[entire]"))
 
 	frCtx, fetchRebaseSpan := perf.Start(ctx, "fetch_and_rebase")
-	syncErr := fetchAndRebaseRefCommon(frCtx, target, ref)
+	syncErr := fetchAndRebaseRefCommon(frCtx, target, ref, w)
 	fetchRebaseSpan.RecordError(syncErr)
 	fetchRebaseSpan.End()
 	if syncErr != nil {
-		stop("")
+		// Actionable warning — bypass the gated writer, print unconditionally.
 		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't sync %s: %v\n", refLabel, syncErr)
 		if nonInteractiveSSHAuthFailure(ctx, syncErr) {
 			printNonInteractiveSSHAuthHint()
@@ -207,21 +230,19 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) e
 		printCheckpointRemoteHint(target)
 		return nil // Don't fail the main push
 	}
-	stop(" done")
 
-	// Try pushing again after rebase
-	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", refLabel, displayTarget)
-	stop = startProgressDots(os.Stderr)
+	fmt.Fprintf(w, "%s Pushing %s to %s...\n", styles.dim("[entire]"), refLabel, displayTarget)
+	retryStart := time.Now()
 
 	if result, err := tryPushRefCommon(ctx, target, ref); err != nil {
-		stop("")
+		// Actionable warning — bypass the gated writer, print unconditionally.
 		fmt.Fprintf(os.Stderr, "[entire] Warning: failed to push %s after sync: %v\n", refLabel, err)
 		if nonInteractiveSSHAuthFailure(ctx, err) {
 			printNonInteractiveSSHAuthHint()
 		}
 		printCheckpointRemoteHint(target)
 	} else {
-		finishPush(ctx, stop, result, target)
+		writePushFinishLine(ctx, w, result, retryStart, target)
 	}
 
 	return nil
@@ -329,18 +350,6 @@ func parsePushResult(output string) pushResult {
 	return pushResult{upToDate: false}
 }
 
-// finishPush stops the progress dots and prints "already up-to-date" or "done"
-// depending on the push result. Only prints the settings commit hint when new
-// content was actually pushed.
-func finishPush(ctx context.Context, stop func(string), result pushResult, target string) {
-	if result.upToDate {
-		stop(" already up-to-date")
-	} else {
-		stop(" done")
-		printSettingsCommitHint(ctx, target)
-	}
-}
-
 // tryPushRefCommon attempts to push a ref. No timeout of its own —
 // runs under doPushRef's shared budget. Branch refs use a bare branch-name
 // refSpec so existing remote-tracking works; non-branch refs use an explicit
@@ -355,17 +364,20 @@ func tryPushRefCommon(ctx context.Context, remoteName string, ref plumbing.Refer
 		refSpec = ref.String() + ":" + ref.String()
 	}
 
-	// Span the actual `git push` subprocess: on a slow remote (e.g. a custom
-	// git transport) this is typically where pre-push time is spent. Called once
-	// per push attempt, so a retry after fetch+rebase shows up as a second
-	// git_push step (git_push~1) in the trace. A rejected first push records an
-	// error flag, which signals the recovery path was taken.
 	_, pushSpan := perf.Start(ctx, "git_push")
-	result, err := remote.Push(ctx, remoteName, refSpec)
+	pushOut, err := remote.Push(ctx, remoteName, refSpec)
 	pushSpan.RecordError(err)
 	pushSpan.End()
 
-	outputStr := result.Output
+	displayGitProgress(pushProgressOutput(), pushOut.Stderr)
+	// File-log transfer detail unconditionally, matching the git-refs backend
+	// (batchPushRefs): displayGitProgress's writer is gated to io.Discard on
+	// non-TTY, so without this the legacy git-branch path would drop
+	// --progress transfer detail entirely instead of recording it to
+	// .entire/logs/.
+	logGitProgress(ctx, pushOut.Stderr)
+
+	outputStr := pushOut.Output
 	if err != nil {
 		return pushResult{}, classifyPushFailure(ctx, outputStr, err)
 	}
@@ -455,7 +467,10 @@ func printProtectedRefBlock(w io.Writer, ref, target string) {
 // of the remote tip. Since checkpoint shards use unique paths, rebases always
 // apply cleanly.
 // The target can be a remote name or a URL.
-func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.ReferenceName) error {
+func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.ReferenceName, w io.Writer) error {
+	styles := pushProgressStylesFor(w, false)
+	displayTarget := displayPushTarget(target)
+
 	// No timeout: runs under doPushRef's shared budget.
 	fetchTarget, err := remote.ResolveFetchTarget(ctx, target)
 	if err != nil {
@@ -487,6 +502,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	// Span the fetch separately so a slow sync can be attributed to the network
 	// fetch versus the local reconcile/rebase that follows it.
 	_, fetchSpan := perf.Start(ctx, "git_fetch")
+	fetchStart := time.Now()
 	fetchOutput, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
@@ -497,6 +513,10 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	if fetchErr != nil {
 		return fmt.Errorf("fetch failed: %s", fetchOutput)
 	}
+	fmt.Fprintf(w, "         %s %s %s\n",
+		styles.dim(fmt.Sprintf("fetching from %s...", displayTarget)),
+		styles.green("done"),
+		styles.dim("("+elapsedPushSec(fetchStart)+")"))
 
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -510,7 +530,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	// this cherry-picks local commits onto remote tip, updating the local ref.
 	// If reconciliation fails, abort — proceeding to rebase on disconnected
 	// refs would silently combine unrelated histories.
-	if reconcileErr := ReconcileDisconnectedMetadataRef(ctx, repo, ref, fetchedRefName, os.Stderr); reconcileErr != nil {
+	if reconcileErr := ReconcileDisconnectedMetadataRef(ctx, repo, ref, fetchedRefName, w); reconcileErr != nil {
 		return fmt.Errorf("metadata reconciliation failed: %w", reconcileErr)
 	}
 
@@ -578,10 +598,29 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 		return fmt.Errorf("failed to load shallow boundaries: %w", err)
 	}
 
-	newTip, err := cherryPickOnto(ctx, repo, remoteRef.Hash(), localCommits, shallow)
+	remoteOnlyCommits, remoteOnlyErr := collectCommitsSince(ctx, repo, repoPath, remoteRef.Hash(), localRef.Hash())
+	remoteAhead := 0
+	if remoteOnlyErr == nil {
+		remoteAhead = len(remoteOnlyCommits)
+	}
+	fmt.Fprintf(w, "         %s\n",
+		styles.dim(fmt.Sprintf("remote is %d commits ahead, rebasing %d local commits...", remoteAhead, len(localCommits))))
+
+	rebaseStart := time.Now()
+	onProgress := func(current, total int) {
+		fmt.Fprintf(w, "         %s %s\n",
+			styles.dim(fmt.Sprintf("rebasing %d/%d...", current, total)),
+			styles.dim("("+elapsedPushSec(rebaseStart)+")"))
+	}
+
+	newTip, err := cherryPickOnto(ctx, repo, remoteRef.Hash(), localCommits, shallow, onProgress)
 	if err != nil {
 		return fmt.Errorf("failed to rebase local commits onto remote: %w", err)
 	}
+	fmt.Fprintf(w, "         %s %s %s\n",
+		styles.dim("rebasing"),
+		styles.green("done"),
+		styles.dim("("+elapsedPushSec(rebaseStart)+")"))
 
 	return advance(newTip)
 }
@@ -645,29 +684,4 @@ func collectCommitsSince(ctx context.Context, repo *git.Repository, repoPath str
 	}
 
 	return commits, nil
-}
-
-// startProgressDots prints dots to w every second until the returned stop function
-// is called. The stop function prints the given suffix and a newline.
-func startProgressDots(w io.Writer) func(suffix string) {
-	done := make(chan struct{})
-	stopped := make(chan struct{})
-	go func() {
-		defer close(stopped)
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				fmt.Fprint(w, ".")
-			}
-		}
-	}()
-	return func(suffix string) {
-		close(done)
-		<-stopped // Wait for goroutine to finish before writing suffix
-		fmt.Fprintln(w, suffix)
-	}
 }

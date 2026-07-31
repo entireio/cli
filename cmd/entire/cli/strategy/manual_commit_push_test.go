@@ -5,8 +5,11 @@ import (
 	"os/exec"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
+	git "github.com/go-git/go-git/v6"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,4 +56,39 @@ func TestDeferCheckpointPushOnEmptyRemote_UsesLocalTrackingRefs(t *testing.T) {
 	require.False(t,
 		deferCheckpointPushOnEmptyRemote(ctx, pushSettings{remote: "origin", checkpointURL: "https://example.invalid/cp.git"}),
 		"a dedicated checkpoint remote is exempt from the guard")
+}
+
+// TestFlushCheckpointRefsQueue_NonTTY_NoProgressOutput verifies the git-refs
+// default pre-push path stays silent on a non-TTY writer while still landing
+// the queued refs. captureStderr's os.Pipe write end is never a terminal, so
+// interactive.IsTerminalWriter(os.Stderr) is false for the duration of the
+// call without any extra faking.
+//
+// Not parallel: uses captureStderr's os.Stderr redirection and t.Chdir.
+func TestFlushCheckpointRefsQueue_NonTTY_NoProgressOutput(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	output := restore()
+
+	require.NoError(t, err)
+	assert.False(t, pushDisabled)
+	assert.Equal(t, len(refs), pushed)
+
+	assert.NotContains(t, output, "[entire] Pushing", "non-TTY stderr must contain no progress banner")
+	assert.NotContains(t, output, "syncing", "non-TTY stderr must contain no progress text")
+
+	for _, ref := range refs {
+		assert.NotEmpty(t, remoteRefHash(t, bareDir, ref), "ref should still land on the remote")
+	}
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "pushed refs are removed from the queue")
 }

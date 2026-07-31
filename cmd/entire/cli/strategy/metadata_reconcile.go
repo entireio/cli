@@ -194,7 +194,7 @@ func ReconcileDisconnectedMetadataRef(
 
 	fmt.Fprintf(w, "[entire] Cherry-picking %d local checkpoint(s) onto remote...\n", len(dataCommits))
 
-	newTip, err := cherryPickOnto(ctx, repo, remoteHash, dataCommits, shallow)
+	newTip, err := cherryPickOnto(ctx, repo, remoteHash, dataCommits, shallow, nil)
 	if err != nil {
 		return fmt.Errorf("failed to cherry-pick local commits onto remote: %w", err)
 	}
@@ -305,6 +305,9 @@ func loadShallowHashes(ctx context.Context, repoPath string) (map[plumbing.Hash]
 	return set, nil
 }
 
+// cherryPickProgress reports cherry-pick replay progress (current/total commits).
+type cherryPickProgress func(current, total int)
+
 // cherryPickOnto applies each commit's delta onto base, building a linear chain.
 // For each commit, it computes the full diff from its parent (additions, modifications,
 // and deletions), then applies that delta onto the current tip's tree.
@@ -314,8 +317,9 @@ func loadShallowHashes(ctx context.Context, repoPath string) (map[plumbing.Hash]
 // a shallow-boundary commit would be diffed against a stale parent tree whose
 // objects live in the local pack but no longer represent the actual checkpoint
 // history — producing nonsense changes when replayed onto the remote tip.
-func cherryPickOnto(ctx context.Context, repo *git.Repository, base plumbing.Hash, commits []*object.Commit, shallow map[plumbing.Hash]bool) (plumbing.Hash, error) {
+func cherryPickOnto(ctx context.Context, repo *git.Repository, base plumbing.Hash, commits []*object.Commit, shallow map[plumbing.Hash]bool, onProgress cherryPickProgress) (plumbing.Hash, error) {
 	currentTip := base
+	processed := 0
 
 	for _, commit := range commits {
 		changes, err := treeChangesForCherryPick(ctx, repo, commit, shallow)
@@ -343,6 +347,10 @@ func cherryPickOnto(ctx context.Context, repo *git.Repository, base plumbing.Has
 		}
 
 		currentTip = newHash
+		processed++
+		if onProgress != nil {
+			onProgress(processed, len(commits))
+		}
 	}
 
 	return currentTip, nil

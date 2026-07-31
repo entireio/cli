@@ -9,14 +9,18 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
 )
@@ -103,6 +107,13 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 			// Policy failures should skip checkpoint pushes, not abort the user's push.
 			return nil
 		}
+	}
+
+	// Session-tree summary is progress, not an error/hint — skip the git-log
+	// work entirely on non-TTY stderr (agents/CI) instead of computing it only
+	// to have pushProgressOutput() discard it.
+	if interactive.IsTerminalWriter(os.Stderr) {
+		printPushSummary(ctx, remote, ps.pushTarget())
 	}
 
 	// OPF pre-push rewrite: if OPF is configured, resolve the user's
@@ -351,30 +362,30 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 	}
 
 	// Progress: pushing many refs over the network can take tens of seconds, so
-	// surface it (matching the v1 path's "[entire] Pushing ..." line) instead of
-	// leaving the user's git push apparently hung. Written to stderr, which git
-	// shows during the pre-push hook.
+	// surface it via the threshold-gated reporter instead of leaving the user's
+	// git push apparently hung. TTY-gated and threshold-delayed: agents and CI
+	// (non-TTY stderr) see zero progress bytes.
 	displayTarget := displayPushTarget(pushTarget)
-	fmt.Fprintf(os.Stderr, "[entire] Pushing %d checkpoint ref(s) to %s...", len(existing), displayTarget)
-	stop := startProgressDots(os.Stderr)
+	rep := newPushReporter(ctx, os.Stderr, interactive.IsTerminalWriter(os.Stderr), 2*time.Second)
+	rep.phase(fmt.Sprintf("syncing %d checkpoint(s) to %s", len(existing), displayTarget))
 
 	// Fast path: push all refs in one round-trip (fast-forward-only). If every
 	// ref was up to date or fast-forwarded, we're done.
 	batchErr := batchPushRefs(pushCtx, pushTarget, existing)
 	if batchErr == nil {
-		stop(" done")
+		rep.finish(fmt.Sprintf("pushed %d checkpoint(s)", len(existing)))
 		if removeErr := queue.Remove(existing); removeErr != nil {
 			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 				slog.String("error", removeErr.Error()))
 		}
 		return len(existing), nil
 	}
-	stop("")
 
 	// Non-interactive SSH auth failures cannot be fixed by per-ref
 	// fetch+replay. Surface the same actionable hint as the v1 doPushRef path
 	// (issue #1523) instead of only logging to .entire/logs/.
 	if nonInteractiveSSHAuthFailure(pushCtx, batchErr) {
+		rep.finish("")
 		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't push checkpoint refs: %v\n", batchErr)
 		printNonInteractiveSSHAuthHint()
 		printCheckpointRemoteHint(pushTarget)
@@ -386,8 +397,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 	// fetch+replay recovery, and remove from the queue only the refs that land
 	// (a genuine cherry-pick conflict leaves that ref queued for a later push,
 	// never force-overwriting the remote).
-	fmt.Fprintf(os.Stderr, "[entire] Some checkpoint refs diverged; syncing %d ref(s) individually...", len(existing))
-	stop = startProgressDots(os.Stderr)
+	rep.phase(fmt.Sprintf("resolving %d diverged checkpoint(s)", len(existing)))
 	pushed := make([]plumbing.ReferenceName, 0, len(existing))
 	var firstErr error
 	for _, ref := range existing {
@@ -404,7 +414,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 		}
 		pushed = append(pushed, ref)
 	}
-	stop(fmt.Sprintf(" pushed %d of %d", len(pushed), len(existing)))
+	rep.finish(fmt.Sprintf("pushed %d of %d checkpoint(s)", len(pushed), len(existing)))
 	if err := queue.Remove(pushed); err != nil {
 		logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 			slog.String("error", err.Error()))
@@ -429,4 +439,67 @@ func cleanupPushedShadowBranches(ctx context.Context) {
 			slog.Int("count", deleted),
 		)
 	}
+}
+
+// printPushSummary writes a session-level summary of pending checkpoint commits.
+// Silent on any failure — never blocks the push.
+func printPushSummary(ctx context.Context, remoteName, target string) {
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+
+	branchName := paths.MetadataBranchName
+	logFormat := "%H|%s|%(trailers:key=" + trailers.SessionTrailerKey + ",valueonly,separator=%x20)|%aI"
+
+	var logOutput string
+	isNewBranch := false
+
+	if !checkpointremote.IsURL(target) {
+		rangeSpec := "refs/remotes/" + remoteName + "/" + branchName + "..refs/heads/" + branchName
+		firstOut, firstErr := runPushSummaryGitLog(ctx, repoRoot, logFormat, rangeSpec)
+		if firstErr == nil && strings.TrimSpace(firstOut) != "" {
+			logOutput = firstOut
+		} else {
+			fallbackOut, fallbackErr := runPushSummaryGitLog(ctx, repoRoot, logFormat, "refs/heads/"+branchName)
+			if fallbackErr == nil && strings.TrimSpace(fallbackOut) != "" {
+				logOutput = fallbackOut
+				isNewBranch = true
+			}
+		}
+	} else {
+		fallbackOut, fallbackErr := runPushSummaryGitLog(ctx, repoRoot, logFormat, "refs/heads/"+branchName)
+		if fallbackErr == nil {
+			logOutput = fallbackOut
+			isNewBranch = strings.TrimSpace(logOutput) != ""
+		}
+	}
+	if strings.TrimSpace(logOutput) == "" {
+		return
+	}
+
+	summaries := parsePushSummaryFromLog(logOutput)
+	if len(summaries) == 0 {
+		return
+	}
+
+	totalCommits := len(strings.Split(strings.TrimSpace(logOutput), "\n"))
+	lines := formatSessionTree(summaries, formatSessionTreeOpts{
+		TotalCommits: totalCommits,
+		IsNewBranch:  isNewBranch,
+	})
+	w := pushProgressOutput()
+	for _, line := range lines {
+		fmt.Fprintln(w, line)
+	}
+}
+
+func runPushSummaryGitLog(ctx context.Context, repoRoot, format, rangeSpec string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "log", "--format="+format, rangeSpec)
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git log: %w", err)
+	}
+	return string(out), nil
 }
