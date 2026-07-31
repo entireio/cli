@@ -1045,16 +1045,10 @@ func TestGenerateCheckpointAISummary_NoTimeoutInheritsParent(t *testing.T) {
 // "safety deadline" guidance instead of the auth/rate-limit message.
 //
 // Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
-// TestGenerateCheckpointAISummary_UnpacksEvidenceIntoAttempt pins the middle
-// link of the three-link evidence chain: producers wrap subprocess output in a
-// *agent.TextGenerationError, generateCheckpointAISummary unpacks it into
-// attempt, and timeoutDiagnostic renders it.
-//
-// The producers and the renderer were both tested; this middle link was not,
-// and its two assignment lines had coverage count 0. Deleting them left every
-// test in the repo green while, in production, every timeout fell into the
-// "provider produced no output" branch with a blank stderr row — the exact
-// degradation the two-error-type composition exists to prevent.
+// The middle link of the evidence chain: producers wrap, this unpacks into
+// attempt, timeoutDiagnostic renders. Producers and renderer were tested; this
+// was not, and deleting its two lines left the suite green while every
+// production timeout degraded to "provider produced no output".
 //
 // Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
 func TestGenerateCheckpointAISummary_UnpacksEvidenceIntoAttempt(t *testing.T) {

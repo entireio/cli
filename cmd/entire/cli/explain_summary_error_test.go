@@ -195,21 +195,10 @@ func TestRenderTextGenError_NonClaudeProvidersUseStderrVerbatim(t *testing.T) {
 	}
 }
 
-// TestSummaryProviderTablesAreComplete closes the silent-registration class.
-//
-// Three tables are keyed on provider and all three degrade quietly when an
-// agent is missing from one of them:
-//
-//   - displayNameFor      -> renders the raw registry key ("copilot-cli
-//     authentication failed" instead of "Copilot ...")
-//   - syntheticFallback   -> no "try" row, so the failure block loses its
-//     remediation entirely
-//   - summaryProviderBinaries -> IsSummaryCLIAvailable returns false and the
-//     agent silently vanishes from the provider picker
-//
-// None of those produce an error, a lint failure, or a test failure on their
-// own, so adding an agent and forgetting one table ships a subtly worse UX.
-// Enumerating the registry is the only way to catch it.
+// Three provider-keyed tables all degrade quietly when an agent is missing:
+// displayNameFor renders the raw registry key, syntheticFallback drops the
+// "try" row, and summaryProviderBinaries makes the agent vanish from the
+// picker. None of those fail anything on their own.
 func TestSummaryProviderTablesAreComplete(t *testing.T) {
 	t.Parallel()
 	agents := agent.SummaryCapableAgents()

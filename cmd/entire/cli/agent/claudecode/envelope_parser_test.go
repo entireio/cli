@@ -116,18 +116,10 @@ func TestClassifyClaudeEnvelope_HTTPStatusMapping(t *testing.T) {
 	}
 }
 
-// TestEnvelopeAndStderrClassifiersAgree pins that Claude's two reporting
-// channels produce the same Kind for the same status.
-//
-// Claude surfaces an identical failure either as a structured
-// api_error_status in its JSON envelope or as a status in stderr text. Those
-// went through separate switches and drifted twice: 413/422 (Config via
-// envelope, Unknown via stderr) and then 402 (RateLimit via stderr, Config via
-// envelope, trail #193 finding 019fb568-645). Each time the user got different
-// remediation for the same problem depending on which channel Claude used.
-//
-// Both now delegate to agent.KindForHTTPStatus. This test is the guard that a
-// future edit re-introduces a switch in only one of them.
+// Claude's two reporting channels — envelope api_error_status and stderr text —
+// must produce the same Kind. Separate switches drifted twice (413/422, then
+// 402), giving different remediation for the same failure. Both now delegate to
+// agent.KindForHTTPStatus; this guards a future edit re-introducing one.
 func TestEnvelopeAndStderrClassifiersAgree(t *testing.T) {
 	t.Parallel()
 	for _, status := range []int{400, 401, 402, 403, 404, 408, 409, 413, 422, 429, 451} {

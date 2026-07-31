@@ -167,12 +167,10 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 	// without it (env/keychain auth still work) rather than failing the call.
 	settingsPath, cleanup, settingsErr := writeAuthSettingsFile(readUserAPIKeyHelper())
 	if settingsErr != nil {
-		// Leave a breadcrumb: this is the one downgrade the error surface
-		// cannot self-diagnose. An unwritable TMPDIR skips the injection, claude
-		// then genuinely fails auth, and the user is correctly told to run
-		// `claude login` — which will never help an API-billing user whose only
-		// credential is apiKeyHelper. Without this line the real cause appears
-		// nowhere, not even in .entire/logs/.
+		// The one downgrade the error surface cannot self-diagnose: an
+		// unwritable TMPDIR skips injection, claude then genuinely fails auth,
+		// and "run `claude login`" never helps an API-billing user whose only
+		// credential is apiKeyHelper.
 		logging.Warn(ctx, "could not inject claude apiKeyHelper; falling back to env/keychain auth",
 			slog.String("error", settingsErr.Error()))
 		settingsPath = ""
@@ -183,10 +181,8 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 
 	res, runErr := agent.RunIsolatedTextGeneratorCLIRaw(ctx, c.CommandRunner, "claude", buildGenerateArgs(model, settingsPath), prompt)
 
-	// withEvidence attaches the captured subprocess output the explain layer's
-	// timeout diagnostic reads, matching agent.HandleTextGenResult. Classification
-	// (*TextGenError) and evidence (*TextGenerationError) are complementary: both
-	// have to survive, so the typed error is wrapped rather than replaced.
+	// Matches agent.HandleTextGenResult: classification and evidence are
+	// complementary, so the typed error is wrapped rather than replaced.
 	withEvidence := func(err error) error {
 		return &agent.TextGenerationError{
 			Err:         err,
@@ -197,17 +193,12 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 
 	if env := classifyClaudeEnvelope(res.Stdout, runErr); env != nil {
 		env.ExitCode = res.ExitCode
-		// Deliberately do NOT stamp a ctx sentinel into Cause. explain's
-		// generateCheckpointAISummary branches on errors.Is(err,
-		// DeadlineExceeded) BEFORE formatCheckpointSummaryError runs, and that
-		// branch returns a bare "timed out" error — dropping the classification
-		// entirely. Stamping the sentinel here would therefore turn a fully
-		// diagnosed auth failure into "Timed out after 30s" whenever the
-		// deadline fires during teardown, and no retry would ever fix it.
-		//
-		// This keeps main's documented invariant true: DeadlineExceeded is
-		// present in the chain only when the timeout was actually the cause. It
-		// also matches the streaming path, which sets no Cause at all.
+		// Never stamp a ctx sentinel into Cause: generateCheckpointAISummary
+		// branches on errors.Is(err, DeadlineExceeded) before classification
+		// runs and returns a bare "timed out", so a fully diagnosed auth
+		// failure would surface as "Timed out after 30s" that no retry fixes.
+		// Keeps the invariant that DeadlineExceeded is in the chain only when
+		// the timeout actually caused the failure.
 		if !errors.Is(runErr, context.Canceled) && !errors.Is(runErr, context.DeadlineExceeded) {
 			env.Cause = runErr
 		}
@@ -228,9 +219,7 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 				Cause:    runErr,
 			})
 		}
-		// Message: prefer stderr, fall back to stdout, then to the run error, so
-		// it is never empty — a launch failure (permission denied, exec format
-		// error) produces no output and only runErr describes it.
+		// Message: stderr, else stdout, else runErr — never empty.
 		stderr := strings.TrimSpace(string(res.Stderr))
 		raw := stderr
 		if raw == "" {
@@ -239,19 +228,15 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 		if raw == "" {
 			raw = runErr.Error()
 		}
-		// Classification reads stderr ONLY, and the full stderr. Claude's stdout
-		// here is a partial envelope — the model's draft summary of the user's
-		// transcript — so classifying it would let a summary that merely
-		// discusses an invalid API key report itself as an auth failure. Full
-		// stderr because a status line or auth phrase can sit past the 500-byte
-		// display cap.
+		// Classify stderr only, and all of it. Claude's stdout here is a partial
+		// envelope (the model's draft summary), so classifying it would let a
+		// summary discussing an invalid API key report itself as an auth
+		// failure.
 		kind := agent.ClassifyStderrHTTPStatus(stderr)
 		if kind == agent.TextGenErrorUnknown && containsAuthPhrase(stderr) {
-			// Claude's CLI sometimes exits non-zero with auth failure text on
-			// stderr before any envelope is produced (e.g. "Invalid API key"
-			// with exit 2). Reuses containsAuthPhrase/envelopeAuthPhrases from
-			// envelope_parser.go — one list, two call sites (envelope result
-			// text and raw stderr).
+			// Claude can exit non-zero with auth text on stderr before any
+			// envelope ("Invalid API key", exit 2). One phrase list, two call
+			// sites — see envelope_parser.go.
 			kind = agent.TextGenErrorAuth
 		}
 		return "", withEvidence(&agent.TextGenError{
@@ -271,12 +256,9 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 			Message:  "claude CLI returned empty output",
 		})
 	}
-	// classifyClaudeEnvelope already parsed these same bytes successfully — with
-	// runErr == nil it returns non-nil on any parse failure, so reaching here
-	// means the parse succeeded. The previous defensive branch here was
-	// unreachable and was the only failure return in this function not wrapped
-	// in withEvidence; parseGenerateTextResponse is pure, so the second call
-	// cannot disagree with the first.
+	// classifyClaudeEnvelope already parsed these bytes: with runErr == nil it
+	// returns non-nil on any parse failure, so the parse succeeded and this
+	// branch is defensive only.
 	result, _, parseErr := parseGenerateTextResponse(res.Stdout)
 	if parseErr != nil {
 		return "", withEvidence(&agent.TextGenError{

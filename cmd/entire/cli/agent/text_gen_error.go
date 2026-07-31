@@ -35,17 +35,15 @@ const (
 )
 
 // TextGenError is the shared typed error every summary provider's GenerateText
-// returns on failure, except context cancellation/deadline, which pass through
-// as bare sentinels (wrapped for evidence — see HandleTextGenResult).
+// returns on failure, except ctx cancellation/deadline which pass through as
+// sentinels.
 //
-// APIStatus is 0 when no HTTP status was observed (there is no HTTP 0).
-// ExitCode is 0 both when the subprocess genuinely exited 0 — Claude's primary
-// failure mode is exit 0 with is_error:true — and when no exit code was
-// captured; the two are not distinguished because no consumer needs to.
+// APIStatus is 0 when no HTTP status was seen. ExitCode is 0 both for a genuine
+// exit 0 (Claude's primary failure mode is exit 0 with is_error:true) and for
+// "not captured"; no consumer distinguishes them.
 //
-// Message is user-facing: it is rendered verbatim by the explain layer, and is
-// populated from third-party CLI stderr, so it must stay whitespace-trimmed,
-// length-capped and valid UTF-8 (see TruncateStderr).
+// Message is rendered verbatim to the user and comes from third-party stderr,
+// so it must stay trimmed, capped and valid UTF-8 — see TruncateStderr.
 type TextGenError struct {
 	Kind      TextGenErrorKind
 	Provider  types.AgentName
@@ -55,18 +53,13 @@ type TextGenError struct {
 	Cause     error
 }
 
-// Error renders the error for consumers that print it directly rather than
-// going through the explain layer's renderTextGenError — `entire dispatch`,
-// `entire review`'s synthesis sink, and runner setup. Those surfaces have no
-// access to the (unexported, package cli) renderer, so this string is what
-// their users actually see.
+// Error is what `entire dispatch`, `entire review` and runner setup print —
+// they cannot reach renderTextGenError (unexported, package cli).
 //
-// Cause is included when Message is empty, which is the CLIMissing shape:
-// those constructions deliberately set no Message, so without this the user
-// would get only "codex CLI error (kind=cli_missing)" — internal jargon that
-// names no binary. Falling back to Cause restores the actionable text
-// (`exec: "codex": executable file not found in $PATH`), and for Cursor it is
-// the only place the real binary name (`agent`, not `cursor`) appears.
+// Cause fills in when Message is empty (the CLIMissing shape sets no Message),
+// so the user gets `exec: "codex": executable file not found in $PATH` rather
+// than bare "kind=cli_missing". For Cursor that is the only place the real
+// binary name (`agent`) appears.
 func (e *TextGenError) Error() string {
 	detail := e.Message
 	if detail == "" && e.Cause != nil {
@@ -128,91 +121,61 @@ func IsExecNotFoundErr(err error) bool {
 	return errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist)
 }
 
-// http4xxPattern matches a 4xx HTTP status code that appears in an actual
-// HTTP-status context, via one of two alternatives:
+// A 4xx status must appear in an HTTP-status context, matched by one of three
+// alternatives: (a) keyword-prefixed, (b) followed by its reason phrase, or
+// (c) parenthesized after a reason phrase. The status is in whichever group
+// matched.
 //
-//	(a) preceded by a status-ish keyword within a few non-word characters —
-//	    "HTTP 401", "HTTP/1.1 401", "status: 401", "status=401", "code 401",
-//	    "ERROR: 401".
-//	(b) followed by its canonical reason phrase — "401 Unauthorized",
-//	    "429 Too Many Requests".
+// Lexical context is required because word boundaries alone are not enough:
+// ':' and '.' are non-word characters, so `\b4\d{2}\b` also matches stack
+// frames ("foo.js:401:12"), decimals ("2.403 seconds") and bare counts.
 //
-// Requiring lexical context (rather than just digit isolation) is what makes
-// this safe. Word boundaries alone are NOT sufficient, because the digits in
-// real CLI stderr are usually adjacent to ':' and '.', which are themselves
-// non-word characters — so `\b4\d{2}\b` happily matches a stack frame
-// ("at foo.js:401:12"), a decimal ("took 2.403 seconds"), a source line
-// ("main.go:404 +0x1f") and a bare count ("build 404 finished"), and reports
-// them as authentication or config failures. Gemini, Copilot and Cursor are
-// Node CLIs whose crash output is exactly "file.js:LINE:COL" frames, so that
-// false-positive class was the common case, not an edge case.
-//
-// The status is captured in whichever of the two groups matched.
-//
-// The two alternatives differ in how safe they are on untrusted text, which
-// matters because stdout is classified too (see ClassifyDiagnosticHTTPStatus):
-// (a) is machine-shaped and essentially absent from prose, whereas (b) is
-// exactly how prose names a status ("we hit a 401 Unauthorized"). Keep them
-// separable.
+// (a) and (c) are machine-shaped; (b) is how prose names a status. They stay
+// separable because stdout is classified with (a)+(c) only — see
+// ClassifyDiagnosticHTTPStatus.
 const (
-	// `status[_\s-]*code` (not just `status\s*code`) so the JSON form
-	// `{"status_code": 401}` matches: '_' is a word character, so a bare
-	// `\bstatus\b` fails on "status_code" — the exact shape Python- and
-	// Go-backed CLIs emit.
+	// `status[_\s-]*code` matches the JSON form `{"status_code": 401}`: '_' is
+	// a word character, so a bare `\bstatus\b` fails on "status_code".
 	httpStatusKeywordAlt = `\b(?:https?(?:/[\d.]+)?|status(?:[_\s-]*code)?|code|err(?:or)?)\b\W{0,3}(4\d{2})\b`
 	httpStatusReasonAlt  = `\b(4\d{2})\s+(?:unauthorized|forbidden|too\s+many\s+requests|bad\s+request` +
 		`|not\s+found|payment\s+required|request\s+timeout|conflict|gone` +
 		`|payload\s+too\s+large|unprocessable|rate\s*limit)`
-	// (c) a reason phrase followed by a parenthesized status — "Unauthorized
-	// (401)", "rate limit exceeded (429)". Machine-shaped like (a): prose does
-	// not usually parenthesize the code, and the reason word is required.
+	// (c) "Unauthorized (401)", "rate limit exceeded (429)".
 	httpStatusParenAlt = `\b(?:unauthorized|forbidden|too\s+many\s+requests|bad\s+request` +
 		`|not\s+found|payment\s+required|rate\s*limit(?:\s+exceeded)?|quota\s+exceeded)\b\W{0,4}\((4\d{2})\)`
 )
 
 var (
 	http4xxPattern = regexp.MustCompile(`(?i)` + httpStatusKeywordAlt + `|` + httpStatusReasonAlt + `|` + httpStatusParenAlt)
-	// httpStatusKeywordPattern is alternative (a) alone — for text that may be
-	// model output rather than diagnostics.
+	// Machine-shaped alternatives only, for text that may be model output.
 	httpStatusKeywordPattern = regexp.MustCompile(`(?i)` + httpStatusKeywordAlt + `|` + httpStatusParenAlt)
 )
 
-// KindForHTTPStatus is the single authoritative mapping from an HTTP status to
-// a TextGenErrorKind.
+// KindForHTTPStatus is the single authoritative status -> Kind mapping.
 //
-// Exported and shared deliberately. Claude reports the same failure two ways —
-// a structured api_error_status in its JSON envelope, or a status in stderr
-// text — and those went through separate switches that drifted twice: first
-// 413/422 (Config via envelope, Unknown via stderr), then 402 (RateLimit via
-// stderr, Config via envelope). Each time the user got different remediation
-// for an identical failure depending on which channel the provider happened to
-// use. A shared function makes that class of divergence unrepresentable, the
-// same reasoning that produced classifyEnvelopeFields.
+// Shared by the stderr/stdout classifier and Claude's envelope classifier.
+// Claude reports the same failure through either channel, and separate
+// switches drifted twice (413/422, then 402), giving different remediation for
+// an identical failure. Pinned by TestEnvelopeAndStderrClassifiersAgree.
 func KindForHTTPStatus(status int) TextGenErrorKind {
 	switch {
 	case status == 401, status == 403:
 		return TextGenErrorAuth
-	// 402 is quota/credit exhaustion — the same user action as a 429 ("wait or
-	// top up"), not a misconfiguration.
+	// 402 is quota exhaustion: same user action as 429, not a misconfiguration.
 	case status == 429, status == 402:
 		return TextGenErrorRateLimit
 	case status >= 400 && status < 500:
-		// Every other 4xx is a client-side request problem.
 		return TextGenErrorConfig
 	default:
 		return TextGenErrorUnknown
 	}
 }
 
-// classifyWith runs one pattern over s and returns the MOST SPECIFIC Kind found
-// anywhere in it. Shared so the strict and permissive scans cannot drift.
+// classifyWith returns the most specific Kind found anywhere in s.
 //
-// Precedence is Auth > RateLimit > Config, not document order. Auth and
-// RateLimit carry specific remediations ("log in", "wait"); Config is the
-// catch-all for every other 4xx. So when stderr mentions several statuses —
-// common when a CLI retries and logs each attempt — the actionable one should
-// win regardless of position. Positional order was the earlier rule, and it
-// meant a leading 413 masked a later 401.
+// Precedence is Auth > RateLimit > Config, not document order: when a retrying
+// CLI logs several statuses, the one with a specific remediation should win
+// regardless of position. Config is the catch-all for other 4xx.
 func classifyWith(re *regexp.Regexp, s string) TextGenErrorKind {
 	best := TextGenErrorUnknown
 	rank := map[TextGenErrorKind]int{
@@ -248,18 +211,13 @@ func classifyWith(re *regexp.Regexp, s string) TextGenErrorKind {
 	return best
 }
 
-// ClassifyDiagnosticHTTPStatus classifies text that is only *probably*
-// diagnostic — specifically a stdout-primary CLI's output on a non-zero exit
-// with empty stderr (codex, cursor, copilot all behave this way).
+// ClassifyDiagnosticHTTPStatus classifies text that is only probably
+// diagnostic — a stdout-primary CLI's output on a non-zero exit with empty
+// stderr.
 //
-// It accepts only the keyword-anchored form ("HTTP 401", "status: 429",
-// `{"status_code": 401}`), never the reason-phrase form ("401 Unauthorized").
-// That asymmetry is the whole point: stdout on a summary call is usually the
-// model's prose summary of the user's transcript, and prose about a failed
-// request says "401 Unauthorized" while a machine diagnostic says "status 401".
-// Classifying the prose form would report a summary that merely *discusses* an
-// auth error as an auth error, attaching a confident and wrong remediation —
-// worse than Unknown, which at least shows the text honestly.
+// Accepts only the machine-shaped forms ("HTTP 401", `{"status_code": 401}`),
+// never the prose form ("401 Unauthorized"), because stdout on a summary call
+// is usually the model's summary of the user's transcript.
 func ClassifyDiagnosticHTTPStatus(stdout string) TextGenErrorKind {
 	return classifyWith(httpStatusKeywordPattern, stdout)
 }
@@ -280,25 +238,15 @@ func ClassifyStderrHTTPStatus(stderr string) TextGenErrorKind {
 	return classifyWith(http4xxPattern, stderr)
 }
 
-// HandleTextGenResult converts the outcome of a RunIsolatedTextGeneratorCLIRaw
-// call into (trimmed stdout, err). On success returns (output, nil).
+// HandleTextGenResult converts a RunIsolatedTextGeneratorCLIRaw outcome into
+// (trimmed stdout, err). On success returns (output, nil).
 //
-// On failure it returns a *TextGenerationError whose Err is either a ctx
-// sentinel or a *TextGenError. The two error types are complementary, not
-// alternatives, and both must survive to the explain layer:
-//
-//   - *TextGenError answers "what kind of failure was this?" and drives the
-//     user-facing label and remediation (renderTextGenError).
-//   - *TextGenerationError answers "what did the subprocess emit before it
-//     died?" and drives the timeout diagnostic ("provider produced no output"
-//     vs "was generating output when killed"). That evidence is the only
-//     signal available on the ctx path, where classification is meaningless.
-//
-// Wrapping preserves both: errors.As finds *TextGenError through the wrapper,
-// errors.Is finds the ctx sentinel, and errors.As finds *TextGenerationError
-// for the evidence. Returning a bare sentinel here would silently regress the
-// timeout diagnostic, and returning a bare *TextGenError would drop the
-// stdout-byte count.
+// On failure it returns a *TextGenerationError wrapping either a ctx sentinel
+// or a *TextGenError. Both must survive: *TextGenError drives the user-facing
+// label, *TextGenerationError carries the evidence the timeout diagnostic
+// needs and is the only signal on the ctx path. Wrapping keeps all three
+// lookups working (errors.As for either type, errors.Is for the sentinel);
+// returning either one bare silently degrades the other.
 //
 // On a failed run, Message is the first non-empty of stderr, stdout, and
 // runErr.Error() — so it is never empty — and both classification and
@@ -315,8 +263,7 @@ func ClassifyStderrHTTPStatus(stderr string) TextGenErrorKind {
 // Claude does not use this helper — its envelope-first classification order
 // differs and is inlined in claudecode.GenerateText.
 func HandleTextGenResult(res ExecResult, runErr error, provider types.AgentName, emptyMsg string, extraClassify func(stderr string) TextGenErrorKind) (string, error) {
-	// withEvidence attaches the captured subprocess output that the explain
-	// layer's timeout diagnostic reads. Applied to every failure return.
+	// Attached to every failure return; the timeout diagnostic reads it.
 	withEvidence := func(err error) error {
 		return &TextGenerationError{
 			Err:         err,
@@ -334,14 +281,10 @@ func HandleTextGenResult(res ExecResult, runErr error, provider types.AgentName,
 		if IsExecNotFoundErr(runErr) {
 			return "", withEvidence(&TextGenError{Kind: TextGenErrorCLIMissing, Provider: provider, Cause: runErr})
 		}
-		// Prefer stderr, fall back to stdout, then to the run error itself, so
-		// Message is never empty. codex/cursor/copilot are stdout-primary
-		// tools that print diagnostics there and exit non-zero; reading only
-		// stderr renders "(no diagnostic detail available from X CLI)" while
-		// the real text sits unused in res.Stdout. The run error is the last
-		// resort — it is the only thing that describes a launch failure
-		// (permission denied, exec format error), which produces no output at
-		// all and is not a "binary missing" case.
+		// Message: stderr, else stdout, else the run error — never empty.
+		// codex/cursor/copilot are stdout-primary and print diagnostics there;
+		// a launch failure (permission denied, exec format error) produces no
+		// output at all and only runErr describes it.
 		stderr := strings.TrimSpace(string(res.Stderr))
 		raw := stderr
 		if raw == "" {
@@ -350,25 +293,19 @@ func HandleTextGenResult(res ExecResult, runErr error, provider types.AgentName,
 		if raw == "" {
 			raw = runErr.Error()
 		}
-		// Classify stderr with the full pattern, against the FULL text —
-		// truncating first would drop a status line (or a provider phrase)
-		// sitting past the 500-byte cap, which is exactly where it lands when
-		// the CLI prints a banner or stack preamble ahead of the real error.
+		// Classify the FULL stderr: truncating first would drop a status line
+		// sitting past the 500-byte display cap, which is where it lands when a
+		// CLI prints a banner or stack preamble ahead of the real error.
 		kind := ClassifyStderrHTTPStatus(stderr)
 		if kind == TextGenErrorUnknown && extraClassify != nil {
 			if k := extraClassify(stderr); k != TextGenErrorUnknown {
 				kind = k
 			}
 		}
-		// Only when stderr said nothing at all, fall back to stdout — but with
-		// the strict keyword-only scan. codex/cursor/copilot are stdout-primary
-		// and put genuine auth/quota diagnostics there on a non-zero exit, so
-		// skipping stdout entirely leaves those three providers permanently
-		// Unknown and defeats the classification this type exists for. Scanning
-		// it permissively is the opposite failure: stdout here may instead be
-		// the model's prose summary, and "401 Unauthorized" inside a summary is
-		// a description, not a diagnosis. ClassifyDiagnosticHTTPStatus accepts
-		// only the machine-shaped form, which threads between the two.
+		// Only when stderr said nothing, fall back to stdout with the strict
+		// scan. Skipping stdout leaves the stdout-primary providers permanently
+		// Unknown; scanning it permissively misreads a summary that merely
+		// discusses a 401 as a 401.
 		if kind == TextGenErrorUnknown && stderr == "" {
 			kind = ClassifyDiagnosticHTTPStatus(strings.TrimSpace(string(res.Stdout)))
 		}

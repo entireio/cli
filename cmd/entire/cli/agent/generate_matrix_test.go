@@ -65,14 +65,9 @@ func matrixAgents() []matrixAgent {
 	}
 }
 
-// assertComposition pins the contract the #964/#1005 reconciliation created:
-// one error must satisfy all three lookups. Classification (*TextGenError)
-// drives the user-facing label; evidence (*TextGenerationError) drives the
-// timeout diagnostic and is the only signal on the ctx path.
-//
-// Enforced here rather than left to review because dropping withEvidence from
-// any single return degrades timeoutDiagnostic to its no-information branch,
-// and every other assertion in this file would still pass.
+// One error must satisfy all three lookups. Enforced here because dropping
+// withEvidence from any single return degrades timeoutDiagnostic to its
+// no-information branch while every other assertion still passes.
 func assertComposition(t *testing.T, err error, wantKind agent.TextGenErrorKind, wantProvider types.AgentName) {
 	t.Helper()
 	var tge *agent.TextGenError
@@ -133,16 +128,14 @@ func matrixDiagnosticOnStdout(t *testing.T, a matrixAgent) {
 	if !strings.Contains(tge.Message, "quota exhausted") {
 		t.Errorf("Message = %q; want the stdout diagnostic", tge.Message)
 	}
-	// Must be CLASSIFIED, not merely shown: leaving these Unknown would mean
-	// three of six providers never get actionable messaging.
+	// Must be classified, not merely shown.
 	if tge.Kind != agent.TextGenErrorRateLimit {
 		t.Errorf("Kind = %q; want rate_limit from the stdout diagnostic", tge.Kind)
 	}
 }
 
-// matrixProseOnStdout is the other direction: the model describing a 401 is not
-// the provider reporting one. Classifying prose attaches a confident, wrong
-// remediation row — worse than Unknown, which shows the text honestly.
+// The model describing a 401 is not the provider reporting one; classifying
+// prose attaches a confident, wrong remediation row.
 func matrixProseOnStdout(t *testing.T, a matrixAgent) {
 	_, err := a.make(shRunner(`printf 'The user was debugging a 401 Unauthorized from the payments API.'; exit 1`)).
 		GenerateText(context.Background(), "prompt", "")
@@ -175,15 +168,10 @@ func matrixEmptyStdout(t *testing.T, a matrixAgent) {
 // matrixCanceled covers the ctx path, where classification is meaningless so
 // the sentinel and the evidence are the entire payload.
 func matrixCanceled(t *testing.T, a matrixAgent) {
-	// The child emits on both streams, touches a sentinel file, then stalls.
-	// The parent cancels only once that file appears.
-	//
-	// A fixed `time.Sleep(50ms); cancel()` was flaky in CI: it races subprocess
-	// startup, so on a loaded runner the kill can land before sh has run either
-	// printf, leaving Stderr empty and StdoutBytes 0. Waiting on an observable
-	// side effect makes it deterministic. The sentinel is per-subtest because
-	// these run in parallel — a shared path would let one provider's child
-	// release another's cancel.
+	// The child writes both streams, touches a sentinel, then stalls; the parent
+	// cancels only once the sentinel appears. A fixed sleep raced subprocess
+	// startup and was flaky in CI. Per-subtest path because these run in
+	// parallel — a shared one would let one child release another's cancel.
 	ready := filepath.Join(t.TempDir(), "ready")
 	runner := shRunner("printf 'partial'; printf 'stalled talking to API' 1>&2; : > " + ready + "; exec sleep 10")
 

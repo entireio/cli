@@ -10,10 +10,8 @@ import (
 	"unicode/utf8"
 )
 
-// TestHandleTextGenResult_TrimsStdout pins that the helper — not the subprocess
-// runner — is what trims stdout. RunIsolatedTextGeneratorCLIRaw must return raw
-// bytes (Claude's envelope parser needs them unmodified), so the trim has to
-// happen here or trailing whitespace reaches parseSummaryText.
+// The helper trims, not the runner: RunIsolatedTextGeneratorCLIRaw must return
+// raw bytes for Claude's envelope parser.
 func TestHandleTextGenResult_TrimsStdout(t *testing.T) {
 	t.Parallel()
 	res := ExecResult{Stdout: []byte("  hello world\n\n")}
@@ -41,9 +39,8 @@ func TestHandleTextGenResult_WhitespaceOnlyStdoutIsEmpty(t *testing.T) {
 	}
 }
 
-// TestHandleTextGenResult_ClassifiesFullStderr pins that classification runs on
-// the whole stderr, not the 500-byte-truncated Message. A CLI that prints a
-// banner or stack preamble puts the real status line past the cap.
+// Classification runs on the whole stderr, not the truncated Message: a banner
+// or stack preamble puts the real status line past the 500-byte cap.
 func TestHandleTextGenResult_ClassifiesFullStderr(t *testing.T) {
 	t.Parallel()
 	noise := strings.Repeat("at someFrame (/a/b/c.js)\n", 30) // ~750 bytes
@@ -64,11 +61,9 @@ func TestHandleTextGenResult_ClassifiesFullStderr(t *testing.T) {
 	}
 }
 
-// TestHandleTextGenResult_MessageNeverEmptyOnFailure pins the three-tier
-// fallback restored after the PR #1005 review: stderr, then stdout, then the run
-// error. Without it a stdout-primary CLI (codex/cursor/copilot) or a launch
-// failure renders "(no diagnostic detail available)" while the real text is
-// sitting unused in the ExecResult.
+// Three-tier fallback: stderr, stdout, run error. Without it a stdout-primary
+// CLI or a launch failure renders "(no diagnostic detail available)" while the
+// real text sits unused in the ExecResult.
 func TestHandleTextGenResult_MessageNeverEmptyOnFailure(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -108,12 +103,9 @@ func TestTextGenError_ErrorIncludesKindAndMessage(t *testing.T) {
 	}
 }
 
-// TestTextGenError_ErrorFallsBackToCause pins the CLIMissing message for the
-// consumers that print Error() directly (dispatch, review synthesis, runner
-// setup) instead of going through renderTextGenError. Those constructions set
-// no Message, so without the Cause fallback the user sees only
-// "codex CLI error (kind=cli_missing)" — jargon that names no binary. For
-// Cursor this is also the only place the real binary name (`agent`) appears.
+// CLIMissing sets no Message, so without the Cause fallback the consumers that
+// print Error() directly (dispatch, review, runner setup) show only
+// "codex CLI error (kind=cli_missing)" — jargon naming no binary.
 func TestTextGenError_ErrorFallsBackToCause(t *testing.T) {
 	t.Parallel()
 	cause := &exec.Error{Name: "codex", Err: exec.ErrNotFound}
@@ -198,12 +190,9 @@ func TestClassifyStderrHTTPStatus(t *testing.T) {
 		{"timestamp minute containing 401 is NOT auth", "2026-04-21T14:01:23Z connection reset", TextGenErrorUnknown},
 		{"most specific kind wins", "HTTP 401 Unauthorized; retry window 429", TextGenErrorAuth},
 
-		// Second round of PR #1005 review guards. Word boundaries alone were
-		// NOT sufficient: ':' and '.' are themselves non-word characters, so
-		// `\b4\d{2}\b` matched stack frames, decimals and bare counts. Gemini,
-		// Copilot and Cursor are Node CLIs whose crash output is
-		// "file.js:LINE:COL", so this was the common case, not an edge case.
-		// Classification now requires an actual HTTP-status context.
+		// Word boundaries alone are not sufficient: ':' and '.' are non-word
+		// characters, so `\b4\d{2}\b` matched stack frames, decimals and bare
+		// counts. Node CLIs emit "file.js:LINE:COL" constantly.
 		{"node stack frame line:col is NOT auth", "at Socket.emit (node:events:401:20)", TextGenErrorUnknown},
 		{"js bundle frame is NOT rate_limit", "at Object.<anonymous> (/x/dist/index.js:429:15)", TextGenErrorUnknown},
 		{"go panic source line is NOT config", "panic: index out of range\n\tmain.go:404 +0x1f", TextGenErrorUnknown},
@@ -239,14 +228,10 @@ func TestClassifyStderrHTTPStatus(t *testing.T) {
 	}
 }
 
-// TestClassifyDiagnosticHTTPStatus pins the strict scan used on stdout, where
-// the text may be the model's summary rather than a diagnostic. It accepts the
-// machine-shaped keyword form and rejects the prose form, because "the user hit
-// a 401 Unauthorized" is a description, not a diagnosis — classifying it would
-// attach a confident, wrong remediation row.
-//
-// Trail #193 finding 019fb411-d5a: skipping stdout entirely was the opposite
-// error, leaving codex/cursor/copilot (all stdout-primary) permanently Unknown.
+// The strict scan used on stdout, which may be the model's summary rather than
+// a diagnostic: accepts the machine-shaped form, rejects the prose form.
+// Skipping stdout entirely is the opposite error — it leaves the
+// stdout-primary providers permanently Unknown.
 func TestClassifyDiagnosticHTTPStatus(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

@@ -22,14 +22,10 @@ import (
 //     JSON case on an otherwise successful run (stdout non-empty but
 //     unparseable while runErr is nil).
 //
-// runErr is consulted to suppress parse-failure classification whenever the
-// subprocess also failed, because in that case the run error is strictly more
-// informative than "the bytes on stdout were not JSON":
-//   - ctx sentinel  → caller surfaces "canceled"/"timed out" unwrapped.
-//   - any other err → caller classifies stderr, so a genuine "401
-//     Unauthorized" on stderr is reported as an auth failure instead of being
-//     masked by a JSON-parse complaint. (Claude can emit a node warning or a
-//     progress line on stdout and still fail with a real error on stderr.)
+// runErr suppresses parse-failure classification whenever the subprocess also
+// failed, because the run error beats "the bytes on stdout were not JSON": a
+// ctx sentinel surfaces as "canceled", and any other error lets the caller
+// classify stderr so a real 401 there is not masked by a parse complaint.
 //
 // A complete is_error envelope still wins over a ctx sentinel — that is 963's
 // intentional ordering: if Claude managed to emit a structured diagnostic,
@@ -71,16 +67,13 @@ func containsAuthPhrase(s string) bool {
 	return false
 }
 
-// classifyEnvelopeFields maps an is_error result envelope's fields to a typed
-// *agent.TextGenError. Shared by both Claude code paths so they cannot drift:
-// the non-streaming path reaches it via classifyClaudeEnvelope, the streaming
-// path via envelopeErrorMessage. Without a single implementation, users lose
-// the specific remediation hints on whichever path forgot to classify.
+// classifyEnvelopeFields maps an is_error envelope to a typed *TextGenError.
+// Shared by both Claude paths (classifyClaudeEnvelope and
+// envelopeErrorMessage) so they cannot drift.
 //
-// APIStatus is 0 when the envelope carried no api_error_status (there is no
-// HTTP 0). ExitCode is left unset: envelope errors arrive on stdout while the
-// CLI itself exits 0, and the non-streaming caller stamps the real exit code
-// afterwards when there was one.
+// APIStatus is 0 when the envelope carried none. ExitCode is left unset:
+// envelope errors arrive on stdout while the CLI exits 0, and the
+// non-streaming caller stamps the real code afterwards.
 func classifyEnvelopeFields(result string, apiErrorStatus *int) *agent.TextGenError {
 	apiStatus := 0
 	if apiErrorStatus != nil {
@@ -88,11 +81,9 @@ func classifyEnvelopeFields(result string, apiErrorStatus *int) *agent.TextGenEr
 	}
 	e := &agent.TextGenError{
 		Provider: agent.AgentNameClaudeCode,
-		// TruncateStderr, despite the name, is the shared Message sanitizer:
-		// trim + 500-byte cap + valid UTF-8. The envelope's result field is
-		// arbitrary CLI output (a multi-KB stack dump is a normal shape for
-		// tool/permission errors) and is rendered verbatim by the explain
-		// layer, so it needs the same treatment every other producer applies.
+		// TruncateStderr is the shared Message sanitizer (trim, 500-byte cap,
+		// valid UTF-8). The envelope result is arbitrary CLI output rendered
+		// verbatim, so it needs the same treatment as every other producer.
 		Message:   agent.TruncateStderr(result),
 		APIStatus: apiStatus,
 	}

@@ -64,8 +64,7 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
-		// A missing/unexecutable binary must classify as CLIMissing so the user
-		// gets "not installed or not on PATH" rather than a raw exec error.
+		// CLIMissing so the user gets "not installed or not on PATH".
 		if agent.IsExecNotFoundErr(err) {
 			return "", &agent.TextGenerationError{
 				Err: &agent.TextGenError{
@@ -138,11 +137,9 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 		}
 		return "", &agent.TextGenerationError{
 			Err: sentinel,
-			// Capped like every other evidence site. attempt.stderrCaptured is
-			// rendered straight into an explainRow with no truncation of its
-			// own, so an unbounded buffer (a CLI stuck in a retry loop spamming
-			// warnings for the whole timeout window) would bury the cause and
-			// try rows this PR formats.
+			// Capped like every other evidence site: attempt.stderrCaptured is
+			// rendered into an explainRow untruncated, so an unbounded buffer
+			// would bury the cause and try rows.
 			Stderr:      agent.TruncateStderr(stderr.String()),
 			StdoutBytes: counted.n,
 		}
@@ -172,16 +169,13 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 // path does — HTTP status on stderr, then Claude's auth-phrase fallback — and
 // attaches the captured evidence.
 //
-// EVERY failure return in GenerateTextStreaming goes through this or an
-// explicit *TextGenerationError — there are no bare fmt.Errorf failure returns
-// left in this file, and TestGenerateTextStreaming_ClassifiesStderrFailures
-// pins that for the auth-phrase, 401, 429 and 404 shapes.
+// Every failure return in GenerateTextStreaming goes through this or an
+// explicit *TextGenerationError; none are bare fmt.Errorf. Pinned by
+// TestGenerateTextStreaming_ClassifiesStderrFailures.
 //
-// Why it matters: TextGeneratorAdapter prefers streaming, so this is the path
-// `explain --generate` actually takes for Claude. A stale key (claude exits 2,
-// "Invalid API key" on stderr, no envelope) must produce "Claude
-// authentication failed" with a remediation row, not a raw Go error string via
-// formatCheckpointSummaryError's default branch.
+// TextGeneratorAdapter prefers streaming, so this is the path
+// `explain --generate` actually takes for Claude — a stale key has to produce
+// "Claude authentication failed" with a remediation row, not a raw Go error.
 func streamFailure(stderrBuf string, stdoutBytes int, exitCode int, cause error, fallbackMsg string) error {
 	stderrStr := strings.TrimSpace(stderrBuf)
 	msg := stderrStr

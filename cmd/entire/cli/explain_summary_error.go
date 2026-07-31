@@ -36,12 +36,9 @@ func displayNameFor(p types.AgentName) string {
 // separately by renderTextGenError because its message omits the prefix
 // entirely; Unknown falls through to the default branch.
 func kindPrefix(k agent.TextGenErrorKind, displayName string) string {
-	// Every kind is enumerated deliberately, with no nolint:exhaustive waiver:
-	// adding a sixth Kind should fail lint HERE, at the place that has to decide
-	// what the user reads, rather than silently landing in a default branch and
-	// rendering the generic label. CLIMissing and Unknown are short-circuited by
-	// renderTextGenError before this is called, but naming them costs two lines
-	// and buys the exhaustiveness check.
+	// Enumerated with no nolint:exhaustive waiver, so a sixth Kind fails lint
+	// here rather than silently rendering the generic label. CLIMissing and
+	// Unknown are short-circuited by renderTextGenError.
 	switch k {
 	case agent.TextGenErrorAuth:
 		return displayName + " authentication failed"

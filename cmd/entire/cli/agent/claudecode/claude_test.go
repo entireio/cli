@@ -219,14 +219,9 @@ func TestReadUserAPIKeyHelper_MissingFileReturnsEmpty(t *testing.T) {
 	}
 }
 
-// TestGenerateText_InjectsAPIKeyHelperIntoArgv pins the apiKeyHelper injection
-// through the REAL GenerateText argv, not just through buildGenerateArgs in
-// isolation. Without this, deleting the injection from GenerateText and passing
-// buildGenerateArgs(model, "") leaves every existing test green while
-// API-billing users silently lose auth on the non-streaming path — the exact
-// regression #964 was written to fix.
-//
-// Also pins the security-critical --setting-sources "" isolation end-to-end.
+// Pins the injection through the real GenerateText argv, not just
+// buildGenerateArgs in isolation: dropping it left every test green while
+// API-billing users lost auth. Also pins --setting-sources "" end-to-end.
 //
 // t.Setenv: no t.Parallel.
 func TestGenerateText_InjectsAPIKeyHelperIntoArgv(t *testing.T) {
@@ -360,12 +355,8 @@ func TestGenerateText_StderrAuthFallback(t *testing.T) {
 	}
 }
 
-// TestGenerateText_UnparseableStdoutDoesNotMaskStderr pins the live half of the
-// PR #1005 cursor-bot finding. The bot reported that unparseable stdout
-// preempted ctx cancellation; the same early return also preempted stderr
-// classification, so a real 401 on stderr surfaced as a JSON-parse complaint.
-// Claude can emit a node warning or a progress line on stdout and still fail
-// with an actionable error on stderr.
+// Unparseable stdout must not preempt stderr classification: Claude can emit a
+// node warning on stdout and still fail with a real 401 on stderr.
 func TestGenerateText_UnparseableStdoutDoesNotMaskStderr(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == windowsOS {
@@ -393,10 +384,8 @@ func TestGenerateText_UnparseableStdoutDoesNotMaskStderr(t *testing.T) {
 	}
 }
 
-// TestGenerateText_LaunchFailureCarriesDiagnostic pins that a launch failure
-// which is NOT "binary missing" (permission denied, exec format error) still
-// reaches the user with something actionable. Such a process produces no
-// stdout, no stderr and no exit code, so runErr is the only description of it.
+// A launch failure that is not "binary missing" (permission denied, exec format
+// error) produces no output and no exit code, so runErr is the only diagnostic.
 func TestGenerateText_LaunchFailureCarriesDiagnostic(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == windowsOS {
