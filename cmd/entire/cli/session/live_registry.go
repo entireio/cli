@@ -56,21 +56,17 @@ func RegisterLiveSession(state *State, commonDir string) error {
 		return nil
 	}
 	if !ShouldRegisterLive(state) {
-		return UnregisterLiveSession(state.SessionID)
+		return UnregisterLiveSession(state.SessionID, commonDir)
 	}
 	if err := validation.ValidateSessionID(state.SessionID); err != nil {
 		return fmt.Errorf("invalid session ID: %w", err)
 	}
-	commonDir = strings.TrimSpace(commonDir)
-	if commonDir == "" {
+	if strings.TrimSpace(commonDir) == "" {
 		return errors.New("common dir is required")
 	}
 	// Persist an absolute common dir. Relative values like ".git" resolve against
 	// the reader's CWD and falsely match unrelated repos in sameAdoptStore.
-	if abs, err := filepath.Abs(commonDir); err == nil {
-		commonDir = abs
-	}
-	commonDir = filepath.Clean(commonDir)
+	commonDir = normalizeCommonDir(commonDir)
 
 	entry := LiveSessionEntry{
 		SessionID:           state.SessionID,
@@ -120,8 +116,17 @@ func RegisterLiveSession(state *State, commonDir string) error {
 	return nil
 }
 
-// UnregisterLiveSession removes the cross-repo live-session pointer.
-func UnregisterLiveSession(sessionID string) error {
+// UnregisterLiveSession removes the cross-repo live-session pointer for
+// sessionID, but only when the on-disk entry belongs to commonDir.
+//
+// The registry is keyed by session ID alone, so a cross-repo adopt writes the
+// TARGET's entry and then retires the SOURCE session in the same breath (Save
+// of the tombstoned source state → this unregister). Without the common-dir
+// scope the source retire would delete the entry the target just wrote, erasing
+// the adopted session from the registry. An entry owned by a different common
+// dir is therefore left untouched; a missing entry, or one we cannot read/parse
+// (junk), is removed best-effort.
+func UnregisterLiveSession(sessionID, commonDir string) error {
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("invalid session ID: %w", err)
 	}
@@ -134,8 +139,28 @@ func UnregisterLiveSession(sessionID string) error {
 		return fmt.Errorf("open live-sessions dir: %w", err)
 	}
 	defer root.Close()
-	_ = osroot.Remove(root, sessionID+".json") //nolint:errcheck // best-effort
+
+	fileName := sessionID + ".json"
+	if data, readErr := osroot.ReadFile(root, fileName); readErr == nil {
+		var existing LiveSessionEntry
+		if json.Unmarshal(data, &existing) == nil &&
+			existing.CommonDir != "" && strings.TrimSpace(commonDir) != "" &&
+			normalizeCommonDir(existing.CommonDir) != normalizeCommonDir(commonDir) {
+			return nil // entry belongs to a different repo; not ours to remove
+		}
+	}
+	_ = osroot.Remove(root, fileName) //nolint:errcheck // best-effort
 	return nil
+}
+
+// normalizeCommonDir makes a git common dir absolute and clean so entries and
+// callers compare on the same canonical form regardless of the reader's CWD.
+func normalizeCommonDir(commonDir string) string {
+	commonDir = strings.TrimSpace(commonDir)
+	if abs, err := filepath.Abs(commonDir); err == nil {
+		commonDir = abs
+	}
+	return filepath.Clean(commonDir)
 }
 
 // ListLiveSessions returns all live-session registry entries.

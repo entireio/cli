@@ -40,7 +40,7 @@ func TestLiveRegistry_RegisterListUnregister(t *testing.T) {
 		t.Fatalf("entry = %+v", entries[0])
 	}
 
-	if err := UnregisterLiveSession(state.SessionID); err != nil {
+	if err := UnregisterLiveSession(state.SessionID, commonDir); err != nil {
 		t.Fatal(err)
 	}
 	entries, err = ListLiveSessions()
@@ -88,6 +88,65 @@ func TestLiveRegistry_SaveHooksRegisterAndClearUnregisters(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected empty registry after Clear, got %+v", entries)
+	}
+}
+
+func TestLiveRegistry_CrossRepoRetireKeepsTargetEntry(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	sessionID := "live-reg-adopt-001"
+	now := time.Now()
+
+	// Target repo store: a cross-repo adopt writes the ACTIVE session here first.
+	targetCommon := filepath.Join(t.TempDir(), ".git")
+	targetStore := NewStateStoreWithDir(filepath.Join(targetCommon, "entire-sessions"))
+	if err := targetStore.Save(context.Background(), &State{
+		SessionID:           sessionID,
+		Phase:               PhaseActive,
+		StartedAt:           now,
+		LastInteractionTime: &now,
+		WorktreePath:        "/tmp/target-wt",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Source repo store: the adopt then retires the SAME session id here. Because
+	// the registry is keyed by session id alone, an unscoped unregister would
+	// delete the entry the target just wrote. It must survive.
+	sourceCommon := filepath.Join(t.TempDir(), ".git")
+	sourceStore := NewStateStoreWithDir(filepath.Join(sourceCommon, "entire-sessions"))
+	ended := now
+	if err := sourceStore.Save(context.Background(), &State{
+		SessionID:      sessionID,
+		Phase:          PhaseEnded,
+		EndedAt:        &ended,
+		FullyCondensed: true,
+		WorktreePath:   "/tmp/source-wt",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := ListLiveSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].SessionID != sessionID {
+		t.Fatalf("source retire erased the target registry entry: %+v", entries)
+	}
+	if entries[0].CommonDir != normalizeCommonDir(targetCommon) {
+		t.Fatalf("entry CommonDir = %q, want target %q", entries[0].CommonDir, normalizeCommonDir(targetCommon))
+	}
+
+	// A retire from the OWNING common dir still clears the entry.
+	if err := UnregisterLiveSession(sessionID, targetCommon); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = ListLiveSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("owning-common-dir unregister left entry behind: %+v", entries)
 	}
 }
 

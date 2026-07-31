@@ -679,7 +679,9 @@ func (s *StateStore) Save(ctx context.Context, state *State) error {
 	if ShouldRegisterLive(state) {
 		_ = RegisterLiveSession(state, commonDir) //nolint:errcheck // hook-path resilient
 	} else {
-		_ = UnregisterLiveSession(state.SessionID) //nolint:errcheck // hook-path resilient
+		// Common-dir-scoped: retiring a source session (cross-repo adopt) must not
+		// delete the target's freshly-written entry for the same session ID.
+		_ = UnregisterLiveSession(state.SessionID, commonDir) //nolint:errcheck // hook-path resilient
 	}
 	return nil
 }
@@ -710,7 +712,7 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 		}
 	}
 
-	_ = UnregisterLiveSession(sessionID) //nolint:errcheck // best-effort registry cleanup
+	_ = UnregisterLiveSession(sessionID, CommonDirFromStateDir(s.stateDir)) //nolint:errcheck // best-effort registry cleanup
 	return nil
 }
 
