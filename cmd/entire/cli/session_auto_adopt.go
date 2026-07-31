@@ -125,13 +125,16 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 	}
 
 	regCtx, regCancel := context.WithTimeout(ctx, autoAdoptDiscoveryTimeout)
-	candidates := collectRegistryAutoAdoptCandidates(regCtx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
+	registryCandidates := collectRegistryAutoAdoptCandidates(regCtx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
 	regCancel()
-	if len(candidates) == 0 {
-		scanCtx, scanCancel := context.WithTimeout(ctx, autoAdoptDiscoveryTimeout)
-		candidates = collectSiblingAutoAdoptCandidates(scanCtx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
-		scanCancel()
-	}
+	scanCtx, scanCancel := context.WithTimeout(ctx, autoAdoptDiscoveryTimeout)
+	siblingCandidates := collectSiblingAutoAdoptCandidates(scanCtx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
+	scanCancel()
+	// Union both discovery sources (deduped by session ID) BEFORE the uniqueness
+	// test. Gating the sibling scan on an empty registry would let a single
+	// registry hit bypass the ambiguity guard when a second, distinct candidate
+	// exists on disk — auto-adopt would then silently steal one of two sessions.
+	candidates := unionAutoAdoptCandidates(registryCandidates, siblingCandidates)
 	if len(candidates) != 1 {
 		if len(candidates) > 1 {
 			logging.Debug(logCtx, "auto-adopt: skipped ambiguous cross-common-dir sessions",
@@ -188,6 +191,25 @@ type autoAdoptCandidate struct {
 	WorktreePath string
 	CommonDir    string
 	Store        *session.StateStore
+}
+
+// unionAutoAdoptCandidates concatenates candidate sets, deduping by session ID
+// (session IDs are globally unique, so the same session found by both the
+// registry and the sibling scan collapses to one). The union feeds the
+// uniqueness test so a candidate present in only one source still counts.
+func unionAutoAdoptCandidates(sets ...[]autoAdoptCandidate) []autoAdoptCandidate {
+	seen := make(map[string]struct{})
+	var out []autoAdoptCandidate
+	for _, set := range sets {
+		for _, cand := range set {
+			if _, ok := seen[cand.SessionID]; ok {
+				continue
+			}
+			seen[cand.SessionID] = struct{}{}
+			out = append(out, cand)
+		}
+	}
+	return out
 }
 
 func hasLocalActiveSession(ctx context.Context, store *session.StateStore) bool {
