@@ -281,6 +281,11 @@ func newHooksGitPostCommitCmd() *cobra.Command {
 			hookErr := g.strategy.PostCommit(g.ctx)
 			g.logCompleted(hookErr)
 
+			// Complete any cross-common-dir auto-adopt whose destructive
+			// source-side retire prepare-commit-msg deferred to here (#1439):
+			// the commit is now a fact, so it is safe to tombstone the source.
+			finalizePendingSourceRetires(g.ctx)
+
 			return nil
 		},
 	}

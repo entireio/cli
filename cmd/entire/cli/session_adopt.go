@@ -34,6 +34,14 @@ type adoptOptions struct {
 	// transcript path is missing or not owned by a registered agent. The
 	// adopted state clears an invalid transcript path instead of failing.
 	SkipTranscriptValidation bool
+	// DeferSourceRetire splits the external-store adopt across git hooks: register
+	// the adopted session in the target and stamp a PendingSourceRetire marker,
+	// but SKIP the destructive source-side tombstone. Cross-common-dir auto-adopt
+	// sets this from prepare-commit-msg so an aborted commit (editor abort,
+	// empty-message strip) never retires the source with no commit; post-commit
+	// completes the retire via finalizePendingSourceRetires. Manual
+	// `entire session adopt` leaves it false and retires immediately.
+	DeferSourceRetire bool
 }
 
 // adoptRecentWindow bounds how recently a session must have been active to be
@@ -187,8 +195,24 @@ func adoptFromExternalSessionStore(
 		if existing != nil && !opts.Force {
 			return fmt.Errorf("session %s is already tracked in this repo; rerun with --force to replace it", next.SessionID)
 		}
+		if opts.DeferSourceRetire {
+			// Stage the source-side tombstone instead of applying it: record where
+			// the source lives so post-commit can retire it once the commit is a
+			// fact. The source stays ACTIVE for now — if the commit aborts,
+			// post-commit never runs and the source keeps its checkpointing.
+			next.PendingSourceRetire = &session.PendingSourceRetire{
+				SourceCommonDir:    sourceCommonDir,
+				SourceWorktreePath: sourceWorktree,
+			}
+		}
 		if err := targetStore.Save(ctx, next); err != nil {
 			return fmt.Errorf("save adopted session state: %w", err)
+		}
+		if opts.DeferSourceRetire {
+			// Non-destructive prepare phase: target registered, source untouched.
+			adopted = next
+			filesTouched = touched
+			return nil
 		}
 		retired := retireAdoptedSourceSession(sourceState, next)
 		if err := sourceStore.Save(ctx, &retired); err != nil {

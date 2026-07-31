@@ -133,6 +133,16 @@ type State struct {
 	// AdoptedIntoWorktreePath when available.
 	AdoptedIntoWorktreeID string `json:"adopted_into_worktree_id,omitempty"`
 
+	// PendingSourceRetire records a cross-common-dir source session that must be
+	// tombstoned after this adopted session's commit becomes a fact. Written at
+	// prepare-commit-msg time by cross-common-dir auto-adopt, which registers the
+	// adopted session in this (target) worktree so the checkpoint trailer lands,
+	// but DEFERS the destructive source-side retire to post-commit — an aborted
+	// commit must never strand the source with its checkpointing retired and no
+	// commit to show for it. Cleared once post-commit completes the retire
+	// (finalizePendingSourceRetires). nil in the normal steady state.
+	PendingSourceRetire *PendingSourceRetire `json:"pending_source_retire,omitempty"`
+
 	// Branch is the git branch HEAD pointed at the last time this session took a
 	// turn. Captured on each turn start so it tracks branches created or renamed
 	// after the session began. Empty when HEAD was detached or for sessions
@@ -366,6 +376,19 @@ type State struct {
 	// resolved, in which case liveness falls back to the StuckActiveThreshold
 	// timeout. Only meaningful on Owner.Host.
 	Owner *proclive.Identity `json:"owner,omitempty"`
+}
+
+// PendingSourceRetire locates the source session store whose ACTIVE session was
+// adopted into a worktree and now awaits a post-commit tombstone. It is the
+// staged intent recorded by cross-common-dir auto-adopt at prepare-commit-msg
+// time so post-commit can complete the (destructive) source-side retire once
+// the commit is a fact. The session ID is the enclosing State's SessionID.
+type PendingSourceRetire struct {
+	// SourceCommonDir is the git common dir of the source repo/worktree, used to
+	// reopen the source session store and retire the session there.
+	SourceCommonDir string `json:"source_common_dir"`
+	// SourceWorktreePath is the source worktree root (best-effort, for logging).
+	SourceWorktreePath string `json:"source_worktree_path,omitempty"`
 }
 
 // PromptAttribution captures line-level attribution data at the start of each prompt.

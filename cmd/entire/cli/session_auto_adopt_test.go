@@ -420,6 +420,117 @@ func TestAutoAdopt_SkipsWhenLocalActiveSessionExists(t *testing.T) {
 	}
 }
 
+// TestAutoAdopt_AbortedCommitLeavesSourceActive proves the prepare/post-commit
+// split: prepare-commit-msg registers the adopted session in the target (so a
+// trailer can land) and stamps a PendingSourceRetire marker, but does NOT retire
+// the source. When the commit is aborted (post-commit never runs), the source
+// session must remain ACTIVE — the whole point of deferring the destructive
+// retire until the commit is a fact.
+//
+// Uses t.Chdir(), so no t.Parallel().
+func TestAutoAdopt_AbortedCommitLeavesSourceActive(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+
+	sessionID := "test-auto-adopt-abort-001"
+	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"services/billing/handler.go"}, true)
+
+	testutil.WriteFile(t, targetRepo, "services/billing/handler.go", "agent change\n")
+	testutil.GitAdd(t, targetRepo, "services/billing/handler.go")
+	t.Chdir(targetRepo)
+
+	// prepare-commit-msg phase only (simulating an aborted commit: post-commit
+	// never fires).
+	tryAutoAdoptCrossCommonDirSession(context.Background())
+
+	// Target registered the adopted session with a pending-retire marker.
+	targetStore := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	adopted, err := targetStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted == nil {
+		t.Fatal("expected adopted session state in target after prepare phase")
+	}
+	if adopted.PendingSourceRetire == nil {
+		t.Fatal("expected PendingSourceRetire marker recorded at prepare phase")
+	}
+
+	// Source must still be ACTIVE — not tombstoned — because no commit happened.
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	sourceAfter, err := sourceStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourceAfter == nil {
+		t.Fatal("source session vanished after aborted commit")
+	}
+	if !isAdoptableSourceSession(sourceAfter) {
+		t.Fatalf("aborted commit must leave source ACTIVE; phase=%s endedAt=%v fullyCondensed=%v",
+			sourceAfter.Phase, sourceAfter.EndedAt, sourceAfter.FullyCondensed)
+	}
+}
+
+// TestAutoAdopt_PostCommitFinalizeRetiresSource proves the companion of the
+// aborted-commit case: once the commit is a fact, the post-commit finalize step
+// tombstones the source and clears the marker.
+//
+// Uses t.Chdir(), so no t.Parallel().
+func TestAutoAdopt_PostCommitFinalizeRetiresSource(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+
+	sessionID := "test-auto-adopt-finalize-001"
+	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"services/billing/handler.go"}, true)
+
+	testutil.WriteFile(t, targetRepo, "services/billing/handler.go", "agent change\n")
+	testutil.GitAdd(t, targetRepo, "services/billing/handler.go")
+	t.Chdir(targetRepo)
+
+	// prepare-commit-msg phase: register target, defer source retire.
+	tryAutoAdoptCrossCommonDirSession(context.Background())
+	// post-commit phase: commit is a fact, so complete the retire.
+	finalizePendingSourceRetires(context.Background())
+
+	targetStore := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	adopted, err := targetStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted == nil {
+		t.Fatal("expected adopted session state in target")
+	}
+	if adopted.PendingSourceRetire != nil {
+		t.Fatal("post-commit finalize must clear the PendingSourceRetire marker")
+	}
+
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	sourceAfter, err := sourceStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourceAfter == nil {
+		t.Fatal("source session vanished")
+	}
+	if isAdoptableSourceSession(sourceAfter) {
+		t.Fatalf("post-commit finalize must tombstone the source; phase=%s", sourceAfter.Phase)
+	}
+	if sourceAfter.Phase != session.PhaseEnded {
+		t.Fatalf("source phase = %s, want %s after finalize", sourceAfter.Phase, session.PhaseEnded)
+	}
+	if !sameAdoptPath(sourceAfter.AdoptedIntoWorktreePath, targetRepo) {
+		t.Fatalf("source AdoptedIntoWorktreePath = %q, want %q", sourceAfter.AdoptedIntoWorktreePath, targetRepo)
+	}
+}
+
 func setupAdoptRepoAt(t *testing.T, repoDir string) string {
 	t.Helper()
 	if err := os.MkdirAll(repoDir, 0o750); err != nil {

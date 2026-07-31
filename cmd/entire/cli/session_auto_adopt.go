@@ -177,7 +177,11 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 		targetStore,
 		targetCommonDir,
 		source.SessionID,
-		adoptOptions{Force: true, SkipTranscriptValidation: true},
+		// DeferSourceRetire: this runs in prepare-commit-msg, before the commit
+		// exists. Register the adopted session here (so the trailer lands) but
+		// defer the destructive source retire to post-commit, where the commit is
+		// a fact — an aborted commit must not tombstone the source.
+		adoptOptions{Force: true, SkipTranscriptValidation: true, DeferSourceRetire: true},
 	)
 	adoptCancel()
 	if adoptErr != nil {
@@ -196,6 +200,115 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 			)
 		}
 	}
+}
+
+// finalizePendingSourceRetires completes cross-common-dir auto-adopts that were
+// deferred at prepare-commit-msg time. For each session in the current
+// (committing) worktree carrying a PendingSourceRetire marker, it tombstones the
+// source session — now that the commit is a fact — and clears the marker. Runs
+// from the post-commit git hook, after strategy.PostCommit. Best-effort: it
+// never returns an error to the hook caller, and is panic-guarded so a fault in
+// the retire path can never break `git commit`.
+//
+// An aborted commit (editor abort, empty-message strip) never reaches
+// post-commit, so this never runs for it — leaving the source ACTIVE, which is
+// the whole point of splitting the adopt across the two hooks.
+func finalizePendingSourceRetires(ctx context.Context) {
+	logCtx := logging.WithComponent(ctx, "session")
+
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Error(logCtx, "auto-adopt finalize: recovered from panic",
+				slog.Any("panic", r),
+			)
+		}
+	}()
+
+	// Bound the whole finalize the same way the prepare-side attempt is bounded:
+	// each pending retire takes a cross-process source flock, and a lock held by
+	// a hung process must not block git's post-commit indefinitely.
+	ctx, cancel := context.WithTimeout(ctx, autoAdoptOverallBudget)
+	defer cancel()
+
+	targetWorktree, err := paths.WorktreeRoot(ctx)
+	if err != nil || targetWorktree == "" {
+		return
+	}
+	targetCtx, targetCancel := context.WithTimeout(ctx, autoAdoptGitResolveTimeout)
+	targetStore, _, targetCommonDir, err := stateStoreForWorktree(targetCtx, targetWorktree)
+	targetCancel()
+	if err != nil {
+		return
+	}
+
+	states, err := targetStore.List(ctx)
+	if err != nil {
+		return
+	}
+	for _, state := range states {
+		if ctx.Err() != nil {
+			return
+		}
+		if state.PendingSourceRetire == nil {
+			continue
+		}
+		retirePendingSource(ctx, targetStore, targetCommonDir, state)
+	}
+}
+
+// retirePendingSource tombstones the source session recorded on adopted's
+// PendingSourceRetire marker and clears the marker on the target. Idempotent:
+// if the source is already gone or already retired it just clears the marker, so
+// a crash between the source retire and the marker clear self-heals on the next
+// post-commit.
+func retirePendingSource(ctx context.Context, targetStore *session.StateStore, targetCommonDir string, adopted *session.State) {
+	logCtx := logging.WithComponent(ctx, "session")
+	marker := adopted.PendingSourceRetire
+	if marker == nil || marker.SourceCommonDir == "" {
+		return
+	}
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(marker.SourceCommonDir, session.SessionStateDirName))
+
+	retireCtx, cancel := context.WithTimeout(ctx, autoAdoptAdoptTimeout)
+	defer cancel()
+
+	err := strategy.WithSessionStateLocks(retireCtx, adopted.SessionID, []string{marker.SourceCommonDir, targetCommonDir}, func() error {
+		// Reload the target under the lock so clearing the marker never clobbers a
+		// concurrent write to the adopted session state.
+		target, err := targetStore.Load(retireCtx, adopted.SessionID)
+		if err != nil {
+			return fmt.Errorf("reload adopted session state: %w", err)
+		}
+		if target == nil || target.PendingSourceRetire == nil {
+			return nil // already finalized by a concurrent hook
+		}
+		sourceState, err := sourceStore.Load(retireCtx, adopted.SessionID)
+		if err != nil {
+			return fmt.Errorf("load source session state: %w", err)
+		}
+		if sourceState != nil && isAdoptableSourceSession(sourceState) {
+			retired := retireAdoptedSourceSession(sourceState, target)
+			if err := sourceStore.Save(retireCtx, &retired); err != nil {
+				return fmt.Errorf("retire source session state: %w", err)
+			}
+		}
+		target.PendingSourceRetire = nil
+		if err := targetStore.Save(retireCtx, target); err != nil {
+			return fmt.Errorf("clear pending source retire marker: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		logging.Warn(logCtx, "auto-adopt finalize: failed to retire source session",
+			slog.String("session_id", adopted.SessionID),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	logging.Info(logCtx, "auto-adopt finalize: retired source session after commit",
+		slog.String("session_id", adopted.SessionID),
+		slog.String("source_common_dir", marker.SourceCommonDir),
+	)
 }
 
 type autoAdoptCandidate struct {
