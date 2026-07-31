@@ -87,7 +87,10 @@ Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
 `configure`, `agent-help`, `api`.
 
-`status` also reports whether the current clone points at an Entire mirror. The
+`status` also reports whether the current clone points at an Entire mirror. This
+section renders only once Entire is set up in the repo (after `entire enable`);
+a not-set-up repo shows just the `○ not set up` funnel and no mirror line, and
+`status --json` returns its `not set up` form without a `mirror` field. The
 "is it a mirror, and which cluster" half is read offline from the clone's git
 remote (an `entire://` URL); the mirror's live state (processing / ready /
 failed / suspended) is a best-effort, time-bounded control-plane lookup done
