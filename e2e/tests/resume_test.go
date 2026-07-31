@@ -160,8 +160,9 @@ func TestResumeSquashMergeMultipleCheckpoints(t *testing.T) {
 }
 
 // TestResumeNoCheckpointOnBranch: resume on a feature branch that has only
-// human commits (no agent interaction). Should switch to the branch and exit
-// cleanly with an informational message, not an error.
+// human commits (no agent interaction). Should switch to the branch, explain
+// that there is nothing to resume, and exit non-zero so scripted callers can
+// detect that no session was restored.
 func TestResumeNoCheckpointOnBranch(t *testing.T) {
 	testutil.ForEachAgent(t, 1*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		mainBranch := testutil.GitOutput(t, s.Dir, "branch", "--show-current")
@@ -184,9 +185,9 @@ func TestResumeNoCheckpointOnBranch(t *testing.T) {
 		s.Git(t, "checkout", mainBranch)
 
 		out, err := entire.Resume(s.Dir, "no-checkpoint")
-		require.NoError(t, err, "resume should not error for missing checkpoints: %s", out)
+		require.Error(t, err, "resume should exit non-zero when nothing was resumed: %s", out)
 
-		assert.Contains(t, out, "No Entire checkpoint found",
+		assert.Contains(t, out, "no Entire checkpoint found",
 			"should inform user no checkpoint exists on branch")
 	})
 }

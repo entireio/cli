@@ -256,10 +256,15 @@ func TestResumeFromCurrentBranch_NoCheckpoint(t *testing.T) {
 	// Initialize repo with initial commit (no checkpoint trailer)
 	setupResumeTestRepo(t, tmpDir, false)
 
-	// Run resumeFromCurrentBranch - should not error, just report no checkpoint found
+	// Run resumeFromCurrentBranch - nothing was resumed, so the command must
+	// fail with a typed no-checkpoint error (honest exit code for agents).
 	err := resumeFromCurrentBranch(context.Background(), io.Discard, io.Discard, "master", false)
-	if err != nil {
-		t.Errorf("resumeFromCurrentBranch() returned error for commit without checkpoint: %v", err)
+	var noCheckpoint *ResumeNoCheckpointError
+	if !errors.As(err, &noCheckpoint) {
+		t.Fatalf("resumeFromCurrentBranch() error = %v, want ResumeNoCheckpointError", err)
+	}
+	if noCheckpoint.Branch != "master" {
+		t.Errorf("noCheckpoint.Branch = %q, want master", noCheckpoint.Branch)
 	}
 }
 
@@ -280,15 +285,20 @@ func TestRunResume_AlreadyOnBranch(t *testing.T) {
 		t.Fatalf("Failed to checkout feature branch: %v", err)
 	}
 
-	// Run resume on the branch we're already on - should skip checkout
+	// Run resume on the branch we're already on - should skip checkout and,
+	// since the branch has no checkpoint, fail with the typed no-checkpoint
+	// error (nothing was resumed).
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	err := runResume(context.Background(), cmd, "feature", false)
-	// Should not error (no session, but shouldn't error)
-	if err != nil {
-		t.Errorf("runResume() returned error when already on branch: %v", err)
+	var noCheckpoint *ResumeNoCheckpointError
+	if !errors.As(err, &noCheckpoint) {
+		t.Fatalf("runResume() error = %v, want ResumeNoCheckpointError", err)
+	}
+	if noCheckpoint.Branch != testFeatureBranch {
+		t.Errorf("noCheckpoint.Branch = %q, want feature", noCheckpoint.Branch)
 	}
 }
 
@@ -1235,16 +1245,22 @@ func TestCheckRemoteMetadata_NoRemoteMetadataBranch(t *testing.T) {
 
 	// Don't create any remote ref - simulating no remote entire/checkpoints/v1
 
-	// Call checkRemoteMetadata - should handle gracefully (no remote branch)
+	// Call checkRemoteMetadata - metadata is nowhere to be found, so the
+	// caller must get a typed metadata-unavailable error, not a silent nil.
+	checkpointID := id.MustCheckpointID("aaa111bbb222")
 	_, err := checkRemoteMetadata(
 		context.Background(),
 		os.Stdout,
 		os.Stderr,
-		id.MustCheckpointID("aaa111bbb222"),
+		checkpointID,
 		checkpoint.DefaultV1Refs(),
 	)
-	if err != nil {
-		t.Errorf("checkRemoteMetadata() returned error when no remote branch: %v", err)
+	var unavailable *ResumeMetadataUnavailableError
+	if !errors.As(err, &unavailable) {
+		t.Fatalf("checkRemoteMetadata() error = %v, want ResumeMetadataUnavailableError", err)
+	}
+	if unavailable.CheckpointID != checkpointID {
+		t.Errorf("CheckpointID = %s, want %s", unavailable.CheckpointID, checkpointID)
 	}
 }
 
@@ -1282,16 +1298,22 @@ func TestCheckRemoteMetadata_CheckpointNotOnRemote(t *testing.T) {
 		t.Fatalf("Failed to remove local metadata branch: %v", err)
 	}
 
-	// Call checkRemoteMetadata with a DIFFERENT checkpoint ID (not on remote)
+	// Call checkRemoteMetadata with a DIFFERENT checkpoint ID (not on remote):
+	// nothing was resumed, so a typed metadata-unavailable error is required.
+	missingID := id.MustCheckpointID("abcd12345678")
 	_, err = checkRemoteMetadata(
 		context.Background(),
 		os.Stdout,
 		os.Stderr,
-		id.MustCheckpointID("abcd12345678"),
+		missingID,
 		checkpoint.DefaultV1Refs(),
 	)
-	if err != nil {
-		t.Errorf("checkRemoteMetadata() returned error for missing checkpoint: %v", err)
+	var unavailable *ResumeMetadataUnavailableError
+	if !errors.As(err, &unavailable) {
+		t.Fatalf("checkRemoteMetadata() error = %v, want ResumeMetadataUnavailableError", err)
+	}
+	if unavailable.CheckpointID != missingID {
+		t.Errorf("CheckpointID = %s, want %s", unavailable.CheckpointID, missingID)
 	}
 }
 
@@ -1453,10 +1475,15 @@ func TestResumeFromCurrentBranch_NoMetadataAvailable(t *testing.T) {
 	}
 
 	// Run resumeFromCurrentBranch - no local or remote metadata branch exists,
-	// so checkRemoteMetadata prints an informational message and returns nil.
+	// so checkRemoteMetadata prints its guidance and must surface a typed
+	// metadata-unavailable error (nothing was resumed).
 	err = resumeFromCurrentBranch(context.Background(), io.Discard, io.Discard, "master", false)
-	if err != nil {
-		t.Errorf("resumeFromCurrentBranch() returned unexpected error: %v", err)
+	var unavailable *ResumeMetadataUnavailableError
+	if !errors.As(err, &unavailable) {
+		t.Fatalf("resumeFromCurrentBranch() error = %v, want ResumeMetadataUnavailableError", err)
+	}
+	if unavailable.CheckpointID != checkpointID {
+		t.Errorf("CheckpointID = %s, want %s", unavailable.CheckpointID, checkpointID)
 	}
 }
 

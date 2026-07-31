@@ -319,8 +319,8 @@ func resumeTrailLatest(ctx context.Context, cmd *cobra.Command, branch string, f
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
-	if !ensureTrailResumeBranchAvailable(ctx, w, branch) {
-		return nil
+	if err := ensureTrailResumeBranchAvailable(ctx, w, branch); err != nil {
+		return err
 	}
 	proceed, err := switchToBranchForResume(ctx, w, errW, branch, trailResumeSkipBranchPrompts(force))
 	if err != nil || !proceed {
@@ -337,8 +337,8 @@ func resumeTrailCheckpoint(ctx context.Context, cmd *cobra.Command, branch strin
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
-	if !ensureTrailResumeBranchAvailable(ctx, w, branch) {
-		return nil
+	if err := ensureTrailResumeBranchAvailable(ctx, w, branch); err != nil {
+		return err
 	}
 	proceed, err := switchToBranchForResume(ctx, w, errW, branch, trailResumeSkipBranchPrompts(force))
 	if err != nil || !proceed {
@@ -1115,8 +1115,8 @@ func launchTrailRestoredSession(ctx context.Context, w io.Writer, session strate
 }
 
 func runTrailResumePicker(ctx context.Context, cmd *cobra.Command, branch string, sessions []trailResumeSessionContext, force bool) error {
-	if !ensureTrailResumeBranchAvailable(ctx, cmd.OutOrStdout(), branch) {
-		return nil
+	if err := ensureTrailResumeBranchAvailable(ctx, cmd.OutOrStdout(), branch); err != nil {
+		return err
 	}
 
 	options := make([]huh.Option[string], 0, len(sessions)+1)
@@ -1152,13 +1152,16 @@ func runTrailResumePicker(ctx context.Context, cmd *cobra.Command, branch string
 	return resumeTrailCheckpoint(ctx, cmd, branch, id.CheckpointID(sessionCtx.CheckpointID), sessionCtx.SessionID, force)
 }
 
-func ensureTrailResumeBranchAvailable(ctx context.Context, w io.Writer, branch string) bool {
+// ensureTrailResumeBranchAvailable returns a typed (silent) error when the
+// branch is checked out in another worktree, after printing guidance. A nil
+// return means the branch is available for checkout here.
+func ensureTrailResumeBranchAvailable(ctx context.Context, w io.Writer, branch string) error {
 	otherPath, ok := branchCheckedOutElsewhere(ctx, branch)
 	if !ok {
-		return true
+		return nil
 	}
 	fmt.Fprint(w, trailResumeWorktreeClashMessage(branch, otherPath))
-	return false
+	return NewSilentError(&ResumeWorktreeClashError{Branch: branch, WorktreePath: otherPath})
 }
 
 func trailResumeWorktreeClashMessage(branch, otherPath string) string {

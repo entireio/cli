@@ -145,14 +145,15 @@ func TestResume_NoCheckpointOnBranch(t *testing.T) {
 	// Switch back to master
 	env.GitCheckoutBranch(masterBranch)
 
-	// Resume to the plain branch - should indicate no checkpoint found
+	// Resume to the plain branch - nothing was resumed, so the command must
+	// exit non-zero with the typed no-checkpoint message.
 	output, err := env.RunResume(plainBranch)
-	if err != nil {
-		t.Fatalf("resume failed: %v\nOutput: %s", err, output)
+	if err == nil {
+		t.Fatalf("resume succeeded for branch without checkpoints, want non-zero exit\nOutput: %s", output)
 	}
 
 	// Should indicate no checkpoint found
-	if !strings.Contains(output, "No Entire checkpoint found") {
+	if !strings.Contains(output, "no Entire checkpoint found") {
 		t.Errorf("output should indicate no checkpoint found, got: %s", output)
 	}
 
@@ -383,10 +384,16 @@ func TestResume_CheckpointWithoutMetadata(t *testing.T) {
 	// Switch to main
 	env.GitCheckoutBranch(masterBranch)
 
-	// Resume - should not error but indicate no session available
+	// Resume - nothing can be restored (the checkpoint's metadata is missing),
+	// so the command must exit non-zero after printing its guidance.
 	output, err := env.RunResume(featureBranch)
-	if err != nil {
-		t.Fatalf("resume failed: %v\nOutput: %s", err, output)
+	if err == nil {
+		t.Fatalf("resume succeeded despite missing checkpoint metadata, want non-zero exit\nOutput: %s", output)
+	}
+
+	// The guidance for fetching the metadata branch should still be printed.
+	if !strings.Contains(output, "metadata branch was not pushed") {
+		t.Errorf("output should retain the fetch guidance, got: %s", output)
 	}
 
 	// Verify we switched to the feature branch
@@ -395,7 +402,6 @@ func TestResume_CheckpointWithoutMetadata(t *testing.T) {
 	}
 
 	// Should NOT show session info since metadata is missing
-	// The resume command should silently skip commits without valid metadata
 	if strings.Contains(output, "Restored session") {
 		t.Errorf("output should not contain 'Restored session' when metadata is missing, got: %s", output)
 	}

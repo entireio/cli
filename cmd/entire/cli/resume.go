@@ -270,8 +270,7 @@ func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName
 		return nil, err
 	}
 	if len(result.checkpointIDs) == 0 {
-		fmt.Fprintf(w, "No Entire checkpoint found on branch '%s'\n", branchName)
-		return nil, nil
+		return nil, &ResumeNoCheckpointError{Branch: branchName}
 	}
 
 	logging.Debug(logCtx, "found checkpoint(s) on branch",
@@ -282,19 +281,26 @@ func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName
 	)
 
 	// If there are newer commits without checkpoints, ask for confirmation.
-	// Merge commits (e.g., from merging main) don't count as "work" and are skipped silently.
+	// Non-interactive runs cannot answer a prompt: proceed from the latest
+	// checkpoint with a notice instead, so agent callers never need --force
+	// just to avoid blocking. Merge commits (e.g., from merging main) don't
+	// count as "work" and are skipped silently.
 	if result.newerCommitsExist && !force {
-		fmt.Fprintf(w, "Found checkpoint in an older commit.\n")
-		fmt.Fprintf(w, "There are %d newer commit(s) on this branch without checkpoints.\n", result.newerCommitCount)
-		fmt.Fprintf(w, "Checkpoint from: %s %s\n\n", result.commitHash[:7], firstLine(result.commitMessage))
+		if !interactive.CanPromptInteractively() {
+			fmt.Fprintln(w, olderCheckpointNotice(repo, result))
+		} else {
+			fmt.Fprintf(w, "Found checkpoint in an older commit.\n")
+			fmt.Fprintf(w, "There are %d newer commit(s) on this branch without checkpoints.\n", result.newerCommitCount)
+			fmt.Fprintf(w, "Checkpoint from: %s %s\n\n", result.commitHash[:7], firstLine(result.commitMessage))
 
-		shouldResume, err := promptResumeFromOlderCheckpoint()
-		if err != nil {
-			return nil, err
-		}
-		if !shouldResume {
-			fmt.Fprintf(w, "Resume cancelled.\n")
-			return nil, nil
+			shouldResume, err := promptResumeFromOlderCheckpoint()
+			if err != nil {
+				return nil, err
+			}
+			if !shouldResume {
+				fmt.Fprintf(w, "Resume cancelled.\n")
+				return nil, nil
+			}
 		}
 	}
 
@@ -737,6 +743,21 @@ func findCheckpointInHistory(start *object.Commit, stopAt *plumbing.Hash) *branc
 }
 
 // promptResumeFromOlderCheckpoint asks the user if they want to resume from an older checkpoint.
+// olderCheckpointNotice describes proceeding from a checkpoint older than
+// HEAD, for non-interactive runs where the confirmation prompt cannot fire.
+func olderCheckpointNotice(repo *git.Repository, result *branchCheckpointsResult) string {
+	headLabel := detachedHEADDisplay
+	if head, err := repo.Head(); err == nil {
+		headLabel = detachedHEADDisplay + " " + head.Hash().String()[:7]
+	}
+	plural := "s"
+	if result.newerCommitCount == 1 {
+		plural = ""
+	}
+	return fmt.Sprintf("%s has no checkpoint; resuming from %s (%d commit%s newer than the checkpoint)",
+		headLabel, result.commitHash[:7], result.newerCommitCount, plural)
+}
+
 func promptResumeFromOlderCheckpoint() (bool, error) {
 	var confirmed bool
 
@@ -771,7 +792,7 @@ func checkRemoteMetadata(
 	if !refs.ReadBootstrappableFromOrigin() {
 		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but metadata is not available in %s.\n", checkpointID, refs.Read)
 		fmt.Fprintf(errW, "This ref is local-only. Try: entire explain %s\n", checkpointID)
-		return nil, nil
+		return nil, NewSilentError(&ResumeMetadataUnavailableError{CheckpointID: checkpointID})
 	}
 
 	// Open a fresh repo to avoid stale packfile index issues
@@ -781,7 +802,7 @@ func checkRemoteMetadata(
 			slog.String("error", repoErr.Error()),
 		)
 		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but session metadata not available\n", checkpointID)
-		return nil, nil
+		return nil, NewSilentError(&ResumeMetadataUnavailableError{CheckpointID: checkpointID})
 	}
 	defer repo.Close()
 
@@ -881,7 +902,7 @@ func checkRemoteMetadata(
 		fmt.Fprintf(errW, "This can happen if the metadata branch was not pushed. Try:\n")
 		fmt.Fprintf(errW, "  git fetch origin entire/checkpoints/v1:entire/checkpoints/v1\n")
 	}
-	return nil, nil
+	return nil, NewSilentError(&ResumeMetadataUnavailableError{CheckpointID: checkpointID})
 }
 
 // promoteRemoteTrackingPrimary advances the local primary ref to match origin's
