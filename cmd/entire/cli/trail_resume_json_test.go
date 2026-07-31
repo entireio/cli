@@ -87,6 +87,30 @@ func TestBuildTrailResumeActionReport_PreferredSessionWins(t *testing.T) {
 	}
 }
 
+// TestEnsurePreferredRestoredSession pins the --session contract on the JSON
+// path: a session id that is not among the restored sessions must error (as
+// the human path does via continueRestoredSessions), never silently fall back
+// to a different session with exit 0.
+func TestEnsurePreferredRestoredSession(t *testing.T) {
+	t.Parallel()
+
+	sessions := []strategy.RestoredSession{{SessionID: "sess-a", Agent: "Claude Code"}}
+
+	if err := ensurePreferredRestoredSession(sessions, ""); err != nil {
+		t.Errorf("no preferred session: error = %v, want nil", err)
+	}
+	if err := ensurePreferredRestoredSession(sessions, "sess-a"); err != nil {
+		t.Errorf("restored preferred session: error = %v, want nil", err)
+	}
+	err := ensurePreferredRestoredSession(sessions, "sess-bogus")
+	if err == nil {
+		t.Fatal("bogus preferred session: error = nil, want not-found error")
+	}
+	if !strings.Contains(err.Error(), "sess-bogus") || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %q, want it to name the missing session", err)
+	}
+}
+
 // TestTrailResumeReportErrorFrom pins the typed-error JSON contract: the enum
 // values and per-type fields, plus nil for untyped errors (which keep the
 // default empty-stdout stderr-text behavior).

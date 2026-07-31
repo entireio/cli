@@ -206,8 +206,25 @@ func runTrailResumeJSON(ctx context.Context, cmd *cobra.Command, found api.Trail
 	if err != nil {
 		return fail(err)
 	}
+	if err := ensurePreferredRestoredSession(sessions, preferred); err != nil {
+		return err
+	}
 
 	return emit(buildTrailResumeActionReport(found, branch, actions, sessions, preferred))
+}
+
+// ensurePreferredRestoredSession rejects a --session id that is not among the
+// restored sessions, mirroring the human path's continueRestoredSessions
+// error — the JSON contract must never point the continuation at a different
+// session than the one requested.
+func ensurePreferredRestoredSession(sessions []strategy.RestoredSession, preferredSessionID string) error {
+	if preferredSessionID == "" {
+		return nil
+	}
+	if _, ok := findTrailRestoredSession(sessions, preferredSessionID); ok {
+		return nil
+	}
+	return fmt.Errorf("session %q was not found in the restored checkpoint", preferredSessionID)
 }
 
 // trailResumeCheckpointBehindHead reports how many branch commits are newer
@@ -244,9 +261,9 @@ func restoreTrailSessionsForReport(ctx context.Context, errW io.Writer, branch s
 		} else {
 			fmt.Fprintf(errW, "Warning: could not load trail checkpoint sessions: %v\n", ctxErr)
 		}
-		sessions, err := restoreFromCurrentBranch(ctx, io.Discard, errW, branch, opts.Force)
+		sessions, err := restoreFromCurrentBranch(ctx, io.Discard, errW, branch, opts.Force, false)
 		return sessions, opts.SessionID, err
 	}
-	sessions, err := restoreFromCurrentBranch(ctx, io.Discard, errW, branch, opts.Force)
+	sessions, err := restoreFromCurrentBranch(ctx, io.Discard, errW, branch, opts.Force, false)
 	return sessions, "", err
 }

@@ -167,6 +167,37 @@ func TestCheckRemoteMetadata_LocalOnlyRefReturnsMetadataUnavailable(t *testing.T
 	}
 }
 
+// TestRestoreFromCurrentBranch_JSONModeSuppressesPromptEvenOnTTY pins the
+// --json prompt contract: even when a real terminal could prompt
+// (ENTIRE_TEST_TTY=1 forces interactivity on), a caller that disallows
+// prompts must get the notice-and-proceed behavior, never a huh dialog —
+// stdout on the JSON path carries only JSON.
+func TestRestoreFromCurrentBranch_JSONModeSuppressesPromptEvenOnTTY(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", filepath.Join(tmpDir, "claude-projects"))
+
+	repo, w, _ := setupResumeTestRepo(t, tmpDir, false)
+	checkpointID := id.MustCheckpointID("bbb222ccc333")
+	writeCommittedResumeCheckpoint(t, repo, checkpointID, "session-json-tty", time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
+
+	writeResumeTestCommit(t, tmpDir, w, "checkpointed.txt", "Add feature\n\nEntire-Checkpoint: "+checkpointID.String())
+	writeResumeTestCommit(t, tmpDir, w, "newer.txt", "Manual follow-up commit")
+
+	var stdout, stderr bytes.Buffer
+	sessions, err := restoreFromCurrentBranch(context.Background(), &stdout, &stderr, "master", false, false)
+	if err != nil {
+		t.Fatalf("restoreFromCurrentBranch() error = %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if len(sessions) == 0 {
+		t.Fatalf("restoreFromCurrentBranch() restored no sessions\nstdout: %s\nstderr: %s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "has no checkpoint; resuming from") {
+		t.Errorf("stdout = %q, want the proceed notice instead of a prompt", stdout.String())
+	}
+}
+
 // TestRestoreFromCurrentBranch_NewerCommitsNonInteractiveProceedsWithNotice
 // pins the prompt guard: a non-interactive run (go test is non-interactive by
 // default) with commits newer than the checkpoint must proceed with a notice
@@ -184,7 +215,7 @@ func TestRestoreFromCurrentBranch_NewerCommitsNonInteractiveProceedsWithNotice(t
 	writeResumeTestCommit(t, tmpDir, w, "newer.txt", "Manual follow-up commit")
 
 	var stdout, stderr bytes.Buffer
-	sessions, err := restoreFromCurrentBranch(context.Background(), &stdout, &stderr, "master", false)
+	sessions, err := restoreFromCurrentBranch(context.Background(), &stdout, &stderr, "master", false, true)
 	if err != nil {
 		t.Fatalf("restoreFromCurrentBranch() error = %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
 	}

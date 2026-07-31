@@ -348,7 +348,7 @@ func resumeTrailLatest(ctx context.Context, cmd *cobra.Command, branch string, f
 	if err != nil || !proceed {
 		return err
 	}
-	sessions, err := restoreFromCurrentBranch(ctx, w, errW, branch, force)
+	sessions, err := restoreFromCurrentBranch(ctx, w, errW, branch, force, true)
 	if err != nil {
 		return err
 	}

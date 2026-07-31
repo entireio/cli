@@ -239,7 +239,7 @@ func restoreByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID 
 }
 
 func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName string, force bool) error {
-	sessions, err := restoreFromCurrentBranch(ctx, w, errW, branchName, force)
+	sessions, err := restoreFromCurrentBranch(ctx, w, errW, branchName, force, true)
 	if err != nil || len(sessions) == 0 {
 		return err
 	}
@@ -255,7 +255,11 @@ func continueSessionRestoredSessions(ctx context.Context, w io.Writer, sessions 
 	})
 }
 
-func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName string, force bool) ([]strategy.RestoredSession, error) {
+// restoreFromCurrentBranch restores the latest checkpoint's sessions on
+// branchName. allowPrompts=false suppresses the older-checkpoint confirmation
+// even on a real terminal (used by the trail resume --json path, where stdout
+// must carry only JSON) without implying --force's log-overwrite semantics.
+func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName string, force, allowPrompts bool) ([]strategy.RestoredSession, error) {
 	logCtx := logging.WithComponent(ctx, "resume")
 
 	repo, err := openRepository(ctx)
@@ -286,7 +290,7 @@ func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName
 	// just to avoid blocking. Merge commits (e.g., from merging main) don't
 	// count as "work" and are skipped silently.
 	if result.newerCommitsExist && !force {
-		if !interactive.CanPromptInteractively() {
+		if !allowPrompts || !interactive.CanPromptInteractively() {
 			fmt.Fprintln(w, olderCheckpointNotice(repo, result))
 		} else {
 			fmt.Fprintf(w, "Found checkpoint in an older commit.\n")
