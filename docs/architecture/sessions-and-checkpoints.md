@@ -188,10 +188,21 @@ adopt eligibility) are swept on read. The registry is keyed by session ID alone,
 so unregister is **scoped to the caller's common dir** — a cross-repo adopt
 retires the source session without deleting the target entry it just wrote.
 
-Because this adoption is **automatic and destructive** (it retires the source
-session as a commit side effect), it fires only when every one of these
-adoption-safety invariants holds — any ambiguity or missing signal skips
-silently:
+The adopt is **split across the two commit hooks** so an aborted commit can
+never strand the source. `prepare-commit-msg` registers the adopted session in
+the target worktree (so the checkpoint trailer lands) and stamps a
+`PendingSourceRetire` marker on it, but leaves the source session ACTIVE.
+`post-commit` (`finalizePendingSourceRetires`) applies the destructive
+source-side tombstone only once the commit is a fact, then clears the marker. If
+the commit is aborted (editor abort, empty-message strip), post-commit never
+runs and the source keeps its checkpointing. The retire is idempotent (a crash
+between the source retire and the marker clear self-heals on the next
+post-commit) and time-bounded. Manual `entire session adopt` retires
+immediately, in-band.
+
+Because this adoption is **automatic** and eventually retires the source session
+as a commit side effect, it fires only when every one of these adoption-safety
+invariants holds — any ambiguity or missing signal skips silently:
 
 - **Enabled + writes a trailer**: the target repo has Entire enabled and the
   commit is one `prepare-commit-msg` would write a fresh checkpoint trailer for
@@ -206,8 +217,12 @@ silently:
   NUL-separated so non-ASCII names still match) is in the source session's
   `FilesTouched` and is not a boilerplate basename (README, go.mod,
   package.json, …) — those collide across unrelated siblings.
-- **Sibling proximity**: registry candidates must share the target's parent
-  directory (the immediate-sibling scan is inherently parent-scoped).
+- **Discovery reach**: the immediate-sibling scan is inherently parent-scoped,
+  but the **registry path is not** — it reaches sessions in worktrees under
+  unrelated parents (issue #1439's own repro: a session in
+  `…/entire.io/.worktrees/…` committing in an unrelated `/private/tmp/…`
+  checkout). The registry path drops the proximity gate and leans on the stronger
+  owner + non-boilerplate-overlap + uniqueness guards instead.
 - **Uniqueness**: the registry and sibling candidate sets are unioned (deduped
   by session ID) and exactly one candidate must remain.
 

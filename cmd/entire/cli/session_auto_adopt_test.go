@@ -175,7 +175,16 @@ func TestAutoAdopt_PrepareCommitMsg_ViaLiveRegistry(t *testing.T) {
 	}
 }
 
-func TestAutoAdopt_SkipsDistantRegistryEntry(t *testing.T) {
+// TestAutoAdopt_AdoptsDistantRegistryEntry reproduces issue #1439's own repro:
+// the source session lives under one parent (…/src-nest/repo) while the commit
+// happens in a repo under a completely unrelated parent (…/dst-nest/repo), so the
+// two are NOT siblings. With a distinctive overlapping path and a matching owner,
+// the registry discovery path now adopts across the parent boundary — proximity
+// is no longer required for the registry path — and the checkpoint trailer lands,
+// which is exactly what #1439 asked for.
+//
+// Uses t.Chdir(), so no t.Parallel().
+func TestAutoAdopt_AdoptsDistantRegistryEntry(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	requireResolveOwner(t)
 
@@ -184,9 +193,9 @@ func TestAutoAdopt_SkipsDistantRegistryEntry(t *testing.T) {
 	targetRepo := setupAdoptRepoAt(t, filepath.Join(t.TempDir(), "dst-nest", "repo"))
 
 	sessionID := "test-auto-adopt-distant-registry"
-	// Distinctive path + matching owner: overlap and owner both PASS, so the
-	// proximity guard is the only reason to reject. README.md (boilerplate) would
-	// have been rejected by the overlap guard first, never exercising proximity.
+	// Distinctive path + matching owner: the registry path's stronger guards
+	// (owner + non-boilerplate overlap + uniqueness) all PASS, so the adopt goes
+	// through even though the repos are non-siblings.
 	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"services/billing/handler.go"}, true)
 
 	testutil.WriteFile(t, targetRepo, "services/billing/handler.go", "agent change\n")
@@ -200,8 +209,58 @@ func TestAutoAdopt_SkipsDistantRegistryEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if adopted == nil {
+		t.Fatal("non-sibling registry entry with owner+distinctive overlap must auto-adopt (#1439 repro)")
+	}
+
+	commitMsgFile := filepath.Join(targetRepo, "COMMIT_EDITMSG")
+	if err := os.WriteFile(commitMsgFile, []byte("commit in unrelated dir\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := strategy.NewManualCommitStrategy().PrepareCommitMsg(context.Background(), commitMsgFile, ""); err != nil {
+		t.Fatalf("PrepareCommitMsg: %v", err)
+	}
+	content, err := os.ReadFile(commitMsgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "Entire-Checkpoint:") {
+		t.Fatalf("commit message = %q, want Entire-Checkpoint trailer after non-sibling adopt", string(content))
+	}
+}
+
+// TestAutoAdopt_SkipsDistantRegistryOwnerMismatch proves that dropping the
+// registry proximity gate did not weaken cross-parent safety: a non-sibling
+// source with a distinctive overlapping path but NO matching owner must still be
+// rejected. Owner match is the primary steal guard for the registry path once
+// proximity is gone.
+//
+// Uses t.Chdir(), so no t.Parallel().
+func TestAutoAdopt_SkipsDistantRegistryOwnerMismatch(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
+
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(t.TempDir(), "src-nest", "repo"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(t.TempDir(), "dst-nest", "repo"))
+
+	sessionID := "test-auto-adopt-distant-owner-mismatch"
+	// Distinctive path overlaps and proximity is no longer checked, so the owner
+	// guard is the ONLY reason to reject — the source records no owner.
+	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"services/billing/handler.go"}, false)
+
+	testutil.WriteFile(t, targetRepo, "services/billing/handler.go", "agent change\n")
+	testutil.GitAdd(t, targetRepo, "services/billing/handler.go")
+	t.Chdir(targetRepo)
+
+	tryAutoAdoptCrossCommonDirSession(context.Background())
+
+	targetStore := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	adopted, err := targetStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if adopted != nil {
-		t.Fatal("distant registry entry must not auto-adopt even with owner+overlap")
+		t.Fatal("non-sibling registry entry without owner match must not auto-adopt")
 	}
 }
 
@@ -239,19 +298,6 @@ func TestAutoAdopt_SkipsIdleSibling(t *testing.T) {
 	}
 	if adopted != nil {
 		t.Fatal("Idle sibling must not be auto-adopted")
-	}
-}
-
-func TestAutoAdoptSiblingProximity(t *testing.T) {
-	t.Parallel()
-	base := t.TempDir()
-	a := filepath.Join(base, "a")
-	b := filepath.Join(base, "b")
-	if !autoAdoptSiblingProximity(a, b) {
-		t.Fatal("siblings under same parent should match")
-	}
-	if autoAdoptSiblingProximity(a, filepath.Join(t.TempDir(), "other")) {
-		t.Fatal("distinct parents must not match")
 	}
 }
 

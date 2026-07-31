@@ -69,16 +69,18 @@ func shouldTryAutoAdoptOnPrepareCommitMsg(ctx context.Context, source string) bo
 // git common dir into the current worktree when it is safe to do so.
 //
 // Discovery order:
-//  1. Live-session registry (written on ACTIVE StateStore.Save), limited to
-//     worktrees that share the target's parent directory (same proximity as #2)
+//  1. Live-session registry (written on ACTIVE StateStore.Save) — reaches any
+//     worktree, including non-siblings under unrelated parents (issue #1439's own
+//     repro), guarded by owner + distinctive-overlap + uniqueness instead of proximity
 //  2. Immediate sibling repos under the parent directory (seeded / microservices)
 //
 // A candidate is accepted only when exactly one match remains after filtering
 // for recent ACTIVE sessions that (a) share the committing process owner and
 // (b) have FilesTouched overlapping the staged commit paths on a
 // non-boilerplate relative path (README.md / go.mod / package.json / … alone
-// never count). Registry entries also require sibling proximity. Idle sessions
-// are never auto-adopted. Ambiguity skips.
+// never count). The sibling scan is inherently parent-scoped; the registry path
+// is not, relying on the stronger owner + distinctive-overlap + uniqueness
+// guards. Idle sessions are never auto-adopted. Ambiguity skips.
 //
 // Best-effort: never returns an error to the git hook caller.
 func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
@@ -137,7 +139,7 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 	}
 
 	regCtx, regCancel := context.WithTimeout(ctx, autoAdoptDiscoveryTimeout)
-	registryCandidates := collectRegistryAutoAdoptCandidates(regCtx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
+	registryCandidates := collectRegistryAutoAdoptCandidates(regCtx, targetCommonDir, staged, owner, hasOwner)
 	regCancel()
 	scanCtx, scanCancel := context.WithTimeout(ctx, autoAdoptDiscoveryTimeout)
 	siblingCandidates := collectSiblingAutoAdoptCandidates(scanCtx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
@@ -359,7 +361,7 @@ func hasLocalActiveSession(ctx context.Context, store *session.StateStore) bool 
 
 func collectRegistryAutoAdoptCandidates(
 	ctx context.Context,
-	targetWorktree, targetCommonDir string,
+	targetCommonDir string,
 	staged []string,
 	owner proclive.Identity,
 	hasOwner bool,
@@ -381,11 +383,17 @@ func collectRegistryAutoAdoptCandidates(
 		if !isRecentLiveEntry(entry) {
 			continue
 		}
-		// Same parent-dir proximity as the sibling scan. Without this, a shared
-		// owner (tmux/IDE) + common relative filename can steal across unrelated repos.
-		if !autoAdoptSiblingProximity(entry.WorktreePath, targetWorktree) {
-			continue
-		}
+		// The registry path deliberately does NOT gate on parent-dir proximity
+		// (unlike the sibling scan, which is inherently parent-scoped). Issue
+		// #1439's own repro is cross-parent — a session in
+		// …/entire.io/.worktrees/… committing in an unrelated /private/tmp/…
+		// checkout — so requiring siblinghood here would leave the motivating case
+		// with no trailer. A registry candidate's stronger guards stand in for
+		// proximity: candidateFromSource → candidateFromLoaded requires an exact
+		// process-owner match AND a non-boilerplate distinctive FilesTouched∩staged
+		// overlap, and the caller's global exactly-one-candidate uniqueness test
+		// still applies. A shared owner (tmux/IDE) plus a common relative filename
+		// alone therefore cannot steal across unrelated repos.
 		resolved++
 		resolveCtx, resolveCancel := context.WithTimeout(ctx, autoAdoptGitResolveTimeout)
 		cand, ok := candidateFromSource(resolveCtx, entry.WorktreePath, entry.SessionID, staged, owner, hasOwner)
@@ -541,20 +549,6 @@ func siblingLooksLikeGitWorktree(dir string) bool {
 func siblingLooksLikeEntireRepo(dir string) bool {
 	_, err := os.Lstat(filepath.Join(dir, ".entire"))
 	return err == nil
-}
-
-// autoAdoptSiblingProximity reports whether source and target worktrees share a
-// parent directory (the same bound used by collectSiblingAutoAdoptCandidates).
-func autoAdoptSiblingProximity(sourceWorktree, targetWorktree string) bool {
-	if sourceWorktree == "" || targetWorktree == "" {
-		return false
-	}
-	srcParent := filepath.Dir(sourceWorktree)
-	tgtParent := filepath.Dir(targetWorktree)
-	if srcParent == "" || tgtParent == "" || srcParent == sourceWorktree || tgtParent == targetWorktree {
-		return false
-	}
-	return sameAdoptPath(srcParent, tgtParent)
 }
 
 func ownerMatches(recorded *proclive.Identity, current proclive.Identity) bool {
