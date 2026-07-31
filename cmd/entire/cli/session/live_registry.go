@@ -9,10 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
-	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
@@ -21,14 +19,11 @@ import (
 // in a different git common dir can discover a unique adopt candidate without
 // scanning the filesystem.
 type LiveSessionEntry struct {
-	SessionID           string             `json:"session_id"`
-	CommonDir           string             `json:"common_dir"`
-	WorktreePath        string             `json:"worktree_path"`
-	AgentType           types.AgentType    `json:"agent_type,omitempty"`
-	Phase               Phase              `json:"phase"`
-	LastInteractionTime *time.Time         `json:"last_interaction_time,omitempty"`
-	Owner               *proclive.Identity `json:"owner,omitempty"`
-	FilesTouched        []string           `json:"files_touched,omitempty"`
+	SessionID           string     `json:"session_id"`
+	CommonDir           string     `json:"common_dir"`
+	WorktreePath        string     `json:"worktree_path"`
+	Phase               Phase      `json:"phase"`
+	LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`
 }
 
 func liveSessionsDir() string {
@@ -77,11 +72,8 @@ func RegisterLiveSession(state *State, commonDir string) error {
 		SessionID:           state.SessionID,
 		CommonDir:           commonDir,
 		WorktreePath:        state.WorktreePath,
-		AgentType:           state.AgentType,
 		Phase:               state.Phase,
 		LastInteractionTime: cloneTime(state.LastInteractionTime),
-		Owner:               cloneOwner(state.Owner),
-		FilesTouched:        append([]string(nil), state.FilesTouched...),
 	}
 
 	dir := liveSessionsDir()
@@ -203,14 +195,6 @@ func cloneTime(t *time.Time) *time.Time {
 		return nil
 	}
 	cloned := *t
-	return &cloned
-}
-
-func cloneOwner(owner *proclive.Identity) *proclive.Identity {
-	if owner == nil {
-		return nil
-	}
-	cloned := *owner
 	return &cloned
 }
 

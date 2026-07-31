@@ -163,8 +163,6 @@ type autoAdoptCandidate struct {
 	WorktreePath string
 	CommonDir    string
 	Store        *session.StateStore
-	OwnerMatch   bool
-	OverlapMatch bool
 }
 
 func hasLocalActiveSession(ctx context.Context, store *session.StateStore) bool {
@@ -336,8 +334,6 @@ func candidateFromLoaded(
 		WorktreePath: worktree,
 		CommonDir:    commonDir,
 		Store:        store,
-		OwnerMatch:   ownerMatch,
-		OverlapMatch: overlapMatch,
 	}, true
 }
 
