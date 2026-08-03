@@ -107,6 +107,36 @@ func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, err
 	return strings.TrimSpace(string(output)), nil
 }
 
+// GetRemoteURLsInDirIfSet returns every raw URL stored for the named git
+// remote in dir, distinguishing "remote not configured" from a failed lookup:
+// exit code 1 from `git config --get-all` is reported as found=false with a
+// nil error — for well-formed remote names that means the key is unset (git
+// also exits 1 for invalid key names). Any other failure (dir missing, git
+// unavailable, context canceled) returns an error; `git remote get-url`
+// collapses both cases into one error, which is why it is not used here. A
+// remote can carry several fetch URLs (git remote set-url --add); callers
+// matching for exclusion should treat a match on ANY of them as a match.
+func GetRemoteURLsInDirIfSet(ctx context.Context, dir, remoteName string) (urls []string, found bool, err error) {
+	cmd := exec.CommandContext(ctx, "git", "config", "--get-all", "remote."+remoteName+".url")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	output, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("looking up remote %q: %w", remoteName, err)
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(string(output)), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			urls = append(urls, line)
+		}
+	}
+	return urls, len(urls) > 0, nil
+}
+
 // ParseURL parses a git remote URL (SSH SCP-style or HTTPS) into its components.
 func ParseURL(rawURL string) (*Info, error) {
 	rawURL = strings.TrimSpace(rawURL)

@@ -3,6 +3,7 @@ package gitremote
 import (
 	"context"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -257,4 +258,74 @@ func TestResolveRemoteRepo_MissingRemote(t *testing.T) {
 
 	_, _, _, err := ResolveRemoteRepo(context.Background(), "origin")
 	assert.Error(t, err)
+}
+
+func TestGetRemoteURLsInDirIfSet(t *testing.T) {
+	t.Parallel()
+
+	newRepo := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		testutil.InitRepo(t, dir)
+		return dir
+	}
+	runGit := func(t *testing.T, dir string, args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = dir
+		cmd.Env = testutil.GitIsolatedEnv()
+		require.NoError(t, cmd.Run())
+	}
+
+	t.Run("remote configured", func(t *testing.T) {
+		t.Parallel()
+		dir := newRepo(t)
+		runGit(t, dir, "remote", "add", "origin", "git@github.com:acme/widgets.git")
+
+		urls, found, err := GetRemoteURLsInDirIfSet(t.Context(), dir, "origin")
+		require.NoError(t, err)
+		assert.True(t, found)
+		assert.Equal(t, []string{"git@github.com:acme/widgets.git"}, urls)
+	})
+
+	t.Run("multiple URLs are all returned", func(t *testing.T) {
+		t.Parallel()
+		dir := newRepo(t)
+		runGit(t, dir, "remote", "add", "origin", "git@github.com:acme/widgets.git")
+		runGit(t, dir, "remote", "set-url", "--add", "origin", "https://github.com/acme/mirror.git")
+
+		urls, found, err := GetRemoteURLsInDirIfSet(t.Context(), dir, "origin")
+		require.NoError(t, err)
+		assert.True(t, found)
+		assert.Equal(t, []string{"git@github.com:acme/widgets.git", "https://github.com/acme/mirror.git"}, urls)
+	})
+
+	t.Run("remote not configured is found=false, not an error", func(t *testing.T) {
+		t.Parallel()
+		dir := newRepo(t)
+
+		urls, found, err := GetRemoteURLsInDirIfSet(t.Context(), dir, "origin")
+		require.NoError(t, err)
+		assert.False(t, found)
+		assert.Empty(t, urls)
+	})
+
+	t.Run("lookup failure is an error, not found=false", func(t *testing.T) {
+		t.Parallel()
+		dir := filepath.Join(t.TempDir(), "does-not-exist")
+
+		_, _, err := GetRemoteURLsInDirIfSet(t.Context(), dir, "origin")
+		assert.Error(t, err)
+	})
+
+	t.Run("canceled context is an error even with a configured remote", func(t *testing.T) {
+		t.Parallel()
+		dir := newRepo(t)
+		runGit(t, dir, "remote", "add", "origin", "git@github.com:acme/widgets.git")
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, _, err := GetRemoteURLsInDirIfSet(ctx, dir, "origin")
+		assert.Error(t, err)
+	})
 }
