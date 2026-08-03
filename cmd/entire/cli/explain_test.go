@@ -1898,6 +1898,98 @@ func TestRunExplainCheckpoint_GenerateWritesV1Store(t *testing.T) {
 	require.Equal(t, "selected v1 intent", v1Metadata.Summary.Intent)
 }
 
+// TestRunExplainAuto_GeneratePersistsHexOnBranchUnderRefsPrimary is the
+// end-to-end regression test for the motivating field bug: under a git-refs
+// primary, `entire checkpoint explain --generate <hex-id>` for a pre-migration
+// checkpoint that lives only on the v1 branch generated the AI summary and
+// then discarded it (the summary backfill went refs-only), reporting
+// `no checkpoint or commit found`. The whole CLI path must work: auto target
+// resolution → routed read → summary generation → kind-routed backfill →
+// summary persisted on the v1 branch.
+func TestRunExplainAuto_GeneratePersistsHexOnBranchUnderRefsPrimary(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "test.txt"), []byte("test"), 0o644))
+	_, err = wt.Add("test.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// git-refs is the configured primary — the field configuration in which
+	// the backfill was discarded.
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tmpDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "summary_generation": {"provider": "claude-code"}, "checkpoints": {"primary": {"type": "git-refs"}}}`),
+		0o644,
+	))
+
+	originalGet := getSummaryAgent
+	originalCLI := isSummaryCLIAvailable
+	originalDiscover := discoverSummaryProviders
+	originalGenerate := generateTranscriptSummary
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		isSummaryCLIAvailable = originalCLI
+		discoverSummaryProviders = originalDiscover
+		generateTranscriptSummary = originalGenerate
+	})
+
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		return &stubTextAgent{name: name, kind: agent.AgentTypeClaudeCode}, nil
+	}
+	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
+	discoverSummaryProviders = func(context.Context) {}
+	generateTranscriptSummary = func(
+		_ context.Context,
+		_ redact.RedactedBytes,
+		_ []string,
+		_ types.AgentType,
+		_ summarize.Generator,
+		_ agent.ProgressFn,
+	) (*checkpoint.Summary, error) {
+		return &checkpoint.Summary{Intent: "backfilled intent", Outcome: "backfilled outcome"}, nil
+	}
+
+	// The checkpoint exists ONLY on the pre-migration v1 branch.
+	branchStore := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	cpID := id.MustCheckpointID("aabbccddeeff")
+	ctx := context.Background()
+
+	transcript := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"generate test"}]}}` + "\n" +
+		`{"type":"assistant","message":{"content":"done"}}` + "\n")
+
+	require.NoError(t, branchStore.Write(ctx, checkpoint.Session{
+		CheckpointID: cpID,
+		SessionID:    "session-hex-on-branch",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted(transcript),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}))
+
+	var buf, errBuf bytes.Buffer
+	err = runExplainAuto(ctx, &buf, &errBuf, cpID.String(), true, false, false, false, true, false, false, 0)
+	require.NoError(t, err, "generate for a hex checkpoint on the branch must succeed under a refs primary")
+	require.NotContains(t, errBuf.String(), "no checkpoint or commit found",
+		"the resolved checkpoint must not be misreported as missing")
+
+	// The summary must be readable back from the v1 branch copy.
+	meta, err := branchStore.ReadSessionMetadata(ctx, cpID, 0)
+	require.NoError(t, err)
+	require.NotNil(t, meta.Summary, "the generated summary must persist on the v1 branch")
+	require.Equal(t, "backfilled intent", meta.Summary.Intent)
+}
+
 func TestRunExplainCheckpoint_GenerateReloadsAfterV1Write(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)

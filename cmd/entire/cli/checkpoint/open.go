@@ -87,10 +87,11 @@ func Open(ctx context.Context, repo *git.Repository, opts OpenOptions) (*Stores,
 	}
 	writer := newFanoutStore(primary, mirrors)
 
-	// Read routing: resolve id-keyed reads by the checkpoint's format across both
-	// git backends (a ULID lives in refs, a hex ID on the branch or a migrated
-	// ref), so a coexisting / mid-migration repo reads either format without
-	// reconfiguring. Writes still go through writer (configured primary + mirrors).
+	// Kind routing: resolve id-keyed reads and backfill writes by the
+	// checkpoint's format across both git backends (a ULID lives in refs, a hex
+	// ID on the branch or a migrated ref), so a coexisting / mid-migration repo
+	// handles either format without reconfiguring. Creates still go through
+	// writer (configured primary + mirrors).
 	branchStore, refsStore, err := buildKindReadStores(ctx, env, primaryType, primary)
 	if err != nil {
 		return nil, err
@@ -174,7 +175,11 @@ func buildMirrors(ctx context.Context, env OpenEnv, cfg *settings.CheckpointsCon
 			return nil, fmt.Errorf("checkpoints.mirrors[%d]: backend type %q is already used by the primary or another mirror; each backend type may appear at most once", i, m.Type)
 		}
 		seen[m.Type] = true
-		store, err := build(ctx, env, m.Type, m.Config)
+		// Mirrors are best-effort write-only copies whose failures are logged
+		// and dropped; never pay on-demand ref-fetch network probes for them.
+		mirrorEnv := env
+		mirrorEnv.RefFetcher = nil
+		store, err := build(ctx, mirrorEnv, m.Type, m.Config)
 		if err != nil {
 			return nil, fmt.Errorf("checkpoints.mirrors[%d]: %w", i, err)
 		}

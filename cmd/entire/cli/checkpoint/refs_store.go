@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/go-git/go-git/v6"
@@ -48,6 +49,17 @@ type gitRefsStore struct {
 	blobFetcher     BlobFetchFunc
 	refFetcher      RefFetchFunc
 	remoteRefLister RemoteRefListFunc
+
+	// fetchFailureMu guards fetchFailure: the first transport-level ref-fetch
+	// failure, memoized for the store's lifetime so a loop over N missing refs
+	// (e.g. a stop hook finalizing every checkpoint of a turn) pays a dead —
+	// or too-slow-for-the-budget — network once instead of N times. Genuine
+	// remote absence is per-ref and
+	// is never memoized. The memo never clears — safe because every
+	// fetcher-wired store today is opened per command/hook invocation; a
+	// long-lived fetcher-wired store would need an expiry before reusing this.
+	fetchFailureMu sync.Mutex
+	fetchFailure   error
 }
 
 // newGitRefsStore constructs the per-checkpoint-ref store for a repository.
@@ -116,8 +128,18 @@ func (s *gitRefsStore) Write(ctx context.Context, req WriteRequest) error {
 }
 
 // refBase resolves a checkpoint ref's current tip commit (the parent for the
-// next write) and subtree object (the checkpoint's current contents). A missing
-// ref yields (ZeroHash, nil) so the next write becomes an orphan commit.
+// next write) and subtree object (the checkpoint's current contents) with a
+// LOCAL-ONLY lookup. A missing ref yields (ZeroHash, nil) so the next write
+// becomes an orphan commit — correct for creates, whose ref never exists yet
+// (locally or remotely); probing the remote would add a doomed round-trip to
+// every condensation and, with a fetcher configured, fail offline writes.
+// Backfills, which target an existing checkpoint, use refBaseForBackfill
+// instead. Migration (migrate.go) also uses refBase deliberately: it imports
+// from the LOCAL v1 branch and must never probe the remote, even though its
+// target ref may already exist. One writeSession caller does target an
+// existing checkpoint — attach, which adds a session to it — but attach
+// pre-fetches and verifies the ref's presence itself (refreshCheckpoint)
+// before writing, so the local-only probe is safe there too.
 func (s *gitRefsStore) refBase(cid id.CheckpointID) (plumbing.Hash, *object.Tree, error) {
 	refName, err := RefName(cid)
 	if err != nil {
@@ -132,6 +154,35 @@ func (s *gitRefsStore) refBase(cid id.CheckpointID) (plumbing.Hash, *object.Tree
 		// rather than silently starting a fresh orphan history over the ref.
 		return plumbing.ZeroHash, nil, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
 	}
+	return s.refTip(cid, ref)
+}
+
+// refBaseForBackfill resolves like refBase, but a ref missing locally is
+// first fetched once from the remote (resolveRefMaybeFetch) when a fetcher is
+// configured: a backfill targets an EXISTING checkpoint that may have been
+// written or migrated on another machine, and declaring it absent without
+// looking remotely diverges from the read path — the backfill would be
+// handled as targeting a nonexistent checkpoint while reads, which DO fetch,
+// serve the refs copy, leaving the backfilled data permanently invisible.
+// A ref absent even after the fetch yields (ZeroHash, nil), which the
+// backfill helpers report as ErrCheckpointNotFound — the signal that the
+// checkpoint does not exist in this backend. A fetch FAILURE is returned
+// as-is: transient unavailability must never masquerade as absence, because
+// a caller or routing layer acting on a false "absent" would misdirect the
+// backfill (e.g. onto a stale copy in another backend) instead of retrying.
+func (s *gitRefsStore) refBaseForBackfill(ctx context.Context, cid id.CheckpointID) (plumbing.Hash, *object.Tree, error) {
+	ref, err := s.resolveRefMaybeFetch(ctx, cid)
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return plumbing.ZeroHash, nil, nil // genuinely absent → backfill reports not-found
+	}
+	if err != nil {
+		return plumbing.ZeroHash, nil, err
+	}
+	return s.refTip(cid, ref)
+}
+
+// refTip reads the commit and tree at a resolved checkpoint ref.
+func (s *gitRefsStore) refTip(cid id.CheckpointID, ref *plumbing.Reference) (plumbing.Hash, *object.Tree, error) {
 	commit, err := s.repo.CommitObject(ref.Hash())
 	if err != nil {
 		return plumbing.ZeroHash, nil, fmt.Errorf("read checkpoint commit %s: %w", ref.Hash(), err)
@@ -207,11 +258,14 @@ func (s *gitRefsStore) writeSession(ctx context.Context, opts WriteOptions) erro
 }
 
 func (s *gitRefsStore) backfillTranscript(ctx context.Context, opts UpdateOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // Propagating context cancellation
+	}
 	if opts.CheckpointID.IsEmpty() {
 		return errors.New("invalid update options: checkpoint ID is required")
 	}
 
-	parentHash, existing, err := s.refBase(opts.CheckpointID)
+	parentHash, existing, err := s.refBaseForBackfill(ctx, opts.CheckpointID)
 	if err != nil {
 		return err
 	}
@@ -238,7 +292,7 @@ func (s *gitRefsStore) backfillSummary(ctx context.Context, checkpointID id.Chec
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	parentHash, existing, err := s.refBase(checkpointID)
+	parentHash, existing, err := s.refBaseForBackfill(ctx, checkpointID)
 	if err != nil {
 		return err
 	}
@@ -262,7 +316,7 @@ func (s *gitRefsStore) backfillAttribution(ctx context.Context, checkpointID id.
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	parentHash, existing, err := s.refBase(checkpointID)
+	parentHash, existing, err := s.refBaseForBackfill(ctx, checkpointID)
 	if err != nil {
 		return err
 	}
@@ -330,7 +384,33 @@ func (s *gitRefsStore) resolveRefMaybeFetch(ctx context.Context, cid id.Checkpoi
 	if s.refFetcher == nil {
 		return nil, err //nolint:wrapcheck // genuinely absent; caller maps ErrReferenceNotFound to ErrCheckpointNotFound
 	}
+	s.fetchFailureMu.Lock()
+	priorFailure := s.fetchFailure
+	s.fetchFailureMu.Unlock()
+	if priorFailure != nil {
+		// Note the cause may name a DIFFERENT ref — it is the first failure
+		// of this operation, remembered so the outage is paid once.
+		return nil, fmt.Errorf("fetch checkpoint ref %s: skipped, an earlier checkpoint-ref fetch already failed in this operation: %w", refName, priorFailure)
+	}
 	if fetchErr := s.refFetcher(ctx, refName); fetchErr != nil {
+		if errors.Is(fetchErr, plumbing.ErrReferenceNotFound) {
+			// The fetcher probed the remote and it genuinely lacks this ref
+			// (remote.FetchCheckpointRef's absence signal) — absence, not a
+			// failure, and per-ref, so it is not memoized.
+			logging.Debug(ctx, "git-refs: remote has no such checkpoint ref",
+				slog.String("ref", refName.String()))
+			return nil, plumbing.ErrReferenceNotFound
+		}
+		// Memoize only network verdicts: a cancellation originating from the
+		// CALLER's context says nothing about the remote and must not poison
+		// later fetches on this store.
+		if ctx.Err() == nil {
+			s.fetchFailureMu.Lock()
+			if s.fetchFailure == nil {
+				s.fetchFailure = fetchErr
+			}
+			s.fetchFailureMu.Unlock()
+		}
 		logging.Debug(ctx, "git-refs: on-demand checkpoint ref fetch failed",
 			slog.String("ref", refName.String()), slog.String("error", fetchErr.Error()))
 		return nil, fmt.Errorf("fetch checkpoint ref %s: %w", refName, fetchErr)

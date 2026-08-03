@@ -866,8 +866,9 @@ func (s *GitStore) backfillAttribution(ctx context.Context, checkpointID id.Chec
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	if err := s.ensureSessionsBranch(ctx); err != nil {
-		return fmt.Errorf("failed to ensure sessions branch: %w", err)
+	// Backfills require the branch to exist; a miss must not create it.
+	if err := s.requireSessionsBranch(); err != nil {
+		return err
 	}
 
 	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
@@ -1701,9 +1702,9 @@ func (s *GitStore) backfillSummary(ctx context.Context, checkpointID id.Checkpoi
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	// Ensure sessions branch exists
-	if err := s.ensureSessionsBranch(ctx); err != nil {
-		return fmt.Errorf("failed to ensure sessions branch: %w", err)
+	// Backfills require the branch to exist; a miss must not create it.
+	if err := s.requireSessionsBranch(); err != nil {
+		return err
 	}
 
 	// Get branch ref and root tree hash (O(1), no flatten)
@@ -1745,13 +1746,16 @@ func (s *GitStore) backfillSummary(ctx context.Context, checkpointID id.Checkpoi
 //
 // Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
 func (s *GitStore) backfillTranscript(ctx context.Context, opts UpdateOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // Propagating context cancellation
+	}
 	if opts.CheckpointID.IsEmpty() {
 		return errors.New("invalid update options: checkpoint ID is required")
 	}
 
-	// Ensure sessions branch exists
-	if err := s.ensureSessionsBranch(ctx); err != nil {
-		return fmt.Errorf("failed to ensure sessions branch: %w", err)
+	// Backfills require the branch to exist; a miss must not create it.
+	if err := s.requireSessionsBranch(); err != nil {
+		return err
 	}
 
 	// Get branch ref and root tree hash (O(1), no flatten)
@@ -2112,6 +2116,23 @@ func PrecomputeTranscriptBlobs(ctx context.Context, repo *git.Repository, transc
 		ContentHashBlob: hashBlob,
 		ContentHash:     contentHash,
 	}, nil
+}
+
+// requireSessionsBranch reports ErrCheckpointNotFound when the primary
+// metadata ref does not exist. Backfills use this instead of
+// ensureSessionsBranch: they target an existing checkpoint, and a missing
+// branch trivially implies the checkpoint is absent — creating an orphan
+// branch as a side effect of that probe would leave a live v1 branch (List
+// union, pre-push) in a repo that never used the git-branch backend.
+func (s *GitStore) requireSessionsBranch() error {
+	_, err := s.repo.Reference(s.refs.Primary, true)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return ErrCheckpointNotFound
+	}
+	return fmt.Errorf("failed to check sessions branch: %w", err)
 }
 
 // ensureSessionsBranch ensures the primary metadata ref exists.
