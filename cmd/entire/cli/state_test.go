@@ -65,13 +65,9 @@ func TestPrePromptState_BackwardCompat_LastTranscriptLineCount(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	// Initialize git repo
-	if err := os.MkdirAll(".git/objects", 0o755); err != nil {
-		t.Fatalf("Failed to create .git: %v", err)
-	}
-	if err := os.WriteFile(".git/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
-		t.Fatalf("Failed to create HEAD: %v", err)
-	}
+	// Initialize a real git repo so the native git CLI (used by GitCLIStatus)
+	// recognizes the directory.
+	testutil.InitRepo(t, tmpDir)
 	paths.ClearWorktreeRootCache()
 	if err := os.MkdirAll(paths.EntireTmpDir, 0o755); err != nil {
 		t.Fatalf("Failed to create tmp dir: %v", err)
@@ -347,13 +343,9 @@ func setupTestRepoWithTranscript(t *testing.T, transcriptContent string, transcr
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	// Initialize git repo
-	if err := os.MkdirAll(".git/objects", 0o755); err != nil {
-		t.Fatalf("Failed to create .git: %v", err)
-	}
-	if err := os.WriteFile(".git/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
-		t.Fatalf("Failed to create HEAD: %v", err)
-	}
+	// Initialize a real git repo so the native git CLI (used by GitCLIStatus)
+	// recognizes the directory.
+	testutil.InitRepo(t, tmpDir)
 
 	// Clear the repo root cache to pick up the new repo
 	paths.ClearWorktreeRootCache()
