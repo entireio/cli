@@ -41,6 +41,10 @@ type Context struct {
 	// KeychainService is the OS-keyring slot where the access token is
 	// filed; the refresh token lives at KeychainService+":refresh".
 	KeychainService string `json:"keychain_service"`
+	// JurisdictionAudiences lists the audiences this context has a jurisdiction
+	// (data-plane) access token filed for, trailing-slash-trimmed; each lives at
+	// tokenstore.JurisdictionService(audience), also keyed by Handle.
+	JurisdictionAudiences []string `json:"jurisdiction_audiences,omitempty"`
 }
 
 // File is the on-disk shape of contexts.json.

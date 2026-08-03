@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
@@ -10,17 +12,36 @@ import (
 	"github.com/go-git/go-git/v6"
 )
 
-func ensureCommittedCheckpointWritePolicy(ctx context.Context, repo *git.Repository) error {
-	state, err := checkpointpolicy.ReadLocal(ctx, repo)
+var errUnsupportedCheckpointPolicy = errors.New("checkpoint policy cannot be satisfied by this Entire CLI")
+var errUnreadableCheckpointPolicy = errors.New("checkpoint policy could not be read")
+
+func ensureCheckpointPolicyAllowsCheckpointData(ctx context.Context, repo *git.Repository) error {
+	policy, err := checkpointPolicyForCheckpointData(ctx, repo)
 	if err != nil {
-		return fmt.Errorf("read checkpoint policy: %w", err)
+		return err
 	}
-	if !checkpointpolicy.UnsupportedWrite(state.Policy) {
+	if checkpointpolicy.CanSatisfyPolicy(policy) {
 		return nil
 	}
-	return fmt.Errorf(
-		"checkpoint policy requires checkpoint_version %q, which this Entire CLI cannot write; upgrade Entire and rerun the command: %s",
-		state.Policy.CheckpointVersion,
+	return unsupportedCheckpointPolicyError(policy)
+}
+
+func checkpointPolicyForCheckpointData(ctx context.Context, repo *git.Repository) (checkpointpolicy.Policy, error) {
+	state, err := checkpointpolicy.ReadLocal(ctx, repo)
+	if err != nil {
+		return checkpointpolicy.Policy{}, unreadableCheckpointPolicyError(err)
+	}
+	return state.Policy, nil
+}
+
+func unsupportedCheckpointPolicyError(policy checkpointpolicy.Policy) error {
+	message := strings.TrimSpace(checkpointpolicy.UnsupportedPolicyMessage(
+		policy,
 		versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version),
-	)
+	))
+	return fmt.Errorf("%w:\n%s", errUnsupportedCheckpointPolicy, message)
+}
+
+func unreadableCheckpointPolicyError(err error) error {
+	return fmt.Errorf("%w: %w", errUnreadableCheckpointPolicy, err)
 }

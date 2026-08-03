@@ -22,19 +22,32 @@ This repo contains the CLI for Entire.
 
 ### Command Layout
 
-The visible CLI is organized around five noun groups plus a small set of
+The visible CLI is organized around a set of noun groups plus a small set of
 top-level verbs. The groups are the canonical home for each verb; legacy
 top-level shortcuts remain functional but hidden, and emit a deprecation hint
 pointing at the canonical group form. Newer experimental command families are
-discoverable through `entire labs` and may remain hidden from root help while
-their canonical paths are still runnable.
+discoverable through `entire labs` and their canonical paths are always
+runnable.
 
-- `session` (alias: `sessions`): `list`, `info`, `tokens`, `stop`, `attach`, `resume`, `current`.
+Experimental commands are gated by a build-time visibility flag (the
+`cmd/entire/cli/experimental` package): they are shown — grouped under an
+"Experimental commands:" help section — in developer and nightly builds, and
+hidden in stable release builds. Visibility is toggled by `experimental.Visible`
+(default `"true"`), which GoReleaser stamps `"false"` only on stable tags
+(`.Prerelease` empty); nightly (`vX.Y.Z-nightly.*`) and local builds leave it at
+the default. Register a command as experimental with `experimental.Register(parent,
+child)` instead of `parent.AddCommand(child)`. Gating only controls visibility —
+the commands are always runnable in every build.
+
+- `session` (alias: `sessions`): `list`, `info`, `tokens`, `stop`, `attach`, `adopt`, `resume`, `current`.
   `resume` with a branch arg switches to it and resumes its session; with no arg
   it opens an interactive picker of stopped sessions (across all worktrees),
   resolving each to its branch and pointing at the owning worktree when the
   branch is checked out elsewhere. Resume keeps an existing local session log
   as-is by default (`--force` overwrites it from the checkpoint).
+  `adopt` moves an active session from another repo or worktree into the current
+  worktree and resets target-local checkpoint bookkeeping so future commits link
+  to the adopted session from the new location.
 - `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`, plus
   the deprecated `rewind` (functional, prints a cobra deprecation message, will
   be removed in a future release)
@@ -42,33 +55,85 @@ their canonical paths are still runnable.
 - `configure`: bare prints help and a hint pointing at `entire agent`; flags
   manage non-agent settings (telemetry, git-hook installation mode, strategy
   options, summary provider). Agent CRUD lives under `entire agent`.
-- `auth`: `login`, `logout`, `status`, `contexts`, `use`, plus the hidden
+- `auth`: `login`, `logout`, `status`, `contexts`, `use`, plus
   `token` (prints the active control-plane bearer to stdout for scripting/curl;
-  honors `ENTIRE_TOKEN`, else the refreshed active-context login JWT). `logout`
+  honors `ENTIRE_TOKEN`, else the refreshed active-context login JWT). `token`
+  also takes `--jurisdiction <slug>` (e.g. `us`, `eu`), which instead mints a
+  jurisdictional identity token (RFC 8693 exchange, `scope=openid`,
+  `aud=<jurisdiction host>`) for that jurisdiction's entire-api cells (e.g.
+  `https://aws-us-east-2.api.entire.io/api/v1`), which reject the control-plane
+  bearer; it exchanges `ENTIRE_TOKEN` when set (deriving the environment from the
+  env token's `aud`), else the active login. `auth status` shows the caller's
+  home jurisdiction so the slug is discoverable. `logout`
   takes `--everywhere` (revoke every session on the active core, not just the
   current one) and `--all-contexts` (log out of every saved login)
 - `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
+- `org`: control-plane organization management — `create`, `list`, `get`, `delete`
+- `project`: control-plane project management — `create`, `list`, `get`, `delete`
+- `repo`: control-plane repository lifecycle — `create`, `list`, `get`, `delete`,
+  `clone`, plus the `mirror` and `visibility` subtrees. Git content operations
+  (log, diff, …) are intentionally out of scope.
+- `grant`: manage access grants and org membership — `org`, `project`, and `repo`
+  each support `add` / `list` / `remove`
 
-Experimental command families advertised through `entire labs`:
-
-- `tokens`: `profile` (hidden from root help while token diagnostics mature)
+Experimental commands (gated by the build-time visibility flag above — visible
+and grouped under "Experimental commands:" in developer/nightly builds, hidden
+in stable releases, always runnable): `tokens`, `import`, `review`,
+`investigate`, `blame`, `why`, the top-level `search` shortcut, `experts`,
+`runner`, and `checkpoint policy`. `tokens` is also advertised through `entire
+labs`. The canonical `checkpoint search` is not gated and stays visible.
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
-`configure`.
+`configure`, `agent-help`, `api`.
+
+`api` is an authenticated passthrough to Entire's HTTP APIs (gh-style): it
+attaches the right bearer and dials the right host so callers don't plumb auth
+themselves. `--to core` (default) hits the control plane; `--to cell` hits an
+entire-api cell. `--jurisdiction <slug>` (e.g. `us`, `eu`) targets a specific
+jurisdiction's cell instead of the caller's home cell and implies `--to cell`
+(cell routing + identity-token exchange live in `auth.NewEntireAPICellClient`
+via `auth.CellTarget`). `{owner}`/`{repo}`/`{repo_id}` in the path are filled
+from the current repo's origin remote. It is visible in `entire help` and
+`entire agent-help`, so agents discover it as the supported way to call the API.
+
+`agent-help` renders machine-readable, agent-facing usage live from the Cobra
+command tree (so it always matches the installed binary): bare prints a
+"when to use entire / which subcommand" map; `agent-help <command>` drills into
+one command's current flags; `--json` emits structured output. It is the single
+source of truth the first-turn context injection and the `--agent-help-skill`
+skill point agents at, instead of enumerating a surface that goes stale.
+Hidden commands opt into being advertised here by setting
+`Annotations[agentHelpAnnotation] = "true"` (e.g. `trail`). Because `agent-help`
+renders live and lists non-hidden commands, the experimental commands appear in
+`agent-help` in developer/nightly builds and are absent in stable releases — the
+advertised surface is build-dependent, matching what `entire help` shows.
+No-channel agents (Cursor, Copilot CLI, Factory Droid, MCP hosts — no
+context-injection channel and no agent-help skill template) reach it without an
+active push. All of them can discover it passively: it is visible in `entire
+help`, the `entire status` footer points at it, and `entire status --json`
+exposes it as the `agent_help` field. On top of that, Factory AI Droid (which is
+banner-only) gets the pointer appended to its SessionStart hook banner, and
+MCP-host agents can launch the hidden `entire mcp` stdio server, which exposes
+`agent_help` and `entire_status` as MCP tools using the same live rendering.
+Enabling a no-channel agent with `--agent-help-skill` reports the skill
+unsupported and points the agent at this passive path instead.
 
 Hidden top-level shortcuts (functional, emit a one-line deprecation hint):
 `resume` → `session resume`, `attach` → `session attach`, `explain` →
 `checkpoint explain`, `trace` → `doctor trace`.
 Cobra-native aliases (no hint): `sessions` → `session`, `cp`/`checkpoints` →
-`checkpoint`. The `search` top-level remains hidden without a hint.
+`checkpoint`. The `search` top-level is experimental (see the visibility gate
+above), so it follows the build-dependent visibility rather than being
+unconditionally hidden.
 
 Deprecated top-level commands (functional, print a cobra deprecation message):
 `reset` → `clean`, and `rewind` (no replacement, announces removal — same
 deprecation as `checkpoint rewind`).
 
 Hidden infrastructure commands: `hooks`, `trail`,
-`curl-bash-post-install`, `__send_analytics`.
+`curl-bash-post-install`, `__send_analytics`, `mcp` (MCP stdio server for
+MCP-host agents).
 
 The `hideAsAlias(cmd, canonical)` helper in `cmd/entire/cli/aliascmd.go`
 marks a command Hidden and sets cobra's `Deprecated` field so the hint
@@ -395,6 +460,31 @@ Don't use `fmt.Print*` for operational messages (checkpoint saves, hook invocati
 
 We use github.com/go-git/go-git for most git operations, but with important exceptions:
 
+#### Opening Repositories - Always Use `gitrepo`
+
+**Never call `git.Open`, `git.PlainOpen`, or `git.PlainOpenWithOptions` directly.
+`cmd/entire/cli/gitrepo` is the single source of truth for opening a
+repository.** Use `gitrepo.OpenCurrent(ctx)` for the current worktree or
+`gitrepo.OpenPath(root)` for a specific worktree root. Both funnel through
+`openPathWithAlternates`, which is the only place that opens a `*git.Repository`.
+
+Routing every open through `gitrepo` guarantees two behaviours no ad-hoc
+`git.PlainOpen` call gets right:
+
+- **Object alternates** are rewritten to absolute paths so shared clones resolve
+  their objects (`PlainOpen` cannot follow relative/absolute alternates).
+- **Reftable repositories** are detected and opened through the git-CLI-backed
+  reference storer (`reftableStorer`). A direct `git.PlainOpen` on a reftable
+  repo fails outright with `unknown extension: refstorage`, because go-git's
+  filesystem storer cannot read the reftable backend. The reftable storer also
+  re-approves the `objectformat` (sha1/sha256) and `worktreeconfig` extensions
+  that go-git verifies at open time.
+
+If a code path opens a repo with a bare go-git call, it silently breaks on
+reftable and sha256 repositories. Reviewers should flag any new
+`git.PlainOpen*`/`git.Open` outside `gitrepo`. Key files: `gitrepo/repository.go`
+(open entry points) and `gitrepo/reftable.go` (`reftableStorer`).
+
 #### go-git v5 Bugs - Use CLI Instead
 
 **Do NOT use go-git v5 for `checkout` or `reset --hard` operations.**
@@ -414,9 +504,7 @@ worktree.Reset(&git.ResetOptions{
 cmd := exec.CommandContext(ctx, "git", "reset", "--hard", hash.String())
 ```
 
-See `HardResetWithProtection()` in `common.go` and `CheckoutBranch()` in `git_operations.go` for examples.
-
-Regression tests in `hard_reset_test.go` verify this behavior - if go-git v6 fixes this issue, those tests can be used to validate switching back.
+See `CheckoutBranch()` in `git_operations.go` for an example.
 
 #### Repo Root vs Current Working Directory
 
@@ -476,6 +564,35 @@ env-token-first precedence itself — see `resolveAuthStatusTarget` /
 deliberate exception: it manages a *stored* login session, which an ephemeral
 env token has none of, so it stays on the active context.
 
+### Entire-API Cell Routing (which cell does a data-plane request go to?)
+
+The data plane (entire-api) is deployed per jurisdiction; a repo placement
+lives in exactly one cell, user `/me/*` activity is consolidated in the
+caller's home cell, and no server-side cross-cell aggregator exists. The CLI
+therefore has exactly three routing shapes, mirroring the entire.io BFF:
+
+- **Repo-scoped → one cell**: `resolveRepoCellTarget` (`cell_target.go`) maps
+  a repo (ULID or owner/repo) to the cell hosting it via mirrors + the cluster
+  catalog. Best-effort: any failure returns nil and the auth layer falls back
+  to home-jurisdiction routing. Used by experts
+  (`NewAuthenticatedEntireAPICellClient` in `api_client.go`).
+- **User-scoped `/me` → home cell, never fan out**:
+  `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the
+  `home_jurisdiction` JWT claim; activity/recap use it with a data-API
+  fallback (`runAuthenticatedActivityAPI` in `entireapi_client.go`).
+- **Repo-set queries → fan out and merge client-side**: `cell_fanout.go` —
+  `groupReposByCell` (repo index → per-cell groups; the catalog join key is
+  `ClusterSlug`↔`Cluster.Slug`, NOT the cell name, which the catalog does not
+  expose), `resolveCellBaseURLs`, and `fanOutCells` (parallel per-cell calls,
+  per-cell timeout, partial failures isolated per slot). Merge semantics stay
+  with the command.
+
+Token rule: identity tokens are **per-jurisdiction, not per-cell**. Multi-cell
+callers must build one `auth.CellClientFactory`
+(`NewEntireAPICellClientFactory`) per operation — it resolves the login
+subject once and mints at most one token per jurisdiction. `fanOutCells` does
+this automatically; do not call `NewEntireAPICellClient` in a loop.
+
 ### Session Strategy (`cmd/entire/cli/strategy/`)
 
 The CLI uses a manual-commit strategy for managing session data and checkpoints. The strategy implements the `Strategy` interface defined in `strategy.go`.
@@ -497,7 +614,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - **Worktree-specific branches** - each git worktree gets its own shadow branch namespace, preventing conflicts
 - **Supports multiple concurrent sessions** - checkpoints from different sessions in the same directory interleave on the same shadow branch
 - Condenses session logs to permanent `entire/checkpoints/v1` branch on user commits
-- Each committed session stores the raw transcript (`full.jsonl`, read by CLI rewind/resume/explain) plus a best-effort compact transcript (`transcript.jsonl`, generated via `transcript/compact` and pre-sliced to the checkpoint's `checkpoint_transcript_start`). Both are pushed with the v1 branch. The root `metadata.json` `sessions[].transcript` pointer keeps targeting `full.jsonl`; when the compact transcript was generated the session entry also carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted otherwise) so external readers can locate it next to `full.jsonl`.
+- Each committed session stores the raw transcript (`full.jsonl`, read by CLI rewind/resume/explain) plus a best-effort compact transcript (`transcript.jsonl`, generated via `transcript/compact`). Like `full.jsonl`, `transcript.jsonl` stores the **full compacted session** on every checkpoint (via `compact.FullWithBoundary`), so each checkpoint is self-contained and the session survives a mid-history checkpoint being lost/reverted/rebased. This checkpoint's slice begins at the session metadata's `compact_transcript_start` (a line offset in compact-output coordinates, distinct from `checkpoint_transcript_start` which indexes raw `full.jsonl` lines); a nil/absent marker means a legacy delta-only `transcript.jsonl` (read from line 0). The marker rounds toward inclusion when a streaming message straddles the boundary, so the slice never drops this checkpoint's content but may repeat ≤1 merged line at its head. Compact generation is best-effort and is skipped when the compacted output exceeds the 50MB blob cap (unlike `full.jsonl`, `transcript.jsonl` is not chunked — `full.jsonl` stays authoritative and the compact is regenerable); in the OPF finalize rewrite a failed/skipped regeneration drops the prior `transcript.jsonl` and clears the marker rather than shipping a stale, less-redacted compact. Both files are pushed with the v1 branch. The root `metadata.json` `sessions[].transcript` pointer keeps targeting `full.jsonl`; when the compact transcript was generated the session entry also carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted otherwise) so external readers can locate it next to `full.jsonl`.
 - Uses the `post-rewrite` Git hook to keep local session linkage aligned after amend/rebase rewrites
 - Builds git trees in-memory using go-git plumbing APIs
 - Rewind restores files from shadow branch commit tree (does not use `git reset`)
@@ -507,7 +624,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - **Shadow branch migration** - if user does stash/pull/rebase (HEAD changes without commit), shadow branch is automatically moved to new base commit
 - **Orphaned branch cleanup** - if a shadow branch exists without a corresponding session state file, it is automatically reset when a new session starts
 - PrePush hook can push `entire/checkpoints/v1` branch alongside user pushes
-- **OPF (OpenAI Privacy Filter) runs at pre-push, not post-commit**: when `redaction.openai_privacy_filter.enabled` is true, the PrePush hook re-redacts unpushed `entire/checkpoints/v1` commits with the OPF 8th layer, builds new commits carrying an `Entire-OPF-Applied: true` trailer, and atomically updates the local v1 ref before pushing. Per-commit condensation stays on the fast 7-layer pipeline. See `strategy/manual_commit_opf_rewrite.go` and `docs/security-and-privacy.md` for the full flow, including divergence detection, bootstrap caps, and CAS-on-conflict semantics.
+- **OPF (OpenAI Privacy Filter) runs at pre-push, not post-commit**: when `redaction.openai_privacy_filter.enabled` is true, the PrePush hook re-redacts unpushed `entire/checkpoints/v1` commits with the OPF 9th layer, builds new commits carrying an `Entire-OPF-Applied: true` trailer, and atomically updates the local v1 ref before pushing. Per-commit condensation stays on the fast 8-layer pipeline. See `strategy/manual_commit_opf_rewrite.go` and `docs/security-and-privacy.md` for the full flow, including divergence detection, bootstrap caps, and CAS-on-conflict semantics.
 - Safe to use on main/master since it never modifies commit history
 
 #### Key Files
@@ -528,6 +645,7 @@ The phase state machine, metadata directory layout, sharded checkpoint format, m
 
 - [Sessions and Checkpoints](docs/architecture/sessions-and-checkpoints.md) - domain model, storage layout, checkpoint ID linking, commit trailers, package structure
 - [Checkpoint Scenarios](docs/architecture/checkpoint-scenarios.md) - phase state machine and worked condensation scenarios
+- [Ref-Based Checkpoint Backend](docs/architecture/ref-checkpoint-backend.md) - git-refs backend: primary/mirror taxonomy, ref layout + sharding, push-discovery queue, read routing, config + rollout
 
 #### When Modifying the Strategy
 
@@ -540,6 +658,56 @@ The phase state machine, metadata directory layout, sharded checkpoint format, m
 `entire review` runs a configured review profile. Keep documentation brief and user-facing.
 
 See [Review Command](docs/architecture/review-command.md) for usage, minimal profile config, and key files.
+
+### Agent-Safe CLI Fallbacks
+
+When building CLI features, do not make useful output available only through a
+TUI, picker, wizard, terminal selection menu, confirmation dialog, or stdin
+question. Agents must be able to complete the same read-only workflow from a
+non-interactive terminal.
+
+Plain text output is acceptable when it contains the full information needed for
+the workflow. JSON is preferred for structured data, following existing patterns
+such as `--json` on `status`, `agent-help`, `sessions`, `search`, and trail
+finding commands. Long human-readable output may use a pager in TTY mode, but
+must provide a bypass like the existing `--no-pager` pattern on `explain`.
+
+For interactive browsing flows, provide one of these non-interactive shapes:
+
+- a list command that prints stable identifiers, plus a show/detail command that
+  accepts an identifier
+- a flag or positional argument that selects the item directly
+- a complete text or JSON fallback when stdout is not a terminal, like existing
+  static/text fallbacks for TUI-backed commands
+
+When reviewing CLI changes, inspect terminal-gated paths such as
+`IsTerminalWriter`, `CanPromptInteractively`, Bubble Tea, `huh`, direct stdin
+reads, terminal selection menus, confirmation dialogs, and wizard flows. Flag
+the change if a non-interactive agent can only see a menu, preview, truncated
+summary, or cannot select the item whose details matter.
+
+Tests for interactive CLI features should cover the non-interactive path. See
+the "Spawning subprocesses in tests (TTY detection)" section above for the
+`execx.NonInteractive` pattern when testing a real `entire` command.
+
+Existing good patterns:
+
+- `entire investigate --findings` prints a complete plain-text list and includes
+  `view: entire investigate show <run-id>` hints.
+- `entire investigate show <run-id>` prints the saved investigation summary and
+  findings without needing a TUI.
+- `entire repo clone /gh/...` prompts only when several clusters are possible;
+  without a TTY it asks for `--cluster`.
+- `entire experts --tui` is safe because the TUI is opt-in and non-TTY output
+  falls back to deterministic plain text.
+- `entire explain --no-pager` is the local pattern for avoiding pager-only long
+  text output.
+- `entire status --json`, `entire agent-help --json`, `entire sessions list --json`,
+  and trail finding commands show the local `--json` convention.
+
+Do not require JSON everywhere. Human-readable text is fine if it contains the
+complete information an agent needs. The failure mode is requiring an
+interactive terminal to select something or reveal details.
 
 # Important Notes
 

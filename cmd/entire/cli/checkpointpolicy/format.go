@@ -14,6 +14,9 @@ const (
 	CheckpointFamilyRefs   CheckpointFamily = "refs"
 )
 
+// CheckpointVersionBranchV1 identifies the branch-backed checkpoint format.
+const CheckpointVersionBranchV1 = "branch-v1"
+
 type CheckpointFormat struct {
 	Family CheckpointFamily
 	Major  int
@@ -72,14 +75,19 @@ var familyRanks = map[CheckpointFamily]int{
 	CheckpointFamilyRefs:   1,
 }
 
-var branchV1Format = CheckpointFormat{Family: CheckpointFamilyBranch, Major: 1}
+var (
+	branchV1Format = CheckpointFormat{Family: CheckpointFamilyBranch, Major: 1}
+	refsV1Format   = CheckpointFormat{Family: CheckpointFamilyRefs, Major: 1}
+)
 
 var (
 	readFormats = map[CheckpointFormat]bool{
 		branchV1Format: true,
+		refsV1Format:   true,
 	}
 
 	writeFormats = map[CheckpointFormat]bool{
 		branchV1Format: true,
+		refsV1Format:   true,
 	}
 )

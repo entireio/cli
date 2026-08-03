@@ -169,63 +169,44 @@ func extractPromptsFromEvents(events []copilotEvent) []string {
 	return prompts
 }
 
-// extractSummaryFromEvents returns the content of the last assistant.message event.
-func extractSummaryFromEvents(events []copilotEvent) string {
+// lastEventField scans events newest-first for entries of eventType,
+// returning the first non-empty value extract produces (skipping entries
+// whose data doesn't unmarshal).
+func lastEventField[T any](events []copilotEvent, eventType string, extract func(T) string) string {
 	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Type != eventTypeAssistantMsg {
+		if events[i].Type != eventType {
 			continue
 		}
 
-		var data assistantMessageData
+		var data T
 		if err := json.Unmarshal(events[i].Data, &data); err != nil {
 			continue
 		}
 
-		if data.Content != "" {
-			return data.Content
+		if v := extract(data); v != "" {
+			return v
 		}
 	}
 
 	return ""
 }
 
+// extractSummaryFromEvents returns the content of the last assistant.message event.
+func extractSummaryFromEvents(events []copilotEvent) string {
+	return lastEventField(events, eventTypeAssistantMsg,
+		func(d assistantMessageData) string { return d.Content })
+}
+
 // extractModelFromEvents returns the model from transcript events.
 // First checks session.model_change events, then falls back to the model field
 // in tool.execution_complete events (Copilot CLI includes model per tool call).
 func extractModelFromEvents(events []copilotEvent) string {
-	// Primary: session.model_change (explicit model declaration)
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Type != eventTypeModelChange {
-			continue
-		}
-
-		var data modelChangeData
-		if err := json.Unmarshal(events[i].Data, &data); err != nil {
-			continue
-		}
-
-		if data.NewModel != "" {
-			return data.NewModel
-		}
+	if model := lastEventField(events, eventTypeModelChange,
+		func(d modelChangeData) string { return d.NewModel }); model != "" {
+		return model
 	}
-
-	// Fallback: tool.execution_complete events include a model field
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Type != eventTypeToolExecDone {
-			continue
-		}
-
-		var data toolExecCompleteData
-		if err := json.Unmarshal(events[i].Data, &data); err != nil {
-			continue
-		}
-
-		if data.Model != "" {
-			return data.Model
-		}
-	}
-
-	return ""
+	return lastEventField(events, eventTypeToolExecDone,
+		func(d toolExecCompleteData) string { return d.Model })
 }
 
 // sessionShutdownData is the data payload for session.shutdown events.

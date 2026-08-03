@@ -1,0 +1,56 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+# Per-commit publish of git-remote-entire, keyed by full commit sha, to
+# the anonymous-read public release bucket. Consumed by Buildkite Cloud
+# hosted agents (which have no AWS creds and no Homebrew) so they can
+# resolve `git clone entire://…` — see the entire-core-auth Buildkite
+# plugin's environment hook, which pins a sha from this pipeline.
+#
+# This lived in entiredb's .goreleaser.nonprod.yaml until the command
+# moved here; the bucket and IAM role are defined in
+# infra/aws/entire-nonprod/public-release-bucket/.
+#
+# Tagged releases (.goreleaser.yaml) are unaffected: this config is only
+# run by the publish-git-remote-entire workflow on pushes to main.
+
+builds:
+  - id: git-remote-entire
+    main: ./cmd/git-remote-entire
+    binary: git-remote-entire
+    env:
+      - CGO_ENABLED=0
+    # Buildkite Cloud hosted agents are always linux; nothing else
+    # consumes these artifacts.
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      # No Version stamp: the workflow's throwaway v0.0.0 tag would be
+      # stamped verbatim. versioninfo.Load() falls back to build info,
+      # so the binary still self-reports the commit it was built from.
+      - -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Commit={{.ShortCommit}}
+
+archives:
+  - id: git-remote-entire
+    ids:
+      - git-remote-entire
+    formats: [tar.gz]
+    # OS and arch spelled to match `uname` output, which is how the
+    # Buildkite plugin assembles the download URL.
+    name_template: git-remote-entire_{{ .Os }}_{{ .Arch }}
+
+blobs:
+  - ids:
+      - git-remote-entire
+    provider: s3
+    bucket: entire-public-release-bucket-7f3e2a01c9b48d56
+    region: us-east-2
+    # The bucket policy only allows anonymous reads under commit/*.
+    directory: "commit/{{.FullCommit}}"
+
+release:
+  disable: true

@@ -52,15 +52,17 @@ func TestPostOAuthToken_LiftsAndPercentEncodesClientCreds(t *testing.T) {
 }
 
 // TestPostOAuthToken_ErrorCode pins that a non-200 response surfaces as
-// *OAuthError with the RFC 6749 `error` code parsed from the body (empty for
-// non-JSON bodies), so callers can branch on e.g. invalid_target.
+// *OAuthError with the RFC 6749 `error` code and `error_description` parsed
+// from the body (both empty for non-JSON bodies), so callers can branch on
+// e.g. invalid_target and render the description (the git-remote-entire
+// wrong-cluster UX relies on Description being extracted here).
 func TestPostOAuthToken_ErrorCode(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name, body, wantCode string
+		name, body, wantCode, wantDesc string
 	}{
-		{"json error code", `{"error":"invalid_target","error_description":"no mirror"}`, "invalid_target"},
-		{"non-json body", `gateway exploded`, ""},
+		{"json error code", `{"error":"invalid_target","error_description":"no mirror"}`, "invalid_target", "no mirror"},
+		{"non-json body", `gateway exploded`, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -75,6 +77,7 @@ func TestPostOAuthToken_ErrorCode(t *testing.T) {
 			require.ErrorAs(t, err, &oe)
 			assert.Equal(t, http.StatusBadRequest, oe.Status)
 			assert.Equal(t, tc.wantCode, oe.Code)
+			assert.Equal(t, tc.wantDesc, oe.Description)
 			assert.Equal(t, tc.body, oe.Body)
 		})
 	}

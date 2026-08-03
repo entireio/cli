@@ -3,7 +3,6 @@ package geminicli
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -170,47 +169,6 @@ func ExtractAllUserPromptsFromTranscript(transcript *GeminiTranscript) []string 
 		}
 	}
 	return prompts
-}
-
-// GetLastMessageID returns the ID of the last message in the transcript.
-// Returns empty string if the transcript is empty or the last message has no ID.
-func GetLastMessageID(data []byte) (string, error) {
-	transcript, err := ParseTranscript(data)
-	if err != nil {
-		return "", err
-	}
-	return GetLastMessageIDFromTranscript(transcript), nil
-}
-
-// GetLastMessageIDFromTranscript returns the ID of the last message in a parsed transcript.
-// Returns empty string if the transcript is empty or the last message has no ID.
-func GetLastMessageIDFromTranscript(transcript *GeminiTranscript) string {
-	if len(transcript.Messages) == 0 {
-		return ""
-	}
-	return transcript.Messages[len(transcript.Messages)-1].ID
-}
-
-// GetLastMessageIDFromFile reads a transcript file and returns the last message's ID.
-// Returns empty string if the file doesn't exist, is empty, or has no messages with IDs.
-func GetLastMessageIDFromFile(path string) (string, error) {
-	if path == "" {
-		return "", nil
-	}
-
-	data, err := os.ReadFile(path) //nolint:gosec // Reading from controlled transcript path
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", fmt.Errorf("failed to read transcript: %w", err)
-	}
-
-	if len(data) == 0 {
-		return "", nil
-	}
-
-	return GetLastMessageID(data)
 }
 
 // NormalizeTranscript normalizes user message content fields in-place from

@@ -608,7 +608,7 @@ func (r *shortReturnRuntime) RedactBatch(_ context.Context, inputs []string, _ [
 
 // TestJSONLContentWithPrivacyFilter_ShortReturnTripsBreaker pins the
 // privacy contract: if the OPF runtime returns fewer span slices than
-// inputs, we treat it as a runtime failure (trip the breaker + 7-layer
+// inputs, we treat it as a runtime failure (trip the breaker + regex-only
 // fallback) rather than silently produce under-redacted output. The
 // per-blob caller in the pre-push rewrite then catches the tripped
 // breaker via OPFBreakerTripped() and aborts before CAS.
@@ -626,7 +626,7 @@ func TestJSONLContentWithPrivacyFilter_ShortReturnTripsBreaker(t *testing.T) {
 	content := `{"a":"Alice met Bob","b":"Charlie sat down","c":"Eve walked home"}`
 	_, err := JSONLContentWithPrivacyFilter(context.Background(), content)
 	if err != nil {
-		t.Fatalf("short return should fall back to 7-layer (no error), got %v", err)
+		t.Fatalf("short return should fall back to regex-only (no error), got %v", err)
 	}
 	if !opfBreakerTripped.Load() {
 		t.Error("short return must trip the OPF breaker so the rewrite's post-loop check aborts the push")

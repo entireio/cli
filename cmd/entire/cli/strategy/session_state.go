@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -22,6 +23,41 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
+
+// sessionLockDeadlineKey carries an optional wall-clock deadline bounding how
+// long acquireSessionGate waits for the cross-process session flock. It exists
+// so latency-critical, best-effort callers (the pre-agent TurnStart hook) can
+// degrade gracefully instead of blocking behind a long-running lock holder —
+// e.g. the previous turn's checkpoint condensation, which holds the same
+// per-session lock while it reads and rewrites the multi-MB transcript. Without
+// a bound the blocking flock stalls TurnStart for the full duration of that work
+// (observed ~30s on large sessions), even though TurnStart's own state update is
+// trivial and repaired on the next turn / at turn-end.
+//
+// The bound is a single absolute deadline shared across every acquisition on the
+// path (a caller like TurnStart runs several best-effort mutations), so the
+// worst-case contended cost is the budget once — not the budget times the number
+// of mutations. A passed deadline only fails an acquisition when the lock is
+// actually held; a free lock is always taken (non-blocking), so the deadline
+// never penalizes the common uncontended case.
+type sessionLockDeadlineKey struct{}
+
+// WithSessionLockWait returns a context whose session-state flock acquisitions
+// are bounded to complete within wait from now (a shared wall-clock budget).
+// Zero or negative leaves the wait unbounded (the default, used by
+// turn-end/condensation which must not drop work). Only the lock acquisition is
+// bounded; the mutation itself still runs under the caller's original context.
+func WithSessionLockWait(ctx context.Context, wait time.Duration) context.Context {
+	if wait <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionLockDeadlineKey{}, time.Now().Add(wait))
+}
+
+func sessionLockDeadlineFromContext(ctx context.Context) (time.Time, bool) {
+	deadline, ok := ctx.Value(sessionLockDeadlineKey{}).(time.Time)
+	return deadline, ok
+}
 
 // Session state management functions shared across all strategies.
 // SessionState is stored in .git/entire-sessions/{session_id}.json
@@ -72,15 +108,6 @@ func openSessionStateRootForRead(ctx context.Context) (*os.Root, error) {
 		return nil, fmt.Errorf("failed to open session state directory: %w", err)
 	}
 	return root, nil
-}
-
-// sessionStateFile returns the path to a session state file.
-func sessionStateFile(ctx context.Context, sessionID string) (string, error) {
-	stateDir, err := getSessionStateDir(ctx)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(stateDir, sessionID+".json"), nil
 }
 
 // LoadSessionState loads the session state for the given session ID.
@@ -566,7 +593,19 @@ func acquireSessionGate(ctx context.Context, sessionID string) (gate *sessionGat
 	if err != nil {
 		return nil, false, nil, fmt.Errorf("resolve state lock path: %w", err)
 	}
-	flockRel, err := flock.Acquire(lockPath)
+	// Bound the acquisition when the caller opted in (TurnStart), so a
+	// best-effort mutation can't stall behind a long-running lock holder. The
+	// deadline is shared across the whole path, so several mutations don't sum
+	// their waits. Only the acquire is bounded — the mutation runs under the
+	// original ctx.
+	var flockRel func()
+	if deadline, ok := sessionLockDeadlineFromContext(ctx); ok {
+		acqCtx, cancel := context.WithDeadline(ctx, deadline)
+		flockRel, err = flock.AcquireContext(acqCtx, lockPath)
+		cancel()
+	} else {
+		flockRel, err = flock.Acquire(lockPath)
+	}
 	if err != nil {
 		return nil, false, nil, fmt.Errorf("acquire state lock: %w", err)
 	}
@@ -590,6 +629,48 @@ func acquireSessionGate(ctx context.Context, sessionID string) (gate *sessionGat
 		}
 		gate.mu.Unlock()
 	}, nil
+}
+
+// WithSessionStateLocks acquires the per-session state lock in each git common
+// dir, then runs fn. Lock paths are deduplicated and sorted so callers that
+// span repositories or worktrees can safely acquire more than one lock.
+func WithSessionStateLocks(ctx context.Context, sessionID string, commonDirs []string, fn func() error) error {
+	lockPaths := make([]string, 0, len(commonDirs))
+	seen := make(map[string]struct{}, len(commonDirs))
+	for _, commonDir := range commonDirs {
+		lockPath, err := stateLockPathInCommonDir(commonDir, sessionID)
+		if err != nil {
+			return err
+		}
+		if _, ok := seen[lockPath]; ok {
+			continue
+		}
+		seen[lockPath] = struct{}{}
+		lockPaths = append(lockPaths, lockPath)
+	}
+	slices.Sort(lockPaths)
+
+	releases := make([]func(), 0, len(lockPaths))
+	releaseAll := func() {
+		for i := len(releases) - 1; i >= 0; i-- {
+			releases[i]()
+		}
+	}
+	for _, lockPath := range lockPaths {
+		if err := ctx.Err(); err != nil {
+			releaseAll()
+			return fmt.Errorf("session state lock canceled: %w", err)
+		}
+		release, err := flock.Acquire(lockPath)
+		if err != nil {
+			releaseAll()
+			return fmt.Errorf("acquire session state lock: %w", err)
+		}
+		releases = append(releases, release)
+	}
+	defer releaseAll()
+
+	return fn()
 }
 
 // ErrMutationSkip signals MutateSessionState to skip the save without
@@ -634,12 +715,19 @@ func RecordFilesTouched(ctx context.Context, sessionID string, modified, added, 
 // holder distinct from the data — Save's atomic-rename pattern would
 // otherwise unlink the inode the flock is held on.
 func stateLockPath(ctx context.Context, sessionID string) (string, error) {
-	if err := validation.ValidateSessionID(sessionID); err != nil {
-		return "", fmt.Errorf("invalid session ID: %w", err)
-	}
 	commonDir, err := GetGitCommonDir(ctx)
 	if err != nil {
 		return "", err
+	}
+	return stateLockPathInCommonDir(commonDir, sessionID)
+}
+
+func stateLockPathInCommonDir(commonDir, sessionID string) (string, error) {
+	if strings.TrimSpace(commonDir) == "" {
+		return "", errors.New("empty git common dir")
+	}
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		return "", fmt.Errorf("invalid session ID: %w", err)
 	}
 	lockDir := filepath.Join(commonDir, "entire-session-locks")
 	if err := os.MkdirAll(lockDir, 0o750); err != nil {

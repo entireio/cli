@@ -18,13 +18,24 @@ import (
 // when no backend is configured.
 const BackendTypeGitBranch = "git-branch"
 
+// BackendTypeGitRefs is the built-in git-refs checkpoint backend: it stores the
+// committed record as one git ref per checkpoint (refs/entire/checkpoints/<shard>/
+// <id>) in this repo. Like git-branch it is git-backed, so it may be the primary;
+// the two can run side by side (git-refs primary + git-branch mirror) during the
+// branch->refs rollout, since the one-of-each-type rule permits distinct
+// git-backed backends in the same topology.
+const BackendTypeGitRefs = "git-refs"
+
 // OpenEnv carries the construction context a backend factory may need.
-// Git-backed backends require Repo and use Refs/BlobFetcher; other backends
-// ignore the git-shaped fields and read their own configuration from cfg.
+// Git-backed backends require Repo and use Refs/BlobFetcher/RefFetcher/
+// RemoteRefLister; other backends ignore the git-shaped fields and read their
+// own configuration from cfg.
 type OpenEnv struct {
-	Repo        *git.Repository
-	BlobFetcher BlobFetchFunc
-	Refs        PersistentRefs
+	Repo            *git.Repository
+	BlobFetcher     BlobFetchFunc
+	RefFetcher      RefFetchFunc
+	RemoteRefLister RemoteRefListFunc
+	Refs            PersistentRefs
 }
 
 // Factory constructs a persistent store for one backend type. cfg is the
@@ -55,6 +66,7 @@ var (
 	// RegisterForTesting helpers, so a production binary can never select them.
 	registry = map[string]registeredBackend{
 		BackendTypeGitBranch: {factory: gitBranchBackendFactory, gitBacked: true},
+		BackendTypeGitRefs:   {factory: gitRefsBackendFactory, gitBacked: true},
 	}
 )
 
@@ -81,6 +93,25 @@ func lookupBackend(typ string) (registeredBackend, error) {
 		return registeredBackend{}, fmt.Errorf("unknown checkpoint backend type %q (registered: %s)", typ, registeredTypes())
 	}
 	return b, nil
+}
+
+// ValidatePrimaryBackend reports an error unless typ names a registered backend
+// that may serve as the primary. An unknown type is rejected with an error
+// listing the registered backend types; a registered but non-git-backed type is
+// rejected separately, since only git-backed backends may be the primary. This
+// is the single source of the "primary must be git-backed" rule — buildPrimary
+// delegates here, and selection surfaces (entire enable / configure
+// --checkpoint-backend) call it to reject a bad backend before writing it to
+// settings, rather than failing later in Open.
+func ValidatePrimaryBackend(typ string) error {
+	b, err := lookupBackend(typ)
+	if err != nil {
+		return err
+	}
+	if !b.gitBacked {
+		return fmt.Errorf("checkpoint backend %q cannot be the primary: only git-backed backends (e.g. %q, %q) may be the primary", typ, BackendTypeGitBranch, BackendTypeGitRefs)
+	}
+	return nil
 }
 
 // build constructs the store for the named backend type.
@@ -116,6 +147,26 @@ func gitBranchBackendFactory(_ context.Context, env OpenEnv, _ json.RawMessage) 
 	store := NewGitStore(env.Repo, env.Refs)
 	if env.BlobFetcher != nil {
 		store.SetBlobFetcher(env.BlobFetcher)
+	}
+	return store, nil
+}
+
+// gitRefsBackendFactory builds the git-refs persistent store from the open
+// environment. It ignores cfg and env.Refs: each checkpoint resolves its own ref
+// (refs/entire/checkpoints/<shard>/<id>) rather than a single configured ref.
+func gitRefsBackendFactory(_ context.Context, env OpenEnv, _ json.RawMessage) (PersistentStore, error) {
+	if env.Repo == nil {
+		return nil, errors.New("git-refs checkpoint backend requires a repository")
+	}
+	store := newGitRefsStore(env.Repo)
+	if env.BlobFetcher != nil {
+		store.SetBlobFetcher(env.BlobFetcher)
+	}
+	if env.RefFetcher != nil {
+		store.SetRefFetcher(env.RefFetcher)
+	}
+	if env.RemoteRefLister != nil {
+		store.SetRemoteRefLister(env.RemoteRefLister)
 	}
 	return store, nil
 }

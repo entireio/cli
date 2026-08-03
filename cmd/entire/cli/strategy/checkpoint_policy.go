@@ -2,7 +2,6 @@ package strategy
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 
@@ -15,60 +14,55 @@ import (
 	"github.com/go-git/go-git/v6"
 )
 
-var errCommittedCheckpointWriteBlocked = errors.New("checkpoint write blocked by policy")
-
-func checkCommittedCheckpointWritePolicy(ctx context.Context, repo *git.Repository) error {
+func readLocalCheckpointPolicy(ctx context.Context, repo *git.Repository) (checkpointpolicy.Policy, error) {
 	state, err := checkpointpolicy.ReadLocal(ctx, repo)
 	if err != nil {
-		logging.Warn(ctx, "checkpoint policy read failed; allowing checkpoint write",
-			slog.String("error", err.Error()),
-		)
-		return nil
+		return checkpointpolicy.Policy{}, err
 	}
-	if !checkpointpolicy.UnsupportedWrite(state.Policy) {
-		return nil
-	}
-	warnOrLogUnsupportedCheckpointWrite(ctx, state.Policy)
-	return errCommittedCheckpointWriteBlocked
+	return state.Policy, nil
 }
 
-func syncCheckpointPolicyForPrePush(ctx context.Context, ps pushSettings) bool {
-	repo, err := OpenRepository(ctx)
+func checkpointPolicyAllowsGitHook(ctx context.Context, repo *git.Repository) bool {
+	policy, err := readLocalCheckpointPolicy(ctx, repo)
 	if err != nil {
-		logging.Warn(ctx, "checkpoint policy pre-push: failed to open repository; allowing checkpoint push",
-			slog.String("error", err.Error()),
-		)
+		warnOrLogCheckpointPolicyReadFailure(ctx, err)
+		return false
+	}
+	if checkpointpolicy.CanSatisfyPolicy(policy) {
 		return true
 	}
-	defer repo.Close()
+	warnOrLogCheckpointPolicyUpgrade(ctx, policy)
+	return false
+}
 
+func syncCheckpointPolicyForPrePush(ctx context.Context, repo *git.Repository, ps pushSettings) {
 	dir, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		logging.Warn(ctx, "checkpoint policy pre-push: failed to resolve worktree root; allowing checkpoint push",
 			slog.String("error", err.Error()),
 		)
-		return true
+		return
 	}
 	target := checkpointpolicy.Target{Remote: ps.pushTarget(), Dir: dir}
 	state, err := checkpointpolicy.Sync(ctx, repo, target)
 	if err != nil {
 		warnOrLogCheckpointPolicySyncFailure(ctx, err)
-		localState, readErr := checkpointpolicy.ReadLocal(ctx, repo)
-		if readErr == nil && checkpointpolicy.UnsupportedWrite(localState.Policy) {
-			warnOrLogUnsupportedCheckpointWrite(ctx, localState.Policy)
-			return false
-		}
-		return true
+		return
 	}
 	if state.Source == checkpointpolicy.SourceLocalDiverged {
 		warnOrLogCheckpointPolicyDiverged(ctx, state)
-		return false
+		return
 	}
-	if !checkpointpolicy.UnsupportedWrite(state.Policy) {
-		return true
+}
+
+func warnOrLogCheckpointPolicyReadFailure(ctx context.Context, err error) {
+	if interactive.CanPromptInteractively() {
+		fmt.Fprintf(stderrWriter, "[entire] Could not read checkpoint policy; skipping Entire checkpoint work: %v\n", err)
+		return
 	}
-	warnOrLogUnsupportedCheckpointWrite(ctx, state.Policy)
-	return false
+	logging.Warn(ctx, "checkpoint policy read failed; skipping checkpoint work",
+		slog.String("error", err.Error()),
+	)
 }
 
 func warnOrLogCheckpointPolicySyncFailure(ctx context.Context, err error) {
@@ -91,19 +85,26 @@ func warnOrLogCheckpointPolicyDiverged(ctx context.Context, state checkpointpoli
 		)
 		return
 	}
-	logging.Warn(ctx, "checkpoint policy diverged; skipping checkpoint push",
+	logging.Warn(ctx, "checkpoint policy diverged; allowing checkpoint push",
 		slog.String("local_hash", state.Hash.String()),
 		slog.String("remote_hash", state.RemoteHash.String()),
 	)
 }
 
-func warnOrLogUnsupportedCheckpointWrite(ctx context.Context, policy checkpointpolicy.Policy) {
-	warning := checkpointpolicy.UpgradeWarning(versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version))
+func warnIfCheckpointPolicyNeedsUpgrade(ctx context.Context, policy checkpointpolicy.Policy) {
+	if checkpointpolicy.CanSatisfyPolicy(policy) {
+		return
+	}
+	warnOrLogCheckpointPolicyUpgrade(ctx, policy)
+}
+
+func warnOrLogCheckpointPolicyUpgrade(ctx context.Context, policy checkpointpolicy.Policy) {
+	warning := checkpointpolicy.UnsupportedPolicyMessage(policy, versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version))
 	if interactive.CanPromptInteractively() {
 		fmt.Fprint(stderrWriter, warning)
 		return
 	}
-	logging.Warn(ctx, "checkpoint write skipped by policy",
+	logging.Warn(ctx, "checkpoint policy requires newer CLI",
 		slog.String("checkpoint_version", policy.CheckpointVersion),
 		slog.String("checkpoint_min_version", policy.CheckpointMinVersion),
 	)

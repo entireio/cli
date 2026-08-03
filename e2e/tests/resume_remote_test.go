@@ -59,9 +59,8 @@ func TestResumeFromClonedRepo(t *testing.T) {
 		testutil.Git(t, cloneDir, "config", "user.name", "E2E Clone")
 		testutil.Git(t, cloneDir, "config", "user.email", "e2e-clone@test.local")
 
-		// Verify the checkpoint metadata ref does NOT exist locally in the clone.
-		_, err = testutil.GitOutputErr(cloneDir, "rev-parse", "--verify", testutil.CheckpointVerifyRef())
-		require.Error(t, err, "checkpoint metadata ref should not exist locally in clone")
+		// Verify no committed checkpoint exists locally in the clone yet.
+		require.False(t, testutil.CheckpointsPresent(cloneDir), "checkpoint metadata should not exist locally in clone")
 
 		// Create the local feature branch (clone only has origin/feature as remote tracking ref).
 		// Then switch back to the default branch so resume can switch to it.
@@ -81,9 +80,8 @@ func TestResumeFromClonedRepo(t *testing.T) {
 		assert.Equal(t, "feature", current, "should be on feature branch after resume")
 		assert.Contains(t, out, "To continue", "resume output should show resume instructions")
 
-		// Verify the checkpoint metadata ref now exists locally.
-		_, err = testutil.GitOutputErr(cloneDir, "rev-parse", "--verify", testutil.CheckpointVerifyRef())
-		assert.NoError(t, err, "checkpoint metadata ref should exist locally after resume")
+		// Verify a committed checkpoint now exists locally.
+		assert.True(t, testutil.CheckpointsPresent(cloneDir), "checkpoint metadata should exist locally after resume")
 
 		if restoredTranscript, ok := testutil.RestoredSessionTranscriptPath(t, cloneDir, sessionMeta); ok {
 			_, err = os.Stat(restoredTranscript)

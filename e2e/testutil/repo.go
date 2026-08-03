@@ -158,7 +158,7 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 		Dir:              dir,
 		ArtifactDir:      artDir,
 		HeadBefore:       GitOutput(t, dir, "rev-parse", "HEAD"),
-		CheckpointBefore: strings.TrimSpace(gitOutputSafe(dir, "rev-parse", checkpointReadRef())),
+		CheckpointBefore: CheckpointState(dir),
 		ConsoleLog:       consoleLog,
 	}
 
@@ -176,24 +176,26 @@ func checkpointReadRef() string {
 	return checkpointRefV1
 }
 
-// CurrentCheckpointRef returns the current hash of the checkpoint ref used for
-// reads in the active suite mode. It fails if the ref does not exist.
+// CurrentCheckpointRef returns the current committed-checkpoint state used for
+// advance detection in the active suite mode: the v1 branch hash (git-branch) or
+// the per-checkpoint-ref digest (git-refs). Pair it with WaitForCheckpointAdvanceFrom.
 func CurrentCheckpointRef(t *testing.T, dir string) string {
 	t.Helper()
+	if UsingGitRefs() {
+		return CheckpointState(dir)
+	}
 	return GitOutput(t, dir, "rev-parse", checkpointReadRef())
 }
 
-// CheckpointVerifyRef returns the exact local metadata ref name tests should
-// use for presence checks such as rev-parse --verify.
-func CheckpointVerifyRef() string {
-	return "refs/heads/" + checkpointRefV1
-}
-
-// PushCheckpointRefs pushes the checkpoint ref to the origin remote.
+// PushCheckpointRefs pushes the committed checkpoint refs to the origin remote.
 // Remote-resume tests use this instead of hardcoding v1 branch pushes.
 func PushCheckpointRefs(t *testing.T, dir string) {
 	t.Helper()
 
+	if UsingGitRefs() {
+		Git(t, dir, "push", "origin", checkpointRefPrefix+"*:"+checkpointRefPrefix+"*")
+		return
+	}
 	Git(t, dir, "push", "origin", checkpointRefV1+":"+checkpointRefV1)
 }
 
@@ -639,10 +641,20 @@ func GitOutput(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// NewCheckpointCommits returns the SHAs of commits added to the
-// entire/checkpoints/v1 branch since the test was set up, oldest first.
+// NewCheckpointCommits returns the SHAs of checkpoint commits to capture for
+// artifacts. Under git-branch these are the commits added to entire/checkpoints/v1
+// since setup, oldest first. Under git-refs there is no single advancing branch,
+// so it returns the tip commit of each per-checkpoint ref (diagnostic only).
 func NewCheckpointCommits(t *testing.T, s *RepoState) []string {
 	t.Helper()
+
+	if UsingGitRefs() {
+		out := gitOutputSafe(s.Dir, "for-each-ref", "--format=%(objectname)", checkpointRefPrefix)
+		if strings.TrimSpace(out) == "" {
+			return nil
+		}
+		return strings.Split(strings.TrimSpace(out), "\n")
+	}
 
 	log := GitOutput(t, s.Dir, "log", "--reverse", "--format=%H", s.CheckpointBefore+".."+checkpointReadRef())
 	if log == "" {
@@ -656,6 +668,24 @@ func NewCheckpointCommits(t *testing.T, s *RepoState) []string {
 // ({prefix}/{suffix}/metadata.json) and returns the concatenated IDs.
 func CheckpointIDs(t *testing.T, dir string) []string {
 	t.Helper()
+	if UsingGitRefs() {
+		out := gitOutputSafe(dir, "for-each-ref", "--format=%(refname)", checkpointRefPrefix)
+		if strings.TrimSpace(out) == "" {
+			return nil
+		}
+		seen := map[string]bool{}
+		var ids []string
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			// refs/entire/checkpoints/<shard>/<id> — the ID is the last segment.
+			parts := strings.Split(strings.TrimSpace(line), "/")
+			id := parts[len(parts)-1]
+			if id != "" && !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+		return ids
+	}
 	out := gitOutputSafe(dir, "ls-tree", "-r", "--name-only", checkpointReadRef())
 	if out == "" {
 		return nil
@@ -681,8 +711,7 @@ func CheckpointIDs(t *testing.T, dir string) []string {
 func ReadCheckpointMetadata(t *testing.T, dir string, checkpointID string) CheckpointMetadata {
 	t.Helper()
 
-	path := CheckpointPath(checkpointID) + "/metadata.json"
-	blob := checkpointReadRef() + ":" + path
+	blob := checkpointBlobSpec(checkpointID, "metadata.json")
 
 	raw := GitOutput(t, dir, "show", blob)
 
@@ -699,8 +728,7 @@ func ReadCheckpointMetadata(t *testing.T, dir string, checkpointID string) Check
 func ReadSessionMetadata(t *testing.T, dir string, checkpointID string, sessionIndex int) SessionMetadata {
 	t.Helper()
 
-	path := fmt.Sprintf("%s/%d/metadata.json", CheckpointPath(checkpointID), sessionIndex)
-	blob := checkpointReadRef() + ":" + path
+	blob := checkpointBlobSpec(checkpointID, fmt.Sprintf("%d/metadata.json", sessionIndex))
 
 	raw := GitOutput(t, dir, "show", blob)
 
@@ -719,8 +747,7 @@ func ReadSessionMetadata(t *testing.T, dir string, checkpointID string, sessionI
 func WaitForSessionMetadata(t *testing.T, dir string, checkpointID string, sessionIndex int, timeout time.Duration) SessionMetadata {
 	t.Helper()
 
-	path := fmt.Sprintf("%s/%d/metadata.json", CheckpointPath(checkpointID), sessionIndex)
-	blob := checkpointReadRef() + ":" + path
+	blob := checkpointBlobSpec(checkpointID, fmt.Sprintf("%d/metadata.json", sessionIndex))
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

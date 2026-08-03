@@ -21,7 +21,7 @@ func setupTestEnv(t *testing.T) string {
 	return tempDir
 }
 
-func TestInstallHooks_CreatesConfig(t *testing.T) {
+func TestInstallHooks_CreatesHooksJSONOnly(t *testing.T) {
 	tempDir := setupTestEnv(t)
 
 	ag := &CodexAgent{}
@@ -42,14 +42,93 @@ func TestInstallHooks_CreatesConfig(t *testing.T) {
 	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapProductionSilentHookCommand("entire hooks codex stop"), "Stop")
 	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
 
-	// Verify project-level config.toml enables the hooks feature (per-repo)
-	projectConfig := filepath.Join(tempDir, ".codex", configFileName)
-	projectData, err := os.ReadFile(projectConfig)
+	// Hooks are enabled by default in Codex, so no .codex/config.toml is
+	// written. A TOML file there is actively harmful when the repo lives
+	// inside <CODEX_HOME>/agents, where Codex's agent-role scanner rejects
+	// it at startup (entireio/cli#842).
+	projectConfig := filepath.Join(tempDir, ".codex", "config.toml")
+	_, err = os.Stat(projectConfig)
+	require.True(t, os.IsNotExist(err), "install must not create .codex/config.toml")
+}
+
+func TestInstallHooks_WindowsWrapperProbeSuccessKeepsWrappedCommands(t *testing.T) {
+	tempDir := setupTestEnv(t)
+	withCodexHookEnvironment(t, "windows", true)
+
+	ag := &CodexAgent{}
+	count, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Contains(t, string(projectData), "hooks = true")
-	require.NotContains(t, string(projectData), "codex_hooks = true",
-		"deprecated codex_hooks line must not be written by fresh installs")
-	require.Contains(t, string(projectData), "[features]")
+	require.Equal(t, 4, count)
+
+	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
+	data, err := os.ReadFile(hooksPath)
+	require.NoError(t, err)
+
+	var hooksFile HooksFile
+	require.NoError(t, json.Unmarshal(data, &hooksFile))
+
+	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
+	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapProductionSilentHookCommand("entire hooks codex stop"), "Stop")
+	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
+}
+
+func TestInstallHooks_WindowsWrapperProbeFailureUsesWindowsCommands(t *testing.T) {
+	tempDir := setupTestEnv(t)
+	withCodexHookEnvironment(t, "windows", false)
+
+	ag := &CodexAgent{}
+	count, err := ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+	require.Equal(t, 4, count)
+
+	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
+	data, err := os.ReadFile(hooksPath)
+	require.NoError(t, err)
+
+	var hooksFile HooksFile
+	require.NoError(t, json.Unmarshal(data, &hooksFile))
+
+	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
+	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex stop"), "Stop")
+	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
+	require.NotContains(t, string(data), "sh -c")
+	require.NotContains(t, string(data), "command -v entire")
+	require.Contains(t, string(data), "where.exe entire")
+}
+
+func TestInstallHooks_WindowsWrapperProbeFailureMigratesToWindowsCommands(t *testing.T) {
+	tempDir := setupTestEnv(t)
+	wrapperWorks := true
+	withCodexHookEnvironmentFunc(t, "windows", func(context.Context, string) bool {
+		return wrapperWorks
+	})
+
+	ag := &CodexAgent{}
+	count, err := ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+	require.Equal(t, 4, count)
+
+	wrapperWorks = false
+	count, err = ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+	require.Equal(t, 4, count)
+
+	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
+	data, err := os.ReadFile(hooksPath)
+	require.NoError(t, err)
+
+	var hooksFile HooksFile
+	require.NoError(t, json.Unmarshal(data, &hooksFile))
+
+	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
+	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex stop"), "Stop")
+	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
+	require.NotContains(t, string(data), "sh -c")
+	require.NotContains(t, string(data), "command -v entire")
+	require.Contains(t, string(data), "where.exe entire")
 }
 
 func TestInstallHooks_Idempotent(t *testing.T) {
@@ -270,42 +349,46 @@ func TestInstallHooks_DoesNotModifyUserConfig(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(codexHome, 0o750))
 	existingConfig := "model = \"gpt-4.1\"\n"
-	require.NoError(t, os.WriteFile(filepath.Join(codexHome, configFileName), []byte(existingConfig), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(existingConfig), 0o600))
 
 	ag := &CodexAgent{}
 	_, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
 
-	configData, err := os.ReadFile(filepath.Join(codexHome, configFileName))
+	configData, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
 	require.NoError(t, err)
 	require.Contains(t, string(configData), "model = \"gpt-4.1\"")
 	require.NotContains(t, string(configData), `trust_level = "trusted"`)
 }
 
-// TestInstallHooks_RewritesLegacyFeatureLine pins the rule that an existing
-// `codex_hooks = true` line — written by older entire CLI versions — must
-// be rewritten to the new `hooks = true` form on the next install. Codex
-// 0.129.0 still accepts the legacy alias but prints a deprecation warning
-// at every startup; rewriting silences it without forcing the user to
-// touch their .codex/config.toml.
-func TestInstallHooks_RewritesLegacyFeatureLine(t *testing.T) {
-	tempDir := setupTestEnv(t)
+// TestInstallHooks_LeavesExistingLocalConfigUntouched pins that install
+// never reads, rewrites, or deletes a project-local .codex/config.toml —
+// whether it's a user's own file or a feature-flag leftover from an older
+// entire version. The CLI no longer manages that file at all; leftovers
+// under <CODEX_HOME>/agents must be removed manually (entireio/cli#842).
+func TestInstallHooks_LeavesExistingLocalConfigUntouched(t *testing.T) {
+	contents := map[string]string{
+		"old entire leftover": "[features]\nhooks = true\n",
+		"user file":           "model = \"gpt-4.1\"\n",
+	}
+	for name, content := range contents {
+		t.Run(name, func(t *testing.T) {
+			tempDir := setupTestEnv(t)
 
-	codexDir := filepath.Join(tempDir, ".codex")
-	require.NoError(t, os.MkdirAll(codexDir, 0o750))
-	existingConfig := "[features]\ncodex_hooks = true\n"
-	configPath := filepath.Join(codexDir, configFileName)
-	require.NoError(t, os.WriteFile(configPath, []byte(existingConfig), 0o600))
+			codexDir := filepath.Join(tempDir, ".codex")
+			require.NoError(t, os.MkdirAll(codexDir, 0o750))
+			configPath := filepath.Join(codexDir, "config.toml")
+			require.NoError(t, os.WriteFile(configPath, []byte(content), 0o600))
 
-	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
-	require.NoError(t, err)
+			ag := &CodexAgent{}
+			_, err := ag.InstallHooks(context.Background(), false, false)
+			require.NoError(t, err)
 
-	configData, err := os.ReadFile(configPath)
-	require.NoError(t, err)
-	require.Contains(t, string(configData), "hooks = true")
-	require.NotContains(t, string(configData), "codex_hooks = true",
-		"legacy codex_hooks line must be replaced, not left alongside the new form")
+			data, err := os.ReadFile(configPath)
+			require.NoError(t, err)
+			require.Equal(t, content, string(data), "install must not touch an existing .codex/config.toml")
+		})
+	}
 }
 
 // assertHookCommand verifies that one of the hook entries in groups contains the expected command.
@@ -319,4 +402,16 @@ func assertHookCommand(t *testing.T, groups []MatcherGroup, expectedCmd, label s
 		}
 	}
 	t.Errorf("%s: expected hook command not found: %s", label, expectedCmd)
+}
+
+func withCodexHookEnvironment(t *testing.T, goos string, wrapperWorks bool) {
+	t.Helper()
+	withCodexHookEnvironmentFunc(t, goos, func(context.Context, string) bool {
+		return wrapperWorks
+	})
+}
+
+func withCodexHookEnvironmentFunc(t *testing.T, goos string, wrapperWorks func(context.Context, string) bool) {
+	t.Helper()
+	t.Cleanup(agentpkg.SetWindowsHookProbeForTesting(goos, wrapperWorks))
 }

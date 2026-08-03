@@ -22,6 +22,7 @@ type (
 	CheckpointInfo   = apicheckpoint.CheckpointInfo
 	SessionContent   = apicheckpoint.SessionContent
 	SessionFilePaths = apicheckpoint.SessionFilePaths
+	TranscriptAsset  = apicheckpoint.TranscriptAsset
 	SessionMetrics   = apicheckpoint.SessionMetrics
 	Summary          = apicheckpoint.Summary
 	LearningsSummary = apicheckpoint.LearningsSummary
@@ -50,9 +51,6 @@ type (
 	//nolint:revive // CheckpointAttribution stutter is accepted — makes the checkpoint (vs session) tier explicit.
 	CheckpointAttribution = apicheckpoint.CheckpointAttribution
 )
-
-// CheckpointVersionBranchV1 identifies the branch-backed checkpoint metadata format.
-const CheckpointVersionBranchV1 = apicheckpoint.CheckpointVersionBranchV1
 
 // Sentinel errors (re-exported so errors.Is keeps working across packages).
 var (

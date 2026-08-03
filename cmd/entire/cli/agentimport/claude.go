@@ -32,10 +32,12 @@ func (claudeImporter) Discover(repoRoot, overridePath string, now time.Time, ses
 	return discoverSessionFiles(dir, now, sessionFilter, jsonlSessionResolver(".jsonl", identitySessionID))
 }
 
-// SplitTurns produces one Turn per user-prompt line. Token usage for each turn
-// is computed on the slice [LineStart, LineEnd) so turns don't double-count
-// later turns. tool_result lines (Type == "user" but no text content) do not
-// start a turn.
+// SplitTurns produces one Turn per user-prompt line. Main-agent token usage for
+// each turn is computed on the slice [LineStart, LineEnd) so turns don't
+// double-count later turns; subagent token usage is discovered from the full
+// prefix and rescoped to a per-turn delta by splitLineTurns (see
+// rescopeSubagentTokensToDeltas). tool_result lines (Type == "user" but no text
+// content) do not start a turn.
 func (claudeImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
 	subagentsDir := filepath.Join(filepath.Dir(sf.Path), sf.SessionID, "subagents")
 	ag := &claudecode.ClaudeCodeAgent{}
@@ -55,11 +57,12 @@ func (claudeImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
 				return nil, nil
 			}
 			return &Turn{
-				UUID:      rec.UUID,
-				Prompt:    transcript.ExtractUserContent(rec.Message),
-				Model:     modelInRange(rawLines, start, end),
-				CreatedAt: parseTimestamp(rec.Timestamp),
-				Tokens:    tokens,
+				UUID:       rec.UUID,
+				Prompt:     transcript.ExtractUserContent(rec.Message),
+				Model:      modelInRange(rawLines, start, end),
+				CreatedAt:  parseTimestamp(rec.Timestamp),
+				Tokens:     tokens,
+				CommitSHAs: commitSHAsInRange(rawLines, start, end),
 			}, nil
 		})
 }
@@ -94,6 +97,35 @@ func modelInRange(rawLines [][]byte, start, end int) string {
 		}
 	}
 	return ""
+}
+
+// commitSHAsInRange returns the commit SHAs recorded by gitOperation
+// tool-result records within [start, end), in order. Only kind "committed"
+// is collected — other kinds (or commit-less gitOperation records like
+// push/branch/pr) are ignored. SHAs may be abbreviated; resolution happens
+// in Run.
+func commitSHAsInRange(rawLines [][]byte, start, end int) []string {
+	var shas []string
+	for i := start; i < end && i < len(rawLines); i++ {
+		var rec struct {
+			ToolUseResult struct {
+				GitOperation struct {
+					Commit struct {
+						SHA  string `json:"sha"`
+						Kind string `json:"kind"`
+					} `json:"commit"`
+				} `json:"gitOperation"`
+			} `json:"toolUseResult"`
+		}
+		if err := json.Unmarshal(rawLines[i], &rec); err != nil {
+			continue
+		}
+		c := rec.ToolUseResult.GitOperation.Commit
+		if c.SHA != "" && c.Kind == "committed" {
+			shas = append(shas, c.SHA)
+		}
+	}
+	return shas
 }
 
 // isUserPromptLine reports whether a raw JSONL line is a genuine user-prompt

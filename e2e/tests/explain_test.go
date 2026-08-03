@@ -77,8 +77,7 @@ func TestExplainCheckpointFromClonedRepo(t *testing.T) {
 		testutil.Git(t, "", "clone", bareDir, cloneDir)
 		testutil.Git(t, cloneDir, "config", "user.name", "E2E Clone")
 		testutil.Git(t, cloneDir, "config", "user.email", "e2e-clone@test.local")
-		_, err = testutil.GitOutputErr(cloneDir, "rev-parse", "--verify", testutil.CheckpointVerifyRef())
-		require.Error(t, err, "checkpoint metadata ref should not exist locally in clone before explain")
+		require.False(t, testutil.CheckpointsPresent(cloneDir), "checkpoint metadata should not exist locally in clone before explain")
 
 		entire.Enable(t, cloneDir, s.Agent.EntireAgent())
 		testutil.CommitIfDirty(t, cloneDir, "Enable entire in clone")

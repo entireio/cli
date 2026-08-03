@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cp "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/redact"
 )
@@ -43,7 +44,23 @@ type Turn struct {
 	UUID               string
 	Prompt, Model      string
 	CreatedAt          time.Time
-	Tokens             *types.TokenUsage
+	// Tokens is this turn's token usage. Every field is a per-turn delta:
+	// main-agent fields are scoped to the turn's [LineStart, LineEnd) slice by
+	// the token helpers, and SubagentTokens is rescoped from the cumulative
+	// snapshot those helpers return to a per-turn increment by
+	// rescopeSubagentTokensToDeltas (see linesplit.go). That invariant lets
+	// callers sum turns freely: writeSessionState sums them for the session
+	// total and each imported checkpoint stores its own turn's delta, so a
+	// subagent's tokens are counted exactly once rather than re-added on every
+	// turn after it is discovered.
+	Tokens *types.TokenUsage
+	// CommitSHAs are the commit SHAs (possibly abbreviated) this turn's
+	// transcript records creating, in transcript order. Extraction is
+	// per-importer (see commitSHAsInRange for Claude Code). Callers must
+	// resolve them against the repo before use. Nil when the transcript
+	// records no commits (including agents that don't extract them); the
+	// anchor then falls back to Options.LinkCommitSHA.
+	CommitSHAs []string
 }
 
 // Importer is the per-agent seam: it locates an agent's transcripts for a repo
@@ -81,16 +98,6 @@ func All() []Importer {
 	return out
 }
 
-// Get returns the importer registered for name.
-func Get(name string) (Importer, bool) {
-	for _, imp := range importers {
-		if imp.Name() == name {
-			return imp, true
-		}
-	}
-	return nil, false
-}
-
 // Options configures an import run.
 type Options struct {
 	RepoRoot      string
@@ -98,6 +105,18 @@ type Options struct {
 	SessionFilter []string
 	Now           time.Time
 	DryRun        bool
+
+	// LinkCommitSHA, when non-empty, is the fallback anchor written to each
+	// imported checkpoint's metadata as commit_sha — the commit the UI shows
+	// imported sessions against. The caller resolves it (default branch head
+	// when resolvable; see resolveImportLinkCommitSHA); Run does not. A turn
+	// whose transcript records a resolvable commit that is an ancestor of this
+	// fallback anchors to that real commit instead (see turnAnchorResolver).
+	LinkCommitSHA string
+
+	// Progress, when non-nil, receives session/turn progress notifications
+	// as Run executes. Nil (the default) reports nothing.
+	Progress *Progress
 }
 
 // Result summarizes an import run.
@@ -105,6 +124,54 @@ type Result struct {
 	SessionsScanned int
 	TurnsImported   int
 	TurnsSkipped    int
+}
+
+// Progress reports observable events as Run walks sessions and writes turns.
+// It is UI-agnostic: Run never prints or logs on its behalf, so rendering
+// (a progress bar, log lines, a TUI) is entirely up to the caller. Every
+// field is optional, and a nil *Progress (the default) is a no-op — Run's
+// behavior is byte-identical whether or not one is supplied.
+//
+// Invariant: for every turn Run processes, exactly one of TurnWritten or
+// TurnSkipped fires — so summing both callbacks' calls across one session
+// always equals that session's turnCount (as reported by SessionStart).
+type Progress struct {
+	// SessionStart fires once per session, after its transcript has been
+	// split into turns and before any of them are written. sessionIndex is
+	// 0-based against sessionTotal, the number of sessions Discover
+	// returned; turnCount is the number of turns split from this session.
+	SessionStart func(sessionIndex, sessionTotal int, agentName, sessionID string, turnCount int)
+	// TurnWritten fires once per turn Run actually writes to the checkpoint
+	// store — never for a turn skipped as already-imported, nor under
+	// DryRun (see TurnSkipped for those). turnIndex is 0-based against
+	// turnCount, matching the turnCount reported by this turn's
+	// SessionStart call.
+	TurnWritten func(sessionIndex, turnIndex, turnCount int)
+	// TurnSkipped fires once per turn Run processes without writing: a turn
+	// already imported (idempotent re-run) or, under DryRun, every turn
+	// (dry runs never write). Index semantics match TurnWritten exactly.
+	TurnSkipped func(sessionIndex, turnIndex, turnCount int)
+}
+
+func (p *Progress) sessionStart(sessionIndex, sessionTotal int, agentName, sessionID string, turnCount int) {
+	if p == nil || p.SessionStart == nil {
+		return
+	}
+	p.SessionStart(sessionIndex, sessionTotal, agentName, sessionID, turnCount)
+}
+
+func (p *Progress) turnWritten(sessionIndex, turnIndex, turnCount int) {
+	if p == nil || p.TurnWritten == nil {
+		return
+	}
+	p.TurnWritten(sessionIndex, turnIndex, turnCount)
+}
+
+func (p *Progress) turnSkipped(sessionIndex, turnIndex, turnCount int) {
+	if p == nil || p.TurnSkipped == nil {
+		return
+	}
+	p.TurnSkipped(sessionIndex, turnIndex, turnCount)
 }
 
 // DeriveCheckpointID produces a stable 12-hex checkpoint ID for an imported
@@ -136,7 +203,18 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		}
 	}
 
-	for _, sf := range files {
+	// One resolver per Run: it lazily walks and memoizes opts.LinkCommitSHA's
+	// ancestor set the first time a turn actually carries a candidate, so a
+	// whole import run pays for at most one history walk, not one per turn.
+	anchorResolver := newTurnAnchorResolver(repo, opts.LinkCommitSHA, opts.Now)
+
+	// Resolve the importer's git identity once per run (not per turn):
+	// checkpoint commits otherwise carry an empty author, which the
+	// GitHub->mirror ingestion path falls back to when it has no pusher
+	// identity for imported sessions, leaving them unattributed.
+	authorName, authorEmail := cp.GetGitAuthorFromRepo(repo)
+
+	for sessionIndex, sf := range files {
 		res.SessionsScanned++
 		full, readErr := os.ReadFile(sf.Path)
 		if readErr != nil {
@@ -146,20 +224,24 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		if splitErr != nil {
 			return res, fmt.Errorf("split %s session %s: %w", imp.Name(), sf.SessionID, splitErr)
 		}
+		opts.Progress.sessionStart(sessionIndex, len(files), string(imp.AgentType()), sf.SessionID, len(turns))
+
 		// Redact the session transcript once and reuse it for every turn's
 		// checkpoint (each turn stores the full session transcript with its own
 		// CheckpointTranscriptStart). Redacting per turn would be O(turns).
 		// Computed lazily so a fully-skipped or dry-run file pays nothing.
 		var red redact.RedactedBytes
 		redacted := false
-		for _, turn := range turns {
+		for turnIndex, turn := range turns {
 			cid := DeriveCheckpointID(sf.SessionID, turn.UUID)
 			if existing[cid.String()] {
 				res.TurnsSkipped++
+				opts.Progress.turnSkipped(sessionIndex, turnIndex, len(turns))
 				continue
 			}
 			if opts.DryRun {
 				res.TurnsImported++ // counts what would import
+				opts.Progress.turnSkipped(sessionIndex, turnIndex, len(turns))
 				continue
 			}
 			if !redacted {
@@ -170,17 +252,104 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 				red = r
 				redacted = true
 			}
-			if err := writeTurn(ctx, stores, imp, cid, sf, red, turn); err != nil {
+			anchor, fromCandidate := anchorResolver.resolve(ctx, turn.CommitSHAs)
+			if len(turn.CommitSHAs) > 0 && !fromCandidate {
+				logging.Debug(ctx, "import: turn anchor fell back",
+					"sessionID", sf.SessionID, "turnUUID", turn.UUID, "candidates", len(turn.CommitSHAs))
+			}
+			if err := writeTurn(ctx, stores, imp, cid, sf, red, turn, anchor, authorName, authorEmail); err != nil {
 				return res, err
 			}
 			existing[cid.String()] = true
 			res.TurnsImported++
+			opts.Progress.turnWritten(sessionIndex, turnIndex, len(turns))
+		}
+
+		// Track A: surface this session in `entire session list`. Best-effort —
+		// the read-only checkpoints above are the primary artifact, so a
+		// state-write failure must not abort the import.
+		if !opts.DryRun {
+			if serr := writeSessionState(ctx, imp, sf, turns); serr != nil {
+				logging.Debug(ctx, "import: failed to write imported session state",
+					"sessionID", sf.SessionID, "error", serr.Error())
+			}
 		}
 	}
 	return res, nil
 }
 
-func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.CheckpointID, sf SessionFile, red redact.RedactedBytes, turn Turn) error {
+// writeSessionState upserts a local session.State so an imported session shows
+// up in `entire session list`. It is Kind-gated (KindImported), never sets
+// BaseCommit (imports are commit-less and must not be pinned to HEAD), and uses
+// the transcript's own timestamps — the forward-compat contract that keeps a
+// later commit-SHA link purely additive. It never clobbers a live or
+// manually-attached session that happens to share the ID.
+func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns []Turn) error {
+	if len(turns) == 0 {
+		return nil
+	}
+	store, err := session.NewStateStore(ctx)
+	if err != nil {
+		return fmt.Errorf("open session state store: %w", err)
+	}
+	if existing, lerr := store.Load(ctx, sf.SessionID); lerr == nil && existing != nil &&
+		!existing.Kind.IsImported() {
+		return nil // don't overwrite a real (live/attached) session
+	}
+
+	var started, ended time.Time
+	var tokens *types.TokenUsage
+	model := ""
+	for _, turn := range turns {
+		if !turn.CreatedAt.IsZero() {
+			if started.IsZero() || turn.CreatedAt.Before(started) {
+				started = turn.CreatedAt
+			}
+			if turn.CreatedAt.After(ended) {
+				ended = turn.CreatedAt
+			}
+		}
+		if turn.Model != "" {
+			model = turn.Model
+		}
+		// turn.Tokens holds per-turn deltas for every field, including
+		// SubagentTokens (rescoped from a cumulative snapshot in
+		// rescopeSubagentTokensToDeltas — see the Turn.Tokens doc). Summing
+		// them therefore yields the correct session total: main-agent fields
+		// add up, and the subagent deltas sum back to the final cumulative
+		// subagent snapshot exactly once instead of being multiplied by the
+		// number of turns after each subagent was first discovered.
+		tokens = types.AddTokenUsage(tokens, turn.Tokens)
+	}
+	if started.IsZero() {
+		// No usable per-turn timestamps (some Codex lines): fall back to the
+		// transcript file mtime so the row still sorts sensibly. Never "now".
+		if fi, statErr := os.Stat(sf.Path); statErr == nil {
+			started = fi.ModTime()
+			ended = started
+		}
+	}
+	state := &session.State{
+		SessionID:           sf.SessionID,
+		Kind:                session.KindImported,
+		AgentType:           imp.AgentType(),
+		ModelName:           model,
+		StartedAt:           started,
+		EndedAt:             &ended,
+		Phase:               session.PhaseEnded,
+		LastInteractionTime: &ended,
+		StepCount:           len(turns),
+		TokenUsage:          tokens,
+		LastPrompt:          session.TruncatePromptForStorage(turns[len(turns)-1].Prompt),
+		LastCheckpointID:    DeriveCheckpointID(sf.SessionID, turns[len(turns)-1].UUID),
+	}
+	if err := store.Save(ctx, state); err != nil {
+		return fmt.Errorf("save imported session state %s: %w", sf.SessionID, err)
+	}
+	return nil
+}
+
+func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.CheckpointID, sf SessionFile, red redact.RedactedBytes, turn Turn, anchorCommitSHA, authorName, authorEmail string) error {
 	if err := stores.Persistent.Write(ctx, cp.Session(cp.WriteOptions{
 		CheckpointID:              cid,
 		SessionID:                 sf.SessionID,
@@ -194,6 +363,9 @@ func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.Chec
 		CheckpointsCount:          1,
 		CheckpointTranscriptStart: turn.LineStart,
 		TokenUsage:                turn.Tokens,
+		CommitSHA:                 anchorCommitSHA,
+		AuthorName:                authorName,
+		AuthorEmail:               authorEmail,
 	})); err != nil {
 		return fmt.Errorf("write imported checkpoint %s: %w", cid, err)
 	}

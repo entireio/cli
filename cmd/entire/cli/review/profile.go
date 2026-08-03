@@ -116,7 +116,19 @@ func selectReviewProfile(s *settings.EntireSettings, override string) (string, s
 }
 
 func applyLegacyReviewProfileFallback(s *settings.EntireSettings) {
-	if s == nil || len(nonZeroProfiles(s.ReviewProfiles)) > 0 {
+	if s == nil {
+		return
+	}
+	// Older guided setup wrote Codex reviewers with Claude's curated /review
+	// command. Codex has no such built-in, so spawn-time validation excludes
+	// those workers. Repair that generated shape in memory to a prompt-only
+	// Codex reviewer; explicitly configured Codex skills are left untouched.
+	normalizeLegacyCodexDefaultSkills(s.Review) //nolint:staticcheck // intentional compatibility repair for deprecated review config
+	for name, profile := range s.ReviewProfiles {
+		normalizeLegacyCodexDefaultSkills(profile.Agents)
+		s.ReviewProfiles[name] = profile
+	}
+	if len(nonZeroProfiles(s.ReviewProfiles)) > 0 {
 		return
 	}
 	legacyAgents := nonZeroAgentConfigs(s.Review) //nolint:staticcheck // intentional compatibility fallback for deprecated review config
@@ -133,20 +145,31 @@ func applyLegacyReviewProfileFallback(s *settings.EntireSettings) {
 	}
 }
 
-func nonZeroProfiles(in map[string]settings.ReviewProfileConfig) map[string]settings.ReviewProfileConfig {
-	out := make(map[string]settings.ReviewProfileConfig, len(in))
-	for name, cfg := range in {
-		name = strings.TrimSpace(name)
-		if name == "" || cfg.IsZero() {
+func normalizeLegacyCodexDefaultSkills(configs map[string]settings.ReviewConfig) {
+	for workerName, cfg := range configs {
+		if reviewAgentName(workerName, cfg) != string(agent.AgentNameCodex) ||
+			len(cfg.Skills) != 1 || strings.TrimSpace(cfg.Skills[0]) != "/review" {
 			continue
 		}
-		out[name] = cfg
+		cfg.Skills = nil
+		if strings.TrimSpace(cfg.Prompt) == "" {
+			cfg.Prompt = defaultAgentReviewPrompt
+		}
+		configs[workerName] = cfg
 	}
-	return out
+}
+
+func nonZeroProfiles(in map[string]settings.ReviewProfileConfig) map[string]settings.ReviewProfileConfig {
+	return nonZeroNamed(in)
 }
 
 func nonZeroAgentConfigs(in map[string]settings.ReviewConfig) map[string]settings.ReviewConfig {
-	out := make(map[string]settings.ReviewConfig, len(in))
+	return nonZeroNamed(in)
+}
+
+// nonZeroNamed drops entries with blank names or zero-valued configs.
+func nonZeroNamed[T interface{ IsZero() bool }](in map[string]T) map[string]T {
+	out := make(map[string]T, len(in))
 	for name, cfg := range in {
 		name = strings.TrimSpace(name)
 		if name == "" || cfg.IsZero() {
@@ -330,7 +353,7 @@ func defaultReviewProfileForInstalledAgents(
 		agents[name] = cfg
 	}
 	if len(agents) == 0 {
-		return settings.ReviewProfileConfig{}, errors.New("no agents with review runner adapters and hooks installed; run `entire configure --agent claude-code`, `entire configure --agent codex`, or `entire configure --agent gemini`")
+		return settings.ReviewProfileConfig{}, errors.New("no agents with review runner adapters and hooks installed; run `entire configure --agent claude-code`, `entire configure --agent codex`, `entire configure --agent gemini`, or `entire configure --agent pi`")
 	}
 	profile := settings.ReviewProfileConfig{
 		Task:   profileTask(profileName, settings.ReviewProfileConfig{}),
@@ -342,6 +365,8 @@ func defaultReviewProfileForInstalledAgents(
 	return profile, nil
 }
 
+const defaultAgentReviewPrompt = "Review the change according to the profile task."
+
 func defaultReviewAgentConfig(profileName, agentName string) settings.ReviewConfig {
 	focus := defaultProfileFocus(profileName)
 	switch agentName {
@@ -350,10 +375,8 @@ func defaultReviewAgentConfig(profileName, agentName string) settings.ReviewConf
 			return settings.ReviewConfig{Skills: []string{"/security-review"}}
 		}
 		return settings.ReviewConfig{Skills: []string{"/review"}, Prompt: focus}
-	case string(agent.AgentNameCodex):
-		return settings.ReviewConfig{Skills: []string{"/review"}, Prompt: focus}
-	case string(agent.AgentNameGemini):
-		prompt := "Review the change according to the profile task."
+	case string(agent.AgentNameCodex), string(agent.AgentNameGemini), string(agent.AgentNamePi):
+		prompt := defaultAgentReviewPrompt
 		if focus != "" {
 			prompt += " " + focus
 		}
@@ -375,11 +398,11 @@ func defaultProfileFocus(profileName string) string {
 }
 
 // defaultJudge auto-selects a consolidating judge from the configured
-// reviewers: it prefers claude-code, then codex, then gemini, and otherwise
-// takes the first reviewer that can write a verdict (text generation). ok is
-// false when no reviewer can.
+// reviewers: it prefers claude-code, then codex, then gemini, then pi, and
+// otherwise takes the first reviewer that can write a verdict (text generation).
+// ok is false when no reviewer can.
 func defaultJudge(ctx context.Context, configured map[string]settings.ReviewConfig) (judgeSpec, bool) {
-	for _, preferred := range []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameCodex), string(agent.AgentNameGemini)} {
+	for _, preferred := range []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameCodex), string(agent.AgentNameGemini), string(agent.AgentNamePi)} {
 		for _, workerName := range sortedMapKeys(configured) {
 			cfg := configured[workerName]
 			if reviewAgentName(workerName, cfg) == preferred && agentSupportsTextGeneration(ctx, preferred) {

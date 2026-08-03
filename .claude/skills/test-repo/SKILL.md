@@ -177,7 +177,7 @@ echo "{\"session_id\": \"$SESSION_ID\", \"transcript_path\": \"$TRANSCRIPT_DIR/t
   /tmp/entire-bin hooks claude-code post-task
 
 # Verify task checkpoint created
-/tmp/entire-bin rewind --list | jq '.[] | select(.is_task_checkpoint == true)'
+/tmp/entire-bin checkpoint list --pending --json | jq '.[] | select(.is_task_checkpoint == true)'
 ```
 
 ### Test User Commits (Condensation)

@@ -37,6 +37,39 @@ func TestRegistry_UnknownType(t *testing.T) {
 	assert.Contains(t, err.Error(), BackendTypeGitBranch)
 }
 
+func TestValidatePrimaryBackend_GitBackedTypesAllowed(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, ValidatePrimaryBackend(BackendTypeGitBranch))
+	require.NoError(t, ValidatePrimaryBackend(BackendTypeGitRefs))
+}
+
+func TestValidatePrimaryBackend_UnknownTypeRejected(t *testing.T) {
+	t.Parallel()
+
+	err := ValidatePrimaryBackend("definitely-not-a-backend")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown checkpoint backend type "definitely-not-a-backend"`)
+	// The error lists registered types so a typo is debuggable.
+	assert.Contains(t, err.Error(), BackendTypeGitBranch)
+}
+
+func TestValidatePrimaryBackend_NonGitBackedRejected(t *testing.T) {
+	t.Parallel()
+
+	// Register a mirror-only (non-git-backed) backend and confirm it cannot be the
+	// primary. The unique type name avoids colliding with the built-ins.
+	const typ = "test-mirror-only-primary-check"
+	Register(typ, func(context.Context, OpenEnv, json.RawMessage) (PersistentStore, error) {
+		return nil, nil //nolint:nilnil // never constructed; validation fails before build
+	})
+
+	err := ValidatePrimaryBackend(typ)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot be the primary")
+	assert.Contains(t, err.Error(), BackendTypeGitRefs)
+}
+
 func TestRegistry_GitBranchFactoryIgnoresConfig(t *testing.T) {
 	t.Parallel()
 

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -96,7 +95,8 @@ already captured for the session.
 Use --agent-brief when an agent needs compact guidance for the next step, for
 example: "Use Entire token tracking to check how this session is doing and
 optimize next steps."`,
-		Args: cobra.MaximumNArgs(1),
+		Example: "  entire session tokens\n  entire session tokens --current --agent-brief\n  entire session tokens --json",
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if jsonFlag && agentBriefFlag {
 				return errors.New("--json and --agent-brief are mutually exclusive")
@@ -144,7 +144,7 @@ func runSessionTokens(ctx context.Context, cmd *cobra.Command, sessionID string,
 
 	report := buildSessionTokensReport(state, sessionPhaseLabel(state))
 	if jsonOutput {
-		return writeSessionTokensJSON(cmd.OutOrStdout(), report)
+		return printJSON(cmd.OutOrStdout(), report)
 	}
 	if agentBrief {
 		writeSessionTokensAgentBrief(cmd.OutOrStdout(), report)
@@ -431,15 +431,6 @@ func skillEventLabels(events []agent.SkillEvent) []string {
 		labels = append(labels, label)
 	}
 	return labels
-}
-
-func writeSessionTokensJSON(w io.Writer, report sessionTokensReport) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(report); err != nil {
-		return fmt.Errorf("failed to encode session token report: %w", err)
-	}
-	return nil
 }
 
 func writeSessionTokensText(w io.Writer, report sessionTokensReport) {

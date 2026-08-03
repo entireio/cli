@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"os"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
@@ -15,6 +17,16 @@ import (
 // ErrInvalidCheckpointsConfig is returned when a present "checkpoints" settings
 // block is malformed (e.g. a backend with no type).
 var ErrInvalidCheckpointsConfig = errors.New("invalid checkpoints config")
+
+// Environment overrides for checkpoint backend selection. When EnvCheckpointsPrimary
+// is set, it (and the optional comma-separated EnvCheckpointsMirrors) fully
+// replaces any checkpoints block in settings — env wins over file, matching the
+// other ENTIRE_* overrides (ENTIRE_LOG_LEVEL, ENTIRE_TOKEN, …). Primarily for
+// driving e2e/CI and rollout against a specific backend without editing settings.
+const (
+	EnvCheckpointsPrimary = "ENTIRE_CHECKPOINTS_PRIMARY"
+	EnvCheckpointsMirrors = "ENTIRE_CHECKPOINTS_MIRRORS"
+)
 
 // CheckpointsConfig selects checkpoint storage backends: one primary (source of
 // truth, serves all reads and writes) and zero or more mirrors (independent
@@ -52,6 +64,14 @@ type checkpointsEnvelope struct {
 // a deep-merged document). Clone preferences carry no checkpoint config and are
 // not consulted.
 func LoadCheckpointsConfig(ctx context.Context) (*CheckpointsConfig, error) {
+	// Env override wins over any settings file (precedence like ENTIRE_LOG_LEVEL).
+	if cfg, ok := checkpointsConfigFromEnv(); ok {
+		if err := cfg.validate(); err != nil {
+			return nil, err
+		}
+		return cfg, nil
+	}
+
 	base, local := checkpointsSettingsPaths(ctx)
 
 	// "local replaces base wholesale": prefer a checkpoints block from local
@@ -111,6 +131,25 @@ func rawCheckpointsBlock(ctx context.Context, filePath string) json.RawMessage {
 		return nil
 	}
 	return env.Checkpoints
+}
+
+// checkpointsConfigFromEnv builds a CheckpointsConfig from the environment when
+// EnvCheckpointsPrimary is set. Mirrors are taken from EnvCheckpointsMirrors as a
+// comma-separated list of backend types (no per-backend config blocks — the env
+// override is for backend selection only). Returns ok=false when no primary is
+// set, leaving file-based resolution in charge.
+func checkpointsConfigFromEnv() (*CheckpointsConfig, bool) {
+	primary := strings.TrimSpace(os.Getenv(EnvCheckpointsPrimary))
+	if primary == "" {
+		return nil, false
+	}
+	cfg := &CheckpointsConfig{Primary: BackendConfig{Type: primary}}
+	for _, m := range strings.Split(os.Getenv(EnvCheckpointsMirrors), ",") {
+		if t := strings.TrimSpace(m); t != "" {
+			cfg.Mirrors = append(cfg.Mirrors, BackendConfig{Type: t})
+		}
+	}
+	return cfg, true
 }
 
 func (c *CheckpointsConfig) validate() error {

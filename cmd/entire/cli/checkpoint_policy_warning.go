@@ -25,7 +25,7 @@ func ShouldCheckCheckpointPolicyWarning(cmd *cobra.Command) bool {
 
 func isCheckpointPolicyWarningExcludedCommand(name string) bool {
 	switch name {
-	case "hooks", "__send_analytics", "curl-bash-post-install":
+	case "hooks", "__send_analytics", "__refresh_trail_enablement", "curl-bash-post-install":
 		return true
 	default:
 		return false
@@ -43,9 +43,12 @@ func WarnCheckpointPolicyIfNeeded(ctx context.Context, w io.Writer, currentVersi
 	if err != nil {
 		return
 	}
-	if !checkpointpolicy.RequiresUpgrade(state.Policy) && !checkpointpolicy.UnsupportedWrite(state.Policy) {
+	if checkpointpolicy.CanSatisfyPolicy(state.Policy) {
 		return
 	}
 
-	fmt.Fprint(w, checkpointpolicy.UpgradeWarning(versioncheck.UpdateCommandForCurrentBinary(currentVersion)))
+	fmt.Fprint(w, checkpointpolicy.UnsupportedPolicyMessage(
+		state.Policy,
+		versioncheck.UpdateCommandForCurrentBinary(currentVersion),
+	))
 }

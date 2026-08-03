@@ -384,7 +384,7 @@ func TestRewind_MultipleConsecutive(t *testing.T) {
 	session := env.NewSession()
 
 	// Create 3 checkpoints with different versions
-	versions := []string{"version 1", "version 2", "version 3"}
+	versions := []string{contentV1, contentV2, contentV3}
 	for _, version := range versions {
 		if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
 			t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
@@ -401,7 +401,7 @@ func TestRewind_MultipleConsecutive(t *testing.T) {
 	}
 
 	// Verify we're at version 3
-	if content := env.ReadFile("file.txt"); content != "version 3" {
+	if content := env.ReadFile("file.txt"); content != contentV3 {
 		t.Errorf("expected version 3, got %q", content)
 	}
 
@@ -414,8 +414,8 @@ func TestRewind_MultipleConsecutive(t *testing.T) {
 	if err := env.Rewind(points[1].ID); err != nil {
 		t.Fatalf("Rewind to v2 failed: %v", err)
 	}
-	if content := env.ReadFile("file.txt"); content != "version 2" {
-		t.Errorf("after rewind to v2: got %q, want %q", content, "version 2")
+	if content := env.ReadFile("file.txt"); content != contentV2 {
+		t.Errorf("after rewind to v2: got %q, want %q", content, contentV2)
 	}
 
 	// Get fresh points after rewind
@@ -428,7 +428,7 @@ func TestRewind_MultipleConsecutive(t *testing.T) {
 	if err := env.Rewind(points[len(points)-1].ID); err != nil {
 		t.Fatalf("Rewind to v1 failed: %v", err)
 	}
-	if content := env.ReadFile("file.txt"); content != "version 1" {
-		t.Errorf("after rewind to v1: got %q, want %q", content, "version 1")
+	if content := env.ReadFile("file.txt"); content != contentV1 {
+		t.Errorf("after rewind to v1: got %q, want %q", content, contentV1)
 	}
 }

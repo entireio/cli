@@ -3,6 +3,7 @@ package checkpointpolicy_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 
@@ -22,7 +23,8 @@ func TestReadLocalPolicyDefaultsWhenRefMissing(t *testing.T) {
 	got, err := checkpointpolicy.ReadLocal(t.Context(), repo)
 	require.NoError(t, err)
 	require.Equal(t, checkpointpolicy.SourceDefaults, got.Source)
-	require.Equal(t, checkpointpolicy.DefaultPolicy(), got.Policy)
+	require.Empty(t, got.Policy)
+	require.Equal(t, checkpointpolicy.DefaultPolicy(), checkpointpolicy.Normalize(got.Policy))
 	require.True(t, got.Hash.IsZero())
 }
 
@@ -30,8 +32,8 @@ func TestWriteAndReadLocalPolicy(t *testing.T) {
 	t.Parallel()
 	repo := initPolicyRepo(t)
 	policy := checkpointpolicy.Policy{
-		CheckpointVersion:    checkpoint.CheckpointVersionBranchV1,
-		CheckpointMinVersion: checkpoint.CheckpointVersionBranchV1,
+		CheckpointVersion:    checkpointpolicy.CheckpointVersionBranchV1,
+		CheckpointMinVersion: checkpointpolicy.CheckpointVersionBranchV1,
 	}
 	hash, err := checkpointpolicy.WriteLocal(t.Context(), repo, plumbing.ZeroHash, policy)
 	require.NoError(t, err)
@@ -42,6 +44,25 @@ func TestWriteAndReadLocalPolicy(t *testing.T) {
 	require.Equal(t, checkpointpolicy.SourceLocal, got.Source)
 	require.Equal(t, hash, got.Hash)
 	require.Equal(t, policy, got.Policy)
+}
+
+func TestWriteAndReadLocalPolicyPreservesUnsetFields(t *testing.T) {
+	t.Parallel()
+	repo := initPolicyRepo(t)
+
+	hash, err := checkpointpolicy.WriteLocal(t.Context(), repo, plumbing.ZeroHash, checkpointpolicy.Policy{})
+	require.NoError(t, err)
+	require.False(t, hash.IsZero())
+
+	rawPolicy := readPolicyJSON(t, repo, hash)
+	require.Empty(t, rawPolicy)
+
+	got, err := checkpointpolicy.ReadLocal(t.Context(), repo)
+	require.NoError(t, err)
+	require.Equal(t, checkpointpolicy.SourceLocal, got.Source)
+	require.Equal(t, hash, got.Hash)
+	require.Empty(t, got.Policy)
+	require.Equal(t, checkpointpolicy.DefaultPolicy(), checkpointpolicy.Normalize(got.Policy))
 }
 
 func TestReadLocalPolicyRejectsMalformedJSON(t *testing.T) {
@@ -67,8 +88,8 @@ func TestReadLocalPolicyAllowsUnsupportedPolicy(t *testing.T) {
 	t.Parallel()
 	repo := initPolicyRepo(t)
 	policy := checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "refs-v1",
+		CheckpointVersion:    "refs-v2",
+		CheckpointMinVersion: "refs-v2",
 	}
 	data, err := json.Marshal(policy)
 	require.NoError(t, err)
@@ -79,6 +100,25 @@ func TestReadLocalPolicyAllowsUnsupportedPolicy(t *testing.T) {
 	require.Equal(t, checkpointpolicy.SourceLocal, got.Source)
 	require.Equal(t, hash, got.Hash)
 	require.Equal(t, policy, got.Policy)
+}
+
+func readPolicyJSON(t *testing.T, repo *git.Repository, hash plumbing.Hash) map[string]string {
+	t.Helper()
+	commit, err := repo.CommitObject(hash)
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+	file, err := tree.File(checkpointpolicy.PolicyFileName)
+	require.NoError(t, err)
+	reader, err := file.Reader()
+	require.NoError(t, err)
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	require.NoError(t, err)
+
+	var raw map[string]string
+	require.NoError(t, json.Unmarshal(data, &raw))
+	return raw
 }
 
 func initPolicyRepo(t *testing.T) *git.Repository {

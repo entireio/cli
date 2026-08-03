@@ -119,6 +119,63 @@ func Compact(redacted redact.RedactedBytes, opts MetadataFields) ([]byte, error)
 	return compactJSONL(truncated, opts)
 }
 
+// FullWithBoundary compacts the entire transcript — ignoring opts.StartLine for
+// the purpose of truncation — and returns the full compact bytes together with
+// the boundary: the line index in the compact output at which this checkpoint's
+// data (the content from opts.StartLine onward in the raw transcript) begins.
+//
+// Storing the full compact transcript on every checkpoint makes each checkpoint
+// self-contained: the session is reconstructable from any single surviving
+// checkpoint, and downstream readers segment this checkpoint's slice as
+// fullCompactLines[boundary:]. boundary is 0 when StartLine <= 0 (the first
+// checkpoint of a session, whose data starts at the beginning).
+//
+// boundary is derived as lineCount(full) - lineCount(delta), where delta is the
+// existing per-checkpoint sliced compaction (Compact with the original
+// StartLine). This reuses each format's existing, independently-tested slicing
+// behavior — line offsets for JSONL/Copilot/Droid/pi, message-index for
+// OpenCode/Gemini, response-item index for Codex — rather than threading source
+// indices through every emitter.
+//
+// A single compact line can carry content from both sides of StartLine when its
+// source straddles the boundary — most notably same-ID streaming assistant
+// fragments, which compaction merges into one line. No integer line offset can
+// split within a line, so the boundary rounds toward inclusion: such a merged
+// line is counted as part of this checkpoint's slice. fullCompactLines[boundary:]
+// therefore never drops this checkpoint's content, but its first line may repeat
+// up to one merged line that began in the previous checkpoint. Downstream
+// segmenters must tolerate this bounded head overlap. See the straddle case in
+// TestFullWithBoundary_StraddlingAssistantFragments_RoundsToInclusion.
+func FullWithBoundary(redacted redact.RedactedBytes, opts MetadataFields) (full []byte, boundary int, err error) {
+	fullOpts := opts
+	fullOpts.StartLine = 0
+	full, err = Compact(redacted, fullOpts)
+	if err != nil {
+		return nil, 0, err
+	}
+	if opts.StartLine <= 0 {
+		return full, 0, nil
+	}
+
+	delta, err := Compact(redacted, opts)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	boundary = countCompactLines(full) - countCompactLines(delta)
+	if boundary < 0 {
+		boundary = 0
+	}
+	return full, boundary, nil
+}
+
+// countCompactLines counts newline-terminated lines in compact output. The exact
+// convention does not matter for CompactFull as long as it is applied uniformly
+// to both the full and delta outputs (the boundary is their difference).
+func countCompactLines(b []byte) int {
+	return bytes.Count(b, []byte{'\n'})
+}
+
 // droppedTypes are JSONL entry types that carry no parser-relevant data.
 var droppedTypes = map[string]bool{
 	"progress":              true,

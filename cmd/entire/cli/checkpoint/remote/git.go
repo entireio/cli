@@ -1,21 +1,29 @@
 package remote
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
-	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
+
+// stampConfigTimeout bounds the local git-config reads/writes that mark a newly
+// created checkpoint remote as skipped. They run detached from the fetch's
+// context (see stampNewlyCreatedRemote), so a bound guards against a stuck
+// config lock hanging the caller.
+const stampConfigTimeout = 10 * time.Second
 
 // CheckpointTokenEnvVar is the environment variable for providing an access token
 // used to authenticate git push/fetch operations for checkpoint branches.
@@ -26,6 +34,169 @@ import (
 const CheckpointTokenEnvVar = "ENTIRE_CHECKPOINT_TOKEN"
 
 var sshTokenWarningOnce sync.Once //nolint:gochecknoglobals // intentional per-process gate
+
+// nonInteractiveSSHKey marks a context whose checkpoint git subprocesses must
+// never block on an interactive SSH prompt (e.g. a key passphrase when no
+// ssh-agent is running).
+type nonInteractiveSSHKey struct{}
+
+// WithNonInteractiveSSH marks ctx so every checkpoint git command spawned under
+// it runs SSH with BatchMode=yes, failing fast instead of hanging on an
+// interactive prompt. Set this at best-effort, non-interactive entry points such
+// as the git pre-push hook: a blocked passphrase prompt there would hang the
+// user's own `git push` until the checkpoint push budget kills it, with no way
+// to type the passphrase. Foreground commands (resume, explain) leave it unset
+// so they can still prompt.
+//
+// BatchMode tradeoffs (issue #1523):
+//   - Passphrase-protected keys with no ssh-agent: fail fast (desired).
+//   - Touch-only security keys (sk-, user-presence only): still work — touch is
+//     not a terminal passphrase read.
+//   - PIN-protected FIDO2 keys (verify-required): PIN entry goes through ssh's
+//     passphrase reader, so BatchMode suppresses it and the push fails. Load the
+//     key into ssh-agent beforehand, or set an explicit BatchMode=no via
+//     GIT_SSH_COMMAND / core.sshCommand (respected; we do not override it).
+func WithNonInteractiveSSH(ctx context.Context) context.Context {
+	return context.WithValue(ctx, nonInteractiveSSHKey{}, true)
+}
+
+// IsNonInteractiveSSH reports whether ctx was marked with WithNonInteractiveSSH.
+func IsNonInteractiveSSH(ctx context.Context) bool {
+	return nonInteractiveSSHFromContext(ctx)
+}
+
+func nonInteractiveSSHFromContext(ctx context.Context) bool {
+	v, ok := ctx.Value(nonInteractiveSSHKey{}).(bool)
+	return ok && v
+}
+
+// LooksLikeSSHAuthFailure reports whether errText looks like an SSH
+// authentication failure (passphrase/PIN unavailable under BatchMode, missing
+// agent identity, publickey rejection, etc.). Used to print an actionable
+// ssh-agent hint from the pre-push checkpoint path.
+func LooksLikeSSHAuthFailure(errText string) bool {
+	if errText == "" {
+		return false
+	}
+	lower := strings.ToLower(errText)
+	// Keep needles auth-specific. Do not match git's generic
+	// "Could not read from remote repository" epilogue — that also appears on
+	// network failures where an ssh-agent hint would be wrong. Real auth
+	// failures always include a Permission denied / auth-methods line too.
+	needles := []string{
+		"permission denied (publickey)",
+		"permission denied (keyboard-interactive",
+		"permission denied (password)",
+		"too many authentication failures",
+		"no more authentication methods to try",
+	}
+	for _, n := range needles {
+		if strings.Contains(lower, n) {
+			return true
+		}
+	}
+	// Generic publickey denial without the parenthetical form.
+	if strings.Contains(lower, "permission denied") && strings.Contains(lower, "publickey") {
+		return true
+	}
+	return false
+}
+
+// batchModeOptionRe matches an explicit BatchMode ssh option (e.g.
+// "-o BatchMode=yes" or "BatchMode=no"), case-insensitively. Anchored with \b
+// so it doesn't false-positive on unrelated text that merely contains
+// "BatchMode" as a substring of a longer token.
+var batchModeOptionRe = regexp.MustCompile(`(?i)\bBatchMode\s*=\s*\S+`)
+
+// hasExplicitBatchMode reports whether sshCmd already sets a BatchMode option,
+// with any value. A user-supplied BatchMode=no is a deliberate choice and must
+// be respected, not silently overridden to yes.
+func hasExplicitBatchMode(sshCmd string) bool {
+	return batchModeOptionRe.MatchString(sshCmd)
+}
+
+// envLookup returns the value of the last occurrence of key in env (matching
+// exec.Cmd's last-wins semantics for duplicate entries) and whether it was
+// found.
+func envLookup(env []string, key string) (string, bool) {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if v, ok := strings.CutPrefix(env[i], prefix); ok {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// gitConfigSSHCommand looks up core.sshCommand via `git config`, run with env
+// so the lookup honors any HOME/GIT_CONFIG_* overrides present in env (e.g. in
+// tests). Returns "" if unset or the lookup fails.
+func gitConfigSSHCommand(ctx context.Context, env []string) string {
+	cmd := exec.CommandContext(ctx, "git", "config", "--get", "core.sshCommand")
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// effectiveSSHCommand resolves the ssh invocation git itself would use, in
+// git's own precedence order: the GIT_SSH_COMMAND environment variable, then
+// the core.sshCommand git config value, then the GIT_SSH environment
+// variable, falling back to plain "ssh" when none are set.
+func effectiveSSHCommand(ctx context.Context, env []string) string {
+	if v, ok := envLookup(env, "GIT_SSH_COMMAND"); ok {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	if v := gitConfigSSHCommand(ctx, env); v != "" {
+		return v
+	}
+	if v, ok := envLookup(env, "GIT_SSH"); ok {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return "ssh"
+}
+
+// withBatchModeSSH returns env with GIT_SSH_COMMAND set so ssh runs with
+// BatchMode=yes. The base ssh invocation is resolved via effectiveSSHCommand
+// (env GIT_SSH_COMMAND > core.sshCommand > GIT_SSH > plain "ssh") so a custom
+// ssh command configured via core.sshCommand isn't silently discarded. The
+// flag is only appended when BatchMode isn't already explicitly set — an
+// existing BatchMode=no is a deliberate user choice and is left untouched —
+// so the result is idempotent.
+func withBatchModeSSH(ctx context.Context, env []string) []string {
+	const key = "GIT_SSH_COMMAND="
+	base := effectiveSSHCommand(ctx, env)
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if strings.HasPrefix(e, key) {
+			continue
+		}
+		out = append(out, e)
+	}
+	if !hasExplicitBatchMode(base) {
+		base += " -o BatchMode=yes"
+	}
+	return append(out, key+base)
+}
+
+// applyNonInteractiveSSH sets BatchMode SSH on cmd when ctx is marked
+// non-interactive (see WithNonInteractiveSSH). No-op otherwise, so foreground
+// commands keep their interactive prompt behavior.
+func applyNonInteractiveSSH(ctx context.Context, cmd *exec.Cmd) {
+	if !nonInteractiveSSHFromContext(ctx) {
+		return
+	}
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = withBatchModeSSH(ctx, cmd.Env)
+}
 
 // FetchOptions configures a git fetch operation.
 type FetchOptions struct {
@@ -79,11 +250,32 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	case opts.Unshallow && isShallowRepository(ctx, opts.Dir):
 		args = append(args, "--unshallow")
 	}
-	if !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx) {
+	filtered := !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx)
+	if filtered {
 		args = append(args, "--filter=blob:none")
 	}
 	args = append(args, opts.Remote)
 	args = append(args, opts.RefSpecs...)
+
+	// A filtered fetch from a URL makes git record a URL-keyed remote section
+	// (remote.<url>.*) so it can lazy-fetch filtered-out objects later. That
+	// section also turns the URL into a phantom remote that `git fetch --all`
+	// and `git remote update` keep dialing. When this fetch is the one creating
+	// the section, stamp skipFetchAll so bulk fetches skip our adhoc remote.
+	// Remotes that already existed are left untouched so we never rewrite the
+	// user's config.
+	var stampURL string
+	var stampCandidate, existedBefore bool
+	if filtered && IsURL(opts.Remote) {
+		stampCandidate = true
+		stampURL = opts.Remote
+		if token := strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)); token != "" && isValidToken(token) {
+			// With a checkpoint token, newCommand rewrites SSH targets to HTTPS
+			// and git records the section under the rewritten URL.
+			stampURL, _ = resolveTargetForTokenAuth(ctx, stampURL)
+		}
+		existedBefore = gitRemoteSectionExists(ctx, opts.Dir, stampURL)
+	}
 
 	cmd := newCommand(ctx, args...)
 	if opts.Dir != "" {
@@ -91,10 +283,94 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	}
 	disableTerminalPrompt(cmd)
 	out, err := cmd.CombinedOutput()
+
+	if stampCandidate && !existedBefore {
+		stampNewlyCreatedRemote(ctx, opts.Dir, stampURL)
+	}
+
 	if err != nil {
 		return out, fmt.Errorf("git fetch: %w", err)
 	}
 	return out, nil
+}
+
+// stampNewlyCreatedRemote stamps a URL-keyed remote section that this fetch just
+// created. Git writes remote.<url>.promisor eagerly during connection setup, so
+// a filtered fetch that later fails still leaves the phantom remote behind;
+// stamping here — rather than only on fetch success — keeps it from lingering
+// unstamped forever (the section then exists on the next attempt, so it never
+// looks "new" again). Re-checking existence keeps us from inventing a section
+// when the fetch died before git wrote anything.
+//
+// The git-config commands run on a context detached from the fetch's deadline:
+// a filtered fetch that timed out leaves ctx already past its deadline, and
+// inheriting it would make these local commands fail immediately and leave the
+// phantom unstamped — the very miss this stamping exists to prevent.
+func stampNewlyCreatedRemote(ctx context.Context, dir, url string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stampConfigTimeout)
+	defer cancel()
+	if gitRemoteSectionExists(ctx, dir, url) {
+		markRemoteSkipped(ctx, dir, url)
+	}
+}
+
+// markRemoteSkipped stamps skipFetchAll on a URL-keyed remote section so
+// `git fetch --all` and `git remote update` skip it. Called only for remotes
+// this fetch just created, so an adhoc checkpoint URL never lingers as a phantom
+// remote that bulk fetches keep dialing.
+// Best-effort: the git config write is not worth failing the fetch over, so
+// failures only log.
+func markRemoteSkipped(ctx context.Context, dir, url string) {
+	fullKey := "remote." + url + ".skipFetchAll"
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", fullKey, "true")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	if out, cfgErr := cmd.CombinedOutput(); cfgErr != nil {
+		redactedURL := RedactURL(url)
+		// The output can echo the key, which embeds the URL — and a URL can
+		// carry credentials. Redact before logging.
+		msg := strings.TrimSpace(strings.ReplaceAll(string(out), url, redactedURL))
+		logging.Warn(ctx, "failed to mark remote config entry as skipped for bulk fetches",
+			slog.String("url", redactedURL),
+			slog.String("output", msg),
+			slog.String("error", cfgErr.Error()),
+		)
+	}
+}
+
+// gitRemoteSectionExists reports whether a remote.<url>.* config section already
+// exists in the local git config. Used to tell whether a filtered URL fetch is
+// about to create a new URL-keyed remote, so we only stamp remotes we create and
+// never rewrite ones the user already has.
+func gitRemoteSectionExists(ctx context.Context, dir, url string) bool {
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--list", "--name-only")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	// Each name is "remote.<url>.<key>". Git config keys carry no dots, so the
+	// final dotted component is the key and everything between "remote." and it
+	// is the subsection (the URL, whose case git preserves). Compare the
+	// subsection exactly so a longer URL that shares a prefix (e.g. a
+	// ".../repo.git" section vs a ".../repo" fetch) is not a false match.
+	for line := range strings.SplitSeq(string(out), "\n") {
+		rest, ok := strings.CutPrefix(line, "remote.")
+		if !ok {
+			continue
+		}
+		lastDot := strings.LastIndexByte(rest, '.')
+		if lastDot < 0 {
+			continue
+		}
+		if rest[:lastDot] == url {
+			return true
+		}
+	}
+	return false
 }
 
 // FetchBlobs fetches specific objects (typically blobs) by hash from a remote.
@@ -123,124 +399,6 @@ func FetchBlobs(ctx context.Context, remote string, hashes []string) error {
 		return fmt.Errorf("git fetch-pack from %s: %w", redactedURL, err)
 	}
 	return nil
-}
-
-// CatFilesOptions configures a git cat-file --batch read.
-type CatFilesOptions struct {
-	Specs     []string // one or more object names or revspecs
-	Dir       string   // working directory (empty = CWD)
-	ExtraArgs []string // additional flags before --batch
-}
-
-// CatFileResult is the result of reading one cat-file batch spec.
-type CatFileResult struct {
-	Content []byte
-	Missing bool
-	Err     error
-}
-
-// CatFiles reads specs through git cat-file --batch.
-func CatFiles(ctx context.Context, opts CatFilesOptions) map[string]CatFileResult {
-	specs := uniqueStrings(opts.Specs)
-	results := make(map[string]CatFileResult, len(specs))
-	if len(specs) == 0 {
-		return results
-	}
-
-	args := []string{"cat-file"}
-	args = append(args, opts.ExtraArgs...)
-	args = append(args, "--batch")
-	cmd := newCommand(ctx, args...)
-	if opts.Dir != "" {
-		cmd.Dir = opts.Dir
-	}
-	cmd.Stdin = strings.NewReader(strings.Join(specs, "\n") + "\n")
-	disableTerminalPrompt(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	output, err := cmd.Output()
-	if err != nil {
-		wrapped := catFilesError(err, stderr.String())
-		for _, spec := range specs {
-			results[spec] = CatFileResult{Err: wrapped}
-		}
-		return results
-	}
-
-	reader := bufio.NewReader(bytes.NewReader(output))
-	for i, spec := range specs {
-		result, parseErr := parseBlobBatchEntry(reader)
-		if parseErr != nil {
-			for _, s := range specs[i:] {
-				results[s] = CatFileResult{Err: parseErr}
-			}
-			break
-		}
-		results[spec] = result
-	}
-	return results
-}
-
-func parseBlobBatchEntry(reader *bufio.Reader) (CatFileResult, error) {
-	header, err := reader.ReadString('\n')
-	if err != nil {
-		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: %w", err)
-	}
-	header = strings.TrimSuffix(header, "\n")
-
-	fields := strings.Fields(header)
-	if len(fields) == 2 && fields[1] == "missing" {
-		return CatFileResult{Missing: true}, nil
-	}
-	if len(fields) != 3 {
-		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: unexpected header %q", header)
-	}
-
-	size, err := strconv.ParseInt(fields[2], 10, 64)
-	if err != nil {
-		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: invalid size %q: %w", fields[2], err)
-	}
-	content := make([]byte, size)
-	if _, err := io.ReadFull(reader, content); err != nil {
-		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: %w", err)
-	}
-	separator, err := reader.ReadByte()
-	if err != nil {
-		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: %w", err)
-	}
-	if separator != '\n' {
-		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: unexpected separator %q", separator)
-	}
-
-	if fields[1] != "blob" {
-		return CatFileResult{Err: fmt.Errorf("object %s is %s, want blob", fields[0], fields[1])}, nil
-	}
-	return CatFileResult{Content: content}, nil
-}
-
-func catFilesError(err error, stderr string) error {
-	msg := strings.TrimSpace(stderr)
-	if msg == "" {
-		return fmt.Errorf("git cat-file --batch: %w", err)
-	}
-	return fmt.Errorf("git cat-file --batch: %s: %w", msg, err)
-}
-
-func uniqueStrings(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	unique := make([]string, 0, len(values))
-	for _, value := range values {
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		unique = append(unique, value)
-	}
-	return unique
 }
 
 // PushResult holds raw porcelain output from git push.
@@ -304,9 +462,35 @@ func lsRemote(ctx context.Context, dir, remote string, patterns ...string) ([]by
 	disableTerminalPrompt(cmd)
 	out, err := cmd.Output()
 	if err != nil {
-		return out, fmt.Errorf("git ls-remote: %w", err)
+		return out, fmt.Errorf("git ls-remote: %w", formatGitCommandError(ctx, err, remote))
 	}
 	return out, nil
+}
+
+// formatGitCommandError enriches an exec error from git Output() so callers see
+// useful detail: context deadline expiry by name, and git's stderr (auth denied,
+// repository not found, DNS) which ExitError otherwise hides behind "exit status N".
+// When remote is a URL it may carry credentials that git echoes into stderr;
+// those are redacted before the error is returned (same pattern as FetchBlobs).
+func formatGitCommandError(ctx context.Context, err error, remote string) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("deadline exceeded: %w", err)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+			if remote != "" {
+				stderr = strings.ReplaceAll(stderr, remote, RedactURL(remote))
+			}
+			// Collapse whitespace so multi-line git stderr stays one log/attr value.
+			stderr = strings.Join(strings.Fields(stderr), " ")
+			return fmt.Errorf("%w (%s)", err, stderr)
+		}
+	}
+	return err
 }
 
 // IsURL returns true if the target looks like a URL rather than a git remote name.
@@ -364,6 +548,11 @@ func newCommand(ctx context.Context, args ...string) *exec.Cmd {
 		c := exec.CommandContext(ctx, "git", finalArgs...)
 		c.Stdin = nil // Disconnect stdin to prevent hanging in hook context
 		terminateOnCancel(c)
+		// Fail fast on interactive SSH prompts (e.g. a key passphrase with no
+		// ssh-agent) when the caller marked ctx non-interactive. HTTPS token
+		// auth rebuilds cmd.Env below (SSH is not used there), so this only
+		// takes effect on the SSH/no-token paths that actually run ssh.
+		applyNonInteractiveSSH(ctx, c)
 		return c
 	}
 

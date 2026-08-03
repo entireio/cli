@@ -3,7 +3,6 @@ package pi
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -146,18 +145,13 @@ func piSkillEvents(in []piSkillEventInput) []agent.SkillEvent {
 // ParseHookEvent translates a Pi hook invocation into a normalised lifecycle
 // event. Implements agent.HookSupport.
 func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
-	data, err := io.ReadAll(stdin)
+	// Stream one JSON value rather than io.ReadAll so the hook never blocks
+	// waiting for stdin EOF that some agents don't send on Windows (issue #1398).
+	parsed, err := agent.ReadAndParseHookInput[piHookPayload](stdin)
 	if err != nil {
-		return nil, fmt.Errorf("read pi hook input: %w", err)
+		return nil, err
 	}
-	if len(data) == 0 {
-		return nil, errors.New("empty pi hook input")
-	}
-
-	var payload piHookPayload
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return nil, fmt.Errorf("parse pi hook payload: %w", err)
-	}
+	payload := *parsed
 
 	sessionID := payload.SessionID
 	if sessionID == "" {
@@ -208,6 +202,7 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 			Type:       agent.TurnEnd,
 			SessionID:  sessionID,
 			SessionRef: sessionRef,
+			Model:      extractModelFromPiSessionFile(sessionRef),
 			Timestamp:  now,
 		}, nil
 
@@ -291,6 +286,22 @@ func cacheSessionID(ctx context.Context, id string) {
 	if err := os.WriteFile(filepath.Join(dir, activeSessionFile), []byte(id), 0o600); err != nil {
 		logging.Debug(ctx, "pi: cache session id write", slog.String("err", err.Error()))
 	}
+}
+
+func extractModelFromPiSessionFile(path string) string {
+	if path == "" {
+		return ""
+	}
+	//nolint:gosec // path comes from Pi's hook payload or our captured transcript path
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	model, err := (&PiAgent{}).ExtractModel(data)
+	if err != nil {
+		return ""
+	}
+	return model
 }
 
 func readCachedSessionID(ctx context.Context) string {

@@ -344,7 +344,7 @@ func TestParseGitHubRelease(t *testing.T) {
 // brewUpgradeCmd is the install command produced for any brew-installed
 // binary on a stable channel. Hoisted to a const so tests can reference
 // it without tripping goconst on repeated string literals.
-const brewUpgradeCmd = "brew upgrade entire"
+const brewUpgradeCmd = "brew upgrade --yes entire"
 
 const scoopExecutablePath = `C:\Users\test\scoop\apps\cli\current\entire.exe`
 
@@ -372,7 +372,7 @@ func TestUpdateCommand(t *testing.T) {
 			name:           "homebrew nightly path uses brew command",
 			currentVersion: "1.0.1-nightly.202604101200.abc1234",
 			execPath:       func() (string, error) { return "/opt/homebrew/bin/entire", nil },
-			want:           "brew upgrade entire@nightly",
+			want:           "brew upgrade --yes entire@nightly",
 		},
 		{
 			name:           "linuxbrew path",
@@ -607,7 +607,7 @@ func TestCheckAndNotify_BrewSkipUntilNextVersionCachesLatest(t *testing.T) {
 		t.Errorf("SkippedVersion = %q, want v2.0.0", cache.SkippedVersion)
 	}
 	if f.lastCmdStr != brewUpgradeCmd {
-		t.Errorf("prompt got cmd %q, want brew upgrade entire", f.lastCmdStr)
+		t.Errorf("prompt got cmd %q, want %q", f.lastCmdStr, brewUpgradeCmd)
 	}
 }
 

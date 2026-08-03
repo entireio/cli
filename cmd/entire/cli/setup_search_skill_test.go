@@ -18,13 +18,13 @@ import (
 func TestScaffoldSearchSkill_CreatesManagedFiles(t *testing.T) {
 	testCases := []struct {
 		name        string
-		scaffoldFn  func() (searchSkillScaffoldResult, error)
+		scaffoldFn  func() (managedScaffoldResult, error)
 		relPath     string
 		wantSnippet string
 	}{
 		{
 			name: "claude",
-			scaffoldFn: func() (searchSkillScaffoldResult, error) {
+			scaffoldFn: func() (managedScaffoldResult, error) {
 				return scaffoldSearchSkill(context.Background(), claudecode.NewClaudeCodeAgent())
 			},
 			relPath:     filepath.Join(".claude", "agents", "entire-search.md"),
@@ -32,7 +32,7 @@ func TestScaffoldSearchSkill_CreatesManagedFiles(t *testing.T) {
 		},
 		{
 			name: "codex",
-			scaffoldFn: func() (searchSkillScaffoldResult, error) {
+			scaffoldFn: func() (managedScaffoldResult, error) {
 				return scaffoldSearchSkill(context.Background(), codex.NewCodexAgent())
 			},
 			relPath:     filepath.Join(".codex", "agents", "entire-search.toml"),
@@ -40,7 +40,7 @@ func TestScaffoldSearchSkill_CreatesManagedFiles(t *testing.T) {
 		},
 		{
 			name: "gemini",
-			scaffoldFn: func() (searchSkillScaffoldResult, error) {
+			scaffoldFn: func() (managedScaffoldResult, error) {
 				return scaffoldSearchSkill(context.Background(), geminicli.NewGeminiCLIAgent())
 			},
 			relPath:     filepath.Join(".gemini", "agents", "entire-search.md"),
@@ -56,8 +56,8 @@ func TestScaffoldSearchSkill_CreatesManagedFiles(t *testing.T) {
 			if err != nil {
 				t.Fatalf("scaffoldSearchSkill() error = %v", err)
 			}
-			if result.Status != searchSkillCreated {
-				t.Fatalf("scaffoldSearchSkill() status = %q, want %q", result.Status, searchSkillCreated)
+			if result.Status != managedScaffoldCreated {
+				t.Fatalf("scaffoldSearchSkill() status = %q, want %q", result.Status, managedScaffoldCreated)
 			}
 			if result.RelPath != tc.relPath {
 				t.Fatalf("scaffoldSearchSkill() relPath = %q, want %q", result.RelPath, tc.relPath)
@@ -91,8 +91,8 @@ func TestScaffoldSearchSkill_IdempotentManagedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second scaffoldSearchSkill() error = %v", err)
 	}
-	if result.Status != searchSkillUnchanged {
-		t.Fatalf("second scaffoldSearchSkill() status = %q, want %q", result.Status, searchSkillUnchanged)
+	if result.Status != managedScaffoldUnchanged {
+		t.Fatalf("second scaffoldSearchSkill() status = %q, want %q", result.Status, managedScaffoldUnchanged)
 	}
 }
 
@@ -118,8 +118,8 @@ func TestScaffoldSearchSkill_UpdatesManagedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scaffoldSearchSkill() error = %v", err)
 	}
-	if result.Status != searchSkillUpdated {
-		t.Fatalf("scaffoldSearchSkill() status = %q, want %q", result.Status, searchSkillUpdated)
+	if result.Status != managedScaffoldUpdated {
+		t.Fatalf("scaffoldSearchSkill() status = %q, want %q", result.Status, managedScaffoldUpdated)
 	}
 
 	data, err := os.ReadFile(targetPath)
@@ -154,8 +154,8 @@ func TestScaffoldSearchSkill_PreservesUserOwnedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scaffoldSearchSkill() error = %v", err)
 	}
-	if result.Status != searchSkillSkippedConflict {
-		t.Fatalf("scaffoldSearchSkill() status = %q, want %q", result.Status, searchSkillSkippedConflict)
+	if result.Status != managedScaffoldSkippedConflict {
+		t.Fatalf("scaffoldSearchSkill() status = %q, want %q", result.Status, managedScaffoldSkippedConflict)
 	}
 
 	data, err := os.ReadFile(targetPath)

@@ -822,3 +822,31 @@ func firstNonSpaceIndex(s string, start, end int) int {
 	}
 	return -1
 }
+
+func TestAttributionCheckpointColumnWidth(t *testing.T) {
+	t.Parallel()
+	const headerWidth = 18 // len("Checkpoint/Session")
+
+	t.Run("no lines falls back to the header width", func(t *testing.T) {
+		t.Parallel()
+		if got := attributionCheckpointColumnWidth(nil); got != headerWidth {
+			t.Errorf("got %d, want %d", got, headerWidth)
+		}
+	})
+
+	t.Run("legacy hex keeps the historical 21-char column", func(t *testing.T) {
+		t.Parallel()
+		lines := []attributionLine{{CheckpointID: "a1b2c3d4e5f6", SessionID: "session-1234567890"}}
+		if got := attributionCheckpointColumnWidth(lines); got != 21 { // 12 + "/" + 8
+			t.Errorf("got %d, want 21", got)
+		}
+	})
+
+	t.Run("ULID widens the column so it is not clipped", func(t *testing.T) {
+		t.Parallel()
+		lines := []attributionLine{{CheckpointID: "01KVBJCWYA4YW6J5M9GP655HZN", SessionID: "session-1234567890"}}
+		if got := attributionCheckpointColumnWidth(lines); got != 35 { // 26 + "/" + 8
+			t.Errorf("got %d, want 35", got)
+		}
+	})
+}

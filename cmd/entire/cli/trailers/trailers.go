@@ -51,7 +51,8 @@ const (
 	AgentTrailerKey = "Entire-Agent"
 
 	// OPFAppliedTrailerKey marks an entire/checkpoints/v1 commit whose blobs
-	// have been redacted by the OpenAI Privacy Filter (8-layer pipeline).
+	// have been redacted by the OpenAI Privacy Filter (the opt-in 9th,
+	// network-backed layer, applied on top of the 8 regex layers).
 	// Format: literal "true"; the trailer is omitted entirely when OPF was
 	// not applied. The pre-push rewrite path treats commits lacking this
 	// trailer as candidates to OPF-redact before they reach the remote.
@@ -67,7 +68,6 @@ const (
 var (
 	metadataTrailerRegex     = regexp.MustCompile(MetadataTrailerKey + `:\s*(.+)`)
 	taskMetadataTrailerRegex = regexp.MustCompile(MetadataTaskTrailerKey + `:\s*(.+)`)
-	baseCommitTrailerRegex   = regexp.MustCompile(BaseCommitTrailerKey + `:\s*([a-f0-9]{40})`)
 	sessionTrailerRegex      = regexp.MustCompile(SessionTrailerKey + `:\s*(.+)`)
 	checkpointTrailerRegex   = regexp.MustCompile(CheckpointTrailerKey + `:\s*(` + checkpointID.CheckpointPattern + `)(?:\s|$)`)
 )
@@ -92,20 +92,9 @@ func ParseTaskMetadata(commitMessage string) (string, bool) {
 	return "", false
 }
 
-// ParseBaseCommit extracts the base commit SHA from a commit message.
-// Returns the full SHA and true if found, empty string and false otherwise.
-func ParseBaseCommit(commitMessage string) (string, bool) {
-	matches := baseCommitTrailerRegex.FindStringSubmatch(commitMessage)
-	if len(matches) > 1 {
-		return matches[1], true
-	}
-	return "", false
-}
-
 // ParseSession extracts the session ID from a commit message.
 // Returns the session ID and true if found, empty string and false otherwise.
 // Note: If multiple Entire-Session trailers exist, this returns only the first one.
-// Use ParseAllSessions to get all session IDs.
 func ParseSession(commitMessage string) (string, bool) {
 	matches := sessionTrailerRegex.FindStringSubmatch(commitMessage)
 	if len(matches) > 1 {
@@ -154,35 +143,6 @@ func ParseAllCheckpoints(commitMessage string) []checkpointID.CheckpointID {
 	return ids
 }
 
-// ParseAllSessions extracts all session IDs from a commit message.
-// Returns a slice of session IDs (may be empty if none found).
-// Duplicate session IDs are deduplicated while preserving order.
-// This is useful for commits that may have multiple Entire-Session trailers.
-func ParseAllSessions(commitMessage string) []string {
-	matches := sessionTrailerRegex.FindAllStringSubmatch(commitMessage, -1)
-	if len(matches) == 0 {
-		return nil
-	}
-
-	seen := make(map[string]bool)
-	sessionIDs := make([]string, 0, len(matches))
-	for _, match := range matches {
-		if len(match) > 1 {
-			sessionID := strings.TrimSpace(match[1])
-			if !seen[sessionID] {
-				seen[sessionID] = true
-				sessionIDs = append(sessionIDs, sessionID)
-			}
-		}
-	}
-	return sessionIDs
-}
-
-// FormatTaskMetadata creates a commit message with task metadata trailer.
-func FormatTaskMetadata(message, taskMetadataDir string) string {
-	return fmt.Sprintf("%s\n\n%s: %s\n", message, MetadataTaskTrailerKey, taskMetadataDir)
-}
-
 // FormatSourceRef creates a formatted source ref string for the trailer.
 // Format: "<branch>@<commit-hash-prefix>" (hash truncated to ShortIDLength chars)
 func FormatSourceRef(branch, commitHash string) string {
@@ -191,11 +151,6 @@ func FormatSourceRef(branch, commitHash string) string {
 		shortHash = shortHash[:checkpointID.ShortIDLength]
 	}
 	return fmt.Sprintf("%s@%s", branch, shortHash)
-}
-
-// FormatMetadata creates a commit message with metadata trailer.
-func FormatMetadata(message, metadataDir string) string {
-	return fmt.Sprintf("%s\n\n%s: %s\n", message, MetadataTrailerKey, metadataDir)
 }
 
 // FormatShadowCommit creates a commit message for manual-commit strategy checkpoints.

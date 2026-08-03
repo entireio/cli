@@ -20,6 +20,10 @@ func init() {
 		return
 	}
 	Register(&Droid{})
+	// factoryai-droid is run serially in CI (E2E_CONCURRENT_TEST_LIMIT=1).
+	// Without a registered gate, AcquireSlot is a no-op and that limit has no
+	// effect; register the gate so the intended serialization is respected.
+	RegisterGate("factoryai-droid", 1)
 }
 
 // Droid implements the Agent interface for Factory AI Droid.
@@ -187,10 +191,33 @@ func (d *Droid) StartSession(ctx context.Context, dir string) (Session, error) {
 		return nil, err
 	}
 
-	// Wait for the interactive prompt indicator.
-	if _, err := s.WaitFor(`>`, 30*time.Second); err != nil {
+	// Dismiss startup dialogs (folder trust, etc.) then wait for the input
+	// prompt. Droid v0.178.0 added a "Trust this folder?" dialog in interactive
+	// mode for untrusted directories. Its "1. Trust this folder" option is
+	// pre-selected, so Enter confirms it. The dialog renders its selected option
+	// as "> 1. Trust this folder", so a bare ">" match cannot distinguish the
+	// dialog from the real input box — we must key off the dialog chrome (see
+	// isDroidStartupDialog) before treating ">" as ready.
+	foundPrompt := false
+	for range 5 {
+		content, err := s.WaitFor(`>`, 30*time.Second)
+		if err != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("waiting for startup prompt: %w", err)
+		}
+		if !isDroidStartupDialog(content) {
+			foundPrompt = true
+			break
+		}
+		if err := s.SendKeys("Enter"); err != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("dismissing startup dialog: %w", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !foundPrompt {
 		_ = s.Close()
-		return nil, fmt.Errorf("waiting for startup prompt: %w", err)
+		return nil, errors.New("droid did not reach interactive prompt after dismissing startup dialogs")
 	}
 
 	// Droid auto-generates a greeting on startup which fires a Stop hook.
@@ -204,4 +231,17 @@ func (d *Droid) StartSession(ctx context.Context, dir string) (Session, error) {
 	s.stableAtSend = ""
 
 	return s, nil
+}
+
+// isDroidStartupDialog reports whether the captured pane is showing a Droid
+// startup dialog (currently the "Trust this folder?" prompt) rather than the
+// interactive input box. The dialog renders its pre-selected option as
+// "> 1. Trust this folder", so the presence of ">" alone cannot distinguish it
+// from the real prompt — we key off the dialog title ("trust this folder") and
+// its "exit without trusting" option label instead.
+// Matching is case-insensitive to stay resilient to Droid re-casing its copy.
+func isDroidStartupDialog(content string) bool {
+	lower := strings.ToLower(content)
+	return strings.Contains(lower, "trust this folder") ||
+		strings.Contains(lower, "exit without trusting")
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/uiform"
 )
 
 // envKillSwitch disables the interactive update prompt regardless of TTY.
@@ -114,10 +115,7 @@ func realChooseUpdate(ctx context.Context, currentVersion, latestVersion, cmdStr
 			huh.NewOption("Skip until next version", autoUpdateActionSkipUntilNextVersion),
 		).
 		Value(&action)
-	form := huh.NewForm(huh.NewGroup(sel)).WithTheme(huh.ThemeFunc(huh.ThemeDracula))
-	if os.Getenv("ACCESSIBLE") != "" {
-		form = form.WithAccessible(true)
-	}
+	form := uiform.New(huh.NewGroup(sel))
 	if err := form.RunWithContext(ctx); err != nil {
 		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, huh.ErrTimeout) {
 			return autoUpdateActionSkip, nil

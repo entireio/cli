@@ -50,8 +50,16 @@ func TestRegistry_AllSupportedAgents(t *testing.T) {
 	want := []string{
 		"claude-code", "cursor", "pi", "factoryai-droid", "codex", "copilot-cli", "gemini",
 	}
+	registered := make(map[string]Importer)
+	for _, imp := range All() {
+		if _, dup := registered[imp.Name()]; dup {
+			t.Errorf("duplicate importer name %q", imp.Name())
+		}
+		registered[imp.Name()] = imp
+	}
+
 	for _, name := range want {
-		imp, ok := Get(name)
+		imp, ok := registered[name]
 		if !ok {
 			t.Errorf("%s importer not registered", name)
 			continue
@@ -59,14 +67,6 @@ func TestRegistry_AllSupportedAgents(t *testing.T) {
 		if imp.AgentType() == "" {
 			t.Errorf("%s importer has empty AgentType", name)
 		}
-	}
-
-	seen := make(map[string]bool)
-	for _, imp := range All() {
-		if seen[imp.Name()] {
-			t.Errorf("duplicate importer name %q", imp.Name())
-		}
-		seen[imp.Name()] = true
 	}
 	if len(All()) != len(want) {
 		t.Errorf("registered %d importers, want %d (%v)", len(All()), len(want), want)
@@ -90,7 +90,10 @@ func initRepoWithCommit(t *testing.T) (*git.Repository, string) {
 		t.Fatal(err)
 	}
 	if _, err := wt.Commit("init", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+		// When must be a real timestamp: the anchor resolver's bounded walk
+		// stops at commits older than its date cutoff, and a zero-value When
+		// (year 1) would halt the walk at the first commit.
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -149,6 +152,138 @@ func TestRun_ImportsAndIsIdempotent(t *testing.T) {
 		if !in.Imported {
 			t.Fatalf("checkpoint %s missing Imported flag: %+v", in.CheckpointID, in)
 		}
+	}
+}
+
+// TestRun_StampsLinkCommitSHA proves Options.LinkCommitSHA is copied verbatim
+// into each imported checkpoint's commit_sha metadata field, and that leaving
+// it unset leaves commit_sha empty. Run resolves nothing itself.
+func TestRun_StampsLinkCommitSHA(t *testing.T) {
+	t.Parallel()
+	repo, repoDir := initRepoWithCommit(t)
+	const commitSHA = "b01b59663fd4860fd15a9939499be44a14dbf168"
+
+	claudeDirWithSHA := t.TempDir()
+	writeFixtureSession(t, claudeDirWithSHA, "sess-with-sha.jsonl")
+	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: claudeDirWithSHA,
+		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+		LinkCommitSHA: commitSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported != 2 {
+		t.Fatalf("want 2 imported, got %+v", res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cid := DeriveCheckpointID("sess-with-sha", "u1")
+	md, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md.CommitSHA != commitSHA {
+		t.Fatalf("expected commit_sha %q, got %q", commitSHA, md.CommitSHA)
+	}
+
+	// A separate session fixture (own sessionID/turn UUIDs) run with
+	// LinkCommitSHA unset must persist an empty commit_sha. Reusing the same
+	// session would be idempotently skipped, so this needs its own fixture.
+	claudeDirNoSHA := t.TempDir()
+	writeFixtureSession(t, claudeDirNoSHA, "sess-no-sha.jsonl")
+	res2, err := Run(context.Background(), repo, claudeImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: claudeDirNoSHA,
+		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.TurnsImported != 2 {
+		t.Fatalf("want 2 imported, got %+v", res2)
+	}
+
+	cid2 := DeriveCheckpointID("sess-no-sha", "u1")
+	md2, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md2.CommitSHA != "" {
+		t.Fatalf("expected empty commit_sha, got %q", md2.CommitSHA)
+	}
+}
+
+// TestRun_AnchorsTurnToRecordedCommit proves a turn whose transcript records a
+// resolvable, default-branch-reachable commit anchors to that real commit
+// instead of the LinkCommitSHA fallback, while a turn with no recorded commit
+// still falls back exactly as before.
+func TestRun_AnchorsTurnToRecordedCommit(t *testing.T) {
+	t.Parallel()
+	repo, repoDir := initRepoWithCommit(t)
+	firstCommit, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstSHA := firstCommit.Hash().String()
+
+	// Second commit on the default branch, so tip != first commit.
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAndCommit(t, wt, repoDir, "y", "second")
+	tipHead, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tipSHA := tipHead.Hash().String()
+
+	claudeDir := t.TempDir()
+	content := strings.Join([]string{
+		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"output_tokens":5}}}`,
+		`{"type":"user","uuid":"tr1","toolUseResult":{"gitOperation":{"commit":{"sha":"` + firstSHA[:7] + `","kind":"committed"}}}}`,
+		`{"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"second"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(claudeDir, "sess-anchor.jsonl"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: claudeDir,
+		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+		LinkCommitSHA: tipSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported != 2 {
+		t.Fatalf("want 2 imported, got %+v", res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cid1 := DeriveCheckpointID("sess-anchor", "u1")
+	md1, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md1.CommitSHA != firstSHA {
+		t.Fatalf("turn1 CommitSHA = %q, want recorded commit %q", md1.CommitSHA, firstSHA)
+	}
+
+	cid2 := DeriveCheckpointID("sess-anchor", "u2")
+	md2, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md2.CommitSHA != tipSHA {
+		t.Fatalf("turn2 CommitSHA = %q, want fallback %q", md2.CommitSHA, tipSHA)
 	}
 }
 
@@ -246,6 +381,133 @@ func TestRun_CursorImporterEndToEnd(t *testing.T) {
 	}
 	if len(infos) != 1 || !infos[0].Imported {
 		t.Fatalf("expected 1 imported cursor checkpoint, got %+v", infos)
+	}
+}
+
+// TestRun_StampsImporterGitAuthorOnCheckpointCommit proves an imported
+// checkpoint's underlying git commit on entire/checkpoints/v1 carries the
+// importer's configured git identity (resolved once per Run via
+// checkpoint.GetGitAuthorFromRepo), not an empty signature.
+//
+// Motivation: on the GitHub->mirror ingestion path, the data plane has no
+// pusher identity for imported sessions and falls back to the checkpoint
+// commit's git author. An empty author meant imported sessions couldn't be
+// attributed to the importer.
+func TestRun_StampsImporterGitAuthorOnCheckpointCommit(t *testing.T) {
+	t.Parallel()
+	repo, repoDir := initRepoWithCommit(t)
+	claudeDir := t.TempDir()
+	writeFixtureSession(t, claudeDir, "sess-author.jsonl")
+
+	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: claudeDir,
+		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported != 2 {
+		t.Fatalf("want 2 imported, got %+v", res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ar, ok := stores.Persistent.(cp.AuthorReader)
+	if !ok {
+		t.Fatalf("persistent store %T does not implement AuthorReader", stores.Persistent)
+	}
+	cid := DeriveCheckpointID("sess-author", "u1")
+	author, err := ar.GetCheckpointAuthor(context.Background(), cid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// initRepoWithCommit uses testutil.InitRepo, which configures this
+	// repo-local git identity.
+	const wantName, wantEmail = "Test User", "test@example.com"
+	if author.Name != wantName || author.Email != wantEmail {
+		t.Fatalf("checkpoint commit author = %+v, want Name=%q Email=%q (the repo's configured git identity)",
+			author, wantName, wantEmail)
+	}
+}
+
+// TestRun_UnconfiguredGitIdentityFallsBackToDefaults proves that when the
+// importer's repo has no configured git user (no local or global user.name /
+// user.email), the imported checkpoint commit still gets a signature — the
+// same "Unknown"/"unknown@local" default checkpoint.GetGitAuthorFromRepo
+// already applies elsewhere, rather than an empty one.
+func TestRun_UnconfiguredGitIdentityFallsBackToDefaults(t *testing.T) {
+	// Cannot use t.Parallel(): isolates git config resolution via t.Setenv so
+	// this repo can't see any real identity. GetGitAuthorFromRepo resolves
+	// GlobalScope through go-git's Auto loader, which reads all of git's global
+	// sources; neutralize every one or the fallback assertion is flaky wherever
+	// an identity is configured (~/.gitconfig, XDG, GIT_CONFIG_GLOBAL, or system
+	// /etc/gitconfig). Mirrors the checkpoint package's pointHomeAt helper.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	// t.Setenv registers restoration of the original value; unset it for the
+	// test since an empty GIT_CONFIG_GLOBAL disables global config entirely.
+	t.Setenv("GIT_CONFIG_GLOBAL", "")
+	if err := os.Unsetenv("GIT_CONFIG_GLOBAL"); err != nil {
+		t.Fatal(err)
+	}
+
+	repoDir := t.TempDir()
+	repo, err := git.PlainInit(repoDir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed one commit with a real timestamp (the anchor resolver's bounded
+	// walk stops at commits older than its date cutoff; a zero-value When
+	// would halt it immediately). The commit's own author signature is
+	// independent of GetGitAuthorFromRepo's config-based resolution under
+	// test here.
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, repoDir, "f.txt", "x")
+	if _, err := wt.Add("f.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Commit("init", &git.CommitOptions{
+		Author: &object.Signature{Name: "Seed", Email: "seed@test.com", When: time.Now()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	claudeDir := t.TempDir()
+	writeFixtureSession(t, claudeDir, "sess-noauthor.jsonl")
+
+	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: claudeDir,
+		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported != 2 {
+		t.Fatalf("want 2 imported, got %+v", res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ar, ok := stores.Persistent.(cp.AuthorReader)
+	if !ok {
+		t.Fatalf("persistent store %T does not implement AuthorReader", stores.Persistent)
+	}
+	cid := DeriveCheckpointID("sess-noauthor", "u1")
+	author, err := ar.GetCheckpointAuthor(context.Background(), cid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if author.Name != "Unknown" || author.Email != "unknown@local" {
+		t.Fatalf("checkpoint commit author = %+v, want the GetGitAuthorFromRepo defaults", author)
 	}
 }
 

@@ -140,7 +140,7 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 
 	return "Checkpoint context from commits in scope:\n" +
 		strings.Join(lines, "\n") +
-		"\n\nUse `entire explain <id>` for full checkpoint context, or `entire explain <id> --raw-transcript` for raw transcripts."
+		"\n\nUse `entire checkpoint explain <id>` for full checkpoint context, or `entire checkpoint explain <id> --raw-transcript` for raw transcripts."
 }
 
 // reviewSessionContext returns a "In-progress session context (uncommitted):"
@@ -379,10 +379,7 @@ func truncateReviewContextText(value string) string {
 }
 
 func reviewContextCheckpointNoun(count int) string {
-	if count == 1 {
-		return "checkpoint"
-	}
-	return "checkpoints"
+	return pluralize("checkpoint", count)
 }
 
 func reviewContextCommitMessages(ctx context.Context, repoRoot string, scopeBaseRef string, maxCommits int) ([]string, bool, error) {

@@ -100,7 +100,12 @@ func TestWriteCommitted_WritesCompactTranscript(t *testing.T) {
 	}
 }
 
-func TestWriteCommitted_CompactTranscriptScopedToCheckpointStart(t *testing.T) {
+// TestWriteCommitted_CompactTranscriptFullWithMarker verifies the full-compact
+// contract: transcript.jsonl stores the entire compacted session (so each
+// checkpoint is self-contained), and the session metadata's
+// compact_transcript_start marks where this checkpoint's slice begins. Readers
+// recover this checkpoint's content as fullCompactLines[marker:].
+func TestWriteCommitted_CompactTranscriptFullWithMarker(t *testing.T) {
 	t.Parallel()
 	repo, _ := setupTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
@@ -124,12 +129,26 @@ func TestWriteCommitted_CompactTranscriptScopedToCheckpointStart(t *testing.T) {
 	if !ok {
 		t.Fatal("transcript.jsonl missing from checkpoint tree")
 	}
-	if strings.Contains(compactContent, "hello one") || strings.Contains(compactContent, "reply one") {
-		t.Errorf("compact transcript contains content before checkpoint start:\n%s", compactContent)
+	// The file now contains the WHOLE session, including pre-start content.
+	for _, want := range []string{"hello one", "reply one", "hello two", "reply two"} {
+		if !strings.Contains(compactContent, want) {
+			t.Errorf("full compact transcript missing %q:\n%s", want, compactContent)
+		}
 	}
-	if !strings.Contains(compactContent, "hello two") || !strings.Contains(compactContent, "reply two") {
-		t.Errorf("compact transcript missing checkpoint-scoped content:\n%s", compactContent)
+
+	// The marker scopes this checkpoint: raw line 2 (the second user turn) maps
+	// to compact line 2, and fullCompactLines[2:] is exactly this checkpoint's slice.
+	meta := readSessionMetadata(t, repo, cpID)
+	marker, ok := meta.GetCompactTranscriptStart()
+	if !ok {
+		t.Fatal("compact_transcript_start not recorded in session metadata")
 	}
+	if marker != 2 {
+		t.Fatalf("compact_transcript_start = %d, want 2", marker)
+	}
+
+	assertCompactSliceScoped(t, compactContent, marker,
+		[]string{"hello one", "reply one"}, []string{"hello two", "reply two"})
 }
 
 func TestWriteCommitted_NonCompactableTranscriptPointsAtFull(t *testing.T) {
@@ -268,16 +287,24 @@ func TestUpdateCommitted_CodexCompactSanitizedLikeInitialWrite(t *testing.T) {
 	if !ok {
 		t.Fatal("transcript.jsonl missing after WriteCommitted")
 	}
-	if strings.Contains(initialCompact, "beta") {
-		t.Errorf("initial compact contains pre-start content:\n%s", initialCompact)
-	}
+	// transcript.jsonl is now the full sanitized session: the compaction line is
+	// dropped, so it holds [alpha, beta, gamma]. Scoping is via the marker.
 	if !strings.Contains(initialCompact, "gamma") {
-		t.Errorf("initial compact missing checkpoint-scoped content:\n%s", initialCompact)
+		t.Errorf("initial compact missing content:\n%s", initialCompact)
 	}
+	// The marker scopes out everything before the checkpoint start. Sanitize
+	// runs before compaction, so the dropped compaction line shifts the window:
+	// fullCompactLines[marker:] must be exactly [gamma], excluding "beta".
+	initialMeta := readSessionMetadata(t, repo, cpID)
+	initialMarker, ok := initialMeta.GetCompactTranscriptStart()
+	if !ok {
+		t.Fatal("compact_transcript_start not recorded after WriteCommitted")
+	}
+	assertCompactSliceScoped(t, initialCompact, initialMarker, []string{"beta"}, []string{"gamma"})
 
 	// Finalize with the same raw transcript. replaceTranscript must sanitize
-	// before compaction; otherwise the raw slice at line 2 would reintroduce
-	// "beta".
+	// before compaction, exactly like the initial write — otherwise the full
+	// content or the marker would diverge.
 	err = store.Write(context.Background(), SessionTranscript{
 		CheckpointID: cpID,
 		SessionID:    "session-001",
@@ -291,11 +318,95 @@ func TestUpdateCommitted_CodexCompactSanitizedLikeInitialWrite(t *testing.T) {
 	if !ok {
 		t.Fatal("transcript.jsonl missing after UpdateCommitted")
 	}
-	if strings.Contains(finalizeCompact, "beta") {
-		t.Errorf("finalize compact contains pre-start content (raw bytes not sanitized):\n%s", finalizeCompact)
-	}
 	if finalizeCompact != initialCompact {
 		t.Errorf("finalize compact diverges from initial write:\ninitial:  %s\nfinalize: %s", initialCompact, finalizeCompact)
+	}
+	finalizeMeta := readSessionMetadata(t, repo, cpID)
+	finalizeMarker, ok := finalizeMeta.GetCompactTranscriptStart()
+	if !ok {
+		t.Fatal("compact_transcript_start not recorded after UpdateCommitted")
+	}
+	if finalizeMarker != initialMarker {
+		t.Errorf("finalize marker %d diverges from initial marker %d", finalizeMarker, initialMarker)
+	}
+	assertCompactSliceScoped(t, finalizeCompact, finalizeMarker, []string{"beta"}, []string{"gamma"})
+}
+
+// assertCompactSliceScoped checks that slicing the full compact transcript at
+// the marker yields exactly this checkpoint's content: every wantAbsent string
+// (pre-start content) is gone and every wantPresent string is retained.
+func assertCompactSliceScoped(t *testing.T, compactContent string, marker int, wantAbsent, wantPresent []string) {
+	t.Helper()
+	lines := strings.Split(strings.TrimRight(compactContent, "\n"), "\n")
+	if marker > len(lines) {
+		t.Fatalf("marker %d out of range for %d compact lines", marker, len(lines))
+	}
+	slice := strings.Join(lines[marker:], "\n")
+	for _, s := range wantAbsent {
+		if strings.Contains(slice, s) {
+			t.Errorf("slice past marker contains pre-start content %q:\n%s", s, slice)
+		}
+	}
+	for _, s := range wantPresent {
+		if !strings.Contains(slice, s) {
+			t.Errorf("slice past marker missing checkpoint content %q:\n%s", s, slice)
+		}
+	}
+}
+
+// TestUpdateCommitted_DropsStaleCompactWhenRegenerationProducesNone guards the
+// OPF/finalize rewrite: if the re-redacted transcript no longer yields a compact
+// transcript, the stale transcript.jsonl from the initial write must be removed
+// (not shipped as a less-redacted artifact) and its marker cleared, rather than
+// left pointing at content that no longer matches the re-redacted full.jsonl.
+func TestUpdateCommitted_DropsStaleCompactWhenRegenerationProducesNone(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	cpID := id.MustCheckpointID("a7b8c9d0e1f2")
+
+	// Initial write: compactable transcript → transcript.jsonl + marker present.
+	if err := store.Write(context.Background(), Session{
+		CheckpointID:              cpID,
+		SessionID:                 "session-001",
+		Strategy:                  "manual-commit",
+		Transcript:                redact.AlreadyRedacted(claudeStyleTranscript()),
+		Agent:                     agent.AgentTypeClaudeCode,
+		CheckpointTranscriptStart: 2,
+		AuthorName:                "Test",
+		AuthorEmail:               "test@test.com",
+	}); err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+	sessionPath := cpID.Path() + "/0/"
+	if _, ok := readBranchFile(t, store, sessionPath+paths.CompactTranscriptFileName); !ok {
+		t.Fatal("precondition: transcript.jsonl missing after initial write")
+	}
+	if _, ok := readSessionMetadata(t, repo, cpID).GetCompactTranscriptStart(); !ok {
+		t.Fatal("precondition: compact_transcript_start not recorded after initial write")
+	}
+
+	// Finalize with a non-compactable transcript: regeneration yields nothing.
+	if err := store.Write(context.Background(), SessionTranscript{
+		CheckpointID: cpID,
+		SessionID:    "session-001",
+		Transcript:   redact.AlreadyRedacted([]byte("not json at all\nstill not json\n")),
+		Agent:        agent.AgentTypeClaudeCode,
+	}); err != nil {
+		t.Fatalf("UpdateCommitted() error = %v", err)
+	}
+
+	// Stale compact transcript dropped from the tree.
+	if _, ok := readBranchFile(t, store, sessionPath+paths.CompactTranscriptFileName); ok {
+		t.Error("stale transcript.jsonl left in tree after regeneration produced none")
+	}
+	// Root summary pointer cleared.
+	if got := readSummaryFromBranch(t, repo, cpID).Sessions[0].CompactTranscript; got != "" {
+		t.Errorf("sessions[0].compact_transcript = %q, want empty", got)
+	}
+	// Session metadata marker cleared.
+	if offset, ok := readSessionMetadata(t, repo, cpID).GetCompactTranscriptStart(); ok {
+		t.Errorf("compact_transcript_start still set (%d) after stale compact dropped", offset)
 	}
 }
 

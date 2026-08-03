@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -12,16 +13,15 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// newRepoCmd is the hidden `entire repo` command group: control-plane
-// repository lifecycle (create, list within a project, get, delete) plus the
-// `clone` convenience that resolves a mirror and shells out to `git clone`.
-// Other git content operations (log, diff, …) remain intentionally out of scope
-// here. Surfaced via `entire labs`.
+// newRepoCmd is the `entire repo` command group: control-plane
+// repository lifecycle (create, list within a project, get, delete), the
+// `mirror` and `visibility` subtrees, plus the `clone` convenience that
+// resolves a mirror and shells out to `git clone`. Other git content
+// operations (log, diff, …) remain intentionally out of scope here.
 func newRepoCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "repo",
-		Short:  "Manage Entire repositories",
-		Hidden: true,
+		Use:   "repo",
+		Short: "Manage Entire repositories",
 	}
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newRepoCreateCmd())
@@ -30,6 +30,7 @@ func newRepoCmd() *cobra.Command {
 	cmd.AddCommand(newRepoDeleteCmd())
 	cmd.AddCommand(newRepoCloneCmd())
 	cmd.AddCommand(newRepoMirrorCmd())
+	cmd.AddCommand(newRepoVisibilityCmd())
 	return cmd
 }
 
@@ -38,11 +39,23 @@ func newRepoCmd() *cobra.Command {
 var repoColumns = []string{"ID", "NAME", "PROJECT", "CLUSTER", "STATE"}
 
 func repoRow(r coreapi.Repo) []string {
-	state := ""
-	if v, ok := r.State.Get(); ok {
-		state = string(v)
+	return []string{r.ID, r.Name, r.OwningProjectId, r.ClusterHost.Or("-"), r.State.Or("-")}
+}
+
+// repoDetailColumns / repoDetailRow extend the shared repo view with the
+// entire:// clone URL for the single-repo `get` output. The list view stays on
+// the lean repoColumns — a full clone URL per row would bloat the table — but a
+// person inspecting one repo wants the URL they can paste into `git clone`
+// (COR-699). REMOTE is "-" until the repo is provisioned enough to have a
+// resolvable cluster host + path.
+var repoDetailColumns = []string{"ID", "NAME", "PROJECT", "CLUSTER", "STATE", "REMOTE"}
+
+func repoDetailRow(r coreapi.Repo) []string {
+	remote := repoRemoteURL(r)
+	if remote == "" {
+		remote = "-"
 	}
-	return []string{r.ID, r.Name, r.OwningProjectId, r.ClusterHost.Or("-"), state}
+	return append(repoRow(r), remote)
 }
 
 // repoRemoteURL synthesizes the entire:// clone/remote URL for a repo from
@@ -104,10 +117,10 @@ func newRepoCreateCmd() *cobra.Command {
 		Short: "Create a repository in a project",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
+			return runCoreMutation(cmd, func(ctx context.Context, c *coreapi.Client) (string, any, error) {
 				projID, err := resolveProjectRef(ctx, c, projectID)
 				if err != nil {
-					return nil, err
+					return "", nil, err
 				}
 				body := &coreapi.CreateRepoInputBody{
 					Name:      args[0],
@@ -118,44 +131,136 @@ func newRepoCreateCmd() *cobra.Command {
 				}
 				created, err := c.CreateRepo(ctx, body)
 				if err != nil {
-					return nil, err
+					return "", nil, err
 				}
-				return repoCreateOutput(created)
+				wire, err := repoCreateOutput(created)
+				if err != nil {
+					return "", nil, err
+				}
+				msg := fmt.Sprintf("✓ Created repository %s (%s)", created.Name, created.ID)
+				if remote := repoRemoteURL(*created); remote != "" {
+					msg += "\n  Remote: " + remote
+				}
+				return msg, wire, nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&projectID, "project", "", "owning project (name or ULID) (required)")
-	cmd.Flags().StringVar(&clusterHost, "cluster-host", "", "public host of the cluster to pin the repo to (defaults to the jurisdiction default)")
+	cmd.Flags().StringVar(&projectID, "project", "", "Owning project (name or ULID) (required)")
+	cmd.Flags().StringVar(&clusterHost, "cluster-host", "", "Public host of the cluster to pin the repo to (defaults to the jurisdiction default)")
 	markRequired(cmd, "project")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newRepoListCmd() *cobra.Command {
-	return &cobra.Command{
+	var limit, pageSize int
+	var all, noPager bool
+	var pageToken string
+	cmd := &cobra.Command{
 		Use:   "list <project>",
 		Short: "List repositories in a project",
-		Long:  "List repositories in a project, addressed by name or ULID.",
-		Args:  cobra.ExactArgs(1),
+		Long: "List repositories in a project, addressed by name or ULID.\n\n" +
+			"By default at most " + strconv.Itoa(coreListFetchBudget) + " repositories are fetched; when the project " +
+			"has more, a note on stderr says so — pass --all to fetch everything, or " +
+			"--limit N for exactly the first N (rows come in server order; this list " +
+			"has no local filters or sort).\n\n" +
+			"For manual paging, --page-size/--page-token fetch exactly one page and " +
+			"report the cursor to resume from (--json wraps rows in an {items, " +
+			"nextPageToken} envelope).",
+		Args: cobra.ExactArgs(1),
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			if limit < 0 {
+				return fmt.Errorf("--limit must be zero or positive, got %d", limit)
+			}
+			return validatePageSize(cmd, pageSize)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreList(cmd, repoColumns, repoRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Repo, error) {
-				projID, err := resolveProjectRef(ctx, c, args[0])
-				if err != nil {
-					return nil, err
-				}
-				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Repo, string, error) {
-					params := coreapi.ListProjectReposParams{ProjectId: projID}
-					if cursor != "" {
-						params.PageToken = coreapi.NewOptString(cursor)
-					}
-					out, err := c.ListProjectRepos(ctx, params)
+			// Decide color against the real output writer before
+			// flushThroughPager swaps stdout for a buffer that never looks
+			// like a TTY; the buffered render passes the pre-styled cells
+			// through unchanged (see preStyleTable).
+			headers, row := preStyleTable(cmd.OutOrStdout(), repoColumns, repoRow)
+			if pageModeRequested(cmd) {
+				return flushThroughPager(cmd, noPager, func() error {
+					return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+						projID, err := resolveProjectRef(ctx, c, args[0])
+						if err != nil {
+							return err
+						}
+						params := coreapi.ListProjectReposParams{ProjectId: projID}
+						if pageToken != "" {
+							params.PageToken = coreapi.NewOptString(pageToken)
+						}
+						if pageSize > 0 {
+							params.PageSize = coreapi.NewOptInt32(int32(pageSize)) //nolint:gosec // G115: validatePageSize bounds it
+						}
+						out, err := c.ListProjectRepos(ctx, params)
+						if err != nil {
+							return err
+						}
+						return renderCoreListPage(cmd, "No repositories found in this project.", headers, row, out.Repos, out.NextPageToken.Or(""))
+					})
+				})
+			}
+			return flushThroughPager(cmd, noPager, func() error {
+				return runCoreList(cmd, "No repositories found in this project.", headers, row, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Repo, error) {
+					projID, err := resolveProjectRef(ctx, c, args[0])
 					if err != nil {
-						return nil, "", err
+						return nil, err
 					}
-					return out.Repos, out.NextPageToken.Or(""), nil
+					// Rows render in server order with no local filters or
+					// sort, so --limit bounds the fetch directly; without it
+					// the default budget bounds the walk instead.
+					budget := coreListFetchBudget
+					switch {
+					case all:
+						budget = 0 // unbounded
+					case limit > 0:
+						budget = limit
+					}
+					repos, partial, err := fetchPagesBounded(ctx, budget, func(ctx context.Context, cursor string) ([]coreapi.Repo, string, error) {
+						params := coreapi.ListProjectReposParams{ProjectId: projID}
+						if cursor != "" {
+							params.PageToken = coreapi.NewOptString(cursor)
+						}
+						out, err := c.ListProjectRepos(ctx, params)
+						if err != nil {
+							return nil, "", err
+						}
+						return out.Repos, out.NextPageToken.Or(""), nil
+					})
+					if err != nil {
+						return nil, err
+					}
+					// An explicit --limit is not a surprise, so only the
+					// default budget's stop is disclosed. Printed for --json
+					// too: a script acting on silently partial data is the
+					// worst outcome, and stderr never corrupts the stdout JSON.
+					if partial && limit == 0 {
+						fmt.Fprintf(cmd.ErrOrStderr(),
+							"Note: the project has more repositories; showing the first %d fetched — pass --all to fetch everything.\n",
+							len(repos))
+					}
+					if limit > 0 && len(repos) > limit {
+						repos = repos[:limit] // trim a page overshoot
+					}
+					return repos, nil
 				})
 			})
 		},
 	}
+	cmd.Flags().IntVar(&limit, "limit", 0, "Fetch and show only the first N repositories (0 uses the default fetch budget)")
+	cmd.Flags().BoolVar(&all, "all", false, "Fetch every repository instead of the first "+strconv.Itoa(coreListFetchBudget)+" (slower on large projects)")
+	cmd.Flags().BoolVar(&noPager, "no-pager", false, "Print directly to stdout instead of a pager for long output")
+	pageModeFlags(cmd, &pageSize, &pageToken)
+	addJSONFlag(cmd)
+	setFlagGroup(cmd, flagGroupNavigation, "all", "limit", "page-size", "page-token")
+	setFlagGroup(cmd, flagGroupFormatting, "json", "no-pager")
+	useGroupedFlagHelp(cmd,
+		flagGroup{name: flagGroupNavigation},
+		flagGroup{name: flagGroupFormatting},
+	)
+	return cmd
 }
 
 func newRepoGetCmd() *cobra.Command {
@@ -165,7 +270,7 @@ func newRepoGetCmd() *cobra.Command {
 		Short: "Show a repository by name or ULID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreObject(cmd, repoColumns, repoRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Repo, error) {
+			return runCoreObject(cmd, repoDetailColumns, repoDetailRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Repo, error) {
 				repoID, err := resolveRepoRef(ctx, c, args[0], project)
 				if err != nil {
 					return nil, err
@@ -175,6 +280,7 @@ func newRepoGetCmd() *cobra.Command {
 		},
 	}
 	bindRepoProjectFlag(cmd, &project)
+	addJSONFlag(cmd)
 	return cmd
 }
 
@@ -199,9 +305,111 @@ func newRepoDeleteCmd() *cobra.Command {
 	return cmd
 }
 
+// repoVisibility is the field/JSON view shared by the visibility get/set
+// verbs. Repo is the reference the user passed (name or ULID); Visibility is
+// the server's authoritative value after the call.
+type repoVisibility struct {
+	Repo       string `json:"repo"`
+	Visibility string `json:"visibility"`
+}
+
+var visibilityColumns = []string{"REPO", "VISIBILITY"}
+
+func visibilityRow(v repoVisibility) []string {
+	return []string{v.Repo, v.Visibility}
+}
+
+// parseVisibility maps the CLI argument to the wire enum, rejecting anything
+// other than the two accepted values so a typo fails fast client-side rather
+// than as an opaque 422 from the server.
+func parseVisibility(s string) (coreapi.SetRepoVisibilityInputBodyVisibility, error) {
+	switch s {
+	case "public":
+		return coreapi.SetRepoVisibilityInputBodyVisibilityPublic, nil
+	case "private":
+		return coreapi.SetRepoVisibilityInputBodyVisibilityPrivate, nil
+	default:
+		return "", fmt.Errorf("invalid visibility %q: must be \"public\" or \"private\"", s)
+	}
+}
+
+// newRepoVisibilityCmd groups the read/write verbs for a repo's visibility.
+// "public" sets the SpiceDB public_viewer wildcard, which grants pull (read)
+// to any authenticated account but never push or manage; "private" restricts
+// the repo to explicit grantees. The data plane still requires authentication,
+// so "public" means read-only-to-any-user, not anonymous/unauthenticated.
+func newRepoVisibilityCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "visibility",
+		Short: "Get or set a repository's visibility",
+	}
+	cmd.AddCommand(newRepoVisibilityGetCmd())
+	cmd.AddCommand(newRepoVisibilitySetCmd())
+	return cmd
+}
+
+func newRepoVisibilityGetCmd() *cobra.Command {
+	var project string
+	cmd := &cobra.Command{
+		Use:   "get <repo>",
+		Short: "Show a repository's visibility (public or private)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runCoreObject(cmd, visibilityColumns, visibilityRow, func(ctx context.Context, c *coreapi.Client) (*repoVisibility, error) {
+				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				if err != nil {
+					return nil, err
+				}
+				out, err := c.GetRepoVisibility(ctx, coreapi.GetRepoVisibilityParams{RepoId: repoID})
+				if err != nil {
+					return nil, err
+				}
+				return &repoVisibility{Repo: args[0], Visibility: string(out.Visibility)}, nil
+			})
+		},
+	}
+	bindRepoProjectFlag(cmd, &project)
+	addJSONFlag(cmd)
+	return cmd
+}
+
+func newRepoVisibilitySetCmd() *cobra.Command {
+	var project string
+	cmd := &cobra.Command{
+		Use:   "set <repo> <public|private>",
+		Short: "Set a repository's visibility",
+		Long: "Set a repository's visibility.\n\n" +
+			"\"public\" grants read-only (pull) access to any authenticated Entire user; " +
+			"push and management stay restricted to grantees. \"private\" restricts the repo " +
+			"to explicit grantees. Requires manage permission on the repo.",
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vis, err := parseVisibility(args[1])
+			if err != nil {
+				cmd.SilenceUsage = true
+				return err
+			}
+			return runCoreObject(cmd, visibilityColumns, visibilityRow, func(ctx context.Context, c *coreapi.Client) (*repoVisibility, error) {
+				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				if err != nil {
+					return nil, err
+				}
+				out, err := c.SetRepoVisibility(ctx, &coreapi.SetRepoVisibilityInputBody{Visibility: vis}, coreapi.SetRepoVisibilityParams{RepoId: repoID})
+				if err != nil {
+					return nil, err
+				}
+				return &repoVisibility{Repo: args[0], Visibility: string(out.Visibility)}, nil
+			})
+		},
+	}
+	bindRepoProjectFlag(cmd, &project)
+	addJSONFlag(cmd)
+	return cmd
+}
+
 // bindRepoProjectFlag wires the shared --project scope used to resolve a repo
 // addressed by name (a repo name is unique only within its project). Ignored
 // when the repo arg is already a ULID.
 func bindRepoProjectFlag(cmd *cobra.Command, project *string) {
-	cmd.Flags().StringVar(project, "project", "", "owning project (name or ULID); required when <repo> is a name")
+	cmd.Flags().StringVar(project, "project", "", "Owning project (name or ULID); required when <repo> is a name")
 }

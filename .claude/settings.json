@@ -1,4 +1,8 @@
 {
+  "enabledPlugins": {
+    "e2e@entire-dev-tools": true,
+    "agent-integration@entire-dev-tools": true
+  },
   "extraKnownMarketplaces": {
     "entire-dev-tools": {
       "source": {
@@ -7,11 +11,50 @@
       }
     }
   },
-  "enabledPlugins": {
-    "e2e@entire-dev-tools": true,
-    "agent-integration@entire-dev-tools": true
-  },
   "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code post-task"
+          }
+        ]
+      },
+      {
+        "matcher": "TaskCreate|TaskUpdate",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code post-todo"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code pre-task"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code session-end",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "",
@@ -27,28 +70,6 @@
         ]
       }
     ],
-    "SessionEnd": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code session-end"
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code user-prompt-submit"
-          }
-        ]
-      }
-    ],
     "Stop": [
       {
         "matcher": "",
@@ -60,33 +81,13 @@
         ]
       }
     ],
-    "PreToolUse": [
+    "UserPromptSubmit": [
       {
-        "matcher": "Task",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code pre-task"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Task",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code post-task"
-          }
-        ]
-      },
-      {
-        "matcher": "TodoWrite",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code post-todo"
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code user-prompt-submit"
           }
         ]
       }

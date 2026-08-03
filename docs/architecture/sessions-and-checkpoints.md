@@ -4,6 +4,8 @@
 
 Entire CLI creates checkpoints for AI coding sessions. The system is agent-agnostic - it works with Claude Code, Codex, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, or any tool that triggers Entire hooks.
 
+This document covers the domain model shared by both checkpoint storage backends. For how the **git-refs** backend stores checkpoints as one ref per checkpoint — its layout, push/fetch model, read routing, and configuration — see [Ref-Based Checkpoint Backend](ref-checkpoint-backend.md).
+
 ## Domain Model
 
 ### Session
@@ -26,7 +28,7 @@ A **Checkpoint** captures a point-in-time within a session. Defined in `strategy
 
 ```go
 type Checkpoint struct {
-    CheckpointID     id.CheckpointID // Stable 12-hex-char identifier
+    CheckpointID     id.CheckpointID // Stable identifier (12-hex or ULID; see Checkpoint ID Linking)
     Message          string          // Commit message or checkpoint description
     Timestamp        time.Time
     IsTaskCheckpoint bool            // Task checkpoint (subagent) vs session checkpoint
@@ -144,7 +146,10 @@ func (s *ManualCommitStrategy) CondenseSession(
 |------|----------|----------|
 | Session State | `.git/entire-sessions/<id>.json` | Active session tracking |
 | Ephemeral | `entire/<commit[:7]>-<worktreeHash[:6]>` branch | Full state (code + metadata) |
-| Persistent | `entire/checkpoints/v1` branch (sharded) | Metadata + commit reference |
+| Persistent (git-branch) | `entire/checkpoints/v1` branch, sharded `<id[:2]>/<id[2:]>/` | Metadata + commit reference |
+| Persistent (git-refs) | `refs/entire/checkpoints/<shard>/<id>`, one ref per checkpoint | Metadata + commit reference |
+
+The persistent store is pluggable: `git-branch` stores every committed checkpoint as a subtree of a single `entire/checkpoints/v1` branch, while `git-refs` stores one ref per checkpoint. New setups write an explicit backend choice via `entire enable` (`git-refs` recommended and pre-selected); a repo with no checkpoints config still resolves to `git-branch` (the config-less fallback), so pre-existing repos keep their behavior. Both are git-backed and share the same checkpoint tree layout; they differ only in where that tree is committed. This document describes the git-branch layout; for the ref-based backend — its ref naming, sharding, push/fetch model, read routing, and configuration — see [Ref-Based Checkpoint Backend](ref-checkpoint-backend.md).
 
 ### Session State
 
@@ -158,6 +163,13 @@ session began). `entire resume` (bare, no arg) uses it to list stopped sessions
 and map each back to its branch; for sessions recorded before the field existed
 it falls back to deriving the branch from the session's last checkpoint ID found
 in branch-only commit trailers.
+
+`entire session adopt` moves an active session from a source repo or worktree
+into the current worktree. Adoption preserves the live transcript path, validates
+that the source state still belongs to the requested source worktree, rewrites
+the session's branch/worktree/base metadata to the target, clears target-local
+checkpoint windows and checkpoint IDs, and snapshots the target's current file
+changes so the next commit can link to the adopted session.
 
 ### Temporary Checkpoints
 
@@ -196,7 +208,7 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 ├── 0/                   # First session (0-based indexing)
 │   ├── metadata.json    # Session-specific Metadata
 │   ├── full.jsonl       # Raw agent transcript (CLI rewind/resume/explain)
-│   ├── transcript.jsonl # Compact transcript, scoped to this checkpoint
+│   ├── transcript.jsonl # Full compacted session (slice at compact_transcript_start)
 │   ├── prompt.txt       # Checkpoint-scoped user prompts
 │   └── content_hash.txt # sha256 of full.jsonl (dedup short-circuit)
 ├── 1/                   # Second session
@@ -208,11 +220,23 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 
 **Compact transcript (`transcript.jsonl`):** generated best-effort from
 `full.jsonl` via `transcript/compact` on every committed write and on
-transcript replacement during finalization. Unlike `full.jsonl` (the
-cumulative session transcript, scoped at read time via
-`checkpoint_transcript_start`), `transcript.jsonl` is pre-sliced to the
-checkpoint's own portion (`compact.Compact` is called with
-`StartLine = checkpoint_transcript_start`), so it needs no offset to consume.
+transcript replacement during finalization. Like `full.jsonl`, it stores the
+**full compacted session** on every checkpoint (via `compact.FullWithBoundary`),
+so each checkpoint is self-contained — the session is reconstructable from any
+single surviving checkpoint, robust to a mid-history checkpoint being lost,
+reverted, or dropped during a rebase. This checkpoint's slice begins at the
+session metadata's `compact_transcript_start` (a line offset into
+`transcript.jsonl`, in compact-output coordinates — distinct from
+`checkpoint_transcript_start`, which indexes raw `full.jsonl` lines).
+Consumers segment this checkpoint's content as `compactLines[compact_transcript_start:]`.
+The marker rounds toward inclusion when a streaming message straddles the
+boundary (compaction merges same-ID fragments into one line that cannot be
+split), so the slice never drops this checkpoint's content but its head may
+repeat at most one merged line from the previous checkpoint — segmenters must
+tolerate that bounded overlap. A nil/absent `compact_transcript_start` marks a
+legacy checkpoint whose `transcript.jsonl` holds only its own delta (pre-change
+CLI versions); read it as-is from line 0.
+
 It is written into the checkpoint tree and pushed alongside `full.jsonl`. The
 root `metadata.json` `sessions[].transcript` pointer keeps targeting
 `full.jsonl`; when a compact transcript was generated the session entry also
@@ -220,14 +244,18 @@ carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted
 otherwise) so external readers can find it next to `full.jsonl`.
 CLI read paths (rewind/resume/explain) read `full.jsonl` by filename. Compact
 generation is best-effort: failures are logged but never fail the checkpoint
-write, and during finalization a failed regeneration keeps the previous
-`transcript.jsonl`.
+write. It is also **skipped when the compacted output exceeds the 50MB blob cap**
+— unlike `full.jsonl`, `transcript.jsonl` is not chunked, so a very long session
+whose full compaction exceeds the cap will lack a compact transcript on those
+checkpoints. This is a known limitation; `full.jsonl` remains authoritative and
+the compact transcript is regenerable from it. During the OPF finalize rewrite, a
+failed or skipped regeneration **drops** the prior `transcript.jsonl` and clears
+`compact_transcript_start` rather than shipping a stale, less-redacted compact.
 
 **Root-level metadata.json (`CheckpointSummary`):**
 ```json
 {
   "cli_version": "0.0.0-dev",
-  "checkpoint_version": "branch-v1",
   "checkpoint_id": "abc123def456",
   "strategy": "manual-commit",
   "branch": "main",
@@ -277,6 +305,21 @@ When condensing multiple concurrent sessions:
 - `sessions` array in `CheckpointSummary` maps each session to its file paths
 - `files_touched` is merged from all sessions
 
+Checkpoints written by `entire import <agent>` additionally carry a `commit_sha`
+(omitempty) on both the session `Metadata` and the root `CheckpointSummary`,
+set to the default branch's head at import time — origin's tip is preferred
+(the commit the server already knows about), falling back to the local branch
+tip, then HEAD, then empty when nothing resolves. When the transcript itself
+records the commit(s) a turn made (Claude Code `gitOperation` records), the
+turn's checkpoint instead anchors to the last such commit that resolves and is
+reachable from the resolved link anchor (the default-branch head when
+resolvable) — see `turnAnchorResolver` (`agentimport/turn_anchor.go`);
+otherwise (older transcripts, or a recorded commit that's been
+squashed/rebased away) it falls back to the default-branch head as described
+above. It is a best-effort anchor for UI display only, not
+an attribution signal, and pre-existing imported checkpoints are not
+backfilled with it.
+
 ### Checkpoint Policy
 
 Repo-wide checkpoint policy lives at `refs/entire/policies/checkpoint`. The ref
@@ -289,36 +332,89 @@ points at a commit whose tree contains `policy.json`:
 }
 ```
 
-`checkpoint_version` is the checkpoint format new writes should use.
-`checkpoint_min_version` is the oldest checkpoint format clients must be able
-to read for this repo. Missing policy fields default to `branch-v1`.
+Either field may be omitted. An empty policy file means both fields inherit the
+CLI defaults:
 
-Policy follows the configured checkpoint remote. `entire policy checkpoint`
+```json
+{}
+```
+
+`checkpoint_version` is a checkpoint-data write guard. If no policy is
+configured, a policy omits `checkpoint_version`, or the field was set to an
+empty string with `entire checkpoint policy --checkpoint-version ""`, the CLI
+uses its default checkpoint version for policy decisions. The quotes are
+required so the shell passes an empty value instead of omitting the flag value.
+If another client configures a `checkpoint_version` this CLI cannot write,
+explicit checkpoint-data writers fail until the CLI is upgraded.
+
+`checkpoint_min_version` is an upgrade nudge and checkpoint-data write guard.
+Clients that cannot read that version warn users to upgrade. Explicit
+checkpoint-data writers fail until the CLI is upgraded. If no policy is
+configured, a policy omits `checkpoint_min_version`, or the field was set to an
+empty string with `entire checkpoint policy --checkpoint-min-version ""`, the
+CLI uses its default minimum checkpoint version for policy decisions.
+
+Unsetting a field is still evaluated against the normal downgrade guard. If the
+field's current effective version is newer than the default inherited after
+unsetting, `entire checkpoint policy` rejects the change unless `--force` is
+passed.
+
+`entire checkpoint policy` validates requested policy values against the
+current CLI, so it rejects setting unsupported checkpoint versions.
+
+Policy follows the configured checkpoint remote. `entire checkpoint policy`
 fetches the latest remote policy before validating requested changes, updates
 the local policy ref, and pushes only `refs/entire/policies/checkpoint`.
 Policy commits use the same signing settings as checkpoint commits.
 
-Hooks that run while ordinary git operations must keep working offline:
-post-commit and agent lifecycle hooks read only the local policy ref. If the
-local policy requires checkpoint writes this CLI does not support, they skip
-writing checkpoint data and warn only when running in an interactive terminal.
-The pre-push hook is the regular online sync point: it compares the remote
-policy ref with the local ref, fetches updated policy when needed, and evaluates
-the refreshed policy before pushing `entire/checkpoints/v1`. If policy refresh
-fails, the hook warns or logs the failure and lets the normal push continue.
+Agent session-start hooks warn that checkpoint capture is disabled for the
+session and exit successfully. Other agent hooks fail with a checkpoint-disabled
+message so the agent can see that no Entire checkpoints will be generated until
+the CLI is upgraded.
+
+Git hooks never block Git because of checkpoint policy. When the policy cannot
+be satisfied, Git hooks log the violation, warn only in an interactive
+terminal, skip Entire checkpoint work, and exit successfully. Pre-push refreshes
+policy first, then applies the same skip behavior to checkpoint push work.
 
 User-driven commands warn when the local policy indicates the CLI should be
-upgraded. Commands that need to decode checkpoint contents, such as
-`entire checkpoint explain` and `entire session resume`, fail when the target
-checkpoint uses an unsupported `checkpoint_version`.
+upgraded. Explicit checkpoint-data writers such as `entire session attach`,
+`entire checkpoint explain --generate`, and `entire import <agent>` fail when
+the local policy cannot be satisfied.
 
 ### Checkpoint ID Linking
 
 The checkpoint ID is the **stable identifier** that links user commits to metadata across branches.
 
-**Format:** 12-hex-character random ID (e.g., `a3b2c4d5e6f7`)
+**Format:** one of two shapes — do **not** assume a fixed width:
+- **Legacy 12-hex** random ID (e.g., `a3b2c4d5e6f7`) — the git-branch store's format.
+- **26-char ULID** (Crockford base32, e.g., `01KVBJCWYA4YW6J5M9GP655HZN`) — minted only
+  under the git-refs checkpoint store. A ULID's leading chars encode a millisecond
+  timestamp (so it is lexicographically time-sortable) and its tail is random; front
+  prefixes are therefore ambiguous — trim ULIDs from nowhere / show them in full for
+  display (see `id.CheckpointID.DisplayShort`), and use `id.MaxIDLength`, not a
+  hardcoded 12, when reasoning about maximum width.
+
+Both formats are validated by `id.KindOf` / `id.Validate`; readers accept either.
+
+**Read routing (`checkpoint.Open` → `kindRoutingStore`):** id-keyed reads resolve
+across both git backends by the checkpoint's format, so a repo running git-refs
+and git-branch side by side (or mid-migration) reads either format without
+reconfiguring:
+- A **ULID** is read from the git-refs store only — never the branch.
+- A **hex** ID is read from the active (configured) primary first; when the
+  primary is git-refs it also falls back to the git-branch store (a hex checkpoint
+  may still sit on the pre-migration v1 branch, or have been migrated into refs).
+- `List` unions both backends. **Creates (`Session`) are not kind-routed** — they
+  go to the configured primary (+ mirrors); the minted ID already matches the
+  primary. **Backfills** (summary/transcript/attribution) update an existing
+  checkpoint and ARE kind-routed: they follow the read order, falling through to
+  the next store only on `ErrCheckpointNotFound`.
 
 **Generation:**
+- Minted by `checkpoint.GenerateCheckpointID`, which picks the format from the
+  configured primary store (ULID under git-refs, 12-hex otherwise). Do not call
+  `id.Generate()` / `id.GenerateULID()` directly from a checkpoint write path.
 - Generated during condensation (post-commit hook)
 
 **Usage:**
@@ -401,15 +497,24 @@ session/
 ├── phase.go             # Session phase state machine (ACTIVE, IDLE, ENDED, etc.)
 
 checkpoint/
-├── checkpoint.go        # checkpoint.Type, checkpoint.Store interface, CheckpointSummary, etc.
-├── store.go             # GitStore implementation
-├── temporary.go         # Shadow branch storage
-├── committed.go         # Metadata branch storage
-├── id/                  # CheckpointID type and generation
+├── checkpoint.go        # checkpoint.Type, store interfaces, CheckpointSummary, etc.
+├── open.go              # Open() facade: resolves topology, wires stores + fetchers
+├── registry.go          # Backend registry + gitBacked capability (git-branch, git-refs)
+├── routing_store.go     # kindRoutingStore: id-kind read routing across both backends
+├── fanout.go            # Mirror write fan-out (primary + best-effort mirrors)
+├── generate.go          # GenerateCheckpointID (format follows the configured primary)
+├── persistent.go        # git-branch persistent store (entire/checkpoints/v1)
+├── persistent_write.go  # git-branch write path (treeWriter, subtree splicing)
+├── refs_store.go        # git-refs persistent store (one ref per checkpoint)
+├── refs_naming.go       # RefName / ParseRef, CheckpointRefPrefix, sharding
+├── pushqueue.go         # git-refs push-discovery queue (flock JSONL)
+├── ephemeral.go         # Shadow-branch (ephemeral) store
+├── fsstore/             # Filesystem mirror backend (non-git-backed, mirror-only)
+├── id/                  # CheckpointID type, Kind/KindOf, ShardFor, generation
 │   └── id.go
 ```
 
-Strategies use `checkpoint.Store` primitives - storage details are encapsulated.
+Strategies use the `checkpoint.Open` facade and store primitives - backend and storage details are encapsulated.
 
 ## Strategy Role
 

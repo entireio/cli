@@ -294,10 +294,10 @@ func TestResolveContextForAPI_CachedAcrossCalls(t *testing.T) {
 	// The trusted issuers are persisted (in the cores cache, separate file).
 	cache, err := discovery.LoadAPICores(cacheDir)
 	require.NoError(t, err)
-	urls, fresh, ok := cache.Get("partial.to")
+	entry, fresh, ok := cache.GetEntry("partial.to")
 	require.True(t, ok)
 	assert.True(t, fresh)
-	assert.Equal(t, []string{"https://us.auth.partial.to"}, urls)
+	assert.Equal(t, []string{"https://us.auth.partial.to"}, entry.CoreURLs)
 }
 
 // TestResolveContextForAPI_StaleFallbackOnFetchFailure: a present-but-stale

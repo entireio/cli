@@ -28,8 +28,9 @@ import (
 // roundtrip; production wiring uses AgentSynthesisProvider.
 type SynthesisProvider interface {
 	// Synthesize takes the composed synthesis prompt and returns the
-	// verdict text. Errors are surfaced to the caller; SynthesisSink
-	// degrades gracefully on error rather than failing the run.
+	// verdict text. On error the sink prints "final report unavailable" and
+	// signals OnError; the command then surfaces an attempted-but-failed
+	// synthesis as a non-zero exit (see runMultiAgentPath).
 	Synthesize(ctx context.Context, prompt string) (string, error)
 }
 
@@ -72,16 +73,29 @@ type SynthesisSink struct {
 	Task            string
 	MasterName      string
 	RunContext      context.Context // optional; nil falls back to context.Background()
-	ProviderTimeout time.Duration   // optional; zero uses defaultSynthesisProviderTimeout
+	ProviderTimeout time.Duration   // positive: use it; zero: defaultSynthesisProviderTimeout; negative: disabled (no deadline)
 	OnResult        func(result string)
 	OnStart         func()
 	OnComplete      func(error)
+	// OnError is called when an attempted synthesis fails (provider error or
+	// timeout). It is NOT called when synthesis is skipped (cancelled run or
+	// fewer than two usable reviewers). Lets the caller surface a missing verdict
+	// in the command's exit status instead of exiting 0 with no final report.
+	OnError func(error)
 }
 
 // Compile-time interface check.
 var _ reviewtypes.Sink = SynthesisSink{}
 
-const defaultSynthesisProviderTimeout = 2 * time.Minute
+// defaultSynthesisProviderTimeout bounds the judge's single consolidation call
+// when SynthesisSink.ProviderTimeout is unset. The judge reads every reviewer's
+// report and writes the combined verdict in one text-generation call, which
+// regularly needs more than the original 2m. 20m matches the judge's previous
+// effective bound: before the reviewer default was dropped, the --timeout flag
+// default (20m) always flowed into ProviderTimeout on the no-flag path, so
+// keeping 5m here would have silently tightened the judge 4x — and a judge
+// timeout discards an entire multi-reviewer run with no verdict.
+const defaultSynthesisProviderTimeout = 20 * time.Minute
 
 // AgentEvent is a no-op; SynthesisSink only acts in RunFinished.
 func (SynthesisSink) AgentEvent(_ string, _ reviewtypes.Event) {}
@@ -117,6 +131,9 @@ func (s SynthesisSink) RunFinished(summary reviewtypes.RunSummary) {
 	result, provErr := s.Provider.Synthesize(providerCtx, synthesisPrompt)
 	if provErr != nil {
 		fmt.Fprintf(s.Writer, "final report unavailable: %v\n", provErr)
+		if s.OnError != nil {
+			s.OnError(provErr)
+		}
 		if s.OnComplete != nil {
 			s.OnComplete(provErr)
 		}
@@ -157,12 +174,21 @@ func (s SynthesisSink) runContext() context.Context {
 	return context.Background()
 }
 
+// providerContext bounds the judge's consolidation call. ProviderTimeout follows
+// the same three-state convention as the reviewer timeout so a single --timeout
+// value can govern the whole command:
+//   - positive: use it.
+//   - zero (unset): use defaultSynthesisProviderTimeout.
+//   - negative: disabled — no deadline (mirrors `--timeout 0` for reviewers).
 func (s SynthesisSink) providerContext() (context.Context, context.CancelFunc) {
-	timeout := s.ProviderTimeout
-	if timeout <= 0 {
-		timeout = defaultSynthesisProviderTimeout
+	switch {
+	case s.ProviderTimeout < 0:
+		return context.WithCancel(s.runContext())
+	case s.ProviderTimeout > 0:
+		return context.WithTimeout(s.runContext(), s.ProviderTimeout)
+	default:
+		return context.WithTimeout(s.runContext(), defaultSynthesisProviderTimeout)
 	}
-	return context.WithTimeout(s.runContext(), timeout)
 }
 
 // usableAgentCount returns the number of agents that produced usable narrative

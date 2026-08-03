@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 // Test constants to avoid goconst warnings
@@ -19,7 +18,6 @@ const (
 	testSessionID = "2025-01-15-test-session"
 	testComponent = "hooks"
 	testAgent     = "claude-code"
-	levelINFO     = "INFO"
 )
 
 // testLogFilePath returns the expected log file path for a test temp directory.
@@ -310,10 +308,7 @@ func TestLogging_IncludesContextValues(t *testing.T) {
 	}
 
 	// Create context with values
-	// Note: session_id from context is skipped when Init() has already set a global session ID
 	ctx := context.Background()
-	ctx = WithSession(ctx, "context-session-id") // Will be ignored, global takes precedence
-	ctx = WithToolCall(ctx, "toolu_123")
 	ctx = WithComponent(ctx, testComponent)
 	ctx = WithAgent(ctx, testAgent)
 
@@ -334,62 +329,15 @@ func TestLogging_IncludesContextValues(t *testing.T) {
 		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, content)
 	}
 
-	// session_id comes from Init() when set, not from context (to avoid duplicates)
+	// session_id comes from Init()
 	if logEntry["session_id"] != sessionID {
 		t.Errorf("Expected session_id='%s' (from Init), got %v", sessionID, logEntry["session_id"])
-	}
-	if logEntry["tool_call_id"] != "toolu_123" {
-		t.Errorf("Expected tool_call_id='toolu_123', got %v", logEntry["tool_call_id"])
 	}
 	if logEntry["component"] != testComponent {
 		t.Errorf("Expected component='%s', got %v", testComponent, logEntry["component"])
 	}
 	if logEntry["agent"] != testAgent {
 		t.Errorf("Expected agent='%s', got %v", testAgent, logEntry["agent"])
-	}
-}
-
-func TestLogging_ParentSessionID(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	initGitRepo(t, tmpDir)
-
-	sessionID := "2025-01-15-parent-test"
-	err := Init(context.Background(), sessionID)
-	if err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
-
-	// Create parent context, then child context
-	// Note: WithSession sets parent_session_id when there's already a session in context
-	ctx := context.Background()
-	ctx = WithSession(ctx, "parent-session")
-	ctx = WithSession(ctx, "child-session") // This sets parent_session_id to "parent-session"
-
-	Info(ctx, "nested session test")
-
-	Close()
-
-	// Read log file
-	content, err := os.ReadFile(testLogFilePath(tmpDir))
-	if err != nil {
-		t.Fatalf("Failed to read log file: %v", err)
-	}
-
-	// Parse as JSON
-	var logEntry map[string]interface{}
-	if err := json.Unmarshal(content, &logEntry); err != nil {
-		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, content)
-	}
-
-	// session_id comes from Init(), context session_id is skipped to avoid duplicates
-	if logEntry["session_id"] != sessionID {
-		t.Errorf("Expected session_id='%s' (from Init), got %v", sessionID, logEntry["session_id"])
-	}
-	// parent_session_id from context is still included
-	if logEntry["parent_session_id"] != "parent-session" {
-		t.Errorf("Expected parent_session_id='parent-session', got %v", logEntry["parent_session_id"])
 	}
 }
 
@@ -405,7 +353,7 @@ func TestLogging_AdditionalAttrs(t *testing.T) {
 		t.Fatalf("Init() error = %v", err)
 	}
 
-	ctx := WithSession(context.Background(), "context-session") // Will be ignored, global takes precedence
+	ctx := context.Background()
 
 	// Log with additional attrs
 	Info(ctx, "attrs test",
@@ -441,100 +389,6 @@ func TestLogging_AdditionalAttrs(t *testing.T) {
 	if logEntry["success"] != true {
 		t.Errorf("Expected success=true, got %v", logEntry["success"])
 	}
-}
-
-func TestLogDuration(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	initGitRepo(t, tmpDir)
-
-	sessionID := "2025-01-15-duration-test"
-	err := Init(context.Background(), sessionID)
-	if err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
-
-	ctx := WithSession(context.Background(), "context-session") // Will be ignored, global takes precedence
-	ctx = WithComponent(ctx, testComponent)
-
-	// Simulate some work
-	start := time.Now().Add(-100 * time.Millisecond) // Fake 100ms ago
-
-	LogDuration(ctx, slog.LevelInfo, "operation completed", start,
-		slog.String("hook", "pre-push"),
-		slog.Bool("success", true),
-	)
-
-	Close()
-
-	// Read log file
-	content, err := os.ReadFile(testLogFilePath(tmpDir))
-	if err != nil {
-		t.Fatalf("Failed to read log file: %v", err)
-	}
-
-	// Parse as JSON
-	var logEntry map[string]interface{}
-	if err := json.Unmarshal(content, &logEntry); err != nil {
-		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, content)
-	}
-
-	// Verify duration_ms is present and reasonable
-	durationMs, ok := logEntry["duration_ms"].(float64)
-	if !ok {
-		t.Fatalf("Expected duration_ms to be a number, got %T: %v", logEntry["duration_ms"], logEntry["duration_ms"])
-	}
-	if durationMs < 90 || durationMs > 200 {
-		t.Errorf("Expected duration_ms around 100, got %v", durationMs)
-	}
-
-	// session_id comes from Init(), not context
-	if logEntry["session_id"] != sessionID {
-		t.Errorf("Expected session_id='%s' (from Init), got %v", sessionID, logEntry["session_id"])
-	}
-	if logEntry["component"] != testComponent {
-		t.Errorf("Expected component='%s', got %v", testComponent, logEntry["component"])
-	}
-	if logEntry["hook"] != "pre-push" {
-		t.Errorf("Expected hook='pre-push', got %v", logEntry["hook"])
-	}
-	if logEntry["success"] != true {
-		t.Errorf("Expected success=true, got %v", logEntry["success"])
-	}
-	if logEntry["level"] != levelINFO {
-		t.Errorf("Expected level='%s', got %v", levelINFO, logEntry["level"])
-	}
-}
-
-func TestLogging_ContextSessionID_WhenNoGlobalSet(t *testing.T) {
-	// Reset any global state to ensure no global session ID
-	resetLogger()
-
-	// Create a buffer to capture output since we won't use Init()
-	var buf bytes.Buffer
-	mu.Lock()
-	logger = createLogger(&buf, slog.LevelInfo)
-	mu.Unlock()
-
-	// Set session_id via context (no global set)
-	ctx := WithSession(context.Background(), "context-only-session")
-	ctx = WithComponent(ctx, testComponent)
-
-	Info(ctx, "context session test")
-
-	// Parse the output
-	var logEntry map[string]interface{}
-	if err := json.Unmarshal(buf.Bytes(), &logEntry); err != nil {
-		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, buf.String())
-	}
-
-	// When no global session ID is set, context session_id should be used
-	if logEntry["session_id"] != "context-only-session" {
-		t.Errorf("Expected session_id='context-only-session' from context, got %v", logEntry["session_id"])
-	}
-
-	resetLogger()
 }
 
 func TestLogging_ConcurrentInitAndLog(t *testing.T) {

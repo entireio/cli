@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"time"
 
 	ulid "github.com/oklog/ulid/v2"
 )
@@ -44,9 +45,31 @@ const ulidPattern = `[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}`
 // a loose shape, not authoritative validation).
 const CheckpointPattern = `(?:` + Pattern + `|` + ulidPattern + `)`
 
+// prefixShapeRegex matches strings shaped like a checkpoint ID or a prefix of
+// one: 1-12 lowercase hex characters (legacy) or 1-26 Crockford base32
+// characters starting with 0-7 (a ULID's leading timestamp character cannot
+// exceed 7, per isULID/ParseStrict). Kept next to Pattern/ulidPattern as a
+// reminder to update them together when the ID formats change.
+var prefixShapeRegex = regexp.MustCompile(`^(?:[0-9a-f]{1,12}|[0-7][0-9ABCDEFGHJKMNPQRSTVWXYZ]{0,25})$`)
+
+// CouldBePrefix reports whether s is shaped like a checkpoint ID or a prefix
+// of one. It is a cheap gate for callers deciding whether a free-form target
+// could name a checkpoint before paying for a store lookup; it is not
+// validation (see Validate).
+func CouldBePrefix(s string) bool {
+	return prefixShapeRegex.MatchString(s)
+}
+
 // ShortIDLength is the standard length for truncating IDs for display purposes.
 // Used for tool use IDs, session IDs, and commit hashes in logs and messages.
 const ShortIDLength = 12
+
+// MaxIDLength is the longest a valid checkpoint ID can be — a 26-character ULID.
+// Use it (not ShortIDLength) when reasoning about whether a string could be a
+// checkpoint ID or a prefix of one, since IDs are no longer fixed-width. Tied to
+// oklog/ulid's own encoded-size constant so the three ULID-width sites (this,
+// ulidPattern's {26}, and the library) cannot drift apart.
+const MaxIDLength = ulid.EncodedSize
 
 // checkpointIDRegex validates the legacy format: exactly 12 lowercase hex characters.
 var checkpointIDRegex = regexp.MustCompile(`^` + Pattern + `$`)
@@ -88,6 +111,34 @@ func KindOf(s string) Kind {
 	}
 }
 
+// Kind classifies this checkpoint ID.
+func (id CheckpointID) Kind() Kind {
+	return KindOf(string(id))
+}
+
+// ShardFor returns the two-character shard for storing this ID under a
+// per-checkpoint git ref (refs/entire/checkpoints/<shard>/<id>): the LAST two
+// characters of the ID, for BOTH supported formats.
+//
+// A single positional rule (independent of the ID's Kind) keeps ref naming
+// robust for legacy and ULID IDs alike and impossible to compute inconsistently
+// between callers. The suffix spreads checkpoints evenly across buckets for
+// either format: a legacy hex ID is random throughout, and a ULID's leading
+// characters encode its timestamp (barely varying between nearby checkpoints)
+// while its trailing characters are random — so sharding on the suffix keeps the
+// distribution even while the ID itself stays lexicographically sortable.
+//
+// This is the git-refs ref namespace only; the entire/checkpoints/v1 branch tree
+// keeps its own independent first-two layout (see Path). For an ID shorter than
+// two characters the whole ID is returned.
+func (id CheckpointID) ShardFor() string {
+	s := string(id)
+	if len(s) < 2 {
+		return s
+	}
+	return s[len(s)-2:]
+}
+
 // NewCheckpointID creates a CheckpointID from a string, validating its format.
 // Returns an error unless the string is a valid checkpoint ID (12-char hex or ULID).
 func NewCheckpointID(s string) (CheckpointID, error) {
@@ -120,6 +171,22 @@ func Generate() (CheckpointID, error) {
 	return CheckpointID(hex.EncodeToString(bytes)), nil
 }
 
+// GenerateULID creates a new 26-character Crockford base32 ULID checkpoint ID:
+// a millisecond timestamp prefix plus crypto-random entropy, so IDs are unique
+// and lexicographically time-sortable. It is the format the git-refs store uses
+// (chosen by checkpoint.GenerateCheckpointID); the value is canonical and passes
+// KindOf/Validate as KindULID.
+//
+// The timestamp is Unix epoch milliseconds (via ulid.Now), so it is inherently
+// timezone-independent — the machine's local zone does not affect the ID.
+func GenerateULID() (CheckpointID, error) {
+	u, err := ulid.New(ulid.Now(), rand.Reader)
+	if err != nil {
+		return EmptyCheckpointID, fmt.Errorf("failed to generate ULID checkpoint ID: %w", err)
+	}
+	return CheckpointID(u.String()), nil
+}
+
 // Validate checks if a string is a valid checkpoint ID format: either a legacy
 // 12-character lowercase hex ID or a 26-character Crockford base32 ULID.
 // Returns an error if invalid, nil if valid.
@@ -135,9 +202,45 @@ func (id CheckpointID) String() string {
 	return string(id)
 }
 
+// DisplayShort returns the checkpoint ID trimmed for compact display. A legacy
+// hex ID is random throughout, so its ShortIDLength-char prefix identifies it and
+// resolves as a prefix. A ULID encodes a millisecond timestamp in its leading
+// characters (near-identical for checkpoints minted close in time) with entropy
+// only in the tail, so a front-truncated ULID is both ambiguous and misleading —
+// it looks like a complete ID but won't resolve — so a ULID is returned in full.
+// Non-ID strings (e.g. "temporary") are trimmed like the legacy case.
+func (id CheckpointID) DisplayShort() string {
+	s := string(id)
+	if KindOf(s) == KindULID {
+		return s
+	}
+	if len(s) > ShortIDLength {
+		return s[:ShortIDLength]
+	}
+	return s
+}
+
 // IsEmpty returns true if the checkpoint ID is empty or unset.
 func (id CheckpointID) IsEmpty() bool {
 	return id == EmptyCheckpointID
+}
+
+// Time returns the creation time encoded in this ID and whether one is
+// available. A ULID embeds a millisecond Unix timestamp in its leading
+// characters, so the time is recoverable from the ID alone — no store read
+// required. This is what lets remote-ref discovery (which learns only ref names
+// via ls-remote) present and sort a not-yet-hydrated checkpoint by its real
+// creation time. Legacy 12-hex IDs carry no timestamp, so this returns
+// (zero, false) for them.
+func (id CheckpointID) Time() (time.Time, bool) {
+	if id.Kind() != KindULID {
+		return time.Time{}, false
+	}
+	u, err := ulid.ParseStrict(string(id))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ulid.Time(u.Time()), true
 }
 
 // Path returns the sharded path for this checkpoint ID on entire/checkpoints/v1.

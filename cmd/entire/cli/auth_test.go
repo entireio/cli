@@ -90,6 +90,25 @@ func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	}
 }
 
+// TestWriteProfileLines_Jurisdiction verifies the home jurisdiction slug is
+// rendered (so `auth token --jurisdiction` is discoverable) and omitted when the
+// server didn't populate it.
+func TestWriteProfileLines_Jurisdiction(t *testing.T) {
+	t.Parallel()
+
+	var withJ bytes.Buffer
+	writeProfileLines(&withJ, &authProfile{Handle: "alice", Provider: "github", Jurisdiction: "us"})
+	if !strings.Contains(withJ.String(), "Jurisdiction: us") {
+		t.Fatalf("output = %q, want a 'Jurisdiction: us' line", withJ.String())
+	}
+
+	var withoutJ bytes.Buffer
+	writeProfileLines(&withoutJ, &authProfile{Handle: "alice", Provider: "github"})
+	if strings.Contains(withoutJ.String(), "Jurisdiction") {
+		t.Fatalf("output = %q, want no Jurisdiction line when the slug is empty", withoutJ.String())
+	}
+}
+
 // In ENTIRE_TOKEN mode there is no stored context, keychain slot, or revocable
 // session: status names the env-token core and bearer source, and renders none
 // of the context/keychain/session lines. listSessions must not be called — you
@@ -410,5 +429,30 @@ func TestAuthCmd_TopLevelLoginAndLogoutStillRegistered(t *testing.T) {
 		if !found {
 			t.Errorf("top-level %q command should remain registered", name)
 		}
+	}
+}
+
+// The Token: provenance line must reflect the configured credential backend:
+// with ENTIRE_TOKEN_STORE=file the token lives in a JSON file, not the OS
+// keychain, and claiming otherwise misleads exactly the headless users the
+// file backend exists for (#1036).
+func TestRunAuthStatus_FileTokenStoreProvenance(t *testing.T) {
+	// Not parallel: t.Setenv.
+	t.Setenv("ENTIRE_TOKEN_STORE", "file")
+	t.Setenv("ENTIRE_TOKEN_STORE_PATH", "/ci/secrets/tokens.json")
+
+	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "core"}
+	listSessions := func(context.Context, string, string) ([]api.AuthSession, error) { return nil, nil }
+
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, okProfile, listSessions, target); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "stored in file /ci/secrets/tokens.json") {
+		t.Fatalf("output = %q, want the file-backend provenance line", got)
+	}
+	if strings.Contains(got, "OS keychain") {
+		t.Fatalf("output = %q, must not claim the OS keychain when the file backend is configured", got)
 	}
 }

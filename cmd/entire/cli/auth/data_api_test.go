@@ -126,6 +126,63 @@ func TestResolveDataAPIToken_ExchangesForDataHostOrigin(t *testing.T) {
 	}
 }
 
+func TestResolveDataAPIToken_UsesPlainHTTPDiscoveryForLoopbackDataOrigin(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	var gotAudience string
+	coreSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm() //nolint:errcheck // test handler
+		gotAudience = r.FormValue("audience")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"access_token":"loopback-exchanged-token","token_type":"Bearer","expires_in":3600}`)
+	}))
+	defer coreSrv.Close()
+
+	svc := tokenstore.CoreKeyringService(coreSrv.URL)
+	jwt := makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"me","exp":%d}`, coreSrv.URL, time.Now().Add(2*time.Hour).Unix()))
+	if err := tokenstore.Set(svc, "me", tokenstore.EncodeTokenWithExpiration(jwt, 7200)); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	ctxObj := &contexts.Context{Name: "me@core", CoreURL: coreSrv.URL, Handle: "me", KeychainService: svc}
+
+	dataSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != clusterdiscovery.APIPath {
+			t.Errorf("discovery path = %q, want %q", r.URL.Path, clusterdiscovery.APIPath)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"trusted_issuers":[%q]}`, coreSrv.URL)
+	}))
+	defer dataSrv.Close()
+	dataHost := strings.TrimPrefix(dataSrv.URL, "http://")
+
+	stubResolveContextForAPI(t, func(ctx context.Context, _ string, _ string, host string, c *http.Client, debugf clusterdiscovery.DebugFunc) (*contexts.Context, error) {
+		if host != dataHost {
+			return nil, fmt.Errorf("host = %q, want %q", host, dataHost)
+		}
+		doc, err := clusterdiscovery.DiscoverAPI(ctx, host, c, debugf)
+		if err != nil {
+			return nil, err
+		}
+		if len(doc.TrustedIssuers) != 1 || doc.TrustedIssuers[0] != coreSrv.URL {
+			return nil, fmt.Errorf("trusted issuers = %v, want %q", doc.TrustedIssuers, coreSrv.URL)
+		}
+		return ctxObj, nil
+	})
+
+	token, err := ResolveDataAPIToken(context.Background(), dataSrv.URL)
+	if err != nil {
+		t.Fatalf("ResolveDataAPIToken: %v", err)
+	}
+	if token != "loopback-exchanged-token" {
+		t.Fatalf("token = %q, want the exchanged loopback token", token)
+	}
+	if gotAudience != mustOrigin(t, dataSrv.URL) {
+		t.Fatalf("audience = %q, want loopback data origin %q", gotAudience, mustOrigin(t, dataSrv.URL))
+	}
+}
+
 func TestNewRefreshingResourceProvider_Validation(t *testing.T) {
 	t.Parallel()
 	if _, err := NewRefreshingResourceProvider(nil, "https://data.example", nil, false); err == nil {

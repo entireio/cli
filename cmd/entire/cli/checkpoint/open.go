@@ -19,9 +19,29 @@ type OpenOptions struct {
 	// fetching off.
 	BlobFetcher BlobFetchFunc
 
+	// RefFetcher is the CLI-level on-demand checkpoint-ref fetcher, used by the
+	// git-refs backend to resolve a checkpoint ref missing locally. nil leaves
+	// reads local-only; ignored by the git-branch backend.
+	RefFetcher RefFetchFunc
+
+	// RemoteRefLister is the CLI-level checkpoint-ref enumerator, used by the
+	// git-refs backend's List to discover checkpoints present on the checkpoint
+	// remote but not yet local (see RemoteRefListFunc). It only fires on a
+	// context marked by WithRemoteListDiscovery. nil (or an unmarked context)
+	// leaves List local-only; ignored by the git-branch backend.
+	RemoteRefLister RemoteRefListFunc
+
 	// Refs overrides the default committed-ref topology. A non-nil value wins,
 	// e.g. attach pins reads to Primary via PrimaryAsRead().
 	Refs *PersistentRefs
+}
+
+// PrimaryIsRefs reports whether the configured primary backend is the git-refs
+// per-checkpoint store. It centralizes the topology check so push/pre-push code
+// does not compare backend-type strings itself. A nil config (default) is the
+// git-branch backend, so this returns false.
+func PrimaryIsRefs(cfg *settings.CheckpointsConfig) bool {
+	return cfg != nil && cfg.Primary.Type == BackendTypeGitRefs
 }
 
 // Stores is the facade returned by Open: the persistent store plus the git-only
@@ -49,7 +69,7 @@ type Stores struct {
 // default git-branch backend with no mirrors, preserving default behavior.
 func Open(ctx context.Context, repo *git.Repository, opts OpenOptions) (*Stores, error) {
 	refs := resolveOpenRefs(ctx, opts)
-	env := OpenEnv{Repo: repo, BlobFetcher: opts.BlobFetcher, Refs: refs}
+	env := OpenEnv{Repo: repo, BlobFetcher: opts.BlobFetcher, RefFetcher: opts.RefFetcher, RemoteRefLister: opts.RemoteRefLister, Refs: refs}
 
 	cfg, err := settings.LoadCheckpointsConfig(ctx)
 	if err != nil {
@@ -65,12 +85,44 @@ func Open(ctx context.Context, repo *git.Repository, opts OpenOptions) (*Stores,
 	if err != nil {
 		return nil, err
 	}
+	writer := newFanoutStore(primary, mirrors)
+
+	// Kind routing: resolve id-keyed reads and backfill writes by the
+	// checkpoint's format across both git backends (a ULID lives in refs, a hex
+	// ID on the branch or a migrated ref), so a coexisting / mid-migration repo
+	// handles either format without reconfiguring. Creates still go through
+	// writer (configured primary + mirrors).
+	branchStore, refsStore, err := buildKindReadStores(ctx, env, primaryType, primary)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Stores{
-		Persistent: newFanoutStore(primary, mirrors),
+		Persistent: newKindRoutingStore(writer, branchStore, refsStore, primaryType),
 		ephemeral:  newEphemeralStore(repo, refs),
 		refs:       refs,
 	}, nil
+}
+
+// buildKindReadStores returns the git-branch and git-refs read stores used for
+// id-kind read routing, reusing the already-built primary for whichever kind it
+// is and constructing the sibling. A non-branch/refs git-backed primary (not a
+// real configuration today, since buildPrimary only accepts git-backed backends)
+// yields both freshly built git stores.
+func buildKindReadStores(ctx context.Context, env OpenEnv, primaryType string, primary PersistentStore) (branch, refs PersistentStore, err error) {
+	switch primaryType {
+	case BackendTypeGitBranch:
+		branch = primary
+		refs, err = build(ctx, env, BackendTypeGitRefs, nil)
+	case BackendTypeGitRefs:
+		refs = primary
+		branch, err = build(ctx, env, BackendTypeGitBranch, nil)
+	default:
+		if branch, err = build(ctx, env, BackendTypeGitBranch, nil); err == nil {
+			refs, err = build(ctx, env, BackendTypeGitRefs, nil)
+		}
+	}
+	return branch, refs, err
 }
 
 // resolvePrimaryType returns the configured primary backend type, defaulting to
@@ -95,12 +147,8 @@ func primaryConfig(cfg *settings.CheckpointsConfig) json.RawMessage {
 // the primary's record through the repo and its refs, so a non-git-backed
 // primary is rejected rather than silently half-supported.
 func buildPrimary(ctx context.Context, env OpenEnv, typ string, raw json.RawMessage) (PersistentStore, error) {
-	b, err := lookupBackend(typ)
-	if err != nil {
+	if err := ValidatePrimaryBackend(typ); err != nil {
 		return nil, fmt.Errorf("checkpoints.primary: %w", err)
-	}
-	if !b.gitBacked {
-		return nil, fmt.Errorf("checkpoints.primary.type %q cannot be the primary: only git-backed backends (e.g. %q) may be the primary", typ, BackendTypeGitBranch)
 	}
 	return build(ctx, env, typ, raw)
 }
@@ -127,7 +175,11 @@ func buildMirrors(ctx context.Context, env OpenEnv, cfg *settings.CheckpointsCon
 			return nil, fmt.Errorf("checkpoints.mirrors[%d]: backend type %q is already used by the primary or another mirror; each backend type may appear at most once", i, m.Type)
 		}
 		seen[m.Type] = true
-		store, err := build(ctx, env, m.Type, m.Config)
+		// Mirrors are best-effort write-only copies whose failures are logged
+		// and dropped; never pay on-demand ref-fetch network probes for them.
+		mirrorEnv := env
+		mirrorEnv.RefFetcher = nil
+		store, err := build(ctx, mirrorEnv, m.Type, m.Config)
 		if err != nil {
 			return nil, fmt.Errorf("checkpoints.mirrors[%d]: %w", i, err)
 		}

@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -66,8 +67,11 @@ func TestCacheRoundTrip(t *testing.T) {
 		"https://node1.rc.partial.to",
 	}, 24*time.Hour)
 
-	if err := SaveCache(dir, cache); err != nil {
-		t.Fatalf("SaveCache: %v", err)
+	if err := ModifyCache(dir, func(c ClusterCache) error {
+		maps.Copy(c, cache)
+		return nil
+	}); err != nil {
+		t.Fatalf("ModifyCache: %v", err)
 	}
 
 	loaded, err := LoadCache(dir)
@@ -158,7 +162,7 @@ func TestLoadCacheMissingFile(t *testing.T) {
 
 func TestLoadCacheCorruptFile(t *testing.T) {
 	dir := t.TempDir()
-	if err := SaveCache(dir, make(ClusterCache)); err != nil {
+	if err := ModifyCache(dir, func(ClusterCache) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, cacheFileName), []byte("not json"), 0600); err != nil {

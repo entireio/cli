@@ -41,7 +41,7 @@ func ReadLocal(ctx context.Context, repo *git.Repository) (State, error) {
 	ref, err := repo.Reference(RefName, true)
 	if err != nil {
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
-			return State{Policy: DefaultPolicy(), Source: SourceDefaults}, nil
+			return State{Source: SourceDefaults}, nil
 		}
 		return State{}, fmt.Errorf("read checkpoint policy ref: %w", err)
 	}
@@ -57,7 +57,6 @@ func ReadFromRef(ctx context.Context, repo *git.Repository, refName plumbing.Ref
 }
 
 func WriteLocal(ctx context.Context, repo *git.Repository, parent plumbing.Hash, policy Policy) (plumbing.Hash, error) {
-	policy = Normalize(policy)
 	data, err := jsonutil.MarshalIndentWithNewline(policy, "", "  ")
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("marshal checkpoint policy: %w", err)
@@ -127,5 +126,5 @@ func readFromHash(ctx context.Context, repo *git.Repository, hash plumbing.Hash,
 		}
 		return State{}, fmt.Errorf("parse %s: %w", PolicyFileName, err)
 	}
-	return State{Policy: Normalize(policy), Source: source, Hash: hash}, nil
+	return State{Policy: policy, Source: source, Hash: hash}, nil
 }

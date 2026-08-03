@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -85,7 +84,8 @@ from the checkpoint remote.
 
 Use --compare <checkpoint-id> to compare this checkpoint against a previous
 checkpoint and qualify observed token reduction or increase.`,
-		Args: cobra.ExactArgs(1),
+		Example: "  entire checkpoint tokens a1b2\n  entire checkpoint tokens a1b2 --compare c3d4\n  entire checkpoint tokens a1b2 --json",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if jsonFlag && agentBriefFlag {
 				return errors.New("--json and --agent-brief are mutually exclusive")
@@ -125,7 +125,7 @@ func runCheckpointTokens(ctx context.Context, cmd *cobra.Command, checkpointIDPr
 	}
 
 	if jsonOutput {
-		return writeCheckpointTokensJSON(cmd.OutOrStdout(), report)
+		return printJSON(cmd.OutOrStdout(), report)
 	}
 	if agentBrief {
 		writeCheckpointTokensAgentBrief(cmd.OutOrStdout(), report)
@@ -544,15 +544,6 @@ func checkpointComparisonCacheReadCaveat(delta *checkpointTokensMetricDelta) str
 		return ""
 	}
 	return "Total tokens include cache/context replay; use the cache/context replay delta below before treating total direction as work saved or added."
-}
-
-func writeCheckpointTokensJSON(w io.Writer, report checkpointTokensReport) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(report); err != nil {
-		return fmt.Errorf("failed to encode checkpoint token report: %w", err)
-	}
-	return nil
 }
 
 func writeCheckpointTokensText(w io.Writer, report checkpointTokensReport) {

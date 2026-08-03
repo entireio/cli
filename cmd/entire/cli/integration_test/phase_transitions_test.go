@@ -487,7 +487,7 @@ func TestShadow_PostRewriteRebaseRemapsSessionState(t *testing.T) {
 	env.GitCommit("Upstream change")
 	env.gitCheckout("feature/post-rewrite-rebase")
 
-	cmd := exec.Command("git", "rebase", "master")
+	cmd := exec.CommandContext(t.Context(), "git", "rebase", "master")
 	cmd.Dir = env.RepoDir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git rebase failed: %v\nOutput: %s", err, output)

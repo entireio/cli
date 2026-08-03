@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
@@ -208,9 +209,10 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// the banner marker is only claimed inside this branch so a non-writer
 	// winner can't consume the user's only banner.
 	_, hookResponseSpan := perf.Start(ctx, "write_hook_response")
-	if event.ResponseMessage != "" {
-		message = event.ResponseMessage
-	}
+	// Apply any agent-supplied ResponseMessage override, then append the
+	// agent-help banner pointer so it survives the override — banner-only agents
+	// (Factory Droid) have no other in-session channel for it.
+	message = finalizeSessionStartBanner(message, event.ResponseMessage, ag.Name())
 	if writer, ok := agent.AsHookResponseWriter(ag); ok {
 		bannerFirst, bErr := strategy.ClaimSessionStartBanner(ctx, event.SessionID)
 		if bErr != nil {
@@ -242,6 +244,11 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// so ErrStateNotFound is the normal first-session path — only warn on
 	// genuinely unexpected errors, matching the rest of this file.
 	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
+		if state.AdoptedIntoWorktreePath != "" {
+			logging.Info(logCtx, "skipping adopted-away source session start",
+				slog.String("adopted_into_worktree", state.AdoptedIntoWorktreePath))
+			return strategy.ErrMutationSkip
+		}
 		persistEventMetadataToState(event, state)
 		if transErr := strategy.TransitionAndLog(ctx, state, session.EventSessionStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logCtx, "session start transition failed",
@@ -269,6 +276,32 @@ func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
 		return "\n\nEntire CLI found no commits yet — checkpoints will activate after your first commit."
 	}
 	return "\n\nEntire CLI will link this conversation to your next commit."
+}
+
+// agentHelpBannerSuffix returns the SessionStart banner suffix that points an
+// agent at `entire agent-help`. It targets Factory AI Droid, which is banner-only
+// — no model-context injection and no agent-help skill file — so the SessionStart
+// banner is its sole in-session channel for the pointer. Every other agent gets
+// the pointer via context injection (Claude/Codex/Gemini/OpenCode/Pi), a skill
+// file (Claude/Codex/Gemini), or the passive `entire status` surface
+// (Cursor/Copilot), so this returns "" for them to avoid a duplicate pointer.
+func agentHelpBannerSuffix(agentName types.AgentName) string {
+	if agentName == agent.AgentNameFactoryAIDroid {
+		return fmt.Sprintf("\n  Run `%s` to see entire's commands and flags.", agentHelpCommand)
+	}
+	return ""
+}
+
+// finalizeSessionStartBanner applies an agent-supplied ResponseMessage override
+// (if any) and THEN appends the agent-help banner pointer, so the pointer
+// survives even when the agent supplies its own banner text. Order matters: a
+// ResponseMessage override replaces the assembled message wholesale, so the
+// pointer must be appended after it, not before.
+func finalizeSessionStartBanner(message, responseMessage string, agentName types.AgentName) string {
+	if responseMessage != "" {
+		message = responseMessage
+	}
+	return message + agentHelpBannerSuffix(agentName)
 }
 
 // handleLifecycleModelUpdate persists the model name for the current session.
@@ -382,12 +415,38 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 
 // handleLifecycleTurnStart handles turn start: captures pre-prompt state,
 // ensures strategy setup, initializes session.
-// entireTrailContextInjection is the one-time, model-facing documentation Entire
-// injects to teach the agent the `entire trail` command. Kept terse: it costs
-// context-window tokens on the first turn of every session, and states no
-// transient fact (whether a trail exists can change at any time).
-func entireTrailContextInjection() string {
-	return "A trail ties together the context for a branch. Use `entire trail` to view, create, update, or watch it."
+// entireTrailContextInjection is the one-time, model-facing pointer Entire
+// injects on the first turn of a session. It points at `entire agent-help` for
+// the full flag/subcommand surface — fetched on demand so that surface never goes
+// stale here as it grows — and adds only a small, stable behavioral invariant an
+// agent must know even if it never drills in: commits auto-capture checkpoints,
+// the two stable query anchors (`why`, `checkpoint search`) for recovering intent
+// before edits, and that setup/destructive commands belong to the user. It also
+// names the auto-detected repo (from the already-loaded session scope, no IO) and
+// the standing rule that the agent is inside the repo and must never ask the user
+// for the repo name. Kept terse: it costs context-window tokens on the first turn
+// of every session.
+func entireTrailContextInjection(scope trailEnablementScope) string {
+	repo := ""
+	if scope.Forge != "" && scope.Owner != "" && scope.Repo != "" {
+		repo = trailEnablementRepoKey(scope.Forge, scope.Owner, scope.Repo)
+	}
+	var b strings.Builder
+	b.WriteString("Entire is enabled for this repo. Run `entire agent-help` to see what entire does and which subcommand to use, then `entire agent-help <command>` for that command's exact, current flags. ")
+	b.WriteString("Commits automatically capture the AI session as a checkpoint, so never create checkpoints by hand — just commit normally. Before large edits, `entire why <file>:<line>` and `entire checkpoint search` recover the intent behind existing code. Leave setup and destructive commands (enable, disable, clean, rewind, auth) to the user. ")
+	// Mirror agentHelpRepoBlock's defense-in-depth: this string is injected raw
+	// into the agent's model context (no escaping), so a repo key carrying control
+	// characters (e.g. an <sessionID>.trail-scope.json cache written by a pre-fix
+	// binary, or tampered) degrades to the generic message rather than reaching
+	// that sink.
+	if repo != "" && strings.IndexFunc(repo, unicode.IsControl) < 0 {
+		b.WriteString("This repo is auto-detected from the git origin remote as ")
+		b.WriteString(repo)
+		b.WriteString("; you are already inside it, so never ask the user for the repo name.")
+	} else {
+		b.WriteString("Entire auto-detects the repo from the git origin remote, so never ask the user for the repo name.")
+	}
+	return b.String()
 }
 
 // emitContextInjection writes ag's native context-injection payload to stdout
@@ -444,7 +503,7 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 		return
 	}
 
-	payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: entireTrailContextInjection()})
+	payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: entireTrailContextInjection(scope)})
 	if err != nil {
 		logging.Warn(logCtx, "failed to render context injection",
 			slog.String("error", err.Error()))
@@ -458,6 +517,16 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 			slog.String("error", err.Error()))
 	}
 }
+
+// turnStartSessionLockWait bounds how long the TurnStart hook waits for the
+// per-session state lock. TurnStart fires before the agent runs and must stay
+// cheap; its session-state work is best-effort and repaired on the next turn or
+// at turn-end. Without a bound, TurnStart blocks on the previous turn's
+// still-running checkpoint condensation (which holds the same lock while it
+// rewrites the multi-MB transcript), stalling the user's prompt for ~30s. A
+// short wait still wins the lock in the common uncontended/brief-contention
+// case while degrading gracefully under pathological contention.
+const turnStartSessionLockWait = 2 * time.Second
 
 func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
@@ -475,6 +544,10 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("invalid %s event: %w", event.Type, err)
 	}
+
+	// Bound every session-state lock acquisition on the TurnStart path so a
+	// background lock holder can't stall the user's prompt (see the const doc).
+	ctx = strategy.WithSessionLockWait(ctx, turnStartSessionLockWait)
 
 	// Fill model from hint file if the agent didn't provide it on this hook
 	if event.Model == "" {

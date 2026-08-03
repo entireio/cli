@@ -10,7 +10,7 @@ func TestClusterCores_RoundTripFresh(t *testing.T) {
 	dir := t.TempDir()
 
 	if err := ModifyClusterCores(dir, func(c ClusterCoresCache) error {
-		c.Set("aws-us-east-2.entire.io", []string{"https://us.auth.entire.io", "https://eu.auth.entire.io"})
+		c.SetEntry("aws-us-east-2.entire.io", CoresEntry{CoreURLs: []string{"https://us.auth.entire.io", "https://eu.auth.entire.io"}})
 		return nil
 	}); err != nil {
 		t.Fatalf("ModifyClusterCores: %v", err)
@@ -20,14 +20,14 @@ func TestClusterCores_RoundTripFresh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadClusterCores: %v", err)
 	}
-	urls, fresh, ok := cache.Get("aws-us-east-2.entire.io")
+	entry, fresh, ok := cache.GetEntry("aws-us-east-2.entire.io")
 	if !ok {
 		t.Fatal("expected entry to exist")
 	}
 	if !fresh {
 		t.Fatal("expected freshly-set entry to be fresh")
 	}
-	if len(urls) != 2 || urls[0] != "https://us.auth.entire.io" || urls[1] != "https://eu.auth.entire.io" {
+	if urls := entry.CoreURLs; len(urls) != 2 || urls[0] != "https://us.auth.entire.io" || urls[1] != "https://eu.auth.entire.io" {
 		t.Fatalf("unexpected core URLs: %v", urls)
 	}
 }
@@ -38,7 +38,7 @@ func TestClusterCores_Miss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadClusterCores: %v", err)
 	}
-	if _, _, ok := cache.Get("unknown.example"); ok {
+	if _, _, ok := cache.GetEntry("unknown.example"); ok {
 		t.Fatal("expected miss for unknown cluster")
 	}
 }
@@ -62,14 +62,14 @@ func TestClusterCores_StaleEntryStillReturned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadClusterCores: %v", err)
 	}
-	urls, fresh, ok := cache.Get("old.example")
+	entry, fresh, ok := cache.GetEntry("old.example")
 	if !ok {
 		t.Fatal("stale entry should still report ok=true so callers can fall back to it")
 	}
 	if fresh {
 		t.Fatal("entry older than the TTL should report fresh=false")
 	}
-	if len(urls) != 1 || urls[0] != "https://core.example" {
+	if urls := entry.CoreURLs; len(urls) != 1 || urls[0] != "https://core.example" {
 		t.Fatalf("unexpected stale core URLs: %v", urls)
 	}
 }
@@ -79,7 +79,7 @@ func TestClusterCores_ModifyAccumulates(t *testing.T) {
 	dir := t.TempDir()
 
 	if err := ModifyClusterCores(dir, func(c ClusterCoresCache) error {
-		c.Set("a.example", []string{"https://core-a.example"})
+		c.SetEntry("a.example", CoresEntry{CoreURLs: []string{"https://core-a.example"}})
 		return nil
 	}); err != nil {
 		t.Fatalf("ModifyClusterCores a: %v", err)
@@ -87,7 +87,7 @@ func TestClusterCores_ModifyAccumulates(t *testing.T) {
 	// Second modify must see the first's write (single locked RMW) rather
 	// than clobbering it.
 	if err := ModifyClusterCores(dir, func(c ClusterCoresCache) error {
-		c.Set("b.example", []string{"https://core-b.example"})
+		c.SetEntry("b.example", CoresEntry{CoreURLs: []string{"https://core-b.example"}})
 		return nil
 	}); err != nil {
 		t.Fatalf("ModifyClusterCores b: %v", err)
@@ -97,26 +97,26 @@ func TestClusterCores_ModifyAccumulates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadClusterCores: %v", err)
 	}
-	if _, _, ok := cache.Get("a.example"); !ok {
+	if _, _, ok := cache.GetEntry("a.example"); !ok {
 		t.Fatal("first entry lost after second modify")
 	}
-	if _, _, ok := cache.Get("b.example"); !ok {
+	if _, _, ok := cache.GetEntry("b.example"); !ok {
 		t.Fatal("second entry missing")
 	}
 }
 
-func TestClusterCores_SetCopiesSlice(t *testing.T) {
+func TestClusterCores_SetEntryCopiesSlice(t *testing.T) {
 	t.Parallel()
 	cache := make(ClusterCoresCache)
 	urls := []string{"https://core.example"}
-	cache.Set("c.example", urls)
-	urls[0] = "https://evil.example" // mutate caller's slice after Set
+	cache.SetEntry("c.example", CoresEntry{CoreURLs: urls})
+	urls[0] = "https://evil.example" // mutate caller's slice after SetEntry
 
-	got, _, ok := cache.Get("c.example")
+	got, _, ok := cache.GetEntry("c.example")
 	if !ok {
 		t.Fatal("expected entry")
 	}
-	if got[0] != "https://core.example" {
-		t.Fatalf("Set did not copy the slice; cache corrupted to %v", got)
+	if got.CoreURLs[0] != "https://core.example" {
+		t.Fatalf("SetEntry did not copy the slice; cache corrupted to %v", got.CoreURLs)
 	}
 }

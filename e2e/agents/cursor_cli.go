@@ -16,6 +16,10 @@ func init() {
 		return
 	}
 	Register(&CursorCLI{})
+	// Cursor is rate-limited ("Increase limits for faster responses"), so gate
+	// its parallelism. Without a registered gate, AcquireSlot is a no-op and the
+	// E2E_CONCURRENT_TEST_LIMIT override the workflow sets has no effect.
+	RegisterGate("cursor-cli", 2)
 }
 
 // CursorCLI implements the E2E Agent interface for the Cursor Agent CLI binary.

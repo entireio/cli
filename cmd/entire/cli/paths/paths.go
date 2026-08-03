@@ -6,13 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 	"unicode"
-
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 )
 
 // Directory constants
@@ -22,6 +19,7 @@ const (
 	EntireMetadataDir = ".entire/metadata"
 
 	osWindows = "windows"
+	osDarwin  = "darwin"
 )
 
 // Metadata file names
@@ -30,12 +28,20 @@ const (
 	TranscriptFileName       = "full.jsonl"
 	TranscriptFileNameLegacy = "full.log"
 	// CompactTranscriptFileName is the compact transcript stored alongside
-	// full.jsonl, pre-sliced to the checkpoint's own portion.
+	// full.jsonl. It holds the full compacted session; this checkpoint's slice
+	// begins at the session metadata's compact_transcript_start.
 	CompactTranscriptFileName = "transcript.jsonl"
 	MetadataFileName          = "metadata.json"
 	CheckpointFileName        = "checkpoint.json"
 	ContentHashFileName       = "content_hash.txt"
 	SettingsFileName          = "settings.json"
+
+	// AssetsDir is the per-session subfolder holding externalized transcript
+	// assets (e.g. images); AssetsManifestFile indexes them. AssetsDirName is the
+	// bare tree-entry name (no trailing slash) used when walking git trees.
+	AssetsDirName      = "assets"
+	AssetsDir          = "assets/"
+	AssetsManifestFile = "assets/manifest.json"
 )
 
 // MetadataBranchName is the orphan branch used by manual-commit strategy to store metadata
@@ -44,15 +50,6 @@ const MetadataBranchName = "entire/checkpoints/v1"
 // TrailsBranchName is the orphan branch used to store trail metadata.
 // Trails are branch-centric work tracking abstractions that link to checkpoints by branch name.
 const TrailsBranchName = "entire/trails/v1"
-
-// CheckpointPath returns the sharded storage path for a checkpoint ID.
-// Uses first 2 characters as shard (256 buckets), remaining as folder name.
-// Example: "a3b2c4d5e6f7" -> "a3/b2c4d5e6f7"
-//
-// Deprecated: Use checkpointID.Path() directly instead.
-func CheckpointPath(checkpointID id.CheckpointID) string {
-	return checkpointID.Path()
-}
 
 // worktreeRootCache caches the worktree root to avoid repeated git commands.
 // The cache is keyed by the current working directory to handle directory changes.
@@ -126,21 +123,72 @@ func AbsPath(ctx context.Context, relPath string) (string, error) {
 }
 
 // IsInfrastructurePath returns true if the path is part of CLI infrastructure
-// (i.e., inside the .entire directory)
+// (i.e., inside the .entire directory). It is used only to EXCLUDE infra paths
+// from checkpoints/tracking, so it matches case-insensitively on
+// case-insensitive filesystems via IsProtectedSubpath. Do not use it as a
+// containment/allow gate.
 func IsInfrastructurePath(path string) bool {
-	return IsSubpath(EntireDir, path)
+	return IsProtectedSubpath(EntireDir, path)
 }
 
 // IsSubpath reports whether child is lexically under parent (or equal to it).
 // It uses filepath.Rel, which cleans both inputs and is traversal-resistant:
 // a crafted child like "/a/b/../../../etc/passwd" that escapes parent will
 // produce a relative path starting with ".." and be rejected.
+//
+// Matching is case-SENSITIVE. This is the correct primitive for fail-closed
+// containment/allow checks (e.g. validating an attacker-influenced path stays
+// under an Entire-owned dir): on a case-sensitive volume a differently-cased
+// path names a different directory, so folding it in would fail open. For
+// EXCLUSION decisions that must also catch case variants on Windows/macOS, use
+// IsProtectedSubpath instead.
 func IsSubpath(parent, child string) bool {
 	rel, err := filepath.Rel(parent, child)
 	if err != nil {
 		return false
 	}
 	return !IsRelativeTraversal(rel)
+}
+
+// IsProtectedSubpath reports whether child is under parent for the purpose of
+// EXCLUDING protected/infrastructure content from checkpoints and tracking.
+// Unlike IsSubpath it honors OS case-insensitivity (see CaseInsensitiveFS), so
+// a case variant of a protected dir (".Claude" vs ".claude") is still excluded
+// on Windows/macOS.
+//
+// SECURITY: never use this for allow/containment decisions. Case-folding widens
+// what counts as "inside" parent, which is safe only when the effect is to
+// exclude more. On a case-sensitive volume under a case-insensitive GOOS it
+// over-matches; for a fail-closed gate that would fail open. Use IsSubpath there.
+func IsProtectedSubpath(parent, child string) bool {
+	if CaseInsensitiveFS() {
+		return IsSubpath(strings.ToLower(parent), strings.ToLower(child))
+	}
+	return IsSubpath(parent, child)
+}
+
+// CaseInsensitiveFS reports whether path comparisons should be case-insensitive
+// on the host OS. This is OS-based, not volume-based: Windows and macOS default
+// to case-insensitive filesystems, Linux to case-sensitive. Keying on GOOS keeps
+// the result deterministic. It must only influence EXCLUSION decisions (see
+// IsProtectedSubpath / Equal): on an atypical volume (e.g. a case-sensitive
+// macOS APFS volume) it treats a differently-cased path as matching, which is
+// safe only when the effect is to exclude more, never to widen an allow gate.
+func CaseInsensitiveFS() bool {
+	return runtime.GOOS == osWindows || runtime.GOOS == osDarwin
+}
+
+// Equal reports whether two paths refer to the same location, honoring the host
+// OS's case sensitivity (see CaseInsensitiveFS). Both inputs are cleaned and
+// slash-normalized before comparison. Like IsProtectedSubpath, this is intended
+// for EXCLUSION matching (e.g. protected files), not fail-closed containment.
+func Equal(a, b string) bool {
+	a = filepath.Clean(filepath.FromSlash(a))
+	b = filepath.Clean(filepath.FromSlash(b))
+	if CaseInsensitiveFS() {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // IsRelativeTraversal reports whether rel escapes its base directory.
@@ -187,34 +235,6 @@ func normalizeMSYSPath(p string) string {
 		return string(unicode.ToUpper(rune(p[1]))) + ":" + p[2:]
 	}
 	return p
-}
-
-// nonAlphanumericRegex matches any non-alphanumeric character
-var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9]`)
-
-// SanitizePathForClaude converts a path to Claude's project directory format.
-// Claude replaces any non-alphanumeric character with a dash.
-func SanitizePathForClaude(path string) string {
-	return nonAlphanumericRegex.ReplaceAllString(path, "-")
-}
-
-// GetClaudeProjectDir returns the directory where Claude stores session transcripts
-// for the given repository path.
-//
-// In test environments, set ENTIRE_TEST_CLAUDE_PROJECT_DIR to override the default location.
-func GetClaudeProjectDir(repoPath string) (string, error) {
-	override := os.Getenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR")
-	if override != "" {
-		return override, nil
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	projectDir := SanitizePathForClaude(repoPath)
-	return filepath.Join(homeDir, ".claude", "projects", projectDir), nil
 }
 
 // SessionMetadataDirFromSessionID returns the path to a session's metadata directory

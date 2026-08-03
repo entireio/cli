@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"time"
 )
@@ -127,20 +128,28 @@ func firstString(raw map[string]json.RawMessage, keys ...string) string {
 }
 
 // ParseTimestamp decodes a Copilot event timestamp, which may be either numeric
-// epoch-millis or an RFC3339(Nano) string. A null/zero value returns the zero
-// time (callers treat that as "missing"). Exported so transcript importers can
-// decode the same dual-format field without re-implementing the logic.
+// epoch-millis or an RFC3339(Nano) string. The numeric form may carry a
+// fractional part (Copilot CLI 1.0.71 emits e.g. 1784283185447.0); sub-millisecond
+// precision is truncated. A null/zero value returns the zero time (callers treat
+// that as "missing"). Exported so transcript importers can decode the same
+// dual-format field without re-implementing the logic.
 func ParseTimestamp(raw json.RawMessage) (time.Time, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return time.Time{}, nil
 	}
 
-	var millis int64
+	var millis float64
 	if err := json.Unmarshal(raw, &millis); err == nil {
-		if millis == 0 {
+		// Guard the float→int64 conversion: out-of-range values are
+		// implementation-defined in Go, so reject them instead.
+		if millis >= float64(math.MaxInt64) || millis <= float64(math.MinInt64) {
+			return time.Time{}, fmt.Errorf("timestamp %v out of range", millis)
+		}
+		ms := int64(millis) // truncates any fractional milliseconds
+		if ms == 0 {
 			return time.Time{}, nil // Treat epoch as missing — triggers time.Now() fallback.
 		}
-		return time.UnixMilli(millis), nil
+		return time.UnixMilli(ms), nil
 	}
 
 	var ts string
@@ -167,7 +176,7 @@ func isJSONNumber(raw json.RawMessage) bool {
 	if len(raw) == 0 || raw[0] == 'n' {
 		return false
 	}
-	var n int64
+	var n float64
 	return json.Unmarshal(raw, &n) == nil
 }
 

@@ -32,10 +32,18 @@ func writeNotFoundProblem(t *testing.T, w http.ResponseWriter) {
 	}
 }
 
-// runDeleteCmd points the active-context client at srv via the activeCoreClient
-// seam, runs newCmd() with args, and returns its stdout and error. The caller
-// must not be parallel: the seam is package-global.
-func runDeleteCmd(t *testing.T, newCmd func() *cobra.Command, srvURL string, args ...string) (string, error) {
+// runCoreCmd runs any active-context control-plane command against a seamed
+// httptest core: it points the active-context client at srv via the
+// activeCoreClient seam, runs newCmd() with args, and returns its stdout,
+// stderr, and error. Commands dialing via runCoreForCluster (mirror
+// create/remove/collaborators) bypass the seam and need their own httptest
+// wiring. The caller must not be parallel: the seam is package-global.
+//
+// Note: cobra's cmd.Print* falls back to OutOrStderr(), which under SetOut
+// resolves to the stdout buffer — so Empty(errOut) assertions in these tests
+// only guard explicit ErrOrStderr writes; the Contains-on-stdout assertions
+// are what pin the production stream.
+func runCoreCmd(t *testing.T, newCmd func() *cobra.Command, srvURL string, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	prev := activeCoreClient
 	activeCoreClient = func(context.Context) (*coreapi.Client, error) {
@@ -44,12 +52,12 @@ func runDeleteCmd(t *testing.T, newCmd func() *cobra.Command, srvURL string, arg
 	t.Cleanup(func() { activeCoreClient = prev })
 
 	cmd := newCmd()
-	var out bytes.Buffer
+	var out, errW bytes.Buffer
 	cmd.SetOut(&out)
-	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetErr(&errW)
 	cmd.SetArgs(args)
-	err := cmd.ExecuteContext(t.Context())
-	return out.String(), err
+	err = cmd.ExecuteContext(t.Context())
+	return out.String(), errW.String(), err
 }
 
 // TestControlPlaneDelete_Wiring exercises the org/project/repo delete commands
@@ -79,11 +87,12 @@ func TestControlPlaneDelete_Wiring(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 
-			out, err := runDeleteCmd(t, tc.newCmd, srv.URL, testDeleteULID, "--force")
+			out, errOut, err := runCoreCmd(t, tc.newCmd, srv.URL, testDeleteULID, "--force")
 			require.NoError(t, err)
 			require.Equal(t, http.MethodDelete, gotMethod)
 			require.Equal(t, tc.wantPath, gotPath)
-			require.Contains(t, out, "Deleted "+tc.noun+" "+testDeleteULID)
+			require.Contains(t, out, "✓ Deleted "+tc.noun+" "+testDeleteULID)
+			require.Empty(t, errOut, "no explicit ErrOrStderr writes expected")
 		})
 
 		t.Run(tc.noun+"/already-gone is idempotent", func(t *testing.T) {
@@ -92,9 +101,10 @@ func TestControlPlaneDelete_Wiring(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 
-			out, err := runDeleteCmd(t, tc.newCmd, srv.URL, testDeleteULID, "--force")
+			out, errOut, err := runCoreCmd(t, tc.newCmd, srv.URL, testDeleteULID, "--force")
 			require.NoError(t, err)
 			require.Contains(t, out, "not found; nothing to delete")
+			require.Empty(t, errOut)
 		})
 
 		t.Run(tc.noun+"/refuses without --force when non-interactive", func(t *testing.T) {
@@ -104,7 +114,7 @@ func TestControlPlaneDelete_Wiring(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 
-			_, err := runDeleteCmd(t, tc.newCmd, srv.URL, testDeleteULID)
+			_, _, err := runCoreCmd(t, tc.newCmd, srv.URL, testDeleteULID)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "--force")
 		})

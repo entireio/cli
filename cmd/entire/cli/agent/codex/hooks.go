@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -85,43 +84,39 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 		cmdPrefix = "entire hooks codex "
 	}
 	sessionStartCmd := cmdPrefix + "session-start"
+	useWindowsProductionHooks := agent.UseWindowsProductionHooks(ctx, localDev)
 	if !localDev {
-		sessionStartCmd = agent.WrapProductionJSONWarningHookCommand(sessionStartCmd, agent.WarningFormatSingleLine)
+		sessionStartCmd = agent.WrapProductionJSONWarningHookCommandForOS(sessionStartCmd, agent.WarningFormatSingleLine, useWindowsProductionHooks)
 	}
 	userPromptSubmitCmd := cmdPrefix + "user-prompt-submit"
 	stopCmd := cmdPrefix + "stop"
 	postToolUseCmd := cmdPrefix + "post-tool-use"
 	if !localDev {
-		userPromptSubmitCmd = agent.WrapProductionSilentHookCommand(userPromptSubmitCmd)
-		stopCmd = agent.WrapProductionSilentHookCommand(stopCmd)
-		postToolUseCmd = agent.WrapProductionSilentHookCommand(postToolUseCmd)
+		userPromptSubmitCmd = agent.WrapProductionSilentHookCommandForOS(userPromptSubmitCmd, useWindowsProductionHooks)
+		stopCmd = agent.WrapProductionSilentHookCommandForOS(stopCmd, useWindowsProductionHooks)
+		postToolUseCmd = agent.WrapProductionSilentHookCommandForOS(postToolUseCmd, useWindowsProductionHooks)
 	}
 
 	count := 0
 
-	if !hookCommandExists(sessionStart, sessionStartCmd) {
-		sessionStart = addHook(sessionStart, sessionStartCmd)
+	if updated, changed := syncHookCommand(sessionStart, sessionStartCmd); changed {
+		sessionStart = updated
 		count++
 	}
-	if !hookCommandExists(userPromptSubmit, userPromptSubmitCmd) {
-		userPromptSubmit = addHook(userPromptSubmit, userPromptSubmitCmd)
+	if updated, changed := syncHookCommand(userPromptSubmit, userPromptSubmitCmd); changed {
+		userPromptSubmit = updated
 		count++
 	}
-	if !hookCommandExists(stop, stopCmd) {
-		stop = addHook(stop, stopCmd)
+	if updated, changed := syncHookCommand(stop, stopCmd); changed {
+		stop = updated
 		count++
 	}
-	if !hookCommandExists(postToolUse, postToolUseCmd) {
-		postToolUse = addHook(postToolUse, postToolUseCmd)
+	if updated, changed := syncHookCommand(postToolUse, postToolUseCmd); changed {
+		postToolUse = updated
 		count++
 	}
 
 	if count == 0 {
-		// Still ensure the feature flag is configured even if hooks
-		// were already present (e.g., manually installed).
-		if err := ensureProjectFeatureEnabled(repoRoot); err != nil {
-			return 0, fmt.Errorf("failed to enable codex_hooks feature: %w", err)
-		}
 		return 0, nil
 	}
 
@@ -157,12 +152,11 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 		return 0, fmt.Errorf("failed to write hooks.json: %w", err)
 	}
 
-	// Enable the codex_hooks feature in the project-level .codex/config.toml.
-	// This keeps the feature flag per-repo rather than global.
-	if err := ensureProjectFeatureEnabled(repoRoot); err != nil {
-		return count, fmt.Errorf("failed to enable codex_hooks feature: %w", err)
-	}
-
+	// No .codex/config.toml is written: hooks are enabled by default in
+	// Codex (since 0.124.0), and a TOML file inside Codex's reserved
+	// <CODEX_HOME>/agents tree would be rejected by its agent-role scanner
+	// at every startup (entireio/cli#842). A leftover config.toml written
+	// by an older entire version must be removed manually.
 	return count, nil
 }
 
@@ -296,6 +290,16 @@ func hookCommandExists(groups []MatcherGroup, command string) bool {
 	return false
 }
 
+func syncHookCommand(groups []MatcherGroup, command string) ([]MatcherGroup, bool) {
+	if hookCommandExists(groups, command) {
+		return groups, false
+	}
+	if hasEntireHook(groups) {
+		groups = removeEntireHooks(groups)
+	}
+	return addHook(groups, command), true
+}
+
 func addHook(groups []MatcherGroup, command string) []MatcherGroup {
 	entry := HookEntry{
 		Type:    "command",
@@ -346,84 +350,4 @@ func removeEntireHooks(groups []MatcherGroup) []MatcherGroup {
 		}
 	}
 	return result
-}
-
-// configFileName is the Codex config file name.
-const configFileName = "config.toml"
-
-// featureLine is the TOML line that enables the hooks feature. The flag was
-// renamed from `codex_hooks` to `hooks` in Codex 0.129.0; the old name is
-// still accepted as a legacy alias but emits a deprecation warning at
-// every startup. ensureProjectFeatureEnabled rewrites the legacy form when
-// it sees it.
-const (
-	featureLine       = "hooks = true"
-	legacyFeatureLine = "codex_hooks = true"
-)
-
-// ensureProjectFeatureEnabled writes features.hooks = true to the
-// project-level .codex/config.toml. This keeps the feature flag per-repo.
-// Replaces the deprecated codex_hooks = true line if it's present.
-func ensureProjectFeatureEnabled(repoRoot string) error {
-	configPath := filepath.Join(repoRoot, ".codex", configFileName)
-
-	data, err := os.ReadFile(configPath) //nolint:gosec // path constructed from repo root
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to read config.toml: %w", err)
-	}
-
-	content := string(data)
-	hasNew := containsFeatureLine(content, featureLine)
-	hasLegacy := containsFeatureLine(content, legacyFeatureLine)
-	switch {
-	case hasNew && hasLegacy:
-		content = stripLegacyFeatureLine(content)
-	case hasNew:
-		return nil
-	case hasLegacy:
-		content = strings.Replace(content, legacyFeatureLine, featureLine, 1)
-	case strings.Contains(content, "[features]"):
-		content = strings.Replace(content, "[features]", "[features]\n"+featureLine, 1)
-	default:
-		if len(content) > 0 && !strings.HasSuffix(content, "\n") {
-			content += "\n"
-		}
-		content += "\n[features]\n" + featureLine + "\n"
-	}
-
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o750); err != nil {
-		return fmt.Errorf("failed to create .codex directory: %w", err)
-	}
-	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil { //nolint:gosec // path constructed from repo root
-		return fmt.Errorf("failed to write config.toml: %w", err)
-	}
-	return nil
-}
-
-// containsFeatureLine checks for an exact line match. A plain
-// strings.Contains is wrong because "hooks = true" is a substring of
-// "codex_hooks = true" — without the line-boundary anchor we'd treat the
-// legacy form as if the new form was already present.
-func containsFeatureLine(content, line string) bool {
-	for _, raw := range strings.Split(content, "\n") {
-		if strings.TrimSpace(raw) == line {
-			return true
-		}
-	}
-	return false
-}
-
-// stripLegacyFeatureLine removes the deprecated `codex_hooks = true` line
-// from a TOML config string, dropping a trailing blank line so the file
-// stays tidy. The new `hooks = true` is added separately by the caller.
-func stripLegacyFeatureLine(content string) string {
-	idx := strings.Index(content, legacyFeatureLine)
-	if idx < 0 {
-		return content
-	}
-	end := idx + len(legacyFeatureLine)
-	if end < len(content) && content[end] == '\n' {
-		end++
-	}
-	return content[:idx] + content[end:]
 }

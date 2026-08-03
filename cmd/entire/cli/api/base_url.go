@@ -52,11 +52,6 @@ func BaseURL() string {
 	return DefaultBaseURL
 }
 
-// ResolveURL joins an API-relative path against the effective base URL.
-func ResolveURL(path string) (string, error) {
-	return ResolveURLFromBase(BaseURL(), path)
-}
-
 // ResolveURLFromBase joins an API-relative path against an explicit base URL.
 // Only http and https schemes are accepted.
 func ResolveURLFromBase(baseURL, path string) (string, error) {
@@ -135,7 +130,7 @@ func NormalizeOriginURL(raw string) string {
 }
 
 // OriginOnly is a backwards-compatible alias for NormalizeOriginURL.
-// Callers reading raw URLs (e.g. ENTIRE_SEARCH_URL) and feeding them into
+// Callers reading raw URLs (e.g. ENTIRE_API_BASE_URL) and feeding them into
 // tokenmanager.TokenRequest.Resource use this to strip path/query/fragment
 // before the lib's stricter origin-only validator runs.
 func OriginOnly(raw string) string {

@@ -939,67 +939,6 @@ func createBlobFromFile(repo *git.Repository, filePath string) (plumbing.Hash, f
 	return hash, mode, nil
 }
 
-// addDirectoryToEntriesWithAbsPath recursively adds all files in a directory to the entries map.
-func addDirectoryToEntriesWithAbsPath(ctx context.Context, repo *git.Repository, dirPathAbs, dirPathRel string, entries map[string]object.TreeEntry) error {
-	err := filepath.Walk(dirPathAbs, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Skip symlinks to prevent reading files outside the metadata directory.
-		// A symlink could point to sensitive files (e.g., /etc/passwd) which would
-		// then be captured in the checkpoint and stored in git history.
-		// NOTE: filepath.Walk uses os.Stat (follows symlinks), so info.Mode() never
-		// reports ModeSymlink. We use os.Lstat to check the entry itself.
-		// This check MUST come before IsDir() because Walk follows symlinked
-		// directories and would recurse into them otherwise.
-		linfo, lstatErr := os.Lstat(path)
-		if lstatErr != nil {
-			return fmt.Errorf("failed to lstat %s: %w", path, lstatErr)
-		}
-		if linfo.Mode()&os.ModeSymlink != 0 {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		if info.IsDir() {
-			return nil
-		}
-
-		// Calculate relative path within the directory, then join with dirPathRel for tree entry
-		relWithinDir, err := filepath.Rel(dirPathAbs, path)
-		if err != nil {
-			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
-		}
-
-		// Prevent path traversal via unexpected relative paths outside the metadata dir.
-		if paths.IsRelativeTraversal(relWithinDir) {
-			return fmt.Errorf("path traversal detected: %s", relWithinDir)
-		}
-
-		treePath := filepath.ToSlash(filepath.Join(dirPathRel, relWithinDir))
-
-		// Use redacted blob creation for metadata files (transcripts, prompts, etc.)
-		// to ensure PII and secrets are redacted before writing to git.
-		blobHash, mode, err := createRedactedBlobFromFile(ctx, repo, path, treePath)
-		if err != nil {
-			return fmt.Errorf("failed to create blob for %s: %w", path, err)
-		}
-		entries[treePath] = object.TreeEntry{
-			Name: treePath,
-			Mode: mode,
-			Hash: blobHash,
-		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("failed to walk directory %s: %w", dirPathAbs, err)
-	}
-	return nil
-}
-
 // treeNode represents a node in our tree structure.
 type treeNode struct {
 	entries map[string]*treeNode // subdirectories
@@ -1016,7 +955,13 @@ func addDirectoryToChanges(ctx context.Context, repo *git.Repository, dirPathAbs
 			return err
 		}
 
-		// Skip symlinks (same security rationale as addDirectoryToEntriesWithAbsPath)
+		// Skip symlinks to prevent reading files outside the metadata directory.
+		// A symlink could point to sensitive files (e.g., /etc/passwd) which would
+		// then be captured in the checkpoint and stored in git history.
+		// NOTE: filepath.Walk uses os.Stat (follows symlinks), so info.Mode() never
+		// reports ModeSymlink. We use os.Lstat to check the entry itself.
+		// This check MUST come before IsDir() because Walk follows symlinked
+		// directories and would recurse into them otherwise.
 		linfo, lstatErr := os.Lstat(path)
 		if lstatErr != nil {
 			return fmt.Errorf("failed to lstat %s: %w", path, lstatErr)
@@ -1250,6 +1195,35 @@ func filterGitIgnoredFiles(ctx context.Context, repo *git.Repository, files []st
 	return kept
 }
 
+// isProtectedCheckpointPath reports whether a repo-relative path must be kept
+// out of checkpoint snapshots: the .entire infrastructure dir, or any
+// registered agent's declared protected dir/file (e.g. .claude, or an external
+// plugin's protected_dirs).
+//
+// This mirrors shouldIgnoreSessionTrackingPath in the cli package. The two
+// cannot share an implementation because cli imports checkpoint, so the logic
+// is duplicated deliberately. The first-checkpoint path (collectChangedFiles)
+// must apply the same exclusions as the session-tracking and rewind paths, or
+// protected-dir content is captured into the shadow tree on session start
+// (see the DetectFileChanges / isProtectedPath call sites).
+func isProtectedCheckpointPath(relPath string) bool {
+	cleanPath := filepath.Clean(filepath.FromSlash(relPath))
+	if paths.IsInfrastructurePath(cleanPath) {
+		return true
+	}
+	for _, file := range agent.AllProtectedFiles() {
+		if paths.Equal(cleanPath, file) {
+			return true
+		}
+	}
+	for _, dir := range agent.AllProtectedDirs() {
+		if paths.IsProtectedSubpath(filepath.Clean(filepath.FromSlash(dir)), cleanPath) {
+			return true
+		}
+	}
+	return false
+}
+
 // collectChangedFiles returns all changed files from git status for the first checkpoint.
 //
 // For the first checkpoint, we need to capture:
@@ -1301,16 +1275,16 @@ func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFile
 		filename := entry[3:] // No TrimSpace needed with -z format
 
 		// Handle R/C (rename/copy) first - they have a second entry we must skip
-		// even if the new filename is an infrastructure path
+		// even if the new filename is a protected path
 		if staging == 'R' || staging == 'C' {
 			// Renamed or copied: current entry is new name, next entry is old name
-			if !paths.IsInfrastructurePath(filename) {
+			if !isProtectedCheckpointPath(filename) {
 				changedSeen[filename] = struct{}{}
 			}
 			// The old name follows as the next NUL-separated entry - must always skip it
 			if i+1 < len(entries) && entries[i+1] != "" {
 				oldName := entries[i+1]
-				if staging == 'R' && !paths.IsInfrastructurePath(oldName) {
+				if staging == 'R' && !isProtectedCheckpointPath(oldName) {
 					// For renames, old file is effectively deleted
 					deletedSeen[oldName] = struct{}{}
 				}
@@ -1319,8 +1293,8 @@ func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFile
 			continue
 		}
 
-		// Skip .entire directory for non-R/C entries
-		if paths.IsInfrastructurePath(filename) {
+		// Skip .entire and agent-protected dirs/files for non-R/C entries
+		if isProtectedCheckpointPath(filename) {
 			continue
 		}
 

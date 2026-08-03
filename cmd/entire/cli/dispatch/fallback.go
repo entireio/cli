@@ -31,33 +31,32 @@ type fallbackResult struct {
 func applyFallbackChain(candidates []candidate) fallbackResult {
 	result := fallbackResult{Used: make([]repoBullet, 0, len(candidates))}
 
-	for _, candidate := range candidates {
-		if text := strings.TrimSpace(candidate.LocalSummaryTitle); text != "" {
-			result.Used = append(result.Used, repoBullet{
-				RepoFullName: candidate.RepoFullName,
-				Bullet: Bullet{
-					CheckpointID: candidate.CheckpointID,
-					Text:         text,
-					Source:       bulletSourceLocalSummary,
-					Branch:       candidate.Branch,
-					CreatedAt:    candidate.CreatedAt,
-				},
-			})
-			continue
-		}
+	// Preference order: the local summary title, else the commit subject.
+	sources := []struct {
+		text   func(candidate) string
+		source string
+	}{
+		{func(c candidate) string { return c.LocalSummaryTitle }, bulletSourceLocalSummary},
+		{func(c candidate) string { return c.CommitSubject }, bulletSourceCommitMessage},
+	}
 
-		if text := strings.TrimSpace(candidate.CommitSubject); text != "" {
+	for _, cand := range candidates {
+		for _, s := range sources {
+			text := strings.TrimSpace(s.text(cand))
+			if text == "" {
+				continue
+			}
 			result.Used = append(result.Used, repoBullet{
-				RepoFullName: candidate.RepoFullName,
+				RepoFullName: cand.RepoFullName,
 				Bullet: Bullet{
-					CheckpointID: candidate.CheckpointID,
+					CheckpointID: cand.CheckpointID,
 					Text:         text,
-					Source:       bulletSourceCommitMessage,
-					Branch:       candidate.Branch,
-					CreatedAt:    candidate.CreatedAt,
+					Source:       s.source,
+					Branch:       cand.Branch,
+					CreatedAt:    cand.CreatedAt,
 				},
 			})
-			continue
+			break
 		}
 	}
 

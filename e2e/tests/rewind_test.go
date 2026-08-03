@@ -104,7 +104,7 @@ func TestRewindAfterCommit(t *testing.T) {
 
 		// Attempting to rewind to the old shadow branch ID should fail.
 		err = entire.Rewind(t, s.Dir, oldID)
-		assert.Error(t, err, "rewind to old shadow branch ID should fail after commit")
+		require.Error(t, err, "rewind to old shadow branch ID should fail after commit")
 
 		// Working directory should be unchanged — file still committed.
 		testutil.AssertFileExists(t, s.Dir, "docs/red.md")
@@ -174,7 +174,7 @@ func TestRewindSquashMergeMultipleCheckpoints(t *testing.T) {
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Add red doc")
 		testutil.WaitForCheckpoint(t, s, 30*time.Second)
-		cp1Ref := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
+		cp1Ref := testutil.CheckpointState(s.Dir)
 
 		_, err = s.RunPrompt(t, ctx,
 			"create a file at docs/blue.md with a paragraph about the colour blue. Do not ask for confirmation, just make the change.")

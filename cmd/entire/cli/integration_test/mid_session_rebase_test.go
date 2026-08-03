@@ -71,7 +71,7 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 	}
 
 	// Create first file change
-	fileAContent := "package main\n\nfunc A() {}\n"
+	fileAContent := pkgFuncA
 	env.WriteFile("a.go", fileAContent)
 
 	session.CreateTranscript(
@@ -103,7 +103,7 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 	// This simulates what happens when Claude runs: git rebase master
 	// Note: We're NOT calling SimulateUserPromptSubmit here because the rebase
 	// happens mid-session as part of Claude's tool execution
-	cmd := exec.Command("git", "rebase", "master")
+	cmd := exec.CommandContext(t.Context(), "git", "rebase", "master")
 	cmd.Dir = env.RepoDir
 	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -126,7 +126,7 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 	// Claude continues working after the rebase - creates more files
 	// Note: We do NOT call SimulateUserPromptSubmit because this is continuing
 	// the same tool execution flow (no new user prompt)
-	fileBContent := "package main\n\nfunc B() {}\n"
+	fileBContent := pkgFuncB
 	env.WriteFile("b.go", fileBContent)
 
 	// Reset transcript builder for new checkpoint
@@ -225,7 +225,7 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 func (env *TestEnv) gitCheckout(ref string) {
 	env.T.Helper()
 
-	cmd := exec.Command("git", "checkout", ref)
+	cmd := exec.CommandContext(env.T.Context(), "git", "checkout", ref)
 	cmd.Dir = env.RepoDir
 	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -282,7 +282,7 @@ func TestShadow_CommitThenRebaseMidSession(t *testing.T) {
 	}
 
 	// Create file and checkpoint
-	fileAContent := "package main\n\nfunc A() {}\n"
+	fileAContent := pkgFuncA
 	env.WriteFile("a.go", fileAContent)
 
 	session.CreateTranscript(
@@ -330,7 +330,7 @@ func TestShadow_CommitThenRebaseMidSession(t *testing.T) {
 	// ========================================
 	t.Log("Phase 4: Claude rebases onto master")
 
-	cmd := exec.Command("git", "rebase", "master")
+	cmd := exec.CommandContext(t.Context(), "git", "rebase", "master")
 	cmd.Dir = env.RepoDir
 	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -350,7 +350,7 @@ func TestShadow_CommitThenRebaseMidSession(t *testing.T) {
 	// ========================================
 	t.Log("Phase 5: Creating checkpoint after commit and rebase")
 
-	fileBContent := "package main\n\nfunc B() {}\n"
+	fileBContent := pkgFuncB
 	env.WriteFile("b.go", fileBContent)
 
 	// IMPORTANT: Don't reset the TranscriptBuilder - append to existing transcript

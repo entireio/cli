@@ -22,9 +22,31 @@ func TestCheckpointPolicyCmd_PrintsDefaults(t *testing.T) {
 
 	stdout, err := executeCheckpointPolicyCmd(t)
 	require.NoError(t, err)
-	require.Contains(t, stdout, "checkpoint_version: branch-v1")
-	require.Contains(t, stdout, "checkpoint_min_version: branch-v1")
+	require.Contains(t, stdout, "checkpoint_version: branch-v1 (default)")
+	require.Contains(t, stdout, "checkpoint_min_version: branch-v1 (default)")
 	require.Contains(t, stdout, "source: defaults")
+}
+
+func TestCheckpointPolicyCmd_HelpDocumentsEnforcementBehavior(t *testing.T) {
+	t.Parallel()
+
+	cmd := newCheckpointGroupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"policy", "--help"})
+
+	err := cmd.Execute()
+	require.NoError(t, err)
+
+	help := stdout.String()
+	require.Contains(t, help, "checkpoint_version is a checkpoint-data write guard")
+	require.Contains(t, help, `If another client configures a checkpoint_version this CLI cannot write`)
+	require.Contains(t, help, "commands that create checkpoint data fail until the CLI is upgraded")
+	require.Contains(t, help, "checkpoint_min_version is an upgrade nudge")
+	require.Contains(t, help, `Set checkpoint_version to "" to inherit the CLI default`)
+	require.Contains(t, help, `Set checkpoint_min_version to "" to inherit the CLI default`)
+	require.Contains(t, help, "Unsetting a field still uses the normal downgrade guard")
+	require.NotContains(t, help, "unset-checkpoint-version")
 }
 
 func TestCheckpointPolicyCmd_RejectsUnsupportedVersion(t *testing.T) {
@@ -34,7 +56,7 @@ func TestCheckpointPolicyCmd_RejectsUnsupportedVersion(t *testing.T) {
 		wantErr string
 	}{
 		{name: "checkpoint version", args: []string{"--checkpoint-version", "branch-v2342"}, wantErr: `checkpoint_version "branch-v2342" is not supported by this Entire CLI`},
-		{name: "minimum version", args: []string{"--checkpoint-min-version", "refs-v1"}, wantErr: `checkpoint_min_version "refs-v1" is not supported by this Entire CLI`},
+		{name: "minimum version", args: []string{"--checkpoint-min-version", "refs-v2"}, wantErr: `checkpoint_min_version "refs-v2" is not supported by this Entire CLI`},
 	}
 
 	for _, tt := range tests {
@@ -47,11 +69,26 @@ func TestCheckpointPolicyCmd_RejectsUnsupportedVersion(t *testing.T) {
 	}
 }
 
+func TestCheckpointPolicyCmd_PrintsUnsupportedConfiguredVersion(t *testing.T) {
+	dir, bareDir := setupCheckpointPolicyRepo(t)
+	seedCheckpointPolicyForCommand(t, dir, checkpointpolicy.Policy{
+		CheckpointVersion:    "refs-v2",
+		CheckpointMinVersion: "branch-v1",
+	})
+	pushCheckpointPolicyRefForCommandTest(t, dir, bareDir)
+
+	stdout, err := executeCheckpointPolicyCmd(t)
+	require.NoError(t, err)
+	require.Contains(t, stdout, "checkpoint_version: refs-v2 (unsupported)")
+	require.NotContains(t, stdout, "writing branch-v1")
+	require.Contains(t, stdout, "checkpoint_min_version: branch-v1")
+}
+
 func TestCheckpointPolicyCmd_RejectsDowngradeWithoutForce(t *testing.T) {
 	dir, bareDir := setupCheckpointPolicyRepo(t)
 	seedCheckpointPolicyForCommand(t, dir, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "refs-v1",
+		CheckpointVersion:    "refs-v2",
+		CheckpointMinVersion: "refs-v2",
 	})
 	pushCheckpointPolicyRefForCommandTest(t, dir, bareDir)
 
@@ -81,6 +118,23 @@ func TestCheckpointPolicyCmd_UpdatesAndPushesOnlyPolicyRef(t *testing.T) {
 
 	branches := runCheckpointPolicyGit(t, dir, "ls-remote", bareDir, "refs/heads/*")
 	require.Empty(t, strings.TrimSpace(branches))
+}
+
+func TestCheckpointPolicyCmd_UnsetsPolicyFields(t *testing.T) {
+	dir, bareDir := setupCheckpointPolicyRepo(t)
+	seedCheckpointPolicyForCommand(t, dir, checkpointpolicy.DefaultPolicy())
+	pushCheckpointPolicyRefForCommandTest(t, dir, bareDir)
+
+	stdout, err := executeCheckpointPolicyCmd(t, "--checkpoint-version", "", "--checkpoint-min-version", "")
+	require.NoError(t, err)
+	require.Contains(t, stdout, "checkpoint_version: branch-v1 (default)")
+	require.Contains(t, stdout, "checkpoint_min_version: branch-v1 (default)")
+
+	repo := openCheckpointPolicyRepoForCommandTest(t, dir)
+	localState, err := checkpointpolicy.ReadLocal(t.Context(), repo)
+	require.NoError(t, err)
+	require.Empty(t, localState.Policy)
+	require.Equal(t, checkpointpolicy.DefaultPolicy(), checkpointpolicy.Normalize(localState.Policy))
 }
 
 func TestCheckpointPolicyCmd_SilencesContextCanceled(t *testing.T) {

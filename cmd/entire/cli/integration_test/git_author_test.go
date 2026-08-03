@@ -51,7 +51,7 @@ func TestGetGitAuthorFallbackToGitCommand(t *testing.T) {
 	env := NewTestEnv(t)
 
 	// Initialize repo using git command (not go-git) to avoid setting local config
-	cmd := exec.Command("git", "init")
+	cmd := exec.CommandContext(t.Context(), "git", "init")
 	cmd.Dir = env.RepoDir
 	cmd.Env = testutil.GitIsolatedEnv()
 	if err := cmd.Run(); err != nil {
@@ -59,7 +59,7 @@ func TestGetGitAuthorFallbackToGitCommand(t *testing.T) {
 	}
 
 	// Disable GPG signing for test commits
-	configCmd := exec.Command("git", "config", "commit.gpgsign", "false")
+	configCmd := exec.CommandContext(t.Context(), "git", "config", "commit.gpgsign", "false")
 	configCmd.Dir = env.RepoDir
 	configCmd.Env = testutil.GitIsolatedEnv()
 	if err := configCmd.Run(); err != nil {
@@ -74,7 +74,7 @@ func TestGetGitAuthorFallbackToGitCommand(t *testing.T) {
 	// Create initial commit using environment variables for author/committer
 	env.WriteFile("README.md", "# Test")
 
-	addCmd := exec.Command("git", "add", "README.md")
+	addCmd := exec.CommandContext(t.Context(), "git", "add", "README.md")
 	addCmd.Dir = env.RepoDir
 	addCmd.Env = testutil.GitIsolatedEnv()
 	if err := addCmd.Run(); err != nil {
@@ -82,7 +82,7 @@ func TestGetGitAuthorFallbackToGitCommand(t *testing.T) {
 	}
 
 	// Use environment variables to set author and committer (works in CI without global config)
-	commitCmd := exec.Command("git", "commit", "-m", "Initial")
+	commitCmd := exec.CommandContext(t.Context(), "git", "commit", "-m", "Initial")
 	commitCmd.Dir = env.RepoDir
 	commitCmd.Env = append(testutil.GitIsolatedEnv(),
 		"GIT_AUTHOR_NAME=Test User",
@@ -95,7 +95,7 @@ func TestGetGitAuthorFallbackToGitCommand(t *testing.T) {
 	}
 
 	// Create feature branch
-	branchCmd := exec.Command("git", "checkout", "-b", "feature/test")
+	branchCmd := exec.CommandContext(t.Context(), "git", "checkout", "-b", "feature/test")
 	branchCmd.Dir = env.RepoDir
 	branchCmd.Env = testutil.GitIsolatedEnv()
 	if err := branchCmd.Run(); err != nil {
@@ -132,7 +132,7 @@ func TestGetGitAuthorNoConfigReturnsDefaults(t *testing.T) {
 	fakeHome := t.TempDir()
 
 	// Initialize repo
-	initCmd := exec.Command("git", "init")
+	initCmd := exec.CommandContext(t.Context(), "git", "init")
 	initCmd.Dir = env.RepoDir
 	initCmd.Env = []string{
 		"HOME=" + fakeHome,
@@ -144,7 +144,7 @@ func TestGetGitAuthorNoConfigReturnsDefaults(t *testing.T) {
 	}
 
 	// Disable GPG signing for test commits
-	configCmd := exec.Command("git", "config", "commit.gpgsign", "false")
+	configCmd := exec.CommandContext(t.Context(), "git", "config", "commit.gpgsign", "false")
 	configCmd.Dir = env.RepoDir
 	configCmd.Env = []string{
 		"HOME=" + fakeHome,
@@ -160,16 +160,18 @@ func TestGetGitAuthorNoConfigReturnsDefaults(t *testing.T) {
 	// Create initial commit using environment variables (required for CI without global config)
 	env.WriteFile("README.md", "# Test")
 
-	addCmd := exec.Command("git", "add", "README.md")
+	addCmd := exec.CommandContext(t.Context(), "git", "add", "README.md")
 	addCmd.Dir = env.RepoDir
 	addCmd.Env = []string{
 		"HOME=" + fakeHome,
 		"PATH=" + os.Getenv("PATH"),
 		"GIT_CONFIG_NOSYSTEM=1",
 	}
-	addCmd.Run()
+	if err := addCmd.Run(); err != nil {
+		t.Fatalf("git add failed: %v", err)
+	}
 
-	commitCmd := exec.Command("git", "commit", "-m", "Initial")
+	commitCmd := exec.CommandContext(t.Context(), "git", "commit", "-m", "Initial")
 	commitCmd.Dir = env.RepoDir
 	commitCmd.Env = []string{
 		"HOME=" + fakeHome,
@@ -180,23 +182,27 @@ func TestGetGitAuthorNoConfigReturnsDefaults(t *testing.T) {
 		"GIT_COMMITTER_NAME=Test",
 		"GIT_COMMITTER_EMAIL=test@test.com",
 	}
-	commitCmd.Run()
+	if err := commitCmd.Run(); err != nil {
+		t.Fatalf("git commit failed: %v", err)
+	}
 
 	// Create feature branch
-	branchCmd := exec.Command("git", "checkout", "-b", "feature/test")
+	branchCmd := exec.CommandContext(t.Context(), "git", "checkout", "-b", "feature/test")
 	branchCmd.Dir = env.RepoDir
 	branchCmd.Env = []string{
 		"HOME=" + fakeHome,
 		"PATH=" + os.Getenv("PATH"),
 		"GIT_CONFIG_NOSYSTEM=1",
 	}
-	branchCmd.Run()
+	if err := branchCmd.Run(); err != nil {
+		t.Fatalf("git checkout -b failed: %v", err)
+	}
 
 	env.WriteFile("test.txt", "content")
 
 	// Run hook command with isolated HOME (no global git config)
 	// Use the hook runner but with custom environment
-	hookCmd := exec.Command(getTestBinary(), "hooks", "claude-code", "user-prompt-submit")
+	hookCmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", agentClaudeCode, "user-prompt-submit")
 	hookCmd.Dir = env.RepoDir
 	hookCmd.Stdin = strings.NewReader(`{"session_id": "test-session", "transcript_path": ""}`)
 	hookCmd.Env = []string{
@@ -248,12 +254,14 @@ func TestGetGitAuthorRemovingLocalConfig(t *testing.T) {
 	// Need to create initial commit - use environment variables (works in CI without global config)
 	env.WriteFile("README.md", "# Test")
 
-	addCmd := exec.Command("git", "add", "README.md")
+	addCmd := exec.CommandContext(t.Context(), "git", "add", "README.md")
 	addCmd.Dir = env.RepoDir
 	addCmd.Env = testutil.GitIsolatedEnv()
-	addCmd.Run()
+	if err := addCmd.Run(); err != nil {
+		t.Fatalf("git add failed: %v", err)
+	}
 
-	commitCmd := exec.Command("git", "commit", "-m", "Initial")
+	commitCmd := exec.CommandContext(t.Context(), "git", "commit", "-m", "Initial")
 	commitCmd.Dir = env.RepoDir
 	commitCmd.Env = append(testutil.GitIsolatedEnv(),
 		"GIT_AUTHOR_NAME=Test User",
@@ -261,13 +269,17 @@ func TestGetGitAuthorRemovingLocalConfig(t *testing.T) {
 		"GIT_COMMITTER_NAME=Test User",
 		"GIT_COMMITTER_EMAIL=test@example.com",
 	)
-	commitCmd.Run()
+	if err := commitCmd.Run(); err != nil {
+		t.Fatalf("git commit failed: %v", err)
+	}
 
 	// Create feature branch
-	branchCmd := exec.Command("git", "checkout", "-b", "feature/test")
+	branchCmd := exec.CommandContext(t.Context(), "git", "checkout", "-b", "feature/test")
 	branchCmd.Dir = env.RepoDir
 	branchCmd.Env = testutil.GitIsolatedEnv()
-	branchCmd.Run()
+	if err := branchCmd.Run(); err != nil {
+		t.Fatalf("git checkout -b failed: %v", err)
+	}
 
 	env.WriteFile("test.txt", "content")
 

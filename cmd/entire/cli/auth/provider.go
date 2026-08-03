@@ -1,5 +1,7 @@
 package auth
 
+import "github.com/entireio/cli/internal/entireclient/httputil"
+
 // OAuth wiring for the entire-cli public client against an entire-core
 // login server. Matches an OIDC-standard auth server's discovery doc —
 // confirmed against us.auth.entire.io's /.well-known/openid-configuration.
@@ -8,7 +10,7 @@ package auth
 // grant_type differentiates token vs exchange at the shared /oauth/token
 // endpoint.
 const (
-	oauthClientID       = "entire-cli"
+	oauthClientID       = httputil.OAuthClientID
 	oauthDeviceCodePath = "/device_authorization"
 	oauthAuthorizePath  = "/authorize"
 	oauthTokenPath      = "/oauth/token" //nolint:gosec // G101: an endpoint path, not a credential

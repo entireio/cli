@@ -38,7 +38,7 @@ const (
 )
 
 func TestNewTrailCreateRequestUsesLinkBranchAction(t *testing.T) {
-	req := newTrailCreateRequest("title", "body", "feature/x", "main", "open")
+	req := newTrailCreateRequest("title", "body", "feature/x", "main", "open", "", "", nil)
 
 	require.Equal(t, api.TrailCreateRequest{
 		Title:        "title",
@@ -51,7 +51,7 @@ func TestNewTrailCreateRequestUsesLinkBranchAction(t *testing.T) {
 }
 
 func TestNewTrailCreateRequestCanBeBranchless(t *testing.T) {
-	req := newTrailCreateRequest("title", "body", "", "main", "open")
+	req := newTrailCreateRequest("title", "body", "", "main", "open", "", "", nil)
 
 	require.Equal(t, api.TrailCreateRequest{
 		Title:  "title",
@@ -382,7 +382,7 @@ func TestRunTrailListAll_PrintsLoginHintWhenNotLoggedIn(t *testing.T) {
 		}))
 
 	var out, errOut bytes.Buffer
-	err := runTrailListAll(t.Context(), &out, &errOut, defaultTrailListOptions(false))
+	err := runTrailListAll(t.Context(), &out, &errOut, trailListOptions{Status: defaultTrailListStatus, Limit: defaultTrailListLimit})
 	if err == nil {
 		t.Fatal("expected error when not logged in")
 	}
@@ -414,8 +414,7 @@ func TestRunTrailListAll_ValidatesOptionsBeforeAuth(t *testing.T) {
 			return nil, errors.New("unreachable")
 		}))
 
-	opts := defaultTrailListOptions(false)
-	opts.Limit = 0
+	opts := trailListOptions{Status: defaultTrailListStatus, Limit: 0}
 
 	var out, errOut bytes.Buffer
 	err := runTrailListAll(t.Context(), &out, &errOut, opts)
@@ -433,22 +432,6 @@ func TestRunTrailListAll_ValidatesOptionsBeforeAuth(t *testing.T) {
 	}
 }
 
-func TestRunTrailListAllWithClient_ValidatesOptionsBeforeRepoLookup(t *testing.T) {
-	t.Parallel()
-
-	opts := defaultTrailListOptions(false)
-	opts.Limit = 0
-
-	var out bytes.Buffer
-	err := runTrailListAllValidatedWithClient(t.Context(), &out, nil, opts)
-	if err == nil {
-		t.Fatal("expected validation error")
-	}
-	if got, want := err.Error(), "limit must be greater than 0"; got != want {
-		t.Fatalf("error = %q, want %q", got, want)
-	}
-}
-
 func TestTrailRootPrintsHelp(t *testing.T) {
 	t.Parallel()
 	cmd := newTrailCmd()
@@ -460,7 +443,7 @@ func TestTrailRootPrintsHelp(t *testing.T) {
 		t.Fatalf("execute trail root: %v", err)
 	}
 	text := out.String()
-	for _, want := range []string{"A trail ties together the context for a branch", "show", "list", "create"} {
+	for _, want := range []string{"A trail ties together the context for a branch", "`entire trail finding`", "show", "list", "create", "finding"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("help output missing %q, got:\n%s", want, text)
 		}
@@ -605,6 +588,70 @@ func TestFetchTrailDescription_ReadsNestedBodyDocument(t *testing.T) {
 	}
 	if bodyText != "the intent text" {
 		t.Fatalf("bodyText = %q, want %q", bodyText, "the intent text")
+	}
+}
+
+func TestResolveTrailUpdateBody_PrefersDetailSnapshot(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := io.WriteString(w, `{"trail":{"number":42,"body_document":{"text_snapshot":"the real body"}},"checkpoints":[],"has_write_permission":true}`); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	// The list resource omits the description, so found.Body is empty. The
+	// seed must come from the detail endpoint, not the empty list body.
+	found := &api.TrailResource{Number: 42, Body: ""}
+	body, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	if err != nil {
+		t.Fatalf("resolveTrailUpdateBody: %v", err)
+	}
+	if body != "the real body" {
+		t.Fatalf("body = %q, want %q", body, "the real body")
+	}
+}
+
+func TestResolveTrailUpdateBody_FallsBackToListBody(t *testing.T) {
+	t.Parallel()
+	// Older/partial server: detail omits body_document (text_snapshot empty).
+	// The seed must fall back to the list body rather than blanking it.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := io.WriteString(w, `{"trail":{"number":42},"checkpoints":[],"has_write_permission":true}`); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	found := &api.TrailResource{Number: 42, Body: "list body"}
+	body, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	if err != nil {
+		t.Fatalf("resolveTrailUpdateBody: %v", err)
+	}
+	if body != "list body" {
+		t.Fatalf("body = %q, want %q", body, "list body")
+	}
+}
+
+func TestResolveTrailUpdateBody_ReturnsErrorOnFetchFailure(t *testing.T) {
+	t.Parallel()
+	// A detail-fetch failure must be surfaced (not swallowed) so the caller can
+	// warn: a blank baseline could otherwise silently overwrite an unseen body.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	found := &api.TrailResource{Number: 42, Body: "list body"}
+	body, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	if err == nil {
+		t.Fatal("expected error on fetch failure, got nil")
+	}
+	if body != "list body" {
+		t.Fatalf("body = %q, want fallback %q", body, "list body")
 	}
 }
 
@@ -788,7 +835,17 @@ func TestResolveTrailRemote_RejectsUnsupportedForge(t *testing.T) {
 // (2xx => enabled) is covered by api.TestClient_TrailsEnabled.
 //
 // Not parallel: uses t.Chdir() to point clone preferences at a fake repo.
-func TestTrailsEnabledForRepo_ReadsClonePreference(t *testing.T) {
+func TestTrailEnablementCache_ReadsClonePreference(t *testing.T) {
+	// Inline of the former trailsEnabledForRepo wrapper: resolves the current
+	// repo's enablement scope and checks the cached enablement decision.
+	trailsEnabledForCurrentRepo := func(ctx context.Context) bool {
+		scope, err := currentTrailEnablementScope(ctx)
+		if err != nil {
+			return false
+		}
+		return cachedTrailsEnablementForScope(ctx, scope, time.Now()) == trailEnablementCacheEnabled
+	}
+
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
 	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@github.com:acme/repo.git")
@@ -800,19 +857,19 @@ func TestTrailsEnabledForRepo_ReadsClonePreference(t *testing.T) {
 	t.Chdir(repoDir)
 	ctx := context.Background()
 
-	if trailsEnabledForRepo(ctx) {
+	if trailsEnabledForCurrentRepo(ctx) {
 		t.Fatal("expected trails disabled when cache is absent")
 	}
 	if err := saveTrailsEnabledForRepo(ctx, false); err != nil {
 		t.Fatalf("save false cache: %v", err)
 	}
-	if trailsEnabledForRepo(ctx) {
+	if trailsEnabledForCurrentRepo(ctx) {
 		t.Fatal("expected trails disabled when cache is false")
 	}
 	if err := saveTrailsEnabledForRepo(ctx, true); err != nil {
 		t.Fatalf("save true cache: %v", err)
 	}
-	if !trailsEnabledForRepo(ctx) {
+	if !trailsEnabledForCurrentRepo(ctx) {
 		t.Fatal("expected trails enabled when cache is true")
 	}
 
@@ -826,32 +883,41 @@ func TestTrailsEnabledForRepo_ReadsClonePreference(t *testing.T) {
 
 	currentAuthKey := prefs.TrailsEnabledAuthKey
 	prefs.TrailsEnabledAuthKey = currentAuthKey + "-other"
-	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+	if err := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
+		*p = *prefs
+		return nil
+	}); err != nil {
 		t.Fatalf("save auth-mismatched prefs: %v", err)
 	}
-	if trailsEnabledForRepo(ctx) {
+	if trailsEnabledForCurrentRepo(ctx) {
 		t.Fatal("expected trails disabled for mismatched auth cache scope")
 	}
 	prefs.TrailsEnabledAuthKey = currentAuthKey
 	fresh := time.Now()
 	prefs.TrailsEnabledCheckedAt = &fresh
-	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+	if err := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
+		*p = *prefs
+		return nil
+	}); err != nil {
 		t.Fatalf("restore auth-matched prefs: %v", err)
 	}
 
 	stale := time.Now().Add(-trailEnablementCacheTTL - time.Minute)
 	prefs.TrailsEnabledCheckedAt = &stale
-	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+	if err := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
+		*p = *prefs
+		return nil
+	}); err != nil {
 		t.Fatalf("save stale prefs: %v", err)
 	}
-	if trailsEnabledForRepo(ctx) {
+	if trailsEnabledForCurrentRepo(ctx) {
 		t.Fatal("expected trails disabled when cache is stale")
 	}
 
 	if err := saveTrailsEnabledForRemote(ctx, "gh", "other", "repo", true); err != nil {
 		t.Fatalf("save mismatched cache: %v", err)
 	}
-	if trailsEnabledForRepo(ctx) {
+	if trailsEnabledForCurrentRepo(ctx) {
 		t.Fatal("expected trails disabled for mismatched cache scope")
 	}
 }
@@ -1455,5 +1521,152 @@ func TestFetchCurrentUserLoginWrapsGhError(t *testing.T) {
 	// Surface the hint about the --author <login> fallback.
 	if !strings.Contains(err.Error(), "--author <login>") {
 		t.Fatalf("error should mention the --author fallback hint, got: %v", err)
+	}
+}
+
+func TestMergeStringSetAddsAndRemoves(t *testing.T) {
+	t.Parallel()
+	got := mergeStringSet([]string{"a", "b"}, []string{"c", "a"}, []string{"b"})
+	want := []string{"a", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestBuildTrailUpdateRequestAssigneesReviewersTypePriority(t *testing.T) {
+	t.Parallel()
+	current := &api.TrailResource{
+		Assignees:          []string{"alice"},
+		RequestedReviewers: []string{"bob"},
+	}
+	req := buildTrailUpdateRequest(current, trailUpdateInputs{
+		AssigneeAdd:     []string{"carol"},
+		ReviewerRemove:  []string{"bob"},
+		Type:            string(trail.TypeBug),
+		TypeChanged:     true,
+		Priority:        string(trail.PriorityHigh),
+		PriorityChanged: true,
+	})
+	if req.Assignees == nil || len(*req.Assignees) != 2 {
+		t.Fatalf("Assignees = %v, want [alice carol]", req.Assignees)
+	}
+	if req.RequestedReviewers == nil || len(*req.RequestedReviewers) != 0 {
+		t.Fatalf("RequestedReviewers = %v, want []", req.RequestedReviewers)
+	}
+	if req.Type == nil || *req.Type != string(trail.TypeBug) {
+		t.Fatalf("Type = %v, want bug", req.Type)
+	}
+	if req.Priority == nil || *req.Priority != string(trail.PriorityHigh) {
+		t.Fatalf("Priority = %v, want high", req.Priority)
+	}
+}
+
+func TestValidateTrailUpdateFieldsRejectsInvalidTypePriority(t *testing.T) {
+	t.Parallel()
+	if err := validateTrailUpdateFields(trailUpdateInputs{TypeChanged: true, Type: "epic"}); err == nil {
+		t.Error("expected invalid type to be rejected")
+	}
+	if err := validateTrailUpdateFields(trailUpdateInputs{PriorityChanged: true, Priority: "critical"}); err == nil {
+		t.Error("expected invalid priority to be rejected")
+	}
+	if err := validateTrailUpdateFields(trailUpdateInputs{TypeChanged: true, Type: "bug", PriorityChanged: true, Priority: "low"}); err != nil {
+		t.Errorf("valid type/priority rejected: %v", err)
+	}
+}
+
+func TestSplitTrailUpdateSeparatesBodyFromMetadata(t *testing.T) {
+	t.Parallel()
+	body := "new body"
+	title := "new title"
+	full := api.TrailUpdateRequest{Body: &body, Title: &title}
+	meta, hasMeta, bodyReq := splitTrailUpdate(full)
+	if !hasMeta || meta.Title == nil || *meta.Title != "new title" {
+		t.Fatalf("meta = %#v, hasMeta = %v, want title-only metadata", meta, hasMeta)
+	}
+	if meta.Body != nil {
+		t.Fatal("metadata request must not carry body")
+	}
+	if bodyReq == nil || bodyReq.Body == nil || *bodyReq.Body != "new body" {
+		t.Fatalf("bodyReq = %#v, want body-only request", bodyReq)
+	}
+
+	_, hasMeta2, bodyReq2 := splitTrailUpdate(api.TrailUpdateRequest{Body: &body})
+	if hasMeta2 {
+		t.Error("body-only update must not produce a metadata request")
+	}
+	if bodyReq2 == nil {
+		t.Error("body-only update must produce a body request")
+	}
+}
+
+func TestTrailUpdateCmdHasCollaborationFlags(t *testing.T) {
+	t.Parallel()
+	cmd := newTrailUpdateCmd()
+	for _, name := range []string{"add-assignee", "remove-assignee", "add-reviewer", "remove-reviewer", "type", "priority"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Errorf("trail update missing --%s flag", name)
+		}
+	}
+}
+
+func TestPrintTrailDetailsShowsTypePriorityReviewers(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	printTrailDetails(&out, &trail.Metadata{
+		Title:     "T",
+		Branch:    "b",
+		Base:      "main",
+		Status:    trail.StatusOpen,
+		Type:      trail.TypeBug,
+		Priority:  trail.PriorityHigh,
+		Reviewers: []trail.Reviewer{{Login: "rev1", Status: trail.ReviewerApproved}},
+	}, "", "")
+	s := out.String()
+	for _, want := range []string{"Type:", "bug", "Priority:", "high", "Reviewers:", "rev1", "approved"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("output missing %q:\n%s", want, s)
+		}
+	}
+}
+
+func TestTrailCreateCmdHasMetadataFlags(t *testing.T) {
+	t.Parallel()
+	cmd := newTrailCreateCmd()
+	for _, name := range []string{"type", "priority", "add-assignee"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Errorf("trail create missing --%s flag", name)
+		}
+	}
+}
+
+func TestNewTrailCreateRequestCarriesMetadata(t *testing.T) {
+	t.Parallel()
+	req := newTrailCreateRequest("Title", "body", "b", "main", "open", string(trail.TypeBug), string(trail.PriorityHigh), []string{"alice"})
+	if req.Type != string(trail.TypeBug) || req.Priority != string(trail.PriorityHigh) {
+		t.Fatalf("type/priority = %q/%q, want bug/high", req.Type, req.Priority)
+	}
+	if len(req.Assignees) != 1 || req.Assignees[0] != "alice" {
+		t.Fatalf("assignees = %v, want [alice]", req.Assignees)
+	}
+}
+
+func TestBuildTrailUpdateRequestTrimsTypeAndPriority(t *testing.T) {
+	t.Parallel()
+	req := buildTrailUpdateRequest(&api.TrailResource{}, trailUpdateInputs{
+		Type:            "  bug  ",
+		TypeChanged:     true,
+		Priority:        "  high ",
+		PriorityChanged: true,
+	})
+	if req.Type == nil || *req.Type != string(trail.TypeBug) {
+		t.Fatalf("Type on wire = %v, want trimmed bug", req.Type)
+	}
+	if req.Priority == nil || *req.Priority != string(trail.PriorityHigh) {
+		t.Fatalf("Priority on wire = %v, want trimmed high", req.Priority)
 	}
 }

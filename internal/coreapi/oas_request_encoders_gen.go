@@ -108,8 +108,8 @@ func encodeCreateRepoRequest(
 	return nil
 }
 
-func encodeCreateServiceAccountRequest(
-	req *CreateServiceAccountInputBody,
+func encodeCreateRepoCIWebhookRequest(
+	req *CreateRepoCIWebhookInputBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"
@@ -122,8 +122,8 @@ func encodeCreateServiceAccountRequest(
 	return nil
 }
 
-func encodeGrantMirrorCollaboratorRequest(
-	req *GrantMirrorCollaboratorInputBody,
+func encodeCreateServiceAccountRequest(
+	req *CreateServiceAccountInputBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"
@@ -178,8 +178,22 @@ func encodeGrantServiceAccountAccessRequest(
 	return nil
 }
 
-func encodeUpdateMeRequest(
-	req *UpdateMeInputBody,
+func encodePatchRepoCIWebhookRequest(
+	req *PatchRepoCIWebhookInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeSetRepoVisibilityRequest(
+	req *SetRepoVisibilityInputBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"

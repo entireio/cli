@@ -21,7 +21,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -94,7 +93,7 @@ func rowsHaveValue(rows []explainRow, want string) bool {
 
 func TestFormatCheckpointSummaryError_Auth(t *testing.T) {
 	t.Parallel()
-	label, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorAuth, Message: "Invalid API key"}, 0)
+	label, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorAuth, Message: "Invalid API key"}, newSummaryAttempt("claude-code", 0))
 	if !strings.Contains(strings.ToLower(label), "authentication failed") {
 		t.Errorf("missing 'authentication failed' in label %q", label)
 	}
@@ -108,7 +107,7 @@ func TestFormatCheckpointSummaryError_Auth(t *testing.T) {
 
 func TestFormatCheckpointSummaryError_RateLimit(t *testing.T) {
 	t.Parallel()
-	label, _, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorRateLimit, Message: "429"}, 0)
+	label, _, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorRateLimit, Message: "429"}, newSummaryAttempt("claude-code", 0))
 	if !strings.Contains(label, "rate limit") {
 		t.Errorf("missing rate-limit phrasing in label: %q", label)
 	}
@@ -119,7 +118,7 @@ func TestFormatCheckpointSummaryError_RateLimit(t *testing.T) {
 
 func TestFormatCheckpointSummaryError_Config(t *testing.T) {
 	t.Parallel()
-	_, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorConfig, Message: "model not found"}, 0)
+	_, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorConfig, Message: "model not found"}, newSummaryAttempt("claude-code", 0))
 	if !rowsHaveValue(rows, "model not found") {
 		t.Errorf("envelope message not surfaced in rows: %+v", rows)
 	}
@@ -130,7 +129,7 @@ func TestFormatCheckpointSummaryError_Config(t *testing.T) {
 
 func TestFormatCheckpointSummaryError_CLIMissing(t *testing.T) {
 	t.Parallel()
-	label, _, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorCLIMissing}, 0)
+	label, _, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorCLIMissing}, newSummaryAttempt("claude-code", 0))
 	if !strings.Contains(label, "not installed") {
 		t.Errorf("missing cli-missing phrasing in label: %q", label)
 	}
@@ -153,7 +152,7 @@ func TestFormatCheckpointSummaryError_TypedBranchesHandleEmptyMessage(t *testing
 	for _, kind := range kinds {
 		t.Run(string(kind), func(t *testing.T) {
 			t.Parallel()
-			label, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: kind}, 0)
+			label, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: kind}, newSummaryAttempt("claude-code", 0))
 			if err == nil {
 				t.Fatal("expected structured error")
 			}
@@ -173,8 +172,9 @@ func TestFormatCheckpointSummaryError_TypedBranchesHandleEmptyMessage(t *testing
 
 func TestFormatCheckpointSummaryError_DeadlineExceeded(t *testing.T) {
 	t.Parallel()
-	label, rows, err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.DeadlineExceeded), 5*time.Minute)
-	if !strings.Contains(label, "timed out") {
+	attempt := newSummaryAttempt("codex", 5*time.Minute)
+	label, rows, err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.DeadlineExceeded), attempt)
+	if !strings.Contains(strings.ToLower(label), "timed out") {
 		t.Errorf("expected 'timed out' in label, got %q", label)
 	}
 	if !strings.Contains(label, "5m") {
@@ -207,7 +207,7 @@ func TestFormatCheckpointSummaryError_DeadlineExceeded(t *testing.T) {
 
 func TestFormatCheckpointSummaryError_Canceled(t *testing.T) {
 	t.Parallel()
-	label, _, err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.Canceled), 0)
+	label, _, err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.Canceled), newSummaryAttempt("claude-code", 0))
 	if !strings.Contains(label, "canceled") {
 		t.Errorf("missing canceled in label: %q", label)
 	}
@@ -218,7 +218,7 @@ func TestFormatCheckpointSummaryError_Canceled(t *testing.T) {
 
 func TestFormatCheckpointSummaryError_Passthrough(t *testing.T) {
 	t.Parallel()
-	_, rows, err := formatCheckpointSummaryError(errors.New("something else"), 0)
+	_, rows, err := formatCheckpointSummaryError(errors.New("something else"), newSummaryAttempt("claude-code", 0))
 	if err == nil {
 		t.Fatal("expected structured error")
 	}
@@ -253,7 +253,7 @@ func TestFormatCheckpointSummaryError_Unknown(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			label, rows, err := formatCheckpointSummaryError(tc.err, 0)
+			label, rows, err := formatCheckpointSummaryError(tc.err, newSummaryAttempt("claude-code", 0))
 			if err == nil {
 				t.Fatal("expected structured error")
 			}
@@ -477,6 +477,109 @@ func TestRunExplainAuto_CommitWithoutTrailer(t *testing.T) {
 	}
 }
 
+// TestShouldFallBackToCommitResolution pins runExplainAuto's fallback
+// decision: commit resolution may run ONLY when the positional target matched
+// no committed or temporary checkpoint. A failure from a step AFTER a
+// successful match that merely wraps checkpoint.ErrCheckpointNotFound (in the
+// field: "failed to save summary: checkpoint not found", from a summary
+// backfill against a backend missing the checkpoint) must NOT trigger the
+// fallback — it was masked as `no checkpoint or commit found matching ...`
+// for a checkpoint the same command had just resolved.
+func TestShouldFallBackToCommitResolution(t *testing.T) {
+	runExplainAutoTestRepo(t)
+
+	// A genuine target miss, produced by the real checkpoint path.
+	var out, errOut bytes.Buffer
+	missErr := runExplainCheckpoint(context.Background(), &out, &errOut, "abababababab", false, false, false, false, false, false, false, 0)
+	require.Error(t, missErr)
+	require.True(t, shouldFallBackToCommitResolution(missErr),
+		"a genuine target miss must fall back to commit resolution")
+	require.ErrorIs(t, missErr, checkpoint.ErrCheckpointNotFound,
+		"the target-miss error must keep wrapping the public sentinel")
+
+	// A post-resolution failure that wraps the same sentinel must not.
+	saveErr := fmt.Errorf("failed to save summary: %w", checkpoint.ErrCheckpointNotFound)
+	require.False(t, shouldFallBackToCommitResolution(saveErr),
+		"a post-resolution failure wrapping ErrCheckpointNotFound must surface verbatim, not be masked by the commit fallback")
+
+	require.False(t, shouldFallBackToCommitResolution(errors.New("network down")),
+		"unrelated errors never fall back")
+}
+
+// TestRunExplainAuto_PostResolutionErrorSurfacesVerbatim guards the adjacent
+// contract end-to-end, for both the read-only and --generate entry points:
+// when the target RESOLVES via the committed-checkpoint prefix match but a
+// later read step fails hard, runExplainAuto must surface that failure —
+// naming the resolved checkpoint — instead of running the commit fallback.
+// The fault injector is the pinned "a ULID is never read from the branch"
+// routing contract: the checkpoint is listed (List unions both backends) but
+// its read routes to refs only, where the on-demand ref fetch fails hard in a
+// repo with no reachable remote.
+func TestRunExplainAuto_PostResolutionErrorSurfacesVerbatim(t *testing.T) {
+	for _, generate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("generate=%v", generate), func(t *testing.T) {
+			repo, _ := runExplainAutoTestRepo(t)
+			ctx := context.Background()
+
+			ulidID := id.MustCheckpointID("01KVBJCWYA4YW6J5M9GP655HZN")
+			require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).Write(ctx, checkpoint.Session{
+				CheckpointID: ulidID,
+				SessionID:    "session-stray-ulid",
+				Strategy:     "manual-commit",
+				Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n")),
+				AuthorName:   "Test",
+				AuthorEmail:  "test@example.com",
+			}))
+
+			var out, errOut bytes.Buffer
+			err := runExplainAuto(ctx, &out, &errOut, ulidID.String(), true, false, false, false, generate, false, false, 0)
+
+			require.Error(t, err)
+			require.ErrorContains(t, err, "failed to read checkpoint",
+				"the post-resolution failure must surface as-is")
+			require.ErrorContains(t, err, ulidID.String(),
+				"the error must name the checkpoint the target resolved to")
+			require.NotContains(t, err.Error(), "no checkpoint or commit found",
+				"a post-resolution failure must not be masked by the commit fallback")
+			require.False(t, shouldFallBackToCommitResolution(err),
+				"a post-resolution failure must not classify as a target miss")
+		})
+	}
+}
+
+// TestRunExplainAuto_TrailerReferencedCheckpointMissing: when the positional
+// target is a commit whose Entire-Checkpoint trailer references a checkpoint
+// that no longer resolves, the error must name the commit and the trailer
+// linkage — the user typed a commit SHA and would otherwise see "checkpoint
+// not found: <id>" for an ID they never entered.
+func TestRunExplainAuto_TrailerReferencedCheckpointMissing(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	ctx := context.Background()
+
+	cpID := id.MustCheckpointID("deadbeefcafe")
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	tmpDir := wt.Filesystem().Root()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "feature.txt"), []byte("feature"), 0o644))
+	_, err = wt.Add("feature.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit(trailers.AppendCheckpointTrailer("Implement feature", cpID.String()), &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	var out, errOut bytes.Buffer
+	err = runExplainAuto(ctx, &out, &errOut, commitHash.String(), true, false, false, false, false, false, false, 0)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, checkpoint.ErrCheckpointNotFound)
+	require.ErrorContains(t, err, cpID.String())
+	require.ErrorContains(t, err, commitHash.String()[:7],
+		"the error must name the commit the user actually typed")
+	require.ErrorContains(t, err, "Entire-Checkpoint trailer",
+		"the error must explain how the commit led to the checkpoint")
+}
+
 // TestRunExplainCheckpoint_NotFoundSentinels verifies the typed-error
 // contract runExplainAuto depends on: non-matching targets return an error
 // wrapping checkpoint.ErrCheckpointNotFound (for errors.Is detection),
@@ -579,6 +682,9 @@ func TestRunExplainAuto_TemporaryCheckpointRendersIdentityBullet(t *testing.T) {
 	}
 	if !strings.Contains(output, "Temporary checkpoints can be summarized after commit") {
 		t.Errorf("expected 'after commit' affordance in temporary output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "entire checkpoint explain --generate") {
+		t.Errorf("expected canonical `entire checkpoint explain --generate` hint in temporary output, got:\n%s", output)
 	}
 }
 
@@ -811,15 +917,12 @@ func TestExplainCmd_CommitFlagWithGenerateValidates(t *testing.T) {
 	}
 }
 
-func TestGenerateCheckpointAISummary_AddsDefaultTimeoutWithoutParentDeadline(t *testing.T) {
-	tmpTimeout := checkpointSummaryTimeout
+// Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
+func TestGenerateCheckpointAISummary_ExplicitTimeoutApplied(t *testing.T) {
 	tmpGenerator := generateTranscriptSummary
-	t.Cleanup(func() {
-		checkpointSummaryTimeout = tmpTimeout
-		generateTranscriptSummary = tmpGenerator
-	})
+	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })
 
-	checkpointSummaryTimeout = 50 * time.Millisecond
+	const explicitTimeout = 50 * time.Millisecond
 
 	var gotDeadline time.Time
 	generateTranscriptSummary = func(
@@ -828,17 +931,18 @@ func TestGenerateCheckpointAISummary_AddsDefaultTimeoutWithoutParentDeadline(t *
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		deadline, ok := ctx.Deadline()
 		if !ok {
-			return nil, errors.New("expected deadline on summary context")
+			return nil, errors.New("expected deadline on summary context when timeout > 0")
 		}
 		gotDeadline = deadline
 		return &checkpoint.Summary{Intent: "intent", Outcome: "outcome"}, nil
 	}
 
 	start := time.Now()
-	summary, _, err := generateCheckpointAISummary(context.Background(), []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, checkpointSummaryTimeout)
+	summary, err := generateCheckpointAISummary(context.Background(), []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, explicitTimeout, nil, newSummaryAttempt("claude-code", explicitTimeout))
 	if err != nil {
 		t.Fatalf("generateCheckpointAISummary() error = %v", err)
 	}
@@ -849,7 +953,7 @@ func TestGenerateCheckpointAISummary_AddsDefaultTimeoutWithoutParentDeadline(t *
 		t.Fatal("expected deadline to be set")
 	}
 	if remaining := gotDeadline.Sub(start); remaining < 30*time.Millisecond || remaining > 200*time.Millisecond {
-		t.Fatalf("deadline offset = %s, want around %s", remaining, checkpointSummaryTimeout)
+		t.Fatalf("deadline offset = %s, want around %s", remaining, explicitTimeout)
 	}
 }
 
@@ -902,55 +1006,35 @@ esac
 	}
 }
 
-func TestGenerateCheckpointAISummary_UsesParentDeadlineAndWrapsSentinel(t *testing.T) {
-	tmpTimeout := checkpointSummaryTimeout
+// TestGenerateCheckpointAISummary_NoTimeoutInheritsParent verifies that when
+// timeout == 0 the provider call inherits the parent context unchanged, so a
+// tight parent deadline fires and the error wraps DeadlineExceeded.
+//
+// Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
+func TestGenerateCheckpointAISummary_NoTimeoutInheritsParent(t *testing.T) {
 	tmpGenerator := generateTranscriptSummary
-	t.Cleanup(func() {
-		checkpointSummaryTimeout = tmpTimeout
-		generateTranscriptSummary = tmpGenerator
-	})
+	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })
 
-	checkpointSummaryTimeout = 30 * time.Second
-
-	parentCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	parentDeadline, _ := parentCtx.Deadline()
-
-	var gotDeadline time.Time
+	// Use a mock that blocks until ctx is done, so the parent deadline fires.
 	generateTranscriptSummary = func(
 		ctx context.Context,
 		_ redact.RedactedBytes,
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
-		gotDeadline, _ = ctx.Deadline()
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
 
-	_, appliedDeadline, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, checkpointSummaryTimeout)
-	if err == nil {
-		t.Fatal("expected timeout error")
-	}
+	parentCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, 0, nil, newSummaryAttempt("claude-code", 0))
+	// Parent deadline (50ms) should fire, not our absence of a deadline.
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected DeadlineExceeded, got %v", err)
-	}
-	if gotDeadline.IsZero() {
-		t.Fatal("expected deadline to be captured")
-	}
-	// The applied deadline must reflect the shorter parent-ctx deadline,
-	// not the package-default checkpointSummaryTimeout. Otherwise
-	// formatCheckpointSummaryError would report the wrong timeout to users.
-	if appliedDeadline >= checkpointSummaryTimeout {
-		t.Fatalf("appliedDeadline = %s; want shorter than %s (parent had tighter deadline)",
-			appliedDeadline, checkpointSummaryTimeout)
-	}
-	if delta := gotDeadline.Sub(parentDeadline); delta < -5*time.Millisecond || delta > 5*time.Millisecond {
-		t.Fatalf("deadline delta = %s, want near 0", delta)
-	}
-	if strings.Contains(err.Error(), "30s") {
-		t.Fatalf("timeout error should not report default timeout when parent deadline fired: %v", err)
+		t.Fatalf("expected DeadlineExceeded from parent, got %v", err)
 	}
 }
 
@@ -960,15 +1044,11 @@ func TestGenerateCheckpointAISummary_UsesParentDeadlineAndWrapsSentinel(t *testi
 // timeoutCtx.Err() and unconditionally wrapped with %w context.DeadlineExceeded,
 // which discarded the typed error and routed the user to the wrong
 // "safety deadline" guidance instead of the auth/rate-limit message.
+//
+// Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
 func TestGenerateCheckpointAISummary_PreservesClaudeErrorWhenCtxIsDone(t *testing.T) {
-	tmpTimeout := checkpointSummaryTimeout
 	tmpGenerator := generateTranscriptSummary
-	t.Cleanup(func() {
-		checkpointSummaryTimeout = tmpTimeout
-		generateTranscriptSummary = tmpGenerator
-	})
-
-	checkpointSummaryTimeout = 30 * time.Second
+	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })
 
 	// Cancel the parent before we even call — ctx.Err() will be non-nil.
 	parentCtx, cancel := context.WithCancel(context.Background())
@@ -981,11 +1061,12 @@ func TestGenerateCheckpointAISummary_PreservesClaudeErrorWhenCtxIsDone(t *testin
 		[]string,
 		types.AgentType,
 		summarize.Generator,
+		agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		return nil, claudeErr
 	}
 
-	_, _, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, checkpointSummaryTimeout)
+	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, 0, nil, newSummaryAttempt("claude-code", 0))
 	var ce *claudecode.ClaudeError
 	if !errors.As(err, &ce) {
 		t.Fatalf("errors.As did not recover *ClaudeError; got %v", err)
@@ -993,24 +1074,6 @@ func TestGenerateCheckpointAISummary_PreservesClaudeErrorWhenCtxIsDone(t *testin
 	if ce.Kind != claudecode.ClaudeErrorAuth {
 		t.Errorf("Kind = %v; want auth", ce.Kind)
 	}
-}
-
-func TestLoadCheckpointForExplainRejectsUnsupportedCheckpointVersion(t *testing.T) {
-	repo := setupExportRepo(t)
-
-	cpID := id.MustCheckpointID("bbbbccccdddd")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
-		SessionID:  "session-explain-unsupported",
-		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
-	})
-	rewriteExportCheckpointVersionToRefsV1(t, repo, cpID)
-
-	lookup, err := newExplainCheckpointLookup(context.Background())
-	require.NoError(t, err)
-	defer lookup.Close()
-
-	_, _, err = loadCheckpointForExplain(context.Background(), lookup, cpID)
-	require.ErrorContains(t, err, `checkpoint bbbbccccdddd uses unsupported checkpoint_version "refs-v1"`)
 }
 
 // Not parallel: uses t.Chdir() and package-level var stubs.
@@ -1095,7 +1158,7 @@ func stubSummaryProviderForTest(t *testing.T) {
 		return &stubTextAgent{name: name, kind: agent.AgentTypeClaudeCode}, nil
 	}
 	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
-	generateTranscriptSummary = func(context.Context, redact.RedactedBytes, []string, types.AgentType, summarize.Generator) (*checkpoint.Summary, error) {
+	generateTranscriptSummary = func(context.Context, redact.RedactedBytes, []string, types.AgentType, summarize.Generator, agent.ProgressFn) (*checkpoint.Summary, error) {
 		return &checkpoint.Summary{Intent: "i", Outcome: "o"}, nil
 	}
 }
@@ -1109,7 +1172,6 @@ func TestGenerateCheckpointSummary_AdvancesV1Metadata(t *testing.T) {
 		fixture.ctx,
 		&stdout,
 		&stderr,
-		fixture.repo,
 		fixture.store,
 		fixture.cpID,
 		fixture.cpSummary,
@@ -1123,43 +1185,49 @@ func TestGenerateCheckpointSummary_AdvancesV1Metadata(t *testing.T) {
 	require.NotEqual(t, fixture.v1Hash, v1After.Hash(), "v1 metadata branch must advance after UpdateSummary")
 }
 
-func TestGenerateCheckpointSummaryRejectsUnsupportedCheckpointWritePolicy(t *testing.T) {
+func TestRunExplainGenerateBlocksWhenPolicyWriteUnsupported(t *testing.T) {
 	fixture := setupGenerateSummaryFixture(t)
-	_, err := checkpointpolicy.WriteLocal(fixture.ctx, fixture.repo, plumbing.ZeroHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "branch-v1",
-	})
+	stubSummaryProviderForTest(t)
+	writeUnsupportedCheckpointPolicyForCLITest(t, fixture.repo)
+
+	lookup, err := newExplainCheckpointLookup(context.Background())
 	require.NoError(t, err)
+	defer lookup.Close()
 
 	var stdout, stderr bytes.Buffer
-	err = generateCheckpointSummary(
+	err = runExplainCheckpointWithLookup(
 		fixture.ctx,
 		&stdout,
 		&stderr,
-		fixture.repo,
-		fixture.store,
-		fixture.cpID,
-		fixture.cpSummary,
-		fixture.content,
+		fixture.cpID.String(),
 		false,
+		false,
+		false,
+		false,
+		true,
+		false,
+		false,
+		lookup,
+		nil,
 		0,
 	)
-	require.ErrorContains(t, err, `checkpoint_version "refs-v1"`)
+	require.ErrorContains(t, err, "checkpoint policy cannot be satisfied by this Entire CLI")
 
 	v1After, refErr := fixture.repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.NoError(t, refErr)
-	require.Equal(t, fixture.v1Hash, v1After.Hash(), "v1 metadata branch must not advance after rejected summary write")
+	require.Equal(t, fixture.v1Hash, v1After.Hash(), "summary write must not advance metadata")
 }
 
-func TestGenerateCheckpointAISummary_ClampsLongParentDeadlineToDefaultTimeout(t *testing.T) {
-	tmpTimeout := checkpointSummaryTimeout
+// TestGenerateCheckpointAISummary_ExplicitTimeoutNarrowsLongParent verifies
+// that an explicit timeout (e.g. from --summary-timeout-seconds) takes effect
+// even when the parent context has a much longer deadline.
+//
+// Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
+func TestGenerateCheckpointAISummary_ExplicitTimeoutNarrowsLongParent(t *testing.T) {
 	tmpGenerator := generateTranscriptSummary
-	t.Cleanup(func() {
-		checkpointSummaryTimeout = tmpTimeout
-		generateTranscriptSummary = tmpGenerator
-	})
+	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })
 
-	checkpointSummaryTimeout = 50 * time.Millisecond
+	const explicitTimeout = 50 * time.Millisecond
 
 	parentCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -1171,17 +1239,18 @@ func TestGenerateCheckpointAISummary_ClampsLongParentDeadlineToDefaultTimeout(t 
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		deadline, ok := ctx.Deadline()
 		if !ok {
-			return nil, errors.New("expected deadline on summary context")
+			return nil, errors.New("expected deadline on summary context when timeout > 0")
 		}
 		gotDeadline = deadline
 		return &checkpoint.Summary{Intent: "intent", Outcome: "outcome"}, nil
 	}
 
 	start := time.Now()
-	summary, _, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, checkpointSummaryTimeout)
+	summary, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, explicitTimeout, nil, newSummaryAttempt("claude-code", explicitTimeout))
 	if err != nil {
 		t.Fatalf("generateCheckpointAISummary() error = %v", err)
 	}
@@ -1192,17 +1261,14 @@ func TestGenerateCheckpointAISummary_ClampsLongParentDeadlineToDefaultTimeout(t 
 		t.Fatal("expected deadline to be set")
 	}
 	if remaining := gotDeadline.Sub(start); remaining < 30*time.Millisecond || remaining > 200*time.Millisecond {
-		t.Fatalf("deadline offset = %s, want around %s", remaining, checkpointSummaryTimeout)
+		t.Fatalf("deadline offset = %s, want around %s", remaining, explicitTimeout)
 	}
 }
 
+// Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
 func TestGenerateCheckpointAISummary_UsesCancellationSentinel(t *testing.T) {
-	tmpTimeout := checkpointSummaryTimeout
 	tmpGenerator := generateTranscriptSummary
-	t.Cleanup(func() {
-		checkpointSummaryTimeout = tmpTimeout
-		generateTranscriptSummary = tmpGenerator
-	})
+	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })
 
 	parentCtx, cancel := context.WithCancel(context.Background())
 
@@ -1212,13 +1278,14 @@ func TestGenerateCheckpointAISummary_UsesCancellationSentinel(t *testing.T) {
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		cancel()
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
 
-	_, _, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, checkpointSummaryTimeout)
+	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, 0, nil, newSummaryAttempt("claude-code", 0))
 	if err == nil {
 		t.Fatal("expected cancellation error")
 	}
@@ -1282,8 +1349,8 @@ func TestResolveSummaryTimeout_DefaultWhenBothUnset(t *testing.T) {
 
 	got := resolveSummaryTimeout(context.Background(), 0)
 
-	if got != checkpointSummaryTimeout {
-		t.Fatalf("resolveSummaryTimeout(flag=0, setting=0) = %s, want %s (package default)", got, checkpointSummaryTimeout)
+	if got != 0 {
+		t.Fatalf("resolveSummaryTimeout(flag=0, setting=0) = %s, want 0 (no deadline)", got)
 	}
 }
 
@@ -1295,18 +1362,27 @@ func TestResolveSummaryTimeout_NegativeSettingTreatedAsUnset(t *testing.T) {
 
 	got := resolveSummaryTimeout(context.Background(), 0)
 
-	if got != checkpointSummaryTimeout {
-		t.Fatalf("resolveSummaryTimeout(flag=0, setting=-1) = %s, want %s (package default)", got, checkpointSummaryTimeout)
+	if got != 0 {
+		t.Fatalf("resolveSummaryTimeout(flag=0, setting=-1) = %s, want 0 (no deadline)", got)
 	}
 }
 
-// Locks in 5 minutes as the package default so a casual edit doesn't silently
-// regress to the prior 30s — issue #1198 raised the default specifically
-// because 30s was too tight for large transcripts.
-func TestDefaultCheckpointSummaryTimeout_IsFiveMinutes(t *testing.T) {
-	t.Parallel()
-	if defaultCheckpointSummaryTimeout != 5*time.Minute {
-		t.Fatalf("defaultCheckpointSummaryTimeout = %s, want 5m (see issue #1198)", defaultCheckpointSummaryTimeout)
+// TestResolveSummaryTimeout_DefaultZero locks in that with no flag and no
+// settings file, --generate has no automatic deadline. The opt-in surface
+// (--summary-timeout-seconds flag and summary_timeout_seconds setting) is
+// the only way to introduce a cap. See
+// docs/superpowers/specs/2026-05-13-explain-summary-streaming-design.md.
+//
+// Cannot use t.Parallel() — t.Chdir mutates process-global state.
+func TestResolveSummaryTimeout_DefaultZero(t *testing.T) {
+	// settings.Load reads .entire/settings.json from CWD; redirect to a
+	// temp dir that has none.
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	got := resolveSummaryTimeout(context.Background(), 0)
+	if got != 0 {
+		t.Errorf("resolveSummaryTimeout(ctx, 0) = %v, want 0 (no deadline)", got)
 	}
 }
 
@@ -1421,7 +1497,7 @@ func TestExplainCommit_WithMetadataTrailerButNoCheckpoint(t *testing.T) {
 
 	// Commit with Entire-Metadata trailer (no Entire-Checkpoint)
 	metadataDir := ".entire/metadata/" + sessionID
-	commitMessage := trailers.FormatMetadata("Add new feature", metadataDir)
+	commitMessage := fmt.Sprintf("Add new feature\n\n%s: %s\n", trailers.MetadataTrailerKey, metadataDir)
 	commitHash, err := w.Commit(commitMessage, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  "Test",
@@ -1453,116 +1529,6 @@ func TestExplainCommit_WithMetadataTrailerButNoCheckpoint(t *testing.T) {
 	}
 }
 
-func TestExplainDefault_ShowsBranchView(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize git repo
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	// Create initial commit so HEAD exists (required for branch view)
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("test content"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	_, err = w.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test",
-			Email: "test@example.com",
-		},
-	})
-	if err != nil {
-		t.Fatalf("failed to create initial commit: %v", err)
-	}
-
-	// Create .entire directory
-	if err := os.MkdirAll(".entire", 0o750); err != nil {
-		t.Fatalf("failed to create .entire dir: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	err = runExplainDefault(context.Background(), &stdout, &stderr, true) // noPager=true for test
-
-	// Should NOT error - should show branch view
-	if err != nil {
-		t.Errorf("expected no error, got: %v", err)
-	}
-
-	output := stdout.String()
-	// Should show branch header (new metadata-row shape: "branch  <name>")
-	if !strings.Contains(output, "branch  ") {
-		t.Errorf("expected 'branch' row in output, got: %s", output)
-	}
-	// Should show checkpoints count (likely 0)
-	if !strings.Contains(output, "checkpoints") {
-		t.Errorf("expected 'checkpoints' row in output, got: %s", output)
-	}
-}
-
-func TestExplainDefault_NoCheckpoints_ShowsHelpfulMessage(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize git repo
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	// Create initial commit so HEAD exists (required for branch view)
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("test content"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	_, err = w.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test",
-			Email: "test@example.com",
-		},
-	})
-	if err != nil {
-		t.Fatalf("failed to create initial commit: %v", err)
-	}
-
-	// Create .entire directory but no checkpoints
-	if err := os.MkdirAll(".entire", 0o750); err != nil {
-		t.Fatalf("failed to create .entire dir: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	err = runExplainDefault(context.Background(), &stdout, &stderr, true) // noPager=true for test
-
-	// Should NOT error
-	if err != nil {
-		t.Errorf("expected no error, got: %v", err)
-	}
-
-	output := stdout.String()
-	// Should show checkpoints count as 0 (new metadata-row shape)
-	if !strings.Contains(output, "checkpoints  0") {
-		t.Errorf("expected 'checkpoints  0' in output, got: %s", output)
-	}
-	// Should show helpful message about checkpoints appearing after saves
-	if !strings.Contains(output, "Checkpoints will appear") || !strings.Contains(output, "agent session") {
-		t.Errorf("expected helpful message about checkpoints, got: %s", output)
-	}
-}
-
 func TestExplainBothFlagsError(t *testing.T) {
 	// Test that providing both --session and --commit returns an error
 	var stdout, stderr bytes.Buffer
@@ -1575,390 +1541,6 @@ func TestExplainBothFlagsError(t *testing.T) {
 	errLower := strings.ToLower(err.Error())
 	if !strings.Contains(errLower, "cannot specify multiple") {
 		t.Errorf("expected 'cannot specify multiple' in error, got: %v", err)
-	}
-}
-
-func TestFormatSessionInfo(t *testing.T) {
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-09-test-session-abc",
-		Description: "Test description",
-		Strategy:    "manual-commit",
-		StartTime:   now,
-		Checkpoints: []strategy.Checkpoint{
-			{
-				CheckpointID: "abc1234567890",
-				Message:      "First checkpoint",
-				Timestamp:    now.Add(-time.Hour),
-			},
-			{
-				CheckpointID: "def0987654321",
-				Message:      "Second checkpoint",
-				Timestamp:    now,
-			},
-		},
-	}
-
-	// Create checkpoint details matching the session checkpoints
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:     1,
-			ShortID:   "abc1234",
-			Timestamp: now.Add(-time.Hour),
-			Message:   "First checkpoint",
-			Interactions: []interaction{{
-				Prompt:    "Fix the bug",
-				Responses: []string{"Fixed the bug in auth module"},
-				Files:     []string{"auth.go"},
-			}},
-			Files: []string{"auth.go"},
-		},
-		{
-			Index:     2,
-			ShortID:   "def0987",
-			Timestamp: now,
-			Message:   "Second checkpoint",
-			Interactions: []interaction{{
-				Prompt:    "Add tests",
-				Responses: []string{"Added unit tests"},
-				Files:     []string{"auth_test.go"},
-			}},
-			Files: []string{"auth_test.go"},
-		},
-	}
-
-	output := formatSessionInfo(session, "", checkpointDetails)
-
-	// Verify output contains expected sections
-	if !strings.Contains(output, "Session:") {
-		t.Error("expected output to contain 'Session:'")
-	}
-	if !strings.Contains(output, session.ID) {
-		t.Error("expected output to contain session ID")
-	}
-	if !strings.Contains(output, "Strategy:") {
-		t.Error("expected output to contain 'Strategy:'")
-	}
-	if !strings.Contains(output, "manual-commit") {
-		t.Error("expected output to contain strategy name")
-	}
-	if !strings.Contains(output, "Checkpoints: 2") {
-		t.Error("expected output to contain 'Checkpoints: 2'")
-	}
-	// Check checkpoint details
-	if !strings.Contains(output, "Checkpoint 1") {
-		t.Error("expected output to contain 'Checkpoint 1'")
-	}
-	if !strings.Contains(output, "## Prompt") {
-		t.Error("expected output to contain '## Prompt'")
-	}
-	if !strings.Contains(output, "## Responses") {
-		t.Error("expected output to contain '## Responses'")
-	}
-	if !strings.Contains(output, "Files Modified") {
-		t.Error("expected output to contain 'Files Modified'")
-	}
-}
-
-func TestFormatSessionInfo_WithSourceRef(t *testing.T) {
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-09-test-session-abc",
-		Description: "Test description",
-		Strategy:    "manual-commit",
-		StartTime:   now,
-		Checkpoints: []strategy.Checkpoint{
-			{
-				CheckpointID: "abc1234567890",
-				Message:      "First checkpoint",
-				Timestamp:    now,
-			},
-		},
-	}
-
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:     1,
-			ShortID:   "abc1234",
-			Timestamp: now,
-			Message:   "First checkpoint",
-		},
-	}
-
-	// Test with source ref provided
-	sourceRef := "entire/metadata@abc123def456"
-	output := formatSessionInfo(session, sourceRef, checkpointDetails)
-
-	// Verify source ref is displayed
-	if !strings.Contains(output, "Source Ref:") {
-		t.Error("expected output to contain 'Source Ref:'")
-	}
-	if !strings.Contains(output, sourceRef) {
-		t.Errorf("expected output to contain source ref %q, got:\n%s", sourceRef, output)
-	}
-}
-
-func TestFormatSessionInfo_CheckpointNumberingReversed(t *testing.T) {
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-09-test-session",
-		Strategy:    "manual-commit",
-		StartTime:   now.Add(-2 * time.Hour),
-		Checkpoints: []strategy.Checkpoint{}, // Not used for format test
-	}
-
-	// Simulate checkpoints coming in newest-first order from ListSessions
-	// but numbered with oldest=1, newest=N
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:     3, // Newest checkpoint should have highest number
-			ShortID:   "ccc3333",
-			Timestamp: now,
-			Message:   "Third (newest) checkpoint",
-			Interactions: []interaction{{
-				Prompt:    "Latest change",
-				Responses: []string{},
-			}},
-		},
-		{
-			Index:     2,
-			ShortID:   "bbb2222",
-			Timestamp: now.Add(-time.Hour),
-			Message:   "Second checkpoint",
-			Interactions: []interaction{{
-				Prompt:    "Middle change",
-				Responses: []string{},
-			}},
-		},
-		{
-			Index:     1, // Oldest checkpoint should be #1
-			ShortID:   "aaa1111",
-			Timestamp: now.Add(-2 * time.Hour),
-			Message:   "First (oldest) checkpoint",
-			Interactions: []interaction{{
-				Prompt:    "Initial change",
-				Responses: []string{},
-			}},
-		},
-	}
-
-	output := formatSessionInfo(session, "", checkpointDetails)
-
-	// Verify checkpoint ordering in output
-	// Checkpoint 3 should appear before Checkpoint 2 which should appear before Checkpoint 1
-	idx3 := strings.Index(output, "Checkpoint 3")
-	idx2 := strings.Index(output, "Checkpoint 2")
-	idx1 := strings.Index(output, "Checkpoint 1")
-
-	if idx3 == -1 || idx2 == -1 || idx1 == -1 {
-		t.Fatalf("expected all checkpoints to be in output, got:\n%s", output)
-	}
-
-	// In the output, they should appear in the order they're in the slice (newest first)
-	if idx3 > idx2 || idx2 > idx1 {
-		t.Errorf("expected checkpoints to appear in order 3, 2, 1 in output (newest first), got positions: 3=%d, 2=%d, 1=%d", idx3, idx2, idx1)
-	}
-
-	// Verify the dates appear correctly
-	if !strings.Contains(output, "Latest change") {
-		t.Error("expected output to contain 'Latest change' prompt")
-	}
-	if !strings.Contains(output, "Initial change") {
-		t.Error("expected output to contain 'Initial change' prompt")
-	}
-}
-
-func TestFormatSessionInfo_EmptyCheckpoints(t *testing.T) {
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-09-empty-session",
-		Strategy:    "manual-commit",
-		StartTime:   now,
-		Checkpoints: []strategy.Checkpoint{},
-	}
-
-	output := formatSessionInfo(session, "", nil)
-
-	if !strings.Contains(output, "Checkpoints: 0") {
-		t.Errorf("expected output to contain 'Checkpoints: 0', got:\n%s", output)
-	}
-}
-
-func TestFormatSessionInfo_CheckpointWithTaskMarker(t *testing.T) {
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-09-task-session",
-		Strategy:    "manual-commit",
-		StartTime:   now,
-		Checkpoints: []strategy.Checkpoint{},
-	}
-
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:            1,
-			ShortID:          "abc1234",
-			Timestamp:        now,
-			IsTaskCheckpoint: true,
-			Message:          "Task checkpoint",
-			Interactions: []interaction{{
-				Prompt:    "Run tests",
-				Responses: []string{},
-			}},
-		},
-	}
-
-	output := formatSessionInfo(session, "", checkpointDetails)
-
-	if !strings.Contains(output, "[Task]") {
-		t.Errorf("expected output to contain '[Task]' marker, got:\n%s", output)
-	}
-}
-
-func TestFormatSessionInfo_CheckpointWithDate(t *testing.T) {
-	// Test that checkpoint headers include the full date
-	timestamp := time.Date(2025, 12, 10, 14, 35, 0, 0, time.UTC)
-	session := &strategy.Session{
-		ID:          "2025-12-10-dated-session",
-		Strategy:    "manual-commit",
-		StartTime:   timestamp,
-		Checkpoints: []strategy.Checkpoint{},
-	}
-
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:     1,
-			ShortID:   "abc1234",
-			Timestamp: timestamp,
-			Message:   "Test checkpoint",
-		},
-	}
-
-	output := formatSessionInfo(session, "", checkpointDetails)
-
-	// Should contain "2025-12-10 14:35" in the checkpoint header
-	if !strings.Contains(output, "2025-12-10 14:35") {
-		t.Errorf("expected output to contain date '2025-12-10 14:35', got:\n%s", output)
-	}
-}
-
-func TestFormatSessionInfo_ShowsMessageWhenNoInteractions(t *testing.T) {
-	// Test that checkpoints without transcript content show the commit message
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-12-incremental-session",
-		Strategy:    "manual-commit",
-		StartTime:   now,
-		Checkpoints: []strategy.Checkpoint{},
-	}
-
-	// Checkpoint with message but no interactions (like incremental checkpoints)
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:            1,
-			ShortID:          "abc1234",
-			Timestamp:        now,
-			IsTaskCheckpoint: true,
-			Message:          "Starting 'dev' agent: Implement feature X (toolu_01ABC)",
-			Interactions:     []interaction{}, // Empty - no transcript available
-		},
-	}
-
-	output := formatSessionInfo(session, "", checkpointDetails)
-
-	// Should show the commit message when there are no interactions
-	if !strings.Contains(output, "Starting 'dev' agent: Implement feature X (toolu_01ABC)") {
-		t.Errorf("expected output to contain commit message when no interactions, got:\n%s", output)
-	}
-
-	// Should NOT show "## Prompt" or "## Responses" sections since there are no interactions
-	if strings.Contains(output, "## Prompt") {
-		t.Errorf("expected output to NOT contain '## Prompt' when no interactions, got:\n%s", output)
-	}
-	if strings.Contains(output, "## Responses") {
-		t.Errorf("expected output to NOT contain '## Responses' when no interactions, got:\n%s", output)
-	}
-}
-
-func TestFormatSessionInfo_ShowsMessageAndFilesWhenNoInteractions(t *testing.T) {
-	// Test that checkpoints without transcript but with files show both message and files
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-12-incremental-with-files",
-		Strategy:    "manual-commit",
-		StartTime:   now,
-		Checkpoints: []strategy.Checkpoint{},
-	}
-
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:            1,
-			ShortID:          "def5678",
-			Timestamp:        now,
-			IsTaskCheckpoint: true,
-			Message:          "Running tests for API endpoint (toolu_02DEF)",
-			Interactions:     []interaction{}, // Empty - no transcript
-			Files:            []string{"api/endpoint.go", "api/endpoint_test.go"},
-		},
-	}
-
-	output := formatSessionInfo(session, "", checkpointDetails)
-
-	// Should show the commit message
-	if !strings.Contains(output, "Running tests for API endpoint (toolu_02DEF)") {
-		t.Errorf("expected output to contain commit message, got:\n%s", output)
-	}
-
-	// Should also show the files
-	if !strings.Contains(output, "Files Modified") {
-		t.Errorf("expected output to contain 'Files Modified', got:\n%s", output)
-	}
-	if !strings.Contains(output, "api/endpoint.go") {
-		t.Errorf("expected output to contain modified file, got:\n%s", output)
-	}
-}
-
-func TestFormatSessionInfo_DoesNotShowMessageWhenHasInteractions(t *testing.T) {
-	// Test that checkpoints WITH interactions don't show the message separately
-	// (the interactions already contain the content)
-	now := time.Now()
-	session := &strategy.Session{
-		ID:          "2025-12-12-full-checkpoint",
-		Strategy:    "manual-commit",
-		StartTime:   now,
-		Checkpoints: []strategy.Checkpoint{},
-	}
-
-	checkpointDetails := []checkpointDetail{
-		{
-			Index:            1,
-			ShortID:          "ghi9012",
-			Timestamp:        now,
-			IsTaskCheckpoint: true,
-			Message:          "Completed 'dev' agent: Implement feature (toolu_03GHI)",
-			Interactions: []interaction{
-				{
-					Prompt:    "Implement the feature",
-					Responses: []string{"I've implemented the feature by..."},
-					Files:     []string{"feature.go"},
-				},
-			},
-		},
-	}
-
-	output := formatSessionInfo(session, "", checkpointDetails)
-
-	// Should show the interaction content
-	if !strings.Contains(output, "Implement the feature") {
-		t.Errorf("expected output to contain prompt, got:\n%s", output)
-	}
-	if !strings.Contains(output, "I've implemented the feature by") {
-		t.Errorf("expected output to contain response, got:\n%s", output)
-	}
-
-	// The message should NOT appear as a separate line (it's redundant when we have interactions)
-	// The output should contain ## Prompt and ## Responses for the interaction
-	if !strings.Contains(output, "## Prompt") {
-		t.Errorf("expected output to contain '## Prompt' when has interactions, got:\n%s", output)
 	}
 }
 
@@ -2138,6 +1720,7 @@ func TestRunExplainCheckpoint_GenerateV1OnlyReloadsFromV1(t *testing.T) {
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		sawV1Transcript = strings.Contains(string(transcript.Bytes()), "v1-only generate prompt")
 		return &checkpoint.Summary{Intent: "generated intent", Outcome: "generated outcome"}, nil
@@ -2207,6 +1790,7 @@ func TestRunExplainCheckpoint_GenerateV1ModeUsesSelectedStore(t *testing.T) {
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		sawV1Transcript = strings.Contains(string(transcript.Bytes()), "v1-mode generate prompt")
 		return &checkpoint.Summary{Intent: "generated v1 intent", Outcome: "generated v1 outcome"}, nil
@@ -2283,6 +1867,7 @@ func TestRunExplainCheckpoint_GenerateWritesV1Store(t *testing.T) {
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		return &checkpoint.Summary{Intent: "selected v1 intent", Outcome: "selected v1 outcome"}, nil
 	}
@@ -2311,6 +1896,98 @@ func TestRunExplainCheckpoint_GenerateWritesV1Store(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, v1Metadata.Summary)
 	require.Equal(t, "selected v1 intent", v1Metadata.Summary.Intent)
+}
+
+// TestRunExplainAuto_GeneratePersistsHexOnBranchUnderRefsPrimary is the
+// end-to-end regression test for the motivating field bug: under a git-refs
+// primary, `entire checkpoint explain --generate <hex-id>` for a pre-migration
+// checkpoint that lives only on the v1 branch generated the AI summary and
+// then discarded it (the summary backfill went refs-only), reporting
+// `no checkpoint or commit found`. The whole CLI path must work: auto target
+// resolution → routed read → summary generation → kind-routed backfill →
+// summary persisted on the v1 branch.
+func TestRunExplainAuto_GeneratePersistsHexOnBranchUnderRefsPrimary(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "test.txt"), []byte("test"), 0o644))
+	_, err = wt.Add("test.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// git-refs is the configured primary — the field configuration in which
+	// the backfill was discarded.
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tmpDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "summary_generation": {"provider": "claude-code"}, "checkpoints": {"primary": {"type": "git-refs"}}}`),
+		0o644,
+	))
+
+	originalGet := getSummaryAgent
+	originalCLI := isSummaryCLIAvailable
+	originalDiscover := discoverSummaryProviders
+	originalGenerate := generateTranscriptSummary
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		isSummaryCLIAvailable = originalCLI
+		discoverSummaryProviders = originalDiscover
+		generateTranscriptSummary = originalGenerate
+	})
+
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		return &stubTextAgent{name: name, kind: agent.AgentTypeClaudeCode}, nil
+	}
+	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
+	discoverSummaryProviders = func(context.Context) {}
+	generateTranscriptSummary = func(
+		_ context.Context,
+		_ redact.RedactedBytes,
+		_ []string,
+		_ types.AgentType,
+		_ summarize.Generator,
+		_ agent.ProgressFn,
+	) (*checkpoint.Summary, error) {
+		return &checkpoint.Summary{Intent: "backfilled intent", Outcome: "backfilled outcome"}, nil
+	}
+
+	// The checkpoint exists ONLY on the pre-migration v1 branch.
+	branchStore := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	cpID := id.MustCheckpointID("aabbccddeeff")
+	ctx := context.Background()
+
+	transcript := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"generate test"}]}}` + "\n" +
+		`{"type":"assistant","message":{"content":"done"}}` + "\n")
+
+	require.NoError(t, branchStore.Write(ctx, checkpoint.Session{
+		CheckpointID: cpID,
+		SessionID:    "session-hex-on-branch",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted(transcript),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}))
+
+	var buf, errBuf bytes.Buffer
+	err = runExplainAuto(ctx, &buf, &errBuf, cpID.String(), true, false, false, false, true, false, false, 0)
+	require.NoError(t, err, "generate for a hex checkpoint on the branch must succeed under a refs primary")
+	require.NotContains(t, errBuf.String(), "no checkpoint or commit found",
+		"the resolved checkpoint must not be misreported as missing")
+
+	// The summary must be readable back from the v1 branch copy.
+	meta, err := branchStore.ReadSessionMetadata(ctx, cpID, 0)
+	require.NoError(t, err)
+	require.NotNil(t, meta.Summary, "the generated summary must persist on the v1 branch")
+	require.Equal(t, "backfilled intent", meta.Summary.Intent)
 }
 
 func TestRunExplainCheckpoint_GenerateReloadsAfterV1Write(t *testing.T) {
@@ -2360,6 +2037,7 @@ func TestRunExplainCheckpoint_GenerateReloadsAfterV1Write(t *testing.T) {
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		return &checkpoint.Summary{Intent: "generated v1 intent", Outcome: "generated v1 outcome"}, nil
 	}
@@ -2797,6 +2475,20 @@ func TestRunExplainAuto_TemporaryVerboseCompactsScopedExternalNativeTranscript(t
 	require.NotContains(t, output, "(failed to parse transcript)")
 }
 
+func TestFormatTranscriptBytes_PiNativeJSONL(t *testing.T) {
+	t.Parallel()
+
+	piJSONL := []byte(`{"type":"session","version":3,"id":"pi-session","cwd":"/tmp/repo"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"2026-07-25T10:00:00Z","message":{"role":"user","content":[{"type":"text","text":"Review this trail"}]}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-07-25T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"The trail needs two fixes."}],"model":"gpt-5.6-sol"}}
+`)
+
+	output := formatTranscriptBytes(piJSONL, "", agent.AgentTypePi)
+	require.Contains(t, output, "[User] Review this trail")
+	require.Contains(t, output, "[Assistant] The trail needs two fixes.")
+	require.NotContains(t, output, "(failed to parse transcript)")
+}
+
 func TestRunExplainCheckpoint_FullFallsBackWhenExternalCompactionFails(t *testing.T) {
 	// Cannot use t.Parallel() because external agent discovery mutates the
 	// package-level agent registry and this test changes cwd/PATH.
@@ -2936,8 +2628,8 @@ func TestFormatCheckpointOutput_Short(t *testing.T) {
 	if !strings.Contains(output, "## Summary") {
 		t.Errorf("expected '## Summary' heading in no-color output, got:\n%s", output)
 	}
-	if !strings.Contains(output, "entire explain --generate") {
-		t.Errorf("expected --generate hint in summary affordance, got:\n%s", output)
+	if !strings.Contains(output, "entire checkpoint explain --generate") {
+		t.Errorf("expected canonical `entire checkpoint explain --generate` hint in summary affordance, got:\n%s", output)
 	}
 	// Should NOT show full file list in default mode
 	if strings.Contains(output, "main.go") {
@@ -4166,130 +3858,6 @@ func TestGetReachableTemporaryCheckpoints_FiltersByWorktree(t *testing.T) {
 	}
 }
 
-// TestRunExplainBranchDefault_ShowsBranchCheckpoints is covered by TestExplainDefault_ShowsBranchView
-// since runExplainDefault now calls runExplainBranchDefault directly.
-
-func TestRunExplainBranchDefault_DetachedHead(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize git repo with a commit
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("test content"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	commitHash, err := w.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test",
-			Email: "test@example.com",
-		},
-	})
-	if err != nil {
-		t.Fatalf("failed to create initial commit: %v", err)
-	}
-
-	// Checkout to detached HEAD state
-	if err := w.Checkout(&git.CheckoutOptions{Hash: commitHash}); err != nil {
-		t.Fatalf("failed to checkout detached HEAD: %v", err)
-	}
-
-	// Create .entire directory
-	if err := os.MkdirAll(".entire", 0o750); err != nil {
-		t.Fatalf("failed to create .entire dir: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	err = runExplainBranchDefault(context.Background(), &stdout, &stderr, true)
-
-	// Should NOT error
-	if err != nil {
-		t.Errorf("expected no error, got: %v", err)
-	}
-
-	output := stdout.String()
-
-	// Should indicate detached HEAD state in branch name
-	if !strings.Contains(output, "HEAD") && !strings.Contains(output, "detached") {
-		t.Errorf("expected output to indicate detached HEAD state, got: %s", output)
-	}
-}
-
-func TestIsAncestorOf(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize git repo
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create first commit
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("v1"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	commit1, err := w.Commit("first commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
-	})
-	if err != nil {
-		t.Fatalf("failed to create first commit: %v", err)
-	}
-
-	// Create second commit
-	if err := os.WriteFile(testFile, []byte("v2"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	commit2, err := w.Commit("second commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
-	})
-	if err != nil {
-		t.Fatalf("failed to create second commit: %v", err)
-	}
-
-	t.Run("commit is ancestor of later commit", func(t *testing.T) {
-		// commit1 should be an ancestor of commit2
-		if !strategy.IsAncestorOf(context.Background(), repo, commit1, commit2) {
-			t.Error("expected commit1 to be ancestor of commit2")
-		}
-	})
-
-	t.Run("commit is not ancestor of earlier commit", func(t *testing.T) {
-		// commit2 should NOT be an ancestor of commit1
-		if strategy.IsAncestorOf(context.Background(), repo, commit2, commit1) {
-			t.Error("expected commit2 to NOT be ancestor of commit1")
-		}
-	})
-
-	t.Run("commit is ancestor of itself", func(t *testing.T) {
-		// A commit should be considered an ancestor of itself
-		if !strategy.IsAncestorOf(context.Background(), repo, commit1, commit1) {
-			t.Error("expected commit to be ancestor of itself")
-		}
-	})
-}
-
 func TestGetBranchCheckpoints_OnFeatureBranch(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -4333,220 +3901,6 @@ func TestGetBranchCheckpoints_OnFeatureBranch(t *testing.T) {
 	// Should return empty list (no checkpoints yet)
 	if len(points) != 0 {
 		t.Errorf("expected 0 checkpoints, got %d", len(points))
-	}
-}
-
-func TestHasCodeChanges_FirstCommitReturnsTrue(t *testing.T) {
-	// First commit on a shadow branch (no parent) should return true
-	// since it captures the working copy state - real uncommitted work
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create first commit (has no parent)
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	commitHash, err := w.Commit("first commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create commit: %v", err)
-	}
-
-	commit, err := repo.CommitObject(commitHash)
-	if err != nil {
-		t.Fatalf("failed to get commit object: %v", err)
-	}
-
-	// First commit (no parent) captures working copy state - should return true
-	if !hasCodeChanges(commit) {
-		t.Error("hasCodeChanges() should return true for first commit (captures working copy)")
-	}
-}
-
-func TestHasCodeChanges_OnlyMetadataChanges(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create first commit
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	_, err = w.Commit("first commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create first commit: %v", err)
-	}
-
-	// Create second commit with only .entire/ metadata changes
-	metadataDir := filepath.Join(tmpDir, ".entire", "metadata", "session-123")
-	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
-		t.Fatalf("failed to create metadata dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
-		t.Fatalf("failed to write metadata file: %v", err)
-	}
-	if _, err := w.Add(".entire"); err != nil {
-		t.Fatalf("failed to add .entire: %v", err)
-	}
-	commitHash, err := w.Commit("metadata only commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create second commit: %v", err)
-	}
-
-	commit, err := repo.CommitObject(commitHash)
-	if err != nil {
-		t.Fatalf("failed to get commit object: %v", err)
-	}
-
-	// Only .entire/ changes should return false
-	if hasCodeChanges(commit) {
-		t.Error("hasCodeChanges() should return false when only .entire/ files changed")
-	}
-}
-
-func TestHasCodeChanges_WithCodeChanges(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create first commit
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	_, err = w.Commit("first commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create first commit: %v", err)
-	}
-
-	// Create second commit with code changes
-	if err := os.WriteFile(testFile, []byte("modified"), 0o644); err != nil {
-		t.Fatalf("failed to modify test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add modified file: %v", err)
-	}
-	commitHash, err := w.Commit("code change commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create second commit: %v", err)
-	}
-
-	commit, err := repo.CommitObject(commitHash)
-	if err != nil {
-		t.Fatalf("failed to get commit object: %v", err)
-	}
-
-	// Code changes should return true
-	if !hasCodeChanges(commit) {
-		t.Error("hasCodeChanges() should return true when code files changed")
-	}
-}
-
-func TestHasCodeChanges_MixedChanges(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create first commit
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	_, err = w.Commit("first commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create first commit: %v", err)
-	}
-
-	// Create second commit with BOTH code and metadata changes
-	if err := os.WriteFile(testFile, []byte("modified"), 0o644); err != nil {
-		t.Fatalf("failed to modify test file: %v", err)
-	}
-	metadataDir := filepath.Join(tmpDir, ".entire", "metadata", "session-123")
-	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
-		t.Fatalf("failed to create metadata dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
-		t.Fatalf("failed to write metadata file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	if _, err := w.Add(".entire"); err != nil {
-		t.Fatalf("failed to add .entire: %v", err)
-	}
-	commitHash, err := w.Commit("mixed changes commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create second commit: %v", err)
-	}
-
-	commit, err := repo.CommitObject(commitHash)
-	if err != nil {
-		t.Fatalf("failed to get commit object: %v", err)
-	}
-
-	// Mixed changes should return true (code changes present)
-	if !hasCodeChanges(commit) {
-		t.Error("hasCodeChanges() should return true when commit has both code and metadata changes")
 	}
 }
 
@@ -5010,6 +4364,45 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 		// Should show filter info even with no matches (label aligned to widest "checkpoints")
 		if !strings.Contains(output, "session      nonexistent-session") {
 			t.Errorf("expected 'session ... nonexistent-session' in output, got:\n%s", output)
+		}
+	})
+
+	t.Run("filter matches archived SessionIDs contributor", func(t *testing.T) {
+		// Multi-session checkpoint: latest SessionID is beta, but alpha is still
+		// in SessionIDs. The shared matcher must keep it when filtering for alpha.
+		multi := []strategy.RewindPoint{
+			{
+				ID:           "abc123def456",
+				Message:      "multi-session checkpoint",
+				Date:         now,
+				CheckpointID: "chk444444444",
+				SessionID:    "2026-01-22-session-beta",
+				SessionIDs:   []string{"2026-01-22-session-alpha", "2026-01-22-session-beta"},
+			},
+		}
+		output := formatBranchCheckpoints(io.Discard, "main", multi, "2026-01-22-session-alpha")
+		if !strings.Contains(output, "checkpoints  1") {
+			t.Errorf("expected archived contributor to match session filter, got:\n%s", output)
+		}
+	})
+
+	t.Run("unhydrated remote stub does not match session filter", func(t *testing.T) {
+		// Documents the pre-hydrate failure mode trail 871 caught: a names-only
+		// List stub has empty SessionID, so --session would drop it. Production
+		// collectCheckpoint hydrates before formatting; this asserts the filter
+		// itself does not invent a match for an empty SessionID.
+		stub := []strategy.RewindPoint{
+			{
+				ID:           "abc123def456",
+				Message:      "remote-discovered stub",
+				Date:         now,
+				CheckpointID: "01KVBJCWYA4YW6J5M9GP655HZN",
+				SessionID:    "",
+			},
+		}
+		output := formatBranchCheckpoints(io.Discard, "main", stub, "2026-01-22-session-alpha")
+		if !strings.Contains(output, "checkpoints  0") {
+			t.Errorf("empty SessionID stub must not match a session filter, got:\n%s", output)
 		}
 	})
 }
@@ -6284,7 +5677,7 @@ func TestHasAnyChanges_FirstCommitReturnsTrue(t *testing.T) {
 }
 
 func TestHasAnyChanges_MetadataOnlyChangeReturnsTrue(t *testing.T) {
-	// Unlike hasCodeChanges, hasAnyChanges uses tree hash comparison and
+	// hasAnyChanges uses tree hash comparison and
 	// does not filter out .entire/ metadata files. A metadata-only change
 	// should return true because the tree hash differs from the parent's.
 	tmpDir := t.TempDir()
@@ -6338,7 +5731,7 @@ func TestHasAnyChanges_MetadataOnlyChangeReturnsTrue(t *testing.T) {
 	}
 
 	// hasAnyChanges compares tree hashes, so metadata-only changes DO count
-	// (unlike hasCodeChanges which filters .entire/ files)
+	// (it does not filter .entire/ files)
 	if !hasAnyChanges(commit) {
 		t.Error("hasAnyChanges() should return true for metadata-only changes (tree hash differs)")
 	}
@@ -6479,13 +5872,13 @@ func TestExtractIntent_TruncatesLongPrompts(t *testing.T) {
 
 func TestBuildNoSummaryMarkdown_IntentAndAffordance(t *testing.T) {
 	t.Parallel()
-	got := buildNoSummaryMarkdown("add explain --generate flag", nil, "Run `entire explain --generate abc`.")
+	got := buildNoSummaryMarkdown("add explain --generate flag", nil, "Run `entire checkpoint explain --generate abc`.")
 	if !strings.Contains(got, "## Intent\n\nadd explain --generate flag\n") {
 		t.Fatalf("missing intent section:\n%s", got)
 	}
 	// escapeSummaryText replaces every backtick with U+2018 (‘), so both
-	// backticks in "Run `entire explain --generate abc`." map to ‘.
-	if !strings.Contains(got, "## Summary\n\n*Run ‘entire explain --generate abc‘.*\n") {
+	// backticks in "Run `entire checkpoint explain --generate abc`." map to ‘.
+	if !strings.Contains(got, "## Summary\n\n*Run ‘entire checkpoint explain --generate abc‘.*\n") {
 		t.Fatalf("missing italic summary affordance:\n%s", got)
 	}
 	if strings.Contains(got, "## Files") {
@@ -6529,22 +5922,16 @@ func TestGetBranchCheckpoints_TruncationSignal(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "test.txt", "initial")
+	testutil.GitAdd(t, tmpDir, "test.txt")
+	testutil.GitCommit(t, tmpDir, "initial commit")
+
 	repo, err := git.PlainOpen(tmpDir)
 	require.NoError(t, err)
 
-	w, err := repo.Worktree()
-	require.NoError(t, err)
-
-	testFile := filepath.Join(tmpDir, "test.txt")
-	require.NoError(t, os.WriteFile(testFile, []byte("initial"), 0o644))
-	_, err = w.Add("test.txt")
-	require.NoError(t, err)
-	_, err = w.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	require.NoError(t, err)
-
-	// Create 4 committed checkpoints, each its own commit carrying the trailer.
+	// Create 4 committed checkpoints, each on its own commit carrying the
+	// Entire-Checkpoint trailer. The testutil helpers configure user identity
+	// and disable GPG signing, matching repo convention.
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 	const total = 4
 	cpIDs := []string{"aa11aa11aa11", "bb22bb22bb22", "cc33cc33cc33", "dd44dd44dd44"}
@@ -6556,13 +5943,9 @@ func TestGetBranchCheckpoints_TruncationSignal(t *testing.T) {
 			Strategy:     "manual-commit",
 			Prompts:      []string{fmt.Sprintf("prompt %d", i)},
 		}))
-		require.NoError(t, os.WriteFile(testFile, []byte(fmt.Sprintf("change %d", i)), 0o644))
-		_, err = w.Add("test.txt")
-		require.NoError(t, err)
-		_, err = w.Commit(trailers.FormatCheckpoint(fmt.Sprintf("checkpoint %d", i), cpID), &git.CommitOptions{
-			Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(time.Duration(i) * time.Second)},
-		})
-		require.NoError(t, err)
+		testutil.WriteFile(t, tmpDir, "test.txt", fmt.Sprintf("change %d", i))
+		testutil.GitAdd(t, tmpDir, "test.txt")
+		testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint(fmt.Sprintf("checkpoint %d", i), cpID))
 	}
 
 	t.Run("budget hit reports truncated and caps the slice", func(t *testing.T) {
@@ -6584,4 +5967,305 @@ func TestGetBranchCheckpoints_TruncationSignal(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, truncated)
 	})
+}
+
+// setupExplainBranchViewRepo initializes a repo with one commit and an .entire
+// dir in a temp CWD, returning the commit hash. Shared scaffolding for the
+// default branch-view tests of runExplainBranchWithFilter.
+func setupExplainBranchViewRepo(t *testing.T) plumbing.Hash {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	w, err := repo.Worktree()
+	require.NoError(t, err)
+	testFile := filepath.Join(tmpDir, "test.txt")
+	require.NoError(t, os.WriteFile(testFile, []byte("test content"), 0o644))
+	_, err = w.Add("test.txt")
+	require.NoError(t, err)
+	commitHash, err := w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test",
+			Email: "test@example.com",
+		},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll(".entire", 0o750))
+	return commitHash
+}
+
+// TestRunExplainBranchWithFilter_ShowsBranchView covers the default
+// `entire explain` view (no filter): branch header plus checkpoint count.
+func TestRunExplainBranchWithFilter_ShowsBranchView(t *testing.T) {
+	setupExplainBranchViewRepo(t)
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainBranchWithFilter(context.Background(), &stdout, &stderr, true, "")
+	if err != nil {
+		t.Errorf("expected no error, got: %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "branch  ") {
+		t.Errorf("expected 'branch' row in output, got: %s", output)
+	}
+	if !strings.Contains(output, "checkpoints") {
+		t.Errorf("expected 'checkpoints' row in output, got: %s", output)
+	}
+}
+
+// TestRunExplainBranchWithFilter_NoCheckpoints_ShowsHelpfulMessage pins the
+// zero-checkpoint hint shown to users before their first agent session saves.
+func TestRunExplainBranchWithFilter_NoCheckpoints_ShowsHelpfulMessage(t *testing.T) {
+	setupExplainBranchViewRepo(t)
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainBranchWithFilter(context.Background(), &stdout, &stderr, true, "")
+	if err != nil {
+		t.Errorf("expected no error, got: %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "checkpoints  0") {
+		t.Errorf("expected 'checkpoints  0' in output, got: %s", output)
+	}
+	if !strings.Contains(output, "Checkpoints will appear") || !strings.Contains(output, "agent session") {
+		t.Errorf("expected helpful message about checkpoints, got: %s", output)
+	}
+}
+
+// TestRunExplainBranchWithFilter_DetachedHead covers the default view's branch
+// labeling when HEAD is detached — a real user path with no branch name.
+func TestRunExplainBranchWithFilter_DetachedHead(t *testing.T) {
+	commitHash := setupExplainBranchViewRepo(t)
+
+	repo, err := git.PlainOpen(".")
+	require.NoError(t, err)
+	w, err := repo.Worktree()
+	require.NoError(t, err)
+	require.NoError(t, w.Checkout(&git.CheckoutOptions{Hash: commitHash}))
+
+	var stdout, stderr bytes.Buffer
+	err = runExplainBranchWithFilter(context.Background(), &stdout, &stderr, true, "")
+	if err != nil {
+		t.Errorf("expected no error, got: %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "HEAD") && !strings.Contains(output, "detached") {
+		t.Errorf("expected output to indicate detached HEAD state, got: %s", output)
+	}
+}
+func TestSummaryProgressWriter_NonTTY(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	attempt := newSummaryAttempt("claude-code", 0)
+	pw := newSummaryProgressWriter(&buf, attempt)
+
+	// Throttling rule: emit on first PhaseGenerating, then on 500ms OR 25% jump.
+	// The two events here are back-to-back (~0ms) but the second is a 100% jump,
+	// so both should emit.
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseConnecting})
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseFirstToken, TTFTms: 935, CachedInputTokens: 35892})
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: 100})
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: 200})
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseDone, OutputTokens: 200, DurationMs: 3100})
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("expected 5 lines, got %d: %q", len(lines), buf.String())
+	}
+	wantSubstr := []string{
+		"Sending request to provider",
+		"Provider responded",
+		"Writing summary",
+		"Writing summary",
+		"Summary generated",
+	}
+	for i, ws := range wantSubstr {
+		if !strings.Contains(lines[i], ws) {
+			t.Errorf("line %d = %q, want substring %q", i, lines[i], ws)
+		}
+	}
+	if strings.Contains(buf.String(), "\r") {
+		t.Error("non-TTY output should not contain carriage returns")
+	}
+}
+
+func TestSummaryProgressWriter_NonTTYGenerateThrottle(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	attempt := newSummaryAttempt("claude-code", 0)
+	pw := newSummaryProgressWriter(&buf, attempt)
+
+	// First Generating event always emits (no prior state).
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: 100})
+	// Tiny jump (10%) within 500ms → suppressed.
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: 110})
+	// 30% jump from baseline of 100 → emits (>=25% rule).
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: 130})
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Errorf("expected 2 emitted Generating lines, got %d: %q", len(lines), buf.String())
+	}
+}
+
+func TestSummaryProgressWriter_Accessible(t *testing.T) {
+	// Cannot use t.Parallel() — t.Setenv mutates process-global state.
+	// (Strictly, t.Setenv IS compatible with t.Parallel() in Go 1.17+ when
+	// Setenv is called BEFORE Parallel, but the project convention is to
+	// avoid pairing them to keep the rules simple.)
+	t.Setenv("ACCESSIBLE", "1")
+	var buf bytes.Buffer
+	attempt := newSummaryAttempt("claude-code", 0)
+	pw := newSummaryProgressWriter(&buf, attempt)
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseConnecting})
+
+	out := buf.String()
+	if strings.Contains(out, "→") {
+		t.Errorf("accessible mode should not contain unicode arrow: %q", out)
+	}
+	if !strings.Contains(out, "->") {
+		t.Errorf("accessible mode should contain ASCII arrow: %q", out)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("accessible mode should not contain ANSI escapes: %q", out)
+	}
+}
+
+func TestSummaryProgressWriter_PopulatesAttempt(t *testing.T) {
+	t.Parallel()
+
+	attempt := newSummaryAttempt("claude-code", 30*time.Second)
+	pw := newSummaryProgressWriter(&bytes.Buffer{}, attempt)
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseConnecting})
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseFirstToken})
+
+	if !attempt.streaming {
+		t.Error("expected attempt.streaming=true after any progress event")
+	}
+	if !attempt.phasesReached[agent.PhaseConnecting] {
+		t.Error("expected PhaseConnecting recorded in attempt")
+	}
+	if !attempt.phasesReached[agent.PhaseFirstToken] {
+		t.Error("expected PhaseFirstToken recorded in attempt")
+	}
+	if attempt.phasesReached[agent.PhaseDone] {
+		t.Error("did not expect PhaseDone yet")
+	}
+}
+
+func TestTimeoutDiagnostic_StreamingStuckBeforeConnecting(t *testing.T) {
+	t.Parallel()
+	attempt := newSummaryAttempt("claude-code", 5*time.Second)
+	attempt.streaming = true // streaming was attempted but no events fired
+
+	label, rows := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "never sent its request") {
+		t.Errorf("label = %q, want 'never sent its request'", label)
+	}
+	if !rowsHaveValue(rows, "claude") {
+		t.Errorf("rows should suggest running 'claude' directly: %v", rows)
+	}
+}
+
+func TestTimeoutDiagnostic_StreamingStuckBeforeFirstToken(t *testing.T) {
+	t.Parallel()
+	attempt := newSummaryAttempt("claude-code", 5*time.Second)
+	attempt.streaming = true
+	attempt.phasesReached[agent.PhaseConnecting] = true
+
+	label, _ := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "received no response") {
+		t.Errorf("label = %q, want 'received no response'", label)
+	}
+}
+
+func TestTimeoutDiagnostic_StreamingStuckMidGeneration(t *testing.T) {
+	t.Parallel()
+	attempt := newSummaryAttempt("claude-code", 5*time.Second)
+	attempt.streaming = true
+	attempt.phasesReached[agent.PhaseConnecting] = true
+	attempt.phasesReached[agent.PhaseFirstToken] = true
+	attempt.phasesReached[agent.PhaseGenerating] = true
+
+	label, _ := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "did not finish") {
+		t.Errorf("label = %q, want 'did not finish'", label)
+	}
+}
+
+func TestTimeoutDiagnostic_StreamingFirstTokenWithoutConnecting(t *testing.T) {
+	t.Parallel()
+	// Older CLIs can reach FirstToken without ever emitting the
+	// version-dependent "requesting" status event. The diagnostic must key
+	// off the furthest phase reached — reporting "never sent its request"
+	// here would contradict the progress lines the user just watched.
+	attempt := newSummaryAttempt("claude-code", 5*time.Second)
+	attempt.streaming = true
+	attempt.phasesReached[agent.PhaseFirstToken] = true
+
+	label, _ := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "did not finish") {
+		t.Errorf("label = %q, want 'did not finish' (furthest phase reached wins)", label)
+	}
+}
+
+func TestTimeoutDiagnostic_StreamingDoneButDeadlineFired(t *testing.T) {
+	t.Parallel()
+	// All phases including Done were reached, yet the deadline still fired
+	// (e.g. while the result was being read). Must not fall through to the
+	// non-streaming branch and claim the provider produced no output.
+	attempt := newSummaryAttempt("claude-code", 5*time.Second)
+	attempt.streaming = true
+	attempt.phasesReached[agent.PhaseConnecting] = true
+	attempt.phasesReached[agent.PhaseFirstToken] = true
+	attempt.phasesReached[agent.PhaseGenerating] = true
+	attempt.phasesReached[agent.PhaseDone] = true
+
+	label, _ := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "was not delivered in time") {
+		t.Errorf("label = %q, want 'was not delivered in time'", label)
+	}
+	if strings.Contains(label, "produced no output") {
+		t.Errorf("label = %q must not claim the provider produced no output", label)
+	}
+}
+
+func TestTimeoutDiagnostic_NonStreamingNoOutput(t *testing.T) {
+	t.Parallel()
+	attempt := newSummaryAttempt("codex", 5*time.Second)
+	attempt.stderrCaptured = "failed to look up host: nodename nor servname provided"
+	attempt.stdoutByteCount = 0
+
+	label, rows := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "produced no output") {
+		t.Errorf("label = %q, want 'produced no output'", label)
+	}
+	if !rowsHaveValue(rows, "failed to look up host") {
+		t.Errorf("rows should surface stderr, got: %v", rows)
+	}
+}
+
+func TestTimeoutDiagnostic_NonStreamingWithOutput(t *testing.T) {
+	t.Parallel()
+	attempt := newSummaryAttempt("codex", 5*time.Second)
+	attempt.stderrCaptured = "model is processing your request"
+	attempt.stdoutByteCount = 1024
+
+	label, rows := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "was generating output when killed") {
+		t.Errorf("label = %q, want 'was generating output when killed'", label)
+	}
+	if !rowsHaveValue(rows, "model is processing") {
+		t.Errorf("rows should surface stderr, got: %v", rows)
+	}
 }

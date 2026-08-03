@@ -22,7 +22,7 @@ func BinPath() string {
 	return p
 }
 
-// RewindPoint represents a single entry from `entire rewind --list`.
+// RewindPoint represents a single entry from `entire checkpoint list --pending --json`.
 type RewindPoint struct {
 	ID               string `json:"id"`
 	Message          string `json:"message"`
@@ -65,10 +65,10 @@ func CleanForce(t *testing.T, dir string) string {
 	return run(t, dir, "clean", "--force")
 }
 
-// RewindList runs `entire checkpoint rewind --list` and parses the JSON output.
+// RewindList runs `entire checkpoint list --pending --json` and parses the JSON output.
 func RewindList(t *testing.T, dir string) []RewindPoint {
 	t.Helper()
-	out := runStdout(t, dir, "checkpoint", "rewind", "--list")
+	out := runStdout(t, dir, "checkpoint", "list", "--pending", "--json")
 
 	var points []RewindPoint
 	if err := json.Unmarshal([]byte(out), &points); err != nil {

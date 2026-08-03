@@ -40,7 +40,7 @@ func TestRunActivity_SilencesContextCanceled(t *testing.T) {
 		}))
 
 	var out, errOut bytes.Buffer
-	err := runActivity(t.Context(), &out, &errOut)
+	err := runActivity(t.Context(), &out, &errOut, false)
 	if err == nil {
 		t.Fatal("expected error when STS exchange is cancelled")
 	}
@@ -74,7 +74,7 @@ func TestRunActivity_PrintsLoginHintOnNotLoggedIn(t *testing.T) {
 		}))
 
 	var out, errOut bytes.Buffer
-	err := runActivity(t.Context(), &out, &errOut)
+	err := runActivity(t.Context(), &out, &errOut, false)
 	if err == nil {
 		t.Fatal("expected error when not logged in")
 	}

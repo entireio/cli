@@ -15,9 +15,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/require"
 )
@@ -79,44 +79,6 @@ func writeCheckpointForExport(t *testing.T, repo *git.Repository, cpID id.Checkp
 	require.NoError(t, store.Write(context.Background(), checkpoint.Session(opts)))
 }
 
-func rewriteExportCheckpointVersionToRefsV1(t *testing.T, repo *git.Repository, cpID id.CheckpointID) {
-	t.Helper()
-	ctx := context.Background()
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	ref, err := repo.Reference(refName, true)
-	require.NoError(t, err)
-	commit, err := repo.CommitObject(ref.Hash())
-	require.NoError(t, err)
-	tree, err := commit.Tree()
-	require.NoError(t, err)
-
-	metadataPath := cpID.Path() + "/" + paths.MetadataFileName
-	metadataFile, err := tree.File(metadataPath)
-	require.NoError(t, err)
-	content, err := metadataFile.Contents()
-	require.NoError(t, err)
-	var summary checkpoint.CheckpointSummary
-	require.NoError(t, json.Unmarshal([]byte(content), &summary))
-	summary.CheckpointVersion = "refs-v1"
-	metadataJSON, err := json.Marshal(summary)
-	require.NoError(t, err)
-	metadataHash, err := checkpoint.CreateBlobFromContent(repo, metadataJSON)
-	require.NoError(t, err)
-
-	entries := make(map[string]object.TreeEntry)
-	require.NoError(t, tree.Files().ForEach(func(file *object.File) error {
-		entries[file.Name] = object.TreeEntry{Name: file.Name, Mode: file.Mode, Hash: file.Hash}
-		return nil
-	}))
-	entries[metadataPath] = object.TreeEntry{Name: metadataPath, Mode: metadataFile.Mode, Hash: metadataHash}
-
-	treeHash, err := checkpoint.BuildTreeFromEntries(ctx, repo, entries)
-	require.NoError(t, err)
-	commitHash, err := checkpoint.CreateCommit(ctx, repo, treeHash, ref.Hash(), "rewrite checkpoint summary\n", exportTestAuthorName, exportTestAuthorEmail)
-	require.NoError(t, err)
-	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, commitHash)))
-}
-
 func TestRunExplainExport_JSONSingleCheckpoint(t *testing.T) {
 	repo := setupExportRepo(t)
 
@@ -142,26 +104,6 @@ func TestRunExplainExport_JSONSingleCheckpoint(t *testing.T) {
 	require.Len(t, envelope.Sessions, 1)
 	require.Equal(t, "session-json", envelope.Sessions[0].SessionID)
 	require.Equal(t, 0, envelope.Sessions[0].Index)
-}
-
-func TestRunExplainExportJSONRejectsUnsupportedCheckpointVersion(t *testing.T) {
-	repo := setupExportRepo(t)
-
-	cpID := id.MustCheckpointID("aaaabbbbcccc")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
-		SessionID:  "session-json-unsupported",
-		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
-	})
-	rewriteExportCheckpointVersionToRefsV1(t, repo, cpID)
-
-	var stdout, stderr bytes.Buffer
-	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
-		target:       "aaaabbbb",
-		json:         true,
-		sessionIndex: -1,
-	})
-	require.ErrorContains(t, err, `checkpoint aaaabbbbcccc uses unsupported checkpoint_version "refs-v1"`)
-	require.Empty(t, stdout.String())
 }
 
 func TestRunExplainExport_JSONFetchesRemoteV1Metadata(t *testing.T) {
@@ -250,6 +192,150 @@ func TestRunExplainExport_JSONUsesMetadataOnlyReader(t *testing.T) {
 	require.Empty(t, envelope.Sessions[0].Error, "well-formed v1 read must not surface a per-session error")
 }
 
+// TestRunExplainExport_CommitWithoutTrailerSurfacesTrailerError (issue #1814):
+// a positional target that resolves to a real commit without an
+// Entire-Checkpoint trailer must surface that fact — not be masked as
+// `checkpoint not found: <sha>`, which reads as a typo and hides that the
+// commit was found. Same conflation class PR #1812 fixes for the prose path.
+func TestRunExplainExport_CommitWithoutTrailerSurfacesTrailerError(t *testing.T) {
+	repo := setupExportRepo(t)
+	head, err := repo.Head()
+	require.NoError(t, err)
+
+	var stdout, stderr bytes.Buffer
+	err = runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       head.Hash().String(),
+		json:         true,
+		sessionIndex: -1,
+	})
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "has no Entire-Checkpoint trailer",
+		"a trailer-less commit target must surface the trailer failure")
+	require.NotContains(t, err.Error(), "checkpoint not found",
+		"a resolved commit must not be masked as an unknown checkpoint")
+}
+
+// TestRunExplainExport_TrailerCheckpointUnavailableFailsWithCause: when a
+// commit's Entire-Checkpoint trailer references a checkpoint that is neither
+// local nor fetchable, the export path must fail naming the commit, the
+// checkpoint, and availability as the cause — not succeed and let a
+// downstream read die with a bare "checkpoint not found" that misdirects the
+// user toward the checkpoint ID instead of connectivity.
+func TestRunExplainExport_TrailerCheckpointUnavailableFailsWithCause(t *testing.T) {
+	repo := setupExportRepo(t)
+
+	cpID := id.MustCheckpointID("deadbeefcafe")
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "feature.txt"), []byte("feature"), 0o644))
+	_, err = wt.Add("feature.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit(trailers.AppendCheckpointTrailer("Implement feature", cpID.String()), &git.CommitOptions{
+		Author: &object.Signature{Name: exportTestAuthorName, Email: exportTestAuthorEmail, When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	var stdout, stderr bytes.Buffer
+	err = runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		commitRef:    commitHash.String(),
+		json:         true,
+		sessionIndex: -1,
+	})
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "not available locally",
+		"the failure must name availability as the cause")
+	require.ErrorContains(t, err, cpID.String())
+	require.ErrorContains(t, err, commitHash.String()[:7],
+		"the failure must name the commit the user typed")
+}
+
+// TestRunExplainExport_AmbiguousCommitPrefixNamesCandidates: an ambiguous
+// positional prefix must be reported as ambiguity — with the candidate
+// commits, so the user can disambiguate without rerunning git log — and must
+// not be masked as "checkpoint not found" (the pre-#1814 behavior).
+func TestRunExplainExport_AmbiguousCommitPrefixNamesCandidates(t *testing.T) {
+	repo := setupExportRepo(t)
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	prefix := collidingShaPrefix(t, repo, cwd)
+
+	var stdout, stderr bytes.Buffer
+	err = runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       prefix,
+		json:         true,
+		sessionIndex: -1,
+	})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, errAmbiguousCommitPrefix)
+	require.ErrorContains(t, err, "ambiguous commit ref")
+	require.ErrorContains(t, err, "matches commits",
+		"the error must list the candidate commits")
+	require.NotContains(t, err.Error(), "checkpoint not found",
+		"ambiguity must not be masked as an unknown checkpoint")
+}
+
+// TestRunExplainExport_CommitFlagNotFoundMessage pins the --commit flag
+// path's user-visible message: the errExportTargetNotCommit sentinel's text
+// is part of the rendered error, so renaming it would silently change every
+// --commit failure message.
+func TestRunExplainExport_CommitFlagNotFoundMessage(t *testing.T) {
+	setupExportRepo(t)
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		commitRef:    "nosuchref",
+		json:         true,
+		sessionIndex: -1,
+	})
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "commit not found: nosuchref")
+}
+
+// TestRunExplainExport_CheckpointFlagNeverFallsBackToCommit pins the
+// deliberate asymmetry: an explicit --checkpoint selector is never
+// reinterpreted as a commit ref, even when it would resolve as one.
+func TestRunExplainExport_CheckpointFlagNeverFallsBackToCommit(t *testing.T) {
+	repo := setupExportRepo(t)
+	head, err := repo.Head()
+	require.NoError(t, err)
+
+	var stdout, stderr bytes.Buffer
+	err = runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		checkpointFlag: head.Hash().String(),
+		json:           true,
+		sessionIndex:   -1,
+	})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, checkpoint.ErrCheckpointNotFound)
+	require.NotContains(t, err.Error(), "trailer",
+		"--checkpoint must not be reinterpreted as a commit ref")
+}
+
+// TestRunExplainExport_UnknownTargetStillReportsNotFound pins the genuine-miss
+// contract around the #1814 fix: a target that is neither a checkpoint prefix
+// nor a commit keeps the plain not-found report.
+func TestRunExplainExport_UnknownTargetStillReportsNotFound(t *testing.T) {
+	setupExportRepo(t)
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       "abababababab",
+		json:         true,
+		sessionIndex: -1,
+	})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, checkpoint.ErrCheckpointNotFound)
+	require.ErrorContains(t, err, "checkpoint not found: abababababab")
+}
+
 func TestRunExplainExport_JSONNeverEmbedsTranscript(t *testing.T) {
 	repo := setupExportRepo(t)
 
@@ -289,33 +375,6 @@ func TestRunExplainExport_TranscriptStreamsStoredBytes(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, raw, stdout.Bytes())
-}
-
-func TestRunExplainExportTranscriptRejectsUnsupportedCheckpointVersion(t *testing.T) {
-	tests := []struct {
-		name string
-		opts explainExportOptions
-	}{
-		{name: "transcript", opts: explainExportOptions{target: "abcd1111", transcript: true, sessionIndex: -1}},
-		{name: "raw transcript", opts: explainExportOptions{target: "abcd1111", rawTranscript: true, sessionIndex: -1}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			repo := setupExportRepo(t)
-			cpID := id.MustCheckpointID("abcd11112222")
-			raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"stored line"}]}}` + "\n")
-			writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
-				SessionID:  "session-unsupported-transcript",
-				Transcript: redact.AlreadyRedacted(raw),
-			})
-			rewriteExportCheckpointVersionToRefsV1(t, repo, cpID)
-
-			var stdout, stderr bytes.Buffer
-			err := runExplainExport(context.Background(), &stdout, &stderr, tt.opts)
-			require.ErrorContains(t, err, `checkpoint abcd11112222 uses unsupported checkpoint_version "refs-v1"`)
-			require.Empty(t, stdout.String())
-		})
-	}
 }
 
 func TestRunExplainExport_RawTranscriptStreamsRawBytes(t *testing.T) {

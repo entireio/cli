@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v6"
@@ -204,51 +205,6 @@ func GetCurrentBranch(ctx context.Context) (string, error) {
 	return head.Name().Short(), nil
 }
 
-// GetMergeBase finds the common ancestor (merge-base) between two branches.
-// Returns the hash of the merge-base commit.
-func GetMergeBase(ctx context.Context, branch1, branch2 string) (*plumbing.Hash, error) {
-	repo, err := openRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open git repository: %w", err)
-	}
-	defer repo.Close()
-
-	// Resolve branch references
-	ref1, err := repo.Reference(plumbing.NewBranchReferenceName(branch1), true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve branch %s: %w", branch1, err)
-	}
-
-	ref2, err := repo.Reference(plumbing.NewBranchReferenceName(branch2), true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve branch %s: %w", branch2, err)
-	}
-
-	// Get commit objects
-	commit1, err := repo.CommitObject(ref1.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit for %s: %w", branch1, err)
-	}
-
-	commit2, err := repo.CommitObject(ref2.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit for %s: %w", branch2, err)
-	}
-
-	// Find common ancestor
-	mergeBase, err := commit1.MergeBase(commit2)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find merge base: %w", err)
-	}
-
-	if len(mergeBase) == 0 {
-		return nil, errors.New("no common ancestor found")
-	}
-
-	hash := mergeBase[0].Hash
-	return &hash, nil
-}
-
 // HasUncommittedChanges checks if there are any uncommitted changes in the repository.
 // This includes staged changes, unstaged changes, and untracked files.
 // Uses git CLI instead of go-git because go-git doesn't respect global gitignore
@@ -262,22 +218,6 @@ func HasUncommittedChanges(ctx context.Context) (bool, error) {
 
 	// If output is empty, there are no changes
 	return len(strings.TrimSpace(string(output))) > 0, nil
-}
-
-// findNewUntrackedFiles finds files that are newly untracked (not in pre-existing list)
-func findNewUntrackedFiles(current, preExisting []string) []string {
-	preExistingSet := make(map[string]bool)
-	for _, file := range preExisting {
-		preExistingSet[file] = true
-	}
-
-	var newFiles []string
-	for _, file := range current {
-		if !preExistingSet[file] {
-			newFiles = append(newFiles, file)
-		}
-	}
-	return newFiles
 }
 
 // BranchExistsOnRemote checks if a branch exists on the origin remote.
@@ -523,15 +463,89 @@ func FetchMetadataFromCheckpointRemote(ctx context.Context) error {
 }
 
 // resolveCheckpointFetchTarget returns the fetch target for checkpoint data.
-// It prefers the effective URL resolved by checkpoint/remote.FetchURL, which is
-// the source of truth for checkpoint fetch location. If URL resolution fails, it
-// falls back to the origin remote name so callers can still attempt a fetch.
+// Thin alias for remote.CheckpointFetchTarget (the single source of truth).
 func resolveCheckpointFetchTarget(ctx context.Context) string {
-	url, err := remote.FetchURL(ctx)
-	if err == nil && url != "" {
-		return url
+	return remote.CheckpointFetchTarget(ctx)
+}
+
+// FetchCheckpointRef fetches a single per-checkpoint ref from the checkpoint
+// remote. Thin alias for remote.FetchCheckpointRef, kept so existing cli-side
+// call sites and OpenOptions wiring stay unchanged; see that function for the
+// absence-vs-failure contract (remote-lacks-ref wraps
+// plumbing.ErrReferenceNotFound; transport failures surface as-is).
+func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
+	return remote.FetchCheckpointRef(ctx, ref) //nolint:wrapcheck // thin alias; the remote error carries full context
+}
+
+// checkpointRefListTimeout bounds the names-only ls-remote used by user-facing
+// `entire checkpoint list` / branch explain. Kept short (not a full fetch
+// budget): discovery is best-effort and additive — on timeout or unreachable
+// remote the store falls back to local refs rather than stalling a previously
+// instant command for tens of seconds.
+const checkpointRefListTimeout = 5 * time.Second
+
+// ListCheckpointRefsOnRemote enumerates the per-checkpoint refs
+// (refs/entire/checkpoints/<shard>/<id>) present on the checkpoint remote, names
+// only, via a single `git ls-remote refs/entire/checkpoints/*` — no object
+// transfer. The git-refs store's List uses it to discover checkpoints written
+// on another machine that have no local ref yet, then hydrates each lazily on
+// read through FetchCheckpointRef.
+//
+// Scope (deliberately stricter than the on-demand read fetch):
+//   - no checkpoint_remote configured → (nil, nil), List stays local-only
+//     (unlike FetchCheckpointRef / remote.FetchURL, which fall back to origin);
+//   - with checkpoint_remote configured → queries the resolved checkpoint URL
+//     via remote.FetchURL (which can still fall through to origin in edge cases
+//     such as settings-load failure or an underivable checkpoint URL).
+//
+// Resolution and ls-remote are pinned to the worktree root (not process cwd) so
+// repo-local git config (url.*.insteadOf, credential helpers, remotes) applies.
+func ListCheckpointRefsOnRemote(ctx context.Context) ([]plumbing.ReferenceName, error) {
+	if !remote.Configured(ctx) {
+		return nil, nil
 	}
-	return "origin"
+
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve worktree root: %w", err)
+	}
+
+	url, err := remote.FetchURL(ctx, remote.FetchURLOptions{WorktreeRoot: worktreeRoot})
+	if err != nil {
+		return nil, fmt.Errorf("resolve checkpoint remote URL: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, checkpointRefListTimeout)
+	defer cancel()
+
+	output, err := remote.LsRemoteInDir(ctx, worktreeRoot, url, checkpoint.CheckpointRefPrefix+"*")
+	if err != nil {
+		return nil, fmt.Errorf("ls-remote checkpoint refs from %s: %w", remote.RedactURL(url), err)
+	}
+	return parseCheckpointRefNames(output), nil
+}
+
+// parseCheckpointRefNames extracts the checkpoint ref names from `git ls-remote`
+// output. Each line is "<hash>\t<refname>"; only refs under CheckpointRefPrefix
+// are kept (the store re-validates each via ParseRef). Checkpoint refs point at
+// commits so no peeled (`^{}`) lines appear for them; refs/tags peeled lines
+// lack the checkpoint prefix and drop out here; any anomalous
+// refs/entire/checkpoints/...^{} name is rejected by ParseRef downstream (the
+// "{}" shard never matches ShardFor).
+func parseCheckpointRefNames(output []byte) []plumbing.ReferenceName {
+	var names []plumbing.ReferenceName
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		name := fields[1]
+		if !strings.HasPrefix(name, checkpoint.CheckpointRefPrefix) {
+			continue
+		}
+		names = append(names, plumbing.ReferenceName(name))
+	}
+	return names
 }
 
 // FetchBlobsByHash fetches specific blob objects from the remote by their SHA-1 hashes.

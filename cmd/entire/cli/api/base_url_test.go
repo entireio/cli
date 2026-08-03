@@ -79,16 +79,16 @@ func TestNormalizeOriginURL(t *testing.T) {
 	}
 }
 
-func TestResolveURL(t *testing.T) {
-	t.Setenv(BaseURLEnvVar, "http://localhost:8787/")
+func TestResolveURLFromBase_JoinsPath(t *testing.T) {
+	t.Parallel()
 
-	got, err := ResolveURL("/oauth/device/code")
+	got, err := ResolveURLFromBase("http://localhost:8787", "/oauth/device/code")
 	if err != nil {
-		t.Fatalf("ResolveURL() error = %v", err)
+		t.Fatalf("ResolveURLFromBase() error = %v", err)
 	}
 
 	if got != "http://localhost:8787/oauth/device/code" {
-		t.Fatalf("ResolveURL() = %q, want %q", got, "http://localhost:8787/oauth/device/code")
+		t.Fatalf("ResolveURLFromBase() = %q, want %q", got, "http://localhost:8787/oauth/device/code")
 	}
 }
 

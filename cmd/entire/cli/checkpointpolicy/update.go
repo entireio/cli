@@ -8,9 +8,11 @@ import (
 )
 
 type UpdateOptions struct {
-	CheckpointVersion    string
-	CheckpointMinVersion string
-	Force                bool
+	CheckpointVersion       string
+	CheckpointVersionSet    bool
+	CheckpointMinVersion    string
+	CheckpointMinVersionSet bool
+	Force                   bool
 }
 
 func Update(ctx context.Context, repo *git.Repository, target Target, opts UpdateOptions) (State, error) {
@@ -20,10 +22,10 @@ func Update(ctx context.Context, repo *git.Repository, target Target, opts Updat
 	}
 
 	policy := baseline.Policy
-	if opts.CheckpointVersion != "" {
+	if opts.CheckpointVersionSet {
 		policy.CheckpointVersion = opts.CheckpointVersion
 	}
-	if opts.CheckpointMinVersion != "" {
+	if opts.CheckpointMinVersionSet {
 		policy.CheckpointMinVersion = opts.CheckpointMinVersion
 	}
 
@@ -39,7 +41,7 @@ func Update(ctx context.Context, repo *git.Repository, target Target, opts Updat
 		return State{}, err
 	}
 	return State{
-		Policy:     Normalize(policy),
+		Policy:     policy,
 		Source:     SourceLocal,
 		Hash:       hash,
 		RemoteHash: baseline.RemoteHash,
@@ -87,12 +89,12 @@ func rejectDowngrades(before, after Policy, opts UpdateOptions) error {
 	if opts.Force {
 		return nil
 	}
-	if opts.CheckpointVersion != "" {
+	if opts.CheckpointVersionSet {
 		if err := rejectFieldDowngrade("checkpoint_version", before.CheckpointVersion, after.CheckpointVersion); err != nil {
 			return err
 		}
 	}
-	if opts.CheckpointMinVersion != "" {
+	if opts.CheckpointMinVersionSet {
 		if err := rejectFieldDowngrade("checkpoint_min_version", before.CheckpointMinVersion, after.CheckpointMinVersion); err != nil {
 			return err
 		}

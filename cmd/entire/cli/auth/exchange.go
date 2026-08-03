@@ -7,6 +7,8 @@ import (
 	"github.com/entireio/auth-go/tokenmanager"
 )
 
+const schemeHTTP = "http"
+
 // ErrNotLoggedIn re-exports tokenmanager.ErrNotLoggedIn so callers in
 // the cli package can errors.Is against it without an extra import.
 var ErrNotLoggedIn = tokenmanager.ErrNotLoggedIn
@@ -41,7 +43,7 @@ func insecureHTTPEnabled() bool {
 // keep working.
 func isLoopbackHTTP(rawURL string) bool {
 	u, err := url.Parse(rawURL)
-	if err != nil || u.Scheme != "http" {
+	if err != nil || u.Scheme != schemeHTTP {
 		return false
 	}
 	host := u.Hostname()

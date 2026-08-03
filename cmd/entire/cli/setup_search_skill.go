@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,21 +19,6 @@ const (
 	legacyEntireManagedSearchSubagentMarker = "ENTIRE-MANAGED SEARCH SUBAGENT v1"
 )
 
-type searchSkillScaffoldStatus string
-
-const (
-	searchSkillUnsupported     searchSkillScaffoldStatus = "unsupported"
-	searchSkillCreated         searchSkillScaffoldStatus = "created"
-	searchSkillUpdated         searchSkillScaffoldStatus = "updated"
-	searchSkillUnchanged       searchSkillScaffoldStatus = "unchanged"
-	searchSkillSkippedConflict searchSkillScaffoldStatus = "skipped_conflict"
-)
-
-type searchSkillScaffoldResult struct {
-	Status  searchSkillScaffoldStatus
-	RelPath string
-}
-
 func setupOptionalSearchSkill(ctx context.Context, w io.Writer, ag agent.Agent, opts EnableOptions) error {
 	if !opts.SearchSkill {
 		return nil
@@ -48,87 +32,25 @@ func setupOptionalSearchSkill(ctx context.Context, w io.Writer, ag agent.Agent, 
 }
 
 func setupOptionalSearchSkillForNames(ctx context.Context, w io.Writer, names []string, opts EnableOptions) error {
-	if !opts.SearchSkill {
-		return nil
-	}
-
-	var errs []error
-	seen := make(map[types.AgentName]struct{}, len(names))
-	for _, name := range names {
-		agentName := types.AgentName(name)
-		if _, ok := seen[agentName]; ok {
-			continue
-		}
-		seen[agentName] = struct{}{}
-
-		ag, err := agent.Get(agentName)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("failed to get agent %s: %w", name, err))
-			continue
-		}
-		if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
+	return setupOptionalSkillForNames(ctx, w, names, opts.SearchSkill, setupOptionalSearchSkill, opts)
 }
 
-func scaffoldSearchSkill(ctx context.Context, ag agent.Agent) (searchSkillScaffoldResult, error) {
+func scaffoldSearchSkill(ctx context.Context, ag agent.Agent) (managedScaffoldResult, error) {
 	relPath, content, ok := searchSkillTemplate(ag.Name())
 	if !ok {
-		return searchSkillScaffoldResult{Status: searchSkillUnsupported}, nil
+		return managedScaffoldResult{Status: managedScaffoldUnsupported}, nil
 	}
 
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails in tests
 		if err != nil {
-			return searchSkillScaffoldResult{}, fmt.Errorf("failed to get current directory: %w", err)
+			return managedScaffoldResult{}, fmt.Errorf("failed to get current directory: %w", err)
 		}
 	}
 
 	targetPath := filepath.Join(repoRoot, relPath)
-	return writeManagedSearchSkill(targetPath, relPath, content)
-}
-
-func writeManagedSearchSkill(targetPath, relPath string, content []byte) (searchSkillScaffoldResult, error) {
-	existingData, err := os.ReadFile(targetPath) //nolint:gosec // target path is derived from repo root + fixed relative path
-	if err == nil {
-		if !isManagedSearchSkill(existingData) {
-			return searchSkillScaffoldResult{
-				Status:  searchSkillSkippedConflict,
-				RelPath: relPath,
-			}, nil
-		}
-		if bytes.Equal(existingData, content) {
-			return searchSkillScaffoldResult{
-				Status:  searchSkillUnchanged,
-				RelPath: relPath,
-			}, nil
-		}
-		if err := os.WriteFile(targetPath, content, 0o600); err != nil {
-			return searchSkillScaffoldResult{}, fmt.Errorf("failed to update managed search skill: %w", err)
-		}
-		return searchSkillScaffoldResult{
-			Status:  searchSkillUpdated,
-			RelPath: relPath,
-		}, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return searchSkillScaffoldResult{}, fmt.Errorf("failed to read search skill: %w", err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0o750); err != nil {
-		return searchSkillScaffoldResult{}, fmt.Errorf("failed to create search skill directory: %w", err)
-	}
-	if err := os.WriteFile(targetPath, content, 0o600); err != nil {
-		return searchSkillScaffoldResult{}, fmt.Errorf("failed to write search skill: %w", err)
-	}
-
-	return searchSkillScaffoldResult{
-		Status:  searchSkillCreated,
-		RelPath: relPath,
-	}, nil
+	return writeManagedScaffold(targetPath, relPath, content, isManagedSearchSkill)
 }
 
 func isManagedSearchSkill(data []byte) bool {
@@ -136,28 +58,20 @@ func isManagedSearchSkill(data []byte) bool {
 		bytes.Contains(data, []byte(legacyEntireManagedSearchSubagentMarker))
 }
 
-func printSearchSkillNonInteractiveNoAgentsGuidance(w io.Writer) {
-	fmt.Fprintln(w, "Cannot install the search skill in non-interactive mode because no agents are enabled.")
-	fmt.Fprintln(w, "Install it for a specific agent with:")
-	fmt.Fprintln(w, "  entire enable --agent <name> --search-skill")
-	fmt.Fprintln(w, "or:")
-	fmt.Fprintln(w, "  entire agent add <name> --search-skill")
-}
-
-func reportSearchSkillScaffold(w io.Writer, ag agent.Agent, result searchSkillScaffoldResult) {
+func reportSearchSkillScaffold(w io.Writer, ag agent.Agent, result managedScaffoldResult) {
 	switch result.Status {
-	case searchSkillCreated:
+	case managedScaffoldCreated:
 		fmt.Fprintf(w, "  ✓ Installed %s search skill\n", ag.Type())
 		fmt.Fprintf(w, "    %s\n", result.RelPath)
-	case searchSkillUpdated:
+	case managedScaffoldUpdated:
 		fmt.Fprintf(w, "  ✓ Updated %s search skill\n", ag.Type())
 		fmt.Fprintf(w, "    %s\n", result.RelPath)
-	case searchSkillSkippedConflict:
+	case managedScaffoldSkippedConflict:
 		fmt.Fprintf(w, "  Skipped %s search skill (unmanaged file exists)\n", ag.Type())
 		fmt.Fprintf(w, "    %s\n", result.RelPath)
-	case searchSkillUnsupported:
+	case managedScaffoldUnsupported:
 		fmt.Fprintf(w, "  Search skill is not supported for %s\n", ag.Type())
-	case searchSkillUnchanged:
+	case managedScaffoldUnchanged:
 		fmt.Fprintf(w, "  Search skill already installed for %s\n", ag.Type())
 		fmt.Fprintf(w, "    %s\n", result.RelPath)
 	}

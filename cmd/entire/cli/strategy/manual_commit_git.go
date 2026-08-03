@@ -122,6 +122,34 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		if step.TokenUsage != nil {
 			state.TokenUsage = accumulateTokenUsage(state.TokenUsage, step.TokenUsage)
 			state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, step.TokenUsage)
+			// step.TokenUsage.SubagentTokens is a cumulative-since-session-start
+			// snapshot (agent IDs are discovered from the full transcript and each
+			// subagent's own transcript is re-read from its start on every call —
+			// see CalculateTotalTokenUsage in the claudecode/factoryaidroid
+			// packages), not a per-step delta like the rest of TokenUsage.
+			// accumulateTokenUsage already replaces (rather than adds) the
+			// SubagentTokens field for that reason, so state.TokenUsage ends up
+			// correctly holding the latest cumulative total. CheckpointTokenUsage
+			// additionally needs rescoping to "since last condensation" by
+			// subtracting the baseline captured at the last reset, otherwise the
+			// full cumulative subagent total would be reported again at every
+			// checkpoint instead of just this checkpoint's share.
+			//
+			// Derive the checkpoint delta FRESH each call from the session-wide
+			// cumulative (state.TokenUsage.SubagentTokens) minus the baseline —
+			// do NOT mutate CheckpointTokenUsage.SubagentTokens in place. A later
+			// step in the same window can carry step.TokenUsage != nil but
+			// SubagentTokens == nil (the subagent transcript was cleaned up, so
+			// CalculateTotalTokenUsage returned APICallCount==0 and left it nil);
+			// accumulateTokenUsage then leaves CheckpointTokenUsage.SubagentTokens
+			// at its already-rescoped value, and re-subtracting the baseline from
+			// that would double-subtract and (via clampSubtract) shrink or zero a
+			// real subagent total. Recomputing from the session-wide cumulative
+			// is idempotent regardless of whether this step carried a snapshot.
+			if state.CheckpointTokenUsage != nil {
+				state.CheckpointTokenUsage.SubagentTokens = types.SubtractTokenUsage(
+					state.TokenUsage.SubagentTokens, state.SubagentTokensBaseline)
+			}
 		}
 
 		if !branchExisted {
@@ -310,6 +338,17 @@ func mergeFilesTouched(existing []string, fileLists ...[]string) []string {
 
 // accumulateTokenUsage adds new token usage to existing accumulated usage.
 // If existing is nil, returns a copy of incoming. If incoming is nil, returns existing unchanged.
+//
+// SubagentTokens is handled differently from the other fields: main-agent
+// usage (InputTokens, OutputTokens, ...) arrives per step as a delta scoped to
+// that step's transcript slice, so it is correct to sum deltas across steps.
+// Subagent usage arrives as a cumulative-since-session-start snapshot instead
+// — CalculateTotalTokenUsage discovers agent IDs from the full transcript
+// (so a subagent spawned before the current checkpoint window is still
+// found) and re-reads each subagent transcript from its start on every call.
+// Summing that snapshot across steps would re-add a subagent's full usage on
+// every subsequent step after it was first discovered, so SubagentTokens is
+// replaced with the latest snapshot rather than added.
 func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsage {
 	if incoming == nil {
 		return existing
@@ -333,12 +372,29 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 	existing.OutputTokens += incoming.OutputTokens
 	existing.APICallCount += incoming.APICallCount
 
-	// Accumulate subagent tokens if present
+	// Replace (not add) subagent tokens: incoming.SubagentTokens is already
+	// the cumulative total as of this step, so the latest snapshot supersedes
+	// whatever was recorded before rather than stacking on top of it.
 	if incoming.SubagentTokens != nil {
-		existing.SubagentTokens = accumulateTokenUsage(existing.SubagentTokens, incoming.SubagentTokens)
+		existing.SubagentTokens = incoming.SubagentTokens
 	}
 
 	return existing
+}
+
+// resetCheckpointWindow resets the per-checkpoint accumulation window after a
+// condensation reset. It zeroes the step count, clears the checkpoint-scoped
+// token usage, and snapshots the cumulative subagent total into
+// SubagentTokensBaseline so the next window's CheckpointTokenUsage.SubagentTokens
+// can be rescoped to "since this condensation" rather than re-reporting the full
+// cumulative subagent total (see accumulateTokenUsage and the SaveStep rescoping
+// in this file, plus SessionState.SubagentTokensBaseline). Shared by all three
+// condensation reset sites (CondenseSessionByID, CondenseAndMarkFullyCondensed,
+// condenseAndUpdateState) so the baseline capture cannot drift between them.
+func resetCheckpointWindow(state *SessionState) {
+	state.StepCount = 0
+	state.CheckpointTokenUsage = nil
+	state.RebaselineSubagentTokens()
 }
 
 // deleteShadowBranch deletes a shadow branch by name.

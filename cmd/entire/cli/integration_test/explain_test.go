@@ -71,7 +71,7 @@ func TestExplain_MutualExclusivity(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 	// Try to provide both --session and --commit flags
-	output, err := env.RunCLIWithError("checkpoint", "explain", "--session", "test-session", "--commit", "abc123")
+	output, err := env.RunCLIWithError("checkpoint", "explain", "--session", testSessionID, "--commit", "abc123")
 
 	if err == nil {
 		t.Errorf("expected error when both flags provided, got output: %s", output)
@@ -103,7 +103,7 @@ func TestExplain_CheckpointMutualExclusivity(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 	// Try to provide --checkpoint with --session
-	output, err := env.RunCLIWithError("checkpoint", "explain", "--session", "test-session", "--checkpoint", "abc123")
+	output, err := env.RunCLIWithError("checkpoint", "explain", "--session", testSessionID, "--checkpoint", "abc123")
 
 	if err == nil {
 		t.Errorf("expected error when both flags provided, got output: %s", output)
@@ -202,72 +202,61 @@ func TestExplain_BranchListingShowsCheckpointsAndPrompts(t *testing.T) {
 }
 
 // TestExplain_CheckpointFetchesFromRemoteWhenMissingLocally verifies that
-// explain --checkpoint fetches metadata from the remote when the
-// entire/checkpoints/v1 branch doesn't exist locally (e.g., reviewing
-// someone else's PR).
+// explain --checkpoint fetches checkpoint data from the remote when it doesn't
+// exist locally (e.g., reviewing someone else's PR). Under git-branch this is
+// the v1 branch fetch; under git-refs it is the on-demand per-checkpoint
+// RefFetcher path.
 func TestExplain_CheckpointFetchesFromRemoteWhenMissingLocally(t *testing.T) {
 	t.Parallel()
-	env := NewFeatureBranchEnv(t)
+	ForEachBackend(t, func(t *testing.T, backend string) {
+		env := NewFeatureBranchEnv(t)
+		env.CheckpointStore = backend
 
-	// Set up bare remote
-	env.SetupBareRemote()
+		// Set up bare remote
+		env.SetupBareRemote()
 
-	// Create a session, make changes, checkpoint, and commit (triggers condensation)
-	session := env.NewSession()
-	transcriptPath := session.CreateTranscript("Add feature module", []FileChange{
-		{Path: "feature.go", Content: "package feature"},
+		// Create a session, make changes, checkpoint, and commit (triggers condensation)
+		checkpointID := createCheckpointedCommit(t, env, "Add feature module", "feature.go", "package feature", "Add feature module")
+		if checkpointID == "" {
+			t.Fatal("should have a checkpoint ID after condensation")
+		}
+
+		// Push checkpoint data to remote
+		env.RunPrePush("origin")
+
+		// Delete the local checkpoint (and remote-tracking ref, git-branch only) to
+		// simulate a collaborator's repo that has never fetched the checkpoint.
+		repo, err := git.PlainOpen(env.RepoDir)
+		require.NoError(t, err)
+		if env.usingGitRefs() {
+			ref := plumbing.ReferenceName(checkpointRefName(checkpointID))
+			require.NoError(t, repo.Storer.RemoveReference(ref))
+			_, err = repo.Storer.Reference(ref)
+			require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "local checkpoint ref should be absent")
+		} else {
+			localRef := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+			remoteRef := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
+			require.NoError(t, repo.Storer.RemoveReference(localRef))
+			require.NoError(t, repo.Storer.RemoveReference(remoteRef))
+			_, err = repo.Storer.Reference(localRef)
+			require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "local metadata ref should be absent")
+			_, err = repo.Storer.Reference(remoteRef)
+			require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "remote-tracking metadata ref should be absent")
+		}
+
+		// This should succeed by fetching the checkpoint from the remote
+		output := env.RunCLI("checkpoint", "explain", "--checkpoint", checkpointID)
+
+		// Verify the output contains checkpoint content (prompt text)
+		if !strings.Contains(output, "Add feature module") {
+			t.Errorf("expected output to contain prompt text, got:\n%s", output)
+		}
 	})
-
-	if err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(session.ID, "Add feature module", transcriptPath); err != nil {
-		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
-	}
-
-	env.WriteFile("feature.go", "package feature")
-	env.GitAdd("feature.go")
-
-	if err := env.SimulateStop(session.ID, transcriptPath); err != nil {
-		t.Fatalf("SimulateStop failed: %v", err)
-	}
-
-	// Commit with hooks (triggers prepare-commit-msg + post-commit = condensation)
-	env.GitCommitWithShadowHooks("Add feature module", "feature.go")
-
-	// Get the checkpoint ID before we delete the local branch
-	checkpointID := env.GetLatestCheckpointID()
-	if checkpointID == "" {
-		t.Fatal("should have a checkpoint ID after condensation")
-	}
-
-	// Push checkpoint data to remote
-	env.RunPrePush("origin")
-
-	// Delete local metadata branch and remote-tracking ref to simulate
-	// a collaborator's repo that has never fetched the metadata branch.
-	// RemoveReference may fail if the remote-tracking ref was never
-	// populated; we tolerate that but assert absence below so the test
-	// actually exercises the "fetch from remote when missing" path.
-	repo, err := git.PlainOpen(env.RepoDir)
-	require.NoError(t, err)
-
-	localRef := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	remoteRef := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
-	_ = repo.Storer.RemoveReference(localRef)
-	_ = repo.Storer.RemoveReference(remoteRef)
-
-	_, err = repo.Storer.Reference(localRef)
-	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "local metadata ref should be absent")
-	_, err = repo.Storer.Reference(remoteRef)
-	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "remote-tracking metadata ref should be absent")
-
-	// This should succeed by fetching metadata from the remote
-	output := env.RunCLI("checkpoint", "explain", "--checkpoint", checkpointID)
-
-	// Verify the output contains checkpoint content (prompt text)
-	if !strings.Contains(output, "Add feature module") {
-		t.Errorf("expected output to contain prompt text, got:\n%s", output)
-	}
 }
 
+// git-branch only: asserts the local v1 branch tip hash is unchanged by
+// fetch-on-miss (the branch is the unit of divergence). The git-refs equivalent
+// (per-checkpoint refs never rewound) is separate future work (test plan D2).
 func TestExplain_CheckpointFetchDoesNotRewindLocalAheadBranch(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
@@ -314,7 +303,9 @@ func TestExplain_CheckpointFetchDoesNotRewindLocalAheadBranch(t *testing.T) {
 	// unlikely to collide with a real checkpoint ID.
 	// The command is expected to fail (no such checkpoint) — we're testing the
 	// side effect on the local ref, not the command's success.
-	_, _ = env.RunCLIWithError("checkpoint", "explain", "--checkpoint", "000000000000")
+	if _, cliErr := env.RunCLIWithError("checkpoint", "explain", "--checkpoint", "000000000000"); cliErr == nil {
+		t.Log("explain for nonexistent checkpoint unexpectedly succeeded; continuing to check ref side effect")
+	}
 
 	// Re-open repo (go-git caches ref state per handle).
 	repo, err = git.PlainOpen(env.RepoDir)
@@ -330,6 +321,9 @@ func TestExplain_CheckpointFetchDoesNotRewindLocalAheadBranch(t *testing.T) {
 		"locally-committed checkpoint must remain discoverable after fetch-on-miss")
 }
 
+// git-branch only: seeds a treeless clone of the v1 branch (refspec targets
+// refs/heads/entire/checkpoints/v1). The git-refs partial-clone equivalent is
+// separate future work (test plan C6).
 func TestExplain_CheckpointSucceedsAfterTreelessFetch(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)

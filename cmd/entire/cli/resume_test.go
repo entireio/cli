@@ -16,7 +16,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -644,58 +643,6 @@ func TestResolveLatestCheckpointUsesCheckpointInfoReader(t *testing.T) {
 	}
 }
 
-func TestResolveLatestCheckpointReturnsUnsupportedWhenAnyCheckpointIsUnsupported(t *testing.T) {
-	t.Parallel()
-
-	unsupportedID := id.MustCheckpointID("aaa111bbb222")
-	newID := id.MustCheckpointID("ccc333ddd444")
-	reader := &resumeCheckpointInfoReaderStub{
-		summaries: map[id.CheckpointID]*checkpoint.CheckpointSummary{
-			unsupportedID: {CheckpointVersion: "refs-v1"},
-			newID:         {Sessions: []checkpoint.SessionFilePaths{{Metadata: "new"}}},
-		},
-		metadata: map[id.CheckpointID][]checkpoint.Metadata{
-			newID: {{
-				SessionID: "new-session",
-				CreatedAt: time.Date(2025, 1, 1, 11, 0, 0, 0, time.UTC),
-			}},
-		},
-	}
-
-	_, found, err := resolveLatestCheckpoint(context.Background(), reader, []id.CheckpointID{unsupportedID, newID})
-	if err == nil {
-		t.Fatal("resolveLatestCheckpoint() error = nil, want unsupported version")
-	}
-	if found {
-		t.Fatal("resolveLatestCheckpoint() found = true")
-	}
-	if !checkpointpolicy.IsUnsupportedVersion(err) {
-		t.Fatalf("resolveLatestCheckpoint() error = %v, want unsupported version", err)
-	}
-}
-
-func TestResolveLatestCheckpointReturnsUnsupportedWhenNoReadableCheckpointExists(t *testing.T) {
-	t.Parallel()
-
-	unsupportedID := id.MustCheckpointID("aaa111bbb222")
-	reader := &resumeCheckpointInfoReaderStub{
-		summaries: map[id.CheckpointID]*checkpoint.CheckpointSummary{
-			unsupportedID: {CheckpointVersion: "refs-v1"},
-		},
-	}
-
-	_, found, err := resolveLatestCheckpoint(context.Background(), reader, []id.CheckpointID{unsupportedID})
-	if err == nil {
-		t.Fatal("resolveLatestCheckpoint() error = nil, want unsupported version")
-	}
-	if found {
-		t.Fatal("resolveLatestCheckpoint() found = true")
-	}
-	if !checkpointpolicy.IsUnsupportedVersion(err) {
-		t.Fatalf("resolveLatestCheckpoint() error = %v, want unsupported version", err)
-	}
-}
-
 func TestResolveLatestCheckpointReturnsErrorWhenAnyCheckpointCannotBeRead(t *testing.T) {
 	t.Parallel()
 
@@ -977,10 +924,10 @@ func TestResumeFromCurrentBranch_MultipleCheckpointsSaysLatest(t *testing.T) {
 // session ID that flows into path construction (in production this comes from the
 // remote checkpoint metadata via readCheckpointInfoFromStore). A "../"-laden ID
 // resolves to a path outside the agent's session directory. Before the fix,
-// resumeSingleSession would resolve the path, write the attacker-controlled
+// restoreSingleSession would resolve the path, write the attacker-controlled
 // transcript there, and overwrite the sentinel — RCE if the target is e.g. a
 // shell init file. The fix must reject the ID and write nothing.
-func TestResumeSingleSession_RejectsPathTraversalSessionID(t *testing.T) {
+func TestRestoreSingleSession_RejectsPathTraversalSessionID(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
@@ -1029,13 +976,13 @@ func TestResumeSingleSession_RejectsPathTraversalSessionID(t *testing.T) {
 
 	maliciousSessionID := "../victim/secret"
 
-	var stdout, stderr bytes.Buffer
-	err := resumeSingleSession(ctx, &stdout, &stderr, ag, maliciousSessionID, cpID, tmpDir, true)
+	var stdout bytes.Buffer
+	_, _, err := restoreSingleSession(ctx, &stdout, ag, maliciousSessionID, cpID, tmpDir, true)
 	if err == nil {
-		t.Fatalf("resumeSingleSession() with traversal session ID = nil error, want rejection\nstdout: %s", stdout.String())
+		t.Fatalf("restoreSingleSession() with traversal session ID = nil error, want rejection\nstdout: %s", stdout.String())
 	}
 	if ag.writtenSession != nil {
-		t.Fatalf("resumeSingleSession() wrote a session despite malicious ID: ref=%s", ag.writtenSession.SessionRef)
+		t.Fatalf("restoreSingleSession() wrote a session despite malicious ID: ref=%s", ag.writtenSession.SessionRef)
 	}
 	got, readErr := os.ReadFile(sentinel)
 	if readErr != nil {
@@ -1187,48 +1134,6 @@ func TestCheckRemoteMetadata_MetadataExistsOnRemote(t *testing.T) {
 		t.Error("checkRemoteMetadata() should return error when agent is missing from metadata")
 	} else if !strings.Contains(err.Error(), "failed to resolve agent") {
 		t.Errorf("checkRemoteMetadata() expected agent resolution error, got: %v", err)
-	}
-}
-
-func TestCheckRemoteMetadata_ReturnsUnsupportedVersionFromRemote(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
-
-	checkpointID := id.MustCheckpointID("abc123def456")
-	writeCommittedResumeCheckpointWithAgent(
-		t,
-		repo,
-		checkpointID,
-		"2025-01-01-test-session",
-		time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
-		agent.AgentTypeClaudeCode,
-	)
-	rewriteExportCheckpointVersionToRefsV1(t, repo, checkpointID)
-
-	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	if err != nil {
-		t.Fatalf("Failed to get local metadata branch: %v", err)
-	}
-	remoteRef := plumbing.NewHashReference(
-		plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName),
-		localRef.Hash(),
-	)
-	if err := repo.Storer.SetReference(remoteRef); err != nil {
-		t.Fatalf("Failed to create remote ref: %v", err)
-	}
-	if err := repo.Storer.RemoveReference(plumbing.NewBranchReferenceName(paths.MetadataBranchName)); err != nil {
-		t.Fatalf("Failed to remove local metadata branch: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	_, err = checkRemoteMetadata(context.Background(), &stdout, &stderr, checkpointID, checkpoint.DefaultV1Refs())
-	if err == nil {
-		t.Fatal("checkRemoteMetadata() error = nil, want unsupported checkpoint version")
-	}
-	if !checkpointpolicy.IsUnsupportedVersion(err) {
-		t.Fatalf("checkRemoteMetadata() error = %v, want unsupported checkpoint version", err)
 	}
 }
 

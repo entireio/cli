@@ -9,13 +9,12 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// newProjectCmd is the hidden `entire project` command group: create and
-// list projects on the Entire control plane. Surfaced via `entire labs`.
+// newProjectCmd is the `entire project` command group: create, list,
+// get, and delete projects on the Entire control plane.
 func newProjectCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "project",
-		Short:  "Manage Entire projects",
-		Hidden: true,
+		Use:   "project",
+		Short: "Manage Entire projects",
 	}
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newProjectCreateCmd())
@@ -55,7 +54,7 @@ func newProjectCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
+			return runCoreMutation(cmd, func(ctx context.Context, c *coreapi.Client) (string, any, error) {
 				// Orgs are addressed by name, accounts by github:handle; both
 				// also accept a raw ULID.
 				var ownerRef string
@@ -66,7 +65,7 @@ func newProjectCreateCmd() *cobra.Command {
 					ownerRef, err = resolveAccountRef(ctx, c, ownerID)
 				}
 				if err != nil {
-					return nil, err
+					return "", nil, err
 				}
 				body := &coreapi.CreateProjectInputBody{
 					Name:      args[0],
@@ -76,14 +75,19 @@ func newProjectCreateCmd() *cobra.Command {
 				if region != "" {
 					body.Region = coreapi.NewOptString(region)
 				}
-				return c.CreateProject(ctx, body)
+				project, err := c.CreateProject(ctx, body)
+				if err != nil {
+					return "", nil, err
+				}
+				return fmt.Sprintf("✓ Created project %s (%s)", project.Name, project.ID), project, nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&ownerID, "owner", "", "owning org (name or ULID), or account (github:handle or ULID) (required)")
-	cmd.Flags().StringVar(&ownerType, "owner-type", "org", "owner kind: org or account")
-	cmd.Flags().StringVar(&region, "region", "", "jurisdiction slug (defaults to the server's home jurisdiction)")
+	cmd.Flags().StringVar(&ownerID, "owner", "", "Owning org (name or ULID), or account (github:handle or ULID) (required)")
+	cmd.Flags().StringVar(&ownerType, "owner-type", "org", "Owner kind: org or account")
+	cmd.Flags().StringVar(&region, "region", "", "Jurisdiction slug (defaults to the server's home jurisdiction)")
 	markRequired(cmd, "owner")
+	addJSONFlag(cmd)
 	return cmd
 }
 
@@ -94,7 +98,7 @@ func newProjectListCmd() *cobra.Command {
 		Short: "List projects you can see",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runCoreList(cmd, projectColumns, projectRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Project, error) {
+			return runCoreList(cmd, "No projects found.", projectColumns, projectRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Project, error) {
 				// Both the global and org-scoped list endpoints filter by name
 				// server-side (case-insensitive), returning the single match under
 				// the response's `project` field (or 404 → empty result, not an
@@ -150,13 +154,14 @@ func newProjectListCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&name, "name", "", "filter by exact project name")
-	cmd.Flags().StringVar(&org, "org", "", "list projects owned by this org (name or ULID)")
+	cmd.Flags().StringVar(&name, "name", "", "Filter by exact project name")
+	cmd.Flags().StringVar(&org, "org", "", "List projects owned by this org (name or ULID)")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newProjectGetCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "get <project>",
 		Short: "Show a project by name or ULID",
 		Args:  cobra.ExactArgs(1),
@@ -170,6 +175,8 @@ func newProjectGetCmd() *cobra.Command {
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }
 
 func newProjectDeleteCmd() *cobra.Command {

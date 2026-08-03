@@ -168,6 +168,7 @@ Commands:
   stop     Stop one or more active sessions
   current  Show the active session for the current worktree
   attach   Attach an existing agent session
+  adopt    Adopt an active session from another worktree
   resume   Switch to a branch and resume its session
 
 Examples:
@@ -178,6 +179,7 @@ Examples:
   entire session stop                      Interactive stop
   entire session current                   Active session for cwd
   entire session attach <session-id>       Attach an external session
+  entire session adopt <session-id> --from ../repo  Adopt a moved session
   entire session resume <branch>           Resume from a branch`,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			if _, err := paths.WorktreeRoot(cmd.Context()); err != nil {
@@ -193,6 +195,7 @@ Examples:
 	cmd.AddCommand(newStopCmd())
 	cmd.AddCommand(newSessionCurrentCmd())
 	cmd.AddCommand(newAttachCmd())
+	cmd.AddCommand(newAdoptCmd())
 	cmd.AddCommand(newResumeCmd())
 
 	return cmd
@@ -434,9 +437,12 @@ func writeSessionCard(w io.Writer, s *strategy.SessionState, sty statusStyles) {
 		fmt.Fprintf(w, "%s \"%s\"\n", sty.render(sty.dim, ">"), prompt)
 	}
 
-	// Line 3: status · started X ago · active X ago · tokens X.Xk
+	// Line 3: status · [imported (read-only) ·] started X ago · active X ago · tokens X.Xk
 	var stats []string
 	stats = append(stats, sessionPhaseLabel(s))
+	if s.Kind.IsImported() {
+		stats = append(stats, "imported (read-only)")
+	}
 	stats = append(stats, "started "+timeAgo(s.StartedAt))
 	if s.LastInteractionTime != nil && s.LastInteractionTime.Sub(s.StartedAt) > time.Minute {
 		stats = append(stats, activeTimeDisplay(s.LastInteractionTime))
@@ -567,6 +573,8 @@ type sessionInfoJSON struct {
 	Agent          string         `json:"agent"`
 	Model          string         `json:"model,omitempty"`
 	Status         string         `json:"status"`
+	Kind           string         `json:"kind,omitempty"`
+	ReadOnly       bool           `json:"read_only,omitempty"`
 	Branch         string         `json:"branch,omitempty"`
 	WorktreeID     string         `json:"worktree_id,omitempty"`
 	WorktreePath   string         `json:"worktree_path,omitempty"`
@@ -601,6 +609,8 @@ func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionIn
 		Agent:          agentLabel,
 		Model:          state.ModelName,
 		Status:         status,
+		Kind:           string(state.Kind),
+		ReadOnly:       state.Kind.IsImported(),
 		Branch:         state.Branch,
 		WorktreeID:     state.WorktreeID,
 		WorktreePath:   state.WorktreePath,
@@ -647,6 +657,10 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 	}
 
 	fmt.Fprintf(w, "Status:      %s\n", status)
+
+	if state.Kind.IsImported() {
+		fmt.Fprintf(w, "Note:        imported history — read-only (not resumable or rewindable)\n")
+	}
 
 	wt := sessionWorktreeLabel(state)
 	fmt.Fprintf(w, "Worktree:    %s\n", wt)
@@ -756,24 +770,34 @@ func runStopAll(ctx context.Context, cmd *cobra.Command, activeSessions []*strat
 	}
 
 	if !force {
-		var confirmed bool
-		form := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title(fmt.Sprintf("Stop %d session(s)?", len(activeSessions))).
-					Value(&confirmed),
-			),
-		)
-		if err := form.Run(); err != nil {
-			return handleFormCancellation(cmd.OutOrStdout(), "Stop", err)
-		}
-		if !confirmed {
-			fmt.Fprintln(cmd.OutOrStdout(), "Stop cancelled.")
-			return nil
+		confirmed, err := confirmStopSessions(cmd, len(activeSessions))
+		if err != nil || !confirmed {
+			return err
 		}
 	}
 
 	return stopSelectedSessions(ctx, cmd, activeSessions)
+}
+
+// confirmStopSessions asks the user to confirm stopping count sessions.
+// When declined or cancelled it prints the outcome and returns confirmed=false.
+func confirmStopSessions(cmd *cobra.Command, count int) (bool, error) {
+	var confirmed bool
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title(fmt.Sprintf("Stop %d session(s)?", count)).
+				Value(&confirmed),
+		),
+	)
+	if err := form.Run(); err != nil {
+		return false, handleFormCancellation(cmd.OutOrStdout(), "Stop", err)
+	}
+	if !confirmed {
+		fmt.Fprintln(cmd.OutOrStdout(), "Stop cancelled.")
+		return false, nil
+	}
+	return true, nil
 }
 
 // runStopMultiSelect shows a TUI multi-select for multiple active sessions.
@@ -816,20 +840,9 @@ func runStopMultiSelect(ctx context.Context, cmd *cobra.Command, activeSessions 
 
 	// Confirm only if not forcing
 	if !force {
-		var confirmed bool
-		form := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title(fmt.Sprintf("Stop %d session(s)?", len(selectedIDs))).
-					Value(&confirmed),
-			),
-		)
-		if err := form.Run(); err != nil {
-			return handleFormCancellation(cmd.OutOrStdout(), "Stop", err)
-		}
-		if !confirmed {
-			fmt.Fprintln(cmd.OutOrStdout(), "Stop cancelled.")
-			return nil
+		confirmed, err := confirmStopSessions(cmd, len(selectedIDs))
+		if err != nil || !confirmed {
+			return err
 		}
 	}
 

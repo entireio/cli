@@ -31,10 +31,18 @@ filter="${usage_filter:-}"
 # triggers a Go toolchain panic on Windows ARM64 in modload/search.go
 # (slice bounds out of range) and a GetFileInformationByHandleEx error
 # with relative paths.
-gotestsum --format dots --jsonfile "$E2E_ARTIFACT_DIR/test-events.json" -- \
+#
+# --rerun-fails retries only the tests that failed (one extra attempt) to
+# absorb transient real-agent non-determinism. It requires --packages (so the
+# package list can no longer be a trailing positional arg) and -count=1. The
+# default --rerun-fails-max-failures=10 means a broadly-broken run (>10
+# failures) is reported as-is rather than retried, so a genuine regression
+# still surfaces. Do NOT add reruns to the deterministic canary/roger-roger
+# tasks — there a failure is always a real bug and must not be masked.
+gotestsum --format dots --rerun-fails=1 --packages=./e2e/tests \
+  --jsonfile "$E2E_ARTIFACT_DIR/test-events.json" -- \
   -tags=e2e -count=1 -timeout=30m \
-  ${filter:+-run "$filter"} \
-  ./e2e/tests || rc=$?
+  ${filter:+-run "$filter"} || rc=$?
 
 go run ./e2e/cmd/testreport -color -o "$E2E_ARTIFACT_DIR/report.txt" "$E2E_ARTIFACT_DIR/test-events.json"
 echo ""

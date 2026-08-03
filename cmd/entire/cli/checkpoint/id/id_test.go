@@ -1,12 +1,103 @@
 package id
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
+	"time"
+
+	ulid "github.com/oklog/ulid/v2"
 )
 
 // A representative ULID (Crockford base32, 26 chars) used across tests.
 const sampleULID = "01KVBJCWYA4YW6J5M9GP655HZN"
+
+func TestCheckpointID_Time(t *testing.T) {
+	t.Parallel()
+
+	// A ULID minted from a known instant recovers that instant (millisecond
+	// precision), so remote-ref discovery can sort/display a checkpoint by its
+	// real creation time from the ref name alone — no store read.
+	want := time.UnixMilli(1700000000000).UTC()
+	// Deterministic entropy (zeros); Time() only reads the timestamp prefix.
+	minted := ulid.MustNew(ulid.Timestamp(want), bytes.NewReader(make([]byte, 16)))
+	got, ok := CheckpointID(minted.String()).Time()
+	if !ok {
+		t.Fatalf("Time() ok = false for a valid ULID %q", minted)
+	}
+	if !got.Equal(want) {
+		t.Errorf("Time() = %v, want %v", got, want)
+	}
+
+	// The canonical sample ULID also yields a non-zero time.
+	if ts, ok := CheckpointID(sampleULID).Time(); !ok || ts.IsZero() {
+		t.Errorf("Time() for sample ULID = (%v, %v), want a non-zero time", ts, ok)
+	}
+
+	// A legacy hex ID carries no timestamp.
+	if _, ok := CheckpointID("a1b2c3d4e5f6").Time(); ok {
+		t.Errorf("Time() ok = true for a legacy hex ID; want false")
+	}
+
+	// Non-ID / empty strings report no time.
+	if _, ok := CheckpointID("").Time(); ok {
+		t.Errorf("Time() ok = true for empty ID; want false")
+	}
+	if _, ok := CheckpointID("not-an-id").Time(); ok {
+		t.Errorf("Time() ok = true for a non-ID string; want false")
+	}
+}
+
+func TestGenerateULID(t *testing.T) {
+	t.Parallel()
+	a, err := GenerateULID()
+	if err != nil {
+		t.Fatalf("GenerateULID() error = %v", err)
+	}
+	if err := Validate(string(a)); err != nil {
+		t.Errorf("generated ULID %q failed Validate: %v", a, err)
+	}
+	if a.Kind() != KindULID {
+		t.Errorf("Kind() = %v, want KindULID for %q", a.Kind(), a)
+	}
+	if len(string(a)) != 26 {
+		t.Errorf("len = %d, want 26 for %q", len(string(a)), a)
+	}
+	b, err := GenerateULID()
+	if err != nil {
+		t.Fatalf("GenerateULID() error = %v", err)
+	}
+	if a == b {
+		t.Errorf("two GenerateULID() calls returned the same id %q", a)
+	}
+}
+
+func TestCheckpointID_DisplayShort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		// Legacy hex is random throughout: its 12-char form is shown whole.
+		{"legacy hex", "a1b2c3d4e5f6", "a1b2c3d4e5f6"},
+		// A ULID is shown in full — front-truncating drops its entropy tail and
+		// would render an ambiguous, unresolvable prefix.
+		{"ulid shown in full", sampleULID, sampleULID},
+		// Non-ID sentinels trim like the legacy case (here: unchanged, under width).
+		{"temporary sentinel", "temporary", "temporary"},
+		// An over-width unknown string is trimmed to ShortIDLength.
+		{"overlong unknown", "0123456789abcdef", "0123456789ab"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := CheckpointID(tt.input).DisplayShort(); got != tt.want {
+				t.Errorf("CheckpointID(%q).DisplayShort() = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestCheckpointID_Methods(t *testing.T) {
 	t.Run("String", func(t *testing.T) {
@@ -145,6 +236,38 @@ func TestKindOf(t *testing.T) {
 			if got := KindOf(tt.input); got != tt.want {
 				t.Errorf("KindOf(%q) = %v, want %v", tt.input, got, tt.want)
 			}
+			if got := CheckpointID(tt.input).Kind(); got != tt.want {
+				t.Errorf("CheckpointID(%q).Kind() = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCheckpointID_ShardFor(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		// Every format shards on the LAST two chars (single positional rule).
+		{"legacy", "a1b2c3d4e5f6", "f6"},
+		{"legacy other", "abcdef123456", "56"},
+		{"ulid", sampleULID, "ZN"},
+		{"ulid trailing", "0123456789ABCDEFGHJKMNPQRS", "RS"},
+		{"unknown", "XYZ", "YZ"},
+		// Short-string fallbacks.
+		{"empty", "", ""},
+		{"one char", "a", "a"},
+		{"two chars", "ab", "ab"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := CheckpointID(tt.input).ShardFor(); got != tt.want {
+				t.Errorf("CheckpointID(%q).ShardFor() = %q, want %q", tt.input, got, tt.want)
+			}
 		})
 	}
 }
@@ -224,5 +347,31 @@ func TestCheckpointID_Path(t *testing.T) {
 				t.Errorf("CheckpointID(%q).Path() = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCouldBePrefix(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"abc123", true},
+		{"abc123def456", true},
+		{"01HZXW5J8KQ2M3N4P5Q6R7S8T9", true},
+		{"01HZXW", true},
+		{"HEAD", false},
+		{"7ZZZZZ", true},
+		{"8ZZZZZ", false},
+		{"", false},
+		{"abc123def4567", false},
+		{"feature/foo", false},
+		{"abcdefI", false},
+		{"01hzxw5j8kq2m3n4p5q6r7s8t9x", false},
+	}
+	for _, tt := range tests {
+		if got := CouldBePrefix(tt.input); got != tt.want {
+			t.Errorf("CouldBePrefix(%q) = %v, want %v", tt.input, got, tt.want)
+		}
 	}
 }

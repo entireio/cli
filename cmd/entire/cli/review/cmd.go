@@ -2,7 +2,7 @@
 //
 // cmd.go provides NewCommand(), the cobra entry point for `entire review`.
 // It routes through the new AgentReviewer / Sink / Run architecture for
-// agents with review-runner adapters (claude-code, codex, gemini) and falls
+// agents with review-runner adapters (claude-code, codex, gemini, pi) and falls
 // back to RunMarkerFallback for agents that are not yet wired into that review
 // runner contract.
 package review
@@ -126,7 +126,7 @@ Flags:
   --set-slot     with --configure: a reviewer slot as agent[=model] (repeatable;
                  the same agent/model may repeat to run it multiple times)
   --edit         re-open the advanced profile skill picker
-  --findings     browse local findings
+  --findings     browse local findings; pass a handle to print one saved run
   --agent NAME   run only one reviewer from the selected profile
   --list         list configured review profiles (their reviewers and judge)
   --agents       list the reviewer agents you can pass to --agent for the profile
@@ -134,21 +134,25 @@ Flags:
   --models       list the models each agent advertises (optionally --agent NAME)
   --profile NAME select a profile (also accepted as positional arg)
   --prompt TEXT  add one-off per-run instructions for this invocation
-  --timeout DUR  max time each reviewer may run before it's cancelled and
-                 marked failed (default 10m; 0 disables). Siblings and the
-                 judge proceed.
+  --timeout DUR  optional hard cap on each reviewer before it's cancelled and
+                 marked failed. No default — reviewers run until they finish,
+                 like a directly-invoked skill. A positive value also bounds
+                 the consolidating judge, which otherwise keeps its own 20m
+                 default (the judge is never unbounded; its timeout or error
+                 fails the review with no verdict). A timed-out reviewer's
+                 siblings and the judge still proceed.
   --base REF     scope against REF instead of mainline. Useful for stacked
                  PRs where the base is the parent feature branch, not main.
                  Default: first existing of origin/HEAD, origin/main,
                  origin/master, main, master.
 
 To tag an already-finished session as a review, use
-'entire attach --review <id>'.`,
+'entire session attach --review <id>'.`,
 		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) > 1 {
 				return fmt.Errorf("accepts at most one argument, received %d", len(args))
 			}
-			if len(args) == 1 && profileOverride != "" {
+			if len(args) == 1 && profileOverride != "" && !findings {
 				return errors.New("pass profile either positionally or with --profile, not both")
 			}
 			return nil
@@ -186,9 +190,13 @@ To tag an already-finished session as a review, use
 			if modelOverride != "" && agentOverride == "" {
 				return errors.New("--model requires --agent (the model applies to a single reviewer)")
 			}
-			profileName := profileOverride
+			positionalArg := ""
 			if len(args) == 1 {
-				profileName = args[0]
+				positionalArg = args[0]
+			}
+			profileName := profileOverride
+			if positionalArg != "" && !findings {
+				profileName = positionalArg
 			}
 			if configure {
 				return runReviewConfigure(ctx, cmd, profileName, reviewConfigureOptions{
@@ -202,20 +210,27 @@ To tag an already-finished session as a review, use
 				}, deps)
 			}
 			if edit {
+				if !reviewCommandIsInteractive(cmd) {
+					err := errors.New("--edit requires an interactive terminal")
+					cmd.SilenceUsage = true
+					fmt.Fprintln(cmd.ErrOrStderr(), "--edit requires an interactive terminal.")
+					fmt.Fprintln(cmd.ErrOrStderr(), "Inspect current profiles with:")
+					fmt.Fprintln(cmd.ErrOrStderr(), "  entire review --list")
+					fmt.Fprintln(cmd.ErrOrStderr(), "For non-interactive changes, use:")
+					fmt.Fprintln(cmd.ErrOrStderr(), "  entire review --configure --set-agents <agent>[,<agent>] [--set-judge <agent>]")
+					return wrapReviewSilentError(deps.NewSilentError, err)
+				}
 				return RunReviewProfileConfigPicker(ctx, cmd.OutOrStdout(), deps.GetAgentsWithHooksInstalled, profileName)
 			}
 			if findings {
-				return runReviewFindings(ctx, cmd, deps.NewSilentError)
+				return runReviewFindings(ctx, cmd, positionalArg, deps.NewSilentError)
 			}
-			// --timeout 0 disables the per-reviewer bound. The RunConfig zero
-			// value means "use the default", so translate an explicit 0 to a
-			// negative disable sentinel. (The flag defaults to 10m, so the value is
-			// only 0 when the user passed --timeout 0.)
-			timeoutArg := reviewTimeout
-			if timeoutArg == 0 {
-				timeoutArg = -1
-			}
-			return runReview(ctx, cmd, agentOverride, modelOverride, baseOverride, profileName, perRunPrompt, timeoutArg, deps)
+			// The flag flows through unmapped: RunConfig.ReviewerTimeout is
+			// two-state (positive = hard cap, anything else = no cap), so the
+			// default 0, an explicit --timeout 0, and a negative all mean
+			// "reviewers run until done". The judge derives its own bound via
+			// judgeTimeoutArg and is never uncapped.
+			return runReview(ctx, cmd, agentOverride, modelOverride, baseOverride, profileName, perRunPrompt, reviewTimeout, deps)
 		},
 	}
 	cmd.Flags().BoolVar(&configure, "configure", false, "set up a review profile; shows available agents and accepts --set-* flags for non-interactive config")
@@ -227,7 +242,7 @@ To tag an already-finished session as a review, use
 	cmd.Flags().StringArrayVar(&setModels, "set-model", nil, "with --configure: per-reviewer model as agent=model (repeatable)")
 	cmd.Flags().StringArrayVar(&setSlots, "set-slot", nil, "with --configure: a reviewer slot as agent[=model] (repeatable; same agent/model may repeat)")
 	cmd.Flags().BoolVar(&edit, "edit", false, "re-open the advanced review profile skill picker")
-	cmd.Flags().BoolVar(&findings, "findings", false, "browse local review findings")
+	cmd.Flags().BoolVar(&findings, "findings", false, "browse local review findings; pass a handle to print one saved run")
 	cmd.Flags().BoolVar(&listAgents, "agents", false, "list the reviewer agents you can pass to --agent for the selected profile")
 	cmd.Flags().BoolVar(&listModels, "models", false, "list the models each review agent advertises (optionally filtered by --agent)")
 	cmd.Flags().BoolVar(&listProfiles, "list", false, "list configured review profiles (reviewers and judge)")
@@ -236,7 +251,7 @@ To tag an already-finished session as a review, use
 	cmd.Flags().StringVar(&profileOverride, "profile", "", "review profile to run (default: review_default_profile or general)")
 	cmd.Flags().StringVar(&perRunPrompt, "prompt", "", "one-off instructions appended to this review run")
 	cmd.Flags().StringVar(&baseOverride, "base", "", "git ref to scope the review against (default: origin/HEAD → origin/main → origin/master → main → master)")
-	cmd.Flags().DurationVar(&reviewTimeout, "timeout", defaultReviewerTimeout, "max time each reviewer may run before it is cancelled and marked failed (0 disables)")
+	cmd.Flags().DurationVar(&reviewTimeout, "timeout", 0, "optional hard cap per reviewer (default: none — reviewers run until they finish, like a skill invoked directly in a session). When set, it also bounds the consolidating judge; unset, the judge keeps its own 20m default")
 	// The listing modes and the action modes each select a distinct command
 	// behavior; combining them silently runs one and drops the rest, so reject
 	// the combination up front with a clear cobra error.
@@ -253,6 +268,41 @@ type reviewConfigureOptions struct {
 	Task   string   // profile task text (--set-task)
 	Models []string // per-reviewer "agent=model" entries (--set-model)
 	Slots  []string // reviewer slots as "agent[=model]" entries (--set-slot)
+}
+
+// reviewCommandIsInteractive requires the exact stdin consumed by huh and
+// Bubble Tea, plus stdout, to be terminals. CanPromptInteractively adds the
+// independent policy gate for tests, CI, and agent subprocess sentinels; a
+// controlling /dev/tty alone is insufficient because stdin may still be piped.
+func reviewCommandIsInteractive(cmd *cobra.Command) bool {
+	hardDisabled := reviewInteractivityHardDisabled(
+		os.Getenv(interactive.EnvTestTTY),
+		os.Getenv("CI"),
+		interactive.UnderTest(),
+	)
+	return reviewTTYIsInteractive(
+		interactive.IsTerminalReader(cmd.InOrStdin()),
+		interactive.IsTerminalWriter(cmd.OutOrStdout()),
+		interactive.CanPromptInteractively(),
+		hardDisabled,
+	)
+}
+
+func reviewInteractivityHardDisabled(testTTY, ci string, underTest bool) bool {
+	// Match CanPromptInteractively's precedence: ENTIRE_TEST_TTY=1 may opt an
+	// in-process test into interaction, while tests without that explicit
+	// override must never read from a developer's real terminal.
+	if testTTY != "" {
+		return testTTY != "1"
+	}
+	return underTest || (ci != "" && ci != "false")
+}
+
+func reviewTTYIsInteractive(stdinTTY, stdoutTTY, canPrompt, hardDisabled bool) bool {
+	// Real stdio terminals are necessary but not sufficient: agent shells can
+	// allocate a PTY while advertising that no human is available through the
+	// sentinels enforced by CanPromptInteractively.
+	return !hardDisabled && stdinTTY && stdoutTTY && canPrompt
 }
 
 func (o reviewConfigureOptions) scripted() bool {
@@ -314,7 +364,7 @@ func runReviewConfigure(ctx context.Context, cmd *cobra.Command, profileOverride
 	// duplicate the catalog here. Pass the raw --profile value (empty when not
 	// given) so the guided setup runs the "what kind of review?" type picker
 	// instead of being silently defaulted to the general profile.
-	if interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively() {
+	if reviewCommandIsInteractive(cmd) {
 		name, profile, setupErr := RunReviewGuidedSetup(ctx, out, installed, deps.ReviewerFor, strings.TrimSpace(profileOverride), false, s)
 		if setupErr != nil {
 			return handlePickerError(cmd, silentErr, setupErr)
@@ -698,6 +748,16 @@ func reviewAgentNames(deps Deps) []string {
 	return names
 }
 
+// judgeTimeoutArg maps the reviewer --timeout value to the judge's
+// ProviderTimeout. The judge is a single text-generation call with no event
+// stream, so unlike reviewers it always keeps a bound: an explicit positive
+// --timeout governs it, anything else (unset, 0, or a negative like
+// `--timeout -5m`) maps to 0 so the synthesis default (20m) applies — a
+// reviewer-side "no cap" must never leak through as "judge unbounded".
+func judgeTimeoutArg(reviewerArg time.Duration) time.Duration {
+	return max(reviewerArg, 0)
+}
+
 // runReview executes the main review flow.
 func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOverride, baseOverride, profileOverride, perRunPrompt string, timeout time.Duration, deps Deps) error {
 	out := cmd.OutOrStdout()
@@ -730,7 +790,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	applyLegacyReviewProfileFallback(s)
 
 	profileOverride = strings.TrimSpace(profileOverride)
-	interactiveTTY := interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively()
+	interactiveTTY := reviewCommandIsInteractive(cmd)
 
 	// Bare `entire review` never auto-runs a profile. Without a TTY we cannot
 	// prompt, so list the profiles (or point at setup) and require an explicit
@@ -759,7 +819,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 		// Non-interactive first run writes the shared project settings; interactive
 		// setup asks the user where to save below.
 		saveScope := reviewScopeProject
-		guidedSetup := interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively()
+		guidedSetup := interactiveTTY
 		if guidedSetup {
 			var setupErr error
 			profileForSetup, profile, setupErr = RunReviewGuidedSetup(ctx, out, installed, deps.ReviewerFor, profileForSetup, true, s)
@@ -917,12 +977,12 @@ func nonLaunchableEligibleNames(profile settings.ReviewProfileConfig, eligible [
 // (true, nil). In a non-interactive context it cannot prompt, so it proceeds
 // (the user explicitly invoked `entire review`) after printing a note rather
 // than blocking on a confirm form that would error out.
-func confirmReReviewOrProceed(ctx context.Context, out io.Writer, deps Deps) (bool, error) {
+func confirmReReviewOrProceed(ctx context.Context, out io.Writer, deps Deps, canPrompt bool) (bool, error) {
 	reviewed, meta := deps.HeadHasReviewCheckpoint(ctx)
 	if !reviewed {
 		return true, nil
 	}
-	if !interactive.CanPromptInteractively() {
+	if !canPrompt {
 		fmt.Fprintf(out, "Note: HEAD was already reviewed (%s); re-running.\n", meta)
 		return true, nil
 	}
@@ -984,7 +1044,8 @@ func runSingleAgentPath(
 	}
 
 	// 4. Re-run guard: check if HEAD's checkpoint already has a review.
-	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps); guardErr != nil {
+	canPrompt := reviewCommandIsInteractive(cmd)
+	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps, canPrompt); guardErr != nil {
 		fmt.Fprintln(out, "prompt cancelled")
 		return silentErr(guardErr)
 	} else if !proceed {
@@ -1038,10 +1099,9 @@ func runSingleAgentPath(
 	defer cancelRun()
 
 	runCfg.EnrichSummary = reviewSummaryTokenEnricher(worktreeRoot, headSHA)
-	canPrompt := interactive.CanPromptInteractively()
 	sinks := composeSingleAgentSinks(singleAgentSinkInputs{
 		out:       out,
-		isTTY:     interactive.IsTerminalWriter(out) && canPrompt,
+		isTTY:     canPrompt,
 		canPrompt: canPrompt,
 		agentName: displayName,
 		cancelRun: cancelRun,
@@ -1128,7 +1188,8 @@ func runMultiAgentPath(
 		return fmt.Errorf("resolve HEAD: %w", shaErr)
 	}
 
-	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps); guardErr != nil {
+	canPrompt := reviewCommandIsInteractive(cmd)
+	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps, canPrompt); guardErr != nil {
 		fmt.Fprintln(out, "prompt cancelled")
 		return deps.NewSilentError(guardErr)
 	} else if !proceed {
@@ -1146,6 +1207,7 @@ func runMultiAgentPath(
 		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
 	}
 	reviewers := make([]reviewtypes.AgentReviewer, 0, len(launchableEligible))
+	var excludedWorkers []string
 	for _, choice := range launchableEligible {
 		workerName := choice.Name
 		agentCfg := profile.Agents[workerName]
@@ -1156,9 +1218,14 @@ func runMultiAgentPath(
 				return fmt.Errorf("resolve agent %s: %w", agentName, agErr)
 			}
 			if err := VerifyConfiguredSkillsInstalled(ctx, ag, agentCfg); err != nil {
-				cmd.SilenceUsage = true
-				fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-				return deps.NewSilentError(err)
+				// One worker's stale config must not hold the whole crew
+				// hostage (e.g. codex's legacy auto-preselected "/review",
+				// orphaned when its curated builtin was removed). Exclude
+				// the worker loudly and let the remaining reviewers run;
+				// the all-excluded case fails below.
+				excludedWorkers = append(excludedWorkers, workerName)
+				fmt.Fprintf(cmd.ErrOrStderr(), "skipping reviewer %s: %s\n", workerName, err.Error())
+				continue
 			}
 		}
 		reviewer := deps.ReviewerFor(agentName)
@@ -1180,6 +1247,14 @@ func runMultiAgentPath(
 		})
 	}
 
+	if len(reviewers) == 0 {
+		cmd.SilenceUsage = true
+		err := fmt.Errorf("no runnable reviewers: every configured worker failed skill validation (%s); run `entire review --edit` to reconfigure",
+			strings.Join(excludedWorkers, ", "))
+		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
+		return deps.NewSilentError(err)
+	}
+
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
@@ -1188,6 +1263,7 @@ func runMultiAgentPath(
 		agentNames[i] = r.Name()
 	}
 	aggregateOutput := ""
+	var synthErr error
 
 	// The single consolidating judge (resolved and validated by the caller)
 	// turns the reviewers' reports into the final verdict.
@@ -1195,7 +1271,7 @@ func runMultiAgentPath(
 	masterLabel := judgeLabel(judge)
 	sinks := composeMultiAgentSinks(multiAgentSinkInputs{
 		out:               out,
-		isTTY:             interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively(),
+		isTTY:             canPrompt,
 		agentNames:        agentNames,
 		cancelRun:         cancelRun,
 		runContext:        runCtx,
@@ -1204,8 +1280,12 @@ func runMultiAgentPath(
 		profileName:       profileName,
 		task:              profile.Task,
 		masterName:        masterLabel,
+		judgeTimeout:      judgeTimeoutArg(timeout),
 		onSynthesisResult: func(result string) {
 			aggregateOutput = result
+		},
+		onSynthesisError: func(err error) {
+			synthErr = err
 		},
 	})
 	if tuiSink, ok := findTUISink(sinks); ok {
@@ -1218,11 +1298,33 @@ func runMultiAgentPath(
 	runMultiCfg.EnrichSummary = reviewSummaryTokenEnricher(worktreeRoot, headSHA)
 	summary, waitErr := RunMulti(runCtx, reviewers, runMultiCfg, sinks)
 	if shouldAbortMultiReview(summary, waitErr) && runCtx.Err() == nil && ctx.Err() == nil {
+		// Operational failure, not a usage error — don't dump the command help.
+		cmd.SilenceUsage = true
 		return multiReviewFailureError(waitErr)
 	}
 	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, aggregateOutput)
 	maybePostReviewToTrail(ctx, out, deps, outputMode, profileName, summary, aggregateOutput)
+	// The judge produces the review's primary deliverable — the consolidated
+	// verdict. If it was attempted but failed (provider error or timeout), the
+	// run produced no verdict, so exit non-zero instead of reporting success.
+	// The reviewers' partial output is still recorded above. Skip when the run
+	// was cancelled (Ctrl+C cancels both ctx and runCtx), which is not a failure.
+	if synthErr != nil && ctx.Err() == nil && runCtx.Err() == nil {
+		// Operational failure, not a usage error — don't dump the command help.
+		cmd.SilenceUsage = true
+		return judgeFailureError(masterLabel, synthErr)
+	}
 	return nil
+}
+
+// judgeFailureError reports a judge (synthesis) failure as the command's error
+// so a missing verdict surfaces in the exit status. The provider's own message
+// was already printed to the output; this drives the non-zero exit.
+func judgeFailureError(judge string, err error) error {
+	if judge != "" {
+		return fmt.Errorf("review verdict unavailable: judge %s failed: %w", judge, err)
+	}
+	return fmt.Errorf("review verdict unavailable: %w", err)
 }
 
 // handlePickerError maps picker error sentinels to the appropriate
@@ -1243,11 +1345,10 @@ func handlePickerError(cmd *cobra.Command, silentErr func(error) error, pickErr 
 // instead of monkey-patching interactive helpers at run time.
 //
 // isTTY here means "the TUI sink is safe to compose" — production callers
-// AND IsTerminalWriter(out) with CanPromptInteractively() before passing
-// it in, since the TUI both writes ANSI to stdout AND reads keypresses
-// from stdin. A terminal-stdout-but-non-interactive-stdin scenario (an
-// agent host like Claude Code invoking `entire review`) must NOT use the
-// TUI — its dismissal loop would block forever.
+// use reviewCommandIsInteractive before passing it in, since the TUI both
+// writes ANSI to stdout and reads keypresses from stdin. A terminal stdout
+// with non-interactive stdin must not use the TUI; its dismissal loop would
+// block forever.
 type multiAgentSinkInputs struct {
 	out               io.Writer
 	isTTY             bool
@@ -1259,7 +1360,13 @@ type multiAgentSinkInputs struct {
 	profileName       string
 	task              string
 	masterName        string
+	// judgeTimeout bounds the judge's consolidation call, following the same
+	// three-state convention as the reviewer timeout (positive: use it; zero:
+	// default; negative: disabled). Set from the resolved --timeout so one knob
+	// governs both reviewers and the judge.
+	judgeTimeout      time.Duration
 	onSynthesisResult func(result string)
+	onSynthesisError  func(err error)
 }
 
 type singleAgentSinkInputs struct {
@@ -1289,15 +1396,17 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 			postRunOut := &bytes.Buffer{}
 			sinks = append(sinks, DumpSink{W: postRunOut})
 			sinks = append(sinks, SynthesisSink{
-				Provider:     in.synthesisProvider,
-				Writer:       postRunOut,
-				RenderWriter: in.out,
-				PerRunPrompt: in.perRunPrompt,
-				ProfileName:  in.profileName,
-				Task:         in.task,
-				MasterName:   in.masterName,
-				RunContext:   in.runContext,
-				OnResult:     in.onSynthesisResult,
+				Provider:        in.synthesisProvider,
+				Writer:          postRunOut,
+				RenderWriter:    in.out,
+				PerRunPrompt:    in.perRunPrompt,
+				ProfileName:     in.profileName,
+				Task:            in.task,
+				MasterName:      in.masterName,
+				RunContext:      in.runContext,
+				ProviderTimeout: in.judgeTimeout,
+				OnResult:        in.onSynthesisResult,
+				OnError:         in.onSynthesisError,
 				OnStart: func() {
 					tui.FinalPhaseStarted(finalJudgeDisplayName(in.masterName))
 				},
@@ -1316,14 +1425,16 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 	sinks = append(sinks, DumpSink{W: in.out})
 	if in.synthesisProvider != nil {
 		sinks = append(sinks, SynthesisSink{
-			Provider:     in.synthesisProvider,
-			Writer:       in.out,
-			PerRunPrompt: in.perRunPrompt,
-			ProfileName:  in.profileName,
-			Task:         in.task,
-			MasterName:   in.masterName,
-			RunContext:   in.runContext,
-			OnResult:     in.onSynthesisResult,
+			Provider:        in.synthesisProvider,
+			Writer:          in.out,
+			PerRunPrompt:    in.perRunPrompt,
+			ProfileName:     in.profileName,
+			Task:            in.task,
+			MasterName:      in.masterName,
+			RunContext:      in.runContext,
+			ProviderTimeout: in.judgeTimeout,
+			OnResult:        in.onSynthesisResult,
+			OnError:         in.onSynthesisError,
 		})
 	}
 	return sinks
@@ -1503,10 +1614,6 @@ func reviewSummaryTokenEnricher(worktreeRoot, headSHA string) func(context.Conte
 		}
 		return enriched
 	}
-}
-
-func reviewAgentRunTokenEnricher(worktreeRoot, headSHA string) func(context.Context, reviewtypes.AgentRun) reviewtypes.AgentRun {
-	return reviewAgentRunTokenEnricherForRuns(worktreeRoot, headSHA, nil)
 }
 
 func reviewAgentRunTokenEnricherForRuns(worktreeRoot, headSHA string, planned []reviewtypes.AgentRun) func(context.Context, reviewtypes.AgentRun) reviewtypes.AgentRun {

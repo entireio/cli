@@ -1,0 +1,32 @@
+{
+  "id": "trail-review-focus",
+  "display_name": "Review Focus",
+  "enabled": true,
+  "scope": "trail",
+  "runtime": {
+    "kind": "prompt_runner",
+    "agent": "claude",
+    "model": "haiku",
+    "timeout_ms": 300000,
+    "sandbox": {
+      "base_template": "claude",
+      "repo_token": "read"
+    }
+  },
+  "automation": {
+    "kind": "trail_prompt"
+  },
+  "prompt": {
+    "template": "You are a code review assistant. Analyze the changes on branch \"{{branch}}\" compared to \"{{base_branch}}\".\n\nRun `git diff origin/{{base_branch}}...HEAD`, then identify the most critical areas a human reviewer should focus on.\n\nOutput ONLY this JSON object as the very last line:\n\n{\"files\": [{\"path\": \"<file path>\", \"lines\": \"<optional line range>\", \"why\": \"<brief reason>\"}]}\n\nIf no critical areas need attention, output: {\"files\": []}"
+  },
+  "select": {
+    "trigger_types": [
+      "api",
+      "push"
+    ]
+  },
+  "output": {
+    "adapter": "last_json_line",
+    "result_type": "trail_review_focus"
+  }
+}

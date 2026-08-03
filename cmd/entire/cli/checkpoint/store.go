@@ -14,11 +14,25 @@ var (
 	_ EphemeralStore  = (*ephemeralStore)(nil)
 )
 
+// treeWriter holds the repo-only machinery for building a single checkpoint's
+// subtree from write requests: entry builders, transcript/session writers, and
+// the per-request appliers (applySessionWrite / applyTranscriptBackfill /
+// applySummaryBackfill / applyAttributionBackfill). It is independent of where
+// the resulting subtree is committed, so both the git-branch store (which nests
+// the subtree under <shard>/<id>/ on the v1 branch) and the git-refs store
+// (which keeps it at the root of a per-checkpoint ref) embed it and share this
+// code.
+type treeWriter struct {
+	repo *git.Repository
+}
+
 // GitStore is the committed (persistent) checkpoint store. Writes target
 // refs.Primary; committed reads resolve against refs.Read. The temporary
-// shadow-branch surface lives in ephemeralStore.
+// shadow-branch surface lives in ephemeralStore. It embeds *treeWriter for the
+// shared subtree-building machinery.
 type GitStore struct {
-	repo        *git.Repository
+	*treeWriter
+
 	refs        PersistentRefs
 	blobFetcher BlobFetchFunc
 }
@@ -49,7 +63,7 @@ func NewEphemeralStore(repo *git.Repository, refs PersistentRefs) EphemeralStore
 // and committed-metadata topology. Pass DefaultV1Refs() for the v1-only default
 // or ResolveRefs(ctx) in code paths that honor settings.
 func NewGitStore(repo *git.Repository, refs PersistentRefs) *GitStore {
-	return &GitStore{repo: repo, refs: refs}
+	return &GitStore{treeWriter: &treeWriter{repo: repo}, refs: refs}
 }
 
 // SetBlobFetcher configures the store to automatically fetch missing blobs

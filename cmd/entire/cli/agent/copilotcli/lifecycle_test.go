@@ -358,6 +358,53 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 	}
 }
 
+// TestParseHookEvent_SubagentSession_LifecycleHooksReturnNil verifies that the
+// per-turn/session lifecycle hooks are dropped when Copilot fires them for a
+// subagent turn (sessionId is a Task tool-use id, e.g. "toolu_…"). Otherwise a
+// phantom top-level session is created that never ends and pins its shadow
+// branch open after the user commits.
+func TestParseHookEvent_SubagentSession_LifecycleHooksReturnNil(t *testing.T) {
+	t.Parallel()
+
+	const subagentSessionID = "toolu_bdrk_01KTyZvJLaUtkjgvdA355rMX"
+	ag := &CopilotCLIAgent{}
+
+	lifecycleHooks := []string{
+		HookNameUserPromptSubmitted,
+		HookNameSessionStart,
+		HookNameAgentStop,
+		HookNameSessionEnd,
+	}
+
+	for _, hookName := range lifecycleHooks {
+		t.Run(hookName, func(t *testing.T) {
+			t.Parallel()
+			input := `{"timestamp":1771480081360,"cwd":"/path/to/repo","sessionId":"` + subagentSessionID + `","prompt":"hi"}`
+
+			event, err := ag.ParseHookEvent(context.Background(), hookName, strings.NewReader(input))
+
+			require.NoError(t, err)
+			require.Nil(t, event, "expected nil event for subagent-session lifecycle hook %s", hookName)
+		})
+	}
+}
+
+// TestParseHookEvent_SubagentSession_SubagentStopStillFires verifies the
+// subagent-stop hook is NOT dropped — it always carries the main session id and
+// drives the task-checkpoint path.
+func TestParseHookEvent_SubagentSession_SubagentStopStillFires(t *testing.T) {
+	t.Parallel()
+
+	ag := &CopilotCLIAgent{}
+	input := `{"timestamp":1771480085412,"cwd":"/path/to/repo","sessionId":"` + testSessionID + `"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
+
+	require.NoError(t, err)
+	require.NotNil(t, event, "subagent-stop must still produce an event")
+	require.Equal(t, agent.SubagentEnd, event.Type)
+}
+
 func TestParseHookEvent_PassthroughHooks_ReturnNil(t *testing.T) {
 	t.Parallel()
 

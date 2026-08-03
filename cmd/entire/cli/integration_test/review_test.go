@@ -18,6 +18,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
+const reviewSkillPR = "/pr-review-toolkit:review-pr"
+
 // TestReview_EnvVarAdoptionCondensesReviewMetadataOnNextCommit exercises
 // the full adoption pipeline: ENTIRE_REVIEW_* env vars are present when the
 // UserPromptSubmit hook fires (as `entire review` sets them on the spawned
@@ -27,9 +29,9 @@ func TestReview_EnvVarAdoptionCondensesReviewMetadataOnNextCommit(t *testing.T) 
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
-	enableReviewAgent(t, env, "claude-code")
+	enableReviewAgent(t, env, agentClaudeCode)
 
-	skills := []string{"/pr-review-toolkit:review-pr", "/test-auditor"}
+	skills := []string{reviewSkillPR, "/test-auditor"}
 	reviewPrompt := composeReviewPromptForTest(skills)
 	skillsJSON, err := review.EncodeSkills(skills)
 	if err != nil {
@@ -61,7 +63,7 @@ func TestReview_EnvVarAdoptionCondensesReviewMetadataOnNextCommit(t *testing.T) 
 	if state.Kind != session.KindAgentReview {
 		t.Fatalf("state.Kind = %q, want %q", state.Kind, session.KindAgentReview)
 	}
-	if len(state.ReviewSkills) != 2 || state.ReviewSkills[0] != "/pr-review-toolkit:review-pr" || state.ReviewSkills[1] != "/test-auditor" {
+	if len(state.ReviewSkills) != 2 || state.ReviewSkills[0] != reviewSkillPR || state.ReviewSkills[1] != "/test-auditor" {
 		t.Fatalf("state.ReviewSkills = %v", state.ReviewSkills)
 	}
 	if state.ReviewPrompt != reviewPrompt {
@@ -95,7 +97,7 @@ func TestReview_EnvVarAdoptionCondensesReviewMetadataOnNextCommit(t *testing.T) 
 	if metadata.Kind != string(session.KindAgentReview) {
 		t.Fatalf("metadata.Kind = %q, want %q", metadata.Kind, session.KindAgentReview)
 	}
-	if len(metadata.ReviewSkills) != 2 || metadata.ReviewSkills[0] != "/pr-review-toolkit:review-pr" || metadata.ReviewSkills[1] != "/test-auditor" {
+	if len(metadata.ReviewSkills) != 2 || metadata.ReviewSkills[0] != reviewSkillPR || metadata.ReviewSkills[1] != "/test-auditor" {
 		t.Fatalf("metadata.ReviewSkills = %v", metadata.ReviewSkills)
 	}
 	if metadata.ReviewPrompt != state.ReviewPrompt {
@@ -104,13 +106,13 @@ func TestReview_EnvVarAdoptionCondensesReviewMetadataOnNextCommit(t *testing.T) 
 }
 
 func TestReviewCommand_PassesReviewEnvToSpawnedAgentHook(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("fake agent launcher uses a POSIX shell script")
 	}
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
-	enableReviewAgent(t, env, "claude-code")
+	enableReviewAgent(t, env, agentClaudeCode)
 	env.WriteSettings(map[string]any{
 		"enabled":                true,
 		"review_default_profile": "general",
@@ -118,11 +120,11 @@ func TestReviewCommand_PassesReviewEnvToSpawnedAgentHook(t *testing.T) {
 			"general": map[string]any{
 				"task": "Test review task.",
 				"agents": map[string]any{
-					"claude-code": map[string]any{
+					agentClaudeCode: map[string]any{
 						"skills": []string{"/review"},
 					},
 				},
-				"judge": map[string]any{"agent": "claude-code"},
+				"judge": map[string]any{"agent": agentClaudeCode},
 			},
 		},
 	})
@@ -184,7 +186,7 @@ func TestReviewAttach_TagsAttachedSessionAsReview(t *testing.T) {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	output := env.RunCLI("attach", "--review", sessionID, "--force", "--agent", "claude-code", "--skills", "/pr-review-toolkit:review-pr")
+	output := env.RunCLI("attach", "--review", sessionID, "--force", "--agent", agentClaudeCode, "--skills", reviewSkillPR)
 	if !strings.Contains(output, "Attached session") {
 		t.Fatalf("expected attached session output, got:\n%s", output)
 	}
@@ -204,7 +206,7 @@ func TestReviewAttach_TagsAttachedSessionAsReview(t *testing.T) {
 	if state.Kind != session.KindAgentReview {
 		t.Fatalf("state.Kind = %q, want %q", state.Kind, session.KindAgentReview)
 	}
-	if len(state.ReviewSkills) != 1 || state.ReviewSkills[0] != "/pr-review-toolkit:review-pr" {
+	if len(state.ReviewSkills) != 1 || state.ReviewSkills[0] != reviewSkillPR {
 		t.Fatalf("state.ReviewSkills = %v", state.ReviewSkills)
 	}
 	if state.ReviewPrompt != "review the branch for security regressions" {
@@ -220,7 +222,7 @@ func TestReviewAttach_TagsAttachedSessionAsReview(t *testing.T) {
 	if metadata.Kind != string(session.KindAgentReview) {
 		t.Fatalf("metadata.Kind = %q, want %q", metadata.Kind, session.KindAgentReview)
 	}
-	if len(metadata.ReviewSkills) != 1 || metadata.ReviewSkills[0] != "/pr-review-toolkit:review-pr" {
+	if len(metadata.ReviewSkills) != 1 || metadata.ReviewSkills[0] != reviewSkillPR {
 		t.Fatalf("metadata.ReviewSkills = %v", metadata.ReviewSkills)
 	}
 	if metadata.ReviewPrompt != "review the branch for security regressions" {
@@ -235,7 +237,7 @@ func TestReview_MissingSkillAtSpawn_ErrorsCleanly(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
-	enableReviewAgent(t, env, "claude-code")
+	enableReviewAgent(t, env, agentClaudeCode)
 
 	env.WriteSettings(map[string]any{
 		"review_default_profile": "general",
@@ -243,11 +245,11 @@ func TestReview_MissingSkillAtSpawn_ErrorsCleanly(t *testing.T) {
 			"general": map[string]any{
 				"task": "Test review task.",
 				"agents": map[string]any{
-					"claude-code": map[string]any{
+					agentClaudeCode: map[string]any{
 						"skills": []string{"/nonexistent:skill-xyz"},
 					},
 				},
-				"judge": map[string]any{"agent": "claude-code"},
+				"judge": map[string]any{"agent": agentClaudeCode},
 			},
 		},
 	})
@@ -290,7 +292,10 @@ func envWithOverrides(base []string, overrides ...string) []string {
 
 func enableReviewAgent(t *testing.T, env *TestEnv, name string) {
 	t.Helper()
-	env.RunCLI("enable", "--agent", name, "--telemetry=false")
+	// Pin the git-branch backend: readCheckpointSummary/readSessionMetadata
+	// resolve checkpoint content from the v1 metadata branch, and first-run
+	// enable now defaults new setups to git-refs.
+	env.RunCLI("enable", "--agent", name, "--telemetry=false", "--checkpoint-backend", "branch")
 }
 
 func readCheckpointSummary(t *testing.T, env *TestEnv, checkpointID string) checkpoint.CheckpointSummary {

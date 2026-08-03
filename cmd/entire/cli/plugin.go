@@ -31,6 +31,14 @@ const (
 	agentPluginBinaryPrefix = "entire-agent-"
 )
 
+// selfUpdatePluginName is the plugin that replaces the entire binary on
+// disk (`entire upgrade` → entire-upgrade).
+const selfUpdatePluginName = "upgrade"
+
+// postPluginVersionCheck is a test seam for the version-check notice that
+// fires after a successful plugin run.
+var postPluginVersionCheck = versioncheck.CheckAndNotify
+
 // MaybeRunPlugin returns (true, exitCode) when an external command was
 // resolved and run. On launch failure (e.g. missing executable bit)
 // returns (true, 1) after printing to stderr. On no-match returns
@@ -47,7 +55,15 @@ func MaybeRunPlugin(ctx context.Context, rootCmd *cobra.Command, args []string) 
 	exitCode = runPlugin(ctx, pluginName, binPath, pluginArgs)
 	if exitCode == 0 {
 		maybeTrackPluginInvocation(ctx, pluginName)
-		versioncheck.CheckAndNotify(ctx, os.Stdout, versioninfo.Version)
+		// Stderr, matching the built-in PersistentPostRun: the plugin's own
+		// stdout may be machine-readable and piped.
+		//
+		// Skipped after a self-update: this process still carries the
+		// pre-upgrade compiled-in version, so the check would see itself as
+		// outdated and prompt to redo the upgrade that just completed.
+		if pluginName != selfUpdatePluginName {
+			postPluginVersionCheck(ctx, os.Stderr, versioninfo.Version)
+		}
 	}
 	return true, exitCode
 }

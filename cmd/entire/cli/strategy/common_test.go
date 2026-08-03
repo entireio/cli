@@ -170,103 +170,6 @@ func TestWorktreeRoot_Worktree(t *testing.T) {
 	}
 }
 
-func TestIsInsideWorktree(t *testing.T) {
-	t.Run("main repo", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		initTestRepo(t, tmpDir)
-		t.Chdir(tmpDir)
-
-		if IsInsideWorktree(context.Background()) {
-			t.Error("IsInsideWorktree(context.Background()) should return false in main repo")
-		}
-	})
-
-	t.Run("worktree", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		initTestRepo(t, tmpDir)
-
-		// Create a worktree
-		worktreeDir := filepath.Join(tmpDir, "worktree")
-		if err := createWorktree(tmpDir, worktreeDir, "test-branch"); err != nil {
-			t.Fatalf("failed to create worktree: %v", err)
-		}
-		t.Cleanup(func() {
-			removeWorktree(tmpDir, worktreeDir)
-		})
-
-		t.Chdir(worktreeDir)
-
-		if !IsInsideWorktree(context.Background()) {
-			t.Error("IsInsideWorktree(context.Background()) should return true in worktree")
-		}
-	})
-
-	t.Run("non-repo", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
-
-		if IsInsideWorktree(context.Background()) {
-			t.Error("IsInsideWorktree(context.Background()) should return false in non-repo")
-		}
-	})
-}
-
-func TestGetMainRepoRoot(t *testing.T) {
-	t.Run("main repo", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		// Resolve symlinks (macOS /var -> /private/var)
-		// git rev-parse --show-toplevel returns the resolved path
-		resolved, err := filepath.EvalSymlinks(tmpDir)
-		if err != nil {
-			t.Fatalf("filepath.EvalSymlinks() failed: %v", err)
-		}
-		tmpDir = resolved
-
-		initTestRepo(t, tmpDir)
-		t.Chdir(tmpDir)
-
-		root, err := GetMainRepoRoot(context.Background())
-		if err != nil {
-			t.Fatalf("GetMainRepoRoot(context.Background()) failed: %v", err)
-		}
-
-		if root != tmpDir {
-			t.Errorf("GetMainRepoRoot(context.Background()) = %q, want %q", root, tmpDir)
-		}
-	})
-
-	t.Run("worktree", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		// Resolve symlinks (macOS /var -> /private/var)
-		resolved, err := filepath.EvalSymlinks(tmpDir)
-		if err != nil {
-			t.Fatalf("filepath.EvalSymlinks() failed: %v", err)
-		}
-		tmpDir = resolved
-
-		initTestRepo(t, tmpDir)
-
-		worktreeDir := filepath.Join(tmpDir, "worktree")
-		if err := createWorktree(tmpDir, worktreeDir, "test-branch"); err != nil {
-			t.Fatalf("failed to create worktree: %v", err)
-		}
-		t.Cleanup(func() {
-			removeWorktree(tmpDir, worktreeDir)
-		})
-
-		t.Chdir(worktreeDir)
-
-		root, err := GetMainRepoRoot(context.Background())
-		if err != nil {
-			t.Fatalf("GetMainRepoRoot(context.Background()) failed: %v", err)
-		}
-
-		if root != tmpDir {
-			t.Errorf("GetMainRepoRoot(context.Background()) = %q, want %q", root, tmpDir)
-		}
-	})
-}
-
 func TestGetCurrentBranchName(t *testing.T) {
 	t.Run("on branch", func(t *testing.T) {
 		tmpDir := t.TempDir()
@@ -1084,6 +987,38 @@ func TestEnsurePrimaryRef(t *testing.T) {
 		if len(tree.Entries) != 0 {
 			t.Errorf("expected empty tree, got %d entries", len(tree.Entries))
 		}
+	})
+
+	t.Run("skips empty orphan when primary is git-refs", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		initTestRepo(t, dir)
+
+		// Select the git-refs backend for this repo. EnsurePrimaryRef rebinds
+		// the config lookup to the repo root, so a repo-local settings file is
+		// what it reads.
+		settingsDir := filepath.Join(dir, ".entire")
+		if err := os.MkdirAll(settingsDir, 0o750); err != nil {
+			t.Fatalf("failed to create .entire dir: %v", err)
+		}
+		cfg := []byte(`{"checkpoints":{"primary":{"type":"git-refs"}}}`)
+		if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"), cfg, 0o600); err != nil {
+			t.Fatalf("failed to write settings: %v", err)
+		}
+
+		repo, err := git.PlainOpen(dir)
+		if err != nil {
+			t.Fatalf("failed to open repo: %v", err)
+		}
+		if err := EnsurePrimaryRef(t.Context(), repo); err != nil {
+			t.Fatalf("EnsurePrimaryRef() failed: %v", err)
+		}
+
+		// Under git-refs, checkpoints live in per-checkpoint refs and nothing
+		// is ever written to v1, so no vestigial empty orphan should be created.
+		_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+		require.ErrorIs(t, err, plumbing.ErrReferenceNotFound,
+			"expected no v1 branch under git-refs primary")
 	})
 }
 

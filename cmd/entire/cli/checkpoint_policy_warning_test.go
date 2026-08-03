@@ -20,8 +20,8 @@ func TestWarnCheckpointPolicyIfNeeded(t *testing.T) {
 		_ = repo.Close()
 	})
 	_, err = checkpointpolicy.WriteLocal(t.Context(), repo, plumbing.ZeroHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "refs-v1",
+		CheckpointVersion:    "refs-v2",
+		CheckpointMinVersion: "refs-v2",
 	})
 	require.NoError(t, err)
 
@@ -47,8 +47,12 @@ func TestShouldCheckCheckpointPolicyWarning(t *testing.T) {
 	sendAnalytics := &cobra.Command{Use: "__send_analytics", Hidden: true}
 	root.AddCommand(sendAnalytics)
 
+	refreshTrailEnablement := &cobra.Command{Use: "__refresh_trail_enablement", Hidden: true}
+	root.AddCommand(refreshTrailEnablement)
+
 	require.True(t, ShouldCheckCheckpointPolicyWarning(visible))
 	require.True(t, ShouldCheckCheckpointPolicyWarning(hiddenAlias))
 	require.False(t, ShouldCheckCheckpointPolicyWarning(gitHook))
 	require.False(t, ShouldCheckCheckpointPolicyWarning(sendAnalytics))
+	require.False(t, ShouldCheckCheckpointPolicyWarning(refreshTrailEnablement))
 }

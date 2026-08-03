@@ -103,11 +103,17 @@ func (a *OpenCodeAgent) ExtractModifiedFilesFromOffset(path string, startOffset 
 		return nil, 0, nil
 	}
 
+	return modifiedFilesFromMessages(session.Messages, startOffset), len(session.Messages), nil
+}
+
+// modifiedFilesFromMessages collects unique file paths touched by
+// file-modification tool calls in msgs[startOffset:].
+func modifiedFilesFromMessages(msgs []ExportMessage, startOffset int) []string {
 	seen := make(map[string]bool)
 	var files []string
 
-	for i := startOffset; i < len(session.Messages); i++ {
-		msg := session.Messages[i]
+	for i := startOffset; i < len(msgs); i++ {
+		msg := msgs[i]
 		if msg.Info.Role != roleAssistant {
 			continue
 		}
@@ -127,7 +133,7 @@ func (a *OpenCodeAgent) ExtractModifiedFilesFromOffset(path string, startOffset 
 		}
 	}
 
-	return files, len(session.Messages), nil
+	return files
 }
 
 // ExtractModifiedFiles extracts modified file paths from raw export JSON transcript bytes.
@@ -141,30 +147,7 @@ func ExtractModifiedFiles(data []byte) ([]string, error) {
 		return nil, nil
 	}
 
-	seen := make(map[string]bool)
-	var files []string
-
-	for _, msg := range session.Messages {
-		if msg.Info.Role != roleAssistant {
-			continue
-		}
-		for _, part := range msg.Parts {
-			if part.Type != "tool" || part.State == nil {
-				continue
-			}
-			if !slices.Contains(FileModificationTools, part.Tool) {
-				continue
-			}
-			for _, filePath := range extractFilePaths(part.State) {
-				if !seen[filePath] {
-					seen[filePath] = true
-					files = append(files, filePath)
-				}
-			}
-		}
-	}
-
-	return files, nil
+	return modifiedFilesFromMessages(session.Messages, 0), nil
 }
 
 // extractFilePaths extracts file paths from an OpenCode tool's state.

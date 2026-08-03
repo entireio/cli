@@ -124,7 +124,7 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
+		case r.Method == http.MethodPost && r.URL.Path == pathOAuthToken:
 			writeTrailResumeIntegrationJSON(t, w, http.StatusOK, map[string]any{
 				"access_token": "trail-resume-data-token",
 				"token_type":   "Bearer",
@@ -183,7 +183,7 @@ func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL str
 	host := mustTrailResumeIntegrationHost(t, coreURL)
 	cacheDir := filepath.Join(xdgCacheHome, "entire")
 	if err := discovery.ModifyAPICores(cacheDir, func(c discovery.ClusterCoresCache) error {
-		c.Set(host, []string{coreURL})
+		c.SetEntry(host, discovery.CoresEntry{CoreURLs: []string{coreURL}})
 		return nil
 	}); err != nil {
 		t.Fatalf("seed API discovery cache: %v", err)

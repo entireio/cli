@@ -75,7 +75,6 @@ func TestSetupGeminiHooks_AddsAllRequiredHooks(t *testing.T) {
 	if len(settings.Hooks.Notification) == 0 {
 		t.Error("Notification hook should exist")
 	}
-
 }
 
 // TestSetupGeminiHooks_PreservesExistingSettings is a smoke test verifying that
@@ -129,7 +128,7 @@ func TestSetupGeminiHooks_PreservesExistingSettings(t *testing.T) {
 		t.Fatalf("failed to parse settings.json: %v", err)
 	}
 
-	if rawSettings["customSetting"] != "should-be-preserved" {
+	if rawSettings["customSetting"] != preservedSetting {
 		t.Error("customSetting should be preserved after enable gemini")
 	}
 

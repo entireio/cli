@@ -49,15 +49,18 @@ func artifactDir(t *testing.T) string {
 func CaptureArtifacts(t *testing.T, s *RepoState) {
 	t.Helper()
 	dir := s.ArtifactDir
-	checkpointRef := checkpointReadRef()
 
 	writeArtifact(t, dir, "git-log.txt",
 		gitOutputSafe(s.Dir, "log", "--decorate", "--graph", "--all"))
 
+	checkpointTree := "\n--- " + checkpointReadRef() + " ---\n" +
+		gitOutputSafe(s.Dir, "ls-tree", "-r", checkpointReadRef())
+	if UsingGitRefs() {
+		checkpointTree = "\n--- " + checkpointRefPrefix + " ---\n" +
+			gitOutputSafe(s.Dir, "for-each-ref", "--format=%(refname) %(objectname)", checkpointRefPrefix)
+	}
 	writeArtifact(t, dir, "git-tree.txt",
-		gitOutputSafe(s.Dir, "ls-tree", "-r", "HEAD")+
-			"\n--- "+checkpointRef+" ---\n"+
-			gitOutputSafe(s.Dir, "ls-tree", "-r", checkpointRef))
+		gitOutputSafe(s.Dir, "ls-tree", "-r", "HEAD")+checkpointTree)
 
 	// console.log is written incrementally to disk via s.ConsoleLog (*os.File),
 	// so it already exists in the artifact dir and survives global timeouts.
@@ -103,13 +106,20 @@ func captureCheckpointMetadata(t *testing.T, s *RepoState, outDir string) {
 		id := m[1]
 		cpPath := CheckpointPath(id)
 
+		// In-tree prefix: git-branch nests the checkpoint under <shard>/<id>/;
+		// git-refs has the checkpoint contents at the ref commit's tree root.
+		inTreePrefix := cpPath + "/"
+		if UsingGitRefs() {
+			inTreePrefix = ""
+		}
+
 		cpDir := filepath.Join(metaDir, cpPath)
 		_ = os.MkdirAll(cpDir, 0o755)
-		raw := gitOutputSafe(s.Dir, "show", sha+":"+cpPath+"/metadata.json")
+		raw := gitOutputSafe(s.Dir, "show", sha+":"+inTreePrefix+"metadata.json")
 		writeArtifact(t, cpDir, "metadata.json", raw)
 
 		for i := 0; ; i++ {
-			sessPath := fmt.Sprintf("%s/%d/metadata.json", cpPath, i)
+			sessPath := fmt.Sprintf("%s%d/metadata.json", inTreePrefix, i)
 			raw := gitOutputSafe(s.Dir, "show", sha+":"+sessPath)
 			if raw == "" {
 				break

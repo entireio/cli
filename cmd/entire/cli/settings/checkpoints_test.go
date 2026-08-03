@@ -60,6 +60,44 @@ func TestLoadCheckpointsConfig_ParsesPrimaryAndMirrors(t *testing.T) {
 	assert.JSONEq(t, `{"path": "/tmp/x"}`, string(cfg.Mirrors[0].Config))
 }
 
+func TestLoadCheckpointsConfig_EnvOverridesPrimary(t *testing.T) {
+	dir := newCheckpointsSettingsRepo(t)
+	// A file block that the env override must replace wholesale.
+	writeFile(t, dir, "settings.json", `{"enabled": true, "checkpoints": {"primary": {"type": "git-branch"}}}`)
+	t.Setenv(EnvCheckpointsPrimary, "git-refs")
+
+	cfg, err := LoadCheckpointsConfig(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, "git-refs", cfg.Primary.Type)
+	assert.Empty(t, cfg.Mirrors)
+}
+
+func TestLoadCheckpointsConfig_EnvPrimaryAndMirrors(t *testing.T) {
+	newCheckpointsSettingsRepo(t)
+	t.Setenv(EnvCheckpointsPrimary, "git-refs")
+	t.Setenv(EnvCheckpointsMirrors, "git-branch, fs")
+
+	cfg, err := LoadCheckpointsConfig(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, "git-refs", cfg.Primary.Type)
+	require.Len(t, cfg.Mirrors, 2)
+	assert.Equal(t, "git-branch", cfg.Mirrors[0].Type)
+	assert.Equal(t, "fs", cfg.Mirrors[1].Type)
+}
+
+func TestLoadCheckpointsConfig_EmptyEnvFallsBackToFile(t *testing.T) {
+	dir := newCheckpointsSettingsRepo(t)
+	writeFile(t, dir, "settings.json", `{"enabled": true, "checkpoints": {"primary": {"type": "git-branch"}}}`)
+	t.Setenv(EnvCheckpointsPrimary, "")
+
+	cfg, err := LoadCheckpointsConfig(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, "git-branch", cfg.Primary.Type, "empty env override defers to the settings file")
+}
+
 func TestLoadCheckpointsConfig_RejectsUnknownFieldInBlock(t *testing.T) {
 	dir := newCheckpointsSettingsRepo(t)
 	writeFile(t, dir, "settings.json", `{"enabled": true, "checkpoints": {"primary": {"type": "git"}, "bogus": 1}}`)

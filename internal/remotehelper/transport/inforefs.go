@@ -33,32 +33,7 @@ import (
 // carries no replica header we fall back to following the redirect
 // once. A direct 2xx is handled in place.
 func (p *Proxy) InfoRefs(ctx context.Context, service string) (io.ReadCloser, error) {
-	suffix := "/info/refs?service=" + service
-
-	var warmErr error
-	switch {
-	case len(p.nodes) > 0:
-		debuglog.Printf("info/refs warm path: trying %d cached replicas %v", len(p.nodes), p.nodes)
-		resp, err := p.doWithFailover(ctx, suffix, http.MethodGet, nil, nil)
-		if err == nil {
-			return p.handleInfoRefsResponse(resp)
-		}
-		if p.entryURL == "" {
-			return nil, fmt.Errorf("fetching info/refs: %w", err)
-		}
-		warmErr = err
-		debuglog.Printf("all cached replicas failed for info/refs, falling back to entry URL %s: %v", p.entryURL, err)
-	case p.entryURL == "":
-		return nil, errors.New("no replicas available and no entry URL configured")
-	default:
-		debuglog.Printf("info/refs cold path: hitting entry URL %s (LB will route or 307 to a hosting replica)", p.entryURL)
-	}
-
-	body, err := p.coldInfoRefs(ctx, suffix, nil)
-	if err != nil && warmErr != nil {
-		return nil, errors.Join(fmt.Errorf("cached replicas: %w", warmErr), err)
-	}
-	return body, err
+	return p.infoRefs(ctx, "info/refs", "/info/refs?service="+service, nil)
 }
 
 // InfoRefsV2 is InfoRefs with Git-Protocol: version=2 added — same
@@ -66,28 +41,31 @@ func (p *Proxy) InfoRefs(ctx context.Context, service string) (io.ReadCloser, er
 // capability advertisement is what gets returned instead of the v0/v1
 // ref list.
 func (p *Proxy) InfoRefsV2(ctx context.Context) (io.ReadCloser, error) {
-	suffix := "/info/refs?service=git-upload-pack"
-	setHeaders := func(req *http.Request) {
+	return p.infoRefs(ctx, "v2 info/refs", "/info/refs?service=git-upload-pack", func(req *http.Request) {
 		req.Header.Set("Git-Protocol", "version=2")
-	}
+	})
+}
 
+// infoRefs runs the warm-replica / cold-entry-URL attempt sequence shared by
+// InfoRefs and InfoRefsV2. label only differentiates log and error text.
+func (p *Proxy) infoRefs(ctx context.Context, label, suffix string, setHeaders func(*http.Request)) (io.ReadCloser, error) {
 	var warmErr error
 	switch {
 	case len(p.nodes) > 0:
-		debuglog.Printf("v2 info/refs warm path: trying %d cached replicas %v", len(p.nodes), p.nodes)
+		debuglog.Printf("%s warm path: trying %d cached replicas %v", label, len(p.nodes), p.nodes)
 		resp, err := p.doWithFailover(ctx, suffix, http.MethodGet, nil, setHeaders)
 		if err == nil {
 			return p.handleInfoRefsResponse(resp)
 		}
 		if p.entryURL == "" {
-			return nil, fmt.Errorf("fetching v2 info/refs: %w", err)
+			return nil, fmt.Errorf("fetching %s: %w", label, err)
 		}
 		warmErr = err
-		debuglog.Printf("all cached replicas failed for v2 info/refs, falling back to entry URL %s: %v", p.entryURL, err)
+		debuglog.Printf("all cached replicas failed for %s, falling back to entry URL %s: %v", label, p.entryURL, err)
 	case p.entryURL == "":
 		return nil, errors.New("no replicas available and no entry URL configured")
 	default:
-		debuglog.Printf("v2 info/refs cold path: hitting entry URL %s (LB will route or 307 to a hosting replica)", p.entryURL)
+		debuglog.Printf("%s cold path: hitting entry URL %s (LB will route or 307 to a hosting replica)", label, p.entryURL)
 	}
 
 	body, err := p.coldInfoRefs(ctx, suffix, setHeaders)
@@ -165,18 +143,25 @@ func (p *Proxy) handleInfoRefsResponse(resp *http.Response) (io.ReadCloser, erro
 	p.refreshReplicas(resp)
 
 	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		_ = resp.Body.Close()
-		var msg string
-		if readErr == nil {
-			msg = strings.TrimSpace(string(body))
-		}
-		if strings.HasPrefix(msg, "<") {
-			msg = ""
-		}
-		return nil, HTTPErrorMessage(resp.StatusCode, msg, p.ErrorBaseURL())
+		return nil, p.httpError(resp)
 	}
 	return resp.Body, nil
+}
+
+// httpError drains up to 1KB of the error body into a typed HTTP error,
+// dropping HTML bodies (they're LB/proxy noise, not a server message).
+// Closes resp.Body.
+func (p *Proxy) httpError(resp *http.Response) error {
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	_ = resp.Body.Close()
+	var msg string
+	if readErr == nil {
+		msg = strings.TrimSpace(string(body))
+	}
+	if strings.HasPrefix(msg, "<") {
+		msg = ""
+	}
+	return HTTPErrorMessage(resp.StatusCode, msg, p.ErrorBaseURL())
 }
 
 // ServiceRPC sends data to a Git service endpoint and returns the
@@ -199,16 +184,7 @@ func (p *Proxy) ServiceRPC(ctx context.Context, service string, body io.ReadSeek
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		_ = resp.Body.Close()
-		var msg string
-		if readErr == nil {
-			msg = strings.TrimSpace(string(respBody))
-		}
-		if strings.HasPrefix(msg, "<") {
-			msg = ""
-		}
-		return nil, HTTPErrorMessage(resp.StatusCode, msg, p.ErrorBaseURL())
+		return nil, p.httpError(resp)
 	}
 
 	return resp.Body, nil
@@ -223,7 +199,9 @@ func HTTPErrorMessage(statusCode int, serverMsg, baseURL string) error {
 		if serverMsg != "" {
 			return fmt.Errorf("authentication failed: %s", serverMsg)
 		}
-		return errors.New("authentication failed - please run 'entire login'")
+		// Reaching here means the transport already re-minted and retried once
+		// (see retryOn401) and the fresh credential was still rejected.
+		return errors.New("authentication failed even after refreshing credentials - run 'entire login' if this persists")
 	case http.StatusNotFound:
 		if serverMsg != "" {
 			return errors.New(serverMsg)
