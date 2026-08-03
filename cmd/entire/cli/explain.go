@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/palette"
@@ -715,7 +716,12 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 			return err
 		}
 		stopLoad(false) // generation prints its own progress to w/errW
-		writeStores, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{})
+		// RefFetcher: the summary backfill's absence probe fetches a ref that
+		// exists remotely but not locally (written/migrated on another
+		// machine), bounded by the write-probe budget.
+		writeStores, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{
+			RefFetcher: remote.BoundedCheckpointRefFetcher(remote.WriteProbeFetchBudget),
+		})
 		if openErr != nil {
 			return fmt.Errorf("open checkpoint store: %w", openErr)
 		}

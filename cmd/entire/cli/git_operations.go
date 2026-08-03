@@ -463,37 +463,18 @@ func FetchMetadataFromCheckpointRemote(ctx context.Context) error {
 }
 
 // resolveCheckpointFetchTarget returns the fetch target for checkpoint data.
-// It prefers the effective URL resolved by checkpoint/remote.FetchURL, which is
-// the source of truth for checkpoint fetch location. If URL resolution fails, it
-// falls back to the origin remote name so callers can still attempt a fetch.
+// Thin alias for remote.CheckpointFetchTarget (the single source of truth).
 func resolveCheckpointFetchTarget(ctx context.Context) string {
-	url, err := remote.FetchURL(ctx)
-	if err == nil && url != "" {
-		return url
-	}
-	return "origin"
+	return remote.CheckpointFetchTarget(ctx)
 }
 
-// FetchCheckpointRef fetches a single per-checkpoint ref (refs/entire/checkpoints/
-// <shard>/<id>) from the checkpoint remote into the local ref of the same name,
-// so the git-refs store can resolve a checkpoint written on another machine.
-// Best-effort: the caller treats a fetch failure as "checkpoint not found".
+// FetchCheckpointRef fetches a single per-checkpoint ref from the checkpoint
+// remote. Thin alias for remote.FetchCheckpointRef, kept so existing cli-side
+// call sites and OpenOptions wiring stay unchanged; see that function for the
+// absence-vs-failure contract (remote-lacks-ref wraps
+// plumbing.ErrReferenceNotFound; transport failures surface as-is).
 func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
-	fetchTarget := resolveCheckpointFetchTarget(ctx)
-	refSpec := "+" + ref.String() + ":" + ref.String()
-	if _, err := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refSpec},
-		NoTags:   true,
-	}); err != nil {
-		// Redact: fetchTarget can be a remote URL with embedded credentials
-		// (CI origin URLs), and this error is logged and shown to users.
-		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, remote.RedactURL(fetchTarget), err)
-	}
-	return nil
+	return remote.FetchCheckpointRef(ctx, ref) //nolint:wrapcheck // thin alias; the remote error carries full context
 }
 
 // checkpointRefListTimeout bounds the names-only ls-remote used by user-facing

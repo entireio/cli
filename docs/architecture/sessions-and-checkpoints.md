@@ -405,8 +405,11 @@ reconfiguring:
 - A **hex** ID is read from the active (configured) primary first; when the
   primary is git-refs it also falls back to the git-branch store (a hex checkpoint
   may still sit on the pre-migration v1 branch, or have been migrated into refs).
-- `List` unions both backends. **Writes are not kind-routed** — they go to the
-  configured primary (+ mirrors); the minted ID already matches the primary.
+- `List` unions both backends. **Creates (`Session`) are not kind-routed** — they
+  go to the configured primary (+ mirrors); the minted ID already matches the
+  primary. **Backfills** (summary/transcript/attribution) update an existing
+  checkpoint and ARE kind-routed: they follow the read order, falling through to
+  the next store only on `ErrCheckpointNotFound`.
 
 **Generation:**
 - Minted by `checkpoint.GenerateCheckpointID`, which picks the format from the

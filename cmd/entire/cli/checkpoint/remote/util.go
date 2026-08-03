@@ -40,6 +40,18 @@ type FetchURLOptions struct {
 // If ENTIRE_CHECKPOINT_TOKEN is set and a checkpoint remote is configured, HTTPS is
 // forced so the token can be used even when origin is configured via SSH.
 func FetchURL(ctx context.Context, opts ...FetchURLOptions) (string, error) {
+	url, _, err := fetchURLAuthoritative(ctx, opts...)
+	return url, err
+}
+
+// fetchURLAuthoritative is FetchURL plus whether the returned URL is
+// authoritative for checkpoint refs. It is false exactly when a
+// checkpoint_remote IS configured (or cannot be determined) but resolution
+// fell back to the origin URL — a remote that by construction does not host
+// the configured checkpoint refs. Callers that classify "ref absent on the
+// remote" (FetchCheckpointRef's ls-remote probe) must not treat emptiness on
+// a non-authoritative target as absence.
+func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string, bool, error) {
 	var opt FetchURLOptions
 	if len(opts) > 0 {
 		opt = opts[0]
@@ -70,17 +82,23 @@ func FetchURL(ctx context.Context, opts ...FetchURLOptions) (string, error) {
 	if err != nil {
 		if originURL != "" {
 			logFallback(ctx, "fetch", originURL, "load settings", err)
-			return originURL, nil
+			// Settings unreadable → checkpoint_remote unknown; conservative:
+			// do not certify origin as authoritative for checkpoint refs.
+			return originURL, false, nil
 		}
-		return "", fmt.Errorf("load settings: %w", err)
+		return "", false, fmt.Errorf("load settings: %w", err)
 	}
 
 	config := s.GetCheckpointRemote()
 	if config == nil {
 		if originURL == "" {
-			return "", fmt.Errorf("no fetch URL found: %w", originErr)
+			// Genuinely no remote to fetch checkpoints from: no origin remote and
+			// no configured checkpoint_remote. Tagged with the sentinel so callers
+			// classify a probe failure as absence rather than a real error.
+			return "", false, fmt.Errorf("no fetch URL found: %w: %w", originErr, errNoCheckpointRemoteConfigured)
 		}
-		return originURL, nil
+		// No checkpoint_remote configured: origin IS the checkpoint host.
+		return originURL, true, nil
 	}
 
 	if withToken {
@@ -91,25 +109,25 @@ func FetchURL(ctx context.Context, opts ...FetchURLOptions) (string, error) {
 				Host:     host,
 			}, config)
 			if err == nil {
-				return checkpointURL, nil
+				return checkpointURL, true, nil
 			}
 		}
 
 		// In token-based execution path, short-circuit to avoid additional
 		// change in protocol.
 		if originURL != "" {
-			return originURL, nil
+			return originURL, false, nil
 		}
 	}
 
 	if originURL == "" {
-		return "", fmt.Errorf("no fetch URL found: %w", originErr)
+		return "", false, fmt.Errorf("no fetch URL found: %w", originErr)
 	}
 
 	info, err := ParseURL(originURL)
 	if err != nil {
 		logFallback(ctx, "fetch", originURL, "parse origin remote URL", err)
-		return originURL, nil
+		return originURL, false, nil
 	}
 
 	checkpointURL, err := deriveCheckpointURLFromInfo(info, config)
@@ -119,13 +137,13 @@ func FetchURL(ctx context.Context, opts ...FetchURLOptions) (string, error) {
 		// provider). Honor the configured checkpoint_remote by targeting the
 		// provider's canonical host over HTTPS rather than falling back to origin.
 		if providerURL, ok := resolveProviderCheckpointURL(ctx, config, opt.WorktreeRoot); ok {
-			return providerURL, nil
+			return providerURL, true, nil
 		}
 		logFallback(ctx, "fetch", originURL, "derive checkpoint remote URL", err)
-		return originURL, nil
+		return originURL, false, nil
 	}
 
-	return checkpointURL, nil
+	return checkpointURL, true, nil
 }
 
 // PushURL returns the effective checkpoint push URL for the current repository.
