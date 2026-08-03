@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/spf13/cobra"
@@ -57,7 +59,9 @@ type trailResumeContinuation struct {
 
 // trailResumeReportError is the typed-failure half of the JSON contract:
 // typed resume errors emit the report with this error object and a non-zero
-// exit; untyped/pre-action failures keep stdout empty with text on stderr.
+// exit. Untyped errors, and failures before the resume phase is entered
+// (trail lookup, flag validation, --repo/--branch assertions), keep stdout
+// empty with text on stderr.
 type trailResumeReportError struct {
 	Type         string `json:"type"`
 	Message      string `json:"message"`
@@ -119,7 +123,7 @@ func buildTrailResumeActionReport(
 	actions trailResumeReportActions,
 	sessions []strategy.RestoredSession,
 	preferredSessionID string,
-) trailResumeActionReport {
+) (trailResumeActionReport, error) {
 	report := trailResumeActionReport{
 		Trail: trailResumeReportTrail{
 			ID:     strings.TrimSpace(found.ID),
@@ -140,28 +144,36 @@ func buildTrailResumeActionReport(
 	if report.Actions.CheckpointID == "" {
 		report.Actions.CheckpointID = restoredSessionsCheckpointID(sessions)
 	}
-	report.Continuation = trailResumeContinuationFor(sessions, preferredSessionID)
-	return report
+	if len(sessions) > 0 {
+		continuation, err := trailResumeContinuationFor(sessions, preferredSessionID)
+		if err != nil {
+			return report, err
+		}
+		report.Continuation = continuation
+	}
+	return report, nil
 }
 
-func trailResumeContinuationFor(sessions []strategy.RestoredSession, preferredSessionID string) *trailResumeContinuation {
-	if len(sessions) == 0 {
-		return nil
-	}
+// trailResumeContinuationFor mirrors the text path's contract: an
+// unresolvable agent is an error (a continuation nobody can execute is not a
+// continuation), never a silent empty command. Callers guarantee sessions is
+// non-empty.
+func trailResumeContinuationFor(sessions []strategy.RestoredSession, preferredSessionID string) (*trailResumeContinuation, error) {
 	choice := buildTrailResumeRestoredSessionChoices(sessions)[0].Session
 	if preferredSessionID != "" {
 		if preferred, ok := findTrailRestoredSession(sessions, preferredSessionID); ok {
 			choice = preferred
 		}
 	}
-	continuation := &trailResumeContinuation{
+	sessionAgent, err := strategy.ResolveAgentForRewind(choice.Agent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve agent for session %s: %w", choice.SessionID, err)
+	}
+	return &trailResumeContinuation{
 		Agent:     string(choice.Agent),
 		SessionID: choice.SessionID,
-	}
-	if sessionAgent, err := strategy.ResolveAgentForRewind(choice.Agent); err == nil {
-		continuation.Command = sessionAgent.FormatResumeCommand(choice.SessionID)
-	}
-	return continuation
+		Command:   sessionAgent.FormatResumeCommand(choice.SessionID),
+	}, nil
 }
 
 // runTrailResumeJSON drives an actual resume with a JSON action report on
@@ -189,13 +201,25 @@ func runTrailResumeJSON(ctx context.Context, cmd *cobra.Command, found api.Trail
 		if reportErr == nil {
 			return err
 		}
-		report := buildTrailResumeActionReport(found, branch, actions, restored, "")
+		// Continuation is nil'd below, so the builder's continuation error
+		// (unresolvable agent) is irrelevant on the failure path.
+		report, buildErr := buildTrailResumeActionReport(found, branch, actions, restored, "")
+		if buildErr != nil {
+			logging.Debug(ctx, "trail resume json: continuation unresolvable in failure report (ignored)",
+				slog.String("error", buildErr.Error()))
+		}
 		report.Continuation = nil
 		report.Error = reportErr
 		if encodeErr := emit(report); encodeErr != nil {
-			return encodeErr
+			return fmt.Errorf("%w (also failed to encode the action report: %w)", err, encodeErr)
 		}
 		return NewSilentError(err)
+	}
+
+	if checkpointID := strings.TrimSpace(opts.CheckpointID); checkpointID != "" {
+		// Record the requested checkpoint up front so failure reports carry
+		// it even when nothing was restored.
+		actions.CheckpointID = checkpointID
 	}
 
 	if err := ensureTrailResumeBranchAvailable(ctx, errW, branch); err != nil {
@@ -206,10 +230,14 @@ func runTrailResumeJSON(ctx context.Context, cmd *cobra.Command, found api.Trail
 	// there is no current branch, so a successful checkout below did switch.
 	currentBranch, branchErr := GetCurrentBranch(ctx)
 	if branchErr != nil {
+		logging.Debug(ctx, "trail resume json: current branch unreadable, reporting checkout as a switch",
+			slog.String("error", branchErr.Error()))
 		currentBranch = ""
 	}
 	existedLocally, existsErr := BranchExistsLocally(ctx, branch)
 	if existsErr != nil {
+		logging.Debug(ctx, "trail resume json: local branch existence unreadable, reporting no fetch",
+			slog.String("error", existsErr.Error()))
 		existedLocally = true
 	}
 	proceed, err := switchToBranchForResume(ctx, io.Discard, errW, branch, true)
@@ -242,7 +270,13 @@ func runTrailResumeJSON(ctx context.Context, cmd *cobra.Command, found api.Trail
 		return fail(err)
 	}
 
-	return emit(buildTrailResumeActionReport(found, branch, actions, sessions, preferred))
+	report, err := buildTrailResumeActionReport(found, branch, actions, sessions, preferred)
+	if err != nil {
+		// Unresolvable agent: mirror the text path's non-zero exit (untyped,
+		// so stdout stays empty per the failure contract).
+		return err
+	}
+	return emit(report)
 }
 
 // ensurePreferredRestoredSession rejects a --session id that is not among the
@@ -265,11 +299,18 @@ func ensurePreferredRestoredSession(sessions []strategy.RestoredSession, preferr
 func trailResumeCheckpointBehindHead(ctx context.Context, branch string) int {
 	repo, err := openRepository(ctx)
 	if err != nil {
+		logging.Debug(ctx, "trail resume json: behind-head count unavailable",
+			slog.String("error", err.Error()))
 		return 0
 	}
 	defer repo.Close()
 	result, err := findBranchCheckpoints(repo, branch)
-	if err != nil || result == nil || !result.newerCommitsExist {
+	if err != nil {
+		logging.Debug(ctx, "trail resume json: behind-head count unavailable",
+			slog.String("error", err.Error()))
+		return 0
+	}
+	if result == nil || !result.newerCommitsExist {
 		return 0
 	}
 	return result.newerCommitCount
@@ -284,16 +325,18 @@ func restoreTrailSessionsForReport(ctx context.Context, errW io.Writer, branch s
 		return sessions, "", err
 	}
 	if opts.SessionID != "" {
+		// Both failure modes stop BEFORE any restore: falling back to the
+		// latest checkpoint here would, with --force, overwrite session logs
+		// the caller never asked to touch.
 		contexts, _, ctxErr := resolveTrailResumeSessionContexts(ctx, branch)
-		if ctxErr == nil {
-			if sessionCtx, ok := findTrailResumeSession(contexts, opts.SessionID); ok {
-				sessions, err := restoreByCheckpointID(ctx, io.Discard, errW, id.CheckpointID(sessionCtx.CheckpointID), opts.Force)
-				return sessions, opts.SessionID, err
-			}
-		} else {
-			fmt.Fprintf(errW, "Warning: could not load trail checkpoint sessions: %v\n", ctxErr)
+		if ctxErr != nil {
+			return nil, "", fmt.Errorf("cannot resolve --session %s: loading trail checkpoint sessions failed: %w", opts.SessionID, ctxErr)
 		}
-		sessions, err := restoreFromCurrentBranch(ctx, io.Discard, errW, branch, opts.Force, false)
+		sessionCtx, ok := findTrailResumeSession(contexts, opts.SessionID)
+		if !ok {
+			return nil, "", &ResumeSessionNotFoundError{SessionID: opts.SessionID}
+		}
+		sessions, err := restoreByCheckpointID(ctx, io.Discard, errW, id.CheckpointID(sessionCtx.CheckpointID), opts.Force)
 		return sessions, opts.SessionID, err
 	}
 	sessions, err := restoreFromCurrentBranch(ctx, io.Discard, errW, branch, opts.Force, false)

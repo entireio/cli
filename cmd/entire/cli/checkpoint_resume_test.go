@@ -265,8 +265,12 @@ func TestCheckpointResume_WorktreeClash(t *testing.T) {
 
 	cmd, out := newCheckpointResumeTestCmd(t)
 	cmd.SetArgs([]string{cpID.String()})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute() error = %v\noutput: %s", err, out.String())
+	// Nothing was resumed, so scripted callers must see a non-zero exit; the
+	// guidance is still printed (to stderr).
+	execErr := cmd.Execute()
+	var clash *ResumeWorktreeClashError
+	if !errors.As(execErr, &clash) || clash.WorktreePath == "" {
+		t.Fatalf("Execute() error = %v, want ResumeWorktreeClashError with the other worktree's path\noutput: %s", execErr, out.String())
 	}
 	output := out.String()
 	if !strings.Contains(output, "already checked out") {

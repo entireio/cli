@@ -195,8 +195,14 @@ func resumeSessionOnBranch(ctx context.Context, cmd *cobra.Command, branchName s
 // resume, so two sessions on the same branch resume independently.
 func resumeByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID id.CheckpointID, force bool) error {
 	sessions, err := restoreByCheckpointID(ctx, w, errW, checkpointID, force)
-	if err != nil || len(sessions) == 0 {
+	if err != nil {
 		return err
+	}
+	if err := ensureSessionsRestored(sessions, force); err != nil {
+		return err
+	}
+	if len(sessions) == 0 {
+		return nil
 	}
 	return continueSessionRestoredSessions(ctx, w, sessions)
 }
@@ -236,10 +242,32 @@ func restoreByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID 
 
 func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName string, force bool) error {
 	sessions, err := restoreFromCurrentBranch(ctx, w, errW, branchName, force, true)
-	if err != nil || len(sessions) == 0 {
+	if err != nil {
 		return err
 	}
+	if err := ensureSessionsRestored(sessions, force); err != nil {
+		return err
+	}
+	if len(sessions) == 0 {
+		return nil
+	}
 	return continueSessionRestoredSessions(ctx, w, sessions)
+}
+
+// ensureSessionsRestored enforces the non-interactive contract shared by the
+// trail, session, and checkpoint resume paths: zero restored sessions is a
+// failure ("nothing was resumed") for scripted callers. When prompts were
+// possible, an interactive zero is treated as a decline and exits 0 — the
+// guard cannot distinguish a genuine empty restore there, which then also
+// exits 0 (the user saw the restore messages).
+func ensureSessionsRestored(sessions []strategy.RestoredSession, force bool) error {
+	if len(sessions) > 0 {
+		return nil
+	}
+	if !force && interactive.CanPromptInteractively() {
+		return nil
+	}
+	return &ResumeNoSessionsRestoredError{}
 }
 
 func continueSessionRestoredSessions(ctx context.Context, w io.Writer, sessions []strategy.RestoredSession) error {
@@ -736,13 +764,17 @@ func findCheckpointInHistory(start *object.Commit, stopAt *plumbing.Hash) *branc
 	return result
 }
 
-// promptResumeFromOlderCheckpoint asks the user if they want to resume from an older checkpoint.
+// headCommitLabel names the current commit in resume notices. Deliberately
+// not status.go's detachedHEADDisplay: that constant labels a *detached* HEAD
+// and may diverge; this notice fires on attached branch tips too.
+const headCommitLabel = "HEAD"
+
 // olderCheckpointNotice describes proceeding from a checkpoint older than
 // HEAD, for non-interactive runs where the confirmation prompt cannot fire.
 func olderCheckpointNotice(repo *git.Repository, result *branchCheckpointsResult) string {
-	headLabel := detachedHEADDisplay
+	headLabel := headCommitLabel
 	if head, err := repo.Head(); err == nil {
-		headLabel = detachedHEADDisplay + " " + head.Hash().String()[:7]
+		headLabel += " " + head.Hash().String()[:7]
 	}
 	plural := "s"
 	if result.newerCommitCount == 1 {
@@ -752,6 +784,7 @@ func olderCheckpointNotice(repo *git.Repository, result *branchCheckpointsResult
 		headLabel, result.commitHash[:7], result.newerCommitCount, plural)
 }
 
+// promptResumeFromOlderCheckpoint asks the user if they want to resume from an older checkpoint.
 func promptResumeFromOlderCheckpoint() (bool, error) {
 	var confirmed bool
 

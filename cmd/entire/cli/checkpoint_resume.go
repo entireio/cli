@@ -223,9 +223,11 @@ func resumeResolvedCheckpoint(ctx context.Context, cmd *cobra.Command, lookup *e
 		return resumeByCheckpointID(ctx, w, cmd.ErrOrStderr(), cpID, force)
 	}
 	if otherPath, ok := branchCheckedOutElsewhere(ctx, branch); ok {
-		fmt.Fprintf(w, "Branch %q is already checked out at %s.\nResume this checkpoint from that worktree:\n\n  cd %s && entire checkpoint resume %s\n",
+		// Guidance on stderr, typed silent error for the exit code: nothing
+		// was resumed, and scripted callers must be able to detect that.
+		fmt.Fprintf(cmd.ErrOrStderr(), "Branch %q is already checked out at %s.\nResume this checkpoint from that worktree:\n\n  cd %s && entire checkpoint resume %s\n",
 			branch, otherPath, shellQuote(otherPath), cpID)
-		return nil
+		return NewSilentError(&ResumeWorktreeClashError{Branch: branch, WorktreePath: otherPath})
 	}
 	return resumeSessionOnBranch(ctx, cmd, branch, cpID, force)
 }

@@ -52,9 +52,9 @@ func (e *ResumeSessionNotFoundError) Error() string {
 	return fmt.Sprintf("session %q was not found in the restored checkpoint", e.SessionID)
 }
 
-// ResumeMetadataUnavailableError reports that a checkpoint referenced by a
-// commit trailer exists but its metadata could not be read locally or fetched
-// from any remote.
+// ResumeMetadataUnavailableError reports that a checkpoint id (from a commit
+// trailer or an explicit --checkpoint flag, so it may also simply not exist)
+// has no readable metadata locally and none could be fetched from origin.
 type ResumeMetadataUnavailableError struct {
 	CheckpointID id.CheckpointID
 }

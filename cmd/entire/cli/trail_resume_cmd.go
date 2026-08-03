@@ -143,7 +143,7 @@ branch. Without one, the trail for the current branch is used.
 
 Resuming switches to the trail branch, restores the latest checkpoint's agent
 session logs, and continues. Interactive terminals ask whether Entire should
-start the agent, with a picker when the checkpoint has multiple sessions.
+start the agent, with a picker when the trail branch has multiple sessions.
 Non-interactive runs print the actions taken and end with the default
 session's resume command as the final line; --json replaces that output with a
 machine-readable action report. Use --session or --checkpoint to resume an
@@ -272,13 +272,18 @@ func runTrailResume(cmd *cobra.Command, opts trailResumeOptions) error {
 		if opts.SessionID != "" {
 			// --session may target a checkpoint older than the latest; the
 			// pre-restore reads map the session id to its owning checkpoint.
+			// Both failure modes stop BEFORE any restore: falling back to the
+			// latest checkpoint here would, with --force, overwrite session
+			// logs the caller never asked to touch.
 			sessions, _, sessionErr := resolveTrailResumeSessionContexts(ctx, branch)
 			if sessionErr != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load trail checkpoint sessions: %v\n", sessionErr)
-			} else if sessionCtx, ok := findTrailResumeSession(sessions, opts.SessionID); ok {
-				return resumeTrailCheckpoint(ctx, cmd, branch, id.CheckpointID(sessionCtx.CheckpointID), opts.SessionID, opts.Force)
+				return fmt.Errorf("cannot resolve --session %s: loading trail checkpoint sessions failed: %w", opts.SessionID, sessionErr)
 			}
-			return resumeTrailLatest(ctx, cmd, branch, opts.Force, opts.SessionID)
+			sessionCtx, ok := findTrailResumeSession(sessions, opts.SessionID)
+			if !ok {
+				return &ResumeSessionNotFoundError{SessionID: opts.SessionID}
+			}
+			return resumeTrailCheckpoint(ctx, cmd, branch, id.CheckpointID(sessionCtx.CheckpointID), opts.SessionID, opts.Force)
 		}
 
 		if interactive.CanPromptInteractively() {
@@ -341,7 +346,7 @@ func resumeTrailLatest(ctx context.Context, cmd *cobra.Command, branch string, f
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
-	if err := ensureTrailResumeBranchAvailable(ctx, w, branch); err != nil {
+	if err := ensureTrailResumeBranchAvailable(ctx, errW, branch); err != nil {
 		return err
 	}
 	proceed, err := switchToBranchForResume(ctx, w, errW, branch, trailResumeSkipBranchPrompts(force))
@@ -352,27 +357,17 @@ func resumeTrailLatest(ctx context.Context, cmd *cobra.Command, branch string, f
 	if err != nil {
 		return err
 	}
-	if err := ensureTrailSessionsRestored(sessions, force); err != nil {
+	if err := ensureSessionsRestored(sessions, force); err != nil {
 		return err
 	}
 	return continueTrailRestoredSessions(ctx, cmd, sessions, preferredSessionID, force)
-}
-
-// ensureTrailSessionsRestored enforces the non-interactive contract: zero
-// restored sessions is a failure ("nothing was resumed"), except when prompts
-// were possible — an interactive zero means the user declined, which exits 0.
-func ensureTrailSessionsRestored(sessions []strategy.RestoredSession, force bool) error {
-	if len(sessions) > 0 || trailResumeCanPromptRestoredSessions(force) {
-		return nil
-	}
-	return &ResumeNoSessionsRestoredError{}
 }
 
 func resumeTrailCheckpoint(ctx context.Context, cmd *cobra.Command, branch string, checkpointID id.CheckpointID, preferredSessionID string, force bool) error {
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
-	if err := ensureTrailResumeBranchAvailable(ctx, w, branch); err != nil {
+	if err := ensureTrailResumeBranchAvailable(ctx, errW, branch); err != nil {
 		return err
 	}
 	proceed, err := switchToBranchForResume(ctx, w, errW, branch, trailResumeSkipBranchPrompts(force))
@@ -383,7 +378,7 @@ func resumeTrailCheckpoint(ctx context.Context, cmd *cobra.Command, branch strin
 	if err != nil {
 		return err
 	}
-	if err := ensureTrailSessionsRestored(sessions, force); err != nil {
+	if err := ensureSessionsRestored(sessions, force); err != nil {
 		return err
 	}
 	return continueTrailRestoredSessions(ctx, cmd, sessions, preferredSessionID, force)
@@ -1201,7 +1196,7 @@ func launchTrailRestoredSession(ctx context.Context, w io.Writer, session strate
 }
 
 func runTrailResumePicker(ctx context.Context, cmd *cobra.Command, branch string, sessions []trailResumeSessionContext, force bool) error {
-	if err := ensureTrailResumeBranchAvailable(ctx, cmd.OutOrStdout(), branch); err != nil {
+	if err := ensureTrailResumeBranchAvailable(ctx, cmd.ErrOrStderr(), branch); err != nil {
 		return err
 	}
 
@@ -1239,7 +1234,8 @@ func runTrailResumePicker(ctx context.Context, cmd *cobra.Command, branch string
 }
 
 // ensureTrailResumeBranchAvailable returns a typed (silent) error when the
-// branch is checked out in another worktree, after printing guidance. A nil
+// branch is checked out in another worktree, after printing guidance to w
+// (callers pass stderr so act-path stdout stays machine-liftable). A nil
 // return means the branch is available for checkout here.
 func ensureTrailResumeBranchAvailable(ctx context.Context, w io.Writer, branch string) error {
 	otherPath, ok := branchCheckedOutElsewhere(ctx, branch)
