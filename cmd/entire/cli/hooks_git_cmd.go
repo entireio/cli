@@ -127,9 +127,12 @@ func (g *gitHookContext) skipUnreadableCheckpointPolicy(err error) bool {
 // Returns a cleanup function that should be deferred.
 // If Entire is not set up or disabled, returns a no-op to avoid creating files.
 func initHookLogging(ctx context.Context) func() {
-	// Don't create any files if Entire is not set up or disabled.
-	// This is checked here as defense-in-depth (also checked in PersistentPreRunE).
-	if !settings.IsSetUpAndEnabled(ctx) {
+	// Don't create any files if Entire is not active for this repo
+	// (repo-level setup or the user-global tier). This is checked here as
+	// defense-in-depth (also checked in PersistentPreRunE); both layers of
+	// the gate must use the same predicate, settings.IsActiveForRepo, so
+	// global-mode repos get hook logging and redaction configuration too.
+	if !settings.IsActiveForRepo(ctx) {
 		return func() {}
 	}
 
@@ -162,10 +165,11 @@ func newHooksGitCmd() *cobra.Command {
 		Hidden: true, // Internal command, not for direct user use
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			// Check if Entire is set up and enabled before doing any work.
-			// This prevents global git hooks from doing anything in repos where
-			// Entire was never enabled or has been disabled.
-			if !settings.IsSetUpAndEnabled(ctx) {
+			// Check if Entire is active for this repo before doing any work.
+			// This prevents global git hooks from doing anything in repos
+			// where Entire was never enabled (repo-level or via the
+			// user-global tier) or has been disabled.
+			if !settings.IsActiveForRepo(ctx) {
 				gitHooksDisabled = true
 				return nil
 			}

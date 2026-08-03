@@ -116,9 +116,11 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	// only short-circuits when the read succeeded), which meant a corrupted
 	// or unreadable settings file made every hook invocation pay the full
 	// dispatch cost instead of exiting fast (#524).
-	// settings.IsSetUpAndEnabled is the same fail-closed gate the git hooks
-	// use (see PersistentPreRunE in hooks_git_cmd.go).
-	if !settings.IsSetUpAndEnabled(cmd.Context()) {
+	// settings.IsActiveForRepo is the same fail-closed gate the git hooks
+	// use (see PersistentPreRunE in hooks_git_cmd.go). It extends
+	// IsSetUpAndEnabled with the user-global tier: repos with no repo-level
+	// setup proceed when global mode is on and the repo is not excluded.
+	if !settings.IsActiveForRepo(cmd.Context()) {
 		return nil
 	}
 
