@@ -52,6 +52,12 @@ type formatSessionTreeOpts struct {
 	TotalCommits int
 	NoColor      bool
 	IsNewBranch  bool
+	// Writer is the target the formatted lines will actually be printed to.
+	// Styling decisions (pushProgressStylesFor) must be computed against this
+	// writer, not io.Discard, or ANSI styling never applies even when the
+	// caller prints to a real, style-capable terminal. Defaults to
+	// io.Discard (no styling) if left unset.
+	Writer io.Writer
 }
 
 type pushProgressStyles struct {
@@ -196,7 +202,11 @@ func sortSessionSummariesByLatest(results []sessionSummary) {
 
 // formatSessionTree renders session summaries as indented stderr lines.
 func formatSessionTree(summaries []sessionSummary, opts formatSessionTreeOpts) []string {
-	styles := pushProgressStylesFor(io.Discard, opts.NoColor)
+	w := opts.Writer
+	if w == nil {
+		w = io.Discard
+	}
+	styles := pushProgressStylesFor(w, opts.NoColor)
 	lines := make([]string, 0, len(summaries)+3)
 
 	branchLabel := ""
@@ -302,6 +312,14 @@ func parsePercentGitProgressEvent(phase gitProgressPhase, m []string, trimmed st
 func displayGitProgress(w io.Writer, stderr string) {
 	styles := pushProgressStylesFor(w, false)
 	lastPhase := gitProgressPhase("")
+	// git emits both "Enumerating objects: N, done." and "Counting objects:
+	// 100% (N/N), done." — parseGitProgressLine maps both to
+	// gitProgressPhaseCounting with Done=true, so without this guard the loop
+	// below prints the "counting objects" Done summary twice. printed tracks
+	// which phases already had their one-time Done summary printed so each
+	// phase surfaces at most once per call, no matter how many raw git lines
+	// mapped to it.
+	printed := make(map[gitProgressPhase]bool)
 	for _, line := range strings.FieldsFunc(stderr, func(r rune) bool { return r == '\n' || r == '\r' }) {
 		event := parseGitProgressLine(line)
 		if event == nil {
@@ -311,6 +329,12 @@ func displayGitProgress(w io.Writer, stderr string) {
 			continue
 		}
 		lastPhase = event.Phase
+		if event.Done {
+			if printed[event.Phase] {
+				continue
+			}
+			printed[event.Phase] = true
+		}
 
 		switch event.Phase {
 		case gitProgressPhaseCounting:

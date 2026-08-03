@@ -105,6 +105,7 @@ func TestFormatSessionTree(t *testing.T) {
 		lines := formatSessionTree(summaries, formatSessionTreeOpts{
 			TotalCommits: 8,
 			NoColor:      true,
+			Writer:       &bytes.Buffer{},
 		})
 
 		assert.Contains(t, lines[0], "8 commits, 2 sessions")
@@ -133,6 +134,7 @@ func TestFormatSessionTree(t *testing.T) {
 		lines := formatSessionTree(summaries, formatSessionTreeOpts{
 			TotalCommits: 16,
 			NoColor:      true,
+			Writer:       &bytes.Buffer{},
 		})
 
 		assert.Contains(t, lines[0], "16 commits, 8 sessions")
@@ -155,6 +157,7 @@ func TestFormatSessionTree(t *testing.T) {
 		lines := formatSessionTree(summaries, formatSessionTreeOpts{
 			TotalCommits: 1,
 			NoColor:      true,
+			Writer:       &bytes.Buffer{},
 		})
 		assert.Contains(t, lines[1], "1 checkpoint")
 		assert.NotContains(t, lines[1], "1 checkpoints")
@@ -174,8 +177,42 @@ func TestFormatSessionTree(t *testing.T) {
 			TotalCommits: 2,
 			NoColor:      true,
 			IsNewBranch:  true,
+			Writer:       &bytes.Buffer{},
 		})
 		assert.Contains(t, lines[0], "new branch")
+	})
+
+	t.Run("styles against the provided writer, not a hardcoded io.Discard", func(t *testing.T) {
+		t.Parallel()
+		summaries := []sessionSummary{{
+			SessionID:       "sess-a",
+			CheckpointCount: 1,
+			CommitCount:     1,
+			EarliestTime:    time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC),
+			LatestTime:      time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC),
+		}}
+
+		// NoColor is left false so the only thing suppressing ANSI codes is
+		// pushProgressStylesFor's own interactive.ShouldStyle(w) check against
+		// whatever writer formatSessionTree actually passes it. A *bytes.Buffer
+		// is never a terminal, so this must render unstyled regardless of
+		// which non-terminal writer is threaded through — but it must be
+		// threaded through opts.Writer, not silently swapped for io.Discard
+		// (the pre-fix behavior, which produced the same unstyled output for a
+		// different reason and so would mask a regression back to it).
+		var buf bytes.Buffer
+		lines := formatSessionTree(summaries, formatSessionTreeOpts{
+			TotalCommits: 1,
+			Writer:       &buf,
+		})
+		require.NotEmpty(t, lines)
+		assert.NotContains(t, lines[0], "\x1b[", "a non-terminal writer must never be styled")
+
+		// Writer left unset (nil) must fall back to io.Discard-equivalent
+		// (unstyled) behavior rather than panicking on a nil io.Writer.
+		assert.NotPanics(t, func() {
+			formatSessionTree(summaries, formatSessionTreeOpts{TotalCommits: 1})
+		})
 	})
 }
 
@@ -246,6 +283,33 @@ func TestParseGitProgressLine(t *testing.T) {
 		assert.Nil(t, parseGitProgressLine("remote: Resolving deltas: 100%"))
 		assert.Nil(t, parseGitProgressLine("Delta compression using up to 8 threads"))
 	})
+}
+
+// TestDisplayGitProgress_DedupsCountingPhase guards against a regression
+// where git's "Enumerating objects: N, done." and "Counting objects: 100%
+// (N/N), done." lines both parse to gitProgressPhaseCounting with Done=true,
+// so the display loop printed two identical "counting objects" lines for a
+// single push. Each phase's Done summary must print at most once.
+func TestDisplayGitProgress_DedupsCountingPhase(t *testing.T) {
+	t.Parallel()
+	stderr := strings.Join([]string{
+		"Enumerating objects: 47, done.",
+		"Counting objects: 100% (47/47), done.",
+		"Compressing objects:  81% (31/38)",
+		"Compressing objects: 100% (38/38), done.",
+		"Writing objects: 100% (42/42), 156.23 KiB | 312.00 KiB/s, done.",
+	}, "\n")
+
+	var buf bytes.Buffer
+	displayGitProgress(&buf, stderr)
+
+	out := buf.String()
+	assert.Equal(t, 1, strings.Count(out, "counting objects"),
+		"the counting phase's Done summary must print exactly once, got: %q", out)
+	assert.Equal(t, 1, strings.Count(out, "compressing:"),
+		"the compressing phase's Done summary must print exactly once, got: %q", out)
+	assert.Equal(t, 1, strings.Count(out, "writing:"),
+		"the writing phase's Done summary must print exactly once, got: %q", out)
 }
 
 // captureStdout redirects os.Stdout to a pipe and returns a function that

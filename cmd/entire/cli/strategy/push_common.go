@@ -159,7 +159,7 @@ func displayPushTarget(target string) string {
 // hints) must NOT be routed through this writer; they write to os.Stderr
 // directly so they still print on non-TTY.
 func pushProgressOutput() io.Writer {
-	if !interactive.IsTerminalWriter(os.Stderr) {
+	if !interactive.ShouldStyle(os.Stderr) {
 		return io.Discard
 	}
 	return os.Stderr

@@ -4,9 +4,31 @@ import (
 	"bytes"
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// syncBuffer is a mutex-guarded io.Writer for tests that read a buffer
+// concurrently with a goroutine writing to it (e.g. pushReporter's reveal
+// goroutine). Reading a plain bytes.Buffer while such a goroutine runs is a
+// data race; syncBuffer serializes access so polling is race-safe.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
 
 func TestPushShouldReveal(t *testing.T) {
 	t.Parallel()
@@ -44,10 +66,23 @@ func TestPushReporter_NonTTY_WritesNothing(t *testing.T) {
 
 func TestPushReporter_TTY_RevealsThenClears(t *testing.T) {
 	t.Parallel()
-	var buf bytes.Buffer
-	r := newPushReporter(context.Background(), &buf, true, time.Millisecond)
+	buf := &syncBuffer{}
+	r := newPushReporter(context.Background(), buf, true, time.Millisecond)
 	r.phase("syncing 3 checkpoints")
-	time.Sleep(15 * time.Millisecond) // let the reveal goroutine fire
+
+	// Poll until the reveal goroutine writes the phase text, rather than
+	// sleeping a fixed duration: under saturated -race CI load the goroutine
+	// may not be scheduled within any fixed window. buf.String() is
+	// mutex-guarded, so polling concurrently with the goroutine's writes is
+	// race-safe.
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(buf.String(), "syncing 3 checkpoints") {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for revealed phase text, got %q", buf.String())
+		}
+		time.Sleep(time.Millisecond)
+	}
+
 	r.finish("pushed 3")
 	out := buf.String()
 	if !strings.Contains(out, "syncing 3 checkpoints") {

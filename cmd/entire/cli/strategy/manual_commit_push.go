@@ -112,7 +112,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// Session-tree summary is progress, not an error/hint — skip the git-log
 	// work entirely on non-TTY stderr (agents/CI) instead of computing it only
 	// to have pushProgressOutput() discard it.
-	if interactive.IsTerminalWriter(os.Stderr) {
+	if interactive.ShouldStyle(os.Stderr) {
 		printPushSummary(ctx, remote, ps.pushTarget())
 	}
 
@@ -366,7 +366,10 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 	// git push apparently hung. TTY-gated and threshold-delayed: agents and CI
 	// (non-TTY stderr) see zero progress bytes.
 	displayTarget := displayPushTarget(pushTarget)
-	rep := newPushReporter(ctx, os.Stderr, interactive.IsTerminalWriter(os.Stderr), 2*time.Second)
+	// isTTY here means "ANSI-capable per ShouldStyle" (respects NO_COLOR and
+	// TERM=cygwin), not merely "stderr is a terminal" — see the repo-wide rule
+	// on gating \r/\033[K writes.
+	rep := newPushReporter(ctx, os.Stderr, interactive.ShouldStyle(os.Stderr), 2*time.Second)
 	rep.phase(fmt.Sprintf("syncing %d checkpoint(s) to %s", len(existing), displayTarget))
 
 	// Fast path: push all refs in one round-trip (fast-forward-only). If every
@@ -441,6 +444,17 @@ func cleanupPushedShadowBranches(ctx context.Context) {
 	}
 }
 
+// pushSummaryLogFormat is the `git log --format=` string runPushSummaryGitLog
+// uses to gather commits for the session-tree summary; parsePushSummaryFromLog
+// parses its output. Deliberately omits `valueonly` on the trailers
+// placeholder: parsePushSummaryFromLog's sessionTrailerRE regex matches
+// against the "Entire-Session: <id>" prefixed form, so stripping the key
+// prefix here would bucket every commit under "unknown". Kept as a
+// package-level const (baked into runPushSummaryGitLog rather than threaded
+// as a parameter) so tests can exercise the exact production format against a
+// real git log — see TestPrintPushSummaryLogFormat_TrailerGroupsUnderSessionID.
+const pushSummaryLogFormat = "%H|%s|%(trailers:key=" + trailers.SessionTrailerKey + ",separator=%x20)|%aI"
+
 // printPushSummary writes a session-level summary of pending checkpoint commits.
 // Silent on any failure — never blocks the push.
 func printPushSummary(ctx context.Context, remoteName, target string) {
@@ -450,25 +464,24 @@ func printPushSummary(ctx context.Context, remoteName, target string) {
 	}
 
 	branchName := paths.MetadataBranchName
-	logFormat := "%H|%s|%(trailers:key=" + trailers.SessionTrailerKey + ",valueonly,separator=%x20)|%aI"
 
 	var logOutput string
 	isNewBranch := false
 
 	if !checkpointremote.IsURL(target) {
 		rangeSpec := "refs/remotes/" + remoteName + "/" + branchName + "..refs/heads/" + branchName
-		firstOut, firstErr := runPushSummaryGitLog(ctx, repoRoot, logFormat, rangeSpec)
+		firstOut, firstErr := runPushSummaryGitLog(ctx, repoRoot, rangeSpec)
 		if firstErr == nil && strings.TrimSpace(firstOut) != "" {
 			logOutput = firstOut
 		} else {
-			fallbackOut, fallbackErr := runPushSummaryGitLog(ctx, repoRoot, logFormat, "refs/heads/"+branchName)
+			fallbackOut, fallbackErr := runPushSummaryGitLog(ctx, repoRoot, "refs/heads/"+branchName)
 			if fallbackErr == nil && strings.TrimSpace(fallbackOut) != "" {
 				logOutput = fallbackOut
 				isNewBranch = true
 			}
 		}
 	} else {
-		fallbackOut, fallbackErr := runPushSummaryGitLog(ctx, repoRoot, logFormat, "refs/heads/"+branchName)
+		fallbackOut, fallbackErr := runPushSummaryGitLog(ctx, repoRoot, "refs/heads/"+branchName)
 		if fallbackErr == nil {
 			logOutput = fallbackOut
 			isNewBranch = strings.TrimSpace(logOutput) != ""
@@ -484,18 +497,22 @@ func printPushSummary(ctx context.Context, remoteName, target string) {
 	}
 
 	totalCommits := len(strings.Split(strings.TrimSpace(logOutput), "\n"))
+	w := pushProgressOutput()
+	// Pass the same writer the tree is printed to so formatSessionTree styles
+	// against the real target instead of io.Discard — otherwise ANSI styling
+	// never applies even when w is a real, style-capable terminal.
 	lines := formatSessionTree(summaries, formatSessionTreeOpts{
 		TotalCommits: totalCommits,
 		IsNewBranch:  isNewBranch,
+		Writer:       w,
 	})
-	w := pushProgressOutput()
 	for _, line := range lines {
 		fmt.Fprintln(w, line)
 	}
 }
 
-func runPushSummaryGitLog(ctx context.Context, repoRoot, format, rangeSpec string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "log", "--format="+format, rangeSpec)
+func runPushSummaryGitLog(ctx context.Context, repoRoot, rangeSpec string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "log", "--format="+pushSummaryLogFormat, rangeSpec)
 	cmd.Dir = repoRoot
 	out, err := cmd.Output()
 	if err != nil {

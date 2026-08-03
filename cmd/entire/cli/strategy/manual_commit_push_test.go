@@ -58,6 +58,47 @@ func TestDeferCheckpointPushOnEmptyRemote_UsesLocalTrackingRefs(t *testing.T) {
 		"a dedicated checkpoint remote is exempt from the guard")
 }
 
+// TestPrintPushSummaryLogFormat_TrailerGroupsUnderSessionID guards against a
+// regression where pushSummaryLogFormat's %(trailers:...) placeholder used
+// `valueonly`, which strips the "Entire-Session: " key prefix that
+// parsePushSummaryFromLog's regex requires. Without the prefix every commit
+// falls back to the "unknown" bucket. This runs the real `git log` (via
+// runPushSummaryGitLog) against a real commit carrying the trailer, so
+// re-adding `valueonly` to pushSummaryLogFormat makes this test fail.
+func TestPrintPushSummaryLogFormat_TrailerGroupsUnderSessionID(t *testing.T) {
+	// No t.Parallel: uses t.Chdir via testutil helpers reading cwd-independent
+	// paths only (repoRoot passed explicitly to runPushSummaryGitLog).
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = dir
+		require.NoError(t, cmd.Run(), "git %v", args)
+	}
+	// Orphan branch, matching how the manual-commit strategy actually creates
+	// the metadata branch: the checkpoint commit has no ancestor commit
+	// (which would otherwise carry no trailer and legitimately bucket under
+	// "unknown", muddying the assertion below).
+	run("checkout", "--orphan", paths.MetadataBranchName)
+	run("rm", "-rf", "--cached", ".")
+	testutil.WriteFile(t, dir, "checkpoint.txt", "data")
+	testutil.GitAdd(t, dir, "checkpoint.txt")
+	testutil.GitCommit(t, dir, "Checkpoint: abc1234\n\nEntire-Session: sess-real-123")
+
+	out, err := runPushSummaryGitLog(t.Context(), dir, "refs/heads/"+paths.MetadataBranchName)
+	require.NoError(t, err)
+
+	summaries := parsePushSummaryFromLog(out)
+	require.Len(t, summaries, 1)
+	assert.Equal(t, "sess-real-123", summaries[0].SessionID,
+		"a real Entire-Session trailer must group under its session id, not fall back to unknown")
+}
+
 // TestFlushCheckpointRefsQueue_NonTTY_NoProgressOutput verifies the git-refs
 // default pre-push path stays silent on a non-TTY writer while still landing
 // the queued refs. captureStderr's os.Pipe write end is never a terminal, so
@@ -66,6 +107,7 @@ func TestDeferCheckpointPushOnEmptyRemote_UsesLocalTrackingRefs(t *testing.T) {
 //
 // Not parallel: uses captureStderr's os.Stderr redirection and t.Chdir.
 func TestFlushCheckpointRefsQueue_NonTTY_NoProgressOutput(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()

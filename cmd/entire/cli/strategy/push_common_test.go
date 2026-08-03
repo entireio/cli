@@ -1611,6 +1611,7 @@ func TestDoPushRef_NewContent_SaysDone(t *testing.T) {
 //
 // Not parallel: uses t.Chdir() and the logging package's global writer state.
 func TestTryPushRefCommon_FileLogsProgressOnNonTTY(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	workDir, bareDir := setupBareRemoteWithCheckpointBranch(t)
 	t.Chdir(workDir)
 
