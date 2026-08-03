@@ -45,6 +45,12 @@ the commands are always runnable in every build.
   resolving each to its branch and pointing at the owning worktree when the
   branch is checked out elsewhere. Resume keeps an existing local session log
   as-is by default (`--force` overwrites it from the checkpoint).
+  Non-interactive and `--json` resume runs (including the hidden
+  `trail resume` and `checkpoint resume`) exit non-zero whenever nothing was
+  resumed — typed errors: worktree clash, no checkpoint, metadata unavailable,
+  session not found, no sessions restored; declining an interactive prompt
+  exits zero. `trail resume --json` performs the resume and emits a
+  machine-readable action report (`--no-resume --json` stays inspection-only).
   `adopt` moves an active session from another repo or worktree into the current
   worktree and resets target-local checkpoint bookkeeping so future commits link
   to the adopted session from the new location.

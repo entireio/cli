@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -299,5 +300,99 @@ func TestRunTrailResumeJSON_DrivesSuccessAndTypedFailure(t *testing.T) {
 	}
 	if _, hasContinuation := report["continuation"]; hasContinuation {
 		t.Errorf("failure report must not offer a continuation: %s", stdout.String())
+	}
+}
+
+// TestRunTrailResumeJSON_ReportsBranchSwitch pins switched_branch=true: the
+// act path checked out the trail branch from elsewhere.
+func TestRunTrailResumeJSON_ReportsBranchSwitch(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", filepath.Join(tmpDir, "claude-projects"))
+
+	repo, w, _ := setupResumeTestRepo(t, tmpDir, false)
+	cpID := id.MustCheckpointID("1234abcd5678")
+	writeCommittedResumeCheckpoint(t, repo, cpID, "session-switch", time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
+	writeResumeTestCommit(t, tmpDir, w, "checkpointed.txt", "Add feature\n\nEntire-Checkpoint: "+cpID.String())
+
+	runResumeTestGit(t, tmpDir, "checkout", "-b", "elsewhere")
+
+	cmd := &cobra.Command{}
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	found := api.TrailResource{Number: 13, Branch: "master"}
+	if err := runTrailResumeJSON(context.Background(), cmd, found, "master", trailResumeOptions{JSON: true}); err != nil {
+		t.Fatalf("runTrailResumeJSON() error = %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	var report map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	actionsPayload, ok := report["actions"].(map[string]any)
+	if !ok {
+		t.Fatalf("actions = %v, want an object", report["actions"])
+	}
+	if actionsPayload["switched_branch"] != true {
+		t.Errorf("switched_branch = %v, want true (was on another branch)", actionsPayload["switched_branch"])
+	}
+	if actionsPayload["fetched_branch"] != false {
+		t.Errorf("fetched_branch = %v, want false (branch existed locally)", actionsPayload["fetched_branch"])
+	}
+}
+
+// TestRunTrailResumeJSON_ReportsBranchFetch pins fetched_branch=true: the
+// trail branch existed only on origin and the act path fetched it, with no
+// prompt, before restoring.
+func TestRunTrailResumeJSON_ReportsBranchFetch(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", filepath.Join(tmpDir, "claude-projects"))
+
+	repo, w, _ := setupResumeTestRepo(t, tmpDir, false)
+	cpID := id.MustCheckpointID("9876fedc5432")
+	writeCommittedResumeCheckpoint(t, repo, cpID, "session-fetch", time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
+
+	runResumeTestGit(t, tmpDir, "checkout", "-b", "feat-remote")
+	writeResumeTestCommit(t, tmpDir, w, "checkpointed.txt", "Add feature\n\nEntire-Checkpoint: "+cpID.String())
+
+	bareDir := t.TempDir()
+	runResumeTestGit(t, tmpDir, "init", "--bare", bareDir)
+	runResumeTestGit(t, tmpDir, "remote", "add", "origin", bareDir)
+	runResumeTestGit(t, tmpDir, "push", "--quiet", "origin", "feat-remote")
+	runResumeTestGit(t, tmpDir, "checkout", "master")
+	runResumeTestGit(t, tmpDir, "branch", "-D", "feat-remote")
+
+	cmd := &cobra.Command{}
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	found := api.TrailResource{Number: 14, Branch: "feat-remote"}
+	if err := runTrailResumeJSON(context.Background(), cmd, found, "feat-remote", trailResumeOptions{JSON: true}); err != nil {
+		t.Fatalf("runTrailResumeJSON() error = %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	var report map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	actionsPayload, ok := report["actions"].(map[string]any)
+	if !ok {
+		t.Fatalf("actions = %v, want an object", report["actions"])
+	}
+	if actionsPayload["fetched_branch"] != true {
+		t.Errorf("fetched_branch = %v, want true (branch was remote-only)", actionsPayload["fetched_branch"])
+	}
+	if actionsPayload["switched_branch"] != true {
+		t.Errorf("switched_branch = %v, want true", actionsPayload["switched_branch"])
+	}
+}
+
+// runResumeTestGit runs a git command in dir, failing the test on error.
+func runResumeTestGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	gitCmd := exec.CommandContext(context.Background(), "git", args...)
+	gitCmd.Dir = dir
+	if out, err := gitCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
