@@ -114,6 +114,27 @@ func TestPushReporter_Styled_RevealsLiveDetailThenPersistentSummary(t *testing.T
 	}
 }
 
+// TestPushReporter_Styled_EmptySummaryClearsWithoutGarbage covers the
+// aborted/failed-push path (e.g. non-interactive SSH auth failure) where the
+// caller calls finish("") and then prints its own error. A revealed line must
+// be cleared, NOT replaced by a content-less "[entire]  (Ns)" persistent line.
+func TestPushReporter_Styled_EmptySummaryClearsWithoutGarbage(t *testing.T) {
+	t.Parallel()
+	buf := &syncBuffer{}
+	r := newPushReporter(context.Background(), buf, true, time.Millisecond)
+	r.phase("syncing 3 checkpoints")
+	waitForContains(t, buf, "syncing 3 checkpoints")
+
+	r.finish("")
+	out := buf.String()
+	if strings.Contains(out, "[entire]  (") {
+		t.Fatalf("empty-summary finish emitted a content-less persistent line: %q", out)
+	}
+	if !strings.HasSuffix(out, "\r\033[K") {
+		t.Fatalf("expected empty-summary finish to clear the line, got %q", out)
+	}
+}
+
 func TestPushReporter_Styled_FastPush_StaysHidden(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer

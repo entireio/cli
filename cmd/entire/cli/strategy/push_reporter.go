@@ -153,8 +153,15 @@ func (r *pushReporter) finish(summary string) {
 
 	r.mu.Lock()
 	if r.revealed && r.styled {
-		elapsed := int(time.Since(r.start).Seconds())
-		fmt.Fprintf(r.w, "\r[entire] %s (%ds)\033[K\n", summary, elapsed)
+		if summary == "" {
+			// No summary (e.g. an aborted/failed push whose caller prints its
+			// own error next): just clear the in-place line, don't emit a
+			// content-less "[entire]  (Ns)" persistent line.
+			fmt.Fprint(r.w, "\r\033[K")
+		} else {
+			elapsed := int(time.Since(r.start).Seconds())
+			fmt.Fprintf(r.w, "\r[entire] %s (%ds)\033[K\n", summary, elapsed)
+		}
 	}
 	r.mu.Unlock()
 
