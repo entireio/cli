@@ -2090,6 +2090,8 @@ const shellCompletionComment = "# Entire CLI shell completion"
 // errUnsupportedShell is returned when the user's shell is not supported for completion.
 var errUnsupportedShell = errors.New("unsupported shell")
 
+const installerShellEnv = "ENTIRE_INSTALLER_SHELL"
+
 // shellCompletionTarget returns the rc file path and completion lines for the
 // user's current shell.
 func shellCompletionTarget() (shellName, rcFile, completionLine string, err error) {
@@ -2098,7 +2100,10 @@ func shellCompletionTarget() (shellName, rcFile, completionLine string, err erro
 		return "", "", "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
 
-	shell := os.Getenv("SHELL")
+	shell := os.Getenv(installerShellEnv)
+	if shell == "" {
+		shell = os.Getenv("SHELL")
+	}
 	switch {
 	case strings.Contains(shell, "zsh"):
 		return "Zsh",
@@ -2115,8 +2120,12 @@ func shellCompletionTarget() (shellName, rcFile, completionLine string, err erro
 			"source <(entire completion bash)",
 			nil
 	case strings.Contains(shell, "fish"):
+		configHome := os.Getenv("XDG_CONFIG_HOME")
+		if configHome == "" {
+			configHome = filepath.Join(home, ".config")
+		}
 		return "Fish",
-			filepath.Join(home, ".config", "fish", "config.fish"),
+			filepath.Join(configHome, "fish", "config.fish"),
 			"entire completion fish | source",
 			nil
 	default:

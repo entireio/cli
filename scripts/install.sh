@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# This installer requires Bash. It can be launched from Fish, Zsh, or Bash with:
+#   curl -fsSL https://entire.io/install.sh | bash
+
 set -euo pipefail
 
 GITHUB_REPO="entireio/cli"
@@ -48,6 +51,84 @@ Options:
   --channel   Release channel to install (default: stable)
   -h, --help  Show this help message
 EOF
+}
+
+normalize_shell_name() {
+    local shell_name="${1##*/}"
+    shell_name="${shell_name#-}"
+
+    case "$shell_name" in
+        bash|fish|zsh)
+            echo "$shell_name"
+            ;;
+    esac
+}
+
+detect_user_shell() {
+    local parent_command=""
+    local shell_name=""
+
+    # The installer itself runs under Bash, so inspect its parent first to find
+    # the shell the user actually launched it from. $SHELL is only a fallback:
+    # it commonly names the login shell rather than the current shell.
+    if command -v ps &> /dev/null; then
+        parent_command="$(ps -p "$PPID" -o comm= 2>/dev/null || true)"
+        shell_name="$(normalize_shell_name "$parent_command")"
+    fi
+
+    if [[ -z "$shell_name" ]]; then
+        shell_name="$(normalize_shell_name "${SHELL:-}")"
+    fi
+
+    echo "$shell_name"
+}
+
+show_path_setup() {
+    local shell_name="$1"
+    local install_dir="$2"
+    local shell_config=""
+
+    echo ""
+    echo -e "  Add ${BOLD}entire${NC} to your PATH:"
+    echo ""
+
+    case "$shell_name" in
+        fish)
+            # fish_add_path updates this Fish session and persists the path for
+            # future sessions, so no config-file edit or restart is required.
+            echo -e "    ${BOLD}fish_add_path \"\$HOME/.local/bin\"${NC}"
+            echo ""
+            echo -e "  Then run ${BOLD}entire${NC} to get started."
+            ;;
+        zsh)
+            # shellcheck disable=SC2088
+            shell_config="~/.zshrc"
+            echo -e "    ${BOLD}echo 'export PATH=\"${install_dir}:\$PATH\"' >> ${shell_config}${NC}"
+            echo ""
+            echo -e "  Restart your terminal, then run ${BOLD}entire${NC} to get started."
+            ;;
+        bash)
+            if [[ -f "$HOME/.bash_profile" ]]; then
+                # shellcheck disable=SC2088
+                shell_config="~/.bash_profile"
+            else
+                # shellcheck disable=SC2088
+                shell_config="~/.bashrc"
+            fi
+            echo -e "    ${BOLD}echo 'export PATH=\"${install_dir}:\$PATH\"' >> ${shell_config}${NC}"
+            echo ""
+            echo -e "  Restart your terminal, then run ${BOLD}entire${NC} to get started."
+            ;;
+        *)
+            echo "  Fish:"
+            echo -e "    ${BOLD}fish_add_path \"\$HOME/.local/bin\"${NC}"
+            echo ""
+            echo "  Bash, Zsh, and other POSIX-compatible shells:"
+            echo -e "    ${BOLD}export PATH=\"${install_dir}:\$PATH\"${NC}"
+            echo ""
+            echo -e "  Then run ${BOLD}entire${NC} to get started."
+            ;;
+    esac
 }
 
 detect_os() {
@@ -269,6 +350,11 @@ main() {
         error "Installation completed but the binary failed to execute. Please check the installation."
     fi
 
+    # Detect the invoking shell before checking PATH. This process is Bash even
+    # when the user launched it from Fish or Zsh.
+    local shell_name
+    shell_name="$(detect_user_shell)"
+
     # Check if the installed binary is the one that will be found in PATH
     local path_binary
     path_binary=$(command -v "entire" 2>/dev/null || true)
@@ -286,54 +372,20 @@ main() {
         echo -e "${YELLOW}!${NC}   2. Adjust your PATH to prioritize ${install_dir}"
         echo ""
         error "Installation completed but PATH needs adjustment. Then, rerun the installation."
-    elif [[ -z "$path_binary" ]]; then
-        # First-time install: ~/.local/bin likely isn't on their PATH yet.
-        # Detect their shell and show the right config file.
-        local shell_name shell_config
-        shell_name="$(basename "${SHELL:-}")"
-        case "$shell_name" in
-            zsh)
-                # shellcheck disable=SC2088
-                shell_config="~/.zshrc" ;;
-            bash)
-                if [[ -f "$HOME/.bash_profile" ]]; then
-                    # shellcheck disable=SC2088
-                    shell_config="~/.bash_profile"
-                else
-                    # shellcheck disable=SC2088
-                    shell_config="~/.bashrc"
-                fi
-                ;;
-            fish)
-                # shellcheck disable=SC2088
-                shell_config="~/.config/fish/config.fish" ;;
-            *)
-                shell_config="" ;;
-        esac
-
-        echo ""
-        echo -e "  Add ${BOLD}entire${NC} to your PATH:"
-        echo ""
-        if [[ "$shell_name" == "fish" ]]; then
-            echo -e "    ${BOLD}mkdir -p ~/.config/fish${NC}"
-            echo -e "    ${BOLD}echo 'fish_add_path ${install_dir}' >> \$HOME/.config/fish/config.fish${NC}"
-        elif [[ -n "$shell_config" ]]; then
-            echo -e "    ${BOLD}echo 'export PATH=\"${install_dir}:\$PATH\"' >> ${shell_config}${NC}"
-        else
-            echo -e "  Add this to your shell config:"
-            echo ""
-            echo -e "    ${BOLD}export PATH=\"${install_dir}:\$PATH\"${NC}"
-            echo ""
-            echo -e "  Restart your terminal, then run ${BOLD}entire${NC} to get started."
-            exit 0
-        fi
-        echo ""
-        echo -e "  Restart your terminal, then run ${BOLD}entire${NC} to get started."
-        exit 0
     fi
 
+    # Use the absolute binary path so first-time installs can run post-install
+    # actions before ~/.local/bin has been added to PATH.
     info "Running post-install actions..."
-    "$install_path" curl-bash-post-install
+    ENTIRE_INSTALLER_SHELL="$shell_name" "$install_path" curl-bash-post-install
+
+    if [[ -z "$path_binary" ]]; then
+        # First-time install: ~/.local/bin likely isn't on their PATH yet.
+        show_path_setup "$shell_name" "$install_dir"
+        exit 0
+    fi
 }
 
-main "$@"
+if [[ -z "${BASH_SOURCE[0]:-}" || "${BASH_SOURCE[0]:-}" == "$0" ]]; then
+    main "$@"
+fi

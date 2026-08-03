@@ -1365,7 +1365,9 @@ func TestShellCompletionTarget(t *testing.T) {
 	tests := []struct {
 		name             string
 		shell            string
+		installerShell   string
 		createBashProf   bool
+		useXDGConfigHome bool
 		wantShell        string
 		wantRCBase       string // basename of rc file
 		wantCompletion   string
@@ -1401,6 +1403,22 @@ func TestShellCompletionTarget(t *testing.T) {
 			wantCompletion: "entire completion fish | source",
 		},
 		{
+			name:             "fish_xdg_config_home",
+			shell:            "/usr/bin/fish",
+			useXDGConfigHome: true,
+			wantShell:        "Fish",
+			wantRCBase:       filepath.Join("fish", "config.fish"),
+			wantCompletion:   "entire completion fish | source",
+		},
+		{
+			name:           "installer_shell_overrides_login_shell",
+			shell:          "/bin/zsh",
+			installerShell: "fish",
+			wantShell:      "Fish",
+			wantRCBase:     filepath.Join(".config", "fish", "config.fish"),
+			wantCompletion: "entire completion fish | source",
+		},
+		{
 			name:             "empty_shell",
 			shell:            "",
 			wantErrUnsupport: true,
@@ -1412,6 +1430,14 @@ func TestShellCompletionTarget(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
 			t.Setenv("SHELL", tt.shell)
+			t.Setenv(installerShellEnv, tt.installerShell)
+			t.Setenv("XDG_CONFIG_HOME", "")
+
+			configRoot := home
+			if tt.useXDGConfigHome {
+				configRoot = filepath.Join(home, "xdg-config")
+				t.Setenv("XDG_CONFIG_HOME", configRoot)
+			}
 
 			if tt.createBashProf {
 				if err := os.WriteFile(filepath.Join(home, ".bash_profile"), []byte(""), 0o644); err != nil {
@@ -1433,7 +1459,7 @@ func TestShellCompletionTarget(t *testing.T) {
 			if shellName != tt.wantShell {
 				t.Errorf("shellName = %q, want %q", shellName, tt.wantShell)
 			}
-			wantRC := filepath.Join(home, tt.wantRCBase)
+			wantRC := filepath.Join(configRoot, tt.wantRCBase)
 			if rcFile != wantRC {
 				t.Errorf("rcFile = %q, want %q", rcFile, wantRC)
 			}
