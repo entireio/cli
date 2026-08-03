@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,8 +71,14 @@ func TestCheckpointResumeAuto_ChecksCheckpointBeforeBranch(t *testing.T) {
 
 	cmd, out := newCheckpointResumeTestCmd(t)
 	cmd.SetArgs([]string{cpID.String()})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute() error = %v\noutput: %s", err, out.String())
+	// The checkpoint path is taken (not the branch checkout), which is this
+	// test's point; the fixture's metadata is unreadable via the ULID read
+	// path, so the restore-only fallback now fails with the typed
+	// metadata-unavailable error instead of silently restoring nothing.
+	err := cmd.Execute()
+	var unavailable *ResumeMetadataUnavailableError
+	if !errors.As(err, &unavailable) {
+		t.Fatalf("Execute() error = %v, want ResumeMetadataUnavailableError\noutput: %s", err, out.String())
 	}
 	if !strings.Contains(out.String(), "not on any local branch") {
 		t.Errorf("output should mention restore-only fallback, got: %s", out.String())
@@ -108,8 +115,13 @@ func TestCheckpointResumeAuto_BranchBeforeCommit(t *testing.T) {
 
 	cmd, out := newCheckpointResumeTestCmd(t)
 	cmd.SetArgs([]string{"abcdef"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute() error = %v\noutput: %s", err, out.String())
+	// Delegation to the branch flow is this test's point: the checkout
+	// happens, and the branch having no checkpoints then fails with the
+	// typed no-checkpoint error (nothing was resumed).
+	err = cmd.Execute()
+	var noCheckpoint *ResumeNoCheckpointError
+	if !errors.As(err, &noCheckpoint) {
+		t.Fatalf("Execute() error = %v, want ResumeNoCheckpointError\noutput: %s", err, out.String())
 	}
 	branch, err := GetCurrentBranch(context.Background())
 	if err != nil || branch != "abcdef" {
@@ -292,8 +304,13 @@ func TestCheckpointResumeAuto_RemoteBranchFallback(t *testing.T) {
 
 	cmd, out := newCheckpointResumeTestCmd(t)
 	cmd.SetArgs([]string{"remote-feature", "--force"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute() error = %v\noutput: %s", err, out.String())
+	// The remote-branch fallback is this test's point: the fetch + checkout
+	// happen, and the branch having no checkpoints then fails with the typed
+	// no-checkpoint error (nothing was resumed).
+	execErr := cmd.Execute()
+	var noCheckpoint *ResumeNoCheckpointError
+	if !errors.As(execErr, &noCheckpoint) {
+		t.Fatalf("Execute() error = %v, want ResumeNoCheckpointError\noutput: %s", execErr, out.String())
 	}
 	branch, err := GetCurrentBranch(context.Background())
 	if err != nil || branch != "remote-feature" {

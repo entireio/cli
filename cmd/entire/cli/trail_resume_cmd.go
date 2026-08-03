@@ -428,14 +428,10 @@ func printTrailResumeIdentity(w io.Writer, found api.TrailResource) {
 }
 
 func describeTrailResumeRef(found api.TrailResource) string {
-	switch {
-	case found.Number > 0:
+	if found.Number > 0 {
 		return fmt.Sprintf("trail #%d", found.Number)
-	case strings.TrimSpace(found.ID) != "":
-		return "trail " + strings.TrimSpace(found.ID)
-	default:
-		return "trail"
 	}
+	return strings.TrimSpace("trail " + strings.TrimSpace(found.ID))
 }
 
 // displayTrailResumeContinuation is the non-interactive act-path display:
