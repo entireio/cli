@@ -172,6 +172,42 @@ func TestInitHookLogging_SkipsWhenDisabled(t *testing.T) {
 	}
 }
 
+// TestInitHookLogging_InitsUnderGlobalMode tests that initHookLogging
+// initializes logging in a repo with NO repo-level setup when the user-global
+// tier is enabled — the defense-in-depth check must use the same
+// settings.IsActiveForRepo predicate as the hook entry gates.
+func TestInitHookLogging_InitsUnderGlobalMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// Initialize git repo
+	gitInit := exec.CommandContext(context.Background(), "git", "init")
+	gitInit.Dir = tmpDir
+	if err := gitInit.Run(); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Do NOT create .entire/settings.json — no repo-level setup. Instead,
+	// enable the user-global tier in an isolated config dir.
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{"global":{"enabled":true}}`), 0o644); err != nil {
+		t.Fatalf("failed to write user-global settings file: %v", err)
+	}
+
+	cleanup := initHookLogging(context.Background())
+	if cleanup == nil {
+		t.Fatal("expected cleanup function, got nil")
+	}
+	cleanup() // Should not panic
+
+	// Verify .entire/logs WAS created — logging initialized under global mode
+	logsDir := filepath.Join(tmpDir, ".entire", "logs")
+	if _, err := os.Stat(logsDir); err != nil {
+		t.Errorf("expected .entire/logs to be created under global mode, but stat failed: %v", err)
+	}
+}
+
 // TestHooksGitCmd_DiscoverExternalAgents_WhenEnabled verifies that when Entire is set up
 // and enabled, PersistentPreRunE calls external.DiscoverAndRegister so that external
 // agents are available during hook execution (e.g. post-commit condensation).
