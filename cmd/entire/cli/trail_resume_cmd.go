@@ -233,11 +233,10 @@ func runTrailResume(cmd *cobra.Command, opts trailResumeOptions) error {
 			return err
 		}
 
-		// Inspection mode keeps the full context dump (sessions, findings,
-		// commands). The act path below skips those fetches entirely: findings
-		// are `trail finding`'s job, and the pre-restore checkpoint-session
-		// reads are only needed where they are consumed — the interactive
-		// picker and --session resolution.
+		// Inspection mode keeps the full context dump. The act path below
+		// skips those fetches: findings are `trail finding`'s job, and the
+		// pre-restore session reads run only where consumed (picker,
+		// --session).
 		if opts.NoResume {
 			sessions, sessionsSkipped, sessionErr := resolveTrailResumeSessionContexts(ctx, branch)
 			sessions, sessionsSkipped, sessionsUnavailable := knownTrailResumeSessionsForContext(sessions, sessionsSkipped, sessionErr)
@@ -270,11 +269,10 @@ func runTrailResume(cmd *cobra.Command, opts trailResumeOptions) error {
 		}
 
 		if opts.SessionID != "" {
-			// --session may target a checkpoint older than the latest; the
-			// pre-restore reads map the session id to its owning checkpoint.
-			// Both failure modes stop BEFORE any restore: falling back to the
-			// latest checkpoint here would, with --force, overwrite session
-			// logs the caller never asked to touch.
+			// The pre-restore reads map the session id to its owning
+			// checkpoint (which may be older than the latest). Fail before
+			// any restore: a fallback restore of the latest checkpoint would
+			// overwrite unrelated session logs under --force.
 			sessions, _, sessionErr := resolveTrailResumeSessionContexts(ctx, branch)
 			if sessionErr != nil {
 				return fmt.Errorf("cannot resolve --session %s: loading trail checkpoint sessions failed: %w", opts.SessionID, sessionErr)
@@ -395,9 +393,8 @@ func trailResumeCanPromptRestoredSessions(force bool) bool {
 func continueTrailRestoredSessions(ctx context.Context, cmd *cobra.Command, sessions []strategy.RestoredSession, preferredSessionID string, force bool) error {
 	w := cmd.OutOrStdout()
 	canPrompt := trailResumeCanPromptRestoredSessions(force)
-	// Interactive declines get the full per-session command menu they asked
-	// for; non-interactive runs get the slim continuation whose final line is
-	// the default session's resume command.
+	// Interactive declines get the full command menu; non-interactive runs
+	// get the slim continuation ending in the default resume command.
 	display := displayTrailResumeContinuation
 	if canPrompt {
 		display = displayTrailRestoredSessions
@@ -430,9 +427,9 @@ func describeTrailResumeRef(found api.TrailResource) string {
 }
 
 // displayTrailResumeContinuation is the non-interactive act-path display:
-// restore summary, a pointer to any other restored sessions (there is no
-// table to discover them from), and the default session's resume command as
-// the final stdout line so callers can lift it without parsing prose.
+// restore summary, a pointer line naming any other restored sessions, and
+// the default session's resume command as the final stdout line (the
+// machine-liftable contract).
 func displayTrailResumeContinuation(w io.Writer, sessions []strategy.RestoredSession) error {
 	if len(sessions) == 0 {
 		return nil

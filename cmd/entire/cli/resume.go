@@ -254,12 +254,10 @@ func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName 
 	return continueSessionRestoredSessions(ctx, w, sessions)
 }
 
-// ensureSessionsRestored enforces the non-interactive contract shared by the
-// trail, session, and checkpoint resume paths: zero restored sessions is a
-// failure ("nothing was resumed") for scripted callers. When prompts were
-// possible, an interactive zero is treated as a decline and exits 0 — the
-// guard cannot distinguish a genuine empty restore there, which then also
-// exits 0 (the user saw the restore messages).
+// ensureSessionsRestored enforces the shared resume contract: zero restored
+// sessions is a failure for scripted callers. When prompts were possible the
+// zero is treated as a decline and exits 0 — the guard cannot distinguish a
+// genuine empty restore there (the user saw the restore messages).
 func ensureSessionsRestored(sessions []strategy.RestoredSession, force bool) error {
 	if len(sessions) > 0 {
 		return nil
@@ -281,8 +279,8 @@ func continueSessionRestoredSessions(ctx context.Context, w io.Writer, sessions 
 
 // restoreFromCurrentBranch restores the latest checkpoint's sessions on
 // branchName. allowPrompts=false suppresses the older-checkpoint confirmation
-// even on a real terminal (used by the trail resume --json path, where stdout
-// must carry only JSON) without implying --force's log-overwrite semantics.
+// even on a real terminal (the --json path, whose stdout must carry only
+// JSON) without implying --force's log-overwrite semantics.
 func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName string, force, allowPrompts bool) ([]strategy.RestoredSession, error) {
 	logCtx := logging.WithComponent(ctx, "resume")
 
@@ -308,11 +306,10 @@ func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName
 		slog.Bool("newer_commits_exist", result.newerCommitsExist),
 	)
 
-	// If there are newer commits without checkpoints, ask for confirmation.
-	// Non-interactive runs cannot answer a prompt: proceed from the latest
-	// checkpoint with a notice instead, so agent callers never need --force
-	// just to avoid blocking. Merge commits (e.g., from merging main) don't
-	// count as "work" and are skipped silently.
+	// If there are newer commits without checkpoints, ask for confirmation;
+	// when prompting isn't possible or allowed, proceed with a notice. Merge
+	// commits (e.g., from merging main) don't count as "work" and are
+	// skipped silently.
 	if result.newerCommitsExist && !force {
 		if !allowPrompts || !interactive.CanPromptInteractively() {
 			fmt.Fprintln(w, olderCheckpointNotice(repo, result))
@@ -764,9 +761,9 @@ func findCheckpointInHistory(start *object.Commit, stopAt *plumbing.Hash) *branc
 	return result
 }
 
-// headCommitLabel names the current commit in resume notices. Deliberately
-// not status.go's detachedHEADDisplay: that constant labels a *detached* HEAD
-// and may diverge; this notice fires on attached branch tips too.
+// headCommitLabel names the current commit in resume notices. Not
+// detachedHEADDisplay: that labels a detached HEAD and may diverge, while
+// this notice fires on attached branch tips too.
 const headCommitLabel = "HEAD"
 
 // olderCheckpointNotice describes proceeding from a checkpoint older than

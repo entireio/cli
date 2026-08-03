@@ -59,9 +59,8 @@ type trailResumeContinuation struct {
 
 // trailResumeReportError is the typed-failure half of the JSON contract:
 // typed resume errors emit the report with this error object and a non-zero
-// exit. Untyped errors, and failures before the resume phase is entered
-// (trail lookup, flag validation, --repo/--branch assertions), keep stdout
-// empty with text on stderr.
+// exit; untyped errors and pre-resume failures (trail lookup, flag
+// validation) keep stdout empty with text on stderr.
 type trailResumeReportError struct {
 	Type         string `json:"type"`
 	Message      string `json:"message"`
@@ -154,10 +153,9 @@ func buildTrailResumeActionReport(
 	return report, nil
 }
 
-// trailResumeContinuationFor mirrors the text path's contract: an
-// unresolvable agent is an error (a continuation nobody can execute is not a
-// continuation), never a silent empty command. Callers guarantee sessions is
-// non-empty.
+// trailResumeContinuationFor builds the continuation for the default (or
+// preferred) session. An unresolvable agent is an error, matching the text
+// path. Callers guarantee sessions is non-empty.
 func trailResumeContinuationFor(sessions []strategy.RestoredSession, preferredSessionID string) (*trailResumeContinuation, error) {
 	choice := buildTrailResumeRestoredSessionChoices(sessions)[0].Session
 	if preferredSessionID != "" {
@@ -193,16 +191,15 @@ func runTrailResumeJSON(ctx context.Context, cmd *cobra.Command, found api.Trail
 		}
 		return nil
 	}
-	// fail emits the report with whatever side effects already happened
-	// (branch switch, restored sessions) so a typed failure never hides real
-	// state changes from the caller.
+	// fail emits the report carrying any side effects that already happened
+	// (branch switch, restored sessions) before returning the typed error.
 	fail := func(err error) error {
 		reportErr := trailResumeReportErrorFrom(err)
 		if reportErr == nil {
 			return err
 		}
-		// Continuation is nil'd below, so the builder's continuation error
-		// (unresolvable agent) is irrelevant on the failure path.
+		// The builder's continuation error is irrelevant here: Continuation
+		// is nil'd below.
 		report, buildErr := buildTrailResumeActionReport(found, branch, actions, restored, "")
 		if buildErr != nil {
 			logging.Debug(ctx, "trail resume json: continuation unresolvable in failure report (ignored)",
@@ -216,9 +213,8 @@ func runTrailResumeJSON(ctx context.Context, cmd *cobra.Command, found api.Trail
 		return NewSilentError(err)
 	}
 
+	// Recorded up front so failure reports carry the requested checkpoint.
 	if checkpointID := strings.TrimSpace(opts.CheckpointID); checkpointID != "" {
-		// Record the requested checkpoint up front so failure reports carry
-		// it even when nothing was restored.
 		actions.CheckpointID = checkpointID
 	}
 
@@ -261,9 +257,8 @@ func runTrailResumeJSON(ctx context.Context, cmd *cobra.Command, found api.Trail
 	}
 	restored = sessions
 	if len(sessions) == 0 {
-		// The checkpoint resolved but its restore produced nothing (e.g.
-		// session log content unavailable): success-with-empty-report would
-		// break the "non-zero whenever nothing was resumed" contract.
+		// Checkpoint resolved but its restore produced nothing (e.g. session
+		// log content unavailable): nothing was resumed.
 		return fail(&ResumeNoSessionsRestoredError{})
 	}
 	if err := ensurePreferredRestoredSession(sessions, preferred); err != nil {
@@ -272,16 +267,14 @@ func runTrailResumeJSON(ctx context.Context, cmd *cobra.Command, found api.Trail
 
 	report, err := buildTrailResumeActionReport(found, branch, actions, sessions, preferred)
 	if err != nil {
-		// Unresolvable agent: mirror the text path's non-zero exit (untyped,
-		// so stdout stays empty per the failure contract).
+		// Unresolvable agent: untyped, so stdout stays empty like the text path.
 		return err
 	}
 	return emit(report)
 }
 
-// ensurePreferredRestoredSession rejects a --session id that is not among the
-// restored sessions, mirroring the human path's continueRestoredSessions
-// error — the JSON contract must never point the continuation at a different
+// ensurePreferredRestoredSession rejects a --session id that is not among
+// the restored sessions: the continuation must never point at a different
 // session than the one requested.
 func ensurePreferredRestoredSession(sessions []strategy.RestoredSession, preferredSessionID string) error {
 	if preferredSessionID == "" {
@@ -325,9 +318,8 @@ func restoreTrailSessionsForReport(ctx context.Context, errW io.Writer, branch s
 		return sessions, "", err
 	}
 	if opts.SessionID != "" {
-		// Both failure modes stop BEFORE any restore: falling back to the
-		// latest checkpoint here would, with --force, overwrite session logs
-		// the caller never asked to touch.
+		// Fail before any restore: a fallback restore of the latest
+		// checkpoint would overwrite unrelated session logs under --force.
 		contexts, _, ctxErr := resolveTrailResumeSessionContexts(ctx, branch)
 		if ctxErr != nil {
 			return nil, "", fmt.Errorf("cannot resolve --session %s: loading trail checkpoint sessions failed: %w", opts.SessionID, ctxErr)
