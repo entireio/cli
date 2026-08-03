@@ -408,11 +408,14 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 	// fetch+replay recovery, and remove from the queue only the refs that land
 	// (a genuine cherry-pick conflict leaves that ref queued for a later push,
 	// never force-overwriting the remote).
-	rep.phase(fmt.Sprintf("resolving %d diverged checkpoint(s)", len(existing)))
 	rep.setDetail("") // clear the batch attempt's stale transfer detail
 	pushed := make([]plumbing.ReferenceName, 0, len(existing))
 	var firstErr error
-	for _, ref := range existing {
+	for i, ref := range existing {
+		// Recovery is per-ref — fetch the remote's version of the checkpoint,
+		// replay the local commit(s) on top, then push — so it runs one sync
+		// cycle per ref and can take a while. Surface an advancing counter.
+		rep.phase(fmt.Sprintf("syncing checkpoint %d/%d with remote", i+1, len(existing)))
 		if err := pushCheckpointRefWithRecovery(pushCtx, pushTarget, ref); err != nil {
 			logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
 				slog.String("ref", ref.String()), slog.String("error", err.Error()))
