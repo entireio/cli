@@ -411,7 +411,17 @@ func runSetupFlow(ctx context.Context, w io.Writer, opts EnableOptions) error {
 		return fmt.Errorf("agent selection failed: %w", err)
 	}
 
-	return runEnableInteractive(ctx, w, agents, opts)
+	if err := runEnableInteractive(ctx, w, agents, opts); err != nil {
+		if errors.Is(err, errSetupCancelled) {
+			// The user cancelled a first-run prompt (e.g. the checkpoint
+			// storage question). Nothing is persisted before that prompt, so
+			// re-running `entire enable` resumes at the same point.
+			fmt.Fprintln(w, "\nSetup cancelled — run `entire enable` again to resume where you left off.")
+			return NewSilentError(err)
+		}
+		return err
+	}
+	return nil
 }
 
 // selectAllAgents is a selectFn that selects all available agents.
@@ -1440,18 +1450,15 @@ func resolveFirstRunCheckpointBackend(ctx context.Context, w io.Writer, opts Ena
 			return "", err
 		}
 		if ctx.Err() != nil {
-			// A cancelled command context (SIGINT/SIGTERM) surfaces as a
-			// form cancellation, but the user asked to stop: setup must not
-			// adopt a default and keep mutating the repo.
-			return "", fmt.Errorf("checkpoint storage selection: %w", ctx.Err())
+			// Accessible mode cannot surface Ctrl+C as a form error (huh
+			// discards the field error), so a cancelled command context is the
+			// only signal the user aborted. Treat it as a cancellation — the
+			// same errSetupCancelled the raw-TUI abort returns — so enable
+			// stops here instead of adopting a default, and resumes on the
+			// next run.
+			return "", errSetupCancelled
 		}
-		if chosen == "" {
-			// Cancelled prompt: the recommendation is adopted, but never
-			// silently — every other cancelled setup prompt skips its
-			// action, so persisting a choice here must be disclosed.
-			fmt.Fprintln(w, "Using the recommended git-refs checkpoint storage.")
-		}
-		backend = chosen // "" (cancelled) falls through to the recommendation
+		backend = chosen
 	}
 	if backend == "" && firstRun {
 		backend = firstRunCheckpointBackendDefault()

@@ -4081,6 +4081,74 @@ func TestRunEnableInteractive_BootstrapDefersOnboardingLadder(t *testing.T) {
 	}
 }
 
+// Cancelling the checkpoint-storage prompt (Ctrl+C) must abort enable rather
+// than silently adopt the default and continue to telemetry. Because settings
+// are only persisted AFTER that prompt, aborting leaves the repo not-set-up,
+// so the next `entire enable` is a fresh run that lands back on the storage
+// question — the resume path the user expects.
+func TestRunEnableInteractive_CancelledBackendPromptAbortsWithoutPersisting(t *testing.T) {
+	// Not parallel: overrides the promptCheckpointBackend seam and sets a TTY env.
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1") // reach the interactive storage prompt
+
+	prev := promptCheckpointBackend
+	promptCheckpointBackend = func(context.Context, io.Writer) (string, error) {
+		return "", errSetupCancelled // simulate Ctrl+C at the storage prompt
+	}
+	t.Cleanup(func() { promptCheckpointBackend = prev })
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+	var buf bytes.Buffer
+	err = runEnableInteractive(context.Background(), &buf, []agent.Agent{ag}, EnableOptions{})
+
+	if !errors.Is(err, errSetupCancelled) {
+		t.Fatalf("runEnableInteractive() error = %v, want errSetupCancelled", err)
+	}
+	// The resume guarantee: nothing persisted, so re-running enable is still a
+	// fresh run that re-asks the storage question.
+	if settings.IsSetUpAny(context.Background()) {
+		t.Error("cancelled setup must not persist settings (repo would skip the storage prompt on re-run)")
+	}
+}
+
+// runSetupFlow turns a cancelled first-run prompt into a friendly resume hint
+// and a SilentError, so the process exits cleanly (exit 1, no raw error or
+// usage dump) instead of falling through.
+func TestRunSetupFlow_CancelledBackendPromptExitsSilentlyWithResumeHint(t *testing.T) {
+	// Not parallel: overrides the prompt seams and sets a TTY env.
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+
+	prevAgent := promptAgentSelection
+	promptAgentSelection = func([]huh.Option[string]) ([]string, error) {
+		return []string{"claude-code"}, nil // pick an agent, then reach the storage prompt
+	}
+	t.Cleanup(func() { promptAgentSelection = prevAgent })
+
+	prevBackend := promptCheckpointBackend
+	promptCheckpointBackend = func(context.Context, io.Writer) (string, error) {
+		return "", errSetupCancelled
+	}
+	t.Cleanup(func() { promptCheckpointBackend = prevBackend })
+
+	var buf bytes.Buffer
+	err := runSetupFlow(context.Background(), &buf, EnableOptions{})
+
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Fatalf("runSetupFlow() error = %v, want a SilentError", err)
+	}
+	if !errors.Is(err, errSetupCancelled) {
+		t.Errorf("runSetupFlow() error = %v, want it to wrap errSetupCancelled", err)
+	}
+	if !strings.Contains(buf.String(), "run `entire enable` again to resume") {
+		t.Errorf("expected a resume hint in output, got:\n%s", buf.String())
+	}
+}
+
 // First-time setups get the git-refs checkpoint backend written explicitly
 // into the new settings.json — new users must not answer a storage-topology
 // question (the old wizard prompt), and the explicit write is what keeps the
