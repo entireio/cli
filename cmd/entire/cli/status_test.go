@@ -2045,9 +2045,13 @@ func stubOnboardingResults(t *testing.T, results []onboarding.Result) {
 func TestRunStatus_ShowsSetupChecklistWhenIncomplete(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
+	// A genuinely mid-onboarding repo: more than the login step is missing, so
+	// the "finish setup → entire enable" framing applies (login alone would
+	// render as a reconnect instead — see TestRunStatus_LoginOnlyGap...).
 	stubOnboardingResults(t, []onboarding.Result{
 		{Rung: onboarding.Rung{Key: onboarding.KeyHooks, Title: "Agent hooks"}, Check: onboarding.Check{State: onboarding.StateDone, Detail: "Claude Code"}},
 		{Rung: onboarding.Rung{Key: onboarding.KeyAuth, Title: "Logged in"}, Check: onboarding.Check{State: onboarding.StateMissing, Hint: "entire auth login"}},
+		{Rung: onboarding.Rung{Key: onboarding.KeyMirror, Title: "Repo mirrored"}, Check: onboarding.Check{State: onboarding.StateBlocked, Detail: "needs login", Hint: "entire auth login"}},
 	})
 
 	var stdout bytes.Buffer
@@ -2056,11 +2060,38 @@ func TestRunStatus_ShowsSetupChecklistWhenIncomplete(t *testing.T) {
 	}
 
 	out := stdout.String()
-	if !strings.Contains(out, "Setup 1/2 complete") {
+	if !strings.Contains(out, "Setup 1/3 complete") {
 		t.Errorf("expected setup counter in status output, got: %s", out)
 	}
 	if !strings.Contains(out, "Run `entire enable` to finish setup") {
 		t.Errorf("expected enable resume hint, got: %s", out)
+	}
+}
+
+// When login is the ONLY remaining step (a deliberate logout, or a local repo
+// that can't be mirrored), status must read as a reconnect — point at `entire
+// auth login`, not "finish setup / entire enable", which framed a logout as
+// unfinished onboarding.
+func TestRunStatus_LoginOnlyGapShowsReconnectHint(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	stubOnboardingResults(t, []onboarding.Result{
+		{Rung: onboarding.Rung{Key: onboarding.KeyHooks, Title: "Agent hooks"}, Check: onboarding.Check{State: onboarding.StateDone, Detail: "Claude Code"}},
+		{Rung: onboarding.Rung{Key: onboarding.KeyAuth, Title: "Logged in"}, Check: onboarding.Check{State: onboarding.StateMissing, Hint: "entire auth login"}},
+		{Rung: onboarding.Rung{Key: onboarding.KeyMirror, Title: "Repo mirrored"}, Check: onboarding.Check{State: onboarding.StateNotApplicable, Detail: "no GitHub origin"}},
+	})
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "→ Run `entire auth login` to connect") {
+		t.Errorf("expected reconnect hint, got: %s", out)
+	}
+	if strings.Contains(out, "finish setup") || strings.Contains(out, "Setup ") {
+		t.Errorf("login-only gap must not use the 'finish setup' onboarding framing, got: %s", out)
 	}
 }
 
@@ -2072,6 +2103,7 @@ func TestRunStatus_DetailedShowsSetupChecklist(t *testing.T) {
 	stubOnboardingResults(t, []onboarding.Result{
 		{Rung: onboarding.Rung{Key: onboarding.KeyHooks, Title: "Agent hooks"}, Check: onboarding.Check{State: onboarding.StateDone, Detail: "Claude Code"}},
 		{Rung: onboarding.Rung{Key: onboarding.KeyAuth, Title: "Logged in"}, Check: onboarding.Check{State: onboarding.StateMissing, Hint: "entire auth login"}},
+		{Rung: onboarding.Rung{Key: onboarding.KeyMirror, Title: "Repo mirrored"}, Check: onboarding.Check{State: onboarding.StateBlocked, Detail: "needs login", Hint: "entire auth login"}},
 	})
 
 	var stdout bytes.Buffer
@@ -2079,7 +2111,7 @@ func TestRunStatus_DetailedShowsSetupChecklist(t *testing.T) {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 
-	if out := stdout.String(); !strings.Contains(out, "Setup 1/2 complete") {
+	if out := stdout.String(); !strings.Contains(out, "Setup 1/3 complete") {
 		t.Errorf("expected setup checklist in detailed status, got: %s", out)
 	}
 }

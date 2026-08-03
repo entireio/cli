@@ -26,10 +26,23 @@ func renderOnboardingChecklist(results []onboarding.Result, sty statusStyles) st
 		return renderConnectedLine(results, sty)
 	}
 
-	done, total := onboarding.Summary(results)
+	// When login is the ONLY remaining step, this is a reconnect (a deliberate
+	// logout, or a never-logged-in local repo), not unfinished onboarding — so
+	// drop the "Setup X/Y … finish setup → entire enable" framing and point
+	// straight at the login command. auth is the sole actionable rung only when
+	// nothing else needs enable: mirror/import are done or not applicable (e.g.
+	// a repo with no GitHub origin has no web-UI payoff to "finish"). A
+	// mirrorable repo that's logged out still has a blocked mirror rung, so it
+	// keeps the full setup framing.
+	missing := onboarding.Missing(results)
+	reconnectOnly := len(missing) == 1 && missing[0].Rung.Key == onboarding.KeyAuth
+
 	var b strings.Builder
-	b.WriteString(sty.render(sty.bold, fmt.Sprintf("Setup %d/%d complete", done, total)))
-	b.WriteString("\n")
+	if !reconnectOnly {
+		done, total := onboarding.Summary(results)
+		b.WriteString(sty.render(sty.bold, fmt.Sprintf("Setup %d/%d complete", done, total)))
+		b.WriteString("\n")
+	}
 
 	titleWidth := 0
 	for _, r := range results {
@@ -59,7 +72,14 @@ func renderOnboardingChecklist(results []onboarding.Result, sty statusStyles) st
 		b.WriteString("\n")
 	}
 
-	if remaining := len(onboarding.Missing(results)); remaining > 0 {
+	if reconnectOnly {
+		hint := missing[0].Check.Hint
+		if hint == "" {
+			hint = authLoginCommand
+		}
+		b.WriteString(sty.render(sty.cyan, fmt.Sprintf("→ Run `%s` to connect", hint)))
+		b.WriteString("\n")
+	} else if remaining := len(missing); remaining > 0 {
 		step := "steps"
 		if remaining == 1 {
 			step = "step"

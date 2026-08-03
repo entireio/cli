@@ -15,6 +15,52 @@ func resultFor(key, title string, check onboarding.Check) onboarding.Result {
 	return onboarding.Result{Rung: onboarding.Rung{Key: key, Title: title}, Check: check}
 }
 
+// When login is the only actionable rung (a deliberate logout, or a local repo
+// that can't be mirrored), the checklist reads as a reconnect: it points at
+// the login command and drops the "Setup X/Y … finish setup → entire enable"
+// onboarding framing, which wrongly presented a logout as unfinished setup.
+func TestRenderOnboardingChecklist_LoginOnlyGapIsReconnect(t *testing.T) {
+	t.Parallel()
+	results := []onboarding.Result{
+		resultFor(onboarding.KeyHooks, "Agent hooks", onboarding.Check{State: onboarding.StateDone, Detail: "Claude Code"}),
+		resultFor(onboarding.KeyAuth, "Logged in", onboarding.Check{State: onboarding.StateMissing, Hint: "entire auth login"}),
+		resultFor(onboarding.KeyMirror, "Repo mirrored", onboarding.Check{State: onboarding.StateNotApplicable, Detail: "no GitHub origin"}),
+	}
+
+	out := renderOnboardingChecklist(results, plainStyles())
+
+	if !strings.Contains(out, "✗ Logged in") {
+		t.Errorf("reconnect checklist should still show the login row, got:\n%s", out)
+	}
+	if !strings.Contains(out, "→ Run `entire auth login` to connect") {
+		t.Errorf("reconnect checklist should point at the login command, got:\n%s", out)
+	}
+	if strings.Contains(out, "Setup ") || strings.Contains(out, "finish setup") {
+		t.Errorf("login-only gap must not use the 'finish setup' framing, got:\n%s", out)
+	}
+}
+
+// A logged-out repo that CAN mirror (GitHub origin) has a blocked mirror rung
+// alongside the missing login, so more than login remains — it keeps the full
+// "finish setup → entire enable" framing rather than the reconnect shortcut.
+func TestRenderOnboardingChecklist_LogoutWithMirrorableRepoKeepsFinishSetup(t *testing.T) {
+	t.Parallel()
+	results := []onboarding.Result{
+		resultFor(onboarding.KeyHooks, "Agent hooks", onboarding.Check{State: onboarding.StateDone, Detail: "Claude Code"}),
+		resultFor(onboarding.KeyAuth, "Logged in", onboarding.Check{State: onboarding.StateMissing, Hint: "entire auth login"}),
+		resultFor(onboarding.KeyMirror, "Repo mirrored", onboarding.Check{State: onboarding.StateBlocked, Detail: "needs login", Hint: "entire auth login"}),
+	}
+
+	out := renderOnboardingChecklist(results, plainStyles())
+
+	if !strings.Contains(out, "Setup 1/3 complete") {
+		t.Errorf("mirrorable logged-out repo should keep the setup counter, got:\n%s", out)
+	}
+	if !strings.Contains(out, "→ Run `entire enable` to finish setup (2 steps left)") {
+		t.Errorf("mirrorable logged-out repo should keep the enable pointer, got:\n%s", out)
+	}
+}
+
 func TestRenderOnboardingChecklist_MidSetup(t *testing.T) {
 	t.Parallel()
 	results := []onboarding.Result{
@@ -114,18 +160,22 @@ func TestRenderOnboardingChecklist_BlockedAndUnknownRows(t *testing.T) {
 
 func TestRenderOnboardingChecklist_SkipsNotApplicableRows(t *testing.T) {
 	t.Parallel()
+	// More than login is missing (auth + mirror), so this keeps the setup
+	// counter — the login-only case renders as a reconnect instead. The
+	// not-applicable import rung must still be skipped and excluded.
 	results := []onboarding.Result{
 		resultFor(onboarding.KeyHooks, "Agent hooks", onboarding.Check{State: onboarding.StateDone, Detail: "Claude Code"}),
 		resultFor(onboarding.KeyAuth, "Logged in", onboarding.Check{State: onboarding.StateMissing, Hint: "entire auth login"}),
-		resultFor(onboarding.KeyMirror, "Repo mirrored", onboarding.Check{State: onboarding.StateNotApplicable, Detail: "no GitHub origin"}),
+		resultFor(onboarding.KeyMirror, "Repo mirrored", onboarding.Check{State: onboarding.StateMissing, Detail: "commits won't appear in the web UI"}),
+		resultFor(onboarding.KeyImport, "History", onboarding.Check{State: onboarding.StateNotApplicable, Detail: "no prior history found"}),
 	}
 
 	out := renderOnboardingChecklist(results, plainStyles())
 
-	if strings.Contains(out, "Repo mirrored") {
+	if strings.Contains(out, "History") {
 		t.Errorf("not-applicable rung should not render a row, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Setup 1/2 complete") {
+	if !strings.Contains(out, "Setup 1/3 complete") {
 		t.Errorf("counter should exclude not-applicable rungs, got:\n%s", out)
 	}
 }

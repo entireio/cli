@@ -30,6 +30,11 @@ import (
 // terminal degrades to StateUnknown instead of hanging.
 const mirrorProbeTimeout = 5 * time.Second
 
+// authLoginCommand is the remediation/reconnect command shared by the auth
+// rung, the blocked-mirror rung ("needs login"), and the status checklist's
+// login-only reconnect footer.
+const authLoginCommand = "entire auth login"
+
 // onboardingRungDeps carries the ground-truth probes the setup rungs check.
 // Production wiring lives in newOnboardingRungDeps; tests inject fakes so rung
 // logic runs without keyring, network, or filesystem access.
@@ -465,7 +470,7 @@ func mirrorRung(deps onboardingRungDeps) onboarding.Rung {
 				return onboarding.Check{
 					State:  onboarding.StateBlocked,
 					Detail: "needs login",
-					Hint:   "entire auth login",
+					Hint:   authLoginCommand,
 				}
 			}
 			probe, err := deps.probeMirror(ctx, owner, repo)
@@ -627,7 +632,7 @@ func authRung(deps onboardingRungDeps) onboarding.Rung {
 				}
 				break
 			}
-			return onboarding.Check{State: onboarding.StateMissing, Hint: "entire auth login"}
+			return onboarding.Check{State: onboarding.StateMissing, Hint: authLoginCommand}
 		},
 	}
 }
