@@ -1366,6 +1366,7 @@ func TestShellCompletionTarget(t *testing.T) {
 		name             string
 		shell            string
 		installerShell   string
+		installerPathDir string
 		createBashProf   bool
 		useXDGConfigHome bool
 		wantShell        string
@@ -1411,12 +1412,13 @@ func TestShellCompletionTarget(t *testing.T) {
 			wantCompletion:   "entire completion fish | source",
 		},
 		{
-			name:           "installer_shell_overrides_login_shell",
-			shell:          "/bin/zsh",
-			installerShell: "fish",
-			wantShell:      "Fish",
-			wantRCBase:     filepath.Join(".config", "fish", "config.fish"),
-			wantCompletion: "entire completion fish | source",
+			name:             "installer_shell_overrides_login_shell",
+			shell:            "/bin/zsh",
+			installerShell:   "fish",
+			installerPathDir: "/Users/Example User/.local/bin",
+			wantShell:        "Fish",
+			wantRCBase:       filepath.Join(".config", "fish", "config.fish"),
+			wantCompletion:   `env PATH='/Users/Example User/.local/bin':"$PATH" entire completion fish | source`,
 		},
 		{
 			name:             "empty_shell",
@@ -1431,6 +1433,7 @@ func TestShellCompletionTarget(t *testing.T) {
 			t.Setenv("HOME", home)
 			t.Setenv("SHELL", tt.shell)
 			t.Setenv(installerShellEnv, tt.installerShell)
+			t.Setenv(installerPathDirEnv, tt.installerPathDir)
 			t.Setenv("XDG_CONFIG_HOME", "")
 
 			configRoot := home
@@ -1465,6 +1468,28 @@ func TestShellCompletionTarget(t *testing.T) {
 			}
 			if completion != tt.wantCompletion {
 				t.Errorf("completion = %q, want %q", completion, tt.wantCompletion)
+			}
+		})
+	}
+}
+
+func TestQuoteShellWord(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "spaces", value: "/Users/Example User/.local/bin", want: "'/Users/Example User/.local/bin'"},
+		{name: "single_quote", value: "/Users/O'Brien/.local/bin", want: "'/Users/O'\\''Brien/.local/bin'"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := quoteShellWord(tt.value); got != tt.want {
+				t.Fatalf("quoteShellWord(%q) = %q, want %q", tt.value, got, tt.want)
 			}
 		})
 	}

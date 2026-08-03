@@ -54,7 +54,13 @@ EOF
 }
 
 normalize_shell_name() {
-    local shell_name="${1##*/}"
+    local shell_name="$1"
+
+    # ps implementations may pad `comm` output. Trim it before extracting the
+    # executable name so the exact-match below still recognizes the shell.
+    shell_name="${shell_name#"${shell_name%%[![:space:]]*}"}"
+    shell_name="${shell_name%"${shell_name##*[![:space:]]}"}"
+    shell_name="${shell_name##*/}"
     shell_name="${shell_name#-}"
 
     case "$shell_name" in
@@ -375,9 +381,17 @@ main() {
     fi
 
     # Use the absolute binary path so first-time installs can run post-install
-    # actions before ~/.local/bin has been added to PATH.
+    # actions before ~/.local/bin has been added to PATH. Tell post-install
+    # where the binary lives so any completion command it writes can use that
+    # directory as a PATH fallback until the user's shell setup is complete.
+    local installer_path_dir=""
+    if [[ -z "$path_binary" ]]; then
+        installer_path_dir="$install_dir"
+    fi
     info "Running post-install actions..."
-    ENTIRE_INSTALLER_SHELL="$shell_name" "$install_path" curl-bash-post-install
+    ENTIRE_INSTALLER_SHELL="$shell_name" \
+        ENTIRE_INSTALLER_PATH_DIR="$installer_path_dir" \
+        "$install_path" curl-bash-post-install
 
     if [[ -z "$path_binary" ]]; then
         # First-time install: ~/.local/bin likely isn't on their PATH yet.
