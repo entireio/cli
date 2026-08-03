@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # required for actions/upload-artifact under a restricted token (matches e2e.yml)
 
 concurrency:
   group: checkpoint-audit-${{ github.ref }}

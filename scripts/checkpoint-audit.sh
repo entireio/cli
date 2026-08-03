@@ -65,7 +65,8 @@ json_str() {
 echo "Enumerating checkpoint refs on ${CHECKPOINT_REPO} ..." >&2
 if [ -n "$TOKEN" ]; then
   auth_b64=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
-  remote_refs=$(git -c "http.extraheader=AUTHORIZATION: basic ${auth_b64}" \
+  # Standard header name/scheme casing, matching the CLI (Authorization: Basic).
+  remote_refs=$(git -c "http.extraheader=Authorization: Basic ${auth_b64}" \
     ls-remote "$CHECKPOINT_URL" 'refs/entire/checkpoints/*') || {
     echo "::error::failed to ls-remote ${CHECKPOINT_REPO} (check ENTIRE_CHECKPOINT_TOKEN and repo access)" >&2
     exit 2
@@ -144,6 +145,10 @@ EOF
     echo "| Checkpoint | Commit | Author | Branch(es) | Date | Subject |"
     echo "|---|---|---|---|---|---|"
     while IFS=$'\x1e' read -r cp short author branches cdate subject; do
+      # Escape every free-form cell: author names and (legal) branch names can
+      # contain a pipe, which would otherwise break the markdown table.
+      author=${author//|/\\|}
+      branches=${branches//|/\\|}
       subject=${subject//|/\\|}
       echo "| \`${cp}\` | \`${short}\` | ${author} | ${branches} | ${cdate} | ${subject} |"
     done < "$ROWS_FILE"
