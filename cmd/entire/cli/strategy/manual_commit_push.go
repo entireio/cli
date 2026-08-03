@@ -363,18 +363,26 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 
 	// Progress: pushing many refs over the network can take tens of seconds, so
 	// surface it via the threshold-gated reporter instead of leaving the user's
-	// git push apparently hung. TTY-gated and threshold-delayed: agents and CI
-	// (non-TTY stderr) see zero progress bytes.
-	displayTarget := displayPushTarget(pushTarget)
-	// isTTY here means "ANSI-capable per ShouldStyle" (respects NO_COLOR and
-	// TERM=cygwin), not merely "stderr is a terminal" — see the repo-wide rule
-	// on gating \r/\033[K writes.
-	rep := newPushReporter(ctx, os.Stderr, interactive.ShouldStyle(os.Stderr), 2*time.Second)
-	rep.phase(fmt.Sprintf("syncing %d checkpoint(s) to %s", len(existing), displayTarget))
+	// git push apparently hung. Styled-gated (interactive.ShouldStyle — respects
+	// NO_COLOR and TERM=cygwin, not merely "stderr is a terminal") and
+	// threshold-delayed: agents and CI (non-TTY stderr) see zero progress bytes.
+	rep := newPushReporter(ctx, os.Stderr, interactive.ShouldStyle(os.Stderr), time.Second)
+	rep.phase(fmt.Sprintf("syncing %d checkpoint(s)", len(existing)))
+
+	// Stream git's own --progress output live into the reporter's detail line
+	// (counting/compressing/writing) as the batch push runs, instead of only
+	// showing it after the push completes.
+	streamer := &gitProgressStreamer{
+		onEvent: func(event *gitProgressEvent) {
+			if detail := formatPushProgressDetail(event); detail != "" {
+				rep.setDetail(detail)
+			}
+		},
+	}
 
 	// Fast path: push all refs in one round-trip (fast-forward-only). If every
 	// ref was up to date or fast-forwarded, we're done.
-	batchErr := batchPushRefs(pushCtx, pushTarget, existing)
+	batchErr := batchPushRefs(pushCtx, pushTarget, existing, streamer)
 	if batchErr == nil {
 		rep.finish(fmt.Sprintf("pushed %d checkpoint(s)", len(existing)))
 		if removeErr := queue.Remove(existing); removeErr != nil {
@@ -401,6 +409,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 	// (a genuine cherry-pick conflict leaves that ref queued for a later push,
 	// never force-overwriting the remote).
 	rep.phase(fmt.Sprintf("resolving %d diverged checkpoint(s)", len(existing)))
+	rep.setDetail("") // clear the batch attempt's stale transfer detail
 	pushed := make([]plumbing.ReferenceName, 0, len(existing))
 	var firstErr error
 	for _, ref := range existing {

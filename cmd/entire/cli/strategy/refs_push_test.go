@@ -79,7 +79,7 @@ func TestBatchPushRefs(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
 	t.Chdir(workDir)
 
-	require.NoError(t, batchPushRefs(context.Background(), bareDir, refs))
+	require.NoError(t, batchPushRefs(context.Background(), bareDir, refs, nil))
 
 	// All refs now exist on the bare remote.
 	lsCmd := exec.CommandContext(context.Background(), "git", "ls-remote", bareDir)
@@ -95,7 +95,7 @@ func TestBatchPushRefs(t *testing.T) {
 func TestBatchPushRefs_Empty(t *testing.T) {
 	t.Parallel()
 	// No refs → no git invocation, no error.
-	require.NoError(t, batchPushRefs(context.Background(), "unused-target", nil))
+	require.NoError(t, batchPushRefs(context.Background(), "unused-target", nil, nil))
 }
 
 // TestBatchPushRefs_AllowsFastForward: advancing a checkpoint ref to a descendant
@@ -105,7 +105,7 @@ func TestBatchPushRefs_AllowsFastForward(t *testing.T) {
 	t.Chdir(workDir)
 	ctx := context.Background()
 
-	require.NoError(t, batchPushRefs(ctx, bareDir, refs))
+	require.NoError(t, batchPushRefs(ctx, bareDir, refs, nil))
 
 	// Advance refs[0] to a child commit (fast-forward).
 	repo, err := git.PlainOpen(workDir)
@@ -117,7 +117,7 @@ func TestBatchPushRefs_AllowsFastForward(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refs[0], head2.Hash())))
 
-	require.NoError(t, batchPushRefs(ctx, bareDir, refs[:1]), "fast-forward update should push without force")
+	require.NoError(t, batchPushRefs(ctx, bareDir, refs[:1], nil), "fast-forward update should push without force")
 	assert.Equal(t, head2.Hash().String(), remoteRefHash(t, bareDir, refs[0]),
 		"remote ref should advance to the descendant commit")
 }
@@ -130,7 +130,7 @@ func TestBatchPushRefs_RejectsNonFastForward(t *testing.T) {
 	t.Chdir(workDir)
 	ctx := context.Background()
 
-	require.NoError(t, batchPushRefs(ctx, bareDir, refs))
+	require.NoError(t, batchPushRefs(ctx, bareDir, refs, nil))
 	original := remoteRefHash(t, bareDir, refs[0])
 
 	// Point refs[0] at an orphan commit (no parent) — not a descendant of what was
@@ -149,7 +149,7 @@ func TestBatchPushRefs_RejectsNonFastForward(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refs[0], plumbing.NewHash(orphan))))
 
-	err = batchPushRefs(ctx, bareDir, refs[:1])
+	err = batchPushRefs(ctx, bareDir, refs[:1], nil)
 	require.Error(t, err, "a non-fast-forward update must be rejected, not force-pushed")
 	assert.Equal(t, original, remoteRefHash(t, bareDir, refs[0]),
 		"remote ref must be unchanged after a rejected non-fast-forward push")
@@ -178,14 +178,14 @@ func TestPushCheckpointRefWithRecovery_MergesDivergedRef(t *testing.T) {
 	}
 
 	c1 := head()
-	require.NoError(t, batchPushRefs(ctx, bareDir, []plumbing.ReferenceName{ref})) // remote ref = C1
+	require.NoError(t, batchPushRefs(ctx, bareDir, []plumbing.ReferenceName{ref}, nil)) // remote ref = C1
 
 	// Remote advances: C2 (child of C1) adds b.txt; point the ref at it and push.
 	testutil.WriteFile(t, workDir, "b.txt", "b")
 	testutil.GitAdd(t, workDir, "b.txt")
 	testutil.GitCommit(t, workDir, "add b")
 	setRef(head())
-	require.NoError(t, batchPushRefs(ctx, bareDir, []plumbing.ReferenceName{ref})) // remote ref = C2
+	require.NoError(t, batchPushRefs(ctx, bareDir, []plumbing.ReferenceName{ref}, nil)) // remote ref = C2
 
 	// Local diverges: reset to C1 and make C3 (sibling of C2) adding c.txt.
 	testutil.GitReset(t, workDir, c1.String())

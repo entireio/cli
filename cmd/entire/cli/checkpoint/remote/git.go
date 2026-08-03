@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -414,6 +415,14 @@ type PushOptions struct {
 	RefSpecs  []string
 	ExtraArgs []string // additional flags before remote
 	Dir       string
+	// ProgressWriter, when non-nil, receives a live copy of git's --progress
+	// stderr bytes as they are written, in addition to the buffered capture
+	// that always populates PushResult.Stderr. This lets a caller stream
+	// transfer progress (counting/compressing/writing) to a UI while the push
+	// is still running, without affecting the post-push Stderr capture used
+	// for file logging. checkpoint/remote does not parse these bytes itself —
+	// that stays in the strategy package to avoid an import cycle.
+	ProgressWriter io.Writer
 }
 
 // Push runs git push --no-verify --porcelain with token injection.
@@ -446,7 +455,11 @@ func PushWithOptions(ctx context.Context, opts PushOptions) (PushResult, error) 
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	if opts.ProgressWriter != nil {
+		cmd.Stderr = io.MultiWriter(&stderr, opts.ProgressWriter)
+	} else {
+		cmd.Stderr = &stderr
+	}
 	err = cmd.Run()
 	result := PushResult{
 		Output: stdout.String(),

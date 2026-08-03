@@ -308,6 +308,73 @@ func parsePercentGitProgressEvent(phase gitProgressPhase, m []string, trimmed st
 	}
 }
 
+// gitProgressStreamer is an io.Writer that live-parses git `--progress`
+// stderr bytes as they arrive, without waiting for the push to finish. git
+// emits progress as segments separated by '\r' (in-place updates) or '\n'
+// (a completed line, e.g. the final "done." for a phase). Write accumulates
+// bytes across calls — a chunk boundary can land mid-line — and parses each
+// completed segment as soon as its terminator arrives, invoking onEvent for
+// every line that parses to a non-nil *gitProgressEvent. Leftover partial
+// bytes (after the last terminator in the chunk) are buffered for the next
+// Write. Not safe for concurrent Write calls; callers must serialize writes
+// (e.g. a single git stderr pipe copied by one goroutine).
+type gitProgressStreamer struct {
+	buf     []byte
+	onEvent func(*gitProgressEvent)
+}
+
+// Write implements io.Writer. It never returns an error — parse failures are
+// simply skipped — so it never causes the underlying io.MultiWriter copy (see
+// checkpoint/remote.PushOptions.ProgressWriter) to abort the push.
+func (s *gitProgressStreamer) Write(p []byte) (int, error) {
+	s.buf = append(s.buf, p...)
+
+	start := 0
+	for i, b := range s.buf {
+		if b != '\r' && b != '\n' {
+			continue
+		}
+		segment := string(s.buf[start:i])
+		start = i + 1
+		if event := parseGitProgressLine(segment); event != nil && s.onEvent != nil {
+			s.onEvent(event)
+		}
+	}
+	s.buf = s.buf[start:]
+
+	return len(p), nil
+}
+
+// formatPushProgressDetail renders a gitProgressEvent as the short live
+// detail string shown next to the pushReporter's prefix (e.g. "writing
+// 40/47 objects"). Returns "" for phases/events that don't carry enough
+// information to render (e.g. a bare "Enumerating objects: N" line with no
+// current count yet).
+func formatPushProgressDetail(event *gitProgressEvent) string {
+	switch event.Phase {
+	case gitProgressPhaseCounting:
+		if event.Current > 0 {
+			return fmt.Sprintf("counting objects: %d", event.Current)
+		}
+		if event.Total > 0 {
+			return fmt.Sprintf("counting objects: %d", event.Total)
+		}
+		return ""
+	case gitProgressPhaseCompressing:
+		if event.Total == 0 {
+			return ""
+		}
+		return fmt.Sprintf("compressing %d/%d", event.Current, event.Total)
+	case gitProgressPhaseWriting:
+		if event.Total == 0 {
+			return ""
+		}
+		return fmt.Sprintf("writing %d/%d objects", event.Current, event.Total)
+	default:
+		return ""
+	}
+}
+
 // displayGitProgress writes human-friendly git transfer progress lines to w.
 func displayGitProgress(w io.Writer, stderr string) {
 	styles := pushProgressStylesFor(w, false)

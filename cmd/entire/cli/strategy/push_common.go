@@ -56,7 +56,11 @@ func partitionLocalRefs(repo *git.Repository, refs []plumbing.ReferenceName) (ex
 // remote history with no signal. On rejection the whole push errors; the caller
 // retries the rejected refs individually with fetch+replay recovery
 // (pushCheckpointRefWithRecovery).
-func batchPushRefs(ctx context.Context, target string, refs []plumbing.ReferenceName) error {
+// progressW, when non-nil, receives a live copy of git's --progress stderr
+// bytes as the push runs (see remote.PushOptions.ProgressWriter) — typically a
+// *gitProgressStreamer feeding a pushReporter's setDetail. Pass nil when no
+// caller needs live streaming (e.g. the single-ref recovery retry).
+func batchPushRefs(ctx context.Context, target string, refs []plumbing.ReferenceName, progressW io.Writer) error {
 	if len(refs) == 0 {
 		return nil
 	}
@@ -64,7 +68,7 @@ func batchPushRefs(ctx context.Context, target string, refs []plumbing.Reference
 	for _, ref := range refs {
 		refSpecs = append(refSpecs, ref.String()+":"+ref.String())
 	}
-	result, err := remote.PushWithOptions(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs})
+	result, err := remote.PushWithOptions(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs, ProgressWriter: progressW})
 	logGitProgress(ctx, result.Stderr)
 	if err != nil {
 		return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
@@ -88,13 +92,13 @@ func pushCheckpointRefWithRecovery(ctx context.Context, target string, ref plumb
 	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
 	defer cancel()
 
-	if err := batchPushRefs(ctx, target, []plumbing.ReferenceName{ref}); err == nil {
+	if err := batchPushRefs(ctx, target, []plumbing.ReferenceName{ref}, nil); err == nil {
 		return nil
 	}
 	if err := fetchAndRebaseRefCommon(ctx, target, ref, io.Discard); err != nil {
 		return fmt.Errorf("sync diverged checkpoint ref %s: %w", ref, err)
 	}
-	return batchPushRefs(ctx, target, []plumbing.ReferenceName{ref})
+	return batchPushRefs(ctx, target, []plumbing.ReferenceName{ref}, nil)
 }
 
 // pushRefIfNeeded pushes a ref to the given target if it has unpushed changes.
