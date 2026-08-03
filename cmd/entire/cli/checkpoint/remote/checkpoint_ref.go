@@ -4,8 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
+	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 
 	"github.com/go-git/go-git/v6/plumbing"
 )
@@ -58,11 +63,49 @@ func checkpointFetchTarget(ctx context.Context) (string, bool) {
 //   - Any transport-level failure (probe or fetch) is surfaced as a real
 //     error, never mapped to absence — a false "absent" would misdirect a
 //     backfill onto another backend instead of retrying.
+//   - A repository with no git remotes at all and no checkpoint_remote
+//     configured also returns an error wrapping plumbing.ErrReferenceNotFound
+//     without probing: there is no remote that could host the ref.
 func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 	ctx, cancel := context.WithTimeout(ctx, readFetchTimeout)
 	defer cancel()
 
 	fetchTarget, authoritative := checkpointFetchTarget(ctx)
+
+	// A fully local repository — no git remotes at all and no
+	// checkpoint_remote configured — has no remote that could host checkpoint
+	// refs, so the ref's local absence is the final verdict. Without this,
+	// the origin-name fallback below probes a remote git cannot resolve
+	// ("'origin' does not appear to be a git repository", exit 128) and a
+	// remoteless repo is misreported as a transport outage. Absence is only
+	// ever classified on positive evidence; each escape below keeps today's
+	// hard-failure probe:
+	//   - dead caller context: every subprocess fails for reasons that say
+	//     nothing about the repository
+	//   - unreadable settings: a configured checkpoint remote cannot be
+	//     ruled out
+	//   - checkpoint_remote key present in any form, valid or malformed
+	//     (see settings.HasCheckpointRemoteKey for why key presence, not
+	//     GetCheckpointRemote, is the signal)
+	//   - any remote listed, or the listing itself failing: checkpoint refs
+	//     are pushed to whatever remote the pre-push hook fires for, so a
+	//     repo with only non-origin remotes is NOT remoteless
+	// The skipped-guard cases surface through the ordinary probe paths: a
+	// missing origin fails the ls-remote probe as a transport error, and an
+	// origin that merely lacks the ref hits the fallback-emptiness refusal
+	// below — neither classifies as absence.
+	if fetchTarget == originRemote && !authoritative && ctx.Err() == nil {
+		s, loadErr := settings.Load(ctx)
+		switch {
+		case loadErr != nil:
+			logging.Warn(ctx, "checkpoint probe: settings unreadable; cannot rule out a configured checkpoint remote, probing anyway",
+				slog.String("error", loadErr.Error()))
+		case !s.HasCheckpointRemoteKey() && repoHasNoRemotes(ctx):
+			logging.Debug(ctx, "checkpoint probe: repository has no git remotes; classifying ref as absent",
+				slog.String("ref", ref.String()))
+			return fmt.Errorf("checkpoint ref %s: repository has no git remotes to fetch from: %w", ref, plumbing.ErrReferenceNotFound)
+		}
+	}
 
 	out, err := LsRemoteInDir(ctx, "", fetchTarget, ref.String())
 	if err != nil {
@@ -98,6 +141,16 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, RedactURL(fetchTarget), err)
 	}
 	return nil
+}
+
+// repoHasNoRemotes reports whether the repository at the current directory
+// definitively has no git remotes configured. Only a successful, empty
+// `git remote` listing counts as proof; any error (dead context, missing git
+// binary, not a repository) returns false so the caller falls through to the
+// probe instead of classifying absence off an undifferentiated failure.
+func repoHasNoRemotes(ctx context.Context) bool {
+	out, err := exec.CommandContext(ctx, "git", "remote").Output()
+	return err == nil && len(bytes.TrimSpace(out)) == 0
 }
 
 // HookCheckpointRefFetcher returns the write-probe fetcher for git-hook

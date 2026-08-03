@@ -1407,6 +1407,19 @@ func (c *CheckpointRemoteConfig) Owner() string {
 	return parts[0]
 }
 
+// HasCheckpointRemoteKey reports whether a checkpoint_remote entry exists in
+// strategy options at all — deliberately including malformed entries that
+// GetCheckpointRemote rejects (it returns nil for absent AND malformed, so it
+// cannot distinguish "no intent" from "botched intent"). Presence in any form
+// means the user intends a checkpoint remote.
+func (s *EntireSettings) HasCheckpointRemoteKey() bool {
+	if s.StrategyOptions == nil {
+		return false
+	}
+	_, ok := s.StrategyOptions["checkpoint_remote"]
+	return ok
+}
+
 // GetCheckpointRemote returns the configured checkpoint remote.
 // Expects a structured object: {"provider": "github", "repo": "org/repo"}.
 // Returns nil if not configured, wrong type, or missing required fields.

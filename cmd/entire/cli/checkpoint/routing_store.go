@@ -199,9 +199,10 @@ func (s *kindRoutingStore) ReadSessionMetadataAndPrompts(ctx context.Context, ch
 // (which falls through on absent OR any error): only the not-found sentinel
 // falls through here. Redirecting a write to another backend after a transient
 // primary failure could fork the data, so a hard error aborts and surfaces.
-// Note the stores' backfill absence probes are local-only (the refs store's
-// refBase does not on-demand fetch like its read path does); a checkpoint
-// whose ref exists only remotely backfills to the fallback store.
+// Note the refs store's backfill absence probe fetches a locally-missing ref
+// on demand when a fetcher is wired (refBaseForBackfill), so a checkpoint
+// whose ref exists only remotely is fetched and backfilled in place rather
+// than falling through to the fallback store.
 func (s *kindRoutingStore) Write(ctx context.Context, req WriteRequest) error {
 	checkpointID, isBackfill := backfillTarget(req)
 	if !isBackfill {

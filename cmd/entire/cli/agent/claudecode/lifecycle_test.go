@@ -527,23 +527,146 @@ func TestWaitForTranscriptFlush_StaleFile_SkipsWait(t *testing.T) {
 	}
 }
 
-func TestWaitForTranscriptFlush_RecentFile_WaitsForSentinel(t *testing.T) {
+func TestWaitForTranscriptFlush_RecentStableFile_ReturnsFast(t *testing.T) {
 	t.Parallel()
 
-	// Create a transcript file with recent mtime (no sentinel present)
+	// A recent transcript that has stopped growing (the healthy turn-end case:
+	// the assistant finished streaming). Even though the "hooks claude-code stop"
+	// sentinel is never present in the file, the wait must settle on size
+	// stability and return quickly instead of burning the full 3s maxWait.
 	transcriptFile := filepath.Join(t.TempDir(), "transcript.jsonl")
 	if err := os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644); err != nil {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
-	// File was just created, so mtime is now — should NOT skip the wait
 
 	start := time.Now()
 	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
 	elapsed := time.Since(start)
 
-	// Should wait close to maxWait (3s) since no sentinel will be found
-	if elapsed < 2*time.Second {
-		t.Errorf("expected to wait ~3s for recent file without sentinel, but only took %v", elapsed)
+	// A stable file settles once its size has held steady for the quiet window
+	// (~500ms) — comfortably under the 3s cap that the old sentinel-only wait
+	// always hit.
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("expected fast return for a stable recent transcript, but took %v", elapsed)
+	}
+}
+
+func TestWaitForTranscriptFlush_GrowingFile_WaitsUntilSettled(t *testing.T) {
+	t.Parallel()
+
+	// A transcript that is still being written must NOT be treated as settled
+	// while it grows; the wait returns only after the writes stop.
+	transcriptFile := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	const growFor = 600 * time.Millisecond
+	stop := make(chan struct{})
+	go func() {
+		f, err := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		ticker := time.NewTicker(40 * time.Millisecond)
+		defer ticker.Stop()
+		deadline := time.Now().Add(growFor)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if time.Now().After(deadline) {
+					return
+				}
+				if _, werr := f.WriteString(`{"type":"assistant"}` + "\n"); werr != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	start := time.Now()
+	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
+	elapsed := time.Since(start)
+	close(stop)
+
+	// It should keep waiting while the file grows (i.e. not return near-instantly),
+	// but still return once writes stop (bounded by the 3s cap).
+	if elapsed < 300*time.Millisecond {
+		t.Errorf("expected to keep waiting while transcript grew, returned after only %v", elapsed)
+	}
+	if elapsed > 3500*time.Millisecond {
+		t.Errorf("expected to return once settled/within cap, but took %v", elapsed)
+	}
+}
+
+func TestWaitForTranscriptFlush_BriefMidWritePause_NotDeclaredDoneEarly(t *testing.T) {
+	t.Parallel()
+
+	// A writer that stalls briefly mid-write (shorter than the quiet window) and
+	// then resumes must NOT be treated as settled during the lull. With a
+	// too-short stability check the ~300ms pause below would be mistaken for
+	// completion and turn-end would read a truncated transcript.
+	transcriptFile := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	const (
+		pauseDur  = 300 * time.Millisecond // stable, but shorter than the 500ms quiet window
+		resumeDur = 200 * time.Millisecond // further writes after the pause
+	)
+
+	lastWrite := make(chan time.Time, 1)
+	go func() {
+		f, err := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			lastWrite <- time.Now()
+			return
+		}
+		defer f.Close()
+
+		// Hold the file size steady for pauseDur — a brief mid-write stall.
+		time.Sleep(pauseDur)
+
+		// Resume writing; record when the final write lands.
+		ticker := time.NewTicker(40 * time.Millisecond)
+		defer ticker.Stop()
+		deadline := time.Now().Add(resumeDur)
+		last := time.Now()
+		for range ticker.C {
+			if time.Now().After(deadline) {
+				break
+			}
+			if _, werr := f.WriteString(`{"type":"assistant"}` + "\n"); werr != nil {
+				break
+			}
+			last = time.Now()
+		}
+		lastWrite <- last
+	}()
+
+	start := time.Now()
+	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
+	returnedAt := time.Now()
+	elapsed := returnedAt.Sub(start)
+
+	final := <-lastWrite
+
+	// The wait must not have returned during the pause: a truncated early return
+	// would land near the old ~100ms stability window, before writing resumed.
+	if !returnedAt.After(final) {
+		t.Errorf("returned at %v before the writer's final write at %v (declared done during mid-write pause)",
+			returnedAt.Sub(start), final.Sub(start))
+	}
+	// Sanity: it keeps waiting past the pause, and still returns within the cap.
+	if elapsed < pauseDur {
+		t.Errorf("expected to keep waiting through the mid-write pause, returned after only %v", elapsed)
+	}
+	if elapsed > 3500*time.Millisecond {
+		t.Errorf("expected to return once settled/within cap, but took %v", elapsed)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -937,4 +938,123 @@ func TestClearSessionState_RemovesOrphanedHintFile(t *testing.T) {
 	if len(matches) != 0 {
 		t.Errorf("expected no files for session after clear, found: %v", matches)
 	}
+}
+
+// TestMutateSessionState_BoundedLockWait_DegradesUnderContention proves the
+// TurnStart fix for the pathological hook latency: when a concurrent process
+// holds the per-session flock (e.g. the previous turn's still-running
+// condensation), a caller that opted into WithSessionLockWait returns promptly
+// with a lock-acquire error instead of blocking for the full duration of the
+// lock holder. Without the bound the acquisition is an unbounded LOCK_EX and
+// TurnStart stalls the user's prompt for as long as the holder runs (~30s in
+// production).
+func TestMutateSessionState_BoundedLockWait_DegradesUnderContention(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	const sessionID = "lock-wait-session"
+
+	// Hold the raw per-session flock from a separate open descriptor, exactly
+	// as a concurrent condensation process would. flock contends across
+	// independent descriptors even within one process.
+	lockPath, err := stateLockPath(ctx, sessionID)
+	require.NoError(t, err)
+	release, err := flock.Acquire(lockPath)
+	require.NoError(t, err)
+	heldReleased := false
+	defer func() {
+		if !heldReleased {
+			release()
+		}
+	}()
+
+	// A bounded caller must give up quickly, not block behind the holder.
+	const lockWait = 150 * time.Millisecond
+	boundedCtx := WithSessionLockWait(ctx, lockWait)
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		done <- MutateSessionState(boundedCtx, sessionID, func(*SessionState) error {
+			t.Error("mutation ran even though the lock was held")
+			return nil
+		})
+	}()
+
+	select {
+	case mutErr := <-done:
+		elapsed := time.Since(start)
+		require.Error(t, mutErr, "expected a lock-acquire timeout error while lock is held")
+		// It must not be treated as "no state" — it's a genuine acquisition timeout.
+		require.NotErrorIs(t, mutErr, ErrStateNotFound,
+			"timeout should surface as an acquire error, not ErrStateNotFound")
+		assert.Less(t, elapsed, 2*time.Second,
+			"bounded MutateSessionState should return shortly after lockWait, not block on the holder")
+	case <-time.After(3 * time.Second):
+		t.Fatal("bounded MutateSessionState blocked on the held lock instead of timing out")
+	}
+
+	// Once the holder releases, a bounded caller acquires normally. State was
+	// never created, so the mutation reaches "not found" AFTER successfully
+	// acquiring the lock — proving contention, not the bound, was the only
+	// thing stopping it before.
+	release()
+	heldReleased = true
+
+	ran := false
+	err = MutateSessionState(WithSessionLockWait(ctx, time.Second), sessionID, func(state *SessionState) error {
+		ran = true
+		state.StepCount = 7
+		return nil
+	})
+	require.ErrorIs(t, err, ErrStateNotFound)
+	assert.False(t, ran, "mutation body only runs when state exists")
+}
+
+// TestMutateSessionState_UnboundedByDefault verifies the default path is
+// unchanged: with no WithSessionLockWait the acquisition still blocks until the
+// lock frees (turn-end/condensation must never drop work). We assert this by
+// releasing the lock from a goroutine after a short delay and confirming the
+// mutation only proceeds afterward.
+func TestMutateSessionState_UnboundedByDefault(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	const sessionID = "unbounded-session"
+
+	// Seed state so the mutation body can run once the lock is free.
+	require.NoError(t, SaveSessionState(ctx, &SessionState{
+		SessionID:  sessionID,
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+	}))
+
+	lockPath, err := stateLockPath(ctx, sessionID)
+	require.NoError(t, err)
+	release, err := flock.Acquire(lockPath)
+	require.NoError(t, err)
+
+	const holdFor = 400 * time.Millisecond
+	go func() {
+		time.Sleep(holdFor)
+		release()
+	}()
+
+	start := time.Now()
+	ran := false
+	// No WithSessionLockWait: must wait for the holder rather than time out.
+	err = MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		ran = true
+		state.StepCount = 3
+		return nil
+	})
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	assert.True(t, ran, "unbounded mutation must eventually run")
+	assert.GreaterOrEqual(t, elapsed, holdFor,
+		"unbounded acquire should block until the holder releases, not time out")
 }

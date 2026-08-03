@@ -518,6 +518,16 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	}
 }
 
+// turnStartSessionLockWait bounds how long the TurnStart hook waits for the
+// per-session state lock. TurnStart fires before the agent runs and must stay
+// cheap; its session-state work is best-effort and repaired on the next turn or
+// at turn-end. Without a bound, TurnStart blocks on the previous turn's
+// still-running checkpoint condensation (which holds the same lock while it
+// rewrites the multi-MB transcript), stalling the user's prompt for ~30s. A
+// short wait still wins the lock in the common uncontended/brief-contention
+// case while degrading gracefully under pathological contention.
+const turnStartSessionLockWait = 2 * time.Second
+
 func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	logging.Info(logCtx, "turn-start",
@@ -534,6 +544,10 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("invalid %s event: %w", event.Type, err)
 	}
+
+	// Bound every session-state lock acquisition on the TurnStart path so a
+	// background lock holder can't stall the user's prompt (see the const doc).
+	ctx = strategy.WithSessionLockWait(ctx, turnStartSessionLockWait)
 
 	// Fill model from hint file if the agent didn't provide it on this hook
 	if event.Model == "" {
