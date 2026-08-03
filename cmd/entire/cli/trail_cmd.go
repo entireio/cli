@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trail"
 
@@ -173,7 +174,7 @@ Otherwise, <trail> may be a trail number, id, or branch in the target repo.`,
 		},
 	}
 	cmd.Flags().StringVar(&branch, "branch", "", "Show the trail for this branch instead of the current branch; cannot be combined with a trail selector")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output the trail as JSON, including the description")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
 	return cmd
 }
 
@@ -227,26 +228,29 @@ func runTrailShow(ctx context.Context, w, errW io.Writer, insecureHTTP bool, sel
 	})
 }
 
-// encodeTrailShowJSON emits the resolved trail as JSON, with the body carrying
-// the resolved description text and the URL carrying the browser link the
-// human output surfaces. description_loaded distinguishes a genuinely empty
-// description (true, body "") from a failed description fetch (false) —
-// the same distinction the text path draws via trailDescriptionForDisplay.
+// encodeTrailShowJSON emits the resolved trail in the same wire shape as
+// `trail list --json` (trail.Metadata: trail_id key, normalized slices), with
+// the body carrying the resolved description text and the URL carrying the
+// browser link. description_loaded reports whether the description was
+// authoritatively consulted; false means the detail fetch failed (or never
+// ran) and no list body was available either.
 func encodeTrailShowJSON(w io.Writer, found api.TrailResource, webURL, bodyText string, descriptionLoaded bool) error {
-	found.Body = bodyText
+	m := found.ToMetadata()
+	m.Body = bodyText
 	if strings.TrimSpace(webURL) != "" {
-		found.URL = webURL
+		m.URL = webURL
 	}
 	payload := struct {
-		api.TrailResource
+		*trail.Metadata
 
 		DescriptionLoaded bool `json:"description_loaded"`
-	}{TrailResource: found, DescriptionLoaded: descriptionLoaded}
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(payload); err != nil {
+	}{Metadata: m, DescriptionLoaded: descriptionLoaded}
+	data, err := jsonutil.MarshalIndentWithNewline(payload, "", "  ")
+	if err != nil {
 		return fmt.Errorf("encode trail JSON: %w", err)
+	}
+	if _, err := w.Write(data); err != nil {
+		return fmt.Errorf("write trail JSON: %w", err)
 	}
 	return nil
 }
