@@ -29,8 +29,8 @@ case "$1" in
         exit 0
         ;;
     curl-bash-post-install)
-        printf 'shell=%s\nxdg=%s\npath_dir=%s\n' \
-            "$ENTIRE_INSTALLER_SHELL" "$XDG_CONFIG_HOME" "$ENTIRE_INSTALLER_PATH_DIR" \
+        printf 'shell=%s\nlegacy_shell=%s\nxdg=%s\npath_dir=%s\n' \
+            "$ENTIRE_INSTALLER_SHELL" "$SHELL" "$XDG_CONFIG_HOME" "$ENTIRE_INSTALLER_PATH_DIR" \
             > "$HOME/post-install-env"
         ;;
 esac
@@ -118,7 +118,7 @@ esac
 	if err != nil {
 		t.Fatalf("post-install marker: %v", err)
 	}
-	wantPostInstallEnv := "shell=fish\nxdg=" + xdgConfigHome + "\npath_dir=" + filepath.Join(home, ".local", "bin") + "\n"
+	wantPostInstallEnv := "shell=fish\nlegacy_shell=fish\nxdg=" + xdgConfigHome + "\npath_dir=" + filepath.Join(home, ".local", "bin") + "\n"
 	if string(postInstallEnv) != wantPostInstallEnv {
 		t.Fatalf("post-install environment = %q, want %q", postInstallEnv, wantPostInstallEnv)
 	}

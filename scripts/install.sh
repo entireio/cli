@@ -397,8 +397,13 @@ main() {
     if [[ -z "$path_binary" ]]; then
         installer_path_dir="$install_dir"
     fi
+    local post_install_shell="${shell_name:-${SHELL:-}}"
     info "Running post-install actions..."
-    ENTIRE_INSTALLER_SHELL="$shell_name" \
+    # Released binaries that predate ENTIRE_INSTALLER_SHELL only inspect
+    # SHELL. Override it for this child process so the updated installer still
+    # targets the invoking shell while a compatible binary is rolling out.
+    SHELL="$post_install_shell" \
+        ENTIRE_INSTALLER_SHELL="$shell_name" \
         ENTIRE_INSTALLER_PATH_DIR="$installer_path_dir" \
         "$install_path" curl-bash-post-install
 
