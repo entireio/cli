@@ -92,7 +92,16 @@ detect_user_shell() {
 show_path_setup() {
     local shell_name="$1"
     local install_dir="$2"
+    local install_dir_display="$install_dir"
     local shell_config=""
+
+    # Keep copy-paste instructions portable when installing under the user's
+    # home directory, while still honoring any other install directory.
+    if [[ "$install_dir" == "$HOME" ]]; then
+        install_dir_display="\$HOME"
+    elif [[ "$install_dir" == "$HOME/"* ]]; then
+        install_dir_display="\$HOME/${install_dir#"$HOME/"}"
+    fi
 
     echo ""
     echo -e "  Add ${BOLD}entire${NC} to your PATH:"
@@ -102,14 +111,14 @@ show_path_setup() {
         fish)
             # fish_add_path updates this Fish session and persists the path for
             # future sessions, so no config-file edit or restart is required.
-            echo -e "    ${BOLD}fish_add_path \"\$HOME/.local/bin\"${NC}"
+            echo -e "    ${BOLD}fish_add_path \"${install_dir_display}\"${NC}"
             echo ""
             echo -e "  Then run ${BOLD}entire${NC} to get started."
             ;;
         zsh)
             # shellcheck disable=SC2088
             shell_config="~/.zshrc"
-            echo -e "    ${BOLD}echo 'export PATH=\"${install_dir}:\$PATH\"' >> ${shell_config}${NC}"
+            echo -e "    ${BOLD}echo 'export PATH=\"${install_dir_display}:\$PATH\"' >> ${shell_config}${NC}"
             echo ""
             echo -e "  Restart your terminal, then run ${BOLD}entire${NC} to get started."
             ;;
@@ -121,16 +130,16 @@ show_path_setup() {
                 # shellcheck disable=SC2088
                 shell_config="~/.bashrc"
             fi
-            echo -e "    ${BOLD}echo 'export PATH=\"${install_dir}:\$PATH\"' >> ${shell_config}${NC}"
+            echo -e "    ${BOLD}echo 'export PATH=\"${install_dir_display}:\$PATH\"' >> ${shell_config}${NC}"
             echo ""
             echo -e "  Restart your terminal, then run ${BOLD}entire${NC} to get started."
             ;;
         *)
             echo "  Fish:"
-            echo -e "    ${BOLD}fish_add_path \"\$HOME/.local/bin\"${NC}"
+            echo -e "    ${BOLD}fish_add_path \"${install_dir_display}\"${NC}"
             echo ""
             echo "  Bash, Zsh, and other POSIX-compatible shells:"
-            echo -e "    ${BOLD}export PATH=\"${install_dir}:\$PATH\"${NC}"
+            echo -e "    ${BOLD}export PATH=\"${install_dir_display}:\$PATH\"${NC}"
             echo ""
             echo -e "  Then run ${BOLD}entire${NC} to get started."
             ;;

@@ -226,6 +226,23 @@ func TestShowPathSetup_FishUsesNativePersistentCommand(t *testing.T) {
 	}
 }
 
+func TestShowPathSetup_FishUsesProvidedInstallDir(t *testing.T) {
+	t.Parallel()
+
+	out := runInstallerHelper(t, map[string]string{
+		"HOME":  "/Users/Example User",
+		"PATH":  "/usr/bin:/bin",
+		"SHELL": "/usr/bin/fish",
+	}, "show_path_setup", "fish", "/opt/entire/bin")
+
+	if !strings.Contains(out, `fish_add_path "/opt/entire/bin"`) {
+		t.Fatalf("Fish PATH instructions do not use the provided install directory:\n%s", out)
+	}
+	if strings.Contains(out, `$HOME/.local/bin`) {
+		t.Fatalf("Fish PATH instructions should not hard-code the default install directory:\n%s", out)
+	}
+}
+
 func TestShowPathSetup_UnknownShellShowsFishAndPOSIXOptions(t *testing.T) {
 	t.Parallel()
 
@@ -239,7 +256,7 @@ func TestShowPathSetup_UnknownShellShowsFishAndPOSIXOptions(t *testing.T) {
 		"Fish:",
 		`fish_add_path "$HOME/.local/bin"`,
 		"Bash, Zsh, and other POSIX-compatible shells:",
-		`export PATH="/home/example/.local/bin:$PATH"`,
+		`export PATH="$HOME/.local/bin:$PATH"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("PATH instructions missing %q:\n%s", want, out)
