@@ -336,7 +336,8 @@ func releaseNotesURL(version string) string {
 // It's a variable so tests can override it.
 var executablePath = os.Executable
 
-func releaseChannel(version string) string {
+// ReleaseChannel reports whether the given version is a stable or nightly build.
+func ReleaseChannel(version string) string {
 	if isNightly(version) {
 		return installChannelNightly
 	}
@@ -394,7 +395,7 @@ const downloadsURL = "https://github.com/entireio/cli/releases"
 func updateCommand(currentVersion string) string {
 	switch installManagerForCurrentBinary() {
 	case installManagerBrew:
-		if releaseChannel(currentVersion) == installChannelNightly {
+		if ReleaseChannel(currentVersion) == installChannelNightly {
 			return "brew upgrade --yes entire@nightly"
 		}
 		return "brew upgrade --yes entire"
@@ -404,7 +405,7 @@ func updateCommand(currentVersion string) string {
 		return "scoop update entire/cli"
 	}
 
-	if releaseChannel(currentVersion) == installChannelNightly {
+	if ReleaseChannel(currentVersion) == installChannelNightly {
 		return "curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly"
 	}
 	return "curl -fsSL https://entire.io/install.sh | bash"

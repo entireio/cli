@@ -59,6 +59,16 @@ func TestIsOutdated(t *testing.T) {
 	}
 }
 
+func TestReleaseChannel(t *testing.T) {
+	t.Parallel()
+	if got := ReleaseChannel("v1.2.3"); got != "stable" {
+		t.Errorf("ReleaseChannel(stable) = %q, want stable", got)
+	}
+	if got := ReleaseChannel("v1.2.3-nightly.20260805"); got != "nightly" {
+		t.Errorf("ReleaseChannel(nightly) = %q, want nightly", got)
+	}
+}
+
 func TestIsNightly(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
