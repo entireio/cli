@@ -86,7 +86,11 @@ func TestResumeSquashMergeMultipleCheckpoints(t *testing.T) {
 
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Add red doc")
-		testutil.WaitForCheckpoint(t, s, 30*time.Second)
+		// The second checkpoint condenses onto the single git-branch v1 branch,
+		// whose advance can lag on a loaded CI runner. 30s flaked here
+		// intermittently (only on the git-branch backend); give it 60s. See #787
+		// for the same CI-slower-than-local timing class.
+		testutil.WaitForCheckpoint(t, s, 60*time.Second)
 		cp1Ref := testutil.CurrentCheckpointRef(t, s.Dir)
 
 		_, err = s.RunPrompt(t, ctx,
@@ -97,7 +101,7 @@ func TestResumeSquashMergeMultipleCheckpoints(t *testing.T) {
 
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Add blue doc")
-		testutil.WaitForCheckpointAdvanceFrom(t, s.Dir, cp1Ref, 30*time.Second)
+		testutil.WaitForCheckpointAdvanceFrom(t, s.Dir, cp1Ref, 60*time.Second)
 
 		// Record checkpoint IDs from both feature branch commits.
 		cpID1 := testutil.GetCheckpointTrailer(t, s.Dir, "HEAD~1")
