@@ -28,15 +28,3 @@ Other flags: `--yes`, `--fast` (no simulated delays), `--github`, `--no-telemetr
 
 Keys: `↑↓` move · `←→`/`space` change a row (Agents expands to multi-select) ·
 `enter` accept · `esc`/`q` cancel.
-
-## Record a GIF for the PR
-
-Uses [VHS](https://github.com/charmbracelet/vhs) (`brew install vhs`):
-
-```bash
-cd prototypes/onboarding
-vhs demo.tape        # writes onboarding-demo.gif
-```
-
-Then drag the GIF into the PR description. Edit `demo.tape` to change the
-scenario or keystrokes.
