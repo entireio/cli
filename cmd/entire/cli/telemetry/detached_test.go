@@ -155,6 +155,38 @@ func TestSendEventHandlesInvalidJSON(_ *testing.T) {
 	SendEvent("{}")
 }
 
+func TestBuildInstallEventPayload(t *testing.T) {
+	t.Parallel()
+	p := BuildInstallEventPayload("brew", "v1.2.3-nightly.20260805")
+	if p == nil {
+		t.Fatal("BuildInstallEventPayload returned nil")
+	}
+	if p.Event != "cli_installed" {
+		t.Errorf("Event = %q, want cli_installed", p.Event)
+	}
+	if p.DistinctID == "" {
+		t.Error("DistinctID is empty")
+	}
+	if p.Properties["method"] != "brew" {
+		t.Errorf("method = %v, want brew", p.Properties["method"])
+	}
+	if p.Properties["channel"] != "nightly" {
+		t.Errorf("channel = %v, want nightly", p.Properties["channel"])
+	}
+	if p.Properties["cli_version"] != "v1.2.3-nightly.20260805" {
+		t.Errorf("cli_version = %v", p.Properties["cli_version"])
+	}
+	if p.Properties["os"] == nil || p.Properties["arch"] == nil {
+		t.Error("os/arch missing")
+	}
+}
+
+func TestTrackInstallDetachedRespectsOptOut(t *testing.T) {
+	t.Setenv("ENTIRE_TELEMETRY_OPTOUT", "1")
+	// Should not panic and should skip sending.
+	TrackInstallDetached("scoop", "v1.2.3")
+}
+
 func TestParseGitVersion(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

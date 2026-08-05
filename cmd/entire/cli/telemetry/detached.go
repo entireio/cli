@@ -11,6 +11,7 @@ import (
 
 	"github.com/denisbrodbeck/machineid"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/posthog/posthog-go"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -210,6 +211,48 @@ func SendEvent(payloadJSON string) {
 		Properties: props,
 		Timestamp:  payload.Timestamp,
 	})
+}
+
+// BuildInstallEventPayload constructs the cli_installed event payload.
+// Exported for testing. Returns nil if the machine ID cannot be resolved.
+func BuildInstallEventPayload(method, version string) *EventPayload {
+	machineID, err := machineid.ProtectedID("entire-cli")
+	if err != nil {
+		return nil
+	}
+
+	properties := map[string]any{
+		"method":      method,
+		"channel":     versioncheck.ReleaseChannel(version),
+		"cli_version": version,
+		"os":          runtime.GOOS,
+		"arch":        runtime.GOARCH,
+	}
+
+	return &EventPayload{
+		Event:      "cli_installed",
+		DistinctID: machineID,
+		Properties: properties,
+		Timestamp:  time.Now(),
+	}
+}
+
+// TrackInstallDetached records a one-time install event by spawning a detached
+// subprocess. Fires before the in-app telemetry consent prompt, so it is gated
+// only by ENTIRE_TELEMETRY_OPTOUT (see docs/security-and-privacy.md).
+func TrackInstallDetached(method, version string) {
+	if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+		return
+	}
+
+	payload := BuildInstallEventPayload(method, version)
+	if payload == nil {
+		return
+	}
+
+	if payloadJSON, err := json.Marshal(payload); err == nil {
+		spawnDetachedAnalytics(string(payloadJSON))
+	}
 }
 
 // gitVersion returns the installed git version (e.g. "2.43.0"), best-effort.
