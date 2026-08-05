@@ -229,6 +229,55 @@ func resolveOneShotClusterHost(cmd *cobra.Command) (string, error) {
 	}); err != nil {
 		return "", err
 	}
+	return chooseClusterHost(cmd.Context(), errW, regions, jurisdiction)
+}
+
+// resolveOfferRegions resolves the enable flow's mirror-offer placement
+// regions with the same capability as the bare create wizard: the catalog's
+// regions as a multi-select pre-checked to the caller's jurisdiction default
+// (one Enter for the common case, several regions selectable — data residency
+// is the user's call, in setup exactly as in `repo mirror create`). One
+// region skips the question; non-interactive keeps the fixed default so
+// scripts stay stable. The offer has no [cluster-host] escape hatch, so a
+// failed catalog fetch surfaces as the offer's error and the checklist keeps
+// its retry hint. Runs after the login rung, so the active context the
+// catalog fetch needs is guaranteed.
+func resolveOfferRegions(ctx context.Context, errW io.Writer) ([]regionChoice, error) {
+	if !interactive.CanPromptInteractively() {
+		return []regionChoice{{host: defaultClusterHost}}, nil
+	}
+	client, err := coreapi.New()
+	if err != nil {
+		return nil, fmt.Errorf("connect to control plane: %w", err)
+	}
+	stop := startSpinner(errW, "Fetching clusters")
+	regions, err := availableRegions(ctx, client)
+	if err != nil {
+		stop(false)
+		return nil, err
+	}
+	var jurisdiction string
+	// The jurisdiction only pre-selects the picker's default; a /me hiccup
+	// shouldn't sink the offer, so fall back to no pre-selection.
+	if me, merr := client.GetMe(ctx); merr == nil {
+		jurisdiction, _ = me.Jurisdiction.Get()
+	}
+	stop(true)
+	if len(regions) == 0 {
+		return nil, errors.New("no clusters available to mirror into")
+	}
+	if len(regions) == 1 {
+		fmt.Fprintf(errW, "Using cluster %s\n", regions[0].host)
+		return regions[:1], nil
+	}
+	return pickRegions(ctx, errW, regions, jurisdiction)
+}
+
+// chooseClusterHost turns the fetched catalog into a cluster-host decision:
+// none is an error, one is used silently (announced), several run the
+// jurisdiction-preselected picker. Shared by the one-shot create and the
+// enable flow's mirror offer so both resolve placements identically.
+func chooseClusterHost(ctx context.Context, errW io.Writer, regions []regionChoice, jurisdiction string) (string, error) {
 	if len(regions) == 0 {
 		return "", errors.New("no clusters available to mirror into; pass [cluster-host] explicitly")
 	}
@@ -236,7 +285,7 @@ func resolveOneShotClusterHost(cmd *cobra.Command) (string, error) {
 		fmt.Fprintf(errW, "Using cluster %s\n", regions[0].host)
 		return regions[0].host, nil
 	}
-	return pickOneCluster(cmd.Context(), errW, regions, jurisdiction)
+	return pickOneCluster(ctx, errW, regions, jurisdiction)
 }
 
 // pickOneCluster runs the one-shot create's cluster single-select,

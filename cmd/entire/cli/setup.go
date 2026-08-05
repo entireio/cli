@@ -411,7 +411,17 @@ func runSetupFlow(ctx context.Context, w io.Writer, opts EnableOptions) error {
 		return fmt.Errorf("agent selection failed: %w", err)
 	}
 
-	return runEnableInteractive(ctx, w, agents, opts)
+	if err := runEnableInteractive(ctx, w, agents, opts); err != nil {
+		if errors.Is(err, errSetupCancelled) {
+			// The user cancelled a first-run prompt (e.g. the checkpoint
+			// storage question). Nothing is persisted before that prompt, so
+			// re-running `entire enable` resumes at the same point.
+			fmt.Fprintln(w, "\nSetup cancelled — run `entire enable` again to resume where you left off.")
+			return NewSilentError(err)
+		}
+		return err
+	}
+	return nil
 }
 
 // selectAllAgents is a selectFn that selects all available agents.
@@ -845,6 +855,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 			// the initial commit captures the .entire/, .claude/, hooks, and
 			// settings files that setup writes.
 			var bootstrap *bootstrapState
+			loggingReady := false
 			if _, err := paths.WorktreeRoot(ctx); err != nil {
 				bootstrapOpts.Yes = opts.Yes
 				state, bootstrapErr := runGitHubBootstrapInit(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), bootstrapOpts)
@@ -869,6 +880,15 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				}
 				// Visual separator between bootstrap init and agent setup.
 				printBootstrapSection(cmd.OutOrStdout(), "Enabling Entire")
+				// Logging must initialize BEFORE the finalize defer below is
+				// registered: defers run LIFO, so Close (registered here,
+				// first) runs after the deferred ladder — whose probe/offer
+				// warnings would otherwise be written to a closed log file
+				// and silently dropped. Safe at this point: phase 1 just
+				// created the repo, so Init can't leave a stray .entire/ in
+				// a folder whose bootstrap was declined.
+				defer initEnableLogging(ctx)()
+				loggingReady = true
 				// On the way out (if setup succeeded), create the initial
 				// commit and push to the GitHub repo. If setup returned an
 				// error, skip the finalize — the user can fix the issue and
@@ -879,8 +899,31 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 					}
 					if err := runGitHubBootstrapFinalize(ctx, cmd.OutOrStdout(), bootstrap); err != nil {
 						runErr = err
+						return
 					}
+					// The connect ladder runs only now, after finalize created
+					// the origin remote: probed any earlier, the mirror rung
+					// can only report "couldn't check" and the mirror offer
+					// can never fire on a first enable (the setup paths skip
+					// their in-flow ladder while a bootstrap is pending). A
+					// bootstrapped repo is always a first run; nil importScope
+					// means every agent whose hooks were just installed.
+					printBootstrapSection(cmd.OutOrStdout(), "Connecting to entire.io")
+					runEnableOnboarding(ctx, cmd.OutOrStdout(), enableOnboardingOpts{
+						assumeYes:   opts.Yes,
+						neverPrompt: agentName != "",
+						firstRun:    true,
+					})
+					fmt.Fprintln(cmd.OutOrStdout(), "\nDone.")
 				}()
+			}
+
+			// After the bootstrap block, so a declined bootstrap doesn't
+			// leave a stray .entire/ in a non-repo folder; the bootstrap
+			// path initialized logging inside the block instead (before its
+			// finalize defer — see the LIFO note there).
+			if !loggingReady {
+				defer initEnableLogging(ctx)()
 			}
 
 			if err := validateSetupFlags(opts.UseLocalSettings, opts.UseProjectSettings); err != nil {
@@ -1155,9 +1198,16 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 			fmt.Fprintln(w, "Entire is already enabled.")
 		}
 		printEnabledStatus(ctx, w)
+		// Re-running enable is the resume path for interrupted onboarding:
+		// offer whichever connect rungs are still missing.
+		runEnableOnboarding(ctx, w, enableOnboardingOpts{assumeYes: opts.Yes})
 		return nil
 	}
-	return runEnable(ctx, w, useProject)
+	if err := runEnable(ctx, w, useProject); err != nil {
+		return err
+	}
+	runEnableOnboarding(ctx, w, enableOnboardingOpts{assumeYes: opts.Yes})
+	return nil
 }
 
 // scopeExplicitlyDisabled reports whether the settings file for the given scope
@@ -1186,9 +1236,8 @@ func scopeExplicitlyDisabled(ctx context.Context, useProject bool) bool {
 }
 
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
-	// Capture first-run status before we write any settings: setupEntireDirectory
-	// and saveSettings below make IsSetUpAny report true. maybeOfferSessionImport
-	// uses this so the import offer only fires on the very first enable.
+	// Capture first-run status before any settings write makes IsSetUpAny
+	// report true: --yes auto-import is gated to the very first enable.
 	firstRun := !settings.IsSetUpAny(ctx)
 
 	// Uninstall hooks for agents that were previously active but are no longer selected
@@ -1322,9 +1371,19 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
 
-	// Offer to import pre-existing agent history for the just-selected agents.
-	// First-run only; best-effort (never fails enable).
-	maybeOfferSessionImport(ctx, w, agents, opts, firstRun)
+	// Connect rungs (login, mirror, import): one consent prompt covering
+	// whatever is missing, then the setup checklist. Also the resume path —
+	// re-running enable re-offers only rungs that are still missing. While a
+	// bootstrap is pending (SuppressDoneMessage) the ladder is deferred to
+	// the enable RunE, which runs it after the GitHub publish step so the
+	// mirror rung can see the origin remote the finalize creates.
+	if !opts.SuppressDoneMessage {
+		runEnableOnboarding(ctx, w, enableOnboardingOpts{
+			assumeYes:   opts.Yes,
+			firstRun:    firstRun,
+			importScope: agents,
+		})
+	}
 
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary after
@@ -1355,6 +1414,21 @@ func printEnabledStatus(ctx context.Context, w io.Writer) {
 	fmt.Fprintln(w, "\nTo add more agents, run `entire agent add <name>`.")
 }
 
+// initEnableLogging routes enable's operational logging (ladder probes,
+// offer failures) into .entire/logs — without Init the logging package falls
+// back to slog's stderr default and WARN lines leak verbatim into enable's
+// output. It initializes immediately and returns the close func (a no-op
+// when Init failed) so callers control defer ordering — the bootstrap path
+// must register the close BEFORE its finalize defer (LIFO), or the deferred
+// ladder logs to an already-closed file.
+func initEnableLogging(ctx context.Context) func() {
+	logging.SetLogLevelGetter(GetLogLevel)
+	if err := logging.Init(ctx, ""); err != nil {
+		return func() {}
+	}
+	return logging.Close
+}
+
 // resolveFirstRunCheckpointBackend decides the checkpoint storage backend
 // the setup flow writes. An explicit --checkpoint-backend always wins.
 // Otherwise a first interactive setup asks, with git-refs pre-selected as
@@ -1376,18 +1450,15 @@ func resolveFirstRunCheckpointBackend(ctx context.Context, w io.Writer, opts Ena
 			return "", err
 		}
 		if ctx.Err() != nil {
-			// A cancelled command context (SIGINT/SIGTERM) surfaces as a
-			// form cancellation, but the user asked to stop: setup must not
-			// adopt a default and keep mutating the repo.
-			return "", fmt.Errorf("checkpoint storage selection: %w", ctx.Err())
+			// Accessible mode cannot surface Ctrl+C as a form error (huh
+			// discards the field error), so a cancelled command context is the
+			// only signal the user aborted. Treat it as a cancellation — the
+			// same errSetupCancelled the raw-TUI abort returns — so enable
+			// stops here instead of adopting a default, and resumes on the
+			// next run.
+			return "", errSetupCancelled
 		}
-		if chosen == "" {
-			// Cancelled prompt: the recommendation is adopted, but never
-			// silently — every other cancelled setup prompt skips its
-			// action, so persisting a choice here must be disclosed.
-			fmt.Fprintln(w, "Using the recommended git-refs checkpoint storage.")
-		}
-		backend = chosen // "" (cancelled) falls through to the recommendation
+		backend = chosen
 	}
 	if backend == "" && firstRun {
 		backend = firstRunCheckpointBackendDefault()
@@ -1841,8 +1912,8 @@ func printWrongAgentError(w io.Writer, name string) {
 // setupAgentHooksNonInteractive sets up hooks for a specific agent non-interactively.
 // If strategyName is provided, it sets the strategy; otherwise uses default.
 func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Agent, opts EnableOptions) error {
-	// Capture first-run status before setupEntireDirectory/saveEnabledState make
-	// IsSetUpAny report true, so the import offer fires only on first enable.
+	// Capture first-run status before any settings write makes IsSetUpAny
+	// report true: --yes auto-import is gated to the very first enable.
 	firstRun := !settings.IsSetUpAny(ctx)
 
 	agentName := ag.Name()
@@ -1983,9 +2054,21 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
 
-	// Offer to import pre-existing history for the just-configured agent.
-	// First-run only; best-effort (never fails enable).
-	maybeOfferSessionImport(ctx, w, []agent.Agent{ag}, opts, firstRun)
+	// Connect rungs — same ladder as interactive enable, but --agent is
+	// documented as non-interactive, so prompting is always suppressed here;
+	// --yes additionally auto-imports on first run (local-only, scoped to the
+	// targeted agent), matching the enable-time import contract. The
+	// checklist hints carry the rest. While a bootstrap is pending
+	// (SuppressDoneMessage) the ladder is deferred to the enable RunE, after
+	// the GitHub publish step that creates the origin remote.
+	if !opts.SuppressDoneMessage {
+		runEnableOnboarding(ctx, w, enableOnboardingOpts{
+			assumeYes:   opts.Yes,
+			neverPrompt: true,
+			firstRun:    firstRun,
+			importScope: []agent.Agent{ag},
+		})
+	}
 
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary.

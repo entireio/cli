@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -636,12 +637,27 @@ func markRequired(cmd *cobra.Command, names ...string) {
 // SilenceUsage, so the message reaches the user without a usage dump. (A
 // SilentError here would be swallowed — main.go skips printing those —
 // leaving e.g. a 409 conflict with no output.)
+// coreErrorStatusRe extracts the HTTP status from ogen's generated decoder
+// wrapping ("default (code 502)"), the only place the status survives when a
+// response fails to decode — e.g. a gateway 502 serving a text/plain error
+// page — since no typed error exists on that path.
+var coreErrorStatusRe = regexp.MustCompile(`\(code (\d{3})\)`)
+
 func renderCoreError(err error) error {
 	if err == nil {
 		return nil
 	}
 	if msg := coreapi.APIError(err); msg != "" {
 		return errors.New(msg)
+	}
+	// A response that failed decoding renders as ogen's raw wrap chain
+	// ("decode response: … unexpected Content-Type: text/plain") — developer
+	// noise where a user needs one line. Collapse it to the status.
+	if m := coreErrorStatusRe.FindStringSubmatch(err.Error()); m != nil {
+		if m[1][0] == '5' {
+			return fmt.Errorf("the control plane returned HTTP %s — try again shortly", m[1])
+		}
+		return fmt.Errorf("control-plane request failed with HTTP %s", m[1])
 	}
 	return err
 }

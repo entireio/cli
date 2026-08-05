@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -3873,6 +3874,278 @@ func TestCleanRemoteURLForReport(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Bare `entire enable` on an already-enabled repo is the resume path for
+// interrupted onboarding: it must run the setup ladder, not just print
+// "already enabled".
+func TestEnableCmd_AlreadyEnabled_RunsOnboardingLadder(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeClaudeHooksFixture(t)
+
+	ladderRan := false
+	prev := runEnableOnboarding
+	runEnableOnboarding = func(context.Context, io.Writer, enableOnboardingOpts) { ladderRan = true }
+	t.Cleanup(func() { runEnableOnboarding = prev })
+
+	cmd := newEnableCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Entire is already enabled.") {
+		t.Fatalf("expected lightweight re-enable message, got: %s", stdout.String())
+	}
+	if !ladderRan {
+		t.Error("already-enabled enable must run the onboarding ladder (resume path)")
+	}
+}
+
+// Re-enabling a disabled repo also converges setup.
+func TestEnableCmd_ReenableDisabledRepo_RunsOnboardingLadder(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsDisabled)
+	writeClaudeHooksFixture(t)
+
+	ladderRan := false
+	prev := runEnableOnboarding
+	runEnableOnboarding = func(context.Context, io.Writer, enableOnboardingOpts) { ladderRan = true }
+	t.Cleanup(func() { runEnableOnboarding = prev })
+
+	cmd := newEnableCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable error = %v", err)
+	}
+	if !ladderRan {
+		t.Error("re-enable must run the onboarding ladder")
+	}
+}
+
+// A bootstrapped enable must run the connect ladder only after the publish
+// phase (initial commit + optional GitHub repo) — that step is what creates
+// the origin remote, so a ladder run any earlier can only report the mirror
+// rung as "couldn't check" and the mirror offer can never fire on the very
+// first enable. Not parallel: chdir + env isolation.
+func TestEnableCmd_Bootstrap_RunsLadderAfterPublish(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	gitcfg := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(gitcfg, []byte("[user]\n\tname = Test\n\temail = t@example.com\n[commit]\n\tgpgsign = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", gitcfg)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+
+	var stdout, stderr bytes.Buffer
+	var atLadder string
+	var got *enableOnboardingOpts
+	prev := runEnableOnboarding
+	runEnableOnboarding = func(_ context.Context, _ io.Writer, o enableOnboardingOpts) {
+		atLadder = stdout.String()
+		got = &o
+	}
+	t.Cleanup(func() { runEnableOnboarding = prev })
+
+	cmd := newEnableCmd()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	// The --agent variant keeps the test hermetic: --yes select-all would also
+	// pick up external agents other tests registered in the process-global
+	// registry (whose temp-dir binaries are gone). The bootstrap defer under
+	// test is shared by the bare-wizard and --agent paths.
+	cmd.SetArgs([]string{"--agent", "claude-code", "--init-repo", "--no-github", "--yes"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable error = %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	if got == nil {
+		t.Fatalf("bootstrapped enable must run the onboarding ladder; output:\n%s", stdout.String())
+	}
+	if !strings.Contains(atLadder, "Created initial commit") {
+		t.Errorf("ladder ran before the publish phase; output at ladder time:\n%s", atLadder)
+	}
+	if !got.firstRun {
+		t.Error("a bootstrapped repo is always a first run (gates --yes auto-import)")
+	}
+	if !got.neverPrompt {
+		t.Error("--agent enable must suppress onboarding prompts in the deferred ladder too")
+	}
+	if !strings.HasSuffix(strings.TrimSpace(stdout.String()), "Done.") {
+		t.Errorf("enable should close with Done. after the ladder, got:\n%s", stdout.String())
+	}
+}
+
+// The --agent path is documented as non-interactive ("Enables non-interactive
+// mode"); the onboarding ladder must run there with prompting suppressed
+// regardless of --yes, or CI on a TTY runner hangs on the consent prompt.
+func TestSetupAgentHooksNonInteractive_RunsOnboardingWithoutPrompts(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeClaudeHooksFixture(t)
+
+	var got *enableOnboardingOpts
+	prev := runEnableOnboarding
+	runEnableOnboarding = func(_ context.Context, _ io.Writer, o enableOnboardingOpts) { got = &o }
+	t.Cleanup(func() { runEnableOnboarding = prev })
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+	var buf bytes.Buffer
+	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, EnableOptions{}); err != nil {
+		t.Fatalf("setupAgentHooksNonInteractive() error = %v", err)
+	}
+
+	if got == nil {
+		t.Fatal("--agent enable must run the onboarding ladder")
+	}
+	if !got.neverPrompt {
+		t.Error("--agent enable must suppress onboarding prompts even without --yes")
+	}
+	if got.assumeYes {
+		t.Error("--agent without --yes must not auto-run offers (assumeYes must be false)")
+	}
+	if len(got.importScope) != 1 {
+		t.Errorf("importScope has %d agents, want just the --agent target", len(got.importScope))
+	}
+}
+
+// First-run interactive enable (the feature's primary audience) must run the
+// onboarding ladder; --yes must propagate so no prompt can appear.
+func TestRunEnableInteractive_FirstRun_RunsOnboardingLadder(t *testing.T) {
+	setupTestRepo(t)
+
+	var got *enableOnboardingOpts
+	prev := runEnableOnboarding
+	runEnableOnboarding = func(_ context.Context, _ io.Writer, o enableOnboardingOpts) { got = &o }
+	t.Cleanup(func() { runEnableOnboarding = prev })
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+	var buf bytes.Buffer
+	if err := runEnableInteractive(context.Background(), &buf, []agent.Agent{ag}, EnableOptions{Yes: true, Telemetry: true}); err != nil {
+		t.Fatalf("runEnableInteractive() error = %v", err)
+	}
+
+	if got == nil {
+		t.Fatal("first-run enable must run the onboarding ladder")
+	}
+	if !got.assumeYes {
+		t.Error("--yes must propagate to the onboarding ladder")
+	}
+	if !got.firstRun {
+		t.Error("a fresh repo must report firstRun=true (gates --yes auto-import)")
+	}
+}
+
+// While a bootstrap is pending (SuppressDoneMessage), the setup flow must NOT
+// run the ladder in-flow: the origin remote doesn't exist until the deferred
+// publish phase, so an early ladder can only report the mirror rung as
+// "couldn't check" and the mirror offer can never fire. The enable RunE runs
+// the ladder after the publish instead (TestEnableCmd_Bootstrap_RunsLadderAfterPublish).
+func TestRunEnableInteractive_BootstrapDefersOnboardingLadder(t *testing.T) {
+	setupTestRepo(t)
+
+	ladderRan := false
+	prev := runEnableOnboarding
+	runEnableOnboarding = func(context.Context, io.Writer, enableOnboardingOpts) { ladderRan = true }
+	t.Cleanup(func() { runEnableOnboarding = prev })
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+	var buf bytes.Buffer
+	if err := runEnableInteractive(context.Background(), &buf, []agent.Agent{ag},
+		EnableOptions{Yes: true, Telemetry: true, SuppressDoneMessage: true}); err != nil {
+		t.Fatalf("runEnableInteractive() error = %v", err)
+	}
+
+	if ladderRan {
+		t.Error("bootstrap enable must defer the onboarding ladder to after the publish phase")
+	}
+}
+
+// Cancelling the checkpoint-storage prompt (Ctrl+C) must abort enable rather
+// than silently adopt the default and continue to telemetry. Because settings
+// are only persisted AFTER that prompt, aborting leaves the repo not-set-up,
+// so the next `entire enable` is a fresh run that lands back on the storage
+// question — the resume path the user expects.
+func TestRunEnableInteractive_CancelledBackendPromptAbortsWithoutPersisting(t *testing.T) {
+	// Not parallel: overrides the promptCheckpointBackend seam and sets a TTY env.
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1") // reach the interactive storage prompt
+
+	prev := promptCheckpointBackend
+	promptCheckpointBackend = func(context.Context, io.Writer) (string, error) {
+		return "", errSetupCancelled // simulate Ctrl+C at the storage prompt
+	}
+	t.Cleanup(func() { promptCheckpointBackend = prev })
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+	var buf bytes.Buffer
+	err = runEnableInteractive(context.Background(), &buf, []agent.Agent{ag}, EnableOptions{})
+
+	if !errors.Is(err, errSetupCancelled) {
+		t.Fatalf("runEnableInteractive() error = %v, want errSetupCancelled", err)
+	}
+	// The resume guarantee: nothing persisted, so re-running enable is still a
+	// fresh run that re-asks the storage question.
+	if settings.IsSetUpAny(context.Background()) {
+		t.Error("cancelled setup must not persist settings (repo would skip the storage prompt on re-run)")
+	}
+}
+
+// runSetupFlow turns a cancelled first-run prompt into a friendly resume hint
+// and a SilentError, so the process exits cleanly (exit 1, no raw error or
+// usage dump) instead of falling through.
+func TestRunSetupFlow_CancelledBackendPromptExitsSilentlyWithResumeHint(t *testing.T) {
+	// Not parallel: overrides the prompt seams and sets a TTY env.
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+
+	prevAgent := promptAgentSelection
+	promptAgentSelection = func([]huh.Option[string]) ([]string, error) {
+		return []string{"claude-code"}, nil // pick an agent, then reach the storage prompt
+	}
+	t.Cleanup(func() { promptAgentSelection = prevAgent })
+
+	prevBackend := promptCheckpointBackend
+	promptCheckpointBackend = func(context.Context, io.Writer) (string, error) {
+		return "", errSetupCancelled
+	}
+	t.Cleanup(func() { promptCheckpointBackend = prevBackend })
+
+	var buf bytes.Buffer
+	err := runSetupFlow(context.Background(), &buf, EnableOptions{})
+
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Fatalf("runSetupFlow() error = %v, want a SilentError", err)
+	}
+	if !errors.Is(err, errSetupCancelled) {
+		t.Errorf("runSetupFlow() error = %v, want it to wrap errSetupCancelled", err)
+	}
+	if !strings.Contains(buf.String(), "run `entire enable` again to resume") {
+		t.Errorf("expected a resume hint in output, got:\n%s", buf.String())
 	}
 }
 

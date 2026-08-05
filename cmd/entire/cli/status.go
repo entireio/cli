@@ -103,6 +103,9 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
+		if results := onboardingStatusResults(ctx); len(results) > 0 {
+			fmt.Fprint(w, renderOnboardingChecklist(results, sty))
+		}
 	}
 	writeAgentHelpHint(w, sty)
 
@@ -153,6 +156,11 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 
 	if effectiveSettings.Enabled {
 		writeActiveSessions(ctx, w, sty)
+		// Same setup checklist the short view shows — --detailed must not
+		// hide remaining onboarding steps.
+		if results := onboardingStatusResults(ctx); len(results) > 0 {
+			fmt.Fprint(w, renderOnboardingChecklist(results, sty))
+		}
 	}
 	writeAgentHelpHint(w, sty)
 
@@ -597,10 +605,28 @@ type statusJSON struct {
 	// `entire status --json` instead of the human footer. Set only on the
 	// success path (mirrors writeAgentHelpHint, which only renders when set up).
 	AgentHelp string `json:"agent_help,omitempty"`
+	// Setup maps each onboarding rung (hooks, auth, mirror, import) to its
+	// state plus the same detail and remediation command the human checklist
+	// shows — the state name alone isn't actionable for a non-interactive
+	// agent (Agent-Safe CLI Fallbacks). Present only when enabled — same gate
+	// as the human checklist.
+	Setup map[string]setupRungJSON `json:"setup,omitempty"`
 	// HooksOutdated lists agents whose installed hook config is out of date and
 	// should be refreshed with `entire enable --force`.
 	HooksOutdated []string `json:"hooks_outdated,omitempty"`
 	Error         string   `json:"error,omitempty"`
+}
+
+// setupRungJSON is one onboarding rung in `entire status --json`.
+type setupRungJSON struct {
+	// State: done, missing, blocked, unknown, or not_applicable.
+	State string `json:"state"`
+	// Detail mirrors the human checklist row's annotation, e.g.
+	// "2 claude-code sessions found, not imported".
+	Detail string `json:"detail,omitempty"`
+	// Hint is the remediation command for this rung, e.g.
+	// "entire repo mirror create github.com/owner/repo".
+	Hint string `json:"hint,omitempty"`
 }
 
 type sessionBriefJSON struct {
@@ -655,6 +681,17 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 	if s.Enabled {
 		if names := InstalledAgentDisplayNames(ctx); len(names) > 0 {
 			result.Agents = names
+		}
+
+		if results := onboardingStatusResults(ctx); len(results) > 0 {
+			result.Setup = make(map[string]setupRungJSON, len(results))
+			for _, r := range results {
+				result.Setup[r.Rung.Key] = setupRungJSON{
+					State:  r.Check.State.String(),
+					Detail: r.Check.Detail,
+					Hint:   r.Check.Hint,
+				}
+			}
 		}
 
 		if claudecode.CheckHookConfig(ctx) == claudecode.HooksOutdated {

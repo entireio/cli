@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -98,7 +99,10 @@ func checkpointBackendChoices() (opts []huh.Option[string], recommended string) 
 // an interactive terminal (and skip it when ENTIRE_CHECKPOINTS_PRIMARY is
 // active — the env fully replaces settings, so an answer could not take
 // effect and would only write diverging config).
-func promptCheckpointBackend(ctx context.Context, w io.Writer) (string, error) {
+//
+// Package-level var so tests can substitute it — the real prompt needs a TTY
+// that `go test` doesn't have.
+var promptCheckpointBackend = func(ctx context.Context, w io.Writer) (string, error) {
 	opts, recommended := checkpointBackendChoices()
 	choice := recommended
 	form := NewAccessibleForm(
@@ -111,10 +115,26 @@ func promptCheckpointBackend(ctx context.Context, w io.Writer) (string, error) {
 		),
 	)
 	if err := form.RunWithContext(ctx); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
+			// Cancelling the storage question cancels `entire enable`; it must
+			// not silently adopt a default and march on to later prompts. No
+			// settings are persisted until after this prompt, so re-running
+			// `entire enable` resumes here. Deliberately NOT a soft
+			// handleFormCancellation skip like the optional prompts elsewhere.
+			return "", errSetupCancelled
+		}
 		return "", handleFormCancellation(w, "Checkpoint storage selection", err)
 	}
 	return choice, nil
 }
+
+// errSetupCancelled marks a first-run setup prompt the user cancelled (Ctrl+C).
+// It propagates up through runEnableInteractive so `entire enable` stops
+// instead of persisting a default and continuing; runSetupFlow turns it into a
+// friendly "run enable again to resume" line and a SilentError so the process
+// exits cleanly. Because no settings are written until after the storage
+// prompt, the next `entire enable` is still a fresh run and lands back here.
+var errSetupCancelled = errors.New("setup cancelled")
 
 // updateCheckpointBackend persists opts.CheckpointBackend to the target settings
 // file. Used by `entire configure` and by `entire enable` on repos that are

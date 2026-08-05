@@ -280,3 +280,24 @@ func TestClustersToRegions(t *testing.T) {
 		{slug: "eu-west", jurisdiction: "eu", host: "eu-west-1.entire.io"},
 	}, got)
 }
+
+// chooseClusterHost is shared by the one-shot create and the enable flow's
+// mirror offer: no regions is an error, one region resolves silently, so the
+// picker appears only when there is a real choice.
+func TestChooseClusterHost_PromptOnlyWhenThereIsAChoice(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+
+	if _, err := chooseClusterHost(context.Background(), &out, nil, ""); err == nil {
+		t.Error("no regions must be an error, not a silent default")
+	}
+
+	one := []regionChoice{{slug: "us1", jurisdiction: "us", host: "aws-us-east-2.entire.io", isDefault: true}}
+	host, err := chooseClusterHost(context.Background(), &out, one, "us")
+	if err != nil || host != "aws-us-east-2.entire.io" {
+		t.Errorf("chooseClusterHost(one) = (%q, %v), want the sole region silently", host, err)
+	}
+	if !strings.Contains(out.String(), "Using cluster aws-us-east-2.entire.io") {
+		t.Errorf("single-region resolution should announce the cluster, got:\n%s", out.String())
+	}
+}
