@@ -1,0 +1,20 @@
+#!/bin/sh
+#MISE description="Run all tests (unit + integration + E2E canary) with race detection (integration: no -race on darwin)"
+
+# Runs the same tasks CI runs, so a local pass matches CI and the integration
+# package's race handling is decided in exactly one place — see the comment in
+# mise-tasks/test/ci/integration/shard (ThreadSanitizer is not fork-safe on
+# darwin, and nearly every test in that package spawns a subprocess).
+#
+# Shards a, b and c partition the integration package exactly, so running all
+# three covers every test in it.
+
+set -eu
+
+mise run test:ci:core
+
+for shard in a b c; do
+  mise run test:ci:integration:shard -- "$shard"
+done
+
+mise run test:e2e:canary

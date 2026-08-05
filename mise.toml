@@ -19,13 +19,6 @@ run = "gotestsum --format pkgname --format-icons text --format-hide-empty-pkg --
 description = "Run integration tests"
 run = "gotestsum --format testname --format-icons text --hide-summary skipped -- -tags=integration ./cmd/entire/cli/integration_test/... ./cmd/entire/cli/auth/..."
 
-[tasks."test:ci"]
-description = "Run all tests (unit + integration + E2E canary) with race detection"
-run = """
-go test -tags=integration -race ./...
-mise run test:e2e:canary
-"""
-
 [tasks.check]
 description = "Run formatting, linting, and CI tests"
 depends = ["fmt", "lint", "test:ci"]

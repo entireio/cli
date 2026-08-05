@@ -85,5 +85,26 @@ run_regex="$(
     paste -sd'|' -
 )"
 
-go test -tags=integration -race -count=1 -parallel="$parallel" \
+# ThreadSanitizer is not fork-safe, and this package spawns a subprocess in
+# nearly every test. On darwin, syscall.rawSyscall is a Go function that lacks
+# //go:norace — Linux's RawSyscall carries it precisely "to avoid race
+# instrumentation if RawSyscall is called after fork" — so under -race the
+# instrumentation runs in the child of fork() before exec and intermittently
+# faults it (__tsan::TraceSwitchPartImpl, SIGSEGV, "crashed on child side of
+# fork pre-exec"). It lands on a random test, roughly one run in three, and is
+# indistinguishable from a real regression until you read the crash report.
+# See golang/go#49138 and #50172.
+#
+# CI runs Linux, where the pragma exists, so race coverage there is unchanged.
+# Note this package is overwhelmingly subprocess-driven (272 of 294 tests drive
+# the spawned binary, which TestMain builds WITHOUT -race), so -race can only
+# ever see the harness here — not the CLI under test.
+race="-race"
+if [ "$(uname -s)" = "Darwin" ]; then
+  race=""
+  echo "integration shard $shard: -race disabled (ThreadSanitizer is not fork-safe on darwin; see comment in $0)"
+fi
+
+# shellcheck disable=SC2086 # $race is one optional flag; intentionally unquoted so empty means "omit"
+go test -tags=integration $race -count=1 -parallel="$parallel" \
   "$pkg" -run "^(${run_regex})$"

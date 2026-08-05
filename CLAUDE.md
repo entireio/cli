@@ -175,7 +175,9 @@ mise run test:integration
 mise run test:ci
 ```
 
-This runs unit tests, integration tests, and the E2E canary (Vogon agent) in sequence. Integration tests use the `//go:build integration` build tag and are located in `cmd/entire/cli/integration_test/`.
+This runs unit tests, integration tests, and the E2E canary (Vogon agent) in sequence. Integration tests use the `//go:build integration` build tag and are located in `cmd/entire/cli/integration_test/`. It delegates to the same tasks CI runs (`test:ci:core`, then integration shards `a`/`b`/`c`, then the canary), so a local pass matches CI.
+
+**`-race` is deliberately off for the integration package on darwin.** ThreadSanitizer is not fork-safe there: `syscall.rawSyscall` on darwin is a Go function lacking `//go:norace` (Linux's `RawSyscall` carries it precisely "to avoid race instrumentation if RawSyscall is called after fork"), so under `-race` the instrumentation runs in the child of `fork()` before `exec` and intermittently segfaults it. It surfaces as `signal: segmentation fault` from a spawned subprocess, on a random test, roughly one run in three — indistinguishable from a real regression until you read `~/Library/Logs/DiagnosticReports/integration_test.test-*.ips`. See golang/go#49138. The gate lives in `mise-tasks/test/ci/integration/shard`; do not re-add `-race` there. CI runs Linux, where the pragma exists, so its race coverage is unchanged. Note also that this package is overwhelmingly subprocess-driven — the spawned binary is built without `-race`, so `-race` here can only ever instrument the test harness, not the CLI under test.
 
 ### Running E2E Canary Tests (Vogon Agent)
 
