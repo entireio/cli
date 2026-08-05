@@ -338,6 +338,22 @@ func TestRoot_VisibleCommandsAreGrouped(t *testing.T) {
 	}
 }
 
+func TestTrackInstallCmd_RequiresMethod(t *testing.T) {
+	t.Parallel()
+	cmd := newTrackInstallCmd()
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err == nil {
+		t.Error("expected error when --method is missing")
+	}
+}
+
+func TestTrackInstallCmd_Hidden(t *testing.T) {
+	t.Parallel()
+	if !newTrackInstallCmd().Hidden {
+		t.Error("__track-install must be hidden")
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

@@ -164,6 +164,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newHooksCmd())
 	cmd.AddCommand(newTrailCmd())
 	cmd.AddCommand(newSendAnalyticsCmd())
+	cmd.AddCommand(newTrackInstallCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
 	cmd.AddCommand(newRefreshTrailEnablementCmd())
 
@@ -206,4 +207,21 @@ func newSendAnalyticsCmd() *cobra.Command {
 			telemetry.SendEvent(args[0])
 		},
 	}
+}
+
+// newTrackInstallCmd creates the hidden command invoked by the brew/scoop
+// installers to record a one-time install event. Not for direct user use.
+func newTrackInstallCmd() *cobra.Command {
+	var method string
+	cmd := &cobra.Command{
+		Use:    "__track-install",
+		Hidden: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			telemetry.TrackInstallDetached(method, versioninfo.Version)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&method, "method", "", "installation method (brew|scoop)")
+	markRequired(cmd, "method")
+	return cmd
 }
