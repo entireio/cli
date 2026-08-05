@@ -21,7 +21,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
@@ -2076,6 +2078,8 @@ func newCurlBashPostInstallCmd() *cobra.Command {
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			w := cmd.OutOrStdout()
+			// Record the install (curl|bash path). Best-effort, detached, opt-out aware.
+			telemetry.TrackInstallDetached("install.sh", versioninfo.Version)
 			if err := promptShellCompletion(w); err != nil {
 				fmt.Fprintf(w, "Note: Shell completion setup skipped: %v\n", err)
 			}
