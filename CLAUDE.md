@@ -299,12 +299,27 @@ Tests that spawn the real `entire` or `git` binary need the child to be non-inte
 2. `testing.Testing()` → false. In-process `go test` runs are non-interactive by default; no per-test `t.Setenv("ENTIRE_TEST_TTY", "0")` is needed.
 3. Agent sentinels (`GEMINI_CLI`, `COPILOT_CLI`, `PI_CODING_AGENT`, `GIT_TERMINAL_PROMPT=0`) → false.
 4. `CI=<non-empty-non-false>` → false.
-5. `/dev/tty` probe, plus its terminal mode → a terminal held in raw mode
-   (canonical input off) belongs to a full-screen TUI that spawned us, not to a
-   shell we can prompt: TUI git clients (lazygit, gitui, tig) run `git commit`
-   as a child while owning the screen, so the hook inherits a `/dev/tty` it
-   must not prompt on. Fails open when the mode can't be read. See
+5. Git-hook context with a private terminal session → false. TUI git clients run
+   `git commit` on a pty of their own (lazygit does) and only render what comes
+   back, so the hook inherits a `/dev/tty` that opens, sits in canonical mode,
+   and that nothing forwards keystrokes to — prompting there hangs the commit and
+   freezes the client. Job control is the tell: a shell gives each foreground
+   command its own process group (`sid != pgrp`), while a private session makes
+   the command its own session leader (`sid == pgrp`). Only applied when
+   `interactive.MarkGitHookContext()` was called (the `entire hooks git` tree), so
+   one-shot interactive invocations that share the shape but do forward input
+   (`ssh -t host entire enable`, `docker run -it … entire enable`) keep prompting.
+   See `interactive/jobcontrol_unix.go`.
+6. `/dev/tty` probe, plus its terminal mode → a terminal held in raw mode
+   (canonical input off) belongs to a full-screen TUI that spawned us and reuses
+   the user's terminal rather than allocating its own (gitui, tig), so it must
+   not be prompted on. Fails open when the mode can't be read. See
    `interactive/rawmode_unix.go` for the rationale.
+
+Both terminal checks fail open, so they can only suppress prompts we positively
+know are unusable. When adding a prompt reachable from a git hook, gate it on
+`CanPromptInteractively()` and make the non-interactive branch a sensible default
+(the commit-linking prompt auto-links, which is its default answer).
 
 For subprocesses spawning the real `entire` binary (e2e, integration tests, `entire` calling itself from a hook), prefer `execx.NonInteractive` over env-var plumbing:
 

@@ -162,6 +162,11 @@ func newHooksGitCmd() *cobra.Command {
 		Hidden: true, // Internal command, not for direct user use
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
+			// Tell the prompt gate we're a git hook: the terminal we inherit
+			// belongs to whatever ran git, which for a TUI client is a private pty
+			// it only renders. Set unconditionally and before any early return so
+			// every prompt in this process sees it.
+			interactive.MarkGitHookContext()
 			// Check if Entire is set up and enabled before doing any work.
 			// This prevents global git hooks from doing anything in repos where
 			// Entire was never enabled or has been disabled.

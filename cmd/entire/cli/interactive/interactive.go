@@ -30,9 +30,14 @@ const EnvTestTTY = "ENTIRE_TEST_TTY"
 //     Subprocess tests must spawn via execx.NonInteractive (or set EnvTestTTY).
 //  3. Agent sentinels — vendor-set by agent subprocesses.
 //  4. CI=<non-empty-non-false> — de-facto CI convention.
-//  5. /dev/tty probe, plus its terminal mode: a controlling terminal held in
-//     raw mode belongs to a full-screen TUI (lazygit, gitui, tig, …) that
-//     spawned us, not to a shell we can prompt. See rawmode_unix.go.
+//  5. Git-hook context with a private session — when we run as a git hook (see
+//     MarkGitHookContext) and our terminal session was created for this command
+//     alone, git was run by a client capturing our output: lazygit gives `git
+//     commit` its own pty and only renders what comes back, so a prompt there is
+//     never answered and the commit hangs. See jobcontrol_unix.go.
+//  6. /dev/tty probe, plus its terminal mode: a controlling terminal held in raw
+//     mode belongs to a full-screen TUI (gitui, tig, …) that spawned us, not to
+//     a shell we can prompt. See rawmode_unix.go.
 func CanPromptInteractively() bool {
 	if v := os.Getenv(EnvTestTTY); v != "" {
 		return v == "1"
@@ -49,6 +54,15 @@ func CanPromptInteractively() bool {
 	// CI=false is the `is-ci` escape hatch for developers who need to override
 	// an inherited value.
 	if v := os.Getenv("CI"); v != "" && v != "false" {
+		return false
+	}
+
+	// A git hook inherits whatever terminal the client that ran git left it, and
+	// a TUI client hands us a private one it only reads from. This is scoped to
+	// hook context because one-shot interactive invocations (`ssh -t host entire
+	// enable`, `docker run -it … entire enable`) have the same private-session
+	// shape but do forward the user's keystrokes.
+	if inGitHookContext() && ttyIsPrivateSession() {
 		return false
 	}
 
