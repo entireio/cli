@@ -48,16 +48,6 @@ func TestImportedSessions_SurviveCleanup(t *testing.T) {
 	if !containsSessionID(states, sid) {
 		t.Error("listAllSessionStates purged the imported session")
 	}
-
-	items, err := ListOrphanedSessionStates(ctx)
-	if err != nil {
-		t.Fatalf("ListOrphanedSessionStates: %v", err)
-	}
-	for _, it := range items {
-		if it.ID == sid {
-			t.Error("entire clean flagged the imported session as orphaned")
-		}
-	}
 }
 
 func containsSessionID(states []*SessionState, sid string) bool {

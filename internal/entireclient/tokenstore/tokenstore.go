@@ -10,9 +10,11 @@
 // directory — see internal/entireclient/userdirs).
 //
 // Service-name conventions:
-//   - "entire:<cluster-host>"        — entiredb cluster login tokens
-//   - "entire-core:<core-base-url>"  — entire-core control-plane tokens
-//   - "<service>:refresh"            — refresh-token entry paired with the
+//   - "entire:<cluster-host>"          — entiredb cluster login tokens
+//   - "entire-core:<core-base-url>"    — entire-core control-plane tokens
+//   - "entire-jurisdiction:<audience>" — jurisdiction (data-plane) access
+//     tokens, keyed by jurisdiction audience
+//   - "<service>:refresh"              — refresh-token entry paired with the
 //     corresponding access-token service
 package tokenstore
 
@@ -36,21 +38,25 @@ var ErrNotFound = keyring.ErrNotFound
 // at "entire-core:<base-url>" regardless of which CLI wrote it. Two CLIs
 // sharing this prefix on the same machine read each other's writes.
 const (
-	ClusterKeyringPrefix = "entire:"      // entiredb cluster-issued tokens
-	CoreKeyringPrefix    = "entire-core:" // entire-core control-plane tokens
+	ClusterKeyringPrefix      = "entire:"              // entiredb cluster-issued tokens
+	CoreKeyringPrefix         = "entire-core:"         // entire-core control-plane tokens
+	JurisdictionKeyringPrefix = "entire-jurisdiction:" // jurisdiction (data-plane) access tokens
 )
-
-// ClusterKeyringService returns the service name for tokens issued by an
-// entiredb cluster. host is typically the cluster's entry domain.
-func ClusterKeyringService(host string) string {
-	return ClusterKeyringPrefix + host
-}
 
 // CoreKeyringService returns the service name for tokens issued by
 // entire-core. coreURL is the base URL of the issuer; trailing slashes
 // are normalized away so callers don't have to.
 func CoreKeyringService(coreURL string) string {
 	return CoreKeyringPrefix + strings.TrimRight(coreURL, "/")
+}
+
+// JurisdictionService returns the service name for a jurisdiction (data-plane)
+// access token, keyed by the jurisdiction audience so tokens for different
+// jurisdictions — and for prod vs staging — can't be confused. The account key
+// is the login context's handle. Trailing slashes are normalized away so
+// callers don't have to.
+func JurisdictionService(audience string) string {
+	return JurisdictionKeyringPrefix + strings.TrimRight(audience, "/")
 }
 
 // RefreshService returns the paired refresh-token service name for an
@@ -60,19 +66,6 @@ func CoreKeyringService(coreURL string) string {
 // access token at (service, user).
 func RefreshService(service string) string {
 	return service + ":refresh"
-}
-
-// KeyringServiceForIssuerKey infers the right service prefix from a
-// raw issuer key (entire-core URL or entiredb cluster host). URL-shaped
-// keys (anything beginning with a scheme) are treated as entire-core
-// issuers; bare hostnames as cluster issuers. Used by callers that
-// derive a service name without already having a *contexts.Context in
-// hand (tests, entiredb's pre-resolution code paths).
-func KeyringServiceForIssuerKey(key string) string {
-	if strings.HasPrefix(key, "http://") || strings.HasPrefix(key, "https://") {
-		return CoreKeyringService(key)
-	}
-	return ClusterKeyringService(key)
 }
 
 // backendMu guards `resolved` and `backend`. It serializes the production

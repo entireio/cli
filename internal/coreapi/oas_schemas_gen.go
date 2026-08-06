@@ -8482,6 +8482,89 @@ func (s *RepoPrimariesAdditional) init() RepoPrimariesAdditional {
 	return m
 }
 
+type ResolveMirrorPlacementsProvider string
+
+const (
+	ResolveMirrorPlacementsProviderGithub ResolveMirrorPlacementsProvider = "github"
+)
+
+// AllValues returns all ResolveMirrorPlacementsProvider values.
+func (ResolveMirrorPlacementsProvider) AllValues() []ResolveMirrorPlacementsProvider {
+	return []ResolveMirrorPlacementsProvider{
+		ResolveMirrorPlacementsProviderGithub,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ResolveMirrorPlacementsProvider) MarshalText() ([]byte, error) {
+	switch s {
+	case ResolveMirrorPlacementsProviderGithub:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ResolveMirrorPlacementsProvider) UnmarshalText(data []byte) error {
+	switch ResolveMirrorPlacementsProvider(data) {
+	case ResolveMirrorPlacementsProviderGithub:
+		*s = ResolveMirrorPlacementsProviderGithub
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Ref: #/components/schemas/ResolvePlacementsOutputBody
+type ResolvePlacementsOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI              `json:"$schema"`
+	Placements      []ResolvedPlacement `json:"placements"`
+	AdditionalProps ResolvePlacementsOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ResolvePlacementsOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetPlacements returns the value of Placements.
+func (s *ResolvePlacementsOutputBody) GetPlacements() []ResolvedPlacement {
+	return s.Placements
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ResolvePlacementsOutputBody) GetAdditionalProps() ResolvePlacementsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ResolvePlacementsOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetPlacements sets the value of Placements.
+func (s *ResolvePlacementsOutputBody) SetPlacements(val []ResolvedPlacement) {
+	s.Placements = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ResolvePlacementsOutputBody) SetAdditionalProps(val ResolvePlacementsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ResolvePlacementsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ResolvePlacementsOutputBodyAdditional) init() ResolvePlacementsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ResolvedIdentity
 type ResolvedIdentity struct {
 	// A URL to the JSON Schema for this object.
@@ -8556,6 +8639,78 @@ func (s *ResolvedIdentity) SetAdditionalProps(val ResolvedIdentityAdditional) {
 type ResolvedIdentityAdditional map[string]jx.Raw
 
 func (s *ResolvedIdentityAdditional) init() ResolvedIdentityAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ResolvedPlacement
+type ResolvedPlacement struct {
+	// Physical cell the mirror's cluster runs in, e.g. aws-us-east-2.
+	Cell OptString `json:"cell"`
+	// Public host of the cluster serving this mirror.
+	ClusterHost     string    `json:"clusterHost"`
+	Jurisdiction    OptString `json:"jurisdiction"`
+	MirrorId        string    `json:"mirrorId"`
+	AdditionalProps ResolvedPlacementAdditional
+}
+
+// GetCell returns the value of Cell.
+func (s *ResolvedPlacement) GetCell() OptString {
+	return s.Cell
+}
+
+// GetClusterHost returns the value of ClusterHost.
+func (s *ResolvedPlacement) GetClusterHost() string {
+	return s.ClusterHost
+}
+
+// GetJurisdiction returns the value of Jurisdiction.
+func (s *ResolvedPlacement) GetJurisdiction() OptString {
+	return s.Jurisdiction
+}
+
+// GetMirrorId returns the value of MirrorId.
+func (s *ResolvedPlacement) GetMirrorId() string {
+	return s.MirrorId
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ResolvedPlacement) GetAdditionalProps() ResolvedPlacementAdditional {
+	return s.AdditionalProps
+}
+
+// SetCell sets the value of Cell.
+func (s *ResolvedPlacement) SetCell(val OptString) {
+	s.Cell = val
+}
+
+// SetClusterHost sets the value of ClusterHost.
+func (s *ResolvedPlacement) SetClusterHost(val string) {
+	s.ClusterHost = val
+}
+
+// SetJurisdiction sets the value of Jurisdiction.
+func (s *ResolvedPlacement) SetJurisdiction(val OptString) {
+	s.Jurisdiction = val
+}
+
+// SetMirrorId sets the value of MirrorId.
+func (s *ResolvedPlacement) SetMirrorId(val string) {
+	s.MirrorId = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ResolvedPlacement) SetAdditionalProps(val ResolvedPlacementAdditional) {
+	s.AdditionalProps = val
+}
+
+type ResolvedPlacementAdditional map[string]jx.Raw
+
+func (s *ResolvedPlacementAdditional) init() ResolvedPlacementAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}

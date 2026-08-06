@@ -16,7 +16,7 @@ var _ agent.ModelLister = (*PiAgent)(nil)
 // Pi has a real enumeration command spanning every configured provider, so the
 // result reflects what this machine/account can actually use.
 func (a *PiAgent) ListModels(ctx context.Context) ([]agent.ModelInfo, error) {
-	out, err := agent.RunIsolatedTextGeneratorCLI(ctx, nil, "pi", "pi", []string{"--list-models"}, "")
+	out, _, _, err := agent.RunIsolatedTextGeneratorCLI(ctx, nil, "pi", "pi", []string{"--list-models"}, "")
 	if err != nil {
 		return nil, fmt.Errorf("pi --list-models: %w", err)
 	}

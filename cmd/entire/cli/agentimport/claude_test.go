@@ -89,6 +89,47 @@ func TestClaudeSplitTurns_TwoPromptsBoundedByNext(t *testing.T) {
 	}
 }
 
+// TestClaudeSplitTurns_ExtractsCommitSHAs proves gitOperation tool-result
+// records are collected into Turn.CommitSHAs in transcript order, only for
+// kind "committed" — a tool_result line carrying a commit is not itself a
+// turn boundary (isUserPromptLine already rejects it), so it just attaches to
+// the enclosing turn. A garbage (non-JSON) line between the two commit
+// records proves one bad line is skipped without dropping the turn's other
+// recorded SHAs.
+func TestClaudeSplitTurns_ExtractsCommitSHAs(t *testing.T) {
+	t.Parallel()
+	full := []byte(strings.Join([]string{
+		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"output_tokens":5}}}`,
+		`{"type":"user","uuid":"tr1","toolUseResult":{"gitOperation":{"commit":{"sha":"fe71aa6","kind":"committed"},"push":{"ok":true}}}}`,
+		`not valid json {{{`,
+		`{"type":"user","uuid":"tr2","toolUseResult":{"gitOperation":{"commit":{"sha":"aabbccd","kind":"committed"}}}}`,
+		`{"type":"user","uuid":"tr3","toolUseResult":{"gitOperation":{"commit":{"sha":"ddeeff0","kind":"amended"}}}}`,
+		`{"type":"user","uuid":"tr4","toolUseResult":{"gitOperation":{"push":{"ok":true}}}}`,
+		`{"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"second"}}`,
+	}, "\n") + "\n")
+
+	turns, err := claudeImporter{}.SplitTurns(SessionFile{Path: filepath.Join(t.TempDir(), "s.jsonl"), SessionID: "s"}, full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("want 2 turns, got %d", len(turns))
+	}
+	wantSHAs := []string{"fe71aa6", "aabbccd"}
+	if len(turns[0].CommitSHAs) != len(wantSHAs) {
+		t.Fatalf("turn0 CommitSHAs = %v, want %v", turns[0].CommitSHAs, wantSHAs)
+	}
+	for i, want := range wantSHAs {
+		if turns[0].CommitSHAs[i] != want {
+			t.Errorf("turn0 CommitSHAs[%d] = %q, want %q", i, turns[0].CommitSHAs[i], want)
+		}
+	}
+	if len(turns[1].CommitSHAs) != 0 {
+		t.Errorf("turn1 CommitSHAs = %v, want empty", turns[1].CommitSHAs)
+	}
+}
+
 func TestClaudeSplitTurns_ToolResultIsNotATurn(t *testing.T) {
 	t.Parallel()
 	full := []byte(strings.Join([]string{

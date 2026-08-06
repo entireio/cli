@@ -735,30 +735,6 @@ func TestResume_FetchesPrimaryBranchFullyWithFilteredFetches(t *testing.T) {
 // Helpers
 // =============================================================================
 
-// fileExistsOnRemoteBranch checks if a file exists in the metadata branch tree on a bare remote.
-func fileExistsOnRemoteBranch(t *testing.T, bareDir, filePath string) bool {
-	t.Helper()
-
-	cmd := exec.CommandContext(t.Context(), "git", "cat-file", "-t", paths.MetadataBranchName+":"+filePath)
-	cmd.Dir = bareDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	return cmd.Run() == nil
-}
-
-// getRemoteBranchHash returns the commit hash of a branch on a bare remote.
-func getRemoteBranchHash(t *testing.T, bareDir, branchName string) string {
-	t.Helper()
-
-	cmd := exec.CommandContext(t.Context(), "git", "rev-parse", "refs/heads/"+branchName)
-	cmd.Dir = bareDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	output, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("failed to get hash for %s on remote: %v", branchName, err)
-	}
-	return strings.TrimSpace(string(output))
-}
-
 // listCheckpointsInDir reads checkpoint IDs from the metadata branch tree.
 // This intentionally uses a separate implementation (git ls-tree) rather than
 // the production ListCheckpoints() to avoid testing the code with itself.

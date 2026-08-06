@@ -104,7 +104,7 @@ func TestRewindAfterCommit(t *testing.T) {
 
 		// Attempting to rewind to the old shadow branch ID should fail.
 		err = entire.Rewind(t, s.Dir, oldID)
-		assert.Error(t, err, "rewind to old shadow branch ID should fail after commit")
+		require.Error(t, err, "rewind to old shadow branch ID should fail after commit")
 
 		// Working directory should be unchanged — file still committed.
 		testutil.AssertFileExists(t, s.Dir, "docs/red.md")

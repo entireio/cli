@@ -5,6 +5,7 @@ package integration
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -610,11 +611,12 @@ func TestManualCommit_AttributionStaleBase(t *testing.T) {
 	// - post-commit: calls postCommitUpdateBaseCommitOnly
 	//   → BaseCommit advances to this commit
 	//   → AttributionBaseCommit stays at first commit (BUG)
-	unrelatedContent := "package utils\n\n"
+	var unrelated strings.Builder
+	unrelated.WriteString("package utils\n\n")
 	for i := range 50 {
-		unrelatedContent += fmt.Sprintf("func util%d() { return %d }\n", i, i)
+		fmt.Fprintf(&unrelated, "func util%d() { return %d }\n", i, i)
 	}
-	env.WriteFile("utils.go", unrelatedContent)
+	env.WriteFile("utils.go", unrelated.String())
 	env.GitCommitWithShadowHooks("Add utility functions", "utils.go")
 
 	unrelatedHead := env.GetHeadHash()
@@ -749,11 +751,12 @@ func TestManualCommit_AttributionStaleBase_BranchSwitch(t *testing.T) {
 	// Switch to a different branch and make a commit with many files
 	env.GitCheckoutNewBranch("feature/other-work")
 
-	unrelatedContent := "package utils\n\n"
+	var unrelated strings.Builder
+	unrelated.WriteString("package utils\n\n")
 	for i := range 50 {
-		unrelatedContent += fmt.Sprintf("func util%d() { return %d }\n", i, i)
+		fmt.Fprintf(&unrelated, "func util%d() { return %d }\n", i, i)
 	}
-	env.WriteFile("utils.go", unrelatedContent)
+	env.WriteFile("utils.go", unrelated.String())
 	env.GitCommitWithShadowHooks("Other branch work", "utils.go")
 	t.Logf("Commit on feature/other-work: %s", env.GetHeadHash()[:7])
 

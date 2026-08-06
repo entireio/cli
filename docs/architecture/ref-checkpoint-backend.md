@@ -69,7 +69,7 @@ The git-refs store (`gitRefsStore`, `checkpoint/refs_store.go`) shares the check
 
 Every persistent write (`WriteSession`, and the `Backfill*` operations for transcript / summary / attribution) follows the same shape:
 
-1. **Resolve the ref's current tip** (`refBase`). A missing ref → `(ZeroHash, nil)`, so the first write to a checkpoint becomes an **orphan commit**. A real lookup failure (IO/corruption) is surfaced, never silently treated as "new checkpoint".
+1. **Resolve the ref's current tip.** Creates (`WriteSession`) use the local-only `refBase`: a missing ref → `(ZeroHash, nil)`, so the first write to a checkpoint becomes an **orphan commit**. The `Backfill*` operations use `refBaseForBackfill`, which first on-demand fetches a locally-missing ref (when a ref fetcher is configured — the checkpoint may have been written or migrated on another machine); a ref still absent after the fetch surfaces as `ErrCheckpointNotFound` rather than orphaning, and a fetch failure surfaces as a real error, never as absence. A real lookup failure (IO/corruption) is surfaced, never silently treated as "new checkpoint".
 2. **Build the updated checkpoint subtree** from the existing tree plus the new content (shared `treeWriter` logic).
 3. **Create a commit** with the current tip as parent (orphan on first write, parented thereafter), so each checkpoint accretes its **own per-checkpoint history**.
 4. **Point the ref at the new commit** (`setRef`) and **enqueue it for push**.
@@ -111,18 +111,30 @@ All checkpoint-ref pushes are **fast-forward-only — never a force push.** Ther
 
 When a push *is* rejected as non-fast-forward — genuine divergence, e.g. the same checkpoint was written on two machines — recovery **fetches the remote ref and replays the local-only commits on top** (`fetchAndRebaseRefCommon`), then retries. After the replay the local ref is a fast-forward over the remote, so the retry is *still* non-force and the remote commit is preserved as an ancestor rather than overwritten. A genuine cherry-pick conflict (both sides rewrote the same file, e.g. root `metadata.json`) leaves the ref queued — degrading to the safe state, never forcing.
 
-### On-demand fetch for reads
+### On-demand fetch (reads and backfill writes)
 
-A checkpoint written on another machine has no local ref. When a read misses locally and a **ref fetcher** is configured, `resolveRefMaybeFetch` fetches that one ref from the remote and retries once. It carefully distinguishes:
+A checkpoint written on another machine has no local ref. When a read — or a backfill write's base resolution (`refBaseForBackfill`) — misses locally and a **ref fetcher** is configured, `resolveRefMaybeFetch` fetches that one ref from the remote and retries once. It carefully distinguishes:
 
 - **genuinely absent** (remote has no such checkpoint) → maps to `ErrCheckpointNotFound`;
 - **a real failure** (IO, network, context cancellation) → returned as-is, never swallowed as "not found".
 
-`List` at the storage level is **local-refs-only** — it enumerates local refs and reads each root summary. There is no remote enumeration.
+### List and remote discovery
 
-## Read routing and coexistence
+`List` at the storage level enumerates **local refs** and reads each root summary. That alone is not enough on a **second device**: a checkpoint written elsewhere has no local ref, so a purely local `List` shows zero even though the checkpoint exists on the remote. Reads already fetch a *known* ID on demand (above), but `List` is a *discovery* problem — it has to learn which checkpoints exist before anything can read them.
 
-`checkpoint.Open` returns a `kindRoutingStore` (`checkpoint/routing_store.go`) that resolves id-keyed reads across **both** git backends by the checkpoint's ID kind, so a repo running git-refs and git-branch side by side (or mid-migration) reads either format without reconfiguring:
+To close that gap `List` supports **opt-in remote discovery**:
+
+- The caller marks the context with `WithRemoteListDiscovery` (set only on explicit, user-facing enumeration — `entire checkpoint list` and the branch `explain` view — never the per-turn commit hook, so routine local listings stay network-free).
+- A **remote ref lister** injected by the CLI runs a single `git ls-remote refs/entire/checkpoints/*` — **names only, no object transfer** — against the checkpoint remote.
+- Each advertised ref that has no local ref yet is added to the result as a not-yet-hydrated `CheckpointInfo`. Its `CreatedAt` is recovered from the ULID timestamp in the ref name, so it sorts by real recency without a fetch; the rest of its contents are **hydrated lazily on the next read** via the on-demand ref fetch (and, on the branch `explain` / `checkpoint list` path, eagerly for the truncated display set so `--session` filters see real SessionIDs).
+
+**Surfacing vs discovery:** storage-level `List` can return remote-only stubs, but the branch view (`getBranchCheckpoints`) only surfaces a discovered checkpoint when an `Entire-Checkpoint` trailer for that ID is present in the scanned local commit range. Discovery therefore helps only after the user has pulled the branch commits that carry those trailers — it does not invent branch entries from remote refs alone.
+
+Enumeration is **checkpoint-remote-scoped** and **stricter than the on-demand read fetch**: with a `checkpoint_remote` configured it queries the resolved checkpoint URL (`remote.FetchURL`, which can fall through to origin in edge cases); with **none** configured the lister returns no refs and `List` stays local-only — unlike by-ID reads, which fall back to origin when nothing is configured. Discovery is also **best-effort and additive**: an `ls-remote` failure or a short timeout (a few seconds — this path must not turn a previously-local listing into a long hang when the remote is unreachable) logs, warns on stderr, and returns the local results rather than failing the whole listing. URL resolution and `ls-remote` run from the worktree root so repo-local git config applies.
+
+## Kind routing and coexistence
+
+`checkpoint.Open` returns a `kindRoutingStore` (`checkpoint/routing_store.go`) that resolves id-keyed reads — and backfill writes — across **both** git backends by the checkpoint's ID kind, so a repo running git-refs and git-branch side by side (or mid-migration) handles either format without reconfiguring:
 
 | ID kind | Read from | Rationale |
 |---------|-----------|-----------|
@@ -133,7 +145,8 @@ A checkpoint written on another machine has no local ref. When a read misses loc
 - `List` **unions both** backends and de-dups by ID (the same checkpoint can appear in both during coexistence), keeping the most recent.
 - The `firstResolved` helper tries stores in priority order; a non-final store that reports absent *or* errors falls through to the next, so a transient git-refs fetch error cannot hide a checkpoint that resolves on the branch. The final store's result (hit, absent, or error) is returned verbatim.
 - The optional `AuthorReader` capability (`explain` relies on it) is preserved and routed by the same rules when both read stores provide it.
-- **Writes are not kind-routed.** They target the configured primary (+ mirrors); the minted ID already matches the primary's format.
+- **Creates (`Session`) are not kind-routed.** They target the configured primary (+ mirrors); the minted ID already matches the primary's format.
+- **Backfills (`SessionSummary`, `SessionTranscript`, `CheckpointAttribution`) are kind-routed.** They update an *existing* checkpoint, which may live in either backend, so they follow the read order above, falling through to the next store only on `ErrCheckpointNotFound` (stricter than reads — a hard error aborts rather than risking a forked write). A backfill landing on the primary still fans out to mirrors; one landing on a fallback store skips mirrors (mirrors follow the primary) and logs the routing decision.
 
 All general read paths — resume, explain, attribution, blame, tokens, attach — inherit this routing for free through `checkpoint.Open`; there is no per-command config knob.
 
@@ -164,7 +177,7 @@ The switch is a **primary flip**, not a dual-write phase. There is no "run both 
 
 | State | `primary` | Behavior |
 |-------|-----------|----------|
-| **Default** (today) | `git-branch` | Hex checkpoints on the `v1` branch; unchanged legacy behavior |
+| **Config-less fallback** | `git-branch` | Hex checkpoints on the `v1` branch; unchanged legacy behavior for repos set up before the git-refs default (new setups write an explicit primary — `git-refs` as the recommended pick unless the setup question chose branch) |
 | **Refs-only** | `git-refs` | New checkpoints are ULIDs written as per-checkpoint refs; pre-existing hex/`v1` checkpoints stay readable via the read-routing fallback |
 
 ## Checkpoint version and policy
@@ -202,7 +215,7 @@ When checkpoints *are* actively migrated from the branch into refs (a path that 
 | `checkpoint/refs_naming.go` | `RefName` / `ParseRef`, `CheckpointRefPrefix` |
 | `checkpoint/refs_store.go` | `gitRefsStore` — per-checkpoint write/read, on-demand fetch |
 | `checkpoint/pushqueue.go` | Flock JSONL push-discovery queue |
-| `checkpoint/routing_store.go` | `kindRoutingStore` — id-kind read routing across both backends |
+| `checkpoint/routing_store.go` | `kindRoutingStore` — id-kind read + backfill-write routing across both backends |
 | `checkpoint/id/id.go` | `ShardFor`, `Kind`/`KindOf`, ID generation |
 | `checkpointpolicy/format.go` | `branch-v1` / `refs-v1` format families and read/write sets |
 | `settings/checkpoints.go` | `checkpoints` block parsing + env override |
@@ -211,6 +224,6 @@ When checkpoints *are* actively migrated from the branch into refs (a path that 
 
 ## Known limitations and deferred work
 
-- **Storage-level `List` is local-only** — no remote enumeration of checkpoint refs. `List` at the routing layer still unions the two local stores.
+- **Storage-level `List` is local-only by default**, with **opt-in remote discovery** for user-facing enumeration (see [List and remote discovery](#list-and-remote-discovery)): an `ls-remote` of `refs/entire/checkpoints/*` surfaces checkpoints written on another machine, hydrated lazily on read. It is scoped to a configured `checkpoint_remote` and kept off the per-turn hook hot path.
 - **OPF (OpenAI Privacy Filter) at pre-push is git-branch-only for now.** The per-ref push does not run OPF re-redaction; that is deferred until after the store lands. See `strategy/manual_commit_opf_rewrite.go` and [security-and-privacy.md](../security-and-privacy.md).
 - **The "ULIDs never land on the branch" invariant is not yet enforced at write time.** A config flip or a missing `ENTIRE_CHECKPOINTS_PRIMARY` in an amending environment could, in principle, condense a ULID checkpoint onto the `v1` branch, which readers (routing ULIDs to refs only) would then fail to find. Because git-branch is *not* a mirror of git-refs (see [Migration and coexistence](#migration-and-coexistence)), a ULID reaching the git-branch write path is unambiguously a bug — so enforcing this is a straightforward reject at that write path, not a topology-role-aware check.

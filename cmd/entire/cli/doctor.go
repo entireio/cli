@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"charm.land/huh/v2"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -40,7 +41,12 @@ Checks performed:
      review hasn't run yet on this machine, or a newer entire release
      added a hook the user hasn't approved yet).
 
-  3. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  When Claude Code hooks are installed:
+  3. Claude Code hook config: warn when the installed hooks are out of
+     date (e.g. an older release wrote tool matchers that no longer fire).
+     Fix by re-running 'entire enable --force'.
+
+  4. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -98,6 +104,9 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	// Agent-specific: Codex hook trust state.
 	checkCodexHookTrust(cmd)
+
+	// Agent-specific: Claude Code hook config drift.
+	checkClaudeCodeHookDrift(cmd)
 
 	// Stuck sessions
 	// Load all session states
@@ -437,6 +446,24 @@ func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, err
 // Both checks are structural (file/key presence). Stays silent when
 // this repo doesn't have codex hooks installed or when we can't
 // resolve the worktree root. Warn-only.
+// checkClaudeCodeHookDrift warns when Entire's Claude Code hooks are installed
+// but out of date — e.g. an older release wrote tool matchers that no longer
+// fire on current Claude Code. Read-only; the fix is `entire enable --force`.
+// Stays silent when Claude Code hooks aren't installed here.
+func checkClaudeCodeHookDrift(cmd *cobra.Command) {
+	w := cmd.OutOrStdout()
+	switch claudecode.CheckHookConfig(cmd.Context()) {
+	case claudecode.HooksAbsent:
+		// Not installed in this repo — nothing to report.
+	case claudecode.HooksCurrent:
+		fmt.Fprintln(w, "✓ Claude Code hook config: OK")
+	case claudecode.HooksOutdated:
+		fmt.Fprintln(w, "Claude Code hooks: OUT OF DATE")
+		fmt.Fprintln(w, "  The installed hooks use outdated tool matchers and no longer fire.")
+		fmt.Fprintln(w, "  Run `entire enable --force` to update the hooks file.")
+	}
+}
+
 func checkCodexHookTrust(cmd *cobra.Command) {
 	repoRoot, err := paths.WorktreeRoot(cmd.Context())
 	if err != nil {

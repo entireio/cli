@@ -152,69 +152,6 @@ func TestParseSubagentTypeAndDescription(t *testing.T) {
 	}
 }
 
-func TestExtractTodoContentFromToolInput(t *testing.T) {
-	tests := []struct {
-		name      string
-		toolInput string
-		want      string
-	}{
-		{
-			name:      "in_progress item present",
-			toolInput: `{"todos": [{"content": "First task", "status": "completed"}, {"content": "Second task", "status": "in_progress"}, {"content": "Third task", "status": "pending"}]}`,
-			want:      "Second task",
-		},
-		{
-			name:      "no in_progress - fallback to first pending",
-			toolInput: `{"todos": [{"content": "First task", "status": "completed"}, {"content": "Second task", "status": "pending"}, {"content": "Third task", "status": "pending"}]}`,
-			want:      "Second task",
-		},
-		{
-			name:      "all pending - first TodoWrite scenario",
-			toolInput: `{"todos": [{"content": "First pending task", "status": "pending", "activeForm": "Doing first task"}, {"content": "Second pending task", "status": "pending", "activeForm": "Doing second task"}]}`,
-			want:      "First pending task",
-		},
-		{
-			name:      "no in_progress or pending - returns last completed",
-			toolInput: `{"todos": [{"content": "First task", "status": "completed"}]}`,
-			want:      "First task",
-		},
-		{
-			name:      "empty todos array",
-			toolInput: `{"todos": []}`,
-			want:      "",
-		},
-		{
-			name:      "no todos field",
-			toolInput: `{"other_field": "value"}`,
-			want:      "",
-		},
-		{
-			name:      "null todos field",
-			toolInput: `{"todos": null}`,
-			want:      "",
-		},
-		{
-			name:      "empty input",
-			toolInput: ``,
-			want:      "",
-		},
-		{
-			name:      "invalid json",
-			toolInput: `not valid json`,
-			want:      "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ExtractTodoContentFromToolInput([]byte(tt.toolInput))
-			if got != tt.want {
-				t.Errorf("ExtractTodoContentFromToolInput() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestExtractLastCompletedTodoFromToolInput(t *testing.T) {
 	tests := []struct {
 		name      string

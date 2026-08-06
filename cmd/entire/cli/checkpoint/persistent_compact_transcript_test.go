@@ -239,12 +239,12 @@ func TestUpdateCommitted_RefreshesCompactTranscriptPointer(t *testing.T) {
 }
 
 // codexTranscriptWithCompactionBeforeStart returns a Codex-format JSONL
-// transcript whose line 1 is a `compaction` entry that
-// codex.SanitizePortableTranscript drops. With a checkpoint start of line 2,
-// slicing the raw (unsanitized) transcript yields [beta, gamma] while slicing
-// the sanitized transcript (compaction removed) yields only [gamma] — so the
-// compact transcript diverges unless the finalize path sanitizes like the
-// initial-write path does.
+// transcript whose line 2 is a `compaction` entry, positioned before the
+// checkpoint start so it exercises offset alignment.
+// codex.SanitizePortableTranscript strips the entry's payload but keeps its line,
+// so the sanitized transcript stays line-aligned with the rollout and a checkpoint
+// start of line 2 yields [beta, gamma] in both. (It used to drop the line, which
+// shifted the window and silently lost "beta".)
 func codexTranscriptWithCompactionBeforeStart() []byte {
 	lines := []string{
 		`{"timestamp":"2026-01-01T00:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"alpha"}]}}`,
@@ -287,20 +287,20 @@ func TestUpdateCommitted_CodexCompactSanitizedLikeInitialWrite(t *testing.T) {
 	if !ok {
 		t.Fatal("transcript.jsonl missing after WriteCommitted")
 	}
-	// transcript.jsonl is now the full sanitized session: the compaction line is
-	// dropped, so it holds [alpha, beta, gamma]. Scoping is via the marker.
+	// transcript.jsonl is the full sanitized session; scoping is via the marker.
 	if !strings.Contains(initialCompact, "gamma") {
 		t.Errorf("initial compact missing content:\n%s", initialCompact)
 	}
-	// The marker scopes out everything before the checkpoint start. Sanitize
-	// runs before compaction, so the dropped compaction line shifts the window:
-	// fullCompactLines[marker:] must be exactly [gamma], excluding "beta".
+	// The marker scopes out everything before the checkpoint start. Because
+	// sanitization preserves line numbering, a start of line 2 maps to the same
+	// place in the sanitized bytes as in the rollout: fullCompactLines[marker:]
+	// must hold [beta, gamma] and exclude "alpha".
 	initialMeta := readSessionMetadata(t, repo, cpID)
 	initialMarker, ok := initialMeta.GetCompactTranscriptStart()
 	if !ok {
 		t.Fatal("compact_transcript_start not recorded after WriteCommitted")
 	}
-	assertCompactSliceScoped(t, initialCompact, initialMarker, []string{"beta"}, []string{"gamma"})
+	assertCompactSliceScoped(t, initialCompact, initialMarker, []string{"alpha"}, []string{"beta", "gamma"})
 
 	// Finalize with the same raw transcript. replaceTranscript must sanitize
 	// before compaction, exactly like the initial write — otherwise the full
@@ -329,7 +329,7 @@ func TestUpdateCommitted_CodexCompactSanitizedLikeInitialWrite(t *testing.T) {
 	if finalizeMarker != initialMarker {
 		t.Errorf("finalize marker %d diverges from initial marker %d", finalizeMarker, initialMarker)
 	}
-	assertCompactSliceScoped(t, finalizeCompact, finalizeMarker, []string{"beta"}, []string{"gamma"})
+	assertCompactSliceScoped(t, finalizeCompact, finalizeMarker, []string{"alpha"}, []string{"beta", "gamma"})
 }
 
 // assertCompactSliceScoped checks that slicing the full compact transcript at

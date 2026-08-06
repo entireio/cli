@@ -739,6 +739,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		Strategy:                    opts.Strategy,
 		CreatedAt:                   checkpointCreatedAt(opts),
 		Branch:                      opts.Branch,
+		CommitSHA:                   opts.CommitSHA,
 		CheckpointsCount:            opts.CheckpointsCount,
 		SaveStepCount:               opts.SaveStepCount,
 		FilesTouched:                opts.FilesTouched,
@@ -801,6 +802,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 	// was imported (Kind == "imported"). Compared as a literal because the
 	// session package imports checkpoint, so we can't reference its constant.
 	imported := opts.Kind == "imported"
+	commitSHA := opts.CommitSHA
 	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
 	if entry, exists := entries[rootMetadataPath]; exists {
 		existingSummary, readErr := s.readSummaryFromBlob(entry.Hash)
@@ -817,6 +819,12 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 			if !imported {
 				imported = existingSummary.Imported
 			}
+			// A later write to the same checkpoint (e.g. a review session
+			// attached to it) carries no CommitSHA; the imported anchor
+			// must survive that rewrite rather than be cleared.
+			if commitSHA == "" {
+				commitSHA = existingSummary.CommitSHA
+			}
 		}
 	}
 
@@ -825,6 +833,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 		CLIVersion:          versioninfo.Version,
 		Strategy:            opts.Strategy,
 		Branch:              opts.Branch,
+		CommitSHA:           commitSHA,
 		CheckpointsCount:    checkpointsCount,
 		FilesTouched:        filesTouched,
 		Sessions:            sessions,
@@ -859,8 +868,9 @@ func (s *GitStore) backfillAttribution(ctx context.Context, checkpointID id.Chec
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	if err := s.ensureSessionsBranch(ctx); err != nil {
-		return fmt.Errorf("failed to ensure sessions branch: %w", err)
+	// Backfills require the branch to exist; a miss must not create it.
+	if err := s.requireSessionsBranch(); err != nil {
+		return err
 	}
 
 	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
@@ -1050,6 +1060,28 @@ func mergeModelUsage(a, b []types.ModelUsage) []types.ModelUsage {
 	return out
 }
 
+// SanitizeTranscriptForAgentType strips non-portable agent state from a transcript
+// about to be stored (see agent.TranscriptSanitizer). It exists for callers that work
+// from a types.AgentType rather than a live agent.Agent: the store itself, as a
+// last-resort safety net, and `entire import`, which reads raw third-party rollouts
+// and calls this before its own redaction pass so the sanitize-before-redact order
+// holds there too.
+//
+// It dispatches on agent type explicitly rather than resolving via
+// agent.GetByAgentType: the registry is populated by package init, so that lookup
+// only succeeds when something else in the binary happens to import agent/codex, and
+// when it doesn't, sanitization silently degrades to a no-op — reintroducing the bug
+// this guards against with no signal. A compile-time dependency cannot fail that way.
+func SanitizeTranscriptForAgentType(agentType types.AgentType, data []byte) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	if agentType == agent.AgentTypeCodex {
+		return codex.SanitizePortableTranscript(data)
+	}
+	return data
+}
+
 // writeTranscript writes the transcript, compact transcript, and content hash
 // to the checkpoint entries. The compact transcript.jsonl (the full compacted
 // session) is written into the tree and pushed alongside full.jsonl. Returns
@@ -1071,7 +1103,10 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 			rawData = nil
 		}
 		if len(rawData) > 0 {
-			redacted, redactErr := redact.JSONLBytes(rawData)
+			// Sanitize BEFORE redacting, matching the pipeline order everywhere else:
+			// redaction must not scan ciphertext that sanitization is about to
+			// discard. This is the one path that reaches the store with raw bytes.
+			redacted, redactErr := redact.JSONLBytes(SanitizeTranscriptForAgentType(opts.Agent, rawData))
 			if redactErr != nil {
 				return false, nil, fmt.Errorf("failed to redact transcript from file: %w", redactErr)
 			}
@@ -1082,9 +1117,11 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 		return false, nil, nil
 	}
 
-	if opts.Agent == agent.AgentTypeCodex {
-		transcriptBytes = codex.SanitizePortableTranscript(transcriptBytes)
-	}
+	// Safety net for in-memory callers that reached the store without sanitizing
+	// (notably `entire import`, which writes raw third-party rollouts). Idempotent,
+	// so it is a no-op for the paths that already did it — including the fallback
+	// above.
+	transcriptBytes = SanitizeTranscriptForAgentType(opts.Agent, transcriptBytes)
 
 	// Chunk the transcript if it's too large
 	chunkStart := time.Now()
@@ -1735,9 +1772,9 @@ func (s *GitStore) backfillSummary(ctx context.Context, checkpointID id.Checkpoi
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	// Ensure sessions branch exists
-	if err := s.ensureSessionsBranch(ctx); err != nil {
-		return fmt.Errorf("failed to ensure sessions branch: %w", err)
+	// Backfills require the branch to exist; a miss must not create it.
+	if err := s.requireSessionsBranch(); err != nil {
+		return err
 	}
 
 	// Get branch ref and root tree hash (O(1), no flatten)
@@ -1779,13 +1816,16 @@ func (s *GitStore) backfillSummary(ctx context.Context, checkpointID id.Checkpoi
 //
 // Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
 func (s *GitStore) backfillTranscript(ctx context.Context, opts UpdateOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // Propagating context cancellation
+	}
 	if opts.CheckpointID.IsEmpty() {
 		return errors.New("invalid update options: checkpoint ID is required")
 	}
 
-	// Ensure sessions branch exists
-	if err := s.ensureSessionsBranch(ctx); err != nil {
-		return fmt.Errorf("failed to ensure sessions branch: %w", err)
+	// Backfills require the branch to exist; a miss must not create it.
+	if err := s.requireSessionsBranch(); err != nil {
+		return err
 	}
 
 	// Get branch ref and root tree hash (O(1), no flatten)
@@ -2084,13 +2124,10 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 	}
 
 	// Regenerate the compact transcript from the new content so the pushed
-	// transcript.jsonl stays current. Codex transcripts are sanitized first to
-	// match the initial-write path (writeTranscript), which sanitizes before
-	// compaction; this finalize path otherwise passes raw bytes.
-	compactBytes := transcript.Bytes()
-	if agentType == agent.AgentTypeCodex {
-		compactBytes = codex.SanitizePortableTranscript(compactBytes)
-	}
+	// transcript.jsonl stays current. Sanitized first to match the initial-write
+	// path (writeTranscript), which sanitizes before compaction; this finalize path
+	// otherwise passes raw bytes.
+	compactBytes := SanitizeTranscriptForAgentType(agentType, transcript.Bytes())
 	compactStart := s.writeCompactTranscript(ctx, agentType, startLine, compactBytes, sessionDir, entries)
 
 	// If regeneration produced no compact transcript (failure, empty, or
@@ -2146,6 +2183,23 @@ func PrecomputeTranscriptBlobs(ctx context.Context, repo *git.Repository, transc
 		ContentHashBlob: hashBlob,
 		ContentHash:     contentHash,
 	}, nil
+}
+
+// requireSessionsBranch reports ErrCheckpointNotFound when the primary
+// metadata ref does not exist. Backfills use this instead of
+// ensureSessionsBranch: they target an existing checkpoint, and a missing
+// branch trivially implies the checkpoint is absent — creating an orphan
+// branch as a side effect of that probe would leave a live v1 branch (List
+// union, pre-push) in a repo that never used the git-branch backend.
+func (s *GitStore) requireSessionsBranch() error {
+	_, err := s.repo.Reference(s.refs.Primary, true)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return ErrCheckpointNotFound
+	}
+	return fmt.Errorf("failed to check sessions branch: %w", err)
 }
 
 // ensureSessionsBranch ensures the primary metadata ref exists.

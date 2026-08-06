@@ -3,6 +3,8 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
@@ -34,6 +36,34 @@ func RemoveContext(name string) error {
 	return nil
 }
 
+// RememberJurisdictionAudience adds audience to context `name`'s
+// JurisdictionAudiences, so logout can find the matching keyring slot.
+// Idempotent: an already-recorded audience rewrites nothing.
+//
+// Callers MUST record before writing the token to the credential store — a
+// persisted-but-unrecorded token is a bearer logout can't find, whereas a
+// failed record that aborts the write costs only one token exchange.
+func RememberJurisdictionAudience(name, audience string) error {
+	aud := strings.TrimRight(strings.TrimSpace(audience), "/")
+	if name == "" || aud == "" {
+		return errors.New("context name and jurisdiction audience are both required")
+	}
+	if err := contexts.Modify(userdirs.Config(), func(f *contexts.File) (bool, error) {
+		c := f.Find(name)
+		if c == nil {
+			return false, fmt.Errorf("no login context named %q", name)
+		}
+		if slices.Contains(c.JurisdictionAudiences, aud) {
+			return false, nil
+		}
+		c.JurisdictionAudiences = append(c.JurisdictionAudiences, aud)
+		return true, nil
+	}); err != nil {
+		return fmt.Errorf("record jurisdiction audience %q for context %q: %w", aud, name, err)
+	}
+	return nil
+}
+
 // removeContextLocked deletes the context selected by pick — keyring slots
 // first, then the contexts.json entry — inside a single locked Modify, so
 // selection, credential deletion, and entry removal can't interleave with a
@@ -53,7 +83,7 @@ func removeContextLocked(pick func(*contexts.File) *contexts.Context) error {
 		if c == nil {
 			return false, nil
 		}
-		if err := deleteContextKeychain(c.KeychainService, c.Handle); err != nil {
+		if err := deleteContextKeychain(c); err != nil {
 			return false, fmt.Errorf("remove credentials for %q: %w", c.Name, err)
 		}
 		f.Delete(c.Name)
@@ -61,20 +91,40 @@ func removeContextLocked(pick func(*contexts.File) *contexts.Context) error {
 	})
 }
 
-// deleteContextKeychain removes a context's keyring slots. A missing entry
-// is fine; any other failure surfaces so logout doesn't claim success over
-// surviving credentials. The refresh slot goes first — it's the long-lived
-// credential, and if the second delete then fails, the leftover access
-// token at least expires on its own.
-func deleteContextKeychain(svc, handle string) error {
-	if svc == "" || handle == "" {
+// deleteContextKeychain removes every keyring slot a context owns: the paired
+// refresh + access tokens, plus one jurisdiction (data-plane) access token per
+// recorded audience — each of those authorizes git against every repo the
+// account can reach. A missing entry is fine; any other failure surfaces so
+// logout doesn't claim success over surviving credentials.
+//
+// Deletion runs longest-lived-first — refresh (indefinite), jurisdiction (8h),
+// access (an hour at most) — so a mid-sequence failure leaves behind only the
+// shorter-lived credential. Unrecorded jurisdiction slots are unreachable (no
+// enumeration API) and left to expire.
+func deleteContextKeychain(c *contexts.Context) error {
+	if c == nil || c.Handle == "" {
 		return nil
 	}
-	if err := tokenstore.Delete(tokenstore.RefreshService(svc), handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
-		return fmt.Errorf("delete refresh token: %w", err)
+	if c.KeychainService != "" {
+		if err := tokenstore.Delete(tokenstore.RefreshService(c.KeychainService), c.Handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
+			return fmt.Errorf("delete refresh token: %w", err)
+		}
 	}
-	if err := tokenstore.Delete(svc, handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
-		return fmt.Errorf("delete access token: %w", err)
+	for _, audience := range c.JurisdictionAudiences {
+		// A blank entry can only come from a hand-edited or corrupted
+		// contexts.json, and would resolve to the bare service prefix — no
+		// token lives there, so skip rather than round-trip the keyring.
+		if strings.TrimSpace(audience) == "" {
+			continue
+		}
+		if err := tokenstore.Delete(tokenstore.JurisdictionService(audience), c.Handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
+			return fmt.Errorf("delete jurisdiction token for %s: %w", audience, err)
+		}
+	}
+	if c.KeychainService != "" {
+		if err := tokenstore.Delete(c.KeychainService, c.Handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
+			return fmt.Errorf("delete access token: %w", err)
+		}
 	}
 	return nil
 }

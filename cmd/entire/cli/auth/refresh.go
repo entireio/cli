@@ -173,9 +173,50 @@ func contextReauthError(c *contexts.Context, err error) error {
 	return nil
 }
 
+// RefreshingLoginCredential resolves a context's login JWT and can force a
+// refresh after a server rejects a still-locally-valid token.
+type RefreshingLoginCredential struct {
+	context *contexts.Context
+	manager *tokenmanager.Manager
+}
+
+// NewRefreshingLoginCredential returns a refreshable login credential for
+// context c.
+func NewRefreshingLoginCredential(c *contexts.Context, transport http.RoundTripper, allowInsecureHTTP bool) (*RefreshingLoginCredential, error) {
+	mgr, err := newContextTokenManager(c, transport, allowInsecureHTTP)
+	if err != nil {
+		return nil, err
+	}
+	return &RefreshingLoginCredential{context: c, manager: mgr}, nil
+}
+
+// Token returns a locally fresh login JWT, refreshing it when needed.
+func (c *RefreshingLoginCredential) Token(ctx context.Context) (string, error) {
+	tok, err := c.manager.Refresh(ctx)
+	return c.result(tok, err)
+}
+
+// ForceRefresh re-mints the login JWT after staleToken was rejected by the
+// server despite still appearing locally valid.
+func (c *RefreshingLoginCredential) ForceRefresh(ctx context.Context, staleToken string) (string, error) {
+	tok, err := c.manager.ForceRefresh(ctx, staleToken)
+	return c.result(tok, err)
+}
+
+func (c *RefreshingLoginCredential) result(tok string, err error) (string, error) {
+	if mapped := contextReauthError(c.context, err); mapped != nil {
+		return "", mapped
+	}
+	if err != nil {
+		return "", fmt.Errorf("refresh login token: %w", err)
+	}
+	return tok, nil
+}
+
 // NewRefreshingLoginProvider returns a login-JWT provider (the shape
-// repocreds wants) for context c that transparently re-mints an expired
-// login JWT from the stored refresh token.
+// repocreds wants) for context c that transparently re-mints an expired login
+// JWT from the stored refresh token. Call NewRefreshingLoginCredential when a
+// reactive 401 path also needs to force-refresh a rejected token.
 //
 // It is backed by auth-go's tokenmanager, which is what makes this safe
 // against the server's single-use refresh-token rotation: refreshes are
@@ -193,20 +234,11 @@ func contextReauthError(c *contexts.Context, err error) error {
 // transport carries the caller's TLS configuration; allowInsecureHTTP
 // permits an http:// core for loopback/dev.
 func NewRefreshingLoginProvider(c *contexts.Context, transport http.RoundTripper, allowInsecureHTTP bool) (func(context.Context) (string, error), error) {
-	mgr, err := newContextTokenManager(c, transport, allowInsecureHTTP)
+	credential, err := NewRefreshingLoginCredential(c, transport, allowInsecureHTTP)
 	if err != nil {
 		return nil, err
 	}
-	return func(ctx context.Context) (string, error) {
-		tok, err := mgr.Refresh(ctx)
-		if mapped := contextReauthError(c, err); mapped != nil {
-			return "", mapped
-		}
-		if err != nil {
-			return "", fmt.Errorf("refresh login token: %w", err)
-		}
-		return tok, nil
-	}, nil
+	return credential.Token, nil
 }
 
 // RefreshedLoginToken returns context c's login JWT, transparently re-minting

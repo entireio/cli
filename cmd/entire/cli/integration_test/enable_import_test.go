@@ -5,7 +5,6 @@ package integration
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -40,7 +39,7 @@ func TestEnableOffersImport_FirstRunAutoImportsWithYes(t *testing.T) {
 
 	// --yes ("accept all defaults") auto-imports the selected agent's
 	// discoverable history on first-time enable, even non-interactively.
-	out := env.RunCLI("enable", "--agent", "claude-code", "--yes", "--telemetry=false")
+	out := env.RunCLI("enable", "--agent", agentClaudeCode, "--yes", "--telemetry=false")
 	require.Contains(t, out, "Ready.", "enable should complete; got: %s", out)
 	require.Contains(t, out, "Imported 2 turn(s)", "first-time enable --yes should import discovered history; got: %s", out)
 
@@ -60,7 +59,7 @@ func TestEnableOffersImport_NonInteractiveWithoutYesHints(t *testing.T) {
 
 	// A non-interactive (no-TTY) enable without --yes must NOT silently import;
 	// it points at the manual command instead.
-	out := env.RunCLI("enable", "--agent", "claude-code", "--telemetry=false")
+	out := env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
 	require.Contains(t, out, "Ready.", "enable should complete; got: %s", out)
 	require.NotContains(t, out, "Imported", "non-interactive enable without --yes must not auto-import; got: %s", out)
 	require.Contains(t, out, "entire import", "should point at the manual import command; got: %s", out)
@@ -75,7 +74,7 @@ func TestEnableOffersImport_NoHistoryIsSilent(t *testing.T) {
 	env := freshRepoEnv(t)
 	// No transcripts written: nothing discoverable.
 
-	out := env.RunCLI("enable", "--agent", "claude-code", "--telemetry=false")
+	out := env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
 	require.Contains(t, out, "Ready.", "enable should complete; got: %s", out)
 	require.NotContains(t, out, "Imported", "no history => import offer must be a silent no-op; got: %s", out)
 }
@@ -88,12 +87,12 @@ func TestEnableOffersImport_NotOfferedOnReEnable(t *testing.T) {
 		[]byte(claudeImportFixture), 0o644))
 
 	// First enable imports (--yes accepts the import).
-	first := env.RunCLI("enable", "--agent", "claude-code", "--yes", "--telemetry=false")
+	first := env.RunCLI("enable", "--agent", agentClaudeCode, "--yes", "--telemetry=false")
 	require.Contains(t, first, "Imported 2 turn(s)", "first enable should import; got: %s", first)
 
 	// Re-enable must not re-offer or re-import, even though history is still present.
-	second := env.RunCLI("enable", "--agent", "claude-code", "--yes", "--telemetry=false")
+	second := env.RunCLI("enable", "--agent", agentClaudeCode, "--yes", "--telemetry=false")
 	require.NotContains(t, second, "Imported", "re-enable must not offer import again; got: %s", second)
-	require.False(t, strings.Contains(second, "already imported"),
+	require.NotContains(t, second, "already imported",
 		"re-enable must not run import at all; got: %s", second)
 }

@@ -25,9 +25,9 @@ import (
 
 // writePluginScript writes a shell script that records argv and exits
 // with exitCode. Skips the calling test on Windows.
-func writePluginScript(t *testing.T, dir, binaryName, argFile string, exitCode int) string {
+func writePluginScript(t *testing.T, dir, binaryName, argFile string, exitCode int) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("plugin shell-script harness only runs on Unix")
 	}
 	path := filepath.Join(dir, binaryName)
@@ -38,10 +38,9 @@ func writePluginScript(t *testing.T, dir, binaryName, argFile string, exitCode i
 			"exit %d\n",
 		argFile, exitCode,
 	)
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatalf("write plugin %s: %v", path, err)
 	}
-	return path
 }
 
 // pathWith returns os.Environ with dir prepended to PATH. Returning a
@@ -184,13 +183,13 @@ func TestExternalCommand_FlagAfterPluginNameNotEatenByCobra(t *testing.T) {
 
 func TestExternalCommand_StdinPassthrough(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("plugin shell-script harness only runs on Unix")
 	}
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "stdin.txt")
 	body := fmt.Sprintf("#!/bin/sh\ncat > %q\nexit 0\n", outFile)
-	if err := os.WriteFile(filepath.Join(dir, "entire-stdincat"), []byte(body), 0o755); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(filepath.Join(dir, "entire-stdincat"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write plugin: %v", err)
 	}
 
@@ -214,7 +213,7 @@ func TestExternalCommand_StdinPassthrough(t *testing.T) {
 
 func TestExternalCommand_EnvVarsForwarded(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("plugin shell-script harness only runs on Unix")
 	}
 	// Spawn the parent CLI from inside a real git repo so it can resolve
@@ -237,7 +236,7 @@ func TestExternalCommand_EnvVarsForwarded(t *testing.T) {
 			"} > %q\nexit 0\n",
 		envFile,
 	)
-	if err := os.WriteFile(filepath.Join(pluginDir, "entire-envcheck"), []byte(body), 0o755); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(filepath.Join(pluginDir, "entire-envcheck"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write plugin: %v", err)
 	}
 
@@ -279,7 +278,7 @@ func writeEnvDumpPlugin(t *testing.T) (pluginDir, envFile string) {
 	pluginDir = t.TempDir()
 	envFile = filepath.Join(pluginDir, "env.txt")
 	body := fmt.Sprintf("#!/bin/sh\nenv > %q\nexit 0\n", envFile)
-	if err := os.WriteFile(filepath.Join(pluginDir, "entire-envfilter"), []byte(body), 0o755); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(filepath.Join(pluginDir, "entire-envfilter"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write plugin: %v", err)
 	}
 	return pluginDir, envFile
@@ -290,7 +289,7 @@ func writeEnvDumpPlugin(t *testing.T) (pluginDir, envFile string) {
 // the plugin, while allowlisted OS-plumbing variables do.
 func TestExternalCommand_EnvFiltered_CredentialsDropped(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("plugin shell-script harness only runs on Unix")
 	}
 	pluginDir, envFile := writeEnvDumpPlugin(t)
@@ -327,7 +326,7 @@ func TestExternalCommand_EnvFiltered_CredentialsDropped(t *testing.T) {
 // disable filtering for everything else.
 func TestExternalCommand_EnvFiltered_OverrideWildcard(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("plugin shell-script harness only runs on Unix")
 	}
 	pluginDir, envFile := writeEnvDumpPlugin(t)
@@ -378,14 +377,14 @@ func parseEnvLines(t *testing.T, contents string) map[string]string {
 
 func TestExternalCommand_NonExecutableReportsLaunchError(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("executable bit semantics tested on Unix only")
 	}
 	dir := t.TempDir()
 	// Mode 0o644 — file exists on PATH but cannot be exec'd. The dispatcher
 	// must report a launch failure rather than silently falling through to
 	// Cobra's generic unknown-command path.
-	if err := os.WriteFile(filepath.Join(dir, "entire-noexec"), []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(filepath.Join(dir, "entire-noexec"), []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
 		t.Fatalf("write plugin: %v", err)
 	}
 

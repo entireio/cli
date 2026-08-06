@@ -202,6 +202,29 @@ type SidecarImageProvider interface {
 	SidecarImages(ctx context.Context, sessionRef string) ([]CompactedTranscriptAsset, error)
 }
 
+// TranscriptSanitizer is implemented by agents whose native transcript format
+// carries state that Entire must not keep in its own copy — e.g. Codex rollouts
+// embed encrypted reasoning payloads and compaction blobs that are bound to the
+// originating session and cannot be replayed out of a checkpoint.
+//
+// Entire always leaves the agent's own transcript untouched; this transform applies
+// only to the copy Entire stores. Sanitizing before redaction is what keeps
+// non-replayable payloads out of storage AND keeps the redaction layers from
+// scanning megabytes of ciphertext they would only discard afterwards (base64 is
+// the pathological input for the entropy layer).
+//
+// Implementations must be pure byte transforms: idempotent (sanitizing an
+// already-sanitized transcript is a no-op), safe to call from hooks, and never
+// dependent on the agent process being alive.
+type TranscriptSanitizer interface {
+	Agent
+
+	// SanitizeTranscriptForStorage returns the transcript with non-portable state
+	// removed. It must return the input unchanged rather than nil when it cannot
+	// parse the transcript, so a sanitizer failure never loses the session.
+	SanitizeTranscriptForStorage(data []byte) []byte
+}
+
 // TokenCalculator provides token usage calculation for a session.
 // The framework calls this during step save and checkpoint if implemented.
 type TokenCalculator interface {
@@ -249,6 +272,49 @@ type TextGenerator interface {
 	// GenerateText sends a prompt to the agent's CLI and returns the raw text response.
 	// model is a hint (e.g., "haiku", "sonnet"). Implementations may ignore if not applicable.
 	GenerateText(ctx context.Context, prompt string, model string) (string, error)
+}
+
+// ProgressPhase identifies a coarse stage in streaming text generation.
+type ProgressPhase string
+
+const (
+	// PhaseConnecting is emitted once when the CLI signals it is making the upstream request.
+	PhaseConnecting ProgressPhase = "connecting"
+	// PhaseFirstToken is emitted once when the upstream responds with the first event,
+	// carrying TTFT and input/cache token counts.
+	PhaseFirstToken ProgressPhase = "first-token"
+	// PhaseGenerating is emitted repeatedly as text or thinking deltas arrive.
+	// OutputTokens carries a running estimate based on delta sizes.
+	PhaseGenerating ProgressPhase = "generating"
+	// PhaseDone is emitted once when the final result event is received without error.
+	PhaseDone ProgressPhase = "done"
+)
+
+// GenerationProgress reports a snapshot of streaming text generation progress.
+// Fields not relevant to the current Phase may be zero-valued.
+type GenerationProgress struct {
+	Phase             ProgressPhase
+	OutputTokens      int // running estimate during PhaseGenerating; final at PhaseDone
+	InputTokens       int // populated at PhaseFirstToken
+	CachedInputTokens int // populated at PhaseFirstToken
+	TTFTms            int // time-to-first-token, populated at PhaseFirstToken
+	DurationMs        int // populated at PhaseDone (final result event)
+}
+
+// ProgressFn receives streaming progress updates. It must not block — invoke it
+// from the same goroutine that reads the stream and keep handlers fast.
+type ProgressFn func(GenerationProgress)
+
+// StreamingTextGenerator is an optional interface for text generators whose
+// underlying CLI exposes a streaming output mode. Callers can use AsStreamingTextGenerator
+// to detect support and fall back to plain GenerateText when unavailable.
+type StreamingTextGenerator interface {
+	Agent
+
+	// GenerateTextStreaming invokes the agent's streaming text generation and
+	// calls progress for each phase update. progress may be nil to suppress
+	// reporting. The returned string is the final response text.
+	GenerateTextStreaming(ctx context.Context, prompt, model string, progress ProgressFn) (string, error)
 }
 
 // CompactedTranscript contains the result of transcript compaction into Entire

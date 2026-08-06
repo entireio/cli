@@ -313,6 +313,15 @@ type ResolveHandleParams struct {
 	Handle string
 }
 
+// ResolveMirrorPlacementsParams is parameters of resolveMirrorPlacements operation.
+type ResolveMirrorPlacementsParams struct {
+	Provider ResolveMirrorPlacementsProvider
+	// Upstream owner login (case-insensitive).
+	Owner string
+	// Upstream repo name (case-insensitive).
+	Repo string
+}
+
 // RevokeProjectAccessParams is parameters of revokeProjectAccess operation.
 type RevokeProjectAccessParams struct {
 	ProjectId   string

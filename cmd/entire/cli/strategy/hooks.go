@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
@@ -292,6 +293,17 @@ func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (i
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
 		return 0, err
+	}
+
+	info, statErr := os.Stat(hooksDir)
+	notDir := statErr == nil && !info.IsDir()
+	// ENOTDIR: a path component of hooksDir is itself a non-directory
+	// (e.g. core.hooksPath=/dev/null/hooks) — same misconfiguration.
+	if notDir || errors.Is(statErr, syscall.ENOTDIR) {
+		return 0, fmt.Errorf("git resolves the hooks directory to %s, which is not a directory — core.hooksPath is likely set to disable git hooks\n"+
+			"Entire requires git hooks to capture sessions. See where it is set with:\n"+
+			"  git config --show-origin --get-all core.hooksPath\n"+
+			"then unset it (git config --global --unset core.hooksPath) or override for this repo (git config core.hooksPath .git/hooks) and re-run 'entire enable'", hooksDir)
 	}
 
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil { //nolint:gosec // Git hooks require executable permissions

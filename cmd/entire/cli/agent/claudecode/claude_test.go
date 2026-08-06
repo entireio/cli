@@ -2,8 +2,11 @@ package claudecode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -53,6 +56,163 @@ func TestProtectedDirs(t *testing.T) {
 	dirs := ag.ProtectedDirs()
 	if len(dirs) != 1 || dirs[0] != ".claude" {
 		t.Errorf("ProtectedDirs() = %v, want [.claude]", dirs)
+	}
+}
+
+func flagValue(args []string, name string) (string, bool) {
+	for i, a := range args {
+		if a == name && i+1 < len(args) {
+			return args[i+1], true
+		}
+	}
+	return "", false
+}
+
+func TestBuildGenerateArgs_IsolatesSettingSources(t *testing.T) {
+	t.Parallel()
+	// Isolation is the security-critical invariant: --setting-sources must be
+	// empty so user-level hooks and tool permissions (e.g. bypassPermissions)
+	// are never loaded for this internal, injection-exposed call.
+	args := buildGenerateArgs("haiku", "")
+	got, ok := flagValue(args, "--setting-sources")
+	if !ok {
+		t.Fatalf("--setting-sources flag missing from args: %v", args)
+	}
+	if got != "" {
+		t.Fatalf("--setting-sources = %q, want %q (must load no sources)", got, "")
+	}
+	// With no settings path, we inject nothing extra.
+	if _, ok := flagValue(args, "--settings"); ok {
+		t.Fatalf("--settings must be absent when there is no settings path: %v", args)
+	}
+}
+
+func TestBuildGenerateArgs_PassesSettingsAsPath(t *testing.T) {
+	t.Parallel()
+	// The injected settings must be passed as a file path, not inline JSON, so a
+	// key-bearing apiKeyHelper never lands in argv (ps / /proc/<pid>/cmdline).
+	path := "/tmp/entire-claude-auth-123.json"
+	args := buildGenerateArgs("haiku", path)
+
+	if got, _ := flagValue(args, "--setting-sources"); got != "" {
+		t.Fatalf("--setting-sources = %q, want empty", got)
+	}
+	got, ok := flagValue(args, "--settings")
+	if !ok {
+		t.Fatalf("--settings flag missing: %v", args)
+	}
+	if got != path {
+		t.Fatalf("--settings = %q, want the file path %q", got, path)
+	}
+	// Guard against regressing to inline JSON in argv.
+	if strings.Contains(got, "{") {
+		t.Fatalf("--settings must be a path, not inline JSON: %q", got)
+	}
+}
+
+func TestBuildStreamingGenerateArgs_KeepsIsolationAndAuthContract(t *testing.T) {
+	t.Parallel()
+	// The streaming argv must keep the same isolation (--setting-sources "")
+	// and auth-injection (--settings <path>) contract as buildGenerateArgs;
+	// dropping the injection silently breaks apiKeyHelper (API-billing) auth
+	// on every streaming call.
+	args := buildStreamingGenerateArgs("haiku", "")
+	got, ok := flagValue(args, "--setting-sources")
+	if !ok {
+		t.Fatalf("--setting-sources flag missing from args: %v", args)
+	}
+	if got != "" {
+		t.Fatalf("--setting-sources = %q, want %q (must load no sources)", got, "")
+	}
+	if got, ok := flagValue(args, "--output-format"); !ok || got != "stream-json" {
+		t.Fatalf("--output-format = %q, want stream-json: %v", got, args)
+	}
+	if _, ok := flagValue(args, "--settings"); ok {
+		t.Fatalf("--settings must be absent when there is no settings path: %v", args)
+	}
+
+	path := "/tmp/entire-claude-auth-123.json"
+	args = buildStreamingGenerateArgs("haiku", path)
+	got, ok = flagValue(args, "--settings")
+	if !ok {
+		t.Fatalf("--settings flag missing: %v", args)
+	}
+	if got != path {
+		t.Fatalf("--settings = %q, want the file path %q", got, path)
+	}
+}
+
+func TestWriteAuthSettingsFile_WritesOnlyAPIKeyHelper0600(t *testing.T) {
+	t.Parallel()
+	helper := `echo "sk-ant-secret"` // could embed a literal key
+	path, cleanup, err := writeAuthSettingsFile(helper)
+	if err != nil {
+		t.Fatalf("writeAuthSettingsFile: %v", err)
+	}
+	if cleanup == nil {
+		t.Fatal("cleanup func is nil")
+	}
+	defer cleanup()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat settings file: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("settings file perm = %o, want 0600", perm)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read settings file: %v", err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("settings file is not valid JSON: %v (%s)", err, data)
+	}
+	if settings["apiKeyHelper"] != helper {
+		t.Fatalf("apiKeyHelper = %v, want %q", settings["apiKeyHelper"], helper)
+	}
+	if len(settings) != 1 {
+		t.Fatalf("settings file must contain only apiKeyHelper, got %v", settings)
+	}
+
+	cleanup()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("cleanup did not remove settings file (stat err=%v)", err)
+	}
+}
+
+func TestWriteAuthSettingsFile_EmptyHelperNoFile(t *testing.T) {
+	t.Parallel()
+	path, cleanup, err := writeAuthSettingsFile("")
+	if err != nil {
+		t.Fatalf("writeAuthSettingsFile(\"\"): %v", err)
+	}
+	if path != "" {
+		t.Fatalf("path = %q, want empty for no apiKeyHelper", path)
+	}
+	if cleanup != nil {
+		t.Fatal("cleanup should be nil when no file is written")
+	}
+}
+
+func TestReadUserAPIKeyHelper_FromClaudeConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"),
+		[]byte(`{"apiKeyHelper":"echo secret-cmd","permissions":{"defaultMode":"bypassPermissions"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readUserAPIKeyHelper(); got != "echo secret-cmd" {
+		t.Fatalf("readUserAPIKeyHelper() = %q, want %q", got, "echo secret-cmd")
+	}
+}
+
+func TestReadUserAPIKeyHelper_MissingFileReturnsEmpty(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir()) // no settings.json inside
+	if got := readUserAPIKeyHelper(); got != "" {
+		t.Fatalf("readUserAPIKeyHelper() = %q, want empty for missing file", got)
 	}
 }
 

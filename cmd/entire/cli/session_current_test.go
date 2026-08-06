@@ -37,6 +37,37 @@ func TestSessionCurrent_NoSessionsPrintsHint(t *testing.T) {
 	}
 }
 
+// Machine-readable modes must keep stdout parseable: with --json and no
+// active session, the hint text goes to stderr and the command exits
+// non-zero, instead of printing prose to stdout with exit 0 (which crashed
+// downstream JSON parsers in the review runner sandboxes).
+func TestSessionCurrent_JSONNoSessionErrorsWithCleanStdout(t *testing.T) {
+	// t.Chdir cannot coexist with t.Parallel; this test mutates process CWD.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	for _, flag := range []string{"--json", "--transcript"} {
+		cmd := newSessionCurrentCmd()
+		var stdout, stderr bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetContext(context.Background())
+		cmd.SetArgs([]string{flag})
+
+		err := cmd.Execute()
+		if err == nil {
+			t.Errorf("%s: expected non-zero exit when no session exists", flag)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("%s: stdout must stay clean for parsers, got: %q", flag, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "No active session") {
+			t.Errorf("%s: expected 'No active session' on stderr, got: %q", flag, stderr.String())
+		}
+	}
+}
+
 func TestSessionCurrent_JSONPrintsCurrentSessionInfo(t *testing.T) {
 	// t.Chdir cannot coexist with t.Parallel; this test mutates process CWD.
 	dir := t.TempDir()

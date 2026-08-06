@@ -204,6 +204,7 @@ type agentHelpJSON struct {
 	Command     string                    `json:"command"`
 	Short       string                    `json:"short,omitempty"`
 	Long        string                    `json:"long,omitempty"`
+	Example     string                    `json:"example,omitempty"`
 	Repo        string                    `json:"repo,omitempty"`
 	Flags       []agentHelpFlagJSON       `json:"flags,omitempty"`
 	Subcommands []agentHelpSubcommandJSON `json:"subcommands,omitempty"`
@@ -215,6 +216,7 @@ func renderAgentHelpJSON(rootCmd, target *cobra.Command, repoLine string, trails
 		Command: target.CommandPath(),
 		Short:   target.Short,
 		Long:    strings.TrimSpace(target.Long),
+		Example: strings.TrimSpace(target.Example),
 		Repo:    repoLine,
 	}
 	if target != rootCmd {
@@ -296,6 +298,11 @@ func renderAgentHelpCommand(cmd *cobra.Command, repoLine string, trailsEnabled b
 	fmt.Fprintf(&b, "%s — %s\n", cmd.CommandPath(), cmd.Short)
 	if long := strings.TrimSpace(cmd.Long); long != "" && long != strings.TrimSpace(cmd.Short) {
 		b.WriteString(long)
+		b.WriteString("\n")
+	}
+	if example := strings.TrimSpace(cmd.Example); example != "" {
+		b.WriteString("\nExamples:\n")
+		b.WriteString(example)
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")

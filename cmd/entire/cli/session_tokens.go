@@ -99,7 +99,8 @@ already captured for the session.
 Use --agent-brief when an agent needs compact guidance for the next step, for
 example: "Use Entire token tracking to check how this session is doing and
 optimize next steps."`,
-		Args: cobra.MaximumNArgs(1),
+		Example: "  entire session tokens\n  entire session tokens --current --agent-brief\n  entire session tokens --json",
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if jsonFlag && agentBriefFlag {
 				return errors.New("--json and --agent-brief are mutually exclusive")

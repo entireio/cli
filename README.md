@@ -43,34 +43,45 @@ With Entire, you can:
 
 ## Quick Start
 
+### macOS and Linux
+
+Install with Homebrew:
+
 ```bash
-# To use Homebrew, first tap:
 brew tap entireio/tap
 brew trust entireio/tap
+brew install --cask entire            # stable
+# brew install --cask entire@nightly  # or nightly
+```
 
-# Install stable via Homebrew
-brew install --cask entire
+Or with the install script:
 
-# Or install nightly via Homebrew
-brew install --cask entire@nightly
+```bash
+curl -fsSL https://entire.io/install.sh | bash                          # stable
+# curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly  # or nightly
+```
 
-# Or install stable via install.sh
-curl -fsSL https://entire.io/install.sh | bash
+### Windows
 
-# Or install nightly via install.sh
-curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly
+Install with Scoop:
 
-# Or install stable via Scoop (Windows)
+```powershell
 scoop bucket add entire https://github.com/entireio/scoop-bucket.git
 scoop install entire/cli
+```
 
-# Or install via Go (development/manual setup)
+### Go (development/manual setup)
+
+```bash
 go install github.com/entireio/cli/cmd/entire@latest
 
-# Linux: Add Go binaries to PATH (add to ~/.zshrc or ~/.bashrc if not already configured)
+# Add Go binaries to PATH (add to ~/.zshrc or ~/.bashrc if not already configured)
 export PATH="$HOME/go/bin:$PATH"
+```
 
-# Enable in your project
+### Enable in your project
+
+```bash
 cd your-project && entire enable
 
 # Check status
@@ -491,7 +502,7 @@ Local settings override project settings field-by-field. When you run `entire st
 
 ### Agent-Specific Steps & Limitations
 
-- When enabling Entire for Codex, the command will also create or update `.codex/config.toml` with `hooks = true` to enable Codex hooks. If you configure Codex manually, make sure this flag is set in your `.codex/config.toml`. Or select Codex from the interactive agent picker when running `entire enable`.
+- Codex hooks are enabled by default (codex-cli 0.124.0+), so enabling Entire for Codex only installs `.codex/hooks.json` — no `config.toml` is needed and Entire never creates one. If an older Entire version left a `.codex/config.toml` behind and your repo lives inside `~/.codex/agents`, delete that file to stop Codex's "malformed agent role definition" startup warning.
 - Entire supports Cursor IDE and Cursor Agent CLI tool, but `entire rewind` is not available at this time. Other commands (`doctor`, `status` etc.) work the same as all other agents.
 - Entire supports Copilot CLI, but not Copilot in VS Code, in other IDEs, or on github.com.
 - Entire supports Pi coding agent (Preview). Pi uses a TypeScript extension instead of a JSON hook config. Subagent capture is not currently available.

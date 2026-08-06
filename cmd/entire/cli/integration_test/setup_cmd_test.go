@@ -86,7 +86,7 @@ func TestEnableDisable(t *testing.T) {
 	}
 
 	// Re-enable (using --agent for non-interactive mode)
-	stdout = env.RunCLI("enable", "--agent", "claude-code", "--telemetry=false")
+	stdout = env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
 	if !strings.Contains(stdout, "Ready.") {
 		t.Errorf("Expected enable output to contain 'Ready.', got: %s", stdout)
 	}
@@ -159,7 +159,7 @@ func TestEnableWhenDisabled(t *testing.T) {
 	env.SetEnabled(false)
 
 	// Enable command should work (using --agent for non-interactive mode)
-	stdout := env.RunCLI("enable", "--agent", "claude-code", "--telemetry=false")
+	stdout := env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
 	if !strings.Contains(stdout, "Ready.") {
 		t.Errorf("Expected enable output to contain 'Ready.', got: %s", stdout)
 	}
@@ -209,10 +209,10 @@ func TestEnableDefaultStrategy(t *testing.T) {
 		t.Error("Expected enabled to be true")
 	}
 
-	// Verify status shows manual-commit (the only strategy)
+	// Verify status shows the enabled state
 	stdout = env.RunCLI("status")
-	if !strings.Contains(stdout, "manual-commit") {
-		t.Errorf("Expected status to show 'manual-commit', got: %s", stdout)
+	if !strings.Contains(stdout, "Enabled") {
+		t.Errorf("Expected status to show 'Enabled', got: %s", stdout)
 	}
 }
 
@@ -293,7 +293,7 @@ func TestEnableReenablesProjectScopeAfterProjectDisable(t *testing.T) {
 
 	// First-time setup via the real binary; a plain enable writes the project
 	// .entire/settings.json.
-	env.RunCLI("enable", "--agent", "claude-code", "--telemetry=false")
+	env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
 	assertProjectSettingsEnabled(t, env, true)
 
 	// Disable at the project scope → settings.json enabled=false.

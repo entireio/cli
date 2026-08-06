@@ -149,7 +149,7 @@ func (s *ManualCommitStrategy) CondenseSession(
 | Persistent (git-branch) | `entire/checkpoints/v1` branch, sharded `<id[:2]>/<id[2:]>/` | Metadata + commit reference |
 | Persistent (git-refs) | `refs/entire/checkpoints/<shard>/<id>`, one ref per checkpoint | Metadata + commit reference |
 
-The persistent store is pluggable: `git-branch` (the default) stores every committed checkpoint as a subtree of a single `entire/checkpoints/v1` branch, while `git-refs` stores one ref per checkpoint. Both are git-backed and share the same checkpoint tree layout; they differ only in where that tree is committed. This document describes the git-branch layout; for the ref-based backend — its ref naming, sharding, push/fetch model, read routing, and configuration — see [Ref-Based Checkpoint Backend](ref-checkpoint-backend.md).
+The persistent store is pluggable: `git-branch` stores every committed checkpoint as a subtree of a single `entire/checkpoints/v1` branch, while `git-refs` stores one ref per checkpoint. New setups write an explicit backend choice via `entire enable` (`git-refs` recommended and pre-selected); a repo with no checkpoints config still resolves to `git-branch` (the config-less fallback), so pre-existing repos keep their behavior. Both are git-backed and share the same checkpoint tree layout; they differ only in where that tree is committed. This document describes the git-branch layout; for the ref-based backend — its ref naming, sharding, push/fetch model, read routing, and configuration — see [Ref-Based Checkpoint Backend](ref-checkpoint-backend.md).
 
 ### Session State
 
@@ -190,6 +190,46 @@ Contains full worktree snapshot plus metadata overlay. **Multiple concurrent ses
 
 Tied to a base commit. Condensed to committed on user commit.
 
+**Transcript sanitization (before redaction).** Entire never modifies the agent's
+own transcript, but the copy it stores goes through the agent's optional
+`agent.TranscriptSanitizer` first, at the point Entire takes custody (the Stop path
+in `lifecycle.go`, before `.entire/metadata/<session>/full.jsonl` is written). Codex
+implements it to strip encrypted reasoning payloads and compaction blobs, which are
+bound to the originating session and cannot be replayed out of a checkpoint.
+
+Sanitization always runs before redaction, but the paths differ in whether image
+externalization happens at all:
+
+| Path | Pipeline | Where |
+|---|---|---|
+| Stop (shadow branch) | sanitize → redact | `lifecycle.go` sanitizes before `full.jsonl` is written; the metadata-dir walker (`createRedactedBlobFromFile`) redacts it into the shadow tree |
+| Post-commit condensation | sanitize → externalize → redact | `prepareTranscriptForStorage` in `manual_commit_condensation.go` |
+| Stop finalize (full-session rewrite) | sanitize → externalize → redact | `manual_commit_hooks.go`, before `extractSessionImages` |
+
+**Image externalization runs only on the committed paths** (condensation and
+finalize). The shadow-branch copy is never externalized, so inline images there are
+subject to redaction like any other high-entropy content — do not assume a shadow
+transcript preserves them. Assets and the `assets/manifest.json` index exist only
+under committed checkpoints.
+
+Where all three steps run, each must precede the next. Sanitizing first avoids
+externalizing images out of items that are about to be discarded — that would store
+an asset whose referencing transcript line disappears moments later — and avoids
+redacting megabytes of ciphertext only to throw it away; base64 is the pathological
+input for the entropy layer, so a large Codex rollout otherwise costs tens of seconds
+per Stop *and* per commit. Externalizing before redaction is required because base64
+is high-entropy and redaction would otherwise flag and destroy it.
+
+The sanitize transform is idempotent, so a downstream write path can call it without
+knowing whether an upstream path already did (`checkpoint.sanitizeForAgentType` is
+the store's own belt-and-braces call).
+
+One coupling to respect when changing this: `SessionState.CheckpointTranscriptSize`
+is a growth baseline compared against the shadow transcript blob's size in
+`sessionHasNewContent`, so it must be measured in the same (sanitized) coordinate —
+see `CondenseResult.TranscriptSizeBaseline`. A raw baseline against a sanitized blob
+makes the comparison false forever and the session silently stops condensing.
+
 **Shadow branch lifecycle:**
 - Created on first checkpoint for a base commit
 - Migrated automatically if base commit changes (stash → pull → apply scenario)
@@ -207,7 +247,7 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 ├── metadata.json        # CheckpointSummary (aggregated stats)
 ├── 0/                   # First session (0-based indexing)
 │   ├── metadata.json    # Session-specific Metadata
-│   ├── full.jsonl       # Raw agent transcript (CLI rewind/resume/explain)
+│   ├── full.jsonl       # Agent transcript, sanitized + redacted (CLI rewind/resume/explain)
 │   ├── transcript.jsonl # Full compacted session (slice at compact_transcript_start)
 │   ├── prompt.txt       # Checkpoint-scoped user prompts
 │   └── content_hash.txt # sha256 of full.jsonl (dedup short-circuit)
@@ -305,6 +345,21 @@ When condensing multiple concurrent sessions:
 - `sessions` array in `CheckpointSummary` maps each session to its file paths
 - `files_touched` is merged from all sessions
 
+Checkpoints written by `entire import <agent>` additionally carry a `commit_sha`
+(omitempty) on both the session `Metadata` and the root `CheckpointSummary`,
+set to the default branch's head at import time — origin's tip is preferred
+(the commit the server already knows about), falling back to the local branch
+tip, then HEAD, then empty when nothing resolves. When the transcript itself
+records the commit(s) a turn made (Claude Code `gitOperation` records), the
+turn's checkpoint instead anchors to the last such commit that resolves and is
+reachable from the resolved link anchor (the default-branch head when
+resolvable) — see `turnAnchorResolver` (`agentimport/turn_anchor.go`);
+otherwise (older transcripts, or a recorded commit that's been
+squashed/rebased away) it falls back to the default-branch head as described
+above. It is a best-effort anchor for UI display only, not
+an attribution signal, and pre-existing imported checkpoints are not
+backfilled with it.
+
 ### Checkpoint Policy
 
 Repo-wide checkpoint policy lives at `refs/entire/policies/checkpoint`. The ref
@@ -390,8 +445,11 @@ reconfiguring:
 - A **hex** ID is read from the active (configured) primary first; when the
   primary is git-refs it also falls back to the git-branch store (a hex checkpoint
   may still sit on the pre-migration v1 branch, or have been migrated into refs).
-- `List` unions both backends. **Writes are not kind-routed** — they go to the
-  configured primary (+ mirrors); the minted ID already matches the primary.
+- `List` unions both backends. **Creates (`Session`) are not kind-routed** — they
+  go to the configured primary (+ mirrors); the minted ID already matches the
+  primary. **Backfills** (summary/transcript/attribution) update an existing
+  checkpoint and ARE kind-routed: they follow the read order, falling through to
+  the next store only on `ErrCheckpointNotFound`.
 
 **Generation:**
 - Minted by `checkpoint.GenerateCheckpointID`, which picks the format from the

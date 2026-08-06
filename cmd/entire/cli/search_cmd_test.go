@@ -42,6 +42,23 @@ func TestSearchCmd_AccessibleModeRequiresQuery(t *testing.T) {
 	}
 }
 
+// Each instance's examples must use its own command path: the top-level alias
+// is `entire search`, the canonical form under the checkpoint group is
+// `entire checkpoint search`. A shared prefix would mislead one command's help.
+func TestSearchCmd_ExamplesMatchCommandPath(t *testing.T) {
+	t.Parallel()
+
+	topLevel := newSearchCmd().Example
+	if !strings.Contains(topLevel, "entire search ") || strings.Contains(topLevel, "checkpoint search") {
+		t.Fatalf("top-level search examples must use the `entire search` prefix:\n%s", topLevel)
+	}
+
+	checkpoint := newCheckpointSearchCmd().Example
+	if !strings.Contains(checkpoint, "entire checkpoint search ") {
+		t.Fatalf("checkpoint search examples must use the `entire checkpoint search` prefix:\n%s", checkpoint)
+	}
+}
+
 func TestSearchCmd_HelpMentionsRepoFlagAndInlineFilters(t *testing.T) {
 	t.Parallel()
 
@@ -795,6 +812,40 @@ func TestSearchCmd_MultipleInlineRepoFilters(t *testing.T) {
 	// Will fail at auth, but should NOT fail at filter parsing.
 	if err != nil && strings.Contains(err.Error(), "invalid") {
 		t.Errorf("multiple repo: filters should be accepted, got: %v", err)
+	}
+}
+
+func TestSearchCmd_SemanticMultipleRepoFlags(t *testing.T) {
+	// Semantic search (no --code) must accept multiple repos via a repeatable
+	// --repo flag (ENT-1047) — parity with code search. It fails later at
+	// auth/git, but must not be rejected as an invalid/unsupported filter.
+	root := NewRootCmd()
+	root.SetArgs([]string{"search", "auth", "--repo", "entirehq/entire.io", "--repo", "entireio/cli"})
+
+	err := root.Execute()
+	if err != nil {
+		if strings.Contains(err.Error(), "validating repo filter") {
+			t.Errorf("multiple --repo flags should pass validation, got: %v", err)
+		}
+		if strings.Contains(err.Error(), "only one explicit repo filter") {
+			t.Errorf("multiple repos should no longer be rejected, got: %v", err)
+		}
+	}
+}
+
+func TestSearchCmd_SemanticCommaSeparatedRepoFlag(t *testing.T) {
+	// A single comma-separated --repo value must expand to multiple repos.
+	root := NewRootCmd()
+	root.SetArgs([]string{"search", "auth", "--repo", "entirehq/entire.io,entireio/cli"})
+
+	err := root.Execute()
+	if err != nil {
+		if strings.Contains(err.Error(), "validating repo filter") {
+			t.Errorf("comma-separated --repo should pass validation, got: %v", err)
+		}
+		if strings.Contains(err.Error(), "only one explicit repo filter") {
+			t.Errorf("comma-separated repos should no longer be rejected, got: %v", err)
+		}
 	}
 }
 

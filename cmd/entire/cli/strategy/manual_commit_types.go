@@ -52,8 +52,16 @@ type CondenseResult struct {
 	FilesTouched         []string
 	Prompts              []string // User prompts from the condensed session
 	TotalTranscriptLines int      // Total transcript units after this condensation (JSONL line count or message count by agent format)
-	Transcript           []byte   // Raw transcript bytes for downstream consumers (trail title generation)
 	Skipped              bool     // True if condensation was skipped (no transcript or files to condense)
+
+	// TranscriptSizeBaseline is the byte size to record as
+	// SessionState.CheckpointTranscriptSize. It must be measured on the SANITIZED,
+	// pre-externalization transcript so it lives in the same coordinate as the
+	// shadow-branch blob it is later compared against in sessionHasNewContent. A
+	// raw-transcript size makes `blobSize > baseline` false forever for agents with
+	// a TranscriptSanitizer, so the session silently stops condensing after its
+	// first commit.
+	TranscriptSizeBaseline int64
 }
 
 // ExtractedSessionData contains data extracted from a shadow branch.

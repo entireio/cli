@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -404,8 +405,15 @@ func TestFileBackendPath_DefaultsToConfigDirTokensJSON(t *testing.T) {
 // changing the default to io.Discard would silently delete the feature in
 // production while the whole suite stays green (verified by mutation).
 // Not parallel: reads the package-global writer that other tests swap.
+//
+// Pinned by descriptor rather than pointer equality with os.Stderr: under
+// `go test -json` (Go 1.26) the testing package replaces the os.Stderr
+// variable after package init to attribute output to tests, so the default
+// captured at init no longer compares equal even though it is the process's
+// real stderr. io.Discard or a buffer still fails this (not an *os.File).
 func TestLoosePermsWarnWriter_DefaultsToStderr(t *testing.T) {
-	if loosePermsWarnW != os.Stderr {
-		t.Fatalf("loosePermsWarnW default = %T, want os.Stderr", loosePermsWarnW)
+	f, ok := loosePermsWarnW.(*os.File)
+	if !ok || f.Fd() != uintptr(syscall.Stderr) {
+		t.Fatalf("loosePermsWarnW default = %T, want the process stderr", loosePermsWarnW)
 	}
 }

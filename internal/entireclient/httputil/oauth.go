@@ -1,7 +1,6 @@
 package httputil
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,30 +39,6 @@ func TokenExchangeForm(subjectToken, audience, scope string) url.Values {
 	form.Set("scope", scope)
 	form.Set("client_id", OAuthClientID)
 	return form
-}
-
-// BufferRequestBody reads the request body once so a fallback retry
-// can replay it. http.NoBody (and nil) short-circuits — both signal
-// "no body" but only the latter is a runtime nil, so the explicit
-// identity check keeps the cloned request's Content-Length correct on
-// the wire. Returns (nil, nil) for no-body requests; the caller can
-// safely forward without replay state.
-func BufferRequestBody(req *http.Request) ([]byte, error) {
-	if req.Body == nil || req.Body == http.NoBody {
-		return nil, nil
-	}
-	b, err := io.ReadAll(req.Body)
-	_ = req.Body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("buffer request body: %w", err)
-	}
-	return b, nil
-}
-
-// BodyReader wraps a buffered request body so http.Request.Body /
-// GetBody can replay it across a retry. Pair with BufferRequestBody.
-func BodyReader(body []byte) io.ReadCloser {
-	return io.NopCloser(bytes.NewReader(body))
 }
 
 // cloneValuesWithoutClient returns a shallow copy of v with the

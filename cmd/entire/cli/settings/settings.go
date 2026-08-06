@@ -836,15 +836,6 @@ func LoadClonePreferences(ctx context.Context) (*ClonePreferences, error) {
 	return loadClonePreferencesFromFile(path)
 }
 
-// SaveClonePreferences saves clone-local preferences to the git common dir.
-func SaveClonePreferences(ctx context.Context, prefs *ClonePreferences) error {
-	path, err := ClonePreferencesPath(ctx)
-	if err != nil {
-		return err
-	}
-	return saveClonePreferencesToFile(prefs, path)
-}
-
 // ModifyClonePreferences runs a read-modify-write under the preferences lock.
 func ModifyClonePreferences(ctx context.Context, fn func(*ClonePreferences) error) error {
 	path, err := ClonePreferencesPath(ctx)
@@ -1630,6 +1621,19 @@ func (c *CheckpointRemoteConfig) Owner() string {
 		return ""
 	}
 	return parts[0]
+}
+
+// HasCheckpointRemoteKey reports whether a checkpoint_remote entry exists in
+// strategy options at all — deliberately including malformed entries that
+// GetCheckpointRemote rejects (it returns nil for absent AND malformed, so it
+// cannot distinguish "no intent" from "botched intent"). Presence in any form
+// means the user intends a checkpoint remote.
+func (s *EntireSettings) HasCheckpointRemoteKey() bool {
+	if s.StrategyOptions == nil {
+		return false
+	}
+	_, ok := s.StrategyOptions["checkpoint_remote"]
+	return ok
 }
 
 // GetCheckpointRemote returns the configured checkpoint remote.
