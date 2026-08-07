@@ -86,9 +86,18 @@ the commands are always runnable in every build.
 Experimental commands (gated by the build-time visibility flag above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden
 in stable releases, always runnable): `tokens`, `import`, `review`,
-`investigate`, `blame`, `why`, the top-level `search` shortcut, `experts`,
-`runner`, and `checkpoint policy`. `tokens` is also advertised through `entire
-labs`. The canonical `checkpoint search` is not gated and stays visible.
+`investigate`, `blame`, `why`, `scan`, the top-level `search` shortcut,
+`experts`, `runner`, and `checkpoint policy`. `tokens` is also advertised
+through `entire labs`. The canonical `checkpoint search` is not gated and stays
+visible.
+
+`scan [dir...]` reports Entire enablement across a folder of repositories (set
+up / enabled, git hooks, agents hooked, agents present without hooks), with
+`--json`, and `--fix` re-runs `entire enable` in the ones that need it. Each
+repo is inspected without chdir'ing, via `paths.WithWorktreeRoot` +
+`settings.WithWorktreeRoot` on a per-repo context; `--fix` shells out to
+`entire enable` per repo so the real (cwd-dependent) enable path is reused
+unchanged.
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,

@@ -133,6 +133,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(inGroup(newEnableCmd(), groupSetup))
 	cmd.AddCommand(inGroup(newDisableCmd(), groupSetup))
 	cmd.AddCommand(inGroup(newStatusCmd(), groupSetup))
+	experimental.Register(cmd, newScanCmd())  // 'scan' (experimental); per-repo enablement across a folder of repos
 	experimental.Register(cmd, newBlameCmd()) // 'blame' (experimental)
 	experimental.Register(cmd, newWhyCmd())   // 'why' (experimental)
 	cmd.AddCommand(inGroup(newLoginCmd(), groupAccount))
