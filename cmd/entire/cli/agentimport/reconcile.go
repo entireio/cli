@@ -303,6 +303,13 @@ func (r *reconciler) applyHeuristic(heuristics map[string]string, turnUUID, anch
 	if !ok {
 		return anchor, method, false
 	}
+	// Proposals are computed once per session, before the turn loop, so an
+	// earlier turn in the SAME session may have claimed this commit with a
+	// recorded link since. Re-check membership rather than reporting the same
+	// commit linked twice.
+	if _, stillUnlinked := r.unlinked[plumbing.NewHash(sha)]; !stillUnlinked {
+		return anchor, method, false
+	}
 	return sha, cp.CommitSHAMethodHeuristic, !r.opts.acceptingHeuristics()
 }
 

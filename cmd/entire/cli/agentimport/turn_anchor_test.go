@@ -132,6 +132,15 @@ func TestResolveTurnAnchor_ExtraAcceptGatesUnreachableCandidate(t *testing.T) {
 	if got != s1 || method != cp.CommitSHAMethodRecorded {
 		t.Fatalf("scanned side commit: resolve = (%q, %q), want (%q, %q)", got, method, s1, cp.CommitSHAMethodRecorded)
 	}
+
+	// An empty fallback (nothing to anchor a display link to) must not disable
+	// the scan set: it is an independent gate, so a scanned candidate still
+	// resolves to a recorded link.
+	noFallback := newTurnAnchorResolver(repo, "", time.Now(), DefaultLookbackDays)
+	noFallback.extraAccept = map[plumbing.Hash]*CommitRecord{plumbing.NewHash(s1): {SHA: s1}}
+	if got, method := noFallback.resolve(context.Background(), []string{s1[:7]}); got != s1 || method != cp.CommitSHAMethodRecorded {
+		t.Fatalf("empty fallback with a scan set: resolve = (%q, %q), want (%q, %q)", got, method, s1, cp.CommitSHAMethodRecorded)
+	}
 }
 
 // TestResolveTurnAnchor_DateCutoffBoundsWalk proves the ancestor walk stops at

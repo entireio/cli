@@ -104,7 +104,11 @@ func newTurnAnchorResolver(repo *git.Repository, fallback string, now time.Time,
 // anchor — the unanchorable-repo case, matching resolveImportLinkCommitSHA's
 // contract — reports an empty method, because there is no link to describe.
 func (r *turnAnchorResolver) resolve(ctx context.Context, candidates []string) (anchor, method string) {
-	if r.fallback == "" || len(candidates) == 0 {
+	// With no candidates, or nothing to check them against, there is nothing to
+	// resolve. An empty fallback normally means an unanchorable repo, but a
+	// non-empty scan set can still gate a candidate, so it is not on its own a
+	// reason to give up.
+	if len(candidates) == 0 || (r.fallback == "" && len(r.extraAccept) == 0) {
 		return r.fallback, r.fallbackMethod()
 	}
 	if r.ancestors == nil {
@@ -165,6 +169,9 @@ func (r *turnAnchorResolver) fallbackMethod() string {
 // its recorded commit.
 func (r *turnAnchorResolver) buildAncestors(ctx context.Context) map[plumbing.Hash]struct{} {
 	ancestors := make(map[plumbing.Hash]struct{})
+	if r.fallback == "" {
+		return ancestors // nothing to walk from; the scan set is the only gate
+	}
 	err := walkRecentCommits(r.repo, plumbing.NewHash(r.fallback), r.cutoff, r.maxWalk, func(c *object.Commit) {
 		ancestors[c.Hash] = struct{}{}
 	})
