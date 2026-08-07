@@ -25,12 +25,12 @@ func (factoryImporter) AgentType() types.AgentType { return agent.AgentTypeFacto
 
 // Discover returns Factory transcript files for the repo modified within the
 // lookback window.
-func (factoryImporter) Discover(repoRoot, overridePath string, now time.Time, sessionFilter []string) ([]SessionFile, error) {
+func (factoryImporter) Discover(repoRoot, overridePath string, cutoff time.Time, sessionFilter []string) ([]SessionFile, error) {
 	dir, err := resolveDir(repoRoot, overridePath, "factory", (&factoryaidroid.FactoryAIDroidAgent{}).GetSessionDir)
 	if err != nil {
 		return nil, err
 	}
-	return discoverSessionFiles(dir, now, sessionFilter, jsonlSessionResolver(".jsonl", identitySessionID))
+	return discoverSessionFiles(dir, cutoff, sessionFilter, jsonlSessionResolver(".jsonl", identitySessionID))
 }
 
 // SplitTurns produces one Turn per user-prompt envelope, bounded by the next.

@@ -277,6 +277,113 @@ func (s *treeWriter) applyAttributionBackfill(ctx context.Context, existing *obj
 	return s.buildCheckpointSubtree(ctx, entries, basePath)
 }
 
+// importedSessionKind is the session Kind marking imported (read-only,
+// commit-less) history. Compared as a literal because the session package
+// imports checkpoint, so we can't reference its constant.
+const importedSessionKind = "imported"
+
+// applyCommitSHABackfill rewrites the commit link (commit_sha +
+// commit_sha_method) on the checkpoint's root summary and on the selected
+// session metadata, returning the new subtree hash. changed is false when the
+// backfill is a no-op — either every target already holds exactly this link, or
+// applying it would downgrade a "recorded" one — and callers must then skip the
+// commit entirely so a redundant reconcile run leaves the ref untouched.
+// Returns ErrCheckpointNotFound when the checkpoint has no root summary.
+//
+// req.SessionID selects one session by ID; empty selects every imported
+// session. A non-imported session is never touched by the empty selector:
+// non-imported checkpoints link through the Entire-Checkpoint trailer, and
+// stamping an anchor on them would invent a second, weaker link.
+func (s *treeWriter) applyCommitSHABackfill(ctx context.Context, existing *object.Tree, basePath string, req CheckpointCommitSHA) (hash plumbing.Hash, changed bool, err error) {
+	entries, err := s.flattenExisting(existing, basePath)
+	if err != nil {
+		return plumbing.ZeroHash, false, err
+	}
+
+	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
+	entry, exists := entries[rootMetadataPath]
+	if !exists {
+		return plumbing.ZeroHash, false, ErrCheckpointNotFound
+	}
+	summary, err := s.readSummaryFromBlob(entry.Hash)
+	if err != nil {
+		return plumbing.ZeroHash, false, fmt.Errorf("failed to read checkpoint summary: %w", err)
+	}
+
+	if commitSHALinkNeedsUpdate(summary.CommitSHA, summary.CommitSHAMethod, req) {
+		summary.CommitSHA = req.CommitSHA
+		summary.CommitSHAMethod = req.Method
+		summaryJSON, marshalErr := jsonutil.MarshalIndentWithNewline(summary, "", "  ")
+		if marshalErr != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to marshal checkpoint summary: %w", marshalErr)
+		}
+		summaryHash, blobErr := CreateBlobFromContent(s.repo, summaryJSON)
+		if blobErr != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to create checkpoint summary blob: %w", blobErr)
+		}
+		entries[rootMetadataPath] = object.TreeEntry{Name: rootMetadataPath, Mode: filemode.Regular, Hash: summaryHash}
+		changed = true
+	}
+
+	for i := range summary.Sessions {
+		sessionMetadataPath := checkpointSubtreePath(basePath, strconv.Itoa(i), paths.MetadataFileName)
+		sessionEntry, ok := entries[sessionMetadataPath]
+		if !ok {
+			continue
+		}
+		meta, readErr := s.readMetadataFromBlob(sessionEntry.Hash)
+		if readErr != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to read session %d metadata: %w", i, readErr)
+		}
+		if !commitSHABackfillSelects(meta, req.SessionID) {
+			continue
+		}
+		if !commitSHALinkNeedsUpdate(meta.CommitSHA, meta.CommitSHAMethod, req) {
+			continue
+		}
+		meta.CommitSHA = req.CommitSHA
+		meta.CommitSHAMethod = req.Method
+		metadataJSON, marshalErr := jsonutil.MarshalIndentWithNewline(meta, "", "  ")
+		if marshalErr != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to marshal session %d metadata: %w", i, marshalErr)
+		}
+		metadataHash, blobErr := CreateBlobFromContent(s.repo, metadataJSON)
+		if blobErr != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to create session %d metadata blob: %w", i, blobErr)
+		}
+		entries[sessionMetadataPath] = object.TreeEntry{Name: sessionMetadataPath, Mode: filemode.Regular, Hash: metadataHash}
+		changed = true
+	}
+
+	if !changed {
+		return plumbing.ZeroHash, false, nil
+	}
+	subtree, err := s.buildCheckpointSubtree(ctx, entries, basePath)
+	if err != nil {
+		return plumbing.ZeroHash, false, err
+	}
+	return subtree, true, nil
+}
+
+// commitSHABackfillSelects reports whether a session's metadata is a target of
+// req: the named session, or (with no name) any imported session.
+func commitSHABackfillSelects(meta *Metadata, sessionID string) bool {
+	if sessionID != "" {
+		return meta.SessionID == sessionID
+	}
+	return meta.Kind == importedSessionKind
+}
+
+// commitSHALinkNeedsUpdate reports whether a stored link should be replaced by
+// req's: only when it actually differs and the replacement is not a downgrade
+// of a "recorded" link.
+func commitSHALinkNeedsUpdate(storedSHA, storedMethod string, req CheckpointCommitSHA) bool {
+	if storedSHA == req.CommitSHA && storedMethod == req.Method {
+		return false
+	}
+	return !IsCommitSHAMethodDowngrade(storedMethod, req.Method)
+}
+
 // applySummaryBackfill rewrites the latest session's summary on the checkpoint's
 // current subtree, returning the new subtree hash and that session's ID (for the
 // commit message). Returns ErrCheckpointNotFound when the checkpoint has no root
@@ -740,6 +847,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		CreatedAt:                   checkpointCreatedAt(opts),
 		Branch:                      opts.Branch,
 		CommitSHA:                   opts.CommitSHA,
+		CommitSHAMethod:             opts.CommitSHAMethod,
 		CheckpointsCount:            opts.CheckpointsCount,
 		SaveStepCount:               opts.SaveStepCount,
 		FilesTouched:                opts.FilesTouched,
@@ -798,10 +906,10 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 	hasReview := opts.HasReview
 	hasInvestigation := opts.HasInvestigation
 	// imported is the umbrella flag: true when any session in this checkpoint
-	// was imported (Kind == "imported"). Compared as a literal because the
-	// session package imports checkpoint, so we can't reference its constant.
-	imported := opts.Kind == "imported"
+	// was imported.
+	imported := opts.Kind == importedSessionKind
 	commitSHA := opts.CommitSHA
+	commitSHAMethod := opts.CommitSHAMethod
 	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
 	if entry, exists := entries[rootMetadataPath]; exists {
 		existingSummary, readErr := s.readSummaryFromBlob(entry.Hash)
@@ -820,9 +928,12 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 			}
 			// A later write to the same checkpoint (e.g. a review session
 			// attached to it) carries no CommitSHA; the imported anchor
-			// must survive that rewrite rather than be cleared.
+			// must survive that rewrite rather than be cleared. The method
+			// travels with the SHA it describes — preserving one without the
+			// other would mislabel the link's provenance.
 			if commitSHA == "" {
 				commitSHA = existingSummary.CommitSHA
+				commitSHAMethod = existingSummary.CommitSHAMethod
 			}
 		}
 	}
@@ -833,6 +944,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 		Strategy:            opts.Strategy,
 		Branch:              opts.Branch,
 		CommitSHA:           commitSHA,
+		CommitSHAMethod:     commitSHAMethod,
 		CheckpointsCount:    checkpointsCount,
 		FilesTouched:        filesTouched,
 		Sessions:            sessions,
@@ -898,6 +1010,65 @@ func (s *GitStore) backfillAttribution(ctx context.Context, checkpointID id.Chec
 	}
 
 	return s.setPrimaryRef(newCommitHash)
+}
+
+// backfillCommitSHA updates an existing checkpoint's commit link (root summary
+// plus the selected session metadata). A no-op backfill — the link is already
+// stored, or applying it would downgrade a "recorded" link — writes nothing at
+// all: no blob, no commit, no ref move, so a redundant reconcile run leaves the
+// v1 branch byte-identical.
+func (s *GitStore) backfillCommitSHA(ctx context.Context, req CheckpointCommitSHA) error {
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // Propagating context cancellation
+	}
+	if req.CheckpointID.IsEmpty() {
+		return errors.New("invalid commit-sha backfill: checkpoint ID is required")
+	}
+
+	// Backfills require the branch to exist; a miss must not create it.
+	if err := s.requireSessionsBranch(); err != nil {
+		return err
+	}
+
+	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
+	if err != nil {
+		return err
+	}
+
+	existing, err := s.subtreeObjAt(rootTreeHash, req.CheckpointID.Path())
+	if err != nil {
+		return err
+	}
+	checkpointSubtree, changed, err := s.applyCommitSHABackfill(ctx, existing, req.CheckpointID.Path()+"/", req)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		logCommitSHABackfillSkipped(ctx, req)
+		return nil
+	}
+
+	newTreeHash, err := s.spliceCheckpointSubtree(rootTreeHash, req.CheckpointID, checkpointSubtree)
+	if err != nil {
+		return err
+	}
+
+	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
+	commitMsg := fmt.Sprintf("Update commit link for checkpoint %s", req.CheckpointID)
+	newCommitHash, err := CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
+	if err != nil {
+		return err
+	}
+
+	return s.setPrimaryRef(newCommitHash)
+}
+
+// logCommitSHABackfillSkipped records a no-op commit-link backfill. Operational
+// metadata only (IDs and the method labels) — never the commit subject.
+func logCommitSHABackfillSkipped(ctx context.Context, req CheckpointCommitSHA) {
+	logging.Debug(ctx, "checkpoint: commit-link backfill is a no-op, nothing written",
+		slog.String("checkpoint_id", req.CheckpointID.String()),
+		slog.String("method", req.Method))
 }
 
 // findSessionIndex returns the index of an existing session with the given ID,

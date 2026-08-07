@@ -90,14 +90,16 @@ func maybeOfferSessionImport(ctx context.Context, w io.Writer, agents []agent.Ag
 // discoverImportableAgents keeps the selected agents that have a registered
 // importer and at least one discoverable session for the repo.
 func discoverImportableAgents(ctx context.Context, agents []agent.Agent, repoRoot string) []eligibleImport {
-	now := time.Now()
+	// Same window the import itself uses, so the count offered here matches
+	// what an accepted import actually reaches.
+	cutoff := time.Now().AddDate(0, 0, -agentimport.DefaultLookbackDays)
 	var out []eligibleImport
 	for _, ag := range agents {
 		imp := importerForAgent(ag)
 		if imp == nil {
 			continue
 		}
-		sessions, err := imp.Discover(repoRoot, "", now, nil)
+		sessions, err := imp.Discover(repoRoot, "", cutoff, nil)
 		if err != nil {
 			logging.Warn(ctx, "session import discovery failed", "agent", string(ag.Type()), "error", err)
 			continue
@@ -140,7 +142,7 @@ func promptImportSelection(ctx context.Context, w io.Writer, eligible []eligible
 	options := make([]huh.Option[string], 0, len(eligible))
 	for _, e := range eligible {
 		byName[e.imp.Name()] = e
-		label := fmt.Sprintf("%s  (%s, last %d days)", e.displayName, pluralSessions(e.sessionCount), agentimport.LookbackDays)
+		label := fmt.Sprintf("%s  (%s, last %d days)", e.displayName, pluralSessions(e.sessionCount), agentimport.DefaultLookbackDays)
 		options = append(options, huh.NewOption(label, e.imp.Name()))
 	}
 
@@ -178,7 +180,7 @@ func promptImportConfirmSingle(ctx context.Context, w io.Writer, e eligibleImpor
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title(fmt.Sprintf("Import existing %s sessions into Entire? (optional)", e.displayName)).
-				Description(fmt.Sprintf("%s from the last %d days. Enter to confirm.", pluralSessions(e.sessionCount), agentimport.LookbackDays)).
+				Description(fmt.Sprintf("%s from the last %d days. Enter to confirm.", pluralSessions(e.sessionCount), agentimport.DefaultLookbackDays)).
 				Affirmative("Import").
 				Negative("Skip").
 				Value(&confirmed),

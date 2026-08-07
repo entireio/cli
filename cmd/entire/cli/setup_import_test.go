@@ -340,7 +340,7 @@ func TestRunSelectedImports_NonTTYProgressLines(t *testing.T) {
 	if claudeImp == nil {
 		t.Fatal("claude-code importer not registered")
 	}
-	sessions, err := claudeImp.Discover(dir, sessionsDir, time.Now(), nil)
+	sessions, err := claudeImp.Discover(dir, sessionsDir, time.Now().AddDate(0, 0, -agentimport.DefaultLookbackDays), nil)
 	if err != nil {
 		t.Fatalf("discover fixture sessions: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestRunSelectedImports_NonTTYProgressLines_Reimport(t *testing.T) {
 	if claudeImp == nil {
 		t.Fatal("claude-code importer not registered")
 	}
-	sessions, err := claudeImp.Discover(dir, sessionsDir, time.Now(), nil)
+	sessions, err := claudeImp.Discover(dir, sessionsDir, time.Now().AddDate(0, 0, -agentimport.DefaultLookbackDays), nil)
 	if err != nil {
 		t.Fatalf("discover fixture sessions: %v", err)
 	}

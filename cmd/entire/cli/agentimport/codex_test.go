@@ -43,7 +43,7 @@ func TestCodexDiscover_RepoFilterLookbackRecursive(t *testing.T) {
 	// In repo but outside lookback → excluded.
 	writeRollout("2026/05/01/rollout-d-old.jsonl", "old", repoRoot, 60*24*time.Hour)
 
-	got, err := codexImporter{}.Discover(repoRoot, dir, now, nil)
+	got, err := codexImporter{}.Discover(repoRoot, dir, discoverCutoff(now), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestCodexDiscover_RepoFilterLookbackRecursive(t *testing.T) {
 		t.Fatalf("repo/lookback filter wrong, got %v", gotIDs)
 	}
 
-	got, err = codexImporter{}.Discover(repoRoot, dir, now, []string{"mine"})
+	got, err = codexImporter{}.Discover(repoRoot, dir, discoverCutoff(now), []string{"mine"})
 	if err != nil {
 		t.Fatal(err)
 	}

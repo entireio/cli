@@ -119,6 +119,8 @@ func (s *Store) Write(_ context.Context, req cp.WriteRequest) error {
 		return s.writeSessionSummary(r)
 	case cp.CheckpointAttribution:
 		return s.writeAttribution(r)
+	case cp.CheckpointCommitSHA:
+		return s.writeCommitSHA(r)
 	default:
 		return fmt.Errorf("fsstore: unsupported write request %T", req)
 	}
@@ -198,6 +200,61 @@ func (s *Store) writeAttribution(r cp.CheckpointAttribution) error {
 	}
 	sc.Summary.CombinedAttribution = r.Attribution
 	return s.save(sc)
+}
+
+// writeCommitSHA backfills the commit link on the root summary and the
+// selected session(s), mirroring the git stores: an empty SessionID selects
+// every imported session, and a write that would downgrade a "recorded" link
+// is skipped rather than applied. A fully skipped backfill saves nothing, so
+// the stored document is byte-identical afterwards.
+func (s *Store) writeCommitSHA(r cp.CheckpointCommitSHA) error {
+	sc, err := s.load(r.CheckpointID)
+	if err != nil {
+		return err
+	}
+	if sc == nil {
+		return fmt.Errorf("fsstore: cannot set commit link for unknown checkpoint %s: %w", r.CheckpointID, cp.ErrCheckpointNotFound)
+	}
+
+	changed := false
+	if commitLinkNeedsUpdate(sc.Summary.CommitSHA, sc.Summary.CommitSHAMethod, r) {
+		sc.Summary.CommitSHA = r.CommitSHA
+		sc.Summary.CommitSHAMethod = r.Method
+		changed = true
+	}
+	for i := range sc.Sessions {
+		meta := &sc.Sessions[i].Metadata
+		if r.SessionID != "" {
+			if meta.SessionID != r.SessionID {
+				continue
+			}
+		} else if meta.Kind != importedSessionKind {
+			continue
+		}
+		if !commitLinkNeedsUpdate(meta.CommitSHA, meta.CommitSHAMethod, r) {
+			continue
+		}
+		meta.CommitSHA = r.CommitSHA
+		meta.CommitSHAMethod = r.Method
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return s.save(sc)
+}
+
+// importedSessionKind is the session Kind marking imported history, matching
+// the git stores' literal (the session package can't be imported here).
+const importedSessionKind = "imported"
+
+// commitLinkNeedsUpdate reports whether a stored link should be replaced by
+// r's: only when it differs and the replacement is not a downgrade.
+func commitLinkNeedsUpdate(storedSHA, storedMethod string, r cp.CheckpointCommitSHA) bool {
+	if storedSHA == r.CommitSHA && storedMethod == r.Method {
+		return false
+	}
+	return !cp.IsCommitSHAMethodDowngrade(storedMethod, r.Method)
 }
 
 // Read returns the checkpoint summary, or (nil, nil) when absent so the
@@ -316,6 +373,8 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		Strategy:                    opts.Strategy,
 		CreatedAt:                   createdAt,
 		Branch:                      opts.Branch,
+		CommitSHA:                   opts.CommitSHA,
+		CommitSHAMethod:             opts.CommitSHAMethod,
 		CheckpointsCount:            opts.CheckpointsCount,
 		SaveStepCount:               opts.SaveStepCount,
 		FilesTouched:                opts.FilesTouched,

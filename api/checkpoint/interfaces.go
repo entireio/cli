@@ -39,9 +39,9 @@ type PersistentStore interface {
 // mirror/fan-out store forwards the same value to each backend's Write.
 //
 // Three requests are session-level (Session, SessionTranscript, SessionSummary)
-// and one is checkpoint-level (CheckpointAttribution). Adding a write operation
-// is a new request type plus one dispatch case — the Store interface stays
-// unchanged and existing backends keep compiling.
+// and two are checkpoint-level (CheckpointAttribution, CheckpointCommitSHA).
+// Adding a write operation is a new request type plus one dispatch case — the
+// Store interface stays unchanged and existing backends keep compiling.
 type WriteRequest interface {
 	isWriteRequest()
 }
@@ -70,10 +70,34 @@ type CheckpointAttribution struct {
 	Attribution  *Attribution
 }
 
+// CheckpointCommitSHA backfills the commit anchor/link of an existing
+// checkpoint: the root summary plus the named session's metadata.json.
+// (checkpoint-level)
+//
+// It exists so `entire import --reconcile` can attach a commit link to history
+// it already imported — pushed commits are never rewritten, so the link lives
+// on the checkpoint, not in a commit trailer. Stores refuse to apply it when
+// it would downgrade a "recorded" link (see IsCommitSHAMethodDowngrade): the
+// write is skipped, not failed, so a weaker re-run is a no-op.
+//
+//nolint:revive // CheckpointCommitSHA stutter is accepted — the name makes the checkpoint (vs session) tier explicit.
+type CheckpointCommitSHA struct {
+	CheckpointID id.CheckpointID
+	// SessionID selects the session slot whose metadata.json is updated.
+	// Empty means every imported session in the checkpoint.
+	SessionID string
+	CommitSHA string
+	// Method is the provenance of CommitSHA: CommitSHAMethodRecorded or
+	// CommitSHAMethodHeuristic. Backfilling a fallback anchor is pointless
+	// (the write path already stamps it), so it is not expected here.
+	Method string
+}
+
 func (Session) isWriteRequest()               {}
 func (SessionTranscript) isWriteRequest()     {}
 func (SessionSummary) isWriteRequest()        {}
 func (CheckpointAttribution) isWriteRequest() {}
+func (CheckpointCommitSHA) isWriteRequest()   {}
 
 // Writer is the persistent-store write surface: a single Write that accepts any
 // WriteRequest. It is the natural type for mirror fan-out.

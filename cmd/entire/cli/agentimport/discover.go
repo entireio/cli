@@ -30,13 +30,13 @@ type sessionResolver func(dir string, e os.DirEntry) (sessionID, path string, ok
 
 // discoverSessionFiles lists transcripts in dir using the discovery rules every
 // flat-directory importer shares: skip entries the resolver rejects, apply the
-// session-ID filter, drop transcripts older than the lookback window (by the
-// transcript file's modtime), and sort by path. A missing dir yields no
-// sessions (not an error).
+// session-ID filter, drop transcripts last modified before cutoff (the start of
+// the run's lookback window, computed once by Run), and sort by path. A missing
+// dir yields no sessions (not an error).
 //
 // codex does not use this — its sessions live in a recursively-walked,
 // session_meta-filtered tree rather than a flat directory.
-func discoverSessionFiles(dir string, now time.Time, sessionFilter []string, resolve sessionResolver) ([]SessionFile, error) {
+func discoverSessionFiles(dir string, cutoff time.Time, sessionFilter []string, resolve sessionResolver) ([]SessionFile, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -44,7 +44,6 @@ func discoverSessionFiles(dir string, now time.Time, sessionFilter []string, res
 		}
 		return nil, fmt.Errorf("read session dir: %w", err)
 	}
-	cutoff := now.AddDate(0, 0, -LookbackDays)
 	var out []SessionFile
 	for _, e := range entries {
 		sessionID, path, ok := resolve(dir, e)

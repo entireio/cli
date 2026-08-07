@@ -44,12 +44,23 @@ type (
 	Writer           = apicheckpoint.Writer
 	WriteRequest     = apicheckpoint.WriteRequest
 	// Write request union: session-level (Session, SessionTranscript,
-	// SessionSummary) and checkpoint-level (CheckpointAttribution).
+	// SessionSummary) and checkpoint-level (CheckpointAttribution,
+	// CheckpointCommitSHA).
 	Session           = apicheckpoint.Session
 	SessionTranscript = apicheckpoint.SessionTranscript
 	SessionSummary    = apicheckpoint.SessionSummary
 	//nolint:revive // CheckpointAttribution stutter is accepted — makes the checkpoint (vs session) tier explicit.
 	CheckpointAttribution = apicheckpoint.CheckpointAttribution
+	//nolint:revive // CheckpointCommitSHA stutter is accepted — makes the checkpoint (vs session) tier explicit.
+	CheckpointCommitSHA = apicheckpoint.CheckpointCommitSHA
+)
+
+// Commit-link provenance values, re-exported so store and import code can
+// share one vocabulary. See apicheckpoint.WriteOptions.CommitSHAMethod.
+const (
+	CommitSHAMethodRecorded  = apicheckpoint.CommitSHAMethodRecorded
+	CommitSHAMethodHeuristic = apicheckpoint.CommitSHAMethodHeuristic
+	CommitSHAMethodFallback  = apicheckpoint.CommitSHAMethodFallback
 )
 
 // Sentinel errors (re-exported so errors.Is keeps working across packages).
@@ -60,6 +71,12 @@ var (
 
 // Contract helper functions, re-exported as thin wrappers rather than vars so
 // the facade symbols can't be reassigned by consumers.
+
+// IsCommitSHAMethodDowngrade reports whether replacing a commit link stored
+// with method existing by one with method incoming would weaken it.
+func IsCommitSHAMethodDowngrade(existing, incoming string) bool {
+	return apicheckpoint.IsCommitSHAMethodDowngrade(existing, incoming)
+}
 
 func ReadCheckpoint(ctx context.Context, reader CheckpointReader, checkpointID id.CheckpointID) (*CheckpointSummary, error) {
 	return apicheckpoint.ReadCheckpoint(ctx, reader, checkpointID) //nolint:wrapcheck // thin re-export of the api/checkpoint helper

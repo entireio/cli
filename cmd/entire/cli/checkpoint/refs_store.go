@@ -122,6 +122,8 @@ func (s *gitRefsStore) Write(ctx context.Context, req WriteRequest) error {
 		return s.backfillSummary(ctx, r.CheckpointID, r.Summary)
 	case CheckpointAttribution:
 		return s.backfillAttribution(ctx, r.CheckpointID, r.Attribution)
+	case CheckpointCommitSHA:
+		return s.backfillCommitSHA(ctx, r)
 	default:
 		return fmt.Errorf("checkpoint: unsupported write request %T", req)
 	}
@@ -333,6 +335,41 @@ func (s *gitRefsStore) backfillAttribution(ctx context.Context, checkpointID id.
 		return err
 	}
 	return s.setRef(ctx, checkpointID, commitHash)
+}
+
+// backfillCommitSHA updates an existing checkpoint's commit link on its ref.
+// A no-op backfill (link already stored, or a refused downgrade of a
+// "recorded" link) writes nothing and leaves the ref — and therefore the push
+// queue — untouched.
+func (s *gitRefsStore) backfillCommitSHA(ctx context.Context, req CheckpointCommitSHA) error {
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // Propagating context cancellation
+	}
+	if req.CheckpointID.IsEmpty() {
+		return errors.New("invalid commit-sha backfill: checkpoint ID is required")
+	}
+
+	parentHash, existing, err := s.refBaseForBackfill(ctx, req.CheckpointID)
+	if err != nil {
+		return err
+	}
+
+	checkpointSubtree, changed, err := s.applyCommitSHABackfill(ctx, existing, "", req)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		logCommitSHABackfillSkipped(ctx, req)
+		return nil
+	}
+
+	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
+	commitMsg := fmt.Sprintf("Update commit link for checkpoint %s", req.CheckpointID)
+	commitHash, err := CreateCommit(ctx, s.repo, checkpointSubtree, parentHash, commitMsg, authorName, authorEmail)
+	if err != nil {
+		return err
+	}
+	return s.setRef(ctx, req.CheckpointID, commitHash)
 }
 
 // checkpointTree resolves a FetchingTree rooted at a checkpoint's ref commit

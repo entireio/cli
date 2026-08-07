@@ -25,7 +25,7 @@ func TestFactoryDiscover_LookbackAndFilter(t *testing.T) {
 	writeAged("recent.jsonl", 5*24*time.Hour)
 	writeAged("old.jsonl", 60*24*time.Hour)
 
-	got, err := factoryImporter{}.Discover("", dir, now, nil)
+	got, err := factoryImporter{}.Discover("", dir, discoverCutoff(now), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestFactoryDiscover_LookbackAndFilter(t *testing.T) {
 		t.Fatalf("lookback filter wrong: %v", got)
 	}
 
-	got, err = factoryImporter{}.Discover("", dir, now, []string{"old"})
+	got, err = factoryImporter{}.Discover("", dir, discoverCutoff(now), []string{"old"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -23,12 +23,12 @@ func (geminiImporter) AgentType() types.AgentType { return agent.AgentTypeGemini
 
 // Discover returns Gemini transcript files for the repo modified within the
 // lookback window. The session ID is the file stem (session-<date>-<shortid>).
-func (geminiImporter) Discover(repoRoot, overridePath string, now time.Time, sessionFilter []string) ([]SessionFile, error) {
+func (geminiImporter) Discover(repoRoot, overridePath string, cutoff time.Time, sessionFilter []string) ([]SessionFile, error) {
 	dir, err := resolveDir(repoRoot, overridePath, "gemini", (&geminicli.GeminiCLIAgent{}).GetSessionDir)
 	if err != nil {
 		return nil, err
 	}
-	return discoverSessionFiles(dir, now, sessionFilter, jsonlSessionResolver(".json", identitySessionID))
+	return discoverSessionFiles(dir, cutoff, sessionFilter, jsonlSessionResolver(".json", identitySessionID))
 }
 
 // SplitTurns returns a single Turn covering the whole session. Offsets are

@@ -38,7 +38,7 @@ func TestCopilotDiscover_RepoFilterAndLookback(t *testing.T) {
 	writeCopilotSession(t, base, "other", "/work/elsewhere", 5*24*time.Hour, now)
 	writeCopilotSession(t, base, "old", repoRoot, 60*24*time.Hour, now)
 
-	got, err := copilotImporter{}.Discover(repoRoot, base, now, nil)
+	got, err := copilotImporter{}.Discover(repoRoot, base, discoverCutoff(now), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestCopilotDiscover_RepoFilterAndLookback(t *testing.T) {
 		t.Fatalf("repo/lookback filter wrong: %v", got)
 	}
 
-	got, err = copilotImporter{}.Discover(repoRoot, base, now, []string{"old"})
+	got, err = copilotImporter{}.Discover(repoRoot, base, discoverCutoff(now), []string{"old"})
 	if err != nil {
 		t.Fatal(err)
 	}

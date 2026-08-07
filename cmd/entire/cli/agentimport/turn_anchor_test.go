@@ -10,6 +10,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 
+	cp "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -79,31 +80,57 @@ func writeAndCommit(t *testing.T, wt *git.Worktree, repoDir, content, msg string
 func TestResolveTurnAnchor_PicksLastReachableCandidate(t *testing.T) {
 	t.Parallel()
 	repo, c1, c2, _ := buildAnchorTestRepo(t)
-	r := newTurnAnchorResolver(repo, c2, time.Now())
+	r := newTurnAnchorResolver(repo, c2, time.Now(), DefaultLookbackDays)
 
-	got, fromCandidate := r.resolve(context.Background(), []string{c1[:7], c2[:7]})
+	got, method := r.resolve(context.Background(), []string{c1[:7], c2[:7]})
 	if got != c2 {
 		t.Fatalf("resolve = %q, want last candidate (full) %q", got, c2)
 	}
 	// The winning candidate happens to equal the fallback tip — resolve must
-	// still report it as a candidate match, not a fallback (the caller's
-	// "fell back" debug log keys off this).
-	if !fromCandidate {
-		t.Fatal("resolve reported fallback for a turn whose candidate matched")
+	// still report it as a recorded match, not a fallback (the caller's "fell
+	// back" debug log and the stored commit_sha_method both key off this).
+	if method != cp.CommitSHAMethodRecorded {
+		t.Fatalf("resolve method = %q, want %q for a turn whose candidate matched", method, cp.CommitSHAMethodRecorded)
 	}
 }
 
-// TestResolveTurnAnchor_ReportsFallback proves the fromCandidate return is
-// false when the anchor genuinely came from the fallback (unreachable
-// candidate), so the caller's debug log fires only for real fallbacks.
+// TestResolveTurnAnchor_ReportsFallback proves the returned method is
+// "fallback" when the anchor genuinely came from the fallback (unreachable
+// candidate), so the caller's debug log fires only for real fallbacks and the
+// stored link is labeled as the display anchor it is.
 func TestResolveTurnAnchor_ReportsFallback(t *testing.T) {
 	t.Parallel()
 	repo, _, c2, s1 := buildAnchorTestRepo(t)
-	r := newTurnAnchorResolver(repo, c2, time.Now())
+	r := newTurnAnchorResolver(repo, c2, time.Now(), DefaultLookbackDays)
 
-	got, fromCandidate := r.resolve(context.Background(), []string{s1[:7]})
-	if got != c2 || fromCandidate {
-		t.Fatalf("resolve = (%q, %v), want fallback %q with fromCandidate=false", got, fromCandidate, c2)
+	got, method := r.resolve(context.Background(), []string{s1[:7]})
+	if got != c2 || method != cp.CommitSHAMethodFallback {
+		t.Fatalf("resolve = (%q, %q), want fallback %q labeled %q", got, method, c2, cp.CommitSHAMethodFallback)
+	}
+}
+
+// TestResolveTurnAnchor_ExtraAcceptGatesUnreachableCandidate proves the
+// reconcile widening: a commit that is NOT reachable from the fallback tip
+// (an unmerged feature-branch commit) anchors as "recorded" once it is in the
+// scanned set, and still falls back when it isn't. Set membership is the whole
+// gate — that is what keeps a rebased-away SHA, which resolves as an object
+// but was never scanned, from being linked.
+func TestResolveTurnAnchor_ExtraAcceptGatesUnreachableCandidate(t *testing.T) {
+	t.Parallel()
+	repo, _, c2, s1 := buildAnchorTestRepo(t)
+
+	withoutScan := newTurnAnchorResolver(repo, c2, time.Now(), DefaultLookbackDays)
+	if got, method := withoutScan.resolve(context.Background(), []string{s1[:7]}); got != c2 || method != cp.CommitSHAMethodFallback {
+		t.Fatalf("unscanned side commit: resolve = (%q, %q), want fallback %q", got, method, c2)
+	}
+
+	withScan := newTurnAnchorResolver(repo, c2, time.Now(), DefaultLookbackDays)
+	withScan.extraAccept = map[plumbing.Hash]*CommitRecord{
+		plumbing.NewHash(s1): {SHA: s1},
+	}
+	got, method := withScan.resolve(context.Background(), []string{s1[:7]})
+	if got != s1 || method != cp.CommitSHAMethodRecorded {
+		t.Fatalf("scanned side commit: resolve = (%q, %q), want (%q, %q)", got, method, s1, cp.CommitSHAMethodRecorded)
 	}
 }
 
@@ -138,10 +165,10 @@ func TestResolveTurnAnchor_DateCutoffBoundsWalk(t *testing.T) {
 	}
 	tip := head.Hash().String()
 
-	r := newTurnAnchorResolver(repo, tip, time.Now())
-	got, fromCandidate := r.resolve(context.Background(), []string{oldHash.String()[:7]})
-	if got != tip || fromCandidate {
-		t.Fatalf("resolve = (%q, %v), want fallback %q: pre-cutoff commit must miss the bounded walk", got, fromCandidate, tip)
+	r := newTurnAnchorResolver(repo, tip, time.Now(), DefaultLookbackDays)
+	got, method := r.resolve(context.Background(), []string{oldHash.String()[:7]})
+	if got != tip || method != cp.CommitSHAMethodFallback {
+		t.Fatalf("resolve = (%q, %q), want fallback %q: pre-cutoff commit must miss the bounded walk", got, method, tip)
 	}
 }
 
@@ -151,23 +178,23 @@ func TestResolveTurnAnchor_DateCutoffBoundsWalk(t *testing.T) {
 func TestResolveTurnAnchor_MaxWalkCapBoundsWalk(t *testing.T) {
 	t.Parallel()
 	repo, c1, c2, _ := buildAnchorTestRepo(t)
-	r := newTurnAnchorResolver(repo, c2, time.Now())
+	r := newTurnAnchorResolver(repo, c2, time.Now(), DefaultLookbackDays)
 	r.maxWalk = 1
 
-	got, fromCandidate := r.resolve(context.Background(), []string{c1[:7]})
-	if got != c2 || fromCandidate {
-		t.Fatalf("resolve = (%q, %v), want fallback %q: capped walk must not collect c1", got, fromCandidate, c2)
+	got, method := r.resolve(context.Background(), []string{c1[:7]})
+	if got != c2 || method != cp.CommitSHAMethodFallback {
+		t.Fatalf("resolve = (%q, %q), want fallback %q: capped walk must not collect c1", got, method, c2)
 	}
 	// The tip itself was collected before the cap hit, so it still anchors.
-	if got, fromCandidate := r.resolve(context.Background(), []string{c2[:7]}); got != c2 || !fromCandidate {
-		t.Fatalf("resolve = (%q, %v), want tip as candidate match", got, fromCandidate)
+	if got, method := r.resolve(context.Background(), []string{c2[:7]}); got != c2 || method != cp.CommitSHAMethodRecorded {
+		t.Fatalf("resolve = (%q, %q), want tip as recorded candidate match", got, method)
 	}
 }
 
 func TestResolveTurnAnchor_SkipsUnreachableAndUnresolvable(t *testing.T) {
 	t.Parallel()
 	repo, _, c2, s1 := buildAnchorTestRepo(t)
-	r := newTurnAnchorResolver(repo, c2, time.Now())
+	r := newTurnAnchorResolver(repo, c2, time.Now(), DefaultLookbackDays)
 	ctx := context.Background()
 
 	// s1 resolves but is not an ancestor of the fallback c2.
@@ -193,7 +220,7 @@ func TestResolveTurnAnchor_SkipsUnreachableAndUnresolvable(t *testing.T) {
 func TestResolveTurnAnchor_RejectsRevisionSyntax(t *testing.T) {
 	t.Parallel()
 	repo, _, c2, _ := buildAnchorTestRepo(t)
-	r := newTurnAnchorResolver(repo, c2, time.Now())
+	r := newTurnAnchorResolver(repo, c2, time.Now(), DefaultLookbackDays)
 	ctx := context.Background()
 
 	if got, _ := r.resolve(ctx, []string{"HEAD"}); got != c2 {
@@ -207,7 +234,7 @@ func TestResolveTurnAnchor_RejectsRevisionSyntax(t *testing.T) {
 func TestResolveTurnAnchor_EmptyFallback(t *testing.T) {
 	t.Parallel()
 	repo, c1, _, _ := buildAnchorTestRepo(t)
-	r := newTurnAnchorResolver(repo, "", time.Now())
+	r := newTurnAnchorResolver(repo, "", time.Now(), DefaultLookbackDays)
 
 	if got, _ := r.resolve(context.Background(), []string{c1[:7]}); got != "" {
 		t.Fatalf("empty fallback: resolve = %q, want empty", got)
@@ -223,7 +250,7 @@ func TestResolveTurnAnchor_FallbackDoesNotResolve(t *testing.T) {
 	t.Parallel()
 	repo, c1, _, _ := buildAnchorTestRepo(t)
 	fallback := strings.Repeat("ca", 20) // valid hex, 40 chars, not a real object
-	r := newTurnAnchorResolver(repo, fallback, time.Now())
+	r := newTurnAnchorResolver(repo, fallback, time.Now(), DefaultLookbackDays)
 
 	got, _ := r.resolve(context.Background(), []string{c1[:7]})
 	if got != fallback {

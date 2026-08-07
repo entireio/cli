@@ -27,12 +27,12 @@ func (cursorImporter) AgentType() types.AgentType { return agent.AgentTypeCursor
 // Discover returns Cursor transcript files for the repo modified within the
 // lookback window. Cursor stores sessions either flat (<dir>/<id>.jsonl) or
 // nested (<dir>/<id>/<id>.jsonl, the IDE layout); both are discovered.
-func (cursorImporter) Discover(repoRoot, overridePath string, now time.Time, sessionFilter []string) ([]SessionFile, error) {
+func (cursorImporter) Discover(repoRoot, overridePath string, cutoff time.Time, sessionFilter []string) ([]SessionFile, error) {
 	dir, err := resolveDir(repoRoot, overridePath, "cursor", (&cursor.CursorAgent{}).GetSessionDir)
 	if err != nil {
 		return nil, err
 	}
-	return discoverSessionFiles(dir, now, sessionFilter, func(dir string, e os.DirEntry) (string, string, bool) {
+	return discoverSessionFiles(dir, cutoff, sessionFilter, func(dir string, e os.DirEntry) (string, string, bool) {
 		id, path := cursorSessionFile(dir, e)
 		return id, path, path != ""
 	})

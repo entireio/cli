@@ -28,3 +28,41 @@ func resolveImportLinkCommitSHA(repo *git.Repository) string {
 	}
 	return ""
 }
+
+// resolveImportScanTips returns the commit tips `entire import --reconcile`
+// walks when looking for commits with no session data: origin's default-branch
+// tip, the local default-branch tip, and HEAD, deduped and in that order.
+//
+// It resolves all three rather than just the link anchor because they routinely
+// disagree, and each disagreement hides real work: HEAD catches an unmerged
+// feature branch (whose commits are unreachable from the default branch), the
+// local tip catches commits not yet pushed, and origin's tip catches commits
+// merged by someone else. Unresolvable refs are simply absent — a repo with no
+// origin, or none at all, still scans whatever exists.
+func resolveImportScanTips(repo *git.Repository) []plumbing.Hash {
+	var tips []plumbing.Hash
+	seen := make(map[plumbing.Hash]struct{}, 3)
+	add := func(hash plumbing.Hash) {
+		if hash.IsZero() {
+			return
+		}
+		if _, dup := seen[hash]; dup {
+			return
+		}
+		seen[hash] = struct{}{}
+		tips = append(tips, hash)
+	}
+
+	if name := strategy.GetDefaultBranchName(repo); name != "" {
+		if ref, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", name), true); err == nil {
+			add(ref.Hash())
+		}
+		if ref, err := repo.Reference(plumbing.NewBranchReferenceName(name), true); err == nil {
+			add(ref.Hash())
+		}
+	}
+	if head, err := repo.Head(); err == nil {
+		add(head.Hash())
+	}
+	return tips
+}

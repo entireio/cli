@@ -27,7 +27,7 @@ func TestCursorDiscover_FlatLookbackAndFilter(t *testing.T) {
 	writeAged("skip.txt", 1*time.Hour)
 
 	imp := cursorImporter{}
-	got, err := imp.Discover("", dir, now, nil)
+	got, err := imp.Discover("", dir, discoverCutoff(now), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,7 @@ func TestCursorDiscover_FlatLookbackAndFilter(t *testing.T) {
 	}
 
 	writeAged("abc123.jsonl", 1*24*time.Hour)
-	got, err = imp.Discover("", dir, now, []string{"abc123"})
+	got, err = imp.Discover("", dir, discoverCutoff(now), []string{"abc123"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestCursorDiscover_NestedLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := cursorImporter{}.Discover("", dir, now, nil)
+	got, err := cursorImporter{}.Discover("", dir, discoverCutoff(now), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

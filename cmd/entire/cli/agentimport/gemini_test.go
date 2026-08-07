@@ -25,7 +25,7 @@ func TestGeminiDiscover_LookbackAndFilter(t *testing.T) {
 	writeAged("session-2026-04-01-old00001.json", 60*24*time.Hour)
 	writeAged("notes.txt", 1*time.Hour)
 
-	got, err := geminiImporter{}.Discover("", dir, now, nil)
+	got, err := geminiImporter{}.Discover("", dir, discoverCutoff(now), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestGeminiDiscover_LookbackAndFilter(t *testing.T) {
 		t.Fatalf("lookback/extension filter wrong: %v", got)
 	}
 
-	got, err = geminiImporter{}.Discover("", dir, now, []string{"session-2026-06-20-recent01"})
+	got, err = geminiImporter{}.Discover("", dir, discoverCutoff(now), []string{"session-2026-06-20-recent01"})
 	if err != nil {
 		t.Fatal(err)
 	}

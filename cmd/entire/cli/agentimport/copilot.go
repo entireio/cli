@@ -32,14 +32,14 @@ func (copilotImporter) AgentType() types.AgentType { return agent.AgentTypeCopil
 // Discover returns Copilot session transcripts belonging to this repo (by the
 // session.start context) modified within the lookback window. The session ID is
 // the session-state subdirectory name.
-func (copilotImporter) Discover(repoRoot, overridePath string, now time.Time, sessionFilter []string) ([]SessionFile, error) {
+func (copilotImporter) Discover(repoRoot, overridePath string, cutoff time.Time, sessionFilter []string) ([]SessionFile, error) {
 	dir, err := resolveDir(repoRoot, overridePath, "copilot", (&copilotcli.CopilotCLIAgent{}).GetSessionDir)
 	if err != nil {
 		return nil, err
 	}
 	// Each session is a subdirectory holding events.jsonl; keep only those whose
 	// session.start places them in this repo.
-	return discoverSessionFiles(dir, now, sessionFilter, func(dir string, e os.DirEntry) (string, string, bool) {
+	return discoverSessionFiles(dir, cutoff, sessionFilter, func(dir string, e os.DirEntry) (string, string, bool) {
 		if !e.IsDir() {
 			return "", "", false
 		}

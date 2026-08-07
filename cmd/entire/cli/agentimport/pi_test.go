@@ -26,7 +26,7 @@ func TestPiDiscover_LookbackFilterAndSessionID(t *testing.T) {
 	writeAged("2026-06-20T00-00-00-000Z_sessA.jsonl", 5*24*time.Hour)
 	writeAged("2026-04-01T00-00-00-000Z_old.jsonl", 60*24*time.Hour)
 
-	got, err := piImporter{}.Discover("", dir, now, nil)
+	got, err := piImporter{}.Discover("", dir, discoverCutoff(now), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestPiDiscover_LookbackFilterAndSessionID(t *testing.T) {
 		t.Fatalf("lookback/session-id wrong: %v", got)
 	}
 
-	got, err = piImporter{}.Discover("", dir, now, []string{"sessA"})
+	got, err = piImporter{}.Discover("", dir, discoverCutoff(now), []string{"sessA"})
 	if err != nil {
 		t.Fatal(err)
 	}

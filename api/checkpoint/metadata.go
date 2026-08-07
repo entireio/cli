@@ -11,6 +11,29 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
+// Commit-link provenance values for WriteOptions.CommitSHAMethod (and the
+// commit_sha_method field it lands in). See WriteOptions.CommitSHAMethod for
+// the full semantics of each.
+const (
+	// CommitSHAMethodRecorded marks a link the turn's transcript itself recorded.
+	CommitSHAMethodRecorded = "recorded"
+	// CommitSHAMethodHeuristic marks a link inferred by time-window matching.
+	CommitSHAMethodHeuristic = "heuristic"
+	// CommitSHAMethodFallback marks the default-branch-tip display anchor.
+	CommitSHAMethodFallback = "fallback"
+)
+
+// IsCommitSHAMethodDowngrade reports whether replacing a link stored with
+// method existing by one with method incoming would weaken it. Only "recorded"
+// links are protected: they are transcript-sourced ground truth, so a later
+// heuristic or fallback pass must never overwrite one. Stores consult this
+// before applying a CheckpointCommitSHA backfill and skip the write when it
+// returns true, which is what makes a weaker re-run a no-op rather than a
+// regression.
+func IsCommitSHAMethodDowngrade(existing, incoming string) bool {
+	return existing == CommitSHAMethodRecorded && incoming != CommitSHAMethodRecorded
+}
+
 // TranscriptAsset is a binary blob (e.g. an image) lifted out of a transcript
 // and stored raw in the checkpoint, referenced by a placeholder in the log.
 type TranscriptAsset struct {
@@ -38,14 +61,33 @@ type WriteOptions struct {
 	Branch string
 
 	// CommitSHA links this checkpoint to an existing commit without a trailer.
-	// It is an anchor — "imported at this point in time" — not attribution.
-	// Currently set only by `entire import`: imported history has no
-	// Entire-Checkpoint trailer (we never rewrite existing commits), so import
-	// stamps the resolved anchor commit here (the default branch head when
-	// resolvable; see resolveImportLinkCommitSHA for the fallback order).
-	// Empty for all other writers. This comment is the canonical description;
-	// Metadata.CommitSHA and CheckpointSummary.CommitSHA point back here.
+	// Imported history has no Entire-Checkpoint trailer (we never rewrite
+	// existing commits), so `entire import` — the only writer that sets this —
+	// stamps the resolved commit here instead. How trustworthy the link is
+	// depends on CommitSHAMethod, which every writer of CommitSHA must also
+	// set. Empty for all other writers. This comment is the canonical
+	// description; Metadata.CommitSHA and CheckpointSummary.CommitSHA point
+	// back here.
 	CommitSHA string
+
+	// CommitSHAMethod records HOW CommitSHA was derived, so consumers can tell
+	// a commit-accurate link from a display anchor. One of:
+	//
+	//   - CommitSHAMethodRecorded: the turn's own transcript recorded creating
+	//     this commit and the SHA resolved within the scanned window.
+	//     Commit-accurate, but still not trailer attribution — nothing was
+	//     written to the commit itself.
+	//   - CommitSHAMethodHeuristic: `entire import --reconcile
+	//     --accept-heuristics` matched the turn to an unlinked commit by time
+	//     window, 1:1 and unambiguous in both directions. A best guess.
+	//   - CommitSHAMethodFallback: the display anchor — the default branch tip
+	//     at import time (see resolveImportLinkCommitSHA). Says "imported at
+	//     this point in time", nothing about which commit the turn produced.
+	//
+	// Empty means legacy/unknown: written before this field existed, so the
+	// link's provenance cannot be recovered. Reconciliation treats empty like
+	// fallback (it may be upgraded), and never downgrades a "recorded" link.
+	CommitSHAMethod string
 
 	// Transcript is the session transcript content (full.jsonl).
 	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
@@ -343,7 +385,11 @@ type Metadata struct {
 	// CommitSHA anchors an imported checkpoint to an existing commit; empty for
 	// non-imported checkpoints, which link via the Entire-Checkpoint trailer.
 	// See WriteOptions.CommitSHA for the full semantics.
-	CommitSHA        string `json:"commit_sha,omitempty"`
+	CommitSHA string `json:"commit_sha,omitempty"`
+	// CommitSHAMethod records how CommitSHA was derived ("recorded",
+	// "heuristic", "fallback"); empty means legacy/unknown. See
+	// WriteOptions.CommitSHAMethod.
+	CommitSHAMethod  string `json:"commit_sha_method,omitempty"`
 	CheckpointsCount int    `json:"checkpoints_count"`
 	// SaveStepCount is the number of SaveStep-recorded steps for this session.
 	// Honest "real checkpoint work happened" signal (0 = commit-only/fallback
@@ -501,7 +547,9 @@ type CheckpointSummary struct {
 	Strategy     string          `json:"strategy"`
 	Branch       string          `json:"branch,omitempty"`
 	// CommitSHA: import-only anchor; see WriteOptions.CommitSHA.
-	CommitSHA           string             `json:"commit_sha,omitempty"`
+	CommitSHA string `json:"commit_sha,omitempty"`
+	// CommitSHAMethod: how CommitSHA was derived; see WriteOptions.CommitSHAMethod.
+	CommitSHAMethod     string             `json:"commit_sha_method,omitempty"`
 	CheckpointsCount    int                `json:"checkpoints_count"`
 	FilesTouched        []string           `json:"files_touched"`
 	Sessions            []SessionFilePaths `json:"sessions"`

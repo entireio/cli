@@ -36,12 +36,11 @@ type codexSessionMeta struct {
 
 // Discover walks the Codex sessions tree and returns transcripts belonging to
 // this repo (by session_meta cwd) modified within the lookback window.
-func (codexImporter) Discover(repoRoot, overridePath string, now time.Time, sessionFilter []string) ([]SessionFile, error) {
+func (codexImporter) Discover(repoRoot, overridePath string, cutoff time.Time, sessionFilter []string) ([]SessionFile, error) {
 	dir, err := resolveDir(repoRoot, overridePath, "codex", (&codex.CodexAgent{}).GetSessionDir)
 	if err != nil {
 		return nil, err
 	}
-	cutoff := now.AddDate(0, 0, -LookbackDays)
 	var out []SessionFile
 	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {

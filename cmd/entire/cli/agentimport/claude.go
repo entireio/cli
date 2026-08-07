@@ -24,12 +24,12 @@ func (claudeImporter) AgentType() types.AgentType { return agent.AgentTypeClaude
 // lookback window. overridePath replaces the default ~/.claude/projects/<slug>
 // dir; sessionFilter, when non-empty, keeps only matching session IDs (the
 // file stem).
-func (claudeImporter) Discover(repoRoot, overridePath string, now time.Time, sessionFilter []string) ([]SessionFile, error) {
+func (claudeImporter) Discover(repoRoot, overridePath string, cutoff time.Time, sessionFilter []string) ([]SessionFile, error) {
 	dir, err := resolveDir(repoRoot, overridePath, "claude", (&claudecode.ClaudeCodeAgent{}).GetSessionDir)
 	if err != nil {
 		return nil, err
 	}
-	return discoverSessionFiles(dir, now, sessionFilter, jsonlSessionResolver(".jsonl", identitySessionID))
+	return discoverSessionFiles(dir, cutoff, sessionFilter, jsonlSessionResolver(".jsonl", identitySessionID))
 }
 
 // SplitTurns produces one Turn per user-prompt line. Main-agent token usage for

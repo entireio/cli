@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cp "github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -27,8 +28,11 @@ import (
 	"github.com/entireio/cli/redact"
 )
 
-// LookbackDays bounds how far back import reaches. Fixed this pass (no flag).
-const LookbackDays = 30
+// DefaultLookbackDays bounds how far back import reaches when the caller does
+// not set Options.LookbackDays. The effective window applies uniformly to
+// transcript discovery, the anchor walk, and the reconcile commit scan — a
+// commit outside it can never be linked to a turn outside it.
+const DefaultLookbackDays = 30
 
 // SessionFile is one discovered agent transcript for a repo.
 type SessionFile struct {
@@ -71,10 +75,12 @@ type Importer interface {
 	Name() string
 	// AgentType is the display name stored in checkpoint metadata (e.g. "Claude Code").
 	AgentType() types.AgentType
-	// Discover returns the agent's transcript files for the repo within the
-	// lookback window. overridePath replaces the default transcript dir;
-	// sessionFilter, when non-empty, keeps only matching session IDs.
-	Discover(repoRoot, overridePath string, now time.Time, sessionFilter []string) ([]SessionFile, error)
+	// Discover returns the agent's transcript files for the repo, dropping
+	// transcripts last modified before cutoff (the start of the run's lookback
+	// window, computed once by Run so every importer bounds identically).
+	// overridePath replaces the default transcript dir; sessionFilter, when
+	// non-empty, keeps only matching session IDs.
+	Discover(repoRoot, overridePath string, cutoff time.Time, sessionFilter []string) ([]SessionFile, error)
 	// SplitTurns splits one session's raw transcript bytes into per-turn units.
 	SplitTurns(sf SessionFile, full []byte) ([]Turn, error)
 }
@@ -106,6 +112,11 @@ type Options struct {
 	Now           time.Time
 	DryRun        bool
 
+	// LookbackDays bounds how far back the run reaches — transcript
+	// discovery, the anchor ancestor walk, and the reconcile commit scan all
+	// derive their cutoff from it. 0 means DefaultLookbackDays.
+	LookbackDays int
+
 	// LinkCommitSHA, when non-empty, is the fallback anchor written to each
 	// imported checkpoint's metadata as commit_sha — the commit the UI shows
 	// imported sessions against. The caller resolves it (default branch head
@@ -114,9 +125,47 @@ type Options struct {
 	// fallback anchors to that real commit instead (see turnAnchorResolver).
 	LinkCommitSHA string
 
+	// Reconcile, when non-nil and Enabled, makes commit linking first-class:
+	// Run scans ScanTips for commits with no session data, links the turns it
+	// can, backfills links onto already-imported checkpoints, and reports the
+	// rest. Nil (the default) is off — Run behaves exactly as before.
+	Reconcile *ReconcileOptions
+
+	// ScanTips are the commit tips the reconcile scan walks (typically
+	// origin/<default>, the local default branch, and HEAD). The CLI layer
+	// resolves them; Run builds the missing-commit map itself so the package
+	// stays testable without a ref-resolution seam. Ignored when Reconcile is
+	// off.
+	ScanTips []plumbing.Hash
+
 	// Progress, when non-nil, receives session/turn progress notifications
 	// as Run executes. Nil (the default) reports nothing.
 	Progress *Progress
+}
+
+// reconciling reports whether this run should scan commits and link them.
+func (o Options) reconciling() bool { return o.Reconcile != nil && o.Reconcile.Enabled }
+
+// acceptingHeuristics reports whether time-window matches may be written
+// rather than only reported.
+func (o Options) acceptingHeuristics() bool {
+	return o.reconciling() && o.Reconcile.AcceptHeuristics
+}
+
+// lookbackDays returns the effective lookback window in days.
+func (o Options) lookbackDays() int {
+	if o.LookbackDays <= 0 {
+		return DefaultLookbackDays
+	}
+	return o.LookbackDays
+}
+
+// now returns the run's reference time (wall clock when unset).
+func (o Options) now() time.Time {
+	if o.Now.IsZero() {
+		return time.Now()
+	}
+	return o.Now
 }
 
 // Result summarizes an import run.
@@ -124,6 +173,16 @@ type Result struct {
 	SessionsScanned int
 	TurnsImported   int
 	TurnsSkipped    int
+
+	// LinksRecorded counts links whose commit the transcript itself recorded.
+	LinksRecorded int
+	// LinksHeuristic counts accepted time-window links.
+	LinksHeuristic int
+	// Backfilled counts already-imported checkpoints whose link was upgraded.
+	Backfilled int
+
+	// Report is the reconcile pass's full outcome; nil when not reconciling.
+	Report *ReconcileReport
 }
 
 // Progress reports observable events as Run walks sessions and writes turns.
@@ -185,9 +244,18 @@ func DeriveCheckpointID(sessionID, turnUUID string) id.CheckpointID {
 // Run imports the given agent's transcripts (within the lookback window) as
 // read-only checkpoints on the v1 metadata branch (Kind "imported"). It is
 // idempotent: turns whose deterministic ID already exists are skipped.
+//
+// With Options.Reconcile enabled it additionally scans Options.ScanTips for
+// commits carrying no session data, links the turns it can (transcript-recorded
+// links always; time-window guesses only under AcceptHeuristics), backfills
+// links onto checkpoints imported by an earlier run, and reports the rest in
+// Result.Report. Commits are never rewritten — the link lives on the
+// checkpoint. Re-running converges: every link becomes "unchanged" and no write
+// is issued.
 func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) (Result, error) {
 	var res Result
-	files, err := imp.Discover(opts.RepoRoot, opts.OverridePath, opts.Now, opts.SessionFilter)
+	cutoff := opts.now().AddDate(0, 0, -opts.lookbackDays())
+	files, err := imp.Discover(opts.RepoRoot, opts.OverridePath, cutoff, opts.SessionFilter)
 	if err != nil {
 		return res, fmt.Errorf("discover %s sessions: %w", imp.Name(), err)
 	}
@@ -206,7 +274,17 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 	// One resolver per Run: it lazily walks and memoizes opts.LinkCommitSHA's
 	// ancestor set the first time a turn actually carries a candidate, so a
 	// whole import run pays for at most one history walk, not one per turn.
-	anchorResolver := newTurnAnchorResolver(repo, opts.LinkCommitSHA, opts.Now)
+	anchorResolver := newTurnAnchorResolver(repo, opts.LinkCommitSHA, opts.now(), opts.lookbackDays())
+
+	rec, err := newReconciler(ctx, repo, opts, cutoff)
+	if err != nil {
+		return res, err
+	}
+	// Scanned commits widen the anchor resolver's reachability gate: a commit
+	// on an unmerged feature branch is unreachable from the default-branch
+	// fallback, yet it IS in the scan set, so a turn that recorded it links
+	// exactly instead of falling back to the tip.
+	anchorResolver.extraAccept = rec.scanned()
 
 	// Resolve the importer's git identity once per run (not per turn):
 	// checkpoint commits otherwise carry an empty author, which the
@@ -226,6 +304,11 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		}
 		opts.Progress.sessionStart(sessionIndex, len(files), string(imp.AgentType()), sf.SessionID, len(turns))
 
+		// Heuristic matches are computed once per session, against the commits
+		// still unlinked at this point, so an earlier session's link can't be
+		// proposed again here.
+		heuristics := rec.matchSession(turns)
+
 		// Redact the session transcript once and reuse it for every turn's
 		// checkpoint (each turn stores the full session transcript with its own
 		// CheckpointTranscriptStart). Redacting per turn would be O(turns).
@@ -234,14 +317,36 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		redacted := false
 		for turnIndex, turn := range turns {
 			cid := DeriveCheckpointID(sf.SessionID, turn.UUID)
-			if existing[cid.String()] {
+			alreadyImported := existing[cid.String()]
+
+			// Anchor resolution is skipped entirely when nothing will consume
+			// it (an already-imported or dry-run turn in a non-reconcile run),
+			// preserving the pre-reconcile cost profile.
+			var anchor, method string
+			var heuristicOnly bool
+			if rec.enabled() || (!alreadyImported && !opts.DryRun) {
+				anchor, method = anchorResolver.resolve(ctx, turn.CommitSHAs)
+				if len(turn.CommitSHAs) > 0 && method != cp.CommitSHAMethodRecorded {
+					logging.Debug(ctx, "import: turn anchor fell back",
+						"sessionID", sf.SessionID, "turnUUID", turn.UUID, "candidates", len(turn.CommitSHAs))
+				}
+				anchor, method, heuristicOnly = rec.applyHeuristic(heuristics, turn.UUID, anchor, method)
+			}
+			link := LinkResult{
+				CommitSHA: anchor, CheckpointID: cid, SessionID: sf.SessionID,
+				TurnUUID: turn.UUID, Method: method,
+			}
+
+			if alreadyImported {
 				res.TurnsSkipped++
 				opts.Progress.turnSkipped(sessionIndex, turnIndex, len(turns))
+				rec.recordExisting(ctx, stores, link, heuristicOnly, &res)
 				continue
 			}
 			if opts.DryRun {
 				res.TurnsImported++ // counts what would import
 				opts.Progress.turnSkipped(sessionIndex, turnIndex, len(turns))
+				rec.record(link, heuristicOnly, ActionDryRun, &res)
 				continue
 			}
 			if !redacted {
@@ -257,17 +362,19 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 				red = r
 				redacted = true
 			}
-			anchor, fromCandidate := anchorResolver.resolve(ctx, turn.CommitSHAs)
-			if len(turn.CommitSHAs) > 0 && !fromCandidate {
-				logging.Debug(ctx, "import: turn anchor fell back",
-					"sessionID", sf.SessionID, "turnUUID", turn.UUID, "candidates", len(turn.CommitSHAs))
+			// A heuristic match that wasn't accepted is reported, never
+			// written: the checkpoint keeps the fallback anchor.
+			writeAnchor, writeMethod := anchor, method
+			if heuristicOnly {
+				writeAnchor, writeMethod = anchorResolver.fallbackAnchor()
 			}
-			if err := writeTurn(ctx, stores, imp, cid, sf, red, turn, anchor, authorName, authorEmail); err != nil {
+			if err := writeTurn(ctx, stores, imp, cid, sf, red, turn, writeAnchor, writeMethod, authorName, authorEmail); err != nil {
 				return res, err
 			}
 			existing[cid.String()] = true
 			res.TurnsImported++
 			opts.Progress.turnWritten(sessionIndex, turnIndex, len(turns))
+			rec.record(link, heuristicOnly, ActionWritten, &res)
 		}
 
 		// Track A: surface this session in `entire session list`. Best-effort —
@@ -280,6 +387,7 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 			}
 		}
 	}
+	res.Report = rec.finish()
 	return res, nil
 }
 
@@ -354,7 +462,7 @@ func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns 
 	return nil
 }
 
-func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.CheckpointID, sf SessionFile, red redact.RedactedBytes, turn Turn, anchorCommitSHA, authorName, authorEmail string) error {
+func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.CheckpointID, sf SessionFile, red redact.RedactedBytes, turn Turn, anchorCommitSHA, anchorMethod, authorName, authorEmail string) error {
 	if err := stores.Persistent.Write(ctx, cp.Session(cp.WriteOptions{
 		CheckpointID:              cid,
 		SessionID:                 sf.SessionID,
@@ -369,6 +477,7 @@ func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.Chec
 		CheckpointTranscriptStart: turn.LineStart,
 		TokenUsage:                turn.Tokens,
 		CommitSHA:                 anchorCommitSHA,
+		CommitSHAMethod:           anchorMethod,
 		AuthorName:                authorName,
 		AuthorEmail:               authorEmail,
 	})); err != nil {
