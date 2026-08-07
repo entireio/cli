@@ -60,6 +60,11 @@ var experimentalCommands = []experimentalCommandInfo{
 		Invocation:  "entire experts",
 		Summary:     "Show agent, skill, and tool provenance for files or topics",
 	},
+	{
+		CommandPath: []string{"shellhook"},
+		Invocation:  "entire shellhook install",
+		Summary:     "Warn (or offer to enable) when you cd into a repo without Entire",
+	},
 }
 
 func newLabsCmd() *cobra.Command {
@@ -108,6 +113,7 @@ Try:
   entire blame --help
   entire why --help
   entire experts --help
+  entire shellhook --help
 `
 }
 

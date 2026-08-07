@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/shellhook"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 
@@ -2058,6 +2060,9 @@ func newCurlBashPostInstallCmd() *cobra.Command {
 			if err := promptShellCompletion(w); err != nil {
 				fmt.Fprintf(w, "Note: Shell completion setup skipped: %v\n", err)
 			}
+			if err := promptShellHook(w); err != nil {
+				fmt.Fprintf(w, "Note: Shell hook setup skipped: %v\n", err)
+			}
 			return nil
 		},
 	}
@@ -2082,6 +2087,67 @@ func shellCompletionTarget() (shellName, rcFile, completionLine string, err erro
 		return "", "", "", err
 	}
 	return shellName, rcFile, completionLines[kind], nil
+}
+
+// promptShellHook offers to install the `entire shellhook` integration during
+// the curl|bash post-install flow. It defaults to No: the hook writes to the
+// user's rc file and speaks up in every repository, so it has to be chosen.
+// Only prompts when a terminal is available and the hook is not already there.
+func promptShellHook(w io.Writer) error {
+	if runtime.GOOS == windowsGOOS {
+		return nil
+	}
+
+	kind, shellName, rcFile, err := shellRCTarget("")
+	if err != nil {
+		if errors.Is(err, errUnsupportedShell) {
+			return nil // Completion already reported the unsupported shell.
+		}
+		return fmt.Errorf("shell hook: %w", err)
+	}
+
+	if isMarkerConfigured(rcFile, shellhookComment) {
+		fmt.Fprintf(w, "✓ Shell hook already configured in %s\n", rcFile)
+		return nil
+	}
+	if !interactive.CanPromptInteractively() {
+		return nil
+	}
+
+	var selected string
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title(fmt.Sprintf("Warn when you cd into a repo without Entire? (detected: %s)", shellName)).
+				Description("Adds an opt-in hook to your shell. Remove it later with `entire shellhook uninstall`.").
+				Options(
+					huh.NewOption("No", "no"),
+					huh.NewOption("Yes", promptOptionYes),
+				).
+				Value(&selected),
+		),
+	)
+	if err := form.Run(); err != nil {
+		//nolint:nilerr // User cancelled - not a fatal error, just skip
+		return nil
+	}
+	if selected != promptOptionYes {
+		return nil
+	}
+
+	if err := shellhook.SavePreferences(&shellhook.Preferences{
+		Version: shellhook.PreferencesVersion,
+		Mode:    shellhook.ModeWarn,
+	}); err != nil {
+		return fmt.Errorf("saving shell hook preferences: %w", err)
+	}
+	if err := appendMarkedBlock(rcFile, shellhookComment, shellhookRCLines[kind]); err != nil {
+		return fmt.Errorf("failed to update %s: %w", rcFile, err)
+	}
+
+	fmt.Fprintf(w, "✓ Shell hook added to %s\n", rcFile)
+	fmt.Fprintln(w, "  Restart your shell to activate")
+	return nil
 }
 
 // promptShellCompletion offers to add shell completion to the user's rc file.

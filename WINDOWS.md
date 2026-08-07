@@ -71,6 +71,7 @@ The E2E test infrastructure uses native PTY (ConPTY on Windows, creack/pty on Un
 - **File permissions** (0o755, 0o644) are set but ignored by Windows — Windows uses ACLs instead.
 - **Symlinks** in E2E tests require Windows Developer Mode or admin privileges.
 - **OpenCode plugin** uses `Bun.spawnSync(["sh", "-c", ...])` which won't work on Windows unless Bun supports it. OpenCode Windows support is pending.
+- **`entire shellhook`** targets bash, zsh, and fish only. `shellhook init` and `shellhook install` return a polite unsupported-platform error on Windows; PowerShell support is not implemented. `shellhook status`, `dismiss`, and `check` still run, and `check` stays a no-op there because the hook is never installed.
 
 ## Smoke Test Checklist
 

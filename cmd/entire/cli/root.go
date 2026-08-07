@@ -152,7 +152,8 @@ func NewRootCmd() *cobra.Command {
 	experimental.Register(cmd, newSearchCmd()) // 'entire search' = 'checkpoint search' (experimental)
 
 	// Experimental labs commands (listed via `entire labs`; not deprecation shortcuts).
-	experimental.Register(cmd, newExpertsCmd()) // 'experts' (experimental); agent/workflow provenance
+	experimental.Register(cmd, newExpertsCmd())   // 'experts' (experimental); agent/workflow provenance
+	experimental.Register(cmd, newShellhookCmd()) // 'shellhook' (experimental); opt-in cd-time warn/auto-enable
 
 	// Deprecated top-level commands (functional; the constructors mark them
 	// Deprecated, which also excludes them from help and completion).

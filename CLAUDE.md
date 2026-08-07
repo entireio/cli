@@ -87,8 +87,23 @@ Experimental commands (gated by the build-time visibility flag above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden
 in stable releases, always runnable): `tokens`, `import`, `review`,
 `investigate`, `blame`, `why`, the top-level `search` shortcut, `experts`,
-`runner`, and `checkpoint policy`. `tokens` is also advertised through `entire
-labs`. The canonical `checkpoint search` is not gated and stays visible.
+`runner`, `shellhook`, and `checkpoint policy`. `tokens` and `shellhook` are
+also advertised through `entire labs`. The canonical `checkpoint search` is not
+gated and stays visible.
+
+`shellhook` is an opt-in, per-user shell integration (bash/zsh/fish; Windows is
+out of scope and `init`/`install` say so): `install` / `uninstall` manage one
+marked block in the rc file, `init <shell>` prints the script that block evals,
+`status` (`--json`) reports installed/mode/dismissals, and `dismiss` silences
+the current repository. The emitted script does the whole steady-state decision
+with shell builtins — interactivity, `ENTIRE_NO_SHELL_HOOK`, a `.git` walk up
+from `$PWD`, a last-seen-root dedupe, and the settings-file check — and only
+then forks the hidden `shellhook check --root <dir>`, which warns once per repo
+per throttle window (24h default) on stderr and always exits 0. Preferences live
+at `userdirs.Config()/shellhook.json` and throttle state at
+`userdirs.Cache()/shellhook_state.json` (see `cmd/entire/cli/shellhook`); the
+opt-in `auto` mode additionally requires a TTY and a repo owned by the current
+uid before it offers to run `entire enable`.
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
@@ -140,7 +155,7 @@ deprecation as `checkpoint rewind`).
 
 Hidden infrastructure commands: `hooks`, `trail`,
 `curl-bash-post-install`, `__send_analytics`, `mcp` (MCP stdio server for
-MCP-host agents).
+MCP-host agents), and `shellhook check` (invoked by the emitted shell hook).
 
 The `hideAsAlias(cmd, canonical)` helper in `cmd/entire/cli/aliascmd.go`
 marks a command Hidden and sets cobra's `Deprecated` field so the hint
