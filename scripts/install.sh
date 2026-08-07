@@ -333,6 +333,7 @@ main() {
     fi
 
     info "Running post-install actions..."
+    info "Sending an anonymous install ping. Set ENTIRE_TELEMETRY_OPTOUT=1 to disable."
     "$install_path" curl-bash-post-install
 }
 

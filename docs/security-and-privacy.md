@@ -393,6 +393,10 @@ Opt out via any one of:
 - `"telemetry": false` in `.entire/settings.json` or `.entire/settings.local.json`.
 - `ENTIRE_TELEMETRY_OPTOUT=1` in the environment.
 
+### Install event
+
+On installation, the CLI sends a one-time anonymous `cli_installed` event to PostHog with: `method` (`install.sh` / `brew` / `scoop`), `channel` (`stable` / `nightly`), `cli_version`, `os`, and `arch`. The identifier is the same hashed per-machine ID used for other telemetry (`machineid.ProtectedID`) — no personal data is sent. Because installation happens before the in-app telemetry prompt, this event is governed solely by the `ENTIRE_TELEMETRY_OPTOUT` environment variable: set `ENTIRE_TELEMETRY_OPTOUT=1` before installing to disable it.
+
 ## Reporting a vulnerability
 
 For vulnerability disclosure, see [SECURITY.md](../SECURITY.md) at the repo root: email `security@entire.io`, expect acknowledgment within 48 hours and resolution of criticals within 90 days.
