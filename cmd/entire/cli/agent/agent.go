@@ -202,6 +202,29 @@ type SidecarImageProvider interface {
 	SidecarImages(ctx context.Context, sessionRef string) ([]CompactedTranscriptAsset, error)
 }
 
+// TranscriptSanitizer is implemented by agents whose native transcript format
+// carries state that Entire must not keep in its own copy — e.g. Codex rollouts
+// embed encrypted reasoning payloads and compaction blobs that are bound to the
+// originating session and cannot be replayed out of a checkpoint.
+//
+// Entire always leaves the agent's own transcript untouched; this transform applies
+// only to the copy Entire stores. Sanitizing before redaction is what keeps
+// non-replayable payloads out of storage AND keeps the redaction layers from
+// scanning megabytes of ciphertext they would only discard afterwards (base64 is
+// the pathological input for the entropy layer).
+//
+// Implementations must be pure byte transforms: idempotent (sanitizing an
+// already-sanitized transcript is a no-op), safe to call from hooks, and never
+// dependent on the agent process being alive.
+type TranscriptSanitizer interface {
+	Agent
+
+	// SanitizeTranscriptForStorage returns the transcript with non-portable state
+	// removed. It must return the input unchanged rather than nil when it cannot
+	// parse the transcript, so a sanitizer failure never loses the session.
+	SanitizeTranscriptForStorage(data []byte) []byte
+}
+
 // TokenCalculator provides token usage calculation for a session.
 // The framework calls this during step save and checkpoint if implemented.
 type TokenCalculator interface {

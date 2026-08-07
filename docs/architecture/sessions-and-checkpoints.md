@@ -190,6 +190,46 @@ Contains full worktree snapshot plus metadata overlay. **Multiple concurrent ses
 
 Tied to a base commit. Condensed to committed on user commit.
 
+**Transcript sanitization (before redaction).** Entire never modifies the agent's
+own transcript, but the copy it stores goes through the agent's optional
+`agent.TranscriptSanitizer` first, at the point Entire takes custody (the Stop path
+in `lifecycle.go`, before `.entire/metadata/<session>/full.jsonl` is written). Codex
+implements it to strip encrypted reasoning payloads and compaction blobs, which are
+bound to the originating session and cannot be replayed out of a checkpoint.
+
+Sanitization always runs before redaction, but the paths differ in whether image
+externalization happens at all:
+
+| Path | Pipeline | Where |
+|---|---|---|
+| Stop (shadow branch) | sanitize → redact | `lifecycle.go` sanitizes before `full.jsonl` is written; the metadata-dir walker (`createRedactedBlobFromFile`) redacts it into the shadow tree |
+| Post-commit condensation | sanitize → externalize → redact | `prepareTranscriptForStorage` in `manual_commit_condensation.go` |
+| Stop finalize (full-session rewrite) | sanitize → externalize → redact | `manual_commit_hooks.go`, before `extractSessionImages` |
+
+**Image externalization runs only on the committed paths** (condensation and
+finalize). The shadow-branch copy is never externalized, so inline images there are
+subject to redaction like any other high-entropy content — do not assume a shadow
+transcript preserves them. Assets and the `assets/manifest.json` index exist only
+under committed checkpoints.
+
+Where all three steps run, each must precede the next. Sanitizing first avoids
+externalizing images out of items that are about to be discarded — that would store
+an asset whose referencing transcript line disappears moments later — and avoids
+redacting megabytes of ciphertext only to throw it away; base64 is the pathological
+input for the entropy layer, so a large Codex rollout otherwise costs tens of seconds
+per Stop *and* per commit. Externalizing before redaction is required because base64
+is high-entropy and redaction would otherwise flag and destroy it.
+
+The sanitize transform is idempotent, so a downstream write path can call it without
+knowing whether an upstream path already did (`checkpoint.sanitizeForAgentType` is
+the store's own belt-and-braces call).
+
+One coupling to respect when changing this: `SessionState.CheckpointTranscriptSize`
+is a growth baseline compared against the shadow transcript blob's size in
+`sessionHasNewContent`, so it must be measured in the same (sanitized) coordinate —
+see `CondenseResult.TranscriptSizeBaseline`. A raw baseline against a sanitized blob
+makes the comparison false forever and the session silently stops condensing.
+
 **Shadow branch lifecycle:**
 - Created on first checkpoint for a base commit
 - Migrated automatically if base commit changes (stash → pull → apply scenario)
@@ -207,7 +247,7 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 ├── metadata.json        # CheckpointSummary (aggregated stats)
 ├── 0/                   # First session (0-based indexing)
 │   ├── metadata.json    # Session-specific Metadata
-│   ├── full.jsonl       # Raw agent transcript (CLI rewind/resume/explain)
+│   ├── full.jsonl       # Agent transcript, sanitized + redacted (CLI rewind/resume/explain)
 │   ├── transcript.jsonl # Full compacted session (slice at compact_transcript_start)
 │   ├── prompt.txt       # Checkpoint-scoped user prompts
 │   └── content_hash.txt # sha256 of full.jsonl (dedup short-circuit)

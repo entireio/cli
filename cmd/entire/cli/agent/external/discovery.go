@@ -58,6 +58,35 @@ func DiscoverAndRegisterNamedAlways(ctx context.Context, name types.AgentName) e
 	return discoverAndRegisterNamed(ctx, name, discoveryTimeout)
 }
 
+// discoveryCanceled reports whether either the caller's context or the derived
+// discovery-timeout context has been cancelled.
+//
+// Both must be consulted. A context closes its own Done channel *before* cancelling
+// its children, so a goroutine that has just observed the caller's cancellation can
+// run while the derived context still reports no error — and when the caller is not a
+// standard context, propagation happens in a watcher goroutine, widening the window
+// further. Checking only the derived context therefore lets a caller whose deadline
+// expired mid-operation look like it is still live.
+func discoveryCanceled(caller, derived context.Context) bool {
+	return caller.Err() != nil || derived.Err() != nil
+}
+
+// discoveryCtxErr wraps whichever of the two contexts has been cancelled, preferring
+// the caller's, and returns nil when neither has. op names the stage for the message.
+// See discoveryCanceled for why the caller's context must be consulted too: missing it
+// lets a caller whose deadline expired mid-lookup receive a nil error and a silently
+// skipped agent instead of its context error.
+func discoveryCtxErr(caller, derived context.Context, op string) error {
+	err := caller.Err()
+	if err == nil {
+		err = derived.Err()
+	}
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
 func discoverAndRegisterNamed(ctx context.Context, name types.AgentName, timeout time.Duration) error {
 	if name == "" {
 		return nil
@@ -69,16 +98,19 @@ func discoverAndRegisterNamed(ctx context.Context, name types.AgentName, timeout
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	// `ctx` deliberately stays the CALLER's context; the derived timeout gets its own
+	// name. Shadowing `ctx` with the derived context is what caused the bug this
+	// function is guarding against, and it left the trap in place for the next edit.
+	discoveryCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("discovering external agent %q: %w", name, err)
+	if err := discoveryCtxErr(ctx, discoveryCtx, fmt.Sprintf("discovering external agent %q", name)); err != nil {
+		return err
 	}
 
 	binName := binaryPrefix + string(name)
 	binPath, err := lookPathExternalAgent(binName)
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return fmt.Errorf("looking up external agent %q binary %q: %w", name, binName, ctxErr)
+	if ctxErr := discoveryCtxErr(ctx, discoveryCtx, fmt.Sprintf("looking up external agent %q binary %q", name, binName)); ctxErr != nil {
+		return ctxErr
 	}
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
@@ -86,7 +118,7 @@ func discoverAndRegisterNamed(ctx context.Context, name types.AgentName, timeout
 		}
 		return fmt.Errorf("looking up external agent %q binary %q: %w", name, binName, err)
 	}
-	registered, err := registerExternalAgent(ctx, binPath, name)
+	registered, err := registerExternalAgent(discoveryCtx, binPath, name)
 	if err != nil {
 		return err
 	}
@@ -98,7 +130,8 @@ func discoverAndRegisterNamed(ctx context.Context, name types.AgentName, timeout
 
 // discoverAndRegister contains the shared scanning logic for external agent discovery.
 func discoverAndRegister(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, discoveryTimeout)
+	// As above: `ctx` remains the caller's, the derived timeout is named.
+	discoveryCtx, cancel := context.WithTimeout(ctx, discoveryTimeout)
 	defer cancel()
 
 	pathEnv := os.Getenv("PATH")
@@ -114,7 +147,7 @@ func discoverAndRegister(ctx context.Context) {
 
 	seen := make(map[string]bool) // deduplicate binaries across PATH dirs
 	for _, dir := range filepath.SplitList(pathEnv) {
-		if ctx.Err() != nil {
+		if discoveryCanceled(ctx, discoveryCtx) {
 			logging.Debug(ctx, "external agent discovery timed out")
 			return
 		}
@@ -124,7 +157,7 @@ func discoverAndRegister(ctx context.Context) {
 			continue // skip unreadable directories
 		}
 		for _, binPath := range matches {
-			if ctx.Err() != nil {
+			if discoveryCanceled(ctx, discoveryCtx) {
 				logging.Debug(ctx, "external agent discovery timed out")
 				return
 			}
@@ -146,7 +179,7 @@ func discoverAndRegister(ctx context.Context) {
 				continue
 			}
 
-			registeredAgent, err := registerExternalAgent(ctx, binPath, agentName)
+			registeredAgent, err := registerExternalAgent(discoveryCtx, binPath, agentName)
 			if err != nil {
 				logging.Debug(ctx, "skipping external agent (registration failed)",
 					slog.String("binary", binPath),

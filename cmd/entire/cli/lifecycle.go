@@ -741,14 +741,20 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		copySpan.End()
 		return fmt.Errorf("failed to read transcript: %w", err)
 	}
+	// Sanitize before writing: this copy is what the shadow-branch walk blobs and
+	// redacts on every Stop. See agent.TranscriptSanitizer for why order matters.
+	// The agent's own rollout is untouched.
+	storedTranscript := agent.SanitizeTranscriptForStorage(ag, transcriptData)
 	logFile := filepath.Join(sessionDirAbs, paths.TranscriptFileName)
-	if err := os.WriteFile(logFile, transcriptData, 0o600); err != nil {
+	if err := os.WriteFile(logFile, storedTranscript, 0o600); err != nil {
 		copySpan.RecordError(err)
 		copySpan.End()
 		return fmt.Errorf("failed to write transcript: %w", err)
 	}
 	logging.Debug(logCtx, "copied transcript",
-		slog.String("path", sessionDir+"/"+paths.TranscriptFileName))
+		slog.String("path", sessionDir+"/"+paths.TranscriptFileName),
+		slog.Int("raw_bytes", len(transcriptData)),
+		slog.Int("stored_bytes", len(storedTranscript)))
 	copySpan.End()
 
 	// Load pre-prompt state (captured on TurnStart)

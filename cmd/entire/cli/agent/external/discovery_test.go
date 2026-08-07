@@ -651,3 +651,57 @@ func TestDiscoverAndRegisterNamedAlways_RegistersBatOnWindows(t *testing.T) {
 		t.Fatalf("agent Name() = %q, want %q", ag.Name(), name)
 	}
 }
+
+// stalledPropagationCtx is a context whose cancellation is immediately visible via
+// Done and Err, but whose propagation to derived contexts is not awaited. Because it
+// is not a standard context, context.WithTimeout watches it from a goroutine, so a
+// derived context still reports no error for a moment after this one is cancelled.
+//
+// That window is real, not contrived: even for standard contexts, cancel() closes its
+// own Done channel before cancelling children, so a goroutine woken by the parent can
+// run before the child observes anything. This type just makes the window wide enough
+// to assert on deterministically instead of relying on scheduler luck.
+type stalledPropagationCtx struct {
+	done chan struct{}
+}
+
+func (*stalledPropagationCtx) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *stalledPropagationCtx) Done() <-chan struct{}     { return c.done }
+func (*stalledPropagationCtx) Value(any) any               { return nil }
+func (c *stalledPropagationCtx) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+// TestDiscoverAndRegisterNamedAlways_ReportsCallerDeadlineExpiredDuringLookup pins the
+// contract that a caller whose context expires while the helper binary is being looked
+// up gets its context error back — not a nil "no such agent" result.
+//
+// Before the fix this returned nil: the caller's context was shadowed by the derived
+// timeout context, so the post-lookup check consulted only the derived one, which had
+// not yet observed the caller's cancellation. That is the same defect that made
+// TestDiscoverAndRegisterNamedAlways_DeadlineWhileLookingUpMissingHelper flaky under
+// load, where the window had to be hit by chance.
+func TestDiscoverAndRegisterNamedAlways_ReportsCallerDeadlineExpiredDuringLookup(t *testing.T) {
+	name := types.AgentName("disc-named-caller-deadline")
+	caller := &stalledPropagationCtx{done: make(chan struct{})}
+
+	originalLookPath := lookPathExternalAgent
+	t.Cleanup(func() { lookPathExternalAgent = originalLookPath })
+	lookPathExternalAgent = func(string) (string, error) {
+		// Expire the caller mid-lookup and return straight away, before the derived
+		// context's watcher goroutine can observe it. ErrNotFound is the benign
+		// "no such helper" result the deadline must take precedence over.
+		close(caller.done)
+		return "", exec.ErrNotFound
+	}
+
+	err := DiscoverAndRegisterNamedAlways(caller, name)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("DiscoverAndRegisterNamedAlways() error = %v, want context deadline exceeded", err)
+	}
+}

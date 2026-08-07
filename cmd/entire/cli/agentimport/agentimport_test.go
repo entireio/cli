@@ -540,3 +540,82 @@ func TestRun_DryRunWritesNothing(t *testing.T) {
 		t.Fatalf("dry-run must not write, got %+v", infos)
 	}
 }
+
+// TestRun_CodexImportSanitizesAndKeepsOffsetsAligned covers `entire import` for
+// Codex, which reads raw third-party rollouts. It guards two properties, neither of
+// which had any import-side test before:
+//
+//  1. The stored transcript is sanitized — no encrypted payloads reach storage.
+//  2. Turn offsets still line up. The Codex importer derives
+//     CheckpointTranscriptStart from raw line indices (splitLineTurns), so
+//     sanitization must not change the line count; a dropped line would silently
+//     mis-scope every imported turn after it. This is the property that made import
+//     a fourth casualty of the old drop-the-compaction-line behavior.
+//
+// It does NOT pin the sanitize-before-redact ORDER in Run(): the store sanitizes as a
+// last-resort safety net, so the stored content is identical either way. Getting the
+// order right in Run() is a wasted-work fix (redaction scanning ciphertext the store
+// would discard), and it is not observable from the stored result.
+func TestRun_CodexImportSanitizesAndKeepsOffsetsAligned(t *testing.T) {
+	t.Parallel()
+	repo, repoDir := initRepoWithCommit(t)
+	codexDir := t.TempDir()
+
+	const ciphertext = "Y2lwaGVydGV4dC1wYXlsb2FkLXNob3VsZC1uZXZlci1iZS1zdG9yZWQ="
+	rollout := strings.Join([]string{
+		`{"timestamp":"2026-06-20T00:00:00Z","type":"session_meta","payload":{"id":"codex-import-1","cwd":"` + repoDir + `"}}`,
+		`{"timestamp":"2026-06-20T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first prompt"}]}}`,
+		`{"timestamp":"2026-06-20T00:00:02Z","type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"` + ciphertext + `"}}`,
+		`{"timestamp":"2026-06-20T00:00:03Z","type":"response_item","payload":{"type":"compaction","encrypted_content":"` + ciphertext + `"}}`,
+		`{"timestamp":"2026-06-20T00:00:04Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}}`,
+	}, "\n") + "\n"
+	rawLines := len(strings.Split(strings.TrimRight(rollout, "\n"), "\n"))
+
+	if err := os.WriteFile(filepath.Join(codexDir, "codex-import-1.jsonl"), []byte(rollout), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(context.Background(), repo, codexImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: codexDir,
+		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported == 0 {
+		t.Fatalf("expected at least one imported turn, got %+v", res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Derive the turn UUID the same way the importer does rather than guessing it.
+	turns, splitErr := codexImporter{}.SplitTurns(SessionFile{SessionID: "codex-import-1"}, []byte(rollout))
+	if splitErr != nil {
+		t.Fatalf("SplitTurns: %v", splitErr)
+	}
+	if len(turns) == 0 {
+		t.Fatal("codex importer produced no turns")
+	}
+	cid := DeriveCheckpointID("codex-import-1", turns[0].UUID)
+	sc, err := stores.Persistent.ReadSessionContent(context.Background(), cid, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent(%s): %v", cid, err)
+	}
+
+	stored := string(sc.Transcript)
+	if strings.Contains(stored, ciphertext) {
+		t.Error("imported transcript still carries encrypted_content ciphertext")
+	}
+	if strings.Contains(stored, "encrypted_content") {
+		t.Error("imported transcript still has an encrypted_content key")
+	}
+	if !strings.Contains(stored, "first prompt") || !strings.Contains(stored, "first answer") {
+		t.Errorf("imported transcript lost conversation content:\n%s", stored)
+	}
+	if got := len(strings.Split(strings.TrimRight(stored, "\n"), "\n")); got != rawLines {
+		t.Errorf("stored transcript has %d lines, rollout had %d — imported turn offsets "+
+			"(CheckpointTranscriptStart from raw line indices) would drift", got, rawLines)
+	}
+}

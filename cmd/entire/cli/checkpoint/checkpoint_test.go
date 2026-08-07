@@ -1461,10 +1461,17 @@ func TestWriteCommitted_CodexSanitizesPortableTranscript(t *testing.T) {
 
 	got := string(content.Transcript)
 	require.NotContains(t, got, `"encrypted_content":"REDACTED"`)
-	require.NotContains(t, got, `"type":"compaction"`)
-	require.NotContains(t, got, `"type":"compaction_summary"`)
 	require.Contains(t, got, `"summary":[{"text":"brief"}]`)
 	require.Contains(t, got, `"summary":[{"text":"nested"}]`)
+
+	// The top-level compaction item keeps its line (payload stripped) so the stored
+	// transcript stays line-aligned with the agent's rollout. Items nested inside a
+	// compacted line's replacement_history are still removed outright — they are
+	// array elements, so removing them cannot shift line numbers.
+	require.Contains(t, got, `"type":"compaction"`)
+	require.NotContains(t, got, `"type":"compaction_summary"`)
+	require.Len(t, strings.Split(strings.TrimRight(got, "\n"), "\n"), 3,
+		"stored transcript must keep one line per rollout line")
 }
 
 // TestReadSessionContent_InvalidIndex verifies that ReadSessionContent returns
@@ -5051,4 +5058,51 @@ func TestCommittedMetadata_InvestigateFieldsRoundTrip(t *testing.T) {
 	if meta.InvestigateTopic != "topic-x" {
 		t.Errorf("InvestigateTopic: got %q", meta.InvestigateTopic)
 	}
+}
+
+// TestWriteCommitted_CodexSanitizesTranscriptFromPath covers writeTranscript's
+// TranscriptPath fallback — the one way raw bytes reach the store, and previously
+// the only transcript path with no test at all.
+//
+// It asserts the stored result: sanitized, line-aligned, conversation intact. It
+// deliberately does NOT claim to pin the sanitize-before-redact ORDER on this path,
+// because the two orders are indistinguishable by output — redaction is JSON-aware,
+// so redact-then-sanitize still ends with the encrypted_content key deleted. Getting
+// the order right there is a wasted-work fix (redaction scanning ciphertext that
+// sanitization discards), not a content fix, and it is not observable from here.
+func TestWriteCommitted_CodexSanitizesTranscriptFromPath(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	checkpointID := id.MustCheckpointID("c0de5a1712ed")
+
+	rollout := `{"timestamp":"2026-03-25T11:31:11.754Z","type":"response_item","payload":{"type":"reasoning","summary":[{"text":"brief"}],"encrypted_content":"Y2lwaGVydGV4dA=="}}
+{"timestamp":"2026-03-25T11:31:11.755Z","type":"response_item","payload":{"type":"compaction","encrypted_content":"Y2lwaGVydGV4dA=="}}
+{"timestamp":"2026-03-25T11:31:11.756Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}
+`
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(rollout), 0o600))
+
+	// No in-memory Transcript: force the TranscriptPath fallback.
+	err := store.Write(context.Background(), Session{
+		CheckpointID:     checkpointID,
+		SessionID:        "codex-session",
+		Strategy:         "manual-commit",
+		Agent:            agent.AgentTypeCodex,
+		TranscriptPath:   path,
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	require.NoError(t, err)
+
+	content, err := store.ReadLatestSessionContent(context.Background(), checkpointID)
+	require.NoError(t, err)
+
+	got := string(content.Transcript)
+	require.NotContains(t, got, "Y2lwaGVydGV4dA==", "ciphertext survived into storage")
+	require.NotContains(t, got, "encrypted_content")
+	require.Contains(t, got, `"type":"compaction"`, "compaction line must survive, payload stripped")
+	require.Contains(t, got, "hello", "conversation content was lost")
+	require.Len(t, strings.Split(strings.TrimRight(got, "\n"), "\n"), 3,
+		"stored transcript must stay line-aligned with the rollout")
 }

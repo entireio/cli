@@ -1017,6 +1017,28 @@ func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 	return result
 }
 
+// SanitizeTranscriptForAgentType strips non-portable agent state from a transcript
+// about to be stored (see agent.TranscriptSanitizer). It exists for callers that work
+// from a types.AgentType rather than a live agent.Agent: the store itself, as a
+// last-resort safety net, and `entire import`, which reads raw third-party rollouts
+// and calls this before its own redaction pass so the sanitize-before-redact order
+// holds there too.
+//
+// It dispatches on agent type explicitly rather than resolving via
+// agent.GetByAgentType: the registry is populated by package init, so that lookup
+// only succeeds when something else in the binary happens to import agent/codex, and
+// when it doesn't, sanitization silently degrades to a no-op — reintroducing the bug
+// this guards against with no signal. A compile-time dependency cannot fail that way.
+func SanitizeTranscriptForAgentType(agentType types.AgentType, data []byte) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	if agentType == agent.AgentTypeCodex {
+		return codex.SanitizePortableTranscript(data)
+	}
+	return data
+}
+
 // writeTranscript writes the transcript, compact transcript, and content hash
 // to the checkpoint entries. The compact transcript.jsonl (the full compacted
 // session) is written into the tree and pushed alongside full.jsonl. Returns
@@ -1038,7 +1060,10 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 			rawData = nil
 		}
 		if len(rawData) > 0 {
-			redacted, redactErr := redact.JSONLBytes(rawData)
+			// Sanitize BEFORE redacting, matching the pipeline order everywhere else:
+			// redaction must not scan ciphertext that sanitization is about to
+			// discard. This is the one path that reaches the store with raw bytes.
+			redacted, redactErr := redact.JSONLBytes(SanitizeTranscriptForAgentType(opts.Agent, rawData))
 			if redactErr != nil {
 				return false, nil, fmt.Errorf("failed to redact transcript from file: %w", redactErr)
 			}
@@ -1049,9 +1074,11 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 		return false, nil, nil
 	}
 
-	if opts.Agent == agent.AgentTypeCodex {
-		transcriptBytes = codex.SanitizePortableTranscript(transcriptBytes)
-	}
+	// Safety net for in-memory callers that reached the store without sanitizing
+	// (notably `entire import`, which writes raw third-party rollouts). Idempotent,
+	// so it is a no-op for the paths that already did it — including the fallback
+	// above.
+	transcriptBytes = SanitizeTranscriptForAgentType(opts.Agent, transcriptBytes)
 
 	// Chunk the transcript if it's too large
 	chunkStart := time.Now()
@@ -2054,13 +2081,10 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 	}
 
 	// Regenerate the compact transcript from the new content so the pushed
-	// transcript.jsonl stays current. Codex transcripts are sanitized first to
-	// match the initial-write path (writeTranscript), which sanitizes before
-	// compaction; this finalize path otherwise passes raw bytes.
-	compactBytes := transcript.Bytes()
-	if agentType == agent.AgentTypeCodex {
-		compactBytes = codex.SanitizePortableTranscript(compactBytes)
-	}
+	// transcript.jsonl stays current. Sanitized first to match the initial-write
+	// path (writeTranscript), which sanitizes before compaction; this finalize path
+	// otherwise passes raw bytes.
+	compactBytes := SanitizeTranscriptForAgentType(agentType, transcript.Bytes())
 	compactStart := s.writeCompactTranscript(ctx, agentType, startLine, compactBytes, sessionDir, entries)
 
 	// If regeneration produced no compact transcript (failure, empty, or
