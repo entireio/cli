@@ -120,6 +120,8 @@ scoops:
     description: "CLI for Entire"
     license: MIT
     skip_upload: auto
+    post_install:
+      - "entire __track-install --method scoop"
 
 homebrew_casks:
   - name: entire
@@ -143,6 +145,10 @@ homebrew_casks:
     conflicts:
       - cask: entire@nightly
     skip_upload: auto
+    hooks:
+      post:
+        install: |
+          system_command "#{staged_path}/entire", args: ["__track-install", "--method", "brew"]
 
   - name: entire@nightly
     repository:
@@ -165,6 +171,10 @@ homebrew_casks:
     conflicts:
       - cask: entire
     skip_upload: "{{ if not .Prerelease }}true{{ end }}"
+    hooks:
+      post:
+        install: |
+          system_command "#{staged_path}/entire", args: ["__track-install", "--method", "brew"]
 
 announce:
   discord:
