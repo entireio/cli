@@ -221,7 +221,7 @@ func newTrackInstallCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&method, "method", "", "installation method (brew|scoop)")
+	cmd.Flags().StringVar(&method, "method", "", "installation method (install.sh|brew|scoop)")
 	markRequired(cmd, "method")
 	return cmd
 }

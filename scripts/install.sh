@@ -269,6 +269,12 @@ main() {
         error "Installation completed but the binary failed to execute. Please check the installation."
     fi
 
+    # Record the install as early as possible — before any PATH-related early
+    # exit below — so first-time installs (not yet on PATH) are still counted.
+    # Best-effort, detached, opt-out aware; uses the absolute path, not PATH.
+    info "Sending an anonymous install ping. Set ENTIRE_TELEMETRY_OPTOUT=1 (before installing) to disable."
+    "$install_path" __track-install --method install.sh || true
+
     # Check if the installed binary is the one that will be found in PATH
     local path_binary
     path_binary=$(command -v "entire" 2>/dev/null || true)
@@ -333,7 +339,6 @@ main() {
     fi
 
     info "Running post-install actions..."
-    info "Sending an anonymous install ping. Set ENTIRE_TELEMETRY_OPTOUT=1 to disable."
     "$install_path" curl-bash-post-install
 }
 

@@ -191,11 +191,17 @@ func SendEvent(payloadJSON string) {
 	// Resolve the installed git version best-effort. A missing or failing
 	// git must never block the rest of the telemetry — the property is simply
 	// omitted when it can't be determined.
-	if v := gitVersion(context.Background()); v != "" {
-		if payload.Properties == nil {
-			payload.Properties = map[string]any{}
+	//
+	// Skipped for the pre-consent cli_installed event: its disclosure
+	// enumerates an exact, fixed set of properties (method/channel/
+	// cli_version/os/arch) with no git_version. Other events are unaffected.
+	if payload.Event != "cli_installed" {
+		if v := gitVersion(context.Background()); v != "" {
+			if payload.Properties == nil {
+				payload.Properties = map[string]any{}
+			}
+			payload.Properties["git_version"] = v
 		}
-		payload.Properties["git_version"] = v
 	}
 
 	// Build properties
