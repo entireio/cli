@@ -96,6 +96,13 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 
+	// Memoize worktree status for the handlers whose window is provably stable.
+	// Centralized here rather than inside a handler so that no handler can opt
+	// itself in without the precondition being reviewed (see statusCacheSafe).
+	if statusCacheSafe(event.Type) {
+		ctx = gitrepo.WithStatusCache(ctx)
+	}
+
 	switch event.Type {
 	case agent.SessionStart:
 		return handleLifecycleSessionStart(ctx, ag, event)
@@ -117,6 +124,33 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return handleLifecycleToolUse(ctx, ag, event)
 	default:
 		return fmt.Errorf("unknown lifecycle event type: %d", event.Type)
+	}
+}
+
+// statusCacheSafe reports whether t's handler is guaranteed to neither write
+// tracked files nor stage anything for the duration of the handler, which is the
+// precondition for reusing one worktree status across it (see
+// gitrepo.WithStatusCache).
+//
+// This is a closed allowlist and must stay one. Post-agent handlers — TurnEnd,
+// SubagentEnd — run after the agent has edited files, and DetectFileChanges
+// there must observe those edits. Before adding an event, check that its handler
+// performs no tracked-file write between its first and last status read;
+// TurnStart only qualifies because EnsureSetup (which can rewrite the tracked
+// .entire/.gitignore) was hoisted above its first read.
+//
+// Every event is listed explicitly rather than folded into the default so the
+// exhaustive linter fails the build when a new EventType is added, forcing that
+// review to happen. The default stays as a belt-and-braces deny.
+func statusCacheSafe(t agent.EventType) bool {
+	switch t {
+	case agent.TurnStart:
+		return true
+	case agent.SessionStart, agent.TurnEnd, agent.Compaction, agent.SessionEnd,
+		agent.SubagentStart, agent.SubagentEnd, agent.ModelUpdate, agent.ToolUse:
+		return false
+	default:
+		return false
 	}
 }
 
@@ -550,16 +584,6 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	// background lock holder can't stall the user's prompt (see the const doc).
 	ctx = strategy.WithSessionLockWait(ctx, turnStartSessionLockWait)
 
-	// Read the worktree status at most once for this hook. TurnStart runs before
-	// the agent acts, and it neither stages anything nor writes tracked files —
-	// only session metadata under .entire/ and refs under .git/ — so the status
-	// cannot change while this hook executes. Note the precondition is "no index
-	// writes and no tracked-file writes", not merely "nothing outside .git/":
-	// .git/index lives inside .git/ and staging does change reported status.
-	// Without the cache both CapturePrePromptState and the strategy's prompt
-	// attribution pay for a full go-git worktree walk.
-	ctx = gitrepo.WithStatusCache(ctx)
-
 	// Fill model from hint file if the agent didn't provide it on this hook
 	if event.Model == "" {
 		if hint := strategy.LoadModelHint(ctx, sessionID); hint != "" {
@@ -568,6 +592,20 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 				slog.String("model", hint))
 		}
 	}
+
+	// Strategy setup runs before the first worktree-status read below.
+	// EnsureEntireGitignore can append entries to .entire/.gitignore, which is
+	// tracked, and the dispatcher has already installed a status cache for this
+	// event (see statusCacheSafe). The cache fills on first read rather than at
+	// install, so doing this write first keeps every cached read consistent with
+	// the worktree. Moving this back below CapturePrePromptState would reintroduce
+	// a tracked-file write between two cached reads.
+	_, setupSpan := perf.Start(ctx, "ensure_setup")
+	if err := strategy.EnsureSetup(ctx); err != nil {
+		logging.Warn(logCtx, "failed to ensure strategy setup",
+			slog.String("error", err.Error()))
+	}
+	setupSpan.End()
 
 	// Capture pre-prompt state (including transcript position via TranscriptAnalyzer)
 	_, captureSpan := perf.Start(ctx, "capture_pre_prompt_state")
@@ -601,13 +639,8 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		}
 	}
 
-	// Ensure strategy setup and initialize session
+	// Initialize session (setup already ran above, before the first status read)
 	_, initSpan := perf.Start(ctx, "init_session")
-	if err := strategy.EnsureSetup(ctx); err != nil {
-		logging.Warn(logCtx, "failed to ensure strategy setup",
-			slog.String("error", err.Error()))
-	}
-
 	strat := GetStrategy(ctx)
 	if err := strat.InitializeSession(ctx, sessionID, ag.Type(), event.SessionRef, event.Prompt, event.Model); err != nil {
 		logging.Warn(logCtx, "failed to initialize session state",
