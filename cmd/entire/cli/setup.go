@@ -34,6 +34,9 @@ const (
 	configDisplayLocal   = ".entire/settings.local.json"
 )
 
+// promptOptionYes is the value the shell setup prompts compare against.
+const promptOptionYes = "yes"
+
 // Flag names used across setup commands.
 const (
 	agentFlagName            = "agent"
@@ -2063,41 +2066,22 @@ func newCurlBashPostInstallCmd() *cobra.Command {
 // shellCompletionComment is the comment preceding the completion line
 const shellCompletionComment = "# Entire CLI shell completion"
 
-// errUnsupportedShell is returned when the user's shell is not supported for completion.
-var errUnsupportedShell = errors.New("unsupported shell")
+// completionLines maps a shell to the line that loads Entire's completions.
+var completionLines = map[shellKind]string{
+	shellZsh:  "autoload -Uz compinit && compinit && source <(entire completion zsh)",
+	shellBash: "source <(entire completion bash)",
+	shellFish: "entire completion fish | source",
+}
 
 // shellCompletionTarget returns the rc file path and completion lines for the
-// user's current shell.
+// user's current shell. Shell detection and rc-file selection live in
+// shellRCTarget, shared with `entire shellhook install`.
 func shellCompletionTarget() (shellName, rcFile, completionLine string, err error) {
-	home, err := os.UserHomeDir()
+	kind, shellName, rcFile, err := shellRCTarget("")
 	if err != nil {
-		return "", "", "", fmt.Errorf("cannot determine home directory: %w", err)
+		return "", "", "", err
 	}
-
-	shell := os.Getenv("SHELL")
-	switch {
-	case strings.Contains(shell, "zsh"):
-		return "Zsh",
-			filepath.Join(home, ".zshrc"),
-			"autoload -Uz compinit && compinit && source <(entire completion zsh)",
-			nil
-	case strings.Contains(shell, "bash"):
-		bashRC := filepath.Join(home, ".bashrc")
-		if _, err := os.Stat(filepath.Join(home, ".bash_profile")); err == nil {
-			bashRC = filepath.Join(home, ".bash_profile")
-		}
-		return "Bash",
-			bashRC,
-			"source <(entire completion bash)",
-			nil
-	case strings.Contains(shell, "fish"):
-		return "Fish",
-			filepath.Join(home, ".config", "fish", "config.fish"),
-			"entire completion fish | source",
-			nil
-	default:
-		return "", "", "", errUnsupportedShell
-	}
+	return shellName, rcFile, completionLines[kind], nil
 }
 
 // promptShellCompletion offers to add shell completion to the user's rc file.
@@ -2123,7 +2107,7 @@ func promptShellCompletion(w io.Writer) error {
 			huh.NewSelect[string]().
 				Title(fmt.Sprintf("Enable shell completion? (detected: %s)", shellName)).
 				Options(
-					huh.NewOption("Yes", "yes"),
+					huh.NewOption("Yes", promptOptionYes),
 					huh.NewOption("No", "no"),
 				).
 				Value(&selected),
@@ -2135,7 +2119,7 @@ func promptShellCompletion(w io.Writer) error {
 		return nil
 	}
 
-	if selected != "yes" {
+	if selected != promptOptionYes {
 		return nil
 	}
 
@@ -2150,32 +2134,15 @@ func promptShellCompletion(w io.Writer) error {
 }
 
 // isCompletionConfigured checks if shell completion is already in the rc file.
+// It matches the completion invocation itself rather than Entire's marker
+// comment, so a hand-written completion line also counts as configured.
 func isCompletionConfigured(rcFile string) bool {
-	//nolint:gosec // G304: rcFile is constructed from home dir + known filename, not user input
-	content, err := os.ReadFile(rcFile)
-	if err != nil {
-		return false // File doesn't exist or can't read, treat as not configured
-	}
-	return strings.Contains(string(content), "entire completion")
+	return rcFileContains(rcFile, "entire completion")
 }
 
 // appendShellCompletion adds the completion line to the rc file.
 func appendShellCompletion(rcFile, completionLine string) error {
-	if err := os.MkdirAll(filepath.Dir(rcFile), 0o700); err != nil {
-		return fmt.Errorf("creating directory: %w", err)
-	}
-	//nolint:gosec // G302: Shell rc files need 0644 for user readability
-	f, err := os.OpenFile(rcFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("opening file: %w", err)
-	}
-	defer f.Close()
-
-	_, err = f.WriteString("\n" + shellCompletionComment + "\n" + completionLine + "\n")
-	if err != nil {
-		return fmt.Errorf("writing completion: %w", err)
-	}
-	return nil
+	return appendMarkedBlock(rcFile, shellCompletionComment, completionLine)
 }
 
 // promptTelemetryConsent asks the user if they want to enable telemetry.
