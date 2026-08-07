@@ -59,12 +59,44 @@ var (
 	worktreeRootCacheDir string
 )
 
+type worktreeRootContextKey struct{}
+
+// WithWorktreeRoot returns a context that pins WorktreeRoot (and everything
+// derived from it, such as AbsPath) to worktreeRoot instead of resolving the
+// process cwd. It mirrors settings.WithWorktreeRoot so a caller can inspect a
+// repository it is not running inside — `entire scan` uses it to evaluate every
+// discovered repo without chdir'ing the process.
+//
+// An empty root is ignored so callers can pass through an unset value.
+//
+// Only attach this to per-repo contexts, never to a command's root context: the
+// override silently redirects every path helper downstream of it.
+func WithWorktreeRoot(ctx context.Context, worktreeRoot string) context.Context {
+	if worktreeRoot == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, worktreeRootContextKey{}, filepath.Clean(worktreeRoot))
+}
+
+func worktreeRootFromContext(ctx context.Context) (string, bool) {
+	root, ok := ctx.Value(worktreeRootContextKey{}).(string)
+	return root, ok && root != ""
+}
+
 // WorktreeRoot returns the git worktree root directory.
 // Uses 'git rev-parse --show-toplevel' which returns the working tree toplevel.
 // In a worktree this is the worktree root, not the main repository root.
 // The result is cached per working directory.
 // Returns an error if not inside a git repository.
+//
+// A root installed with WithWorktreeRoot takes precedence and bypasses the
+// cwd-keyed cache entirely — the override must neither be served from nor
+// written to a cache keyed by a directory it has nothing to do with.
 func WorktreeRoot(ctx context.Context) (string, error) {
+	if root, ok := worktreeRootFromContext(ctx); ok {
+		return root, nil
+	}
+
 	// Get current working directory to check cache validity
 	cwd, err := os.Getwd() //nolint:forbidigo // already present in codebase
 	if err != nil {
