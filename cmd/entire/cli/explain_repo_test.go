@@ -79,18 +79,19 @@ func TestResolveExplainRepoID(t *testing.T) {
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
-	owner, repo, err := resolveExplainRepoID(cmd, "01KVBJCWYA4YW6J5M9GP655HZ9")
+	owner, repo, err := resolveExplainRepoID(cmd, "01KVBJCWYA4YW6J5M9GP655HZ9", "")
 	require.NoError(t, err)
 	assert.Equal(t, "entireio", owner, "full name must come back lowercased")
 	assert.Equal(t, "entire.io", repo)
 
-	_, _, err = resolveExplainRepoID(cmd, "01KVBJCWYA4YW6J5M9GP655HZZ")
+	_, _, err = resolveExplainRepoID(cmd, "01KVBJCWYA4YW6J5M9GP655HZZ", "")
 	require.ErrorContains(t, err, "no repository with ID")
 }
 
 // TestExplainRepoIsCurrent checks same-repo detection against the origin URL
 // forms a clone can carry. Not parallel: uses t.Chdir.
 func TestExplainRepoIsCurrent(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "f.txt", "x")
@@ -111,6 +112,9 @@ func TestExplainRepoIsCurrent(t *testing.T) {
 
 	gitRun(t, dir, "remote", "set-url", "origin", "entire://aws-us-east-2.entire.io/gh/EntireIO/CLI")
 	assert.True(t, explainRepoIsCurrent(ctx, "entireio", "cli"), "entire:// mirror origin")
+
+	gitRun(t, dir, "remote", "set-url", "origin", "entire://aws-us-east-2.entire.io/et/EntireIO/CLI")
+	assert.False(t, explainRepoIsCurrent(ctx, "entireio", "cli"), "non-GitHub forge must not match — --repo is gh-scoped")
 }
 
 // TestExplainCmd_RepoFlagValidation covers the flag-combination rules for
@@ -148,6 +152,7 @@ func TestExplainCmd_RepoFlagValidation(t *testing.T) {
 // checkpoint ID — a prefix cannot name a per-checkpoint ref. Not parallel:
 // uses t.Chdir (same-repo detection reads the cwd origin).
 func TestExplainCmd_RepoFlagRequiresFullID(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "f.txt", "x")
@@ -169,6 +174,7 @@ func TestExplainCmd_RepoFlagRequiresFullID(t *testing.T) {
 // foreign repo path (usable directly as a fetch URL) and the checkpoint ID.
 func crossRepoFixture(t *testing.T) (foreignDir string, cid id.CheckpointID) {
 	t.Helper()
+	testutil.IsolateGitConfigEnv(t)
 	const settingsBody = `{"enabled":true,"checkpoints":{"primary":{"type":"git-refs"}}}`
 
 	foreignDir = t.TempDir()
@@ -234,6 +240,6 @@ func TestFetchCrossRepoCheckpoint_MissingRefNamesRepo(t *testing.T) {
 	err := fetchCrossRepoCheckpoint(context.Background(), io.Discard, foreignDir, "acme/widgets", missing)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), missing.String())
-	assert.Contains(t, err.Error(), "acme/widgets's mirror")
+	assert.Contains(t, err.Error(), "mirror for acme/widgets")
 	assert.NotContains(t, strings.ToLower(err.Error()), "no checkpoint or commit found")
 }

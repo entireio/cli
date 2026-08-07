@@ -164,17 +164,12 @@ func newRepoCloneCmd() *cobra.Command {
 // right federation. With no clusterFlag, list from the active context. Shared
 // by `repo clone` and cross-repo `checkpoint explain --repo`.
 func listPullablePlacements(cmd *cobra.Command, owner, repo, clusterFlag string) ([]coreapi.ResolvedPlacement, error) {
-	runWithCore := runCore
-	if clusterFlag != "" {
-		if err := validateClusterHost(clusterFlag); err != nil {
-			return nil, fmt.Errorf("invalid --cluster: %w", err)
-		}
-		runWithCore = func(cmd *cobra.Command, fn func(context.Context, *coreapi.Client) error) error {
-			return runCoreForCluster(cmd, clusterFlag, fn)
-		}
+	runWithCore, err := coreRunnerForCluster(clusterFlag)
+	if err != nil {
+		return nil, err
 	}
 	var placements []coreapi.ResolvedPlacement
-	err := runWithCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+	err = runWithCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
 		ps, err := resolvePullablePlacements(ctx, c, owner, repo)
 		if err != nil {
 			return err
@@ -186,6 +181,21 @@ func listPullablePlacements(cmd *cobra.Command, owner, repo, clusterFlag string)
 		return nil, err
 	}
 	return placements, nil
+}
+
+// coreRunnerForCluster returns the core-dialing runner control-plane lookups
+// should use: runCore (active context) with no clusterFlag, else a runner that
+// dials the core fronting that cluster (validating the host first).
+func coreRunnerForCluster(clusterFlag string) (func(*cobra.Command, func(context.Context, *coreapi.Client) error) error, error) {
+	if clusterFlag == "" {
+		return runCore, nil
+	}
+	if err := validateClusterHost(clusterFlag); err != nil {
+		return nil, fmt.Errorf("invalid --cluster: %w", err)
+	}
+	return func(cmd *cobra.Command, fn func(context.Context, *coreapi.Client) error) error {
+		return runCoreForCluster(cmd, clusterFlag, fn)
+	}, nil
 }
 
 // mirrorLister is the subset of the control-plane client listMirrorsForRepo

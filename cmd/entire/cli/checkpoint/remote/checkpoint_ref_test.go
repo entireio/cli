@@ -195,6 +195,7 @@ func TestFetchCheckpointRef_NonOriginRemoteNeverClassifiesAbsence(t *testing.T) 
 // fetch lands objects in the cwd repo's store).
 func foreignRepoFixture(t *testing.T, withRef bool) (workDir, bareDir string, ref plumbing.ReferenceName) {
 	t.Helper()
+	testutil.IsolateGitConfigEnv(t)
 	bareDir = t.TempDir()
 	out, err := exec.CommandContext(t.Context(), "git", "init", "--bare", bareDir).CombinedOutput()
 	require.NoError(t, err, "git init --bare: %s", out)
@@ -236,8 +237,8 @@ func TestFetchCheckpointRefFrom_PresentRefFetches(t *testing.T) {
 // TestFetchCheckpointRefFrom_MissingRefIsAbsence: an explicit URL is
 // authoritative for checkpoint refs, so a remote genuinely lacking the ref
 // must classify as absence (ErrReferenceNotFound) — that's what lets the
-// cross-repo explain path print its specific "not found in <repo>'s mirror"
-// error instead of a generic failure.
+// cross-repo explain path print its specific "not found in the mirror for
+// <repo>" error instead of a generic failure.
 func TestFetchCheckpointRefFrom_MissingRefIsAbsence(t *testing.T) {
 	_, bareDir, ref := foreignRepoFixture(t, false)
 

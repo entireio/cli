@@ -55,9 +55,16 @@ func parseExplainRepoFlag(value string) (explainRepoRef, error) {
 
 // resolveExplainRepoID resolves a raw repo ULID to its owner/name via the
 // control plane's by-id lookup (the same call `entire repo get <ulid>` uses).
-func resolveExplainRepoID(cmd *cobra.Command, repoID string) (owner, repo string, err error) {
+// A clusterFlag naming a cluster in a different federation dials that
+// cluster's core instead of the active context's, matching how the placement
+// lookup routes (see listPullablePlacements).
+func resolveExplainRepoID(cmd *cobra.Command, repoID, clusterFlag string) (owner, repo string, err error) {
+	runWithCore, err := coreRunnerForCluster(clusterFlag)
+	if err != nil {
+		return "", "", err
+	}
 	var fullName string
-	err = runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+	err = runWithCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
 		r, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
 		if err != nil {
 			if isCoreNotFound(err) {
@@ -80,11 +87,13 @@ func resolveExplainRepoID(cmd *cobra.Command, repoID string) (owner, repo string
 
 // explainRepoIsCurrent reports whether owner/repo names the same repository as
 // the cwd worktree's origin remote (handles ssh, https, and entire:// mirror
-// URL forms). Best-effort: any lookup or parse failure returns false, so
-// explain proceeds with the cross-repo fetch path.
+// URL forms). --repo is GitHub-scoped (gh/owner/name), so a non-GitHub origin
+// with a coincidentally matching owner/name must not count as the current
+// repo. Best-effort: any lookup or parse failure returns false, so explain
+// proceeds with the cross-repo fetch path.
 func explainRepoIsCurrent(ctx context.Context, owner, repo string) bool {
-	_, curOwner, curRepo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
-	if err != nil {
+	curForge, curOwner, curRepo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
+	if err != nil || curForge != "gh" {
 		return false
 	}
 	return strings.EqualFold(curOwner, owner) && strings.EqualFold(curRepo, repo)
@@ -134,7 +143,7 @@ func prepareCrossRepoExplain(cmd *cobra.Command, repoFlag, clusterFlag, target s
 	cmd.SilenceUsage = true
 	owner, repoName := ref.owner, ref.repo
 	if ref.repoID != "" {
-		owner, repoName, err = resolveExplainRepoID(cmd, ref.repoID)
+		owner, repoName, err = resolveExplainRepoID(cmd, ref.repoID, clusterFlag)
 		if err != nil {
 			return err
 		}
@@ -172,7 +181,7 @@ func fetchCrossRepoCheckpoint(ctx context.Context, errW io.Writer, url, ownerRep
 		return nil
 	}
 	if errors.Is(fetchErr, plumbing.ErrReferenceNotFound) {
-		return fmt.Errorf("checkpoint %s not found in %s's mirror; repos using the legacy branch-based checkpoint store (or an external checkpoint_remote) are not supported cross-repo yet", cid, ownerRepo)
+		return fmt.Errorf("checkpoint %s not found in the mirror for %s; repos using the legacy branch-based checkpoint store (or an external checkpoint_remote) are not supported cross-repo yet", cid, ownerRepo)
 	}
 	return fmt.Errorf("fetch checkpoint %s from %s: %w", cid, ownerRepo, fetchErr)
 }
