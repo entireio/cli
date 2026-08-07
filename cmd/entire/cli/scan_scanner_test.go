@@ -223,7 +223,7 @@ func TestFindGitRepos_SkipsUnreadableRoots(t *testing.T) {
 // helpers use, so a developer's global git config cannot change the outcome.
 func runScanTestGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(t.Context(), "git", args...)
 	cmd.Dir = dir
 	cmd.Env = testutil.GitIsolatedEnv()
 	out, err := cmd.CombinedOutput()

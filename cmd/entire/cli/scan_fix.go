@@ -212,11 +212,12 @@ func runScanFixWithCLI(ctx context.Context, action scanFixAction, out io.Writer)
 }
 
 // linePrefixWriter prefixes every complete line written through it, so the
-// output of several `entire enable` runs stays attributable.
+// output of several `entire enable` runs stays attributable. Incomplete lines
+// are buffered until their newline arrives; Flush emits whatever is left.
 type linePrefixWriter struct {
 	w      io.Writer
 	prefix string
-	buf    bytes.Buffer
+	buf    []byte
 }
 
 func newLinePrefixWriter(w io.Writer, prefix string) *linePrefixWriter {
@@ -226,26 +227,25 @@ func newLinePrefixWriter(w io.Writer, prefix string) *linePrefixWriter {
 // Flush emits any buffered partial line. Call it once the producer is done —
 // `entire enable` output does not always end in a newline.
 func (p *linePrefixWriter) Flush() {
-	if p.buf.Len() == 0 {
+	if len(p.buf) == 0 {
 		return
 	}
-	_, _ = io.WriteString(p.w, p.prefix+p.buf.String()+"\n")
-	p.buf.Reset()
+	fmt.Fprint(p.w, p.prefix+string(p.buf)+"\n")
+	p.buf = nil
 }
 
+// Write never reports an error: the destination is the command's own output
+// stream, and failing a subprocess because its progress text could not be
+// echoed would be worse than losing the text.
 func (p *linePrefixWriter) Write(data []byte) (int, error) {
-	p.buf.Write(data)
+	p.buf = append(p.buf, data...)
 	for {
-		line, err := p.buf.ReadString('\n')
-		if err != nil {
-			// Partial line: put it back and wait for the rest.
-			p.buf.Reset()
-			p.buf.WriteString(line)
+		idx := bytes.IndexByte(p.buf, '\n')
+		if idx < 0 {
 			break
 		}
-		if _, werr := io.WriteString(p.w, p.prefix+line); werr != nil {
-			return len(data), fmt.Errorf("writing prefixed output: %w", werr)
-		}
+		fmt.Fprint(p.w, p.prefix+string(p.buf[:idx+1]))
+		p.buf = p.buf[idx+1:]
 	}
 	return len(data), nil
 }

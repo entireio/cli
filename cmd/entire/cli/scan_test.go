@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -202,7 +203,7 @@ func (r *recordingScanFixRunner) run(_ context.Context, action scanFixAction, ou
 	r.mu.Lock()
 	r.actions = append(r.actions, action)
 	r.mu.Unlock()
-	_, _ = io.WriteString(out, "enabling\n")
+	fmt.Fprint(out, "enabling\n")
 	if r.failOn != "" && action.RepoRoot == r.failOn {
 		return io.ErrUnexpectedEOF
 	}
