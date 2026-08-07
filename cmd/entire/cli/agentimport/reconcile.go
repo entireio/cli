@@ -172,9 +172,14 @@ func matchHeuristic(turns []Turn, missing map[plumbing.Hash]*CommitRecord) []Lin
 	}
 	starts, ends := turnWindows(turns)
 
-	// commitTurn maps each commit to its unique containing turn (-1 = ambiguous
-	// or none); turnCommits counts, per turn, how many commits its window holds.
-	commitTurn := make(map[plumbing.Hash]int, len(missing))
+	// commitTurn maps each commit to the unique turn whose window contains it
+	// (absent = none, or ambiguous because two windows claim it); turnCommits
+	// counts, per turn, how many commits its window holds.
+	type turnMatch struct {
+		index int
+		uuid  string
+	}
+	commitTurn := make(map[plumbing.Hash]turnMatch, len(missing))
 	turnCommits := make([]int, len(turns))
 	for hash, rec := range missing {
 		match := -1
@@ -188,21 +193,22 @@ func matchHeuristic(turns []Turn, missing map[plumbing.Hash]*CommitRecord) []Lin
 			}
 			match = i
 		}
-		commitTurn[hash] = match
-		if match >= 0 {
-			turnCommits[match]++
+		if match < 0 {
+			continue
 		}
+		commitTurn[hash] = turnMatch{index: match, uuid: turns[match].UUID}
+		turnCommits[match]++
 	}
 
 	var out []LinkResult
 	for hash, rec := range missing {
-		turnIndex := commitTurn[hash]
-		if turnIndex < 0 || turnCommits[turnIndex] != 1 {
+		match, ok := commitTurn[hash]
+		if !ok || turnCommits[match.index] != 1 {
 			continue
 		}
 		out = append(out, LinkResult{
 			CommitSHA: rec.SHA,
-			TurnUUID:  turns[turnIndex].UUID,
+			TurnUUID:  match.uuid,
 			Method:    cp.CommitSHAMethodHeuristic,
 		})
 	}

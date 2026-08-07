@@ -112,6 +112,58 @@ func TestResolveImportLinkCommitSHA_HEADWhenNoDefaultBranch(t *testing.T) {
 	require.Equal(t, sha, got)
 }
 
+// TestResolveImportScanTips_DedupesAndCoversHEAD proves the reconcile scan
+// resolves all three tips, deduping when they coincide. HEAD is the one that
+// reaches an unmerged feature branch, and origin's tip the one that reaches
+// commits merged by someone else — dropping either would silently hide work
+// from the scan.
+func TestResolveImportScanTips_DedupesAndCoversHEAD(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, "f.txt", "one")
+	testutil.GitAdd(t, repoDir, "f.txt")
+	testutil.GitCommit(t, repoDir, "first")
+	firstSHA := testutil.GetHeadHash(t, repoDir)
+
+	repo, err := git.PlainOpen(repoDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = repo.Close() })
+
+	// One commit, no origin: the local default-branch tip and HEAD are the same
+	// commit, so the result must be a single tip, not the same hash three times.
+	require.Equal(t, []plumbing.Hash{plumbing.NewHash(firstSHA)}, resolveImportScanTips(repo))
+
+	// A diverged origin/master adds a second, distinct tip.
+	testutil.WriteFile(t, repoDir, "f.txt", "two")
+	testutil.GitAdd(t, repoDir, "f.txt")
+	testutil.GitCommit(t, repoDir, "second")
+	secondSHA := testutil.GetHeadHash(t, repoDir)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewRemoteReferenceName("origin", "master"), plumbing.NewHash(firstSHA))))
+
+	// origin's tip comes first (the commit the server already knows), then the
+	// local tip. HEAD equals the local tip here and is deduped away.
+	require.Equal(t,
+		[]plumbing.Hash{plumbing.NewHash(firstSHA), plumbing.NewHash(secondSHA)},
+		resolveImportScanTips(repo))
+}
+
+// TestResolveImportScanTips_EmptyRepo proves the scan-tip resolver degrades to
+// no tips (rather than panicking) on a repo with no commits.
+func TestResolveImportScanTips_EmptyRepo(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	// git.PlainInit deliberately: the repo must stay commit-free.
+	repo, err := git.PlainInit(repoDir, false)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = repo.Close() })
+
+	require.Empty(t, resolveImportScanTips(repo))
+}
+
 // TestResolveImportLinkCommitSHA_EmptyRepo proves the resolver returns "" and
 // does not panic on a repo with no commits.
 func TestResolveImportLinkCommitSHA_EmptyRepo(t *testing.T) {

@@ -443,6 +443,14 @@ func recomputeSummary(sc *storedCheckpoint) {
 		if session.Metadata.TokenUsage != nil {
 			summary.TokenUsage = session.Metadata.TokenUsage
 		}
+		// The commit link is lifted from whichever session carries one, and a
+		// link-less later session (e.g. a review attached to an imported
+		// checkpoint) leaves the existing one alone — the same
+		// preserve-on-rewrite rule the git writer applies.
+		if session.Metadata.CommitSHA != "" {
+			summary.CommitSHA = session.Metadata.CommitSHA
+			summary.CommitSHAMethod = session.Metadata.CommitSHAMethod
+		}
 		for _, f := range session.Metadata.FilesTouched {
 			if _, seen := files[f]; !seen {
 				files[f] = struct{}{}

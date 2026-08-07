@@ -345,20 +345,50 @@ When condensing multiple concurrent sessions:
 - `sessions` array in `CheckpointSummary` maps each session to its file paths
 - `files_touched` is merged from all sessions
 
+#### Commit links on imported checkpoints
+
 Checkpoints written by `entire import <agent>` additionally carry a `commit_sha`
-(omitempty) on both the session `Metadata` and the root `CheckpointSummary`,
-set to the default branch's head at import time — origin's tip is preferred
-(the commit the server already knows about), falling back to the local branch
-tip, then HEAD, then empty when nothing resolves. When the transcript itself
-records the commit(s) a turn made (Claude Code `gitOperation` records), the
-turn's checkpoint instead anchors to the last such commit that resolves and is
-reachable from the resolved link anchor (the default-branch head when
-resolvable) — see `turnAnchorResolver` (`agentimport/turn_anchor.go`);
-otherwise (older transcripts, or a recorded commit that's been
-squashed/rebased away) it falls back to the default-branch head as described
-above. It is a best-effort anchor for UI display only, not
-an attribution signal, and pre-existing imported checkpoints are not
-backfilled with it.
+plus a `commit_sha_method` (both omitempty) on the session `Metadata` and the
+root `CheckpointSummary`. Imported history has no `Entire-Checkpoint` trailer —
+existing commits are never rewritten — so the link lives on the checkpoint, and
+`commit_sha_method` records how much to trust it:
+
+| method | meaning |
+| --- | --- |
+| `recorded` | the turn's own transcript recorded creating this commit (Claude Code `gitOperation` records) and the SHA resolved inside the scanned window. Commit-accurate, but still not trailer attribution. |
+| `heuristic` | `--reconcile --accept-heuristics` matched the turn to an unlinked commit by time window, 1:1 and unambiguous in both directions. A best guess. |
+| `fallback` | the display anchor: the default branch's head at import time — origin's tip preferred (the commit the server already knows), then the local branch tip, then HEAD, then empty. Says "imported at this point in time", nothing about which commit the turn produced. |
+
+An empty method is legacy/unknown (written before the field existed);
+reconciliation treats it like `fallback`.
+
+Anchor resolution per turn lives in `turnAnchorResolver`
+(`agentimport/turn_anchor.go`): it takes the LAST transcript-recorded commit
+that resolves and passes a reachability gate — reachable from the fallback
+anchor, or present in the reconcile scan's commit set. Everything else (older
+transcripts, squashed or rebased-away commits) falls back.
+
+`entire import <agent> --reconcile` makes the linking explicit. It walks
+`origin/<default>`, the local default branch, and HEAD within the lookback
+window (`--lookback`, default 30 days), collects the commits carrying no
+`Entire-Checkpoint` trailer, links the turns it can, and reports the rest
+(plain text, or `--json` for the full document with untruncated SHAs and
+checkpoint IDs). Three properties are load-bearing:
+
+- **The scanned set is the reachability gate.** A commit on an unmerged feature
+  branch is unreachable from the default-branch anchor but IS in the scan, so a
+  turn that recorded it links exactly. A rebased-away SHA still resolves as an
+  object but was never scanned, so it falls back.
+- **Backfill, not rewrite.** A checkpoint an earlier import already wrote is
+  upgraded in place through the kind-routed `CheckpointCommitSHA` write request
+  (root summary + the named session; an empty `SessionID` targets every
+  imported session). Like other backfills it follows read routing and falls
+  through on `ErrCheckpointNotFound`, so an imported 12-hex checkpoint still on
+  the v1 branch is reachable under a git-refs primary.
+- **Links never weaken.** Stores refuse to replace a `recorded` link with a
+  `heuristic` or `fallback` one, and a no-op backfill writes nothing at all — no
+  blob, no commit, no ref move — so a converged re-run leaves the store
+  byte-identical.
 
 ### Checkpoint Policy
 
