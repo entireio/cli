@@ -124,33 +124,8 @@ func newRepoCloneCmd() *cobra.Command {
 				return fmt.Errorf("invalid <repo>: %w", err)
 			}
 
-			var placements []coreapi.ResolvedPlacement
-			lister := func(ctx context.Context, c *coreapi.Client) error {
-				ps, err := resolvePullablePlacements(ctx, c, owner, repo)
-				if err != nil {
-					return err
-				}
-				placements = ps
-				return nil
-			}
-			// An explicit --cluster may name a cluster in a different federation
-			// than the active context, whose mirrors the active-context core can't
-			// see (the original bug: cloning a royalcanin.partial.to mirror while a
-			// different context is active failed with "not mirrored on ..."). Dial
-			// the core fronting that cluster — discovered from its well-known and
-			// authenticated with the matching local context, the same path
-			// `mirror create <url> [cluster]` uses — so the lookup resolves against
-			// the right federation. With no --cluster, list from the active context.
-			runWithCore := runCore
-			if cluster != "" {
-				if err := validateClusterHost(cluster); err != nil {
-					return fmt.Errorf("invalid --cluster: %w", err)
-				}
-				runWithCore = func(cmd *cobra.Command, fn func(context.Context, *coreapi.Client) error) error {
-					return runCoreForCluster(cmd, cluster, fn)
-				}
-			}
-			if err := runWithCore(cmd, lister); err != nil {
+			placements, err := listPullablePlacements(cmd, owner, repo, cluster)
+			if err != nil {
 				return err
 			}
 
@@ -176,6 +151,41 @@ func newRepoCloneCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&cluster, "cluster", "", "Cluster host to clone from when the repo is mirrored on more than one (may belong to another auth context)")
 	return cmd
+}
+
+// listPullablePlacements lists a GitHub repo's pullable mirror placements via
+// the control plane. An explicit clusterFlag may name a cluster in a different
+// federation than the active context, whose mirrors the active-context core
+// can't see (the original bug: cloning a royalcanin.partial.to mirror while a
+// different context is active failed with "not mirrored on ..."). In that case
+// dial the core fronting that cluster — discovered from its well-known and
+// authenticated with the matching local context, the same path
+// `mirror create <url> [cluster]` uses — so the lookup resolves against the
+// right federation. With no clusterFlag, list from the active context. Shared
+// by `repo clone` and cross-repo `checkpoint explain --repo`.
+func listPullablePlacements(cmd *cobra.Command, owner, repo, clusterFlag string) ([]coreapi.ResolvedPlacement, error) {
+	runWithCore := runCore
+	if clusterFlag != "" {
+		if err := validateClusterHost(clusterFlag); err != nil {
+			return nil, fmt.Errorf("invalid --cluster: %w", err)
+		}
+		runWithCore = func(cmd *cobra.Command, fn func(context.Context, *coreapi.Client) error) error {
+			return runCoreForCluster(cmd, clusterFlag, fn)
+		}
+	}
+	var placements []coreapi.ResolvedPlacement
+	err := runWithCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+		ps, err := resolvePullablePlacements(ctx, c, owner, repo)
+		if err != nil {
+			return err
+		}
+		placements = ps
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return placements, nil
 }
 
 // mirrorLister is the subset of the control-plane client listMirrorsForRepo

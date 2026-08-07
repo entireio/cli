@@ -234,6 +234,8 @@ func newExplainCmd() *cobra.Command {
 	var searchAllFlag bool
 	var jsonFlag bool
 	var transcriptFlag bool
+	var repoFlag string
+	var clusterFlag string
 	var summaryTimeoutSecondsFlag int
 	sessionIndex := -1
 	listLimit := 0 // 0 means "use default (branchCheckpointsLimit)"
@@ -253,6 +255,16 @@ Viewing specific items:
   entire checkpoint explain <id-or-sha>           Auto-detects checkpoint ID or commit SHA
   entire checkpoint explain --checkpoint <id>     Force interpretation as checkpoint ID
   entire checkpoint explain --commit <ref>        Force interpretation as commit ref
+
+Cross-repo checkpoints:
+  entire checkpoint explain <id> --repo owner/name
+                 Explain a checkpoint owned by another repo (e.g. from
+                 'entire search --repo'). Fetches the checkpoint from that
+                 repo's Entire mirror into the current repo, then renders it.
+                 --repo accepts owner/name, gh/owner/name, or a repo ID, and
+                 requires a full checkpoint ID (positional or --checkpoint).
+                 --cluster picks the mirror cluster when the repo is mirrored
+                 on more than one.
 
 Filtering the list view:
   --session      Filter checkpoints by session ID (or prefix)
@@ -320,45 +332,33 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 				}
 			}
 
-			// --generate and --raw-transcript need a specific target — either the
-			// positional arg, --checkpoint/-c, or --commit (which forwards to
-			// the checkpoint path via the commit's Entire-Checkpoint trailer).
-			hasCheckpointTarget := checkpointFlag != "" || commitFlag != "" || positional != ""
-			if generateFlag && !hasCheckpointTarget {
-				return errors.New("--generate requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
+			if err := validateExplainFlags(cmd, explainFlagValues{
+				checkpoint:            checkpointFlag,
+				commit:                commitFlag,
+				repo:                  repoFlag,
+				cluster:               clusterFlag,
+				generate:              generateFlag,
+				force:                 forceFlag,
+				rawTranscript:         rawTranscriptFlag,
+				transcript:            transcriptFlag,
+				json:                  jsonFlag,
+				sessionIndex:          sessionIndex,
+				listLimit:             listLimit,
+				summaryTimeoutSeconds: summaryTimeoutSecondsFlag,
+			}, positional); err != nil {
+				return err
 			}
-			if forceFlag && !generateFlag {
-				return errors.New("--force requires --generate flag")
-			}
-			if rawTranscriptFlag && !hasCheckpointTarget {
-				return errors.New("--raw-transcript requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
-			}
-			if transcriptFlag && !hasCheckpointTarget {
-				return errors.New("--transcript requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
-			}
-			if cmd.Flags().Changed("session-index") {
-				if !transcriptFlag && !rawTranscriptFlag {
-					return errors.New("--session-index only applies with --transcript or --raw-transcript")
+
+			// Cross-repo pre-fetch: land the foreign checkpoint's ref in the
+			// cwd repo's object store BEFORE routing, so the normal flow
+			// (prose, --json, --transcript, --full) resolves it unchanged.
+			if repoFlag != "" {
+				crossTarget := positional
+				if crossTarget == "" {
+					crossTarget = checkpointFlag
 				}
-				if sessionIndex < 0 {
-					return errors.New("--session-index must be non-negative")
-				}
-			}
-			if cmd.Flags().Changed("limit") {
-				if !jsonFlag {
-					return errors.New("--limit only applies with --json")
-				}
-				if listLimit <= 0 {
-					return errors.New("--limit must be positive")
-				}
-			}
-			// --summary-timeout-seconds only makes sense with --generate.
-			if cmd.Flags().Changed("summary-timeout-seconds") {
-				if !generateFlag {
-					return errors.New("--summary-timeout-seconds only applies with --generate")
-				}
-				if summaryTimeoutSecondsFlag < 0 {
-					return errors.New("--summary-timeout-seconds must be non-negative")
+				if err := prepareCrossRepoExplain(cmd, repoFlag, clusterFlag, crossTarget); err != nil {
+					return err
 				}
 			}
 
@@ -402,9 +402,17 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.Flags().IntVar(&sessionIndex, "session-index", -1, "Session index within a multi-session checkpoint (0-based, defaults to latest)")
 	cmd.Flags().IntVar(&listLimit, "limit", 0, "Cap the list view at N checkpoints (default: 100). Only meaningful with --json.")
 	cmd.Flags().IntVar(&summaryTimeoutSecondsFlag, "summary-timeout-seconds", 0, "Hard deadline in seconds for --generate summary generation; overrides summary_timeout_seconds setting. 0 = use setting; if setting is also unset or 0, no automatic deadline applies.")
+	cmd.Flags().StringVar(&repoFlag, "repo", "", "Explain a checkpoint owned by another repo (owner/name, gh/owner/name, or repo ID); fetches it from that repo's Entire mirror")
+	cmd.Flags().StringVar(&clusterFlag, "cluster", "", "Cluster host to fetch the --repo checkpoint from when the repo is mirrored on more than one")
 
 	// Verbosity / transcript output modes are mutually exclusive
 	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript", "transcript", "json")
+	// --repo needs a checkpoint target: --commit/--session resolve against
+	// local history, and --generate would write a summary the foreign repo
+	// never sees.
+	cmd.MarkFlagsMutuallyExclusive("repo", "commit")
+	cmd.MarkFlagsMutuallyExclusive("repo", "session")
+	cmd.MarkFlagsMutuallyExclusive("repo", "generate")
 	// --generate and --raw-transcript are incompatible (summary would be generated but not shown)
 	cmd.MarkFlagsMutuallyExclusive("generate", "raw-transcript")
 	// --generate is a write op; export modes are reader-only
@@ -412,6 +420,75 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.MarkFlagsMutuallyExclusive("generate", "transcript")
 
 	return cmd
+}
+
+// explainFlagValues carries the explain flag values that participate in
+// combination rules, so validateExplainFlags can enforce them outside the
+// already-large newExplainCmd closure.
+type explainFlagValues struct {
+	checkpoint, commit, repo, cluster                string
+	generate, force, rawTranscript, transcript, json bool
+	sessionIndex, listLimit, summaryTimeoutSeconds   int
+}
+
+// validateExplainFlags enforces the flag-combination rules that
+// MarkFlagsMutuallyExclusive cannot express: target requirements and
+// value-range checks.
+func validateExplainFlags(cmd *cobra.Command, v explainFlagValues, positional string) error {
+	// --generate and --raw-transcript need a specific target — either the
+	// positional arg, --checkpoint/-c, or --commit (which forwards to
+	// the checkpoint path via the commit's Entire-Checkpoint trailer).
+	hasCheckpointTarget := v.checkpoint != "" || v.commit != "" || positional != ""
+	if v.generate && !hasCheckpointTarget {
+		return errors.New("--generate requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
+	}
+	if v.force && !v.generate {
+		return errors.New("--force requires --generate flag")
+	}
+	if v.rawTranscript && !hasCheckpointTarget {
+		return errors.New("--raw-transcript requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
+	}
+	if v.transcript && !hasCheckpointTarget {
+		return errors.New("--transcript requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
+	}
+	if cmd.Flags().Changed("session-index") {
+		if !v.transcript && !v.rawTranscript {
+			return errors.New("--session-index only applies with --transcript or --raw-transcript")
+		}
+		if v.sessionIndex < 0 {
+			return errors.New("--session-index must be non-negative")
+		}
+	}
+	if cmd.Flags().Changed("limit") {
+		if !v.json {
+			return errors.New("--limit only applies with --json")
+		}
+		if v.listLimit <= 0 {
+			return errors.New("--limit must be positive")
+		}
+	}
+	// --repo names another repo whose checkpoint to fetch and explain.
+	// It needs a specific checkpoint target: --commit resolves against
+	// local history and --session filters the local list view, so
+	// neither can be cross-repo (they're excluded via
+	// MarkFlagsMutuallyExclusive in newExplainCmd, along with --generate,
+	// which writes a summary the foreign repo would never see).
+	if v.cluster != "" && v.repo == "" {
+		return errors.New("--cluster requires --repo")
+	}
+	if v.repo != "" && positional == "" && v.checkpoint == "" {
+		return errors.New("--repo requires a checkpoint ID (positional or --checkpoint/-c)")
+	}
+	// --summary-timeout-seconds only makes sense with --generate.
+	if cmd.Flags().Changed("summary-timeout-seconds") {
+		if !v.generate {
+			return errors.New("--summary-timeout-seconds only applies with --generate")
+		}
+		if v.summaryTimeoutSeconds < 0 {
+			return errors.New("--summary-timeout-seconds must be non-negative")
+		}
+	}
+	return nil
 }
 
 // runExplain routes to the appropriate explain function based on flags and the
