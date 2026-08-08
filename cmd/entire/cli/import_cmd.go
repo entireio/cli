@@ -31,6 +31,7 @@ func newImportAgentCmd(imp agentimport.Importer) *cobra.Command {
 	var pathFlag string
 	var dryRun bool
 	var sessions []string
+	var remoteFlag string
 
 	cmd := &cobra.Command{
 		Use:   imp.Name(),
@@ -100,6 +101,10 @@ fails even with --dry-run.`, imp.AgentType()),
 			// A dry run writes nothing locally, so there is nothing to sync.
 			if !dryRun {
 				warnIfImportNotSynced(c.OutOrStdout(), res.TurnsImported > 0 || res.TurnsSkipped > 0)
+				// Not gated on this run having imported anything: turns imported
+				// while logged out stay queued, so a logged-in re-run reporting
+				// "0 imported (N already imported)" is the recovery path (#1773).
+				syncImportedCheckpoints(ctx, c.OutOrStdout(), repo, remoteFlag)
 			}
 			return nil
 		},
@@ -107,5 +112,6 @@ fails even with --dry-run.`, imp.AgentType()),
 	cmd.Flags().StringVar(&pathFlag, "path", "", "Override the transcript directory to import from")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Report what would be imported without writing")
 	cmd.Flags().StringSliceVar(&sessions, "session", nil, "Import only these session IDs (repeatable)")
+	cmd.Flags().StringVar(&remoteFlag, "remote", "", "Git remote to sync imported checkpoints to (default: the elected checkpoint sync remote)")
 	return cmd
 }
