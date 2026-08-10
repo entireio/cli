@@ -1184,12 +1184,7 @@ func checkCanRewindWithWarning(ctx context.Context) (bool, string, error) {
 	}
 	defer repo.Close()
 
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return true, "", nil
-	}
-
-	status, err := worktree.Status()
+	status, err := gitrepo.Status(ctx, repo)
 	if err != nil {
 		return true, "", nil
 	}

@@ -450,9 +450,9 @@ func validateClusterHost(host string) error {
 // newRepoMirrorCmd is the `entire repo mirror` subtree: manage EntireDB
 // GitHub-mirror placements on a cluster. Mirrors the standalone entiredb
 // CLI's `entire repo mirror` surface for the server-side half (create /
-// list / get / remove). The local-clone rewrite (`mirror use`) is not
-// ported — it's a git-config + git-remote-entire concern outside the
-// control-plane API.
+// list / get / remove), plus the local-clone rewrite (`use`) — the one verb
+// here that touches no control-plane state beyond a placement lookup and
+// instead edits the current clone's git config (see repo_mirror_use.go).
 func newRepoMirrorCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mirror",
@@ -461,6 +461,7 @@ func newRepoMirrorCmd() *cobra.Command {
 	cmd.AddCommand(newRepoMirrorCreateCmd())
 	cmd.AddCommand(newRepoMirrorListCmd())
 	cmd.AddCommand(newRepoMirrorGetCmd())
+	cmd.AddCommand(newRepoMirrorUseCmd())
 	cmd.AddCommand(newRepoMirrorRemoveCmd())
 	cmd.AddCommand(newRepoMirrorCollaboratorsCmd())
 	return cmd

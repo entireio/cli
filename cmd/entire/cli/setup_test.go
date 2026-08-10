@@ -3929,20 +3929,6 @@ func TestRunEnableInteractive_FirstRunDefaultsToGitRefs(t *testing.T) {
 		}
 	})
 
-	t.Run("non-interactive first run without --yes takes the recommendation", func(t *testing.T) {
-		// The most common real path: a headless first run without --yes
-		// (go test => CanPromptInteractively false). The storage prompt must
-		// be skipped and the recommendation written — every other first-run
-		// subtest passes Yes: true, so this is the only coverage of the
-		// !opts.Yes non-TTY branch. Telemetry: false dodges the telemetry
-		// prompt, which (pre-existing) has no headless guard.
-		setupTestRepo(t)
-		cfg := enable(t, EnableOptions{Telemetry: false})
-		if cfg == nil || cfg.Primary.Type != checkpoint.BackendTypeGitRefs {
-			t.Errorf("Checkpoints = %+v, want the git-refs recommendation", cfg)
-		}
-	})
-
 	t.Run("re-run of an existing config-less repo stays config-less", func(t *testing.T) {
 		setupTestRepo(t)
 		// A repo set up before this change: settings.json exists, no

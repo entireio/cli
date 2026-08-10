@@ -1086,12 +1086,7 @@ func checkResetSafety(ctx context.Context, targetCommitHash string, uncommittedC
 		warnings = append(warnings, uncommittedChangesWarning)
 	} else {
 		// Fall back to generic check
-		worktree, err := repo.Worktree()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get worktree: %w", err)
-		}
-
-		status, err := worktree.Status()
+		status, err := gitrepo.Status(ctx, repo)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get status: %w", err)
 		}

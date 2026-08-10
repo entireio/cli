@@ -527,7 +527,7 @@ func openBrowser(ctx context.Context, browserURL string) error {
 	var args []string
 
 	switch runtime.GOOS {
-	case "darwin":
+	case darwinGOOS:
 		command = "open"
 		args = []string{browserURL}
 	case "linux":

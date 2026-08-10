@@ -215,6 +215,10 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 	authorName, authorEmail := cp.GetGitAuthorFromRepo(repo)
 
 	for sessionIndex, sf := range files {
+		// Stop before reading and splitting the next transcript.
+		if err := ctx.Err(); err != nil {
+			return res, err //nolint:wrapcheck // propagate context cancellation
+		}
 		res.SessionsScanned++
 		full, readErr := os.ReadFile(sf.Path)
 		if readErr != nil {
@@ -233,6 +237,14 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		var red redact.RedactedBytes
 		redacted := false
 		for turnIndex, turn := range turns {
+			// Ctrl-C must stop the import, and per turn rather than per session:
+			// one session can carry hundreds of turns, each a checkpoint write.
+			// The store guards its create path too, but only this stops the
+			// per-turn work leading up to it (reading, splitting, redacting),
+			// and it is the only brake at all under DryRun, which never writes.
+			if err := ctx.Err(); err != nil {
+				return res, err //nolint:wrapcheck // propagate context cancellation
+			}
 			cid := DeriveCheckpointID(sf.SessionID, turn.UUID)
 			if existing[cid.String()] {
 				res.TurnsSkipped++
@@ -245,7 +257,12 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 				continue
 			}
 			if !redacted {
-				r, rerr := redact.JSONLBytes(full)
+				// Sanitize before redacting, like every other path that stores a
+				// transcript. Import reads raw third-party rollouts, so for Codex
+				// sessions this is where the encrypted payloads would otherwise be
+				// handed to the redaction layers — which then scan megabytes of
+				// base64 ciphertext only for the store to discard it.
+				r, rerr := redact.JSONLBytes(cp.SanitizeTranscriptForAgentType(imp.AgentType(), full))
 				if rerr != nil {
 					return res, fmt.Errorf("redact %s transcript: %w", sf.SessionID, rerr)
 				}

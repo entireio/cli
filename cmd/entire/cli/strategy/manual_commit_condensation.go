@@ -149,11 +149,11 @@ var extractSessionImages = func(agentType types.AgentType, transcript []byte) ([
 // unsupported for the agent, or on error it returns the transcript unchanged with
 // nil assets (the checkpoint then stores the inline transcript).
 //
-// It deliberately does NOT mutate the caller's transcript: the raw transcript is
-// still needed for CondenseResult.Transcript (trail titles) and, critically, as
-// the CheckpointTranscriptSize growth baseline, which is compared against the raw
-// inline shadow-branch blob — feeding it the shrunken externalized size would
-// report spurious growth on every subsequent commit.
+// It deliberately does NOT mutate the caller's transcript: the pre-externalization
+// bytes are what CondenseResult.TranscriptSizeBaseline is measured on, and that
+// baseline must stay in the shadow-branch blob's coordinate (sanitized but NOT
+// image-externalized, matching what the Stop path writes) — feeding it the shrunken
+// externalized size would report spurious growth on every subsequent commit.
 func externalizeSessionImages(ctx, logCtx context.Context, state *SessionState, transcript []byte) ([]byte, []cpkg.TranscriptAsset) {
 	if !settings.IsImageExternalizationEnabled(ctx) {
 		return transcript, nil
@@ -166,6 +166,37 @@ func externalizeSessionImages(ctx, logCtx context.Context, state *SessionState, 
 		return transcript, nil
 	}
 	return rewritten, assets
+}
+
+// prepareTranscriptForStorage runs the first two steps of the stored-copy pipeline
+// in order — sanitize (drop non-portable agent state), then externalize inline
+// images. Redaction is the caller's next step, so the whole pipeline reads
+// sanitize -> externalize -> redact.
+//
+// Each step has to precede the next:
+//
+//   - Sanitize first, so we neither externalize images out of items we are about to
+//     discard — which would store an asset whose referencing transcript line is gone
+//     moments later — nor redact megabytes of ciphertext only to throw it away.
+//     Base64 is the pathological input for the entropy layer, so on a large Codex
+//     rollout that scan alone costs tens of seconds.
+//   - Externalize before redaction, because base64 is high-entropy and redaction
+//     would otherwise flag and destroy it.
+//
+// It returns the sanitized size rather than the sanitized bytes: that size is the
+// coordinate the CheckpointTranscriptSize growth baseline must use (see
+// CondenseResult.TranscriptSizeBaseline), and returning the slice would keep a
+// second multi-MB buffer reachable for the rest of the condensation just to read
+// its length.
+func prepareTranscriptForStorage(
+	ctx, logCtx context.Context,
+	ag agent.Agent,
+	state *SessionState,
+	raw []byte,
+) (externalized []byte, assets []cpkg.TranscriptAsset, sanitizedSize int64) {
+	sanitized := agent.SanitizeTranscriptForStorage(ag, raw)
+	externalized, assets = externalizeSessionImages(ctx, logCtx, state, sanitized)
+	return externalized, assets, int64(len(sanitized))
 }
 
 // sidecarSessionImages captures images an agent stores OUTSIDE the transcript
@@ -306,12 +337,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	filterFilesTouched(sessionData, committedFiles, state)
 
-	// Externalize inline images BEFORE redaction: base64 is high-entropy and
-	// redaction would otherwise flag/destroy it. Opt-in; a no-codec agent or a
-	// transcript with no externalizable images is a no-op. sessionData.Transcript
-	// is left as the raw transcript (used for the result / growth baseline); only
-	// the redacted, externalized copy is stored.
-	externalizedTranscript, extractedAssets := externalizeSessionImages(ctx, logCtx, state, sessionData.Transcript)
+	// sessionData.Transcript is left as the raw transcript; only the sanitized,
+	// externalized, redacted copy is stored.
+	externalizedTranscript, extractedAssets, transcriptSizeBaseline := prepareTranscriptForStorage(ctx, logCtx, ag, state, sessionData.Transcript)
 
 	redactedTranscript, redactDuration := redactOrDrop(logCtx, externalizedTranscript, state.SessionID, checkpointID)
 	if skipped := skipIfPostRedactionEmpty(logCtx, redactedTranscript, sessionData, state, checkpointID); skipped != nil {
@@ -425,13 +453,13 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	)
 
 	return &CondenseResult{
-		CheckpointID:         checkpointID,
-		SessionID:            state.SessionID,
-		CheckpointsCount:     checkpointStepCount(state),
-		FilesTouched:         sessionData.FilesTouched,
-		Prompts:              sessionData.Prompts,
-		TotalTranscriptLines: sessionData.FullTranscriptLines,
-		Transcript:           sessionData.Transcript,
+		CheckpointID:           checkpointID,
+		SessionID:              state.SessionID,
+		CheckpointsCount:       checkpointStepCount(state),
+		FilesTouched:           sessionData.FilesTouched,
+		Prompts:                sessionData.Prompts,
+		TotalTranscriptLines:   sessionData.FullTranscriptLines,
+		TranscriptSizeBaseline: transcriptSizeBaseline,
 	}, nil
 }
 
@@ -1242,7 +1270,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 
 		resetCheckpointWindow(state)
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
-		state.CheckpointTranscriptSize = int64(len(result.Transcript))
+		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 		state.Phase = session.PhaseIdle
 		state.LastCheckpointID = checkpointID
 		state.LastCheckpointCommitHash = state.BaseCommit

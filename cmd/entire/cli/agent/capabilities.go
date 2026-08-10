@@ -17,9 +17,10 @@ type CapabilityDeclarer interface {
 // can deserialize directly into this type.
 //
 // Not every optional interface appears here: built-in-only capabilities that
-// have no external-protocol equivalent (SessionBaseDirProvider, ModelExtractor)
-// are intentionally excluded — their As* helpers resolve by type assertion
-// alone, with no DeclaredCaps gate.
+// have no external-protocol equivalent (SessionBaseDirProvider, ModelExtractor,
+// SkillEventExtractor, TranscriptSanitizer) are intentionally excluded — their
+// As* helpers resolve by type assertion alone (see builtinCapability), with no
+// DeclaredCaps gate.
 type DeclaredCaps struct {
 	Hooks                  bool `json:"hooks"`
 	TranscriptAnalyzer     bool `json:"transcript_analyzer"`
@@ -87,6 +88,35 @@ func AsSidecarImageProvider(ag Agent) (SidecarImageProvider, bool) {
 	}
 	p, ok := ag.(SidecarImageProvider)
 	return p, ok
+}
+
+// AsTranscriptSanitizer returns the agent as TranscriptSanitizer if it implements
+// the interface. This is a pure local byte transform with no external process to
+// negotiate with, so it needs no DeclaredCaps gate.
+func AsTranscriptSanitizer(ag Agent) (TranscriptSanitizer, bool) {
+	return builtinCapability[TranscriptSanitizer](ag)
+}
+
+// SanitizeTranscriptForStorage applies the agent's storage sanitizer when it has one
+// and returns data unchanged otherwise. Every path that stores a transcript copy
+// should call this BEFORE redaction — see TranscriptSanitizer for why. A no-op for
+// agents without the capability and idempotent for those with it, so it is safe to
+// call on any transcript from any path.
+func SanitizeTranscriptForStorage(ag Agent, data []byte) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	s, ok := AsTranscriptSanitizer(ag)
+	if !ok {
+		return data
+	}
+	sanitized := s.SanitizeTranscriptForStorage(data)
+	if sanitized == nil {
+		// Defensive: the interface forbids this, but a nil return would silently
+		// drop the whole session. Prefer the unsanitized transcript over none.
+		return data
+	}
+	return sanitized
 }
 
 // AsTokenCalculator returns the agent as TokenCalculator if it both

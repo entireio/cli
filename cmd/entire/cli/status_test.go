@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
@@ -2029,5 +2030,390 @@ func TestRunStatus_PrintsBothReviewAndInvestigation(t *testing.T) {
 	}
 	if !strings.Contains(out, "Investigation") || !strings.Contains(out, "investigated") {
 		t.Errorf("expected 'Investigation' / 'investigated' line in status output; got:\n%s", out)
+	}
+}
+
+// --- Checkpoint sync visibility (single-remote gate observability) ---
+
+// checkpointSyncTestCommit creates a commit in the cwd test repo and returns
+// its hash. setupTestRepo leaves the repo without commits, and both the v1
+// counter and ref updates need at least one.
+func checkpointSyncTestCommit(t *testing.T, name, content string) string {
+	t.Helper()
+	testutil.WriteFile(t, ".", name, content)
+	testutil.GitAdd(t, ".", name)
+	testutil.GitCommit(t, ".", "commit "+name)
+	return testutil.GetHeadHash(t, ".")
+}
+
+func TestRunStatus_CheckpointSyncDestination_Origin(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, ".", "publish", "https://example.com/publish.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints sync to: origin") {
+		t.Errorf("expected destination line naming origin, got:\n%s", out)
+	}
+	if strings.Contains(out, "(set by checkpoint_push_remote)") {
+		t.Errorf("default election must not carry the config annotation, got:\n%s", out)
+	}
+	if strings.Contains(out, "not yet on") {
+		t.Errorf("counter line must be omitted when nothing is unpushed, got:\n%s", out)
+	}
+}
+
+func TestRunStatus_CheckpointSyncDestination_ConfigAnnotated(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "private"}}`)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, ".", "private", "https://example.com/private.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints sync to: private (set by checkpoint_push_remote)") {
+		t.Errorf("expected annotated destination line for configured remote, got:\n%s", out)
+	}
+}
+
+func TestRunStatus_CheckpointSyncFailClosed(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "gone"}}`)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints NOT syncing:") {
+		t.Errorf("expected fail-closed warning line, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"gone"`) {
+		t.Errorf("fail-closed line should name the misconfigured remote, got:\n%s", out)
+	}
+	if strings.Contains(out, "Checkpoints sync to:") {
+		t.Errorf("fail-closed status must not also print a destination line, got:\n%s", out)
+	}
+}
+
+func TestRunStatus_CheckpointSyncHiddenWhenNoRemotes(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	if strings.Contains(stdout.String(), "Checkpoints sync") || strings.Contains(stdout.String(), "Checkpoints NOT syncing") {
+		t.Errorf("no remotes: checkpoint sync lines must be absent, got:\n%s", stdout.String())
+	}
+}
+
+func TestRunStatus_CheckpointSyncHiddenWhenDisabled(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsDisabled)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	if strings.Contains(stdout.String(), "Checkpoints sync to:") {
+		t.Errorf("disabled: checkpoint sync lines must be absent, got:\n%s", stdout.String())
+	}
+}
+
+func TestRunStatus_CheckpointSyncCounter_GitBranchAhead(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	checkpointSyncTestCommit(t, "a.txt", "one")
+	second := checkpointSyncTestCommit(t, "b.txt", "two")
+	// Local v1 with no origin-tracking ref: every v1 commit counts as unpushed
+	// (the deferred-publish reading).
+	testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, second)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "2 checkpoints not yet on origin — they sync with your next 'git push origin'") {
+		t.Errorf("expected unpushed counter line, got:\n%s", out)
+	}
+}
+
+func TestRunStatus_CheckpointSyncCounterOmitted_WhenSynced(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	head := checkpointSyncTestCommit(t, "a.txt", "one")
+	testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, head)
+	testutil.GitUpdateRef(t, ".", "refs/remotes/origin/"+paths.MetadataBranchName, head)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints sync to: origin") {
+		t.Errorf("expected destination line, got:\n%s", out)
+	}
+	if strings.Contains(out, "not yet on") {
+		t.Errorf("tracking ref equals local v1: counter must be omitted, got:\n%s", out)
+	}
+}
+
+func TestRunStatus_CheckpointSyncDedicated_GitBranch_NoCounter(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
+	// Same owner ("org") as checkpoint_remote and a parseable GitHub URL, so
+	// PushURL derivation succeeds locally and dedicated mode is verified.
+	testutil.AddRemote(t, ".", "origin", "https://github.com/org/repo.git")
+	head := checkpointSyncTestCommit(t, "a.txt", "one")
+	// A local v1 branch exists, but in dedicated URL mode on the git-branch
+	// backend the tracking-ref comparison would permanently read "all
+	// unpushed" — the counter must be suppressed.
+	testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, head)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints sync to: dedicated checkpoint remote (org/checkpoints)") {
+		t.Errorf("expected dedicated destination line with repo slug, got:\n%s", out)
+	}
+	if strings.Contains(out, "not yet") {
+		t.Errorf("dedicated + git-branch: counter must be suppressed, got:\n%s", out)
+	}
+}
+
+func TestRunStatus_CheckpointSyncDedicated_GitRefs_QueueCounter(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}, "checkpoints": {"primary": {"type": "git-refs"}}}`)
+	testutil.AddRemote(t, ".", "origin", "https://github.com/org/repo.git")
+	checkpointSyncTestCommit(t, "a.txt", "one")
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	queue := checkpoint.NewPushQueue(filepath.Join(cwd, ".git"))
+	if err := queue.Enqueue("refs/entire/checkpoints/aa/bb0000000001"); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := queue.Enqueue("refs/entire/checkpoints/aa/bb0000000002"); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints sync to: dedicated checkpoint remote (org/checkpoints)") {
+		t.Errorf("expected dedicated destination line, got:\n%s", out)
+	}
+	// Dedicated mode has no remote name to phrase the counter around.
+	if !strings.Contains(out, "2 checkpoints not yet pushed") {
+		t.Errorf("expected queue-length counter without a remote name, got:\n%s", out)
+	}
+	if strings.Contains(out, "not yet on") {
+		t.Errorf("dedicated counter must not name a git remote, got:\n%s", out)
+	}
+}
+
+func TestRunStatusJSON_CheckpointSync_Elected(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	checkpointSyncTestCommit(t, "a.txt", "one")
+	second := checkpointSyncTestCommit(t, "b.txt", "two")
+	testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, second)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if result.CheckpointSyncRemote != "origin" {
+		t.Errorf("checkpoint_sync_remote = %q, want %q", result.CheckpointSyncRemote, "origin")
+	}
+	if result.CheckpointSyncRemoteSource != "default" {
+		t.Errorf("checkpoint_sync_remote_source = %q, want %q", result.CheckpointSyncRemoteSource, "default")
+	}
+	if result.CheckpointSyncError != "" {
+		t.Errorf("checkpoint_sync_error should be empty, got %q", result.CheckpointSyncError)
+	}
+	if result.UnpushedCheckpoints != 2 {
+		t.Errorf("unpushed_checkpoints = %d, want 2", result.UnpushedCheckpoints)
+	}
+}
+
+func TestRunStatusJSON_CheckpointSync_FailClosed(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "gone"}}`)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if result.CheckpointSyncRemote != "" {
+		t.Errorf("checkpoint_sync_remote should be empty when unresolved, got %q", result.CheckpointSyncRemote)
+	}
+	if result.CheckpointSyncRemoteSource != "" {
+		t.Errorf("checkpoint_sync_remote_source should be empty when unresolved, got %q", result.CheckpointSyncRemoteSource)
+	}
+	if !strings.Contains(result.CheckpointSyncError, `"gone"`) {
+		t.Errorf("checkpoint_sync_error should name the misconfigured remote, got %q", result.CheckpointSyncError)
+	}
+}
+
+func TestRunStatusJSON_CheckpointSync_Dedicated(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
+	testutil.AddRemote(t, ".", "origin", "https://github.com/org/repo.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if result.CheckpointSyncRemote != "org/checkpoints" {
+		t.Errorf("checkpoint_sync_remote = %q, want the org/repo slug", result.CheckpointSyncRemote)
+	}
+	if result.CheckpointSyncRemoteSource != "dedicated" {
+		t.Errorf("checkpoint_sync_remote_source = %q, want %q", result.CheckpointSyncRemoteSource, "dedicated")
+	}
+	if result.UnpushedCheckpoints != 0 {
+		t.Errorf("dedicated + git-branch must not report a count, got %d", result.UnpushedCheckpoints)
+	}
+}
+
+// Dedicated mode is reported only when PushURL derivation succeeds (the same
+// condition the pre-push gate's exemption uses). An owner mismatch between the
+// elected remote and checkpoint_remote makes derivation fall back, so the next
+// push uses normal single-remote sync — status must say so.
+func TestRunStatus_CheckpointSyncDedicated_IneligibleFallsBackToElected(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
+	// Remote owner "other" != checkpoint_remote owner "org": fork detection
+	// rejects the dedicated store at push time.
+	testutil.AddRemote(t, ".", "origin", "https://github.com/other/repo.git")
+	checkpointSyncTestCommit(t, "a.txt", "one")
+	second := checkpointSyncTestCommit(t, "b.txt", "two")
+	testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, second)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "dedicated") {
+		t.Errorf("ineligible derivation must not render dedicated mode, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Checkpoints sync to: origin") {
+		t.Errorf("expected normal elected-remote destination line, got:\n%s", out)
+	}
+	// The elected-remote counter applies in normal mode (v1 ahead, no
+	// tracking ref -> all commits count).
+	if !strings.Contains(out, "2 checkpoints not yet on origin") {
+		t.Errorf("expected elected-remote counter in fallback mode, got:\n%s", out)
+	}
+}
+
+func TestRunStatusJSON_CheckpointSync_DedicatedIneligible(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
+	testutil.AddRemote(t, ".", "origin", "https://github.com/other/repo.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if result.CheckpointSyncRemote != "origin" {
+		t.Errorf("checkpoint_sync_remote = %q, want the elected remote %q", result.CheckpointSyncRemote, "origin")
+	}
+	if result.CheckpointSyncRemoteSource != "default" {
+		t.Errorf("checkpoint_sync_remote_source = %q, want %q (not dedicated)", result.CheckpointSyncRemoteSource, "default")
+	}
+	if result.CheckpointSyncError != "" {
+		t.Errorf("checkpoint_sync_error should be empty, got %q", result.CheckpointSyncError)
+	}
+}
+
+func TestRunStatusJSON_CheckpointSync_AbsentWhenNoRemotes(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if result.CheckpointSyncRemote != "" || result.CheckpointSyncRemoteSource != "" || result.CheckpointSyncError != "" {
+		t.Errorf("no remotes: checkpoint sync JSON fields must be absent, got remote=%q source=%q err=%q",
+			result.CheckpointSyncRemote, result.CheckpointSyncRemoteSource, result.CheckpointSyncError)
+	}
+	if strings.Contains(stdout.String(), "checkpoint_sync_remote") {
+		t.Errorf("omitempty should drop empty checkpoint sync fields, got: %s", stdout.String())
 	}
 }

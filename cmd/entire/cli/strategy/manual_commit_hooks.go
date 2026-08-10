@@ -24,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/gitops"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -1415,7 +1416,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	state.RealignAttributionBase(newHead)
 	resetCheckpointWindow(state)
 	state.CheckpointTranscriptStart = result.TotalTranscriptLines
-	state.CheckpointTranscriptSize = int64(len(result.Transcript))
+	state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 
 	// Clear attribution tracking — condensation already used these values
 	state.PromptAttributions = nil
@@ -2498,8 +2499,10 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 		return result
 	}
 
-	// Get worktree status to find ALL changed files
-	status, err := worktree.Status()
+	// Get worktree status to find ALL changed files. Shared with the turn-start
+	// pre-prompt capture via the context status cache, so the expensive go-git
+	// worktree walk runs once per hook rather than once per caller.
+	status, err := gitrepo.Status(ctx, repo)
 	if err != nil {
 		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree status",
 			slog.String("error", err.Error()))
@@ -2842,6 +2845,12 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 
 	ag, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; ExtractSkillEvents handles nil
 	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(agent.ExtractSkillEvents(ctx, ag, fullTranscript, 0), state.TurnID))
+
+	// Sanitize before externalizing and redacting, matching CondenseSession's
+	// sanitize -> externalize -> redact order. Skill events above are extracted from
+	// the pre-sanitization bytes because they are session telemetry rather than
+	// stored transcript content.
+	fullTranscript = agent.SanitizeTranscriptForStorage(ag, fullTranscript)
 
 	// Redact secrets before writing. Checkpoint store methods require
 	// pre-redacted in-memory transcript content from callers. The live

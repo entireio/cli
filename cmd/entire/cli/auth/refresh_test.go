@@ -125,6 +125,58 @@ func TestNewRefreshingLoginProvider_FreshTokenNoNetwork(t *testing.T) {
 	}
 }
 
+func TestRefreshingLoginCredential_ForceRefreshesRejectedFreshToken(t *testing.T) {
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	var refreshes int
+	newJWT := makeJWT(t, fmt.Sprintf(`{"iss":"https://core.example","handle":"alice","exp":%d}`, time.Now().Add(time.Hour).Unix()))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refreshes++
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse form: %v", err)
+		}
+		if got := r.FormValue("refresh_token"); got != "entr_old" {
+			t.Errorf("refresh_token = %q, want entr_old", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"access_token":%q,"refresh_token":"entr_new","token_type":"Bearer","expires_in":3600}`, newJWT)
+	}))
+	defer srv.Close()
+
+	svc := tokenstore.CoreKeyringService(srv.URL)
+	staleJWT := makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"alice","exp":%d}`, srv.URL, time.Now().Add(2*time.Hour).Unix()))
+	if err := tokenstore.Set(svc, "alice", tokenstore.EncodeTokenWithExpiration(staleJWT, 7200)); err != nil {
+		t.Fatalf("seed access token: %v", err)
+	}
+	if err := tokenstore.Set(tokenstore.RefreshService(svc), "alice", "entr_old"); err != nil {
+		t.Fatalf("seed refresh token: %v", err)
+	}
+
+	c := &contexts.Context{Name: "alice@core", CoreURL: srv.URL, Handle: "alice", KeychainService: svc}
+	credential, err := NewRefreshingLoginCredential(c, srv.Client().Transport, true)
+	if err != nil {
+		t.Fatalf("NewRefreshingLoginCredential: %v", err)
+	}
+	if got, err := credential.Token(t.Context()); err != nil || got != staleJWT {
+		t.Fatalf("Token() = %q, %v; want stale-but-locally-fresh JWT", got, err)
+	}
+	if refreshes != 0 {
+		t.Fatalf("ordinary Token refreshes = %d, want 0", refreshes)
+	}
+
+	got, err := credential.ForceRefresh(t.Context(), staleJWT)
+	if err != nil {
+		t.Fatalf("ForceRefresh: %v", err)
+	}
+	if got != newJWT {
+		t.Fatalf("ForceRefresh returned %q, want re-minted JWT", got)
+	}
+	if refreshes != 1 {
+		t.Fatalf("forced refreshes = %d, want 1", refreshes)
+	}
+}
+
 // Expired token with no refresh token behaves like the old read-only path:
 // a clear re-login error, not a crash.
 func TestNewRefreshingLoginProvider_ExpiredNoRefresh(t *testing.T) {

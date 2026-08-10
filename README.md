@@ -28,6 +28,7 @@ With Entire, you can:
 - [Headless & CI Authentication](#headless--ci-authentication)
 - [Local Device Auth Testing](#local-device-auth-testing)
 - [Commands Reference](#commands-reference)
+- [Plugins](#plugins)
 - [Configuration](#configuration)
 - [Security & Privacy](#security--privacy)
 - [Troubleshooting](#troubleshooting)
@@ -301,6 +302,7 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | `entire checkpoint rewind` | Rewind to a previous checkpoint (deprecated, will be removed in a future release)       |
 | `entire login`   | Authenticate the CLI with Entire device auth                                                      |
 | `entire org`     | Manage Entire organizations (create, list, get, delete)                                           |
+| `entire plugin`  | Discover, install, upgrade, and remove plugins (see [Plugins](#plugins))                          |
 | `entire project` | Manage Entire projects (create, list, get, delete)                                                |
 | `entire repo`    | Manage Entire repositories (create, list, get, delete, clone, mirror, visibility)                 |
 | `entire grant`   | Manage access grants and org membership (org, project, repo)                                      |
@@ -378,6 +380,27 @@ entire configure --checkpoint-remote github:myorg/checkpoints-private
 entire agent add claude-code
 entire agent remove claude-code
 ```
+
+## Plugins
+
+Plugins extend the CLI with new verbs: any executable named `entire-<name>` on `$PATH` runs as `entire <name>`, kubectl-style — stdio passes through, exit codes propagate, no SDK or protocol required.
+
+```sh
+entire plugin search                                    # browse the plugin index
+entire plugin install upgrade                           # install by name (index lookup)
+entire plugin install https://github.com/you/entire-x   # install from any git host
+entire plugin install ./dist/entire-x                   # link a local build
+entire upgrade                                          # run an installed plugin
+entire plugin upgrade --all                             # update remote-installed plugins
+entire plugin doctor                                    # check for broken installs and missing dependencies
+entire plugin remove x
+```
+
+Remote installs are forge-agnostic: the newest stable semver tag is resolved over the git protocol (prereleases need an explicit `--pin`), and the platform's release asset is downloaded over HTTPS and verified against the release's `checksums.txt`. A release that publishes no checksums is refused unless you pass `--allow-unverified` — installing means making those bytes executable. `entire plugin doctor` re-checks installed binaries against the digests recorded at install time. Plugins can declare dependencies on other plugins in an `entire-plugin.yml`; missing ones are installed after a single confirmation.
+
+Discovery uses a git-synced catalog, [entireio/plugin-index](https://github.com/entireio/plugin-index) by default. Organizations can point the CLI at an internal catalog with the `ENTIRE_PLUGIN_INDEX_URL` environment variable or `--index`. It is deliberately not settable from a repository's committed settings: an index-listed plugin installs without a prompt, so a checked-out repo must not be able to choose the catalog.
+
+For the full contract — resolution rules, environment filtering, release-asset conventions, and how to author a plugin — see [External Commands](docs/architecture/external-commands.md).
 
 ## Configuration
 
@@ -457,7 +480,8 @@ Entire derives the git URL automatically using the same protocol (SSH or HTTPS) 
 
 - Fetch the checkpoint branch locally if it exists on the remote but not locally (one-time)
 - Push `entire/checkpoints/v1` to the checkpoint repo instead of your default push remote
-- Skip pushing if a fork is detected (push remote owner differs from checkpoint repo owner)
+- Ignore the setting if it looks inherited rather than yours, and push checkpoints to your own push remote instead. `checkpoint_remote` is normally committed in `.entire/settings.json`, so forking a project inherits it — without this, a contributor's session data would be pushed into the upstream project's checkpoint repo. A setting is treated as yours when it lives in the gitignored `.entire/settings.local.json`, or when your `origin` remote is owned by the same account or org as the checkpoint repo
+- If your checkpoint repo is owned by a different account or org than `origin`, configure it in `.entire/settings.local.json` so it is always honored
 - If the remote is unreachable, warn and continue without blocking your main push
 
 #### `ENTIRE_CHECKPOINT_TOKEN`

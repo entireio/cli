@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	git "github.com/go-git/go-git/v6"
+
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -171,6 +173,13 @@ func TestPrePush_OPFProgressUsesConfiguredWriter(t *testing.T) {
     }
   }
 }`), 0o644))
+	// The checkpoint sync gate requires a configured remote that resolves to
+	// "origin"; use a local bare repo so resolution stays hermetic (no
+	// network) rather than an unreachable URL.
+	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	_, err := git.PlainInit(remoteDir, true)
+	require.NoError(t, err)
+	testutil.AddRemote(t, tmpDir, "origin", remoteDir)
 	t.Chdir(tmpDir)
 	configureFakeOPF(t, &fakeOPFForRewrite{})
 
