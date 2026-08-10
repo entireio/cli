@@ -395,7 +395,7 @@ Opt out via any one of:
 
 ### Install event
 
-On installation, the CLI sends a one-time anonymous `cli_installed` event to PostHog with: `method` (`bash` / `brew` / `scoop`), `channel` (`stable` / `nightly`), `cli_version`, `os`, and `arch`. The identifier is the same hashed per-machine ID used for other telemetry (`machineid.ProtectedID`) — no personal data is sent. Because installation happens before the in-app telemetry prompt, this event is governed solely by the `ENTIRE_TELEMETRY_OPTOUT` environment variable: set `ENTIRE_TELEMETRY_OPTOUT=1` before installing to disable it. The event fires at most once per machine — a local sentinel keeps `brew upgrade` / `scoop update` from re-emitting it.
+On installation **and upgrade**, the CLI sends an anonymous `cli_installed` event to PostHog with: `method` (`bash` / `brew` / `scoop`), `channel` (`stable` / `nightly`), `cli_version`, `previous_version` (the last version recorded on this machine; empty on a first install), `os`, and `arch`. The identifier is the same hashed per-machine ID used for other telemetry (`machineid.ProtectedID`) — no personal data is sent. First installs are distinguished from upgrades by `previous_version` (and by first-vs-repeat events per machine); the last version is kept in a small `install_state.json` in the config directory. Because installation happens before the in-app telemetry prompt, this event is governed solely by the `ENTIRE_TELEMETRY_OPTOUT` environment variable: set `ENTIRE_TELEMETRY_OPTOUT=1` before installing to disable it.
 
 ## Reporting a vulnerability
 

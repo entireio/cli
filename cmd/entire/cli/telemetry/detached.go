@@ -3,7 +3,6 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -233,9 +232,11 @@ var validInstallMethods = map[string]bool{
 }
 
 // BuildInstallEventPayload constructs the cli_installed event payload.
-// Exported for testing. Returns nil for an unrecognized method or if the
-// machine ID cannot be resolved.
-func BuildInstallEventPayload(method, version string) *EventPayload {
+// previousVersion is the last version recorded on this machine ("" on a first
+// install), letting analytics tell installs from upgrades. Exported for
+// testing. Returns nil for an unrecognized method or if the machine ID cannot
+// be resolved.
+func BuildInstallEventPayload(method, version, previousVersion string) *EventPayload {
 	if !validInstallMethods[method] {
 		return nil
 	}
@@ -246,11 +247,12 @@ func BuildInstallEventPayload(method, version string) *EventPayload {
 	}
 
 	properties := map[string]any{
-		"method":      method,
-		"channel":     versioncheck.ReleaseChannel(version),
-		"cli_version": version,
-		"os":          runtime.GOOS,
-		"arch":        runtime.GOARCH,
+		"method":           method,
+		"channel":          versioncheck.ReleaseChannel(version),
+		"cli_version":      version,
+		"previous_version": previousVersion,
+		"os":               runtime.GOOS,
+		"arch":             runtime.GOARCH,
 	}
 
 	return &EventPayload{
@@ -261,54 +263,73 @@ func BuildInstallEventPayload(method, version string) *EventPayload {
 	}
 }
 
-// TrackInstallDetached records a one-time install event by spawning a detached
-// subprocess. Fires before the in-app telemetry consent prompt, so it is gated
-// only by ENTIRE_TELEMETRY_OPTOUT (see docs/security-and-privacy.md).
+// TrackInstallDetached records an install-or-upgrade event by spawning a
+// detached subprocess. It fires on every install AND upgrade (brew upgrade /
+// scoop update / reinstall all re-run the post-install hooks); analytics
+// distinguishes installs from upgrades via the per-machine distinct_id
+// (first-ever event = install) and the previous_version property. Fires before
+// the in-app telemetry consent prompt, so it is gated only by
+// ENTIRE_TELEMETRY_OPTOUT (see docs/security-and-privacy.md).
 func TrackInstallDetached(method, version string) {
 	if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
 		return
 	}
 
-	payload := BuildInstallEventPayload(method, version)
+	previous := readInstalledVersion()
+	payload := BuildInstallEventPayload(method, version, previous)
 	if payload == nil {
 		return
 	}
 
-	// Fire at most once per machine. The brew/scoop post-install hooks also run
-	// on upgrade/reinstall, so without this gate every upgrade (especially
-	// frequent nightlies) would re-emit cli_installed and inflate install
-	// counts. The sentinel keeps the event one-time, as documented.
-	if !markFirstInstall() {
-		return
-	}
+	// Record the current version so the next install/upgrade can report it as
+	// previous_version. Best-effort — a write failure must never drop the event.
+	writeInstalledVersion(version)
 
 	if payloadJSON, err := json.Marshal(payload); err == nil {
 		spawnDetachedAnalytics(string(payloadJSON))
 	}
 }
 
-// markFirstInstall records a one-shot sentinel in the user cache dir and
-// reports whether this is the first install-track on this machine. It returns
-// true exactly once; later calls (upgrades/reinstalls) find the sentinel and
-// return false so the cli_installed event stays one-time. Best-effort: if the
-// sentinel cannot be resolved or created for any reason other than "already
-// exists", it returns true rather than silently dropping a genuine install.
-func markFirstInstall() bool {
-	path := filepath.Join(userdirs.Cache(), "install_tracked")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return true
-	}
-	// #nosec G304 -- path is the trusted user cache dir plus a constant
+// installState is the per-user record of the last CLI version whose
+// install/upgrade was tracked. It lives in the persistent config dir (not the
+// ephemeral cache) so it survives cache clears.
+type installState struct {
+	Version string `json:"version"`
+}
+
+func installStatePath() string {
+	return filepath.Join(userdirs.Config(), "install_state.json")
+}
+
+// readInstalledVersion returns the last recorded CLI version, or "" when none
+// is recorded yet (first install) or the record can't be read.
+func readInstalledVersion() string {
+	// #nosec G304 -- path is the trusted user config dir plus a constant
 	// filename, never user input.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err == nil {
-		_ = f.Close()
-		return true
+	data, err := os.ReadFile(installStatePath())
+	if err != nil {
+		return ""
 	}
-	if errors.Is(err, os.ErrExist) {
-		return false
+	var st installState
+	if err := json.Unmarshal(data, &st); err != nil {
+		return ""
 	}
-	return true
+	return st.Version
+}
+
+// writeInstalledVersion records the current CLI version. Best-effort.
+func writeInstalledVersion(version string) {
+	dir := userdirs.Config()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	data, err := json.Marshal(installState{Version: version})
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, "install_state.json"), data, 0o600); err != nil {
+		return
+	}
 }
 
 // gitVersion returns the installed git version (e.g. "2.43.0"), best-effort.

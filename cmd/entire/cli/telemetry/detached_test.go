@@ -157,7 +157,7 @@ func TestSendEventHandlesInvalidJSON(_ *testing.T) {
 
 func TestBuildInstallEventPayload(t *testing.T) {
 	t.Parallel()
-	p := BuildInstallEventPayload("brew", "v1.2.3-nightly.20260805")
+	p := BuildInstallEventPayload("brew", "v1.2.3-nightly.20260805", "v1.2.2")
 	if p == nil {
 		t.Fatal("BuildInstallEventPayload returned nil")
 	}
@@ -176,8 +176,22 @@ func TestBuildInstallEventPayload(t *testing.T) {
 	if p.Properties["cli_version"] != "v1.2.3-nightly.20260805" {
 		t.Errorf("cli_version = %v", p.Properties["cli_version"])
 	}
+	if p.Properties["previous_version"] != "v1.2.2" {
+		t.Errorf("previous_version = %v, want v1.2.2", p.Properties["previous_version"])
+	}
 	if p.Properties["os"] == nil || p.Properties["arch"] == nil {
 		t.Error("os/arch missing")
+	}
+}
+
+func TestBuildInstallEventPayload_FirstInstallHasEmptyPrevious(t *testing.T) {
+	t.Parallel()
+	p := BuildInstallEventPayload("bash", "v1.2.3", "")
+	if p == nil {
+		t.Fatal("BuildInstallEventPayload returned nil")
+	}
+	if p.Properties["previous_version"] != "" {
+		t.Errorf("first install previous_version = %v, want empty", p.Properties["previous_version"])
 	}
 }
 
@@ -190,25 +204,30 @@ func TestTrackInstallDetachedRespectsOptOut(t *testing.T) {
 func TestBuildInstallEventPayload_MethodAllowlist(t *testing.T) {
 	t.Parallel()
 	for _, m := range []string{"bash", "brew", "scoop"} {
-		if p := BuildInstallEventPayload(m, "v1.2.3"); p == nil || p.Properties["method"] != m {
+		if p := BuildInstallEventPayload(m, "v1.2.3", ""); p == nil || p.Properties["method"] != m {
 			t.Errorf("method %q should yield a payload, got %+v", m, p)
 		}
 	}
 	for _, m := range []string{"foo", "install.sh", ""} {
-		if p := BuildInstallEventPayload(m, "v1.2.3"); p != nil {
+		if p := BuildInstallEventPayload(m, "v1.2.3", ""); p != nil {
 			t.Errorf("unknown method %q should yield nil payload, got %+v", m, p)
 		}
 	}
 }
 
-func TestMarkFirstInstall(t *testing.T) {
+func TestInstalledVersionRoundTrip(t *testing.T) {
 	// Uses t.Setenv, so cannot run in parallel.
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	if !markFirstInstall() {
-		t.Fatal("first markFirstInstall should return true (first install)")
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	if got := readInstalledVersion(); got != "" {
+		t.Errorf("no state yet: want empty, got %q", got)
 	}
-	if markFirstInstall() {
-		t.Error("second markFirstInstall should return false (already tracked)")
+	writeInstalledVersion("v1.0.0")
+	if got := readInstalledVersion(); got != "v1.0.0" {
+		t.Errorf("after first write: want v1.0.0, got %q", got)
+	}
+	writeInstalledVersion("v1.1.0")
+	if got := readInstalledVersion(); got != "v1.1.0" {
+		t.Errorf("after upgrade write: want v1.1.0, got %q", got)
 	}
 }
 
