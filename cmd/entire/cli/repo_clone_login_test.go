@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -42,6 +43,19 @@ func swapInteractiveReauthLogin(t *testing.T, fn func(*cobra.Command, string, st
 	t.Cleanup(func() { interactiveReauthLogin = orig })
 }
 
+func unsetCloneEnvToken(t *testing.T) {
+	t.Helper()
+	value, present := os.LookupEnv(auth.EnvTokenVar)
+	require.NoError(t, os.Unsetenv(auth.EnvTokenVar))
+	t.Cleanup(func() {
+		if present {
+			require.NoError(t, os.Setenv(auth.EnvTokenVar, value)) //nolint:usetesting // restore captured presence and value
+		} else {
+			require.NoError(t, os.Unsetenv(auth.EnvTokenVar))
+		}
+	})
+}
+
 // TestRenderCoreError_StripsReauthNoise verifies the shared choke point surfaces
 // only the clean re-login hint, not the ogen/command wrapper noise from the
 // reported `entire repo clone` failure.
@@ -68,7 +82,7 @@ func TestEnsureCloneSession(t *testing.T) {
 	}
 
 	t.Run("healthy session proceeds without prompting", func(t *testing.T) {
-		t.Setenv(auth.EnvTokenVar, "")
+		unsetCloneEnvToken(t)
 		swapProbeCloneSession(t, func(context.Context) (string, error) {
 			return testCloneLoginServer, nil
 		})
@@ -80,7 +94,7 @@ func TestEnsureCloneSession(t *testing.T) {
 	})
 
 	t.Run("non-interactive reauth returns the clean hint, no login", func(t *testing.T) {
-		t.Setenv(auth.EnvTokenVar, "")
+		unsetCloneEnvToken(t)
 		re := notLoggedInReauthErr(t)
 		msg, _ := auth.ReauthMessage(re)
 		swapProbeCloneSession(t, func(context.Context) (string, error) {
@@ -98,7 +112,7 @@ func TestEnsureCloneSession(t *testing.T) {
 	})
 
 	t.Run("transient probe error passes through unchanged", func(t *testing.T) {
-		t.Setenv(auth.EnvTokenVar, "")
+		unsetCloneEnvToken(t)
 		transient := errors.New("dial tcp: connection refused")
 		swapProbeCloneSession(t, func(context.Context) (string, error) {
 			return testCloneLoginServer, transient
@@ -120,8 +134,17 @@ func TestEnsureCloneSession(t *testing.T) {
 		require.NoError(t, ensureCloneSession(newCmd(t)))
 	})
 
-	t.Run("interactive reauth logs in and continues", func(t *testing.T) {
+	t.Run("empty ENTIRE_TOKEN skips the probe", func(t *testing.T) {
 		t.Setenv(auth.EnvTokenVar, "")
+		swapProbeCloneSession(t, func(context.Context) (string, error) {
+			t.Fatal("probe must not run when ENTIRE_TOKEN is present but empty")
+			return "", nil
+		})
+		require.NoError(t, ensureCloneSession(newCmd(t)))
+	})
+
+	t.Run("interactive reauth logs in and continues", func(t *testing.T) {
+		unsetCloneEnvToken(t)
 		t.Setenv(interactive.EnvTestTTY, "1")
 		re := notLoggedInReauthErr(t)
 		msg, _ := auth.ReauthMessage(re)
@@ -142,7 +165,7 @@ func TestEnsureCloneSession(t *testing.T) {
 	})
 
 	t.Run("interactive decline returns the clean hint", func(t *testing.T) {
-		t.Setenv(auth.EnvTokenVar, "")
+		unsetCloneEnvToken(t)
 		t.Setenv(interactive.EnvTestTTY, "1")
 		re := notLoggedInReauthErr(t)
 		msg, _ := auth.ReauthMessage(re)
@@ -155,10 +178,12 @@ func TestEnsureCloneSession(t *testing.T) {
 		err := ensureCloneSession(newCmd(t))
 		require.Error(t, err)
 		require.Equal(t, msg, err.Error())
+		var silentErr *SilentError
+		require.ErrorAs(t, err, &silentErr)
 	})
 
 	t.Run("interactive login error propagates", func(t *testing.T) {
-		t.Setenv(auth.EnvTokenVar, "")
+		unsetCloneEnvToken(t)
 		t.Setenv(interactive.EnvTestTTY, "1")
 		re := notLoggedInReauthErr(t)
 		loginErr := errors.New("login failed")

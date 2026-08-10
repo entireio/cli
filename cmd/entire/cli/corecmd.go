@@ -608,6 +608,13 @@ func runCoreClient(cmd *cobra.Command, newClient func(context.Context) (*coreapi
 	}
 	client, err := newClient(cmd.Context())
 	if err != nil {
+		// Client construction resolves the active login (coreapi.New →
+		// ResolveControlPlaneTarget), so a not-logged-in/expired session fails
+		// here — before any API call reaches renderCoreError. Surface the same
+		// clean re-login hint rather than the wrapper-prefixed chain.
+		if msg, ok := auth.ReauthMessage(err); ok {
+			return errors.New(msg)
+		}
 		return fmt.Errorf("connect to Entire control plane: %w", err)
 	}
 	if err := fn(cmd.Context(), client); err != nil {

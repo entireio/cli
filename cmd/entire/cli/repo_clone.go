@@ -265,11 +265,11 @@ func defaultInteractiveReauthLogin(cmd *cobra.Command, loginServer, hint string)
 // prompt. A fresh coreapi client built afterward re-reads the newly stored
 // token, so the clone proceeds in the same process.
 func ensureCloneSession(cmd *cobra.Command) error {
-	// A non-empty ENTIRE_TOKEN supplies a verbatim bearer with no refreshable
-	// session to probe; leave any failure to the normal flow (renderCoreError
-	// still cleans the message). Such runs are non-interactive CI anyway. An
-	// empty value is treated as unset, matching coreapi's env-token path.
-	if os.Getenv(auth.EnvTokenVar) != "" {
+	// ENTIRE_TOKEN supplies a verbatim bearer with no refreshable session to
+	// probe; leave any failure, including a blank token, to the normal flow
+	// (renderCoreError still cleans the message). Match coreapi's presence-based
+	// env-token precedence so this precondition never probes a stored session.
+	if _, ok := os.LookupEnv(auth.EnvTokenVar); ok {
 		return nil
 	}
 	if insecureHTTPRequested(cmd) {
@@ -293,7 +293,7 @@ func ensureCloneSession(cmd *cobra.Command) error {
 		return err
 	}
 	if !loggedIn {
-		return errors.New(msg)
+		return NewSilentError(errors.New(msg))
 	}
 	return nil
 }
