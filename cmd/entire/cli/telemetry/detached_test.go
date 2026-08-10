@@ -187,6 +187,31 @@ func TestTrackInstallDetachedRespectsOptOut(t *testing.T) {
 	TrackInstallDetached("scoop", "v1.2.3")
 }
 
+func TestBuildInstallEventPayload_MethodAllowlist(t *testing.T) {
+	t.Parallel()
+	for _, m := range []string{"bash", "brew", "scoop"} {
+		if p := BuildInstallEventPayload(m, "v1.2.3"); p == nil || p.Properties["method"] != m {
+			t.Errorf("method %q should yield a payload, got %+v", m, p)
+		}
+	}
+	for _, m := range []string{"foo", "install.sh", ""} {
+		if p := BuildInstallEventPayload(m, "v1.2.3"); p != nil {
+			t.Errorf("unknown method %q should yield nil payload, got %+v", m, p)
+		}
+	}
+}
+
+func TestMarkFirstInstall(t *testing.T) {
+	// Uses t.Setenv, so cannot run in parallel.
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if !markFirstInstall() {
+		t.Fatal("first markFirstInstall should return true (first install)")
+	}
+	if markFirstInstall() {
+		t.Error("second markFirstInstall should return false (already tracked)")
+	}
+}
+
 func TestParseGitVersion(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

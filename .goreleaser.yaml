@@ -121,7 +121,10 @@ scoops:
     license: MIT
     skip_upload: auto
     post_install:
-      - "entire __track-install --method scoop"
+      # Invoke the just-installed binary directly ($dir is this version's app
+      # dir) rather than relying on PATH, which could resolve an older entire.
+      # Wrapped so a tracking failure can never fail the install (best-effort).
+      - 'try { & "$dir\entire.exe" __track-install --method scoop *> $null } catch { }'
 
 homebrew_casks:
   - name: entire

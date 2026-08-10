@@ -273,7 +273,7 @@ main() {
     # exit below — so first-time installs (not yet on PATH) are still counted.
     # Best-effort, detached, opt-out aware; uses the absolute path, not PATH.
     info "Sending an anonymous install ping. Set ENTIRE_TELEMETRY_OPTOUT=1 (before installing) to disable."
-    "$install_path" __track-install --method install.sh || true
+    "$install_path" __track-install --method bash || true
 
     # Check if the installed binary is the one that will be found in PATH
     local path_binary
