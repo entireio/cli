@@ -2,6 +2,7 @@ package agentimport
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -617,5 +618,44 @@ func TestRun_CodexImportSanitizesAndKeepsOffsetsAligned(t *testing.T) {
 	if got := len(strings.Split(strings.TrimRight(stored, "\n"), "\n")); got != rawLines {
 		t.Errorf("stored transcript has %d lines, rollout had %d — imported turn offsets "+
 			"(CheckpointTranscriptStart from raw line indices) would drift", got, rawLines)
+	}
+}
+
+// TestRun_CancelledContextStopsBeforeScanning verifies the session loop honors
+// context cancellation: a cancelled context stops the import cleanly (surfacing
+// context.Canceled) before scanning any session or writing any checkpoint, so a
+// large import aborts on Ctrl-C instead of grinding through every remaining
+// session.
+func TestRun_CancelledContextStopsBeforeScanning(t *testing.T) {
+	t.Parallel()
+	repo, repoDir := initRepoWithCommit(t)
+	claudeDir := t.TempDir()
+	writeFixtureSession(t, claudeDir, "sess1.jsonl")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	opts := Options{RepoRoot: repoDir, OverridePath: claudeDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
+	res, err := Run(ctx, repo, claudeImporter{}, opts)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+	if res.SessionsScanned != 0 {
+		t.Fatalf("cancelled import must not scan any session, got %+v", res)
+	}
+	if res.TurnsImported != 0 {
+		t.Fatalf("cancelled import must import no turns, got %+v", res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	infos, err := stores.Persistent.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 0 {
+		t.Fatalf("cancelled import must write no checkpoints, got %d", len(infos))
 	}
 }

@@ -311,6 +311,41 @@ func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
 	assert.ElementsMatch(t, refs, remaining, "failed push leaves refs queued")
 }
 
+// TestFlushCheckpointRefsQueue_CancelledContextStopsCleanly verifies the flush
+// reacts to context cancellation (Ctrl-C during the user's git push) by bailing
+// cleanly rather than treating the cancelled batch push as a divergence and
+// grinding the per-ref recovery loop under a dead context. A cancelled push
+// must surface context.Canceled, push nothing, and leave every ref queued for
+// the next push.
+func TestFlushCheckpointRefsQueue_CancelledContextStopsCleanly(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel: the batch push fails as cancellation, and flush must stop cleanly
+
+	pushed, err := flushCheckpointRefsQueue(ctx, repo, bareDir)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 0, pushed)
+
+	remaining, drainErr := queue.Drain()
+	require.NoError(t, drainErr)
+	assert.ElementsMatch(t, refs, remaining, "cancelled push leaves every ref queued")
+
+	lsCmd := exec.CommandContext(context.Background(), "git", "ls-remote", bareDir)
+	lsCmd.Env = testutil.GitIsolatedEnv()
+	out, lsErr := lsCmd.CombinedOutput()
+	require.NoError(t, lsErr, "ls-remote failed: %s", out)
+	for _, ref := range refs {
+		assert.NotContains(t, string(out), ref.String(), "no ref should reach the remote after cancellation")
+	}
+}
+
 // remoteRefFiles lists the files in the tree a ref points at on the bare remote.
 func remoteRefFiles(t *testing.T, bareDir string, ref plumbing.ReferenceName) string {
 	t.Helper()

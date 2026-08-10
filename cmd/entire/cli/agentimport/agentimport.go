@@ -215,6 +215,13 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 	authorName, authorEmail := cp.GetGitAuthorFromRepo(repo)
 
 	for sessionIndex, sf := range files {
+		// Honor cancellation (Ctrl-C): a large import spans many sessions, so
+		// stop cleanly between sessions instead of writing every remaining one.
+		// Checkpoints already written stay put — they are idempotent by their
+		// deterministic ID, so a re-run resumes where this left off.
+		if err := ctx.Err(); err != nil {
+			return res, err //nolint:wrapcheck // propagating context cancellation
+		}
 		res.SessionsScanned++
 		full, readErr := os.ReadFile(sf.Path)
 		if readErr != nil {

@@ -371,6 +371,15 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 	}
 	stop("")
 
+	// Cancellation (Ctrl-C during the user's git push) surfaces here as a failed
+	// batch push, not a divergence. Bail cleanly before the per-ref recovery
+	// messaging and loop: nothing was removed from the queue, so every ref stays
+	// queued for the next push. Distinct from the in-loop check below, which
+	// handles a cancel that arrives partway through a genuine divergence sync.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return 0, ctxErr //nolint:wrapcheck // propagating context cancellation
+	}
+
 	// Non-interactive SSH auth failures cannot be fixed by per-ref
 	// fetch+replay. Surface the same actionable hint as the v1 doPushRef path
 	// (issue #1523) instead of only logging to .entire/logs/.
@@ -386,12 +395,25 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 	// fetch+replay recovery, and remove from the queue only the refs that land
 	// (a genuine cherry-pick conflict leaves that ref queued for a later push,
 	// never force-overwriting the remote).
-	fmt.Fprintf(os.Stderr, "[entire] Some checkpoint refs diverged; syncing %d ref(s) individually...", len(existing))
-	stop = startProgressDots(os.Stderr)
+	fmt.Fprintf(os.Stderr, "[entire] Some checkpoint refs diverged; syncing %d ref(s) individually...\n", len(existing))
 	pushed := make([]plumbing.ReferenceName, 0, len(existing))
 	var firstErr error
-	for _, ref := range existing {
+	for i, ref := range existing {
+		// Honor cancellation: Ctrl-C cancels the root context, so stop the loop
+		// instead of spinning through every remaining ref with an already-dead
+		// context (each derived push would just fail fast and log). Unpushed
+		// refs stay queued for the next push.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			firstErr = ctxErr
+			break
+		}
+		// Per-ref counter: each ref can take up to the push budget, so show
+		// forward progress ("k/N") rather than one spinner over the whole loop
+		// that leaves the user unsure how much is left.
+		fmt.Fprintf(os.Stderr, "[entire] Syncing checkpoint ref %d/%d...", i+1, len(existing))
+		stop := startProgressDots(os.Stderr)
 		if err := pushCheckpointRefWithRecovery(pushCtx, pushTarget, ref); err != nil {
+			stop(" failed")
 			logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
 				slog.String("ref", ref.String()), slog.String("error", err.Error()))
 			if nonInteractiveSSHAuthFailure(pushCtx, err) {
@@ -402,9 +424,10 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 			}
 			continue
 		}
+		stop(" done")
 		pushed = append(pushed, ref)
 	}
-	stop(fmt.Sprintf(" pushed %d of %d", len(pushed), len(existing)))
+	fmt.Fprintf(os.Stderr, "[entire] Synced %d of %d checkpoint ref(s).\n", len(pushed), len(existing))
 	if err := queue.Remove(pushed); err != nil {
 		logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 			slog.String("error", err.Error()))
