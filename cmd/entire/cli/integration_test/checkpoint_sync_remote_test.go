@@ -338,6 +338,68 @@ func TestCheckpointSyncRemote_StatusReportsDestinationAndUnpushed(t *testing.T) 
 // refs is separate future work (test plan B5), same scoping as
 // TestHTTPS_CheckpointRemoteRoutesToSeparateRepo. The URL is derived from the
 // push remote's HTTPS URL, so this reuses the smart-HTTP fixture.
+// TestCheckpointSyncRemote_InheritedCheckpointRemoteDoesNotBypassGate is the
+// end-to-end guard for the "cloned the base repo, added my fork" contributor
+// topology.
+//
+// It matters at this level because of how the pre-push gate is written:
+//
+//	if !ps.hasCheckpointURL() && !checkpointSyncAllowedForRemote(ctx, ps.remote)
+//
+// A dedicated checkpoint_remote SKIPS the gate. So while the ownership check
+// accepted an inherited committed setting, a contributor pushing to their own
+// fork sailed straight past the gate and delivered their session transcripts to
+// the upstream project's checkpoint repo. Ownership now also requires the push
+// destination's owner to match, which makes hasCheckpointURL false here and lets
+// the gate do its job.
+func TestCheckpointSyncRemote_InheritedCheckpointRemoteDoesNotBypassGate(t *testing.T) {
+	t.Parallel()
+
+	srv := startGitHTTPSServer(t, "acme/app", "contributor/app", "acme/checkpoints")
+	env := NewFeatureBranchEnv(t)
+
+	upstreamBare := srv.BareDirs["acme/app"]
+	forkBare := srv.BareDirs["contributor/app"]
+	checkpointBare := srv.BareDirs["acme/checkpoints"]
+
+	// origin is the UPSTREAM base repo the contributor cloned; myfork is their
+	// own. Note origin's owner ("acme") matches the checkpoint repo's owner,
+	// which is precisely why an origin-only ownership check was fooled.
+	seedBareRepo(t, env, upstreamBare, srv.URL+"/acme/app.git")
+	testutil.AddRemote(t, env.RepoDir, "myfork", srv.URL+"/contributor/app.git")
+	env.setGitConfigBaseline()
+	env.ExtraEnv = srv.tokenEnv("fork-provenance-token")
+
+	// The setting is committed in .entire/settings.json — i.e. inherited by
+	// cloning, not chosen by this developer.
+	env.PatchSettings(map[string]any{
+		"strategy_options": map[string]any{
+			"checkpoint_remote": map[string]any{
+				"provider": "github",
+				"repo":     "acme/checkpoints",
+			},
+		},
+	})
+
+	_ = createCheckpointedCommit(t, env, "Add contrib module", "contrib.go", "package contrib", "Add contrib module")
+
+	// The contributor's actual workflow: push to their fork. myfork is not the
+	// elected sync remote (origin wins the default election), so with the
+	// inherited setting correctly ignored the gate drops checkpoint sync
+	// entirely — nothing reaches upstream's checkpoint repo.
+	env.RunPrePush("myfork")
+
+	if env.BranchExistsOnRemote(checkpointBare, paths.MetadataBranchName) {
+		t.Error("upstream's checkpoint repo must not receive a contributor's session data from an inherited setting")
+	}
+	if env.BranchExistsOnRemote(upstreamBare, paths.MetadataBranchName) {
+		t.Error("upstream must not receive the checkpoint branch")
+	}
+	if env.BranchExistsOnRemote(forkBare, paths.MetadataBranchName) {
+		t.Error("the fork is not the elected remote, so the gate must drop checkpoint sync there too")
+	}
+}
+
 func TestCheckpointSyncRemote_DedicatedCheckpointRemoteExemptFromGate(t *testing.T) {
 	t.Parallel()
 

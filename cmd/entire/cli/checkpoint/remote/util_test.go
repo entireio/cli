@@ -386,17 +386,50 @@ func TestPushURL(t *testing.T) {
 			wantEnabled:  false,
 		},
 		{
-			// Ownership follows origin, so pushing to a differently-owned remote
-			// (a backup, a colleague's fork) no longer disables our own
-			// checkpoint_remote — which previously sent the checkpoints to that
-			// remote instead of the configured checkpoint repo.
-			name:         "differently owned push remote still uses our checkpoint remote when origin owner matches",
+			// A differently-owned push destination reads as inherited even when
+			// origin's owner matches, because that combination is exactly the
+			// "cloned the base repo, added my fork" contributor topology and is
+			// indistinguishable from this one (own repo + backup remote in
+			// another org) using local git config alone. Erring toward "not
+			// ours" keeps transcripts out of repositories we cannot confirm we
+			// own; pushes to origin still route to the checkpoint repo, and
+			// ENT-1451's pre-push gate blocks checkpoint sync on pushes to a
+			// non-elected remote anyway.
+			name:         "differently owned push remote reads as inherited even when origin owner matches",
 			originURL:    "https://github.com/acme/app.git",
 			pushRemote:   "backup",
 			pushURL:      "https://github.com/otherorg/backup.git",
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
-			wantURL:      "https://github.com/acme/checkpoints.git",
-			wantEnabled:  true,
+			wantURL:      "https://github.com/acme/app.git",
+			wantEnabled:  false,
+		},
+		{
+			// The regression this change exists for: a contributor who cloned
+			// the UPSTREAM base repo and added their own fork. Origin belongs to
+			// upstream, so an origin-only ownership check read the inherited
+			// committed setting as ours and aimed the contributor's session
+			// transcripts at the upstream project's checkpoint repo.
+			name:         "committed setting is inherited when origin is upstream and we push to our fork",
+			originURL:    "https://github.com/acme/app.git",
+			pushRemote:   "myfork",
+			pushURL:      "https://github.com/contributor/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "https://github.com/acme/app.git",
+			wantEnabled:  false,
+		},
+		{
+			// Same topology, but the developer confirmed the checkpoint repo is
+			// theirs by putting it in the gitignored settings.local.json. That
+			// provenance short-circuit still wins — it is the escape hatch for
+			// every case the owner comparison has to refuse.
+			name:              "settings.local.json still wins in the fork topology",
+			originURL:         "https://github.com/acme/app.git",
+			pushRemote:        "myfork",
+			pushURL:           "https://github.com/contributor/app.git",
+			settingsJSON:      `{"enabled":true}`,
+			settingsLocalJSON: `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:           "https://github.com/acme/checkpoints.git",
+			wantEnabled:       true,
 		},
 		{
 			// The escape hatch for a checkpoint repo owned by a different account
