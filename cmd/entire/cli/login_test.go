@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -507,7 +508,7 @@ func TestRunBrowserLogin_OpensAuthorizationURL(t *testing.T) {
 	// The stubbed Wait returns an error, so runBrowserLogin stops before
 	// persistLogin (which would hit the real keyring); we assert on the
 	// side effects up to that point.
-	if err := runBrowserLogin(context.Background(), &out, &bytes.Buffer{}, flow, "https://auth.test", openURL, browserLoginTimeout); err == nil {
+	if err := runBrowserLogin(context.Background(), &out, &bytes.Buffer{}, flow, "https://auth.test", openURL, browserLoginTimeout, nil); err == nil {
 		t.Fatal("expected error from stubbed Wait")
 	}
 
@@ -537,7 +538,7 @@ func TestRunBrowserLogin_OpenBrowserFallback(t *testing.T) {
 	failOpen := func(context.Context, string) error { return errors.New("no browser") }
 
 	var out, errW bytes.Buffer
-	if err := runBrowserLogin(context.Background(), &out, &errW, flow, "https://auth.test", failOpen, browserLoginTimeout); err == nil {
+	if err := runBrowserLogin(context.Background(), &out, &errW, flow, "https://auth.test", failOpen, browserLoginTimeout, nil); err == nil {
 		t.Fatal("expected error from stubbed Wait")
 	}
 
@@ -555,7 +556,7 @@ func TestRunBrowserLogin_WaitError(t *testing.T) {
 	denied := errors.New("access_denied")
 	flow := &fakeBrowserFlow{authURL: "https://auth.test/authorize", waitErr: denied}
 
-	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", noopOpenURL, browserLoginTimeout)
+	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", noopOpenURL, browserLoginTimeout, nil)
 	if !errors.Is(err, denied) {
 		t.Fatalf("err = %v, want wrapped %v", err, denied)
 	}
@@ -570,7 +571,7 @@ func TestRunBrowserLogin_ExchangeError(t *testing.T) {
 		exchErr:  errors.New("invalid_grant"),
 	}
 
-	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", noopOpenURL, browserLoginTimeout)
+	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", noopOpenURL, browserLoginTimeout, nil)
 	if err == nil || !strings.Contains(err.Error(), "complete login") {
 		t.Fatalf("err = %v, want complete login error", err)
 	}
@@ -586,7 +587,7 @@ func TestRunBrowserLogin_WaitTimeout(t *testing.T) {
 	// come from runBrowserLogin's own timeout, or this test would hang.
 	flow := &fakeBrowserFlow{authURL: "https://auth.test/authorize", waitUntilDone: true}
 
-	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", noopOpenURL, 50*time.Millisecond)
+	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", noopOpenURL, 50*time.Millisecond, nil)
 	if err == nil || !strings.Contains(err.Error(), "timed out waiting for sign-in") {
 		t.Fatalf("err = %v, want sign-in timeout", err)
 	}
@@ -606,11 +607,179 @@ func TestRunBrowserLogin_ParentCancelNotReportedAsTimeout(t *testing.T) {
 
 	flow := &fakeBrowserFlow{authURL: "https://auth.test/authorize", waitUntilDone: true}
 
-	err := runBrowserLogin(ctx, &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", noopOpenURL, time.Minute)
+	err := runBrowserLogin(ctx, &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", noopOpenURL, time.Minute, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want wrapped context.Canceled", err)
 	}
 	if strings.Contains(err.Error(), "timed out") {
 		t.Errorf("cancellation must not be reported as a timeout: %v", err)
+	}
+}
+
+func TestRunBrowserLogin_WSLFallback_CallbackWins(t *testing.T) {
+	t.Parallel()
+
+	// Callback returns a code; Exchange errors so we stop before persistLogin
+	// (which would hit real storage). The fallback blocks until the shared
+	// context is cancelled, so the callback wins the race.
+	flow := &fakeBrowserFlow{
+		authURL:  "https://auth.test/authorize",
+		waitCode: "cb-code",
+		exchErr:  errors.New("exchange boom"),
+	}
+	blockingFallback := func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }
+
+	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow,
+		"https://auth.test", noopOpenURL, browserLoginTimeout, blockingFallback)
+
+	if errors.Is(err, errBrowserFallbackRequested) {
+		t.Fatalf("callback should win, got fallback: %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "complete login") {
+		t.Fatalf("err = %v, want 'complete login' from exchange error", err)
+	}
+	if flow.gotExchangeCode != "cb-code" {
+		t.Errorf("exchange code = %q, want cb-code (callback path taken)", flow.gotExchangeCode)
+	}
+	if !flow.closed {
+		t.Error("flow not closed")
+	}
+}
+
+func TestRunBrowserLogin_WSLFallback_EnterWins(t *testing.T) {
+	t.Parallel()
+
+	// flow.Wait blocks until ctx is done; the fallback returns immediately
+	// (as if the user pressed Enter), so the fallback wins.
+	flow := &fakeBrowserFlow{authURL: "https://auth.test/authorize", waitUntilDone: true}
+	enterNow := func(context.Context) error { return nil }
+
+	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow,
+		"https://auth.test", noopOpenURL, browserLoginTimeout, enterNow)
+
+	if !errors.Is(err, errBrowserFallbackRequested) {
+		t.Fatalf("err = %v, want errBrowserFallbackRequested", err)
+	}
+	if flow.gotExchangeCode != "" {
+		t.Errorf("exchange must not run on fallback, got code %q", flow.gotExchangeCode)
+	}
+	if !flow.closed {
+		t.Error("flow not closed")
+	}
+}
+
+func TestRunLoginAuto_WSL_FallbackToDevice(t *testing.T) {
+	t.Parallel()
+
+	// Under test the real waitForEnter (armed only for WSL) returns
+	// immediately, so the fallback fires and routes to the device flow. The
+	// browser flow's Wait blocks so the callback never pre-empts the fallback.
+	flow := &fakeBrowserFlow{authURL: "https://auth.test/authorize", waitUntilDone: true}
+	var browserCalls int
+	var errW bytes.Buffer
+
+	err := runLoginAuto(context.Background(), &bytes.Buffer{}, &errW, &mockClient{},
+		startBrowserStub(&browserCalls, flow, nil), noopOpenURL,
+		loginFlowFacts{canPrompt: true, wsl: true})
+
+	if browserCalls != 1 {
+		t.Errorf("startBrowser calls = %d, want 1 (WSL still tries the loopback flow first)", browserCalls)
+	}
+	if !strings.Contains(errW.String(), "switching to code-based sign-in") {
+		t.Errorf("stderr missing fallback message:\n%s", errW.String())
+	}
+	// mockClient.StartDeviceAuth errors — proof the device flow was attempted.
+	if err == nil || !strings.Contains(err.Error(), "not implemented in mock") {
+		t.Fatalf("err = %v, want device-flow start error from mock", err)
+	}
+	if !flow.closed {
+		t.Error("browser flow not closed before fallback")
+	}
+}
+
+func TestRunLoginAuto_NonWSL_NoFallbackArmed(t *testing.T) {
+	t.Parallel()
+
+	// Without wsl, the browser flow must NOT arm the Enter fallback: Wait's
+	// error surfaces directly as a 'complete login' failure, never a fallback.
+	flow := &fakeBrowserFlow{authURL: "https://auth.test/authorize", waitErr: errors.New("stop")}
+	var browserCalls int
+
+	err := runLoginAuto(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, &mockClient{},
+		startBrowserStub(&browserCalls, flow, nil), noopOpenURL,
+		loginFlowFacts{canPrompt: true})
+
+	if err == nil || !strings.Contains(err.Error(), "complete login") {
+		t.Fatalf("err = %v, want browser-flow 'complete login' error (no fallback)", err)
+	}
+}
+
+func TestWSLFromProcVersion(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"wsl2", "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b)", true},
+		{"wsl1", "Linux version 4.4.0-19041-Microsoft (build)", true},
+		{"plain-linux", "Linux version 6.8.0-generic (buildd@lcy02)", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		if got := wslFromProcVersion(tc.in); got != tc.want {
+			t.Errorf("wslFromProcVersion(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestResolveBrowserLauncher(t *testing.T) {
+	t.Parallel()
+
+	const browserURL = "https://auth.test/cli/auth?user_code=ABCD"
+	found := func(string) (string, error) { return "/usr/bin/wslview", nil }
+	missing := func(string) (string, error) { return "", errors.New("not found") }
+
+	cases := []struct {
+		name     string
+		goos     string
+		wsl      bool
+		look     func(string) (string, error)
+		wantCmd  string
+		wantArgs []string
+		wantDir  string
+		wantErr  bool
+	}{
+		{"darwin", "darwin", false, missing, "open", []string{browserURL}, "", false},
+		{"windows", "windows", false, missing, "cmd", []string{"/c", "start", "", browserURL}, "", false},
+		{"linux-non-wsl", "linux", false, found, "xdg-open", []string{browserURL}, "", false},
+		{"wsl-with-wslview", "linux", true, found, "/usr/bin/wslview", []string{browserURL}, "", false},
+		{"wsl-without-wslview", "linux", true, missing, "cmd.exe", []string{"/c", "start", "", browserURL}, "/mnt/c", false},
+		{"unsupported", "plan9", false, missing, "", nil, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd, args, dir, err := resolveBrowserLauncher(tc.goos, tc.wsl, tc.look, browserURL)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got cmd=%q", cmd)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cmd != tc.wantCmd {
+				t.Errorf("cmd = %q, want %q", cmd, tc.wantCmd)
+			}
+			if !reflect.DeepEqual(args, tc.wantArgs) {
+				t.Errorf("args = %v, want %v", args, tc.wantArgs)
+			}
+			if dir != tc.wantDir {
+				t.Errorf("dir = %q, want %q", dir, tc.wantDir)
+			}
+		})
 	}
 }
