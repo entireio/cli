@@ -16,7 +16,7 @@ func TestRunAgentList_ListsAvailableAgents(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	if err := runAgentList(context.Background(), &buf); err != nil {
+	if err := runAgentList(context.Background(), &buf, false); err != nil {
 		t.Fatalf("runAgentList: %v", err)
 	}
 	out := buf.String()
@@ -46,7 +46,7 @@ func TestRunAgentList_MarksInstalledWithCheck(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	if err := runAgentList(context.Background(), &buf); err != nil {
+	if err := runAgentList(context.Background(), &buf, false); err != nil {
 		t.Fatalf("runAgentList: %v", err)
 	}
 	out := buf.String()
@@ -85,32 +85,48 @@ func TestAgentGroupBareCommandRunsAgentMenu(t *testing.T) {
 	}
 }
 
-func TestAgentGroup_DiscoversExternalAgents(t *testing.T) {
+// TestRunAgentList_ExternalAgentsRequireAllFlag verifies that external plugins
+// on $PATH appear only with `--all`, never in the default listing — and that
+// this holds even when external_agents is enabled in settings. Installing an
+// external agent (which enables external_agents) must not change the default
+// `agent list` output.
+func TestRunAgentList_ExternalAgentsRequireAllFlag(t *testing.T) {
 	// Cannot use t.Parallel because we modify PATH via t.Setenv and cwd via t.Chdir.
-	// The mock agent is a #!/bin/sh script executed during discovery, so skip
-	// on environments without a POSIX shell (matching sibling external-agent tests).
+	// The mock agent is a #!/bin/sh script run by --all discovery, so skip on
+	// environments without a POSIX shell (matching sibling external-agent tests).
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
 
-	// `list` honors the external_agents gate (like attach/explain/hooks), so
-	// stand up an isolated repo with the setting enabled rather than executing
-	// $PATH plugins unconditionally. `agent add` is the on-ramp that flips this
-	// setting on for a real user.
+	// external_agents is ON, to prove the default listing ignores it entirely.
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
 	testutil.WriteFile(t, repoDir, ".entire/settings.json", `{"enabled":true,"external_agents":true}`)
 	t.Chdir(repoDir)
 
+	// Unique name so the process-global agent registry can't collide with other tests.
+	const agentName = "ext-allflag-test"
 	externalDir := t.TempDir()
-	writeExternalAgentBinary(t, externalDir, "ext-agentgroup-test")
+	writeExternalAgentBinary(t, externalDir, agentName)
 	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	var buf bytes.Buffer
-	if err := runAgentList(context.Background(), &buf); err != nil {
-		t.Fatalf("runAgentList with external: %v", err)
+	// Default listing performs no discovery and omits external plugins even with
+	// external_agents enabled. Assert this first, before the --all call registers
+	// the agent in the process-global registry.
+	var def bytes.Buffer
+	if err := runAgentList(context.Background(), &def, false); err != nil {
+		t.Fatalf("runAgentList (default): %v", err)
 	}
-	if !strings.Contains(buf.String(), "ext-agentgroup-test") {
-		t.Errorf("expected external agent 'ext-agentgroup-test' in output, got:\n%s", buf.String())
+	if strings.Contains(def.String(), agentName) {
+		t.Errorf("default listing must not include external agent %q even with external_agents enabled, got:\n%s", agentName, def.String())
+	}
+
+	// --all surfaces external plugins on $PATH.
+	var all bytes.Buffer
+	if err := runAgentList(context.Background(), &all, true); err != nil {
+		t.Fatalf("runAgentList (--all): %v", err)
+	}
+	if !strings.Contains(all.String(), agentName) {
+		t.Errorf("--all listing should include external agent %q, got:\n%s", agentName, all.String())
 	}
 }

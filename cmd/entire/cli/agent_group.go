@@ -57,23 +57,29 @@ func runAgentMenu(ctx context.Context, w io.Writer) error {
 }
 
 func newAgentListCmd() *cobra.Command {
-	return &cobra.Command{
+	var all bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List installed and available agents",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAgentList(cmd.Context(), cmd.OutOrStdout())
+			return runAgentList(cmd.Context(), cmd.OutOrStdout(), all)
 		},
 	}
+	cmd.Flags().BoolVar(&all, "all", false,
+		"Also list external agent plugins found on your PATH")
+	return cmd
 }
 
-func runAgentList(ctx context.Context, w io.Writer) error {
-	// Discover external agent plugins on $PATH so they appear in the listing.
-	// `list` is a passive, read-only command, so it honors the external_agents
-	// setting gate like the other passive discovery call sites (attach, explain,
-	// hooks) rather than executing every entire-agent-* plugin unconditionally.
-	// `add` (targeted, auto-persists external_agents=true) is the on-ramp that
-	// makes an external agent visible here.
-	external.DiscoverAndRegister(ctx)
+func runAgentList(ctx context.Context, w io.Writer, all bool) error {
+	// The default listing shows only built-in agents and performs NO discovery,
+	// so it never executes third-party binaries and is independent of the
+	// external_agents setting — installing an external agent does not change what
+	// `entire agent list` shows. External agent plugins appear only with `--all`,
+	// the explicit opt-in that scans $PATH and runs each entire-agent-* plugin's
+	// info subcommand.
+	if all {
+		external.DiscoverAndRegisterAlways(ctx)
+	}
 
 	installed := GetAgentsWithHooksInstalled(ctx)
 	installedSet := make(map[types.AgentName]struct{}, len(installed))
@@ -81,10 +87,10 @@ func runAgentList(ctx context.Context, w io.Writer) error {
 		installedSet[name] = struct{}{}
 	}
 
-	all := agent.StringList()
+	names := agent.StringList()
 
 	fmt.Fprintln(w, "Agents:")
-	for _, name := range all {
+	for _, name := range names {
 		marker := "  "
 		if _, ok := installedSet[types.AgentName(name)]; ok {
 			marker = "✓ "
