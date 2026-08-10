@@ -67,10 +67,13 @@ func newAgentListCmd() *cobra.Command {
 }
 
 func runAgentList(ctx context.Context, w io.Writer) error {
-	// Discover external agent plugins on $PATH so they appear in the listing,
-	// matching `entire enable` semantics. This is a user-initiated management
-	// command, so bypass the external_agents setting gate.
-	external.DiscoverAndRegisterAlways(ctx)
+	// Discover external agent plugins on $PATH so they appear in the listing.
+	// `list` is a passive, read-only command, so it honors the external_agents
+	// setting gate like the other passive discovery call sites (attach, explain,
+	// hooks) rather than executing every entire-agent-* plugin unconditionally.
+	// `add` (targeted, auto-persists external_agents=true) is the on-ramp that
+	// makes an external agent visible here.
+	external.DiscoverAndRegister(ctx)
 
 	installed := GetAgentsWithHooksInstalled(ctx)
 	installedSet := make(map[types.AgentName]struct{}, len(installed))

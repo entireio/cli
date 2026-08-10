@@ -86,12 +86,22 @@ func TestAgentGroupBareCommandRunsAgentMenu(t *testing.T) {
 }
 
 func TestAgentGroup_DiscoversExternalAgents(t *testing.T) {
-	// Cannot use t.Parallel because we modify PATH via t.Setenv.
+	// Cannot use t.Parallel because we modify PATH via t.Setenv and cwd via t.Chdir.
 	// The mock agent is a #!/bin/sh script executed during discovery, so skip
 	// on environments without a POSIX shell (matching sibling external-agent tests).
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
+
+	// `list` honors the external_agents gate (like attach/explain/hooks), so
+	// stand up an isolated repo with the setting enabled rather than executing
+	// $PATH plugins unconditionally. `agent add` is the on-ramp that flips this
+	// setting on for a real user.
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, ".entire/settings.json", `{"enabled":true,"external_agents":true}`)
+	t.Chdir(repoDir)
+
 	externalDir := t.TempDir()
 	writeExternalAgentBinary(t, externalDir, "ext-agentgroup-test")
 	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
