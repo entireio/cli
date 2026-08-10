@@ -67,6 +67,14 @@ func newGitRefsStore(repo *git.Repository) *gitRefsStore {
 	return &gitRefsStore{treeWriter: &treeWriter{repo: repo}}
 }
 
+// NewRefsReadStore returns a git-refs store over repo with no on-demand
+// fetchers, for reading checkpoints out of a repository that is not the
+// working repo — e.g. cross-repo explain's throwaway fetch repo, where every
+// object is already local and a fetch-on-miss would dial the wrong remote.
+func NewRefsReadStore(repo *git.Repository) PersistentStore {
+	return newGitRefsStore(repo)
+}
+
 // SetBlobFetcher configures on-demand blob fetching for reads from ref trees.
 func (s *gitRefsStore) SetBlobFetcher(f BlobFetchFunc) {
 	s.blobFetcher = f

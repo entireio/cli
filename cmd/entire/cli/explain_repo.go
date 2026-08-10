@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/go-git/go-git/v6/plumbing"
@@ -14,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -128,15 +131,67 @@ func resolveExplainRepoFetchURL(cmd *cobra.Command, owner, repo, clusterFlag str
 	return mirrorCloneURL(chosen.ClusterHost, owner, repo), nil
 }
 
-// prepareCrossRepoExplain resolves --repo/--cluster and, when the target repo
+// crossRepoExplainRequest carries the explain flag values the cross-repo
+// dispatch needs, so maybeRunCrossRepoExplain can live outside the already
+// maintidx-capped newExplainCmd closure.
+type crossRepoExplainRequest struct {
+	repoFlag, clusterFlag, positional, checkpointFlag string
+	json, transcript, rawTranscript                   bool
+	sessionIndex                                      int
+	noPager, short, full, searchAll                   bool
+}
+
+// maybeRunCrossRepoExplain runs the cross-repo explain flow when --repo names
+// a repo other than the cwd one: it fetches the checkpoint into a throwaway
+// temp repo (see openCrossRepoExplain) and renders it through the normal
+// explain pipeline over that repo's lookup. handled=false (with nil error)
+// means --repo names the cwd repo and the caller falls through to the local
+// flow unchanged.
+func maybeRunCrossRepoExplain(cmd *cobra.Command, req crossRepoExplainRequest) (handled bool, err error) {
+	target := req.positional
+	if target == "" {
+		target = req.checkpointFlag
+	}
+	lookup, cleanup, err := openCrossRepoExplain(cmd, req.repoFlag, req.clusterFlag, target)
+	if err != nil {
+		return true, err
+	}
+	if lookup == nil {
+		return false, nil
+	}
+	defer cleanup()
+	if req.json || req.transcript || (req.rawTranscript && cmd.Flags().Changed("session-index")) {
+		// The export flow closes the lookup it is handed.
+		return true, runExplainExport(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), explainExportOptions{
+			checkpointFlag: req.checkpointFlag,
+			target:         req.positional,
+			json:           req.json,
+			transcript:     req.transcript,
+			rawTranscript:  req.rawTranscript,
+			sessionIndex:   req.sessionIndex,
+			lookup:         lookup,
+		})
+	}
+	defer func() { _ = lookup.Close() }()
+	// --generate/--force are mutually exclusive with --repo, so this is
+	// always a read-only render (generate=false, force=false, timeout 0).
+	return true, runExplainCheckpointWithLookup(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), target,
+		req.noPager, !req.short, req.full, req.rawTranscript, false, false, req.searchAll, lookup, nil, 0)
+}
+
+// openCrossRepoExplain resolves --repo/--cluster and, when the target repo
 // differs from the cwd repo, fetches the checkpoint's per-checkpoint ref from
-// that repo's Entire mirror into the cwd repo's object store. After a nil
-// return, the normal explain flow resolves the checkpoint as if it were local.
-// When --repo names the cwd repo it is a no-op (behavior identical to no flag).
-func prepareCrossRepoExplain(cmd *cobra.Command, repoFlag, clusterFlag, target string) error {
+// that repo's Entire mirror into a throwaway temp repo and returns an explain
+// lookup over it — a pure lookup that never writes a ref, object, or config
+// entry into the cwd repo, so a foreign checkpoint can never join (or count
+// as) the local checkpoint namespace. cleanup removes the temp repo; the
+// caller owns closing the lookup before running cleanup. When --repo names
+// the cwd repo both returns are nil and the caller falls through to the
+// normal local flow (behavior identical to no flag).
+func openCrossRepoExplain(cmd *cobra.Command, repoFlag, clusterFlag, target string) (lookup *explainCheckpointLookup, cleanup func(), err error) {
 	ref, err := parseExplainRepoFlag(repoFlag)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	// Everything past flag parsing is a runtime failure (network, git), not a
 	// usage mistake — don't dump usage text on it.
@@ -145,43 +200,75 @@ func prepareCrossRepoExplain(cmd *cobra.Command, repoFlag, clusterFlag, target s
 	if ref.repoID != "" {
 		owner, repoName, err = resolveExplainRepoID(cmd, ref.repoID, clusterFlag)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 	}
 	if explainRepoIsCurrent(cmd.Context(), owner, repoName) {
-		return nil
+		return nil, nil, nil
 	}
 	// A prefix cannot name a per-checkpoint ref, so cross-repo needs the full ID.
 	cid, err := id.NewCheckpointID(target)
 	if err != nil {
-		return fmt.Errorf("--repo requires a full checkpoint ID (12-char hex or 26-char ULID); a prefix cannot be resolved cross-repo: %w", err)
+		return nil, nil, fmt.Errorf("--repo requires a full checkpoint ID (12-char hex or 26-char ULID); a prefix cannot be resolved cross-repo: %w", err)
 	}
 	url, err := resolveExplainRepoFetchURL(cmd, owner, repoName, clusterFlag)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	return fetchCrossRepoCheckpoint(cmd.Context(), cmd.ErrOrStderr(), url, owner+"/"+repoName, cid)
 }
 
 // fetchCrossRepoCheckpoint fetches cid's per-checkpoint ref
-// (refs/entire/checkpoints/<shard>/<id>) from url into the cwd repo's object
-// store. Separated from URL resolution so tests can exercise the fetch +
-// explain flow against a file:// remote without the core API or
-// git-remote-entire.
-func fetchCrossRepoCheckpoint(ctx context.Context, errW io.Writer, url, ownerRepo string, cid id.CheckpointID) error {
+// (refs/entire/checkpoints/<shard>/<id>) from url into a fresh temp repo and
+// returns an explain lookup over that repo, plus a cleanup that deletes it.
+// Separated from URL resolution so tests can exercise the fetch + explain
+// flow against a file:// remote without the core API or git-remote-entire.
+func fetchCrossRepoCheckpoint(ctx context.Context, errW io.Writer, url, ownerRepo string, cid id.CheckpointID) (*explainCheckpointLookup, func(), error) {
 	refName, err := checkpoint.RefName(cid)
 	if err != nil {
 		// Defensive only: cid is already validated by the caller.
-		return err //nolint:wrapcheck // RefName's error is self-describing
+		return nil, nil, err //nolint:wrapcheck // RefName's error is self-describing
+	}
+	tmpDir, err := os.MkdirTemp("", "entire-explain-repo-")
+	if err != nil {
+		return nil, nil, fmt.Errorf("create temp repo for cross-repo checkpoint: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(tmpDir) }
+	lookup, err := fetchCrossRepoCheckpointInto(ctx, errW, tmpDir, url, ownerRepo, cid, refName)
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	return lookup, cleanup, nil
+}
+
+// fetchCrossRepoCheckpointInto initializes a repo in tmpDir, fetches the
+// checkpoint ref into it, and builds the explain lookup over it.
+func fetchCrossRepoCheckpointInto(ctx context.Context, errW io.Writer, tmpDir, url, ownerRepo string, cid id.CheckpointID, refName plumbing.ReferenceName) (*explainCheckpointLookup, error) {
+	if out, initErr := exec.CommandContext(ctx, "git", "init", "-q", tmpDir).CombinedOutput(); initErr != nil {
+		return nil, fmt.Errorf("init temp repo for cross-repo checkpoint: %s: %w", strings.TrimSpace(string(out)), initErr)
 	}
 	stop := startSpinner(errW, "Fetching checkpoint from "+ownerRepo)
-	fetchErr := remote.FetchCheckpointRefFrom(ctx, url, refName)
+	fetchErr := remote.FetchCheckpointRefInto(ctx, tmpDir, url, refName)
 	stop(fetchErr == nil)
-	if fetchErr == nil {
-		return nil
+	if fetchErr != nil {
+		if errors.Is(fetchErr, plumbing.ErrReferenceNotFound) {
+			return nil, fmt.Errorf("checkpoint %s not found in the mirror for %s; repos using the legacy branch-based checkpoint store (or an external checkpoint_remote) are not supported cross-repo yet", cid, ownerRepo)
+		}
+		return nil, fmt.Errorf("fetch checkpoint %s from %s: %w", cid, ownerRepo, fetchErr)
 	}
-	if errors.Is(fetchErr, plumbing.ErrReferenceNotFound) {
-		return fmt.Errorf("checkpoint %s not found in the mirror for %s; repos using the legacy branch-based checkpoint store (or an external checkpoint_remote) are not supported cross-repo yet", cid, ownerRepo)
+	repo, err := gitrepo.OpenPath(tmpDir)
+	if err != nil {
+		return nil, fmt.Errorf("open temp repo for cross-repo checkpoint: %w", err)
 	}
-	return fmt.Errorf("fetch checkpoint %s from %s: %w", cid, ownerRepo, fetchErr)
+	// No fetchers: the single fetched ref brought every object with it
+	// (unfiltered fetch), and an on-demand fetch would dial the cwd repo's
+	// checkpoint remote — the wrong repo.
+	store := checkpoint.NewRefsReadStore(repo)
+	committed, err := store.List(ctx)
+	if err != nil {
+		_ = repo.Close()
+		return nil, fmt.Errorf("list fetched cross-repo checkpoint: %w", err)
+	}
+	return &explainCheckpointLookup{repo: repo, store: store, committed: committed, noRemoteFallback: true}, nil
 }

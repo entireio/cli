@@ -190,9 +190,10 @@ func TestFetchCheckpointRef_NonOriginRemoteNeverClassifiesAbsence(t *testing.T) 
 }
 
 // foreignRepoFixture creates a bare repo holding (or not holding) a checkpoint
-// ref — the "foreign repo's mirror" for FetchCheckpointRefFrom — plus a
-// separate cwd work repo with no remotes, and chdirs into the work repo (the
-// fetch lands objects in the cwd repo's store).
+// ref — the "foreign repo's mirror" for FetchCheckpointRefInto — plus a
+// separate cwd work repo with no remotes, and chdirs into the work repo. The
+// cwd repo stands in for the user's real repo: the Into fetch targets an
+// explicit dir, and the cwd repo must stay untouched.
 func foreignRepoFixture(t *testing.T, withRef bool) (workDir, bareDir string, ref plumbing.ReferenceName) {
 	t.Helper()
 	testutil.IsolateGitConfigEnv(t)
@@ -221,39 +222,53 @@ func foreignRepoFixture(t *testing.T, withRef bool) (workDir, bareDir string, re
 	return workDir, bareDir, ref
 }
 
-// TestFetchCheckpointRefFrom_PresentRefFetches: an explicit remote URL holding
-// the ref must land the local ref of the same name in the cwd repo — the
-// cross-repo explain fetch shape, where the URL is another repo's mirror and
-// the cwd repo has no remote pointing at it.
-func TestFetchCheckpointRefFrom_PresentRefFetches(t *testing.T) {
-	workDir, bareDir, ref := foreignRepoFixture(t, true)
-
-	require.NoError(t, FetchCheckpointRefFrom(context.Background(), bareDir, ref))
-
-	out, err := exec.CommandContext(t.Context(), "git", "-C", workDir, "show-ref", "--verify", ref.String()).CombinedOutput()
-	require.NoError(t, err, "fetched ref must exist locally: %s", out)
+// targetRepoDir initializes an empty repo to fetch a checkpoint ref into —
+// the throwaway temp repo of the cross-repo explain flow.
+func targetRepoDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	out, err := exec.CommandContext(t.Context(), "git", "init", "-q", dir).CombinedOutput()
+	require.NoError(t, err, "git init: %s", out)
+	return dir
 }
 
-// TestFetchCheckpointRefFrom_MissingRefIsAbsence: an explicit URL is
+// TestFetchCheckpointRefInto_PresentRefFetches: an explicit remote URL holding
+// the ref must land the ref in the target dir's repo — and ONLY there. The
+// cwd repo staying clean is the point of the Into shape: a foreign checkpoint
+// must never join the local repo's checkpoint namespace.
+func TestFetchCheckpointRefInto_PresentRefFetches(t *testing.T) {
+	workDir, bareDir, ref := foreignRepoFixture(t, true)
+	targetDir := targetRepoDir(t)
+
+	require.NoError(t, FetchCheckpointRefInto(context.Background(), targetDir, bareDir, ref))
+
+	out, err := exec.CommandContext(t.Context(), "git", "-C", targetDir, "show-ref", "--verify", ref.String()).CombinedOutput()
+	require.NoError(t, err, "fetched ref must exist in the target repo: %s", out)
+
+	out, err = exec.CommandContext(t.Context(), "git", "-C", workDir, "show-ref", "--verify", ref.String()).CombinedOutput()
+	require.Error(t, err, "cwd repo must not gain the checkpoint ref: %s", out)
+}
+
+// TestFetchCheckpointRefInto_MissingRefIsAbsence: an explicit URL is
 // authoritative for checkpoint refs, so a remote genuinely lacking the ref
 // must classify as absence (ErrReferenceNotFound) — that's what lets the
 // cross-repo explain path print its specific "not found in the mirror for
 // <repo>" error instead of a generic failure.
-func TestFetchCheckpointRefFrom_MissingRefIsAbsence(t *testing.T) {
+func TestFetchCheckpointRefInto_MissingRefIsAbsence(t *testing.T) {
 	_, bareDir, ref := foreignRepoFixture(t, false)
 
-	err := FetchCheckpointRefFrom(context.Background(), bareDir, ref)
+	err := FetchCheckpointRefInto(context.Background(), targetRepoDir(t), bareDir, ref)
 	require.Error(t, err)
 	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound,
 		"a ref the explicit remote does not have must classify as absence")
 }
 
-// TestFetchCheckpointRefFrom_UnreachableRemoteIsFailure: a transport-level
+// TestFetchCheckpointRefInto_UnreachableRemoteIsFailure: a transport-level
 // failure on the explicit URL must NOT classify as absence.
-func TestFetchCheckpointRefFrom_UnreachableRemoteIsFailure(t *testing.T) {
+func TestFetchCheckpointRefInto_UnreachableRemoteIsFailure(t *testing.T) {
 	workDir, _, ref := foreignRepoFixture(t, false)
 
-	err := FetchCheckpointRefFrom(context.Background(), workDir+"/nonexistent-remote", ref)
+	err := FetchCheckpointRefInto(context.Background(), targetRepoDir(t), workDir+"/nonexistent-remote", ref)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
 		"a transport failure must stay distinguishable from absence")

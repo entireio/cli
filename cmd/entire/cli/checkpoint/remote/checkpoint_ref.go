@@ -107,36 +107,50 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 		}
 	}
 
-	return probeAndFetchCheckpointRef(ctx, fetchTarget, authoritative, ref)
+	return probeAndFetchCheckpointRef(ctx, probeFetchSpec{target: fetchTarget, authoritative: authoritative}, ref)
 }
 
-// FetchCheckpointRefFrom fetches a single per-checkpoint ref from an explicitly
+// FetchCheckpointRefInto fetches a single per-checkpoint ref from an explicitly
 // named remote URL (rather than the current repo's resolved checkpoint remote)
-// into the local ref of the same name. The URL is treated as authoritative for
-// checkpoint refs: an empty ls-remote probe returns an error wrapping
-// plumbing.ErrReferenceNotFound, distinguishable from transport failures (see
-// FetchCheckpointRef's contract). Used by cross-repo explain, which fetches a
-// checkpoint ref from another repo's Entire mirror into the cwd repo's object
-// store.
-func FetchCheckpointRefFrom(ctx context.Context, url string, ref plumbing.ReferenceName) error {
+// into the repository at dir, under the local ref of the same name. The URL is
+// treated as authoritative for checkpoint refs: an empty ls-remote probe
+// returns an error wrapping plumbing.ErrReferenceNotFound, distinguishable
+// from transport failures (see FetchCheckpointRef's contract). Used by
+// cross-repo explain, which fetches a checkpoint ref from another repo's
+// Entire mirror into a throwaway repo — never into the cwd repo, whose
+// checkpoint namespace must not absorb foreign checkpoints. The fetch is
+// always unfiltered: the target repo is discarded after the read, so it can
+// never lazy-fetch blobs elided by --filter.
+func FetchCheckpointRefInto(ctx context.Context, dir, url string, ref plumbing.ReferenceName) error {
 	ctx, cancel := context.WithTimeout(ctx, readFetchTimeout)
 	defer cancel()
-	return probeAndFetchCheckpointRef(ctx, url, true, ref)
+	return probeAndFetchCheckpointRef(ctx, probeFetchSpec{target: url, dir: dir, authoritative: true, noFilter: true}, ref)
+}
+
+// probeFetchSpec bundles probeAndFetchCheckpointRef's non-ref inputs: the
+// remote to dial, the repository directory to operate in (empty = CWD), the
+// authoritativeness of the remote, and whether to force an unfiltered fetch.
+type probeFetchSpec struct {
+	target        string
+	dir           string
+	authoritative bool
+	noFilter      bool
 }
 
 // probeAndFetchCheckpointRef is the shared probe+fetch core: ls-remote probe
 // (absence detection), then a single-refspec fetch with NoTags. authoritative
 // controls whether an empty probe classifies as absence
 // (plumbing.ErrReferenceNotFound) or is refused (see FetchCheckpointRef).
-func probeAndFetchCheckpointRef(ctx context.Context, fetchTarget string, authoritative bool, ref plumbing.ReferenceName) error {
-	out, err := LsRemoteInDir(ctx, "", fetchTarget, ref.String())
+func probeAndFetchCheckpointRef(ctx context.Context, spec probeFetchSpec, ref plumbing.ReferenceName) error {
+	fetchTarget := spec.target
+	out, err := LsRemoteInDir(ctx, spec.dir, fetchTarget, ref.String())
 	if err != nil {
 		// Redact: fetchTarget can be a remote URL with embedded credentials
 		// (CI origin URLs), and this error is logged and shown to users.
 		return fmt.Errorf("probe checkpoint ref %s on %s: %w", ref, RedactURL(fetchTarget), err)
 	}
 	if len(bytes.TrimSpace(out)) == 0 {
-		if !authoritative {
+		if !spec.authoritative {
 			// The probe hit an origin FALLBACK while a checkpoint_remote is
 			// configured (or undeterminable) — a remote that may simply never
 			// host the configured checkpoint refs. Emptiness there proves
@@ -152,6 +166,8 @@ func probeAndFetchCheckpointRef(ctx context.Context, fetchTarget string, authori
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
+		NoFilter: spec.noFilter,
+		Dir:      spec.dir,
 	}); err != nil {
 		// Fold git's own output into the error (redacted): a bare
 		// "exit status 128" is undebuggable in hook Warn logs.

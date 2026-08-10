@@ -89,6 +89,14 @@ type explainCheckpointLookup struct {
 	repo      *git.Repository
 	store     checkpoint.PersistentStore
 	committed []checkpoint.CheckpointInfo
+
+	// noRemoteFallback disables the fetch-on-miss retry in
+	// matchCheckpointPrefixWithRemoteFallback. Set on cross-repo lookups,
+	// which read a foreign checkpoint out of a throwaway temp repo: a miss
+	// there must not fetch into (or rebuild the lookup over) the cwd repo —
+	// that would put the foreign checkpoint right back into the local
+	// namespace this lookup exists to keep it out of.
+	noRemoteFallback bool
 }
 
 func (l *explainCheckpointLookup) Close() error {
@@ -349,15 +357,28 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 				return err
 			}
 
-			// Cross-repo pre-fetch: land the foreign checkpoint's ref in the
-			// cwd repo's object store BEFORE routing, so the normal flow
-			// (prose, --json, --transcript, --full) resolves it unchanged.
+			// Cross-repo: fetch the foreign checkpoint into a throwaway temp
+			// repo and run the normal flow (prose, --json, --transcript,
+			// --full) against a lookup over that repo — a pure lookup that
+			// never adds the checkpoint to the cwd repo's namespace. Not
+			// handled means --repo names the cwd repo; fall through to the
+			// local flow unchanged.
 			if repoFlag != "" {
-				crossTarget := positional
-				if crossTarget == "" {
-					crossTarget = checkpointFlag
-				}
-				if err := prepareCrossRepoExplain(cmd, repoFlag, clusterFlag, crossTarget); err != nil {
+				handled, err := maybeRunCrossRepoExplain(cmd, crossRepoExplainRequest{
+					repoFlag:       repoFlag,
+					clusterFlag:    clusterFlag,
+					positional:     positional,
+					checkpointFlag: checkpointFlag,
+					json:           jsonFlag,
+					transcript:     transcriptFlag,
+					rawTranscript:  rawTranscriptFlag,
+					sessionIndex:   sessionIndex,
+					noPager:        noPagerFlag,
+					short:          shortFlag,
+					full:           fullFlag,
+					searchAll:      searchAllFlag,
+				})
+				if handled || err != nil {
 					return err
 				}
 			}

@@ -52,6 +52,11 @@ type explainExportOptions struct {
 	// listLimit caps the JSON list view at N entries. 0 means use the
 	// default (branchCheckpointsLimit). Only consulted in list mode.
 	listLimit int
+	// lookup, when non-nil, is a pre-built checkpoint lookup the export flow
+	// resolves against instead of opening the cwd repo — cross-repo explain
+	// injects its temp-repo lookup here. Ownership transfers with it: the
+	// export flow closes it like any lookup it built itself.
+	lookup *explainCheckpointLookup
 }
 
 // runExplainExport handles --json, --transcript, and --raw-transcript with an
@@ -107,9 +112,13 @@ func resolveExplainCheckpointID(ctx context.Context, errW io.Writer, opts explai
 		return id.CheckpointID(""), nil, errors.New("missing checkpoint target")
 	}
 
-	lookup, lookupErr := newExplainCheckpointLookup(ctx)
-	if lookupErr != nil {
-		return id.CheckpointID(""), nil, lookupErr
+	lookup := opts.lookup
+	if lookup == nil {
+		var lookupErr error
+		lookup, lookupErr = newExplainCheckpointLookup(ctx)
+		if lookupErr != nil {
+			return id.CheckpointID(""), nil, lookupErr
+		}
 	}
 
 	matches, resolvedLookup := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, prefix)
@@ -123,8 +132,11 @@ func resolveExplainCheckpointID(ctx context.Context, errW io.Writer, opts explai
 	case 0:
 		// If the user passed a positional target (not --checkpoint), give it
 		// one more shot as a commit ref before failing — mirrors the prose
-		// runExplainAuto behavior so `--json <commit-sha>` works.
-		if opts.target != "" && opts.checkpointFlag == "" {
+		// runExplainAuto behavior so `--json <commit-sha>` works. Not for an
+		// injected cross-repo lookup: its target is a foreign checkpoint ID,
+		// and resolving it against the cwd repo's commits could match an
+		// unrelated local commit (a 12-char hex ID is also a valid SHA prefix).
+		if opts.target != "" && opts.checkpointFlag == "" && !lookup.noRemoteFallback {
 			cpID, freshLookup, commitErr := resolveCheckpointFromCommitRef(ctx, errW, opts.target)
 			if commitErr == nil {
 				_ = lookup.Close()
@@ -246,7 +258,7 @@ func lookupHasCheckpoint(lookup *explainCheckpointLookup, cpID id.CheckpointID) 
 // lookup. The returned lookup may differ from the input on retry.
 func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer, lookup *explainCheckpointLookup, prefix string) ([]id.CheckpointID, *explainCheckpointLookup) {
 	matches := matchCheckpointPrefix(lookup, prefix)
-	if len(matches) > 0 {
+	if len(matches) > 0 || lookup.noRemoteFallback {
 		return matches, lookup
 	}
 

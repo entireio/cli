@@ -214,19 +214,53 @@ func crossRepoFixture(t *testing.T) (foreignDir string, cid id.CheckpointID) {
 
 // TestCrossRepoExplain_FetchAndRender is the end-to-end shape of
 // `checkpoint explain <id> --repo other/repo` with URL resolution bypassed:
-// fetch the foreign checkpoint's ref from an explicit path URL into the local
-// repo, then let the unchanged explain flow resolve and render it. Not
-// parallel: uses t.Chdir.
+// fetch the foreign checkpoint's ref from an explicit path URL into a
+// throwaway temp repo, render it through the unchanged explain flow, and —
+// the invariant the design exists for — leave the local repo's checkpoint
+// namespace untouched. Not parallel: uses t.Chdir.
 func TestCrossRepoExplain_FetchAndRender(t *testing.T) {
 	foreignDir, cid := crossRepoFixture(t)
 
-	require.NoError(t, fetchCrossRepoCheckpoint(context.Background(), io.Discard, foreignDir, "acme/widgets", cid))
+	lookup, cleanup, err := fetchCrossRepoCheckpoint(context.Background(), io.Discard, foreignDir, "acme/widgets", cid)
+	require.NoError(t, err)
+	defer cleanup()
+	defer lookup.Close()
 
 	var out bytes.Buffer
-	err := runExplain(context.Background(), &out, io.Discard, "", "", "", cid.String(), true, true, false, false, false, false, false, 0)
+	err = runExplainCheckpointWithLookup(context.Background(), &out, io.Discard, cid.String(), true, true, false, false, false, false, false, lookup, nil, 0)
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), cid.String(), "explain must render the fetched foreign checkpoint")
 	assert.Contains(t, out.String(), "do the foreign thing", "foreign checkpoint's prompt must render")
+
+	// Pure lookup: the fetch must not have added the foreign checkpoint to
+	// the cwd (local) repo's checkpoint namespace.
+	localLookup, err := newExplainCheckpointLookup(context.Background())
+	require.NoError(t, err)
+	defer localLookup.Close()
+	assert.Empty(t, localLookup.committed, "foreign checkpoint must not join the local repo's checkpoint namespace")
+}
+
+// TestCrossRepoExplain_JSONExport: the export modes resolve against the
+// injected temp-repo lookup (explainExportOptions.lookup) instead of opening
+// the cwd repo. The export flow takes ownership of the lookup and closes it.
+// Not parallel: uses t.Chdir.
+func TestCrossRepoExplain_JSONExport(t *testing.T) {
+	foreignDir, cid := crossRepoFixture(t)
+
+	lookup, cleanup, err := fetchCrossRepoCheckpoint(context.Background(), io.Discard, foreignDir, "acme/widgets", cid)
+	require.NoError(t, err)
+	defer cleanup()
+
+	var out bytes.Buffer
+	err = runExplainExport(context.Background(), &out, io.Discard, explainExportOptions{
+		target:       cid.String(),
+		json:         true,
+		sessionIndex: -1,
+		lookup:       lookup,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), cid.String(), "JSON export must emit the foreign checkpoint")
+	assert.Contains(t, out.String(), "foreign-session", "JSON export must include the foreign session metadata")
 }
 
 // TestFetchCrossRepoCheckpoint_MissingRefNamesRepo: a mirror that does not
@@ -237,8 +271,10 @@ func TestFetchCrossRepoCheckpoint_MissingRefNamesRepo(t *testing.T) {
 	foreignDir, _ := crossRepoFixture(t)
 	missing := id.CheckpointID("01KVBJCWYA4YW6J5M9GP655HZN")
 
-	err := fetchCrossRepoCheckpoint(context.Background(), io.Discard, foreignDir, "acme/widgets", missing)
+	lookup, cleanup, err := fetchCrossRepoCheckpoint(context.Background(), io.Discard, foreignDir, "acme/widgets", missing)
 	require.Error(t, err)
+	assert.Nil(t, lookup)
+	assert.Nil(t, cleanup, "cleanup must be nil on error — the temp repo is already removed")
 	assert.Contains(t, err.Error(), missing.String())
 	assert.Contains(t, err.Error(), "mirror for acme/widgets")
 	assert.NotContains(t, strings.ToLower(err.Error()), "no checkpoint or commit found")
