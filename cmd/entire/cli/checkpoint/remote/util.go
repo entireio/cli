@@ -146,8 +146,8 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 // PushURL returns the effective checkpoint push URL for the current repository.
 // Unlike FetchURL:
 //   - it derives protocol from the requested push remote, not always origin
-//   - it skips checkpoint remote use unless BOTH origin and the push
-//     destination are owned by the configured checkpoint repo's owner
+//   - it skips checkpoint remote use unless origin and EVERY push URL of the
+//     push remote are owned by the configured checkpoint repo's owner
 //     (see checkpointRemoteIsInherited); FetchURL applies no ownership check
 //     at all, so a repo whose writes were diverted still reads from the
 //     configured checkpoint repo
@@ -185,7 +185,11 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 		return fallbackURL, false, nil
 	}
 
-	pushRemoteURL, err := GetPushURL(ctx, pushRemoteName)
+	// Every push URL, not just the first: git fans out to all of them on the
+	// git-branch backend, so ownership has to hold for the whole set. The first
+	// still drives transport derivation below, matching the single destination
+	// resolveRefsPushDestination sends checkpoint refs to.
+	pushRemoteURLs, err := GetPushURLs(ctx, pushRemoteName)
 	if err != nil {
 		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
 		if fallbackErr == nil {
@@ -196,14 +200,15 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 		}
 		return "", true, fmt.Errorf("no push URL found: %w", err)
 	}
+	pushRemoteURL := pushRemoteURLs[0]
 
 	// Whether to use the checkpoint remote at all is a question about ownership
 	// ("is this checkpoint_remote mine, or did I inherit it by cloning?"), which
 	// both remotes get a vote on: origin says which project this is, the push
-	// destination says which repo we are writing to. Either one owned by somebody
-	// other than the checkpoint repo's owner means inherited. See
+	// destinations say which repos we are writing to. Any one of them owned by
+	// somebody other than the checkpoint repo's owner means inherited. See
 	// checkpointRemoteIsInherited.
-	if inherited, reason := checkpointRemoteIsInherited(ctx, config, originURL, pushRemoteURL); inherited {
+	if inherited, reason := checkpointRemoteIsInherited(ctx, config, originURL, pushRemoteURLs); inherited {
 		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
 		if fallbackErr != nil {
 			return "", false, fmt.Errorf("no push URL found: %w", fallbackErr)
@@ -312,23 +317,6 @@ func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
 	return urls, nil
 }
 
-// GetPushURL returns the URL a push to remoteName delivers to. A remote's push
-// destination is remote.<name>.pushurl when set and only otherwise its url, so
-// reading the plain url (as GetRemoteURL does) can name a different repository
-// than the one being pushed to.
-//
-// When several push URLs are configured this returns the FIRST, which is not an
-// arbitrary pick: resolveRefsPushDestination sends checkpoint refs to exactly
-// that URL, so the URL this derives transport and (origin-less) ownership from
-// is the URL the checkpoints land in.
-func GetPushURL(ctx context.Context, remoteName string) (string, error) {
-	urls, err := GetPushURLs(ctx, remoteName)
-	if err != nil {
-		return "", err
-	}
-	return urls[0], nil
-}
-
 // checkpointRemoteIsInherited reports whether the configured checkpoint_remote
 // looks like it belongs to an upstream project rather than to this developer,
 // along with a short reason for logging.
@@ -371,17 +359,17 @@ func GetPushURL(ctx context.Context, remoteName string) (string, error) {
 // the safe direction: it never writes session transcripts to a repository we
 // cannot confirm we own.
 //
-// On a remote with several push URLs only the FIRST is checked, matching the
-// destination resolveRefsPushDestination sends checkpoint refs to. The
-// git-branch backend still fans out to every push URL, so a multi-URL remote
-// whose later URLs are owned by someone else is not covered here.
+// A remote with several push URLs must have EVERY one of them owned by the
+// checkpoint repo's owner. git fans out to all of them on the git-branch
+// backend, so checking only the first would let a differently-owned mirror in
+// second position read as ours.
 //
 // An identity whose owner cannot be determined (no remote at all, or a
 // non-forge URL such as a bare local path) counts as inherited: for a committed
 // setting we cannot confirm ownership, and falling back preserves the previous
 // behavior for those repos. settings.local.json is the escape hatch when the
 // checkpoint repo is genuinely ours but owned by a different account or org.
-func checkpointRemoteIsInherited(ctx context.Context, config *settings.CheckpointRemoteConfig, originURL, pushRemoteURL string) (bool, string) {
+func checkpointRemoteIsInherited(ctx context.Context, config *settings.CheckpointRemoteConfig, originURL string, pushRemoteURLs []string) (bool, string) {
 	checkpointOwner := config.Owner()
 	if checkpointOwner == "" {
 		// No owner to compare (malformed repo field). Matches the predecessor,
@@ -395,12 +383,14 @@ func checkpointRemoteIsInherited(ctx context.Context, config *settings.Checkpoin
 	// Both identities when both exist. A repo with no origin has exactly one
 	// identity — its push remote — and must not lose its configured checkpoint
 	// remote just because nothing is named "origin".
-	identities := make([]struct{ url, source string }, 0, 2)
+	identities := make([]struct{ url, source string }, 0, 1+len(pushRemoteURLs))
 	if originURL != "" {
 		identities = append(identities, struct{ url, source string }{originURL, "origin"})
 	}
-	if pushRemoteURL != "" && pushRemoteURL != originURL {
-		identities = append(identities, struct{ url, source string }{pushRemoteURL, "push remote"})
+	for _, pushRemoteURL := range pushRemoteURLs {
+		if pushRemoteURL != "" && pushRemoteURL != originURL {
+			identities = append(identities, struct{ url, source string }{pushRemoteURL, "push remote"})
+		}
 	}
 	if len(identities) == 0 {
 		return true, "no remote to establish ownership"

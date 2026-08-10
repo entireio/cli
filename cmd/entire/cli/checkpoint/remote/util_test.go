@@ -228,6 +228,7 @@ func TestPushURL(t *testing.T) {
 		originPushURL     string
 		pushRemote        string
 		pushURL           string
+		extraPushURLs     []string
 		settingsJSON      string
 		settingsLocalJSON string
 		token             string
@@ -404,6 +405,36 @@ func TestPushURL(t *testing.T) {
 			wantEnabled:  false,
 		},
 		{
+			// git fans out to every push URL on the git-branch backend, so
+			// ownership has to hold for the whole set: a differently-owned mirror
+			// in SECOND position would otherwise read as ours and receive session
+			// transcripts. The same-owner URL is deliberately first, so a
+			// first-URL-only check would pass this.
+			//
+			// Two extraPushURLs, not one: the first `pushurl` REPLACES the
+			// remote's url as a push destination (git's push_url_of_remote), so a
+			// single --push --add yields a one-URL remote, not a two-URL one.
+			name:          "differently owned second push url reads as inherited",
+			originURL:     "https://github.com/acme/app.git",
+			pushRemote:    "mirror",
+			pushURL:       "https://github.com/acme/app.git",
+			extraPushURLs: []string{"https://github.com/acme/app.git", "https://github.com/otherorg/mirror.git"},
+			settingsJSON:  `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:       "https://github.com/acme/app.git",
+			wantEnabled:   false,
+		},
+		{
+			// Same shape, every push URL owned by the checkpoint owner: still ours.
+			name:          "multiple same-owner push urls keep the checkpoint remote",
+			originURL:     "https://github.com/acme/app.git",
+			pushRemote:    "mirror",
+			pushURL:       "https://github.com/acme/app.git",
+			extraPushURLs: []string{"https://github.com/acme/app.git", "https://github.com/acme/mirror.git"},
+			settingsJSON:  `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:       "https://github.com/acme/checkpoints.git",
+			wantEnabled:   true,
+		},
+		{
 			// The regression this change exists for: a contributor who cloned
 			// the UPSTREAM base repo and added their own fork. Origin belongs to
 			// upstream, so an origin-only ownership check read the inherited
@@ -490,6 +521,9 @@ func TestPushURL(t *testing.T) {
 			}
 			if tt.pushURL != "" {
 				runGit(t, repoDir, "remote", "add", tt.pushRemote, tt.pushURL)
+			}
+			for _, extra := range tt.extraPushURLs {
+				runGit(t, repoDir, "remote", "set-url", "--push", "--add", tt.pushRemote, extra)
 			}
 			writeSettings(t, repoDir, tt.settingsJSON)
 			if tt.settingsLocalJSON != "" {
