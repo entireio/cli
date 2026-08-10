@@ -47,6 +47,23 @@ func TestCodexResumeRestoredSessionWithSanitizedCompactedHistory(t *testing.T) {
 		testutil.WaitForSessionIdle(t, s.Dir, 15*time.Second)
 		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 
+		// Exit the original Codex session before resuming the same thread, the
+		// way a user would: send Ctrl+C and wait for the process to exit.
+		// Codex serialises writers per thread: "Only one app-server process can
+		// hold a paginated thread open for writing at a time. If another process
+		// already owns the thread, thread/resume ... fail[s] with JSON-RPC error
+		// -32600" (codex-rs/app-server/README.md). While the StartSession TUI is
+		// still alive it owns the writer, so the resume below aborts with
+		// "already has an active writer (code -32600)". Quit releases the lock
+		// before the resume attaches (hard-killing only if Ctrl+C doesn't take).
+		//
+		// Quit (like Terminate) skips the OnClose cleanup that RemoveAll's this
+		// isolated CODEX_HOME — the resume flow below still reads and restores
+		// rollouts under it — so we take over removing the home at test end.
+		home := codexSession.Home()
+		t.Cleanup(func() { _ = os.RemoveAll(home) })
+		require.NoError(t, codexSession.Quit(15*time.Second), "quit original Codex session before resume")
+
 		s.Git(t, "checkout", mainBranch)
 
 		out, err := entire.ResumeWithEnv(s.Dir, "feature", []string{"CODEX_HOME=" + codexSession.Home()})
@@ -55,7 +72,7 @@ func TestCodexResumeRestoredSessionWithSanitizedCompactedHistory(t *testing.T) {
 
 		// Prove the restored rollout actually contains the shape under test before
 		// asserting Codex tolerates it — otherwise a green run says nothing.
-		assertRestoredCompactionStripped(t, findRestoredCodexRollout(t, codexSession.Home(), rolloutPath))
+		assertRestoredCompactionStripped(t, findRestoredCodexRollout(t, codexSession.Home()))
 
 		codexAgent, ok := s.Agent.(*agents.Codex)
 		require.True(t, ok, "expected *agents.Codex agent, got %T", s.Agent)
@@ -174,30 +191,53 @@ func appendCompactedEncryptedHistory(t *testing.T, rolloutPath string) {
 	}
 }
 
-// findRestoredCodexRollout returns the rollout `entire resume` wrote. Restore does
-// not overwrite the agent's original file — it writes a fresh rollout for the same
-// session id under a new timestamped name — so the home holds both afterwards and
-// findCodexRollout's exactly-one expectation no longer applies.
-func findRestoredCodexRollout(t *testing.T, codexHome, originalPath string) string {
+// findRestoredCodexRollout returns the rollout `entire resume` wrote, which is the one
+// the subsequent `codex resume` loads.
+//
+// Restore may either overwrite the agent's original file or add a second one, and
+// which happens depends on the machine's timezone: Entire derives the restored path
+// from the session start time in UTC (codex.restoredRolloutPath), while Codex names
+// its own rollout in local time. On a UTC host (CI) the two names collide and restore
+// overwrites in place; anywhere else they differ and both files remain.
+//
+// So do not key off "the path that is not the original" — that only holds off-UTC.
+// Pick the most recently written rollout instead, which is the restored copy in both
+// layouts.
+func findRestoredCodexRollout(t *testing.T, codexHome string) string {
 	t.Helper()
 
 	matches, err := filepath.Glob(filepath.Join(codexHome, "sessions", "*", "*", "*", "rollout-*.jsonl"))
 	require.NoError(t, err)
 	require.NotEmpty(t, matches, "no Codex rollout found after resume")
 
-	var restored []string
-	for _, m := range matches {
-		if m != originalPath {
-			restored = append(restored, m)
+	newest := newestFile(t, matches)
+	t.Logf("rollouts after resume (%d): %v", len(matches), matches)
+	t.Logf("asserting on most recently written: %s", newest)
+	return newest
+}
+
+// newestFile returns the most recently modified of paths. Ties are broken by taking
+// the later entry, which keeps the choice deterministic when a filesystem reports
+// coarse timestamps.
+func newestFile(t *testing.T, paths []string) string {
+	t.Helper()
+	require.NotEmpty(t, paths)
+
+	newest := paths[0]
+	newestMod := fileModTime(t, newest)
+	for _, p := range paths[1:] {
+		if mod := fileModTime(t, p); !mod.Before(newestMod) {
+			newest, newestMod = p, mod
 		}
 	}
-	require.Len(t, restored, 1,
-		"expected exactly one restored rollout alongside the original\noriginal: %s\nall: %v",
-		originalPath, matches)
+	return newest
+}
 
-	t.Logf("original rollout: %s", originalPath)
-	t.Logf("restored rollout: %s", restored[0])
-	return restored[0]
+func fileModTime(t *testing.T, path string) time.Time {
+	t.Helper()
+	fi, err := os.Stat(path)
+	require.NoError(t, err)
+	return fi.ModTime()
 }
 
 // assertRestoredCompactionStripped verifies the restored rollout carries a
@@ -257,4 +297,49 @@ func payloadKeys(payload map[string]any) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// TestFindRestoredCodexRollout_HandlesOverwriteAndSecondFile pins the selection rule
+// against both layouts `entire resume` can produce, without needing a real agent.
+//
+// This exists because the original helper assumed restore always adds a second file
+// and identified it as "the path that is not the original". That assumption is
+// timezone-dependent — Entire derives the restored path in UTC while Codex names its
+// own rollout in local time — so it held on a developer laptop and broke on CI, where
+// the names collide and restore overwrites in place.
+func TestFindRestoredCodexRollout_HandlesOverwriteAndSecondFile(t *testing.T) {
+	t.Parallel()
+
+	write := func(t *testing.T, home, name string, modAt time.Time) string {
+		t.Helper()
+		dir := filepath.Join(home, "sessions", "2026", "08", "06")
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		p := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(p, []byte("{}\n"), 0o644))
+		require.NoError(t, os.Chtimes(p, modAt, modAt))
+		return p
+	}
+
+	base := time.Now().Add(-time.Hour)
+
+	t.Run("overwritten in place (UTC host)", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		only := write(t, home, "rollout-2026-08-06T10-54-17-sess.jsonl", base)
+
+		require.Equal(t, only, findRestoredCodexRollout(t, home),
+			"with a single rollout the helper must use it rather than demanding a second file")
+	})
+
+	t.Run("second file added (non-UTC host)", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		// The agent's own file, named in local time, written first.
+		write(t, home, "rollout-2026-08-06T12-54-17-sess.jsonl", base)
+		// Restore's copy, named in UTC, written afterwards.
+		restored := write(t, home, "rollout-2026-08-06T10-54-17-sess.jsonl", base.Add(time.Minute))
+
+		require.Equal(t, restored, findRestoredCodexRollout(t, home),
+			"with two rollouts the helper must pick the one restore wrote, not the lexically first")
+	})
 }

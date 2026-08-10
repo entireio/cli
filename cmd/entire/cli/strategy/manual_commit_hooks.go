@@ -24,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/gitops"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -2498,8 +2499,10 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 		return result
 	}
 
-	// Get worktree status to find ALL changed files
-	status, err := worktree.Status()
+	// Get worktree status to find ALL changed files. Shared with the turn-start
+	// pre-prompt capture via the context status cache, so the expensive go-git
+	// worktree walk runs once per hook rather than once per caller.
+	status, err := gitrepo.Status(ctx, repo)
 	if err != nil {
 		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree status",
 			slog.String("error", err.Error()))

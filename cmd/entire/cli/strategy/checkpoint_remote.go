@@ -47,7 +47,10 @@ func (ps *pushSettings) hasCheckpointURL() bool {
 // resolvePushSettings loads settings once and returns the resolved push config.
 // If a structured checkpoint_remote is configured (e.g., {"provider": "github", "repo": "org/repo"}):
 //   - Derives the checkpoint URL from the push remote's protocol (SSH vs HTTPS)
-//   - Skips if the push remote owner differs from the checkpoint repo owner (fork detection)
+//   - Ignores the setting when it looks inherited from an upstream project rather
+//     than configured by this developer, so a fork contributor's checkpoints are
+//     not pushed into the upstream's checkpoint repo (see
+//     remote.checkpointRemoteIsInherited for how ownership is established)
 //   - If a checkpoint branch doesn't exist locally, attempts to fetch it from the URL
 //
 // The push itself handles failures gracefully (doPushRef warns and continues),

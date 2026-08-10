@@ -457,7 +457,8 @@ Entire derives the git URL automatically using the same protocol (SSH or HTTPS) 
 
 - Fetch the checkpoint branch locally if it exists on the remote but not locally (one-time)
 - Push `entire/checkpoints/v1` to the checkpoint repo instead of your default push remote
-- Skip pushing if a fork is detected (push remote owner differs from checkpoint repo owner)
+- Ignore the setting if it looks inherited rather than yours, and push checkpoints to your own push remote instead. `checkpoint_remote` is normally committed in `.entire/settings.json`, so forking a project inherits it — without this, a contributor's session data would be pushed into the upstream project's checkpoint repo. A setting is treated as yours when it lives in the gitignored `.entire/settings.local.json`, or when your `origin` remote is owned by the same account or org as the checkpoint repo
+- If your checkpoint repo is owned by a different account or org than `origin`, configure it in `.entire/settings.local.json` so it is always honored
 - If the remote is unreachable, warn and continue without blocking your main push
 
 #### `ENTIRE_CHECKPOINT_TOKEN`

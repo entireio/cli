@@ -240,6 +240,37 @@ makes the comparison false forever and the session silently stops condensing.
 
 Branch: `entire/checkpoints/v1`
 
+Committed checkpoints sync to exactly one git remote — the elected checkpoint
+sync remote, resolved in this order:
+
+1. `strategy_options.checkpoint_push_remote` if set — fail-closed when it
+   names a remote that is not configured (checkpoint sync is disabled until
+   fixed, since this is explicit user intent).
+2. `origin`, if configured.
+3. The sole configured remote.
+4. The first remote in `.git/config` order.
+
+The branch's tracking config (`branch.<name>.pushRemote`,
+`remote.pushDefault`, `branch.<name>.remote`) is deliberately **not** a tier.
+Election is compared against the remote of the push being made, so electing
+the tracking remote turns every push to a different remote into a silent
+no-op — `git push <other> HEAD`, a `git clone -o base` whose checkpoints go to
+a separately added `origin`, any repo with `remote.pushDefault` set. It would
+also elect a remote the read paths cannot see, since `resume` and `explain`
+resolve checkpoints through origin's remote-tracking refs.
+
+For the fork setup where `origin` is an unpushable base repo, name the fork
+explicitly with `checkpoint_push_remote` — the only form of it where the
+checkpoints can also be read back.
+
+The pre-push hook carries checkpoint data only when the push targets the
+elected remote; pushes to any other remote or to a raw URL sync nothing, on
+both the git-branch and git-refs backends (git-refs leaves its push queue
+intact for the next elected-remote push). The dedicated `checkpoint_remote`
+URL mode is exempt — it addresses a separate metadata store directly. `entire
+status` shows the sync destination and how many checkpoints have not reached
+it yet.
+
 Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkpoint**:
 
 ```

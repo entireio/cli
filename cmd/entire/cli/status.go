@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,10 +16,14 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
@@ -201,6 +206,12 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		}
 	}
 
+	// Where checkpoint data syncs (the single elected remote), and how many
+	// checkpoints have not reached it yet. Local-only computation.
+	if s.Enabled {
+		writeCheckpointSyncLines(ctx, &b, s, sty)
+	}
+
 	// Show review status for HEAD's checkpoint, if any.
 	if reviewed, meta := headHasReviewCheckpoint(ctx); reviewed {
 		b.WriteString("\n")
@@ -238,6 +249,134 @@ func formatSettingsStatus(prefix string, s *EntireSettings, sty statusStyles) st
 	}
 
 	return b.String()
+}
+
+// checkpointSyncSourceDedicated is synthesized by the status layer when a
+// structured checkpoint_remote resolves to a dedicated store. It is never
+// returned by strategy.ResolveCheckpointSyncRemote — the resolver's contract
+// stays pure "which configured git remote" (spec Unit 1).
+const checkpointSyncSourceDedicated = "dedicated"
+
+// checkpointSyncInfo is the single shared computation behind both the text and
+// JSON checkpoint-sync sections of `entire status`, so the two outputs cannot
+// drift. Everything here reads local state only (settings, .git/config, local
+// refs, the push queue) — status must stay network-free.
+type checkpointSyncInfo struct {
+	// Remote is the elected git remote name, or the org/repo slug in
+	// dedicated checkpoint_remote mode. Empty when nothing resolved (no
+	// remotes configured, or the fail-closed case).
+	Remote string
+	// Source is config|default|sole|first (resolver values) or "dedicated".
+	Source string
+	// Err is the fail-closed misconfiguration message from the resolver.
+	Err string
+	// Unpushed approximates checkpoints not yet on the sync destination; 0
+	// when none, when counting failed, or when the count would be a lie
+	// (dedicated URL mode on the git-branch backend).
+	Unpushed int
+}
+
+func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpointSyncInfo {
+	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
+	if err != nil {
+		// Fail-closed: checkpoint_push_remote names a remote that does not
+		// exist. The pre-push gate is silently skipping checkpoint sync, so
+		// status is the user's signal.
+		// Accepted divergence: if a structured checkpoint_remote is also
+		// configured, the gate's dedicated exemption may still sync checkpoint
+		// data even while this fail-closed warning is shown, since there is no
+		// elected remote left to probe PushURL against here.
+		return checkpointSyncInfo{Err: err.Error()}
+	}
+	if elected.Name == "" {
+		return checkpointSyncInfo{} // no remotes configured: show nothing
+	}
+
+	// Dedicated checkpoint_remote mode is reported only when PushURL derives
+	// an eligible URL for the elected remote, mirroring the pre-push
+	// exemption (ps.hasCheckpointURL); otherwise the gate applies normal
+	// single-remote sync, so status reports that instead. PushURL is
+	// local-only; never call resolvePushSettings here — its follow-up
+	// metadata fetch dials, and status must stay network-free.
+	// Accepted divergence: a real push to a different named remote may derive
+	// PushURL differently than this elected-remote probe does.
+	if cr := s.GetCheckpointRemote(); cr != nil {
+		if _, enabled, purlErr := checkpointremote.PushURL(ctx, elected.Name); purlErr == nil && enabled {
+			info := checkpointSyncInfo{Remote: cr.Repo, Source: checkpointSyncSourceDedicated}
+			// The unpushed counter is meaningful here only on the git-refs
+			// backend (push-queue length is local and accurate). The
+			// git-branch comparison is omitted: pushes to a raw URL update
+			// no remote-tracking ref, so it would permanently read "all
+			// unpushed".
+			if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
+				info.Unpushed = countUnpushedCheckpointsForStatus(ctx, "")
+			}
+			return info
+		}
+	}
+
+	return checkpointSyncInfo{
+		Remote:   elected.Name,
+		Source:   string(elected.Source),
+		Unpushed: countUnpushedCheckpointsForStatus(ctx, elected.Name),
+	}
+}
+
+// countUnpushedCheckpointsForStatus counts best-effort: status must never fail
+// because counting failed, so errors log at debug and read as "no counter".
+func countUnpushedCheckpointsForStatus(ctx context.Context, remoteName string) int {
+	n, err := strategy.CountUnpushedCheckpoints(ctx, remoteName)
+	if err != nil {
+		logging.Debug(ctx, "unpushed checkpoint count failed; omitting from status",
+			slog.String("error", err.Error()))
+		return 0
+	}
+	return n
+}
+
+// writeCheckpointSyncLines appends the checkpoint sync destination line (and
+// the unpushed counter, when non-zero) to the enabled status block. Rendered
+// whenever something resolved: an elected remote, a dedicated store, or the
+// fail-closed misconfiguration. No remotes configured -> no lines.
+func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *EntireSettings, sty statusStyles) {
+	info := computeCheckpointSyncInfo(ctx, s)
+	switch {
+	case info.Err != "":
+		b.WriteString("\n")
+		b.WriteString(sty.render(sty.yellow, "  ! Checkpoints NOT syncing: "+info.Err))
+	case info.Remote == "":
+		return
+	case info.Source == checkpointSyncSourceDedicated:
+		b.WriteString("\n  Checkpoints sync to: ")
+		b.WriteString(sty.render(sty.cyan, "dedicated checkpoint remote ("+info.Remote+")"))
+	default:
+		b.WriteString("\n  Checkpoints sync to: ")
+		b.WriteString(sty.render(sty.cyan, info.Remote))
+		if info.Source == string(strategy.SyncRemoteSourceConfig) {
+			b.WriteString(sty.render(sty.dim, " (set by checkpoint_push_remote)"))
+		}
+	}
+	if info.Unpushed > 0 {
+		b.WriteString("\n  ")
+		b.WriteString(sty.render(sty.dim, formatUnpushedCheckpointsLine(info)))
+	}
+}
+
+// formatUnpushedCheckpointsLine phrases the unpushed counter. Dedicated URL
+// mode has no git remote to name (and only reaches here on the git-refs
+// backend), so it drops the remote-name phrasing.
+func formatUnpushedCheckpointsLine(info checkpointSyncInfo) string {
+	noun := "checkpoints"
+	pronoun := "they sync"
+	if info.Unpushed == 1 {
+		noun = "checkpoint"
+		pronoun = "it syncs"
+	}
+	if info.Source == checkpointSyncSourceDedicated {
+		return fmt.Sprintf("%d %s not yet pushed", info.Unpushed, noun)
+	}
+	return fmt.Sprintf("%d %s not yet on %s — %s with your next 'git push %s'",
+		info.Unpushed, noun, info.Remote, pronoun, info.Remote)
 }
 
 // timeAgo formats a time as a human-readable relative duration.
@@ -600,7 +739,14 @@ type statusJSON struct {
 	// HooksOutdated lists agents whose installed hook config is out of date and
 	// should be refreshed with `entire enable --force`.
 	HooksOutdated []string `json:"hooks_outdated,omitempty"`
-	Error         string   `json:"error,omitempty"`
+	// CheckpointSyncRemote is the elected checkpoint sync remote name, or the
+	// org/repo slug in dedicated checkpoint_remote mode. Deliberately not named
+	// checkpoint_remote, which is the existing GitHub-coupled setting.
+	CheckpointSyncRemote       string `json:"checkpoint_sync_remote,omitempty"`
+	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|tracking|default|sole|first|dedicated
+	CheckpointSyncError        string `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
+	UnpushedCheckpoints        int    `json:"unpushed_checkpoints,omitempty"`
+	Error                      string `json:"error,omitempty"`
 }
 
 type sessionBriefJSON struct {
@@ -660,6 +806,14 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		if claudecode.CheckHookConfig(ctx) == claudecode.HooksOutdated {
 			result.HooksOutdated = append(result.HooksOutdated, "claude-code")
 		}
+
+		// Same computation as the text path (writeCheckpointSyncLines);
+		// empty fields drop out via omitempty when nothing resolved.
+		syncInfo := computeCheckpointSyncInfo(ctx, s)
+		result.CheckpointSyncRemote = syncInfo.Remote
+		result.CheckpointSyncRemoteSource = syncInfo.Source
+		result.CheckpointSyncError = syncInfo.Err
+		result.UnpushedCheckpoints = syncInfo.Unpushed
 
 		if store, err := session.NewStateStore(ctx); err == nil {
 			if states, err := store.List(ctx); err == nil {

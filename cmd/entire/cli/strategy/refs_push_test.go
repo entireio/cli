@@ -329,7 +329,7 @@ func TestFlushCheckpointRefsQueue_CancelledContextStopsCleanly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel: the batch push fails as cancellation, and flush must stop cleanly
 
-	pushed, err := flushCheckpointRefsQueue(ctx, repo, bareDir)
+	pushed, err := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir})
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, 0, pushed)
 
