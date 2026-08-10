@@ -90,6 +90,27 @@ func ResolveControlPlaneTargetForCluster(ctx context.Context, clusterHost string
 	return targetForContext(c)
 }
 
+// ClusterLoginServers returns the core origins a user may pass to
+// `entire login --server` to become eligible for clusterHost — the cluster's
+// advertised core_urls. Cache-first (a prior ResolveControlPlaneTargetForCluster
+// in the same run warms cluster_cores.json), one /.well-known GET otherwise.
+func ClusterLoginServers(ctx context.Context, clusterHost string) ([]string, error) {
+	httpClient := &http.Client{Timeout: controlPlaneClusterDiscoveryTimeout}
+	entry, err := clusterdiscovery.ResolveClusterCores(ctx, userdirs.Cache(), clusterHost, httpClient, nil)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // ResolveClusterCores already returns a user-facing discovery message
+	}
+	return entry.CoreURLs, nil
+}
+
+// ErrNoEligibleContext and ErrAmbiguousContext re-export the clusterdiscovery
+// classification sentinels so cli callers can errors.Is a cluster session probe
+// without importing clusterdiscovery directly.
+var (
+	ErrNoEligibleContext = clusterdiscovery.ErrNoEligibleContext
+	ErrAmbiguousContext  = clusterdiscovery.ErrAmbiguousContext
+)
+
 // targetForContext builds the ControlPlaneTarget for an already-chosen context:
 // a refreshing login provider (silent JWT re-mint from the stored refresh
 // token) bound to that context's core. Shared by the active-context and

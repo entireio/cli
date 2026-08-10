@@ -97,6 +97,7 @@ func TestResolve_AmbiguousMultipleEligibleErrors(t *testing.T) {
 
 	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "cluster1.entire.io", hostPinningClient(t, srv), t.Logf)
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrAmbiguousContext)
 	assert.Contains(t, err.Error(), "multiple login contexts")
 	assert.Contains(t, err.Error(), "admin@core-us")
 	assert.Contains(t, err.Error(), "alice@core-us")
@@ -120,6 +121,7 @@ func TestResolve_NoEligibleContextReturnsLoginHint(t *testing.T) {
 
 	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNoEligibleContext)
 	assert.Contains(t, err.Error(), "no auth context for cluster aws-eu-central-1.entire.io")
 	assert.Contains(t, err.Error(), "entire login")
 	// Advertised login servers + the `entire auth use` hint are intentionally

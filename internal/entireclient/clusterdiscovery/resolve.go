@@ -219,6 +219,30 @@ func resolveClusterCores(ctx context.Context, cacheDir, clusterHost string, requ
 		}, debugf)
 }
 
+// ErrNoEligibleContext and ErrAmbiguousContext classify the two
+// account-selection failure modes so callers can branch on the cause
+// (errors.Is) instead of parsing the localized message. ErrNoEligibleContext
+// means no stored login is eligible for the resource — the caller can offer to
+// log in to one of the advertised cores. ErrAmbiguousContext means several
+// eligible logins exist and none is active — the fix is `entire auth use`, not
+// a fresh login.
+var (
+	ErrNoEligibleContext = errors.New("no eligible login context")
+	ErrAmbiguousContext  = errors.New("ambiguous login context")
+)
+
+// classifiedError carries a user-facing message while unwrapping to a
+// classification sentinel, so callers can errors.Is the failure mode without
+// parsing the message. Error() returns only msg, so the rendered text is
+// byte-identical to before these sentinels existed.
+type classifiedError struct {
+	msg      string
+	sentinel error
+}
+
+func (e *classifiedError) Error() string { return e.msg }
+func (e *classifiedError) Unwrap() error { return e.sentinel }
+
 // selectContext applies the account-selection rules over a resource's
 // advertised trusted issuers. subject is a noun phrase identifying the
 // resource ("cluster nyc.entire.io" / "API host partial.to") used in
@@ -240,12 +264,12 @@ func selectContext(f *contexts.File, subject string, coreURLs []string, debugf D
 	// 2. Otherwise the eligible set decides.
 	switch len(eligible) {
 	case 0:
-		return nil, errors.New(renderLoginHint(subject, coreURLs))
+		return nil, &classifiedError{msg: renderLoginHint(subject, coreURLs), sentinel: ErrNoEligibleContext}
 	case 1:
 		debugf("%s -> sole eligible context %s", subject, eligible[0].Name)
 		return eligible[0], nil
 	default:
-		return nil, ambiguousContextError(subject, eligible)
+		return nil, &classifiedError{msg: ambiguousContextError(subject, eligible).Error(), sentinel: ErrAmbiguousContext}
 	}
 }
 
