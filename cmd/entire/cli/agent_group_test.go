@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -80,5 +81,20 @@ func TestAgentGroupBareCommandRunsAgentMenu(t *testing.T) {
 	}
 	if strings.Contains(out, "Usage:") {
 		t.Fatalf("bare agent command should not fall through to help, got:\n%s", out)
+	}
+}
+
+func TestAgentGroup_DiscoversExternalAgents(t *testing.T) {
+	// Cannot use t.Parallel because we modify PATH via t.Setenv.
+	externalDir := t.TempDir()
+	writeExternalAgentBinary(t, externalDir, "ext-agentgroup-test")
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var buf bytes.Buffer
+	if err := runAgentList(context.Background(), &buf); err != nil {
+		t.Fatalf("runAgentList with external: %v", err)
+	}
+	if !strings.Contains(buf.String(), "ext-agentgroup-test") {
+		t.Errorf("expected external agent 'ext-agentgroup-test' in output, got:\n%s", buf.String())
 	}
 }

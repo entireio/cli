@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -66,6 +67,11 @@ func newAgentListCmd() *cobra.Command {
 }
 
 func runAgentList(ctx context.Context, w io.Writer) error {
+	// Discover external agent plugins on $PATH so they appear in the listing,
+	// matching `entire enable` semantics. This is a user-initiated management
+	// command, so bypass the external_agents setting gate.
+	external.DiscoverAndRegisterAlways(ctx)
+
 	installed := GetAgentsWithHooksInstalled(ctx)
 	installedSet := make(map[types.AgentName]struct{}, len(installed))
 	for _, name := range installed {
@@ -105,6 +111,10 @@ Examples:
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
+			// Discover external agent plugins so `add` resolves them like
+			// `entire enable --agent <name>` does. Bypass the setting gate
+			// because this command is itself the explicit opt-in.
+			external.DiscoverAndRegisterAlways(cmd.Context())
 			ag, err := agent.Get(types.AgentName(name))
 			if err != nil {
 				printWrongAgentError(cmd.OutOrStdout(), name)
@@ -138,6 +148,8 @@ Examples:
   entire agent remove claude-code`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Discover external agent plugins so `remove` resolves them.
+			external.DiscoverAndRegisterAlways(cmd.Context())
 			return runRemoveAgent(cmd.Context(), cmd.OutOrStdout(), args[0])
 		},
 	}
