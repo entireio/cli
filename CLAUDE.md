@@ -299,7 +299,12 @@ Tests that spawn the real `entire` or `git` binary need the child to be non-inte
 2. `testing.Testing()` → false. In-process `go test` runs are non-interactive by default; no per-test `t.Setenv("ENTIRE_TEST_TTY", "0")` is needed.
 3. Agent sentinels (`GEMINI_CLI`, `COPILOT_CLI`, `PI_CODING_AGENT`, `GIT_TERMINAL_PROMPT=0`) → false.
 4. `CI=<non-empty-non-false>` → false.
-5. `/dev/tty` probe.
+5. `/dev/tty` probe, plus its terminal mode → a terminal held in raw mode
+   (canonical input off) belongs to a full-screen TUI that spawned us, not to a
+   shell we can prompt: TUI git clients (lazygit, gitui, tig) run `git commit`
+   as a child while owning the screen, so the hook inherits a `/dev/tty` it
+   must not prompt on. Fails open when the mode can't be read. See
+   `interactive/rawmode_unix.go` for the rationale.
 
 For subprocesses spawning the real `entire` binary (e2e, integration tests, `entire` calling itself from a hook), prefer `execx.NonInteractive` over env-var plumbing:
 
@@ -492,6 +497,50 @@ reftable and sha256 repositories. Reviewers should flag any new
 `git.PlainOpen*`/`git.Open` outside `gitrepo`. Key files: `gitrepo/repository.go`
 (open entry points) and `gitrepo/reftable.go` (`reftableStorer`).
 
+#### Reading Worktree Status - Always Use `gitrepo.Status`
+
+**Never call go-git's `worktree.Status()` directly.** Use
+`gitrepo.Status(ctx, repo)`; a `forbidigo` rule in `.golangci.yaml` enforces
+this, and `gitrepo/status.go` is the only sanctioned call site.
+
+`Worktree.Status()` walks the whole worktree twice — once in
+`gitignore.ReadPatterns` collecting patterns, once diffing. `ReadPatterns` does
+**not** thread a parent directory's patterns into its recursive walk: each
+recursive call rebuilds its pattern set from that directory's own ignore files,
+so the prune check only ever matches patterns declared by the directory being
+scanned.
+
+**Consequence for `.gitignore` layout:** a rule prunes a subtree only when its
+target is a *direct child* of the `.gitignore` declaring it. A root-level
+`e2e/artifacts/` rule is one level too deep and never prunes, so every
+`Status()` descended ~15k artifact directories and cost 5.25s (against 0.013s
+for `git status --porcelain`), which timed out agent hooks. The rule therefore
+lives in `e2e/.gitignore` as `/artifacts/`. When adding a new ignored directory,
+declare it in a `.gitignore` in its parent directory rather than as a nested
+path from the root — reviewers should flag multi-component directory patterns
+added to the root `.gitignore`.
+
+Anchor the relocated pattern with a leading slash. Moving `a/b/` to a
+`.gitignore` in `a/` as bare `b/` also drops git's root anchoring, so it would
+newly match `b` at any depth below `a/`; `/b/` preserves the original scope and
+prunes identically.
+
+`gitrepo.WithStatusCache(ctx)` memoizes the walk for callers that read status
+more than once. Install it **only** across a window that neither writes tracked
+files nor stages anything: the TurnStart hook qualifies (it runs before the agent
+acts and writes only session metadata under `.entire/` and refs under `.git/`),
+post-agent hooks such as TurnEnd do not — `DetectFileChanges` there must observe
+the agent's edits.
+
+Staging counts as invalidation even though `.git/index` sits inside `.git/`: the
+index feeds the status diff, so an index write makes a cached result stale. Entire
+performs no index writes today — there are no `SetIndex` calls, the single
+`Storer.Index()` use (`strategy/content_overlap.go`) is a read, and the git
+subcommands on the hook paths are all index-read-only. **If you add an
+index-mutating operation, check whether it lands inside a status-cache window.**
+The cache is context-scoped to one short-lived hook process, so it cannot go
+stale across turns.
+
 #### go-git v5 Bugs - Use CLI Instead
 
 **Do NOT use go-git v5 for `checkout` or `reset --hard` operations.**
@@ -632,6 +681,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - **Shadow branch migration** - if user does stash/pull/rebase (HEAD changes without commit), shadow branch is automatically moved to new base commit
 - **Orphaned branch cleanup** - if a shadow branch exists without a corresponding session state file, it is automatically reset when a new session starts
 - PrePush hook can push `entire/checkpoints/v1` branch alongside user pushes
+- **Single checkpoint sync remote** - checkpoint data syncs only to the elected checkpoint sync remote (`strategy_options.checkpoint_push_remote` setting → `origin` → sole remote → first remote in `.git/config` order; fail-closed only when the setting names a missing remote), on both the git-branch and git-refs backends. The branch's tracking config (`branch.<name>.pushRemote`, `remote.pushDefault`, `branch.<name>.remote`) is deliberately **not** a tier: election is compared against the remote of the push being made, so electing the tracking remote silently drops checkpoint sync on every push to a different remote (`git push <other> HEAD`, a `git clone -o base` pushing checkpoints to a separately added `origin`, any repo with `remote.pushDefault`), and elects a remote the read paths — which resolve through origin's remote-tracking refs — cannot see. For a fork setup where `origin` is an unpushable base repo, name the fork with `checkpoint_push_remote`. Pushes to any other remote or to a raw URL never carry checkpoint data; the dedicated `checkpoint_remote` URL mode is exempt. `entire status` shows the sync destination and an unpushed-checkpoint count.
 - **OPF (OpenAI Privacy Filter) runs at pre-push, not post-commit**: when `redaction.openai_privacy_filter.enabled` is true, the PrePush hook re-redacts unpushed `entire/checkpoints/v1` commits with the OPF 9th layer, builds new commits carrying an `Entire-OPF-Applied: true` trailer, and atomically updates the local v1 ref before pushing. Per-commit condensation stays on the fast 8-layer pipeline. See `strategy/manual_commit_opf_rewrite.go` and `docs/security-and-privacy.md` for the full flow, including divergence detection, bootstrap caps, and CAS-on-conflict semantics.
 - Safe to use on main/master since it never modifies commit history
 

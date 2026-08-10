@@ -171,6 +171,36 @@ func CreateBranch(t *testing.T, dir string, name string) {
 	}
 }
 
+// AddRemote adds a git remote named name pointing at url in repoDir.
+func AddRemote(t *testing.T, repoDir, name, url string) {
+	t.Helper()
+	cmd := exec.Command("git", "remote", "add", name, url) //nolint:noctx // test helper, no context needed
+	cmd.Dir = repoDir
+	cmd.Env = GitIsolatedEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add %s: %v\n%s", name, err, out)
+	}
+}
+
+// WriteCheckpointPushRemoteSetting writes .entire/settings.json configuring
+// strategy_options.checkpoint_push_remote to remoteName (with enabled: true).
+func WriteCheckpointPushRemoteSetting(t *testing.T, repoDir, remoteName string) {
+	t.Helper()
+	content := `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "` + remoteName + `"}}`
+	WriteFile(t, repoDir, filepath.Join(".entire", "settings.json"), content)
+}
+
+// GitUpdateRef points ref at hash in repoDir via git update-ref.
+func GitUpdateRef(t *testing.T, repoDir, ref, hash string) {
+	t.Helper()
+	cmd := exec.Command("git", "update-ref", ref, hash) //nolint:noctx // test helper, no context needed
+	cmd.Dir = repoDir
+	cmd.Env = GitIsolatedEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git update-ref %s %s: %v\n%s", ref, hash, err, out)
+	}
+}
+
 // GitReset runs git reset --hard to the given ref.
 func GitReset(t *testing.T, dir string, ref string) {
 	t.Helper()

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/go-git/go-git/v6"
@@ -196,5 +197,39 @@ func TestImportedCheckpoint_CommitSHASurvivesSummaryRewrite(t *testing.T) {
 	}
 	if len(summary.Sessions) != 2 {
 		t.Fatalf("expected both sessions in the rewritten summary, got %d", len(summary.Sessions))
+	}
+}
+
+// TestGitStore_WriteRefusesCanceledContext pins that the git-branch store, like
+// the git-refs store and like its own backfill writers, stops creating
+// checkpoints once the context is canceled. It is still the runtime fallback
+// when no checkpoints config is present and remains selectable via
+// `--checkpoint-backend branch`, so a guard applied only to git-refs would
+// leave every branch-backed repo without a store-level brake on Ctrl-C.
+func TestGitStore_WriteRefusesCanceledContext(t *testing.T) {
+	t.Parallel()
+	store, transcript := newImportedTestStore(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := store.Write(ctx, Session{
+		CheckpointID: id.MustCheckpointID("a1b2c3d4e5f6"),
+		SessionID:    "sess-1",
+		Strategy:     "manual-commit",
+		Transcript:   transcript,
+		AuthorName:   "Test Author",
+		AuthorEmail:  "test@example.com",
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Write() with a canceled context = %v, want context.Canceled", err)
+	}
+
+	infos, listErr := store.List(context.Background())
+	if listErr != nil {
+		t.Fatalf("List: %v", listErr)
+	}
+	if len(infos) != 0 {
+		t.Fatalf("a write refused for cancellation left %d checkpoint(s) behind", len(infos))
 	}
 }

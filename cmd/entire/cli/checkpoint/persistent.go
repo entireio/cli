@@ -59,6 +59,15 @@ var chunkTranscript = agent.ChunkTranscript
 //   - For incremental checkpoints: checkpoints/NNN-<tool-use-id>.json
 //   - For final checkpoints: checkpoint.json and agent-<agent-id>.jsonl
 func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
+	// Parity with this store's backfill writers and with the git-refs store: a
+	// canceled ctx means stop doing work, and creating a checkpoint is the most
+	// expensive write there is. Nothing below here observes cancellation
+	// (ensureSessionsBranch, tree building and CreateCommit all ignore ctx), so
+	// without this a bulk writer that ignores cancellation keeps minting
+	// checkpoints after Ctrl-C.
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // Propagating context cancellation
+	}
 	// Validate identifiers to prevent path traversal and malformed data
 	if opts.CheckpointID.IsEmpty() {
 		return errors.New("invalid checkpoint options: checkpoint ID is required")

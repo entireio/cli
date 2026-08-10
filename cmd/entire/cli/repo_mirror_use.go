@@ -62,16 +62,12 @@ func validateGitRemoteName(name string) error {
 // these errors reach stderr through main.go and from there into logs and pasted
 // transcripts — the same reason reportMirrorRemotePlan redacts what it prints.
 //
-// Only URL-shaped args are touched: gitremote.RedactURL would turn a bare word
-// like "remote" into "://remote", so it cannot be applied blanket-fashion.
+// Non-URL args (bare words like "remote", local paths) pass through untouched;
+// see gitremote.RedactURLOrPath for why RedactURL cannot be applied blanket-fashion.
 func redactGitArgs(args []string) []string {
 	safe := make([]string, len(args))
 	for i, a := range args {
-		if strings.Contains(a, "://") || strings.Contains(a, "@") {
-			safe[i] = gitremote.RedactURL(a)
-			continue
-		}
-		safe[i] = a
+		safe[i] = gitremote.RedactURLOrPath(a)
 	}
 	return safe
 }

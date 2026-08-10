@@ -18,8 +18,10 @@ import (
 // every push URL and — this is the part that matters for checkpoint sync —
 // invokes the pre-push hook ONCE PER PUSH URL, passing the same remote NAME as
 // $1 each time and the individual URL as $2. Our installed hook forwards only
-// $1 (see strategy/hooks.go), so the CLI cannot tell the invocations apart and
-// hands `git push <name>` the remote name, letting git fan out again.
+// $1 (see strategy/hooks.go), so the CLI cannot tell the invocations apart.
+// git-branch then hands `git push <name>` the remote name and lets git fan out
+// again; git-refs resolves the first push URL itself and targets only that (see
+// strategy.resolveRefsPushDestination).
 //
 // See multi_pushurl_test.go for what that means per checkpoint backend.
 
@@ -56,55 +58,38 @@ func (env *TestEnv) AddSecondPushURL(remoteName string) string {
 		env.T.Fatalf("failed to init second bare repo: %v\n%s", err, output)
 	}
 
-	originalURL := env.RemoteURL(remoteName)
-
-	// Re-add the original URL as an explicit push URL first, then the new one,
-	// so push fans out to both in that order.
-	for _, url := range []string{originalURL, secondBare} {
-		cmd = exec.CommandContext(ctx, "git", "remote", "set-url", "--add", "--push", remoteName, url)
-		cmd.Dir = env.RepoDir
-		cmd.Env = testutil.GitIsolatedEnv()
-		if output, err := cmd.CombinedOutput(); err != nil {
-			env.T.Fatalf("failed to add push URL %s to remote %s: %v\n%s", url, remoteName, err, output)
-		}
-	}
+	// The original URL is re-added explicitly because configuring ANY pushurl
+	// replaces url for push purposes — adding only the new one would silently
+	// redirect pushes instead of fanning out.
+	env.setPushURLs(remoteName, env.RemoteURL(remoteName), secondBare)
 
 	// Guard the setup itself: a helper that quietly configured one push URL
-	// would make every fan-out assertion below vacuous.
+	// would make every fan-out assertion vacuous.
 	if got := env.PushURLs(remoteName); len(got) != 2 {
 		env.T.Fatalf("expected 2 push URLs on remote %s, got %d: %v", remoteName, len(got), got)
 	}
 
-	// Re-baseline the .git/config guard: adding push URLs is a deliberate
-	// change, so it must not read as unexpected drift at cleanup.
-	env.setGitConfigBaseline()
-
 	return secondBare
 }
 
-// AddUnreachableSecondPushURL configures remoteName to fan out to its original
-// URL plus a path that does not exist, so every push to that remote partially
-// fails: the real URL receives the refs, the bogus one errors, and git exits
-// non-zero. Models a mirror that is down or whose credentials have expired.
-// Returns the unreachable path.
+// AddUnreachableSecondPushURL configures remoteName to push to its original URL
+// first and a path that does not exist second. Models a mirror that is down or
+// whose credentials have expired, in the position where git still reaches the
+// healthy URL before failing. Returns the unreachable path.
 func (env *TestEnv) AddUnreachableSecondPushURL(remoteName string) string {
 	env.T.Helper()
-
-	ctx := env.T.Context()
 	missing := filepath.Join(env.T.TempDir(), "does-not-exist.git")
-	originalURL := env.RemoteURL(remoteName)
+	env.setPushURLs(remoteName, env.RemoteURL(remoteName), missing)
+	return missing
+}
 
-	for _, url := range []string{originalURL, missing} {
-		cmd := exec.CommandContext(ctx, "git", "remote", "set-url", "--add", "--push", remoteName, url)
-		cmd.Dir = env.RepoDir
-		cmd.Env = testutil.GitIsolatedEnv()
-		if output, err := cmd.CombinedOutput(); err != nil {
-			env.T.Fatalf("failed to add push URL %s to remote %s: %v\n%s", url, remoteName, err, output)
-		}
-	}
-
-	env.setGitConfigBaseline()
-
+// AddUnreachableFirstPushURL is AddUnreachableSecondPushURL with the unreachable
+// path FIRST — the position that matters, because a transport failure makes git
+// die() rather than return, so no later URL is attempted at all.
+func (env *TestEnv) AddUnreachableFirstPushURL(remoteName string) string {
+	env.T.Helper()
+	missing := filepath.Join(env.T.TempDir(), "does-not-exist.git")
+	env.setPushURLs(remoteName, missing, env.RemoteURL(remoteName))
 	return missing
 }
 
@@ -124,6 +109,27 @@ func (env *TestEnv) GitPushWithHooksAllowError(remote, refSpec string) error {
 	output, err := cmd.CombinedOutput()
 	env.T.Logf("git push (with hooks, error allowed) %s %s output: %s", remote, refSpec, output)
 	return err //nolint:wrapcheck // test helper: the caller asserts on presence/absence, not identity
+}
+
+// setPushURLs appends push URLs to remoteName in the given order and
+// re-baselines the .git/config guard (changing push URLs is deliberate here).
+//
+// Order is the parameter that matters: git iterates push URLs in config order,
+// and a transport failure is fatal, so a broken URL first behaves differently
+// from the same URL last.
+func (env *TestEnv) setPushURLs(remoteName string, urls ...string) {
+	env.T.Helper()
+
+	for _, url := range urls {
+		cmd := exec.CommandContext(env.T.Context(), "git", "remote", "set-url", "--add", "--push", remoteName, url)
+		cmd.Dir = env.RepoDir
+		cmd.Env = testutil.GitIsolatedEnv()
+		if output, err := cmd.CombinedOutput(); err != nil {
+			env.T.Fatalf("failed to add push URL %s to remote %s: %v\n%s", url, remoteName, err, output)
+		}
+	}
+
+	env.setGitConfigBaseline()
 }
 
 // RemoteURL returns the fetch URL configured for remoteName.
