@@ -348,7 +348,7 @@ func classifySemanticCells(ctx context.Context, results []cellCallResult[*search
 			skipped = append(skipped, r.group.label())
 		case r.err != nil:
 			lastErr = r.err
-			failed = append(failed, r.group.label())
+			failed = append(failed, fmt.Sprintf("%s: %s", r.group.label(), summarizeCellError(r.err)))
 		case r.value != nil:
 			p := semanticCellPage{body: r.value}
 			for _, res := range r.value.Results {
@@ -373,6 +373,28 @@ func classifySemanticCells(ctx context.Context, results []cellCallResult[*search
 
 // errNoRegionAvailable is returned when every queried cell lacks query-serve.
 var errNoRegionAvailable = errors.New("semantic search is not yet available in the region(s) hosting this search")
+
+// maxCellErrorReason bounds the per-region reason shown in the partial-failure
+// warning. A cell error can embed the raw response body — parseSearchResponse
+// dumps string(body) on a decode failure or non-200 — so the reason is
+// collapsed to a single line and truncated: enough to name the failure mode
+// (e.g. "unexpected response from search service") without spilling a multi-MB
+// body into the user's terminal.
+const maxCellErrorReason = 200
+
+// summarizeCellError renders a cell's error as a short, single-line reason fit
+// for the user-facing warning. It collapses embedded whitespace/newlines and
+// truncates on a rune boundary so a multibyte character is never cut in half.
+func summarizeCellError(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	reason := strings.Join(strings.Fields(err.Error()), " ")
+	if runes := []rune(reason); len(runes) > maxCellErrorReason {
+		reason = string(runes[:maxCellErrorReason]) + "…"
+	}
+	return reason
+}
 
 // rankSemanticResults buckets every page's rows and applies the ordering
 // query-serve uses within a cell (and the BFF uses across cells): repos first,
@@ -514,7 +536,10 @@ func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []ce
 		// straight to stderr on commands that never ran logging.Init.
 		logging.Debug(ctx, "semantic search: partial failure; results may be incomplete",
 			"succeeded", len(pages), "total", len(results), "failed_cells", failed)
-		warnings = append(warnings, fmt.Sprintf("search failed in %d of %d regions; results may be incomplete", len(failed), len(pages)+len(failed)))
+		// Name each failed region and a concise reason (failed entries are
+		// "label: reason"), preserving the "N of M regions" prefix the
+		// user-facing contract and tests key on.
+		warnings = append(warnings, fmt.Sprintf("search failed in %d of %d regions; results may be incomplete (%s)", len(failed), len(pages)+len(failed), strings.Join(failed, "; ")))
 	}
 
 	merged, globalUpper := rankSemanticResults(pages)

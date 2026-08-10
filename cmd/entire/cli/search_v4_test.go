@@ -66,6 +66,10 @@ func v4CellErr(err error) cellCallResult[*search.Response] {
 	return cellCallResult[*search.Response]{err: err}
 }
 
+func v4CellErrLabeled(cell string, err error) cellCallResult[*search.Response] {
+	return cellCallResult[*search.Response]{group: cellGroup{cell: cell}, err: err}
+}
+
 func v4ResultIDs(t *testing.T, results []search.Result) []string {
 	t.Helper()
 	ids := make([]string, len(results))
@@ -395,6 +399,47 @@ func TestMergeSemanticV4Responses_PartialFailureMergesSurvivorsWithWarning(t *te
 	}
 	if len(resp.Warnings) != 1 || !strings.Contains(resp.Warnings[0], "1 of 2 regions") {
 		t.Errorf("warnings = %v, want a visible partial-failure warning naming 1 of 2 regions", resp.Warnings)
+	}
+}
+
+// TestMergeSemanticV4Responses_PartialFailureNamesRegionAndReason verifies the
+// warning surfaces which region failed and why (Bug 3): the count-only warning
+// hid the region + reason in a discarded Debug log, making the underlying 1 MiB
+// truncation undiagnosable. A cell error can embed the raw response body, so
+// the surfaced reason must be a short single line, not a multi-MB blob.
+func TestMergeSemanticV4Responses_PartialFailureNamesRegionAndReason(t *testing.T) {
+	t.Parallel()
+
+	// Simulate parseSearchResponse's decode-failure error, which dumps the raw
+	// (here multi-MB) body into the error string.
+	hugeBody := strings.Repeat("x", 2<<20)
+	cellErr := fmt.Errorf("unexpected response from search service: %s", hugeBody)
+
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellErrLabeled("aws-us-east-2", cellErr),
+		v4CellOK(&search.Response{Results: []search.Result{
+			v4Ckpt("ok", 1, search.Meta{Score: 0.5}),
+		}, Total: 1}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly one", resp.Warnings)
+	}
+	w := resp.Warnings[0]
+	if !strings.Contains(w, "1 of 2 regions") {
+		t.Errorf("warning = %q, want the preserved '1 of 2 regions' prefix", w)
+	}
+	if !strings.Contains(w, "aws-us-east-2") {
+		t.Errorf("warning = %q, want it to name the failed region", w)
+	}
+	if !strings.Contains(w, "unexpected response from search service") {
+		t.Errorf("warning = %q, want a concise reason for the failure", w)
+	}
+	// The huge embedded body must be truncated out — the warning stays readable.
+	if len(w) > 500 {
+		t.Errorf("warning is %d bytes; the raw body must be truncated, not dumped in full", len(w))
 	}
 }
 

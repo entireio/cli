@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -120,6 +121,90 @@ func TestCellV4_ResponseDecodesLikeV3(t *testing.T) {
 	}
 	if resp.Counts == nil || resp.Counts.Commits != 1 {
 		t.Errorf("counts did not decode; got %+v", resp.Counts)
+	}
+}
+
+// TestCellV4_LargeResponseDecodesFully is the regression test for the 1 MiB
+// response cap: a busy cell returns a valid JSON body larger than the old
+// io.LimitReader(resp.Body, 1<<20) limit (rows carry full transcript text).
+// The old cap truncated the body mid-JSON, failed the decode, and dropped the
+// whole region from the cross-cell merge. The response must now decode intact.
+func TestCellV4_LargeResponseDecodesFully(t *testing.T) {
+	t.Parallel()
+
+	// A single checkpoint whose prompt alone exceeds the old 1 MiB cap.
+	bigPrompt := strings.Repeat("transcript ", (1<<20)/11+4096)
+	payload, err := json.Marshal(&Response{
+		Results: []Result{{
+			Type:       TypeCheckpoint,
+			Meta:       Meta{Score: 1.0, Tier: iptrTest(0)},
+			Checkpoint: &CheckpointResult{ID: "big", Prompt: bigPrompt},
+		}},
+		Total: 1,
+		Page:  1,
+	})
+	if err != nil {
+		t.Fatalf("building payload: %v", err)
+	}
+	if len(payload) <= 1<<20 {
+		t.Fatalf("test payload is %d bytes, must exceed the old 1 MiB cap to exercise the bug", len(payload))
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, string(payload))
+	}))
+	defer srv.Close()
+
+	resp, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "transcript"}, nil)
+	if err != nil {
+		t.Fatalf("large response should decode, got error: %v", err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Checkpoint == nil {
+		t.Fatalf("results did not decode: %+v", resp.Results)
+	}
+	if got := resp.Results[0].Checkpoint.Prompt; got != bigPrompt {
+		t.Errorf("prompt truncated: got %d bytes, want %d", len(got), len(bigPrompt))
+	}
+}
+
+func iptrTest(i int) *int { return &i }
+
+// TestReadCappedBody confirms the read guard: bodies at or under the cap are
+// returned intact, and an over-cap body is an explicit error rather than a
+// silently truncated slice fed to the JSON decoder.
+func TestReadCappedBody(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		size    int
+		cap     int64
+		wantErr bool
+	}{
+		{"under cap", 50, 100, false},
+		{"exactly at cap", 100, 100, false},
+		{"one over cap", 101, 100, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			body, err := readCappedBody(strings.NewReader(strings.Repeat("a", tt.size)), tt.cap)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("size %d cap %d: want an overflow error, got nil", tt.size, tt.cap)
+				}
+				if !strings.Contains(err.Error(), "exceeded") {
+					t.Errorf("error = %q, want it to mention the exceeded read limit", err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("size %d cap %d: unexpected error: %v", tt.size, tt.cap, err)
+			}
+			if len(body) != tt.size {
+				t.Errorf("read %d bytes, want %d", len(body), tt.size)
+			}
+		})
 	}
 }
 
