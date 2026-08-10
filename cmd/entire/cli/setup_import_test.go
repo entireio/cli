@@ -446,3 +446,84 @@ func TestRunSelectedImports_NonTTYProgressLines_Reimport(t *testing.T) {
 		t.Errorf("re-import summary line missing or wrong; want %q in:\n%s", want, out)
 	}
 }
+
+// cancelOnDiscoverImporter returns fixed sessions but cancels the run context
+// as a side effect of Discover, so cancellation lands mid-import (after enable's
+// setup has run under a live context) exactly as a real Ctrl-C would.
+type cancelOnDiscoverImporter struct {
+	agentimport.Importer
+
+	sessions []agentimport.SessionFile
+	cancel   context.CancelFunc
+}
+
+func (c cancelOnDiscoverImporter) Discover(string, string, time.Time, []string) ([]agentimport.SessionFile, error) {
+	c.cancel()
+	return c.sessions, nil
+}
+
+// recordDiscoverImporter records whether Discover was ever called, so a test can
+// assert a later agent was never processed.
+type recordDiscoverImporter struct {
+	agentimport.Importer
+
+	called *bool
+}
+
+func (r recordDiscoverImporter) Discover(string, string, time.Time, []string) ([]agentimport.SessionFile, error) {
+	*r.called = true
+	return nil, nil
+}
+
+// TestRunSelectedImports_CancelStopsImportPhase proves a cancelled context
+// (Ctrl-C during enable auto-import) aborts the whole import phase after the
+// current agent instead of walking every remaining agent — each of which would
+// otherwise run Discover and emit its own "context canceled" note.
+func TestRunSelectedImports_CancelStopsImportPhase(t *testing.T) {
+	// Not parallel: chdirs into a temp repo and performs real checkpoint writes.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "x")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+
+	sessionsDir := t.TempDir()
+	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl")
+
+	var claudeImp agentimport.Importer
+	for _, imp := range agentimport.All() {
+		if imp.Name() == testAgentName {
+			claudeImp = imp
+		}
+	}
+	if claudeImp == nil {
+		t.Fatal("claude-code importer not registered")
+	}
+	sessions, err := claudeImp.Discover(dir, sessionsDir, time.Now(), nil)
+	if err != nil {
+		t.Fatalf("discover fixture sessions: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	first := cancelOnDiscoverImporter{Importer: claudeImp, sessions: sessions, cancel: cancel}
+	secondCalled := false
+	second := recordDiscoverImporter{Importer: claudeImp, called: &secondCalled}
+
+	var buf bytes.Buffer
+	runSelectedImports(ctx, &buf, dir, []eligibleImport{
+		{imp: first, displayName: "first"},
+		{imp: second, displayName: "second"},
+	})
+	out := buf.String()
+
+	if secondCalled {
+		t.Error("cancelled import must abort the phase; the second agent must not be processed")
+	}
+	if got := strings.Count(out, "Import cancelled."); got != 1 {
+		t.Errorf("want exactly one cancellation note, got %d:\n%s", got, out)
+	}
+	if strings.Contains(out, "Imported ") {
+		t.Errorf("cancelled import must not print a success summary:\n%s", out)
+	}
+}

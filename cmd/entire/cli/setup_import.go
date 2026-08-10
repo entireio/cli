@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -231,6 +232,14 @@ func runSelectedImports(ctx context.Context, w io.Writer, repoRoot string, selec
 		})
 		stopProgress(err == nil)
 		if err != nil {
+			// Cancellation (Ctrl-C) aborts the whole import phase, not just this
+			// agent: continuing would re-run Discover for every remaining agent
+			// and print a "context canceled" note for each. Stop cleanly and
+			// leave already-written checkpoints in place (idempotent on re-run).
+			if errors.Is(err, context.Canceled) {
+				fmt.Fprintln(w, "Import cancelled.")
+				return
+			}
 			logging.Warn(ctx, "session import failed", "agent", e.imp.Name(), "error", err)
 			fmt.Fprintf(w, "Note: could not import %s history: %v\n", e.displayName, err)
 			continue
