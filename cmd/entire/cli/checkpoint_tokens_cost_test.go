@@ -85,8 +85,9 @@ func TestAddCheckpointTokenUsage_NilCostStaysNil(t *testing.T) {
 }
 
 // buildCheckpointTokensReport must recompute a LOCAL cost estimate from the
-// persisted token breakdown (the CLI no longer persists cost) and label it as a
-// local estimate. Here the per-model breakdown carries 420000 priceable tokens
+// persisted token breakdown at current rates (rather than echoing the spend-time
+// cost stored on the checkpoint) and label it as a local estimate. Here the
+// per-model breakdown carries 420000 priceable tokens
 // under test-model ($1/MTok) => $0.42.
 func TestBuildCheckpointTokensReport_RecomputesLocalCostEstimate(t *testing.T) {
 	t.Parallel()

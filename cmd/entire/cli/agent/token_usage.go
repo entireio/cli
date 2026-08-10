@@ -129,11 +129,12 @@ func PriceUsage(usage *types.TokenUsage, model string, table *pricing.Table, dis
 }
 
 // EstimateCost computes a LOCAL, on-the-fly USD cost estimate for an
-// already-recorded token breakdown, for DISPLAY ONLY. The CLI no longer persists
-// cost — entire-api prices server-side from the token breakdown — so the token
-// commands (`entire session tokens`, `entire checkpoint tokens`, `entire tokens
-// profile`) call this to show a clearly-labeled local estimate alongside the
-// token counts.
+// already-recorded token breakdown, for DISPLAY ONLY. Checkpoints do persist the
+// cost priced when their tokens were spent (see checkpoint.Metadata.TokenUsage);
+// this re-prices a breakdown at the table's CURRENT rates, which is what the
+// token commands (`entire session tokens`, `entire checkpoint tokens`, `entire
+// tokens profile`) render as a clearly-labeled local estimate. It is also the
+// only option for live session state, whose tokens may not be checkpointed yet.
 //
 // It prefers the persisted per-model buckets, pricing each priceable bucket at
 // table's current rates and folding them exactly as CalculateUsageWithCost's

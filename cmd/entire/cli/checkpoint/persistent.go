@@ -269,7 +269,7 @@ func (s *treeWriter) applyAttributionBackfill(ctx context.Context, existing *obj
 	}
 	summary.CombinedAttribution = combinedAttribution
 
-	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary.WithoutCost(), "", "  ")
+	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to marshal checkpoint summary: %w", err)
 	}
@@ -322,7 +322,7 @@ func (s *treeWriter) applySummaryBackfill(ctx context.Context, existing *object.
 
 	existingMetadata.Summary = RedactSummary(summary)
 
-	metadataJSON, err := jsonutil.MarshalIndentWithNewline(existingMetadata.WithoutCost(), "", "  ")
+	metadataJSON, err := jsonutil.MarshalIndentWithNewline(existingMetadata, "", "  ")
 	if err != nil {
 		return plumbing.ZeroHash, "", fmt.Errorf("failed to marshal metadata: %w", err)
 	}
@@ -440,7 +440,7 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 			if sess.CompactTranscript != compactPath || sess.AssetsManifest != manifestPath {
 				sess.CompactTranscript = compactPath
 				sess.AssetsManifest = manifestPath
-				summaryJSON, err := jsonutil.MarshalIndentWithNewline(checkpointSummary.WithoutCost(), "", "  ")
+				summaryJSON, err := jsonutil.MarshalIndentWithNewline(checkpointSummary, "", "  ")
 				if err != nil {
 					return plumbing.ZeroHash, fmt.Errorf("failed to marshal checkpoint summary: %w", err)
 				}
@@ -777,7 +777,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		InvestigateTopic:            opts.InvestigateTopic,
 	}
 
-	metadataJSON, err := jsonutil.MarshalIndentWithNewline(sessionMetadata.WithoutCost(), "", "  ")
+	metadataJSON, err := jsonutil.MarshalIndentWithNewline(sessionMetadata, "", "  ")
 	if err != nil {
 		return filePaths, fmt.Errorf("failed to marshal session metadata: %w", err)
 	}
@@ -854,7 +854,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 		Imported:            imported,
 	}
 
-	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary.WithoutCost(), "", "  ")
+	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal checkpoint summary: %w", err)
 	}
@@ -1888,7 +1888,7 @@ func (s *treeWriter) updateSessionMetadata(sessionDir string, entries map[string
 	}
 	mutate(metadata)
 
-	metadataJSON, err := jsonutil.MarshalIndentWithNewline(metadata.WithoutCost(), "", "  ")
+	metadataJSON, err := jsonutil.MarshalIndentWithNewline(metadata, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal session metadata: %w", err)
 	}

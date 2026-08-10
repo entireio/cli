@@ -183,9 +183,10 @@ func buildTokensProfileReport(ctx context.Context, store checkpoint.PersistentSt
 			continue
 		}
 
-		// Local cost estimate for this checkpoint (the CLI no longer persists
-		// cost). Stamped onto usage so addCheckpointTokenUsage folds the
-		// per-checkpoint estimates into the aggregate total/source.
+		// Re-estimate at current rates for this checkpoint's profile view
+		// (may differ from the cost persisted at checkpoint time if pricing
+		// changed since). Stamped onto usage so addCheckpointTokenUsage folds
+		// the per-checkpoint estimates into the aggregate total/source.
 		if usage != nil {
 			cost, source := agent.EstimateCost(usage, buckets, model, table)
 			usage.CostUSD = cost

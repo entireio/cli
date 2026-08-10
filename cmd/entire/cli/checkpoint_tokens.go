@@ -379,8 +379,9 @@ func checkpointTokenUsage(summary *checkpoint.CheckpointSummary, metas []*checkp
 // checkpointModelUsage returns the per-model token buckets for a checkpoint,
 // mirroring checkpointTokenUsage's source preference so the local cost estimate
 // prices the same tokens the report displays: the per-session buckets when
-// metadata read cleanly, else the aggregated root-summary buckets. Buckets carry
-// only token counts (cost is a display-only local estimate applied downstream).
+// metadata read cleanly, else the aggregated root-summary buckets. Only the
+// buckets' token counts are used — the displayed cost is re-estimated downstream
+// at current rates, not read from the buckets' persisted spend-time cost.
 func checkpointModelUsage(summary *checkpoint.CheckpointSummary, metas []*checkpoint.Metadata, metadataReadWarning bool) []types.ModelUsage {
 	var sessionBuckets []types.ModelUsage
 	for _, meta := range metas {

@@ -393,7 +393,13 @@ type Metadata struct {
 	// (legacy delta file) is distinguishable from 0 (full file, first checkpoint).
 	CompactTranscriptStart *int `json:"compact_transcript_start,omitempty"`
 
-	// Token usage for this checkpoint
+	// Token usage for this checkpoint, including the cost_usd/cost_source
+	// computed when the tokens were spent. Cost is persisted deliberately: the
+	// CLI is the only place that knows which pricing was in force at spend time,
+	// so pricing once here is both simpler and more historically accurate than
+	// having a backend re-derive cost later from raw counts (which needs a full
+	// historical pricing table and breaks for forked/renamed repos with no
+	// lineage). Writers persist Metadata as-is — nothing strips cost.
 	TokenUsage *types.TokenUsage `json:"token_usage,omitempty"`
 
 	// ModelUsage is the per-model breakdown of TokenUsage for this checkpoint. Each
@@ -462,64 +468,6 @@ func (m Metadata) GetCompactTranscriptStart() (offset int, ok bool) {
 		return 0, false
 	}
 	return *m.CompactTranscriptStart, true
-}
-
-// WithoutCost returns a copy of the session Metadata with all token-usage cost
-// provenance removed (the flat TokenUsage, every per-model ModelUsage bucket, and
-// each nested SubagentTokens subtree). Token counts, APICallCount, model ids,
-// SessionMetrics, and every other field are preserved.
-//
-// The CLI no longer persists cost: entire-api prices server-side from the token
-// breakdown, so cost is a display-only local estimate (see the token commands).
-// Every checkpoint-metadata write funnels through this so no committed blob ever
-// carries cost_usd/cost_source, while keeping the four token fields + model id
-// per model that the platform's server-side pricing depends on. The returned copy
-// never aliases the receiver's TokenUsage/ModelUsage, so callers can keep using
-// the originals (e.g. for local diagnostics) after persisting.
-func (m Metadata) WithoutCost() Metadata {
-	m.TokenUsage = tokenUsageWithoutCost(m.TokenUsage)
-	m.ModelUsage = modelUsageWithoutCost(m.ModelUsage)
-	return m
-}
-
-// WithoutCost returns a copy of the root CheckpointSummary with all token-usage
-// cost provenance removed. See Metadata.WithoutCost.
-func (s CheckpointSummary) WithoutCost() CheckpointSummary {
-	s.TokenUsage = tokenUsageWithoutCost(s.TokenUsage)
-	s.ModelUsage = modelUsageWithoutCost(s.ModelUsage)
-	return s
-}
-
-// tokenUsageWithoutCost deep-copies u with its cost fields cleared at every level
-// (flat plus the whole SubagentTokens subtree), preserving the token counts and
-// APICallCount. Returns nil for nil so an absent usage stays absent.
-func tokenUsageWithoutCost(u *types.TokenUsage) *types.TokenUsage {
-	if u == nil {
-		return nil
-	}
-	c := *u
-	c.CostUSD = nil
-	c.CostSource = ""
-	c.SubagentTokens = tokenUsageWithoutCost(u.SubagentTokens)
-	return &c
-}
-
-// modelUsageWithoutCost copies the per-model buckets with each bucket's cost
-// cleared, preserving the model id and the four token fields the platform prices
-// from. Returns nil for a nil/empty slice.
-func modelUsageWithoutCost(in []types.ModelUsage) []types.ModelUsage {
-	if len(in) == 0 {
-		return in
-	}
-	out := make([]types.ModelUsage, len(in))
-	for i := range in {
-		tu := in[i].TokenUsage
-		tu.CostUSD = nil
-		tu.CostSource = ""
-		tu.SubagentTokens = tokenUsageWithoutCost(in[i].TokenUsage.SubagentTokens)
-		out[i] = types.ModelUsage{Model: in[i].Model, TokenUsage: tu}
-	}
-	return out
 }
 
 // SessionFilePaths contains the absolute paths to session files from the git tree root.

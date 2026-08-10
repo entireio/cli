@@ -254,9 +254,10 @@ func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {
 	if total == 0 && usage.APICallCount == 0 {
 		return nil
 	}
-	// Cost is intentionally NOT copied from usage: the CLI no longer persists
-	// cost, so any persisted value is nil. Callers apply a local cost estimate
-	// via applyLocalCostEstimate instead (entire-api owns the authoritative cost).
+	// Cost is intentionally NOT copied from the persisted usage here: this is
+	// live/in-progress session state, not yet checkpointed, so there is no
+	// stored cost to read. Callers apply a local cost estimate via
+	// applyLocalCostEstimate instead.
 	return &sessionTokensUsage{
 		Total:         total,
 		Input:         usage.InputTokens,
@@ -280,9 +281,10 @@ func loadDisplayPricingTable(ctx context.Context) *pricing.Table {
 }
 
 // applyLocalCostEstimate replaces a rendered usage's cost with a LOCAL, on-the-fly
-// estimate computed from its token breakdown at current rates. The CLI no longer
-// persists cost — entire-api prices server-side — so token commands show this as
-// an explicitly-labeled local estimate (see costSourceSuffix / localCostEstimateNote).
+// estimate computed from its token breakdown at current rates, so token commands
+// render a consistent figure for both checkpointed and still-live token usage
+// (see costSourceSuffix / localCostEstimateNote for the labeling). The persisted
+// spend-time cost in checkpoint metadata is unaffected — this is display only.
 // A nil result (nothing priceable) leaves the cost unset so no cost line renders.
 func applyLocalCostEstimate(tokens *sessionTokensUsage, usage *agent.TokenUsage, models []types.ModelUsage, fallbackModel string, table *pricing.Table) {
 	if tokens == nil {
@@ -452,15 +454,14 @@ func formatPercent(percent float64) string {
 	return formatted + "%"
 }
 
-// localCostEstimateNote explains that a rendered cost is a CLI-side estimate and
-// that the authoritative value lives on the platform. The CLI no longer persists
-// cost (entire-api prices server-side), so every cost the token commands show is
-// recomputed locally from the persisted token breakdown.
+// localCostEstimateNote explains that a rendered cost is a CLI-side estimate at
+// today's rates, recomputed from the token breakdown rather than read back from
+// the spend-time cost stored on the checkpoint.
 const localCostEstimateNote = "Cost is a local estimate at current rates; the authoritative cost is computed on the Entire platform."
 
 // formatCostUSD renders a locally-estimated cost for display. The value is a
-// current-rate estimate the token command recomputed from the persisted token
-// breakdown — the CLI no longer persists cost.
+// current-rate estimate the token command recomputed from the token breakdown,
+// not the spend-time cost stored on the checkpoint.
 //
 //   - v == nil        -> "" (unknown/unpriceable cost: caller omits the line, never $0.00)
 //   - 0 < v < $0.005  -> "<$0.01" (sub-cent, would round to $0.00)
@@ -490,8 +491,8 @@ func formatCostAmount(v float64) string {
 }
 
 // costSourceSuffix maps a CostSource provenance to its parenthetical display
-// suffix. Cost is a local estimate now (the CLI no longer persists cost), so the
-// estimated/mixed cases say so explicitly; an empty/unknown source yields "".
+// suffix. Displayed cost is always recomputed locally, so the estimated/mixed
+// cases say so explicitly; an empty/unknown source yields "".
 func costSourceSuffix(source string) string {
 	switch source {
 	case types.CostSourceReported:

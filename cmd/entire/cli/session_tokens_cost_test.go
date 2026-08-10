@@ -44,8 +44,9 @@ func TestFormatCostUSD_Matrix(t *testing.T) {
 }
 
 // buildSessionTokensReport must recompute a LOCAL cost estimate from the
-// session's token breakdown (the CLI no longer persists cost) and label it as a
-// local estimate. The per-model breakdown carries 420000 priceable tokens under
+// session's token breakdown at current rates (rather than echoing any stored
+// spend-time cost) and label it as a local estimate. The per-model breakdown
+// carries 420000 priceable tokens under
 // test-model ($1/MTok) => $0.42.
 func TestBuildSessionTokensReport_RecomputesLocalCostEstimate(t *testing.T) {
 	t.Parallel()

@@ -627,25 +627,23 @@ func TestCondenseSession_RepricesTranscriptModelAfterBackfill(t *testing.T) {
 	var meta checkpoint.Metadata
 	require.NoError(t, json.Unmarshal([]byte(sessionBytes), &meta))
 
-	// The persisted checkpoint carries the backfilled model AND the token
-	// breakdown, but NOT cost: the CLI no longer persists cost (entire-api prices
-	// server-side from these tokens). The reprice/rebucket after model backfill is
-	// what makes the persisted per-model breakdown correct — that is preserved;
-	// only the cost stamp is dropped on write.
+	// The persisted checkpoint carries the backfilled model, the token breakdown,
+	// AND the cost priced with that model. The reprice/rebucket after model
+	// backfill is what makes both the persisted per-model breakdown and the
+	// persisted cost correct, and the write preserves them as-is.
 	require.Equal(t, "gpt-5.5", meta.Model, "persisted model")
 	require.NotNil(t, meta.TokenUsage, "token usage must be persisted")
 	require.Equal(t, 1000000, meta.TokenUsage.InputTokens, "input tokens from transcript")
-	require.Nil(t, meta.TokenUsage.CostUSD, "cost must NOT be persisted")
-	require.Empty(t, meta.TokenUsage.CostSource, "cost source must NOT be persisted")
+	require.NotNil(t, meta.TokenUsage.CostUSD, "cost must be priced after model backfill and persisted")
+	require.Greater(t, *meta.TokenUsage.CostUSD, 0.0, "priced cost must be positive")
+	require.NotEmpty(t, meta.TokenUsage.CostSource, "cost source must be persisted")
 
 	// The per-model breakdown must be bucketed under the real model, never "",
-	// with its four token fields intact (the platform prices from these).
+	// with its four token fields and its priced cost intact.
 	require.NotEmpty(t, meta.ModelUsage, "per-model breakdown must be present")
 	var gpt55 *types.TokenUsage
 	for i := range meta.ModelUsage {
 		require.NotEmpty(t, meta.ModelUsage[i].Model, "no bucket may be keyed under the empty model")
-		require.Nil(t, meta.ModelUsage[i].TokenUsage.CostUSD, "per-model cost must NOT be persisted")
-		require.Empty(t, meta.ModelUsage[i].TokenUsage.CostSource, "per-model cost source must NOT be persisted")
 		if meta.ModelUsage[i].Model == "gpt-5.5" {
 			u := meta.ModelUsage[i].TokenUsage
 			gpt55 = &u
@@ -653,12 +651,12 @@ func TestCondenseSession_RepricesTranscriptModelAfterBackfill(t *testing.T) {
 	}
 	require.NotNil(t, gpt55, "usage must be bucketed under gpt-5.5")
 	require.Equal(t, 1000000, gpt55.InputTokens, "gpt-5.5 bucket carries the token counts")
+	require.NotNil(t, gpt55.CostUSD, "gpt-5.5 bucket must be priced and persisted")
 
-	// The session-state total (local, not platform-facing) still carries the
-	// repriced cost: the compute/reprice pipeline is intact; only the checkpoint
-	// write drops cost.
+	// The session-state total must be repointed to the priced copy: the state
+	// backfill ran before the reprice and aliased the pre-reprice usage.
 	require.NotNil(t, state.TokenUsage, "state total present")
-	require.NotNil(t, state.TokenUsage.CostUSD, "state total still carries the repriced cost (local only)")
+	require.NotNil(t, state.TokenUsage.CostUSD, "state total must carry the repriced cost")
 }
 
 // A zero-token re-extraction (e.g. a Pi fork abandoning the branch that
