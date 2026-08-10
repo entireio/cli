@@ -643,6 +643,14 @@ func renderCoreError(err error) error {
 	if msg := coreapi.APIError(err); msg != "" {
 		return errors.New(msg)
 	}
+	// An expired/absent login surfaces as a *reauthError buried under ogen's
+	// `security "BearerAuth"` wrappers and the command's own `%w` prefix. Surface
+	// just its clean, context-named "run `entire login`" hint instead of the
+	// full noisy chain (the reported `entire repo clone` failure). Covers every
+	// control-plane command, since they all funnel through here.
+	if msg, ok := auth.ReauthMessage(err); ok {
+		return errors.New(msg)
+	}
 	return err
 }
 

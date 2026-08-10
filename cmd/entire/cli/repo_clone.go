@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -11,6 +13,8 @@ import (
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/internal/coreapi"
 )
@@ -124,6 +128,17 @@ func newRepoCloneCmd() *cobra.Command {
 				return fmt.Errorf("invalid <repo>: %w", err)
 			}
 
+			// Make a usable active-context login a precondition: fail fast with a
+			// clean re-login hint (never the noisy wrapped auth chain), and
+			// interactively offer to log in and continue, before diving into the
+			// mirror lookup. Scoped to the active-context path; --cluster dials a
+			// different context and relies on renderCoreError's clean fallback.
+			if cluster == "" {
+				if err := ensureCloneSession(cmd); err != nil {
+					return err
+				}
+			}
+
 			var placements []coreapi.ResolvedPlacement
 			lister := func(ctx context.Context, c *coreapi.Client) error {
 				ps, err := resolvePullablePlacements(ctx, c, owner, repo)
@@ -176,6 +191,111 @@ func newRepoCloneCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&cluster, "cluster", "", "Cluster host to clone from when the repo is mirrored on more than one (may belong to another auth context)")
 	return cmd
+}
+
+// Seams so ensureCloneSession is testable without the real keychain, network,
+// or a TTY (mirrors the activeCoreClient seam in corecmd.go). Tests swap these.
+var (
+	// probeCloneSession resolves the active control-plane target and checks its
+	// login by minting a token. It returns the login server to re-authenticate
+	// against (the context's core, or the default when there is no context) and
+	// the probe result: nil when the session is usable, a *reauthError (via the
+	// token source) when re-login is needed, or a transient error otherwise.
+	probeCloneSession = defaultProbeCloneSession
+	// interactiveReauthLogin prompts the user to re-authenticate and, on
+	// confirmation, logs in against loginServer. It reports whether a login was
+	// performed (false when the user declines).
+	interactiveReauthLogin = defaultInteractiveReauthLogin
+)
+
+func defaultProbeCloneSession(ctx context.Context) (loginServer string, err error) {
+	target, err := auth.ResolveControlPlaneTarget()
+	if err != nil {
+		// No active context surfaces as a *reauthError wrapping ErrNotLoggedIn;
+		// re-login against the default login server. Wrapped with %w so the
+		// caller's auth.ReauthMessage (errors.As) still finds it.
+		return api.DefaultAuthBaseURL, fmt.Errorf("resolve control-plane target: %w", err)
+	}
+	// Client construction does no network I/O — the bearer is lazy per-request —
+	// so mint a token explicitly to detect an expired/absent session up front.
+	if _, err := target.TokenSource(ctx); err != nil {
+		return target.CoreURL, fmt.Errorf("mint login token: %w", err)
+	}
+	return target.CoreURL, nil
+}
+
+func defaultInteractiveReauthLogin(cmd *cobra.Command, loginServer, hint string) (bool, error) {
+	ctx := cmd.Context()
+	// huh opens the TTY during form startup regardless of context state, so
+	// guard explicitly to honor an already-cancelled command context.
+	if ctx.Err() != nil {
+		return false, nil //nolint:nilerr // cancelled context is a clean decline, not an error
+	}
+	// Show why we're prompting (the hint names the context and its core), then
+	// offer to fix it in-process.
+	fmt.Fprintln(cmd.ErrOrStderr(), hint)
+	confirmed := false
+	form := NewAccessibleForm(
+		huh.NewGroup(huh.NewConfirm().
+			Title("Log in now and continue the clone?").
+			Value(&confirmed)),
+	)
+	if err := form.RunWithContext(ctx); err != nil {
+		// A user abort (Esc) or context cancel (Ctrl+C) is a clean decline, not
+		// an error — mirror confirmControlPlaneDeletion.
+		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
+			return false, nil
+		}
+		return false, fmt.Errorf("login prompt: %w", err)
+	}
+	if !confirmed {
+		return false, nil
+	}
+	if err := runLoginToServer(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), loginServer, insecureHTTPRequested(cmd), false); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ensureCloneSession makes a usable active-context login a precondition of the
+// clone. On a missing/expired session it surfaces the clean, context-named
+// re-login hint (never the noisy wrapped chain); interactively it also offers
+// to run the login flow in-process and continue. Non-interactive callers
+// (agents, CI) get the hint and a non-zero exit without ever blocking on a
+// prompt. A fresh coreapi client built afterward re-reads the newly stored
+// token, so the clone proceeds in the same process.
+func ensureCloneSession(cmd *cobra.Command) error {
+	// A non-empty ENTIRE_TOKEN supplies a verbatim bearer with no refreshable
+	// session to probe; leave any failure to the normal flow (renderCoreError
+	// still cleans the message). Such runs are non-interactive CI anyway. An
+	// empty value is treated as unset, matching coreapi's env-token path.
+	if os.Getenv(auth.EnvTokenVar) != "" {
+		return nil
+	}
+	if insecureHTTPRequested(cmd) {
+		auth.EnableInsecureHTTP()
+	}
+	loginServer, probeErr := probeCloneSession(cmd.Context())
+	if probeErr == nil {
+		return nil // session usable
+	}
+	msg, isReauth := auth.ReauthMessage(probeErr)
+	if !isReauth {
+		// Transient (network/STS) failure — not a re-auth prompt. Let the normal
+		// command flow surface it in its own terms.
+		return probeErr
+	}
+	if !interactive.CanPromptInteractively() {
+		return errors.New(msg)
+	}
+	loggedIn, err := interactiveReauthLogin(cmd, loginServer, msg)
+	if err != nil {
+		return err
+	}
+	if !loggedIn {
+		return errors.New(msg)
+	}
+	return nil
 }
 
 // mirrorLister is the subset of the control-plane client listMirrorsForRepo

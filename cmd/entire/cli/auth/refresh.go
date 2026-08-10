@@ -149,6 +149,23 @@ type reauthError struct {
 func (e *reauthError) Error() string { return e.msg }
 func (e *reauthError) Unwrap() error { return e.sentinel }
 
+// ReauthMessage returns the friendly, context-named re-login message carried by
+// a *reauthError anywhere in err's chain (expired session or no usable login),
+// with ok=false when err is not a re-auth error. It is the cross-package
+// accessor for the unexported reauthError: callers in the cli package can't
+// errors.As the type themselves, and matching err's top-level string is wrong
+// because two noise layers (the ogen `security "BearerAuth"` wrappers and the
+// command's own `%w` prefix) sit on top of it. Both re-auth sentinels surface
+// as a *reauthError, so this single check covers ErrReauthRequired and
+// ErrNotLoggedIn.
+func ReauthMessage(err error) (string, bool) {
+	var re *reauthError
+	if errors.As(err, &re) {
+		return re.Error(), true
+	}
+	return "", false
+}
+
 // contextReauthError maps the two re-auth sentinels a per-context manager can
 // return into a friendly message that names the context and its core (so a
 // multi-core user logs back into the right one — matching the
