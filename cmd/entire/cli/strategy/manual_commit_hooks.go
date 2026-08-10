@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/brainnotify"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -41,6 +42,8 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/utils/binary"
 )
+
+var sendBrainCheckpointHint = brainnotify.Notify
 
 // ttyResult represents the outcome of a TTY confirmation prompt.
 type ttyResult int
@@ -1001,8 +1004,9 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		}
 		sessionID := sess.SessionID
 		iterCtx, iterSpan := processSessionsLoop.Iteration(loopCtx)
+		var condensed bool
 		mutErr := MutateSessionState(iterCtx, sessionID, func(state *SessionState) error {
-			s.postCommitProcessSessionLocked(iterCtx, repo, state, &transitionCtx, checkpointID,
+			condensed = s.postCommitProcessSessionLocked(iterCtx, repo, state, &transitionCtx, checkpointID,
 				head, commit, newHead, worktreePath, headTree, parentTree,
 				committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles,
 				sessionsWithCommittedFiles)
@@ -1012,6 +1016,9 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 			logging.Warn(logCtx, "post-commit: session mutation failed",
 				slog.String("session_id", sessionID),
 				slog.String("error", mutErr.Error()))
+		}
+		if condensed {
+			sendBrainCheckpointHint(worktreePath, brainnotify.EventCheckpoint, sessionID, GetCurrentBranchName(repo))
 		}
 		iterSpan.End()
 	}
@@ -1197,7 +1204,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	uncondensedActiveOnBranch map[string]bool,
 	allAgentFiles map[string]struct{},
 	sessionsWithCommittedFiles int,
-) {
+) bool {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 
@@ -1374,6 +1381,8 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	if state.Phase.IsActive() && !handler.condensed {
 		uncondensedActiveOnBranch[shadowBranchName] = true
 	}
+
+	return handler.condensed
 }
 
 // condenseAndUpdateState runs condensation for a session and updates state afterward.

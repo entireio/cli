@@ -364,6 +364,7 @@ func WalkCheckpointShards(ctx context.Context, repo *git.Repository, tree *objec
 
 		bucketTree, err := repo.TreeObject(bucketEntry.Hash)
 		if err != nil {
+			recordListScopeIssue(ctx, ListScopeIssueLocalCheckpointUnreadable)
 			continue
 		}
 

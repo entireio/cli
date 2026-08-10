@@ -499,6 +499,22 @@ func TestGitRefsStore_ListRemoteDiscovery(t *testing.T) {
 		assert.Contains(t, got, local, "local checkpoints remain listed when discovery fails")
 		assert.NotContains(t, got, remoteOnly)
 	})
+
+	t.Run("enumeration failure is machine observable when diagnostics requested", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+		store.SetRemoteRefLister(func(context.Context) ([]plumbing.ReferenceName, error) {
+			return nil, assert.AnError
+		})
+		ctx, diagnostics := WithListScopeDiagnostics(WithRemoteListDiscovery(context.Background()))
+
+		infos, err := store.List(ctx)
+		require.NoError(t, err)
+		require.Len(t, infos, 1)
+		assert.Equal(t, []ListScopeIssue{{Code: ListScopeIssueRemoteEnumerationFailed, Count: 1}}, diagnostics.Issues())
+	})
 }
 
 // TestHydrateListedCheckpointInfo covers the trail-871 gap: a names-only List
@@ -538,6 +554,17 @@ func TestHydrateListedCheckpointInfo(t *testing.T) {
 	assert.Empty(t, failed.SessionID)
 	assert.False(t, failed.ListedStub, "failed hydration must clear ListedStub (fail-once)")
 	assert.False(t, listedCheckpointNeedsHydration(failed))
+}
+
+func TestHydrateListedCheckpointInfoReportsIncompleteScope(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	cid := id.MustCheckpointID("01KVBJCWYA4YW6J5M9GP655HZN")
+	ctx, diagnostics := WithListScopeDiagnostics(context.Background())
+
+	hydrated := HydrateListedCheckpointInfo(ctx, store, remoteDiscoveredInfo(cid))
+	require.False(t, hydrated.ListedStub, "failed hydration remains fail-once")
+	require.Equal(t, []ListScopeIssue{{Code: ListScopeIssueRemoteHydrationFailed, Count: 1}}, diagnostics.Issues())
 }
 
 // TestHydrateListedCheckpointInfo_MatchesLocalList pins the field mapping shared

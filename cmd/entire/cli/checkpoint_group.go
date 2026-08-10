@@ -112,7 +112,7 @@ Optionally filter condensed checkpoints by session ID with --session
 			case pendingFlag:
 				return runCheckpointPendingListHuman(ctx, w)
 			case jsonFlag:
-				return runExplainListJSON(ctx, w, errW, sessionFlag, 0)
+				return runExplainListJSON(ctx, w, errW, sessionFlag, 0, false)
 			default:
 				return runExplainBranchWithFilter(ctx, w, errW, noPagerFlag, sessionFlag)
 			}

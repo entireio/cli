@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
@@ -192,6 +193,72 @@ func TestKindRoutingStore_ListDedupesAcrossBackends(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, count, "a checkpoint present in both backends should appear once")
+}
+
+func TestKindRoutingStore_ListPrefersLocalMetadataOverRemoteStub(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, repo, _ := newTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	refs := newGitRefsStore(repo)
+
+	// A mirrored ULID can still be present on the legacy branch while only its
+	// name is visible on the refs remote. Make the metadata timestamp older than
+	// the ULID-derived stub timestamp to prove richness, not recency, decides
+	// which duplicate survives.
+	dupID := id.MustCheckpointID(routingSampleULID)
+	require.NoError(t, branch.Write(ctx, Session{
+		CheckpointID: dupID,
+		SessionID:    "metadata-backed-session",
+		CreatedAt:    time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("local transcript")),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}))
+	refs.SetRemoteRefLister(func(context.Context) ([]plumbing.ReferenceName, error) {
+		return []plumbing.ReferenceName{mustRefName(t, dupID)}, nil
+	})
+
+	router := newKindRoutingStore(branch, branch, refs, BackendTypeGitBranch)
+	infos, err := router.List(WithRemoteListDiscovery(ctx))
+	require.NoError(t, err)
+	require.Len(t, infos, 1)
+	assert.Equal(t, dupID, infos[0].CheckpointID)
+	assert.Equal(t, "metadata-backed-session", infos[0].SessionID)
+	assert.False(t, infos[0].ListedStub, "available local metadata must not be replaced by a remote name-only stub")
+}
+
+func TestPreferCheckpointListInfoRetainsHydratableStubOverUnreadableLocalRecord(t *testing.T) {
+	t.Parallel()
+
+	cid := id.MustCheckpointID(routingSampleULID)
+	unreadableLocal := CheckpointInfo{CheckpointID: cid}
+	remoteStub := remoteDiscoveredInfo(cid)
+
+	assert.True(t, preferCheckpointListInfo(remoteStub, unreadableLocal),
+		"a source-aware stub can recover metadata while an unreadable local record cannot")
+	assert.False(t, preferCheckpointListInfo(unreadableLocal, remoteStub))
+}
+
+func TestHydrateListedCheckpointInfo_UsesRefsSourceThroughBranchPrimaryRouter(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, repo, _ := newTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	refs := newGitRefsStore(repo)
+
+	// Legacy IDs normally read only from the authoritative branch when that is
+	// the configured primary. A names-only stub is different: its source is
+	// known to be refs, so session-filter hydration must go back to refs.
+	legacyID := id.MustCheckpointID("feedface1234")
+	writeRoutingCheckpoint(t, refs, legacyID, "legacy-session-in-refs")
+	router := newKindRoutingStore(branch, branch, refs, BackendTypeGitBranch)
+
+	hydrated := HydrateListedCheckpointInfo(ctx, router, remoteDiscoveredInfo(legacyID))
+	assert.Equal(t, "legacy-session-in-refs", hydrated.SessionID)
+	assert.Equal(t, []string{"legacy-session-in-refs"}, hydrated.SessionIDs)
+	assert.False(t, hydrated.ListedStub)
 }
 
 func TestKindRoutingStore_SummaryBackfillFallsBackToBranch(t *testing.T) {

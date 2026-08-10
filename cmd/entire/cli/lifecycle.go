@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/brainnotify"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -33,6 +34,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/perf"
 )
+
+var sendBrainLifecycleHint = brainnotify.Notify
 
 // eventBypassesAgentOwnershipCheck reports whether an event must run
 // regardless of the recorded session-owning agent:
@@ -171,6 +174,10 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	if err := validation.ValidateSessionID(event.SessionID); err != nil {
 		return fmt.Errorf("invalid %s event: %w", event.Type, err)
 	}
+	// This is an advisory observation, so send it as soon as identity is valid.
+	// A later banner or state failure does not retract the hint: Brain coalesces
+	// repeated observations and canonical reconciliation remains authoritative.
+	notifyBrainLifecycleEvent(ctx, brainnotify.EventSessionStart, event.SessionID)
 
 	// Claim the session for this agent. First-writer-wins: subsequent agents
 	// firing SessionStart for the same session ID are no-ops. Used by
@@ -1078,6 +1085,7 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 	if event.SessionID == "" {
 		return nil // No session to update
 	}
+	repoRoot, branch := brainLifecycleHintTarget(ctx)
 
 	// Note: We intentionally don't clean up cached transcripts here.
 	// Post-session commits (carry-forward in ENDED phase) may still need
@@ -1088,8 +1096,29 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 		logging.Warn(logCtx, "failed to mark session ended",
 			slog.String("error", err.Error()))
 	}
+	sendBrainLifecycleHint(repoRoot, brainnotify.EventSessionEnd, event.SessionID, branch)
 
 	return nil
+}
+
+// notifyBrainLifecycleEvent sends a content-free, detached hint when the
+// current repository and branch can be resolved. Branch is optional, but a
+// repository root is required because Brain owns canonical repository identity.
+func notifyBrainLifecycleEvent(ctx context.Context, event brainnotify.Event, sessionID string) {
+	repoRoot, branch := brainLifecycleHintTarget(ctx)
+	sendBrainLifecycleHint(repoRoot, event, sessionID, branch)
+}
+
+func brainLifecycleHintTarget(ctx context.Context) (repoRoot, branch string) {
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "", ""
+	}
+	resolvedBranch, branchErr := GetCurrentBranch(ctx)
+	if branchErr == nil {
+		branch = resolvedBranch
+	}
+	return repoRoot, branch
 }
 
 // endSessionNow runs the canonical "this session is over" sequence: it marks the

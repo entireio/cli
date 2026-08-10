@@ -274,15 +274,16 @@ Machine-readable export modes (additive surface for external consumers):
                    Defaults to the latest session. Only meaningful with
                    --transcript or --raw-transcript.
   --limit          Cap the number of checkpoints returned by the list view.
-                   Defaults to 100. When the cap is hit, a stderr note
-                   says how many were skipped. Only meaningful with --json.
+                   Defaults to 100; 0 means all. When the cap is hit, a stderr
+                   note says how many were skipped. Only meaningful with --json.
 
 Summary generation:
   --generate    Generate an AI summary for the checkpoint
   --force       Regenerate even if a summary already exists (requires --generate)
 
 Performance options:
-  --search-all  Remove branch/depth limits when searching for commits (may be slow)
+  --search-all  Remove branch/depth limits when searching commits; with --json
+                list the complete persistent checkpoint-store union (may be slow)
 
 Checkpoint detail view shows:
   - Author of the checkpoint
@@ -348,8 +349,8 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 				if !jsonFlag {
 					return errors.New("--limit only applies with --json")
 				}
-				if listLimit <= 0 {
-					return errors.New("--limit must be positive")
+				if listLimit < 0 {
+					return errors.New("--limit must be non-negative")
 				}
 			}
 			// --summary-timeout-seconds only makes sense with --generate.
@@ -376,8 +377,10 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 					json:           jsonFlag,
 					transcript:     transcriptFlag,
 					rawTranscript:  rawTranscriptFlag,
+					searchAll:      searchAllFlag,
 					sessionIndex:   sessionIndex,
 					listLimit:      listLimit,
+					listLimitSet:   cmd.Flags().Changed("limit"),
 				})
 			}
 
@@ -396,11 +399,11 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.Flags().BoolVar(&rawTranscriptFlag, "raw-transcript", false, "Show raw transcript file (JSONL format)")
 	cmd.Flags().BoolVar(&generateFlag, "generate", false, "Generate an AI summary for the checkpoint")
 	cmd.Flags().BoolVar(&forceFlag, "force", false, "Regenerate summary even if one already exists (requires --generate)")
-	cmd.Flags().BoolVar(&searchAllFlag, "search-all", false, "Search all commits (no branch/depth limit, may be slow)")
+	cmd.Flags().BoolVar(&searchAllFlag, "search-all", false, "Search all commits; with --json list all persistent checkpoints (may be slow)")
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output metadata as JSON (no transcript bytes)")
 	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream stored checkpoint transcript bytes to stdout")
 	cmd.Flags().IntVar(&sessionIndex, "session-index", -1, "Session index within a multi-session checkpoint (0-based, defaults to latest)")
-	cmd.Flags().IntVar(&listLimit, "limit", 0, "Cap the list view at N checkpoints (default: 100). Only meaningful with --json.")
+	cmd.Flags().IntVar(&listLimit, "limit", 0, "Cap the list view at N checkpoints (default: 100; 0 means all). Only meaningful with --json.")
 	cmd.Flags().IntVar(&summaryTimeoutSecondsFlag, "summary-timeout-seconds", 0, "Hard deadline in seconds for --generate summary generation; overrides summary_timeout_seconds setting. 0 = use setting; if setting is also unset or 0, no automatic deadline applies.")
 
 	// Verbosity / transcript output modes are mutually exclusive

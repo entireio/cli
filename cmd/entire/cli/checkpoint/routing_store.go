@@ -106,32 +106,63 @@ func (s *kindRoutingStore) Read(ctx context.Context, checkpointID id.CheckpointI
 }
 
 func (s *kindRoutingStore) List(ctx context.Context) ([]CheckpointInfo, error) {
-	branchList, err := s.branch.List(ctx)
-	if err != nil {
-		return nil, err //nolint:wrapcheck // in-package store error surfaced verbatim
+	branchList, branchErr := s.branch.List(ctx)
+	if branchErr != nil {
+		recordListScopeIssue(ctx, ListScopeIssueLocalStoreUnreadable)
+		branchList = nil
 	}
-	refsList, err := s.refs.List(ctx)
-	if err != nil {
-		return nil, err //nolint:wrapcheck // in-package store error surfaced verbatim
+	refsList, refsErr := s.refs.List(ctx)
+	if refsErr != nil {
+		recordListScopeIssue(ctx, ListScopeIssueLocalStoreUnreadable)
+		refsList = nil
 	}
-	merged := make([]CheckpointInfo, 0, len(branchList)+len(refsList))
-	merged = append(merged, branchList...)
-	merged = append(merged, refsList...)
-	sortCheckpointInfosByRecency(merged)
-	// Dedup by ID: during coexistence/migration the same checkpoint can appear in
-	// both backends (a ULID mirrored to the branch, or a hex still on the branch
-	// and also migrated into refs). Keep the first occurrence — i.e. the most
-	// recent after the sort.
-	deduped := merged[:0]
-	seen := make(map[id.CheckpointID]struct{}, len(merged))
-	for _, info := range merged {
-		if _, dup := seen[info.CheckpointID]; dup {
-			continue
+	if branchErr != nil && refsErr != nil {
+		return nil, errors.Join(branchErr, refsErr)
+	}
+	// Dedup by ID before sorting. During coexistence/migration the same
+	// checkpoint can appear in both backends (a ULID mirrored to the branch, or
+	// a hex still on the branch and also migrated into refs). A names-only
+	// remote discovery record is deliberately less authoritative than a local,
+	// metadata-backed record for the same ID, even if the ULID-derived timestamp
+	// happens to be newer than the local metadata timestamp. Conversely, a stub
+	// remains preferable to a local record whose metadata could not be read: the
+	// stub retains the ability to hydrate from its known refs source.
+	byID := make(map[id.CheckpointID]CheckpointInfo, len(branchList)+len(refsList))
+	for _, infos := range [][]CheckpointInfo{branchList, refsList} {
+		for _, info := range infos {
+			current, exists := byID[info.CheckpointID]
+			if !exists || preferCheckpointListInfo(info, current) {
+				byID[info.CheckpointID] = info
+			}
 		}
-		seen[info.CheckpointID] = struct{}{}
-		deduped = append(deduped, info)
 	}
-	return deduped, nil
+	merged := make([]CheckpointInfo, 0, len(byID))
+	for _, info := range byID {
+		merged = append(merged, info)
+	}
+	sortCheckpointInfosByRecency(merged)
+	return merged, nil
+}
+
+// preferCheckpointListInfo reports whether candidate should replace current
+// while coalescing the same checkpoint ID across stores. Readable metadata
+// always beats a names-only remote stub. When neither copy has readable
+// metadata, retain the stub because it can still hydrate from its known remote
+// source; otherwise retain the most recent copy.
+func preferCheckpointListInfo(candidate, current CheckpointInfo) bool {
+	candidateHasMetadata := checkpointListInfoHasMetadata(candidate)
+	currentHasMetadata := checkpointListInfoHasMetadata(current)
+	if candidateHasMetadata != currentHasMetadata {
+		return candidateHasMetadata
+	}
+	if candidate.ListedStub != current.ListedStub {
+		return candidate.ListedStub
+	}
+	return candidate.CreatedAt.After(current.CreatedAt)
+}
+
+func checkpointListInfoHasMetadata(info CheckpointInfo) bool {
+	return info.SessionCount > 0 || info.SessionID != "" || len(info.SessionIDs) > 0
 }
 
 // sortCheckpointInfosByRecency orders checkpoints most-recent-first by CreatedAt.
@@ -139,8 +170,22 @@ func (s *kindRoutingStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 // present a consistent order.
 func sortCheckpointInfosByRecency(checkpoints []CheckpointInfo) {
 	sort.Slice(checkpoints, func(i, j int) bool {
+		if checkpoints[i].CreatedAt.Equal(checkpoints[j].CreatedAt) {
+			// List order feeds client-side limits. Give equal timestamps a stable
+			// tie-break so repeated calls retain the same boundary record.
+			return checkpoints[i].CheckpointID.String() > checkpoints[j].CheckpointID.String()
+		}
 		return checkpoints[i].CreatedAt.After(checkpoints[j].CreatedAt)
 	})
+}
+
+// hydrateListedCheckpointInfo preserves the source of a names-only List
+// record. Such stubs can only come from the git-refs store, so hydrating one
+// must read refs directly rather than applying normal ID-kind routing. In
+// particular, a legacy hex ref discovered while git-branch is primary would
+// otherwise be looked up only on the branch and incorrectly treated as absent.
+func (s *kindRoutingStore) hydrateListedCheckpointInfo(ctx context.Context, info CheckpointInfo) CheckpointInfo {
+	return HydrateListedCheckpointInfo(ctx, s.refs, info)
 }
 
 func (s *kindRoutingStore) ReadSessionContent(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*SessionContent, error) {

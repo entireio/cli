@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/require"
 )
@@ -104,6 +106,189 @@ func TestRunExplainExport_JSONSingleCheckpoint(t *testing.T) {
 	require.Len(t, envelope.Sessions, 1)
 	require.Equal(t, "session-json", envelope.Sessions[0].SessionID)
 	require.Equal(t, 0, envelope.Sessions[0].Index)
+}
+
+func TestRunExplainExport_JSONSearchAllUnionsBackendsAndHonorsZeroLimit(t *testing.T) {
+	repo := setupExportRepo(t)
+	legacyID := id.MustCheckpointID("aaaa11112222")
+	writeCheckpointForExport(t, repo, legacyID, checkpoint.WriteOptions{
+		SessionID:  "legacy-session",
+		CreatedAt:  time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"legacy"}]}}` + "\n")),
+	})
+
+	repoRoot, err := paths.WorktreeRoot(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".entire", "settings.json"), []byte(`{
+  "enabled": true,
+  "checkpoints": {"primary": {"type": "git-refs"}}
+}`), 0o600))
+	refsID := id.MustCheckpointID("01KVBJCWYA4YW6J5M9GP655HZN")
+	stores, err := checkpoint.Open(context.Background(), repo, checkpoint.OpenOptions{})
+	require.NoError(t, err)
+	require.NoError(t, stores.Persistent.Write(context.Background(), checkpoint.Session(checkpoint.WriteOptions{
+		CheckpointID: refsID,
+		SessionID:    "refs-session",
+		CreatedAt:    time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+		Strategy:     strategy.StrategyNameManualCommit,
+		AuthorName:   exportTestAuthorName,
+		AuthorEmail:  exportTestAuthorEmail,
+		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"refs"}]}}` + "\n")),
+	})))
+
+	var stdout, stderr bytes.Buffer
+	err = runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		json: true, searchAll: true, sessionIndex: -1, listLimit: 0, listLimitSet: true,
+	})
+	require.NoError(t, err)
+	var all []branchCheckpointJSON
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &all), "output: %s", stdout.String())
+	require.Len(t, all, 2)
+	require.Equal(t, refsID.String(), all[0].CheckpointID, "store union stays newest-first")
+	require.Equal(t, legacyID.String(), all[1].CheckpointID)
+	require.Empty(t, stderr.String(), "an explicit zero limit must not truncate")
+
+	stdout.Reset()
+	stderr.Reset()
+	err = runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		json: true, searchAll: true, sessionIndex: -1, listLimit: 1, listLimitSet: true,
+	})
+	require.NoError(t, err)
+	var capped []branchCheckpointJSON
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &capped), "output: %s", stdout.String())
+	require.Len(t, capped, 1)
+	require.Equal(t, refsID.String(), capped[0].CheckpointID, "cap must retain the newest checkpoint")
+	require.Contains(t, stderr.String(), "capped at 1")
+}
+
+func TestExplainCmd_JSONSearchAllListsPersistentCheckpointWithoutCommitTrailer(t *testing.T) {
+	repo := setupExportRepo(t)
+	cpID := id.MustCheckpointID("bbbb11112222")
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
+		SessionID:  "store-only-session",
+		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"stored"}]}}` + "\n")),
+	})
+
+	var stdout, stderr bytes.Buffer
+	cmd := newExplainCmd()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json", "--search-all", "--limit", "0"})
+	require.NoError(t, cmd.ExecuteContext(context.Background()))
+
+	var got []branchCheckpointJSON
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &got), "output: %s", stdout.String())
+	require.Len(t, got, 1)
+	require.Equal(t, cpID.String(), got[0].CheckpointID)
+	require.Empty(t, stderr.String())
+}
+
+func TestRunExplainExport_JSONSearchAllMarksUnreadableLocalRefIncomplete(t *testing.T) {
+	repo := setupExportRepo(t)
+	validID := id.MustCheckpointID("bbbb11112222")
+	writeCheckpointForExport(t, repo, validID, checkpoint.WriteOptions{
+		SessionID:  "readable-session",
+		Transcript: redact.AlreadyRedacted([]byte("readable\n")),
+	})
+
+	// A syntactically valid checkpoint ref whose object is independently
+	// missing must not hide the healthy aggregate-branch sibling.
+	corruptID := "01KVBJCWYA4YW6J5M9GP655HZN"
+	corruptRef := plumbing.ReferenceName(checkpoint.CheckpointRefPrefix + corruptID[len(corruptID)-2:] + "/" + corruptID)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(corruptRef, plumbing.NewHash(strings.Repeat("f", 40)))))
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		json: true, searchAll: true, sessionIndex: -1, listLimit: 0, listLimitSet: true,
+	})
+	require.NoError(t, err)
+	var got []branchCheckpointJSON
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &got), "output: %s", stdout.String())
+	require.Len(t, got, 1)
+	require.Equal(t, validID.String(), got[0].CheckpointID)
+
+	line := strings.TrimSpace(stderr.String())
+	require.True(t, strings.HasPrefix(line, checkpointScopeStatusPrefix), "stderr: %s", line)
+	var status checkpointScopeStatus
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(line, checkpointScopeStatusPrefix)), &status))
+	require.Equal(t, "checkpoint_scope_incomplete", status.Code)
+	require.False(t, status.Complete)
+	require.Contains(t, status.Issues, checkpoint.ListScopeIssue{
+		Code: checkpoint.ListScopeIssueLocalCheckpointUnreadable, Count: 1,
+	})
+}
+
+func TestRunExplainExport_JSONAppliesLimitAfterSessionFilter(t *testing.T) {
+	repo := setupExportRepo(t)
+	older := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Hour)
+	wantedID := id.MustCheckpointID("abcd11112222")
+	otherID := id.MustCheckpointID("abcd33334444")
+
+	writeCheckpointForExport(t, repo, wantedID, checkpoint.WriteOptions{
+		SessionID:  "wanted-session",
+		CreatedAt:  older,
+		Transcript: redact.AlreadyRedacted([]byte("wanted\n")),
+	})
+	writeCheckpointForExport(t, repo, otherID, checkpoint.WriteOptions{
+		SessionID:  "other-session",
+		CreatedAt:  newer,
+		Transcript: redact.AlreadyRedacted([]byte("other\n")),
+	})
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	commitCheckpoint := func(name string, cpID id.CheckpointID, when time.Time) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(name, []byte(cpID.String()), 0o600))
+		_, addErr := wt.Add(name)
+		require.NoError(t, addErr)
+		sig := &object.Signature{Name: exportTestAuthorName, Email: exportTestAuthorEmail, When: when}
+		_, commitErr := wt.Commit("work\n\nEntire-Checkpoint: "+cpID.String()+"\n", &git.CommitOptions{
+			Author: sig, Committer: sig,
+		})
+		require.NoError(t, commitErr)
+	}
+	commitCheckpoint("wanted.txt", wantedID, older)
+	commitCheckpoint("other.txt", otherID, newer)
+
+	var stdout, stderr bytes.Buffer
+	err = runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		json: true, sessionFilter: "wanted", sessionIndex: -1, listLimit: 1, listLimitSet: true,
+	})
+	require.NoError(t, err)
+	var got []branchCheckpointJSON
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &got), "output: %s", stdout.String())
+	require.Len(t, got, 1, "the newest non-match must not consume the result budget")
+	require.Equal(t, wantedID.String(), got[0].CheckpointID)
+	require.Empty(t, stderr.String(), "one matching record is not a truncated result")
+}
+
+func TestResolveExplainListLimitDistinguishesOmittedAndExplicitZero(t *testing.T) {
+	t.Parallel()
+
+	got, err := resolveExplainListLimit(0, false)
+	require.NoError(t, err)
+	require.Equal(t, branchCheckpointsLimit, got)
+
+	got, err = resolveExplainListLimit(0, true)
+	require.NoError(t, err)
+	require.Zero(t, got, "an explicitly-set zero removes the result cap")
+
+	_, err = resolveExplainListLimit(-1, true)
+	require.ErrorContains(t, err, "non-negative")
+}
+
+func TestSortPersistentCheckpointJSONByRecencyHasDeterministicTieBreak(t *testing.T) {
+	t.Parallel()
+
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	checkpoints := []branchCheckpointJSON{
+		{CheckpointID: "aaaa11112222", Date: when},
+		{CheckpointID: "bbbb11112222", Date: when},
+	}
+	sortPersistentCheckpointJSONByRecency(checkpoints)
+	require.Equal(t, "bbbb11112222", checkpoints[0].CheckpointID)
 }
 
 func TestRunExplainExport_JSONFetchesRemoteV1Metadata(t *testing.T) {

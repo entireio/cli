@@ -514,13 +514,19 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 		}
 		commit, commitErr := s.repo.CommitObject(ref.Hash())
 		if commitErr != nil {
+			recordListScopeIssue(ctx, ListScopeIssueLocalCheckpointUnreadable)
 			return nil //nolint:nilerr // skip unreadable refs, keep listing
 		}
 		tree, treeErr := commit.Tree()
 		if treeErr != nil {
+			recordListScopeIssue(ctx, ListScopeIssueLocalCheckpointUnreadable)
 			return nil //nolint:nilerr // skip unreadable refs, keep listing
 		}
-		checkpoints = append(checkpoints, readCommittedInfoFromCheckpointTree(cid, tree))
+		info, complete := readCommittedInfoFromCheckpointTree(cid, tree)
+		if !complete {
+			recordListScopeIssue(ctx, ListScopeIssueLocalCheckpointUnreadable)
+		}
+		checkpoints = append(checkpoints, info)
 		seen[cid] = struct{}{}
 		return nil
 	})
@@ -550,7 +556,9 @@ func (s *gitRefsStore) appendRemoteDiscovered(ctx context.Context, checkpoints [
 			slog.String("error", err.Error()))
 		// Match WarnIfMetadataDisconnected: opted-in discovery failing must be
 		// visible on stderr — logging.Warn alone lands only in .entire/logs/.
-		fmt.Fprintln(os.Stderr, "[entire] Warning: could not reach checkpoint remote; showing local checkpoints only.")
+		if !recordListScopeIssue(ctx, ListScopeIssueRemoteEnumerationFailed) {
+			fmt.Fprintln(os.Stderr, "[entire] Warning: could not reach checkpoint remote; showing local checkpoints only.")
+		}
 		return checkpoints
 	}
 	for _, refName := range remoteRefs {
@@ -611,12 +619,22 @@ func HydrateListedCheckpointInfo(ctx context.Context, store interface {
 	if !listedCheckpointNeedsHydration(info) {
 		return info
 	}
+	// A routing store needs to preserve the source that produced the stub.
+	// Delegate before calling Read: normal legacy-ID routing may intentionally
+	// exclude refs when git-branch is primary, while a ListedStub is proof that
+	// this particular record came from refs.
+	if hydrator, ok := store.(interface {
+		hydrateListedCheckpointInfo(ctx context.Context, info CheckpointInfo) CheckpointInfo
+	}); ok {
+		return hydrator.hydrateListedCheckpointInfo(ctx, info)
+	}
 	summary, err := store.Read(ctx, info.CheckpointID)
 	if err != nil || summary == nil {
 		logging.Warn(ctx, "git-refs: failed to hydrate remote-discovered checkpoint; leaving stub without session metadata",
 			slog.String("checkpoint_id", info.CheckpointID.String()),
 			slog.String("error", errString(err)))
 		info.ListedStub = false // fail-once: do not re-fetch on every list
+		recordListScopeIssue(ctx, ListScopeIssueRemoteHydrationFailed)
 		return info
 	}
 
@@ -658,6 +676,7 @@ func HydrateListedCheckpointInfo(ctx context.Context, store interface {
 		logging.Warn(ctx, "git-refs: remote-discovered checkpoint hydration incomplete; leaving stub without session metadata",
 			slog.String("checkpoint_id", info.CheckpointID.String()))
 		info.ListedStub = false
+		recordListScopeIssue(ctx, ListScopeIssueRemoteHydrationFailed)
 		return info
 	}
 	return out

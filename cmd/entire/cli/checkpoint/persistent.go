@@ -1613,7 +1613,10 @@ func (s *GitStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 
 	tree, err := s.getSessionsBranchTree()
 	if err != nil {
-		return []CheckpointInfo{}, nil //nolint:nilerr // No sessions branch means empty list
+		if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+			recordListScopeIssue(ctx, ListScopeIssueLocalStoreUnreadable)
+		}
+		return []CheckpointInfo{}, nil
 	}
 
 	var checkpoints []CheckpointInfo
@@ -1622,10 +1625,15 @@ func (s *GitStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 	_ = WalkCheckpointShards(ctx, s.repo, tree, func(checkpointID id.CheckpointID, cpTreeHash plumbing.Hash) error { //nolint:errcheck // callback never returns errors
 		checkpointTree, cpTreeErr := s.repo.TreeObject(cpTreeHash)
 		if cpTreeErr != nil {
+			recordListScopeIssue(ctx, ListScopeIssueLocalCheckpointUnreadable)
 			return nil //nolint:nilerr // skip unreadable entries, continue walking
 		}
 
-		checkpoints = append(checkpoints, readCommittedInfoFromCheckpointTree(checkpointID, checkpointTree))
+		info, complete := readCommittedInfoFromCheckpointTree(checkpointID, checkpointTree)
+		if !complete {
+			recordListScopeIssue(ctx, ListScopeIssueLocalCheckpointUnreadable)
+		}
+		checkpoints = append(checkpoints, info)
 		return nil
 	})
 
@@ -1634,22 +1642,22 @@ func (s *GitStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 	return checkpoints, nil
 }
 
-func readCommittedInfoFromCheckpointTree(checkpointID id.CheckpointID, checkpointTree *object.Tree) CheckpointInfo {
+func readCommittedInfoFromCheckpointTree(checkpointID id.CheckpointID, checkpointTree *object.Tree) (CheckpointInfo, bool) {
 	info := CheckpointInfo{
 		CheckpointID: checkpointID,
 	}
 
 	metadataFile, fileErr := checkpointTree.File(paths.MetadataFileName)
 	if fileErr != nil {
-		return info
+		return info, false
 	}
 	content, contentErr := metadataFile.Contents()
 	if contentErr != nil {
-		return info
+		return info, false
 	}
 	var summary CheckpointSummary
 	if err := json.Unmarshal([]byte(content), &summary); err != nil {
-		return info
+		return info, false
 	}
 
 	info.CheckpointsCount = summary.CheckpointsCount
@@ -1657,9 +1665,11 @@ func readCommittedInfoFromCheckpointTree(checkpointID id.CheckpointID, checkpoin
 	info.SessionCount = len(summary.Sessions)
 	info.Imported = summary.Imported
 
+	complete := true
 	for i := range summary.Sessions {
 		sessionMetadata, ok := readCommittedMetadataFromCheckpointTree(checkpointTree, i)
 		if !ok {
+			complete = false
 			continue
 		}
 		if sessionMetadata.SessionID != "" {
@@ -1674,7 +1684,7 @@ func readCommittedInfoFromCheckpointTree(checkpointID id.CheckpointID, checkpoin
 		}
 	}
 
-	return info
+	return info, complete
 }
 
 func readCommittedMetadataFromCheckpointTree(checkpointTree *object.Tree, sessionIndex int) (Metadata, bool) {

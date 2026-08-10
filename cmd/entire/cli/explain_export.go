@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -48,10 +49,13 @@ type explainExportOptions struct {
 	json           bool
 	transcript     bool
 	rawTranscript  bool
+	searchAll      bool
 	sessionIndex   int
-	// listLimit caps the JSON list view at N entries. 0 means use the
-	// default (branchCheckpointsLimit). Only consulted in list mode.
-	listLimit int
+	// listLimit caps the JSON list view at N entries. listLimitSet
+	// distinguishes an omitted zero (the default cap) from an explicit zero
+	// (unbounded). Only consulted in list mode.
+	listLimit    int
+	listLimitSet bool
 }
 
 // runExplainExport handles --json, --transcript, and --raw-transcript with an
@@ -73,7 +77,10 @@ func runExplainExport(ctx context.Context, w, errW io.Writer, opts explainExport
 		return runExplainStreamTranscript(ctx, w, errW, opts)
 	case opts.json:
 		if !hasTarget {
-			return runExplainListJSON(ctx, w, errW, opts.sessionFilter, opts.listLimit)
+			if opts.searchAll {
+				return runExplainAllListJSON(ctx, w, errW, opts.sessionFilter, opts.listLimit, opts.listLimitSet)
+			}
+			return runExplainListJSON(ctx, w, errW, opts.sessionFilter, opts.listLimit, opts.listLimitSet)
 		}
 		return runExplainCheckpointJSON(ctx, w, errW, opts)
 	default:
@@ -611,28 +618,48 @@ type branchCheckpointJSON struct {
 	SessionIDs       []string  `json:"session_ids,omitempty"`
 }
 
+// checkpointScopeStatusPrefix is a stable stderr side channel for consumers
+// that need to distinguish a complete [] from a best-effort partial list while
+// preserving the long-standing flat JSON array on stdout. The payload contains
+// codes and counts only; it never includes backend errors or transcript data.
+const checkpointScopeStatusPrefix = "ENTIRE_CHECKPOINT_SCOPE_V1 "
+
+type checkpointScopeStatus struct {
+	SchemaVersion int                         `json:"schema_version"`
+	Code          string                      `json:"code"`
+	Complete      bool                        `json:"complete"`
+	Issues        []checkpoint.ListScopeIssue `json:"issues"`
+}
+
 // runExplainListJSON emits a JSON array of branch checkpoints, optionally
 // filtered by session ID prefix (mirrors the prose list view). The cap
-// defaults to branchCheckpointsLimit; pass listLimit > 0 to override.
+// defaults to branchCheckpointsLimit; an explicitly-set zero removes it.
 //
 // Truncation detection: getBranchCheckpoints reports whether it hit its scan
 // budget (the authoritative signal — it applies the cap internally). We also
 // hard-cap the flat array at `limit` for the JSON contract, flagging
 // truncation if that slice drops anything. The JSON shape stays a flat array
 // so jq pipelines don't have to unwrap.
-func runExplainListJSON(ctx context.Context, w, errW io.Writer, sessionFilter string, listLimit int) error {
+func runExplainListJSON(ctx context.Context, w, errW io.Writer, sessionFilter string, listLimit int, listLimitSet bool) error {
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
 	}
 	defer repo.Close()
 
-	limit := listLimit
-	if limit <= 0 {
-		limit = branchCheckpointsLimit
+	limit, err := resolveExplainListLimit(listLimit, listLimitSet)
+	if err != nil {
+		return err
+	}
+	queryLimit := limit
+	if queryLimit == 0 || sessionFilter != "" {
+		// The result cap applies after filters. Asking getBranchCheckpoints for
+		// only N records before applying --session could return fewer than N
+		// matches even when older matching records exist.
+		queryLimit = int(^uint(0) >> 1)
 	}
 
-	points, truncated, err := getBranchCheckpoints(ctx, repo, limit)
+	points, sourceTruncated, err := getBranchCheckpoints(ctx, repo, queryLimit)
 	if err != nil {
 		if ctx.Err() != nil {
 			return NewSilentError(ctx.Err())
@@ -642,14 +669,6 @@ func runExplainListJSON(ctx context.Context, w, errW io.Writer, sessionFilter st
 		// a real diagnostic instead of silently degraded output.
 		return fmt.Errorf("failed to list checkpoints: %w", err)
 	}
-	// getBranchCheckpoints budgets the live and imported lists independently,
-	// so it can return up to 2*limit entries. Hard-cap the combined array to
-	// the requested limit for the JSON contract.
-	if len(points) > limit {
-		points = points[:limit]
-		truncated = true
-	}
-
 	out := make([]branchCheckpointJSON, 0, len(points))
 	for _, p := range points {
 		if sessionFilter != "" && !checkpointMatchesSessionFilter(p, sessionFilter) {
@@ -672,6 +691,16 @@ func runExplainListJSON(ctx context.Context, w, errW io.Writer, sessionFilter st
 		}
 		out = append(out, entry)
 	}
+	// getBranchCheckpoints budgets live and imported records independently, so
+	// it can return up to 2*limit entries. Cap only after the session filter and
+	// the source-defined ordering so --limit N means N matching records. That
+	// ordering intentionally keeps live checkpoints ahead of imports so an
+	// import cannot evict branch-local history from a capped branch view.
+	truncated := sourceTruncated
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+		truncated = true
+	}
 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -683,4 +712,126 @@ func runExplainListJSON(ctx context.Context, w, errW io.Writer, sessionFilter st
 		fmt.Fprintf(errW, "note: list capped at %d checkpoints; rerun with --limit <N> to see more\n", limit)
 	}
 	return nil
+}
+
+// runExplainAllListJSON emits the complete persistent-store union instead of
+// the current-branch rewind view. This is the machine-readable counterpart to
+// --search-all: it includes git-branch and per-checkpoint git-refs records,
+// including names-only refs discovered on the configured checkpoint remote.
+// Remote stubs are hydrated only when a session filter requires their session
+// identity; an unfiltered inventory transfers ref names but no objects.
+func runExplainAllListJSON(ctx context.Context, w, errW io.Writer, sessionFilter string, listLimit int, listLimitSet bool) error {
+	repo, err := openRepository(ctx)
+	if err != nil {
+		return fmt.Errorf("not a git repository: %w", err)
+	}
+	defer repo.Close()
+
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		BlobFetcher:     FetchBlobsByHash,
+		RefFetcher:      FetchCheckpointRef,
+		RemoteRefLister: ListCheckpointRefsOnRemote,
+	})
+	if err != nil {
+		return fmt.Errorf("open checkpoint store: %w", err)
+	}
+	listCtx, diagnostics := checkpoint.WithListScopeDiagnostics(checkpoint.WithRemoteListDiscovery(ctx))
+	infos, err := stores.Persistent.List(listCtx)
+	if err != nil {
+		emitCheckpointScopeStatus(errW, diagnostics)
+		return fmt.Errorf("list all persistent checkpoints: %w", err)
+	}
+
+	out := make([]branchCheckpointJSON, 0, len(infos))
+	for _, info := range infos {
+		if sessionFilter != "" && info.ListedStub {
+			info = checkpoint.HydrateListedCheckpointInfo(listCtx, stores.Persistent, info)
+		}
+		if sessionFilter != "" && !checkpointInfoMatchesSessionFilter(info, sessionFilter) {
+			continue
+		}
+		out = append(out, branchCheckpointJSON{
+			CheckpointID:     info.CheckpointID.String(),
+			SessionID:        info.SessionID,
+			Agent:            string(info.Agent),
+			Date:             info.CreatedAt,
+			IsTaskCheckpoint: info.IsTask,
+			IsLogsOnly:       true,
+			SessionCount:     info.SessionCount,
+			SessionIDs:       info.SessionIDs,
+		})
+	}
+
+	limit, err := resolveExplainListLimit(listLimit, listLimitSet)
+	if err != nil {
+		return err
+	}
+	sortPersistentCheckpointJSONByRecency(out)
+	truncated := limit > 0 && len(out) > limit
+	if truncated {
+		out = out[:limit]
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(out); err != nil {
+		return fmt.Errorf("failed to encode checkpoint list: %w", err)
+	}
+	emitCheckpointScopeStatus(errW, diagnostics)
+	if truncated {
+		fmt.Fprintf(errW, "note: list capped at %d checkpoints; rerun with --limit 0 to see all\n", limit)
+	}
+	return nil
+}
+
+func emitCheckpointScopeStatus(w io.Writer, diagnostics *checkpoint.ListScopeDiagnostics) {
+	issues := diagnostics.Issues()
+	if len(issues) == 0 {
+		return
+	}
+	report := checkpointScopeStatus{
+		SchemaVersion: 1,
+		Code:          "checkpoint_scope_incomplete",
+		Complete:      false,
+		Issues:        issues,
+	}
+	data, err := json.Marshal(report)
+	if err != nil {
+		// All report fields are closed enums, integers, and booleans, so this is
+		// defensive only. Still fail closed if a future field becomes fallible.
+		fmt.Fprintln(w, checkpointScopeStatusPrefix+`{"schema_version":1,"code":"checkpoint_scope_incomplete","complete":false,"issues":[]}`)
+		return
+	}
+	fmt.Fprintln(w, checkpointScopeStatusPrefix+string(data))
+}
+
+func resolveExplainListLimit(listLimit int, listLimitSet bool) (int, error) {
+	if !listLimitSet {
+		return branchCheckpointsLimit, nil
+	}
+	if listLimit < 0 {
+		return 0, errors.New("--limit must be non-negative")
+	}
+	return listLimit, nil
+}
+
+func sortPersistentCheckpointJSONByRecency(checkpoints []branchCheckpointJSON) {
+	sort.Slice(checkpoints, func(i, j int) bool {
+		if checkpoints[i].Date.Equal(checkpoints[j].Date) {
+			return checkpoints[i].CheckpointID > checkpoints[j].CheckpointID
+		}
+		return checkpoints[i].Date.After(checkpoints[j].Date)
+	})
+}
+
+func checkpointInfoMatchesSessionFilter(info checkpoint.CheckpointInfo, sessionFilter string) bool {
+	if strings.HasPrefix(info.SessionID, sessionFilter) {
+		return true
+	}
+	for _, sessionID := range info.SessionIDs {
+		if strings.HasPrefix(sessionID, sessionFilter) {
+			return true
+		}
+	}
+	return false
 }
