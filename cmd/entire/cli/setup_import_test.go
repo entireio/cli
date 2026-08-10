@@ -527,3 +527,58 @@ func TestRunSelectedImports_CancelStopsImportPhase(t *testing.T) {
 		t.Errorf("cancelled import must not print a success summary:\n%s", out)
 	}
 }
+
+// TestRunSelectedImports_CancelStillWarnsUnsynced proves that when a prior agent
+// already imported local-only history before the user cancels (Ctrl-C), the
+// logged-out not-synced notice still fires on the cancellation path — otherwise
+// the user silently loses the notice that their imported history won't sync.
+func TestRunSelectedImports_CancelStillWarnsUnsynced(t *testing.T) {
+	// Not parallel: chdirs into a temp repo, performs real checkpoint writes, and
+	// mutates the package-level importLoggedIn seam.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "x")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+
+	orig := importLoggedIn
+	t.Cleanup(func() { importLoggedIn = orig })
+	importLoggedIn = func() bool { return false }
+
+	sessionsDir := t.TempDir()
+	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl")
+
+	var claudeImp agentimport.Importer
+	for _, imp := range agentimport.All() {
+		if imp.Name() == testAgentName {
+			claudeImp = imp
+		}
+	}
+	if claudeImp == nil {
+		t.Fatal("claude-code importer not registered")
+	}
+	sessions, err := claudeImp.Discover(dir, sessionsDir, time.Now(), nil)
+	if err != nil {
+		t.Fatalf("discover fixture sessions: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// First agent imports real local history; second agent then cancels mid-run.
+	first := fixedDiscoverImporter{Importer: claudeImp, sessions: sessions}
+	second := cancelOnDiscoverImporter{Importer: claudeImp, sessions: sessions, cancel: cancel}
+
+	var buf bytes.Buffer
+	runSelectedImports(ctx, &buf, dir, []eligibleImport{
+		{imp: first, displayName: "first"},
+		{imp: second, displayName: "second"},
+	})
+	out := buf.String()
+
+	if !strings.Contains(out, "Import cancelled.") {
+		t.Errorf("want cancellation note, got:\n%s", out)
+	}
+	if !strings.Contains(out, "not logged in") || !strings.Contains(out, "entire login") {
+		t.Errorf("cancelled import after a prior local import must still warn it won't sync:\n%s", out)
+	}
+}

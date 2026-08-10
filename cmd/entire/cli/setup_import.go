@@ -238,6 +238,10 @@ func runSelectedImports(ctx context.Context, w io.Writer, repoRoot string, selec
 			// leave already-written checkpoints in place (idempotent on re-run).
 			if errors.Is(err, context.Canceled) {
 				fmt.Fprintln(w, "Import cancelled.")
+				// A prior agent in the loop may already have imported local-only
+				// history before the cancellation; surface the not-synced notice so
+				// a logged-out user still learns it won't reach the dashboard.
+				warnIfImportNotSynced(w, importedLocalHistory)
 				return
 			}
 			logging.Warn(ctx, "session import failed", "agent", e.imp.Name(), "error", err)
