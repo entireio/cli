@@ -66,19 +66,21 @@ func newAgentListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false,
-		"Also list external agent plugins found on your PATH")
+		"Also list available external agent plugins found on your PATH, not just installed ones")
 	return cmd
 }
 
 func runAgentList(ctx context.Context, w io.Writer, all bool) error {
-	// The default listing shows only built-in agents and performs NO discovery,
-	// so it never executes third-party binaries and is independent of the
-	// external_agents setting — installing an external agent does not change what
-	// `entire agent list` shows. External agent plugins appear only with `--all`,
-	// the explicit opt-in that scans $PATH and runs each entire-agent-* plugin's
-	// info subcommand.
+	// Discover external agent plugins so installed ones appear in the listing.
+	// Default: gated discovery (honors external_agents). An external agent can
+	// only become installed via `agent add`, which enables external_agents, so
+	// this surfaces every installed external without executing plugins for users
+	// who never opted in. `--all` uses ungated discovery so available-but-
+	// uninstalled plugins on $PATH are found and shown too.
 	if all {
 		external.DiscoverAndRegisterAlways(ctx)
+	} else {
+		external.DiscoverAndRegister(ctx)
 	}
 
 	installed := GetAgentsWithHooksInstalled(ctx)
@@ -87,12 +89,21 @@ func runAgentList(ctx context.Context, w io.Writer, all bool) error {
 		installedSet[name] = struct{}{}
 	}
 
-	names := agent.StringList()
-
 	fmt.Fprintln(w, "Agents:")
-	for _, name := range names {
+	for _, name := range agent.StringList() {
+		agentName := types.AgentName(name)
+		_, isInstalled := installedSet[agentName]
+
+		// Built-ins and installed externals always appear. Available (not-yet-
+		// installed) external plugins appear only with --all.
+		if !all && !isInstalled {
+			if ag, err := agent.Get(agentName); err == nil && external.IsExternal(ag) {
+				continue
+			}
+		}
+
 		marker := "  "
-		if _, ok := installedSet[types.AgentName(name)]; ok {
+		if isInstalled {
 			marker = "✓ "
 		}
 		fmt.Fprintf(w, "  %s%s\n", marker, name)

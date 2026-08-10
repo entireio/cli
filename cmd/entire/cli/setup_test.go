@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -132,6 +133,16 @@ func copyExecutable(src, dst string) error {
 
 func writeExternalAgentBinary(t *testing.T, dir, name string) {
 	t.Helper()
+	writeExternalAgentBinaryEx(t, dir, name, false)
+}
+
+// writeExternalAgentBinaryEx writes a mock external-agent binary whose
+// are-hooks-installed subcommand reports hooksInstalled, so callers can
+// simulate both installed and available (uninstalled) external plugins.
+func writeExternalAgentBinaryEx(t *testing.T, dir, name string, hooksInstalled bool) {
+	t.Helper()
+
+	installed := strconv.FormatBool(hooksInstalled)
 
 	script := `#!/bin/sh
 case "$1" in
@@ -152,7 +163,7 @@ case "$1" in
     exit 0
     ;;
   are-hooks-installed)
-    echo '{"installed": false}'
+    echo '{"installed": ` + installed + `}'
     ;;
   *)
     echo '{}'
