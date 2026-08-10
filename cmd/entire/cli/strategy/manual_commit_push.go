@@ -420,7 +420,12 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 		// context (each derived push would just fail fast and log). Unpushed
 		// refs stay queued for the next push.
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			firstErr = ctxErr
+			// Don't let cancellation mask a genuine push failure from an earlier
+			// ref (auth, conflict, etc.); keep the first real error, matching the
+			// per-ref guard below.
+			if firstErr == nil {
+				firstErr = ctxErr
+			}
 			break
 		}
 		// Per-ref counter: each ref can take up to the push budget, so show
