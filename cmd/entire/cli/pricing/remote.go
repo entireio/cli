@@ -160,15 +160,32 @@ func remoteURL() string {
 	return RemoteURL
 }
 
-// ShouldRefresh reports whether the remote pricing cache is stale (older than
-// the 24h interval) or absent. Trigger sites call it to gate a background
-// refresh spawn so a fresh cache skips the work — and the spawn — entirely.
-func ShouldRefresh() bool {
-	rc := loadRemoteCache()
+// cacheStillFresh reports whether rc is recent enough, AND from the currently
+// configured source, to skip a refresh. A nil rc is never fresh.
+//
+// The source check matters because ENTIRE_PRICING_URL can change between
+// processes (self-hosted setups, testing): a cache that is "fresh" by the 24h
+// clock but was fetched from the OLD source must not block a refresh against
+// the NEW one, or the cache would keep serving the wrong source's prices under
+// the new URL's name for up to 24h with no way to tell. Every "skip, still
+// fresh" decision in this file must go through this one function so the source
+// check can't drift out of sync between them.
+func cacheStillFresh(rc *RemoteCache) bool {
 	if rc == nil {
-		return true
+		return false
 	}
-	return time.Since(rc.FetchedAt) >= remoteRefreshInterval
+	if rc.SourceURL != "" && rc.SourceURL != remoteURL() {
+		return false
+	}
+	return time.Since(rc.FetchedAt) < remoteRefreshInterval
+}
+
+// ShouldRefresh reports whether the remote pricing cache is stale (older than
+// the 24h interval), absent, or was fetched from a different source than the
+// one currently configured. Trigger sites call it to gate a background refresh
+// spawn so a fresh, same-source cache skips the work — and the spawn — entirely.
+func ShouldRefresh() bool {
+	return !cacheStillFresh(loadRemoteCache())
 }
 
 // RefreshRemoteCache fetches the remote pricing table and updates the local
@@ -219,10 +236,11 @@ func refreshRemoteCache(ctx context.Context, force bool) (RefreshResult, error) 
 	defer release()
 
 	// Re-read under the lock. If another process refreshed while we waited for
-	// the lock, its FetchedAt is now fresh and we skip the fetch (unless forced).
-	// This is what keeps a burst of spawned workers to a single request.
+	// the lock, its FetchedAt is now fresh (and its source still matches) and we
+	// skip the fetch (unless forced). This is what keeps a burst of spawned
+	// workers to a single request.
 	prev := loadRemoteCache()
-	if !force && prev != nil && time.Since(prev.FetchedAt) < remoteRefreshInterval {
+	if !force && cacheStillFresh(prev) {
 		fillResultFromCache(&res, prev)
 		return res, nil
 	}
@@ -251,9 +269,21 @@ func fillResultFromCache(res *RefreshResult, rc *RemoteCache) {
 
 // fetchRemote performs the conditional HTTP request and folds the outcome into a
 // new RemoteCache derived from prev. Every outcome bumps FetchedAt. It never
-// returns an error — the worst case is "keep prev's Doc+ETag".
+// returns an error — the worst case is "keep prev's Doc+ETag", but only when
+// prev is actually from the source about to be queried.
 func fetchRemote(ctx context.Context, prev *RemoteCache) (*RemoteCache, string) {
 	url := remoteURL()
+	// prev may be from a DIFFERENT source (ENTIRE_PRICING_URL changed since it
+	// was written — self-hosted setups, testing). Carrying its Doc/ETag over as
+	// this fetch's fallback would, on any failure below, silently stamp the OLD
+	// source's prices with the NEW source's URL and a fresh FetchedAt: a caller
+	// reading the cache afterward has no way to tell it isn't actually serving
+	// what SourceURL claims. Treat a source mismatch as "nothing to fall back
+	// on" instead — a failure then correctly yields no usable remote data
+	// (embedded defaults only) rather than mislabeled stale data.
+	if prev.SourceURL != "" && prev.SourceURL != url {
+		prev = &RemoteCache{}
+	}
 	out := &RemoteCache{
 		FetchedAt: time.Now(),
 		ETag:      prev.ETag,

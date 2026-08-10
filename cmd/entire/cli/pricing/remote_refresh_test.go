@@ -232,4 +232,61 @@ func TestShouldRefresh(t *testing.T) {
 
 	writeRemoteCacheFile(t, &RemoteCache{FetchedAt: time.Now().Add(-48 * time.Hour)})
 	assert.True(t, ShouldRefresh(), "stale cache should refresh")
+
+	// A time-fresh cache from a source that no longer matches ENTIRE_PRICING_URL
+	// must still refresh: it would otherwise silently block a refresh against
+	// the newly configured source for up to 24h.
+	t.Setenv("ENTIRE_PRICING_URL", "https://new-source.example/models.json")
+	writeRemoteCacheFile(t, &RemoteCache{FetchedAt: time.Now(), SourceURL: "https://old-source.example/models.json"})
+	assert.True(t, ShouldRefresh(), "fresh cache from a different source should still refresh")
+
+	// A time-fresh cache whose source DOES match the current URL is still
+	// correctly skipped — the source check must not make every cache stale.
+	writeRemoteCacheFile(t, &RemoteCache{FetchedAt: time.Now(), SourceURL: "https://new-source.example/models.json"})
+	assert.False(t, ShouldRefresh(), "fresh cache from the current source should not refresh")
+
+	// A pre-existing cache with no SourceURL recorded (written before this field
+	// existed) must not be treated as a source mismatch — only a genuine,
+	// non-empty different source should force a refresh.
+	writeRemoteCacheFile(t, &RemoteCache{FetchedAt: time.Now(), SourceURL: ""})
+	assert.False(t, ShouldRefresh(), "fresh legacy cache with no recorded source should not refresh")
+}
+
+// TestRefreshRemoteCache_SourceChangeDiscardsMismatchedFallback proves that when
+// ENTIRE_PRICING_URL has changed since the cache was written, a failed fetch
+// against the NEW source does not fall back to the OLD source's Doc/ETag under
+// the new source's name — it must correctly end up with no usable cache instead
+// of silently mislabeled stale data.
+func TestRefreshRemoteCache_SourceChangeDiscardsMismatchedFallback(t *testing.T) {
+	isolateCache(t)
+	writeRemoteCacheFile(t, &RemoteCache{
+		FetchedAt: time.Now().Add(-48 * time.Hour),
+		ETag:      "old-source-etag",
+		SourceURL: "https://old-source.example/models.json",
+		Doc: &fileSchema{
+			SchemaVersion: 1,
+			Models: []ModelRate{
+				{ID: "gpt-5.5", Provider: "openai", InputPerMTok: priorInputRate, OutputPerMTok: 1000},
+			},
+		},
+	})
+	var gotIfNoneMatch string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotIfNoneMatch = r.Header.Get("If-None-Match")
+		w.WriteHeader(http.StatusNotFound) // the new source has nothing (yet)
+	}))
+	defer srv.Close()
+	t.Setenv("ENTIRE_PRICING_URL", srv.URL)
+
+	res, err := RefreshRemoteCacheForce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, refreshOutcomeUnchanged, res.Outcome)
+	assert.Empty(t, gotIfNoneMatch, "must not send the old source's ETag to the new source")
+
+	rc := loadRemoteCache()
+	require.NotNil(t, rc)
+	assert.Equal(t, srv.URL, rc.SourceURL)
+	assert.Nil(t, rc.Doc, "old source's Doc must not survive under the new SourceURL")
+	assert.Empty(t, rc.ETag, "old source's ETag must not survive under the new SourceURL")
+	assert.Nil(t, LoadRemoteEntries(context.Background()), "no usable remote entries after a source change with no successful fetch")
 }

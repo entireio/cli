@@ -105,3 +105,27 @@ func TestEstimateCost_PartialCoverageMixed(t *testing.T) {
 		t.Fatalf("source = %q, want mixed", source)
 	}
 }
+
+// TestEstimateCost_UsageShortfallOverBucketsPriced proves a caller aggregating
+// buckets from multiple sources (e.g. checkpointModelUsage summing ModelUsage
+// across several sessions in a checkpoint) doesn't silently undercount when one
+// contributing source has no per-model bucket at all: usage carries the true
+// combined total (400_000 input tokens from a bucket-covered session plus
+// 100_000 from a session with none), models carries only the covered session's
+// bucket. Before the remainder reconciliation, the 100_000 shortfall tokens were
+// invisible to pricing even though the displayed token total included them.
+func TestEstimateCost_UsageShortfallOverBucketsPriced(t *testing.T) {
+	t.Parallel()
+	usage := &types.TokenUsage{InputTokens: 500000} // 400k covered + 100k from a bucket-less session
+	models := []types.ModelUsage{
+		{Model: "test-a", TokenUsage: types.TokenUsage{InputTokens: 400000}},
+	}
+	// Full 500k at $1/MTok = $0.50, not just the bucket's 400k = $0.40.
+	cost, source := EstimateCost(usage, models, "test-a", testTable(t))
+	if cost == nil || *cost != 0.50 {
+		t.Fatalf("cost = %v, want 0.50 (bucket + remainder for the shortfall)", cost)
+	}
+	if source != types.CostSourceEstimated {
+		t.Fatalf("source = %q, want estimated", source)
+	}
+}

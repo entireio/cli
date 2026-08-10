@@ -161,6 +161,18 @@ func PriceUsage(usage *types.TokenUsage, model string, table *pricing.Table, dis
 // CostSourceMixed when some tokens are priceable and some are not). Returns
 // (nil, "") when nothing is priceable (nil table, unknown models, or no billable
 // tokens) so callers render no cost, never $0.
+//
+// When both models and usage are given, models may not cover all of usage's
+// tokens: a caller aggregating buckets across several sources (e.g.
+// checkpointModelUsage summing per-session ModelUsage) can end up with buckets
+// from only SOME contributing sources — a session with no persisted per-model
+// breakdown contributes tokens to usage's flat total but no bucket at all. Left
+// unreconciled, those tokens are invisible to this function's pricing pass:
+// silently undercounting cost while still reporting a token total that includes
+// them. A remainder bucket under fallbackModel closes any such shortfall, the
+// same way CalculateUsageWithCost's live pricing pass already does. usage is a
+// static, already-persisted read here (not a live multi-turn accumulation), so
+// there is no cumulative-vs-delta subagent baseline to rescope — nil is correct.
 func EstimateCost(usage *types.TokenUsage, models []types.ModelUsage, fallbackModel string, table *pricing.Table) (*float64, string) {
 	if table == nil {
 		return nil, ""
@@ -168,9 +180,14 @@ func EstimateCost(usage *types.TokenUsage, models []types.ModelUsage, fallbackMo
 	var buckets []types.ModelUsage
 	switch {
 	case len(models) > 0:
-		buckets = make([]types.ModelUsage, len(models))
+		buckets = make([]types.ModelUsage, 0, len(models))
 		for i := range models {
-			buckets[i] = types.ModelUsage{Model: models[i].Model, TokenUsage: bucketTokens(&models[i].TokenUsage)}
+			buckets = append(buckets, types.ModelUsage{Model: models[i].Model, TokenUsage: bucketTokens(&models[i].TokenUsage)})
+		}
+		if usage != nil {
+			if rem, ok := remainderBucket(usage, nil, buckets, fallbackModel); ok {
+				buckets = append(buckets, rem)
+			}
 		}
 	case usage != nil:
 		// No per-model breakdown: price the flat total, flattening the subagent
