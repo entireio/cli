@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -86,6 +87,11 @@ func TestAgentGroupBareCommandRunsAgentMenu(t *testing.T) {
 
 func TestAgentGroup_DiscoversExternalAgents(t *testing.T) {
 	// Cannot use t.Parallel because we modify PATH via t.Setenv.
+	// The mock agent is a #!/bin/sh script executed during discovery, so skip
+	// on environments without a POSIX shell (matching sibling external-agent tests).
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
 	externalDir := t.TempDir()
 	writeExternalAgentBinary(t, externalDir, "ext-agentgroup-test")
 	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
