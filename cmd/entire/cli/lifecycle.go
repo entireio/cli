@@ -877,8 +877,21 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Single load serves both prompt retrieval and backfill.
 	_, commitMsgSpan := perf.Start(ctx, "generate_commit_message")
 	lastPrompt := ""
+	// accountedSubagentTokens is the cumulative-since-session-start subagent
+	// snapshot this session has ALREADY attributed cost to. It scopes this turn's
+	// subagent remainder to just the new subagent tokens — see the scoping
+	// contract on agent.CalculateUsageWithCost. state.TokenUsage.SubagentTokens is
+	// the right source because accumulateTokenUsage replaces (never adds) it, so
+	// it always holds the latest snapshot folded into the running totals; reading
+	// it here, before SaveStep folds this turn in, yields the previous turn's
+	// snapshot. Nil (no state, or no subagents yet) correctly means "nothing
+	// attributed yet".
+	var accountedSubagentTokens *agent.TokenUsage
 	if sessionState, stateErr := strategy.LoadSessionState(ctx, sessionID); stateErr == nil && sessionState != nil {
 		lastPrompt = sessionState.LastPrompt
+		if sessionState.TokenUsage != nil {
+			accountedSubagentTokens = sessionState.TokenUsage.SubagentTokens
+		}
 	}
 	// Backfill LastPrompt so `entire status` shows the prompt even when no
 	// files were modified (before the early return below).
@@ -1009,7 +1022,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		tokenUsage, buckets = agent.PriceUsage(event.TokenUsage, pricingModel, table, disableEstimation)
 	} else {
 		var costErr error
-		tokenUsage, buckets, costErr = agent.CalculateUsageWithCost(ag, transcriptData, transcriptLinesAtStart, subagentsDir, table, pricingModel, disableEstimation)
+		tokenUsage, buckets, costErr = agent.CalculateUsageWithCost(ag, transcriptData, transcriptLinesAtStart, subagentsDir, accountedSubagentTokens, table, pricingModel, disableEstimation)
 		if costErr != nil {
 			logging.Debug(logCtx, "failed usage-with-cost extraction",
 				slog.String("error", costErr.Error()))

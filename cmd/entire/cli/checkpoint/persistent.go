@@ -1008,6 +1008,11 @@ func (s *treeWriter) readSummaryFromBlob(hash plumbing.Hash) (*CheckpointSummary
 
 // aggregateTokenUsage sums two TokenUsage structs.
 // Returns nil if both inputs are nil.
+//
+// CacheCreation1hTokens is summed with the rest: it is the subset of
+// CacheCreationTokens written with a 1-hour TTL, which pricing.Estimate bills at
+// 2x input instead of 1.25x, so dropping it makes any re-priced aggregate
+// silently undercount.
 func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 	if a == nil && b == nil {
 		return nil
@@ -1017,6 +1022,7 @@ func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 	if a != nil {
 		result.InputTokens = a.InputTokens
 		result.CacheCreationTokens = a.CacheCreationTokens
+		result.CacheCreation1hTokens = a.CacheCreation1hTokens
 		result.CacheReadTokens = a.CacheReadTokens
 		result.OutputTokens = a.OutputTokens
 		result.APICallCount = a.APICallCount
@@ -1025,6 +1031,7 @@ func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 	if b != nil {
 		result.InputTokens += b.InputTokens
 		result.CacheCreationTokens += b.CacheCreationTokens
+		result.CacheCreation1hTokens += b.CacheCreation1hTokens
 		result.CacheReadTokens += b.CacheReadTokens
 		result.OutputTokens += b.OutputTokens
 		result.APICallCount += b.APICallCount

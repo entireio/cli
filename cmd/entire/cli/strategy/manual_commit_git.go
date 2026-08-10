@@ -364,10 +364,15 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 		return &agent.TokenUsage{
 			InputTokens:         incoming.InputTokens,
 			CacheCreationTokens: incoming.CacheCreationTokens,
-			CacheReadTokens:     incoming.CacheReadTokens,
-			OutputTokens:        incoming.OutputTokens,
-			APICallCount:        incoming.APICallCount,
-			SubagentTokens:      accumulateTokenUsage(nil, incoming.SubagentTokens),
+			// CacheCreation1hTokens is the subset of CacheCreationTokens written with
+			// a 1-hour TTL, billed at 2x input instead of 1.25x. It must be carried
+			// and summed like the other counts, or every accumulated total reports
+			// all-5-minute cache writes and re-prices low.
+			CacheCreation1hTokens: incoming.CacheCreation1hTokens,
+			CacheReadTokens:       incoming.CacheReadTokens,
+			OutputTokens:          incoming.OutputTokens,
+			APICallCount:          incoming.APICallCount,
+			SubagentTokens:        accumulateTokenUsage(nil, incoming.SubagentTokens),
 			// AddCostUSD(nil, ...) returns a fresh pointer, never aliasing incoming.CostUSD.
 			CostUSD:    types.AddCostUSD(nil, incoming.CostUSD),
 			CostSource: types.MergeCostSource("", incoming.CostSource, nil, incoming.CostUSD),
@@ -382,6 +387,7 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 	existing.CostUSD = types.AddCostUSD(existing.CostUSD, incoming.CostUSD)
 	existing.InputTokens += incoming.InputTokens
 	existing.CacheCreationTokens += incoming.CacheCreationTokens
+	existing.CacheCreation1hTokens += incoming.CacheCreation1hTokens
 	existing.CacheReadTokens += incoming.CacheReadTokens
 	existing.OutputTokens += incoming.OutputTokens
 	existing.APICallCount += incoming.APICallCount

@@ -407,6 +407,10 @@ func addCheckpointTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 	if a != nil {
 		result.InputTokens = a.InputTokens
 		result.CacheCreationTokens = a.CacheCreationTokens
+		// CacheCreation1hTokens is the subset of CacheCreationTokens written with a
+		// 1-hour TTL, which EstimateCost bills at 2x input instead of 1.25x. Summing
+		// it here keeps the displayed estimate from silently undercounting.
+		result.CacheCreation1hTokens = a.CacheCreation1hTokens
 		result.CacheReadTokens = a.CacheReadTokens
 		result.OutputTokens = a.OutputTokens
 		result.APICallCount = a.APICallCount
@@ -415,6 +419,7 @@ func addCheckpointTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 	if b != nil {
 		result.InputTokens = saturatingIntAdd(result.InputTokens, b.InputTokens)
 		result.CacheCreationTokens = saturatingIntAdd(result.CacheCreationTokens, b.CacheCreationTokens)
+		result.CacheCreation1hTokens = saturatingIntAdd(result.CacheCreation1hTokens, b.CacheCreation1hTokens)
 		result.CacheReadTokens = saturatingIntAdd(result.CacheReadTokens, b.CacheReadTokens)
 		result.OutputTokens = saturatingIntAdd(result.OutputTokens, b.OutputTokens)
 		result.APICallCount = saturatingIntAdd(result.APICallCount, b.APICallCount)

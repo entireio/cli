@@ -535,6 +535,10 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 			}
 			subagentUsage.InputTokens += agentUsage.InputTokens
 			subagentUsage.CacheCreationTokens += agentUsage.CacheCreationTokens
+			// CacheCreation1hTokens is the subset of CacheCreationTokens written with
+			// a 1-hour TTL, billed at 2x input instead of 1.25x. Omitting it made
+			// every subagent's cache writes look 5-minute, undercounting cost.
+			subagentUsage.CacheCreation1hTokens += agentUsage.CacheCreation1hTokens
 			subagentUsage.CacheReadTokens += agentUsage.CacheReadTokens
 			subagentUsage.OutputTokens += agentUsage.OutputTokens
 			subagentUsage.APICallCount += agentUsage.APICallCount

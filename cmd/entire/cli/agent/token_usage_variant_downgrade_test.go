@@ -104,7 +104,7 @@ func TestCalculateUsageWithCost_UnpriceableFastDowngradesToBase(t *testing.T) {
 		},
 	}
 
-	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", table, "", false)
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil, table, "", false)
 	require.NoError(t, err)
 	require.Len(t, buckets, 1)
 	// Rekeyed to the base id and priced at the base rate, not left unpriced.
@@ -135,7 +135,7 @@ func TestCalculateUsageWithCost_MixedFastPriceableAndUnpriceable(t *testing.T) {
 		},
 	}
 
-	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", table, "", false)
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil, table, "", false)
 	require.NoError(t, err)
 	require.Len(t, buckets, 2)
 
@@ -176,7 +176,7 @@ func TestCalculateUsageWithCost_DowngradedFastCollidesWithRemainderConserved(t *
 		},
 	}
 
-	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", table, "claude-fable-5", false)
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil, table, "claude-fable-5", false)
 	require.NoError(t, err)
 	require.Len(t, buckets, 2)
 

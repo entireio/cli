@@ -822,10 +822,17 @@ func sessionDataUnpricedFromTranscript(d *ExtractedSessionData) bool {
 // the model's "-priority" variant, matching the turn-end hook so a committed
 // checkpoint carries the same tier the turn was priced at. The suffix is a
 // pricing-lookup concern only — the stored model name stays raw.
+//
+// The accounted-subagent baseline is nil because it can only matter when a
+// subagents dir is supplied: with none, no SubagentAwareExtractor produces a
+// SubagentTokens subtree, so there is no cumulative snapshot to rescope and the
+// remainder bucket is already a pure main-agent shortfall. If this ever starts
+// passing a subagents dir, it must pass a baseline too (see the scoping contract
+// on agent.CalculateUsageWithCost).
 func tokenUsageWithCost(ctx context.Context, ag agent.Agent, transcript []byte, fromOffset int, fallbackModel string, agentType types.AgentType) (*agent.TokenUsage, []agent.ModelUsage) {
 	table, disableEstimation := settings.LoadPricingTable(ctx)
 	pricingModel := settings.PricingModelForAgent(ctx, agentType, fallbackModel)
-	usage, buckets, err := agent.CalculateUsageWithCost(ag, transcript, fromOffset, "", table, pricingModel, disableEstimation)
+	usage, buckets, err := agent.CalculateUsageWithCost(ag, transcript, fromOffset, "", nil /* accountedSubagentTokens */, table, pricingModel, disableEstimation)
 	if err != nil {
 		logging.Debug(ctx, "failed usage-with-cost extraction",
 			slog.String("error", err.Error()))

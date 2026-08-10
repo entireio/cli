@@ -78,7 +78,7 @@ func TestCalculateUsageWithCost_FallbackBucketPriced(t *testing.T) {
 	t.Parallel()
 	ag := &fakeTokenCalcAgent{usage: &TokenUsage{InputTokens: 1_000_000}}
 
-	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "test-a", false)
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil, testTable(t), "test-a", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestCalculateUsageWithCost_TwoModelsSumEstimated(t *testing.T) {
 		},
 	}
 
-	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "", false)
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil, testTable(t), "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestCalculateUsageWithCost_UnknownModelMixed(t *testing.T) {
 		},
 	}
 
-	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "", false)
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil, testTable(t), "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestCalculateUsageWithCost_RemainderBucketPriced(t *testing.T) {
 		},
 	}
 
-	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "test-b", false)
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil, testTable(t), "test-b", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestCalculateUsageWithCost_RemainderBucketInflatedScalar(t *testing.T) {
 		},
 	}
 
-	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "test-b", false)
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil, testTable(t), "test-b", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestCalculateUsageWithCost_RemainderBucketNestedSubagents(t *testing.T) {
 		},
 	}
 
-	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "test-b", false)
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil, testTable(t), "test-b", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestCalculateUsageWithCost_SubagentRemainderFallbackNoAliasing(t *testing.T
 	}}
 
 	run := func() ([]types.ModelUsage, *types.TokenUsage) {
-		flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "subdir", testTable(t), "test-a", false)
+		flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "subdir", nil, testTable(t), "test-a", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -343,7 +343,7 @@ func TestCalculateUsageWithCost_RemainderUnpriceableFallbackMixed(t *testing.T) 
 		},
 	}
 
-	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "who-knows", false)
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil, testTable(t), "who-knows", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestCalculateUsageWithCost_NoRemainderWhenBucketsSumToFlat(t *testing.T) {
 		},
 	}
 
-	_, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "test-a", false)
+	_, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil, testTable(t), "test-a", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestCalculateUsageWithCost_ReportedKeptEstimationOff(t *testing.T) {
 		},
 	}
 
-	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "", true /* disableEstimation */)
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil, testTable(t), "", true /* disableEstimation */)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestCalculateUsageWithCost_NilTableNoCost(t *testing.T) {
 	t.Parallel()
 	ag := &fakeTokenCalcAgent{usage: &TokenUsage{InputTokens: 1_000_000}}
 
-	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil /* table */, "test-a", false)
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil, nil /* table */, "test-a", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -441,7 +441,7 @@ func TestCalculateUsageWithCost_NilTableNoCost(t *testing.T) {
 func TestCalculateUsageWithCost_NoUsage(t *testing.T) {
 	t.Parallel()
 	// Agent that supports neither TokenCalculator nor ModelUsageCalculator.
-	flat, buckets, err := CalculateUsageWithCost(&mockBaseAgent{}, nil, 0, "", testTable(t), "test-a", false)
+	flat, buckets, err := CalculateUsageWithCost(&mockBaseAgent{}, nil, 0, "", nil, testTable(t), "test-a", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -453,7 +453,7 @@ func TestCalculateUsageWithCost_NoUsage(t *testing.T) {
 func TestCalculateUsageWithCost_FlatError(t *testing.T) {
 	t.Parallel()
 	ag := &fakeTokenCalcAgent{err: errors.New("boom")}
-	if _, _, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "test-a", false); err == nil {
+	if _, _, err := CalculateUsageWithCost(ag, nil, 0, "", nil, testTable(t), "test-a", false); err == nil {
 		t.Fatal("expected error, got nil")
 	}
 }
@@ -467,7 +467,7 @@ func TestCalculateUsageWithCost_ZeroTokenBucketUnpriced(t *testing.T) {
 	// checkpoint reads as "no cost data", consistent with the ModelUsage path.
 	ag := &fakeTokenCalcAgent{usage: &TokenUsage{APICallCount: 5}}
 
-	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", testTable(t), "test-a", false)
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil, testTable(t), "test-a", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -571,7 +571,7 @@ func TestCalculateUsageWithCost_ClaudeFastVariantPricedAtPremium(t *testing.T) {
 		},
 	}
 
-	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", table, "", false)
+	flat, buckets, err := CalculateUsageWithCost(ag, nil, 0, "", nil, table, "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -602,7 +602,7 @@ func TestRemainderBucket_APICallCountOnlyShortfallNoRemainder(t *testing.T) {
 		{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000, APICallCount: 2}},
 	}
 
-	_, ok := remainderBucket(flat, buckets, "test-a")
+	_, ok := remainderBucket(flat, nil, buckets, "test-a")
 	if ok {
 		t.Fatalf("remainderBucket returned a bucket for an APICallCount-only shortfall, want none")
 	}
@@ -618,7 +618,7 @@ func TestRemainderBucket_RealTokenShortfallStillReturned(t *testing.T) {
 		{Model: "test-a", TokenUsage: TokenUsage{InputTokens: 1_000_000, APICallCount: 2}},
 	}
 
-	rem, ok := remainderBucket(flat, buckets, "test-a")
+	rem, ok := remainderBucket(flat, nil, buckets, "test-a")
 	if !ok {
 		t.Fatalf("remainderBucket returned no bucket for a real token shortfall")
 	}

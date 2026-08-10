@@ -60,7 +60,23 @@ func flatTokenUsage(ag Agent, transcriptData []byte, fromOffset int, subagentsDi
 // (CostSourceMixed when priced and unpriced-with-tokens buckets coexist).
 // Returns the flat usage (cost fields populated) and the buckets; (nil, nil, nil)
 // when the agent produces no usage.
-func CalculateUsageWithCost(ag Agent, transcriptData []byte, fromOffset int, subagentsDir string, table *pricing.Table, fallbackModel string, disableEstimation bool) (*types.TokenUsage, []types.ModelUsage, error) {
+//
+// SCOPING CONTRACT — the returned buckets and the returned flat usage's CostUSD
+// are DELTAS scoped to this call's window, safe for a caller to sum across turns.
+// The returned flat usage's SubagentTokens subtree is NOT a delta: per the
+// SubagentAwareExtractor contract it stays the cumulative-since-session-start
+// snapshot the extractor produced, so a caller must replace (never add) it.
+//
+// accountedSubagentTokens is what makes the cost half of that contract hold. It
+// is the cumulative subagent snapshot a previous call ALREADY attributed cost to
+// (for the live turn-end path: state.TokenUsage.SubagentTokens, which
+// accumulateTokenUsage keeps at the latest snapshot). remainderBucket subtracts
+// it so the subagent remainder covers only the NEW subagent tokens since then.
+// Pass nil for the first call of a session, or when subagentsDir is empty and no
+// subagent subtree can exist. Passing nil on a later call re-attributes the whole
+// cumulative subagent total again, which an additive caller then stacks on top of
+// every earlier turn's — unbounded inflation of cost and per-model tokens.
+func CalculateUsageWithCost(ag Agent, transcriptData []byte, fromOffset int, subagentsDir string, accountedSubagentTokens *types.TokenUsage, table *pricing.Table, fallbackModel string, disableEstimation bool) (*types.TokenUsage, []types.ModelUsage, error) {
 	fallbackModel = resolveTierFallback(fallbackModel, table)
 
 	flat, err := flatTokenUsage(ag, transcriptData, fromOffset, subagentsDir)
@@ -86,7 +102,7 @@ func CalculateUsageWithCost(ag Agent, transcriptData []byte, fromOffset int, sub
 	// remainder bucket under fallbackModel so the pricing pass either estimates
 	// it (priceable fallback) or leaves it unpriced (unpriceable fallback), in
 	// which case foldBucketCost's mixed rule marks coverage honestly.
-	if rem, ok := remainderBucket(flat, buckets, fallbackModel); ok {
+	if rem, ok := remainderBucket(flat, accountedSubagentTokens, buckets, fallbackModel); ok {
 		buckets = append(buckets, rem)
 	}
 
@@ -309,29 +325,71 @@ func modelUsageBuckets(ag Agent, transcriptData []byte, fromOffset int, flat *ty
 // 100k main + 500k subagent tokens would price only the 100k. Here the 500k
 // shortfall becomes a remainder bucket under fallbackModel.
 //
+// SCOPING — the two sides of that subtraction are scoped differently, and
+// reconciling them is this function's second job. flat's own scalar fields and
+// every per-model bucket are DELTAS over the caller's transcript window (both
+// derive from the fromOffset slice), but flat.SubagentTokens is a
+// cumulative-since-session-start snapshot per the SubagentAwareExtractor
+// contract: agent IDs come from the full transcript and each subagent transcript
+// is re-read from line 0 on every call. Flattening the raw subtree into the
+// shortfall therefore re-attributed the ENTIRE cumulative subagent total on every
+// turn. Callers sum these buckets and this call's cost across turns
+// (strategy.accumulateModelUsage / accumulateTokenUsage), so a session with
+// subagents inflated its cost, its per-model token counts, and its persisted
+// checkpoint metadata without bound as it went on — even with no new subagent
+// activity after turn 1.
+//
+// accountedSubagentTokens is the cumulative snapshot already attributed by an
+// earlier call; SubtractTokenUsage rescopes the subtree to just the increment
+// since then, which makes the shortfall a true window delta and the sum across
+// turns converge on the real cumulative total. A nil baseline means "nothing
+// attributed yet" and keeps the full snapshot (correct for the first call, and
+// for callers that pass no subagentsDir and so never see a subtree at all).
+// Rescoping deliberately uses the SESSION-WIDE previous snapshot, not a
+// condensation-window baseline like SessionState.SubagentTokensBaseline: the
+// per-checkpoint aggregate is a suffix of the same additive stream, so it gets
+// its correct window from resetCheckpointWindow zeroing the accumulator, and
+// baselining on the window start instead would re-add the window's whole
+// subagent total on every turn inside it — the same bug, one scope smaller. A
+// turn whose checkpoint is skipped never accumulates, leaving the baseline where
+// it was, so the next attributed turn picks up the whole unaccounted increment.
+//
 // Each field is clamped at 0 (a bucket may legitimately exceed the flat total on
 // an individual field). The bool is false when no billable token shortfall
-// exists: the fallback (single-bucket) path with no subagents and any
-// ModelUsageCalculator whose buckets sum to the flat total both yield a zero
+// exists: the fallback (single-bucket) path with no subagents, any
+// ModelUsageCalculator whose buckets sum to the flat total, and a turn that added
+// no subagent tokens to an already-accounted snapshot all yield a zero
 // remainder. Cost fields are left nil so the pricing pass estimates the
 // remainder when fallbackModel is priceable, or leaves it unpriced otherwise.
-func remainderBucket(flat *types.TokenUsage, buckets []types.ModelUsage, fallbackModel string) (types.ModelUsage, bool) {
+func remainderBucket(flat, accountedSubagentTokens *types.TokenUsage, buckets []types.ModelUsage, fallbackModel string) (types.ModelUsage, bool) {
 	var sum types.TokenUsage
 	for i := range buckets {
 		b := buckets[i].TokenUsage
 		sum.InputTokens += b.InputTokens
 		sum.CacheCreationTokens += b.CacheCreationTokens
+		sum.CacheCreation1hTokens += b.CacheCreation1hTokens
 		sum.CacheReadTokens += b.CacheReadTokens
 		sum.OutputTokens += b.OutputTokens
 		sum.APICallCount += b.APICallCount
 	}
-	flatTotal := flattenTokenUsage(flat)
+	// Rescope the cumulative subagent subtree to this window's increment before
+	// flattening. Copying flat and swapping in the rescoped subtree leaves the
+	// caller's flat untouched (its SubagentTokens must stay the cumulative
+	// snapshot downstream) and cannot alias it: SubtractTokenUsage allocates.
+	scoped := *flat
+	scoped.SubagentTokens = types.SubtractTokenUsage(flat.SubagentTokens, accountedSubagentTokens)
+	flatTotal := flattenTokenUsage(&scoped)
 	short := types.TokenUsage{
 		InputTokens:         clampNonNegative(flatTotal.InputTokens - sum.InputTokens),
 		CacheCreationTokens: clampNonNegative(flatTotal.CacheCreationTokens - sum.CacheCreationTokens),
-		CacheReadTokens:     clampNonNegative(flatTotal.CacheReadTokens - sum.CacheReadTokens),
-		OutputTokens:        clampNonNegative(flatTotal.OutputTokens - sum.OutputTokens),
-		APICallCount:        clampNonNegative(flatTotal.APICallCount - sum.APICallCount),
+		// CacheCreation1hTokens rides along with CacheCreationTokens (it is a
+		// subset of it). Dropping it here billed every remainder-attributed cache
+		// write at the 1.25x 5-minute rate even when the session used the 2x
+		// 1-hour TTL, silently undercounting cost.
+		CacheCreation1hTokens: clampNonNegative(flatTotal.CacheCreation1hTokens - sum.CacheCreation1hTokens),
+		CacheReadTokens:       clampNonNegative(flatTotal.CacheReadTokens - sum.CacheReadTokens),
+		OutputTokens:          clampNonNegative(flatTotal.OutputTokens - sum.OutputTokens),
+		APICallCount:          clampNonNegative(flatTotal.APICallCount - sum.APICallCount),
 	}
 	if short.InputTokens+short.CacheCreationTokens+short.CacheReadTokens+short.OutputTokens == 0 {
 		return types.ModelUsage{}, false
@@ -339,12 +397,19 @@ func remainderBucket(flat *types.TokenUsage, buckets []types.ModelUsage, fallbac
 	return types.ModelUsage{Model: fallbackModel, TokenUsage: short}, true
 }
 
-// flattenTokenUsage returns u's five scalar token fields summed with every
-// nested SubagentTokens subtree, at arbitrary depth. It is nil-safe (nil yields
-// a zero usage) and reads only token counts — the returned usage carries no cost
+// flattenTokenUsage returns u's scalar token fields summed with every nested
+// SubagentTokens subtree, at arbitrary depth. It is nil-safe (nil yields a zero
+// usage) and reads only token counts — the returned usage carries no cost
 // fields. This is how remainderBucket recovers the true billable total from a
 // flat usage whose subagent tokens live in a subtree rather than in the top-level
 // scalar fields.
+//
+// CacheCreation1hTokens is summed like the rest: it is the subset of
+// CacheCreationTokens written with a 1-hour TTL and pricing.Estimate bills it at
+// 2x input instead of 1.25x. Omitting it (as this function did before) collapsed
+// every flattened total onto the 5-minute rate — a silent undercount on both of
+// this function's consumers, remainderBucket's shortfall and EstimateCost's
+// no-buckets flat fallback.
 func flattenTokenUsage(u *types.TokenUsage) types.TokenUsage {
 	var out types.TokenUsage
 	if u == nil {
@@ -352,12 +417,14 @@ func flattenTokenUsage(u *types.TokenUsage) types.TokenUsage {
 	}
 	out.InputTokens = u.InputTokens
 	out.CacheCreationTokens = u.CacheCreationTokens
+	out.CacheCreation1hTokens = u.CacheCreation1hTokens
 	out.CacheReadTokens = u.CacheReadTokens
 	out.OutputTokens = u.OutputTokens
 	out.APICallCount = u.APICallCount
 	sub := flattenTokenUsage(u.SubagentTokens)
 	out.InputTokens += sub.InputTokens
 	out.CacheCreationTokens += sub.CacheCreationTokens
+	out.CacheCreation1hTokens += sub.CacheCreation1hTokens
 	out.CacheReadTokens += sub.CacheReadTokens
 	out.OutputTokens += sub.OutputTokens
 	out.APICallCount += sub.APICallCount

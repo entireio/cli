@@ -182,9 +182,15 @@ func SubtractTokenUsage(a, b *TokenUsage) *TokenUsage {
 	diff := &TokenUsage{
 		InputTokens:         clampSubtract(a.InputTokens, b.InputTokens),
 		CacheCreationTokens: clampSubtract(a.CacheCreationTokens, b.CacheCreationTokens),
-		CacheReadTokens:     clampSubtract(a.CacheReadTokens, b.CacheReadTokens),
-		OutputTokens:        clampSubtract(a.OutputTokens, b.OutputTokens),
-		APICallCount:        clampSubtract(a.APICallCount, b.APICallCount),
+		// CacheCreation1hTokens is a SUBSET of CacheCreationTokens, so it must be
+		// rescoped alongside it. Dropping it (as this function did before) left every
+		// delta claiming all of its cache writes were 5-minute TTL, pricing them at
+		// 1.25x instead of the 2x 1-hour rate — a silent cost undercount that grew
+		// with every rescoped window.
+		CacheCreation1hTokens: clampSubtract(a.CacheCreation1hTokens, b.CacheCreation1hTokens),
+		CacheReadTokens:       clampSubtract(a.CacheReadTokens, b.CacheReadTokens),
+		OutputTokens:          clampSubtract(a.OutputTokens, b.OutputTokens),
+		APICallCount:          clampSubtract(a.APICallCount, b.APICallCount),
 	}
 	diff.SubagentTokens = SubtractTokenUsage(a.SubagentTokens, b.SubagentTokens)
 	return diff
