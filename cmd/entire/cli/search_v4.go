@@ -340,7 +340,7 @@ type semanticCellPage struct {
 // it can't serve the search yet: its gateway has no query-serve route, or the
 // cluster catalog doesn't expose the placement's jurisdiction at all (a cell
 // mid-onboarding). Neither is worth warning the user about on every search.
-func classifySemanticCells(ctx context.Context, results []cellCallResult[*search.Response]) (pages []semanticCellPage, failed []string, lastErr error) {
+func classifySemanticCells(ctx context.Context, results []cellCallResult[*search.Response]) (pages []semanticCellPage, failed []failedCell, lastErr error) {
 	var skipped []string
 	for _, r := range results {
 		switch {
@@ -348,7 +348,7 @@ func classifySemanticCells(ctx context.Context, results []cellCallResult[*search
 			skipped = append(skipped, r.group.label())
 		case r.err != nil:
 			lastErr = r.err
-			failed = append(failed, fmt.Sprintf("%s: %s", r.group.label(), summarizeCellError(r.err)))
+			failed = append(failed, failedCell{label: r.group.label(), reason: summarizeCellError(r.err)})
 		case r.value != nil:
 			p := semanticCellPage{body: r.value}
 			for _, res := range r.value.Results {
@@ -374,6 +374,15 @@ func classifySemanticCells(ctx context.Context, results []cellCallResult[*search
 // errNoRegionAvailable is returned when every queried cell lacks query-serve.
 var errNoRegionAvailable = errors.New("semantic search is not yet available in the region(s) hosting this search")
 
+// failedCell records one hard cell failure: its region label (operational
+// metadata, safe to log) and a summarized, user-safe reason. The two are kept
+// apart so the reason — which can contain response-body-derived content — stays
+// out of the Debug log and only ever reaches the user-facing warning.
+type failedCell struct {
+	label  string
+	reason string
+}
+
 // maxCellErrorReason bounds the per-region reason shown in the partial-failure
 // warning. A cell error can embed the raw response body — parseSearchResponse
 // dumps string(body) on a decode failure or non-200 — so the reason is
@@ -390,6 +399,11 @@ func summarizeCellError(err error) string {
 		return "unknown error"
 	}
 	reason := strings.Join(strings.Fields(err.Error()), " ")
+	if reason == "" {
+		// An empty/whitespace-only error message would leave a dangling
+		// "label: " in the warning; fall back like the nil-error branch.
+		return "unknown error"
+	}
 	if runes := []rune(reason); len(runes) > maxCellErrorReason {
 		reason = string(runes[:maxCellErrorReason]) + "…"
 	}
@@ -525,7 +539,10 @@ func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []ce
 	pages, failed, lastErr := classifySemanticCells(ctx, results)
 	if len(pages) == 0 {
 		if lastErr != nil {
-			return nil, fmt.Errorf("semantic search: %w", lastErr)
+			// Summarize before surfacing: a decode failure embeds the raw
+			// (now up to 64 MiB) response body in lastErr, and this error goes
+			// straight to the user's terminal via main.go.
+			return nil, fmt.Errorf("semantic search: %s", summarizeCellError(lastErr))
 		}
 		return &search.Response{Results: []search.Result{}, Page: 1}, nil
 	}
@@ -533,13 +550,20 @@ func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []ce
 	if len(failed) > 0 {
 		// Debug, not Warn: the warning below already reaches the user via
 		// Response.Warnings, and slog's default handler would print a Warn
-		// straight to stderr on commands that never ran logging.Init.
+		// straight to stderr on commands that never ran logging.Init. Log only
+		// the region labels — the reasons can carry response-body-derived
+		// content, which must not land in .entire/logs/ (privacy).
+		labels := make([]string, len(failed))
+		details := make([]string, len(failed))
+		for i, f := range failed {
+			labels[i] = f.label
+			details[i] = fmt.Sprintf("%s: %s", f.label, f.reason)
+		}
 		logging.Debug(ctx, "semantic search: partial failure; results may be incomplete",
-			"succeeded", len(pages), "total", len(results), "failed_cells", failed)
-		// Name each failed region and a concise reason (failed entries are
-		// "label: reason"), preserving the "N of M regions" prefix the
-		// user-facing contract and tests key on.
-		warnings = append(warnings, fmt.Sprintf("search failed in %d of %d regions; results may be incomplete (%s)", len(failed), len(pages)+len(failed), strings.Join(failed, "; ")))
+			"succeeded", len(pages), "total", len(results), "failed_cells", labels)
+		// Name each failed region and a concise reason, preserving the "N of M
+		// regions" prefix the user-facing contract and tests key on.
+		warnings = append(warnings, fmt.Sprintf("search failed in %d of %d regions; results may be incomplete (%s)", len(failed), len(pages)+len(failed), strings.Join(details, "; ")))
 	}
 
 	merged, globalUpper := rankSemanticResults(pages)

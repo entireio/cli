@@ -516,6 +516,28 @@ func TestMergeSemanticV4Responses_AllCellsFail(t *testing.T) {
 	}
 }
 
+// TestMergeSemanticV4Responses_AllCellsFailTruncatesBody guards the all-failed
+// path: the returned error goes straight to the user's terminal, so a decode
+// failure that embeds the raw (multi-MB) response body must be summarized, not
+// dumped in full — the same guarantee the partial-failure warning gives.
+func TestMergeSemanticV4Responses_AllCellsFailTruncatesBody(t *testing.T) {
+	t.Parallel()
+
+	hugeBody := strings.Repeat("x", 2<<20)
+	_, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellErrLabeled("aws-us-east-2", fmt.Errorf("unexpected response from search service: %s", hugeBody)),
+	})
+	if err == nil {
+		t.Fatal("expected an error when the only cell failed")
+	}
+	if !strings.Contains(err.Error(), "unexpected response from search service") {
+		t.Errorf("error = %q, want the concise failure reason", err.Error())
+	}
+	if len(err.Error()) > 500 {
+		t.Errorf("error is %d bytes; the raw body must be truncated, not dumped in full", len(err.Error()))
+	}
+}
+
 func TestMergeSemanticV4Responses_NoCells(t *testing.T) {
 	t.Parallel()
 
