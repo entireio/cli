@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/binding"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -403,9 +404,20 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return nil
 	}
 
-	modified := normalizeToolUsePaths(event.ModifiedFiles, event.CWD, repoRoot)
-	added := normalizeToolUsePaths(event.NewFiles, event.CWD, repoRoot)
-	deleted := normalizeToolUsePaths(event.DeletedFiles, event.CWD, repoRoot)
+	modified, foreignModified := normalizeToolUsePaths(event.ModifiedFiles, event.CWD, repoRoot)
+	added, foreignAdded := normalizeToolUsePaths(event.NewFiles, event.CWD, repoRoot)
+	deleted, foreignDeleted := normalizeToolUsePaths(event.DeletedFiles, event.CWD, repoRoot)
+
+	// ToolUse and TurnEnd run as separate hook processes: foreign paths seen
+	// here never reach the TurnEnd tap, so record them from this process.
+	foreign := append(append(foreignModified, foreignAdded...), foreignDeleted...)
+	if len(foreign) > 0 {
+		recordForeignEvidence(ctx, event.SessionID, binding.SessionMeta{
+			AgentType:      string(ag.Type()),
+			TranscriptPath: event.SessionRef,
+			LaunchRoot:     repoRoot,
+		}, repoRoot, foreign)
+	}
 
 	if len(modified) == 0 && len(added) == 0 && len(deleted) == 0 {
 		return nil
@@ -429,10 +441,11 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 // normalizeToolUsePaths converts hook-payload paths to repo-root-relative form.
 // Codex apply_patch envelopes carry cwd-relative paths, so we join them against
-// eventCWD before FilterAndNormalizePaths rewrites against repoRoot.
-func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
+// eventCWD before FilterAndNormalizePaths rewrites against repoRoot. foreign
+// carries the absolute out-of-repo paths the clamp dropped (binding evidence).
+func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) (kept, foreign []string) {
 	if len(files) == 0 {
-		return nil
+		return nil, nil
 	}
 	resolved := make([]string, 0, len(files))
 	for _, f := range files {
@@ -445,7 +458,7 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 		}
 		resolved = append(resolved, filepath.Join(eventCWD, f))
 	}
-	return FilterAndNormalizePaths(resolved, repoRoot)
+	return FilterAndNormalizePathsCollectingForeign(resolved, repoRoot)
 }
 
 // handleLifecycleTurnStart handles turn start: captures pre-prompt state,
@@ -980,7 +993,17 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 	// Filter and normalize all paths
 	_, normalizeSpan := perf.Start(ctx, "filter_and_normalize_paths")
-	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
+	relModifiedFiles, foreignModifiedFiles := FilterAndNormalizePathsCollectingForeign(modifiedFiles, repoRoot)
+	// Transcript-extracted paths landing outside this repo are cross-repo
+	// binding evidence. Only this clamp taps: the DetectFileChanges clamps
+	// below operate on git-status output, in-repo by construction.
+	if len(foreignModifiedFiles) > 0 {
+		recordForeignEvidence(ctx, sessionID, binding.SessionMeta{
+			AgentType:      string(ag.Type()),
+			TranscriptPath: event.SessionRef,
+			LaunchRoot:     repoRoot,
+		}, repoRoot, foreignModifiedFiles)
+	}
 	var relNewFiles, relDeletedFiles []string
 	if changes != nil {
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
