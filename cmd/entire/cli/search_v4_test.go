@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/search"
@@ -64,6 +65,10 @@ func v4CellOK(resp *search.Response) cellCallResult[*search.Response] {
 
 func v4CellErr(err error) cellCallResult[*search.Response] {
 	return cellCallResult[*search.Response]{err: err}
+}
+
+func v4CellErrLabeled(cell string, err error) cellCallResult[*search.Response] {
+	return cellCallResult[*search.Response]{group: cellGroup{cell: cell}, err: err}
 }
 
 func v4ResultIDs(t *testing.T, results []search.Result) []string {
@@ -398,6 +403,71 @@ func TestMergeSemanticV4Responses_PartialFailureMergesSurvivorsWithWarning(t *te
 	}
 }
 
+// TestMergeSemanticV4Responses_PartialFailureNamesRegionAndReason verifies the
+// warning surfaces which region failed and why (Bug 3): the count-only warning
+// hid the region + reason in a discarded Debug log, making the underlying 1 MiB
+// truncation undiagnosable. A cell error can embed the raw response body, so
+// the surfaced reason must be a short single line, not a multi-MB blob.
+func TestMergeSemanticV4Responses_PartialFailureNamesRegionAndReason(t *testing.T) {
+	t.Parallel()
+
+	// Simulate parseSearchResponse's decode-failure error, which dumps the raw
+	// (here multi-MB) body into the error string.
+	hugeBody := strings.Repeat("x", 2<<20)
+	cellErr := fmt.Errorf("unexpected response from search service: %s", hugeBody)
+
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellErrLabeled("aws-us-east-2", cellErr),
+		v4CellOK(&search.Response{Results: []search.Result{
+			v4Ckpt("ok", 1, search.Meta{Score: 0.5}),
+		}, Total: 1}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly one", resp.Warnings)
+	}
+	w := resp.Warnings[0]
+	if !strings.Contains(w, "1 of 2 regions") {
+		t.Errorf("warning = %q, want the preserved '1 of 2 regions' prefix", w)
+	}
+	if !strings.Contains(w, "aws-us-east-2") {
+		t.Errorf("warning = %q, want it to name the failed region", w)
+	}
+	if !strings.Contains(w, "unexpected response from search service") {
+		t.Errorf("warning = %q, want a concise reason for the failure", w)
+	}
+	// The huge embedded body must be truncated out — the warning stays readable.
+	if len(w) > 500 {
+		t.Errorf("warning is %d bytes; the raw body must be truncated, not dumped in full", len(w))
+	}
+}
+
+// TestSummarizeCellError_StripsControlChars verifies the reason surfaced to the
+// terminal is sanitized: a cell error can embed the raw untrusted response body
+// (more exposed with --insecure), so ANSI escape / control bytes must be
+// stripped before the reason reaches stderr, never left to hijack the terminal.
+func TestSummarizeCellError_StripsControlChars(t *testing.T) {
+	t.Parallel()
+
+	// An injected ANSI escape + CR/BEL wrapped around real text.
+	err := errors.New("unexpected response: \x1b[31m\x1b]0;pwned\x07malicious\x1b[0m\rtext")
+	got := summarizeCellError(err)
+	for _, r := range got {
+		if !unicode.IsPrint(r) && r != ' ' {
+			t.Fatalf("summary %q still contains a non-printable rune %U", got, r)
+		}
+	}
+	if strings.ContainsRune(got, '\x1b') || strings.ContainsRune(got, '\x07') || strings.ContainsRune(got, '\r') {
+		t.Errorf("summary %q retained a control byte", got)
+	}
+	// The printable text survives.
+	if !strings.Contains(got, "malicious") || !strings.Contains(got, "text") {
+		t.Errorf("summary %q dropped printable content", got)
+	}
+}
+
 // TestMergeSemanticV4Responses_UnavailableCellsSkippedQuietly covers the
 // rollout reality: cells without query-serve deployed 404 on every search.
 // Those cells must not produce a user-facing warning — only real failures do,
@@ -468,6 +538,49 @@ func TestMergeSemanticV4Responses_AllCellsFail(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "semantic search") {
 		t.Errorf("error = %q, want it labeled semantic search", err.Error())
+	}
+}
+
+// TestMergeSemanticV4Responses_AllCellsFailTruncatesBody guards the all-failed
+// path: the returned error goes straight to the user's terminal, so a decode
+// failure that embeds the raw (multi-MB) response body must be summarized, not
+// dumped in full — the same guarantee the partial-failure warning gives.
+func TestMergeSemanticV4Responses_AllCellsFailTruncatesBody(t *testing.T) {
+	t.Parallel()
+
+	hugeBody := strings.Repeat("x", 2<<20)
+	_, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellErrLabeled("aws-us-east-2", fmt.Errorf("unexpected response from search service: %s", hugeBody)),
+	})
+	if err == nil {
+		t.Fatal("expected an error when the only cell failed")
+	}
+	if !strings.Contains(err.Error(), "unexpected response from search service") {
+		t.Errorf("error = %q, want the concise failure reason", err.Error())
+	}
+	if len(err.Error()) > 500 {
+		t.Errorf("error is %d bytes; the raw body must be truncated, not dumped in full", len(err.Error()))
+	}
+}
+
+// TestMergeSemanticV4Responses_AllCellsCancelledPreservesChain guards the
+// signal-exit path: on Ctrl-C during an all-region fan-out every cell fails
+// with context.Canceled and lands on the all-failed return. That error must
+// keep context.Canceled in its chain so main.go's
+// errors.Is(err, context.Canceled) quiet-exit still matches — summarizing to a
+// plain string (needed for the body-dump case) must not sever it.
+func TestMergeSemanticV4Responses_AllCellsCancelledPreservesChain(t *testing.T) {
+	t.Parallel()
+
+	_, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellErr(fmt.Errorf("calling search service: %w", context.Canceled)),
+		v4CellErr(fmt.Errorf("calling search service: %w", context.Canceled)),
+	})
+	if err == nil {
+		t.Fatal("expected an error when every cell was cancelled")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %q, want context.Canceled preserved in the chain", err.Error())
 	}
 }
 

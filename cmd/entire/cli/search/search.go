@@ -19,6 +19,16 @@ import (
 
 const apiTimeout = 30 * time.Second
 
+// maxResponseBytes bounds a single cell's response body. It is a DoS/runaway
+// guard, not a functional limit: a high-hit query against the largest cell
+// returns a few MB of result text (rows carry full transcript snippets), so the
+// cap sits ~30x above any legitimate page (which is itself bounded by the
+// per-request result limit). The previous 1 MiB cap silently truncated big
+// cells mid-JSON, failing the decode and dropping the whole region from a
+// cross-cell fan-out; readCappedBody now turns an over-cap body into an
+// explicit error instead of feeding truncated JSON to the decoder.
+const maxResponseBytes = 64 << 20 // 64 MiB
+
 // v4ServicePath is the per-repo v4 query-serve route exposed by the entire-api
 // cell gateway. It takes repo=<ULID>. The BFF (entire.io /api/v1/search)
 // forwards to this same path; the CLI dials the cell directly with a
@@ -662,9 +672,9 @@ func CellV4(ctx context.Context, client *api.Client, cfg Config, repoIDs []strin
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := readCappedBody(resp.Body, maxResponseBytes)
 	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
+		return nil, err
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		// The gateway has no semantic-search route (plain "404 page not
@@ -695,6 +705,23 @@ func addCommonSearchParams(q url.Values, cfg Config) {
 	if cfg.Page > 0 {
 		q.Set("page", strconv.Itoa(cfg.Page))
 	}
+}
+
+// readCappedBody reads up to maxBytes from r, returning an explicit error if
+// the body exceeds the cap rather than silently truncating it. A truncated
+// body would fail JSON decoding downstream and be misreported as a malformed
+// ("unexpected") response; making the overflow loud keeps the failure mode
+// diagnosable. Reading maxBytes+1 lets a body sitting exactly at the cap
+// succeed while anything larger is detected as over.
+func readCappedBody(r io.Reader, maxBytes int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("search service response exceeded the %d-byte read limit", maxBytes)
+	}
+	return body, nil
 }
 
 // parseSearchResponse decodes a search response body, preserving the
