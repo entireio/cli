@@ -128,10 +128,13 @@ func (g *gitHookContext) skipUnreadableCheckpointPolicy(err error) bool {
 // If Entire is not set up or disabled, returns a no-op to avoid creating files.
 func initHookLogging(ctx context.Context) func() {
 	// Don't create any files if Entire is not active for this repo
-	// (repo-level setup or the user-global tier). This is checked here as
-	// defense-in-depth (also checked in PersistentPreRunE); both layers of
-	// the gate must use the same predicate, settings.IsActiveForRepo, so
-	// global-mode repos get hook logging and redaction configuration too.
+	// (repo-level setup or the user-global tier). On the git-hook route this
+	// is defense-in-depth behind the PersistentPreRunE gate; on the
+	// agent-hook route it runs FIRST (hook_registry's PersistentPreRunE
+	// calls initHookLogging before executeAgentHook's gate), so it is the
+	// primary gate there. All gate layers must use the same predicate,
+	// settings.IsActiveForRepo, so global-mode repos get hook logging and
+	// redaction configuration too.
 	if !settings.IsActiveForRepo(ctx) {
 		return func() {}
 	}
