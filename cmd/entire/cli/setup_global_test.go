@@ -17,9 +17,21 @@ import (
 
 // No t.Parallel in this file: every test uses t.Chdir and/or t.Setenv.
 
+// isolateUserHome points os.UserHomeDir at a temp dir so the user-level agent
+// hook install/removal in the global enable/disable flow never touches the
+// developer's real ~/.claude or ~/.gemini settings.
+func isolateUserHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	return home
+}
+
 func TestRunEnableGlobalMode_OutsideGitRepo(t *testing.T) {
 	cfg := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	home := isolateUserHome(t)
 	t.Chdir(t.TempDir()) // deliberately not a git repository
 	t.Cleanup(settings.ClearGlobalModeCache)
 
@@ -34,14 +46,52 @@ func TestRunEnableGlobalMode_OutsideGitRepo(t *testing.T) {
 	if us.Global == nil || !us.Global.Enabled {
 		t.Fatalf("global.enabled not persisted: %+v", us.Global)
 	}
-	if !strings.Contains(buf.String(), "Global tracking enabled.") {
-		t.Fatalf("missing confirmation, got: %q", buf.String())
+	out := buf.String()
+	if !strings.Contains(out, "Global tracking enabled.") {
+		t.Fatalf("missing confirmation, got: %q", out)
+	}
+	// enable --global installs user-level agent hooks and reports per agent.
+	if !strings.Contains(out, "User-level agent hooks:") {
+		t.Fatalf("missing user-level hook report, got: %q", out)
+	}
+	for _, want := range []string{"claude-code: installed", "gemini: installed", "user-level hooks not supported:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q, got: %q", want, out)
+		}
+	}
+	for _, f := range []string{
+		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(home, ".gemini", "settings.json"),
+	} {
+		if _, err := os.Stat(f); err != nil {
+			t.Errorf("user-level hook file not written: %v", err)
+		}
+	}
+}
+
+func TestRunEnableGlobalMode_ReportsAlreadyInstalled(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	isolateUserHome(t)
+	t.Cleanup(settings.ClearGlobalModeCache)
+
+	if err := runEnableGlobalMode(t.Context(), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := runEnableGlobalMode(t.Context(), &buf); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"claude-code: already installed", "gemini: already installed"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("second enable missing %q, got: %q", want, buf.String())
+		}
 	}
 }
 
 func TestRunEnableGlobalMode_PreservesExcludeLists(t *testing.T) {
 	cfg := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	isolateUserHome(t)
 	t.Cleanup(settings.ClearGlobalModeCache)
 	content := `{"global":{"enabled":false,"exclude_paths":["~/oss/**"],"exclude_origins":["github.com/acme/*"]}}`
 	if err := os.WriteFile(filepath.Join(cfg, settings.UserSettingsFileName), []byte(content), 0o600); err != nil {
@@ -63,6 +113,7 @@ func TestRunEnableGlobalMode_PreservesExcludeLists(t *testing.T) {
 func TestRunDisableGlobalMode_AnswerIsDurable(t *testing.T) {
 	cfg := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	isolateUserHome(t)
 	t.Cleanup(settings.ClearGlobalModeCache)
 
 	var buf bytes.Buffer
@@ -83,6 +134,51 @@ func TestRunDisableGlobalMode_AnswerIsDurable(t *testing.T) {
 	maybeAskGlobalTracking(t.Context(), &wizardOut, EnableOptions{})
 	if wizardOut.Len() != 0 {
 		t.Fatalf("configured answer must silence the wizard, got: %q", wizardOut.String())
+	}
+}
+
+// TestRunDisableGlobalMode_RemovesUserHooksNonInteractive: without a TTY the
+// disable flow removes Entire's user-level hooks without prompting — and only
+// Entire's entries, leaving the rest of the user file intact.
+func TestRunDisableGlobalMode_RemovesUserHooksNonInteractive(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	home := isolateUserHome(t)
+	t.Cleanup(settings.ClearGlobalModeCache)
+
+	claudePath := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(claudePath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(claudePath, []byte(`{"model":"opus"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runEnableGlobalMode(t.Context(), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := runDisableGlobalMode(t.Context(), &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "user-level hooks removed") {
+		t.Fatalf("missing removal report, got: %q", buf.String())
+	}
+	data, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "entire hooks claude-code") {
+		t.Errorf("Entire hooks left in user settings: %s", data)
+	}
+	if !strings.Contains(string(data), "opus") {
+		t.Errorf("unrelated user settings key removed: %s", data)
+	}
+	gemini, err := os.ReadFile(filepath.Join(home, ".gemini", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(gemini), "entire hooks gemini") {
+		t.Errorf("Entire hooks left in gemini user settings: %s", gemini)
 	}
 }
 

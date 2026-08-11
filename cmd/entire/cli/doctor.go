@@ -7,14 +7,17 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"charm.land/huh/v2"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v6"
@@ -107,6 +110,10 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	// Agent-specific: Claude Code hook config drift.
 	checkClaudeCodeHookDrift(cmd)
+
+	// Global tracking tier: user-level agent hook coverage and this clone's
+	// lazy-setup state.
+	checkGlobalTracking(cmd)
 
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
 	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
@@ -501,6 +508,63 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 			fmt.Fprintf(w, "    - %s\n", ev)
 		}
 		fmt.Fprintln(w, "  Open /hooks inside Codex to approve them.")
+	}
+}
+
+// checkGlobalTracking runs the global-mode diagnostics. Warn-only:
+//
+//  1. Global tracking is on but user-level agent hooks are missing for an
+//     agent that supports them — sessions in never-enabled repos cannot fire
+//     a hook for those agents. Fix: `entire enable --global` (idempotent)
+//     re-installs them.
+//  2. This clone carries the globally_enabled clone-preferences marker but
+//     its git hooks are gone. Informational: the lazy setup path self-heals
+//     on the next agent session in this clone.
+//
+// Both checks stay silent while the global tier is unconfigured or off.
+func checkGlobalTracking(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	us, err := settings.LoadUserSettings(ctx)
+	if err != nil || us.Global == nil || !us.Global.Enabled {
+		return
+	}
+	w := cmd.OutOrStdout()
+
+	var missing []string
+	for _, name := range agent.List() {
+		ag, agErr := agent.Get(name)
+		if agErr != nil {
+			continue
+		}
+		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
+			continue
+		}
+		uhs, ok := agent.AsUserHookSupport(ag)
+		if !ok {
+			continue
+		}
+		if !uhs.AreUserHooksInstalled(ctx) {
+			missing = append(missing, string(name))
+		}
+	}
+	if len(missing) == 0 {
+		fmt.Fprintln(w, "✓ Global tracking: user-level agent hooks OK")
+	} else {
+		fmt.Fprintln(w, "Global tracking: USER-LEVEL AGENT HOOKS MISSING")
+		fmt.Fprintf(w, "  Global tracking is on, but user-level hooks are not installed for: %s\n", strings.Join(missing, ", "))
+		fmt.Fprintln(w, "  Sessions in repos without repo-level setup are not tracked for those agents.")
+		fmt.Fprintln(w, "  Run `entire enable --global` to install them.")
+	}
+
+	// Clone-local check: only meaningful when the lazy setup already ran here.
+	prefs, prefsErr := settings.LoadClonePreferences(ctx)
+	if prefsErr != nil || !prefs.GloballyEnabled {
+		return
+	}
+	if !strategy.IsGitHookInstalled(ctx) {
+		fmt.Fprintln(w, "Globally tracked clone: GIT HOOKS MISSING")
+		fmt.Fprintln(w, "  This clone was enabled by global tracking but its git hooks are gone.")
+		fmt.Fprintln(w, "  No action needed: the next agent session here reinstalls them (the lazy setup self-heals).")
 	}
 }
 

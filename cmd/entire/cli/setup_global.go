@@ -7,7 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -38,7 +40,107 @@ func runEnableGlobalMode(ctx context.Context, w io.Writer) error {
 	}
 	fmt.Fprintln(w, "Global tracking enabled.")
 	fmt.Fprintln(w, "Entire now tracks agent sessions in every repo on this machine that has no repo-level setup.")
+	installUserAgentHooks(ctx, w)
 	return nil
+}
+
+// installUserAgentHooks installs user-level agent hooks for every registered
+// agent that supports them and reports the outcome per agent. User-level
+// hooks are what let a session in a never-enabled repo fire a hook at all, so
+// they are the activation step of enable --global. Per-agent failures are
+// reported and skipped: global tracking is already on at this point, and one
+// broken user config file must not block the other agents. Writes only
+// user-scope config — never a repo file.
+func installUserAgentHooks(ctx context.Context, w io.Writer) {
+	fmt.Fprintln(w, "User-level agent hooks:")
+	var unsupported []string
+	for _, name := range agent.List() {
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
+			continue
+		}
+		uhs, ok := agent.AsUserHookSupport(ag)
+		if !ok {
+			unsupported = append(unsupported, string(name))
+			continue
+		}
+		count, err := uhs.InstallUserHooks(ctx)
+		switch {
+		case err != nil:
+			fmt.Fprintf(w, "  ! %s: install failed: %v\n", name, err)
+		case count == 0:
+			fmt.Fprintf(w, "  ✓ %s: already installed\n", name)
+		default:
+			fmt.Fprintf(w, "  ✓ %s: installed\n", name)
+		}
+	}
+	if len(unsupported) > 0 {
+		fmt.Fprintf(w, "  - user-level hooks not supported: %s\n", strings.Join(unsupported, ", "))
+	}
+}
+
+// installedUserHookAgents returns the registered, non-test agents whose
+// user-level hooks are currently installed.
+func installedUserHookAgents(ctx context.Context) []agent.UserHookSupport {
+	var installed []agent.UserHookSupport
+	for _, name := range agent.List() {
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
+			continue
+		}
+		if uhs, ok := agent.AsUserHookSupport(ag); ok && uhs.AreUserHooksInstalled(ctx) {
+			installed = append(installed, uhs)
+		}
+	}
+	return installed
+}
+
+// maybeRemoveUserAgentHooks offers to remove Entire's user-level agent hooks
+// after disable --global. Removal only ever touches entries recognized as
+// Entire's. Interactive runs confirm first; non-interactive runs remove ours
+// without asking. A declined or aborted prompt leaves the hooks in place —
+// they gate on the (now off) global tier, so they are inert until removed.
+func maybeRemoveUserAgentHooks(ctx context.Context, w io.Writer) {
+	installed := installedUserHookAgents(ctx)
+	if len(installed) == 0 {
+		return
+	}
+	remove := true
+	if interactive.CanPromptInteractively() {
+		form := NewAccessibleForm(
+			huh.NewGroup(
+				huh.NewConfirm().
+					Title("Also remove Entire's user-level agent hooks?").
+					Description("Removes only Entire's entries from the agents' user-level settings.").
+					Affirmative("Yes").
+					Negative("No").
+					Value(&remove),
+			),
+		)
+		if err := form.Run(); err != nil {
+			if !errors.Is(err, huh.ErrUserAborted) && !errors.Is(err, context.Canceled) {
+				logging.Debug(ctx, "user hook removal prompt failed", "error", err)
+			}
+			remove = false
+		}
+	}
+	if !remove {
+		fmt.Fprintln(w, "User-level agent hooks left in place (inert while global tracking is off); run 'entire disable --global' again to remove them.")
+		return
+	}
+	for _, uhs := range installed {
+		if err := uhs.UninstallUserHooks(ctx); err != nil {
+			fmt.Fprintf(w, "  ! %s: could not remove user-level hooks: %v\n", uhs.Name(), err)
+			continue
+		}
+		fmt.Fprintf(w, "  ✓ %s: user-level hooks removed\n", uhs.Name())
+	}
 }
 
 // runDisableGlobalMode turns the user-global tracking tier off. The answer is
@@ -57,6 +159,7 @@ func runDisableGlobalMode(ctx context.Context, w io.Writer) error {
 		return fmt.Errorf("saving user settings: %w", err)
 	}
 	fmt.Fprintln(w, "Global tracking disabled.")
+	maybeRemoveUserAgentHooks(ctx, w)
 	return nil
 }
 
@@ -111,6 +214,9 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 	}
 	if enable {
 		fmt.Fprintln(w, "  ✓ Global tracking enabled")
+		// The wizard's yes is the same commitment as enable --global, so it
+		// triggers the same user-level hook install (user-scope config only).
+		installUserAgentHooks(ctx, w)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
@@ -60,9 +61,14 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 		return runStatusJSON(ctx, w)
 	}
 
-	// Check if we're in a git repository
+	// Check if we're in a git repository. Not being in one is a valid status
+	// now that the global tier exists machine-wide: report the global line
+	// plus a short note instead of failing.
 	if _, repoErr := paths.WorktreeRoot(ctx); repoErr != nil {
+		sty := newStatusStyles(w)
 		fmt.Fprintln(w, "✕ not a git repository")
+		writeGlobalTrackingLine(ctx, w, sty)
+		fmt.Fprintln(w, sty.render(sty.dim, "Run inside a git repository for repo-level status."))
 		return nil //nolint:nilerr // Not being in a git repo is a valid status, not an error
 	}
 
@@ -88,12 +94,15 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	projectExists := projectErr == nil
 	localExists := localErr == nil
 
+	sty := newStatusStyles(w)
+
 	if !projectExists && !localExists {
 		fmt.Fprintln(w, "○ not set up (run `entire enable` to get started)")
+		// This is exactly where the global tier matters: a repo with no
+		// repo-level setup may still be tracked machine-wide.
+		writeGlobalTrackingLine(ctx, w, sty)
 		return nil
 	}
-
-	sty := newStatusStyles(w)
 
 	if detailed {
 		return runStatusDetailed(ctx, w, sty, settingsPath, localSettingsPath, projectExists, localExists)
@@ -106,12 +115,68 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	}
 
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
+	writeGlobalTrackingLine(ctx, w, sty)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
 	writeAgentHelpHint(w, sty)
 
 	return nil
+}
+
+// globalTrackingInfo is the shared computation behind the text and JSON
+// global-tracking status, so the two outputs cannot drift. Local reads only.
+type globalTrackingInfo struct {
+	// Configured is false while the machine-wide question was never answered
+	// (global tier absent from the user settings file, or the file is
+	// unreadable) — the status line is omitted entirely then.
+	Configured bool
+	Enabled    bool
+	// AgentsCovered counts agents whose user-level hooks are installed; only
+	// meaningful when Enabled.
+	AgentsCovered int
+}
+
+func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
+	us, err := settings.LoadUserSettings(ctx)
+	if err != nil || us.Global == nil {
+		return globalTrackingInfo{}
+	}
+	info := globalTrackingInfo{Configured: true, Enabled: us.Global.Enabled}
+	if !info.Enabled {
+		return info
+	}
+	for _, name := range agent.List() {
+		ag, agErr := agent.Get(name)
+		if agErr != nil {
+			continue
+		}
+		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
+			continue
+		}
+		if uhs, ok := agent.AsUserHookSupport(ag); ok && uhs.AreUserHooksInstalled(ctx) {
+			info.AgentsCovered++
+		}
+	}
+	return info
+}
+
+// writeGlobalTrackingLine prints the machine-wide tracking line: on with the
+// user-level agent hook coverage count, off, or nothing while unconfigured.
+func writeGlobalTrackingLine(ctx context.Context, w io.Writer, sty statusStyles) {
+	info := computeGlobalTrackingInfo(ctx)
+	if !info.Configured {
+		return
+	}
+	if !info.Enabled {
+		fmt.Fprintln(w, sty.render(sty.dim, "global tracking: off"))
+		return
+	}
+	noun := "agents"
+	if info.AgentsCovered == 1 {
+		noun = "agent"
+	}
+	fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("global tracking: on (%d %s covered)", info.AgentsCovered, noun)))
 }
 
 // agentHelpCommand is the invocation a coding agent runs to get machine-readable
@@ -136,6 +201,7 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, effectiveSettings, sty))
+	writeGlobalTrackingLine(ctx, w, sty)
 	fmt.Fprintln(w) // blank line
 
 	// Show project settings if it exists
@@ -746,7 +812,19 @@ type statusJSON struct {
 	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|tracking|default|sole|first|dedicated
 	CheckpointSyncError        string `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
 	UnpushedCheckpoints        int    `json:"unpushed_checkpoints,omitempty"`
-	Error                      string `json:"error,omitempty"`
+	// GlobalTracking reports the machine-wide tracking tier. Omitted while
+	// unconfigured (the one-time question was never answered). Present on
+	// every output shape, including the not-a-git-repository one — status
+	// works outside a repo now that the global tier is machine-wide.
+	GlobalTracking *globalTrackingJSON `json:"global_tracking,omitempty"`
+	Error          string              `json:"error,omitempty"`
+}
+
+// globalTrackingJSON mirrors globalTrackingInfo for `entire status --json`.
+type globalTrackingJSON struct {
+	Enabled bool `json:"enabled"`
+	// AgentsCovered counts agents whose user-level hooks are installed.
+	AgentsCovered int `json:"agents_covered"`
 }
 
 type sessionBriefJSON struct {
@@ -756,7 +834,14 @@ type sessionBriefJSON struct {
 }
 
 func runStatusJSON(ctx context.Context, w io.Writer) error {
+	// Attach the global-tracking tier to every output shape (including the
+	// error shapes) so `status --json` is useful outside a git repository.
+	var gt *globalTrackingJSON
+	if info := computeGlobalTrackingInfo(ctx); info.Configured {
+		gt = &globalTrackingJSON{Enabled: info.Enabled, AgentsCovered: info.AgentsCovered}
+	}
 	writeJSON := func(v statusJSON) error {
+		v.GlobalTracking = gt
 		return json.NewEncoder(w).Encode(v)
 	}
 

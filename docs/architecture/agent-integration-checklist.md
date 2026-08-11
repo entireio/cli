@@ -84,3 +84,58 @@ See Guide: [Testing Patterns](agent-guide.md#testing-patterns)
 - [ ] **Rewind**: Rewind to earlier checkpoint, verify agent can continue from that state
 - [ ] **Agent shutdown**: Verify graceful handling if agent exits during checkpoint
 - [ ] **Manual token validation for session-wide aggregate agents**: If an agent emits authoritative token totals only at session end (for example Copilot CLI `session.shutdown`), manually verify checkpoint-scoped metadata and full-session status separately. See [Copilot Token Validation](copilot-token-validation.md).
+
+## User-Level Hook Support (Global Tracking)
+
+`agent.UserHookSupport` (`cmd/entire/cli/agent/user_hooks.go`) is an optional
+extension of `HookSupport` for agents whose hooks can also be installed at the
+USER level (home-directory config), so they fire in every repository —
+including repos with no repo-level Entire setup. This is what lets global
+tracking (`entire enable --global`) reach a repo that was never enabled:
+without a user-level hook no agent hook fires there, so the lazy global enable
+never gets a chance to run.
+
+Contract:
+
+- User-level installs write ONLY user-scope config files (never a file inside
+  a repository), and the hook commands use the plain production `entire`
+  binary form — never a repo-local dev script path, which would be
+  meaningless outside that repo.
+- `UninstallUserHooks` removes only entries recognizable as Entire's and
+  preserves every unrelated key in the user config file.
+- All three methods are safe to call outside a git repository.
+- Implement the interface only for agents with a verified user/repo dedup
+  story (both scopes installed must never double-fire hooks); never fake it
+  for agents without a real user-level surface.
+
+Audit of built-in agents (2026-08), recorded per the global-enable design:
+
+- **claude-code**: IMPLEMENTED. `~/.claude/settings.json` accepts the same
+  hooks schema as the repo's `.claude/settings.json`. Claude Code merges
+  hooks across settings scopes and deduplicates identical hook commands;
+  the user-level entries are byte-identical to the repo-level production
+  entries, so a repo with both installed fires each hook once.
+- **gemini**: IMPLEMENTED. `~/.gemini/settings.json` accepts the same hooks
+  schema as the repo's `.gemini/settings.json`; workspace settings take
+  precedence over user settings for the same key, so repo-level installs
+  win and hooks do not double-fire.
+- **cursor**: NOT implemented. Cursor supports a user-level
+  `~/.cursor/hooks.json`, but does not document dedup between user- and
+  project-level hook entries, so installing both risks double-firing
+  every hook; deferred until that contract is verified.
+- **codex**: NOT implemented. Entire manages the repo-scoped
+  `.codex/hooks.json` only, and Codex requires per-machine trust approval
+  (`/hooks`) keyed to each hooks file — a silently installed user-level
+  file would sit unapproved and never fire.
+- **copilot-cli**: NOT implemented. Copilot CLI discovers hook configs from
+  the repository's `.github/hooks` directory; there is no user-level hook
+  surface.
+- **opencode**: NOT implemented. OpenCode has a global plugin directory
+  (`~/.config/opencode/plugin`), but Entire's plugin install contract is
+  only verified for the repo-level `.opencode/plugins` directory; deferred.
+- **pi**: NOT implemented. Entire's pi extension is auto-discovered from the
+  repo's `.pi/extensions` directory; no verified user-level surface.
+- **factoryai-droid**: NOT implemented. Droid reads `~/.factory/settings.json`,
+  but dedup between user- and repo-level hook entries is undocumented, so
+  installing both risks double-firing; deferred.
+- **vogon**: test-only agent, excluded from user-level hook management.
