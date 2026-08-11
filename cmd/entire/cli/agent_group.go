@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/spf13/cobra"
@@ -57,57 +59,61 @@ func runAgentMenu(ctx context.Context, w io.Writer) error {
 }
 
 func newAgentListCmd() *cobra.Command {
-	var all bool
+	var externalOnly bool
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List installed and available agents",
+		Short: "List built-in agents (use --external to list external plugins on your PATH)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAgentList(cmd.Context(), cmd.OutOrStdout(), all)
+			return runAgentList(cmd.Context(), cmd.OutOrStdout(), externalOnly)
 		},
 	}
-	cmd.Flags().BoolVar(&all, "all", false,
-		"Also list available external agent plugins found on your PATH, not just installed ones")
+	cmd.Flags().BoolVar(&externalOnly, "external", false,
+		"List external agent plugins found on your PATH instead of built-in agents")
 	return cmd
 }
 
-func runAgentList(ctx context.Context, w io.Writer, all bool) error {
-	// Discover external agent plugins so installed ones appear in the listing.
-	// Default: gated discovery (honors external_agents). An external agent can
-	// only become installed via `agent add`, which enables external_agents, so
-	// this surfaces every installed external without executing plugins for users
-	// who never opted in. `--all` uses ungated discovery so available-but-
-	// uninstalled plugins on $PATH are found and shown too.
-	if all {
+func runAgentList(ctx context.Context, w io.Writer, externalOnly bool) error {
+	// --external is the explicit opt-in to the costly path: register external
+	// plugins from $PATH so they list through the same rendering as built-ins
+	// (real names, capabilities, test-only filtering). The default path never
+	// discovers, so it stays fast regardless of how many plugins are on $PATH.
+	if externalOnly {
 		external.DiscoverAndRegisterAlways(ctx)
 	}
 
-	installed := GetAgentsWithHooksInstalled(ctx)
-	installedSet := make(map[types.AgentName]struct{}, len(installed))
-	for _, name := range installed {
-		installedSet[name] = struct{}{}
-	}
-
+	hasSomeInstalled := false
 	fmt.Fprintln(w, "Agents:")
-	for _, name := range agent.StringList() {
-		agentName := types.AgentName(name)
-		_, isInstalled := installedSet[agentName]
-
-		// Built-ins and installed externals always appear. Available (not-yet-
-		// installed) external plugins appear only with --all.
-		if !all && !isInstalled {
-			if ag, err := agent.Get(agentName); err == nil && external.IsExternal(ag) {
-				continue
-			}
+	for _, name := range agent.List() {
+		ag, err := agent.Get(name)
+		if err != nil {
+			logging.Debug(ctx, "agent registered but unresolvable, skipping",
+				slog.String("agent", string(name)), slog.String("error", err.Error()))
+			continue
 		}
-
+		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
+			continue
+		}
+		// Default lists built-in agents; --external lists external plugins.
+		if external.IsExternal(ag) != externalOnly {
+			continue
+		}
+		installed := false
+		if hs, ok := agent.AsHookSupport(ag); ok && hs.AreHooksInstalled(ctx) {
+			installed = true
+			hasSomeInstalled = true
+		}
 		marker := "  "
-		if isInstalled {
+		if installed {
 			marker = "✓ "
 		}
 		fmt.Fprintf(w, "  %s%s\n", marker, name)
 	}
-	if len(installed) == 0 {
+
+	if !hasSomeInstalled {
 		fmt.Fprintln(w, "\nNo agents installed. Use 'entire agent add <name>' to install hooks.")
+	}
+	if !externalOnly {
+		fmt.Fprintln(w, "\nRun 'entire agent list --external' to list external agent plugins on your PATH.")
 	}
 	return nil
 }

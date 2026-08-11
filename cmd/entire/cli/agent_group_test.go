@@ -85,68 +85,61 @@ func TestAgentGroupBareCommandRunsAgentMenu(t *testing.T) {
 	}
 }
 
-// TestRunAgentList_AvailableExternalRequiresAllFlag verifies that an
-// available-but-uninstalled external plugin on $PATH appears only with `--all`,
-// not in the default listing.
-func TestRunAgentList_AvailableExternalRequiresAllFlag(t *testing.T) {
+// TestRunAgentList_ExternalFlagListsAvailablePlugin verifies that an
+// available-but-uninstalled external plugin on $PATH is listed under
+// `--external`, and that the default (built-in) listing does not touch $PATH.
+func TestRunAgentList_ExternalFlagListsAvailablePlugin(t *testing.T) {
 	// Cannot use t.Parallel because we modify PATH via t.Setenv and cwd via t.Chdir.
-	// The mock agent is a #!/bin/sh script run by discovery, so skip on
-	// environments without a POSIX shell (matching sibling external-agent tests).
+	// The mock agent is a #!/bin/sh script run by the install-state probe, so skip
+	// on environments without a POSIX shell (matching sibling external-agent tests).
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
 
-	// runAgentList discovers and registers the mock into the process-global
-	// agent registry; restore it so the temp-binary-backed agent doesn't leak
-	// into later tests in the package.
+	// --external registers the mock into the process-global registry; restore it
+	// so the temp-binary-backed agent doesn't leak into later package tests.
 	t.Cleanup(agent.SnapshotForTesting())
 
-	// external_agents ON so discovery runs; the mock reports hooks NOT installed,
-	// i.e. it is available but not installed.
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
 	testutil.WriteFile(t, repoDir, ".entire/settings.json", `{"enabled":true,"external_agents":true}`)
 	t.Chdir(repoDir)
 
-	// Unique name so the process-global agent registry can't collide with other tests.
+	// Unique name so parallel package tests can't collide on $PATH.
 	const agentName = "ext-available-test"
 	externalDir := t.TempDir()
 	writeExternalAgentBinary(t, externalDir, agentName) // are-hooks-installed => false
 	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	// Default listing omits an available (not-installed) external plugin.
+	// Default listing is built-ins only — never scans $PATH, so no external.
 	var def bytes.Buffer
 	if err := runAgentList(context.Background(), &def, false); err != nil {
 		t.Fatalf("runAgentList (default): %v", err)
 	}
 	if strings.Contains(def.String(), agentName) {
-		t.Errorf("default listing must not include available (uninstalled) external agent %q, got:\n%s", agentName, def.String())
+		t.Errorf("default listing must not include external agent %q, got:\n%s", agentName, def.String())
 	}
 
-	// --all surfaces available external plugins on $PATH.
-	var all bytes.Buffer
-	if err := runAgentList(context.Background(), &all, true); err != nil {
-		t.Fatalf("runAgentList (--all): %v", err)
+	// --external surfaces available external plugins on $PATH.
+	var ext bytes.Buffer
+	if err := runAgentList(context.Background(), &ext, true); err != nil {
+		t.Fatalf("runAgentList (--external): %v", err)
 	}
-	if !strings.Contains(all.String(), agentName) {
-		t.Errorf("--all listing should include available external agent %q, got:\n%s", agentName, all.String())
+	if !strings.Contains(ext.String(), agentName) {
+		t.Errorf("--external listing should include available external agent %q, got:\n%s", agentName, ext.String())
 	}
 }
 
-// TestRunAgentList_ShowsInstalledExternalByDefault verifies that an INSTALLED
-// external agent appears (marked installed) in the default listing, without
-// needing --all — mirroring how a real `entire agent add <external>` enables
-// external_agents and installs the plugin's hooks.
-func TestRunAgentList_ShowsInstalledExternalByDefault(t *testing.T) {
+// TestRunAgentList_ExternalFlagMarksInstalled verifies that an INSTALLED external
+// plugin is listed and marked installed (✓) under `--external`.
+func TestRunAgentList_ExternalFlagMarksInstalled(t *testing.T) {
 	// Cannot use t.Parallel because we modify PATH via t.Setenv and cwd via t.Chdir.
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
 
-	// runAgentList discovers and registers the mock into the process-global
-	// agent registry; restore it so this installed-reporting mock doesn't leak
-	// into later tests (its temp binary is deleted at cleanup, so a leaked
-	// registration would poison GetAgentsWithHooksInstalled package-wide).
+	// --external registers the mock into the process-global registry; restore it
+	// so the installed-reporting mock doesn't leak into later package tests.
 	t.Cleanup(agent.SnapshotForTesting())
 
 	repoDir := t.TempDir()
@@ -160,15 +153,11 @@ func TestRunAgentList_ShowsInstalledExternalByDefault(t *testing.T) {
 	writeExternalAgentBinaryEx(t, externalDir, agentName, true) // are-hooks-installed => true
 	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	var def bytes.Buffer
-	if err := runAgentList(context.Background(), &def, false); err != nil {
-		t.Fatalf("runAgentList (default): %v", err)
+	var ext bytes.Buffer
+	if err := runAgentList(context.Background(), &ext, true); err != nil {
+		t.Fatalf("runAgentList (--external): %v", err)
 	}
-	out := def.String()
-	if !strings.Contains(out, agentName) {
-		t.Errorf("default listing should include installed external agent %q, got:\n%s", agentName, out)
-	}
-	if !strings.Contains(out, "✓ "+agentName) {
-		t.Errorf("installed external agent %q should be marked installed (✓), got:\n%s", agentName, out)
+	if !strings.Contains(ext.String(), "✓ "+agentName) {
+		t.Errorf("installed external agent %q should be marked installed (✓) under --external, got:\n%s", agentName, ext.String())
 	}
 }
