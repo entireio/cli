@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
@@ -54,6 +56,12 @@ type UserSettings struct {
 	Global *GlobalConfig `json:"global,omitempty"`
 }
 
+// UserSettingsPath returns the absolute path of the user-global settings
+// file, for callers that name it in error messages.
+func UserSettingsPath() string {
+	return filepath.Join(userdirs.Config(), UserSettingsFileName)
+}
+
 // LoadUserSettings reads the user-global settings file. A missing file is not
 // an error: it returns an empty UserSettings (Global == nil, meaning the
 // global tier is unconfigured). A malformed file returns an error; callers on
@@ -63,7 +71,7 @@ func LoadUserSettings(_ context.Context) (*UserSettings, error) {
 	// symlinks, and ~/.config/entire/settings.json is commonly symlinked by
 	// dotfile managers — with fail-closed semantics that would silently
 	// disable global mode.
-	data, err := os.ReadFile(filepath.Join(userdirs.Config(), UserSettingsFileName))
+	data, err := os.ReadFile(UserSettingsPath())
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return &UserSettings{}, nil
@@ -80,6 +88,31 @@ func LoadUserSettings(_ context.Context) (*UserSettings, error) {
 		return nil, fmt.Errorf("parsing user settings: %w", err)
 	}
 	return &us, nil
+}
+
+// SaveUserSettings writes the user-global settings file atomically (temp file
+// in userdirs.Config() + rename, 0o600), creating the config directory if
+// needed. It writes exactly the known schema: unknown keys are never
+// preserved, by design — LoadUserSettings decodes strictly, so a load-modify-
+// save cycle against a newer file fails at load rather than silently dropping
+// keys here. It also resets the process-level caches derived from the file
+// (the GlobalModeActive memo and the invisible-routing decision), so a writer
+// process observes its own write.
+func SaveUserSettings(_ context.Context, us *UserSettings) error {
+	dir := userdirs.Config()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating config directory: %w", err)
+	}
+	data, err := jsonutil.MarshalIndentWithNewline(us, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding user settings: %w", err)
+	}
+	if err := jsonutil.WriteFileAtomic(UserSettingsPath(), data, 0o600); err != nil {
+		return fmt.Errorf("writing user settings: %w", err)
+	}
+	ClearGlobalModeCache()
+	paths.ClearInvisibleRuntimeCache()
+	return nil
 }
 
 // normalizeOrigin reduces a git remote URL to lowercase "host/owner/repo" for
@@ -183,13 +216,57 @@ func matchesExcludeOrigin(ctx context.Context, patterns []string, normalizedOrig
 	return false
 }
 
+// globalModeCache memoizes GlobalModeActive per worktree root. Hooks are
+// one-shot processes that evaluate the gate more than once (logging init plus
+// the entry gate), and the exclude_origins check forks git each time; one
+// probe per process removes that cost and guarantees every gate in the
+// process sees one consistent answer. The root key keeps in-process tests
+// with multiple temp repos isolated (same pattern as the invisible-routing
+// cache in paths).
+var (
+	globalModeMu     sync.Mutex
+	globalModeRoot   string
+	globalModeCached bool
+	globalModeActive bool
+)
+
+// ClearGlobalModeCache resets the memoized GlobalModeActive result.
+// For tests that flip user-global settings mid-process; SaveUserSettings also
+// calls it so a writer process observes its own write.
+func ClearGlobalModeCache() {
+	globalModeMu.Lock()
+	globalModeRoot = ""
+	globalModeCached = false
+	globalModeActive = false
+	globalModeMu.Unlock()
+}
+
 // GlobalModeActive reports whether the user-global tier activates Entire for
 // the current worktree: the global tier is configured and enabled, the
 // worktree is resolvable, and no exclude pattern matches. Every error path
 // returns false (fail closed) — a hook must never proceed on a guess. A repo
 // with no origin remote stays active (it matches no origin pattern), but a
 // failed origin lookup deactivates: exclusion could not be checked.
+// The result is memoized per process (see globalModeCache above).
 func GlobalModeActive(ctx context.Context) bool {
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return false
+	}
+	globalModeMu.Lock()
+	defer globalModeMu.Unlock()
+	if globalModeCached && globalModeRoot == root {
+		return globalModeActive
+	}
+	active := computeGlobalModeActive(ctx, root)
+	globalModeRoot = root
+	globalModeCached = true
+	globalModeActive = active
+	return active
+}
+
+// computeGlobalModeActive is the uncached evaluation behind GlobalModeActive.
+func computeGlobalModeActive(ctx context.Context, root string) bool {
 	us, err := LoadUserSettings(ctx)
 	if err != nil {
 		logging.Debug(ctx, "user settings unreadable; treating global mode as inactive",
@@ -197,10 +274,6 @@ func GlobalModeActive(ctx context.Context) bool {
 		return false
 	}
 	if us.Global == nil || !us.Global.Enabled {
-		return false
-	}
-	root, err := paths.WorktreeRoot(ctx)
-	if err != nil {
 		return false
 	}
 	if matchesExcludePath(ctx, us.Global.ExcludePaths, root) {
