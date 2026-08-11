@@ -173,11 +173,13 @@ func sessionTranscriptPath(ctx context.Context, sessionID string) (string, error
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return "", fmt.Errorf("invalid session ID for transcript path: %w", err)
 	}
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	// AbsPath (not a bare WorktreeRoot join) so globally tracked repos keep
+	// this cache out of the worktree (invisible-mode routing in paths).
+	tmpFile, err := paths.AbsPath(ctx, paths.EntireTmpDir+"/"+sessionID+".json")
 	if err != nil {
-		repoRoot = "."
+		tmpFile = filepath.Join(".", paths.EntireTmpDir, sessionID+".json")
 	}
-	return filepath.Join(repoRoot, paths.EntireTmpDir, sessionID+".json"), nil
+	return tmpFile, nil
 }
 
 // fetchAndCacheExport calls `opencode export <sessionID>` and writes the result
@@ -192,13 +194,12 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 		return "", fmt.Errorf("invalid session ID for export: %w", err)
 	}
 
-	// Get worktree root for the temp directory
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	// Resolve the temp directory via AbsPath so globally tracked repos keep
+	// this cache out of the worktree (invisible-mode routing in paths).
+	tmpDir, err := paths.AbsPath(ctx, paths.EntireTmpDir)
 	if err != nil {
-		repoRoot = "."
+		tmpDir = filepath.Join(".", paths.EntireTmpDir)
 	}
-
-	tmpDir := filepath.Join(repoRoot, paths.EntireTmpDir)
 	tmpFile := filepath.Join(tmpDir, sessionID+".json")
 
 	// Integration test mode: use pre-written mock file without calling opencode export

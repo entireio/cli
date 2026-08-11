@@ -196,6 +196,13 @@ type ClonePreferences struct {
 	TrailsAgentHelpFailureRepoKey  string     `json:"trails_agent_help_failure_repo_key,omitempty"`
 	TrailsAgentHelpFailureAPIBase  string     `json:"trails_agent_help_failure_api_base,omitempty"`
 	TrailsAgentHelpFailureAuthKey  string     `json:"trails_agent_help_failure_auth_key,omitempty"`
+
+	// GloballyEnabled records that this clone completed the lazy invisible
+	// setup for user-global tracking (git hooks installed, checkpoint metadata
+	// ref ensured) without any repo-level settings. It is the once-per-clone
+	// "already done" marker consulted before that setup does any work; a later
+	// repo-level `entire enable` is unaffected by it.
+	GloballyEnabled bool `json:"globally_enabled,omitempty"`
 }
 
 // SummaryGenerationSettings configures provider selection for on-demand

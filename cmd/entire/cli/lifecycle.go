@@ -600,8 +600,14 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	// install, so doing this write first keeps every cached read consistent with
 	// the worktree. Moving this back below CapturePrePromptState would reintroduce
 	// a tracked-file write between two cached reads.
+	//
+	// EnsureSetupForHook (not EnsureSetup): a repo with no repo-level setup —
+	// reachable here only via the user-global tier — must never receive
+	// worktree writes like .entire/.gitignore; it gets the invisible
+	// MaybeEnsureGlobalSetup instead, which writes only inside .git/ and so
+	// also keeps the status-cache window valid.
 	_, setupSpan := perf.Start(ctx, "ensure_setup")
-	if err := strategy.EnsureSetup(ctx); err != nil {
+	if err := strategy.EnsureSetupForHook(ctx); err != nil {
 		logging.Warn(logCtx, "failed to ensure strategy setup",
 			slog.String("error", err.Error()))
 	}

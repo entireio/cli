@@ -17,6 +17,7 @@ const (
 	EntireDir         = ".entire"
 	EntireTmpDir      = ".entire/tmp"
 	EntireMetadataDir = ".entire/metadata"
+	EntireLogsDir     = ".entire/logs"
 
 	osWindows = "windows"
 	osDarwin  = "darwin"
@@ -109,6 +110,12 @@ func ClearWorktreeRootCache() {
 // AbsPath returns the absolute path for a relative path within the repository.
 // If the path is already absolute, it is returned as-is.
 // Uses WorktreeRoot() to resolve paths relative to the worktree root.
+//
+// Exception: runtime-data paths (.entire/metadata, .entire/logs, .entire/tmp)
+// in a repo tracked only by the user-global tier resolve under the git common
+// dir instead of the worktree, so a globally tracked repo never gains worktree
+// files (see invisibleRuntimeBase in invisible.go). Repos with any repo-level
+// setup resolve every path to the worktree, exactly as before.
 func AbsPath(ctx context.Context, relPath string) (string, error) {
 	if filepath.IsAbs(relPath) {
 		return relPath, nil
@@ -117,6 +124,12 @@ func AbsPath(ctx context.Context, relPath string) (string, error) {
 	root, err := WorktreeRoot(ctx)
 	if err != nil {
 		return "", err
+	}
+
+	if sub, ok := runtimeDataSubpath(relPath); ok {
+		if base := invisibleRuntimeBase(ctx, root); base != "" {
+			return filepath.Join(base, filepath.FromSlash(sub)), nil
+		}
 	}
 
 	return filepath.Join(root, relPath), nil

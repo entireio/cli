@@ -618,7 +618,7 @@ func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found boo
 // GetNextCheckpointSequence returns the next sequence number for incremental checkpoints.
 // It counts existing checkpoint files in the task metadata checkpoints directory.
 // Returns 1 if no checkpoints exist yet.
-func GetNextCheckpointSequence(sessionID, taskToolUseID string) int {
+func GetNextCheckpointSequence(ctx context.Context, sessionID, taskToolUseID string) int {
 	// sessionID/taskToolUseID arrive from agent hook input and are used as path
 	// components below. Reject unsafe values so a crafted "../.." cannot redirect
 	// the os.ReadDir to an arbitrary directory; an invalid ID just starts at 1.
@@ -630,6 +630,12 @@ func GetNextCheckpointSequence(sessionID, taskToolUseID string) int {
 	sessionMetadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
 	taskMetadataDir := strategy.TaskMetadataDir(sessionMetadataDir, taskToolUseID)
 	checkpointsDir := filepath.Join(taskMetadataDir, "checkpoints")
+	// Resolve via AbsPath: it anchors the read at the repo root regardless of
+	// the hook's cwd, and in globally tracked repos it follows the
+	// invisible-mode metadata location under the git common dir.
+	if abs, err := paths.AbsPath(ctx, checkpointsDir); err == nil {
+		checkpointsDir = abs
+	}
 
 	entries, err := os.ReadDir(checkpointsDir)
 	if err != nil {
