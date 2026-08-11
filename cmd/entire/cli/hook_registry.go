@@ -104,6 +104,10 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		if hookName == sessionStartHookVerb && settings.GlobalTierEnabled(cmd.Context()) {
 			warnInactiveOnSessionStart(cmd.Context(), cmd.ErrOrStderr(), agentName, hookName, notGitRepoSessionStartNotice)
 		}
+		// No repo at cwd: capture is impossible, but the session's evidence
+		// may name repos elsewhere (parent-dir launches, #1098). Record it
+		// best-effort and still exit 0 so the agent is never blocked.
+		recordNoRepoEvidence(cmd.Context(), agentName, hookName, cmd.InOrStdin())
 		return nil
 	}
 	ctx, policy, policyErr := prepareHookPolicy(cmd.Context())

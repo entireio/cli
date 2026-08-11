@@ -49,8 +49,8 @@ func TestRecordBinding_CreatesRecordOnFirstWrite(t *testing.T) {
 	if rec == nil {
 		t.Fatal("expected record")
 	}
-	if rec.Version != 1 {
-		t.Errorf("version = %d, want 1", rec.Version)
+	if rec.Version != 2 {
+		t.Errorf("version = %d, want 2", rec.Version)
 	}
 	if rec.SessionID != "sess-1" {
 		t.Errorf("session id = %q", rec.SessionID)
@@ -232,7 +232,7 @@ func TestRecordBinding_RefusesNewerRecordVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "sess-1.json")
-	newer := []byte(`{"version":2,"session_id":"sess-1","future_field":"must survive"}`)
+	newer := []byte(`{"version":3,"session_id":"sess-1","future_field":"must survive"}`)
 	if err := os.WriteFile(path, newer, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -248,16 +248,114 @@ func TestRecordBinding_RefusesNewerRecordVersion(t *testing.T) {
 		t.Errorf("newer-version record was modified:\n%s", got)
 	}
 
-	// Version-1 round-trip is unaffected by the gate.
+	// Current-version round-trip is unaffected by the gate.
 	if err := RecordBinding(ctx, "sess-2", testMeta(), testEvidence("b", true)); err != nil {
 		t.Fatal(err)
 	}
 	rec, err := LoadRecord(ctx, "sess-2")
 	if err != nil || rec == nil || rec.Version != CurrentRecordVersion {
-		t.Fatalf("v1 round-trip broken: rec=%+v err=%v", rec, err)
+		t.Fatalf("current-version round-trip broken: rec=%+v err=%v", rec, err)
 	}
 	if err := RecordBinding(ctx, "sess-2", testMeta(), testEvidence("b", true)); err != nil {
 		t.Fatalf("current-version record must accept rewrites: %v", err)
+	}
+}
+
+func TestAdvanceTranscriptCursor_CreatesRecordOnFirstCall(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+
+	if err := AdvanceTranscriptCursor(ctx, "sess-1", testMeta(), 42, false); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := LoadRecord(ctx, "sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec == nil {
+		t.Fatal("expected record to be created ('scanned, nothing found yet')")
+	}
+	if rec.Version != 2 {
+		t.Errorf("version = %d, want 2", rec.Version)
+	}
+	if rec.LastScannedTranscriptCursor != 42 {
+		t.Errorf("cursor = %d, want 42", rec.LastScannedTranscriptCursor)
+	}
+	if want := testMeta(); rec.AgentType != want.AgentType || rec.TranscriptPath != want.TranscriptPath || rec.LaunchRoot != want.LaunchRoot {
+		t.Errorf("meta not stored: %+v", rec)
+	}
+	if len(rec.BoundRepos) != 0 {
+		t.Errorf("cursor-only record must have no bound repos: %+v", rec.BoundRepos)
+	}
+}
+
+func TestAdvanceTranscriptCursor_MonotonicWithoutReset(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+
+	if err := AdvanceTranscriptCursor(ctx, "sess-1", testMeta(), 50, false); err != nil {
+		t.Fatal(err)
+	}
+	// A racing hook reporting an older position must never regress the cursor.
+	if err := AdvanceTranscriptCursor(ctx, "sess-1", testMeta(), 30, false); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := LoadRecord(ctx, "sess-1")
+	if err != nil || rec == nil {
+		t.Fatalf("load: rec=%v err=%v", rec, err)
+	}
+	if rec.LastScannedTranscriptCursor != 50 {
+		t.Errorf("cursor = %d, want 50 (must not regress without reset)", rec.LastScannedTranscriptCursor)
+	}
+}
+
+func TestAdvanceTranscriptCursor_ResetPermitsRegression(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+
+	if err := AdvanceTranscriptCursor(ctx, "sess-1", testMeta(), 50, false); err != nil {
+		t.Fatal(err)
+	}
+	// Truncated/rotated transcript: the caller passes reset=true and the
+	// cursor must follow it down, or later turns full-rescan forever.
+	if err := AdvanceTranscriptCursor(ctx, "sess-1", testMeta(), 3, true); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := LoadRecord(ctx, "sess-1")
+	if err != nil || rec == nil {
+		t.Fatalf("load: rec=%v err=%v", rec, err)
+	}
+	if rec.LastScannedTranscriptCursor != 3 {
+		t.Errorf("cursor = %d, want 3 (reset must permit regression)", rec.LastScannedTranscriptCursor)
+	}
+}
+
+func TestAdvanceTranscriptCursor_DoesNotClobberMeta(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+
+	if err := RecordBinding(ctx, "sess-1", testMeta(), testEvidence("b", true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := AdvanceTranscriptCursor(ctx, "sess-1", SessionMeta{AgentType: "other"}, 7, false); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := LoadRecord(ctx, "sess-1")
+	if err != nil || rec == nil {
+		t.Fatalf("load: rec=%v err=%v", rec, err)
+	}
+	if want := testMeta().AgentType; rec.AgentType != want {
+		t.Errorf("meta was clobbered: agent type = %q, want %q", rec.AgentType, want)
+	}
+	if rec.LastScannedTranscriptCursor != 7 {
+		t.Errorf("cursor = %d, want 7", rec.LastScannedTranscriptCursor)
+	}
+	if len(rec.BoundRepos) != 1 {
+		t.Errorf("cursor write must not disturb bound repos: %+v", rec.BoundRepos)
 	}
 }
 

@@ -18,7 +18,10 @@ import (
 // mutateRecord refuses to rewrite a record with a newer Version: encoding/json
 // drops unknown fields on the round-trip, so an older binary would silently
 // erase whatever a newer schema added (e.g. slice 2's adopt marker).
-const CurrentRecordVersion = 1
+//
+// Version 2 added LastScannedTranscriptCursor. Consequence: v1-only binaries
+// refuse to mutate v2 records and degrade to a Debug-logged skip.
+const CurrentRecordVersion = 2
 
 // SessionRecord is the machine-level record of a session: which repos its
 // activity has touched. Lives under userdirs.Config()/sessions/, outside any
@@ -36,6 +39,15 @@ type SessionRecord struct {
 	CreatedAt      time.Time   `json:"created_at"`
 	UpdatedAt      time.Time   `json:"updated_at"`
 	BoundRepos     []BoundRepo `json:"bound_repos,omitempty"`
+
+	// LastScannedTranscriptCursor is the position already scanned for evidence
+	// in the session's OWN transcript by the no-repo hook path, in the OWNING
+	// AGENT'S extractor-native unit: lines for Claude Code JSONL, message index
+	// for Gemini CLI's single-JSON format, the extractor's returned position
+	// generally. The in-repo tap does not use it; its offsets come from session
+	// state. It advances monotonically; a shrinking position (truncated/rotated
+	// transcript) resets the scan to 0.
+	LastScannedTranscriptCursor int `json:"last_scanned_transcript_cursor,omitempty"`
 }
 
 // BoundRepo records evidence that a session touched a repo. Keyed by
@@ -80,15 +92,7 @@ type Evidence struct {
 func RecordBinding(ctx context.Context, sessionID string, meta SessionMeta, ev Evidence) error {
 	return mutateRecord(ctx, sessionID, func(rec *SessionRecord) error {
 		now := time.Now().UTC()
-		if rec.AgentType == "" {
-			rec.AgentType = meta.AgentType
-		}
-		if rec.TranscriptPath == "" {
-			rec.TranscriptPath = meta.TranscriptPath
-		}
-		if rec.LaunchRoot == "" {
-			rec.LaunchRoot = meta.LaunchRoot
-		}
+		fillMetaIfEmpty(rec, meta)
 		for i := range rec.BoundRepos {
 			if rec.BoundRepos[i].CommonDir == ev.Repo.CommonDir {
 				rec.BoundRepos[i].LastEvidenceAt = now
@@ -106,6 +110,40 @@ func RecordBinding(ctx context.Context, sessionID string, meta SessionMeta, ev E
 		})
 		return nil
 	})
+}
+
+// AdvanceTranscriptCursor records that the no-repo evidence path has scanned
+// sessionID's transcript up to cursor (in the owning agent's extractor-native
+// unit — see SessionRecord.LastScannedTranscriptCursor). It creates the record
+// if absent ("scanned, nothing found yet"), so repeat scans stay cheap even
+// for sessions that never touch a repo. When reset is false the cursor only
+// moves forward — max(current, cursor) — so a racing hook reporting an older
+// position can never regress it. reset=true (caller detected a truncated or
+// rotated transcript) stores cursor directly, permitting regression: without
+// it a shrunk transcript leaves the cursor stuck at its high watermark and
+// every later turn full-rescans and re-records.
+func AdvanceTranscriptCursor(ctx context.Context, sessionID string, meta SessionMeta, cursor int, reset bool) error {
+	return mutateRecord(ctx, sessionID, func(rec *SessionRecord) error {
+		fillMetaIfEmpty(rec, meta)
+		if reset || cursor > rec.LastScannedTranscriptCursor {
+			rec.LastScannedTranscriptCursor = cursor
+		}
+		return nil
+	})
+}
+
+// fillMetaIfEmpty applies the first-write-only rule for session identity
+// fields: later writes never overwrite non-empty values.
+func fillMetaIfEmpty(rec *SessionRecord, meta SessionMeta) {
+	if rec.AgentType == "" {
+		rec.AgentType = meta.AgentType
+	}
+	if rec.TranscriptPath == "" {
+		rec.TranscriptPath = meta.TranscriptPath
+	}
+	if rec.LaunchRoot == "" {
+		rec.LaunchRoot = meta.LaunchRoot
+	}
 }
 
 // LoadRecord reads the session record for sessionID. Returns (nil, nil) when
