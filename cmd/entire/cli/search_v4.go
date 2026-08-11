@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
@@ -392,16 +393,28 @@ type failedCell struct {
 const maxCellErrorReason = 200
 
 // summarizeCellError renders a cell's error as a short, single-line reason fit
-// for the user-facing warning. It collapses embedded whitespace/newlines and
-// truncates on a rune boundary so a multibyte character is never cut in half.
+// for the user-facing warning. A cell error can embed the raw, untrusted
+// response body verbatim (parseSearchResponse dumps string(body) on a decode
+// or non-200 failure), so this both bounds and sanitizes it: non-printable
+// runes — ANSI escape / C0 / C1 / DEL bytes that could hijack the terminal
+// when the reason is written to stderr — are replaced with spaces, then
+// whitespace is collapsed and the result truncated on a rune boundary (never
+// cutting a multibyte character in half). The body is treated as data, never
+// as terminal control.
 func summarizeCellError(err error) string {
 	if err == nil {
 		return "unknown error"
 	}
-	reason := strings.Join(strings.Fields(err.Error()), " ")
+	cleaned := strings.Map(func(r rune) rune {
+		if !unicode.IsPrint(r) {
+			return ' '
+		}
+		return r
+	}, err.Error())
+	reason := strings.Join(strings.Fields(cleaned), " ")
 	if reason == "" {
-		// An empty/whitespace-only error message would leave a dangling
-		// "label: " in the warning; fall back like the nil-error branch.
+		// An empty/whitespace-only (or all-control) error message would leave a
+		// dangling "label: " in the warning; fall back like the nil-error branch.
 		return "unknown error"
 	}
 	if runes := []rune(reason); len(runes) > maxCellErrorReason {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/search"
@@ -440,6 +441,30 @@ func TestMergeSemanticV4Responses_PartialFailureNamesRegionAndReason(t *testing.
 	// The huge embedded body must be truncated out — the warning stays readable.
 	if len(w) > 500 {
 		t.Errorf("warning is %d bytes; the raw body must be truncated, not dumped in full", len(w))
+	}
+}
+
+// TestSummarizeCellError_StripsControlChars verifies the reason surfaced to the
+// terminal is sanitized: a cell error can embed the raw untrusted response body
+// (more exposed with --insecure), so ANSI escape / control bytes must be
+// stripped before the reason reaches stderr, never left to hijack the terminal.
+func TestSummarizeCellError_StripsControlChars(t *testing.T) {
+	t.Parallel()
+
+	// An injected ANSI escape + CR/BEL wrapped around real text.
+	err := errors.New("unexpected response: \x1b[31m\x1b]0;pwned\x07malicious\x1b[0m\rtext")
+	got := summarizeCellError(err)
+	for _, r := range got {
+		if !unicode.IsPrint(r) && r != ' ' {
+			t.Fatalf("summary %q still contains a non-printable rune %U", got, r)
+		}
+	}
+	if strings.ContainsRune(got, '\x1b') || strings.ContainsRune(got, '\x07') || strings.ContainsRune(got, '\r') {
+		t.Errorf("summary %q retained a control byte", got)
+	}
+	// The printable text survives.
+	if !strings.Contains(got, "malicious") || !strings.Contains(got, "text") {
+		t.Errorf("summary %q dropped printable content", got)
 	}
 }
 
