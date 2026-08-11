@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -116,8 +117,10 @@ func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 		t.Error("checkpoint metadata ref not created by lazy enable")
 	}
 
-	// The invisible guarantee: no worktree files, empty git status.
-	invisibleBase := filepath.Join(env.RepoDir, ".git", "entire", "worktree")
+	// The invisible guarantee: no worktree files, empty git status. The
+	// routed base is namespaced per worktree; env.RepoDir is a main
+	// worktree, whose key hashes the empty worktree ID.
+	invisibleBase := filepath.Join(env.RepoDir, ".git", "entire", "worktree", paths.HashWorktreeID(""))
 	assertNoWorktreeEntireDir(t, env)
 	if status := gitStatusPorcelain(t, env); status != "" {
 		t.Errorf("git status not empty after hook event:\n%s", status)
