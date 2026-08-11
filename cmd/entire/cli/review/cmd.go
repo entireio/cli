@@ -691,9 +691,6 @@ func buildConfiguredProfile(ctx context.Context, profileName string, opts review
 	if opts.Task != "" {
 		profile.Task = opts.Task
 	}
-	if strings.TrimSpace(profile.Task) == "" {
-		profile.Task = profileTask(profileName, settings.ReviewProfileConfig{})
-	}
 
 	// Judge: explicit --set-judge wins; otherwise a multi-reviewer profile gets
 	// an auto-selected judge, and a single-reviewer profile needs none.
@@ -884,20 +881,26 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	}
 	profile.Task = profileTask(profileName, profile)
 	profile.Agents = nonZeroAgentConfigs(profile.Agents)
+	// Fan out multi-skill workers into one worker per skill so skills run
+	// concurrently: the wait is the slowest skill, not the sum. Agents
+	// without a review-runner adapter stay unexploded so they keep the
+	// single-agent marker-fallback path.
+	profile, skillOrigins := explodeSkillWorkers(profile, func(agentName string) bool {
+		return deps.ReviewerFor(agentName) != nil
+	})
 	outputMode := profileOutput(profile)
 
 	if agentOverride != "" {
-		workerName, cfg, selectErr := selectProfileWorker(profile, agentOverride)
+		workerName, cfg, single, selectErr := applyAgentOverride(&profile, agentOverride, modelOverride)
 		if selectErr != nil {
 			cmd.SilenceUsage = true
 			err := fmt.Errorf("%w in review profile %q", selectErr, profileName)
 			fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
 			return silentErr(err)
 		}
-		if modelOverride != "" {
-			cfg.Model = modelOverride
+		if single {
+			return runSingleAgentPath(ctx, cmd, profileName, workerName, baseOverride, perRunPrompt, profile.Task, outputMode, timeout, cfg, installed, deps, out)
 		}
-		return runSingleAgentPath(ctx, cmd, profileName, workerName, baseOverride, perRunPrompt, profile.Task, outputMode, timeout, cfg, installed, deps, out)
 	}
 
 	if missing := missingInstalledProfileAgents(profile.Agents, installed); len(missing) > 0 {
@@ -937,7 +940,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 			fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
 			return silentErr(err)
 		}
-		return runMultiAgentPath(ctx, cmd, profileName, profile, launchableEligible, judge, outputMode, timeout, baseOverride, perRunPrompt, deps, out)
+		return runMultiAgentPath(ctx, cmd, profileName, profile, skillOrigins, launchableEligible, judge, outputMode, timeout, baseOverride, perRunPrompt, deps, out)
 	}
 }
 
@@ -1075,6 +1078,7 @@ func runSingleAgentPath(
 	if deps.ReviewCheckpointContext != nil {
 		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
 	}
+	scopeCtx := buildScopeContextBestEffort(ctx, out, worktreeRoot, scopeBaseRef)
 
 	runCfg := reviewtypes.RunConfig{
 		ProfileName:       profileName,
@@ -1082,6 +1086,7 @@ func runSingleAgentPath(
 		PerRunPrompt:      perRunPrompt,
 		ScopeBaseRef:      scopeBaseRef,
 		CheckpointContext: checkpointContext,
+		ScopeContext:      scopeCtx,
 		StartingSHA:       headSHA,
 		ReviewerTimeout:   timeout,
 	}
@@ -1167,6 +1172,7 @@ func runMultiAgentPath(
 	cmd *cobra.Command,
 	profileName string,
 	profile settings.ReviewProfileConfig,
+	skillOrigins map[string]string,
 	launchableEligible []AgentChoice,
 	judge judgeSpec,
 	outputMode string,
@@ -1206,7 +1212,9 @@ func runMultiAgentPath(
 	if deps.ReviewCheckpointContext != nil {
 		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
 	}
+	scopeCtx := buildScopeContextBestEffort(ctx, out, worktreeRoot, scopeBaseRef)
 	reviewers := make([]reviewtypes.AgentReviewer, 0, len(launchableEligible))
+	rowEntries := make([]rowPlanEntry, 0, len(launchableEligible))
 	var excludedWorkers []string
 	for _, choice := range launchableEligible {
 		workerName := choice.Name
@@ -1233,6 +1241,12 @@ func runMultiAgentPath(
 			cmd.SilenceUsage = true
 			return deps.NewSilentError(fmt.Errorf("agent %q has no review runner adapter but appeared in eligible list", agentName))
 		}
+		rowEntries = append(rowEntries, rowPlanEntry{
+			workerKey: workerName,
+			name:      reviewWorkerLabel(workerName, agentCfg),
+			agentName: agentName,
+			model:     strings.TrimSpace(agentCfg.Model),
+		})
 		reviewers = append(reviewers, &perAgentConfiguredReviewer{
 			name:  reviewWorkerLabel(workerName, agentCfg),
 			inner: reviewer,
@@ -1242,6 +1256,7 @@ func runMultiAgentPath(
 				PerRunPrompt:      perRunPrompt,
 				ScopeBaseRef:      scopeBaseRef,
 				CheckpointContext: checkpointContext,
+				ScopeContext:      scopeCtx,
 				StartingSHA:       headSHA,
 			}, agentCfg),
 		})
@@ -1258,10 +1273,11 @@ func runMultiAgentPath(
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
-	agentNames := make([]string, len(reviewers))
-	for i, r := range reviewers {
-		agentNames[i] = r.Name()
-	}
+	// The dashboard shows one row per configured worker, with skill fan-out
+	// staying behavior-only: exploded siblings of one source worker fold into
+	// that worker's row, while independently configured workers — including
+	// duplicate slots of the same agent+model — keep their own rows.
+	rowNames, workerToAgent := planAgentRows(rowEntries, skillOrigins)
 	aggregateOutput := ""
 	var synthErr error
 
@@ -1270,9 +1286,11 @@ func runMultiAgentPath(
 	var synthProvider SynthesisProvider = AgentSynthesisProvider{AgentName: judge.agent, Model: judge.model}
 	masterLabel := judgeLabel(judge)
 	sinks := composeMultiAgentSinks(multiAgentSinkInputs{
+		scope:             scopeCtx,
 		out:               out,
 		isTTY:             canPrompt,
-		agentNames:        agentNames,
+		agentNames:        rowNames,
+		workerToAgent:     workerToAgent,
 		cancelRun:         cancelRun,
 		runContext:        runCtx,
 		synthesisProvider: synthProvider,
@@ -1340,6 +1358,25 @@ func handlePickerError(cmd *cobra.Command, silentErr func(error) error, pickErr 
 	return silentErr(pickErr)
 }
 
+// buildScopeContextBestEffort wraps BuildScopeContext for the launch paths:
+// scope enumeration is prompt enrichment, so a failure (odd repo state, git
+// error) degrades to the descriptive scope clause instead of failing the run.
+func buildScopeContextBestEffort(ctx context.Context, out io.Writer, worktreeRoot, scopeBaseRef string) reviewtypes.ScopeContext {
+	if scopeBaseRef == "" {
+		return reviewtypes.ScopeContext{}
+	}
+	sc, err := BuildScopeContext(ctx, worktreeRoot, scopeBaseRef)
+	if err != nil {
+		// Degrading silently would revert to the divergent-scope behavior
+		// this enumeration exists to prevent, right after the banner told
+		// the user the scope was computed — so the fallback must be visible.
+		logging.Warn(ctx, "review scope context unavailable", slog.String("error", err.Error()))
+		fmt.Fprintln(out, "Note: could not compute the authoritative scope listing; reviewers will derive scope from the base ref themselves.")
+		return reviewtypes.ScopeContext{}
+	}
+	return sc
+}
+
 // multiAgentSinkInputs collects the parameters composeMultiAgentSinks needs.
 // It exists so tests can drive the helper with an explicit isTTY value
 // instead of monkey-patching interactive helpers at run time.
@@ -1353,6 +1390,7 @@ type multiAgentSinkInputs struct {
 	out               io.Writer
 	isTTY             bool
 	agentNames        []string
+	workerToAgent     map[string]string
 	cancelRun         context.CancelFunc
 	runContext        context.Context
 	synthesisProvider SynthesisProvider
@@ -1367,6 +1405,9 @@ type multiAgentSinkInputs struct {
 	judgeTimeout      time.Duration
 	onSynthesisResult func(result string)
 	onSynthesisError  func(err error)
+	// scope is the parent-computed authoritative scope, threaded to the
+	// judge so consolidation can discard out-of-scope findings.
+	scope reviewtypes.ScopeContext
 }
 
 type singleAgentSinkInputs struct {
@@ -1391,12 +1432,16 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 	sinks := []reviewtypes.Sink{}
 	if in.isTTY {
 		tui := NewTUISink(in.agentNames, in.cancelRun, in.out, os.Stdin)
+		if in.workerToAgent != nil {
+			tui.groupWorkers(in.agentNames, in.workerToAgent)
+		}
 		sinks = append(sinks, tui)
 		if in.synthesisProvider != nil {
 			postRunOut := &bytes.Buffer{}
 			sinks = append(sinks, DumpSink{W: postRunOut})
 			sinks = append(sinks, SynthesisSink{
 				Provider:        in.synthesisProvider,
+				Scope:           in.scope,
 				Writer:          postRunOut,
 				RenderWriter:    in.out,
 				PerRunPrompt:    in.perRunPrompt,
@@ -1426,6 +1471,7 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 	if in.synthesisProvider != nil {
 		sinks = append(sinks, SynthesisSink{
 			Provider:        in.synthesisProvider,
+			Scope:           in.scope,
 			Writer:          in.out,
 			PerRunPrompt:    in.perRunPrompt,
 			ProfileName:     in.profileName,
@@ -1699,8 +1745,9 @@ func (r *perAgentConfiguredReviewer) Name() string {
 	}
 	return r.inner.Name()
 }
-func (r *perAgentConfiguredReviewer) ActualAgentName() string { return r.inner.Name() }
-func (r *perAgentConfiguredReviewer) ModelName() string       { return strings.TrimSpace(r.cfg.Model) }
+func (r *perAgentConfiguredReviewer) ActualAgentName() string  { return r.inner.Name() }
+func (r *perAgentConfiguredReviewer) ModelName() string        { return strings.TrimSpace(r.cfg.Model) }
+func (r *perAgentConfiguredReviewer) ReviewerSkills() []string { return r.cfg.Skills }
 func (r *perAgentConfiguredReviewer) Start(ctx context.Context, _ reviewtypes.RunConfig) (reviewtypes.Process, error) {
 	return r.inner.Start(ctx, r.cfg) //nolint:wrapcheck // transparent adapter; callers see inner's error type directly
 }

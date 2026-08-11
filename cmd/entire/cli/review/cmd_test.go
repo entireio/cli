@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -71,6 +72,48 @@ func seedReviewConfig(ctx context.Context, cfg map[string]settings.ReviewConfig)
 		*p = *prefs
 		return nil
 	})
+}
+
+// seedReviewProfile persists an explicit profile into clone-local
+// preferences — unlike seedReviewConfig it does not invent a task, so tests
+// can distinguish user-configured tasks from the runtime default.
+func seedReviewProfile(ctx context.Context, profile settings.ReviewProfileConfig) error {
+	prefs, err := settings.LoadClonePreferences(ctx)
+	if err != nil {
+		return err
+	}
+	if prefs == nil {
+		prefs = &settings.ClonePreferences{}
+	}
+	prefs.ReviewDefaultProfile = review.DefaultProfileName
+	if profile.Judge == nil {
+		if judge := defaultTestJudge(profile.Agents); judge != "" {
+			profile.Judge = &settings.ReviewConfig{Agent: judge}
+		}
+	}
+	prefs.ReviewProfiles = map[string]settings.ReviewProfileConfig{
+		review.DefaultProfileName: profile,
+	}
+	return settings.SaveClonePreferences(ctx, prefs)
+}
+
+// newCaptureDeps builds minimal Deps that route every launch to reviewer.
+func newCaptureDeps(reviewer *captureRunConfigReviewer) review.Deps {
+	return review.Deps{
+		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
+			return []types.AgentName{types.AgentName(reviewer.name)}
+		},
+		NewSilentError: func(err error) error { return err },
+		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {
+			return false, ""
+		},
+		ReviewerFor: func(agentName string) reviewtypes.AgentReviewer {
+			if agentName == reviewer.name {
+				return reviewer
+			}
+			return nil
+		},
+	}
 }
 
 func defaultTestJudge(cfg map[string]settings.ReviewConfig) string {
@@ -795,6 +838,12 @@ func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, cwd, "fanout-dirty.txt", "wip")
+
 	claudeReviewer := &captureRunConfigReviewer{name: "claude-code"}
 	codexReviewer := &captureRunConfigReviewer{name: testCodexAgent}
 	deps := review.Deps{
@@ -849,6 +898,14 @@ func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 		}
 		if tc.reviewer.got.StartingSHA == "" {
 			t.Fatalf("%s StartingSHA is empty", tc.name)
+		}
+		// The fan-out loop wires ScopeContext and Task independently of the
+		// single-agent path; a regression there passes every single-agent test.
+		if len(tc.reviewer.got.ScopeContext.Uncommitted) == 0 {
+			t.Fatalf("%s ScopeContext.Uncommitted is empty, want the dirty file", tc.name)
+		}
+		if tc.reviewer.got.Task != "Test review task." {
+			t.Fatalf("%s Task = %q, want the seeded user task", tc.name, tc.reviewer.got.Task)
 		}
 	}
 }
@@ -1238,6 +1295,261 @@ func TestComposeMultiAgentSinks_TTYAutoSynthesisRunsBeforeTUIExit(t *testing.T) 
 	}
 	if synth.OnStart == nil || synth.OnComplete == nil {
 		t.Fatal("auto synthesis should notify the TUI when the final judge starts/completes")
+	}
+}
+
+// TestRunReview_InjectsScopeContext verifies the single-agent path hands the
+// spawned reviewer the parent-computed scope enumeration (commits, files,
+// uncommitted, inline diff) so the child never re-derives review scope.
+func TestRunReview_InjectsScopeContext(t *testing.T) {
+	setupCmdTestRepo(t)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.GitCheckoutNewBranch(t, cwd, "feat/scope-ctx")
+	testutil.WriteFile(t, cwd, "changed.go", "package changed")
+	testutil.GitAdd(t, cwd, "changed.go")
+	testutil.GitCommit(t, cwd, "add changed.go")
+	testutil.WriteFile(t, cwd, "dirty.txt", "wip")
+
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+		testAgentName: {Skills: []string{"/review"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewer := &captureRunConfigReviewer{name: testAgentName}
+	deps := review.Deps{
+		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
+			return []types.AgentName{testAgentName}
+		},
+		NewSilentError: func(err error) error { return err },
+		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {
+			return false, ""
+		},
+		ReviewerFor: func(agentName string) reviewtypes.AgentReviewer {
+			if agentName == testAgentName {
+				return reviewer
+			}
+			return nil
+		},
+	}
+
+	out := &bytes.Buffer{}
+	cmd := review.NewCommand(deps)
+	cmd.SetOut(out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"general"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reviewer.called {
+		t.Fatal("reviewer was not started")
+	}
+
+	sc := reviewer.got.ScopeContext
+	if len(sc.Commits) != 1 || !strings.HasSuffix(sc.Commits[0], "add changed.go") {
+		t.Errorf("ScopeContext.Commits = %v, want the branch commit", sc.Commits)
+	}
+	if len(sc.Files) != 1 || sc.Files[0] != "A\tchanged.go" {
+		t.Errorf("ScopeContext.Files = %v, want [A\\tchanged.go]", sc.Files)
+	}
+	if len(sc.Uncommitted) != 1 || !strings.Contains(sc.Uncommitted[0], "dirty.txt") {
+		t.Errorf("ScopeContext.Uncommitted = %v, want dirty.txt porcelain line", sc.Uncommitted)
+	}
+	if !strings.Contains(sc.Diff, "+package changed") {
+		t.Errorf("ScopeContext.Diff missing committed content:\n%s", sc.Diff)
+	}
+}
+
+// TestComposeMultiAgentSinks_ThreadsScopeToSynthesisSink verifies the judge
+// sink receives the scope so out-of-scope findings can be discarded during
+// consolidation.
+func TestComposeMultiAgentSinks_ThreadsScopeToSynthesisSink(t *testing.T) {
+	t.Parallel()
+	scope := reviewtypes.ScopeContext{Files: []string{"M\tcmd/foo.go"}}
+	sinks := review.ExposedComposeMultiAgentSinks(review.SinkComposeInputs{
+		Out:               &bytes.Buffer{},
+		IsTTY:             false,
+		AgentNames:        []string{"a", "b"},
+		SynthesisProvider: &stubSynthesisProvider{},
+		Scope:             scope,
+	})
+	for _, s := range sinks {
+		if syn, ok := s.(review.SynthesisSink); ok {
+			if len(syn.Scope.Files) != 1 || syn.Scope.Files[0] != "M\tcmd/foo.go" {
+				t.Errorf("SynthesisSink.Scope = %+v, want threaded scope", syn.Scope)
+			}
+			return
+		}
+	}
+	t.Fatal("no SynthesisSink composed")
+}
+
+// TestRunReview_TaskSemantics pins the task contract after the
+// persistence-only change: the built-in brief is a RUNTIME default — a
+// profile saved without a task still briefs every worker (skill-bearing
+// included, #1312's deliberate design), while a user-configured task
+// reaches workers verbatim. Setup never persisting the built-in text is
+// covered separately (TestBuildCrewProfile_NoBuiltinTaskPersisted et al).
+func TestRunReview_TaskSemantics(t *testing.T) {
+	cases := []struct {
+		name     string
+		profile  settings.ReviewProfileConfig
+		wantTask func(string) bool
+		desc     string
+	}{
+		{
+			name: "empty task briefs skill workers with runtime default",
+			profile: settings.ReviewProfileConfig{
+				Agents: map[string]settings.ReviewConfig{testAgentName: {Skills: []string{"/review"}}},
+			},
+			wantTask: func(got string) bool { return got != "" },
+			desc:     "want non-empty runtime default",
+		},
+		{
+			name: "user task reaches workers verbatim",
+			profile: settings.ReviewProfileConfig{
+				Task:   "Focus on the storage layer only.",
+				Agents: map[string]settings.ReviewConfig{testAgentName: {Skills: []string{"/review"}}},
+			},
+			wantTask: func(got string) bool { return got == "Focus on the storage layer only." },
+			desc:     "want the user task verbatim",
+		},
+		{
+			name: "skill-less worker briefed too",
+			profile: settings.ReviewProfileConfig{
+				Agents: map[string]settings.ReviewConfig{testAgentName: {Prompt: "Look carefully."}},
+			},
+			wantTask: func(got string) bool { return got != "" },
+			desc:     "want non-empty runtime default",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupCmdTestRepo(t)
+			if err := seedReviewProfile(context.Background(), tc.profile); err != nil {
+				t.Fatal(err)
+			}
+			reviewer := &captureRunConfigReviewer{name: testAgentName}
+			cmd := review.NewCommand(newCaptureDeps(reviewer))
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs([]string{"general"})
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tc.wantTask(reviewer.got.Task) {
+				t.Errorf("Task = %q, %s", reviewer.got.Task, tc.desc)
+			}
+		})
+	}
+}
+
+// multiStartCaptureReviewer records every Start call — the fan-out spawns
+// the same agent multiple times, once per exploded skill worker.
+type multiStartCaptureReviewer struct {
+	name string
+	mu   sync.Mutex
+	got  []reviewtypes.RunConfig
+}
+
+func (r *multiStartCaptureReviewer) Name() string { return r.name }
+func (r *multiStartCaptureReviewer) Start(_ context.Context, cfg reviewtypes.RunConfig) (reviewtypes.Process, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.got = append(r.got, cfg)
+	return &stubDispatchProcess{}, nil
+}
+
+func (r *multiStartCaptureReviewer) captured() []reviewtypes.RunConfig {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]reviewtypes.RunConfig(nil), r.got...)
+}
+
+func multiCaptureDeps(reviewer *multiStartCaptureReviewer) review.Deps {
+	return review.Deps{
+		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
+			return []types.AgentName{types.AgentName(reviewer.name)}
+		},
+		NewSilentError: func(err error) error { return err },
+		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {
+			return false, ""
+		},
+		ReviewerFor: func(agentName string) reviewtypes.AgentReviewer {
+			if agentName == reviewer.name {
+				return reviewer
+			}
+			return nil
+		},
+	}
+}
+
+// TestRunReview_MultiSkillWorkerFansOut verifies a worker with two skills
+// spawns two parallel children, one skill each — wait is the slowest skill,
+// not the sum.
+func TestRunReview_MultiSkillWorkerFansOut(t *testing.T) {
+	setupCmdTestRepo(t)
+	if err := seedReviewProfile(context.Background(), settings.ReviewProfileConfig{
+		Agents: map[string]settings.ReviewConfig{
+			testAgentName: {Skills: []string{"/review", "/security-review"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewer := &multiStartCaptureReviewer{name: testAgentName}
+	cmd := review.NewCommand(multiCaptureDeps(reviewer))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"general"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := reviewer.captured()
+	if len(got) != 2 {
+		t.Fatalf("Start called %d times, want 2 (one per skill)", len(got))
+	}
+	skills := map[string]bool{}
+	for _, cfg := range got {
+		if len(cfg.Skills) != 1 {
+			t.Errorf("run Skills = %v, want exactly one per exploded worker", cfg.Skills)
+			continue
+		}
+		skills[cfg.Skills[0]] = true
+	}
+	if !skills["/review"] || !skills["/security-review"] {
+		t.Errorf("fan-out skills = %v, want both configured skills", skills)
+	}
+}
+
+// TestRunReview_AgentOverrideRunsAllExplodedWorkers verifies --agent with a
+// multi-skill agent runs every exploded worker for that agent instead of
+// erroring on ambiguity.
+func TestRunReview_AgentOverrideRunsAllExplodedWorkers(t *testing.T) {
+	setupCmdTestRepo(t)
+	if err := seedReviewProfile(context.Background(), settings.ReviewProfileConfig{
+		Agents: map[string]settings.ReviewConfig{
+			testAgentName: {Skills: []string{"/review", "/security-review"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewer := &multiStartCaptureReviewer{name: testAgentName}
+	cmd := review.NewCommand(multiCaptureDeps(reviewer))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"general", "--agent", testAgentName})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := reviewer.captured(); len(got) != 2 {
+		t.Fatalf("Start called %d times, want 2 (agent override filters, not selects one)", len(got))
 	}
 }
 

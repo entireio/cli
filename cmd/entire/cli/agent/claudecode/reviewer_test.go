@@ -96,7 +96,8 @@ func TestReviewer_ArgvShape(t *testing.T) {
 	cmd := buildReviewCmd(context.Background(), cfg)
 
 	// Expect: claude -p <prompt> --output-format stream-json --verbose
-	wantSuffix := []string{"--output-format", "stream-json", "--verbose"}
+	//         --allowedTools <read-only allowlist>
+	wantSuffix := []string{"--output-format", "stream-json", "--verbose", "--allowedTools", strings.Join(reviewToolAllowlist, ",")}
 	if len(cmd.Args) != 3+len(wantSuffix) {
 		t.Fatalf("expected %d args, got %d: %v", 3+len(wantSuffix), len(cmd.Args), cmd.Args)
 	}
@@ -495,5 +496,92 @@ func collectEvents(ch <-chan reviewtypes.Event) []reviewtypes.Event {
 func drainEvents(ch <-chan reviewtypes.Event) {
 	for ev := range ch {
 		_ = ev
+	}
+}
+
+// TestReviewer_ArgvIncludesReadOnlyAllowlist verifies the spawned claude
+// child gets an explicit read-only tool allowlist. Headless -p mode
+// auto-denies any tool call not pre-approved, so without this every finder
+// that runs `git diff`/`git log` bounces off a denial and detours — slower
+// reviews and findings that were never verified. The allowlist grants the
+// read-only surface a review needs and nothing write-capable.
+func TestReviewer_ArgvIncludesReadOnlyAllowlist(t *testing.T) {
+	t.Parallel()
+	cmd := buildReviewCmd(context.Background(), reviewtypes.RunConfig{Skills: []string{"/x"}})
+
+	allowed := ""
+	for i, arg := range cmd.Args {
+		if arg == "--allowedTools" && i+1 < len(cmd.Args) {
+			allowed = cmd.Args[i+1]
+		}
+		if arg == "--dangerously-skip-permissions" {
+			t.Fatal("reviewer child must never run with permissions disabled")
+		}
+	}
+	if allowed == "" {
+		t.Fatalf("--allowedTools missing from argv: %v", cmd.Args)
+	}
+
+	members := make(map[string]bool)
+	for _, m := range strings.Split(allowed, ",") {
+		members[strings.TrimSpace(m)] = true
+	}
+	for _, want := range []string{
+		"Read", "Grep", "Glob", "Task", "Skill",
+		// The checkpoint context injected into the same prompt instructs
+		// reviewers to run `entire explain <id>` — the allowlist must cover
+		// the command the prompt itself recommends, or headless -p denies it.
+		"Bash(entire explain:*)",
+		"Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+		"Bash(git status:*)", "Bash(git blame:*)", "Bash(git rev-parse:*)",
+	} {
+		if !members[want] {
+			t.Errorf("allowlist missing %q; got %q", want, allowed)
+		}
+	}
+	for _, banned := range []string{"Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "Bash(git:*)", "Bash(git branch:*)"} {
+		if members[banned] {
+			t.Errorf("allowlist must not grant write-capable or blanket tool %q; got %q", banned, allowed)
+		}
+	}
+}
+
+// TestReviewer_PromptNeverStartsWithSlash guards against claude -p's
+// slash-command expansion swallowing the composed prompt. Observed live: a
+// prompt beginning with the configured skill line
+// "/pr-review-toolkit:review-pr" was expanded by the harness as a slash
+// command — it resolved to the BUILT-IN /review skill with the entire
+// composed prompt (skill name included) as its arguments, so the configured
+// skill never ran and the built-in PR-review harness interpolated the skill
+// name where a PR number belongs. The reviewer must deliver a prompt that
+// cannot trigger expansion, while still instructing the agent to invoke the
+// configured skills via the Skill tool.
+func TestReviewer_PromptNeverStartsWithSlash(t *testing.T) {
+	t.Parallel()
+	cmd := buildReviewCmd(context.Background(), reviewtypes.RunConfig{
+		Skills: []string{"/pr-review-toolkit:review-pr"},
+	})
+	prompt := cmd.Args[2]
+	if strings.HasPrefix(prompt, "/") {
+		t.Fatalf("prompt starts with %q — claude -p will expand it as a slash command:\n%s", "/", prompt)
+	}
+	if !strings.Contains(prompt, "/pr-review-toolkit:review-pr") {
+		t.Errorf("prompt lost the configured skill invocation:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Skill tool") {
+		t.Errorf("prompt missing instruction to invoke skills via the Skill tool:\n%s", prompt)
+	}
+}
+
+// TestReviewer_PromptWithoutLeadingSlashUnchanged verifies the guard only
+// fires when needed: a prompt that already starts with prose is passed
+// through without the skill-invocation preamble.
+func TestReviewer_PromptWithoutLeadingSlashUnchanged(t *testing.T) {
+	t.Parallel()
+	cmd := buildReviewCmd(context.Background(), reviewtypes.RunConfig{
+		PromptOverride: "Review the change described below.",
+	})
+	if got := cmd.Args[2]; got != "Review the change described below." {
+		t.Errorf("prose prompt was modified: %q", got)
 	}
 }

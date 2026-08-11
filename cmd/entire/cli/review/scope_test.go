@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 )
@@ -475,6 +476,133 @@ func TestComputeScopeStats_EmptyOverrideUsesMainlineDetection(t *testing.T) {
 	}
 }
 
+// TestBuildScopeContext_Basic verifies the builder extracts commits (oldest
+// first), name-status file lines, uncommitted porcelain lines, and the inline
+// diff from a real repo.
+func TestBuildScopeContext_Basic(t *testing.T) {
+	dir := t.TempDir()
+	initRepoOnMain(t, dir)
+	commitFile(t, dir, "main.go", "package main", "init")
+
+	testutil.GitCheckoutNewBranch(t, dir, "feat/ctx")
+	commitFile(t, dir, "a.go", "package a", "add a")
+	commitFile(t, dir, "b.go", "package b", "add b")
+	testutil.WriteFile(t, dir, "untracked.go", "package u")
+
+	sc, err := BuildScopeContext(context.Background(), dir, defaultBranchName)
+	if err != nil {
+		t.Fatalf("BuildScopeContext: %v", err)
+	}
+
+	if len(sc.Commits) != 2 {
+		t.Fatalf("Commits = %v, want 2 entries", sc.Commits)
+	}
+	// Oldest first: "add a" before "add b".
+	if !strings.HasSuffix(sc.Commits[0], "add a") || !strings.HasSuffix(sc.Commits[1], "add b") {
+		t.Errorf("Commits not oldest-first with subjects: %v", sc.Commits)
+	}
+	if len(sc.Files) != 2 {
+		t.Fatalf("Files = %v, want 2 entries", sc.Files)
+	}
+	if sc.Files[0] != "A\ta.go" {
+		t.Errorf("Files[0] = %q, want name-status line %q", sc.Files[0], "A\ta.go")
+	}
+	if len(sc.Uncommitted) != 1 || !strings.Contains(sc.Uncommitted[0], "untracked.go") {
+		t.Errorf("Uncommitted = %v, want one porcelain line for untracked.go", sc.Uncommitted)
+	}
+	if !strings.Contains(sc.Diff, "+package a") {
+		t.Errorf("Diff missing committed content:\n%s", sc.Diff)
+	}
+	if sc.DiffOmitted {
+		t.Error("DiffOmitted = true for a tiny diff")
+	}
+	if sc.CommitsTruncated || sc.FilesTruncated || sc.UncommittedTruncated {
+		t.Error("truncation flags set below caps")
+	}
+}
+
+// TestBuildScopeContext_ThreeDotIgnoresUpstreamOnlyChanges guards the exact
+// failure observed in production: a reviewer diffed a behind-main branch in
+// the wrong direction and reported mainline evolution as branch regressions.
+// The builder must use merge-base (three-dot) semantics so upstream-only
+// changes never enter the scope handed to agents.
+func TestBuildScopeContext_ThreeDotIgnoresUpstreamOnlyChanges(t *testing.T) {
+	dir := t.TempDir()
+	initRepoOnMain(t, dir)
+	commitFile(t, dir, "root.go", "package main", "init")
+
+	testutil.GitCheckoutNewBranch(t, dir, "feat/behind")
+	commitFile(t, dir, "feat.go", "package feat", "feat-only change")
+
+	//nolint:noctx // test helper
+	checkout := exec.Command("git", "checkout", defaultBranchName)
+	checkout.Dir = dir
+	if out, err := checkout.CombinedOutput(); err != nil {
+		t.Fatalf("checkout main: %v\n%s", err, out)
+	}
+	commitFile(t, dir, "main-only.go", "package main", "post-branch main change")
+	//nolint:noctx // test helper
+	checkout = exec.Command("git", "checkout", "feat/behind")
+	checkout.Dir = dir
+	if out, err := checkout.CombinedOutput(); err != nil {
+		t.Fatalf("checkout feat/behind: %v\n%s", err, out)
+	}
+
+	sc, err := BuildScopeContext(context.Background(), dir, defaultBranchName)
+	if err != nil {
+		t.Fatalf("BuildScopeContext: %v", err)
+	}
+	for _, f := range sc.Files {
+		if strings.Contains(f, "main-only.go") {
+			t.Errorf("upstream-only file leaked into scope Files: %v", sc.Files)
+		}
+	}
+	if strings.Contains(sc.Diff, "main-only.go") {
+		t.Errorf("upstream-only change leaked into scope Diff:\n%s", sc.Diff)
+	}
+	if len(sc.Commits) != 1 || !strings.HasSuffix(sc.Commits[0], "feat-only change") {
+		t.Errorf("Commits = %v, want only the branch commit", sc.Commits)
+	}
+}
+
+// TestBuildScopeContext_CapsTruncateAndFlagLists verifies list caps set the
+// truncation flags and the diff budget flips to DiffOmitted instead of
+// inlining an oversized diff.
+func TestBuildScopeContext_CapsTruncateAndFlagLists(t *testing.T) {
+	dir := t.TempDir()
+	initRepoOnMain(t, dir)
+	commitFile(t, dir, "main.go", "package main", "init")
+
+	testutil.GitCheckoutNewBranch(t, dir, "feat/capped")
+	commitFile(t, dir, "a.go", "package a", "add a")
+	commitFile(t, dir, "b.go", "package b", "add b")
+
+	sc, err := buildScopeContextCapped(context.Background(), dir, defaultBranchName, scopeContextCaps{
+		maxCommits:      1,
+		maxFiles:        1,
+		maxUncommitted:  1,
+		diffInlineLimit: 1, // any real diff exceeds this
+	})
+	if err != nil {
+		t.Fatalf("buildScopeContextCapped: %v", err)
+	}
+	if len(sc.Commits) != 1 || !sc.CommitsTruncated {
+		t.Errorf("Commits = %v truncated=%v, want 1 entry with flag", sc.Commits, sc.CommitsTruncated)
+	}
+	// The cap must keep the NEWEST commits: the prompt declares this list
+	// authoritative and forbids re-deriving, so dropping recent commits
+	// would hide exactly the changes most likely to need review.
+	if len(sc.Commits) == 1 && !strings.HasSuffix(sc.Commits[0], "add b") {
+		t.Errorf("Commits cap kept %q, want the newest commit (add b)", sc.Commits[0])
+	}
+	if len(sc.Files) != 1 || !sc.FilesTruncated {
+		t.Errorf("Files = %v truncated=%v, want 1 entry with flag", sc.Files, sc.FilesTruncated)
+	}
+	if sc.Diff != "" || !sc.DiffOmitted {
+		t.Errorf("Diff=%q DiffOmitted=%v, want omitted diff", sc.Diff, sc.DiffOmitted)
+	}
+}
+
 // TestComputeScopeStats_Integration verifies the full ComputeScopeStats
 // function produces consistent results.
 // Cannot use t.Parallel because it modifies the filesystem.
@@ -512,5 +640,110 @@ func TestComputeScopeStats_Integration(t *testing.T) {
 	}
 	if stats.Uncommitted != 0 {
 		t.Errorf("Uncommitted = %d, want 0", stats.Uncommitted)
+	}
+}
+
+// TestBuildScopeContext_UncommittedOnlyNoDiffOmitted verifies a branch with
+// only working-tree changes yields Diff=="" and DiffOmitted==false — the
+// prompt must not claim "too large to inline" for a diff that outputs nothing.
+func TestBuildScopeContext_UncommittedOnlyNoDiffOmitted(t *testing.T) {
+	dir := t.TempDir()
+	initRepoOnMain(t, dir)
+	commitFile(t, dir, "main.go", "package main", "init")
+	testutil.GitCheckoutNewBranch(t, dir, "feat/dirty-only")
+	testutil.WriteFile(t, dir, "wip.go", "package wip")
+
+	sc, err := BuildScopeContext(context.Background(), dir, defaultBranchName)
+	if err != nil {
+		t.Fatalf("BuildScopeContext: %v", err)
+	}
+	if sc.Diff != "" || sc.DiffOmitted {
+		t.Errorf("Diff=%q DiffOmitted=%v, want empty diff without omission flag", sc.Diff, sc.DiffOmitted)
+	}
+	if len(sc.Uncommitted) != 1 {
+		t.Errorf("Uncommitted = %v, want the wip file", sc.Uncommitted)
+	}
+}
+
+// TestBuildScopeContext_ListsCountAgainstDiffBudget pins the total-size
+// contract: the inline-diff allowance shrinks by the bytes the rendered
+// lists already consume, so the composed prompt (argv + ENTIRE_REVIEW_PROMPT
+// env var) stays bounded on platforms with ~32KiB limits.
+func TestBuildScopeContext_ListsCountAgainstDiffBudget(t *testing.T) {
+	dir := t.TempDir()
+	initRepoOnMain(t, dir)
+	commitFile(t, dir, "main.go", "package main", "init")
+	testutil.GitCheckoutNewBranch(t, dir, "feat/budget")
+	commitFile(t, dir, "a.go", "package a", "add a")
+
+	// Budget generous enough for the diff alone, but the commit/file/porcelain
+	// list bytes must be charged against it first, leaving no room.
+	sc, err := buildScopeContextCapped(context.Background(), dir, defaultBranchName, scopeContextCaps{
+		maxCommits:      50,
+		maxFiles:        200,
+		maxUncommitted:  100,
+		diffInlineLimit: 40, // smaller than the rendered lists
+	})
+	if err != nil {
+		t.Fatalf("buildScopeContextCapped: %v", err)
+	}
+	if sc.Diff != "" || !sc.DiffOmitted {
+		t.Errorf("Diff=%q DiffOmitted=%v, want diff omitted once lists consume the budget", sc.Diff, sc.DiffOmitted)
+	}
+}
+
+// TestBuildScopeContext_ListsBoundedByBytes pins the byte bound on the list
+// sections: line-count caps alone let wide branches with long paths push the
+// rendered lists past the ~32KiB platform argv cap even with the diff
+// omitted. The lists must be trimmed to fit within half the inline budget,
+// with truncation flags set so the prompt states the elision.
+func TestBuildScopeContext_ListsBoundedByBytes(t *testing.T) {
+	t.Parallel()
+	longPath := "A\t" + strings.Repeat("deeply/nested/directory/", 20) + "file.go" // ~480 bytes
+	sc := reviewtypes.ScopeContext{
+		Commits: []string{"abc1234 subject"},
+	}
+	for range 200 {
+		sc.Files = append(sc.Files, longPath)
+	}
+	budget := 4096
+	capScopeListsToBudget(&sc, budget)
+
+	if got := scopeListBytes(sc); got > budget {
+		t.Errorf("rendered list bytes = %d, want <= %d", got, budget)
+	}
+	if !sc.FilesTruncated {
+		t.Error("files list trimmed by byte budget must set FilesTruncated")
+	}
+	if len(sc.Commits) == 0 || sc.CommitsTruncated {
+		t.Errorf("small commits list should survive untouched: %v truncated=%v", sc.Commits, sc.CommitsTruncated)
+	}
+	if len(sc.Files) == 0 {
+		t.Error("byte cap should keep the leading files, not empty the list")
+	}
+}
+
+// TestCapScopeLists_TrimmedCommitsKeepNewestOldestFirst pins the interaction
+// of byte-trimming with the commit ordering contract: trimming happens while
+// commits are newest-first (keeping the newest), and the final reversal must
+// apply to the TRIMMED slice. A `defer slices.Reverse(sc.Commits)` that
+// captured the pre-trim slice header reversed the full backing array
+// instead, leaving the trimmed view holding the OLDEST commits — inverting
+// the documented keep-newest semantics exactly when truncation matters most.
+func TestCapScopeLists_TrimmedCommitsKeepNewestOldestFirst(t *testing.T) {
+	t.Parallel()
+	sc := reviewtypes.ScopeContext{
+		// Newest-first, as capScopeLines delivers before the reversal.
+		Commits: []string{"c5 newest", "c4", "c3", "c2", "c1 oldest"},
+	}
+	// Budget fits exactly two lines ("c5 newest\n" = 10, "c4\n" = 3).
+	capScopeListsToBudget(&sc, 13)
+
+	if !sc.CommitsTruncated {
+		t.Fatal("expected CommitsTruncated after byte trim")
+	}
+	want := []string{"c4", "c5 newest"} // newest kept, oldest-first order
+	if len(sc.Commits) != 2 || sc.Commits[0] != want[0] || sc.Commits[1] != want[1] {
+		t.Fatalf("Commits = %v, want %v (newest survive, oldest-first)", sc.Commits, want)
 	}
 }

@@ -34,6 +34,20 @@ func reviewerModelName(r reviewtypes.AgentReviewer) string {
 	return ""
 }
 
+// reviewerSkillsMetadata is the optional interface exposing a worker's skill
+// invocations for planned-run construction (session matching needs them to
+// disambiguate same-agent same-model exploded skill workers).
+type reviewerSkillsMetadata interface {
+	ReviewerSkills() []string
+}
+
+func reviewerSkills(r reviewtypes.AgentReviewer) []string {
+	if meta, ok := r.(reviewerSkillsMetadata); ok {
+		return meta.ReviewerSkills()
+	}
+	return nil
+}
+
 // reviewerTimeout resolves the effective per-reviewer wall cap. There is
 // deliberately NO default: reviewers run until they finish, exactly like the
 // same skill invoked in a user's own session. Review time is dominated by
@@ -150,6 +164,7 @@ func Run(
 			Cancelled:  status == reviewtypes.AgentStatusCancelled,
 			AgentRuns: []reviewtypes.AgentRun{{
 				Name:      displayName,
+				Skills:    cfg.Skills,
 				AgentName: agentName,
 				Model:     modelName,
 				Status:    status,
@@ -230,6 +245,7 @@ func Run(
 			Name:      displayName,
 			AgentName: agentName,
 			Model:     modelName,
+			Skills:    cfg.Skills,
 			Status:    status,
 			Tokens:    tokens,
 			Buffer:    buffer,

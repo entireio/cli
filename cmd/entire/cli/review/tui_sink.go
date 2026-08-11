@@ -63,6 +63,29 @@ type TUISink struct {
 	msgs     chan tea.Msg  // bounded dispatch queue drained by the pump
 	done     chan struct{} // closed when the tea.Program exits
 	pumpDone chan struct{} // closed when the pump goroutine exits
+
+	// group reconciles per-worker execution with one-row-per-agent display
+	// (skill fan-out). Nil on the single-agent path, where events and the
+	// summary pass through unchanged.
+	group *agentGrouping
+}
+
+// groupWorkers enables one-row-per-agent collapsing: rowOrder is the ordered
+// per-agent row labels (matching the model's rows) and workerToAgent maps
+// each worker label to the agent row its events and summary entry fold into.
+// Called before Start.
+func (s *TUISink) groupWorkers(rowOrder []string, workerToAgent map[string]string) {
+	s.group = newAgentGrouping(rowOrder, workerToAgent)
+	// Tell the model how many workers fold into each row so it defers a row's
+	// terminal display state until ALL of them finish (not just the fastest
+	// skill). Pre-Start the queue is empty and never drained, so this plain
+	// send cannot block or drop, and FIFO order guarantees the model sees it
+	// before any agentEventMsg.
+	counts := make(map[string]int, len(s.group.rowWorkers))
+	for row, workers := range s.group.rowWorkers {
+		counts[row] = len(workers)
+	}
+	s.msgs <- rowWorkerCountsMsg{counts: counts}
 }
 
 // Compile-time interface check.
@@ -211,8 +234,21 @@ func (s *TUISink) AgentEvent(agent string, ev reviewtypes.Event) {
 	if !ok {
 		return
 	}
+	// Collapse per-worker events onto the agent row (skill fan-out): route to
+	// the agent row, and show the SUM of its workers' cumulative tokens (a
+	// single worker's value would bounce the live number between siblings,
+	// since row.tokens overwrites per CU2). source carries the original
+	// worker label so drill-in can label interleaved skills. Ungrouped rows
+	// pass through unchanged.
+	row, source := agent, agent
+	if s.group != nil {
+		row = s.group.rowFor(agent)
+		if tk, ok := ev.(reviewtypes.Tokens); ok {
+			ev = s.group.liveTokens(agent, tk)
+		}
+	}
 	select {
-	case s.msgs <- agentEventMsg{agent: agent, ev: ev}:
+	case s.msgs <- agentEventMsg{agent: row, source: source, ev: ev}:
 	default:
 		s.mu.Lock()
 		s.dropped++
@@ -258,6 +294,9 @@ func (s *TUISink) RunFinished(summary reviewtypes.RunSummary) {
 	s.finished = true
 	s.mu.Unlock()
 
+	if s.group != nil {
+		summary = s.group.collapseSummary(summary)
+	}
 	s.enqueueControl(runFinishedMsg{summary: summary})
 }
 

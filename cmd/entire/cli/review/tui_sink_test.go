@@ -2,6 +2,7 @@ package review
 
 import (
 	"bytes"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -464,5 +465,215 @@ func TestTUISink_WaitJoinsPump(t *testing.T) {
 	case <-sink.pumpDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Wait returned before the pump goroutine exited")
+	}
+}
+
+// TestTUISink_GroupsWorkerEventsByAgent pins the one-row-per-agent display:
+// skill fan-out runs N parallel workers per agent (claude-code:review,
+// claude-code:pr-review), but the dashboard must show a single row per agent
+// — the fan-out was behavior-only and must not leak per-skill rows. The sink
+// routes each worker's events to its agent row.
+func TestTUISink_GroupsWorkerEventsByAgent(t *testing.T) {
+	t.Parallel()
+	prog := newRecordingProgram()
+	sink := newTUISinkWithProgram(prog)
+	sink.groupWorkers([]string{tAgentClaude}, map[string]string{
+		"claude-code:review":    tAgentClaude,
+		"claude-code:pr-review": tAgentClaude,
+	})
+	sink.Start()
+	defer func() { prog.Kill(); sink.Wait() }()
+
+	sink.AgentEvent("claude-code:review", reviewtypes.AssistantText{Text: "a"})
+	sink.AgentEvent("claude-code:pr-review", reviewtypes.AssistantText{Text: "b"})
+
+	deadline := time.After(5 * time.Second)
+	seen := 0
+	for seen < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("only %d/2 events reached the program", seen)
+		default:
+		}
+		for _, m := range prog.recorded() {
+			if ae, ok := m.(agentEventMsg); ok {
+				if ae.agent != tAgentClaude {
+					t.Fatalf("event routed to row %q, want collapsed agent row tAgentClaude", ae.agent)
+				}
+			}
+		}
+		seen = len(prog.recorded())
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestTUISink_CollapsesSummaryToAgentRows pins that the per-worker
+// RunFinished summary folds into one entry per agent row (worst-status wins,
+// tokens summed) so the model's by-index row sync still aligns.
+func TestTUISink_CollapsesSummaryToAgentRows(t *testing.T) {
+	t.Parallel()
+	g := newAgentGrouping([]string{tAgentClaude, "codex"}, map[string]string{
+		"claude-code:review":    tAgentClaude,
+		"claude-code:pr-review": tAgentClaude,
+		"codex":                 "codex",
+	})
+	in := reviewtypes.RunSummary{AgentRuns: []reviewtypes.AgentRun{
+		{Name: "claude-code:review", Status: reviewtypes.AgentStatusSucceeded, Tokens: reviewtypes.Tokens{In: 100, Out: 10}},
+		{Name: "claude-code:pr-review", Status: reviewtypes.AgentStatusFailed, Tokens: reviewtypes.Tokens{In: 50, Out: 5}},
+		{Name: "codex", Status: reviewtypes.AgentStatusSucceeded, Tokens: reviewtypes.Tokens{In: 200, Out: 20}},
+	}}
+	got := g.collapseSummary(in)
+	if len(got.AgentRuns) != 2 {
+		t.Fatalf("collapsed runs = %d, want 2 (one per agent row): %+v", len(got.AgentRuns), got.AgentRuns)
+	}
+	cc := got.AgentRuns[0]
+	if cc.Name != tAgentClaude || cc.Status != reviewtypes.AgentStatusFailed {
+		t.Errorf("claude-code row = {%s,%v}, want {claude-code, Failed} (worst-status wins)", cc.Name, cc.Status)
+	}
+	if cc.Tokens.In != 150 || cc.Tokens.Out != 15 {
+		t.Errorf("claude-code tokens = %+v, want {150,15} (summed)", cc.Tokens)
+	}
+	if got.AgentRuns[1].Name != "codex" || got.AgentRuns[1].Tokens.In != 200 {
+		t.Errorf("codex row = %+v, want single {codex,200}", got.AgentRuns[1])
+	}
+}
+
+// TestTUISink_SumsLiveTokensAcrossWorkers pins that live token counts on a
+// collapsed agent row are the SUM of its workers' cumulative counts, not
+// last-writer-wins. Since #1666 streams cumulative tokens per worker and the
+// row overwrites on each Tokens event, two skill-workers sharing one agent
+// row would otherwise bounce between their individual counts mid-run.
+func TestTUISink_SumsLiveTokensAcrossWorkers(t *testing.T) {
+	t.Parallel()
+	prog := newRecordingProgram()
+	sink := newTUISinkWithProgram(prog)
+	sink.groupWorkers([]string{tAgentClaude}, map[string]string{
+		"claude-code:review":    tAgentClaude,
+		"claude-code:pr-review": tAgentClaude,
+	})
+	sink.Start()
+	defer func() { prog.Kill(); sink.Wait() }()
+
+	sink.AgentEvent("claude-code:review", reviewtypes.Tokens{In: 100, Out: 1})
+	sink.AgentEvent("claude-code:pr-review", reviewtypes.Tokens{In: 50, Out: 2})
+	sink.AgentEvent("claude-code:review", reviewtypes.Tokens{In: 120, Out: 3}) // worker 1 advances
+
+	// Last forwarded Tokens for the agent row must be the running sum:
+	// worker1's latest {120,3} + worker2's latest {50,2} = {170,5}.
+	want := reviewtypes.Tokens{In: 170, Out: 5}
+	deadline := time.After(5 * time.Second)
+	for {
+		var last *reviewtypes.Tokens
+		for _, m := range prog.recorded() {
+			if ae, ok := m.(agentEventMsg); ok {
+				if tk, ok := ae.ev.(reviewtypes.Tokens); ok {
+					if ae.agent != tAgentClaude {
+						t.Fatalf("tokens routed to %q, want %q", ae.agent, tAgentClaude)
+					}
+					tk := tk
+					last = &tk
+				}
+			}
+		}
+		if last != nil && *last == want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("last forwarded tokens = %v, want %v (per-worker sum)", last, want)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// TestAgentGrouping_CollapseAggregatesDurationSpan pins (a): a collapsed
+// agent run spans from its earliest worker's start to its latest worker's
+// end, not one worker's slice.
+func TestAgentGrouping_CollapseAggregatesDurationSpan(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	g := newAgentGrouping([]string{tAgentClaude}, map[string]string{
+		"claude-code:review":    tAgentClaude,
+		"claude-code:pr-review": tAgentClaude,
+	})
+	in := reviewtypes.RunSummary{AgentRuns: []reviewtypes.AgentRun{
+		// starts at +0, runs 4m → ends +4m
+		{Name: "claude-code:review", StartedAt: base, Duration: 4 * time.Minute},
+		// starts at +1m, runs 5m → ends +6m (latest)
+		{Name: "claude-code:pr-review", StartedAt: base.Add(time.Minute), Duration: 5 * time.Minute},
+	}}
+	got := g.collapseSummary(in)
+	if len(got.AgentRuns) != 1 {
+		t.Fatalf("collapsed runs = %d, want 1", len(got.AgentRuns))
+	}
+	run := got.AgentRuns[0]
+	if !run.StartedAt.Equal(base) {
+		t.Errorf("StartedAt = %v, want earliest %v", run.StartedAt, base)
+	}
+	if run.Duration != 6*time.Minute {
+		t.Errorf("Duration = %v, want 6m span (earliest start → latest end)", run.Duration)
+	}
+}
+
+// TestBuildEventLines_LabelsSkillWhenMultipleSources pins (b): when a
+// collapsed row's buffer holds events from more than one worker, drill-in
+// prefixes each with its skill tag so interleaved parallel skills read
+// cleanly; a single-source buffer stays unprefixed.
+func TestBuildEventLines_LabelsSkillWhenMultipleSources(t *testing.T) {
+	t.Parallel()
+	multi := []bufferedEvent{
+		{source: "claude-code:review", ev: reviewtypes.AssistantText{Text: "found A"}},
+		{source: "claude-code:pr-review", ev: reviewtypes.AssistantText{Text: "found B"}},
+	}
+	lines := buildEventLines(multi, 80)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "review") || !strings.Contains(joined, "pr-review") {
+		t.Errorf("multi-source drill-in should tag each event with its skill:\n%s", joined)
+	}
+	if !strings.Contains(joined, "found A") || !strings.Contains(joined, "found B") {
+		t.Errorf("event text lost:\n%s", joined)
+	}
+
+	single := []bufferedEvent{
+		{source: "codex", ev: reviewtypes.AssistantText{Text: "only one"}},
+		{source: "codex", ev: reviewtypes.ToolCall{Name: "exec", Args: "ls"}},
+	}
+	sl := strings.Join(buildEventLines(single, 80), "\n")
+	if strings.Contains(sl, "[codex]") || strings.Contains(sl, "codex:") {
+		t.Errorf("single-source drill-in must not add a skill prefix:\n%s", sl)
+	}
+}
+
+// TestTUISink_GroupWorkersSendsRowWorkerCounts pins the sink→model handshake
+// that lets the dashboard know how many workers fold into each row: without
+// it the model completes a collapsed row on the FIRST worker's terminal event
+// (frozen duration, premature "✓ done") while sibling skills still run.
+func TestTUISink_GroupWorkersSendsRowWorkerCounts(t *testing.T) {
+	t.Parallel()
+	prog := newRecordingProgram()
+	sink := newTUISinkWithProgram(prog)
+	sink.groupWorkers([]string{tAgentClaude, "codex"}, map[string]string{
+		"claude-code:review":    tAgentClaude,
+		"claude-code:pr-review": tAgentClaude,
+		"codex":                 "codex",
+	})
+	sink.Start()
+	defer func() { prog.Kill(); sink.Wait() }()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		for _, m := range prog.recorded() {
+			if wc, ok := m.(rowWorkerCountsMsg); ok {
+				if wc.counts[tAgentClaude] != 2 || wc.counts["codex"] != 1 {
+					t.Fatalf("worker counts = %v, want {%s:2, codex:1}", wc.counts, tAgentClaude)
+				}
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatal("no rowWorkerCountsMsg reached the program after groupWorkers + Start")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }

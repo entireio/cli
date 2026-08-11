@@ -11,10 +11,12 @@ package review
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitexec"
+	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/storer"
@@ -244,8 +246,153 @@ func countUncommitted(ctx context.Context, repoRoot string) (int, error) {
 	return len(strings.Split(trimmed, "\n")), nil
 }
 
-// runGit runs `git <args>` in repoDir and returns stdout as a string. Thin
-// wrapper around gitexec.Run preserved so existing call sites don't change.
+// runGit runs `git <args>` in repoRoot and returns stdout as a string. It
+// exists to centralize the wrapcheck exemption: gitexec.Run already wraps
+// its errors with the failing git command, so per-call-site wrapping would
+// only duplicate that context, and .golangci.yaml deliberately does not
+// exempt gitexec globally — call sites elsewhere must still add context.
 func runGit(ctx context.Context, repoRoot string, args ...string) (string, error) {
 	return gitexec.Run(ctx, repoRoot, args...) //nolint:wrapcheck // gitexec already wraps
+}
+
+// scopeContextCaps bounds each ScopeContext field so the composed prompt
+// stays well under per-argument exec limits (Linux caps a single argv string
+// at 128KiB; the diff budget plus list caps keep the whole prompt far below).
+type scopeContextCaps struct {
+	maxCommits      int
+	maxFiles        int
+	maxUncommitted  int
+	diffInlineLimit int
+}
+
+const (
+	scopeMaxCommits     = 50
+	scopeMaxFiles       = 200
+	scopeMaxUncommitted = 100
+	// scopeDiffInlineLimit stays well under Windows' ~32KiB CreateProcess
+	// command-line cap (the prompt travels as one argv string and again via
+	// ENTIRE_REVIEW_PROMPT), leaving headroom for the rest of the prompt.
+	scopeDiffInlineLimit = 24 * 1024
+)
+
+// BuildScopeContext enumerates the review scope for prompt injection: the
+// branch's commits (oldest first), the three-dot changed-file list, the
+// uncommitted porcelain lines, and — when it fits the inline budget — the
+// diff itself. Three-dot (merge-base) semantics throughout, so upstream-only
+// changes on baseRef never enter the scope handed to agents.
+func BuildScopeContext(ctx context.Context, repoRoot, baseRef string) (reviewtypes.ScopeContext, error) {
+	return buildScopeContextCapped(ctx, repoRoot, baseRef, scopeContextCaps{
+		maxCommits:      scopeMaxCommits,
+		maxFiles:        scopeMaxFiles,
+		maxUncommitted:  scopeMaxUncommitted,
+		diffInlineLimit: scopeDiffInlineLimit,
+	})
+}
+
+func buildScopeContextCapped(ctx context.Context, repoRoot, baseRef string, caps scopeContextCaps) (reviewtypes.ScopeContext, error) {
+	var sc reviewtypes.ScopeContext
+
+	// Newest-first from git, cap (keeping the newest — the prompt declares
+	// this list authoritative, and recent commits are the ones a review can
+	// least afford to lose), then reverse for oldest-first reading order.
+	commitsOut, err := runGit(ctx, repoRoot, "log", "--format=%h %s", baseRef+"..HEAD")
+	if err != nil {
+		return sc, fmt.Errorf("list scope commits: %w", err)
+	}
+	sc.Commits, sc.CommitsTruncated = capScopeLines(commitsOut, caps.maxCommits)
+
+	filesOut, err := runGit(ctx, repoRoot, "diff", "--name-status", baseRef+"...HEAD")
+	if err != nil {
+		return sc, fmt.Errorf("list scope files: %w", err)
+	}
+	sc.Files, sc.FilesTruncated = capScopeLines(filesOut, caps.maxFiles)
+
+	uncommittedOut, err := runGit(ctx, repoRoot, "status", "--porcelain")
+	if err != nil {
+		return sc, fmt.Errorf("list uncommitted files: %w", err)
+	}
+	sc.Uncommitted, sc.UncommittedTruncated = capScopeLines(uncommittedOut, caps.maxUncommitted)
+
+	diffOut, err := runGit(ctx, repoRoot, "diff", baseRef+"...HEAD")
+	if err != nil {
+		return sc, fmt.Errorf("compute scope diff: %w", err)
+	}
+	// The rendered lists ship in the same prompt (argv + ENTIRE_REVIEW_PROMPT
+	// env var). Line-count caps alone don't bound them — a wide branch with
+	// long paths can push the lists past the platform argv cap even with the
+	// diff omitted — so first trim the lists to half the inline budget, then
+	// charge what remains against the diff allowance.
+	capScopeListsToBudget(&sc, caps.diffInlineLimit/2)
+	allowance := caps.diffInlineLimit - scopeListBytes(sc)
+	switch {
+	case strings.TrimSpace(diffOut) == "":
+		// No committed diff — nothing to inline, nothing omitted.
+	case caps.diffInlineLimit > 0 && len(diffOut) > allowance:
+		sc.DiffOmitted = true
+	default:
+		sc.Diff = diffOut
+	}
+
+	return sc, nil
+}
+
+// capScopeListsToBudget trims the list sections so their rendered bytes fit
+// budget, charging commits, files, then uncommitted against it in order and
+// keeping each list's leading lines. Called while commits are still
+// newest-first (before the oldest-first reversal), so trimming the tail
+// drops the oldest commits — matching the keep-newest cap semantics. It
+// also performs that reversal, making it the single exit point for commit
+// ordering. A non-positive budget only reverses.
+func capScopeListsToBudget(sc *reviewtypes.ScopeContext, budget int) {
+	// The closure re-reads sc.Commits at return time: a bare
+	// `defer slices.Reverse(sc.Commits)` would capture the pre-trim slice
+	// header and reverse the full backing array, leaving a trimmed view
+	// holding the OLDEST commits — inverting keep-newest exactly when
+	// truncation matters.
+	defer func() { slices.Reverse(sc.Commits) }()
+	if budget <= 0 {
+		return
+	}
+	remaining := budget
+	trim := func(lines []string, truncated bool) ([]string, bool) {
+		for i, line := range lines {
+			cost := len(line) + 1
+			if cost > remaining {
+				return lines[:i], true
+			}
+			remaining -= cost
+		}
+		return lines, truncated
+	}
+	sc.Commits, sc.CommitsTruncated = trim(sc.Commits, sc.CommitsTruncated)
+	sc.Files, sc.FilesTruncated = trim(sc.Files, sc.FilesTruncated)
+	sc.Uncommitted, sc.UncommittedTruncated = trim(sc.Uncommitted, sc.UncommittedTruncated)
+}
+
+// scopeListBytes returns the bytes the rendered list sections will occupy
+// in the composed prompt (one newline per line), for charging against the
+// inline-diff budget.
+func scopeListBytes(sc reviewtypes.ScopeContext) int {
+	total := 0
+	for _, group := range [][]string{sc.Commits, sc.Files, sc.Uncommitted} {
+		for _, line := range group {
+			total += len(line) + 1
+		}
+	}
+	return total
+}
+
+// capScopeLines splits command output into lines and applies a cap. Only
+// trailing newlines are trimmed — porcelain status lines carry a significant
+// leading space. maxLines <= 0 means unlimited.
+func capScopeLines(out string, maxLines int) ([]string, bool) {
+	trimmed := strings.TrimRight(out, "\n")
+	if trimmed == "" {
+		return nil, false
+	}
+	lines := strings.Split(trimmed, "\n")
+	if maxLines > 0 && len(lines) > maxLines {
+		return lines[:maxLines], true
+	}
+	return lines, false
 }

@@ -136,7 +136,7 @@ func RunReviewGuidedSetup(
 	if err != nil {
 		return "", settings.ReviewProfileConfig{}, err
 	}
-	profile.Task = guidedProfileTask(profileName, profile.Task, existing.Task, customTask)
+	profile.Task = guidedProfileTask(profile.Task, existing.Task, customTask)
 	if len(profile.Agents) > 1 {
 		judge, err := promptForJudge(ctx, launchable, existing)
 		if err != nil {
@@ -161,7 +161,7 @@ func RunReviewGuidedSetup(
 
 // launchableInstalledAgentNames returns the installed agents that have a
 // review-runner adapter, in the order they can be offered to the user.
-func guidedProfileTask(profileName, generatedTask, existingTask, customTask string) string {
+func guidedProfileTask(generatedTask, existingTask, customTask string) string {
 	if customTask != "" {
 		return customTask
 	}
@@ -171,7 +171,11 @@ func guidedProfileTask(profileName, generatedTask, existingTask, customTask stri
 	if strings.TrimSpace(generatedTask) != "" {
 		return generatedTask
 	}
-	return profileTask(profileName, settings.ReviewProfileConfig{})
+	// No user-provided task: persist empty. The built-in brief is applied at
+	// runtime by profileTask (cmd.go sets profile.Task for every worker), not
+	// saved configuration — persisting it would make it indistinguishable
+	// from a task the user wrote.
+	return ""
 }
 
 func launchableInstalledAgentNames(installed []types.AgentName, reviewerFor func(string) reviewtypes.AgentReviewer) []string {
@@ -431,8 +435,9 @@ func promptChangeModel(ctx context.Context, seed crewSlot) (crewSlot, error) {
 // a worker keyed by workerIDForAgentModel, which disambiguates duplicates
 // (claude-code, claude-code-2, claude-code:opus, …).
 func buildCrewProfile(ctx context.Context, profileName string, slots []crewSlot) settings.ReviewProfileConfig {
+	// Task deliberately left empty: the built-in brief is a runtime fallback
+	// for skill-less workers, not user configuration to persist.
 	profile := settings.ReviewProfileConfig{
-		Task:   profileTask(profileName, settings.ReviewProfileConfig{}),
 		Agents: make(map[string]settings.ReviewConfig, len(slots)),
 	}
 	for _, s := range slots {
@@ -969,9 +974,6 @@ func saveReviewProfileConfig(ctx context.Context, profileName string, agents map
 		profile.Judge = &settings.ReviewConfig{Agent: strings.TrimSpace(judgeAgent)}
 	} else {
 		profile.Judge = nil
-	}
-	if strings.TrimSpace(profile.Task) == "" {
-		profile.Task = profileTask(profileName, settings.ReviewProfileConfig{})
 	}
 	hadProfiles := len(profiles) > 0
 	profiles[profileName] = profile

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
@@ -33,15 +34,63 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 	}
 }
 
+// reviewToolAllowlist is the read-only tool surface a headless claude
+// review child gets pre-approved. Print mode (-p) auto-denies any tool call
+// that would have prompted interactively, so without an explicit allowlist
+// every finder that runs `git diff`/`git log` bounces off a denial and
+// detours (slower reviews, findings verified by workaround or not at all).
+//
+// Deliberately narrow: read-only git subcommands are enumerated instead of
+// granting Bash(git:*) — git can execute arbitrary code via aliases/hooks,
+// and push/commit match the blanket pattern. No file tools that write (Edit,
+// Write) and never --dangerously-skip-permissions: reviewers process
+// untrusted input (the diff under review), so the child must stay unable to
+// modify the repo. Known accepted residual: the granted subcommands accept
+// --output=<path>, so a prompt-injected reviewer could write query output to
+// an arbitrary path — defense-in-depth weakening, not code execution; the
+// tradeoff is accepted because the alternative is denying the git access a
+// review needs. --allowedTools ADDS to the user's own permission config; it
+// cannot revoke anything.
+var reviewToolAllowlist = []string{
+	"Read", "Grep", "Glob", "Task", "TodoWrite", "Skill",
+	"Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+	"Bash(git status:*)", "Bash(git blame:*)", "Bash(git rev-parse:*)",
+	"Bash(git merge-base:*)", "Bash(git ls-files:*)",
+	// `entire explain` is the command the injected checkpoint context tells
+	// reviewers to run; granting only the canonical `checkpoint explain`
+	// form left the prompt's own guidance auto-denied in headless -p.
+	"Bash(entire search:*)", "Bash(entire checkpoint explain:*)", "Bash(entire explain:*)",
+}
+
 // buildReviewCmd builds the exec.Cmd for a claude review run.
 // Exposed at package level for test inspection of argv and env.
 func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
-	prompt := review.ComposeReviewPrompt(cfg)
-	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
+	prompt := guardSlashExpansion(review.ComposeReviewPrompt(cfg))
+	args := []string{
+		"-p", prompt,
+		"--output-format", "stream-json", "--verbose",
+		"--allowedTools", strings.Join(reviewToolAllowlist, ","),
+	}
 	args = review.AppendModelFlag(args, cfg.Model)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "claude-code", cfg, prompt)
 	return cmd
+}
+
+// guardSlashExpansion prevents claude -p from interpreting the prompt as a
+// slash command. The composed prompt leads with the configured skill line
+// (e.g. "/pr-review-toolkit:review-pr"); print mode expands a leading slash
+// token as a command invocation — observed to resolve to the BUILT-IN
+// /review skill with the entire prompt (skill name included) as its
+// arguments, so the configured skill never ran and the built-in PR-review
+// harness treated the skill name as a PR number. A prose preamble makes
+// expansion impossible while telling the agent to invoke the skill lines
+// properly via the Skill tool (which the allowlist pre-approves).
+func guardSlashExpansion(prompt string) string {
+	if !strings.HasPrefix(prompt, "/") {
+		return prompt
+	}
+	return "Perform the review below. Lines starting with \"/\" name configured review skills: invoke each with the Skill tool and follow it.\n\n" + prompt
 }
 
 // parseClaudeOutput converts claude's --output-format stream-json --verbose

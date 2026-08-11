@@ -1286,3 +1286,77 @@ func TestTUIModel_FinalPhaseRow(t *testing.T) {
 		t.Fatalf("final phase should show done after completion:\n%s", out)
 	}
 }
+
+// TestTUIModel_SkillFanout_RowCompletesOnlyWhenAllWorkersFinish pins that a
+// collapsed agent row (skill fan-out: N workers sharing one row) stays in the
+// running state until EVERY worker has reached a terminal event. Stamping
+// runEnd/status on the first worker's Finished would freeze the duration and
+// show "✓ done" while a slower sibling skill is still reviewing — misleading
+// the user about whether the agent's review is actually complete.
+func TestTUIModel_SkillFanout_RowCompletesOnlyWhenAllWorkersFinish(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{tAgentClaude}, func() {})
+	updated, _ := m.Update(rowWorkerCountsMsg{counts: map[string]int{tAgentClaude: 2}})
+	m = mustModel(t, updated)
+
+	// First worker finishes; sibling is still running.
+	updated, _ = m.Update(agentEventMsg{agent: tAgentClaude, source: "claude-code:review", ev: reviewtypes.Finished{Success: true}})
+	m = mustModel(t, updated)
+	row := m.rows[0]
+	if row.status != reviewtypes.AgentStatusUnknown {
+		t.Errorf("row status = %v after 1/2 workers finished, want Unknown (still running)", row.status)
+	}
+	if !row.runEnd.IsZero() {
+		t.Error("runEnd should not be stamped while a sibling worker is still running")
+	}
+
+	// A duplicate terminal event from the SAME worker must not complete the row.
+	updated, _ = m.Update(agentEventMsg{agent: tAgentClaude, source: "claude-code:review", ev: reviewtypes.Finished{Success: true}})
+	m = mustModel(t, updated)
+	if !m.rows[0].runEnd.IsZero() {
+		t.Error("duplicate Finished from the same worker must not complete the row")
+	}
+
+	// Second worker finishes: NOW the row is done.
+	updated, _ = m.Update(agentEventMsg{agent: tAgentClaude, source: "claude-code:pr-review", ev: reviewtypes.Finished{Success: true}})
+	m = mustModel(t, updated)
+	row = m.rows[0]
+	if row.status != reviewtypes.AgentStatusSucceeded {
+		t.Errorf("row status = %v after all workers finished, want Succeeded", row.status)
+	}
+	if row.runEnd.IsZero() {
+		t.Error("runEnd should be stamped once all workers have finished")
+	}
+}
+
+// TestTUIModel_SkillFanout_WorstStatusWinsAcrossWorkers pins that a collapsed
+// row's terminal status aggregates worst-wins across its workers (mirroring
+// collapseSummary): one worker's RunError makes the row Failed even when a
+// sibling later succeeds, and the failure stays sticky.
+func TestTUIModel_SkillFanout_WorstStatusWinsAcrossWorkers(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{tAgentClaude}, func() {})
+	updated, _ := m.Update(rowWorkerCountsMsg{counts: map[string]int{tAgentClaude: 2}})
+	m = mustModel(t, updated)
+
+	theErr := errors.New("worker crashed")
+	updated, _ = m.Update(agentEventMsg{agent: tAgentClaude, source: "claude-code:review", ev: reviewtypes.RunError{Err: theErr}})
+	m = mustModel(t, updated)
+	// Sibling still running: the row must not show a terminal state yet.
+	if m.rows[0].status != reviewtypes.AgentStatusUnknown {
+		t.Errorf("row status = %v after 1/2 workers errored, want Unknown (sibling still running)", m.rows[0].status)
+	}
+
+	updated, _ = m.Update(agentEventMsg{agent: tAgentClaude, source: "claude-code:pr-review", ev: reviewtypes.Finished{Success: true}})
+	m = mustModel(t, updated)
+	row := m.rows[0]
+	if row.status != reviewtypes.AgentStatusFailed {
+		t.Errorf("row status = %v, want Failed (worst-wins across workers)", row.status)
+	}
+	if row.err == nil {
+		t.Error("row.err should retain the failed worker's error")
+	}
+	if row.runEnd.IsZero() {
+		t.Error("runEnd should be stamped once all workers reached a terminal event")
+	}
+}

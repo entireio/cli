@@ -148,7 +148,7 @@ func applyLegacyReviewProfileFallback(s *settings.EntireSettings) {
 func normalizeLegacyCodexDefaultSkills(configs map[string]settings.ReviewConfig) {
 	for workerName, cfg := range configs {
 		if reviewAgentName(workerName, cfg) != string(agent.AgentNameCodex) ||
-			len(cfg.Skills) != 1 || strings.TrimSpace(cfg.Skills[0]) != "/review" {
+			len(cfg.Skills) != 1 || strings.TrimSpace(cfg.Skills[0]) != defaultReviewSkill {
 			continue
 		}
 		cfg.Skills = nil
@@ -178,6 +178,17 @@ func nonZeroNamed[T interface{ IsZero() bool }](in map[string]T) map[string]T {
 		out[name] = cfg
 	}
 	return out
+}
+
+// agentRowLabel is the per-agent dashboard row label: the agent name plus its
+// model when set. Skill fan-out workers of the same agent+model collapse to
+// one row under this label; genuinely distinct agent+model workers stay
+// separate rows, matching the pre-fan-out display.
+func agentRowLabel(agentName, model string) string {
+	if strings.TrimSpace(model) != "" {
+		return agentName + " (" + model + ")"
+	}
+	return agentName
 }
 
 func reviewAgentName(workerName string, cfg settings.ReviewConfig) string {
@@ -253,36 +264,51 @@ func judgeLabel(j judgeSpec) string {
 	return labelForSimpleAgent(j.agent)
 }
 
+// selectProfileWorker resolves a selector to exactly one worker, erroring
+// when the selector matches several — call sites that need a single reviewer
+// (e.g. --model targeting) cannot pick among an agent's workers themselves.
 func selectProfileWorker(profile settings.ReviewProfileConfig, selector string) (string, settings.ReviewConfig, error) {
+	matched, err := selectProfileWorkers(profile, selector)
+	if err != nil {
+		return "", settings.ReviewConfig{}, err
+	}
+	names := sortedMapKeys(matched)
+	if len(names) > 1 {
+		return "", settings.ReviewConfig{}, fmt.Errorf("agent %q has multiple review reviewers (%s); choose one by reviewer name", selector, strings.Join(names, ", "))
+	}
+	return names[0], matched[names[0]], nil
+}
+
+// selectProfileWorkers resolves an --agent/worker selector to every matching
+// worker. An exact worker key wins alone; otherwise all workers whose agent
+// resolves to the selector are returned — multiple matches are the agent's
+// exploded skill workers, which run together as a filtered crew rather than
+// erroring on ambiguity.
+func selectProfileWorkers(profile settings.ReviewProfileConfig, selector string) (map[string]settings.ReviewConfig, error) {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
-		return "", settings.ReviewConfig{}, errors.New("empty review reviewer selector")
+		return nil, errors.New("empty review reviewer selector")
 	}
 	if cfg, ok := profile.Agents[selector]; ok && !cfg.IsZero() {
-		return selector, cfg, nil
+		return map[string]settings.ReviewConfig{selector: cfg}, nil
 	}
-	var matches []string
+	matched := make(map[string]settings.ReviewConfig)
 	for workerName, cfg := range profile.Agents {
 		if cfg.IsZero() {
 			continue
 		}
 		if reviewAgentName(workerName, cfg) == selector {
-			matches = append(matches, workerName)
+			matched[workerName] = cfg
 		}
 	}
-	sort.Strings(matches)
-	switch len(matches) {
-	case 1:
-		return matches[0], profile.Agents[matches[0]], nil
-	case 0:
+	if len(matched) == 0 {
 		configured := sortedMapKeys(profile.Agents)
 		if len(configured) == 0 {
-			return "", settings.ReviewConfig{}, fmt.Errorf("review reviewer or agent %q is not configured", selector)
+			return nil, fmt.Errorf("review reviewer or agent %q is not configured", selector)
 		}
-		return "", settings.ReviewConfig{}, fmt.Errorf("review reviewer or agent %q is not configured; configured reviewers: %s", selector, strings.Join(configured, ", "))
-	default:
-		return "", settings.ReviewConfig{}, fmt.Errorf("agent %q has multiple review reviewers (%s); choose one by reviewer name", selector, strings.Join(matches, ", "))
+		return nil, fmt.Errorf("review reviewer or agent %q is not configured; configured reviewers: %s", selector, strings.Join(configured, ", "))
 	}
+	return matched, nil
 }
 
 func workerIDForAgentModel(agentName, model string, existing map[string]settings.ReviewConfig) string {
@@ -355,8 +381,9 @@ func defaultReviewProfileForInstalledAgents(
 	if len(agents) == 0 {
 		return settings.ReviewProfileConfig{}, errors.New("no agents with review runner adapters and hooks installed; run `entire configure --agent claude-code`, `entire configure --agent codex`, `entire configure --agent gemini`, or `entire configure --agent pi`")
 	}
+	// Task deliberately left empty: the built-in brief is a runtime fallback
+	// for skill-less workers, not user configuration to persist.
 	profile := settings.ReviewProfileConfig{
-		Task:   profileTask(profileName, settings.ReviewProfileConfig{}),
 		Agents: agents,
 	}
 	if j, ok := defaultJudge(ctx, agents); ok {
@@ -367,6 +394,11 @@ func defaultReviewProfileForInstalledAgents(
 
 const defaultAgentReviewPrompt = "Review the change according to the profile task."
 
+// defaultReviewSkill is the built-in review skill claude uses by default and
+// the legacy value old guided setup wrote for every agent (which codex can't
+// run — see normalizeLegacyCodexDefaultSkills).
+const defaultReviewSkill = "/review"
+
 func defaultReviewAgentConfig(profileName, agentName string) settings.ReviewConfig {
 	focus := defaultProfileFocus(profileName)
 	switch agentName {
@@ -374,7 +406,7 @@ func defaultReviewAgentConfig(profileName, agentName string) settings.ReviewConf
 		if strings.EqualFold(profileName, "security") {
 			return settings.ReviewConfig{Skills: []string{"/security-review"}}
 		}
-		return settings.ReviewConfig{Skills: []string{"/review"}, Prompt: focus}
+		return settings.ReviewConfig{Skills: []string{defaultReviewSkill}, Prompt: focus}
 	case string(agent.AgentNameCodex), string(agent.AgentNameGemini), string(agent.AgentNamePi):
 		prompt := defaultAgentReviewPrompt
 		if focus != "" {

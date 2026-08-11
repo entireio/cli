@@ -256,3 +256,55 @@ func TestComposeSynthesisPrompt_DefangsReviewerReports(t *testing.T) {
 		}
 	}
 }
+
+// TestComposeSynthesisPrompt_IncludesScopeFileGate verifies the judge
+// receives the authoritative changed-file list and is instructed to discard
+// findings outside it — the guard against a reviewer that mis-derived scope
+// polluting the consolidated verdict with out-of-scope "regressions".
+func TestComposeSynthesisPrompt_IncludesScopeFileGate(t *testing.T) {
+	t.Parallel()
+	summary := makeSummaryWithNarratives([]struct {
+		name      string
+		narrative string
+		status    reviewtypes.AgentStatus
+	}{
+		{"claude-code", "finding one", reviewtypes.AgentStatusSucceeded},
+		{"codex", "finding two", reviewtypes.AgentStatusSucceeded},
+	})
+
+	prompt := review.ExposedComposeSynthesisPromptScoped(summary, "", reviewtypes.ScopeContext{
+		Files:       []string{"M\tcmd/foo.go", "A\tcmd/bar.go"},
+		Uncommitted: []string{" M docs/readme.md"},
+	})
+
+	for _, want := range []string{
+		"M\tcmd/foo.go",
+		"A\tcmd/bar.go",
+		"docs/readme.md",
+		"out of scope",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q\nfull prompt:\n%s", want, prompt)
+		}
+	}
+}
+
+// TestComposeSynthesisPrompt_EmptyScopeAddsNoGate verifies a zero
+// ScopeContext leaves the prompt unchanged (no empty file-list section).
+func TestComposeSynthesisPrompt_EmptyScopeAddsNoGate(t *testing.T) {
+	t.Parallel()
+	summary := makeSummaryWithNarratives([]struct {
+		name      string
+		narrative string
+		status    reviewtypes.AgentStatus
+	}{
+		{"claude-code", "finding one", reviewtypes.AgentStatusSucceeded},
+		{"codex", "finding two", reviewtypes.AgentStatusSucceeded},
+	})
+
+	got := review.ExposedComposeSynthesisPromptScoped(summary, "", reviewtypes.ScopeContext{})
+	want := review.ExposedComposeSynthesisPrompt(summary, "")
+	if got != want {
+		t.Errorf("empty scope changed the prompt:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}

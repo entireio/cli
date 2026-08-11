@@ -170,3 +170,28 @@ func TestDedupeStrings(t *testing.T) {
 		t.Errorf("dedupeStrings(nil) = %v, want nil", got)
 	}
 }
+
+// TestDefaultReviewProfile_NoTaskPersisted verifies the non-interactive
+// first-run profile leaves task empty — the built-in brief is a runtime
+// fallback for skill-less workers, not saved user configuration.
+func TestDefaultReviewProfile_NoTaskPersisted(t *testing.T) {
+	t.Parallel()
+	profile, err := defaultReviewProfileForInstalledAgents(
+		context.Background(), DefaultProfileName,
+		[]types.AgentName{agent.AgentNameClaudeCode},
+		func(string) reviewtypes.AgentReviewer { return stubReviewerForProfileTest{} },
+	)
+	if err != nil {
+		t.Fatalf("defaultReviewProfileForInstalledAgents: %v", err)
+	}
+	if profile.Task != "" {
+		t.Errorf("persisted Task = %q, want empty (built-in brief is runtime fallback only)", profile.Task)
+	}
+}
+
+type stubReviewerForProfileTest struct{}
+
+func (stubReviewerForProfileTest) Name() string { return "stub" }
+func (stubReviewerForProfileTest) Start(context.Context, reviewtypes.RunConfig) (reviewtypes.Process, error) {
+	return nil, errors.New("not started in tests")
+}
