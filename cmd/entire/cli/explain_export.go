@@ -120,7 +120,6 @@ func resolveExplainCheckpointID(ctx context.Context, errW io.Writer, opts explai
 	}
 	switch len(matches) {
 	case 1:
-		emitCheckpointExplained(ctx, string(matches[0]), telemetry.ExplainSourceExport)
 		return matches[0], lookup, nil
 	case 0:
 		// If the user passed a positional target (not --checkpoint), give it
@@ -363,6 +362,10 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 		return err
 	}
 	defer lookup.Close()
+	// Emitted here rather than inside resolveExplainCheckpointID: the resolver
+	// is shared with `entire checkpoint tokens`, which must not pollute the
+	// search→explain funnel (ENT-1528).
+	emitCheckpointExplained(ctx, string(cpID), telemetry.ExplainSourceExport)
 
 	store := lookup.store
 	summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
@@ -469,6 +472,10 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 		return err
 	}
 	defer lookup.Close()
+	// Emitted here rather than inside resolveExplainCheckpointID: the resolver
+	// is shared with `entire checkpoint tokens`, which must not pollute the
+	// search→explain funnel (ENT-1528).
+	emitCheckpointExplained(ctx, string(cpID), telemetry.ExplainSourceExport)
 
 	store := lookup.store
 	summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
