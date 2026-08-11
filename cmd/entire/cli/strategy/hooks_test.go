@@ -1881,3 +1881,64 @@ func TestResolveHookExePath(t *testing.T) {
 		}
 	})
 }
+
+func TestWriteHookFile_AtomicWriteSemantics(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "post-commit")
+
+	written, err := writeHookFile(path, "#!/bin/sh\necho one\n")
+	if err != nil {
+		t.Fatalf("initial write: %v", err)
+	}
+	if !written {
+		t.Fatal("initial write must report written=true")
+	}
+	if runtime.GOOS != goosWindows {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o755 {
+			t.Fatalf("hook file mode = %o, want 755 (must be executable at rename time)", perm)
+		}
+	}
+
+	// Same content: unchanged, not rewritten.
+	written, err = writeHookFile(path, "#!/bin/sh\necho one\n")
+	if err != nil {
+		t.Fatalf("idempotent write: %v", err)
+	}
+	if written {
+		t.Fatal("identical content must report written=false")
+	}
+
+	// Different content: replaced.
+	written, err = writeHookFile(path, "#!/bin/sh\necho two\n")
+	if err != nil {
+		t.Fatalf("update write: %v", err)
+	}
+	if !written {
+		t.Fatal("changed content must report written=true")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "#!/bin/sh\necho two\n" {
+		t.Fatalf("unexpected content after update: %q", data)
+	}
+
+	// No leftover temp files after the writes.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("expected only the hook file, found %v", names)
+	}
+}

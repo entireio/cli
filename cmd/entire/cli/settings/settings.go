@@ -1582,5 +1582,10 @@ func saveToFile(ctx context.Context, settings *EntireSettings, filePath string) 
 	if err := jsonutil.WriteFileAtomic(filePathAbs, data, 0o644); err != nil {
 		return fmt.Errorf("writing settings file: %w", err)
 	}
+	// A repo settings file's existence is the invisible-routing discriminator:
+	// creating one during enable must flip runtime-data resolution back to the
+	// worktree for the rest of this process (e.g. session import right after
+	// enabling a formerly globally-tracked clone).
+	paths.ClearInvisibleRuntimeCache()
 	return nil
 }

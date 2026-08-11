@@ -807,6 +807,7 @@ func newEnableCmd() *cobra.Command {
 	var agentName string
 	var bootstrapOpts GitHubBootstrapOptions
 	var insecureHTTPAuth bool
+	var globalMode bool
 
 	cmd := &cobra.Command{
 		Use:   "enable",
@@ -817,9 +818,20 @@ If Entire is not yet configured, this runs the full configuration flow.
 If Entire is already configured but disabled, this re-enables it.
 
 If the current directory is not a git repository, Entire can initialize one
-for you and (optionally) create a matching GitHub repository via the gh CLI.`,
+for you and (optionally) create a matching GitHub repository via the gh CLI.
+
+With --global, Entire tracks agent sessions in every repo on this machine
+that has no repo-level setup. This writes only the per-user settings file,
+performs no repo-level setup, and works outside a git repository.`,
 		RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
 			ctx := cmd.Context()
+
+			// --global is a machine-wide action on the user settings file
+			// only: no repo checks, no repo-level setup, valid outside a git
+			// repository. It must branch before anything repo-scoped below.
+			if globalMode {
+				return runEnableGlobalMode(ctx, cmd.OutOrStdout())
+			}
 			// Best-effort: after a successful enable, tell the backend which repo
 			// was enabled so the web onboarding reflects it (and we can warn when
 			// the GitHub App can't reach it). Registered first so it runs LAST
@@ -953,39 +965,10 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 		},
 	}
 
-	cmd.Flags().BoolVar(&opts.LocalDev, flagLocalDev, false, "Use go run instead of entire binary for hooks")
-	cmd.Flags().MarkHidden(flagLocalDev) //nolint:errcheck,gosec // flag is defined above
-	cmd.Flags().BoolVar(&ignoreUntracked, "ignore-untracked", false, "Commit all new files without tracking pre-existing untracked files")
-	cmd.Flags().MarkHidden("ignore-untracked") //nolint:errcheck,gosec // flag is defined above
-	cmd.Flags().BoolVar(&opts.UseLocalSettings, "local", false, "Write settings to .entire/settings.local.json instead of .entire/settings.json")
-	cmd.Flags().BoolVar(&opts.UseProjectSettings, "project", false, "Write settings to .entire/settings.json even if it already exists")
-	cmd.Flags().StringVar(&agentName, agentFlagName, "", "Agent to set up hooks for (e.g., "+strings.Join(agent.StringList(), ", ")+"; external agents on $PATH are also available). Enables non-interactive mode.")
-	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
-	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
-	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
-	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; recommended) or branch (shared entire/checkpoints/v1 branch)")
-	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
-	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
-	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
-	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
-	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit, and push; then enable all agents and accept telemetry). Does not import existing agent history — see --"+flagImportHistory)
-	cmd.Flags().BoolVar(&opts.ImportHistory, flagImportHistory, false, importHistoryFlagUsage)
+	addEnableCmdFlags(cmd, &opts, &ignoreUntracked, &agentName, &globalMode)
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
-
-	// Bootstrap flags for non-git-repo folders.
-	cmd.Flags().BoolVar(&bootstrapOpts.InitRepo, "init-repo", false, "If not a git repo, initialize one non-interactively")
-	cmd.Flags().BoolVar(&bootstrapOpts.NoInitRepo, "no-init-repo", false, "If not a git repo, exit instead of prompting to initialize one")
-	cmd.Flags().StringVar(&bootstrapOpts.RepoName, "repo-name", "", "GitHub repository name for the new repo (used when bootstrapping)")
-	cmd.Flags().StringVar(&bootstrapOpts.RepoOwner, "repo-owner", "", "GitHub user or organization login for the new repo")
-	cmd.Flags().StringVar(&bootstrapOpts.RepoVisibility, "repo-visibility", "", "GitHub repository visibility: public, private, or internal")
-	cmd.Flags().BoolVar(&bootstrapOpts.NoGitHub, "no-github", false, "Initialize local git repo only; skip creating a GitHub remote")
-	cmd.Flags().BoolVar(&bootstrapOpts.Push, "push", false, "When bootstrapping a new repo, push the initial commit to the created GitHub remote (implies creating the remote; without it the repo is created but not pushed)")
-	cmd.Flags().StringVar(&bootstrapOpts.InitialCommitMessage, "initial-commit-message", "", "Commit message for the initial commit when bootstrapping a new repo")
-	cmd.Flags().BoolVar(&bootstrapOpts.SkipInitialCommit, "skip-initial-commit", false, "Don't create the initial commit when bootstrapping a new repo")
-	cmd.MarkFlagsMutuallyExclusive("init-repo", "no-init-repo")
-	cmd.MarkFlagsMutuallyExclusive("initial-commit-message", "skip-initial-commit")
-	cmd.MarkFlagsMutuallyExclusive("push", "no-github")
-	cmd.MarkFlagsMutuallyExclusive("push", "skip-initial-commit")
+	addEnableBootstrapFlags(cmd, &bootstrapOpts)
+	markEnableGlobalFlagConflicts(cmd)
 
 	// Provide a helpful error when --agent is used without a value
 	defaultFlagErr := cmd.FlagErrorFunc()
@@ -999,6 +982,66 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	})
 
 	return cmd
+}
+
+// addEnableCmdFlags registers the non-bootstrap `entire enable` flags.
+func addEnableCmdFlags(cmd *cobra.Command, opts *EnableOptions, ignoreUntracked *bool, agentName *string, globalMode *bool) {
+	cmd.Flags().BoolVar(&opts.LocalDev, flagLocalDev, false, "Use go run instead of entire binary for hooks")
+	cmd.Flags().MarkHidden(flagLocalDev) //nolint:errcheck,gosec // flag is defined above
+	cmd.Flags().BoolVar(ignoreUntracked, "ignore-untracked", false, "Commit all new files without tracking pre-existing untracked files")
+	cmd.Flags().MarkHidden("ignore-untracked") //nolint:errcheck,gosec // flag is defined above
+	cmd.Flags().BoolVar(&opts.UseLocalSettings, "local", false, "Write settings to .entire/settings.local.json instead of .entire/settings.json")
+	cmd.Flags().BoolVar(&opts.UseProjectSettings, "project", false, "Write settings to .entire/settings.json even if it already exists")
+	cmd.Flags().StringVar(agentName, agentFlagName, "", "Agent to set up hooks for (e.g., "+strings.Join(agent.StringList(), ", ")+"; external agents on $PATH are also available). Enables non-interactive mode.")
+	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
+	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
+	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; recommended) or branch (shared entire/checkpoints/v1 branch)")
+	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
+	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
+	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
+	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit, and push; then enable all agents and accept telemetry). Does not import existing agent history — see --"+flagImportHistory)
+	cmd.Flags().BoolVar(&opts.ImportHistory, flagImportHistory, false, importHistoryFlagUsage)
+	cmd.Flags().BoolVar(globalMode, "global", false, "Track every repo on this machine automatically (machine-wide setting; performs no repo-level setup)")
+}
+
+// markEnableGlobalFlagConflicts marks --global mutually exclusive with every
+// enable flag that implies a repo-level action (setup, hooks, bootstrap, the
+// enable report): --global is a machine-wide toggle and silently ignoring a
+// repo-scoped flag would misreport what happened. Pairwise, so the repo-scoped
+// flags keep their existing combinations among themselves.
+func markEnableGlobalFlagConflicts(cmd *cobra.Command) {
+	for _, name := range []string{
+		flagLocalDev, "ignore-untracked", "local", "project", agentFlagName,
+		flagForce, flagSkipPushSessions, flagCheckpointRemote,
+		flagCheckpointBackend, flagTelemetry, flagAbsoluteGitHookPath,
+		flagSearchSkill, flagAgentHelpSkill, "yes", flagImportHistory,
+		"insecure-http-auth",
+		"init-repo", "no-init-repo", "repo-name", "repo-owner",
+		"repo-visibility", "no-github", "push", "initial-commit-message",
+		"skip-initial-commit",
+	} {
+		cmd.MarkFlagsMutuallyExclusive("global", name)
+	}
+}
+
+// addEnableBootstrapFlags registers the enable flags for bootstrapping a git
+// repository (and optional GitHub remote) in a non-repo folder.
+func addEnableBootstrapFlags(cmd *cobra.Command, bootstrapOpts *GitHubBootstrapOptions) {
+	cmd.Flags().BoolVar(&bootstrapOpts.InitRepo, "init-repo", false, "If not a git repo, initialize one non-interactively")
+	cmd.Flags().BoolVar(&bootstrapOpts.NoInitRepo, "no-init-repo", false, "If not a git repo, exit instead of prompting to initialize one")
+	cmd.Flags().StringVar(&bootstrapOpts.RepoName, "repo-name", "", "GitHub repository name for the new repo (used when bootstrapping)")
+	cmd.Flags().StringVar(&bootstrapOpts.RepoOwner, "repo-owner", "", "GitHub user or organization login for the new repo")
+	cmd.Flags().StringVar(&bootstrapOpts.RepoVisibility, "repo-visibility", "", "GitHub repository visibility: public, private, or internal")
+	cmd.Flags().BoolVar(&bootstrapOpts.NoGitHub, "no-github", false, "Initialize local git repo only; skip creating a GitHub remote")
+	cmd.Flags().BoolVar(&bootstrapOpts.Push, "push", false, "When bootstrapping a new repo, push the initial commit to the created GitHub remote (implies creating the remote; without it the repo is created but not pushed)")
+	cmd.Flags().StringVar(&bootstrapOpts.InitialCommitMessage, "initial-commit-message", "", "Commit message for the initial commit when bootstrapping a new repo")
+	cmd.Flags().BoolVar(&bootstrapOpts.SkipInitialCommit, "skip-initial-commit", false, "Don't create the initial commit when bootstrapping a new repo")
+	cmd.MarkFlagsMutuallyExclusive("init-repo", "no-init-repo")
+	cmd.MarkFlagsMutuallyExclusive("initial-commit-message", "skip-initial-commit")
+	cmd.MarkFlagsMutuallyExclusive("push", "no-github")
+	cmd.MarkFlagsMutuallyExclusive("push", "skip-initial-commit")
 }
 
 // reportRepoEnabled records the `entire enable` against the backend so the web
@@ -1086,6 +1129,7 @@ func newDisableCmd() *cobra.Command {
 	var useProjectSettings bool
 	var uninstall bool
 	var force bool
+	var globalMode bool
 
 	cmd := &cobra.Command{
 		Use:   "disable",
@@ -1095,6 +1139,9 @@ func newDisableCmd() *cobra.Command {
 By default, this command will disable Entire. Hooks will exit silently and commands will
 show a disabled message.
 
+With --global, machine-wide automatic tracking is turned off instead;
+repo-level settings are not touched.
+
 To completely remove Entire integrations from this repository, use --uninstall:
   - .entire/ directory (settings, logs, metadata)
   - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)
@@ -1103,6 +1150,11 @@ To completely remove Entire integrations from this repository, use --uninstall:
   - Agent hooks`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
+			// --global only writes the user settings file; it needs no repo
+			// and must not touch repo-level settings.
+			if globalMode {
+				return runDisableGlobalMode(ctx, cmd.OutOrStdout())
+			}
 			if uninstall {
 				return runUninstall(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), force)
 			}
@@ -1117,6 +1169,13 @@ To completely remove Entire integrations from this repository, use --uninstall:
 	cmd.Flags().BoolVar(&useProjectSettings, "project", false, "Update .entire/settings.json instead of .entire/settings.local.json")
 	cmd.Flags().BoolVar(&uninstall, "uninstall", false, "Completely remove Entire from this repository")
 	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmation prompt (use with --uninstall)")
+	cmd.Flags().BoolVar(&globalMode, "global", false, "Turn off machine-wide automatic tracking (repo-level settings are untouched)")
+	// --global performs no repo-level action; reject combinations instead of
+	// silently ignoring the repo-scoped flags (--global --uninstall would
+	// otherwise exit 0 with the uninstall skipped).
+	for _, name := range []string{"uninstall", "project", "force", "local"} {
+		cmd.MarkFlagsMutuallyExclusive("global", name)
+	}
 
 	return cmd
 }
@@ -1252,6 +1311,13 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		return fmt.Errorf("failed to setup .entire directory: %w", err)
 	}
 
+	// A globally tracked clone keeps its runtime data under .git; move it
+	// into the worktree BEFORE the settings write below flips invisible
+	// routing to the worktree (best-effort — see maybeMigrateGlobalRuntimeData),
+	// but AFTER .entire/.gitignore exists so the moved files are never
+	// visible in git status.
+	maybeMigrateGlobalRuntimeData(ctx, w)
+
 	// Load existing settings to preserve other options (like strategy_options.push)
 	settings, err := LoadEntireSettings(ctx)
 	if err != nil {
@@ -1348,6 +1414,11 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	if err := saveSettings(); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
+
+	// One-time machine-wide question (after agent selection, next to the
+	// telemetry consent). Asked only while the global tier is unconfigured;
+	// non-interactive runs get a one-line hint instead.
+	maybeAskGlobalTracking(ctx, w, opts)
 
 	// Explicit, user-initiated setup: allow EnsurePrimaryRef to fetch a
 	// missing primary metadata ref from a configured checkpoint_remote
@@ -1887,6 +1958,13 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		return fmt.Errorf("failed to setup .entire directory: %w", err)
 	}
 
+	// A globally tracked clone keeps its runtime data under .git; move it
+	// into the worktree BEFORE the settings write below flips invisible
+	// routing to the worktree (best-effort — see maybeMigrateGlobalRuntimeData),
+	// but AFTER .entire/.gitignore exists so the moved files are never
+	// visible in git status.
+	maybeMigrateGlobalRuntimeData(ctx, w)
+
 	// Resolve the target file up front so the load below is scoped to that
 	// file's own content rather than the merged view (see setEnabledFlag for
 	// why: writing the merged struct back into a single scope leaks the other
@@ -2003,6 +2081,10 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	// Offer to import pre-existing history for the just-configured agent.
 	// First-run only; best-effort (never fails enable).
 	maybeOfferSessionImport(ctx, w, []agent.Agent{ag}, opts, firstRun)
+
+	// The --agent path never prompts; point at enable --global instead when
+	// the machine-wide question has never been answered.
+	printGlobalTrackingHintIfUnconfigured(ctx, w)
 
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary.

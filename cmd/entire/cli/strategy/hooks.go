@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -361,6 +362,9 @@ func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (i
 
 // writeHookFile writes a hook file if it doesn't exist or has different content.
 // Returns true if the file was written, false if it already had the same content.
+// The write is atomic (temp file in the hooks dir, chmod 0o755, then rename):
+// git can fire a hook at any moment, and a half-written hook script must never
+// be executable in place of the old one.
 func writeHookFile(path, content string) (bool, error) {
 	// Check if file already exists with same content
 	existing, err := os.ReadFile(path) //nolint:gosec // path is controlled
@@ -369,7 +373,7 @@ func writeHookFile(path, content string) (bool, error) {
 	}
 
 	// Git hooks must be executable (0o755)
-	if err := os.WriteFile(path, []byte(content), 0o755); err != nil { //nolint:gosec // Git hooks require executable permissions
+	if err := jsonutil.WriteFileAtomic(path, []byte(content), 0o755); err != nil {
 		return false, fmt.Errorf("failed to write hook file %s: %w", path, err)
 	}
 	return true, nil
