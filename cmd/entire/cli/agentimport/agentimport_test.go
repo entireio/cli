@@ -2,6 +2,7 @@ package agentimport
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -617,5 +618,90 @@ func TestRun_CodexImportSanitizesAndKeepsOffsetsAligned(t *testing.T) {
 	if got := len(strings.Split(strings.TrimRight(stored, "\n"), "\n")); got != rawLines {
 		t.Errorf("stored transcript has %d lines, rollout had %d — imported turn offsets "+
 			"(CheckpointTranscriptStart from raw line indices) would drift", got, rawLines)
+	}
+}
+
+// TestRun_StopsOnContextCancellation proves Ctrl-C mid-import halts Run's own
+// loops, independently of whether the configured checkpoint store rejects a
+// canceled write. DryRun writes nothing, so the loop checks are the only thing
+// that can stop this run.
+func TestRun_StopsOnContextCancellation(t *testing.T) {
+	t.Parallel()
+	repo, repoDir := initRepoWithCommit(t)
+	claudeDir := t.TempDir()
+	writeFixtureSession(t, claudeDir, "sess1.jsonl")
+	writeFixtureSession(t, claudeDir, "sess2.jsonl")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Cancel as soon as the first turn is processed, standing in for a Ctrl-C
+	// during the import. DryRun reports every turn through TurnSkipped.
+	opts := Options{
+		RepoRoot:     repoDir,
+		OverridePath: claudeDir,
+		Now:          time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+		DryRun:       true,
+		Progress:     &Progress{TurnSkipped: func(int, int, int) { cancel() }},
+	}
+
+	res, err := Run(ctx, repo, claudeImporter{}, opts)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	// 4 turns across 2 sessions; the cancel lands after the first.
+	if res.TurnsImported != 1 {
+		t.Fatalf("run continued past cancellation: processed %d turns, want 1 (%+v)",
+			res.TurnsImported, res)
+	}
+	if res.SessionsScanned != 1 {
+		t.Fatalf("run walked into session %d after cancellation, want to stop at 1",
+			res.SessionsScanned)
+	}
+}
+
+// TestRun_CancellationStopsRefsBackedImport is the end-to-end regression for
+// the reported bug, in the configuration it was reported on: `entire enable`
+// defaults a first-time repo to the git-refs checkpoint backend and then
+// offers to import agent history. See gitRefsStore.writeSession for why no
+// layer below this one stopped the run.
+func TestRun_CancellationStopsRefsBackedImport(t *testing.T) {
+	// Not parallel: sets the checkpoint backend via the environment.
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+
+	repo, repoDir := initRepoWithCommit(t)
+	claudeDir := t.TempDir()
+	writeFixtureSession(t, claudeDir, "sess1.jsonl")
+	writeFixtureSession(t, claudeDir, "sess2.jsonl")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	opts := Options{
+		RepoRoot:     repoDir,
+		OverridePath: claudeDir,
+		Now:          time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+		Progress:     &Progress{TurnWritten: func(int, int, int) { cancel() }},
+	}
+
+	res, err := Run(ctx, repo, claudeImporter{}, opts)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if res.TurnsImported != 1 {
+		t.Fatalf("import continued past cancellation: TurnsImported = %d, want 1 (%+v)",
+			res.TurnsImported, res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	infos, err := stores.Persistent.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("wrote %d checkpoints after cancellation, want 1 (the in-flight turn)", len(infos))
 	}
 }

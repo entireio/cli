@@ -50,7 +50,17 @@ the commands are always runnable in every build.
   to the adopted session from the new location.
 - `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`, plus
   the deprecated `rewind` (functional, prints a cobra deprecation message, will
-  be removed in a future release)
+  be removed in a future release).
+  `explain` also takes `--repo <owner/name>`, the drill-down for a cross-repo
+  `search` hit: it reads the checkpoint from that repo's entire-api cell over
+  HTTP (`/repos/{repo_id}/checkpoints/{id}` plus `.../transcript/raw`) rather
+  than fetching git objects, so a foreign checkpoint never enters this repo's
+  object store, ref namespace, or `tokens profile`. It needs a full checkpoint
+  ID and a pushed checkpoint; `--commit`, `--session`, `--search-all`, and
+  `--generate` are rejected with it, and naming the current repo is a no-op
+  that falls through to the local path. See `checkpoint_api_reader.go`
+  (`apiCheckpointReader`, which implements the two checkpoint reader tiers and
+  deliberately not `Writer`) and `explain_repo.go`.
 - `agent`: bare opens the interactive agent selector, plus `list`, `add`, `remove`
 - `configure`: bare prints help and a hint pointing at `entire agent`; flags
   manage non-agent settings (telemetry, git-hook installation mode, strategy
