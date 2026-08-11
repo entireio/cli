@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/spf13/pflag"
 )
 
 // No t.Parallel in this file: every test uses t.Chdir and/or t.Setenv.
@@ -381,6 +382,62 @@ func TestEnableCmd_GlobalRejectsRepoScopedFlags(t *testing.T) {
 		}
 	}
 	// The rejection must happen before any action: no user settings written.
+	if _, err := os.Stat(settings.UserSettingsPath()); !os.IsNotExist(err) {
+		t.Fatalf("rejected combinations must not write the user settings file (err=%v)", err)
+	}
+}
+
+// TestEnableCmd_GlobalConflictListCoversEveryFlag derives the --global
+// exclusivity contract from the live flag set instead of trusting the
+// hand-maintained list in markEnableGlobalFlagConflicts: every flag `entire
+// enable` registers must either be classified below as genuinely
+// global-compatible or be rejected by cobra when combined with --global. A
+// future repo-scoped flag added to newEnableCmd without a matching conflict
+// entry fails here until classified — the silent escape would reintroduce
+// the ignored-flag bug the pairwise registration exists to prevent.
+func TestEnableCmd_GlobalConflictListCoversEveryFlag(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+
+	// Flags that may legitimately combine with --global. Every entry needs a
+	// one-line reason; anything not listed must be mutually exclusive.
+	allowlist := map[string]string{
+		"global": "the machine-wide mode selector itself",
+		"help":   "cobra built-in; prints usage and exits before any repo-level action",
+	}
+
+	enum := newEnableCmd()
+	enum.InitDefaultHelpFlag() // Execute() registers --help; include it in the enumeration
+	var names []string
+	enum.Flags().VisitAll(func(f *pflag.Flag) {
+		if _, allowed := allowlist[f.Name]; !allowed {
+			names = append(names, f.Name)
+		}
+	})
+	if len(names) == 0 {
+		t.Fatal("enumeration found no non-allowlisted enable flags; the harness is broken")
+	}
+
+	for _, name := range names {
+		cmd := newEnableCmd()
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		arg := "--" + name
+		if cmd.Flags().Lookup(name).Value.Type() != "bool" {
+			arg += "=x" // non-bool flags need a value to parse
+		}
+		cmd.SetArgs([]string{"--global", arg})
+		err := cmd.Execute()
+		if err == nil {
+			t.Errorf("--%s combined with --global was accepted; add it to markEnableGlobalFlagConflicts or classify it in this test's allowlist", name)
+			continue
+		}
+		// Pin the rejection to cobra's mutual-exclusion validation, not some
+		// unrelated parse or runtime failure.
+		if !strings.Contains(err.Error(), "none of the others can be") {
+			t.Errorf("--%s with --global was rejected for a reason other than mutual exclusion: %v", name, err)
+		}
+	}
+
 	if _, err := os.Stat(settings.UserSettingsPath()); !os.IsNotExist(err) {
 		t.Fatalf("rejected combinations must not write the user settings file (err=%v)", err)
 	}
