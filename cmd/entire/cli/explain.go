@@ -31,6 +31,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
+	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	transcriptcompact "github.com/entireio/cli/cmd/entire/cli/transcript/compact"
@@ -757,6 +758,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		return &explainTargetNotFoundError{target: checkpointIDPrefix}
 	case 1:
 		fullCheckpointID = matches[0]
+		emitCheckpointExplained(ctx, string(fullCheckpointID), telemetry.ExplainSourceProse)
 	default:
 		// Ambiguous prefix: render styled failure block, return SilentError so
 		// main.go does not double-print. Matches the temporary-side and

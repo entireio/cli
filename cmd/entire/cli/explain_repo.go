@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 )
 
 // crossRepoReader is the read surface cross-repo explain needs: the two
@@ -187,6 +188,7 @@ func runCrossRepoExplain(ctx context.Context, w, errW io.Writer, opts crossRepoE
 		stop(false)
 		return fmt.Errorf("checkpoint %s is not available for %s", cid, ownerRepo)
 	}
+	emitCheckpointExplained(ctx, string(cid), telemetry.ExplainSourceCrossRepo)
 
 	switch {
 	case opts.transcript || opts.rawTranscript:

@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
@@ -119,6 +120,7 @@ func resolveExplainCheckpointID(ctx context.Context, errW io.Writer, opts explai
 	}
 	switch len(matches) {
 	case 1:
+		emitCheckpointExplained(ctx, string(matches[0]), telemetry.ExplainSourceExport)
 		return matches[0], lookup, nil
 	case 0:
 		// If the user passed a positional target (not --checkpoint), give it

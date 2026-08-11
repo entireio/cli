@@ -266,10 +266,21 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			// JSON output: explicit flag or piped/redirected stdout
 			if jsonOutput || !isTerminal {
+				searchID := newSearchID()
+				mode := "json"
+				var served int
+				var writeErr error
 				if compactOutput {
-					return writeSearchCompactJSON(w, resp, requestedLimit, requestedPage)
+					mode = "compact"
+					served, writeErr = writeSearchCompactJSON(w, resp, requestedLimit, requestedPage, searchID, owner+"/"+repoName)
+				} else {
+					served, writeErr = writeSearchJSON(w, resp, requestedLimit, requestedPage, searchID)
 				}
-				return writeSearchJSON(w, resp, requestedLimit, requestedPage)
+				if writeErr != nil {
+					return writeErr
+				}
+				emitSearchPerformed(ctx, searchID, searchCfg.Query, mode, served, len(resp.Results), requestedPage, requestedLimit)
+				return nil
 			}
 
 			styles := newStatusStyles(w)
@@ -971,8 +982,12 @@ func paginateSearchResults(results []search.Result, limit, page int) (pageResult
 	return pageResults, total, totalPages, limit, page
 }
 
-// writeSearchJSON writes client-side paginated search results as JSON.
-func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error {
+// writeSearchJSON writes client-side paginated search results as JSON and
+// returns the number of results served. searchID ties the response to its
+// cli_search_performed telemetry event (ENT-1528); it is minted client-side
+// because the server response carries no request id and the CLI merges
+// several cell responses into one page.
+func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int, searchID string) (int, error) {
 	pageResults, total, totalPages, limit, page := paginateSearchResults(resp.Results, limit, page)
 
 	out := struct {
@@ -981,6 +996,7 @@ func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error 
 		Page       int                `json:"page"`
 		TotalPages int                `json:"total_pages"`
 		Limit      int                `json:"limit"`
+		SearchID   string             `json:"search_id,omitempty"`
 		Counts     *search.TypeCounts `json:"counts,omitempty"`
 	}{
 		Results:    pageResults,
@@ -988,14 +1004,15 @@ func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error 
 		Page:       page,
 		TotalPages: totalPages,
 		Limit:      limit,
+		SearchID:   searchID,
 		Counts:     resp.Counts,
 	}
 	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshaling results: %w", err)
+		return 0, fmt.Errorf("marshaling results: %w", err)
 	}
 	fmt.Fprint(w, string(data))
-	return nil
+	return len(pageResults), nil
 }
 
 // compactTitleMaxLen caps the title snippet length (in runes) in --compact
@@ -1023,6 +1040,34 @@ type compactSearchHit struct {
 	// prompt head) — it's what lets an agent pick which hit to explain.
 	Snippet   string `json:"snippet,omitempty"`
 	MatchType string `json:"matchType,omitempty"`
+	// Explain is the ready-made command to fetch this hit's full detail — the
+	// second step of the search funnel (ENT-1528). Empty for hit types explain
+	// cannot resolve (repo, pr, session).
+	Explain string `json:"explain,omitempty"`
+}
+
+// explainHint returns the ready-made fetch command for a hit, or "" for hit
+// types `explain` cannot resolve. Checkpoint hits from another repo get
+// --repo (cross-repo explain, ENT-1523); commit hits resolve via the local
+// Entire-Checkpoint trailer only, so they get a hint only in the current
+// repo.
+func explainHint(r *search.Result, hitRepo, currentRepo string) string {
+	resultID := r.ResultID()
+	if resultID == "" {
+		return ""
+	}
+	switch r.Type {
+	case search.TypeCheckpoint:
+		if hitRepo != "" && !strings.EqualFold(hitRepo, currentRepo) {
+			return "entire checkpoint explain " + resultID + " --repo " + hitRepo
+		}
+		return "entire checkpoint explain " + resultID
+	case search.TypeCommit:
+		if hitRepo == "" || strings.EqualFold(hitRepo, currentRepo) {
+			return "entire checkpoint explain " + resultID
+		}
+	}
+	return ""
 }
 
 // compactSnippet drops a truncated snippet that duplicates the truncated
@@ -1045,9 +1090,10 @@ func compactSnippet(title, snippet string) string {
 // writeSearchCompactJSON writes client-side paginated search results as
 // compact JSON: per hit only identifiers, ranking, files touched, and a
 // truncated title snippet — never the full prompt. Agents fetch full detail
-// for a single hit via `entire checkpoint explain <id>` (add --full for the
-// checkpoint's entire session transcript).
-func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int) error {
+// for a single hit via the per-hit explain hint (add --full for the
+// checkpoint's entire session transcript). Returns the number of results
+// served. currentRepo ("org/name") decides which hints need --repo.
+func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int, searchID, currentRepo string) (int, error) {
 	pageResults, total, totalPages, limit, page := paginateSearchResults(resp.Results, limit, page)
 
 	hits := make([]compactSearchHit, 0, len(pageResults))
@@ -1071,6 +1117,7 @@ func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int)
 			Score:           r.Meta.Score,
 			Snippet:         compactSnippet(title, truncateOneLine(r.Meta.Snippet, compactTitleMaxLen)),
 			MatchType:       r.Meta.MatchType,
+			Explain:         explainHint(r, repo, currentRepo),
 		}
 		if r.Checkpoint != nil {
 			hit.FilesTouched = r.Checkpoint.FilesTouched
@@ -1084,6 +1131,7 @@ func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int)
 		Page       int                `json:"page"`
 		TotalPages int                `json:"total_pages"`
 		Limit      int                `json:"limit"`
+		SearchID   string             `json:"search_id,omitempty"`
 		Counts     *search.TypeCounts `json:"counts,omitempty"`
 	}{
 		Results:    hits,
@@ -1091,12 +1139,13 @@ func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int)
 		Page:       page,
 		TotalPages: totalPages,
 		Limit:      limit,
+		SearchID:   searchID,
 		Counts:     resp.Counts,
 	}
 	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshaling compact results: %w", err)
+		return 0, fmt.Errorf("marshaling compact results: %w", err)
 	}
 	fmt.Fprint(w, string(data))
-	return nil
+	return len(hits), nil
 }

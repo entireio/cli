@@ -22,6 +22,13 @@ const (
 	testClusterSlugUS = "us-prod"
 )
 
+// test constants used across search JSON writer tests. testCurrentRepo matches
+// the org/repo of the checkpoint hits in testResults() (search_tui_test.go).
+const (
+	testSearchID    = "01JTEST000000000000000000"
+	testCurrentRepo = "entirehq/entire.io"
+)
+
 // TestSearchCmd_AccessibleModeRequiresQuery verifies that accessible mode
 // is treated like --json: a query is required when ACCESSIBLE=1.
 // Note: this test modifies process-global state (env var), so it must NOT
@@ -95,7 +102,7 @@ func TestWriteSearchJSON_ZeroLimitFallsBackToDefaultPageSize(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := writeSearchJSON(&buf, resp, 0, 1); err != nil {
+	if _, err := writeSearchJSON(&buf, resp, 0, 1, testSearchID); err != nil {
 		t.Fatalf("writeSearchJSON returned error: %v", err)
 	}
 
@@ -118,7 +125,7 @@ func TestWriteSearchCompactJSON_TrimsResults(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := writeSearchCompactJSON(&buf, resp, 0, 1); err != nil {
+	if _, err := writeSearchCompactJSON(&buf, resp, 0, 1, testSearchID, testCurrentRepo); err != nil {
 		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
 	}
 
@@ -148,6 +155,85 @@ func TestWriteSearchCompactJSON_TrimsResults(t *testing.T) {
 	}
 }
 
+// The envelope carries the client-minted search_id (ENT-1528) so a response
+// can be tied to its cli_search_performed telemetry event.
+func TestWriteSearchJSON_IncludesSearchIDAndReturnsServedCount(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	served, err := writeSearchJSON(&buf, &search.Response{Results: testResults()}, 10, 1, testSearchID)
+	if err != nil {
+		t.Fatalf("writeSearchJSON returned error: %v", err)
+	}
+	if !strings.Contains(buf.String(), `"search_id": "`+testSearchID+`"`) {
+		t.Errorf("full JSON envelope missing search_id:\n%s", buf.String())
+	}
+	if served != 2 {
+		t.Errorf("served = %d, want 2", served)
+	}
+}
+
+// Compact hits carry a ready-made explain command — the second step of the
+// search funnel (ENT-1528). Same-repo checkpoint hits get the plain form.
+func TestWriteSearchCompactJSON_SearchIDAndSameRepoExplainHint(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	served, err := writeSearchCompactJSON(&buf, &search.Response{Results: testResults()}, 10, 1, testSearchID, testCurrentRepo)
+	if err != nil {
+		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+	}
+	output := buf.String()
+	if !strings.Contains(output, `"search_id": "`+testSearchID+`"`) {
+		t.Errorf("compact envelope missing search_id:\n%s", output)
+	}
+	if !strings.Contains(output, `"explain": "entire checkpoint explain a3b2c4d5e6f7"`) {
+		t.Errorf("compact hit missing same-repo explain hint:\n%s", output)
+	}
+	if strings.Contains(output, "--repo") {
+		t.Errorf("same-repo hint must not carry --repo:\n%s", output)
+	}
+	if served != 2 {
+		t.Errorf("served = %d, want 2", served)
+	}
+}
+
+// Checkpoint hits from another repo get --repo so the hint works cross-repo
+// (ENT-1523 / PR #1942).
+func TestWriteSearchCompactJSON_CrossRepoExplainHint(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	if _, err := writeSearchCompactJSON(&buf, &search.Response{Results: testResults()}, 10, 1, testSearchID, "other/elsewhere"); err != nil {
+		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+	}
+	if !strings.Contains(buf.String(), `"explain": "entire checkpoint explain a3b2c4d5e6f7 --repo entirehq/entire.io"`) {
+		t.Errorf("cross-repo checkpoint hint must carry --repo:\n%s", buf.String())
+	}
+}
+
+// Repo and pr rows cannot be resolved by explain, so they carry no hint.
+func TestWriteSearchCompactJSON_NoExplainHintForRepoAndPRRows(t *testing.T) {
+	t.Parallel()
+
+	wire := `{"results":[
+		{"type":"repo","data":{"id":"01JREPO","name":"backend","org":"acme","fullName":"acme/backend"},"searchMeta":{"score":0.9}},
+		{"type":"pr","data":{"id":"pr-9","title":"Fix login retry","repo":"backend","userLogin":"alice"},"searchMeta":{"score":0.5}}
+	],"total":2,"page":1}`
+	var resp search.Response
+	if err := json.Unmarshal([]byte(wire), &resp); err != nil {
+		t.Fatalf("unmarshaling wire response: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := writeSearchCompactJSON(&buf, &resp, 0, 1, testSearchID, testCurrentRepo); err != nil {
+		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+	}
+	if strings.Contains(buf.String(), `"explain"`) {
+		t.Errorf("repo/pr rows must not carry an explain hint:\n%s", buf.String())
+	}
+}
+
 // Repo/pr rows (reachable via --all-repos) have no typed struct; compact hits
 // must still carry identifying info from the raw payload instead of collapsing
 // to just {id, type, score}.
@@ -164,7 +250,7 @@ func TestWriteSearchCompactJSON_RepoAndPRRowsKeepIdentifyingFields(t *testing.T)
 	}
 
 	var buf bytes.Buffer
-	if err := writeSearchCompactJSON(&buf, &resp, 0, 1); err != nil {
+	if _, err := writeSearchCompactJSON(&buf, &resp, 0, 1, testSearchID, testCurrentRepo); err != nil {
 		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
 	}
 
@@ -240,7 +326,7 @@ func TestWriteSearchCompactJSON_DropsSnippetDuplicatingTitle(t *testing.T) {
 				Total: 1,
 			}
 			var buf bytes.Buffer
-			if err := writeSearchCompactJSON(&buf, resp, 0, 1); err != nil {
+			if _, err := writeSearchCompactJSON(&buf, resp, 0, 1, testSearchID, testCurrentRepo); err != nil {
 				t.Fatalf("writeSearchCompactJSON returned error: %v", err)
 			}
 			if got := strings.Contains(buf.String(), `"snippet"`); got != tc.wantSnippet {
@@ -268,7 +354,7 @@ func TestWriteSearchCompactJSON_TruncatesLongPromptTitle(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := writeSearchCompactJSON(&buf, resp, 0, 1); err != nil {
+	if _, err := writeSearchCompactJSON(&buf, resp, 0, 1, testSearchID, testCurrentRepo); err != nil {
 		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
 	}
 
