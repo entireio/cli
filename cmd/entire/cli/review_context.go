@@ -156,8 +156,10 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 //
 //	<sessionID[:8]> <agent-name> [(touched: N file(s))] prompt: <latest prompt>
 //
-// where latest prompt is read from <worktree>/.entire/metadata/<sessionID>/prompt.txt
-// (the on-filesystem path lifecycle.go appends to on every turn), passed through
+// where latest prompt is read from .entire/metadata/<sessionID>/prompt.txt
+// resolved through paths.AbsPath (the on-filesystem path lifecycle.go appends
+// to on every turn; rerouted under the git common dir for globally tracked
+// repos), passed through
 // the existing reviewPromptText helper to match the committed-pipeline fallback
 // format (loops backwards for the newest non-empty prompt, collapses whitespace,
 // truncates).
@@ -208,7 +210,7 @@ func reviewSessionContext(ctx context.Context, worktreeRoot, headSHA string) str
 		if st.Kind == session.KindAgentReview {
 			continue
 		}
-		line := formatReviewSessionLine(worktreeRoot, st)
+		line := formatReviewSessionLine(ctx, st)
 		if line == "" {
 			continue
 		}
@@ -234,9 +236,17 @@ func canonicalisePath(p string) string {
 }
 
 // formatReviewSessionLine renders one entry of the in-progress section.
-// Returns "" when the session has no prompt content to report.
-func formatReviewSessionLine(worktreeRoot string, st *session.State) string {
-	promptPath := filepath.Join(worktreeRoot, paths.SessionMetadataDirFromSessionID(st.SessionID), paths.PromptFileName)
+// Returns "" when the session has no prompt content to report. The prompt
+// path resolves through paths.AbsPath (not a bare worktree join): globally
+// tracked repos route .entire/metadata under the git common dir, and the
+// sessions rendered here are already filtered to the current worktree, which
+// is what AbsPath resolves against.
+func formatReviewSessionLine(ctx context.Context, st *session.State) string {
+	promptPath, err := paths.AbsPath(ctx,
+		filepath.Join(paths.SessionMetadataDirFromSessionID(st.SessionID), paths.PromptFileName))
+	if err != nil {
+		return ""
+	}
 	raw, err := os.ReadFile(promptPath) //nolint:gosec // path constructed from validated session ID + fixed constants
 	if err != nil {
 		return ""

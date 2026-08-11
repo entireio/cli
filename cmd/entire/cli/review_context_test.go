@@ -544,6 +544,58 @@ func TestReviewSessionContext_IncludesActiveSessionWithLatestPrompt(t *testing.T
 	}
 }
 
+// TestReviewSessionContext_GloballyTrackedRepoFindsRoutedPrompt pins that
+// the in-progress section reads prompt.txt through paths.AbsPath: in a
+// globally tracked repo the session metadata lives under the git common dir,
+// and a worktree-only join would silently drop the section for exactly these
+// repos. No t.Parallel: uses t.Chdir and t.Setenv.
+func TestReviewSessionContext_GloballyTrackedRepoFindsRoutedPrompt(t *testing.T) {
+	repoRoot := newReviewContextRepo(t)
+	t.Chdir(repoRoot)
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{"global":{"enabled":true}}`), 0o600); err != nil {
+		t.Fatalf("write user settings: %v", err)
+	}
+	paths.ClearWorktreeRootCache()
+	paths.ClearInvisibleRuntimeCache()
+	t.Cleanup(func() {
+		paths.ClearWorktreeRootCache()
+		paths.ClearInvisibleRuntimeCache()
+	})
+
+	headSHA := testutil.GetHeadHash(t, repoRoot)
+	const sessionID = "019e0871-c1b2-7000-aa11-bb22cc33dd55"
+	writeReviewContextSessionState(t, repoRoot, session.State{
+		SessionID:    sessionID,
+		WorktreePath: repoRoot,
+		BaseCommit:   headSHA,
+		AgentType:    agent.AgentTypeClaudeCode,
+	})
+
+	// Write the prompt where invisible routing puts it (the git common dir),
+	// exactly as lifecycle.go does in a globally tracked repo.
+	promptPath, err := paths.AbsPath(context.Background(),
+		filepath.Join(paths.SessionMetadataDirFromSessionID(sessionID), paths.PromptFileName))
+	if err != nil {
+		t.Fatalf("resolve routed prompt path: %v", err)
+	}
+	if !strings.Contains(promptPath, filepath.Join(".git", "entire", "worktree")) {
+		t.Fatalf("fixture prompt path is not routed to the git common dir: %s", promptPath)
+	}
+	if err := os.MkdirAll(filepath.Dir(promptPath), 0o750); err != nil {
+		t.Fatalf("mkdir routed metadata dir: %v", err)
+	}
+	if err := os.WriteFile(promptPath, []byte("Ship the routed prompt."), 0o600); err != nil {
+		t.Fatalf("write routed prompt: %v", err)
+	}
+
+	got := reviewSessionContext(context.Background(), repoRoot, headSHA)
+	if !strings.Contains(got, "prompt: Ship the routed prompt.") {
+		t.Fatalf("in-progress section missing routed prompt, got:\n%s", got)
+	}
+}
+
 // TestReviewSessionContext_SkipsSessionsOutsideScope verifies the four
 // exclusion criteria: condensed, wrong worktree, wrong base commit, review-
 // kind sessions. Each is set up in isolation; the helper returns "" when
