@@ -49,6 +49,15 @@ type adoptOptions struct {
 // (an entry swept from the registry is also too old to adopt).
 const adoptRecentWindow = session.LiveSessionMaxAge
 
+// adoptClaimWindow bounds how long a source's in-flight adoption claim keeps
+// blocking other targets. It is deliberately NOT adoptRecentWindow: a claim only
+// has to bridge prepare-commit-msg → post-commit within a single commit, not the
+// lifetime of a live session, and because the claim gates the manual adopt path
+// too, an over-long window turns an aborted commit into a lockout on
+// `entire session adopt`. One hour covers even a commit left sitting in an editor
+// by a wide margin while keeping the self-heal from an aborted commit bounded.
+const adoptClaimWindow = time.Hour
+
 func newAdoptCmd() *cobra.Command {
 	var opts adoptOptions
 
@@ -171,12 +180,22 @@ func adoptFromExternalSessionStore(
 		if !isAdoptableSourceSession(sourceState) {
 			return fmt.Errorf("session %s is ended or fully condensed and cannot be adopted", sessionID)
 		}
-		// Cross-process mutual exclusion for the deferred (auto-adopt) path. The
-		// shared sourceCommonDir lock serializes two concurrent adopts of the same
-		// unique candidate; this makes the loser OBSERVE the winner's claim and
-		// refuse, so the session is adopted into exactly one repo. A stale claim
-		// (aborted commit) or a re-claim by this same target does not block.
-		if opts.DeferSourceRetire && adoptClaimBlocks(sourceState.AdoptClaim, targetCommonDir) {
+		// Cross-process mutual exclusion, enforced on EVERY adopt path. The shared
+		// sourceCommonDir lock serializes two concurrent adopts of the same unique
+		// candidate; this makes the loser OBSERVE the winner's claim and refuse, so
+		// the session is adopted into exactly one repo. A stale claim (aborted
+		// commit) or a re-claim by this same target does not block.
+		//
+		// This must NOT be gated on opts.DeferSourceRetire. A claim marks a source
+		// that another target has already registered non-destructively and will
+		// finalize at post-commit; the manual path (DeferSourceRetire false) skips
+		// straight to retireAdoptedSourceSession, so gating here would let
+		// `entire session adopt --from <src> --force` tombstone a source out from
+		// under that pending target and leave the session adopted into two repos —
+		// the same double-adopt this claim exists to prevent, via the manual door.
+		// --force is scoped to replacing the target's own session below; it is not
+		// a license to steal another repo's claim.
+		if adoptClaimBlocks(sourceState.AdoptClaim, targetCommonDir) {
 			return &sourceClaimedError{sessionID: sessionID, claimedBy: adoptClaimLabel(sourceState.AdoptClaim)}
 		}
 		if !sessionBelongsToSourceWorktree(sourceState, sourceWorktree, sourceWorktreeID) {
@@ -545,17 +564,15 @@ func isAdoptableSourceSession(state *session.State) bool {
 }
 
 // adoptClaimBlocks reports whether a source session's in-flight adoption claim
-// should block a NEW deferred adoption by targetCommonDir. A claim blocks only
-// when it is (a) present, (b) FRESH — within the adopt-recency window, so a stale
-// claim left by an aborted commit self-heals rather than pinning the source
-// forever — and (c) held by a DIFFERENT common dir, since a re-adopt by the same
-// target is idempotent. Reuses adoptRecentWindow (= session.LiveSessionMaxAge);
-// no separate TTL is introduced.
+// should block a NEW adoption by targetCommonDir. A claim blocks only when it is
+// (a) present, (b) FRESH — within adoptClaimWindow, so a stale claim left by an
+// aborted commit self-heals rather than pinning the source forever — and (c) held
+// by a DIFFERENT common dir, since a re-adopt by the same target is idempotent.
 func adoptClaimBlocks(claim *session.AdoptClaim, targetCommonDir string) bool {
 	if claim == nil || claim.At.IsZero() {
 		return false
 	}
-	if time.Since(claim.At) > adoptRecentWindow {
+	if time.Since(claim.At) > adoptClaimWindow {
 		return false
 	}
 	return !sameAdoptStore(claim.ByCommonDir, targetCommonDir)

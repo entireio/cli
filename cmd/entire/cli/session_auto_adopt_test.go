@@ -615,7 +615,7 @@ func TestAdoptClaimBlocks(t *testing.T) {
 	}{
 		{"nil claim", nil, false},
 		{"zero time", &session.AdoptClaim{ByCommonDir: other, At: time.Time{}}, false},
-		{"stale different target", &session.AdoptClaim{ByCommonDir: other, At: now.Add(-2 * adoptRecentWindow)}, false},
+		{"stale different target", &session.AdoptClaim{ByCommonDir: other, At: now.Add(-2 * adoptClaimWindow)}, false},
 		{"fresh same target idempotent", &session.AdoptClaim{ByCommonDir: target, At: now}, false},
 		{"fresh different target blocks", &session.AdoptClaim{ByCommonDir: other, At: now}, true},
 	}
@@ -746,7 +746,7 @@ func TestAutoAdopt_StaleClaimDoesNotBlockAdoption(t *testing.T) {
 	staleClaim := &session.AdoptClaim{
 		ByCommonDir:    filepath.Join(base, "repo-abandoned", ".git"),
 		ByWorktreePath: filepath.Join(base, "repo-abandoned"),
-		At:             time.Now().Add(-2 * adoptRecentWindow),
+		At:             time.Now().Add(-2 * adoptClaimWindow),
 	}
 	saveActiveSourceSession(t, sourceRepo, sessionID, staleClaim)
 
@@ -788,8 +788,90 @@ func TestAutoAdopt_StaleClaimDoesNotBlockAdoption(t *testing.T) {
 	if !sameAdoptStore(sourceAfter.AdoptClaim.ByCommonDir, targetCommonDir) {
 		t.Fatalf("claim ByCommonDir = %q, want target %q (stale claim not replaced)", sourceAfter.AdoptClaim.ByCommonDir, targetCommonDir)
 	}
-	if time.Since(sourceAfter.AdoptClaim.At) > adoptRecentWindow {
-		t.Fatal("refreshed claim must be within the adopt-recency window")
+	if time.Since(sourceAfter.AdoptClaim.At) > adoptClaimWindow {
+		t.Fatal("refreshed claim must be within the adopt-claim window")
+	}
+}
+
+// TestManualAdopt_FreshClaimBlocksForcedAdopt covers the manual door into the
+// same double-adopt the claim exists to prevent. A manual `entire session adopt
+// --from <src> --force` runs with DeferSourceRetire false and retires the source
+// immediately, so if the claim check were gated on the deferred path it would
+// tombstone a source that another target had already registered non-destructively
+// and is waiting to finalize at post-commit — leaving the session adopted into two
+// repos. --force means "replace THIS repo's session", never "steal another repo's
+// claim", so the adopt must be refused and the source left untouched.
+//
+// Uses t.Chdir(), so no t.Parallel().
+func TestManualAdopt_FreshClaimBlocksForcedAdopt(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+	claimantWorktree := filepath.Join(base, "repo-c")
+
+	sessionID := "test-manual-adopt-fresh-claim"
+	freshClaim := &session.AdoptClaim{
+		ByCommonDir:    filepath.Join(claimantWorktree, ".git"),
+		ByWorktreePath: claimantWorktree,
+		At:             time.Now(),
+	}
+	saveActiveSourceSession(t, sourceRepo, sessionID, freshClaim)
+
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	_, _, sourceCommonDir, err := stateStoreForWorktree(context.Background(), sourceRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(targetRepo)
+	targetStore, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, targetCommonDir, err := stateStoreForWorktree(context.Background(), targetRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Manual adopt: Force set, DeferSourceRetire deliberately NOT set.
+	adopted, _, err := adoptFromExternalSessionStore(
+		context.Background(), sourceStore, sourceRepo, sourceCommonDir,
+		targetStore, targetCommonDir, sessionID,
+		adoptOptions{Force: true, SkipTranscriptValidation: true},
+	)
+	if err == nil {
+		t.Fatal("manual --force adopt stole a source claimed by another target")
+	}
+	var claimed *sourceClaimedError
+	if !errors.As(err, &claimed) {
+		t.Fatalf("error = %v, want *sourceClaimedError", err)
+	}
+	if adopted != nil {
+		t.Fatal("refused adopt must not return an adopted state")
+	}
+
+	// The source must survive intact: still ACTIVE, still holding the original
+	// claim. A tombstoned source here is the two-repos-active corruption.
+	sourceAfter, err := sourceStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isAdoptableSourceSession(sourceAfter) {
+		t.Fatal("refused adopt must leave the source adoptable, not retired")
+	}
+	if sourceAfter.AdoptClaim == nil || !sameAdoptStore(sourceAfter.AdoptClaim.ByCommonDir, freshClaim.ByCommonDir) {
+		t.Fatal("refused adopt must leave the original claim in place")
+	}
+
+	// And the target must not have registered the session.
+	targetAfter, err := targetStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targetAfter != nil {
+		t.Fatal("refused adopt must not register the session in the target repo")
 	}
 }
 
