@@ -101,7 +101,14 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 	}
 
 	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
+	return installHooksToFile(settingsPath, localDev, force, true)
+}
 
+// installHooksToFile installs Entire's Claude Code hooks into the settings
+// file at settingsPath. projectScope additionally maintains the repo-scoped
+// permissions.deny rule; the user-level install (InstallUserHooks) passes
+// false so it only ever touches the hooks section of ~/.claude/settings.json.
+func installHooksToFile(settingsPath string, localDev, force, projectScope bool) (int, error) {
 	// Read existing settings if they exist
 	var rawSettings map[string]json.RawMessage
 
@@ -216,22 +223,25 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 		count++
 	}
 
-	// Add permissions.deny rule if not present
+	// Add permissions.deny rule if not present (repo scope only: the rule is
+	// repo-relative and user-level installs must not modify user permissions).
 	permissionsChanged := false
-	var denyRules []string
-	if denyRaw, ok := rawPermissions["deny"]; ok {
-		if err := json.Unmarshal(denyRaw, &denyRules); err != nil {
-			return 0, fmt.Errorf("failed to parse permissions.deny in settings.json: %w", err)
+	if projectScope {
+		var denyRules []string
+		if denyRaw, ok := rawPermissions["deny"]; ok {
+			if err := json.Unmarshal(denyRaw, &denyRules); err != nil {
+				return 0, fmt.Errorf("failed to parse permissions.deny in settings.json: %w", err)
+			}
 		}
-	}
-	if !slices.Contains(denyRules, metadataDenyRule) {
-		denyRules = append(denyRules, metadataDenyRule)
-		denyJSON, err := json.Marshal(denyRules)
-		if err != nil {
-			return 0, fmt.Errorf("failed to marshal permissions.deny: %w", err)
+		if !slices.Contains(denyRules, metadataDenyRule) {
+			denyRules = append(denyRules, metadataDenyRule)
+			denyJSON, err := json.Marshal(denyRules)
+			if err != nil {
+				return 0, fmt.Errorf("failed to marshal permissions.deny: %w", err)
+			}
+			rawPermissions["deny"] = denyJSON
+			permissionsChanged = true
 		}
-		rawPermissions["deny"] = denyJSON
-		permissionsChanged = true
 	}
 
 	if count == 0 && !permissionsChanged {
@@ -253,12 +263,14 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 	}
 	rawSettings["hooks"] = hooksJSON
 
-	// Marshal permissions and update raw settings
-	permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
-	if err != nil {
-		return 0, fmt.Errorf("failed to marshal permissions: %w", err)
+	// Marshal permissions and update raw settings (repo scope only)
+	if projectScope {
+		permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
+		if err != nil {
+			return 0, fmt.Errorf("failed to marshal permissions: %w", err)
+		}
+		rawSettings["permissions"] = permJSON
 	}
-	rawSettings["permissions"] = permJSON
 
 	// Write back to file
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
@@ -308,6 +320,13 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 		repoRoot = "." // Fallback to CWD if not in a git repo
 	}
 	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
+	return uninstallHooksFromFile(settingsPath, true)
+}
+
+// uninstallHooksFromFile removes Entire hooks (and only Entire hooks) from
+// the settings file at settingsPath. projectScope additionally removes the
+// repo-scoped permissions.deny rule; the user-level uninstall passes false.
+func uninstallHooksFromFile(settingsPath string, projectScope bool) error {
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
 		return nil //nolint:nilerr // No settings file means nothing to uninstall
@@ -354,9 +373,10 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	marshalHookType(rawHooks, "PreToolUse", preToolUse)
 	marshalHookType(rawHooks, "PostToolUse", postToolUse)
 
-	// Also remove the metadata deny rule from permissions
+	// Also remove the metadata deny rule from permissions (repo scope only:
+	// user-level installs never wrote it, so leave user permissions alone).
 	var rawPermissions map[string]json.RawMessage
-	if permRaw, ok := rawSettings["permissions"]; ok {
+	if permRaw, ok := rawSettings["permissions"]; ok && projectScope {
 		if err := json.Unmarshal(permRaw, &rawPermissions); err != nil {
 			// If parsing fails, just skip permissions cleanup
 			rawPermissions = nil
@@ -428,7 +448,13 @@ func loadClaudeSettings(ctx context.Context) (ClaudeSettings, bool) {
 		repoRoot = "." // Fallback to CWD if not in a git repo
 	}
 	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	return loadClaudeSettingsFile(settingsPath)
+}
+
+// loadClaudeSettingsFile reads and parses a Claude Code settings file.
+// Returns ok=false when the file is missing or unparseable.
+func loadClaudeSettingsFile(settingsPath string) (ClaudeSettings, bool) {
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from a fixed settings location
 	if err != nil {
 		return ClaudeSettings{}, false
 	}

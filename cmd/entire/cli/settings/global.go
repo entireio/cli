@@ -216,7 +216,29 @@ func matchesExcludeOrigin(ctx context.Context, patterns []string, normalizedOrig
 	return false
 }
 
-// globalModeCache memoizes GlobalModeActive per worktree root. Hooks are
+// InactiveReason explains why the hook gate found Entire inactive for the
+// current worktree. It exists so the SessionStart wrong-folder notice can name
+// the reason without re-deriving (and possibly contradicting) the gate's
+// decision. InactiveReasonNone accompanies an active result.
+type InactiveReason int
+
+const (
+	// InactiveReasonNone: not inactive (the location is active).
+	InactiveReasonNone InactiveReason = iota
+	// InactiveReasonRepoDisabled: repo-level setup exists and is disabled (or
+	// unreadable — fail closed). This is an explicit veto: callers surfacing
+	// inactive-location notices must stay silent for it.
+	InactiveReasonRepoDisabled
+	// InactiveReasonGlobalExcluded: the global tier is on, but this worktree
+	// matches an exclude pattern (or exclusion could not be verified — fail
+	// closed).
+	InactiveReasonGlobalExcluded
+	// InactiveReasonGlobalOff: no repo-level setup, and the global tier is
+	// unconfigured, disabled, or unreadable.
+	InactiveReasonGlobalOff
+)
+
+// globalModeCache memoizes the global-mode probe per worktree root. Hooks are
 // one-shot processes that evaluate the gate more than once (logging init plus
 // the entry gate), and the exclude_origins check forks git each time; one
 // probe per process removes that cost and guarantees every gate in the
@@ -228,9 +250,10 @@ var (
 	globalModeRoot   string
 	globalModeCached bool
 	globalModeActive bool
+	globalModeReason InactiveReason
 )
 
-// ClearGlobalModeCache resets the memoized GlobalModeActive result.
+// ClearGlobalModeCache resets the memoized global-mode probe result.
 // For tests that flip user-global settings mid-process; SaveUserSettings also
 // calls it so a writer process observes its own write.
 func ClearGlobalModeCache() {
@@ -238,6 +261,7 @@ func ClearGlobalModeCache() {
 	globalModeRoot = ""
 	globalModeCached = false
 	globalModeActive = false
+	globalModeReason = InactiveReasonNone
 	globalModeMu.Unlock()
 }
 
@@ -249,50 +273,58 @@ func ClearGlobalModeCache() {
 // failed origin lookup deactivates: exclusion could not be checked.
 // The result is memoized per process (see globalModeCache above).
 func GlobalModeActive(ctx context.Context) bool {
+	active, _ := globalModeStatus(ctx)
+	return active
+}
+
+// globalModeStatus is GlobalModeActive plus the inactive reason, memoized
+// together so both callers observe one consistent answer per process.
+func globalModeStatus(ctx context.Context) (bool, InactiveReason) {
 	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return false
+		return false, InactiveReasonGlobalOff
 	}
 	globalModeMu.Lock()
 	defer globalModeMu.Unlock()
 	if globalModeCached && globalModeRoot == root {
-		return globalModeActive
+		return globalModeActive, globalModeReason
 	}
-	active := computeGlobalModeActive(ctx, root)
+	active, reason := computeGlobalModeStatus(ctx, root)
 	globalModeRoot = root
 	globalModeCached = true
 	globalModeActive = active
-	return active
+	globalModeReason = reason
+	return active, reason
 }
 
-// computeGlobalModeActive is the uncached evaluation behind GlobalModeActive.
-func computeGlobalModeActive(ctx context.Context, root string) bool {
+// computeGlobalModeStatus is the uncached evaluation behind globalModeStatus.
+func computeGlobalModeStatus(ctx context.Context, root string) (bool, InactiveReason) {
 	us, err := LoadUserSettings(ctx)
 	if err != nil {
 		logging.Debug(ctx, "user settings unreadable; treating global mode as inactive",
 			slog.String("error", err.Error()))
-		return false
+		return false, InactiveReasonGlobalOff
 	}
 	if us.Global == nil || !us.Global.Enabled {
-		return false
+		return false, InactiveReasonGlobalOff
 	}
 	if matchesExcludePath(ctx, us.Global.ExcludePaths, root) {
-		return false
+		return false, InactiveReasonGlobalExcluded
 	}
 	if len(us.Global.ExcludeOrigins) > 0 {
 		origins, _, err := gitremote.GetRemoteURLsInDirIfSet(ctx, root, "origin")
 		if err != nil {
 			logging.Debug(ctx, "origin lookup failed; treating global mode as inactive",
 				slog.String("error", err.Error()))
-			return false
+			return false, InactiveReasonGlobalExcluded
 		}
 		for _, origin := range origins {
 			if matchesExcludeOrigin(ctx, us.Global.ExcludeOrigins, normalizeOrigin(origin)) {
-				return false
+				return false, InactiveReasonGlobalExcluded
 			}
 		}
 	}
-	return true
+	return true, InactiveReasonNone
 }
 
 // IsActiveForRepo is the gate predicate for hooks: is Entire active for the
@@ -309,8 +341,35 @@ func computeGlobalModeActive(ctx context.Context, root string) bool {
 // The global tier is a fallback, not a merge layer: any repo-level setup
 // (either settings file) makes the repo-level answer final.
 func IsActiveForRepo(ctx context.Context) bool {
-	if IsSetUpAny(ctx) {
-		return IsSetUpAndEnabled(ctx)
+	active, _ := IsActiveForRepoWithReason(ctx)
+	return active
+}
+
+// GlobalTierEnabled reports whether the user-global tracking tier is
+// configured AND enabled, independent of any repository context. It exists
+// for the one gate that runs where the worktree-scoped reason variant cannot:
+// the SessionStart wrong-folder notice outside a git repository. Deliberately
+// unmemoized — it is only called on that cold path (session-start verb, no
+// repo), so the active hook path pays nothing for it. Fail closed on read
+// errors, like every other gate over this file.
+func GlobalTierEnabled(ctx context.Context) bool {
+	us, err := LoadUserSettings(ctx)
+	if err != nil {
+		return false
 	}
-	return GlobalModeActive(ctx)
+	return us.Global != nil && us.Global.Enabled
+}
+
+// IsActiveForRepoWithReason is IsActiveForRepo plus the reason a location is
+// inactive, for callers that surface a notice (the SessionStart wrong-folder
+// warning). It must stay the same decision as IsActiveForRepo — the reason is
+// derived inside the gate, never re-computed by callers.
+func IsActiveForRepoWithReason(ctx context.Context) (bool, InactiveReason) {
+	if IsSetUpAny(ctx) {
+		if IsSetUpAndEnabled(ctx) {
+			return true, InactiveReasonNone
+		}
+		return false, InactiveReasonRepoDisabled
+	}
+	return globalModeStatus(ctx)
 }

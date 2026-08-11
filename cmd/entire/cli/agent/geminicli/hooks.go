@@ -61,7 +61,13 @@ func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, localDev bool, force 
 	}
 
 	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
+	return installHooksToFile(ctx, settingsPath, localDev, force)
+}
 
+// installHooksToFile installs Entire's Gemini CLI hooks into the settings
+// file at settingsPath, preserving every unrelated key. Shared by the
+// repo-level install above and the user-level install (InstallUserHooks).
+func installHooksToFile(ctx context.Context, settingsPath string, localDev, force bool) (int, error) {
 	// Read existing settings if they exist
 	var rawSettings map[string]json.RawMessage
 
@@ -322,7 +328,13 @@ func (g *GeminiCLIAgent) UninstallHooks(ctx context.Context) error {
 		repoRoot = "." // Fallback to CWD if not in a git repo
 	}
 	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	return uninstallHooksFromFile(ctx, settingsPath)
+}
+
+// uninstallHooksFromFile removes Entire hooks (and only Entire hooks) from
+// the settings file at settingsPath, preserving every unrelated key.
+func uninstallHooksFromFile(ctx context.Context, settingsPath string) error {
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from a fixed settings location
 	if err != nil {
 		return nil //nolint:nilerr // No settings file means nothing to uninstall
 	}
@@ -419,7 +431,13 @@ func (g *GeminiCLIAgent) AreHooksInstalled(ctx context.Context) bool {
 		repoRoot = "." // Fallback to CWD if not in a git repo
 	}
 	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	return areHooksInstalledInFile(settingsPath)
+}
+
+// areHooksInstalledInFile reports whether any Entire hook is present in the
+// settings file at settingsPath.
+func areHooksInstalledInFile(settingsPath string) bool {
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from a fixed settings location
 	if err != nil {
 		return false
 	}

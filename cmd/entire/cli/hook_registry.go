@@ -91,7 +91,7 @@ func getHookType(hookName string) string {
 	case geminicli.HookNameBeforeTool, geminicli.HookNameAfterTool:
 		return "tool"
 	default:
-		return "agent"
+		return "agent" //nolint:goconst // hook-type label; unrelated to the --agent flag name constant
 	}
 }
 
@@ -102,9 +102,19 @@ func getHookType(hookName string) string {
 // since it doesn't go through PersistentPreRunE). Built-in agent subcommands pass false since
 // their parent command's PersistentPreRunE already handles logging.
 func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, initLogging bool) error {
-	// Skip silently if not in a git repository - hooks shouldn't prevent the agent from working
+	// Skip if not in a git repository - hooks shouldn't prevent the agent
+	// from working. On SessionStart only, and only when the user opted in to
+	// global tracking (tier configured AND enabled), leave a one-line notice:
+	// that is the literal wrong-folder case — the user asked for machine-wide
+	// tracking and this location can't be tracked. With the tier off or
+	// unconfigured, silence: explicit off is a durable answer, exactly like
+	// the repo-level disable veto below. Verb check first so the user-settings
+	// read happens only on the cold session-start-outside-a-repo path.
 	worktreeRoot, err := paths.WorktreeRoot(cmd.Context())
 	if err != nil {
+		if hookName == sessionStartHookVerb && settings.GlobalTierEnabled(cmd.Context()) {
+			warnInactiveOnSessionStart(cmd.ErrOrStderr(), hookName, notGitRepoSessionStartNotice)
+		}
 		return nil
 	}
 
@@ -116,11 +126,12 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	// only short-circuits when the read succeeded), which meant a corrupted
 	// or unreadable settings file made every hook invocation pay the full
 	// dispatch cost instead of exiting fast (#524).
-	// settings.IsActiveForRepo is the same fail-closed gate the git hooks
-	// use (see PersistentPreRunE in hooks_git_cmd.go). It extends
+	// settings.IsActiveForRepo(WithReason) is the same fail-closed gate the
+	// git hooks use (see PersistentPreRunE in hooks_git_cmd.go). It extends
 	// IsSetUpAndEnabled with the user-global tier: repos with no repo-level
 	// setup proceed when global mode is on and the repo is not excluded.
-	if !settings.IsActiveForRepo(cmd.Context()) {
+	if active, reason := settings.IsActiveForRepoWithReason(cmd.Context()); !active {
+		warnInactiveOnSessionStart(cmd.ErrOrStderr(), hookName, inactiveSessionStartNotice(reason))
 		return nil
 	}
 
@@ -225,6 +236,53 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 
 	span.RecordError(hookErr)
 	return hookErr
+}
+
+// sessionStartHookVerb is the hook verb every built-in agent uses for its
+// session-start hook (see each agent's HookNameSessionStart). Agents with a
+// different verb simply never match, which is the safe direction: the
+// inactive-location notice below stays off rather than firing on every hook.
+const sessionStartHookVerb = "session-start"
+
+// notGitRepoSessionStartNotice is the SessionStart notice for hooks firing
+// outside any git repository. Emitted only when the global tier is configured
+// AND enabled (see the gate in executeAgentHook): that combination means the
+// user opted in to machine-wide tracking and this location cannot provide it
+// — the literal wrong-folder case.
+const notGitRepoSessionStartNotice = "entire: not tracking this session (not a git repo)"
+
+// inactiveSessionStartNotice maps the gate's inactive reason to the one-line
+// SessionStart notice, or "" for reasons that must stay silent. The notice
+// exists to explain why an opted-in user's session is NOT tracked here, so it
+// fires only when the global tier is on and this location is carved out
+// (excluded repo; the not-a-git-repo case is gated before the reason variant
+// runs). Explicit off is a durable answer and means silence in both scopes:
+// InactiveReasonRepoDisabled (the repo-level veto) and
+// InactiveReasonGlobalOff (the user answered no to — or later disabled —
+// machine-wide tracking). Nagging a globally-off user to re-enable on every
+// SessionStart would also contradict disable --global's "inert while global
+// tracking is off" report about user-level hooks left in place.
+func inactiveSessionStartNotice(reason settings.InactiveReason) string {
+	switch reason {
+	case settings.InactiveReasonGlobalExcluded:
+		return "entire: not tracking this session (repo excluded by global settings)"
+	case settings.InactiveReasonNone, settings.InactiveReasonRepoDisabled, settings.InactiveReasonGlobalOff:
+		return ""
+	default:
+		return ""
+	}
+}
+
+// warnInactiveOnSessionStart writes the inactive-location notice to the
+// agent-hook stderr stream — and ONLY for the session-start verb, never on
+// every hook, and never for an empty notice. This function is reached only
+// from the agent-hook route (executeAgentHook); git hooks gate in
+// hooks_git_cmd.go and never produce this notice, so git output stays clean.
+func warnInactiveOnSessionStart(errW io.Writer, hookName, notice string) {
+	if hookName != sessionStartHookVerb || notice == "" {
+		return
+	}
+	fmt.Fprintln(errW, notice)
 }
 
 func agentHookPolicy(ctx context.Context, worktreeRoot string) (checkpointpolicy.Policy, error) {
