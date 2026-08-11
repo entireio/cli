@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -90,6 +92,14 @@ fails even with --dry-run.`, imp.AgentType()),
 			})
 			stopProgress(err == nil)
 			if err != nil {
+				// Ctrl-C is not a failure: report the partial import (turns
+				// already written stay written, and a re-run resumes where
+				// this one stopped) instead of a raw "context canceled".
+				if errors.Is(err, context.Canceled) {
+					c.SilenceUsage = true
+					fmt.Fprintf(c.OutOrStdout(), "Import interrupted after %d turn(s). Re-run to finish.\n", res.TurnsImported)
+					return NewSilentError(err)
+				}
 				return fmt.Errorf("import %s: %w", imp.Name(), err)
 			}
 			verb := "Imported"

@@ -212,8 +212,19 @@ func (s *gitRefsStore) setRef(ctx context.Context, cid id.CheckpointID, hash plu
 
 // enqueueForPush records refName in the push-discovery queue, logging (never
 // returning) on failure so the local ref write still succeeds.
+//
+// The queue is resolved with the cancellation stripped from ctx. By the time we
+// get here the ref is already written locally (go-git ref writes don't observe
+// ctx), and the queue is the ONLY push-discovery mechanism there is — see the
+// pushQueueFileName doc. A ref that misses the queue is never pushed, and the
+// writers above are idempotent, so a re-run skips it as already-present and
+// never re-enqueues it: it stays local-only forever. Resolving the queue shells
+// out to `git rev-parse --git-common-dir`, which fails instantly on a canceled
+// ctx, so honoring cancellation here would drop the bookkeeping for a write
+// that already happened. This local, sub-millisecond step therefore completes
+// even during shutdown (a second Ctrl-C still force-quits the process).
 func (s *gitRefsStore) enqueueForPush(ctx context.Context, refName plumbing.ReferenceName) {
-	q, err := PushQueueForRepo(ctx, s.repo)
+	q, err := PushQueueForRepo(context.WithoutCancel(ctx), s.repo)
 	if err != nil {
 		logging.Warn(ctx, "checkpoint: resolve push queue failed; ref not enqueued",
 			slog.String("ref", refName.String()), slog.String("error", err.Error()))
@@ -226,6 +237,14 @@ func (s *gitRefsStore) enqueueForPush(ctx context.Context, refName plumbing.Refe
 }
 
 func (s *gitRefsStore) writeSession(ctx context.Context, opts WriteOptions) error {
+	// Parity with the backfill writers above and with GitStore.writeSession: a
+	// canceled ctx means stop doing work, and creating a checkpoint is the most
+	// expensive write there is (tree building plus a commit). Without this a
+	// bulk writer that ignores cancellation — `entire import` was one — keeps
+	// minting checkpoints after Ctrl-C.
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // Propagating context cancellation
+	}
 	if opts.CheckpointID.IsEmpty() {
 		return errors.New("invalid checkpoint options: checkpoint ID is required")
 	}

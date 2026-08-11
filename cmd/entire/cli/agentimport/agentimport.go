@@ -215,6 +215,10 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 	authorName, authorEmail := cp.GetGitAuthorFromRepo(repo)
 
 	for sessionIndex, sf := range files {
+		// Stop before reading and splitting the next transcript.
+		if err := ctx.Err(); err != nil {
+			return res, err //nolint:wrapcheck // propagate context cancellation
+		}
 		res.SessionsScanned++
 		full, readErr := os.ReadFile(sf.Path)
 		if readErr != nil {
@@ -233,6 +237,14 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		var red redact.RedactedBytes
 		redacted := false
 		for turnIndex, turn := range turns {
+			// Ctrl-C must stop the import, and per turn rather than per session:
+			// one session can carry hundreds of turns, each a checkpoint write.
+			// The store guards its create path too, but only this stops the
+			// per-turn work leading up to it (reading, splitting, redacting),
+			// and it is the only brake at all under DryRun, which never writes.
+			if err := ctx.Err(); err != nil {
+				return res, err //nolint:wrapcheck // propagate context cancellation
+			}
 			cid := DeriveCheckpointID(sf.SessionID, turn.UUID)
 			if existing[cid.String()] {
 				res.TurnsSkipped++

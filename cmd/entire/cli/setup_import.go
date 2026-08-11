@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -33,20 +34,43 @@ var (
 	sessionImportRun      = runSelectedImports
 )
 
+// importHistoryFlagUsage is the --import-history help text. It lives here, next
+// to the behavior it describes, so the advertised lookback cannot drift from
+// agentimport's.
+var importHistoryFlagUsage = fmt.Sprintf(
+	"During first-time setup, import the selected agents' existing session history (last %d days) without prompting",
+	agentimport.LookbackDays)
+
+// noteImportHistoryNotApplicable tells a user who asked for a history import
+// that this run cannot do one. The offer is first-time-setup only, so on an
+// already-configured repo the standalone command is the way in; silently
+// dropping the flag would leave them believing history had been imported.
+func noteImportHistoryNotApplicable(w io.Writer) {
+	fmt.Fprintf(w, "Note: --%s applies to first-time setup. Run 'entire import <agent>' to import existing history.\n",
+		flagImportHistory)
+}
+
 // maybeOfferSessionImport offers, on first-time enable only, to import
 // pre-existing agent history for the just-selected agents. Granularity is
 // agent-level: choosing an agent imports all its discoverable sessions (30-day
 // lookback, matching `entire import`). It is best-effort — discovery or import
 // failures are logged and reported to the user but never fail enable.
 //
-// Import only happens on an explicit choice: an interactive run presents a
-// multi-select (nothing pre-checked) and imports what the user selects; `--yes`
-// ("accept all defaults") auto-imports all eligible agents. A non-interactive
-// run without `--yes` (a script, a piped shell, or an agent with no TTY) makes
-// no choice, so it imports nothing and just points at `entire import` — silently
-// importing history there would be surprising.
+// Import only happens on an explicit choice. An interactive run presents a
+// multi-select with nothing pre-checked, so its default is to import nothing;
+// `--import-history` is the non-interactive way to say yes.
+//
+// `--yes` deliberately does NOT import. It means "accept all defaults", and the
+// interactive default here is to skip — so implying an import from it would
+// make the unattended path do the opposite of the attended one. Ingesting a
+// month of local transcripts (which a later push publishes) is its own
+// decision, not a setup default, so `--yes` takes the same path as any other
+// run that makes no choice: import nothing, and point at `entire import`.
 func maybeOfferSessionImport(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions, firstRun bool) {
 	if !firstRun {
+		if opts.ImportHistory {
+			noteImportHistoryNotApplicable(w)
+		}
 		return
 	}
 
@@ -62,15 +86,20 @@ func maybeOfferSessionImport(ctx context.Context, w io.Writer, agents []agent.Ag
 		return
 	}
 
+	// No explicit opt-in, and no way (or no intent) to ask: don't silently
+	// import. Leave a pointer so scripted/agent/--yes enables can still import
+	// on demand. The hint names the standalone command rather than the flag:
+	// by the time this prints, setup has written its settings, so a re-run of
+	// enable is no longer a first run and the flag would not apply.
+	if !opts.ImportHistory && (opts.Yes || !interactive.CanPromptInteractively()) {
+		logging.Info(ctx, "session import offer skipped: no explicit opt-in",
+			"eligible", len(eligible), "yes", opts.Yes)
+		fmt.Fprintf(w, "Found importable history for %s. Run 'entire import <agent>' to import it.\n", pluralAgents(len(eligible)))
+		return
+	}
+
 	selected := eligible
-	if !opts.Yes {
-		if !interactive.CanPromptInteractively() {
-			// Non-interactive without --yes: don't silently import. Leave a
-			// pointer so scripted/agent enables can still import on demand.
-			logging.Info(ctx, "session import offer skipped: non-interactive without --yes", "eligible", len(eligible))
-			fmt.Fprintf(w, "Found importable history for %s. Run 'entire import <agent>' to import it.\n", pluralAgents(len(eligible)))
-			return
-		}
+	if !opts.ImportHistory {
 		selected, err = sessionImportPrompt(ctx, w, eligible)
 		if err != nil {
 			// Best-effort: a prompt/UI failure must never fail enable. Log,
@@ -231,6 +260,19 @@ func runSelectedImports(ctx context.Context, w io.Writer, repoRoot string, selec
 		})
 		stopProgress(err == nil)
 		if err != nil {
+			// Ctrl-C: stop here instead of moving on to the next agent's
+			// history, which is the last thing a user who just interrupted
+			// wants. Report what landed and how to finish it.
+			if errors.Is(err, context.Canceled) {
+				logging.Info(ctx, "session import interrupted",
+					"agent", e.imp.Name(), "turns", res.TurnsImported)
+				if res.TurnsImported > 0 {
+					importedLocalHistory = true
+				}
+				fmt.Fprintf(w, "Import interrupted after %d turn(s). Run 'entire import %s' to finish.\n",
+					res.TurnsImported, e.imp.Name())
+				break
+			}
 			logging.Warn(ctx, "session import failed", "agent", e.imp.Name(), "error", err)
 			fmt.Fprintf(w, "Note: could not import %s history: %v\n", e.displayName, err)
 			continue

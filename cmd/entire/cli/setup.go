@@ -49,6 +49,7 @@ const (
 	flagLocalDev             = "local-dev"
 	flagSearchSkill          = "search-skill"
 	flagAgentHelpSkill       = "agent-help-skill"
+	flagImportHistory        = "import-history"
 	checkpointProviderGitHub = "github"
 )
 
@@ -78,8 +79,13 @@ type EnableOptions struct {
 	// presentation of the final state (commit, push, done).
 	SuppressDoneMessage bool
 	Yes                 bool
-	SearchSkill         bool
-	AgentHelpSkill      bool
+	// ImportHistory opts into importing the selected agents' pre-existing
+	// session history during first-time setup. Deliberately NOT implied by
+	// Yes: ingesting a month of local transcripts is not a setup default (see
+	// maybeOfferSessionImport).
+	ImportHistory  bool
+	SearchSkill    bool
+	AgentHelpSkill bool
 }
 
 // applyStrategyOptions sets strategy_options on settings from CLI flags.
@@ -898,16 +904,42 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				return NewSilentError(errors.New("missing agent name"))
 			}
 
+			// Resolve --agent before logging starts, so a bad agent name is
+			// rejected without touching the repo (see below).
+			var selectedAgent agent.Agent
 			if agentName != "" {
 				ag, err := agent.Get(types.AgentName(agentName))
 				if err != nil {
 					printWrongAgentError(cmd.ErrOrStderr(), agentName)
 					return NewSilentError(errors.New("wrong agent name"))
 				}
+				selectedAgent = ag
+			}
+
+			// Route setup's logging to .entire/logs/ like every other command.
+			// Without Init the package logger stays nil and every logging.*
+			// call under setup — agent detection, hook install, session import,
+			// the checkpoint layer's push/remote warnings — falls back to
+			// slog.Default(), which prints them straight onto the user's
+			// terminal mid-flow (and writes nothing to the log file).
+			//
+			// Placement is load-bearing in both directions: after the git-repo
+			// check above so it cannot create .entire/logs/ outside a
+			// repository, and after every check that can still reject this
+			// invocation, because Init CREATES .entire/logs/ — a rejected
+			// enable must leave a previously untouched repo untouched rather
+			// than seeding it with an untracked directory Entire's gitignore
+			// entry does not exist yet to cover.
+			logging.SetLogLevelGetter(GetLogLevel)
+			if err := logging.Init(ctx, ""); err == nil {
+				defer logging.Close()
+			}
+
+			if selectedAgent != nil {
 				// --agent is a targeted operation: set up this specific agent without
 				// affecting other agents. Unlike the interactive path, it does not
 				// uninstall hooks for other previously-enabled agents.
-				return setupAgentHooksNonInteractive(ctx, cmd.OutOrStdout(), ag, opts)
+				return setupAgentHooksNonInteractive(ctx, cmd.OutOrStdout(), selectedAgent, opts)
 			}
 
 			// Any setup-mutating flags should behave like `configure` on repos that
@@ -936,7 +968,8 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
 	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
-	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit, and push; then enable all agents and accept telemetry)")
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit, and push; then enable all agents and accept telemetry). Does not import existing agent history — see --"+flagImportHistory)
+	cmd.Flags().BoolVar(&opts.ImportHistory, flagImportHistory, false, importHistoryFlagUsage)
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
 	// Bootstrap flags for non-git-repo folders.
@@ -1096,6 +1129,11 @@ To completely remove Entire integrations from this repository, use --uninstall:
 // flag or reports current status.
 func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts EnableOptions) error {
 	w := cmd.OutOrStdout()
+	// This path is by definition not a first run, so it never reaches the
+	// import offer. Say so rather than dropping the flag silently.
+	if opts.ImportHistory {
+		noteImportHistoryNotApplicable(w)
+	}
 	usedSetupFlow := enableUsesSetupFlow(cmd, "")
 	if usedSetupFlow {
 		if hasStrategyFlags(cmd) {
