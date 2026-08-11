@@ -539,9 +539,16 @@ func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []ce
 	pages, failed, lastErr := classifySemanticCells(ctx, results)
 	if len(pages) == 0 {
 		if lastErr != nil {
-			// Summarize before surfacing: a decode failure embeds the raw
-			// (now up to 64 MiB) response body in lastErr, and this error goes
-			// straight to the user's terminal via main.go.
+			// Preserve the error chain for a cancellation so main.go's
+			// errors.Is(err, context.Canceled) signal-exit still matches on
+			// Ctrl-C during an all-region fan-out (every cell fails with
+			// cancellation and lands here); a cancellation error carries no
+			// body to dump. Otherwise summarize: a decode failure embeds the
+			// raw (now up to 64 MiB) response body in lastErr, and this error
+			// goes straight to the user's terminal via main.go.
+			if errors.Is(lastErr, context.Canceled) {
+				return nil, fmt.Errorf("semantic search: %w", lastErr)
+			}
 			return nil, fmt.Errorf("semantic search: %s", summarizeCellError(lastErr))
 		}
 		return &search.Response{Results: []search.Result{}, Page: 1}, nil

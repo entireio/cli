@@ -538,6 +538,27 @@ func TestMergeSemanticV4Responses_AllCellsFailTruncatesBody(t *testing.T) {
 	}
 }
 
+// TestMergeSemanticV4Responses_AllCellsCancelledPreservesChain guards the
+// signal-exit path: on Ctrl-C during an all-region fan-out every cell fails
+// with context.Canceled and lands on the all-failed return. That error must
+// keep context.Canceled in its chain so main.go's
+// errors.Is(err, context.Canceled) quiet-exit still matches — summarizing to a
+// plain string (needed for the body-dump case) must not sever it.
+func TestMergeSemanticV4Responses_AllCellsCancelledPreservesChain(t *testing.T) {
+	t.Parallel()
+
+	_, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellErr(fmt.Errorf("calling search service: %w", context.Canceled)),
+		v4CellErr(fmt.Errorf("calling search service: %w", context.Canceled)),
+	})
+	if err == nil {
+		t.Fatal("expected an error when every cell was cancelled")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %q, want context.Canceled preserved in the chain", err.Error())
+	}
+}
+
 func TestMergeSemanticV4Responses_NoCells(t *testing.T) {
 	t.Parallel()
 
