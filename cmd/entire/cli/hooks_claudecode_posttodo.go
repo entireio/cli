@@ -94,7 +94,7 @@ func handleClaudeCodePostTodoFromReader(ctx context.Context, reader io.Reader) e
 	}
 
 	// Get next checkpoint sequence
-	seq := GetNextCheckpointSequence(sessionID, taskToolUseID)
+	seq := GetNextCheckpointSequence(ctx, sessionID, taskToolUseID)
 
 	// Extract the todo content from the tool_input.
 	// PostToolUse receives the NEW todo list where the just-completed work is

@@ -173,6 +173,10 @@ func newHooksGitCmd() *cobra.Command {
 				gitHooksDisabled = true
 				return nil
 			}
+			// Lazy invisible setup for globally tracked repos — the git-hook
+			// half of the trigger (agent hooks run it in executeAgentHook).
+			// Cheap no-op once the clone-prefs marker is set.
+			strategy.MaybeEnsureGlobalSetup(ctx)
 			// Discover external agent plugins so GetByAgentType works correctly
 			// during condensation (e.g. post-commit). Without this, external agents
 			// registered in the hook phase cannot be resolved here, causing token

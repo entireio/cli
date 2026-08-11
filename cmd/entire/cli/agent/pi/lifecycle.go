@@ -261,16 +261,17 @@ const piHookCacheSubdir = "pi"
 // checkpoint metadata, so subsequent operations on hooked sessions go
 // through the recorded path rather than re-resolving via GetSessionDir.
 func resolveSessionDir(ctx context.Context) string {
-	root, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		//nolint:forbidigo // fallback when no git repo (tests run outside repos)
-		wd, wdErr := os.Getwd()
-		if wdErr != nil {
-			return filepath.Join(paths.EntireTmpDir, piHookCacheSubdir)
-		}
-		root = wd
+	// AbsPath (not a bare WorktreeRoot join) so globally tracked repos keep
+	// this cache out of the worktree (invisible-mode routing in paths).
+	if dir, err := paths.AbsPath(ctx, paths.EntireTmpDir+"/"+piHookCacheSubdir); err == nil {
+		return dir
 	}
-	return filepath.Join(root, paths.EntireTmpDir, piHookCacheSubdir)
+	//nolint:forbidigo // fallback when no git repo (tests run outside repos)
+	wd, wdErr := os.Getwd()
+	if wdErr != nil {
+		return filepath.Join(paths.EntireTmpDir, piHookCacheSubdir)
+	}
+	return filepath.Join(wd, paths.EntireTmpDir, piHookCacheSubdir)
 }
 
 func cacheSessionID(ctx context.Context, id string) {

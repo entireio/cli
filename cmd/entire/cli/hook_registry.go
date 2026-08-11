@@ -124,6 +124,13 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		return nil
 	}
 
+	// Lazy invisible setup for globally tracked repos (no repo-level setup,
+	// user-global tier active): first hook activity installs the git hooks and
+	// seeds the checkpoint metadata ref, entirely inside .git/. Cheap no-op
+	// once the clone-prefs marker is set or when repo-level setup exists. The
+	// git-hook route triggers the same setup (hooks_git_cmd.go).
+	strategy.MaybeEnsureGlobalSetup(cmd.Context())
+
 	if initLogging {
 		cleanup := initHookLogging(cmd.Context())
 		defer cleanup()

@@ -195,16 +195,23 @@ func TestInitHookLogging_InitsUnderGlobalMode(t *testing.T) {
 		t.Fatalf("failed to write user-global settings file: %v", err)
 	}
 
+	paths.ClearInvisibleRuntimeCache()
+	t.Cleanup(paths.ClearInvisibleRuntimeCache)
+
 	cleanup := initHookLogging(context.Background())
 	if cleanup == nil {
 		t.Fatal("expected cleanup function, got nil")
 	}
 	cleanup() // Should not panic
 
-	// Verify .entire/logs WAS created — logging initialized under global mode
-	logsDir := filepath.Join(tmpDir, ".entire", "logs")
+	// Verify logging initialized under global mode — routed to the git common
+	// dir (invisible mode), never to a worktree .entire directory.
+	logsDir := filepath.Join(tmpDir, ".git", "entire", "worktree", "logs")
 	if _, err := os.Stat(logsDir); err != nil {
-		t.Errorf("expected .entire/logs to be created under global mode, but stat failed: %v", err)
+		t.Errorf("expected logs under .git/entire/worktree under global mode, but stat failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, ".entire")); !os.IsNotExist(err) {
+		t.Errorf("global mode must not create a worktree .entire directory (err=%v)", err)
 	}
 }
 

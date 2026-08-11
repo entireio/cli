@@ -137,7 +137,6 @@ func GetRemoteURLsInDirIfSet(ctx context.Context, dir, remoteName string) (urls 
 	return urls, len(urls) > 0, nil
 }
 
-
 // GetPushURLs returns every URL a push to remoteName delivers to, in the order
 // git will use them.
 //

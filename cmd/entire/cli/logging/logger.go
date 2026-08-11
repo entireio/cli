@@ -37,8 +37,9 @@ import (
 // LogLevelEnvVar is the environment variable that controls log level.
 const LogLevelEnvVar = "ENTIRE_LOG_LEVEL"
 
-// LogsDir is the directory where log files are stored (relative to repo root).
-const LogsDir = ".entire/logs"
+// LogsDir is the directory where log files are stored (relative to repo root
+// in repo-enabled repos; rerouted by paths.AbsPath for globally tracked ones).
+const LogsDir = paths.EntireLogsDir
 
 var (
 	// logger is the package-level logger instance
@@ -109,14 +110,14 @@ func Init(ctx context.Context, sessionID string) error {
 		fmt.Fprintf(os.Stderr, "[entire] Warning: invalid log level %q, defaulting to INFO\n", levelStr)
 	}
 
-	// Determine log file path
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	// Determine log file path. AbsPath (not a bare WorktreeRoot join) is
+	// load-bearing: in a globally tracked repo it reroutes .entire/logs to the
+	// git common dir, so hook logging never creates a worktree .entire dir.
+	logsPath, err := paths.AbsPath(ctx, LogsDir)
 	if err != nil {
 		// Fall back to current directory
-		repoRoot = "."
+		logsPath = filepath.Join(".", LogsDir)
 	}
-
-	logsPath := filepath.Join(repoRoot, LogsDir)
 	if err := os.MkdirAll(logsPath, 0o750); err != nil {
 		// Fall back to stderr
 		logger = createLogger(os.Stderr, level)
