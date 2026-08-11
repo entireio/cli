@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -69,6 +70,24 @@ func TestRegistryOperations(t *testing.T) {
 			t.Errorf("expected sorted list [agent-a, agent-b], got %v", names)
 		}
 	})
+}
+
+func TestSnapshotForTesting_RestoresRegistry(t *testing.T) {
+	// Not parallel: mutates the process-global registry.
+	restore := SnapshotForTesting()
+	t.Cleanup(restore)
+
+	const probe types.AgentName = "snapshot-probe-agent"
+	Register(probe, func() Agent { return &mockAgent{} })
+	if !slices.Contains(List(), probe) {
+		t.Fatalf("probe agent %q was not registered before restore", probe)
+	}
+
+	restore()
+
+	if slices.Contains(List(), probe) {
+		t.Fatalf("probe agent %q leaked past restore()", probe)
+	}
 }
 
 // sessionDirAgent is a mock with a configurable session dir, for path-prefix tests.

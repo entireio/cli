@@ -96,6 +96,11 @@ func TestRunAgentList_AvailableExternalRequiresAllFlag(t *testing.T) {
 		t.Skip("sh not available")
 	}
 
+	// runAgentList discovers and registers the mock into the process-global
+	// agent registry; restore it so the temp-binary-backed agent doesn't leak
+	// into later tests in the package.
+	t.Cleanup(agent.SnapshotForTesting())
+
 	// external_agents ON so discovery runs; the mock reports hooks NOT installed,
 	// i.e. it is available but not installed.
 	repoDir := t.TempDir()
@@ -137,6 +142,12 @@ func TestRunAgentList_ShowsInstalledExternalByDefault(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
+
+	// runAgentList discovers and registers the mock into the process-global
+	// agent registry; restore it so this installed-reporting mock doesn't leak
+	// into later tests (its temp binary is deleted at cleanup, so a leaked
+	// registration would poison GetAgentsWithHooksInstalled package-wide).
+	t.Cleanup(agent.SnapshotForTesting())
 
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)

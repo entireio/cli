@@ -79,8 +79,6 @@ func runAgentList(ctx context.Context, w io.Writer, all bool) error {
 	// uninstalled plugins on $PATH are found and shown too.
 	if all {
 		external.DiscoverAndRegisterAlways(ctx)
-	} else {
-		external.DiscoverAndRegister(ctx)
 	}
 
 	installed := GetAgentsWithHooksInstalled(ctx)

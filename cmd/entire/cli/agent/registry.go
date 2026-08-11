@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -26,6 +27,30 @@ func Register(name types.AgentName, factory Factory) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 	registry[name] = factory
+}
+
+// SnapshotForTesting captures the registry's current contents and returns a
+// function that restores it to exactly that state.
+//
+// Tests that trigger agent registration as a side effect — external-agent
+// discovery via runAgentList, for example — must defer or t.Cleanup the
+// returned restore. Otherwise mock agents backed by t.TempDir binaries leak
+// into the process-global registry and corrupt later tests in the package:
+// GetAgentsWithHooksInstalled would exec their now-deleted binaries, and only
+// TempDir cleanup ordering keeps that from mis-reporting installed agents.
+//
+// Both capture and restore hold registryMu, so it is safe against concurrent
+// registry readers.
+func SnapshotForTesting() func() {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	snapshot := make(map[types.AgentName]Factory, len(registry))
+	maps.Copy(snapshot, registry)
+	return func() {
+		registryMu.Lock()
+		defer registryMu.Unlock()
+		registry = snapshot
+	}
 }
 
 // Get retrieves an agent by name.
