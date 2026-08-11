@@ -19,13 +19,34 @@ import (
 // global.enabled true in the user settings file) must never gain files in the
 // worktree — that is the product guarantee of global tracking. AbsPath
 // therefore reroutes the runtime-data directories below from
-// <worktree>/.entire/<sub> to <git-common-dir>/entire/worktree/<sub> for such
-// repos. Any repo-level setup pins every path to the worktree, byte-identical
-// to the historical behavior.
+// <worktree>/.entire/<sub> to
+// <git-common-dir>/entire/worktree/<worktree-key>/<sub> for such repos. The
+// worktree key namespaces the shared common dir per worktree (linked
+// worktrees of one clone share the common dir but must not interleave
+// runtime data); it is the same worktree-ID hash shadow branch names use.
+// Any repo-level setup pins every path to the worktree, byte-identical to
+// the historical behavior.
 
 // invisibleRuntimeSubdir is the directory inside the git common dir that
-// holds rerouted runtime data. It sits next to entire/preferences.json.
+// holds rerouted runtime data, one <worktree-key> namespace per worktree.
+// It sits next to entire/preferences.json.
 const invisibleRuntimeSubdir = "entire/worktree"
+
+// InvisibleRuntimeDir returns the directory invisible routing resolves
+// runtime data under for the worktree rooted at root, given the repo's
+// absolute git common dir: <commonDir>/entire/worktree/<worktree-key>.
+// The key is HashWorktreeID over the worktree's git identifier ("" for the
+// main worktree), so every worktree of a clone gets its own namespace.
+// This is the single source of truth for the layout — the enable-time
+// migration (setup_global.go) uses it to move only the current worktree's
+// namespace.
+func InvisibleRuntimeDir(commonDir, root string) (string, error) {
+	worktreeID, err := GetWorktreeID(root)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(commonDir, filepath.FromSlash(invisibleRuntimeSubdir), HashWorktreeID(worktreeID)), nil
+}
 
 // settingsLocalFileName mirrors settings.EntireSettingsLocalFile's basename.
 // The settings package imports paths, so the constant cannot be shared.
@@ -101,7 +122,11 @@ func computeInvisibleRuntimeBase(ctx context.Context, root string) string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(commonDir, filepath.FromSlash(invisibleRuntimeSubdir))
+	base, err := InvisibleRuntimeDir(commonDir, root)
+	if err != nil {
+		return ""
+	}
+	return base
 }
 
 // userGlobalTierEnabled reports whether the user-global settings file enables

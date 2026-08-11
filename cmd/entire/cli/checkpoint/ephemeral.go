@@ -2,8 +2,6 @@ package checkpoint
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,14 +37,15 @@ const (
 	ShadowBranchHashLength = 7
 
 	// WorktreeIDHashLength is the number of hex characters used for worktree ID hash.
-	WorktreeIDHashLength = 6
+	WorktreeIDHashLength = paths.WorktreeIDHashLength
 )
 
 // HashWorktreeID returns a short hash of the worktree identifier.
-// Used to create unique shadow branch names per worktree.
+// Used to create unique shadow branch names per worktree. The derivation
+// lives in paths (which this package imports) so invisible routing can share
+// the exact same per-worktree namespace key.
 func HashWorktreeID(worktreeID string) string {
-	h := sha256.Sum256([]byte(worktreeID))
-	return hex.EncodeToString(h[:])[:WorktreeIDHashLength]
+	return paths.HashWorktreeID(worktreeID)
 }
 
 // writeCheckpoint writes a temporary checkpoint to a shadow branch.

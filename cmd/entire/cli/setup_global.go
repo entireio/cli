@@ -232,17 +232,21 @@ func printGlobalTrackingHintIfUnconfigured(ctx context.Context, w io.Writer) {
 }
 
 // globalRuntimeSubdirs are the runtime subtrees invisible routing places
-// under <git-common-dir>/entire/worktree for globally tracked repos, relative
-// to that base and to the worktree's .entire directory alike.
+// under the worktree's namespace dir (<git-common-dir>/entire/worktree/
+// <worktree-key>) for globally tracked repos, relative to that base and to
+// the worktree's .entire directory alike.
 var globalRuntimeSubdirs = []string{"metadata", "logs", "tmp"}
 
-// maybeMigrateGlobalRuntimeData moves invisible-routed runtime data
-// (<git-common-dir>/entire/worktree/{metadata,logs,tmp}) into the worktree's
-// .entire directory. Repo-level enable flows call it BEFORE writing
-// .entire/settings.json: that write flips path routing to the worktree, which
-// would otherwise strand the routed files in .git. It triggers when the clone
-// preferences carry the globally_enabled marker or when the routed directory
-// is non-empty. Best-effort by contract — enable never aborts on migration
+// maybeMigrateGlobalRuntimeData moves THIS worktree's invisible-routed
+// runtime data (<git-common-dir>/entire/worktree/<worktree-key>/
+// {metadata,logs,tmp}) into the worktree's .entire directory. Repo-level
+// enable flows call it BEFORE writing .entire/settings.json: that write
+// flips path routing to the worktree, which would otherwise strand the
+// routed files in .git. Only the current worktree's namespace is touched —
+// sibling worktrees of the same clone keep their own namespaces (and their
+// in-flight sessions) untouched. It triggers when the clone preferences
+// carry the globally_enabled marker or when the routed directory is
+// non-empty. Best-effort by contract — enable never aborts on migration
 // failure; files that could not be moved stay in place for a later retry and
 // the outcome is summarized in one line.
 func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
@@ -259,7 +263,10 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 	if err != nil {
 		return
 	}
-	source := filepath.Join(commonDir, "entire", "worktree")
+	source, err := paths.InvisibleRuntimeDir(commonDir, root)
+	if err != nil {
+		return
+	}
 
 	triggered := false
 	if prefs, prefsErr := settings.LoadClonePreferences(ctx); prefsErr == nil && prefs.GloballyEnabled {
@@ -280,6 +287,10 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 		failed += f
 	}
 	removeEmptyDirTree(source)
+	// The parent (<git-common-dir>/entire/worktree) is shared with sibling
+	// worktrees' namespaces; os.Remove only succeeds once the last namespace
+	// is gone, which is exactly the desired cleanup.
+	_ = os.Remove(filepath.Dir(source))
 
 	if moved+skipped+failed == 0 {
 		return

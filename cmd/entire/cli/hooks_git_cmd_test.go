@@ -206,7 +206,7 @@ func TestInitHookLogging_InitsUnderGlobalMode(t *testing.T) {
 
 	// Verify logging initialized under global mode — routed to the git common
 	// dir (invisible mode), never to a worktree .entire directory.
-	logsDir := filepath.Join(tmpDir, ".git", "entire", "worktree", "logs")
+	logsDir := filepath.Join(tmpDir, ".git", "entire", "worktree", paths.HashWorktreeID(""), "logs")
 	if _, err := os.Stat(logsDir); err != nil {
 		t.Errorf("expected logs under .git/entire/worktree under global mode, but stat failed: %v", err)
 	}

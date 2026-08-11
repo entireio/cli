@@ -1,11 +1,29 @@
 package paths
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// WorktreeIDHashLength is the number of hex characters HashWorktreeID
+// returns (mirrored by checkpoint.WorktreeIDHashLength for shadow branch
+// name parsing).
+const WorktreeIDHashLength = 6
+
+// HashWorktreeID returns a short stable hash of a worktree identifier (a
+// GetWorktreeID result; "" for the main worktree). It is the per-worktree
+// namespace key used both in shadow branch names
+// ("entire/<commit>-<worktreeHash>", via checkpoint.HashWorktreeID, which
+// delegates here) and in the invisible-routing runtime directory layout
+// (<git-common-dir>/entire/worktree/<worktreeHash>/...).
+func HashWorktreeID(worktreeID string) string {
+	h := sha256.Sum256([]byte(worktreeID))
+	return hex.EncodeToString(h[:])[:WorktreeIDHashLength]
+}
 
 // GetWorktreeID returns the internal git worktree identifier for the given path.
 // For the main worktree (where .git is a directory), returns empty string.

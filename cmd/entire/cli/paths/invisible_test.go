@@ -58,15 +58,18 @@ func mustAbsPath(t *testing.T, rel string) string {
 //	repo-level setup | global tier | runtime data location
 //	-----------------+-------------+-----------------------------------
 //	yes              | (ignored)   | <worktree>/.entire/...      (unchanged)
-//	no               | enabled     | <git-common-dir>/entire/worktree/...
+//	no               | enabled     | <git-common-dir>/entire/worktree/<worktree-key>/...
 //	no               | off/absent  | <worktree>/.entire/...      (unchanged)
+//
+// The worktree key is HashWorktreeID over the git worktree identifier ("" for
+// the main worktree), the same derivation shadow branch names use.
 //
 // No t.Parallel: these tests use t.Chdir and t.Setenv.
 func TestAbsPath_InvisibleRouting_GloballyTracked(t *testing.T) {
 	repo := newInvisibleTestRepo(t)
 	setGlobalTier(t, `{"global":{"enabled":true}}`)
 
-	base := filepath.Join(repo, ".git", "entire", "worktree")
+	base := filepath.Join(repo, ".git", "entire", "worktree", paths.HashWorktreeID(""))
 	cases := map[string]string{
 		".entire/metadata":                 filepath.Join(base, "metadata"),
 		".entire/metadata/s1/prompt.txt":   filepath.Join(base, "metadata", "s1", "prompt.txt"),
@@ -123,14 +126,20 @@ func TestAbsPath_InvisibleRouting_GlobalTierOff(t *testing.T) {
 	}
 }
 
-// TestAbsPath_InvisibleRouting_LinkedWorktree pins the routed base to the git
-// COMMON dir: in a linked worktree, runtime data must land in the main
-// repository's .git, not the per-worktree .git/worktrees/<name>/ dir.
+// TestAbsPath_InvisibleRouting_LinkedWorktree pins two properties of the
+// routed base in a linked worktree: it lives under the git COMMON dir (the
+// main repository's .git, not the per-worktree .git/worktrees/<name>/ dir),
+// and it is ISOLATED per worktree — the linked worktree's base must differ
+// from the main worktree's under the same common dir, so two globally
+// tracked worktrees of one clone never interleave runtime data.
 func TestAbsPath_InvisibleRouting_LinkedWorktree(t *testing.T) {
 	repo := newInvisibleTestRepo(t)
 	testutil.WriteFile(t, repo, "f.txt", "init")
 	testutil.GitAdd(t, repo, "f.txt")
 	testutil.GitCommit(t, repo, "init")
+	setGlobalTier(t, `{"global":{"enabled":true}}`)
+
+	mainLogs := mustAbsPath(t, ".entire/logs")
 
 	linked := filepath.Join(repo, ".worktrees", "wt1")
 	cmd := exec.CommandContext(t.Context(), "git", "worktree", "add", linked)
@@ -142,10 +151,13 @@ func TestAbsPath_InvisibleRouting_LinkedWorktree(t *testing.T) {
 	t.Chdir(linked)
 	paths.ClearWorktreeRootCache()
 	paths.ClearInvisibleRuntimeCache()
-	setGlobalTier(t, `{"global":{"enabled":true}}`)
 
-	want := filepath.Join(repo, ".git", "entire", "worktree", "logs")
-	if got := mustAbsPath(t, ".entire/logs"); got != want {
+	want := filepath.Join(repo, ".git", "entire", "worktree", paths.HashWorktreeID("wt1"), "logs")
+	got := mustAbsPath(t, ".entire/logs")
+	if got != want {
 		t.Errorf("AbsPath(.entire/logs) = %q, want common-dir path %q", got, want)
+	}
+	if got == mainLogs {
+		t.Errorf("linked worktree shares the main worktree's runtime base %q; worktree namespaces must be isolated", got)
 	}
 }
