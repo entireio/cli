@@ -17,10 +17,28 @@ type TokenUsage struct {
 	SubagentTokens *TokenUsage `json:"subagent_tokens,omitempty"`
 }
 
+// MaxSubagentDepth caps how deep a SubagentTokens chain is walked. Real chains
+// are depth 1 — an agent reports one aggregate for all its subagents — so this is
+// insurance against a malformed or hostile chain, not a real limit.
+//
+// It matters because token usage is read back from per-session metadata.json blobs
+// on the shared checkpoint branch, which anyone with push access can author. The
+// depth is not a stack-overflow risk (encoding/json caps nesting at 10000), but an
+// unbounded chain reaching the root CheckpointSummary is a write amplification
+// vector: the summary is re-marshalled with indentation, which is O(depth²) in
+// output size, so a ~10k-deep chain in a 200KB session blob expands to a ~700MB
+// root blob that then gets written and pushed.
+const MaxSubagentDepth = 16
+
 // AddTokenUsage returns the sum of a and b, recursing into subagent usage.
 // Either operand may be nil (treated as zero); the result is nil only when both
-// are. Neither input is mutated.
+// are. Neither input is mutated. Subagent chains deeper than MaxSubagentDepth are
+// truncated.
 func AddTokenUsage(a, b *TokenUsage) *TokenUsage {
+	return addTokenUsageAtDepth(a, b, 0)
+}
+
+func addTokenUsageAtDepth(a, b *TokenUsage, depth int) *TokenUsage {
 	if a == nil && b == nil {
 		return nil
 	}
@@ -42,7 +60,10 @@ func AddTokenUsage(a, b *TokenUsage) *TokenUsage {
 		sum.APICallCount += b.APICallCount
 		bSub = b.SubagentTokens
 	}
-	sum.SubagentTokens = AddTokenUsage(aSub, bSub)
+	if depth >= MaxSubagentDepth {
+		return sum
+	}
+	sum.SubagentTokens = addTokenUsageAtDepth(aSub, bSub, depth+1)
 	return sum
 }
 

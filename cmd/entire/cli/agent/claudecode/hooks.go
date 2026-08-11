@@ -15,7 +15,10 @@ import (
 )
 
 // Ensure ClaudeCodeAgent implements HookSupport
-var _ agent.HookSupport = (*ClaudeCodeAgent)(nil)
+var (
+	_ agent.HookSupport   = (*ClaudeCodeAgent)(nil)
+	_ agent.HookFreshness = (*ClaudeCodeAgent)(nil)
+)
 
 // Claude Code hook names - these become subcommands under `entire hooks claude-code`
 const (
@@ -474,19 +477,31 @@ func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) bool {
 }
 
 // HookConfigState describes how Entire's Claude Code hooks compare to what
-// InstallHooks would write today.
-type HookConfigState int
+// InstallHooks would write today. Aliased to the shared agent-package type so
+// `entire status` and `entire doctor` can treat every agent's drift check
+// uniformly; the names stay exported here for existing call sites.
+//
+// For Claude Code, HooksOutdated means Entire hooks are installed but the
+// current tool-use matchers no longer carry them (e.g. an older CLI wrote them
+// under the now non-firing "Task"/"TodoWrite" matchers).
+type HookConfigState = agent.HookConfigState
 
 const (
 	// HooksAbsent means Entire hooks are not installed in this repo.
-	HooksAbsent HookConfigState = iota
+	HooksAbsent = agent.HooksAbsent
 	// HooksCurrent means the installed hooks match the current config.
-	HooksCurrent
-	// HooksOutdated means Entire hooks are installed but the current tool-use
-	// matchers no longer carry them (e.g. an older CLI wrote them under the now
-	// non-firing "Task"/"TodoWrite" matchers). Fix: `entire enable --force`.
-	HooksOutdated
+	HooksCurrent = agent.HooksCurrent
+	// HooksOutdated means the installed hooks are stale.
+	// Fix: `entire enable --force`.
+	HooksOutdated = agent.HooksOutdated
 )
+
+// CheckHookConfig satisfies agent.HookFreshness by delegating to the
+// package-level check, which predates the interface and is still called
+// directly by tests.
+func (c *ClaudeCodeAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
+	return CheckHookConfig(ctx)
+}
 
 // CheckHookConfig reports whether Entire's Claude Code hooks are absent,
 // current, or outdated. It is a read-only diagnostic used by `entire status`

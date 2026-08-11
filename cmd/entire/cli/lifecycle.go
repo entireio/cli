@@ -850,8 +850,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 
 	// Compute subagents directory for agents that support subagent extraction.
-	// Subagent transcripts live in <transcriptDir>/<modelSessionID>/subagents/
-	subagentsDir := filepath.Join(filepath.Dir(transcriptRef), event.SessionID, "subagents")
+	subagentsDir := paths.SubagentsDir(filepath.Dir(transcriptRef), event.SessionID)
 
 	// Extract metadata via agent interface (modified files)
 	var modifiedFiles []string
@@ -1151,15 +1150,8 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		event.SubagentType, event.TaskDescription = ParseSubagentTypeAndDescription(event.ToolInput)
 	}
 
-	// Determine subagent transcript path
-	transcriptDir := filepath.Dir(event.SessionRef)
-	var subagentTranscriptPath string
-	if event.SubagentID != "" {
-		subagentTranscriptPath = AgentTranscriptPath(transcriptDir, event.SubagentID)
-		if !fileExists(subagentTranscriptPath) {
-			subagentTranscriptPath = ""
-		}
-	}
+	// Determine subagent transcript path (empty when the agent stores none).
+	subagentTranscriptPath := ResolveAgentTranscriptPath(filepath.Dir(event.SessionRef), event.SessionID, event.SubagentID)
 
 	// Log context
 	subagentEndAttrs := []any{

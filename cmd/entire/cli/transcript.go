@@ -96,11 +96,32 @@ func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string,
 	return "", errors.New("transcript not found in any project directory")
 }
 
-// AgentTranscriptPath returns the path to a subagent's transcript file.
-// Subagent transcripts are stored as agent-{agentId}.jsonl in the same directory
-// as the main transcript.
-func AgentTranscriptPath(transcriptDir, agentID string) string {
-	return filepath.Join(transcriptDir, fmt.Sprintf("agent-%s.jsonl", agentID))
+// ResolveAgentTranscriptPath returns the path to an existing subagent transcript
+// for agentID, or "" when none exists.
+//
+// It prefers the current layout, paths.SubagentsDir (which is also what the
+// turn-end extractor scans), and falls back to the legacy sibling layout —
+// agent-<id>.jsonl directly beside the main transcript — so sessions recorded by
+// older agent versions still resolve.
+//
+// Order is the whole point: resolving only the legacy path silently yielded "" for
+// every modern Claude Code session, which left task checkpoints without a subagent
+// transcript and made file extraction fall back to scanning the main transcript,
+// where a subagent's edits never appear.
+//
+// An empty agentID never resolves — agent-.jsonl is not a real transcript.
+func ResolveAgentTranscriptPath(transcriptDir, sessionID, agentID string) string {
+	if agentID == "" {
+		return ""
+	}
+	name := paths.AgentTranscriptFileName(agentID)
+	if nested := filepath.Join(paths.SubagentsDir(transcriptDir, sessionID), name); fileExists(nested) {
+		return nested
+	}
+	if legacy := filepath.Join(transcriptDir, name); fileExists(legacy) {
+		return legacy
+	}
+	return ""
 }
 
 // toolResultBlock represents a tool_result in a user message

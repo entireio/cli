@@ -66,6 +66,15 @@ func AsHookSupport(ag Agent) (HookSupport, bool) {
 	return declaredCapability[HookSupport](ag, func(c DeclaredCaps) bool { return c.Hooks })
 }
 
+// AsHookFreshness returns the agent as HookFreshness if it implements the
+// interface. No capability declaration is needed: hook-config drift detection
+// is built-in only, since it compares against a template the CLI itself
+// embeds. External agents own their hook config and report installation state
+// through their own protocol.
+func AsHookFreshness(ag Agent) (HookFreshness, bool) {
+	return builtinCapability[HookFreshness](ag)
+}
+
 // AsTranscriptAnalyzer returns the agent as TranscriptAnalyzer if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTranscriptAnalyzer(ag Agent) (TranscriptAnalyzer, bool) {

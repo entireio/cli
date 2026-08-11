@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -11,6 +12,55 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 )
+
+// GeneratedHookFileState reports hook-config drift for agents whose entire
+// Entire integration is one generated file in the repo (Pi's extension,
+// OpenCode's plugin), for use by HookFreshness implementations.
+//
+// The file counts as ours only if it contains marker, and as current only if
+// it matches one of renders — the outputs InstallHooks could have written.
+// Pass both the production and local-dev renders: they differ only in the
+// substituted entire command, and CheckHookConfig cannot know which mode
+// installed the file. Matching on content rather than a stamped version keeps
+// this honest for free — any edit to the embedded template makes installed
+// copies read as outdated without anyone remembering to bump anything.
+//
+// Line endings are normalized before comparing. These files are generated with
+// LF but are typically committed, so on Windows a checkout under the default
+// core.autocrlf=true hands us CRLF and byte equality never holds. That would
+// report permanent drift the user cannot clear: InstallHooks writes LF back,
+// and the next checkout converts it to CRLF again.
+//
+// A file that exists but lacks marker reads as HooksAbsent, not HooksOutdated:
+// InstallHooks refuses to overwrite a foreign file at our path, so there is no
+// Entire config there for us to call stale.
+func GeneratedHookFileState(path, marker string, renders ...string) HookConfigState {
+	data, err := os.ReadFile(path) //nolint:gosec // path constructed from validated repo root
+	if err != nil {
+		return HooksAbsent
+	}
+	content := string(data)
+	if !strings.Contains(content, marker) {
+		return HooksAbsent
+	}
+	normalized := normalizeLineEndings(content)
+	for _, render := range renders {
+		if normalized == normalizeLineEndings(render) {
+			return HooksCurrent
+		}
+	}
+	return HooksOutdated
+}
+
+// normalizeLineEndings rewrites CRLF to LF so content comparison survives a
+// Windows checkout. Lone CR is left alone: no generator here emits it, and
+// touching it would rewrite content that is genuinely different.
+func normalizeLineEndings(s string) string {
+	if !strings.Contains(s, "\r\n") {
+		return s
+	}
+	return strings.ReplaceAll(s, "\r\n", "\n")
+}
 
 type WarningFormat int
 

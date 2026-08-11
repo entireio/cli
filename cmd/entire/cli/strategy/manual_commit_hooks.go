@@ -1945,7 +1945,7 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 	// For Claude Code, use ExtractAllModifiedFiles which parses the main transcript
 	// AND subagent transcripts in a single pass, avoiding redundant parsing.
 	if state.AgentType == agent.AgentTypeClaudeCode {
-		subagentsDir := filepath.Join(filepath.Dir(state.TranscriptPath), state.SessionID, "subagents")
+		subagentsDir := paths.SubagentsDir(filepath.Dir(state.TranscriptPath), state.SessionID)
 		transcriptData, readErr := os.ReadFile(state.TranscriptPath)
 		if readErr != nil {
 			logging.Debug(logCtx, "extractModifiedFilesFromLiveTranscript: failed to read transcript",

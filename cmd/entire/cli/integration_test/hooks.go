@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -291,6 +292,54 @@ func (s *Session) CreateTranscript(prompt string, changes []FileChange) string {
 	}
 
 	return s.TranscriptPath
+}
+
+// CreateSubagentTranscript writes a transcript for a subagent of this session,
+// where current agent versions store it: paths.SubagentsDir/agent-<agentID>.jsonl.
+// Returns the path.
+//
+// A subagent's Write/Edit tool uses appear only in its own transcript, never in the
+// main one, so tests that exercise subagent file extraction or task-checkpoint
+// storage need this rather than CreateTranscript.
+func (s *Session) CreateSubagentTranscript(agentID string, changes []FileChange) string {
+	s.env.T.Helper()
+
+	dir := paths.SubagentsDir(filepath.Dir(s.TranscriptPath), s.ID)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		s.env.T.Fatalf("failed to create subagents dir: %v", err)
+	}
+	path := filepath.Join(dir, paths.AgentTranscriptFileName(agentID))
+	s.writeSubagentTranscriptTo(path, changes)
+	return path
+}
+
+// CreateLegacySubagentTranscript writes a subagent transcript in the pre-nesting
+// layout — agent-<agentID>.jsonl as a sibling of the main transcript — for tests
+// that must keep older sessions resolving.
+func (s *Session) CreateLegacySubagentTranscript(agentID string, changes []FileChange) string {
+	s.env.T.Helper()
+
+	path := filepath.Join(filepath.Dir(s.TranscriptPath), paths.AgentTranscriptFileName(agentID))
+	s.writeSubagentTranscriptTo(path, changes)
+	return path
+}
+
+// writeSubagentTranscriptTo builds a minimal subagent transcript (its own builder,
+// so it never pollutes the main session transcript) and writes it to path.
+func (s *Session) writeSubagentTranscriptTo(path string, changes []FileChange) {
+	s.env.T.Helper()
+
+	builder := NewTranscriptBuilder()
+	builder.AddUserMessage("subagent task")
+	for _, change := range changes {
+		toolID := builder.AddToolUse("mcp__acp__Write", change.Path, change.Content)
+		builder.AddToolResult(toolID)
+	}
+	builder.AddAssistantMessage("Done!")
+
+	if err := builder.WriteToFile(path); err != nil {
+		s.env.T.Fatalf("failed to write subagent transcript %s: %v", path, err)
+	}
 }
 
 // SimulateUserPromptSubmit is a convenience method on TestEnv.

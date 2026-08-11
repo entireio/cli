@@ -11,8 +11,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// Compile-time interface assertion
-var _ agent.HookSupport = (*OpenCodeAgent)(nil)
+// Compile-time interface assertions
+var (
+	_ agent.HookSupport   = (*OpenCodeAgent)(nil)
+	_ agent.HookFreshness = (*OpenCodeAgent)(nil)
+)
 
 const (
 	// pluginFileName is the name of the plugin file written to .opencode/plugins/
@@ -39,6 +42,16 @@ func getPluginPath(ctx context.Context) (string, error) {
 	return filepath.Join(repoRoot, ".opencode", pluginDirName, pluginFileName), nil
 }
 
+// renderPlugin returns the plugin file content for the given install mode,
+// substituting the entire command the hooks shell out to.
+func renderPlugin(localDev bool) string {
+	cmdPrefix := "entire"
+	if localDev {
+		cmdPrefix = agent.LocalDevHookScript
+	}
+	return strings.ReplaceAll(pluginTemplate, entireCmdPlaceholder, cmdPrefix)
+}
+
 // InstallHooks writes the Entire plugin file to .opencode/plugins/entire.ts.
 // Returns 1 if the plugin was written, 0 if already up-to-date (idempotent).
 // If the file exists but content differs (e.g., localDev vs production), it is rewritten.
@@ -48,16 +61,7 @@ func (a *OpenCodeAgent) InstallHooks(ctx context.Context, localDev bool, force b
 		return 0, err
 	}
 
-	// Build the command prefix
-	var cmdPrefix string
-	if localDev {
-		cmdPrefix = agent.LocalDevHookScript
-	} else {
-		cmdPrefix = "entire"
-	}
-
-	// Generate plugin content from template
-	content := strings.ReplaceAll(pluginTemplate, entireCmdPlaceholder, cmdPrefix)
+	content := renderPlugin(localDev)
 
 	// Check if already installed with identical content (idempotent) unless force
 	if !force {
@@ -111,6 +115,19 @@ func (a *OpenCodeAgent) AreHooksInstalled(ctx context.Context) bool {
 	}
 
 	return strings.Contains(string(data), entireMarker)
+}
+
+// CheckHookConfig reports whether the installed plugin matches what
+// InstallHooks would write today. Read-only diagnostic for `entire status` and
+// `entire doctor`; same committed-and-stale exposure as Pi's extension, since
+// .opencode/plugins/entire.ts is likewise a generated file repos commit so
+// every clone is covered.
+func (a *OpenCodeAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
+	pluginPath, err := getPluginPath(ctx)
+	if err != nil {
+		return agent.HooksAbsent
+	}
+	return agent.GeneratedHookFileState(pluginPath, entireMarker, renderPlugin(false), renderPlugin(true))
 }
 
 // GetSupportedHooks returns the normalized lifecycle events this agent supports.

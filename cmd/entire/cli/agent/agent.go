@@ -120,6 +120,42 @@ type HookSupport interface {
 	AreHooksInstalled(ctx context.Context) bool
 }
 
+// HookConfigState describes how an agent's installed Entire hook config
+// compares to what InstallHooks would write today.
+type HookConfigState int
+
+const (
+	// HooksAbsent means Entire hooks are not installed for this agent here.
+	HooksAbsent HookConfigState = iota
+	// HooksCurrent means the installed hooks match what would be written today.
+	HooksCurrent
+	// HooksOutdated means Entire hooks are installed but stale — an older CLI
+	// wrote a config that no longer matches the current one. Fix:
+	// `entire enable --force`.
+	HooksOutdated
+)
+
+// HookFreshness is implemented by hook-supporting agents that can report
+// whether their installed config has drifted from the current one.
+//
+// AreHooksInstalled answers "is Entire wired up here at all?" — for agents
+// whose hook config is a generated file checked into the repo, that stays true
+// forever even after the generated content goes stale, because the file is
+// still present and still recognisably Entire's. CheckHookConfig answers the
+// separate question "is what's installed still what we'd write today?", so
+// `entire status` and `entire doctor` can flag a stale config instead of
+// reporting it healthy while its hooks silently no-op.
+//
+// Implementations must be read-only: they are diagnostics and must never
+// modify the agent's config.
+type HookFreshness interface {
+	Agent
+
+	// CheckHookConfig reports whether this agent's Entire hook config is
+	// absent, current, or outdated in the current repo.
+	CheckHookConfig(ctx context.Context) HookConfigState
+}
+
 // FileWatcher is implemented by agents that use file-based detection.
 // Agents like Aider that don't support hooks can use file watching
 // to detect session activity.

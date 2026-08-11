@@ -384,3 +384,53 @@ func TestAreHooksInstalled(t *testing.T) {
 		t.Error("hooks should not be installed after UninstallHooks")
 	}
 }
+
+// TestCheckHookConfig covers the drift states for the generated plugin file.
+// Same exposure as Pi's extension: .opencode/plugins/entire.ts is a generated
+// file repos commit so every clone is covered, and a committed copy goes stale
+// as the template evolves while AreHooksInstalled keeps returning true.
+func TestCheckHookConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ctx := context.Background()
+	a := &OpenCodeAgent{}
+
+	if got := a.CheckHookConfig(ctx); got != agent.HooksAbsent {
+		t.Errorf("no plugin: CheckHookConfig = %v, want HooksAbsent", got)
+	}
+
+	if _, err := a.InstallHooks(ctx, false, false); err != nil {
+		t.Fatalf("InstallHooks: %v", err)
+	}
+	if got := a.CheckHookConfig(ctx); got != agent.HooksCurrent {
+		t.Errorf("fresh install: CheckHookConfig = %v, want HooksCurrent", got)
+	}
+
+	// A local-dev install differs only in the substituted entire command and
+	// must not read as drift.
+	if _, err := a.InstallHooks(ctx, true, false); err != nil {
+		t.Fatalf("InstallHooks localDev: %v", err)
+	}
+	if got := a.CheckHookConfig(ctx); got != agent.HooksCurrent {
+		t.Errorf("local-dev install: CheckHookConfig = %v, want HooksCurrent", got)
+	}
+
+	path := filepath.Join(dir, ".opencode", pluginDirName, pluginFileName)
+	stale := "// " + entireMarker + "\n// an older release wrote this\n"
+	if err := os.WriteFile(path, []byte(stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !a.AreHooksInstalled(ctx) {
+		t.Error("AreHooksInstalled = false; a stale-but-marked plugin is still installed")
+	}
+	if got := a.CheckHookConfig(ctx); got != agent.HooksOutdated {
+		t.Errorf("stale plugin: CheckHookConfig = %v, want HooksOutdated", got)
+	}
+
+	if err := os.WriteFile(path, []byte("// someone else's plugin\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.CheckHookConfig(ctx); got != agent.HooksAbsent {
+		t.Errorf("foreign file: CheckHookConfig = %v, want HooksAbsent", got)
+	}
+}
