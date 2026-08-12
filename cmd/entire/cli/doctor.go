@@ -527,22 +527,43 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 
 // checkGlobalTracking runs the global-mode diagnostics. Warn-only:
 //
-//  1. Global tracking is on but user-level agent hooks are missing for an
+//  1. The user-global settings file exists but cannot be read or parsed —
+//     global tracking is silently off machine-wide (fail closed). This is
+//     the one failure hook Debug logs can never surface: on the hook paths
+//     logging.Init runs only after the gate that reads this file has already
+//     failed.
+//  2. Global tracking is on but user-level agent hooks are missing for an
 //     agent that supports them — sessions in never-enabled repos cannot fire
 //     a hook for those agents. Fix: `entire enable --global` (idempotent)
 //     re-installs them.
-//  2. This clone carries the globally_enabled clone-preferences marker but
-//     its git hooks are gone. Informational: the lazy setup path self-heals
-//     on the next agent session in this clone.
+//  3. Unusable exclude patterns (relative, unsupported ~user form, invalid
+//     glob) — under the fail-closed rule each one deactivates the tier in
+//     every repo it is checked against.
+//  4. exclude_origins is configured and this repo's origin is present but
+//     cannot be normalized to host/owner/repo — informational: the tier
+//     stays off in this repo (fail closed).
+//  5. This clone carries the globally_enabled clone-preferences marker but
+//     its git hooks are gone. The marker is a run-once latch, so the lazy
+//     setup would never revisit it; per the marker's contract (any component
+//     detecting drift must clear it) doctor clears it so the next hook
+//     activity re-runs the lazy setup.
 //
-// Both checks stay silent while the global tier is unconfigured or off.
+// All checks except 1 stay silent while the global tier is unconfigured or off.
 func checkGlobalTracking(cmd *cobra.Command) {
 	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
 	us, err := settings.LoadUserSettings(ctx)
-	if err != nil || us.Global == nil || !us.Global.Enabled {
+	if err != nil {
+		fmt.Fprintln(w, "Global tracking: USER SETTINGS UNREADABLE")
+		fmt.Fprintf(w, "  %s cannot be read or parsed: %v\n", settings.UserSettingsPath(), err)
+		fmt.Fprintln(w, "  Global tracking is silently off machine-wide (fail closed), and hook debug logs")
+		fmt.Fprintln(w, "  cannot report it: hook logging starts only after this file has gated the hook off.")
+		fmt.Fprintln(w, "  Fix the JSON by hand, or run `entire enable --global` to rewrite the global section.")
 		return
 	}
-	w := cmd.OutOrStdout()
+	if us.Global == nil || !us.Global.Enabled {
+		return
+	}
 
 	var missing []string
 	for _, name := range agent.List() {
@@ -570,6 +591,24 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		fmt.Fprintln(w, "  Run `entire enable --global` to install them.")
 	}
 
+	if problems, verr := settings.ValidateGlobalConfig(ctx); verr == nil && len(problems) > 0 {
+		fmt.Fprintln(w, "Global tracking: UNUSABLE EXCLUDE PATTERNS")
+		fmt.Fprintln(w, "  Fail closed: each of these deactivates global tracking in every repo it is checked against.")
+		for _, p := range problems {
+			fmt.Fprintf(w, "    - %s\n", p)
+		}
+		fmt.Fprintf(w, "  Fix the listed entries in %s: use absolute or ~/ paths and valid doublestar globs.\n", settings.UserSettingsPath())
+	}
+
+	if bad := settings.UnnormalizableOrigins(ctx); len(bad) > 0 {
+		fmt.Fprintln(w, "Global tracking: origin not checkable in this repo (informational)")
+		fmt.Fprintln(w, "  exclude_origins is configured, but this repo's origin cannot be normalized to host/owner/repo:")
+		for _, o := range bad {
+			fmt.Fprintf(w, "    - %s\n", o)
+		}
+		fmt.Fprintln(w, "  Global tracking stays off in this repo (fail closed).")
+	}
+
 	// Clone-local check: only meaningful when the lazy setup already ran here.
 	prefs, prefsErr := settings.LoadClonePreferences(ctx)
 	if prefsErr != nil || !prefs.GloballyEnabled {
@@ -578,7 +617,19 @@ func checkGlobalTracking(cmd *cobra.Command) {
 	if !strategy.IsGitHookInstalled(ctx) {
 		fmt.Fprintln(w, "Globally tracked clone: GIT HOOKS MISSING")
 		fmt.Fprintln(w, "  This clone was enabled by global tracking but its git hooks are gone.")
-		fmt.Fprintln(w, "  No action needed: the next agent session here reinstalls them (the lazy setup self-heals).")
+		// The globally_enabled marker is a run-once latch: MaybeEnsureGlobalSetup
+		// returns on it before ever checking the hooks, so a latched clone with
+		// missing hooks never converges on its own. Clear the marker (the marker's
+		// documented drift contract) so the next hook activity re-runs the setup.
+		if clearErr := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
+			p.GloballyEnabled = false
+			return nil
+		}); clearErr != nil {
+			fmt.Fprintf(w, "  Could not clear the clone's globally_enabled marker (%v).\n", clearErr)
+			fmt.Fprintln(w, "  Run `entire enable` here, or clear the marker manually, to restore tracking.")
+			return
+		}
+		fmt.Fprintln(w, "  Marker cleared — the next hook activity in this repo re-runs the lazy setup and reinstalls them.")
 	}
 }
 
