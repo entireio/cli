@@ -114,6 +114,14 @@ func Init(ctx context.Context, sessionID string) error {
 	// load-bearing: in a globally tracked repo it reroutes .entire/logs to the
 	// git common dir, so hook logging never creates a worktree .entire dir.
 	logsPath, err := paths.AbsPath(ctx, LogsDir)
+	if paths.IsUnroutableRuntimePath(err) {
+		// The global tier owns this repo but its git-side location could not
+		// be resolved. Creating ./.entire/logs here would be a worktree write
+		// in a repo that must stay invisible — skip file logging entirely and
+		// log to stderr instead.
+		logger = createLogger(os.Stderr, level)
+		return nil
+	}
 	if err != nil {
 		// Fall back to current directory
 		logsPath = filepath.Join(".", LogsDir)

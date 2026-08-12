@@ -105,13 +105,13 @@ func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 		t.Fatalf("clone preferences not written: %v", err)
 	}
 	var prefs struct {
-		GloballyEnabled bool `json:"globally_enabled"`
+		GlobalSetupCompleted bool `json:"global_setup_completed"`
 	}
 	if err := json.Unmarshal(prefsData, &prefs); err != nil {
 		t.Fatalf("parse clone preferences: %v", err)
 	}
-	if !prefs.GloballyEnabled {
-		t.Errorf("clone preferences not marked globally_enabled: %s", prefsData)
+	if !prefs.GlobalSetupCompleted {
+		t.Errorf("clone preferences not marked global_setup_completed: %s", prefsData)
 	}
 	if !env.BranchExists("entire/checkpoints/v1") {
 		t.Error("checkpoint metadata ref not created by lazy enable")

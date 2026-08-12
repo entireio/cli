@@ -782,16 +782,16 @@ func ClearGitCommonDirCache() {
 	gitCommonDirMu.Unlock()
 }
 
-// GetGitCommonDir returns the .git common directory for the current working
-// directory. In a regular checkout this is .git/; in a worktree, it's the
-// main repo's .git/ (not .git/worktrees/<name>/). Result is cached per
+// GetGitCommonDir returns the absolute .git common directory for the current
+// working directory. In a regular checkout this is .git/; in a worktree, it's
+// the main repo's .git/ (not .git/worktrees/<name>/). Result is cached per
 // working directory. This is a public wrapper around the package-internal
 // helper for callers outside this package.
 func GetGitCommonDir(ctx context.Context) (string, error) {
 	return getGitCommonDir(ctx)
 }
 
-// getGitCommonDir returns the path to the shared git directory.
+// getGitCommonDir returns the absolute path to the shared git directory.
 // In a regular checkout, this is .git/
 // In a worktree, this is the main repo's .git/ (not .git/worktrees/<name>/)
 // The result is cached per working directory.
@@ -820,10 +820,16 @@ func getGitCommonDir(ctx context.Context) (string, error) {
 
 	commonDir := strings.TrimSpace(string(output))
 
-	// git rev-parse --git-common-dir returns relative paths from the working directory,
-	// so we need to make it absolute if it isn't already
+	// git rev-parse --git-common-dir returns relative paths from the working
+	// directory, so absolutize against the cwd. (filepath.Join(".", dir) — the
+	// previous code — left the result relative, which every consumer then
+	// silently resolved against its own cwd.)
 	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(".", commonDir)
+		abs, absErr := filepath.Abs(commonDir)
+		if absErr != nil {
+			return "", fmt.Errorf("failed to absolutize git common dir: %w", absErr)
+		}
+		commonDir = abs
 	}
 	commonDir = filepath.Clean(commonDir)
 

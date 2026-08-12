@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -285,11 +286,22 @@ func isWindowsAbsoluteHookCommand(cmdPrefix string) bool {
 
 // InstallGitHook installs generic git hooks that delegate to `entire hook` commands.
 // These hooks work with any strategy - the strategy is determined at runtime.
-// If silent is true, no output is printed (except backup notifications, which always print).
+// If silent is true, no output is printed (except backup notifications, which always
+// print — every user-initiated install passes silent=true and prints its own summary,
+// so the backup notice is the only channel telling the user a pre-existing hook was
+// moved aside). The lazy global setup uses installGitHooks with a discarded notice
+// writer instead, so agent stderr stays clean.
 // localDev controls whether hooks use "go run" (true) or the "entire" binary (false).
 // absolutePath embeds the full binary path in hooks for GUI git clients.
 // Returns the number of hooks that were installed (0 if all already up to date).
 func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (int, error) {
+	return installGitHooks(ctx, silent, localDev, absolutePath, os.Stderr)
+}
+
+// installGitHooks is InstallGitHook with an explicit destination for the
+// backup notices ("[entire] Backed up existing ..."). Pass io.Discard to
+// suppress them (lazy invisible setup); InstallGitHook passes os.Stderr.
+func installGitHooks(ctx context.Context, silent, localDev, absolutePath bool, backupNoticeW io.Writer) (int, error) {
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
 		return 0, err
@@ -329,9 +341,9 @@ func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (i
 				if err := os.Rename(hookPath, backupPath); err != nil {
 					return installedCount, fmt.Errorf("failed to back up %s: %w", spec.name, err)
 				}
-				fmt.Fprintf(os.Stderr, "[entire] Backed up existing %s to %s%s\n", spec.name, spec.name, backupSuffix)
+				fmt.Fprintf(backupNoticeW, "[entire] Backed up existing %s to %s%s\n", spec.name, spec.name, backupSuffix)
 			} else {
-				fmt.Fprintf(os.Stderr, "[entire] Warning: replacing %s (backup %s%s already exists from a previous install)\n", spec.name, spec.name, backupSuffix)
+				fmt.Fprintf(backupNoticeW, "[entire] Warning: replacing %s (backup %s%s already exists from a previous install)\n", spec.name, spec.name, backupSuffix)
 			}
 			backupExists = true
 		}

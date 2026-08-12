@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -76,8 +77,8 @@ func TestMaybeEnsureGlobalSetup_GloballyTracked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load clone preferences: %v", err)
 	}
-	if !prefs.GloballyEnabled {
-		t.Error("clone preferences not marked globally_enabled")
+	if !prefs.GlobalSetupCompleted {
+		t.Error("clone preferences not marked global_setup_completed")
 	}
 	// The invisible guarantee: setup must not create any worktree file.
 	if _, err := os.Lstat(filepath.Join(repoDir, ".entire")); !os.IsNotExist(err) {
@@ -100,7 +101,7 @@ func TestMaybeEnsureGlobalSetup_MarkerShortCircuits(t *testing.T) {
 	ctx := t.Context()
 
 	if err := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
-		p.GloballyEnabled = true
+		p.GlobalSetupCompleted = true
 		return nil
 	}); err != nil {
 		t.Fatalf("pre-mark clone preferences: %v", err)
@@ -148,8 +149,82 @@ func TestMaybeEnsureGlobalSetup_RepoLevelSetupWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load clone preferences: %v", err)
 	}
-	if prefs.GloballyEnabled {
-		t.Error("clone preferences marked globally_enabled in a repo-enabled repo")
+	if prefs.GlobalSetupCompleted {
+		t.Error("clone preferences marked global_setup_completed in a repo-enabled repo")
+	}
+}
+
+// TestMaybeEnsureGlobalSetup_WorktreeHooksPath pins the hooksPath guard: when
+// core.hooksPath resolves inside the worktree (e.g. a committed .husky dir),
+// the lazy setup must not install hooks there — a worktree write would break
+// invisibility. The rest of the setup still runs, and the marker IS set:
+// worktree-resident hooksPath is a stable repo property, not a transient
+// failure, and `entire doctor` is the surface that explains it.
+func TestMaybeEnsureGlobalSetup_WorktreeHooksPath(t *testing.T) {
+	repoDir := newGlobalSetupRepo(t)
+	gitCfg := exec.CommandContext(t.Context(), "git", "config", "core.hooksPath", ".husky")
+	gitCfg.Dir = repoDir
+	if out, err := gitCfg.CombinedOutput(); err != nil {
+		t.Fatalf("git config core.hooksPath: %v\n%s", err, out)
+	}
+	ClearHooksDirCache()
+	t.Cleanup(ClearHooksDirCache)
+	enableGlobalTier(t)
+	ctx := t.Context()
+
+	MaybeEnsureGlobalSetup(ctx)
+
+	// No worktree writes: neither the hooks dir nor .entire may appear.
+	if _, err := os.Lstat(filepath.Join(repoDir, ".husky")); !os.IsNotExist(err) {
+		t.Errorf(".husky created in the worktree by lazy setup (err=%v)", err)
+	}
+	if _, err := os.Lstat(filepath.Join(repoDir, ".entire")); !os.IsNotExist(err) {
+		t.Errorf(".entire exists in worktree (err=%v)", err)
+	}
+	if IsGitHookInstalledInDir(ctx, repoDir) {
+		t.Error("git hooks reported installed despite worktree-resident hooksPath")
+	}
+	// The ref half still ran, and the marker is set (documented choice).
+	if !primaryRefExists(t, repoDir) {
+		t.Error("primary metadata ref not created")
+	}
+	prefs, err := settings.LoadClonePreferences(ctx)
+	if err != nil {
+		t.Fatalf("load clone preferences: %v", err)
+	}
+	if !prefs.GlobalSetupCompleted {
+		t.Error("marker not set: setup did everything it safely could and must not retry forever")
+	}
+}
+
+// TestMaybeEnsureGlobalSetup_CorruptPreferences pins the repair path: a
+// corrupt clone preferences file must not permanently kill the lazy setup.
+// Setup treats it as fresh, proceeds, and the marker write recreates the
+// file as valid JSON.
+func TestMaybeEnsureGlobalSetup_CorruptPreferences(t *testing.T) {
+	repoDir := newGlobalSetupRepo(t)
+	enableGlobalTier(t)
+	ctx := t.Context()
+
+	prefsPath := filepath.Join(repoDir, ".git", "entire", "preferences.json")
+	if err := os.MkdirAll(filepath.Dir(prefsPath), 0o750); err != nil {
+		t.Fatalf("mkdir prefs dir: %v", err)
+	}
+	if err := os.WriteFile(prefsPath, []byte(`{not json`), 0o644); err != nil {
+		t.Fatalf("write corrupt prefs: %v", err)
+	}
+
+	MaybeEnsureGlobalSetup(ctx)
+
+	if !IsGitHookInstalledInDir(ctx, repoDir) {
+		t.Error("git hooks not installed despite corrupt preferences (setup permanently wedged)")
+	}
+	prefs, err := settings.LoadClonePreferences(ctx)
+	if err != nil {
+		t.Fatalf("clone preferences not repaired: %v", err)
+	}
+	if !prefs.GlobalSetupCompleted {
+		t.Error("repaired clone preferences not marked global_setup_completed")
 	}
 }
 

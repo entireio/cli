@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -313,6 +314,35 @@ func TestGetHooksDirInPath_CoreHooksPath(t *testing.T) {
 	}
 	if filepath.Clean(absoluteResult) != filepath.Clean(absHooksPath) {
 		t.Errorf("absolute core.hooksPath expected %s, got %s", absHooksPath, absoluteResult)
+	}
+}
+
+// TestInstallGitHooks_BackupNoticeWriter pins that the "[entire] Backed up
+// existing ..." notices go to the caller-provided writer: the lazy global
+// setup passes io.Discard so nothing leaks into agent stderr, while
+// InstallGitHook (user-initiated installs) keeps os.Stderr.
+func TestInstallGitHooks_BackupNoticeWriter(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+	ctx := context.Background()
+
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("mkdir hooks dir: %v", err)
+	}
+	preExisting := filepath.Join(hooksDir, "pre-push")
+	if err := os.WriteFile(preExisting, []byte("#!/bin/sh\necho user hook\n"), 0o755); err != nil {
+		t.Fatalf("write pre-existing hook: %v", err)
+	}
+
+	var notices bytes.Buffer
+	if _, err := installGitHooks(ctx, true, false, false, &notices); err != nil {
+		t.Fatalf("installGitHooks: %v", err)
+	}
+
+	if !strings.Contains(notices.String(), "Backed up existing pre-push") {
+		t.Errorf("backup notice not routed to the provided writer, got: %q", notices.String())
+	}
+	if _, err := os.Stat(preExisting + backupSuffix); err != nil {
+		t.Errorf("pre-existing hook was not backed up: %v", err)
 	}
 }
 

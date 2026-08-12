@@ -197,7 +197,7 @@ type ClonePreferences struct {
 	TrailsAgentHelpFailureAPIBase  string     `json:"trails_agent_help_failure_api_base,omitempty"`
 	TrailsAgentHelpFailureAuthKey  string     `json:"trails_agent_help_failure_auth_key,omitempty"`
 
-	// GloballyEnabled records that this clone completed the lazy invisible
+	// GlobalSetupCompleted records that this clone completed the lazy invisible
 	// setup for user-global tracking (git hooks installed, checkpoint metadata
 	// ref ensured) without any repo-level settings. It is the once-per-clone
 	// "already done" marker consulted before that setup does any work; a later
@@ -205,7 +205,13 @@ type ClonePreferences struct {
 	// believed converged", not "setup verified": any component that detects
 	// drift (e.g. the git hooks are gone) must clear it so the lazy setup
 	// re-runs on the next hook activity.
-	GloballyEnabled bool `json:"globally_enabled,omitempty"`
+	//
+	// Deliberate nuance: when core.hooksPath resolves inside the worktree,
+	// the lazy setup skips hook installation (a worktree write would break
+	// invisibility) but still sets this marker — setup did everything it
+	// safely could, and that repo property is stable, not transient. `entire
+	// doctor` is the surface that explains the hooksPath situation.
+	GlobalSetupCompleted bool `json:"global_setup_completed,omitempty"`
 }
 
 // SummaryGenerationSettings configures provider selection for on-demand
@@ -794,10 +800,15 @@ func loadClonePreferencesFromFile(filePath string) (*ClonePreferences, error) {
 	// EntireSettings stays strict because it's committed and team-edited,
 	// where unknown keys usually mean typos worth surfacing immediately.
 	if err := json.Unmarshal(data, prefs); err != nil {
-		return nil, fmt.Errorf("parsing preferences file: %w", err)
+		return nil, fmt.Errorf("%w: %w", errCorruptClonePreferences, err)
 	}
 	return prefs, nil
 }
+
+// errCorruptClonePreferences marks a clone preferences file whose JSON cannot
+// be parsed — as opposed to an I/O failure reading it. ModifyClonePreferences
+// recreates such a file; see modifyClonePreferencesFile.
+var errCorruptClonePreferences = errors.New("parsing preferences file")
 
 func saveClonePreferencesToFile(prefs *ClonePreferences, filePath string) error {
 	if prefs == nil {
@@ -854,7 +865,15 @@ func modifyClonePreferencesFile(filePath string, fn func(*ClonePreferences) erro
 
 	prefs, err := loadClonePreferencesFromFile(filePath)
 	if err != nil {
-		return err
+		if !errors.Is(err, errCorruptClonePreferences) {
+			return err
+		}
+		// Corrupt JSON: the file is already unreadable for every consumer, so
+		// nothing is lost by starting fresh. Recreating it here (under the
+		// flock held above) is what keeps one bad write from permanently
+		// wedging every future read-modify-write — e.g. the lazy global
+		// setup's completion marker.
+		prefs = &ClonePreferences{}
 	}
 	if err := fn(prefs); err != nil {
 		return err
