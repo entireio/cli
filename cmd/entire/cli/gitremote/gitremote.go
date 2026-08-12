@@ -144,6 +144,12 @@ func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
 // collapses both cases into one error, which is why it is not used here. A
 // remote can carry several fetch URLs (git remote set-url --add); callers
 // matching for exclusion should treat a match on ANY of them as a match.
+//
+// The lookup deliberately reads EFFECTIVE config (no --local): git itself
+// builds a repo's remotes from the full config stack, so a remote defined in
+// global/system scope IS that repo's origin (git remote -v lists it and
+// fetch uses it). Scoping to --local would make origin exclusion diverge
+// from git's own view, treating such a repo as origin-less.
 func GetRemoteURLsInDirIfSet(ctx context.Context, dir, remoteName string) (urls []string, found bool, err error) {
 	cmd := exec.CommandContext(ctx, "git", "config", "--get-all", "remote."+remoteName+".url")
 	if dir != "" {
