@@ -626,11 +626,11 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		// clearing — clearing would just re-run a setup that skips again and
 		// promise a reinstall that never happens.
 		if resident, hooksDir, resErr := strategy.HooksDirIsWorktreeResident(ctx); resErr == nil && resident {
-			fmt.Fprintln(w, "Globally tracked clone: git hooks skipped (core.hooksPath inside the worktree)")
+			fmt.Fprintln(w, "Globally tracked clone: GIT HOOKS SKIPPED (core.hooksPath inside the worktree)")
 			fmt.Fprintf(w, "  core.hooksPath resolves to %s, inside this worktree; global tracking never\n", hooksDir)
 			fmt.Fprintln(w, "  writes worktree files, so its git hooks were deliberately not installed.")
 			fmt.Fprintln(w, "  Agent-side session capture still works; commit-time checkpoint trailers do not.")
-			fmt.Fprintln(w, "  For hook capture, enable Entire in this repo: `entire enable` (repo-level setup")
+			fmt.Fprintln(w, "  For hook capture, enable Entire in this repo: 'entire enable' (repo-level setup")
 			fmt.Fprintln(w, "  chains into an existing hooks dir), or point core.hooksPath back at .git/hooks.")
 			return
 		}

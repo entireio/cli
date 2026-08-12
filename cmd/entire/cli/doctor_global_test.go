@@ -158,10 +158,10 @@ func TestCheckGlobalTracking_ExplainsWorktreeResidentHooksPath(t *testing.T) {
 	}
 
 	got := runCheckGlobalTracking(t)
-	if !strings.Contains(got, "git hooks skipped (core.hooksPath inside the worktree)") {
+	if !strings.Contains(got, "GIT HOOKS SKIPPED (core.hooksPath inside the worktree)") {
 		t.Fatalf("missing hooksPath explanation, got: %q", got)
 	}
-	for _, want := range []string{"Agent-side session capture still works", "entire enable"} {
+	for _, want := range []string{"Agent-side session capture still works", "'entire enable'"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("explanation missing %q, got: %q", want, got)
 		}
