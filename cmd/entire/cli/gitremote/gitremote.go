@@ -140,10 +140,18 @@ func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
 // exit code 1 from `git config --get-all` is reported as found=false with a
 // nil error — for well-formed remote names that means the key is unset (git
 // also exits 1 for invalid key names). Any other failure (dir missing, git
-// unavailable, context canceled) returns an error; `git remote get-url`
-// collapses both cases into one error, which is why it is not used here. A
-// remote can carry several fetch URLs (git remote set-url --add); callers
-// matching for exclusion should treat a match on ANY of them as a match.
+// unavailable, context canceled) returns an error. `git remote get-url`
+// could make the same distinction — its failures are distinguishable too
+// (exit 2 for "no such remote" vs 128 for not-a-repo) — but
+// it is deliberately not used, for two reasons: (i) it expands
+// url.<base>.insteadOf rewrites, which would break the ExcludeOrigins
+// contract that patterns match what git config STORES
+// (settings.GlobalConfig.ExcludeOrigins — a stored gh:acme/widgets must not
+// come back as git@github.com:acme/widgets), and (ii) `git config
+// --get-all` gives the clean exit-1-means-unset contract this function's
+// found return is built on. A remote can carry several fetch URLs (git
+// remote set-url --add); callers matching for exclusion should treat a
+// match on ANY of them as a match.
 //
 // The lookup deliberately reads EFFECTIVE config (no --local): git itself
 // builds a repo's remotes from the full config stack, so a remote defined in

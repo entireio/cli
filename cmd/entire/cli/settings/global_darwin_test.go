@@ -10,7 +10,11 @@ import "testing"
 // regression in the platform predicate itself.
 func TestMatchesExcludePath_FoldsOnDarwin(t *testing.T) {
 	t.Parallel()
-	if !matchesExcludePath(t.Context(), []string{"/TMP/Scratch/**"}, "/tmp/scratch/x") {
+	matched, err := matchesExcludePath(t.Context(), []string{"/TMP/Scratch/**"}, "/tmp/scratch/x")
+	if err != nil {
+		t.Fatalf("matchesExcludePath: %v", err)
+	}
+	if !matched {
 		t.Error("on darwin the production matcher must case-fold")
 	}
 }
