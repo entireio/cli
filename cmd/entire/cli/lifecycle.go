@@ -409,15 +409,17 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 	deleted, foreignDeleted := normalizeToolUsePaths(event.DeletedFiles, event.CWD, repoRoot)
 
 	// ToolUse and TurnEnd run as separate hook processes: foreign paths seen
-	// here never reach the TurnEnd tap, so record them from this process.
+	// here never reach the TurnEnd tap, so record them from this process. The
+	// kept lists are passed too — a kept path inside an unregistered repo
+	// NESTED under repoRoot (home-as-repo dotfiles setups) is cross-repo
+	// evidence the foreign clamp can never see; the tap only reads them, so
+	// the capture inputs below stay untouched.
 	foreign := append(append(foreignModified, foreignAdded...), foreignDeleted...)
-	if len(foreign) > 0 {
-		recordForeignEvidence(ctx, event.SessionID, binding.SessionMeta{
-			AgentType:      string(ag.Type()),
-			TranscriptPath: event.SessionRef,
-			LaunchRoot:     repoRoot,
-		}, repoRoot, foreign)
-	}
+	recordForeignEvidence(ctx, event.SessionID, binding.SessionMeta{
+		AgentType:      string(ag.Type()),
+		TranscriptPath: event.SessionRef,
+		LaunchRoot:     repoRoot,
+	}, repoRoot, foreign, modified, added, deleted)
 
 	if len(modified) == 0 && len(added) == 0 && len(deleted) == 0 {
 		return nil
@@ -996,14 +998,16 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	relModifiedFiles, foreignModifiedFiles := FilterAndNormalizePathsCollectingForeign(modifiedFiles, repoRoot)
 	// Transcript-extracted paths landing outside this repo are cross-repo
 	// binding evidence. Only this clamp taps: the DetectFileChanges clamps
-	// below operate on git-status output, in-repo by construction.
-	if len(foreignModifiedFiles) > 0 {
-		recordForeignEvidence(ctx, sessionID, binding.SessionMeta{
-			AgentType:      string(ag.Type()),
-			TranscriptPath: event.SessionRef,
-			LaunchRoot:     repoRoot,
-		}, repoRoot, foreignModifiedFiles)
-	}
+	// below operate on git-status output, in-repo by construction. The KEPT
+	// list is passed too — a kept path inside an unregistered repo nested
+	// under repoRoot is evidence the foreign clamp cannot see (home-as-repo
+	// dotfiles setups make everything path-wise "inside"); the tap only reads
+	// it, so relModifiedFiles feeds capture below byte-identical.
+	recordForeignEvidence(ctx, sessionID, binding.SessionMeta{
+		AgentType:      string(ag.Type()),
+		TranscriptPath: event.SessionRef,
+		LaunchRoot:     repoRoot,
+	}, repoRoot, foreignModifiedFiles, relModifiedFiles)
 	var relNewFiles, relDeletedFiles []string
 	if changes != nil {
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
