@@ -728,3 +728,74 @@ func writeTestSessionState(t *testing.T, repoDir, sessionID string) {
 	}
 	t.Cleanup(func() { os.Remove(stateFile) })
 }
+
+// TestExecuteAgentHookDispatchesUnderGlobalMode pins the agent-hook entry
+// gate on the user-global tier: a repo with NO repo-level setup must
+// dispatch when global mode is on. Reverting the gate to IsSetUpAndEnabled
+// makes this fail while the git-hook gate tests stay green — the exact
+// inconsistency (checkpoints on commit, no session capture) the shared
+// IsActiveForRepo predicate exists to prevent.
+func TestExecuteAgentHookDispatchesUnderGlobalMode(t *testing.T) {
+	setupStopTestRepo(t)
+	repoRoot := mustGetwd(t)
+	// Deliberately no .entire/ setup — activation comes from the global tier.
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	require.NoError(t, os.WriteFile(filepath.Join(cfg, "settings.json"),
+		[]byte(`{"global":{"enabled":true}}`), 0o600))
+
+	transcriptPath := filepath.Join(repoRoot, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":{"content":"hi"}}`+"\n"), 0o600))
+
+	sessionID := "global-mode-session-start"
+	payload, err := json.Marshal(map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+	})
+	require.NoError(t, err)
+
+	cmd := &cobra.Command{}
+	cmd.SetIn(bytes.NewReader(payload))
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, false))
+
+	hintPath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, sessionID+".agent")
+	require.FileExists(t, hintPath, "SessionStart must dispatch and claim the session under the user-global tier")
+}
+
+// TestExecuteAgentHookShortCircuitsWhenGloballyExcluded pins the negative
+// side of the same gate, at the promise exclude_paths makes: an excluded
+// repo gets no dispatch and no .entire/ artifacts — Entire never touches it.
+func TestExecuteAgentHookShortCircuitsWhenGloballyExcluded(t *testing.T) {
+	setupStopTestRepo(t)
+	repoRoot := mustGetwd(t)
+	resolved, err := filepath.EvalSymlinks(repoRoot)
+	require.NoError(t, err)
+
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	require.NoError(t, os.WriteFile(filepath.Join(cfg, "settings.json"),
+		[]byte(`{"global":{"enabled":true,"exclude_paths":["`+filepath.ToSlash(resolved)+`"]}}`), 0o600))
+
+	sessionID := "globally-excluded-session-start"
+	payload, err := json.Marshal(map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": filepath.Join(repoRoot, "transcript.jsonl"),
+	})
+	require.NoError(t, err)
+
+	cmd := &cobra.Command{}
+	cmd.SetIn(bytes.NewReader(payload))
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, false))
+
+	hintPath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, sessionID+".agent")
+	_, statErr := os.Stat(hintPath)
+	require.True(t, os.IsNotExist(statErr), "a globally excluded repo must not dispatch or claim the session")
+	_, statErr = os.Stat(filepath.Join(repoRoot, ".entire"))
+	require.True(t, os.IsNotExist(statErr), "a globally excluded repo must not gain .entire/ artifacts")
+}
