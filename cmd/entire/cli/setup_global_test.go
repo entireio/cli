@@ -423,8 +423,18 @@ func TestEnableCmd_GlobalConflictListCoversEveryFlag(t *testing.T) {
 		cmd.SetOut(io.Discard)
 		cmd.SetErr(io.Discard)
 		arg := "--" + name
-		if cmd.Flags().Lookup(name).Value.Type() != "bool" {
-			arg += "=x" // non-bool flags need a value to parse
+		if typ := cmd.Flags().Lookup(name).Value.Type(); typ != "bool" {
+			// Non-bool flags need a value that parses for their type, so the
+			// rejection asserted below is cobra's mutual-exclusion check and
+			// not a value parse error.
+			val := "x"
+			switch {
+			case strings.HasPrefix(typ, "int") || strings.HasPrefix(typ, "uint") || strings.HasPrefix(typ, "float"):
+				val = "1"
+			case typ == "duration":
+				val = "1s"
+			}
+			arg += "=" + val
 		}
 		cmd.SetArgs([]string{"--global", arg})
 		err := cmd.Execute()

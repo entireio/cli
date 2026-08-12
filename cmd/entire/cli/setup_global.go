@@ -123,7 +123,7 @@ func maybeRemoveUserAgentHooks(ctx context.Context, w io.Writer) {
 					Value(&remove),
 			),
 		)
-		if err := form.Run(); err != nil {
+		if err := form.RunWithContext(ctx); err != nil {
 			if !errors.Is(err, huh.ErrUserAborted) && !errors.Is(err, context.Canceled) {
 				logging.Debug(ctx, "user hook removal prompt failed", "error", err)
 			}

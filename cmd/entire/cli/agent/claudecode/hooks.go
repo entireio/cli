@@ -128,7 +128,10 @@ func installHooksToFile(settingsPath string, localDev, force, projectScope bool)
 				return 0, fmt.Errorf("failed to parse hooks in settings.json: %w", err)
 			}
 		}
-		if permRaw, ok := rawSettings["permissions"]; ok {
+		// Only project-scope installs maintain the permissions section; a
+		// user-scope install must neither parse nor fail on it — whatever
+		// value is there (even a non-object) round-trips verbatim.
+		if permRaw, ok := rawSettings["permissions"]; ok && projectScope {
 			if err := json.Unmarshal(permRaw, &rawPermissions); err != nil {
 				return 0, fmt.Errorf("failed to parse permissions in settings.json: %w", err)
 			}

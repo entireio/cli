@@ -84,6 +84,32 @@ const existingUserSettings = `{
   }
 }`
 
+// TestInstallUserHooks_NonObjectPermissionsRoundTripsVerbatim pins that a
+// user-scope install never parses the permissions section: a value that is
+// not an object (which a project-scope install would reject) must neither
+// fail the install nor be rewritten — it round-trips byte-for-byte.
+func TestInstallUserHooks_NonObjectPermissionsRoundTripsVerbatim(t *testing.T) {
+	home := setUserHome(t)
+	writeUserClaudeSettings(t, home, `{
+  "permissions": "deny-all",
+  "hooks": {}
+}`)
+
+	agent := &ClaudeCodeAgent{}
+	count, err := agent.InstallUserHooks(context.Background())
+	if err != nil {
+		t.Fatalf("InstallUserHooks() error = %v", err)
+	}
+	if count == 0 {
+		t.Fatal("InstallUserHooks() installed nothing on a file without Entire hooks")
+	}
+
+	raw := readRawSettings(t, userSettingsTestPath(t, home))
+	if got := string(raw["permissions"]); got != `"deny-all"` {
+		t.Errorf("permissions not preserved verbatim: got %s, want %q", got, `"deny-all"`)
+	}
+}
+
 func TestInstallUserHooks_MergesWithoutClobberingUnrelatedKeys(t *testing.T) {
 	home := setUserHome(t)
 	writeUserClaudeSettings(t, home, existingUserSettings)
