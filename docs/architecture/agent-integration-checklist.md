@@ -114,7 +114,11 @@ Audit of built-in agents (2026-08), recorded per the global-enable design:
   hooks schema as the repo's `.claude/settings.json`. Claude Code merges
   hooks across settings scopes and deduplicates identical hook commands;
   the user-level entries are byte-identical to the repo-level production
-  entries, so a repo with both installed fires each hook once.
+  entries, so a repo with both installed fires each hook once. Caveat: the
+  dedup only covers byte-identical commands — a repo whose hooks were
+  installed with `--local-dev` (scripts/entire-dev form) or by a legacy
+  go-run install uses different command strings, so its hooks double-fire
+  alongside the user-level install.
 - **gemini**: IMPLEMENTED. `~/.gemini/settings.json` accepts the same hooks
   schema as the repo's `.gemini/settings.json`; workspace settings take
   precedence over user settings for the same key, so repo-level installs

@@ -243,10 +243,13 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	return hookErr
 }
 
-// sessionStartHookVerb is the hook verb every built-in agent uses for its
-// session-start hook (see each agent's HookNameSessionStart). Agents with a
-// different verb simply never match, which is the safe direction: the
-// inactive-location notice below stays off rather than firing on every hook.
+// sessionStartHookVerb is the hook verb most built-in agents use for their
+// session-start hook (see each agent's HookNameSessionStart). It is NOT
+// universal: pi uses "session_start" (agent/pi/lifecycle.go mirrors Pi's
+// native snake_case event names), so pi sessions never get the
+// inactive-location notice — an accepted gap. A non-matching verb is the
+// safe direction: the notice below stays off rather than firing on every
+// hook.
 const sessionStartHookVerb = "session-start"
 
 // notGitRepoSessionStartNotice is the SessionStart notice for hooks firing
@@ -261,7 +264,11 @@ const notGitRepoSessionStartNotice = "entire: not tracking this session (not a g
 // exists to explain why an opted-in user's session is NOT tracked here, so it
 // fires only when the global tier is on and this location is carved out
 // (excluded repo; the not-a-git-repo case is gated before the reason variant
-// runs). Explicit off is a durable answer and means silence in both scopes:
+// runs). Note InactiveReasonGlobalExcluded also covers the fail-closed
+// could-not-verify shapes (unusable exclude pattern, unparseable origin) —
+// the "repo excluded by global settings" wording is a slight simplification
+// for those, kept because the remedy (fix the exclude config) is the same.
+// Explicit off is a durable answer and means silence in both scopes:
 // InactiveReasonRepoDisabled (the repo-level veto) and
 // InactiveReasonGlobalOff (the user answered no to — or later disabled —
 // machine-wide tracking). Nagging a globally-off user to re-enable on every

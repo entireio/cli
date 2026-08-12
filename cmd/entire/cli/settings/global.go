@@ -418,8 +418,9 @@ var (
 )
 
 // ClearGlobalModeCache resets the memoized global-mode probe result.
-// For tests that flip user-global settings mid-process; SaveUserSettings also
-// calls it so a writer process observes its own write.
+// For tests that flip user-global settings mid-process; every user-settings
+// writer also reaches it through persistUserSettings (ModifyUserSettings and
+// SaveUserSettings alike) so a writer process observes its own write.
 func ClearGlobalModeCache() {
 	globalModeMu.Lock()
 	globalModeRoot = ""
@@ -444,9 +445,11 @@ func ClearGlobalModeCache() {
 // The Debug logs here and in computeGlobalModeStatus are best-effort traces,
 // NOT a diagnostic channel: on the hook paths that call this predicate,
 // logging.Init runs only after the gate passes, so on every failing path
-// these records are dropped by the
-// default slog handler. A user-facing "global mode configured but inactive
-// because X" surface (status/doctor) is the planned diagnosability story.
+// these records are dropped by the default slog handler. The user-facing
+// diagnosability surfaces are doctor's checkGlobalTracking (unreadable user
+// settings, missing/unverifiable user-level hooks, unusable exclude
+// patterns) and `entire status`, whose global-tracking line reports the
+// per-repo carve-out.
 func GlobalModeActive(ctx context.Context) bool {
 	active, _ := globalModeStatus(ctx)
 	return active
