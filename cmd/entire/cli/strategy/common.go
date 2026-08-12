@@ -1109,10 +1109,16 @@ func GetGitCommonDir(ctx context.Context) (string, error) {
 
 	commonDir := strings.TrimSpace(string(output))
 
-	// git rev-parse --git-common-dir returns relative paths from the working directory,
-	// so we need to make it absolute if it isn't already
+	// git rev-parse --git-common-dir returns relative paths from the working
+	// directory, so absolutize against the cwd. (filepath.Join(".", dir) — the
+	// previous code — left the result relative, which every consumer then
+	// silently resolved against its own cwd.)
 	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(".", commonDir)
+		abs, absErr := filepath.Abs(commonDir)
+		if absErr != nil {
+			return "", fmt.Errorf("failed to absolutize git common dir: %w", absErr)
+		}
+		commonDir = abs
 	}
 
 	return filepath.Clean(commonDir), nil
