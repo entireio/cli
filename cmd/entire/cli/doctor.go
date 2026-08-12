@@ -60,7 +60,10 @@ For each stuck session, you can choose to:
 
 Use --force to condense all fixable sessions without prompting.  Sessions that can't
 be condensed will be discarded.`,
-		PreRun: func(_ *cobra.Command, _ []string) {
+		// PersistentPreRun (not PreRun) so subcommands like `doctor bundle`
+		// also load user-defined redaction rules before they redact output;
+		// cobra only runs PreRun for the command it is declared on.
+		PersistentPreRun: func(_ *cobra.Command, _ []string) {
 			strategy.EnsureRedactionConfigured()
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
