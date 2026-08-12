@@ -5,7 +5,6 @@ package integration
 import (
 	"archive/zip"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,12 +12,11 @@ import (
 
 // TestDoctorBundle_AppliesCustomRedactionRules is the regression test for the
 // support report where a diagnostic bundle leaked a project identifier that a
-// user-defined redaction rule was written to catch: EnsureRedactionConfigured
-// hung on the doctor command's PreRun, which cobra does not run for
-// subcommands, so `doctor bundle` redacted with the built-in layers only and
-// silently ignored .entire/redactors/ packs and redaction.custom_redactions.
-// It must run the real binary so the cobra pre-run wiring is exercised —
-// calling writeDoctorBundle directly (like the unit tests) bypasses the bug.
+// user-defined rule was written to catch: redaction setup lived on the doctor
+// command's PreRun, which cobra never runs for subcommands, so `doctor bundle`
+// silently skipped .entire/redactors/ packs and redaction.custom_redactions.
+// It must run the real binary — calling writeDoctorBundle directly (like the
+// unit tests) bypasses the cobra wiring where the bug lived.
 func TestDoctorBundle_AppliesCustomRedactionRules(t *testing.T) {
 	t.Parallel()
 
@@ -36,29 +34,16 @@ func TestDoctorBundle_AppliesCustomRedactionRules(t *testing.T) {
 			},
 		},
 	})
-	redactorsDir := filepath.Join(env.RepoDir, ".entire", "redactors")
-	if err := os.MkdirAll(redactorsDir, 0o755); err != nil {
-		t.Fatalf("mkdir redactors: %v", err)
-	}
-	packYAML := `name: acme
+	env.WriteFile(filepath.Join(".entire", "redactors", "acme.yaml"), `name: acme
 version: 1.0.0
 rules:
   - id: acme-token
     regex: 'ACME_[A-Z0-9]{6}'
-`
-	if err := os.WriteFile(filepath.Join(redactorsDir, "acme.yaml"), []byte(packYAML), 0o644); err != nil {
-		t.Fatalf("write pack: %v", err)
-	}
+`)
 
-	// Vector 1: identifier in a collected log file.
-	logsDir := filepath.Join(env.RepoDir, ".entire", "logs")
-	if err := os.MkdirAll(logsDir, 0o755); err != nil {
-		t.Fatalf("mkdir logs: %v", err)
-	}
-	logBody := "deploying " + packTarget + " with tag " + inlineTarget + "\n"
-	if err := os.WriteFile(filepath.Join(logsDir, "entire.log"), []byte(logBody), 0o600); err != nil {
-		t.Fatalf("write log: %v", err)
-	}
+	// Vector 1: identifiers in a collected log file.
+	env.WriteFile(filepath.Join(".entire", "logs", "entire.log"),
+		"deploying "+packTarget+" with tag "+inlineTarget+"\n")
 
 	// Vector 2: identifier in a git commit subject, the reported leak — the
 	// built-in secret layers leave it (it is not a secret), so only the
@@ -68,20 +53,27 @@ rules:
 	env.GitCommit("rollout " + packTarget)
 
 	outZip := filepath.Join(t.TempDir(), "bundle.zip")
-	out := env.RunCLI("doctor", "bundle", "--out", outZip)
-	t.Logf("doctor bundle output: %s", out)
+	env.RunCLI("doctor", "bundle", "--out", outZip)
 
-	for entry, target := range map[string]string{
-		"logs/entire.log": packTarget,
-		"git-log.txt":     packTarget,
+	for _, tc := range []struct {
+		entry  string
+		target string
+		rule   string
+	}{
+		{"logs/entire.log", packTarget, "pack rule"},
+		{"logs/entire.log", inlineTarget, "inline custom_redactions rule"},
+		{"git-log.txt", packTarget, "pack rule"},
 	} {
-		content := readBundleEntry(t, outZip, entry)
-		if strings.Contains(content, target) {
-			t.Errorf("bundle entry %s leaked custom-rule target %q:\n%s", entry, target, content)
+		content := readBundleEntry(t, outZip, tc.entry)
+		if strings.Contains(content, tc.target) {
+			t.Errorf("bundle entry %s leaked %s target %q:\n%s", tc.entry, tc.rule, tc.target, content)
 		}
-	}
-	if content := readBundleEntry(t, outZip, "logs/entire.log"); strings.Contains(content, inlineTarget) {
-		t.Errorf("bundle entry logs/entire.log leaked inline custom_redactions target %q:\n%s", inlineTarget, content)
+		// Positive control: the surviving text proves the entry carried the
+		// line and redaction replaced the target, so the absence checks above
+		// cannot pass vacuously on an empty or unredacted-but-missing entry.
+		if !strings.Contains(content, "REDACTED") {
+			t.Errorf("bundle entry %s missing REDACTED placeholder — redaction did not run on it:\n%s", tc.entry, content)
+		}
 	}
 }
 
