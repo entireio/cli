@@ -531,9 +531,60 @@ type placementPicker struct {
 	action string
 }
 
+// cloneHomeJurisdiction reports the caller's home jurisdiction for narrowing the
+// placement picker. A package seam so tests can drive the filter without the
+// real auth stack.
+var cloneHomeJurisdiction = defaultCloneHomeJurisdiction
+
+// defaultCloneHomeJurisdiction reads the home_jurisdiction claim off the active
+// login (best-effort — the placements lookup just ran on this same context, so
+// the token is warm). Returns "" on any uncertainty so the picker falls back to
+// showing every placement rather than hiding one.
+func defaultCloneHomeJurisdiction(ctx context.Context) string {
+	target, err := auth.ResolveControlPlaneTarget()
+	if err != nil {
+		return ""
+	}
+	jwt, err := target.TokenSource(ctx)
+	if err != nil {
+		return ""
+	}
+	jur, err := auth.HomeJurisdictionFromLoginJWT(jwt)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(jur)
+}
+
+// preferHomeJurisdiction narrows placements to those in the caller's home
+// jurisdiction, so the picker isn't cluttered with regions the user doesn't
+// belong to (and auto-selects when that leaves exactly one). Best-effort: an
+// unknown home, or a home that matches no placement, returns the input
+// unchanged so a clonable target is never silently hidden.
+func preferHomeJurisdiction(placements []coreapi.ResolvedPlacement, home string) []coreapi.ResolvedPlacement {
+	if home == "" || len(placements) < 2 {
+		return placements
+	}
+	kept := make([]coreapi.ResolvedPlacement, 0, len(placements))
+	for _, p := range placements {
+		if strings.EqualFold(strings.TrimSpace(p.Jurisdiction.Or("")), home) {
+			kept = append(kept, p)
+		}
+	}
+	if len(kept) == 0 {
+		return placements
+	}
+	return kept
+}
+
 // selectCloneTarget resolves which mirror placement to clone from, with the
-// clone verb's wording. See selectPlacement for the selection rules.
+// clone verb's wording. See selectPlacement for the selection rules. With no
+// explicit --cluster it first narrows to the caller's home jurisdiction so a
+// repo mirrored across many regions defaults to the user's own.
 func selectCloneTarget(cmd *cobra.Command, placements []coreapi.ResolvedPlacement, clusterFlag string) (coreapi.ResolvedPlacement, error) {
+	if clusterFlag == "" {
+		placements = preferHomeJurisdiction(placements, cloneHomeJurisdiction(cmd.Context()))
+	}
 	return selectPlacement(cmd, placements, clusterFlag, placementPicker{
 		selector: "--cluster",
 		title:    "This repo is mirrored on more than one cluster — pick one to clone from",
