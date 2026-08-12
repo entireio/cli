@@ -19,7 +19,10 @@ import (
 // git-side runtime location could not be resolved (git common dir probe or
 // worktree-ID classification failed). Direction for every consumer: for
 // tier-owned repos, unroutable means SKIP the runtime write/read — never fall
-// back to the worktree, which would violate the invisibility guarantee.
+// back to the worktree (which would violate the invisibility guarantee) and
+// never fail the user's operation. Skips are logged at the highest level that
+// is live at the site: Warn where hook logging is already initialized (e.g.
+// the turn-end capture), Debug or silent where it is not.
 // AbsPath surfaces this (wrapped) for runtime-data paths; callers detect it
 // with IsUnroutableRuntimePath.
 var ErrUnroutableRuntimePath = errors.New("global tier owns this repo but its git-side runtime location could not be resolved")
@@ -138,9 +141,10 @@ func runtimeDataSubpath(relPath string) (string, bool) {
 var (
 	invisibleMu    sync.Mutex
 	invisibleCache struct {
-		root string
-		base string
-		err  error
+		valid bool // distinguishes the cleared state from a cached root=="" decision
+		root  string
+		base  string
+		err   error
 	}
 )
 
@@ -148,6 +152,7 @@ var (
 // Primarily useful for tests that change global settings for one repo root.
 func ClearInvisibleRuntimeCache() {
 	invisibleMu.Lock()
+	invisibleCache.valid = false
 	invisibleCache.root = ""
 	invisibleCache.base = ""
 	invisibleCache.err = nil
@@ -164,10 +169,11 @@ func ClearInvisibleRuntimeCache() {
 func invisibleRuntimeBase(ctx context.Context, root string) (string, error) {
 	invisibleMu.Lock()
 	defer invisibleMu.Unlock()
-	if invisibleCache.root == root {
+	if invisibleCache.valid && invisibleCache.root == root {
 		return invisibleCache.base, invisibleCache.err
 	}
 	base, err := computeInvisibleRuntimeBase(ctx, root)
+	invisibleCache.valid = true
 	invisibleCache.root = root
 	invisibleCache.base = base
 	invisibleCache.err = err
