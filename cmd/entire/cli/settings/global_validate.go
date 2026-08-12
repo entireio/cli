@@ -27,21 +27,15 @@ func ValidateGlobalConfig(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if us.Global == nil || !us.Global.Enabled {
+	if !us.GlobalEnabled() {
 		return nil, nil
 	}
 	var problems []string
 	for i, p := range us.Global.ExcludePaths {
-		expanded, err := expandTilde(p)
-		if err != nil {
+		// checkExcludePathPattern is the same per-pattern check the
+		// fail-closed matcher applies, so doctor and the gate agree.
+		if _, err := checkExcludePathPattern(p); err != nil {
 			problems = append(problems, fmt.Sprintf("exclude_paths[%d]: %v", i, err))
-			continue
-		}
-		if expanded == "" {
-			continue // blank entry — skipped by the matcher too
-		}
-		if !doublestar.ValidatePattern(expanded) {
-			problems = append(problems, fmt.Sprintf("exclude_paths[%d]: invalid glob", i))
 		}
 	}
 	for i, p := range us.Global.ExcludeOrigins {
@@ -65,7 +59,7 @@ func ValidateGlobalConfig(ctx context.Context) ([]string, error) {
 // no origin remote, lookup failure) returns nil, best-effort.
 func UnnormalizableOrigins(ctx context.Context) []string {
 	us, err := LoadUserSettings(ctx)
-	if err != nil || us.Global == nil || !us.Global.Enabled || len(us.Global.ExcludeOrigins) == 0 {
+	if err != nil || !us.GlobalEnabled() || len(us.Global.ExcludeOrigins) == 0 {
 		return nil
 	}
 	root, err := paths.WorktreeRoot(ctx)

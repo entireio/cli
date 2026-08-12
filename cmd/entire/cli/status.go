@@ -138,10 +138,10 @@ type globalTrackingInfo struct {
 
 func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 	us, err := settings.LoadUserSettings(ctx)
-	if err != nil || us.Global == nil {
+	if err != nil || !us.GlobalConfigured() {
 		return globalTrackingInfo{}
 	}
-	info := globalTrackingInfo{Configured: true, Enabled: us.Global.Enabled}
+	info := globalTrackingInfo{Configured: true, Enabled: us.GlobalEnabled()}
 	if !info.Enabled {
 		return info
 	}

@@ -29,20 +29,26 @@ const globalTrackingHint = "To track every repo on this machine automatically, r
 // the user settings file (preserving existing exclude lists) and never touches
 // repo-level settings, so it works outside a git repository too.
 func runEnableGlobalMode(ctx context.Context, w io.Writer) error {
-	us, err := settings.LoadUserSettings(ctx)
-	if err != nil {
+	// Load first for the actionable unreadable-file message. The write below
+	// re-loads under the user-settings lock, so this is a UX probe, not the
+	// consistency mechanism.
+	if _, err := settings.LoadUserSettings(ctx); err != nil {
 		return unreadableUserSettingsError(err)
 	}
-	if us.Global == nil {
-		us.Global = &settings.GlobalConfig{}
-	}
-	us.Global.Enabled = true
-	if err := settings.SaveUserSettings(ctx, us); err != nil {
+	kept := 0
+	if err := settings.ModifyUserSettings(ctx, func(us *settings.UserSettings) error {
+		if us.Global == nil {
+			us.Global = &settings.GlobalConfig{}
+		}
+		us.Global.Enabled = true
+		kept = len(us.Global.ExcludePaths) + len(us.Global.ExcludeOrigins)
+		return nil
+	}); err != nil {
 		return fmt.Errorf("saving user settings: %w", err)
 	}
 	fmt.Fprintln(w, "Global tracking enabled.")
 	fmt.Fprintln(w, "Entire now tracks agent sessions in every repo on this machine that has no repo-level setup and matches no exclude pattern.")
-	if kept := len(us.Global.ExcludePaths) + len(us.Global.ExcludeOrigins); kept > 0 {
+	if kept > 0 {
 		fmt.Fprintf(w, "Keeping %d exclude pattern(s) from your user settings.\n", kept)
 	}
 	installUserAgentHooks(ctx, w)
@@ -152,15 +158,18 @@ func maybeRemoveUserAgentHooks(ctx context.Context, w io.Writer) {
 // durable: the file keeps global.enabled=false (rather than being removed), so
 // the setup wizard never re-asks. Repo-level settings are not touched.
 func runDisableGlobalMode(ctx context.Context, w io.Writer) error {
-	us, err := settings.LoadUserSettings(ctx)
-	if err != nil {
+	// Same shape as runEnableGlobalMode: probe for the actionable message,
+	// then read-modify-write under the user-settings lock.
+	if _, err := settings.LoadUserSettings(ctx); err != nil {
 		return unreadableUserSettingsError(err)
 	}
-	if us.Global == nil {
-		us.Global = &settings.GlobalConfig{}
-	}
-	us.Global.Enabled = false
-	if err := settings.SaveUserSettings(ctx, us); err != nil {
+	if err := settings.ModifyUserSettings(ctx, func(us *settings.UserSettings) error {
+		if us.Global == nil {
+			us.Global = &settings.GlobalConfig{}
+		}
+		us.Global.Enabled = false
+		return nil
+	}); err != nil {
 		return fmt.Errorf("saving user settings: %w", err)
 	}
 	fmt.Fprintln(w, "Global tracking disabled.")
@@ -191,7 +200,7 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 		fmt.Fprintf(w, "Warning: %v\n", unreadableUserSettingsError(err))
 		return
 	}
-	if us.Global != nil {
+	if us.GlobalConfigured() {
 		// A configured tier (either answer) must never re-ask.
 		return
 	}
@@ -208,8 +217,17 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 		}
 		return
 	}
-	us.Global = &settings.GlobalConfig{Enabled: enable}
-	if err := settings.SaveUserSettings(ctx, us); err != nil {
+	// Persist through a locked read-modify-write of the CURRENT file state:
+	// the prompt can stay open for a while, and saving the pre-prompt
+	// snapshot would clobber anything (say, exclude lists) another process
+	// wrote in that window.
+	if err := settings.ModifyUserSettings(ctx, func(cur *settings.UserSettings) error {
+		if cur.Global == nil {
+			cur.Global = &settings.GlobalConfig{}
+		}
+		cur.Global.Enabled = enable
+		return nil
+	}); err != nil {
 		fmt.Fprintf(w, "Warning: could not save the global tracking answer: %v\n", err)
 		return
 	}
@@ -248,7 +266,7 @@ var askGlobalTrackingConfirm = func(ctx context.Context) (bool, error) {
 // question has never been answered.
 func printGlobalTrackingHintIfUnconfigured(ctx context.Context, w io.Writer) {
 	us, err := settings.LoadUserSettings(ctx)
-	if err != nil || us.Global != nil {
+	if err != nil || us.GlobalConfigured() {
 		return
 	}
 	fmt.Fprintln(w, globalTrackingHint)

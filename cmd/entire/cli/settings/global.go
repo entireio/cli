@@ -16,6 +16,7 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -71,6 +72,20 @@ type UserSettings struct {
 	Global *GlobalConfig `json:"global,omitempty"`
 }
 
+// GlobalConfigured reports whether the global tier has been configured —
+// either answer counts (the ask-once wizard keys off this). Nil-safe, so
+// callers never repeat the raw us.Global nil-check.
+func (us *UserSettings) GlobalConfigured() bool {
+	return us != nil && us.Global != nil
+}
+
+// GlobalEnabled reports whether the global tier is configured AND enabled.
+// Nil-safe. This is only the file's own bit — the full activation gate
+// (worktree resolution, exclude lists, fail-closed rules) is GlobalModeActive.
+func (us *UserSettings) GlobalEnabled() bool {
+	return us.GlobalConfigured() && us.Global.Enabled
+}
+
 // UserSettingsPath returns the absolute path of the user-global settings
 // file, for callers that name it in error messages.
 func UserSettingsPath() string {
@@ -109,21 +124,54 @@ func LoadUserSettings(_ context.Context) (*UserSettings, error) {
 	return &us, nil
 }
 
-// SaveUserSettings writes the user-global settings file atomically (temp file
-// next to the target + rename, 0o600), creating the config directory if
-// needed. A symlinked settings.json is resolved and its target rewritten
-// rather than the link being replaced. It writes exactly the known schema:
-// unknown keys are never
-// preserved, by design — LoadUserSettings decodes strictly, so a load-modify-
-// save cycle against a newer file fails at load rather than silently dropping
-// keys here. It also resets the process-level caches derived from the file
-// (the GlobalModeActive memo and the invisible-routing decision), so a writer
-// process observes its own write.
-func SaveUserSettings(_ context.Context, us *UserSettings) error {
+// ModifyUserSettings runs a read-modify-write of the user-global settings
+// file under a file lock, so two concurrent writers — or a prompt held open
+// while another process writes (the enable wizard's window) — cannot clobber
+// each other's changes. fn receives the freshly loaded settings; returning an
+// error aborts without writing. A load failure aborts too: the strict decoder
+// is what keeps this rewrite from silently dropping a newer binary's keys.
+func ModifyUserSettings(ctx context.Context, fn func(*UserSettings) error) error {
 	dir := userdirs.Config()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
+	release, err := flock.Acquire(UserSettingsPath() + ".lock")
+	if err != nil {
+		return fmt.Errorf("lock user settings: %w", err)
+	}
+	defer release()
+	us, err := LoadUserSettings(ctx)
+	if err != nil {
+		return err
+	}
+	if err := fn(us); err != nil {
+		return err
+	}
+	return persistUserSettings(us)
+}
+
+// SaveUserSettings replaces the user-global settings file with us, delegating
+// to ModifyUserSettings so the write happens under the same lock (and the
+// same strict-load protection). Prefer ModifyUserSettings directly for
+// read-modify-write flows; this whole-struct form suits callers that own the
+// complete desired state.
+func SaveUserSettings(ctx context.Context, us *UserSettings) error {
+	return ModifyUserSettings(ctx, func(cur *UserSettings) error {
+		*cur = *us
+		return nil
+	})
+}
+
+// persistUserSettings writes the user-global settings file atomically (temp
+// file next to the target + rename, 0o600). A symlinked settings.json is
+// resolved and its target rewritten rather than the link being replaced. It
+// writes exactly the known schema: unknown keys are never preserved, by
+// design — LoadUserSettings decodes strictly, so every load-modify-save cycle
+// against a newer file fails at load rather than silently dropping keys here.
+// It also resets the process-level caches derived from the file (the
+// global-mode memo and the invisible-routing decision), so a writer process
+// observes its own write. Callers hold the user-settings lock.
+func persistUserSettings(us *UserSettings) error {
 	data, err := jsonutil.MarshalIndentWithNewline(us, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding user settings: %w", err)
@@ -236,6 +284,25 @@ func resolveGlobPrefixSymlinks(expanded string) string {
 	return slashed
 }
 
+// checkExcludePathPattern expands and validates a single exclude_paths
+// pattern — the one definition of "usable" shared by the fail-closed matcher
+// and doctor's ValidateGlobalConfig, so the two surfaces can never disagree
+// about which patterns deactivate the tier. Returns the expanded pattern,
+// "" for a blank entry (no intent to honor), or the error both report.
+func checkExcludePathPattern(p string) (string, error) {
+	expanded, err := expandTilde(p)
+	if err != nil {
+		return "", err
+	}
+	if expanded == "" {
+		return "", nil
+	}
+	if !doublestar.ValidatePattern(expanded) {
+		return "", errors.New("invalid glob")
+	}
+	return expanded, nil
+}
+
 // matchesExcludePath reports whether worktreeRoot matches any exclude_paths
 // pattern. A pattern also excludes everything under it (p matches, or p/**
 // matches). Blank entries are skipped; an UNUSABLE pattern (unexpandable ~,
@@ -259,7 +326,7 @@ func matchesExcludePathFold(_ context.Context, patterns []string, worktreeRoot s
 		}
 	}
 	for i, p := range patterns {
-		expanded, err := expandTilde(p)
+		expanded, err := checkExcludePathPattern(p)
 		if err != nil {
 			return false, fmt.Errorf("exclude_paths[%d]: %w", i, err)
 		}
@@ -422,7 +489,7 @@ func computeGlobalModeStatus(ctx context.Context, root string) (bool, InactiveRe
 			slog.String("error", err.Error()))
 		return false, InactiveReasonGlobalOff
 	}
-	if us.Global == nil || !us.Global.Enabled {
+	if !us.GlobalEnabled() {
 		return false, InactiveReasonGlobalOff
 	}
 	excluded, err := matchesExcludePath(ctx, us.Global.ExcludePaths, root)
@@ -496,10 +563,7 @@ func IsActiveForRepo(ctx context.Context) bool {
 // errors, like every other gate over this file.
 func GlobalTierEnabled(ctx context.Context) bool {
 	us, err := LoadUserSettings(ctx)
-	if err != nil {
-		return false
-	}
-	return us.Global != nil && us.Global.Enabled
+	return err == nil && us.GlobalEnabled()
 }
 
 // IsActiveForRepoWithReason is IsActiveForRepo plus the reason a location is

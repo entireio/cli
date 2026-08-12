@@ -565,7 +565,7 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		fmt.Fprintln(w, "  Fix the JSON by hand, or run `entire enable --global` to rewrite the global section.")
 		return
 	}
-	if us.Global == nil || !us.Global.Enabled {
+	if !us.GlobalEnabled() {
 		return
 	}
 
