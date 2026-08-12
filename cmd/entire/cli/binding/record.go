@@ -180,8 +180,8 @@ func loadRecordFromFile(path string) (*SessionRecord, error) {
 // kernel indefinitely — a wedged lock holder would then stall the hook,
 // breaking the tap's never-block-capture promise. This layer is best-effort
 // by design, so timing out and dropping the evidence is the correct
-// degradation. Var, not const, so tests can shrink it.
-var recordLockTimeout = 2 * time.Second
+// degradation.
+const recordLockTimeout = 2 * time.Second
 
 // mutateRecord runs fn over the session record under an exclusive file lock:
 // MkdirAll → flock → load-or-create → fn → atomic write. Two hook processes
