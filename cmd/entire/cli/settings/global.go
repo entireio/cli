@@ -97,11 +97,14 @@ func normalizeOrigin(rawURL string) string {
 }
 
 // expandTilde expands a leading "~" or "~/" to the user home directory and
-// cleans the result, so a trailing slash cannot break matching. Returns ""
-// for patterns that cannot be resolved: empty input, an unavailable home dir,
-// the unsupported "~user" form, or a relative pattern (which can never match
-// an absolute worktree root).
+// cleans the result, so a trailing slash cannot break matching. Surrounding
+// whitespace is trimmed first: the file is hand-edited, and a stray trailing
+// space would otherwise make the pattern silently never match — a quiet
+// fail-open. Returns "" for patterns that cannot be resolved: empty input, an
+// unavailable home dir, the unsupported "~user" form, or a relative pattern
+// (which can never match an absolute worktree root).
 func expandTilde(pattern string) string {
+	pattern = strings.TrimSpace(pattern)
 	if pattern == "" {
 		return ""
 	}
@@ -165,11 +168,17 @@ func matchesExcludePathFold(ctx context.Context, patterns []string, worktreeRoot
 
 // matchesExcludeOrigin reports whether the normalized origin ("host/owner/repo")
 // matches any exclude_origins pattern. An empty origin matches nothing.
+// Patterns are whitespace-trimmed (hand-edited file; a stray space must not
+// silently disable an exclusion) and blank entries are skipped.
 func matchesExcludeOrigin(ctx context.Context, patterns []string, normalizedOrigin string) bool {
 	if normalizedOrigin == "" {
 		return false
 	}
 	for i, p := range patterns {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
 		ok, err := doublestar.Match(strings.ToLower(p), normalizedOrigin)
 		if err != nil {
 			logging.Debug(ctx, "skipping invalid exclude_origins glob",
