@@ -125,35 +125,28 @@ func printGlobalTrackingHintIfUnconfigured(ctx context.Context, w io.Writer) {
 	fmt.Fprintln(w, globalTrackingHint)
 }
 
-// globalRuntimeSubdirs are the runtime subtrees invisible routing places
-// under the worktree's namespace dir (<git-common-dir>/entire/worktree/
-// <worktree-key>) for globally tracked repos, relative to that base and to
-// the worktree's .entire directory alike.
-var globalRuntimeSubdirs = []string{"metadata", "logs", "tmp"}
-
 // maybeMigrateGlobalRuntimeData moves THIS worktree's invisible-routed
 // runtime data (<git-common-dir>/entire/worktree/<worktree-key>/
-// {metadata,logs,tmp}) into the worktree's .entire directory. Repo-level
-// enable flows call it BEFORE writing .entire/settings.json: that write
-// flips path routing to the worktree, which would otherwise strand the
-// routed files in .git. Only the current worktree's namespace is touched —
-// sibling worktrees of the same clone keep their own namespaces (and their
-// in-flight sessions) untouched. It triggers when the clone preferences
-// carry the globally_enabled marker or when the routed directory is
-// non-empty. Best-effort by contract — enable never aborts on migration
-// failure; files that could not be moved stay in place for a later retry and
-// the outcome is summarized in one line.
+// {metadata,logs,tmp} — the subtrees paths.InvisibleRuntimeSubdirs
+// enumerates) into the worktree's .entire directory. Repo-level enable flows
+// call it BEFORE writing .entire/settings.json: that write flips path
+// routing to the worktree, which would otherwise strand the routed files in
+// .git. Only the current worktree's namespace is touched — sibling worktrees
+// of the same clone keep their own namespaces (and their in-flight sessions)
+// untouched. It triggers when the clone preferences carry the
+// global_setup_completed marker or when the routed directory is non-empty.
+// Best-effort by contract — enable never aborts on migration failure; files
+// that could not be moved stay in place for a later retry and the outcome is
+// summarized in one line.
 func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return
 	}
+	// session.GetGitCommonDir returns an absolute path (relative rev-parse
+	// output is absolutized against the cwd it was resolved in), satisfying
+	// InvisibleRuntimeDir's absolute-commonDir precondition.
 	commonDir, err := session.GetGitCommonDir(ctx)
-	if err != nil {
-		return
-	}
-	// session.GetGitCommonDir can return a cwd-relative path (e.g. ".git").
-	commonDir, err = filepath.Abs(commonDir)
 	if err != nil {
 		return
 	}
@@ -163,7 +156,7 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 	}
 
 	triggered := false
-	if prefs, prefsErr := settings.LoadClonePreferences(ctx); prefsErr == nil && prefs.GloballyEnabled {
+	if prefs, prefsErr := settings.LoadClonePreferences(ctx); prefsErr == nil && prefs.GlobalSetupCompleted {
 		triggered = true
 	}
 	if !triggered {
@@ -174,7 +167,7 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 	}
 
 	var moved, skipped, failed int
-	for _, sub := range globalRuntimeSubdirs {
+	for _, sub := range paths.InvisibleRuntimeSubdirs() {
 		m, s, f := moveDirContents(filepath.Join(source, sub), filepath.Join(root, paths.EntireDir, sub))
 		moved += m
 		skipped += s
