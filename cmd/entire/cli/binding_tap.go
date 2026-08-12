@@ -160,17 +160,24 @@ func anyPaths(groups [][]string) bool {
 }
 
 // nestedRepoEvidencePaths returns, for the repoRoot-relative kept paths, one
-// absolute path per distinct parent directory that lies inside a git repo
-// NESTED under repoRoot — a `.git` entry (dir or gitfile: linked worktrees
-// and submodules use gitfiles) strictly between the path's directory and
-// repoRoot. Detection is stat-only; the returned paths are handed to the
-// budgeted git resolver for canonical (innermost) worktree-root/common-dir
-// resolution, so a false positive (stale .git junk) costs one fork and is
-// then discarded by the resolver or the own-worktree skip.
+// absolute REPRESENTATIVE path per distinct git repo NESTED under repoRoot —
+// a `.git` entry (dir or gitfile: linked worktrees and submodules use
+// gitfiles) strictly between a path's directory and repoRoot. Detection is
+// stat-only; the returned paths are handed to the budgeted git resolver for
+// canonical (innermost) worktree-root/common-dir resolution, so a false
+// positive (stale .git junk) costs one fork and is then discarded by the
+// resolver or the own-worktree skip. Emitting per detected nested ROOT (not
+// per kept directory) matters: a turn editing many directories of one busy
+// nested repo must cost the resolver one fork for that repo, not spend the
+// whole per-turn resolution budget re-resolving it — which would also starve
+// a second nested repo appearing later in the same turn.
 //
 // Nested repos registered as submodules in repoRoot's .gitmodules are part of
-// the parent project and excluded; unregistered ones (the dotfiles/home-repo
-// case) are evidence. Relative junk that escapes repoRoot after joining
+// the parent project and excluded — including repos UNDER a registered
+// submodule path (a submodule's own submodules are transitively part of the
+// parent project; prefix containment handles that without parsing every
+// submodule's .gitmodules). Unregistered ones (the dotfiles/home-repo case)
+// are evidence. Relative junk that escapes repoRoot after joining
 // (../ traversal kept by the clamp) is skipped: it was never resolvable
 // evidence.
 func nestedRepoEvidencePaths(repoRoot string, keptRelGroups [][]string) []string {
@@ -185,6 +192,7 @@ func nestedRepoEvidencePaths(repoRoot string, keptRelGroups [][]string) []string
 	var submodulePaths map[string]struct{}
 	submodulesLoaded := false
 	seenDirs := map[string]struct{}{}
+	seenRoots := map[string]struct{}{}
 	var out []string
 	for _, group := range keptRelGroups {
 		for _, rel := range group {
@@ -204,6 +212,10 @@ func nestedRepoEvidencePaths(repoRoot string, keptRelGroups [][]string) []string
 			if nestedRoot == "" {
 				continue
 			}
+			if _, done := seenRoots[nestedRoot]; done {
+				continue
+			}
+			seenRoots[nestedRoot] = struct{}{}
 			if !submodulesLoaded {
 				submodulePaths = registeredSubmodulePaths(repoRoot)
 				submodulesLoaded = true
@@ -212,13 +224,31 @@ func nestedRepoEvidencePaths(repoRoot string, keptRelGroups [][]string) []string
 			if err != nil {
 				continue
 			}
-			if _, registered := submodulePaths[filepath.ToSlash(relRoot)]; registered {
+			if isRegisteredSubmodulePath(filepath.ToSlash(relRoot), submodulePaths) {
 				continue
 			}
 			out = append(out, abs)
 		}
 	}
 	return out
+}
+
+// isRegisteredSubmodulePath reports whether relRoot (slash-normalized,
+// repo-relative) is a registered submodule path or lies UNDER one: a repo
+// nested inside a registered submodule (typically the submodule's own
+// submodule) is transitively part of the parent project, so binding to it
+// would be the same noise as binding to the submodule itself. Containment
+// requires a "/" boundary — "vendor/subextra" does not match "vendor/sub".
+func isRegisteredSubmodulePath(relRoot string, registered map[string]struct{}) bool {
+	if _, ok := registered[relRoot]; ok {
+		return true
+	}
+	for reg := range registered {
+		if strings.HasPrefix(relRoot, reg+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // nestedRepoRootFor walks from dir up to (exclusive) repoRoot and returns the

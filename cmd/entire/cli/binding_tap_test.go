@@ -380,36 +380,86 @@ func TestRecordForeignEvidence_DeeplyNestedRepoDetected(t *testing.T) {
 	}
 }
 
-// Regression: nested-repo evidence bypassing the shared per-turn resolution
+// Regression 1: nested-repo evidence bypassing the shared per-turn resolution
 // budget would let one pathological transcript fork unbounded git processes.
+// Regression 2 (per-root dedupe): emitting one candidate per kept DIRECTORY
+// instead of per detected nested ROOT spent one fork per directory of a busy
+// nested repo — exhausting the budget on redundant resolutions of the same
+// repo and starving a second nested repo later in the same turn.
 func TestRecordForeignEvidence_NestedEvidenceSharesResolutionBudget(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	ctx := context.Background()
 	outer := newBindingRepo(t)
-	newNestedBindingRepo(t, outer, "nested")
+	busy := newNestedBindingRepo(t, outer, "busy")
+	second := newNestedBindingRepo(t, outer, "second")
 
-	kept := make([]string, 0, maxForeignResolutionsPerTurn+5)
-	for i := range maxForeignResolutionsPerTurn + 5 {
-		dir := filepath.Join(outer, "nested", fmt.Sprintf("d%02d", i))
+	// More distinct dirs in the busy repo than the whole resolution budget,
+	// then one path in the second repo LAST — per-directory emission would
+	// burn all 16 resolutions on the busy repo before reaching it.
+	kept := make([]string, 0, maxForeignResolutionsPerTurn+3)
+	for i := range maxForeignResolutionsPerTurn + 2 {
+		dir := filepath.Join(outer, "busy", fmt.Sprintf("d%02d", i))
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		kept = append(kept, fmt.Sprintf("nested/d%02d/f.go", i))
+		kept = append(kept, fmt.Sprintf("busy/d%02d/f.go", i))
 	}
+	kept = append(kept, "second/g.go")
 
 	binding.ClearResolveCache()
 	recordForeignEvidence(ctx, "sess-1", bindingTestMeta(outer), outer, nil, kept)
 
-	if n := binding.ResolveCacheSizeForTesting(); n > maxForeignResolutionsPerTurn {
-		t.Errorf("resolved %d distinct dirs, budget is %d — nested evidence must share it",
-			n, maxForeignResolutionsPerTurn)
+	// One representative path per nested root → one resolution per repo.
+	if n := binding.ResolveCacheSizeForTesting(); n != 2 {
+		t.Errorf("resolved %d distinct dirs, want 2 (one per detected nested root)", n)
 	}
 	rec, err := binding.LoadRecord(ctx, "sess-1")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if rec == nil || len(rec.BoundRepos) != 2 {
+		t.Fatalf("expected both nested repos bound, got %+v", rec)
+	}
+	roots := map[string]bool{}
+	for _, br := range rec.BoundRepos {
+		roots[br.WorktreeRoot] = true
+	}
+	if !roots[busy] || !roots[second] {
+		t.Errorf("recorded roots %v, want both %q and %q", roots, busy, second)
+	}
+}
+
+// Regression: a repo nested UNDER a registered submodule path (typically the
+// submodule's own submodule — only vendor/sub is in the session root's
+// .gitmodules) was recorded as foreign, against the "part of the parent
+// project" rationale. Containment must respect the "/" boundary: the sibling
+// vendor/subextra shares the string prefix but is NOT under vendor/sub and
+// must still be recorded.
+func TestRecordForeignEvidence_TransitiveSubmoduleNotRecorded(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+	outer := newBindingRepo(t)
+	newNestedBindingRepo(t, outer, "vendor/sub")
+	newNestedBindingRepo(t, outer, "vendor/sub/inner")
+	subextra := newNestedBindingRepo(t, outer, "vendor/subextra")
+
+	gitmodules := "[submodule \"vendor/sub\"]\n\tpath = vendor/sub\n\turl = https://example.com/sub.git\n"
+	if err := os.WriteFile(filepath.Join(outer, ".gitmodules"), []byte(gitmodules), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	recordForeignEvidence(ctx, "sess-1", bindingTestMeta(outer), outer, nil,
+		[]string{"vendor/sub/inner/f.go", "vendor/subextra/g.go"})
+
+	rec, err := binding.LoadRecord(ctx, "sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if rec == nil || len(rec.BoundRepos) != 1 {
-		t.Fatalf("expected the one nested repo bound within budget, got %+v", rec)
+		t.Fatalf("expected only the unregistered sibling bound, got %+v", rec)
+	}
+	if got := rec.BoundRepos[0].WorktreeRoot; got != subextra {
+		t.Errorf("bound root = %q, want %q (vendor/sub/inner is transitively registered)", got, subextra)
 	}
 }
 
