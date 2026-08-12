@@ -542,8 +542,12 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 //  4. exclude_origins is configured and this repo's origin is present but
 //     cannot be normalized to host/owner/repo — informational: the tier
 //     stays off in this repo (fail closed).
-//  5. This clone carries the globally_enabled clone-preferences marker but
-//     its git hooks are gone. The marker is a run-once latch, so the lazy
+//  5. This clone carries the global_setup_completed clone-preferences marker
+//     but its git hooks are gone. Two shapes: when core.hooksPath resolves
+//     inside the worktree the absence is deliberate (the lazy setup skips
+//     worktree writes and still sets the marker), so doctor explains that
+//     hook capture requires repo-level enable and leaves the marker alone.
+//     Otherwise it is drift — the marker is a run-once latch, so the lazy
 //     setup would never revisit it; per the marker's contract (any component
 //     detecting drift must clear it) doctor clears it so the next hook
 //     activity re-runs the lazy setup.
@@ -611,21 +615,36 @@ func checkGlobalTracking(cmd *cobra.Command) {
 
 	// Clone-local check: only meaningful when the lazy setup already ran here.
 	prefs, prefsErr := settings.LoadClonePreferences(ctx)
-	if prefsErr != nil || !prefs.GloballyEnabled {
+	if prefsErr != nil || !prefs.GlobalSetupCompleted {
 		return
 	}
 	if !strategy.IsGitHookInstalled(ctx) {
+		// A worktree-resident core.hooksPath (e.g. a committed .husky dir) is
+		// the one shape where missing hooks are NOT drift: the lazy setup
+		// deliberately skipped installation there (a worktree write would
+		// break invisibility) and still set the marker. Explain instead of
+		// clearing — clearing would just re-run a setup that skips again and
+		// promise a reinstall that never happens.
+		if resident, hooksDir, resErr := strategy.HooksDirIsWorktreeResident(ctx); resErr == nil && resident {
+			fmt.Fprintln(w, "Globally tracked clone: git hooks skipped (core.hooksPath inside the worktree)")
+			fmt.Fprintf(w, "  core.hooksPath resolves to %s, inside this worktree; global tracking never\n", hooksDir)
+			fmt.Fprintln(w, "  writes worktree files, so its git hooks were deliberately not installed.")
+			fmt.Fprintln(w, "  Agent-side session capture still works; commit-time checkpoint trailers do not.")
+			fmt.Fprintln(w, "  For hook capture, enable Entire in this repo: `entire enable` (repo-level setup")
+			fmt.Fprintln(w, "  chains into an existing hooks dir), or point core.hooksPath back at .git/hooks.")
+			return
+		}
 		fmt.Fprintln(w, "Globally tracked clone: GIT HOOKS MISSING")
 		fmt.Fprintln(w, "  This clone was enabled by global tracking but its git hooks are gone.")
-		// The globally_enabled marker is a run-once latch: MaybeEnsureGlobalSetup
+		// The global_setup_completed marker is a run-once latch: MaybeEnsureGlobalSetup
 		// returns on it before ever checking the hooks, so a latched clone with
 		// missing hooks never converges on its own. Clear the marker (the marker's
 		// documented drift contract) so the next hook activity re-runs the setup.
 		if clearErr := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
-			p.GloballyEnabled = false
+			p.GlobalSetupCompleted = false
 			return nil
 		}); clearErr != nil {
-			fmt.Fprintf(w, "  Could not clear the clone's globally_enabled marker (%v).\n", clearErr)
+			fmt.Fprintf(w, "  Could not clear the clone's global_setup_completed marker (%v).\n", clearErr)
 			fmt.Fprintln(w, "  Run `entire enable` here, or clear the marker manually, to restore tracking.")
 			return
 		}

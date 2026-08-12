@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -88,7 +89,7 @@ func TestCheckGlobalTracking_WarnsOnMarkedCloneWithoutGitHooks(t *testing.T) {
 
 	// Mark this clone as lazily enabled without installing its git hooks.
 	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
-		p.GloballyEnabled = true
+		p.GlobalSetupCompleted = true
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -102,14 +103,14 @@ func TestCheckGlobalTracking_WarnsOnMarkedCloneWithoutGitHooks(t *testing.T) {
 		t.Errorf("warning must say the marker was cleared, got: %q", got)
 	}
 
-	// The globally_enabled marker is a run-once latch that the lazy setup never
+	// The global_setup_completed marker is a run-once latch that the lazy setup never
 	// revisits, so doctor must have cleared it...
 	prefs, err := settings.LoadClonePreferences(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prefs.GloballyEnabled {
-		t.Fatal("doctor must clear the globally_enabled marker when git hooks are missing")
+	if prefs.GlobalSetupCompleted {
+		t.Fatal("doctor must clear the global_setup_completed marker when git hooks are missing")
 	}
 
 	// ...which lets the next hook activity actually reconverge.
@@ -118,6 +119,64 @@ func TestCheckGlobalTracking_WarnsOnMarkedCloneWithoutGitHooks(t *testing.T) {
 	strategy.MaybeEnsureGlobalSetup(t.Context())
 	if !strategy.IsGitHookInstalled(t.Context()) {
 		t.Error("MaybeEnsureGlobalSetup after the marker clear must reinstall the git hooks")
+	}
+}
+
+// TestCheckGlobalTracking_ExplainsWorktreeResidentHooksPath pins the one
+// missing-hooks shape that is NOT drift: core.hooksPath resolving inside the
+// worktree means the lazy setup deliberately skipped installation (and still
+// set the marker). Doctor must explain — hook capture requires repo-level
+// enable — and must NOT clear the marker: clearing would re-run a setup that
+// skips again and promise a reinstall that never happens.
+func TestCheckGlobalTracking_ExplainsWorktreeResidentHooksPath(t *testing.T) {
+	setupTestRepo(t)
+	repoDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCfg := exec.CommandContext(t.Context(), "git", "config", "core.hooksPath", ".husky")
+	gitCfg.Dir = repoDir
+	if out, cfgErr := gitCfg.CombinedOutput(); cfgErr != nil {
+		t.Fatalf("git config core.hooksPath: %v\n%s", cfgErr, out)
+	}
+	strategy.ClearHooksDirCache()
+	t.Cleanup(strategy.ClearHooksDirCache)
+
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	isolateUserHome(t)
+	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+	var buf bytes.Buffer
+	installUserAgentHooks(t.Context(), &buf)
+
+	// The shape the lazy setup leaves behind: marker set, hooks skipped.
+	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
+		p.GlobalSetupCompleted = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := runCheckGlobalTracking(t)
+	if !strings.Contains(got, "git hooks skipped (core.hooksPath inside the worktree)") {
+		t.Fatalf("missing hooksPath explanation, got: %q", got)
+	}
+	for _, want := range []string{"Agent-side session capture still works", "entire enable"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("explanation missing %q, got: %q", want, got)
+		}
+	}
+	for _, banned := range []string{"GIT HOOKS MISSING", "Marker cleared"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("hooksPath shape must not be treated as drift (%q), got: %q", banned, got)
+		}
+	}
+	prefs, err := settings.LoadClonePreferences(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prefs.GlobalSetupCompleted {
+		t.Error("doctor must NOT clear the marker for a worktree-resident hooksPath")
 	}
 }
 
