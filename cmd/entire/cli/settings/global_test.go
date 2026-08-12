@@ -106,6 +106,7 @@ func TestMatchesExcludePath(t *testing.T) {
 		{"empty list", nil, "/anywhere", false},
 		{"trailing whitespace trimmed", []string{"/tmp/scratch "}, "/tmp/scratch/x", true},
 		{"tilde with trailing whitespace trimmed", []string{"~/oss "}, filepath.Join(home, "oss"), true},
+		{"tilde with leading whitespace still expands", []string{" ~/oss"}, filepath.Join(home, "oss"), true},
 		{"whitespace-only pattern skipped", []string{"   "}, "/tmp/scratch", false},
 	}
 	for _, c := range cases {
