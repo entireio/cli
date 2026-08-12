@@ -1247,10 +1247,11 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 			return fmt.Errorf("trail %s has no number yet; cannot update", trailRefLabel(found))
 		}
 
-		// Handle a branch change (--set-branch): attach a branch to a branchless
-		// trail via the /branch endpoint, or (for a trail that already has one)
-		// report that it should be renamed through the metadata PATCH below.
-		renameExisting, newBranch, err := applyTrailBranchChange(ctx, w, client, forge, owner, repoName, found, inputs)
+		// Decide what --set-branch means for this trail, without touching the
+		// server yet: attaching a branch to a branchless trail creates it on the
+		// forge, so it must not happen until every other input has been
+		// validated (see the branch plan/apply split below).
+		branchPlan, err := planTrailBranchChange(ctx, found, inputs)
 		if err != nil {
 			return err
 		}
@@ -1352,10 +1353,21 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 			PriorityChanged: inputs.PriorityChanged,
 		})
 		// Renaming an existing branch rides on the same PATCH as any metadata.
-		if renameExisting {
-			updateReq.Branch = &newBranch
+		if branchPlan.Rename {
+			updateReq.Branch = &branchPlan.Branch
 		}
 		path := trailNumberPath(forge, owner, repoName, found.Number)
+
+		// Every input is validated by this point, so it is safe to start
+		// changing things on the server. Attaching a branch to a branchless trail
+		// goes first because the PATCH below can carry metadata for the same
+		// trail; doing it here (rather than before validation) keeps a bad
+		// --title or --status from leaving a created forge branch behind.
+		if branchPlan.Attach {
+			if err := attachTrailBranchPlan(ctx, w, client, forge, owner, repoName, found, branchPlan); err != nil {
+				return err
+			}
+		}
 
 		// The server rejects body + metadata in one PATCH, so send them as
 		// separate requests when both are present. These two calls are not
@@ -1383,8 +1395,8 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 			}
 		}
 
-		if renameExisting {
-			fmt.Fprintf(w, "Updated trail #%d (branch set to %s)\n", found.Number, newBranch)
+		if branchPlan.Rename {
+			fmt.Fprintf(w, "Updated trail #%d (branch set to %s)\n", found.Number, branchPlan.Branch)
 		} else {
 			fmt.Fprintf(w, "Updated trail #%d\n", found.Number)
 		}
@@ -1399,26 +1411,43 @@ const (
 	trailBranchActionCreate = "create"
 )
 
-// applyTrailBranchChange resolves a --set-branch request against the located
-// trail. For a branchless trail it attaches the branch via the /branch endpoint
-// (linking or creating it on the forge per --branch-action) and returns
-// renameExisting=false. For a trail that already has a branch it validates the
-// inputs and returns renameExisting=true so the caller folds the new branch into
-// the metadata PATCH. When --set-branch was not given it is a no-op.
-func applyTrailBranchChange(ctx context.Context, w io.Writer, client *api.Client, forge, owner, repo string, found *api.TrailResource, inputs trailUpdateInputs) (renameExisting bool, newBranch string, err error) {
+// trailBranchPlan is what a --set-branch request resolves to for a given trail.
+// It is decided up front, before the command changes anything on the server, so
+// that a later validation failure cannot leave a half-applied update behind.
+// The zero value means --set-branch was not given and the branch is untouched.
+type trailBranchPlan struct {
+	// Rename is set when the trail already has a branch: the new name rides on
+	// the metadata PATCH, which neither creates nor verifies it on the forge.
+	Rename bool
+	// Attach is set when the trail is branchless: the branch is attached
+	// through the /branch endpoint, which may create it on the forge.
+	Attach bool
+	// Branch is the new branch name (trimmed and validated).
+	Branch string
+	// Action is the /branch action to use when Attach is set: "link" or "create".
+	Action string
+}
+
+// planTrailBranchChange validates a --set-branch request against the located
+// trail and decides how to apply it. It makes no network calls and changes
+// nothing: attaching a branch to a branchless trail can create that branch on
+// the forge, so the decision is separated from the act, letting the caller
+// finish validating every other input first. Use attachTrailBranchPlan to carry
+// out an Attach plan.
+func planTrailBranchChange(ctx context.Context, found *api.TrailResource, inputs trailUpdateInputs) (trailBranchPlan, error) {
 	if inputs.BranchActionChanged && !inputs.SetBranchChanged {
-		return false, "", errors.New("--branch-action requires --set-branch")
+		return trailBranchPlan{}, errors.New("--branch-action requires --set-branch")
 	}
 	if !inputs.SetBranchChanged {
-		return false, "", nil
+		return trailBranchPlan{}, nil
 	}
 
-	newBranch = strings.TrimSpace(inputs.SetBranch)
+	newBranch := strings.TrimSpace(inputs.SetBranch)
 	if newBranch == "" {
-		return false, "", errors.New("--set-branch requires a branch name")
+		return trailBranchPlan{}, errors.New("--set-branch requires a branch name")
 	}
 	if err := ValidateBranchName(ctx, newBranch); err != nil {
-		return false, "", fmt.Errorf("invalid --set-branch value %q: %w", newBranch, err)
+		return trailBranchPlan{}, fmt.Errorf("invalid --set-branch value %q: %w", newBranch, err)
 	}
 
 	action := strings.TrimSpace(inputs.BranchAction)
@@ -1426,29 +1455,35 @@ func applyTrailBranchChange(ctx context.Context, w io.Writer, client *api.Client
 		action = trailBranchActionLink
 	}
 	if action != trailBranchActionLink && action != trailBranchActionCreate {
-		return false, "", fmt.Errorf("invalid --branch-action %q: must be %q or %q", inputs.BranchAction, trailBranchActionLink, trailBranchActionCreate)
+		return trailBranchPlan{}, fmt.Errorf("invalid --branch-action %q: must be %q or %q", inputs.BranchAction, trailBranchActionLink, trailBranchActionCreate)
 	}
 
 	// A trail that already has a branch is renamed by a plain PATCH, which neither
 	// links nor creates on the forge; --branch-action has no meaning there.
 	if found.Branch != "" {
 		if inputs.BranchActionChanged {
-			return false, "", errors.New("--branch-action only applies when attaching a branch to a branchless trail (this trail already has one)")
+			return trailBranchPlan{}, errors.New("--branch-action only applies when attaching a branch to a branchless trail (this trail already has one)")
 		}
-		return true, newBranch, nil
+		return trailBranchPlan{Rename: true, Branch: newBranch}, nil
 	}
 
-	// Branchless: attach through the dedicated endpoint.
-	branchResp, err := attachTrailBranch(ctx, client, forge, owner, repo, found.Number, action, newBranch)
+	return trailBranchPlan{Attach: true, Branch: newBranch, Action: action}, nil
+}
+
+// attachTrailBranchPlan carries out an Attach plan against the /branch endpoint
+// and reports what happened. This is the first server-changing step of an
+// update, so callers must have validated every other input before calling it.
+func attachTrailBranchPlan(ctx context.Context, w io.Writer, client *api.Client, forge, owner, repo string, found *api.TrailResource, plan trailBranchPlan) error {
+	branchResp, err := attachTrailBranch(ctx, client, forge, owner, repo, found.Number, plan.Action, plan.Branch)
 	if err != nil {
-		return false, "", err
+		return err
 	}
 	if branchResp.BranchCreated {
-		fmt.Fprintf(w, "Created and attached branch %s to trail #%d\n", newBranch, found.Number)
+		fmt.Fprintf(w, "Created and attached branch %s to trail #%d\n", plan.Branch, found.Number)
 	} else {
-		fmt.Fprintf(w, "Attached branch %s to trail #%d\n", newBranch, found.Number)
+		fmt.Fprintf(w, "Attached branch %s to trail #%d\n", plan.Branch, found.Number)
 	}
-	return false, newBranch, nil
+	return nil
 }
 
 // trailRefLabel renders a short human reference for a trail for error messages,

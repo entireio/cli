@@ -35,15 +35,17 @@ import (
 const (
 	trailListTestAuthorAlice = "alice"
 	trailListTestAuthorBob   = "bob"
+	// testTrailBranch is the stand-in branch name for trail branch tests.
+	testTrailBranch = "feature/x"
 )
 
 func TestNewTrailCreateRequestUsesLinkBranchAction(t *testing.T) {
-	req := newTrailCreateRequest("title", "body", "feature/x", "main", "open", "", "", nil)
+	req := newTrailCreateRequest("title", "body", testTrailBranch, "main", "open", "", "", nil)
 
 	require.Equal(t, api.TrailCreateRequest{
 		Title:        "title",
 		Body:         "body",
-		BranchName:   "feature/x",
+		BranchName:   testTrailBranch,
 		BranchAction: "link",
 		Base:         "main",
 		Status:       "open",
@@ -95,7 +97,7 @@ func TestValidateTrailCreateFlagCombosRejectsBranchlessConflicts(t *testing.T) {
 	t.Run("branch", func(t *testing.T) {
 		t.Parallel()
 		cmd := newTrailCreateCmd()
-		require.NoError(t, cmd.Flags().Set("branch", "feature/x"))
+		require.NoError(t, cmd.Flags().Set("branch", testTrailBranch))
 
 		err := validateTrailCreateFlagCombos(cmd, false, true)
 
@@ -122,7 +124,7 @@ func TestTrailCreateCommandRejectsBranchlessFlagConflictsBeforeRepoLookup(t *tes
 	}{
 		{
 			name:    "branch",
-			args:    []string{"--no-branch", "--branch", "feature/x", "--title", "Branchless"},
+			args:    []string{"--no-branch", "--branch", testTrailBranch, "--title", "Branchless"},
 			wantErr: "cannot combine --no-branch with --branch",
 		},
 		{
@@ -822,7 +824,7 @@ func TestAttachTrailBranch(t *testing.T) {
 				t.Errorf("decode request body: %v", err)
 			}
 			if err := json.NewEncoder(w).Encode(api.TrailBranchResponse{
-				Trail:         api.TrailResource{Number: 575, Branch: "feature/x"},
+				Trail:         api.TrailResource{Number: 575, Branch: testTrailBranch},
 				BranchCreated: true,
 			}); err != nil {
 				t.Errorf("encode response: %v", err)
@@ -831,7 +833,7 @@ func TestAttachTrailBranch(t *testing.T) {
 		defer srv.Close()
 
 		client := api.NewClientWithBaseURL("tok", srv.URL)
-		resp, err := attachTrailBranch(t.Context(), client, "gh", "acme", "repo", 575, "create", "feature/x")
+		resp, err := attachTrailBranch(t.Context(), client, "gh", "acme", "repo", 575, "create", testTrailBranch)
 		if err != nil {
 			t.Fatalf("attachTrailBranch: %v", err)
 		}
@@ -841,7 +843,7 @@ func TestAttachTrailBranch(t *testing.T) {
 		if want := "/api/v1/trails/gh/acme/repo/575/branch"; gotPath != want {
 			t.Fatalf("path = %q, want %q", gotPath, want)
 		}
-		if gotBody.Action != "create" || gotBody.BranchName != "feature/x" {
+		if gotBody.Action != "create" || gotBody.BranchName != testTrailBranch {
 			t.Fatalf("body = %+v, want {create feature/x}", gotBody)
 		}
 		if !resp.BranchCreated {
@@ -860,7 +862,7 @@ func TestAttachTrailBranch(t *testing.T) {
 		defer srv.Close()
 
 		client := api.NewClientWithBaseURL("tok", srv.URL)
-		if _, err := attachTrailBranch(t.Context(), client, "gh", "acme", "repo", 575, "link", "feature/x"); err == nil {
+		if _, err := attachTrailBranch(t.Context(), client, "gh", "acme", "repo", 575, "link", testTrailBranch); err == nil {
 			t.Fatal("expected error for 409, got nil")
 		}
 	})
@@ -877,11 +879,126 @@ func TestBuildTrailUpdateRequestOmitsBranchByDefault(t *testing.T) {
 	}
 }
 
+// planTrailBranchChange takes no API client on purpose: deciding what
+// --set-branch means must not touch the forge, so that a later validation
+// failure (a bad --title or --status) cannot leave a created branch behind.
+// These cases cover the decision; attaching is exercised by TestAttachTrailBranch.
+func TestPlanTrailBranchChange(t *testing.T) {
+	t.Parallel()
+
+	withBranch := &api.TrailResource{Number: 575, Branch: "old-branch"}
+	branchless := &api.TrailResource{Number: 575}
+
+	t.Run("no --set-branch leaves the branch alone", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planTrailBranchChange(t.Context(), withBranch, trailUpdateInputs{TitleChanged: true, Title: "new"})
+		if err != nil {
+			t.Fatalf("planTrailBranchChange: %v", err)
+		}
+		if plan != (trailBranchPlan{}) {
+			t.Fatalf("plan = %+v, want zero value", plan)
+		}
+	})
+
+	t.Run("a trail that already has a branch is renamed via PATCH", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planTrailBranchChange(t.Context(), withBranch, trailUpdateInputs{
+			SetBranch: testTrailBranch, SetBranchChanged: true,
+		})
+		if err != nil {
+			t.Fatalf("planTrailBranchChange: %v", err)
+		}
+		if !plan.Rename || plan.Attach || plan.Branch != testTrailBranch {
+			t.Fatalf("plan = %+v, want rename to feature/x", plan)
+		}
+	})
+
+	t.Run("a branchless trail is attached via the /branch endpoint", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planTrailBranchChange(t.Context(), branchless, trailUpdateInputs{
+			SetBranch: testTrailBranch, SetBranchChanged: true,
+			BranchAction: "create", BranchActionChanged: true,
+		})
+		if err != nil {
+			t.Fatalf("planTrailBranchChange: %v", err)
+		}
+		if !plan.Attach || plan.Rename || plan.Branch != testTrailBranch || plan.Action != "create" {
+			t.Fatalf("plan = %+v, want attach feature/x with action create", plan)
+		}
+	})
+
+	t.Run("an attach defaults to linking an existing branch", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planTrailBranchChange(t.Context(), branchless, trailUpdateInputs{
+			SetBranch: testTrailBranch, SetBranchChanged: true,
+		})
+		if err != nil {
+			t.Fatalf("planTrailBranchChange: %v", err)
+		}
+		if plan.Action != "link" {
+			t.Fatalf("Action = %q, want %q", plan.Action, "link")
+		}
+	})
+
+	t.Run("surrounding whitespace is trimmed off the branch name", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planTrailBranchChange(t.Context(), branchless, trailUpdateInputs{
+			SetBranch: "  feature/x  ", SetBranchChanged: true,
+		})
+		if err != nil {
+			t.Fatalf("planTrailBranchChange: %v", err)
+		}
+		if plan.Branch != testTrailBranch {
+			t.Fatalf("Branch = %q, want %q", plan.Branch, testTrailBranch)
+		}
+	})
+
+	rejects := []struct {
+		name   string
+		found  *api.TrailResource
+		inputs trailUpdateInputs
+	}{
+		{
+			name:   "--branch-action without --set-branch",
+			found:  branchless,
+			inputs: trailUpdateInputs{BranchAction: "create", BranchActionChanged: true},
+		},
+		{
+			name:   "an empty --set-branch",
+			found:  branchless,
+			inputs: trailUpdateInputs{SetBranch: "   ", SetBranchChanged: true},
+		},
+		{
+			name:   "an unknown --branch-action",
+			found:  branchless,
+			inputs: trailUpdateInputs{SetBranch: testTrailBranch, SetBranchChanged: true, BranchAction: "nope", BranchActionChanged: true},
+		},
+		{
+			name:   "a branch name git rejects",
+			found:  branchless,
+			inputs: trailUpdateInputs{SetBranch: "bad branch~name", SetBranchChanged: true},
+		},
+		{
+			name:   "--branch-action on a trail that already has a branch",
+			found:  withBranch,
+			inputs: trailUpdateInputs{SetBranch: testTrailBranch, SetBranchChanged: true, BranchAction: "create", BranchActionChanged: true},
+		},
+	}
+	for _, tc := range rejects {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := planTrailBranchChange(t.Context(), tc.found, tc.inputs); err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+		})
+	}
+}
+
 func TestSplitTrailUpdateSendsABranchRename(t *testing.T) {
 	t.Parallel()
 	// A rename-only update sets nothing but Branch. It still has to count as
 	// metadata, or the PATCH is skipped and the rename silently does nothing.
-	branch := "feature/x"
+	branch := testTrailBranch
 	meta, hasMeta, bodyReq := splitTrailUpdate(api.TrailUpdateRequest{Branch: &branch})
 	if !hasMeta {
 		t.Fatal("hasMeta = false, want true for a branch-only update")
