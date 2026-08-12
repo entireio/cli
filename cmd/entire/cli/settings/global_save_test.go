@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -45,6 +46,49 @@ func TestSaveUserSettings_CreatesDirAndRoundTrips(t *testing.T) {
 		if perm := info.Mode().Perm(); perm != 0o600 {
 			t.Fatalf("user settings file mode = %o, want 600", perm)
 		}
+	}
+}
+
+// TestSaveUserSettings_PreservesSymlinkedSettingsFile pins the symlink
+// contract: dotfile managers commonly symlink ~/.config/entire/settings.json,
+// and a rename-over-the-link atomic write would replace the link with a
+// regular file, silently detaching the managed target. The save must follow
+// the link and rewrite its target — mirroring LoadUserSettings' documented
+// symlink-following read path.
+func TestSaveUserSettings_PreservesSymlinkedSettingsFile(t *testing.T) {
+	if runtime.GOOS == goosWindows {
+		t.Skip("symlink creation needs privileges on Windows")
+	}
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	t.Cleanup(ClearGlobalModeCache)
+
+	target := filepath.Join(t.TempDir(), "managed-settings.json")
+	if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(cfg, UserSettingsFileName)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SaveUserSettings(t.Context(), &UserSettings{Global: &GlobalConfig{Enabled: true}}); err != nil {
+		t.Fatalf("SaveUserSettings: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("settings.json symlink was replaced by a regular file (mode %v)", info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("symlink target unreadable after save: %v", err)
+	}
+	if !strings.Contains(string(data), `"enabled": true`) {
+		t.Fatalf("symlink target not updated, got: %s", data)
 	}
 }
 

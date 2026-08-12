@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -103,7 +104,7 @@ func TestMaybeAskGlobalTracking_NonInteractiveHintsWithoutWriting(t *testing.T) 
 	}
 }
 
-func TestMaybeAskGlobalTracking_MalformedFileIsLeftAlone(t *testing.T) {
+func TestMaybeAskGlobalTracking_MalformedFileWarnsAndIsLeftAlone(t *testing.T) {
 	cfg := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
 	if err := os.WriteFile(filepath.Join(cfg, settings.UserSettingsFileName), []byte(`{broken`), 0o600); err != nil {
@@ -112,8 +113,14 @@ func TestMaybeAskGlobalTracking_MalformedFileIsLeftAlone(t *testing.T) {
 
 	var buf bytes.Buffer
 	maybeAskGlobalTracking(t.Context(), &buf, EnableOptions{})
-	if buf.Len() != 0 {
-		t.Fatalf("malformed file must be silent, got: %q", buf.String())
+	out := buf.String()
+	// One warning line naming the file and the remedies — not full silence
+	// (which hid the problem) and not a prompt or a rewrite.
+	if !strings.Contains(out, "Warning:") || !strings.Contains(out, settings.UserSettingsPath()) {
+		t.Fatalf("malformed file must produce a warning naming the file, got: %q", out)
+	}
+	if strings.Count(out, "\n") != 1 {
+		t.Fatalf("expected exactly one warning line, got: %q", out)
 	}
 	data, err := os.ReadFile(filepath.Join(cfg, settings.UserSettingsFileName))
 	if err != nil || string(data) != `{broken` {
@@ -267,6 +274,151 @@ func TestMaybeMigrateGlobalRuntimeData_NoTriggerIsSilentNoop(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".entire")); !os.IsNotExist(err) {
 		t.Fatalf("no-op migration must not create .entire (err=%v)", err)
 	}
+}
+
+// TestRunDisable_GloballyTrackedRepoTakeover is the reviewer's exact repro
+// for the stranded-data bug: `entire disable` in a globally tracked repo
+// creates the discriminator settings file, which flips invisible routing to
+// the worktree. Without the takeover the routed runtime data stayed under
+// .git forever (no later enable migrated it) and the untracked .entire/
+// content dirtied git status. Disable itself must migrate the data, write
+// the gitignore, and clear the once-per-clone lazy-setup marker.
+func TestRunDisable_GloballyTrackedRepoTakeover(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	if err := os.WriteFile(filepath.Join(cfg, settings.UserSettingsFileName), []byte(`{"global":{"enabled":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clearGlobalRoutingCaches(t)
+
+	// Globally tracked state: routed runtime data plus the lazy-setup marker.
+	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
+	testutil.WriteFile(t, dir, sourceRel+"/metadata/sess-1/prompt.txt", "routed prompt")
+	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
+		p.GlobalSetupCompleted = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := runDisable(t.Context(), &buf, false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+
+	// Routed data migrated into the worktree .entire.
+	data, err := os.ReadFile(filepath.Join(dir, ".entire", "metadata", "sess-1", "prompt.txt"))
+	if err != nil || string(data) != "routed prompt" {
+		t.Errorf("routed data must be migrated on disable (data=%q err=%v)", data, err)
+	}
+	// .gitignore present, so the migrated files never dirty git status.
+	if _, err := os.Stat(filepath.Join(dir, ".entire", ".gitignore")); err != nil {
+		t.Errorf(".entire/.gitignore must exist after the takeover: %v", err)
+	}
+	// Porcelain shows only the expected untracked .entire/ entry.
+	out, err := exec.CommandContext(t.Context(), "git", "-C", dir, "status", "--porcelain").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "?? .entire/" {
+		t.Errorf("porcelain must show only the .entire/ entry, got:\n%s", got)
+	}
+	// Marker cleared: repo-level machinery owns this clone now.
+	prefs, err := settings.LoadClonePreferences(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prefs.GlobalSetupCompleted {
+		t.Error("global_setup_completed marker must be cleared by the takeover")
+	}
+	// And the disable itself still landed.
+	if !strings.Contains(buf.String(), "Entire is now disabled") {
+		t.Errorf("missing disable confirmation, got: %q", buf.String())
+	}
+}
+
+// TestRunUninstall_ClearsGlobalSetupMarker pins the enable→uninstall→re-track
+// loop: uninstall removes the git hooks, so the clone's "lazy setup already
+// converged" marker must be cleared with them — otherwise a re-globally-
+// tracked clone short-circuits MaybeEnsureGlobalSetup forever and never gets
+// hooks again.
+func TestRunUninstall_ClearsGlobalSetupMarker(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	if err := os.WriteFile(filepath.Join(cfg, settings.UserSettingsFileName), []byte(`{"global":{"enabled":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clearGlobalRoutingCaches(t)
+
+	// Repo-level setup, with the marker still latched from an earlier
+	// globally tracked phase (the pre-fix state every takeover now clears).
+	testutil.WriteFile(t, dir, ".entire/settings.json", `{"enabled": true}`)
+	if _, err := strategy.InstallGitHook(t.Context(), true, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
+		p.GlobalSetupCompleted = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errW bytes.Buffer
+	if err := runUninstall(t.Context(), &out, &errW, true); err != nil {
+		t.Fatalf("uninstall: %v (stderr: %s)", err, errW.String())
+	}
+	prefs, err := settings.LoadClonePreferences(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prefs.GlobalSetupCompleted {
+		t.Fatal("uninstall must clear the global_setup_completed marker")
+	}
+	if strategy.IsGitHookInstalled(t.Context()) {
+		t.Fatal("uninstall must remove the git hooks")
+	}
+
+	// The clone is globally tracked again: the lazy setup must reconverge
+	// instead of latching on the stale marker.
+	clearGlobalRoutingCaches(t)
+	strategy.MaybeEnsureGlobalSetup(t.Context())
+	if !strategy.IsGitHookInstalled(t.Context()) {
+		t.Fatal("MaybeEnsureGlobalSetup must reinstall git hooks after uninstall cleared the marker")
+	}
+}
+
+// clearGlobalRoutingCaches resets every process-level cache a global-tier
+// test can leave warm (and registers the same reset as cleanup), so tests
+// observe the on-disk state they just seeded.
+func clearGlobalRoutingCaches(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		paths.ClearWorktreeRootCache()
+		paths.ClearInvisibleRuntimeCache()
+		session.ClearGitCommonDirCache()
+		settings.ClearGlobalModeCache()
+	}
+	reset()
+	t.Cleanup(reset)
 }
 
 func TestEnableCmd_GlobalRejectsRepoScopedFlags(t *testing.T) {

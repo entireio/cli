@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"charm.land/huh/v2"
 )
@@ -37,7 +39,10 @@ func runEnableGlobalMode(ctx context.Context, w io.Writer) error {
 		return fmt.Errorf("saving user settings: %w", err)
 	}
 	fmt.Fprintln(w, "Global tracking enabled.")
-	fmt.Fprintln(w, "Entire now tracks agent sessions in every repo on this machine that has no repo-level setup.")
+	fmt.Fprintln(w, "Entire now tracks agent sessions in every repo on this machine that has no repo-level setup and matches no exclude pattern.")
+	if kept := len(us.Global.ExcludePaths) + len(us.Global.ExcludeOrigins); kept > 0 {
+		fmt.Fprintf(w, "Keeping %d exclude pattern(s) from your user settings.\n", kept)
+	}
 	return nil
 }
 
@@ -64,7 +69,7 @@ func runDisableGlobalMode(ctx context.Context, w io.Writer) error {
 // actionable message: the strict decoder also rejects files written by a
 // newer CLI, so name the file and both ways out.
 func unreadableUserSettingsError(err error) error {
-	return fmt.Errorf("cannot update user settings at %s: %w; upgrade entire or remove the unknown key",
+	return fmt.Errorf("cannot update user settings at %s: %w; fix or remove the file (an unknown key means a newer entire wrote it — upgrade instead)",
 		settings.UserSettingsPath(), err)
 }
 
@@ -76,9 +81,15 @@ func unreadableUserSettingsError(err error) error {
 // prompt saves nothing, so a later enable can ask again.
 func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions) {
 	us, err := settings.LoadUserSettings(ctx)
-	if err != nil || us.Global != nil {
+	if err != nil {
 		// A malformed user settings file must never be overwritten from a
-		// side prompt; a configured one must never re-ask.
+		// side prompt — but full silence would hide the problem, so name the
+		// file and the ways out (one line, enable itself still succeeds).
+		fmt.Fprintf(w, "Warning: %v\n", unreadableUserSettingsError(err))
+		return
+	}
+	if us.Global != nil {
+		// A configured tier (either answer) must never re-ask.
 		return
 	}
 	if opts.Yes || !interactive.CanPromptInteractively() {
@@ -125,41 +136,125 @@ func printGlobalTrackingHintIfUnconfigured(ctx context.Context, w io.Writer) {
 	fmt.Fprintln(w, globalTrackingHint)
 }
 
+// ensureRepoLevelTakeover runs the bookkeeping owed whenever repo-level
+// settings take over a clone the user-global tier was (or may have been)
+// tracking. It is invoked from EVERY path that creates the first repo-level
+// settings file — the interactive and --agent enable flows, the raw
+// enable/disable flag flip (a bare `entire disable` also creates the routing
+// discriminator) — plus `entire enable` on an already-configured repo, which
+// is the user-initiated recovery point for clones a pre-fix binary stranded.
+//
+// It self-guards on the migration's own trigger logic (the clone's
+// global_setup_completed marker, or a non-empty routed runtime dir), so it is
+// a cheap no-op for repos the global tier never touched. When the guard
+// holds it, in order:
+//  1. ensures .entire/.gitignore exists, so the migrated runtime files are
+//     never visible in git status (order is load-bearing);
+//  2. migrates this worktree's routed runtime data into .entire/;
+//  3. clears the global_setup_completed marker — repo-level machinery owns
+//     hooks now, and a stale marker would short-circuit the lazy global
+//     setup if the repo ever returns to global-only tracking.
+//
+// It always clears the invisible-routing cache: the settings file being
+// created (or having been created) is the routing discriminator, and the
+// writer process must observe its own write.
+func ensureRepoLevelTakeover(ctx context.Context, w io.Writer) {
+	defer paths.ClearInvisibleRuntimeCache()
+	if !globalTakeoverRelevant(ctx) {
+		return
+	}
+	if err := strategy.EnsureEntireGitignore(ctx); err != nil {
+		logging.Warn(ctx, "repo takeover: could not ensure .entire/.gitignore before migrating runtime data", "error", err)
+	}
+	maybeMigrateGlobalRuntimeData(ctx, w)
+	clearGlobalSetupMarker(ctx)
+}
+
+// globalTakeoverRelevant reports whether the global tier is or was relevant
+// for this clone: the once-per-clone lazy-setup marker is set, or the current
+// worktree's routed runtime dir is non-empty. This is the same trigger logic
+// maybeMigrateGlobalRuntimeData applies.
+func globalTakeoverRelevant(ctx context.Context) bool {
+	if prefs, err := settings.LoadClonePreferences(ctx); err == nil && prefs.GlobalSetupCompleted {
+		return true
+	}
+	source, _, err := invisibleRuntimeLocations(ctx)
+	if err != nil {
+		return false
+	}
+	entries, err := os.ReadDir(source)
+	return err == nil && len(entries) > 0
+}
+
+// clearGlobalSetupMarker clears the clone's global_setup_completed marker so
+// the lazy invisible setup re-runs the next time the global tier owns this
+// clone. Read-before-write keeps the common case (marker absent) to one
+// preferences read, without taking the preferences lock. Best-effort: a
+// failure is logged, and the stale marker's only cost is that a later
+// globally-tracked session skips hook reinstallation until doctor clears it.
+func clearGlobalSetupMarker(ctx context.Context) {
+	if prefs, err := settings.LoadClonePreferences(ctx); err != nil || !prefs.GlobalSetupCompleted {
+		return
+	}
+	if err := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
+		p.GlobalSetupCompleted = false
+		return nil
+	}); err != nil {
+		logging.Warn(ctx, "could not clear the global_setup_completed marker", "error", err)
+	}
+}
+
+// invisibleRuntimeLocations resolves the current worktree's routed runtime
+// dir (<git-common-dir>/entire/worktree/<worktree-key>) and the worktree
+// root. session.GetGitCommonDir returns an absolute path (relative rev-parse
+// output is absolutized against the cwd it was resolved in), satisfying
+// InvisibleRuntimeDir's absolute-commonDir precondition.
+func invisibleRuntimeLocations(ctx context.Context) (source, root string, err error) {
+	root, err = paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve worktree root: %w", err)
+	}
+	commonDir, err := session.GetGitCommonDir(ctx)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve git common dir: %w", err)
+	}
+	source, err = paths.InvisibleRuntimeDir(commonDir, root)
+	if err != nil {
+		return "", "", fmt.Errorf("classify worktree: %w", err)
+	}
+	return source, root, nil
+}
+
 // maybeMigrateGlobalRuntimeData moves THIS worktree's invisible-routed
 // runtime data (<git-common-dir>/entire/worktree/<worktree-key>/
 // {metadata,logs,tmp} — the subtrees paths.InvisibleRuntimeSubdirs
 // enumerates) into the worktree's .entire directory. Repo-level enable flows
-// call it BEFORE writing .entire/settings.json: that write flips path
-// routing to the worktree, which would otherwise strand the routed files in
-// .git. Only the current worktree's namespace is touched — sibling worktrees
-// of the same clone keep their own namespaces (and their in-flight sessions)
-// untouched. It triggers when the clone preferences carry the
-// global_setup_completed marker or when the routed directory is non-empty.
-// Best-effort by contract — enable never aborts on migration failure; files
-// that could not be moved stay in place for a later retry and the outcome is
-// summarized in one line.
+// call it (via ensureRepoLevelTakeover) BEFORE writing .entire/settings.json:
+// that write flips path routing to the worktree, which would otherwise strand
+// the routed files in .git. Only the current worktree's namespace is touched
+// — sibling worktrees of the same clone keep their own namespaces (and their
+// in-flight sessions) untouched. It triggers when the clone preferences carry
+// the global_setup_completed marker or when the routed directory is
+// non-empty. Best-effort by contract — enable never aborts on migration
+// failure; files that could not be moved stay in place for a later retry and
+// the outcome is summarized in one line. When the routed location itself
+// cannot be resolved while the marker says there may be data, the early
+// return logs one Warn — the data stays under .git and the marker persists,
+// so a later enable retries.
 func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
-	root, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return
+	markerSet := false
+	if prefs, prefsErr := settings.LoadClonePreferences(ctx); prefsErr == nil && prefs.GlobalSetupCompleted {
+		markerSet = true
 	}
-	// session.GetGitCommonDir returns an absolute path (relative rev-parse
-	// output is absolutized against the cwd it was resolved in), satisfying
-	// InvisibleRuntimeDir's absolute-commonDir precondition.
-	commonDir, err := session.GetGitCommonDir(ctx)
+	source, root, err := invisibleRuntimeLocations(ctx)
 	if err != nil {
-		return
-	}
-	source, err := paths.InvisibleRuntimeDir(commonDir, root)
-	if err != nil {
+		if markerSet {
+			logging.Warn(ctx, "global runtime data migration skipped: routed location unresolved; any routed data stays under .git until a later enable retries", "error", err)
+		}
 		return
 	}
 
-	triggered := false
-	if prefs, prefsErr := settings.LoadClonePreferences(ctx); prefsErr == nil && prefs.GlobalSetupCompleted {
-		triggered = true
-	}
-	if !triggered {
+	if !markerSet {
 		entries, readErr := os.ReadDir(source)
 		if readErr != nil || len(entries) == 0 {
 			return
@@ -168,7 +263,7 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 
 	var moved, skipped, failed int
 	for _, sub := range paths.InvisibleRuntimeSubdirs() {
-		m, s, f := moveDirContents(filepath.Join(source, sub), filepath.Join(root, paths.EntireDir, sub))
+		m, s, f := moveDirContents(ctx, filepath.Join(source, sub), filepath.Join(root, paths.EntireDir, sub))
 		moved += m
 		skipped += s
 		failed += f
@@ -188,7 +283,7 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 	if failed > 0 {
 		prefix = "  "
 	}
-	line := fmt.Sprintf("%sMoved %d globally-tracked session file(s) into .entire/", prefix, moved)
+	line := fmt.Sprintf("%sMoved %d globally-tracked file(s) into .entire/", prefix, moved)
 	if skipped > 0 {
 		line += fmt.Sprintf(", %d already present", skipped)
 	}
@@ -205,17 +300,25 @@ var migrateRenameFile = os.Rename
 // moveDirContents moves every file under src into the same relative location
 // under dst, creating directories as needed. Files already present in dst are
 // skipped (left in src). Returns moved/skipped/failed counts; a missing src is
-// (0, 0, 0).
-func moveDirContents(src, dst string) (moved, skipped, failed int) {
+// (0, 0, 0), while any other ReadDir failure counts as one failure — an
+// unreadable source is not "nothing to move", and the summary must not claim
+// unqualified success over it. The summary line keeps the counts; every
+// individual failure is logged here with its path and reason, so "1 could not
+// be moved" is diagnosable from the log.
+func moveDirContents(ctx context.Context, src, dst string) (moved, skipped, failed int) {
 	entries, err := os.ReadDir(src)
 	if err != nil {
-		return 0, 0, 0
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, 0, 0
+		}
+		logging.Warn(ctx, "global runtime data migration: source directory unreadable", "path", src, "error", err)
+		return 0, 0, 1
 	}
 	for _, entry := range entries {
 		srcPath := filepath.Join(src, entry.Name())
 		dstPath := filepath.Join(dst, entry.Name())
 		if entry.IsDir() {
-			m, s, f := moveDirContents(srcPath, dstPath)
+			m, s, f := moveDirContents(ctx, srcPath, dstPath)
 			moved, skipped, failed = moved+m, skipped+s, failed+f
 			continue
 		}
@@ -225,6 +328,7 @@ func moveDirContents(src, dst string) (moved, skipped, failed int) {
 		}
 		//nolint:gosec // G301: runtime-data dirs match the .entire directory permissions
 		if mkErr := os.MkdirAll(dst, 0o755); mkErr != nil {
+			logging.Warn(ctx, "global runtime data migration: cannot create destination directory", "path", dst, "error", mkErr)
 			failed++
 			continue
 		}
@@ -232,7 +336,18 @@ func moveDirContents(src, dst string) (moved, skipped, failed int) {
 			// Rename fails with EXDEV when the git common dir and the
 			// worktree live on different filesystems (--separate-git-dir,
 			// linked worktree on another volume); fall back to copy+remove.
-			if copyErr := copyFileThenRemove(srcPath, dstPath); copyErr != nil {
+			copied, copyErr := copyFileThenRemove(srcPath, dstPath)
+			switch {
+			case copyErr == nil:
+				// Fully moved via the fallback.
+			case copied:
+				// The copy landed in .entire; only removing the source
+				// failed. The data IS where the user needs it, so count it
+				// moved — claiming it "could not be moved" would be false —
+				// and record the residue left under .git.
+				logging.Warn(ctx, "global runtime data migration: file copied but source residue remains", "path", srcPath, "error", copyErr)
+			default:
+				logging.Warn(ctx, "global runtime data migration: file could not be moved", "path", srcPath, "rename_error", renameErr, "copy_error", copyErr)
 				failed++
 				continue
 			}
@@ -245,22 +360,24 @@ func moveDirContents(src, dst string) (moved, skipped, failed int) {
 // copyFileThenRemove copies src to dst (temp file in dst's directory, then
 // rename, so a partial copy is never left at dst) and removes src on success.
 // Only regular files are copied; anything else stays behind as failed.
-func copyFileThenRemove(src, dst string) error {
+// copied reports whether dst landed: (true, non-nil error) means the copy
+// succeeded and only the source removal failed, leaving a residue at src.
+func copyFileThenRemove(src, dst string) (copied bool, err error) {
 	info, err := os.Lstat(src)
 	if err != nil {
-		return fmt.Errorf("stat source: %w", err)
+		return false, fmt.Errorf("stat source: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("not a regular file: %s", src)
+		return false, fmt.Errorf("not a regular file: %s", src)
 	}
 	in, err := os.Open(src) //nolint:gosec // path is derived from the git common dir, not user input
 	if err != nil {
-		return fmt.Errorf("open source: %w", err)
+		return false, fmt.Errorf("open source: %w", err)
 	}
 	defer in.Close()
 	tmp, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".tmp-*")
 	if err != nil {
-		return fmt.Errorf("create temp: %w", err)
+		return false, fmt.Errorf("create temp: %w", err)
 	}
 	tmpName := tmp.Name()
 	removeTmp := true
@@ -271,23 +388,23 @@ func copyFileThenRemove(src, dst string) error {
 	}()
 	if _, err := io.Copy(tmp, in); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("copy contents: %w", err)
+		return false, fmt.Errorf("copy contents: %w", err)
 	}
 	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("chmod temp: %w", err)
+		return false, fmt.Errorf("chmod temp: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp: %w", err)
+		return false, fmt.Errorf("close temp: %w", err)
 	}
 	if err := os.Rename(tmpName, dst); err != nil {
-		return fmt.Errorf("rename into place: %w", err)
+		return false, fmt.Errorf("rename into place: %w", err)
 	}
 	removeTmp = false
 	if err := os.Remove(src); err != nil {
-		return fmt.Errorf("remove source: %w", err)
+		return true, fmt.Errorf("remove source: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 // removeEmptyDirTree removes the now-empty directories left behind by

@@ -821,8 +821,9 @@ If the current directory is not a git repository, Entire can initialize one
 for you and (optionally) create a matching GitHub repository via the gh CLI.
 
 With --global, Entire tracks agent sessions in every repo on this machine
-that has no repo-level setup. This writes only the per-user settings file,
-performs no repo-level setup, and works outside a git repository.`,
+that has no repo-level setup and matches no exclude pattern. This writes only
+the per-user settings file, performs no repo-level setup, and works outside a
+git repository.`,
 		RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
 			ctx := cmd.Context()
 
@@ -1228,6 +1229,14 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
 
+	// This repo has settings files, but the clone may still hold routed
+	// runtime data under .git: a pre-fix `entire disable` created the first
+	// settings file without migrating, stranding it. `entire enable` is the
+	// user-initiated recovery point, so run the takeover here too — it
+	// self-guards on the marker / routed-data trigger and is a no-op for
+	// repos the global tier never touched.
+	ensureRepoLevelTakeover(ctx, w)
+
 	// Resolve the target scope first, then decide whether there is anything to
 	// do. Enable writes to the scope resolved by settingsTargetFile, which is
 	// also what strategy/checkpoint-backend updates above use. Without this, a
@@ -1311,12 +1320,12 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		return fmt.Errorf("failed to setup .entire directory: %w", err)
 	}
 
-	// A globally tracked clone keeps its runtime data under .git; move it
-	// into the worktree BEFORE the settings write below flips invisible
-	// routing to the worktree (best-effort — see maybeMigrateGlobalRuntimeData),
-	// but AFTER .entire/.gitignore exists so the moved files are never
-	// visible in git status.
-	maybeMigrateGlobalRuntimeData(ctx, w)
+	// A globally tracked clone keeps its runtime data under .git; take it
+	// over BEFORE the settings write below flips invisible routing to the
+	// worktree (best-effort — see ensureRepoLevelTakeover), but AFTER
+	// setupEntireDirectory so .entire/.gitignore already exists and the moved
+	// files are never visible in git status.
+	ensureRepoLevelTakeover(ctx, w)
 
 	// Load existing settings to preserve other options (like strategy_options.push)
 	settings, err := LoadEntireSettings(ctx)
@@ -1535,8 +1544,18 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 		configDisplay = configDisplayProject
 	}
 
+	// In a repo with no settings file yet, the flip below CREATES one — the
+	// invisible-routing discriminator. If the global tier was tracking this
+	// clone, that write strands its routed runtime data under .git, so the
+	// takeover (gitignore + migration + marker clear) is owed here exactly as
+	// on enable. Captured pre-write; takeover runs after the successful flip.
+	firstRepoSettingsFile := !settings.IsSetUpAny(ctx)
+
 	if err := setEnabledFlag(ctx, false, targetFile == settings.EntireSettingsFile); err != nil {
 		return err
+	}
+	if firstRepoSettingsFile {
+		ensureRepoLevelTakeover(ctx, w)
 	}
 
 	fmt.Fprintf(w, "Entire is now disabled (%s).\n", configDisplay)
@@ -1958,12 +1977,12 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		return fmt.Errorf("failed to setup .entire directory: %w", err)
 	}
 
-	// A globally tracked clone keeps its runtime data under .git; move it
-	// into the worktree BEFORE the settings write below flips invisible
-	// routing to the worktree (best-effort — see maybeMigrateGlobalRuntimeData),
-	// but AFTER .entire/.gitignore exists so the moved files are never
-	// visible in git status.
-	maybeMigrateGlobalRuntimeData(ctx, w)
+	// A globally tracked clone keeps its runtime data under .git; take it
+	// over BEFORE the settings write below flips invisible routing to the
+	// worktree (best-effort — see ensureRepoLevelTakeover), but AFTER
+	// setupEntireDirectory so .entire/.gitignore already exists and the moved
+	// files are never visible in git status.
+	ensureRepoLevelTakeover(ctx, w)
 
 	// Resolve the target file up front so the load below is scoped to that
 	// file's own content rather than the merged view (see setEnabledFlag for
@@ -2548,6 +2567,14 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	} else if branchesRemoved > 0 {
 		fmt.Fprintf(w, "  Removed %d shadow branches\n", branchesRemoved)
 	}
+
+	// 6. The clone may now return to global-tier tracking: clear the
+	// once-per-clone lazy-setup marker so MaybeEnsureGlobalSetup reinstalls
+	// the git hooks this uninstall just removed (the marker means "setup
+	// believed converged", which is no longer true), and drop the memoized
+	// routing decision now that the discriminator settings files are gone.
+	clearGlobalSetupMarker(ctx)
+	paths.ClearInvisibleRuntimeCache()
 
 	fmt.Fprintln(w, "\nEntire CLI uninstalled successfully.")
 	return nil

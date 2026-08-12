@@ -109,8 +109,10 @@ func LoadUserSettings(_ context.Context) (*UserSettings, error) {
 }
 
 // SaveUserSettings writes the user-global settings file atomically (temp file
-// in userdirs.Config() + rename, 0o600), creating the config directory if
-// needed. It writes exactly the known schema: unknown keys are never
+// next to the target + rename, 0o600), creating the config directory if
+// needed. A symlinked settings.json is resolved and its target rewritten
+// rather than the link being replaced. It writes exactly the known schema:
+// unknown keys are never
 // preserved, by design — LoadUserSettings decodes strictly, so a load-modify-
 // save cycle against a newer file fails at load rather than silently dropping
 // keys here. It also resets the process-level caches derived from the file
@@ -125,7 +127,17 @@ func SaveUserSettings(_ context.Context, us *UserSettings) error {
 	if err != nil {
 		return fmt.Errorf("encoding user settings: %w", err)
 	}
-	if err := jsonutil.WriteFileAtomic(UserSettingsPath(), data, 0o600); err != nil {
+	// The atomic write renames a temp file over the target, which would
+	// replace a symlinked settings.json (common with dotfile managers — the
+	// same reason LoadUserSettings avoids readConfined) with a regular file,
+	// silently detaching the managed target. Resolve the symlink and write
+	// through to its target; fall back to the literal path when resolution
+	// fails (typically: the file does not exist yet).
+	path := UserSettingsPath()
+	if resolved, symErr := filepath.EvalSymlinks(path); symErr == nil {
+		path = resolved
+	}
+	if err := jsonutil.WriteFileAtomic(path, data, 0o600); err != nil {
 		return fmt.Errorf("writing user settings: %w", err)
 	}
 	ClearGlobalModeCache()
@@ -352,6 +364,8 @@ func ClearGlobalModeCache() {
 func GlobalModeActive(ctx context.Context) bool {
 	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
+		logging.Debug(ctx, "worktree unresolvable; treating global mode as inactive",
+			slog.String("error", err.Error()))
 		return false
 	}
 	globalModeMu.Lock()
