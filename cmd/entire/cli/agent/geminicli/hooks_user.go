@@ -16,8 +16,16 @@ var _ agent.UserHookSupport = (*GeminiCLIAgent)(nil)
 
 // UserSettingsPath returns the path of Gemini CLI's user-level settings file
 // (~/.gemini/settings.json). It accepts the same hooks schema as the repo's
-// .gemini/settings.json; workspace settings take precedence per key, so a
-// repo-level install wins over these entries and hooks do not double-fire.
+// .gemini/settings.json. There is NO per-key settings precedence for hooks:
+// Gemini concatenates hook event arrays across user and workspace scopes,
+// and the no-double-fire guarantee comes from its execution layer, which
+// deduplicates entries keyed by `name:command`
+// (hookPlanner.deduplicateHooks / getHookKey in gemini-cli). Our user- and
+// repo-level production installs write byte-identical name+command pairs, so
+// each hook executes once — but the dedup is command-sensitive: a repo-level
+// dev-mode install (localDev=true, entire-dev command form) alongside these
+// entries has same names with different commands and double-fires every
+// hook, including SessionEnd condensation.
 func UserSettingsPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {

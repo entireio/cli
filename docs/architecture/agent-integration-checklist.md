@@ -120,9 +120,15 @@ Audit of built-in agents (2026-08), recorded per the global-enable design:
   go-run install uses different command strings, so its hooks double-fire
   alongside the user-level install.
 - **gemini**: IMPLEMENTED. `~/.gemini/settings.json` accepts the same hooks
-  schema as the repo's `.gemini/settings.json`; workspace settings take
-  precedence over user settings for the same key, so repo-level installs
-  win and hooks do not double-fire.
+  schema as the repo's `.gemini/settings.json`. Gemini concatenates hook
+  event arrays across settings scopes (no per-key override) and its hook
+  planner deduplicates entries by name+command
+  (`hookPlanner.deduplicateHooks`/`getHookKey`); the user-level entries are
+  byte-identical to the repo-level production entries, so a repo with both
+  installed fires each hook once. Caveat: the dedup only covers identical
+  name+command pairs — a repo whose hooks were installed with `--local-dev`
+  (scripts/entire-dev form) uses different command strings, so its hooks
+  double-fire alongside the user-level install.
 - **cursor**: NOT implemented. Cursor supports a user-level
   `~/.cursor/hooks.json`, but does not document dedup between user- and
   project-level hook entries, so installing both risks double-firing
