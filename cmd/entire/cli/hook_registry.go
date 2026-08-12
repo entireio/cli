@@ -113,7 +113,7 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	worktreeRoot, err := paths.WorktreeRoot(cmd.Context())
 	if err != nil {
 		if hookName == sessionStartHookVerb && settings.GlobalTierEnabled(cmd.Context()) {
-			warnInactiveOnSessionStart(cmd.ErrOrStderr(), hookName, notGitRepoSessionStartNotice)
+			warnInactiveOnSessionStart(cmd.ErrOrStderr(), agentName, hookName, notGitRepoSessionStartNotice)
 		}
 		return nil
 	}
@@ -131,7 +131,7 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	// IsSetUpAndEnabled with the user-global tier: repos with no repo-level
 	// setup proceed when global mode is on and the repo is not excluded.
 	if active, reason := settings.IsActiveForRepoWithReason(cmd.Context()); !active {
-		warnInactiveOnSessionStart(cmd.ErrOrStderr(), hookName, inactiveSessionStartNotice(reason))
+		warnInactiveOnSessionStart(cmd.ErrOrStderr(), agentName, hookName, inactiveSessionStartNotice(reason))
 		return nil
 	}
 
@@ -285,14 +285,28 @@ func inactiveSessionStartNotice(reason settings.InactiveReason) string {
 	}
 }
 
-// warnInactiveOnSessionStart writes the inactive-location notice to the
-// agent-hook stderr stream — and ONLY for the session-start verb, never on
-// every hook, and never for an empty notice. This function is reached only
+// warnInactiveOnSessionStart delivers the inactive-location notice to the
+// user — and ONLY for the session-start verb, never on every hook, and never
+// for an empty notice. Delivery goes through the agent's hook-response
+// channel when it has one (the same mechanism as
+// writeUnsupportedPolicySessionStartWarning: Claude Code renders a JSON
+// systemMessage from stdout, Gemini and Factory Droid show plain text from
+// stdout — no built-in agent surfaces raw hook stderr to the user), falling
+// back to stderr for agents without that capability. Best-effort: a
+// resolution or write failure downgrades to the stderr fallback and never
+// fails the hook — the agent must always be allowed to start. Reached only
 // from the agent-hook route (executeAgentHook); git hooks gate in
 // hooks_git_cmd.go and never produce this notice, so git output stays clean.
-func warnInactiveOnSessionStart(errW io.Writer, hookName, notice string) {
+func warnInactiveOnSessionStart(errW io.Writer, agentName types.AgentName, hookName, notice string) {
 	if hookName != sessionStartHookVerb || notice == "" {
 		return
+	}
+	if ag, err := agent.Get(agentName); err == nil {
+		if writer, ok := agent.AsHookResponseWriter(ag); ok {
+			if writer.WriteHookResponse(notice) == nil {
+				return
+			}
+		}
 	}
 	fmt.Fprintln(errW, notice)
 }
