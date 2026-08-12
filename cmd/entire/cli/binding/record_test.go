@@ -3,12 +3,14 @@ package binding
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -76,6 +78,10 @@ func TestRecordBinding_CreatesRecordOnFirstWrite(t *testing.T) {
 	}
 	if br.FirstEvidenceAt.IsZero() || br.LastEvidenceAt.IsZero() {
 		t.Error("evidence timestamps must be set")
+	}
+	if rec.UpdatedAt.Before(br.LastEvidenceAt) {
+		t.Errorf("UpdatedAt %v predates LastEvidenceAt %v — the mutation must use a single clock reading",
+			rec.UpdatedAt, br.LastEvidenceAt)
 	}
 
 	if runtime.GOOS != "windows" {
@@ -157,6 +163,78 @@ func TestRecordBinding_SecondRepoAppended(t *testing.T) {
 	}
 	if rec.BoundRepos[1].Enabled {
 		t.Error("second repo must record enabled=false")
+	}
+}
+
+func TestRecordBinding_SameCloneDifferentWorktreeRefreshesIdentity(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+
+	// Entries are keyed by CommonDir (clone identity); evidence from a
+	// different worktree of the same clone must refresh the whole embedded
+	// identity so the stored (WorktreeRoot, Enabled) pair stays coherent.
+	commonDir := "/repos/b/.git"
+	first := Evidence{Repo: RepoIdentity{WorktreeRoot: "/repos/b", CommonDir: commonDir}, Enabled: true}
+	second := Evidence{Repo: RepoIdentity{WorktreeRoot: "/repos/b-wt2", CommonDir: commonDir}, Enabled: false}
+
+	if err := RecordBinding(ctx, "sess-1", testMeta(), first); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordBinding(ctx, "sess-1", testMeta(), second); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := LoadRecord(ctx, "sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec == nil || len(rec.BoundRepos) != 1 {
+		t.Fatalf("same clone must not duplicate, got %+v", rec)
+	}
+	br := rec.BoundRepos[0]
+	if br.WorktreeRoot != "/repos/b-wt2" {
+		t.Errorf("worktree root = %q, want latest %q (stale root makes (WorktreeRoot, Enabled) incoherent)",
+			br.WorktreeRoot, "/repos/b-wt2")
+	}
+	if br.Enabled {
+		t.Error("enabled must reflect the latest observation (false)")
+	}
+	if br.EvidenceCount != 2 {
+		t.Errorf("evidence count = %d, want 2", br.EvidenceCount)
+	}
+}
+
+func TestMutateRecord_LockContentionErrorsInsteadOfHanging(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+
+	path, err := recordPath("sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	release, err := flock.Acquire(path + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	// Hook contexts carry no deadline; the record write must still give up
+	// instead of blocking the hook behind another lock holder. The internal
+	// ceiling is 2s — the assertion window is generous to avoid flake.
+	start := time.Now()
+	err = RecordBinding(ctx, "sess-1", testMeta(), testEvidence("b", true))
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("RecordBinding must error while the lock is held")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error must carry context.DeadlineExceeded, got %v", err)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("lock wait took %v, must be bounded (~2s ceiling)", elapsed)
 	}
 }
 

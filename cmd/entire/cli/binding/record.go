@@ -90,11 +90,15 @@ type Evidence struct {
 // the record if absent, appends or updates the BoundRepo keyed by CommonDir,
 // and bumps counters and timestamps.
 func RecordBinding(ctx context.Context, sessionID string, meta SessionMeta, ev Evidence) error {
-	return mutateRecord(ctx, sessionID, func(rec *SessionRecord) error {
-		now := time.Now().UTC()
+	return mutateRecord(ctx, sessionID, func(now time.Time, rec *SessionRecord) error {
 		fillMetaIfEmpty(rec, meta)
 		for i := range rec.BoundRepos {
 			if rec.BoundRepos[i].CommonDir == ev.Repo.CommonDir {
+				// Enabled is computed at the observed worktree root, and linked
+				// worktrees of one clone can differ (.entire/settings.local.json
+				// is worktree-local) — update the identity WITH the flag so the
+				// stored pair always reflects the same (latest) observation.
+				rec.BoundRepos[i].RepoIdentity = ev.Repo
 				rec.BoundRepos[i].LastEvidenceAt = now
 				rec.BoundRepos[i].EvidenceCount++
 				rec.BoundRepos[i].Enabled = ev.Enabled
@@ -123,7 +127,7 @@ func RecordBinding(ctx context.Context, sessionID string, meta SessionMeta, ev E
 // it a shrunk transcript leaves the cursor stuck at its high watermark and
 // every later turn full-rescans and re-records.
 func AdvanceTranscriptCursor(ctx context.Context, sessionID string, meta SessionMeta, cursor int, reset bool) error {
-	return mutateRecord(ctx, sessionID, func(rec *SessionRecord) error {
+	return mutateRecord(ctx, sessionID, func(_ time.Time, rec *SessionRecord) error {
 		fillMetaIfEmpty(rec, meta)
 		if reset || cursor > rec.LastScannedTranscriptCursor {
 			rec.LastScannedTranscriptCursor = cursor
@@ -171,10 +175,20 @@ func loadRecordFromFile(path string) (*SessionRecord, error) {
 	return &rec, nil
 }
 
+// recordLockTimeout bounds the wait for the session-record flock. Hook
+// contexts carry no deadline, and without one AcquireContext blocks in the
+// kernel indefinitely — a wedged lock holder would then stall the hook,
+// breaking the tap's never-block-capture promise. This layer is best-effort
+// by design, so timing out and dropping the evidence is the correct
+// degradation. Var, not const, so tests can shrink it.
+var recordLockTimeout = 2 * time.Second
+
 // mutateRecord runs fn over the session record under an exclusive file lock:
 // MkdirAll → flock → load-or-create → fn → atomic write. Two hook processes
 // (agent + git hook) can race on the same session; the flock serializes them.
-func mutateRecord(ctx context.Context, sessionID string, fn func(*SessionRecord) error) error {
+// fn receives the single clock reading that also stamps CreatedAt/UpdatedAt,
+// so every timestamp written by one mutation agrees.
+func mutateRecord(ctx context.Context, sessionID string, fn func(now time.Time, rec *SessionRecord) error) error {
 	path, err := recordPath(sessionID)
 	if err != nil {
 		return err
@@ -182,7 +196,9 @@ func mutateRecord(ctx context.Context, sessionID string, fn func(*SessionRecord)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create sessions directory: %w", err)
 	}
-	release, err := flock.AcquireContext(ctx, path+".lock")
+	lockCtx, cancel := context.WithTimeout(ctx, recordLockTimeout)
+	defer cancel()
+	release, err := flock.AcquireContext(lockCtx, path+".lock")
 	if err != nil {
 		return fmt.Errorf("lock session record: %w", err)
 	}
@@ -201,7 +217,7 @@ func mutateRecord(ctx context.Context, sessionID string, fn func(*SessionRecord)
 		rec = &SessionRecord{SessionID: sessionID, CreatedAt: now}
 	}
 	rec.Version = CurrentRecordVersion // normalize legacy/zero-version records upward
-	if err := fn(rec); err != nil {
+	if err := fn(now, rec); err != nil {
 		return err
 	}
 	rec.UpdatedAt = now
