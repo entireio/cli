@@ -664,6 +664,11 @@ func saveRaw(path, label string, raw map[string]json.RawMessage) error {
 	if err := jsonutil.WriteFileAtomic(path, data, 0o644); err != nil {
 		return fmt.Errorf("writing %s settings: %w", label, err)
 	}
+	// Same invalidation contract as saveToFile below: a repo settings file's
+	// existence is the invisible-routing discriminator, and the raw path can
+	// CREATE that file (e.g. a bare `entire disable` in a fresh repo), so the
+	// writer process must observe its own write.
+	paths.ClearInvisibleRuntimeCache()
 	return nil
 }
 

@@ -1,11 +1,15 @@
 package settings
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -45,6 +49,114 @@ func TestSaveUserSettings_CreatesDirAndRoundTrips(t *testing.T) {
 		if perm := info.Mode().Perm(); perm != 0o600 {
 			t.Fatalf("user settings file mode = %o, want 600", perm)
 		}
+	}
+}
+
+// TestRepoSettingsWrites_ClearInvisibleRoutingCache pins the invalidation
+// contract documented on paths' invisibleCache: creating a repo settings
+// file — through the struct save path (saveToFile) or the raw path (saveRaw)
+// — is a discriminator write, so the writer process must observe runtime-data
+// routing flip from the git common dir back to the worktree.
+func TestRepoSettingsWrites_ClearInvisibleRoutingCache(t *testing.T) {
+	cases := []struct {
+		name  string
+		write func(ctx context.Context) error
+	}{
+		{"struct save (saveToFile)", func(ctx context.Context) error {
+			return Save(ctx, &EntireSettings{Enabled: true})
+		}},
+		{"raw save (saveRaw)", func(ctx context.Context) error {
+			path, raw, _, err := LoadLocalRaw(ctx)
+			if err != nil {
+				return err
+			}
+			raw["enabled"] = json.RawMessage("false")
+			return SaveLocalRaw(path, raw)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+				dir = resolved
+			}
+			testutil.InitRepo(t, dir)
+			t.Chdir(dir)
+			cfg := t.TempDir()
+			t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+			if err := os.WriteFile(filepath.Join(cfg, UserSettingsFileName), []byte(`{"global":{"enabled":true}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			reset := func() {
+				paths.ClearWorktreeRootCache()
+				paths.ClearInvisibleRuntimeCache()
+				ClearGlobalModeCache()
+			}
+			reset()
+			t.Cleanup(reset)
+
+			routed, err := paths.AbsPath(t.Context(), paths.EntireMetadataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			worktreeMeta := filepath.Join(dir, ".entire", "metadata")
+			if routed == worktreeMeta {
+				t.Fatalf("precondition: a globally tracked repo must route runtime data into .git, got %s", routed)
+			}
+			if err := tc.write(t.Context()); err != nil {
+				t.Fatalf("settings write: %v", err)
+			}
+			after, err := paths.AbsPath(t.Context(), paths.EntireMetadataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after != worktreeMeta {
+				t.Fatalf("settings write must flip routing worktree-ward in-process: got %s, want %s", after, worktreeMeta)
+			}
+		})
+	}
+}
+
+// TestSaveUserSettings_PreservesSymlinkedSettingsFile pins the symlink
+// contract: dotfile managers commonly symlink ~/.config/entire/settings.json,
+// and a rename-over-the-link atomic write would replace the link with a
+// regular file, silently detaching the managed target. The save must follow
+// the link and rewrite its target — mirroring LoadUserSettings' documented
+// symlink-following read path.
+func TestSaveUserSettings_PreservesSymlinkedSettingsFile(t *testing.T) {
+	if runtime.GOOS == goosWindows {
+		t.Skip("symlink creation needs privileges on Windows")
+	}
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	t.Cleanup(ClearGlobalModeCache)
+
+	target := filepath.Join(t.TempDir(), "managed-settings.json")
+	if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(cfg, UserSettingsFileName)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SaveUserSettings(t.Context(), &UserSettings{Global: &GlobalConfig{Enabled: true}}); err != nil {
+		t.Fatalf("SaveUserSettings: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("settings.json symlink was replaced by a regular file (mode %v)", info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("symlink target unreadable after save: %v", err)
+	}
+	if !strings.Contains(string(data), `"enabled": true`) {
+		t.Fatalf("symlink target not updated, got: %s", data)
 	}
 }
 

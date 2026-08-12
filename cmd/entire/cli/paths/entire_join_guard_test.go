@@ -38,11 +38,15 @@ func TestNoDirectEntireJoins(t *testing.T) {
 		// Doctor bundle collects the repo-level settings files for support
 		// bundles; a globally tracked repo has none by definition.
 		"cmd/entire/cli/doctor_bundle.go": "collects repo-level settings files",
-		// The enable-time migration's DESTINATION is deliberately the literal
-		// worktree .entire dir: it runs before .entire/settings.json exists,
-		// when AbsPath still routes to the git common dir — resolving through
-		// AbsPath would move files onto themselves.
-		"cmd/entire/cli/setup_global.go": "migration destination, pre-routing-flip by design",
+		// The takeover migration's DESTINATION is deliberately the literal
+		// worktree .entire dir, in both of its states: on a fresh enable it
+		// runs before .entire/settings.json exists, when AbsPath still routes
+		// to the git common dir — resolving through AbsPath would move files
+		// onto themselves; on a takeover recovery (enable/disable in a repo
+		// whose settings file already exists) routing already points at the
+		// worktree, and the destination must be that same literal dir
+		// regardless. The join is routing-independent by design.
+		"cmd/entire/cli/setup_global.go": "migration destination, routing-independent by design",
 		// Legacy no-repo fallbacks, guarded by paths.IsUnroutableRuntimePath
 		// so a tier-owned repo can never reach them.
 		"cmd/entire/cli/agent/pi/lifecycle.go":       "sentinel-guarded no-repo fallback",
