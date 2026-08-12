@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"charm.land/huh/v2"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -276,6 +279,229 @@ func TestMaybeMigrateGlobalRuntimeData_NoTriggerIsSilentNoop(t *testing.T) {
 	}
 }
 
+// isolateUserHome points os.UserHomeDir at a temp dir (HOME on Unix,
+// USERPROFILE on Windows) so end-to-end enable/disable runs can never touch
+// the developer's real user-level files.
+func isolateUserHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+}
+
+// TestEnableCmd_GlobalEndToEnd drives the full cobra command, pinning the two
+// success shapes of `entire enable --global`: outside a git repository it
+// still exits 0 and writes the user settings file; inside a repository it
+// stays machine-wide only — no .entire/, no git hooks.
+func TestEnableCmd_GlobalEndToEnd(t *testing.T) {
+	t.Run("outside a git repository", func(t *testing.T) {
+		isolateUserHome(t)
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		t.Chdir(t.TempDir()) // deliberately not a git repository
+		t.Cleanup(settings.ClearGlobalModeCache)
+
+		cmd := newEnableCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs([]string{"--global"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("enable --global outside a repo must succeed: %v\n%s", err, out.String())
+		}
+		us, err := settings.LoadUserSettings(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if us.Global == nil || !us.Global.Enabled {
+			t.Fatalf("global.enabled not persisted: %+v", us.Global)
+		}
+	})
+
+	t.Run("inside a repository writes no repo files", func(t *testing.T) {
+		isolateUserHome(t)
+		dir := t.TempDir()
+		testutil.InitRepo(t, dir)
+		t.Chdir(dir)
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		clearGlobalRoutingCaches(t)
+
+		cmd := newEnableCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs([]string{"--global"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("enable --global inside a repo must succeed: %v\n%s", err, out.String())
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".entire")); !os.IsNotExist(err) {
+			t.Fatalf("--global must not create .entire/ (err=%v)", err)
+		}
+		if strategy.IsGitHookInstalled(t.Context()) {
+			t.Fatal("--global must not install repo git hooks")
+		}
+	})
+}
+
+// TestDisableCmd_GlobalEndToEnd mirrors the enable pin for `entire disable
+// --global`: exit 0 in and outside a repo, a durable false persisted, and no
+// repo-level files touched.
+func TestDisableCmd_GlobalEndToEnd(t *testing.T) {
+	t.Run("outside a git repository", func(t *testing.T) {
+		isolateUserHome(t)
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		t.Chdir(t.TempDir())
+		t.Cleanup(settings.ClearGlobalModeCache)
+
+		cmd := newDisableCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs([]string{"--global"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("disable --global outside a repo must succeed: %v\n%s", err, out.String())
+		}
+		us, err := settings.LoadUserSettings(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if us.Global == nil || us.Global.Enabled {
+			t.Fatalf("disable --global must persist a durable false, got %+v", us.Global)
+		}
+	})
+
+	t.Run("inside a repository writes no repo files", func(t *testing.T) {
+		isolateUserHome(t)
+		dir := t.TempDir()
+		testutil.InitRepo(t, dir)
+		t.Chdir(dir)
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		clearGlobalRoutingCaches(t)
+
+		cmd := newDisableCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs([]string{"--global"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("disable --global inside a repo must succeed: %v\n%s", err, out.String())
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".entire")); !os.IsNotExist(err) {
+			t.Fatalf("--global must not create .entire/ (err=%v)", err)
+		}
+	})
+}
+
+// TestEnableCmd_GlobalRefusesUnknownKeys pins the strict-load protection:
+// `enable --global` against a settings file written by a newer entire (an
+// unknown key) must fail with an error naming the file, and must leave the
+// file byte-identical — a blind read-modify-write would silently drop the
+// newer binary's keys.
+func TestEnableCmd_GlobalRefusesUnknownKeys(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	t.Chdir(t.TempDir())
+	original := `{"global":{"enabled":false},"future_key":{"answer":42}}`
+	if err := os.WriteFile(filepath.Join(cfg, settings.UserSettingsFileName), []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newEnableCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--global"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("enable --global must refuse a file with unknown keys")
+	}
+	if !strings.Contains(err.Error(), settings.UserSettingsPath()) {
+		t.Fatalf("error must name the settings file, got: %v", err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(cfg, settings.UserSettingsFileName))
+	if readErr != nil || string(data) != original {
+		t.Fatalf("refused write must leave the file byte-identical (data=%q err=%v)", data, readErr)
+	}
+}
+
+// TestMaybeAskGlobalTracking_YesSkipsPromptEvenOnTTY pins the --yes disjunct:
+// even when a TTY is available (forced via ENTIRE_TEST_TTY=1), --yes must
+// take the hint path — no prompt, no write.
+func TestMaybeAskGlobalTracking_YesSkipsPromptEvenOnTTY(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	restore := askGlobalTrackingConfirm
+	askGlobalTrackingConfirm = func(context.Context) (bool, error) {
+		t.Error("--yes must never reach the interactive prompt")
+		return false, nil
+	}
+	t.Cleanup(func() { askGlobalTrackingConfirm = restore })
+
+	var buf bytes.Buffer
+	maybeAskGlobalTracking(t.Context(), &buf, EnableOptions{Yes: true})
+	if !strings.Contains(buf.String(), "entire enable --global") {
+		t.Fatalf("expected the enable --global hint, got: %q", buf.String())
+	}
+	if _, err := os.Stat(filepath.Join(cfg, settings.UserSettingsFileName)); !os.IsNotExist(err) {
+		t.Fatalf("--yes must not write the user settings file (err=%v)", err)
+	}
+}
+
+// TestMaybeAskGlobalTracking_AnswerPersistence pins the wizard's persistence
+// contract through the prompt seam: a "No" is durable (saved, never re-asked)
+// and a cancelled prompt saves nothing (a later enable asks again).
+func TestMaybeAskGlobalTracking_AnswerPersistence(t *testing.T) {
+	t.Run("no is durable", func(t *testing.T) {
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		t.Setenv("ENTIRE_TEST_TTY", "1")
+		t.Cleanup(settings.ClearGlobalModeCache)
+		restore := askGlobalTrackingConfirm
+		askGlobalTrackingConfirm = func(context.Context) (bool, error) { return false, nil }
+		t.Cleanup(func() { askGlobalTrackingConfirm = restore })
+
+		var buf bytes.Buffer
+		maybeAskGlobalTracking(t.Context(), &buf, EnableOptions{})
+		us, err := settings.LoadUserSettings(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if us.Global == nil || us.Global.Enabled {
+			t.Fatalf("answered no must persist a durable false, got %+v", us.Global)
+		}
+
+		// Configured (either answer) means never re-ask.
+		askGlobalTrackingConfirm = func(context.Context) (bool, error) {
+			t.Error("a configured answer must never re-prompt")
+			return false, nil
+		}
+		var again bytes.Buffer
+		maybeAskGlobalTracking(t.Context(), &again, EnableOptions{})
+		if again.Len() != 0 {
+			t.Fatalf("configured answer must silence the wizard, got: %q", again.String())
+		}
+	})
+
+	t.Run("cancel saves nothing", func(t *testing.T) {
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		t.Setenv("ENTIRE_TEST_TTY", "1")
+		restore := askGlobalTrackingConfirm
+		askGlobalTrackingConfirm = func(context.Context) (bool, error) { return false, huh.ErrUserAborted }
+		t.Cleanup(func() { askGlobalTrackingConfirm = restore })
+
+		var buf bytes.Buffer
+		maybeAskGlobalTracking(t.Context(), &buf, EnableOptions{})
+		if buf.Len() != 0 {
+			t.Fatalf("a cancelled prompt must stay silent, got: %q", buf.String())
+		}
+		if _, err := os.Stat(filepath.Join(cfg, settings.UserSettingsFileName)); !os.IsNotExist(err) {
+			t.Fatalf("a cancelled prompt must not write the user settings file (err=%v)", err)
+		}
+	})
+}
+
 // TestRunDisable_GloballyTrackedRepoTakeover is the reviewer's exact repro
 // for the stranded-data bug: `entire disable` in a globally tracked repo
 // creates the discriminator settings file, which flips invisible routing to
@@ -423,6 +649,9 @@ func clearGlobalRoutingCaches(t *testing.T) {
 
 func TestEnableCmd_GlobalRejectsRepoScopedFlags(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	// Hardening: if a combination were ever NOT rejected, it must run against
+	// a throwaway directory, not the real repo this test file lives in.
+	t.Chdir(t.TempDir())
 	for _, args := range [][]string{
 		{"--global", "--agent", "claude-code"},
 		{"--global", "--yes"},
@@ -445,6 +674,9 @@ func TestEnableCmd_GlobalRejectsRepoScopedFlags(t *testing.T) {
 
 func TestDisableCmd_GlobalRejectsRepoScopedFlags(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	// Hardening: if a combination were ever NOT rejected, it must run against
+	// a throwaway directory, not the real repo this test file lives in.
+	t.Chdir(t.TempDir())
 	for _, args := range [][]string{
 		{"--global", "--uninstall"},
 		{"--global", "--project"},

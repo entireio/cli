@@ -96,18 +96,8 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 		fmt.Fprintln(w, globalTrackingHint)
 		return
 	}
-	enable := false
-	form := NewAccessibleForm(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Also track every repo on this machine automatically?").
-				Description("Applies to repos without their own Entire setup.").
-				Affirmative("Yes").
-				Negative("No").
-				Value(&enable),
-		),
-	)
-	if err := form.RunWithContext(ctx); err != nil {
+	enable, err := askGlobalTrackingConfirm(ctx)
+	if err != nil {
 		// Ctrl-C stays silent (nothing saved, a later enable asks again);
 		// any other prompt failure must at least be diagnosable.
 		if !errors.Is(err, huh.ErrUserAborted) && !errors.Is(err, context.Canceled) {
@@ -123,6 +113,28 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 	if enable {
 		fmt.Fprintln(w, "  ✓ Global tracking enabled")
 	}
+}
+
+// askGlobalTrackingConfirm runs the machine-wide tracking confirm prompt and
+// returns the answer. A package var (same seam pattern as migrateRenameFile)
+// so tests can pin the persistence contract of each outcome — durable yes,
+// durable no, cancelled — without a TTY.
+var askGlobalTrackingConfirm = func(ctx context.Context) (bool, error) {
+	enable := false
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Also track every repo on this machine automatically?").
+				Description("Applies to repos without their own Entire setup.").
+				Affirmative("Yes").
+				Negative("No").
+				Value(&enable),
+		),
+	)
+	if err := form.RunWithContext(ctx); err != nil {
+		return false, err //nolint:wrapcheck // caller classifies huh.ErrUserAborted/context.Canceled
+	}
+	return enable, nil
 }
 
 // printGlobalTrackingHintIfUnconfigured prints the enable --global pointer on

@@ -95,10 +95,11 @@ func LoadUserSettings(_ context.Context) (*UserSettings, error) {
 	}
 	// Strict decoding: a typo'd exclude key silently failing open (tracking a
 	// repo the user meant to exclude) is worse than an older CLI rejecting a
-	// newer file, which fails closed and is therefore safe. Writer implication
-	// (split C): an older binary cannot load a newer file at all, so a future
-	// writer must not blind read-modify-write this struct — it needs a raw-map
-	// preserve path or must refuse to write when unknown fields are present.
+	// newer file, which fails closed and is therefore safe. Writer
+	// implication: SaveUserSettings (below) writes exactly the known schema
+	// and never preserves unknown keys — safe only because every writer
+	// load-modify-saves through this strict decoder, so a write against a
+	// newer file fails here at load rather than silently dropping its keys.
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var us UserSettings
@@ -356,8 +357,9 @@ func ClearGlobalModeCache() {
 //
 // The result is memoized per process (see globalModeCache above).
 //
-// The Debug logs below are best-effort traces, NOT a diagnostic channel: on
-// the hook paths that call this predicate, logging.Init runs only after the
+// The Debug logs here and in computeGlobalModeActive are best-effort traces,
+// NOT a diagnostic channel: on the hook paths that call this predicate,
+// logging.Init runs only after the
 // gate passes, so on every failing path these records are dropped by the
 // default slog handler. A user-facing "global mode configured but inactive
 // because X" surface (status/doctor) is the planned diagnosability story.
