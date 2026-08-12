@@ -201,7 +201,10 @@ type ClonePreferences struct {
 	// setup for user-global tracking (git hooks installed, checkpoint metadata
 	// ref ensured) without any repo-level settings. It is the once-per-clone
 	// "already done" marker consulted before that setup does any work; a later
-	// repo-level `entire enable` is unaffected by it.
+	// repo-level `entire enable` is unaffected by it. The marker means "setup
+	// believed converged", not "setup verified": any component that detects
+	// drift (e.g. the git hooks are gone) must clear it so the lazy setup
+	// re-runs on the next hook activity.
 	GloballyEnabled bool `json:"globally_enabled,omitempty"`
 }
 
