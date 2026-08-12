@@ -91,7 +91,7 @@ func getHookType(hookName string) string {
 	case geminicli.HookNameBeforeTool, geminicli.HookNameAfterTool:
 		return "tool"
 	default:
-		return "agent" //nolint:goconst // hook-type label; unrelated to the --agent flag name constant
+		return "agent" //nolint:goconst // hook-type label; coincides with the agentFlagName constant's value but is unrelated to the --agent flag
 	}
 }
 

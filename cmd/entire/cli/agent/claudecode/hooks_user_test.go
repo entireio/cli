@@ -97,11 +97,11 @@ func TestInstallUserHooks_NonObjectPermissionsRoundTripsVerbatim(t *testing.T) {
 }`)
 
 	agent := &ClaudeCodeAgent{}
-	count, err := agent.InstallUserHooks(context.Background())
+	res, err := agent.InstallUserHooks(context.Background())
 	if err != nil {
 		t.Fatalf("InstallUserHooks() error = %v", err)
 	}
-	if count == 0 {
+	if res.Installed == 0 {
 		t.Fatal("InstallUserHooks() installed nothing on a file without Entire hooks")
 	}
 
@@ -116,11 +116,11 @@ func TestInstallUserHooks_MergesWithoutClobberingUnrelatedKeys(t *testing.T) {
 	writeUserClaudeSettings(t, home, existingUserSettings)
 
 	agent := &ClaudeCodeAgent{}
-	count, err := agent.InstallUserHooks(context.Background())
+	res, err := agent.InstallUserHooks(context.Background())
 	if err != nil {
 		t.Fatalf("InstallUserHooks() error = %v", err)
 	}
-	if count == 0 {
+	if res.Installed == 0 {
 		t.Fatal("InstallUserHooks() installed nothing on a file without Entire hooks")
 	}
 
@@ -175,8 +175,11 @@ func TestInstallUserHooks_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first InstallUserHooks() error = %v", err)
 	}
-	if first == 0 {
+	if first.Installed == 0 {
 		t.Fatal("first install must report installed hooks")
+	}
+	if first.Repaired {
+		t.Error("a fresh install must not report a repair")
 	}
 	before, err := os.ReadFile(userSettingsTestPath(t, home))
 	if err != nil {
@@ -187,8 +190,8 @@ func TestInstallUserHooks_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second InstallUserHooks() error = %v", err)
 	}
-	if second != 0 {
-		t.Errorf("second install must be a no-op, got count %d", second)
+	if second.Installed != 0 || second.Repaired {
+		t.Errorf("second install must be a no-op, got %+v", second)
 	}
 	after, err := os.ReadFile(userSettingsTestPath(t, home))
 	if err != nil {
@@ -363,8 +366,12 @@ func TestInstallUserHooks_RepairsAlternateFormEntireHook(t *testing.T) {
 }`)
 
 	agent := &ClaudeCodeAgent{}
-	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
+	res, err := agent.InstallUserHooks(context.Background())
+	if err != nil {
 		t.Fatalf("InstallUserHooks() error = %v", err)
+	}
+	if !res.Repaired {
+		t.Error("replacing an alternate-form entry must be reported as a repair")
 	}
 
 	raw := readRawSettings(t, userSettingsTestPath(t, home))
@@ -391,6 +398,59 @@ func TestInstallUserHooks_RepairsAlternateFormEntireHook(t *testing.T) {
 	}
 	if got := countOf(collectHookCommands(t, userSettingsTestPath(t, home)), "entire hooks claude-code stop"); got != 0 {
 		t.Errorf("bare-form Entire hook still present after repair (count %d)", got)
+	}
+}
+
+// TestInstallUserHooks_DuplicateEntryReportsRepairedNotAlreadyInstalled pins
+// the honesty of the install result: a file whose entries are all current but
+// duplicated is rewritten (duplicates stripped) with nothing new added —
+// Installed 0 — and that rewrite must surface as Repaired, not read as
+// "already installed" for a file the install just changed.
+func TestInstallUserHooks_DuplicateEntryReportsRepairedNotAlreadyInstalled(t *testing.T) {
+	home := setUserHome(t)
+	agent := &ClaudeCodeAgent{}
+	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
+		t.Fatalf("seed install: %v", err)
+	}
+
+	// Duplicate the Stop entry in place.
+	path := userSettingsTestPath(t, home)
+	raw := readRawSettings(t, path)
+	var hooks map[string][]ClaudeHookMatcher
+	if err := json.Unmarshal(raw["hooks"], &hooks); err != nil {
+		t.Fatalf("parse hooks: %v", err)
+	}
+	stop := hooks["Stop"]
+	if len(stop) == 0 || len(stop[0].Hooks) == 0 {
+		t.Fatal("seed install left no Stop entry")
+	}
+	stop[0].Hooks = append(stop[0].Hooks, stop[0].Hooks[0])
+	hooks["Stop"] = stop
+	hooksJSON, err := json.Marshal(hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw["hooks"] = hooksJSON
+	data, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := agent.InstallUserHooks(context.Background())
+	if err != nil {
+		t.Fatalf("InstallUserHooks() error = %v", err)
+	}
+	if res.Installed != 0 {
+		t.Errorf("deduplicating a complete install must add nothing, got Installed=%d", res.Installed)
+	}
+	if !res.Repaired {
+		t.Error("stripping a duplicate entry must be reported as a repair")
+	}
+	if got := countOf(collectHookCommands(t, path), agentWrappedStopCmd()); got != 1 {
+		t.Errorf("Stop entry count after repair = %d, want 1", got)
 	}
 }
 
@@ -487,12 +547,15 @@ func TestAreUserHooksInstalled_PartialInstallReadsAsNotInstalled(t *testing.T) {
 	if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || ok {
 		t.Fatalf("Stop-only file: AreUserHooksInstalled() = (%v, %v), want (false, nil)", ok, err)
 	}
-	count, err := agent.InstallUserHooks(context.Background())
+	res, err := agent.InstallUserHooks(context.Background())
 	if err != nil {
 		t.Fatalf("InstallUserHooks() error = %v", err)
 	}
-	if count == 0 {
+	if res.Installed == 0 {
 		t.Fatal("InstallUserHooks() must repair a partial install, reported nothing to do")
+	}
+	if !res.Repaired {
+		t.Error("repairing a partial install must be reported as a repair, not a fresh install")
 	}
 	if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || !ok {
 		t.Fatalf("after repair: AreUserHooksInstalled() = (%v, %v), want (true, nil)", ok, err)

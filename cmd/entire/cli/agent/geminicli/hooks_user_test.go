@@ -54,11 +54,11 @@ func TestInstallUserHooks_Gemini_MergesWithoutClobberingUnrelatedKeys(t *testing
 	}
 
 	agent := &GeminiCLIAgent{}
-	count, err := agent.InstallUserHooks(context.Background())
+	res, err := agent.InstallUserHooks(context.Background())
 	if err != nil {
 		t.Fatalf("InstallUserHooks() error = %v", err)
 	}
-	if count == 0 {
+	if res.Installed == 0 {
 		t.Fatal("InstallUserHooks() installed nothing on a file without Entire hooks")
 	}
 
@@ -92,8 +92,11 @@ func TestInstallUserHooks_Gemini_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first InstallUserHooks() error = %v", err)
 	}
-	if first == 0 {
+	if first.Installed == 0 {
 		t.Fatal("first install must report installed hooks")
+	}
+	if first.Repaired {
+		t.Error("a fresh install must not report a repair")
 	}
 	before, err := os.ReadFile(userGeminiSettingsPath(t, home))
 	if err != nil {
@@ -103,8 +106,8 @@ func TestInstallUserHooks_Gemini_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second InstallUserHooks() error = %v", err)
 	}
-	if second != 0 {
-		t.Errorf("second install must be a no-op, got count %d", second)
+	if second.Installed != 0 || second.Repaired {
+		t.Errorf("second install must be a no-op, got %+v", second)
 	}
 	after, err := os.ReadFile(userGeminiSettingsPath(t, home))
 	if err != nil {
@@ -277,6 +280,190 @@ func TestInstallUserHooks_Gemini_UnparseableHookSectionErrorsCleanly(t *testing.
 	data, readErr := os.ReadFile(path)
 	if readErr != nil || string(data) != original {
 		t.Errorf("refused write must leave the file byte-identical (err=%v):\n%s", readErr, data)
+	}
+}
+
+// collectGeminiHookEntries returns every hook entry in the managed array
+// sections of the settings file at path.
+func collectGeminiHookEntries(t *testing.T, path string) []GeminiHookEntry {
+	t.Helper()
+	raw := readRawGeminiSettings(t, path)
+	hooksRaw, ok := raw["hooks"]
+	if !ok {
+		return nil
+	}
+	var hooks map[string][]GeminiHookMatcher
+	if err := json.Unmarshal(hooksRaw, &hooks); err != nil {
+		t.Fatalf("parse hooks: %v", err)
+	}
+	var entries []GeminiHookEntry
+	for _, matchers := range hooks {
+		for _, m := range matchers {
+			entries = append(entries, m.Hooks...)
+		}
+	}
+	return entries
+}
+
+func productionCommandFor(t *testing.T, name string) string {
+	t.Helper()
+	for _, spec := range geminiHookSpecs {
+		if spec.name == name {
+			return spec.productionCommand()
+		}
+	}
+	t.Fatalf("no gemini hook spec named %s", name)
+	return ""
+}
+
+// TestUserAuthoredEntryWithEntireNameSurvives_Gemini pins narrowed name-based
+// claiming: a user-authored hook that reused an Entire entry name as a
+// template but points at their own command must never be claimed as ours —
+// pure name matching silently deleted it on install (remove-then-add) and on
+// uninstall.
+func TestUserAuthoredEntryWithEntireNameSurvives_Gemini(t *testing.T) {
+	home := setUserHome(t)
+	path := userGeminiSettingsPath(t, home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	const userCmd = "/home/me/bin/my-guard.sh"
+	existing := `{
+  "hooks": {
+    "BeforeTool": [{"matcher": "*", "hooks": [{"name": "entire-before-tool", "type": "command", "command": "` + userCmd + `"}]}]
+  }
+}`
+	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := &GeminiCLIAgent{}
+	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
+		t.Fatalf("InstallUserHooks() error = %v", err)
+	}
+	survived := false
+	for _, e := range collectGeminiHookEntries(t, path) {
+		if e.Command == userCmd {
+			survived = true
+		}
+	}
+	if !survived {
+		t.Fatal("install deleted the user-authored entry that reused an Entire hook name")
+	}
+
+	if err := agent.UninstallUserHooks(context.Background()); err != nil {
+		t.Fatalf("UninstallUserHooks() error = %v", err)
+	}
+	survived = false
+	for _, e := range collectGeminiHookEntries(t, path) {
+		if e.Command == userCmd {
+			survived = true
+		}
+		if isEntireHookEntry(e) {
+			t.Errorf("Entire hook left behind after uninstall: %+v", e)
+		}
+	}
+	if !survived {
+		t.Error("uninstall deleted the user-authored entry that reused an Entire hook name")
+	}
+}
+
+// TestInstallUserHooks_Gemini_RepairsLegacyGoRunEntry pins the legacy rescue:
+// an entry written by an old local-dev install (the `go run
+// ${GEMINI_PROJECT_DIR}` form) must still be recognized as Entire's — now via
+// the command prefix list rather than name-based claiming — and repaired to
+// exactly one current-form entry.
+func TestInstallUserHooks_Gemini_RepairsLegacyGoRunEntry(t *testing.T) {
+	home := setUserHome(t)
+	path := userGeminiSettingsPath(t, home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	const legacyCmd = "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini session-start"
+	existing := `{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"name": "entire-session-start", "type": "command", "command": "` + legacyCmd + `"}]}]
+  }
+}`
+	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := &GeminiCLIAgent{}
+	res, err := agent.InstallUserHooks(context.Background())
+	if err != nil {
+		t.Fatalf("InstallUserHooks() error = %v", err)
+	}
+	if !res.Repaired {
+		t.Error("replacing a legacy go-run entry must be reported as a repair")
+	}
+
+	current := productionCommandFor(t, "entire-session-start")
+	var sessionStartCount int
+	for _, e := range collectGeminiHookEntries(t, path) {
+		if e.Command == legacyCmd {
+			t.Errorf("legacy go-run entry still present after repair: %+v", e)
+		}
+		if e.Name == "entire-session-start" {
+			sessionStartCount++
+			if e.Command != current {
+				t.Errorf("session-start command after repair = %q, want current form %q", e.Command, current)
+			}
+		}
+	}
+	if sessionStartCount != 1 {
+		t.Errorf("entire-session-start entry count after repair = %d, want exactly 1", sessionStartCount)
+	}
+}
+
+// TestAreUserHooksInstalled_Gemini_PartialInstallReadsAsNotInstalled mirrors
+// the Claude Code completeness predicate: a user file with the SessionStart
+// entry intact but every other Entire entry deleted must read as
+// not-installed (status/doctor honesty) and the install must repair it
+// instead of short-circuiting on the surviving SessionStart entry.
+func TestAreUserHooksInstalled_Gemini_PartialInstallReadsAsNotInstalled(t *testing.T) {
+	home := setUserHome(t)
+	path := userGeminiSettingsPath(t, home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	cmdJSON, err := json.Marshal(productionCommandFor(t, "entire-session-start"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing := `{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"name": "entire-session-start", "type": "command", "command": ` + string(cmdJSON) + `}]}]
+  }
+}`
+	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := &GeminiCLIAgent{}
+	if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || ok {
+		t.Fatalf("partial file: AreUserHooksInstalled() = (%v, %v), want (false, nil)", ok, err)
+	}
+	res, err := agent.InstallUserHooks(context.Background())
+	if err != nil {
+		t.Fatalf("InstallUserHooks() error = %v", err)
+	}
+	if !res.Repaired {
+		t.Error("repairing a partial install must be reported as a repair")
+	}
+	if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || !ok {
+		t.Fatalf("after repair: AreUserHooksInstalled() = (%v, %v), want (true, nil)", ok, err)
+	}
+	counts := make(map[string]int)
+	for _, e := range collectGeminiHookEntries(t, path) {
+		if isEntireHookEntry(e) {
+			counts[e.Name]++
+		}
+	}
+	for name := range entireGeminiHookNames {
+		if counts[name] != 1 {
+			t.Errorf("entry %s count after repair = %d, want exactly 1", name, counts[name])
+		}
 	}
 }
 

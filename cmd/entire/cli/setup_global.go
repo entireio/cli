@@ -76,12 +76,16 @@ func installUserAgentHooks(ctx context.Context, w io.Writer) (succeeded, support
 	supports, unsupportedNames := agent.UserHookSupports()
 	for _, ua := range supports {
 		supported++
-		count, err := ua.Support.InstallUserHooks(ctx)
+		res, err := ua.Support.InstallUserHooks(ctx)
 		switch {
 		case err != nil:
 			fmt.Fprintf(w, "  ! %s: install failed: %v\n", ua.Name, err)
 			continue
-		case count == 0:
+		case res.Repaired:
+			// The file was rewritten (partial/duplicate/alternate-form install
+			// normalized) — "already installed" would claim nothing changed.
+			fmt.Fprintf(w, "  ✓ %s: hooks repaired\n", ua.Name)
+		case res.Installed == 0:
 			fmt.Fprintf(w, "  ✓ %s: already installed\n", ua.Name)
 		default:
 			fmt.Fprintf(w, "  ✓ %s: installed\n", ua.Name)

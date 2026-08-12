@@ -18,8 +18,9 @@ type UserHookSupport interface {
 	HookSupport
 
 	// InstallUserHooks installs Entire's hooks in the agent's user-level
-	// config. Idempotent: returns 0 when everything is already installed.
-	InstallUserHooks(ctx context.Context) (int, error)
+	// config. Idempotent: a fully current install is left untouched and
+	// reported as the zero result.
+	InstallUserHooks(ctx context.Context) (UserHookInstallResult, error)
 
 	// UninstallUserHooks removes Entire's hooks (and only Entire's) from the
 	// agent's user-level config. A missing config file is not an error.
@@ -31,6 +32,20 @@ type UserHookSupport interface {
 	// must not fold that into "not installed", which is how an EACCES-broken
 	// config once read as a repo the installer should overwrite.
 	AreUserHooksInstalled(ctx context.Context) (bool, error)
+}
+
+// UserHookInstallResult reports what a user-level hook install actually did,
+// so callers can tell an untouched file from a rewritten one. The zero value
+// means "already installed, nothing written".
+type UserHookInstallResult struct {
+	// Installed is the number of hook entries the install added that were not
+	// already present in current form.
+	Installed int
+	// Repaired reports that pre-existing Entire entries were rewritten
+	// (duplicates, alternate command forms, a partial install, or legacy
+	// config fields normalized) — the file changed even when Installed is 0,
+	// so "already installed" would be dishonest.
+	Repaired bool
 }
 
 // AsUserHookSupport returns the agent as UserHookSupport if it implements the

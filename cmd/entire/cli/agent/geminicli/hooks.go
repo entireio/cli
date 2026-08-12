@@ -43,11 +43,15 @@ const GeminiSettingsFileName = "settings.json"
 // (`entire `) would claim user-authored hooks that merely invoke the entire
 // CLI (e.g. `entire status --json > /tmp/s.json`) as ours — and the install
 // path's remove-then-add cycle would delete them on a plain `entire enable`.
-// The "go run" prefix is retained so hooks installed by older versions are
-// still recognized.
+// The "go run" prefixes cover every local-dev form older versions wrote
+// (oldest first: ${GEMINI_PROJECT_DIR}, unquoted rev-parse, quoted rev-parse),
+// so legacy installs are recognized by command and repaired to the current
+// form rather than relying on name-based claiming.
 var entireHookPrefixes = []string{
 	"entire hooks ",
 	agent.LocalDevHookScript + " hooks ",
+	"go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks ",
+	"go run $(git rev-parse --show-toplevel)/cmd/entire/main.go hooks ",
 	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks `,
 }
 
@@ -69,6 +73,110 @@ var entireGeminiHookNames = map[string]bool{
 	"entire-notification":          true,
 }
 
+// geminiHookSpec describes one hook entry a full install writes: the settings
+// section it lives in, the entry name, and the `entire hooks gemini`
+// subcommand behind its command string.
+type geminiHookSpec struct {
+	section  string
+	name     string
+	hookName string
+	// warnWrap selects the JSON-warning production wrapper (session-start,
+	// the one hook allowed to print) over the silent one.
+	warnWrap bool
+}
+
+// geminiHookSpecs is the full expected entry set — the completeness spec
+// behind the user-scope install and AreUserHooksInstalled. It must stay in
+// lockstep with what installHooksToFile writes; the fresh-install-reads-as-
+// installed regression test pins that.
+var geminiHookSpecs = []geminiHookSpec{
+	{"SessionStart", "entire-session-start", HookNameSessionStart, true},
+	{"SessionEnd", "entire-session-end-exit", HookNameSessionEnd, false},
+	{"SessionEnd", "entire-session-end-logout", HookNameSessionEnd, false},
+	{"BeforeAgent", "entire-before-agent", HookNameBeforeAgent, false},
+	{"AfterAgent", "entire-after-agent", HookNameAfterAgent, false},
+	{"BeforeModel", "entire-before-model", HookNameBeforeModel, false},
+	{"AfterModel", "entire-after-model", HookNameAfterModel, false},
+	{"BeforeToolSelection", "entire-before-tool-selection", HookNameBeforeToolSelection, false},
+	{"BeforeTool", "entire-before-tool", HookNameBeforeTool, false},
+	{"AfterTool", "entire-after-tool", HookNameAfterTool, false},
+	{"PreCompress", "entire-pre-compress", HookNamePreCompress, false},
+	{"Notification", "entire-notification", HookNameNotification, false},
+}
+
+// productionCommand returns the exact production command an install writes
+// for this spec.
+func (s geminiHookSpec) productionCommand() string {
+	cmd := "entire hooks gemini " + s.hookName
+	if s.warnWrap {
+		return agent.WrapProductionJSONWarningHookCommand(cmd, agent.WarningFormatSingleLine)
+	}
+	return agent.WrapProductionSilentHookCommand(cmd)
+}
+
+// userHooksCurrent is the user-scope completeness predicate: every expected
+// entry present, in current production form, in its section. "Any Entire hook
+// present" is not enough there — a file with SessionStart intact but the other
+// entries deleted would read as covered (status, doctor) and short-circuit the
+// install while most hooks never fire. Entries are matched by name+command
+// within the section, tolerating a user-adjusted matcher, mirroring the Claude
+// Code predicate's leniency.
+func userHooksCurrent(sections map[string]*[]GeminiHookMatcher) bool {
+	for _, spec := range geminiHookSpecs {
+		matchers := sections[spec.section]
+		if matchers == nil || !sectionHasEntry(*matchers, spec.name, spec.productionCommand()) {
+			return false
+		}
+	}
+	return true
+}
+
+func sectionHasEntry(matchers []GeminiHookMatcher, name, command string) bool {
+	for _, matcher := range matchers {
+		for _, hook := range matcher.Hooks {
+			if hook.Name == name && hook.Command == command {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hookSections exposes the managed hook sections keyed by their settings-file
+// key — the same shape installHooksToFile parses — so the completeness
+// predicate can run against either representation.
+func (h *GeminiHooks) hookSections() map[string]*[]GeminiHookMatcher {
+	return map[string]*[]GeminiHookMatcher{
+		"SessionStart":        &h.SessionStart,
+		"SessionEnd":          &h.SessionEnd,
+		"BeforeAgent":         &h.BeforeAgent,
+		"AfterAgent":          &h.AfterAgent,
+		"BeforeModel":         &h.BeforeModel,
+		"AfterModel":          &h.AfterModel,
+		"BeforeToolSelection": &h.BeforeToolSelection,
+		"BeforeTool":          &h.BeforeTool,
+		"AfterTool":           &h.AfterTool,
+		"PreCompress":         &h.PreCompress,
+		"Notification":        &h.Notification,
+	}
+}
+
+// areUserHooksCurrentInFile reports whether the settings file carries the FULL
+// expected Entire entry set in current production form — the user-scope
+// completeness predicate the user-scope install repairs to. A missing file is
+// an fs.ErrNotExist error, matching areHooksInstalledInFile.
+func areUserHooksCurrentInFile(settingsPath string) (bool, error) {
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from a fixed settings location
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", settingsPath, err)
+	}
+	var settings GeminiSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return false, fmt.Errorf("parse %s: %w", settingsPath, err)
+	}
+	return userHooksCurrent(settings.Hooks.hookSections()), nil
+}
+
 // InstallHooks installs Gemini CLI hooks in .gemini/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
@@ -85,13 +193,22 @@ func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, localDev bool, force 
 	}
 
 	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
-	return installHooksToFile(ctx, settingsPath, localDev, force)
+	count, _, err := installHooksToFile(ctx, settingsPath, localDev, force, false)
+	return count, err
 }
 
 // installHooksToFile installs Entire's Gemini CLI hooks into the settings
 // file at settingsPath, preserving every unrelated key. Shared by the
 // repo-level install above and the user-level install (InstallUserHooks).
-func installHooksToFile(ctx context.Context, settingsPath string, localDev, force bool) (int, error) {
+//
+// userScope switches the idempotency check from "the SessionStart entry is in
+// current form" to the full completeness predicate (userHooksCurrent): a
+// user-level file with SessionStart intact but other Entire entries deleted
+// must be repaired (strip ours, re-add the full set), not short-circuited.
+// repaired reports a user-scope rewrite that touched pre-existing Entire
+// entries or legacy fields, so the caller can report the repair instead of
+// "already installed". Repo-scope behavior is unchanged.
+func installHooksToFile(ctx context.Context, settingsPath string, localDev, force, userScope bool) (count int, repaired bool, err error) {
 	// Read existing settings if they exist
 	var rawSettings map[string]json.RawMessage
 
@@ -107,16 +224,16 @@ func installHooksToFile(ctx context.Context, settingsPath string, localDev, forc
 	switch {
 	case readErr == nil:
 		if err := json.Unmarshal(existingData, &rawSettings); err != nil {
-			return 0, fmt.Errorf("failed to parse existing %s: %w", settingsPath, err)
+			return 0, false, fmt.Errorf("failed to parse existing %s: %w", settingsPath, err)
 		}
 		if hooksRaw, ok := rawSettings["hooks"]; ok {
 			if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
-				return 0, fmt.Errorf("failed to parse hooks in %s: %w", settingsPath, err)
+				return 0, false, fmt.Errorf("failed to parse hooks in %s: %w", settingsPath, err)
 			}
 		}
 		if hooksConfigRaw, ok := rawSettings["hooksConfig"]; ok {
 			if err := json.Unmarshal(hooksConfigRaw, &hooksConfig); err != nil {
-				return 0, fmt.Errorf("failed to parse hooksConfig in %s: %w", settingsPath, err)
+				return 0, false, fmt.Errorf("failed to parse hooksConfig in %s: %w", settingsPath, err)
 			}
 		}
 	case errors.Is(readErr, fs.ErrNotExist):
@@ -125,7 +242,7 @@ func installHooksToFile(ctx context.Context, settingsPath string, localDev, forc
 		// Only a genuinely missing file means "start fresh". Any other read
 		// failure (permissions, I/O) must abort: proceeding would replace the
 		// user's whole settings file with an Entire-only one.
-		return 0, fmt.Errorf("failed to read %s: %w", settingsPath, readErr)
+		return 0, false, fmt.Errorf("failed to read %s: %w", settingsPath, readErr)
 	}
 
 	if rawHooks == nil {
@@ -148,11 +265,12 @@ func installHooksToFile(ctx context.Context, settingsPath string, localDev, forc
 		cmdPrefix = "entire hooks gemini "
 	}
 
-	// Parse only the hook types we need to modify
+	// Parse only the hook types we need to modify. The section map points at
+	// the local slices, so later reassignments stay visible through it.
 	var sessionStart, sessionEnd, beforeAgent, afterAgent []GeminiHookMatcher
 	var beforeModel, afterModel, beforeToolSelection []GeminiHookMatcher
 	var beforeTool, afterTool, preCompress, notification []GeminiHookMatcher
-	if err := parseGeminiHookSections(rawHooks, settingsPath, map[string]*[]GeminiHookMatcher{
+	sections := map[string]*[]GeminiHookMatcher{
 		"SessionStart":        &sessionStart,
 		"SessionEnd":          &sessionEnd,
 		"BeforeAgent":         &beforeAgent,
@@ -164,29 +282,27 @@ func installHooksToFile(ctx context.Context, settingsPath string, localDev, forc
 		"AfterTool":           &afterTool,
 		"PreCompress":         &preCompress,
 		"Notification":        &notification,
-	}); err != nil {
-		return 0, err
+	}
+	if err := parseGeminiHookSections(rawHooks, settingsPath, sections); err != nil {
+		return 0, false, err
 	}
 
-	// Check for idempotency BEFORE removing hooks.
-	// If the exact same hook command already exists, hooks are already installed.
-	// When cleanupDone, we still need to write the file to persist the cleanup,
-	// but we return 0 (not 12) so callers know no hooks were added.
-	if !force {
-		existingCmd := getFirstEntireHookCommand(sessionStart)
-		expectedCmd := cmdPrefix + "session-start"
-		if !localDev {
-			expectedCmd = agent.WrapProductionJSONWarningHookCommand(expectedCmd, agent.WarningFormatSingleLine)
+	// Check for idempotency BEFORE removing hooks. When cleanupDone, we still
+	// need to write the file to persist the cleanup, but we return 0 (not 12)
+	// so callers know no hooks were added.
+	if !force && installAlreadyCurrent(sections, cmdPrefix, localDev, userScope) {
+		if !cleanupDone {
+			return 0, false, nil // Already installed with same mode, nothing to write
 		}
-		if existingCmd == expectedCmd {
-			if !cleanupDone {
-				return 0, nil // Already installed with same mode, nothing to write
-			}
-			// Cleanup needed but hooks already installed — write cleaned rawHooks
-			// without running the full remove+add cycle.
-			return 0, writeGeminiSettingsFile(rawSettings, rawHooks, hooksConfig, settingsPath)
-		}
+		// The legacy-field cleanup rewrote an otherwise-current file: a
+		// repair, not "already installed".
+		return 0, userScope, writeGeminiSettingsFile(rawSettings, rawHooks, hooksConfig, settingsPath)
 	}
+
+	// A pre-existing Entire entry in any section means the rewrite below is a
+	// repair (partial, duplicate, legacy, or alternate-form install
+	// normalized), not a fresh install.
+	hadOurs := anyEntireHook(sections)
 
 	// Remove existing Entire hooks first (for clean installs and mode switching)
 	sessionStart = removeEntireHooks(sessionStart)
@@ -266,7 +382,7 @@ func installHooksToFile(ctx context.Context, settingsPath string, localDev, forc
 	// - before-tool, after-tool (2)
 	// - pre-compress (1)
 	// - notification (1)
-	count := 12
+	count = 12
 
 	// Marshal modified hook types back to rawHooks
 	marshalGeminiHookType(rawHooks, "SessionStart", sessionStart)
@@ -282,9 +398,36 @@ func installHooksToFile(ctx context.Context, settingsPath string, localDev, forc
 	marshalGeminiHookType(rawHooks, "Notification", notification)
 
 	if err := writeGeminiSettingsFile(rawSettings, rawHooks, hooksConfig, settingsPath); err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	return count, nil
+	return count, userScope && hadOurs, nil
+}
+
+// installAlreadyCurrent is installHooksToFile's idempotency check. User scope
+// requires the FULL entry set in current form (a partial file falls through to
+// the repair pass); repo scope keeps the historical check, where the
+// SessionStart entry in the exact current-mode form stands in for the whole
+// install.
+func installAlreadyCurrent(sections map[string]*[]GeminiHookMatcher, cmdPrefix string, localDev, userScope bool) bool {
+	if userScope {
+		return userHooksCurrent(sections)
+	}
+	expectedCmd := cmdPrefix + "session-start"
+	if !localDev {
+		expectedCmd = agent.WrapProductionJSONWarningHookCommand(expectedCmd, agent.WarningFormatSingleLine)
+	}
+	return getFirstEntireHookCommand(*sections["SessionStart"]) == expectedCmd
+}
+
+// anyEntireHook reports whether any managed section carries an entry
+// recognized as Entire's.
+func anyEntireHook(sections map[string]*[]GeminiHookMatcher) bool {
+	for _, matchers := range sections {
+		if hasEntireHook(*matchers) {
+			return true
+		}
+	}
+	return false
 }
 
 // stripLegacyHooksEnabledField removes the legacy "enabled" boolean that old
@@ -553,12 +696,18 @@ func isEntireHook(command string) bool {
 	return agent.IsManagedHookCommand(command, entireHookPrefixes)
 }
 
-// isEntireHookEntry reports whether a hook entry is Entire's: by its "name"
-// field (the identifier every install writes) or by its command's managed
-// prefix (covers entries whose name was hand-edited but whose command is
-// still ours).
+// isEntireHookEntry reports whether a hook entry is Entire's: by its
+// command's managed prefix (which covers every current and legacy form an
+// install ever wrote, including entries whose name was hand-edited), or — for
+// an entry with no command at all — by the reserved "name" InstallHooks
+// writes. A reserved name over a foreign command is NOT claimed: that is a
+// user-authored hook built from an Entire entry as a template, and claiming
+// it by name silently deleted it on install and uninstall.
 func isEntireHookEntry(hook GeminiHookEntry) bool {
-	return entireGeminiHookNames[hook.Name] || isEntireHook(hook.Command)
+	if isEntireHook(hook.Command) {
+		return true
+	}
+	return hook.Command == "" && entireGeminiHookNames[hook.Name]
 }
 
 // hasEntireHook checks if any hook in the matchers is an Entire hook

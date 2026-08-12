@@ -38,12 +38,13 @@ func UserSettingsPath() (string, error) {
 // and re-added in the current form, so a pre-existing alternate-form entry
 // can never double-fire alongside the one this install writes. Never touches
 // user-level permissions and preserves unrelated keys.
-func (c *ClaudeCodeAgent) InstallUserHooks(_ context.Context) (int, error) {
+func (c *ClaudeCodeAgent) InstallUserHooks(_ context.Context) (agent.UserHookInstallResult, error) {
 	settingsPath, err := UserSettingsPath()
 	if err != nil {
-		return 0, err
+		return agent.UserHookInstallResult{}, err
 	}
-	return installHooksToFile(settingsPath, false, false, false)
+	count, repaired, err := installHooksToFile(settingsPath, false, false, false)
+	return agent.UserHookInstallResult{Installed: count, Repaired: repaired}, err
 }
 
 // UninstallUserHooks removes Entire's hooks (and only Entire's) from

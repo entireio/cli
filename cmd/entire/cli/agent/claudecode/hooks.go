@@ -112,7 +112,8 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 	}
 
 	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
-	return installHooksToFile(settingsPath, localDev, force, true)
+	count, _, err := installHooksToFile(settingsPath, localDev, force, true)
+	return count, err
 }
 
 // readClaudeRawSettings reads and shallow-parses the settings file for a
@@ -206,10 +207,13 @@ func ensureMetadataDenyRule(rawPermissions map[string]json.RawMessage, settingsP
 // file at settingsPath. projectScope additionally maintains the repo-scoped
 // permissions.deny rule; the user-level install (InstallUserHooks) passes
 // false so it only ever touches the hooks section of ~/.claude/settings.json.
-func installHooksToFile(settingsPath string, localDev, force, projectScope bool) (int, error) {
+// repaired reports a user-scope rewrite that normalized pre-existing Entire
+// entries (rather than a pure add or a no-op), so the caller can report the
+// repair instead of "already installed".
+func installHooksToFile(settingsPath string, localDev, force, projectScope bool) (count int, repaired bool, err error) {
 	rawSettings, rawHooks, rawPermissions, err := readClaudeRawSettings(settingsPath, projectScope)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	// Parse only the hook types we need to modify
@@ -222,7 +226,7 @@ func installHooksToFile(settingsPath string, localDev, force, projectScope bool)
 		"PreToolUse":       &preToolUse,
 		"PostToolUse":      &postToolUse,
 	}); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	// Presence checks run against these pre-removal snapshots so a user-scope
@@ -253,8 +257,6 @@ func installHooksToFile(settingsPath string, localDev, force, projectScope bool)
 	}
 
 	cmds := buildClaudeHookCommands(localDev)
-
-	count := 0
 
 	// The local-dev SessionEnd hook gets an explicit timeout so Claude Code
 	// waits for it on exit; every other hook (and all production hooks) keeps
@@ -303,7 +305,7 @@ func installHooksToFile(settingsPath string, localDev, force, projectScope bool)
 	if projectScope {
 		changed, err := ensureMetadataDenyRule(rawPermissions, settingsPath)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		permissionsChanged = changed
 	}
@@ -313,7 +315,7 @@ func installHooksToFile(settingsPath string, localDev, force, projectScope bool)
 	// (removedOurs > entireClaudeHookCount means duplicates or alternate-form
 	// entries were repaired away and the file must be rewritten).
 	if count == 0 && !permissionsChanged && (!userScope || removedOurs == entireClaudeHookCount) {
-		return 0, nil
+		return 0, false, nil
 	}
 
 	// Marshal modified hook types back to rawHooks
@@ -327,7 +329,7 @@ func installHooksToFile(settingsPath string, localDev, force, projectScope bool)
 	// Marshal hooks and update raw settings
 	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 	if err != nil {
-		return 0, fmt.Errorf("failed to marshal hooks: %w", err)
+		return 0, false, fmt.Errorf("failed to marshal hooks: %w", err)
 	}
 	rawSettings["hooks"] = hooksJSON
 
@@ -335,26 +337,29 @@ func installHooksToFile(settingsPath string, localDev, force, projectScope bool)
 	if projectScope {
 		permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
 		if err != nil {
-			return 0, fmt.Errorf("failed to marshal permissions: %w", err)
+			return 0, false, fmt.Errorf("failed to marshal permissions: %w", err)
 		}
 		rawSettings["permissions"] = permJSON
 	}
 
 	// Write back to file
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
-		return 0, fmt.Errorf("failed to create .claude directory: %w", err)
+		return 0, false, fmt.Errorf("failed to create .claude directory: %w", err)
 	}
 
 	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
 	if err != nil {
-		return 0, fmt.Errorf("failed to marshal settings: %w", err)
+		return 0, false, fmt.Errorf("failed to marshal settings: %w", err)
 	}
 
 	if err := jsonutil.WriteFileAtomicFollowingSymlinks(settingsPath, output, 0o600); err != nil {
-		return 0, fmt.Errorf("failed to write %s: %w", settingsPath, err)
+		return 0, false, fmt.Errorf("failed to write %s: %w", settingsPath, err)
 	}
 
-	return count, nil
+	// A user-scope write that stripped pre-existing Entire entries is a repair
+	// (partial, duplicate, or alternate-form install normalized), not a pure
+	// add: the file the user had was changed beyond appending new hooks.
+	return count, userScope && removedOurs > 0, nil
 }
 
 // parseHookSections parses the hook types Entire manages out of rawHooks. A

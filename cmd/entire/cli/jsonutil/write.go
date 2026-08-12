@@ -28,19 +28,6 @@ import (
 //
 // perm is applied to the temp file via Chmod before rename so the final file
 // lands with the requested permission regardless of the temp file's default.
-// WriteFileAtomicFollowingSymlinks writes like WriteFileAtomic but resolves a
-// symlinked filePath first and writes through to its target. The atomic
-// rename would otherwise replace the symlink with a regular file — dotfile
-// managers commonly symlink user-level config files, and replacing the link
-// silently detaches the managed target. Falls back to the literal path when
-// resolution fails (typically: the file does not exist yet).
-func WriteFileAtomicFollowingSymlinks(filePath string, data []byte, perm fs.FileMode) error {
-	if resolved, err := filepath.EvalSymlinks(filePath); err == nil {
-		filePath = resolved
-	}
-	return WriteFileAtomic(filePath, data, perm)
-}
-
 func WriteFileAtomic(filePath string, data []byte, perm fs.FileMode) error {
 	dir := filepath.Dir(filePath)
 	base := filepath.Base(filePath)
@@ -82,4 +69,65 @@ func WriteFileAtomic(filePath string, data []byte, perm fs.FileMode) error {
 		_ = d.Close()
 	}
 	return nil
+}
+
+// WriteFileAtomicFollowingSymlinks writes like WriteFileAtomic but resolves a
+// symlinked filePath first and writes through to its ultimate target — dotfile
+// managers commonly symlink user-level config files, and the atomic rename
+// would otherwise replace the link with a regular file, silently detaching the
+// managed target. A dangling link (stow/chezmoi create the link before the
+// target file exists) is followed to its target so the file is created THROUGH
+// the link; only a final component that is genuinely not a symlink falls back
+// to the literal path.
+//
+// When the resolved target already exists its file mode is preserved; perm
+// applies only when the write creates the file.
+func WriteFileAtomicFollowingSymlinks(filePath string, data []byte, perm fs.FileMode) error {
+	target := resolveWriteTarget(filePath)
+	if info, err := os.Stat(target); err == nil && info.Mode().IsRegular() {
+		perm = info.Mode().Perm()
+	}
+	return WriteFileAtomic(target, data, perm)
+}
+
+// maxSymlinkHops bounds the manual final-component symlink walk in
+// resolveWriteTarget; 40 matches the Linux kernel's total-link-traversal cap.
+const maxSymlinkHops = 40
+
+// resolveWriteTarget resolves filePath to the path a write should land on,
+// following symlinks through the final component even when the link target
+// does not exist yet. filepath.EvalSymlinks alone cannot do this: it errors on
+// a dangling link exactly like on a missing file, and treating that error as
+// "no symlink here" is how an existing dangling settings.json link got
+// replaced by a regular file.
+func resolveWriteTarget(filePath string) string {
+	path := filePath
+	for range maxSymlinkHops {
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			return resolved
+		}
+		// Some component of path does not exist. Resolve the parent so the
+		// temp file and rename land in the real directory, then follow the
+		// final component by hand if it is a dangling symlink.
+		if resolvedDir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
+			path = filepath.Join(resolvedDir, filepath.Base(path))
+		}
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&fs.ModeSymlink == 0 {
+			// The final component is genuinely absent (create it here) or not
+			// a symlink — the literal path is the write target.
+			return path
+		}
+		target, err := os.Readlink(path)
+		if err != nil {
+			return path
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(path), target)
+		}
+		path = target
+	}
+	// Hop cap exceeded (a link cycle); the kernel would fail this path with
+	// ELOOP, so let the write surface whatever error the last hop produces.
+	return path
 }
