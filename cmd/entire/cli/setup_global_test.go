@@ -189,6 +189,7 @@ func TestMaybeMigrateGlobalRuntimeData_MovesRoutedFiles(t *testing.T) {
 // that worktree's invisible-routing namespace into its .entire; a sibling
 // worktree's in-flight runtime data stays untouched in the git common dir.
 func TestMaybeMigrateGlobalRuntimeData_MigratesOnlyCurrentWorktreeNamespace(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	dir := t.TempDir()
 	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = resolved
