@@ -199,7 +199,7 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 				Value(&enable),
 		),
 	)
-	if err := form.Run(); err != nil {
+	if err := form.RunWithContext(ctx); err != nil {
 		// Ctrl-C stays silent (nothing saved, a later enable asks again);
 		// any other prompt failure must at least be diagnosable.
 		if !errors.Is(err, huh.ErrUserAborted) && !errors.Is(err, context.Canceled) {
