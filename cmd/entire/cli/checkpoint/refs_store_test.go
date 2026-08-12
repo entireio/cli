@@ -2,6 +2,7 @@ package checkpoint
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	git "github.com/go-git/go-git/v6"
@@ -116,6 +117,457 @@ func TestGitRefsStore_OnDemandRefFetch_FailurePropagates(t *testing.T) {
 		require.NoError(t, err, "a genuinely absent checkpoint reads as not-found")
 		assert.Nil(t, summary)
 	})
+}
+
+// TestGitRefsStore_BackfillFetchesMissingRef: a backfill targets an EXISTING
+// checkpoint, which may have been written or migrated on another machine — so
+// like reads, backfills must on-demand fetch a ref that is missing locally
+// before declaring the checkpoint absent. Otherwise the backfill is handled
+// as targeting a nonexistent checkpoint while reads — which DO fetch — serve
+// the refs copy, and the backfilled data is permanently invisible.
+func TestGitRefsStore_BackfillFetchesMissingRef(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	backfills := map[string]struct {
+		makeReq func(cid id.CheckpointID) WriteRequest
+		verify  func(t *testing.T, store *gitRefsStore, cid id.CheckpointID)
+	}{
+		"summary": {
+			makeReq: func(cid id.CheckpointID) WriteRequest {
+				return SessionSummary{CheckpointID: cid, Summary: &Summary{Intent: "fetched intent"}}
+			},
+			verify: func(t *testing.T, store *gitRefsStore, cid id.CheckpointID) {
+				t.Helper()
+				meta, err := store.ReadSessionMetadata(context.Background(), cid, 0)
+				require.NoError(t, err)
+				require.NotNil(t, meta.Summary)
+				assert.Equal(t, "fetched intent", meta.Summary.Intent)
+			},
+		},
+		"transcript": {
+			makeReq: func(cid id.CheckpointID) WriteRequest {
+				return SessionTranscript{
+					CheckpointID: cid,
+					SessionID:    "sess-1",
+					Transcript:   redact.AlreadyRedacted([]byte("finalized")),
+				}
+			},
+			verify: func(t *testing.T, store *gitRefsStore, cid id.CheckpointID) {
+				t.Helper()
+				content, err := store.ReadSessionContent(context.Background(), cid, 0)
+				require.NoError(t, err)
+				assert.Equal(t, []byte("finalized"), content.Transcript)
+			},
+		},
+		"attribution": {
+			makeReq: func(cid id.CheckpointID) WriteRequest {
+				return CheckpointAttribution{CheckpointID: cid, Attribution: &Attribution{AgentLines: 3}}
+			},
+			verify: func(t *testing.T, store *gitRefsStore, cid id.CheckpointID) {
+				t.Helper()
+				summary, err := store.Read(context.Background(), cid)
+				require.NoError(t, err)
+				require.NotNil(t, summary)
+				require.NotNil(t, summary.CombinedAttribution)
+				assert.Equal(t, 3, summary.CombinedAttribution.AgentLines)
+			},
+		},
+	}
+
+	for name, tc := range backfills {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := newRefsStore(t)
+			cid := id.MustCheckpointID("a1b2c3d4e5f6")
+			refsWrite(t, store, cid, "sess-1", "transcript")
+
+			ref, err := store.repo.Reference(mustRefName(t, cid), true)
+			require.NoError(t, err)
+			commitHash := ref.Hash()
+			require.NoError(t, store.repo.Storer.RemoveReference(mustRefName(t, cid)))
+
+			fetched := 0
+			store.SetRefFetcher(func(_ context.Context, rn plumbing.ReferenceName) error {
+				fetched++
+				return store.repo.Storer.SetReference(plumbing.NewHashReference(rn, commitHash))
+			})
+
+			require.NoError(t, store.Write(ctx, tc.makeReq(cid)),
+				"a backfill must fetch the missing ref instead of declaring the checkpoint absent")
+			assert.Equal(t, 1, fetched, "fetcher invoked once for the missing ref")
+
+			// The write must have landed on the fetched history, not orphaned
+			// over it: the new tip's parent is the pre-removal commit.
+			newRef, err := store.repo.Reference(mustRefName(t, cid), true)
+			require.NoError(t, err)
+			newTip, err := store.repo.CommitObject(newRef.Hash())
+			require.NoError(t, err)
+			require.Len(t, newTip.ParentHashes, 1)
+			assert.Equal(t, commitHash, newTip.ParentHashes[0],
+				"the backfill commit must parent on the fetched tip")
+
+			tc.verify(t, store, cid)
+		})
+	}
+}
+
+// TestGitRefsStore_BackfillLocalRefNeverFetches pins the zero-cost claim: a
+// backfill whose ref exists locally must not touch the remote — otherwise
+// every summary/attribution/transcript backfill pays a network round-trip and
+// offline finalization breaks.
+func TestGitRefsStore_BackfillLocalRefNeverFetches(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	refsWrite(t, store, cid, "sess-1", "transcript")
+	store.SetRefFetcher(func(_ context.Context, _ plumbing.ReferenceName) error {
+		t.Error("a backfill with a locally-present ref must not fetch")
+		return nil
+	})
+
+	require.NoError(t, store.Write(context.Background(), SessionSummary{
+		CheckpointID: cid,
+		Summary:      &Summary{Intent: "local"},
+	}))
+}
+
+// TestGitRefsStore_BackfillFetchFailureAborts: a failed fetch is a transient
+// availability problem, not evidence of absence. The backfill must surface it
+// as a real error — NOT ErrCheckpointNotFound, which callers treat as "the
+// checkpoint does not exist in this backend", a signal a routing layer may
+// act on to select a different backend (forking the write onto a stale copy).
+func TestGitRefsStore_BackfillFetchFailureAborts(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	store.SetRefFetcher(func(_ context.Context, _ plumbing.ReferenceName) error {
+		return assert.AnError // offline / network failure
+	})
+
+	err := store.Write(context.Background(), SessionSummary{
+		CheckpointID: id.MustCheckpointID("ffffffffffff"),
+		Summary:      &Summary{Intent: "must not land"},
+	})
+	require.ErrorIs(t, err, assert.AnError, "the fetch failure must surface")
+	require.NotErrorIs(t, err, ErrCheckpointNotFound,
+		"a fetch failure must not read as absence")
+}
+
+// TestGitRefsStore_RemoteAbsenceFromFetcherIsNotFound pins the classification
+// chain for a fetcher that reports "the remote has no such ref" by wrapping
+// plumbing.ErrReferenceNotFound (remote.FetchCheckpointRef's absence signal):
+// both backfills and reads must treat it as checkpoint-not-found, not as a
+// hard failure.
+func TestGitRefsStore_RemoteAbsenceFromFetcherIsNotFound(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newRefsStore(t)
+	store.SetRefFetcher(func(_ context.Context, rn plumbing.ReferenceName) error {
+		return fmt.Errorf("checkpoint ref %s not found on origin: %w", rn, plumbing.ErrReferenceNotFound)
+	})
+
+	err := store.Write(ctx, SessionSummary{
+		CheckpointID: id.MustCheckpointID("ffffffffffff"),
+		Summary:      &Summary{Intent: "orphan"},
+	})
+	require.ErrorIs(t, err, ErrCheckpointNotFound, "remote absence must classify as not-found for backfills")
+
+	summary, err := store.Read(ctx, id.MustCheckpointID("ffffffffffff"))
+	require.NoError(t, err)
+	assert.Nil(t, summary, "remote absence must classify as not-found for reads")
+}
+
+// TestGitRefsStore_FetchFailureMemoized: a transport-level fetch failure is
+// remembered for the store's lifetime, so a loop backfilling N checkpoints on
+// a dead network pays the outage once instead of N times (stop hooks finalize
+// every checkpoint of a turn). The memoized error stays a hard error — never
+// absence. Genuine remote absence is NOT memoized (per-ref, not an outage).
+func TestGitRefsStore_FetchFailureMemoized(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("transport failure fetched once", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		calls := 0
+		store.SetRefFetcher(func(_ context.Context, _ plumbing.ReferenceName) error {
+			calls++
+			return assert.AnError
+		})
+
+		for _, cid := range []string{"aaaaaaaaaaaa", "bbbbbbbbbbbb"} {
+			err := store.Write(ctx, SessionSummary{
+				CheckpointID: id.MustCheckpointID(cid),
+				Summary:      &Summary{Intent: "x"},
+			})
+			require.ErrorIs(t, err, assert.AnError)
+			require.NotErrorIs(t, err, ErrCheckpointNotFound)
+		}
+		assert.Equal(t, 1, calls, "the outage must be paid once, not per checkpoint")
+	})
+
+	t.Run("caller cancellation not memoized", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		calls := 0
+		cancelCtx, cancel := context.WithCancel(context.Background())
+		store.SetRefFetcher(func(_ context.Context, _ plumbing.ReferenceName) error {
+			calls++
+			cancel() // the CALLER's context dies mid-fetch (e.g. Ctrl-C)
+			return context.Canceled
+		})
+		err := store.Write(cancelCtx, SessionSummary{
+			CheckpointID: id.MustCheckpointID("aaaaaaaaaaaa"),
+			Summary:      &Summary{Intent: "x"},
+		})
+		require.Error(t, err)
+
+		// A later fetch on the same store must still run: the cancellation
+		// said nothing about the network.
+		store.SetRefFetcher(func(_ context.Context, _ plumbing.ReferenceName) error {
+			calls++
+			return assert.AnError
+		})
+		err = store.Write(context.Background(), SessionSummary{
+			CheckpointID: id.MustCheckpointID("bbbbbbbbbbbb"),
+			Summary:      &Summary{Intent: "x"},
+		})
+		require.ErrorIs(t, err, assert.AnError)
+		assert.Equal(t, 2, calls, "a caller cancellation must not be memoized as a network failure")
+	})
+
+	t.Run("remote absence not memoized", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		calls := 0
+		store.SetRefFetcher(func(_ context.Context, rn plumbing.ReferenceName) error {
+			calls++
+			return fmt.Errorf("ref %s not on remote: %w", rn, plumbing.ErrReferenceNotFound)
+		})
+
+		for _, cid := range []string{"aaaaaaaaaaaa", "bbbbbbbbbbbb"} {
+			err := store.Write(ctx, SessionSummary{
+				CheckpointID: id.MustCheckpointID(cid),
+				Summary:      &Summary{Intent: "x"},
+			})
+			require.ErrorIs(t, err, ErrCheckpointNotFound)
+		}
+		assert.Equal(t, 2, calls, "absence is per-ref and must not suppress later fetches")
+	})
+}
+
+// TestGitRefsStore_BackfillAbsentAfterFetchIsNotFound pins the genuine-absence
+// contract: a fetch that succeeds but restores no ref means the checkpoint
+// really does not exist in this backend, and the backfill reports the
+// not-found sentinel (which a routing layer may legitimately act on).
+func TestGitRefsStore_BackfillAbsentAfterFetchIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	store.SetRefFetcher(func(_ context.Context, _ plumbing.ReferenceName) error {
+		return nil // fetch "succeeds" but the remote has no such ref
+	})
+
+	err := store.Write(context.Background(), SessionSummary{
+		CheckpointID: id.MustCheckpointID("ffffffffffff"),
+		Summary:      &Summary{Intent: "orphan"},
+	})
+	require.ErrorIs(t, err, ErrCheckpointNotFound)
+}
+
+// TestGitRefsStore_CreateNeverFetches pins the deliberate split: a create's
+// ref never exists yet (locally or remotely), so writeSession must not probe
+// the remote — fetch-on-create would add a doomed network round-trip to every
+// condensation and break offline writes.
+func TestGitRefsStore_CreateNeverFetches(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	store.SetRefFetcher(func(_ context.Context, _ plumbing.ReferenceName) error {
+		t.Error("a create must never invoke the ref fetcher")
+		return nil
+	})
+
+	refsWrite(t, store, id.MustCheckpointID("a1b2c3d4e5f6"), "sess-new", "fresh transcript")
+}
+
+// TestGitRefsStore_ListRemoteDiscovery exercises the git-refs List remote-ref
+// discovery that fixes #1770: on a second device, a checkpoint written
+// elsewhere has no local ref, so a purely local List shows zero. With discovery
+// opted in (WithRemoteListDiscovery) and a remote lister configured, List
+// enumerates the checkpoint remote (names only) and surfaces the not-yet-local
+// checkpoint; a later read hydrates it.
+func TestGitRefsStore_ListRemoteDiscovery(t *testing.T) {
+	t.Parallel()
+
+	// A ULID that exists only "on the remote" (never written locally).
+	remoteOnly := id.CheckpointID("01KVBJCWYA4YW6J5M9GP655HZN")
+	remoteOnlyRef := mustRefName(t, remoteOnly)
+	//nolint:unparam // test fake mirrors RemoteRefListFunc's (…, error) signature; it always succeeds here.
+	lister := func(context.Context) ([]plumbing.ReferenceName, error) {
+		return []plumbing.ReferenceName{remoteOnlyRef}, nil
+	}
+
+	ids := func(infos []CheckpointInfo) map[id.CheckpointID]struct{} {
+		out := make(map[id.CheckpointID]struct{}, len(infos))
+		for _, info := range infos {
+			out[info.CheckpointID] = struct{}{}
+		}
+		return out
+	}
+
+	t.Run("discovers remote-only checkpoint when opted in", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+		store.SetRemoteRefLister(lister)
+
+		infos, err := store.List(WithRemoteListDiscovery(context.Background()))
+		require.NoError(t, err)
+		got := ids(infos)
+		assert.Contains(t, got, local, "local checkpoint still listed")
+		assert.Contains(t, got, remoteOnly, "remote-only checkpoint discovered via ls-remote")
+
+		// The discovered entry carries the ULID's embedded creation time, so it
+		// sorts by real recency without an object fetch.
+		for _, info := range infos {
+			if info.CheckpointID == remoteOnly {
+				assert.False(t, info.CreatedAt.IsZero(), "discovered ULID checkpoint should carry its embedded creation time")
+			}
+		}
+	})
+
+	t.Run("stays local-only without the discovery marker", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+		store.SetRemoteRefLister(lister)
+
+		infos, err := store.List(context.Background())
+		require.NoError(t, err)
+		got := ids(infos)
+		assert.Contains(t, got, local)
+		assert.NotContains(t, got, remoteOnly, "no enumeration without WithRemoteListDiscovery (keeps the hot path network-free)")
+	})
+
+	t.Run("stays local-only when no lister is configured", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+
+		infos, err := store.List(WithRemoteListDiscovery(context.Background()))
+		require.NoError(t, err)
+		got := ids(infos)
+		assert.Contains(t, got, local)
+		assert.NotContains(t, got, remoteOnly)
+	})
+
+	t.Run("does not duplicate a checkpoint already present locally", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+		// The lister also advertises the checkpoint that already exists locally.
+		store.SetRemoteRefLister(func(context.Context) ([]plumbing.ReferenceName, error) {
+			return []plumbing.ReferenceName{mustRefName(t, local), remoteOnlyRef}, nil
+		})
+
+		infos, err := store.List(WithRemoteListDiscovery(context.Background()))
+		require.NoError(t, err)
+		count := 0
+		for _, info := range infos {
+			if info.CheckpointID == local {
+				count++
+			}
+		}
+		assert.Equal(t, 1, count, "a locally-present checkpoint advertised by the remote is not duplicated")
+	})
+
+	t.Run("enumeration failure degrades to local-only", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+		store.SetRemoteRefLister(func(context.Context) ([]plumbing.ReferenceName, error) {
+			return nil, assert.AnError // e.g. offline / ls-remote failed
+		})
+
+		infos, err := store.List(WithRemoteListDiscovery(context.Background()))
+		require.NoError(t, err, "a remote enumeration failure must not fail the whole listing")
+		got := ids(infos)
+		assert.Contains(t, got, local, "local checkpoints remain listed when discovery fails")
+		assert.NotContains(t, got, remoteOnly)
+	})
+}
+
+// TestHydrateListedCheckpointInfo covers the trail-871 gap: a names-only List
+// stub has empty SessionID, so --session filters would silently drop it until
+// the checkpoint is read. HydrateListedCheckpointInfo fills session identity
+// from the store (triggering on-demand fetch when configured) so filters match.
+func TestHydrateListedCheckpointInfo(t *testing.T) {
+	t.Parallel()
+
+	store := newRefsStore(t)
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	refsWrite(t, store, cid, "session-from-device-a", "transcript")
+
+	stub := remoteDiscoveredInfo(cid)
+	require.True(t, listedCheckpointNeedsHydration(stub))
+	require.True(t, stub.ListedStub)
+	require.Empty(t, stub.SessionID)
+	require.Zero(t, stub.SessionCount)
+
+	hydrated := HydrateListedCheckpointInfo(context.Background(), store, stub)
+	assert.Equal(t, "session-from-device-a", hydrated.SessionID)
+	assert.Equal(t, 1, hydrated.SessionCount)
+	assert.Equal(t, []string{"session-from-device-a"}, hydrated.SessionIDs)
+	assert.False(t, listedCheckpointNeedsHydration(hydrated))
+	assert.False(t, hydrated.ListedStub)
+
+	// Already-hydrated infos are returned unchanged (no redundant reads needed
+	// for the session-filter path once collectCheckpoint has cached them).
+	again := HydrateListedCheckpointInfo(context.Background(), store, hydrated)
+	assert.Equal(t, hydrated, again)
+
+	// Missing checkpoint: fail-once clears ListedStub so callers do not re-fetch,
+	// but leaves SessionID empty so listing can still surface the ID.
+	missing := remoteDiscoveredInfo(id.CheckpointID("01KVBJCWYA4YW6J5M9GP655HZN"))
+	failed := HydrateListedCheckpointInfo(context.Background(), store, missing)
+	assert.Equal(t, missing.CheckpointID, failed.CheckpointID)
+	assert.Empty(t, failed.SessionID)
+	assert.False(t, failed.ListedStub, "failed hydration must clear ListedStub (fail-once)")
+	assert.False(t, listedCheckpointNeedsHydration(failed))
+}
+
+// TestHydrateListedCheckpointInfo_MatchesLocalList pins the field mapping shared
+// with readCommittedInfoFromCheckpointTree: hydrating a stub for a locally
+// present checkpoint must yield the same CheckpointInfo that List returns for
+// it. Deliberate CreatedAt divergence (documented on HydrateListedCheckpointInfo):
+// local List assigns meta.CreatedAt unconditionally; hydration only overwrites
+// when non-zero (keeping ULID-derived time). A normal refsWrite has non-zero
+// CreatedAt, so both paths agree here.
+func TestHydrateListedCheckpointInfo_MatchesLocalList(t *testing.T) {
+	t.Parallel()
+
+	store := newRefsStore(t)
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	refsWrite(t, store, cid, "session-from-device-a", "transcript")
+
+	infos, err := store.List(context.Background())
+	require.NoError(t, err)
+	var local CheckpointInfo
+	for _, info := range infos {
+		if info.CheckpointID == cid {
+			local = info
+			break
+		}
+	}
+	require.Equal(t, cid, local.CheckpointID)
+	require.False(t, local.ListedStub)
+
+	hydrated := HydrateListedCheckpointInfo(context.Background(), store, remoteDiscoveredInfo(cid))
+	assert.Equal(t, local, hydrated)
 }
 
 func TestGitRefsStore_WriteAllVariantsAndRead(t *testing.T) {
@@ -284,4 +736,53 @@ func TestGitRefsStore_BackfillUnknownCheckpointNotFound(t *testing.T) {
 	summary, err := store.Read(ctx, cid)
 	require.NoError(t, err)
 	assert.Nil(t, summary)
+}
+
+// TestGitRefsStore_WriteRefusesCanceledContext pins that a canceled context
+// stops the refs store from minting checkpoints — see writeSession for why.
+func TestGitRefsStore_WriteRefusesCanceledContext(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := store.Write(ctx, Session{
+		CheckpointID: cid,
+		SessionID:    "sess-1",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("transcript")),
+		AuthorName:   "Test Author",
+		AuthorEmail:  "test@example.com",
+	})
+	require.ErrorIs(t, err, context.Canceled)
+
+	_, refErr := store.repo.Reference(mustRefName(t, cid), true)
+	assert.ErrorIs(t, refErr, plumbing.ErrReferenceNotFound,
+		"a write refused for cancellation must not leave a checkpoint ref behind")
+}
+
+// TestGitRefsStore_EnqueuesForPushDuringShutdown pins that a ref written during
+// shutdown is still queued for push — see enqueueForPush for why dropping the
+// record would strand the checkpoint locally forever.
+func TestGitRefsStore_EnqueuesForPushDuringShutdown(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	head, err := store.repo.Head()
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.NoError(t, store.setRef(ctx, cid, head.Hash()))
+
+	q, err := PushQueueForRepo(context.Background(), store.repo)
+	require.NoError(t, err)
+	refs, err := q.Drain()
+	require.NoError(t, err)
+	assert.Contains(t, refs, mustRefName(t, cid),
+		"a ref written during shutdown must still be queued for push")
 }

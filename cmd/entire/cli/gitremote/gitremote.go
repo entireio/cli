@@ -107,6 +107,34 @@ func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, err
 	return strings.TrimSpace(string(output)), nil
 }
 
+// GetPushURLs returns every URL a push to remoteName delivers to, in the order
+// git will use them.
+//
+// A remote's push destinations are remote.<name>.pushurl when any is set and its
+// remote.<name>.url otherwise (git's push_url_of_remote), and BOTH may repeat —
+// git pushes to all of them, in config order. So this, not GetRemoteURL,
+// describes where a push actually goes; GetRemoteURL reports the FETCH URL,
+// which can name a different repository entirely.
+//
+// Returns at least one entry on success.
+func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", "--push", "--all", remoteName)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("remote %q not found", remoteName)
+	}
+	var urls []string
+	for _, line := range strings.Split(string(output), "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			urls = append(urls, trimmed)
+		}
+	}
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("remote %q has no push URL", remoteName)
+	}
+	return urls, nil
+}
+
 // ParseURL parses a git remote URL (SSH SCP-style or HTTPS) into its components.
 func ParseURL(rawURL string) (*Info, error) {
 	rawURL = strings.TrimSpace(rawURL)
@@ -180,6 +208,22 @@ func RedactURL(rawURL string) string {
 	u.User = nil
 	u.RawQuery = ""
 	return u.Scheme + "://" + u.Host + u.Path
+}
+
+// RedactURLOrPath renders a remote for display with any credentials removed,
+// accepting values that are not URLs at all.
+//
+// RedactURL cannot be applied blanket-fashion: it round-trips through url.Parse
+// and rebuilds "scheme://host/path", so a bare filesystem path like
+// /srv/repo.git comes back as ":///srv/repo.git" and a bare word like "origin"
+// as "://origin". Those inputs carry no credentials, so they pass through
+// unchanged. Use this wherever the value may be a remote name, a local path, or
+// a URL — i.e. anywhere a push/fetch target is shown to a user.
+func RedactURLOrPath(remote string) string {
+	if strings.Contains(remote, "://") || strings.Contains(remote, "@") {
+		return RedactURL(remote)
+	}
+	return remote
 }
 
 // ResolveRemoteRepo returns the forge identifier, owner, and repo name for the

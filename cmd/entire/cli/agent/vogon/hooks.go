@@ -21,6 +21,8 @@ const (
 	HookNameSessionEnd       = "session-end"
 	HookNameStop             = "stop"
 	HookNameUserPromptSubmit = "user-prompt-submit"
+	HookNamePreTask          = "pre-task"
+	HookNamePostTask         = "post-task"
 )
 
 // HookNames returns the hooks the vogon agent supports.
@@ -30,6 +32,8 @@ func (v *Agent) HookNames() []string {
 		HookNameSessionEnd,
 		HookNameStop,
 		HookNameUserPromptSubmit,
+		HookNamePreTask,
+		HookNamePostTask,
 	}
 }
 
@@ -58,6 +62,37 @@ func (v *Agent) ParseHookEvent(_ context.Context, hookName string, stdin io.Read
 
 	case HookNameSessionEnd:
 		return parseSessionInfoEvent(stdin, agent.SessionEnd)
+
+	case HookNamePreTask:
+		raw, err := agent.ReadAndParseHookInput[taskRaw](stdin)
+		if err != nil {
+			return nil, err
+		}
+		return &agent.Event{
+			Type:            agent.SubagentStart,
+			SessionID:       raw.SessionID,
+			SessionRef:      raw.TranscriptPath,
+			ToolUseID:       raw.ToolUseID,
+			SubagentType:    raw.SubagentType,
+			TaskDescription: raw.Description,
+			Timestamp:       time.Now(),
+		}, nil
+
+	case HookNamePostTask:
+		raw, err := agent.ReadAndParseHookInput[taskRaw](stdin)
+		if err != nil {
+			return nil, err
+		}
+		return &agent.Event{
+			Type:            agent.SubagentEnd,
+			SessionID:       raw.SessionID,
+			SessionRef:      raw.TranscriptPath,
+			ToolUseID:       raw.ToolUseID,
+			SubagentID:      raw.AgentID,
+			SubagentType:    raw.SubagentType,
+			TaskDescription: raw.Description,
+			Timestamp:       time.Now(),
+		}, nil
 
 	default:
 		return nil, nil //nolint:nilnil // Unknown hooks have no lifecycle action
@@ -108,6 +143,19 @@ type sessionInfoRaw struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
 	Model          string `json:"model,omitempty"`
+}
+
+// taskRaw is the payload for pre-task / post-task. Unlike Claude Code, vogon
+// passes the subagent type, description and agent ID as flat fields rather than
+// nested under tool_input/tool_response — the dispatcher accepts either, and flat
+// fields keep the fake agent's payload readable.
+type taskRaw struct {
+	SessionID      string `json:"session_id"`
+	TranscriptPath string `json:"transcript_path"`
+	ToolUseID      string `json:"tool_use_id"`
+	AgentID        string `json:"agent_id,omitempty"`
+	SubagentType   string `json:"subagent_type,omitempty"`
+	Description    string `json:"description,omitempty"`
 }
 
 type userPromptSubmitRaw struct {

@@ -18,7 +18,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-// RewindPoint mirrors the rewind --list JSON output.
+// RewindPoint mirrors the `checkpoint list --pending --json` JSON output.
 type RewindPoint struct {
 	ID               string    `json:"id"`
 	Message          string    `json:"message"`
@@ -168,6 +168,36 @@ func CreateBranch(t *testing.T, dir string, name string) {
 	cmd.Env = GitIsolatedEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git branch %s: %v\n%s", name, err, out)
+	}
+}
+
+// AddRemote adds a git remote named name pointing at url in repoDir.
+func AddRemote(t *testing.T, repoDir, name, url string) {
+	t.Helper()
+	cmd := exec.Command("git", "remote", "add", name, url) //nolint:noctx // test helper, no context needed
+	cmd.Dir = repoDir
+	cmd.Env = GitIsolatedEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add %s: %v\n%s", name, err, out)
+	}
+}
+
+// WriteCheckpointPushRemoteSetting writes .entire/settings.json configuring
+// strategy_options.checkpoint_push_remote to remoteName (with enabled: true).
+func WriteCheckpointPushRemoteSetting(t *testing.T, repoDir, remoteName string) {
+	t.Helper()
+	content := `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "` + remoteName + `"}}`
+	WriteFile(t, repoDir, filepath.Join(".entire", "settings.json"), content)
+}
+
+// GitUpdateRef points ref at hash in repoDir via git update-ref.
+func GitUpdateRef(t *testing.T, repoDir, ref, hash string) {
+	t.Helper()
+	cmd := exec.Command("git", "update-ref", ref, hash) //nolint:noctx // test helper, no context needed
+	cmd.Dir = repoDir
+	cmd.Env = GitIsolatedEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git update-ref %s %s: %v\n%s", ref, hash, err, out)
 	}
 }
 

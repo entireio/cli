@@ -12,6 +12,11 @@ type CreateBindingParams struct {
 	AccountId string
 }
 
+// CreateRepoCIWebhookParams is parameters of createRepoCIWebhook operation.
+type CreateRepoCIWebhookParams struct {
+	RepoId string
+}
+
 // DeleteBindingParams is parameters of deleteBinding operation.
 type DeleteBindingParams struct {
 	AccountId string
@@ -40,6 +45,13 @@ type DeleteProjectParams struct {
 // DeleteRepoParams is parameters of deleteRepo operation.
 type DeleteRepoParams struct {
 	RepoId string
+}
+
+// DeleteRepoCIWebhookParams is parameters of deleteRepoCIWebhook operation.
+type DeleteRepoCIWebhookParams struct {
+	RepoId   string
+	ID       string
+	Teardown OptBool `json:",omitempty,omitzero"`
 }
 
 // DeleteServiceAccountParams is parameters of deleteServiceAccount operation.
@@ -182,7 +194,8 @@ type ListOrgsParams struct {
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
 	// Optional: exact-match org name (case-insensitive).
-	Name OptString `json:",omitempty,omitzero"`
+	Name        OptString `json:",omitempty,omitzero"`
+	IfNoneMatch OptString `json:",omitempty,omitzero"`
 }
 
 // ListProjectMembersParams is parameters of listProjectMembers operation.
@@ -215,6 +228,11 @@ type ListProjectsParams struct {
 	Name OptString `json:",omitempty,omitzero"`
 }
 
+// ListRepoCIWebhooksParams is parameters of listRepoCIWebhooks operation.
+type ListRepoCIWebhooksParams struct {
+	RepoId string
+}
+
 // ListRepoGrantsParams is parameters of listRepoGrants operation.
 type ListRepoGrantsParams struct {
 	// Maximum entries to return; server may cap further.
@@ -222,6 +240,19 @@ type ListRepoGrantsParams struct {
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
 	RepoId    string
+}
+
+// ListReposParams is parameters of listRepos operation.
+type ListReposParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+	// Onboarded (default): repos in Entire; all: also include onboardable GitHub candidates.
+	Scope OptListReposScope `json:",omitempty,omitzero"`
+	// Optional: exact-match full_name (owner/repo, case-insensitive). Returns that repo's zero-or-one
+	// entries; pagination and scope are ignored.
+	Filter OptString `json:",omitempty,omitzero"`
 }
 
 // ListServiceAccountGrantsParams is parameters of listServiceAccountGrants operation.
@@ -261,6 +292,12 @@ type LookupResourcesParams struct {
 	Permission OptString `json:",omitempty,omitzero"`
 }
 
+// PatchRepoCIWebhookParams is parameters of patchRepoCIWebhook operation.
+type PatchRepoCIWebhookParams struct {
+	RepoId string
+	ID     string
+}
+
 // RemoveOrgMemberParams is parameters of removeOrgMember operation.
 type RemoveOrgMemberParams struct {
 	OrgId          string
@@ -274,6 +311,15 @@ type ResolveHandleParams struct {
 	Provider string
 	// User-visible handle at the provider.
 	Handle string
+}
+
+// ResolveMirrorPlacementsParams is parameters of resolveMirrorPlacements operation.
+type ResolveMirrorPlacementsParams struct {
+	Provider ResolveMirrorPlacementsProvider
+	// Upstream owner login (case-insensitive).
+	Owner string
+	// Upstream repo name (case-insensitive).
+	Repo string
 }
 
 // RevokeProjectAccessParams is parameters of revokeProjectAccess operation.

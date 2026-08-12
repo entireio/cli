@@ -443,7 +443,7 @@ func reviewSubagentsDir(st *session.State) string {
 	if st == nil || st.TranscriptPath == "" || st.SessionID == "" {
 		return ""
 	}
-	return filepath.Join(filepath.Dir(st.TranscriptPath), st.SessionID, "subagents")
+	return paths.SubagentsDir(filepath.Dir(st.TranscriptPath), st.SessionID)
 }
 
 func reviewTokensFromTokenUsage(usage *agent.TokenUsage) reviewtypes.Tokens {

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -504,6 +505,62 @@ trusted_hash = "sha256:ccc"
 	require.Contains(t, out, "1 hook(s) declared")
 	require.Contains(t, out, "- post_tool_use")
 	require.Contains(t, out, "Open /hooks inside Codex")
+}
+
+// TestCheckHookDrift_SilentWhenNotInstalled — the generalized drift check
+// prints nothing Claude-Code-related when this repo has no Entire hooks
+// installed.
+func TestCheckHookDrift_SilentWhenNotInstalled(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	cmd, stdout := newTestCmd(t)
+	checkHookDrift(cmd)
+	require.NotContains(t, stdout.String(), "Claude Code hook")
+}
+
+// TestCheckHookDrift_ClaudeCodeOKWhenCurrent — a fresh Claude Code install
+// writes the current matchers, so the drift check reports OK.
+func TestCheckHookDrift_ClaudeCodeOKWhenCurrent(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	if _, err := (&claudecode.ClaudeCodeAgent{}).InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	cmd, stdout := newTestCmd(t)
+	checkHookDrift(cmd)
+	require.Contains(t, stdout.String(), "✓ Claude Code hook config: OK")
+}
+
+// TestCheckHookDrift_ClaudeCodeWarnsWhenOutdated — a Claude Code config left by
+// an older CLI (hooks under the stale Task/TodoWrite matchers) is reported OUT
+// OF DATE with the --force fix hint.
+func TestCheckHookDrift_ClaudeCodeWarnsWhenOutdated(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	claudeDir := filepath.Join(dir, ".claude")
+	require.NoError(t, os.MkdirAll(claudeDir, 0o750))
+	stale := `{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "entire hooks claude-code stop"}]}],
+    "PreToolUse": [{"matcher": "Task", "hooks": [{"type": "command", "command": "entire hooks claude-code pre-task"}]}],
+    "PostToolUse": [
+      {"matcher": "Task", "hooks": [{"type": "command", "command": "entire hooks claude-code post-task"}]},
+      {"matcher": "TodoWrite", "hooks": [{"type": "command", "command": "entire hooks claude-code post-todo"}]}
+    ]
+  }
+}`
+	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, claudecode.ClaudeSettingsFileName), []byte(stale), 0o600))
+
+	cmd, stdout := newTestCmd(t)
+	checkHookDrift(cmd)
+
+	out := stdout.String()
+	require.Contains(t, out, "Claude Code hooks: OUT OF DATE")
+	require.Contains(t, out, "entire enable --force")
 }
 
 // TestCheckCodexHookTrust_FlagsStaleHooksFile — user enabled Codex on

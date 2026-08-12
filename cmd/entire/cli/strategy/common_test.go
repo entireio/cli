@@ -988,6 +988,38 @@ func TestEnsurePrimaryRef(t *testing.T) {
 			t.Errorf("expected empty tree, got %d entries", len(tree.Entries))
 		}
 	})
+
+	t.Run("skips empty orphan when primary is git-refs", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		initTestRepo(t, dir)
+
+		// Select the git-refs backend for this repo. EnsurePrimaryRef rebinds
+		// the config lookup to the repo root, so a repo-local settings file is
+		// what it reads.
+		settingsDir := filepath.Join(dir, ".entire")
+		if err := os.MkdirAll(settingsDir, 0o750); err != nil {
+			t.Fatalf("failed to create .entire dir: %v", err)
+		}
+		cfg := []byte(`{"checkpoints":{"primary":{"type":"git-refs"}}}`)
+		if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"), cfg, 0o600); err != nil {
+			t.Fatalf("failed to write settings: %v", err)
+		}
+
+		repo, err := git.PlainOpen(dir)
+		if err != nil {
+			t.Fatalf("failed to open repo: %v", err)
+		}
+		if err := EnsurePrimaryRef(t.Context(), repo); err != nil {
+			t.Fatalf("EnsurePrimaryRef() failed: %v", err)
+		}
+
+		// Under git-refs, checkpoints live in per-checkpoint refs and nothing
+		// is ever written to v1, so no vestigial empty orphan should be created.
+		_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+		require.ErrorIs(t, err, plumbing.ErrReferenceNotFound,
+			"expected no v1 branch under git-refs primary")
+	})
 }
 
 func TestEnsurePrimaryRef_WritesVercelConfigWhenEnabled(t *testing.T) {

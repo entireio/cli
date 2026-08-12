@@ -7,11 +7,14 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
+	"strings"
 
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/perf"
@@ -35,6 +38,31 @@ var opfPrePushProgressWriter io.Writer = os.Stderr
 //   - push_sessions: false to disable automatic pushing of checkpoints
 //   - checkpoint_remote: {"provider": "github", "repo": "org/repo"} to push to a separate repo
 func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error {
+	return s.prePush(ctx, remote, false)
+}
+
+// PrePushFromGitHook handles a push initiated by Git's pre-push hook. Unlike
+// direct callers, it protects an empty user remote from receiving checkpoint
+// metadata before the user's first normal branch is published.
+func (s *ManualCommitStrategy) PrePushFromGitHook(ctx context.Context, remote string) error {
+	return s.prePush(ctx, remote, true)
+}
+
+func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, protectFirstUserBranch bool) error {
+	// This runs inside the user's `git push` pre-push hook. Every checkpoint
+	// git subprocess spawned here (metadata fetch, policy sync, checkpoint
+	// push and its recovery fetch) must fail fast rather than block on an
+	// interactive SSH passphrase prompt — there is no way to answer it here and
+	// it would hang the user's push. Foreground commands do not set this.
+	//
+	// BatchMode=yes suppresses passphrase/PIN prompts (including FIDO2
+	// verify-required PIN entry). Touch-only security keys still work because
+	// user-presence touch is not a terminal read. Users who need a PIN prompt
+	// in this path should load the key into ssh-agent, or set an explicit
+	// BatchMode=no via GIT_SSH_COMMAND / core.sshCommand (respected by the
+	// non-interactive SSH helper).
+	ctx = checkpointremote.WithNonInteractiveSSH(ctx)
+
 	// Load settings once for remote resolution and push_sessions check.
 	// Spanned because checkpoint-remote resolution can perform a one-time
 	// network fetch of the metadata branch (fetchMetadataBranchIfMissing),
@@ -47,12 +75,30 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 		return nil
 	}
 
+	// Single-remote gate (ENT-1451): checkpoint data syncs only to the
+	// elected checkpoint sync remote. A dedicated checkpoint_remote URL is
+	// exempt — it is a dedicated metadata store addressed directly, not a
+	// remote selected by this push. The gate must stay BELOW
+	// resolvePushSettings: hasCheckpointURL is only known after resolution,
+	// so hoisting the gate above it would break the exemption.
+	if !ps.hasCheckpointURL() && !checkpointSyncAllowedForRemote(ctx, ps.remote) {
+		return nil
+	}
+
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
-	// instead of the single v1 branch. (A configured git-branch mirror's v1 ref
-	// is not pushed here yet — mirror push for downgrade safety is a later step.)
+	// instead of the single v1 branch. Those refs live under refs/entire/, not
+	// refs/heads/, so a forge can never pick them as a repository's default
+	// branch — the empty-remote guard below is unnecessary for this backend.
+	// (A configured git-branch mirror's v1 ref is not pushed here yet — mirror
+	// push for downgrade safety is a later step.)
 	if cpCfg, _ := settings.LoadCheckpointsConfig(ctx); checkpoint.PrimaryIsRefs(cpCfg) { //nolint:errcheck // fail-soft: a bad checkpoints block already surfaces via Open; default to no refs push
 		return s.prePushCheckpointRefs(ctx, ps)
 	}
+
+	// git-branch primary: entire/checkpoints/v1 is a real refs/heads branch, so
+	// on an otherwise-empty remote a forge like GitHub would select it as the
+	// default. Defer publication until the user's own branch exists there.
+	deferAutomaticCheckpointPush := protectFirstUserBranch && deferCheckpointPushOnEmptyRemote(ctx, ps)
 
 	refs := checkpoint.ResolveRefs(ctx)
 	repo, repoErr := OpenRepository(ctx)
@@ -71,9 +117,9 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 
 	// OPF pre-push rewrite: if OPF is configured, resolve the user's
 	// decision (env > settings > prompt > non-TTY auto-run), then
-	// re-redact unpushed v1 commits with the 8-layer pipeline before
-	// pushing. Skipped entirely when OPF is off, so the common-case
-	// fast path is unchanged.
+	// re-redact unpushed v1 commits with OPF (producing the OPF-applied,
+	// 9-layer pipeline) before pushing. Skipped entirely when OPF is off,
+	// so the common-case fast path is unchanged.
 	if redact.OPFEnabled() {
 		cfg, _ := settings.Load(ctx) //nolint:errcheck // Load already failed at hook init; fall back to nil
 		var opfCfg *settings.OPFSettings
@@ -92,7 +138,7 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 			return errOPFAbortedByUser
 		case OPFSkip:
 			// User opted out for this push (or settings/env say
-			// "never"). Push 7-layer content as-is.
+			// "never"). Push regex-only (8-layer) content as-is.
 			logging.Info(ctx, "OPF skipped for this push (user choice or settings)")
 		case OPFRun:
 			_, opfSpan := perf.Start(ctx, "opf_pre_push_rewrite")
@@ -116,6 +162,15 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 		}
 	}
 
+	if deferAutomaticCheckpointPush {
+		// Do this only after OPF has had a chance to rewrite v1: the outer
+		// user push may explicitly include the metadata branch.
+		logging.Info(ctx, "automatic checkpoint push deferred until the remote has a branch",
+			slog.String("remote", ps.remote),
+		)
+		return nil
+	}
+
 	// Thread the span's context into the push so the network push and any
 	// fetch+rebase recovery nest beneath it as child steps in the perf trace.
 	pushCtx, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoint_refs")
@@ -130,6 +185,79 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 
 	cleanupPushedShadowBranches(ctx)
 	return nil
+}
+
+// deferCheckpointPushOnEmptyRemote reports whether publication of the git-branch
+// v1 metadata should be held back because the push remote may be brand new.
+//
+// Hosting providers such as GitHub make the first branch pushed to an empty
+// repository its default, so the pre-push hook must not publish
+// entire/checkpoints/v1 ahead of the user's own first branch. The check is
+// purely local: if a remote-tracking ref for this remote already exists
+// (refs/remotes/<remote>/*), the remote has been fetched from or pushed to
+// before and therefore already has at least one branch, so publishing cannot
+// make our metadata the default. Otherwise defer — git records a
+// remote-tracking ref after the first successful push, so the deferred metadata
+// publishes on the next push.
+//
+// It deliberately performs no ls-remote/fetch. A network round trip on the
+// pre-push path can trigger an SSH security-key touch prompt (and doing so per
+// push URL would multiply those prompts), which is a poor pre-push UX. This is
+// also why it uses only the remote git handed the hook rather than resolving
+// every configured push URL.
+//
+// A separate checkpoint remote is exempt: it is a dedicated metadata store, not
+// the repository the user pushes to.
+func deferCheckpointPushOnEmptyRemote(ctx context.Context, ps pushSettings) bool {
+	if ps.hasCheckpointURL() {
+		return false
+	}
+
+	// The hazard only arises for a configured remote (the `git remote add
+	// origin …` then first-push flow). Pushing straight to a bare URL hands that
+	// URL to the hook as the remote arg, and git never records a
+	// refs/remotes/<url>/* tracking ref for it — so a tracking-ref check would
+	// defer the metadata forever. Publish for a non-configured (URL) target
+	// rather than strand it; the first-branch scenario always uses a named
+	// remote.
+	if !isConfiguredRemote(ctx, ps.remote) {
+		return false
+	}
+
+	// Known limitation, accepted for the no-network design: a tracking ref left
+	// over from before a remote was deleted and recreated empty under the same
+	// URL reads as "established", so v1 would publish to the now-empty remote.
+	// Detecting that requires asking the remote — the network round trip we
+	// deliberately avoid here. The scenario is rare and its default branch is
+	// recoverable by resetting it on the forge.
+	return !remoteHasTrackingRefs(ctx, ps.remote)
+}
+
+// isConfiguredRemote reports whether name is a configured git remote, as
+// opposed to a bare URL that git passes through verbatim when a push targets a
+// URL directly. Local and best-effort (reads config, no network); any error is
+// treated as "not a configured remote".
+func isConfiguredRemote(ctx context.Context, name string) bool {
+	if name == "" {
+		return false
+	}
+	return exec.CommandContext(ctx, "git", "remote", "get-url", name).Run() == nil
+}
+
+// remoteHasTrackingRefs reports whether any refs/remotes/<remote>/* ref exists
+// locally. Its presence means the remote has been fetched from or pushed to
+// before and so already has at least one branch. Local-only and best-effort:
+// any error is treated as "no tracking refs" so the caller fails safe (defers).
+func remoteHasTrackingRefs(ctx context.Context, remote string) bool {
+	if remote == "" {
+		return false
+	}
+	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--count=1", "refs/remotes/"+remote+"/")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) != ""
 }
 
 // prePushCheckpointRefs drains the per-checkpoint push queue and batch-pushes the
@@ -160,7 +288,7 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		return nil
 	}
 
-	if _, err := flushCheckpointRefsQueue(ctx, repo, ps.pushTarget()); err != nil {
+	if _, err := flushCheckpointRefsQueue(ctx, repo, ps); err != nil {
 		// Fail-soft: a checkpoint-ref push failure must never block the user's
 		// git push. The refs stay queued for the next pre-push.
 		logging.Warn(ctx, "git-refs pre-push: checkpoint ref push failed; refs left queued",
@@ -188,7 +316,7 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	if !checkpointPolicyAllowsGitHook(ctx, repo) {
 		return 0, false, errors.New("checkpoint policy does not allow pushing checkpoint refs; refs stay queued")
 	}
-	pushed, err = flushCheckpointRefsQueue(ctx, repo, ps.pushTarget())
+	pushed, err = flushCheckpointRefsQueue(ctx, repo, ps)
 	// Clean up even on a partial/failed flush: a diverged batch can push some
 	// refs and still return an error, and the shadow branches for the refs that
 	// *did* land must still be cleaned up — parity with the pre-push path, which
@@ -205,7 +333,7 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 // never block the user's push) and the migration command's opt-in push (which
 // surfaces it). Stale entries — refs no longer present locally — are pruned so
 // they don't block the queue forever.
-func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTarget string) (int, error) {
+func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps pushSettings) (int, error) {
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
 		return 0, fmt.Errorf("resolve push queue: %w", err)
@@ -232,17 +360,23 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 		return 0, nil
 	}
 
+	// Resolved here, not by the caller: it spawns `git remote get-url` and its
+	// result is unused unless refs are actually pushed, so an ordinary push with
+	// an empty queue must not pay for it — nor print the multi-URL warning.
+	dest := resolveRefsPushDestination(pushCtx, ps)
+	dest.warnIgnoredPushURLs(pushCtx)
+
 	// Progress: pushing many refs over the network can take tens of seconds, so
 	// surface it (matching the v1 path's "[entire] Pushing ..." line) instead of
 	// leaving the user's git push apparently hung. Written to stderr, which git
 	// shows during the pre-push hook.
-	displayTarget := displayPushTarget(pushTarget)
-	fmt.Fprintf(os.Stderr, "[entire] Pushing %d checkpoint ref(s) to %s...", len(existing), displayTarget)
+	fmt.Fprintf(os.Stderr, "[entire] Pushing %d checkpoint ref(s) to %s...", len(existing), dest.display())
 	stop := startProgressDots(os.Stderr)
 
 	// Fast path: push all refs in one round-trip (fast-forward-only). If every
 	// ref was up to date or fast-forwarded, we're done.
-	if err := batchPushRefs(pushCtx, pushTarget, existing); err == nil {
+	batchErr := batchPushRefs(pushCtx, dest.target, existing)
+	if batchErr == nil {
 		stop(" done")
 		if removeErr := queue.Remove(existing); removeErr != nil {
 			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
@@ -252,19 +386,38 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 	}
 	stop("")
 
+	// Non-interactive SSH auth failures cannot be fixed by per-ref
+	// fetch+replay. Surface the same actionable hint as the v1 doPushRef path
+	// (issue #1523) instead of only logging to .entire/logs/.
+	if nonInteractiveSSHAuthFailure(pushCtx, batchErr) {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't push checkpoint refs: %v\n", batchErr)
+		printNonInteractiveSSHAuthHint()
+		if dest.checkpointRemote {
+			printCheckpointRemoteHint(dest.target)
+		}
+		return 0, batchErr
+	}
+
 	// At least one ref was rejected — typically a non-fast-forward divergence
 	// (the same checkpoint re-written on another machine). Retry per ref with
 	// fetch+replay recovery, and remove from the queue only the refs that land
 	// (a genuine cherry-pick conflict leaves that ref queued for a later push,
 	// never force-overwriting the remote).
-	fmt.Fprintf(os.Stderr, "[entire] Some checkpoint refs diverged; syncing %d ref(s) individually...", len(existing))
+	// Deliberately names no cause: the batch fails on divergence, but just as
+	// often on an unreachable or unauthorized destination. Telling a user with a
+	// dead remote that their refs "diverged" — or were "rejected", which equally
+	// implies the remote answered — sends them after the wrong problem.
+	fmt.Fprintf(os.Stderr, "[entire] Checkpoint ref push failed; retrying %d ref(s) individually...", len(existing))
 	stop = startProgressDots(os.Stderr)
 	pushed := make([]plumbing.ReferenceName, 0, len(existing))
 	var firstErr error
 	for _, ref := range existing {
-		if err := pushCheckpointRefWithRecovery(pushCtx, pushTarget, ref); err != nil {
+		if err := pushCheckpointRefWithRecovery(pushCtx, dest.target, ref); err != nil {
 			logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
 				slog.String("ref", ref.String()), slog.String("error", err.Error()))
+			if nonInteractiveSSHAuthFailure(pushCtx, err) {
+				printNonInteractiveSSHAuthHint()
+			}
 			if firstErr == nil {
 				firstErr = err
 			}

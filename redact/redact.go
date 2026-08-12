@@ -157,23 +157,26 @@ var connectionStringRules = []connectionStringRule{
 }
 
 // String replaces secrets and PII in s using layered detection:
-// 1. Entropy-based: high-entropy alphanumeric sequences (threshold 4.5)
-// 2. Pattern-based: betterleaks regex rules (260+ known secret formats)
-// 3. Credentialed URIs: URLs containing userinfo passwords
-// 4. Database connection strings: JDBC, keyword DSNs, and semicolon strings
-// 5. User-defined custom rules: configured via ConfigureCustomRules
-// 6. Bounded credential key/value pairs: DB_PASSWORD=...
-// 7. PII detection: email, phone, address patterns (only when configured via ConfigurePII)
+//  1. Entropy-based: high-entropy alphanumeric sequences (threshold 4.5)
+//  2. Pattern-based: betterleaks regex rules (260+ known secret formats)
+//  3. Provider token prefixes: deterministic prefix rules for credential
+//     formats betterleaks misses in isolation (e.g. Supabase sb_secret_)
+//  4. Credentialed URIs: URLs containing userinfo passwords
+//  5. Database connection strings: JDBC, keyword DSNs, and semicolon strings
+//  6. User-defined custom rules: configured via ConfigureCustomRules
+//  7. Bounded credential key/value pairs: DB_PASSWORD=...
+//  8. PII detection: email, phone, address patterns (only when configured via ConfigurePII)
+//
 // A string is redacted if ANY method flags it.
 func String(s string) string {
 	return applyRegions(s, detectAllLayers(s))
 }
 
-// detectAllLayers runs the seven always-on/opt-in regex-based redaction
+// detectAllLayers runs the eight always-on/opt-in regex-based redaction
 // layers and returns their tagged regions. The OpenAI Privacy Filter
-// (layer 8) is NOT included — callers that want it append detectOPF spans
-// to the result before passing to applyRegions. See StringWithPrivacyFilter
-// for the augmented flow.
+// (the final, network-backed layer) is NOT included — callers that want it
+// append detectOPF spans to the result before passing to applyRegions. See
+// StringWithPrivacyFilter for the augmented flow.
 func detectAllLayers(s string) []taggedRegion {
 	var regions []taggedRegion
 
@@ -221,21 +224,26 @@ func detectAllLayers(s string) []taggedRegion {
 		}
 	}
 
-	// 3. Credentialed URIs (secrets — always on).
+	// 3. Provider-specific deterministic token prefixes (secrets — always on).
+	// Catches low-entropy credential formats (e.g. Supabase sb_secret_) that
+	// the entropy and betterleaks layers miss when captured in isolation.
+	regions = append(regions, detectProviderTokens(s)...)
+
+	// 4. Credentialed URIs (secrets — always on).
 	for _, loc := range credentialedURIPattern.FindAllStringIndex(s, -1) {
 		regions = append(regions, taggedRegion{region: region{loc[0], loc[1]}})
 	}
 
-	// 4. Database and connection-string detection (secrets — always on).
+	// 5. Database and connection-string detection (secrets — always on).
 	regions = append(regions, detectConnectionStrings(s)...)
 
-	// 5. User-defined custom rules (secrets — only runs when configured).
+	// 6. User-defined custom rules (secrets — only runs when configured).
 	regions = append(regions, detectCustomRules(getCustomRulesConfig(), s)...)
 
-	// 6. Bounded credential key/value detection (secrets — always on).
+	// 7. Bounded credential key/value detection (secrets — always on).
 	regions = append(regions, detectCredentialValues(s)...)
 
-	// 7. PII detection (opt-in — only runs when configured).
+	// 8. PII detection (opt-in — only runs when configured).
 	regions = append(regions, detectPII(getPIIConfig(), s)...)
 
 	return regions
@@ -616,7 +624,7 @@ func StringWithPrivacyFilter(ctx context.Context, s string) string {
 // JSONLContentWithPrivacyFilter augments JSONLContent with the OpenAI
 // Privacy Filter via batched inference. Walks the content twice: pass 1
 // collects unique prose-shaped leaves into a single RedactBatch call;
-// pass 2 applies the seven regex layers per leaf plus the cached OPF spans
+// pass 2 applies the eight regex layers per leaf plus the cached OPF spans
 // for that leaf. One OPF shell-out covers the whole transcript instead of
 // one per leaf — without batching, a typical 500-leaf transcript would
 // take many minutes per commit.
@@ -819,12 +827,19 @@ func collectJSONLReplacements(v any, redactor func(string) string) []jsonReplace
 }
 
 // shouldSkipJSONLField returns true if a JSON key should be excluded from scanning/redaction.
-// Skips "signature" (exact), ID fields (ending in "id"/"ids"), and common path/directory fields.
+// Skips signature fields (any key ending in "signature"), ID fields (ending in "id"/"ids"),
+// and common path/directory fields.
 func shouldSkipJSONLField(key string) bool {
-	if key == "signature" {
+	lower := strings.ToLower(key)
+
+	// Skip signature fields: cryptographic attestations, not secrets. Covers
+	// "signature" (Claude Code) and provider variants like "thinkingSignature"
+	// (Oh My Pi). Their values are high-entropy base64, so the entropy scanner
+	// would otherwise redact them — corrupting extended-thinking signatures and
+	// breaking transcript replay ("Invalid `signature` in `thinking` block").
+	if strings.HasSuffix(lower, "signature") {
 		return true
 	}
-	lower := strings.ToLower(key)
 
 	// Skip ID fields
 	if strings.HasSuffix(lower, "id") || strings.HasSuffix(lower, "ids") {

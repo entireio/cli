@@ -47,7 +47,10 @@ func (ps *pushSettings) hasCheckpointURL() bool {
 // resolvePushSettings loads settings once and returns the resolved push config.
 // If a structured checkpoint_remote is configured (e.g., {"provider": "github", "repo": "org/repo"}):
 //   - Derives the checkpoint URL from the push remote's protocol (SSH vs HTTPS)
-//   - Skips if the push remote owner differs from the checkpoint repo owner (fork detection)
+//   - Ignores the setting when it looks inherited from an upstream project rather
+//     than configured by this developer, so a fork contributor's checkpoints are
+//     not pushed into the upstream's checkpoint repo (see
+//     remote.checkpointRemoteIsInherited for how ownership is established)
 //   - If a checkpoint branch doesn't exist locally, attempts to fetch it from the URL
 //
 // The push itself handles failures gracefully (doPushRef warns and continues),
@@ -131,7 +134,7 @@ func FetchMetadataBranch(ctx context.Context, remoteURL string) error {
 // fetches are globally enabled. Use noFilter for operations that need blob
 // content (resume, explain) as opposed to sync operations (push recovery)
 // that only need tree structure.
-func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, label string, noFilter bool) error {
+func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, label string, noFilter bool) error { //nolint:unparam // noFilter distinguishes blob-content fetches (true) from tree-only sync fetches (false); kept for the documented fetch-filtering contract even though current callers all need blob content
 	fetchCtx, cancel := context.WithTimeout(ctx, checkpointRemoteFetchTimeout)
 	defer cancel()
 
@@ -180,4 +183,54 @@ func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) error {
 
 	logging.Info(ctx, "checkpoint-remote: fetched metadata branch from URL")
 	return nil
+}
+
+// resolveCheckpointFetchURL resolves the checkpoint_remote fetch URL for the repo
+// rooted at worktreeRoot and verifies it actually targets the configured
+// checkpoint repository. It returns ok=false (never an error) when no
+// checkpoint_remote is configured or a dedicated checkpoint URL cannot be
+// resolved, so callers fall back to keeping the local branch / creating an orphan.
+//
+// remote.FetchURL silently falls back to the origin remote URL in several paths
+// (ENTIRE_CHECKPOINT_TOKEN short-circuit, unparseable origin, non-derivable origin
+// protocol). Adopting from origin would contradict the rule that origin is never
+// authoritative when a checkpoint_remote is configured (issue #1374), so a resolved
+// URL that does not target the configured checkpoint repo is treated as unresolved.
+func resolveCheckpointFetchURL(ctx context.Context, worktreeRoot string) (string, bool) {
+	s, err := settings.Load(ctx)
+	if err != nil {
+		logging.Debug(ctx, "checkpoint-remote: could not load settings for metadata fetch URL",
+			slog.String("error", err.Error()))
+		return "", false
+	}
+	config := s.GetCheckpointRemote()
+	if config == nil {
+		return "", false
+	}
+	url, err := remote.FetchURL(ctx, remote.FetchURLOptions{WorktreeRoot: worktreeRoot})
+	if err != nil || strings.TrimSpace(url) == "" {
+		logging.Debug(ctx, "checkpoint-remote: could not resolve fetch URL for metadata bootstrap",
+			slog.Any("error", err))
+		return "", false
+	}
+	if !urlTargetsCheckpointRepo(url, config) {
+		logging.Debug(ctx, "checkpoint-remote: fetch URL did not resolve to the configured checkpoint repo; not adopting from origin",
+			slog.String("repo", config.Repo))
+		return "", false
+	}
+	return url, true
+}
+
+// urlTargetsCheckpointRepo reports whether url points at the configured checkpoint
+// repository (host-agnostic, case-insensitive owner/repo match). It distinguishes a
+// derived checkpoint URL from remote.FetchURL's origin fallback, which targets the
+// origin repository instead. A same-repo checkpoint_remote (origin == checkpoint
+// repo) still matches, which is correct: adopting from that URL is adopting the
+// checkpoint repo.
+func urlTargetsCheckpointRepo(url string, config *settings.CheckpointRemoteConfig) bool {
+	info, err := remote.ParseURL(url)
+	if err != nil || info.Owner == "" || info.Repo == "" {
+		return false
+	}
+	return strings.EqualFold(info.Owner+"/"+info.Repo, config.Repo)
 }

@@ -65,7 +65,7 @@ func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error 
 
 	// The picker is interactive. Without a usable terminal (CI, piped, agent
 	// subprocess) the form can't render — bail with guidance instead of hanging
-	// or erroring on /dev/tty, matching `entire attach`.
+	// or erroring on /dev/tty, matching `entire session attach`.
 	if !interactive.CanPromptInteractively() {
 		fmt.Fprintln(w, "The resume picker needs an interactive terminal.")
 		fmt.Fprintln(w, "Pass a branch instead, e.g. 'entire session resume <branch>'.")
@@ -80,6 +80,9 @@ func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error 
 	resumable := filterResumableSessions(states)
 	if len(resumable) == 0 {
 		fmt.Fprintln(w, "No resumable sessions found.")
+		if n := countImportedSessions(states); n > 0 {
+			fmt.Fprintf(w, "(skipping %d read-only imported session(s) — imported history can't be resumed.)\n", n)
+		}
 		fmt.Fprintln(w, "Tip: pass a branch to resume directly, e.g. 'entire session resume <branch>'.")
 		return nil
 	}
@@ -104,7 +107,7 @@ func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error 
 			huh.NewSelect[string]().
 				Title("Resume a session").
 				Description("Checks out the branch, restores the session log, and offers to start the agent.\n" +
-					"Lists sessions from this machine — to resume a branch from origin, run: entire resume <branch>").
+					"Lists sessions from this machine — to resume a branch from origin, run: entire session resume <branch>").
 				Options(options...).
 				Value(&selected),
 		),
@@ -164,12 +167,29 @@ func filterResumableSessions(states []*strategy.SessionState) []*strategy.Sessio
 		if s.Phase == session.PhaseActive {
 			continue
 		}
+		// Imported sessions are read-only; they can't be resumed.
+		if s.Kind.IsImported() {
+			continue
+		}
 		resumable = append(resumable, s)
 	}
 	sort.SliceStable(resumable, func(i, j int) bool {
 		return sessionLastActiveTime(resumable[i]).After(sessionLastActiveTime(resumable[j]))
 	})
 	return resumable
+}
+
+// countImportedSessions counts read-only imported sessions in the set. Used to
+// explain an empty resume picker when the only sessions present are imports
+// (which are deliberately filtered out of the resumable list).
+func countImportedSessions(states []*strategy.SessionState) int {
+	n := 0
+	for _, s := range states {
+		if s != nil && s.Kind.IsImported() {
+			n++
+		}
+	}
+	return n
 }
 
 // sessionLastActiveTime returns the best timestamp to represent when a session

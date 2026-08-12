@@ -12,8 +12,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// Compile-time interface assertion
-var _ agent.HookSupport = (*PiAgent)(nil)
+// Compile-time interface assertions
+var (
+	_ agent.HookSupport   = (*PiAgent)(nil)
+	_ agent.HookFreshness = (*PiAgent)(nil)
+)
 
 //go:embed entire_extension.ts
 var extensionTemplate string
@@ -34,6 +37,12 @@ const (
 	// entireCmdPlaceholder is replaced at install time with either `entire`
 	// (production) or a `go run …` path (local-dev).
 	entireCmdPlaceholder = "__ENTIRE_CMD__"
+
+	// piNestedEnvVar marks a Pi process so any Pi it spawns can tell it is nested
+	// and skip forwarding session lifecycle. Set and read only by the embedded
+	// extension — Entire's hook subprocesses inherit it, so no Go code may treat it
+	// as a skip signal.
+	piNestedEnvVar = "ENTIRE_PI_NESTED"
 )
 
 func extensionPath(ctx context.Context) (string, error) {
@@ -121,4 +130,23 @@ func (a *PiAgent) AreHooksInstalled(ctx context.Context) bool {
 		return false
 	}
 	return strings.Contains(string(data), entireMarker)
+}
+
+// CheckHookConfig reports whether the installed extension matches what
+// InstallHooks would write today. Read-only diagnostic for `entire status` and
+// `entire doctor`.
+//
+// This matters more for pi than for agents that configure hooks in a local
+// settings file: repos commonly commit .pi/extensions/entire/index.ts so every
+// clone gets checkpointing without each person enabling it by hand. A committed
+// extension goes stale as the template evolves, and AreHooksInstalled keeps
+// returning true because the marker is still there — while the extension's own
+// fireHook swallows every error by design, so broken hooks are silent. Without
+// this check a stale committed extension reads as healthy forever.
+func (a *PiAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
+	path, err := extensionPath(ctx)
+	if err != nil {
+		return agent.HooksAbsent
+	}
+	return agent.GeneratedHookFileState(path, entireMarker, renderExtension(false), renderExtension(true))
 }

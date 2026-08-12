@@ -11,9 +11,25 @@ Entire integrates with Claude Code through six hooks that fire at different poin
 | `SessionStart`           | New chat session begins        | Generate and persist Entire session ID         |
 | `UserPromptSubmit`       | User submits a prompt          | Capture pre-prompt state, check for conflicts  |
 | `Stop`                   | Claude finishes responding     | Create checkpoint with code + metadata         |
-| `PreToolUse[Task]`       | Subagent is about to start     | Capture pre-task state for diff computation    |
-| `PostToolUse[Task]`      | Subagent finishes              | Create final checkpoint for subagent work      |
-| `PostToolUse[TodoWrite]` | Subagent updates its todo list | Create incremental checkpoint if files changed |
+| `PreToolUse[Agent]`      | Subagent is about to start     | Capture pre-task state for diff computation    |
+| `PostToolUse[Agent]`     | Subagent finishes              | Create final checkpoint for subagent work      |
+| `PostToolUse[TaskCreate\|TaskUpdate]` | Subagent updates its task list | Create incremental checkpoint if files changed |
+
+> **Tool matcher note.** Claude Code's subagent dispatch tool is `Agent` (there
+> was never a `Task` tool), and the `TodoWrite` tool was disabled by default in
+> v2.1.142 in favor of `TaskCreate`/`TaskUpdate`. Older CLI versions installed
+> these hooks under `Task`/`TodoWrite`, where they silently never fired. A normal
+> `entire enable` does not rewrite existing hook config in place; re-run with
+> `--force` (`entire enable --force`) to strip the stale entries and reinstall
+> under the matchers above. See
+> [tools-reference](https://code.claude.com/docs/en/tools-reference.md) and
+> [hooks matcher rules](https://code.claude.com/docs/en/hooks.md).
+>
+> The incremental-checkpoint handler still parses the legacy `TodoWrite`
+> `tool_input` schema for its checkpoint message label; under `TaskCreate`/
+> `TaskUpdate` the checkpoint is still created (file-change detection is
+> independent) but the label falls back to `Checkpoint #N`. Richer labels from
+> the Task* payloads are a follow-up.
 
 ### Critical Capabilities
 
@@ -108,7 +124,8 @@ Fires when Claude finishes responding. Does **not** fire on user interrupt (Ctrl
     - Extracts token counts from assistant messages: input tokens, cache creation/read tokens, output tokens.
     - Deduplicates by message ID (streaming creates multiple rows per message; uses highest output_tokens).
     - Finds spawned subagents by scanning for `agentId:` in Task tool results.
-    - Calculates subagent token usage from their transcript files (`agent-<id>.jsonl`).
+    - Calculates subagent token usage from their transcript files under
+      `paths.SubagentsDir`.
     - Aggregates into a `TokenUsage` struct with nested `SubagentTokens`.
 
 6.  **Invoke Strategy**:
@@ -122,12 +139,12 @@ Fires when Claude finishes responding. Does **not** fire on user interrupt (Ctrl
 
 8.  **Cleanup**: Deletes the temporary `.entire/tmp/pre-prompt-<session-id>.json` file.
 
-### `PreToolUse[Task]`
+### `PreToolUse[Agent]`
 
 - **Command**: `entire hooks claude-code pre-task`
 - **Handler**: `handlePreTask()` in `hooks_claudecode_handlers.go:668`
 
-Fires just before a subagent (Task tool) begins execution. Captures the current state so that file changes can be computed when the task completes.
+Fires just before a subagent (Agent tool) begins execution. Captures the current state so that file changes can be computed when the task completes.
 
 **What it does:**
 
@@ -142,10 +159,10 @@ Fires just before a subagent (Task tool) begins execution. Captures the current 
 
     - Runs `git status` to get current untracked files.
     - Saves to `.entire/tmp/pre-task-<tool-use-id>.json`.
-    - This baseline is used by `PostToolUse[Task]` to determine which files the subagent created.
-    - **Note**: No checkpoint/commit is created at this stage. Commits are only created during task completion (`PostToolUse[Task]` or `PostToolUse[TodoWrite]`) and only if there are actual file changes.
+    - This baseline is used by `PostToolUse[Agent]` to determine which files the subagent created.
+    - **Note**: No checkpoint/commit is created at this stage. Commits are only created during task completion (`PostToolUse[Agent]` or `PostToolUse[TaskCreate|TaskUpdate]`) and only if there are actual file changes.
 
-### `PostToolUse[Task]`
+### `PostToolUse[Agent]`
 
 - **Command**: `entire hooks claude-code post-task`
 - **Handler**: `handlePostTask()` in `hooks_claudecode_handlers.go:770`
@@ -156,10 +173,13 @@ Fires after a subagent finishes its work. Creates the final checkpoint for the s
 
 1.  **Parse Input**: Extracts `tool_use_id`, `agent_id` (from `tool_response.agentId`), `session_id`, `transcript_path`, and `tool_input`.
 
-2.  **Locate Subagent Transcript**:
-
-    - Constructs path: `<transcript_dir>/agent-<agent_id>.jsonl`.
-    - If the subagent transcript exists, uses it for file extraction; otherwise falls back to main transcript.
+2.  **Locate Subagent Transcript** — `ResolveAgentTranscriptPath`, which prefers
+    `paths.SubagentsDir` (`<transcript_dir>/<session_id>/subagents/agent-<agent_id>.jsonl`,
+    where Claude Code writes it today, alongside an unused-by-Entire
+    `agent-<agent_id>.meta.json` sidecar) and falls back to the legacy sibling
+    `<transcript_dir>/agent-<agent_id>.jsonl`. See that function for why the order
+    matters. If it resolves, it is used for file extraction; otherwise extraction
+    falls back to the main transcript, where a subagent's Write/Edit calls do not appear.
 
 3.  **Extract Modified Files**: Parses the transcript (subagent or main) to find Write/Edit tool invocations.
 
@@ -179,12 +199,12 @@ Fires after a subagent finishes its work. Creates the final checkpoint for the s
 
 7.  **Cleanup**: Deletes `.entire/tmp/pre-task-<tool-use-id>.json`.
 
-### `PostToolUse[TodoWrite]`
+### `PostToolUse[TaskCreate|TaskUpdate]`
 
 - **Command**: `entire hooks claude-code post-todo`
 - **Handler**: `handlePostTodo()` in `hooks_claudecode_handlers.go:550`
 
-Fires whenever a subagent updates its todo list. Enables fine-grained, incremental checkpointing _during_ subagent execution.
+Fires whenever a subagent updates its task list. Enables fine-grained, incremental checkpointing _during_ subagent execution. (The `post-todo` command name predates Claude Code's TodoWrite→Task* rename; the matcher now targets `TaskCreate`/`TaskUpdate`.)
 
 **What it does:**
 

@@ -27,6 +27,9 @@ type ClaudeHookMatcher struct {
 type ClaudeHookEntry struct {
 	Type    string `json:"type"`
 	Command string `json:"command"`
+	// Timeout is the hook's timeout in seconds. Omitted (0) leaves Claude Code's
+	// default in place; set only where a hook needs an explicit budget.
+	Timeout int `json:"timeout,omitempty"`
 }
 
 // sessionInfoRaw is the JSON structure from SessionStart/SessionEnd/Stop hooks.

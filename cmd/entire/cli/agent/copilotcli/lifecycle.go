@@ -169,11 +169,13 @@ func (c *CopilotCLIAgent) buildSubagentStop(env *hookEnvelope) *agent.Event {
 }
 
 func (c *CopilotCLIAgent) readHookEnvelope(stdin io.Reader) (*hookEnvelope, error) {
-	data, err := io.ReadAll(stdin)
+	// Stream one JSON value rather than io.ReadAll so the hook never blocks
+	// waiting for stdin EOF that some agents don't send on Windows (issue #1398).
+	raw, err := agent.ReadHookInputRaw(stdin)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read hook input: %w", err)
+		return nil, fmt.Errorf("read hook input: %w", err)
 	}
-	return parseHookEnvelope(data)
+	return parseHookEnvelope(raw)
 }
 
 // resolveTranscriptRef computes the transcript path from the session ID.

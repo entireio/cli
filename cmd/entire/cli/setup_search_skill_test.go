@@ -231,4 +231,25 @@ func assertStrictJSONSearchInstructions(t *testing.T, content string) {
 	if strings.Contains(content, "Your only history-search mechanism is the `entire search` command.") {
 		t.Fatal("scaffolded file should not present plain `entire search` as the required command")
 	}
+	if !strings.Contains(content, "entire search --json --compact") {
+		t.Fatal("scaffolded file should recommend `--json --compact` for scanning results")
+	}
+	if !strings.Contains(content, "entire checkpoint explain <id>") {
+		t.Fatal("scaffolded file should point drill-down at `entire checkpoint explain <id>`")
+	}
+	if !strings.Contains(content, "entire checkpoint explain --session <id>") {
+		t.Fatal("scaffolded file should bridge session hits via `explain --session`")
+	}
+	if !strings.Contains(content, "session hit on the current branch") {
+		t.Fatal("scaffolded file should scope the session bridge to the current branch")
+	}
+	if !strings.Contains(content, "session hits are projections of the same checkpoints") {
+		t.Fatal("scaffolded file should frame session hits as projections of checkpoints")
+	}
+	if !strings.Contains(content, "add `--full` to pull the checkpoint's entire session transcript") {
+		t.Fatal("scaffolded file should escalate to `explain --full` for the session transcript")
+	}
+	if !strings.Contains(content, "summarize from the compact fields alone") {
+		t.Fatal("scaffolded file should tell agents repo/pr and cross-repo hits aren't explainable")
+	}
 }

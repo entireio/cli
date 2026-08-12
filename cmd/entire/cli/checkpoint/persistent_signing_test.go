@@ -21,7 +21,7 @@ type stubSigner struct {
 	err error
 }
 
-func (s *stubSigner) Sign(_ io.Reader) ([]byte, error) {
+func (s *stubSigner) Sign(_ context.Context, _ io.Reader) ([]byte, error) {
 	return s.sig, s.err
 }
 

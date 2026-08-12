@@ -73,7 +73,7 @@ func newOrgListCmd() *cobra.Command {
 					if err != nil {
 						return nil, "", err
 					}
-					return out.Orgs, out.NextPageToken.Or(""), nil
+					return out.Response.Orgs, out.Response.NextPageToken.Or(""), nil
 				})
 			})
 		},

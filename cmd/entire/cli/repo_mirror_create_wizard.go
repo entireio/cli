@@ -359,7 +359,7 @@ func runMirrorCreateWizard(cmd *cobra.Command, noWait bool, waitTimeout time.Dur
 	repos := selectableAvailableRepos(avail.Available)
 	if len(repos) == 0 {
 		fmt.Fprintln(errW, "No GitHub repos available to mirror (you need write access to a repo that isn't mirrored yet).")
-		fmt.Fprintln(errW, "Run 'entire repo mirror list --show-available' to see what's onboardable.")
+		fmt.Fprintln(errW, "Run 'entire repo mirror list' to see what's onboardable.")
 		return nil
 	}
 	selectedRepos, err := pickRepos(ctx, outW, repos)
@@ -604,7 +604,7 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 	}
 
 	if !outcome.polled {
-		if outcome.created.Empty {
+		if outcome.created.Empty { //nolint:staticcheck // CreatedMirror.Empty deprecated by /repos spec bump; create-flow cleanup tracked separately
 			res.status = mirrorStatusEmpty
 		} else {
 			res.status = mirrorStatusRegistered

@@ -51,7 +51,8 @@ const (
 	AgentTrailerKey = "Entire-Agent"
 
 	// OPFAppliedTrailerKey marks an entire/checkpoints/v1 commit whose blobs
-	// have been redacted by the OpenAI Privacy Filter (8-layer pipeline).
+	// have been redacted by the OpenAI Privacy Filter (the opt-in 9th,
+	// network-backed layer, applied on top of the 8 regex layers).
 	// Format: literal "true"; the trailer is omitted entirely when OPF was
 	// not applied. The pre-push rewrite path treats commits lacking this
 	// trailer as candidates to OPF-redact before they reach the remote.
@@ -150,11 +151,6 @@ func FormatSourceRef(branch, commitHash string) string {
 		shortHash = shortHash[:checkpointID.ShortIDLength]
 	}
 	return fmt.Sprintf("%s@%s", branch, shortHash)
-}
-
-// FormatMetadata creates a commit message with metadata trailer.
-func FormatMetadata(message, metadataDir string) string {
-	return fmt.Sprintf("%s\n\n%s: %s\n", message, MetadataTrailerKey, metadataDir)
 }
 
 // FormatShadowCommit creates a commit message for manual-commit strategy checkpoints.

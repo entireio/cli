@@ -416,13 +416,16 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 // handleLifecycleTurnStart handles turn start: captures pre-prompt state,
 // ensures strategy setup, initializes session.
 // entireTrailContextInjection is the one-time, model-facing pointer Entire
-// injects on the first turn of a session. It deliberately enumerates NO flags or
-// subcommands — that surface is fetched on demand via `entire agent-help`, which
-// always matches the installed CLI — so the injection never goes stale when the
-// command surface grows. It names the auto-detected repo (from the already-loaded
-// session scope, no IO) and carries the standing rule that the agent is inside
-// the repo and must never ask the user for the repo name. Kept terse: it costs
-// context-window tokens on the first turn of every session.
+// injects on the first turn of a session. It points at `entire agent-help` for
+// the full flag/subcommand surface — fetched on demand so that surface never goes
+// stale here as it grows — and adds only a small, stable behavioral invariant an
+// agent must know even if it never drills in: commits auto-capture checkpoints,
+// the two stable query anchors (`why`, `checkpoint search`) for recovering intent
+// before edits, and that setup/destructive commands belong to the user. It also
+// names the auto-detected repo (from the already-loaded session scope, no IO) and
+// the standing rule that the agent is inside the repo and must never ask the user
+// for the repo name. Kept terse: it costs context-window tokens on the first turn
+// of every session.
 func entireTrailContextInjection(scope trailEnablementScope) string {
 	repo := ""
 	if scope.Forge != "" && scope.Owner != "" && scope.Repo != "" {
@@ -430,6 +433,7 @@ func entireTrailContextInjection(scope trailEnablementScope) string {
 	}
 	var b strings.Builder
 	b.WriteString("Entire is enabled for this repo. Run `entire agent-help` to see what entire does and which subcommand to use, then `entire agent-help <command>` for that command's exact, current flags. ")
+	b.WriteString("Commits automatically capture the AI session as a checkpoint, so never create checkpoints by hand — just commit normally. Before large edits, `entire why <file>:<line>` and `entire checkpoint search` recover the intent behind existing code. Leave setup and destructive commands (enable, disable, clean, rewind, auth) to the user. ")
 	// Mirror agentHelpRepoBlock's defense-in-depth: this string is injected raw
 	// into the agent's model context (no escaping), so a repo key carrying control
 	// characters (e.g. an <sessionID>.trail-scope.json cache written by a pre-fix
@@ -514,6 +518,16 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	}
 }
 
+// turnStartSessionLockWait bounds how long the TurnStart hook waits for the
+// per-session state lock. TurnStart fires before the agent runs and must stay
+// cheap; its session-state work is best-effort and repaired on the next turn or
+// at turn-end. Without a bound, TurnStart blocks on the previous turn's
+// still-running checkpoint condensation (which holds the same lock while it
+// rewrites the multi-MB transcript), stalling the user's prompt for ~30s. A
+// short wait still wins the lock in the common uncontended/brief-contention
+// case while degrading gracefully under pathological contention.
+const turnStartSessionLockWait = 2 * time.Second
+
 func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	logging.Info(logCtx, "turn-start",
@@ -531,6 +545,10 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		return fmt.Errorf("invalid %s event: %w", event.Type, err)
 	}
 
+	// Bound every session-state lock acquisition on the TurnStart path so a
+	// background lock holder can't stall the user's prompt (see the const doc).
+	ctx = strategy.WithSessionLockWait(ctx, turnStartSessionLockWait)
+
 	// Fill model from hint file if the agent didn't provide it on this hook
 	if event.Model == "" {
 		if hint := strategy.LoadModelHint(ctx, sessionID); hint != "" {
@@ -539,6 +557,16 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 				slog.String("model", hint))
 		}
 	}
+
+	// EnsureEntireGitignore can append to the tracked .entire/.gitignore, so run
+	// it before CapturePrePromptState: the snapshot should describe the tree the
+	// agent starts from, not one setup is about to change.
+	_, setupSpan := perf.Start(ctx, "ensure_setup")
+	if err := strategy.EnsureSetup(ctx); err != nil {
+		logging.Warn(logCtx, "failed to ensure strategy setup",
+			slog.String("error", err.Error()))
+	}
+	setupSpan.End()
 
 	// Capture pre-prompt state (including transcript position via TranscriptAnalyzer)
 	_, captureSpan := perf.Start(ctx, "capture_pre_prompt_state")
@@ -572,13 +600,8 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		}
 	}
 
-	// Ensure strategy setup and initialize session
+	// Initialize session (setup already ran above, before the first status read)
 	_, initSpan := perf.Start(ctx, "init_session")
-	if err := strategy.EnsureSetup(ctx); err != nil {
-		logging.Warn(logCtx, "failed to ensure strategy setup",
-			slog.String("error", err.Error()))
-	}
-
 	strat := GetStrategy(ctx)
 	if err := strat.InitializeSession(ctx, sessionID, ag.Type(), event.SessionRef, event.Prompt, event.Model); err != nil {
 		logging.Warn(logCtx, "failed to initialize session state",
@@ -723,14 +746,20 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		copySpan.End()
 		return fmt.Errorf("failed to read transcript: %w", err)
 	}
+	// Sanitize before writing: this copy is what the shadow-branch walk blobs and
+	// redacts on every Stop. See agent.TranscriptSanitizer for why order matters.
+	// The agent's own rollout is untouched.
+	storedTranscript := agent.SanitizeTranscriptForStorage(ag, transcriptData)
 	logFile := filepath.Join(sessionDirAbs, paths.TranscriptFileName)
-	if err := os.WriteFile(logFile, transcriptData, 0o600); err != nil {
+	if err := os.WriteFile(logFile, storedTranscript, 0o600); err != nil {
 		copySpan.RecordError(err)
 		copySpan.End()
 		return fmt.Errorf("failed to write transcript: %w", err)
 	}
 	logging.Debug(logCtx, "copied transcript",
-		slog.String("path", sessionDir+"/"+paths.TranscriptFileName))
+		slog.String("path", sessionDir+"/"+paths.TranscriptFileName),
+		slog.Int("raw_bytes", len(transcriptData)),
+		slog.Int("stored_bytes", len(storedTranscript)))
 	copySpan.End()
 
 	// Load pre-prompt state (captured on TurnStart)
@@ -776,8 +805,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 
 	// Compute subagents directory for agents that support subagent extraction.
-	// Subagent transcripts live in <transcriptDir>/<modelSessionID>/subagents/
-	subagentsDir := filepath.Join(filepath.Dir(transcriptRef), event.SessionID, "subagents")
+	subagentsDir := paths.SubagentsDir(filepath.Dir(transcriptRef), event.SessionID)
 
 	// Extract metadata via agent interface (modified files)
 	var modifiedFiles []string
@@ -1077,15 +1105,8 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		event.SubagentType, event.TaskDescription = ParseSubagentTypeAndDescription(event.ToolInput)
 	}
 
-	// Determine subagent transcript path
-	transcriptDir := filepath.Dir(event.SessionRef)
-	var subagentTranscriptPath string
-	if event.SubagentID != "" {
-		subagentTranscriptPath = AgentTranscriptPath(transcriptDir, event.SubagentID)
-		if !fileExists(subagentTranscriptPath) {
-			subagentTranscriptPath = ""
-		}
-	}
+	// Determine subagent transcript path (empty when the agent stores none).
+	subagentTranscriptPath := ResolveAgentTranscriptPath(filepath.Dir(event.SessionRef), event.SessionID, event.SubagentID)
 
 	// Log context
 	subagentEndAttrs := []any{
@@ -1143,9 +1164,22 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		return fmt.Errorf("failed to get worktree root: %w", err)
 	}
 
-	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
+	// The transcript records what the subagent wrote at some point in its run, not
+	// what is still uncommitted. When the subagent committed its own work mid-turn
+	// (the scenario TestSingleSessionSubagentCommitInTurn covers), that commit has
+	// already condensed the session and deleted the shadow branch, so there is
+	// nothing left to snapshot. Keeping those paths defeats the "no changes, skip"
+	// gate below and mints a *new* shadow branch after condensation — which nothing
+	// then condenses away, because turn-end skips when no files changed, so it
+	// outlives the session.
+	//
+	// filterToUncommittedFiles is the same guard the turn-end path already applies
+	// for this exact reason; it fails open, so a git error keeps the list as-is
+	// rather than silently dropping a real checkpoint.
+	relModifiedFiles := filterToUncommittedFiles(ctx, FilterAndNormalizePaths(modifiedFiles, repoRoot), repoRoot)
 	var relNewFiles, relDeletedFiles []string
 	if changes != nil {
+		// changes come from git status, so they are uncommitted by construction.
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
 		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
 		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))

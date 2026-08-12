@@ -130,7 +130,7 @@ func NormalizeOriginURL(raw string) string {
 }
 
 // OriginOnly is a backwards-compatible alias for NormalizeOriginURL.
-// Callers reading raw URLs (e.g. ENTIRE_SEARCH_URL) and feeding them into
+// Callers reading raw URLs (e.g. ENTIRE_API_BASE_URL) and feeding them into
 // tokenmanager.TokenRequest.Resource use this to strip path/query/fragment
 // before the lib's stricter origin-only validator runs.
 func OriginOnly(raw string) string {

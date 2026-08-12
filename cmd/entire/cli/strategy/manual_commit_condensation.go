@@ -26,6 +26,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	"github.com/entireio/cli/cmd/entire/cli/transcript/imageextract"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
 
@@ -104,17 +105,131 @@ type condenseOpts struct {
 	allAgentFiles    map[string]struct{} // Union of all sessions' FilesTouched for cross-session exclusion (nil = single-session)
 }
 
-// redactSessionJSONLBytes runs the 7-layer redaction pipeline over a
-// session transcript at post-commit condensation. OPF is intentionally
-// NOT included here — it runs exclusively in the pre-push rewrite path
+// redactSessionJSONLBytes runs the regex-only redaction pipeline (the
+// eight always-on/opt-in layers) over a session transcript at
+// post-commit condensation. OPF is intentionally NOT included here —
+// it runs exclusively in the pre-push rewrite path
 // (strategy/manual_commit_opf_rewrite.go), which re-redacts the
-// 7-layer blobs and produces 8-layer commits before the push.
+// regex-only blobs and produces OPF-applied (9-layer) commits before
+// the push.
 //
 // Exposed as a var so tests can inject deterministic success/error
 // returns. The signature still takes a context so the var can be
 // re-wired to JSONLBytesWithPrivacyFilter from tests that need OPF.
 var redactSessionJSONLBytes = func(_ context.Context, b []byte) (redact.RedactedBytes, error) {
 	return redact.JSONLBytes(b)
+}
+
+// extractSessionImages lifts inline base64 images out of a transcript into
+// externalized assets via the per-agent image codec, returning the rewritten
+// (placeholder-bearing) transcript. Agents with no codec, or transcripts with no
+// externalizable images, pass through unchanged. Injectable for tests.
+var extractSessionImages = func(agentType types.AgentType, transcript []byte) ([]byte, []cpkg.TranscriptAsset, error) {
+	codec := imageextract.CodecFor(agentType)
+	if codec == nil {
+		return transcript, nil, nil
+	}
+	rewritten, assets, err := codec.ExtractImages(transcript)
+	if err != nil {
+		return transcript, nil, fmt.Errorf("extract images: %w", err)
+	}
+	if len(assets) == 0 {
+		return transcript, nil, nil
+	}
+	out := make([]cpkg.TranscriptAsset, len(assets))
+	for i, a := range assets {
+		out[i] = cpkg.TranscriptAsset{Name: a.Name, MediaType: a.MediaType, Data: a.Data}
+	}
+	return rewritten, out, nil
+}
+
+// externalizeSessionImages runs the opt-in image-externalization step over a
+// session transcript before redaction. When enabled it returns the rewritten
+// (placeholder-bearing) transcript plus the extracted assets; when disabled,
+// unsupported for the agent, or on error it returns the transcript unchanged with
+// nil assets (the checkpoint then stores the inline transcript).
+//
+// It deliberately does NOT mutate the caller's transcript: the pre-externalization
+// bytes are what CondenseResult.TranscriptSizeBaseline is measured on, and that
+// baseline must stay in the shadow-branch blob's coordinate (sanitized but NOT
+// image-externalized, matching what the Stop path writes) — feeding it the shrunken
+// externalized size would report spurious growth on every subsequent commit.
+func externalizeSessionImages(ctx, logCtx context.Context, state *SessionState, transcript []byte) ([]byte, []cpkg.TranscriptAsset) {
+	if !settings.IsImageExternalizationEnabled(ctx) {
+		return transcript, nil
+	}
+	rewritten, assets, err := extractSessionImages(state.AgentType, transcript)
+	if err != nil {
+		logging.Warn(logCtx, "image externalization failed; leaving transcript inline",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()))
+		return transcript, nil
+	}
+	return rewritten, assets
+}
+
+// prepareTranscriptForStorage runs the first two steps of the stored-copy pipeline
+// in order — sanitize (drop non-portable agent state), then externalize inline
+// images. Redaction is the caller's next step, so the whole pipeline reads
+// sanitize -> externalize -> redact.
+//
+// Each step has to precede the next:
+//
+//   - Sanitize first, so we neither externalize images out of items we are about to
+//     discard — which would store an asset whose referencing transcript line is gone
+//     moments later — nor redact megabytes of ciphertext only to throw it away.
+//     Base64 is the pathological input for the entropy layer, so on a large Codex
+//     rollout that scan alone costs tens of seconds.
+//   - Externalize before redaction, because base64 is high-entropy and redaction
+//     would otherwise flag and destroy it.
+//
+// It returns the sanitized size rather than the sanitized bytes: that size is the
+// coordinate the CheckpointTranscriptSize growth baseline must use (see
+// CondenseResult.TranscriptSizeBaseline), and returning the slice would keep a
+// second multi-MB buffer reachable for the rest of the condensation just to read
+// its length.
+func prepareTranscriptForStorage(
+	ctx, logCtx context.Context,
+	ag agent.Agent,
+	state *SessionState,
+	raw []byte,
+) (externalized []byte, assets []cpkg.TranscriptAsset, sanitizedSize int64) {
+	sanitized := agent.SanitizeTranscriptForStorage(ag, raw)
+	externalized, assets = externalizeSessionImages(ctx, logCtx, state, sanitized)
+	return externalized, assets, int64(len(sanitized))
+}
+
+// sidecarSessionImages captures images an agent stores OUTSIDE the transcript
+// (e.g. Cursor's per-session SQLite blob store) as checkpoint assets, so they are
+// preserved with the session even though they never appear in full.jsonl. Unlike
+// externalizeSessionImages there is no transcript placeholder and no round trip:
+// these assets are preserve/view-only (the agent reads its own store on restore).
+//
+// Gated on the same opt-in flag. Best-effort: agents without the capability, or
+// any capture error, yield no assets (the checkpoint is written without them).
+func sidecarSessionImages(ctx, logCtx context.Context, ag agent.Agent, state *SessionState) []cpkg.TranscriptAsset {
+	if !settings.IsImageExternalizationEnabled(ctx) {
+		return nil
+	}
+	provider, ok := agent.AsSidecarImageProvider(ag)
+	if !ok {
+		return nil
+	}
+	assets, err := provider.SidecarImages(ctx, state.TranscriptPath)
+	if err != nil {
+		logging.Warn(logCtx, "sidecar image capture failed; checkpoint stored without them",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()))
+		return nil
+	}
+	if len(assets) == 0 {
+		return nil
+	}
+	out := make([]cpkg.TranscriptAsset, len(assets))
+	for i, a := range assets {
+		out[i] = cpkg.TranscriptAsset{Name: a.Name, MediaType: a.MediaType, Data: a.Data}
+	}
+	return out
 }
 
 // checkpointStepCount returns the number of user prompts attributed to the
@@ -181,13 +296,19 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// Backfill session state token usage from the freshly-extracted transcript.
 	// Copilot CLI writes session.shutdown after the hooks return, so by condensation
 	// time we can recover the authoritative full-session total from the transcript
-	// while keeping checkpoint metadata scoped to CheckpointTranscriptStart.
-	if backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, sessionData.Transcript, sessionData.TokenUsage); backfillUsage != nil {
-		state.TokenUsage = backfillUsage
-	}
+	// while keeping checkpoint metadata scoped to CheckpointTranscriptStart. The
+	// recompute drops SubagentTokens (subagentsDir=""); the helper preserves the
+	// cumulative subagent total across the backfill so resetCheckpointWindow's
+	// baseline does not regress to nil (finding 019f5ebf-a57e).
+	applyBackfilledSessionTokenUsage(ctx, ag, state, sessionData.Transcript, sessionData.TokenUsage)
 
 	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.CheckpointTokenUsage) {
+		// Whole-value fallback: accumulateTokenUsage already carries SubagentTokens.
 		sessionData.TokenUsage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
+	} else {
+		// Refill only the subagent total the recompute dropped. Runs after
+		// applyBackfilledSessionTokenUsage, which needs the usage without it.
+		sessionData.TokenUsage = withSubagentTokensFrom(sessionData.TokenUsage, state.CheckpointTokenUsage)
 	}
 
 	// Backfill the model from the transcript for agents that don't report it via
@@ -221,10 +342,18 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	filterFilesTouched(sessionData, committedFiles, state)
 
-	redactedTranscript, redactDuration := redactOrDrop(logCtx, sessionData.Transcript, state.SessionID, checkpointID)
+	// sessionData.Transcript is left as the raw transcript; only the sanitized,
+	// externalized, redacted copy is stored.
+	externalizedTranscript, extractedAssets, transcriptSizeBaseline := prepareTranscriptForStorage(ctx, logCtx, ag, state, sessionData.Transcript)
+
+	redactedTranscript, redactDuration := redactOrDrop(logCtx, externalizedTranscript, state.SessionID, checkpointID)
 	if skipped := skipIfPostRedactionEmpty(logCtx, redactedTranscript, sessionData, state, checkpointID); skipped != nil {
 		return skipped, nil
 	}
+
+	// Capture agent sidecar images (e.g. Cursor's SQLite store) after the skip
+	// check, so the sqlite3 shell-out is avoided when the checkpoint is discarded.
+	extractedAssets = append(extractedAssets, sidecarSessionImages(ctx, logCtx, ag, state)...)
 
 	store, err := s.getPersistentStore(ctx, repo)
 	if err != nil {
@@ -262,7 +391,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		summary = generateSummary(ctx, redactedTranscript, sessionData.FilesTouched, state)
 	}
 
-	// Post-commit emits 7-layer-only blobs. OPF runs later in the
+	// Post-commit emits regex-only blobs. OPF runs later in the
 	// pre-push rewrite path, never here.
 	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(sessionData.SkillEvents, state.TurnID))
 
@@ -272,6 +401,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		Strategy:                    StrategyNameManualCommit,
 		Branch:                      branchName,
 		Transcript:                  redactedTranscript,
+		Assets:                      extractedAssets,
 		Prompts:                     sessionData.Prompts,
 		FilesTouched:                sessionData.FilesTouched,
 		CheckpointsCount:            checkpointStepCount(state),
@@ -328,13 +458,13 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	)
 
 	return &CondenseResult{
-		CheckpointID:         checkpointID,
-		SessionID:            state.SessionID,
-		CheckpointsCount:     checkpointStepCount(state),
-		FilesTouched:         sessionData.FilesTouched,
-		Prompts:              sessionData.Prompts,
-		TotalTranscriptLines: sessionData.FullTranscriptLines,
-		Transcript:           sessionData.Transcript,
+		CheckpointID:           checkpointID,
+		SessionID:              state.SessionID,
+		CheckpointsCount:       checkpointStepCount(state),
+		FilesTouched:           sessionData.FilesTouched,
+		Prompts:                sessionData.Prompts,
+		TotalTranscriptLines:   sessionData.FullTranscriptLines,
+		TranscriptSizeBaseline: transcriptSizeBaseline,
 	}, nil
 }
 
@@ -526,7 +656,7 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 
 	generator := buildSummaryGenerator(summarizeCtx)
 	// scopedTranscript is sliced from redactedTranscript, which was redacted earlier in CondenseSession.
-	summary, err := summarize.GenerateFromTranscript(summarizeCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, state.AgentType, generator)
+	summary, err := summarize.GenerateFromTranscript(summarizeCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, state.AgentType, generator, nil) // no progress in the auto-summary hot path
 	if err != nil {
 		logging.Warn(summarizeCtx, "summary generation failed",
 			slog.String("session_id", state.SessionID),
@@ -637,6 +767,53 @@ func hasTokenUsageData(usage *agent.TokenUsage) bool {
 	}
 
 	return hasTokenUsageData(usage.SubagentTokens)
+}
+
+// withSubagentTokensFrom fills usage's SubagentTokens from src when usage has none
+// of its own, returning a copy. It exists because the transcript recompute runs
+// with subagentsDir="" and so always yields a nil SubagentTokens (see
+// extractSessionData), which would otherwise replace a total already computed.
+//
+// The caller picks the source, and the two callers deliberately pick differently:
+// condensation passes state.CheckpointTokenUsage (this window's total, already
+// rescoped by SaveStep, so committed checkpoints stay summable rather than each
+// re-reporting the session total), while applyBackfilledSessionTokenUsage passes
+// state.TokenUsage (the session-wide cumulative, which is what
+// resetCheckpointWindow must later snapshot as the next baseline).
+//
+// Copies rather than mutates: applyBackfilledSessionTokenUsage can adopt the
+// checkpoint usage as state.TokenUsage (Copilot CLI), so mutating in place would
+// overwrite the cumulative with a window delta.
+//
+// Known gap: a mid-turn commit that condenses before any SaveStep in the window has
+// no CheckpointTokenUsage to draw on, so it records no subagent tokens. The live
+// path could resolve a subagents dir from session state (as review/manifest.go
+// does) and rescope against SubagentTokensBaseline; deferred, not blocked.
+func withSubagentTokensFrom(usage, src *agent.TokenUsage) *agent.TokenUsage {
+	if usage == nil || usage.SubagentTokens != nil || src == nil || src.SubagentTokens == nil {
+		return usage
+	}
+	filled := *usage
+	filled.SubagentTokens = src.SubagentTokens
+	return &filled
+}
+
+// applyBackfilledSessionTokenUsage overwrites state.TokenUsage with the
+// transcript-recomputed session total (see sessionStateBackfillTokenUsage) when
+// one is available, preserving the cumulative subagent total across the backfill.
+//
+// resetCheckpointWindow captures the next window's baseline from
+// state.TokenUsage.SubagentTokens after CondenseSession returns, so letting the
+// backfill drop it would make the baseline nil and the next checkpoint re-report
+// the full cumulative subagent total — hence the withSubagentTokensFrom fill,
+// which copies so the cumulative is never mixed into checkpointUsage (the
+// checkpoint-scoped value written to metadata).
+func applyBackfilledSessionTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte, checkpointUsage *agent.TokenUsage) {
+	backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, transcript, checkpointUsage)
+	if backfillUsage == nil {
+		return
+	}
+	state.TokenUsage = withSubagentTokensFrom(backfillUsage, state.TokenUsage)
 }
 
 // sessionStateBackfillTokenUsage returns the best session-level token usage to
@@ -927,7 +1104,15 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
 	// if they only render the checkpoint-scoped slice.
 	if len(data.Transcript) > 0 {
-		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, "") //TODO: why do we not use here subagents dir?
+		// subagentsDir="" on purpose. Re-reading the subagent transcripts here would
+		// re-parse the whole main transcript plus every subagent file from line 0 —
+		// measured at ~29x the cost of this call, enough to triple post-commit
+		// condensation for a subagent-heavy session — and would still yield a
+		// cumulative snapshot needing the same rescoping SaveStep already did. It
+		// also finds nothing on this path once the agent has cleaned the transcripts
+		// up. CondenseSession fills the already-rescoped window total in instead;
+		// see withSubagentTokensFrom.
+		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, "")
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
@@ -969,7 +1154,11 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
 	// if they only render the checkpoint-scoped slice.
 	if len(data.Transcript) > 0 {
-		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, "") //TODO: why do we not use here subagents dir?
+		// subagentsDir="" for the cost reason in extractSessionData above — but NOT
+		// for the cleanup reason: this is the live mid-turn path, where the subagent
+		// transcripts are still on disk. It is the one place the gap noted on
+		// withSubagentTokensFrom could be closed by reading them.
+		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, "")
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
@@ -1113,10 +1302,9 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 			slog.Int("checkpoints_condensed", result.CheckpointsCount),
 		)
 
-		state.StepCount = 0
-		state.CheckpointTokenUsage = nil
+		resetCheckpointWindow(state)
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
-		state.CheckpointTranscriptSize = int64(len(result.Transcript))
+		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 		state.Phase = session.PhaseIdle
 		state.LastCheckpointID = checkpointID
 		state.LastCheckpointCommitHash = state.BaseCommit
@@ -1232,8 +1420,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			return nil
 		}
 
-		state.StepCount = 0
-		state.CheckpointTokenUsage = nil
+		resetCheckpointWindow(state)
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
 		state.LastCheckpointID = checkpointID
 		state.LastCheckpointCommitHash = state.BaseCommit

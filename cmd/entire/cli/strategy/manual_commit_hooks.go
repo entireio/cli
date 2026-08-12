@@ -21,8 +21,10 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/gitops"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -1063,7 +1065,12 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	repoDir string,
 ) error {
 	logCtx := logging.WithComponent(ctx, "attribution")
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	// RefFetcher: the attribution backfill's absence probe fetches a ref that
+	// exists remotely but not locally. Bounded budget + the store's failure
+	// memo keep a dead network from stalling the post-commit hook.
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		RefFetcher: remote.HookCheckpointRefFetcher(),
+	})
 	if err != nil {
 		return fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -1407,10 +1414,9 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	newHead := head.Hash().String()
 	state.BaseCommit = newHead
 	state.RealignAttributionBase(newHead)
-	state.StepCount = 0
-	state.CheckpointTokenUsage = nil
+	resetCheckpointWindow(state)
 	state.CheckpointTranscriptStart = result.TotalTranscriptLines
-	state.CheckpointTranscriptSize = int64(len(result.Transcript))
+	state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 
 	// Clear attribution tracking — condensation already used these values
 	state.PromptAttributions = nil
@@ -1480,7 +1486,12 @@ func (s *ManualCommitStrategy) postCommitUpdateBaseCommitOnly(ctx context.Contex
 		return // Silent failure — hooks must be resilient
 	}
 
-	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
+	// Exact matches only: this path rewrites BaseCommit, which must track the
+	// HEAD of the session's own worktree. A trailer-less commit here says
+	// nothing about HEAD movement in a sibling worktree, and rewriting a
+	// fallback-matched session's base would orphan its shadow branch
+	// (shadow branches are keyed by BaseCommit + WorktreeID).
+	sessions, err := s.findExactSessionsForWorktree(ctx, worktreePath)
 	if err != nil || len(sessions) == 0 {
 		return
 	}
@@ -1934,7 +1945,7 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 	// For Claude Code, use ExtractAllModifiedFiles which parses the main transcript
 	// AND subagent transcripts in a single pass, avoiding redundant parsing.
 	if state.AgentType == agent.AgentTypeClaudeCode {
-		subagentsDir := filepath.Join(filepath.Dir(state.TranscriptPath), state.SessionID, "subagents")
+		subagentsDir := paths.SubagentsDir(filepath.Dir(state.TranscriptPath), state.SessionID)
 		transcriptData, readErr := os.ReadFile(state.TranscriptPath)
 		if readErr != nil {
 			logging.Debug(logCtx, "extractModifiedFilesFromLiveTranscript: failed to read transcript",
@@ -2488,8 +2499,10 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 		return result
 	}
 
-	// Get worktree status to find ALL changed files
-	status, err := worktree.Status()
+	// Get worktree status to find ALL changed files. This is a second full
+	// worktree walk in the turn-start hook — the pre-prompt capture in
+	// cli/state.go does its own. They are not shared.
+	status, err := gitrepo.Status(ctx, repo)
 	if err != nil {
 		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree status",
 			slog.String("error", err.Error()))
@@ -2833,6 +2846,12 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	ag, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; ExtractSkillEvents handles nil
 	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(agent.ExtractSkillEvents(ctx, ag, fullTranscript, 0), state.TurnID))
 
+	// Sanitize before externalizing and redacting, matching CondenseSession's
+	// sanitize -> externalize -> redact order. Skill events above are extracted from
+	// the pre-sanitization bytes because they are session telemetry rather than
+	// stored transcript content.
+	fullTranscript = agent.SanitizeTranscriptForStorage(ag, fullTranscript)
+
 	// Redact secrets before writing. Checkpoint store methods require
 	// pre-redacted in-memory transcript content from callers. The live
 	// transcript on disk is still treated as raw/untrusted input, so redact it
@@ -2842,9 +2861,48 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// (attribution, files touched, prompts). Hooks run without user interaction
 	// so there is no retry path — preserving partial metadata is better than
 	// losing everything. Persisting an unredacted transcript would be worse.
-	// Run the 7-layer pipeline over the transcript — OPF runs later in
-	// the pre-push rewrite path, which re-redacts these 7-layer blobs
-	// and produces 8-layer commits before the push goes out.
+	// Run the regex-only pipeline over the transcript — OPF runs later in
+	// the pre-push rewrite path, which re-redacts these regex-only blobs
+	// and produces OPF-applied (9-layer) commits before the push goes out.
+	// Externalize inline images BEFORE redaction, mirroring CondenseSession, so the
+	// finalized (authoritative, full-session) transcript keeps its placeholders and
+	// matching assets instead of re-inlining what condensation lifted out. Opt-in;
+	// a no-codec agent or a transcript with no images is a no-op.
+	var finalizeAssets []checkpoint.TranscriptAsset
+	// Whether externalization actually RAN at finalize. When it did not (flag
+	// off here even though it may have been on at condensation — e.g. an
+	// ENTIRE_EXTERNALIZE_IMAGES env override not inherited by the hook
+	// process, or settings toggled mid-session), an empty finalizeAssets means
+	// "extraction didn't run", NOT "the transcript has no images" — clearing
+	// the previously-stored assets would permanently lose them (the re-inlined
+	// base64 is destroyed by redaction below).
+	externalizationRan := false
+	if settings.IsImageExternalizationEnabled(ctx) {
+		rewritten, assets, exErr := extractSessionImages(state.AgentType, fullTranscript)
+		if exErr != nil {
+			logging.Warn(logCtx, "finalize: image externalization failed; leaving transcript inline",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", exErr.Error()),
+			)
+		} else {
+			fullTranscript = rewritten
+			finalizeAssets = assets
+			externalizationRan = true
+		}
+	}
+	// Re-capture sidecar images (e.g. Cursor's SQLite store) so a finalize that
+	// rewrites the transcript re-writes them too. When the full transcript differs
+	// from the stored (mid-turn) one, writeAssets clears the whole assets/ folder
+	// and re-writes only these assets — omitting the sidecar images here would drop
+	// what CondenseSession captured. Content-hash names make this idempotent with
+	// condensation's write; when the transcript is unchanged, writeAssets is not
+	// called and condensation's assets are left intact.
+	finalizeAssets = append(finalizeAssets, sidecarSessionImages(ctx, logCtx, ag, state)...)
+	// Sidecar capture is best-effort: a transient miss here (sqlite3 locked/timed
+	// out) yields no assets. For a sidecar-capable agent, preserve the assets a
+	// prior condensation stored rather than letting an empty set clear them.
+	_, sidecarCapable := agent.AsSidecarImageProvider(ag)
+
 	_, redactSpan := perf.Start(logCtx, "redact_transcript")
 	redactedTranscript, redactErr := redact.JSONLBytes(fullTranscript)
 	redactSpan.End()
@@ -2856,10 +2914,16 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		redactedTranscript = redact.RedactedBytes{}
 	}
 
-	// Post-commit emits 7-layer-only blobs; the writer joins + redacts
+	// Post-commit emits regex-only blobs; the writer joins + redacts
 	// via checkpoint.redactedJoinedPrompts. OPF runs later, once per
 	// push, in the pre-push rewrite path.
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	// RefFetcher: the transcript finalize targets existing checkpoints whose
+	// refs may live only on the remote (resumed/adopted multi-machine
+	// sessions). Bounded budget + the store's failure memo keep a dead
+	// network from stalling the stop hook N times.
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		RefFetcher: remote.HookCheckpointRefFetcher(),
+	})
 	if err != nil {
 		logging.Warn(logCtx, "finalize: failed to open checkpoint store",
 			slog.String("error", err.Error()),
@@ -2883,13 +2947,15 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		}
 
 		updateOpts := checkpoint.UpdateOptions{
-			CheckpointID:     cpID,
-			SessionID:        state.SessionID,
-			Transcript:       redactedTranscript,
-			Prompts:          prompts,
-			Agent:            state.AgentType,
-			SkillEvents:      skillEvents,
-			PrecomputedBlobs: precomputed,
+			CheckpointID:            cpID,
+			SessionID:               state.SessionID,
+			Transcript:              redactedTranscript,
+			Assets:                  finalizeAssets,
+			PreserveAssetsWhenEmpty: sidecarCapable || !externalizationRan,
+			Prompts:                 prompts,
+			Agent:                   state.AgentType,
+			SkillEvents:             skillEvents,
+			PrecomputedBlobs:        precomputed,
 		}
 
 		updateErr := store.Write(ctx, checkpoint.SessionTranscript(updateOpts))

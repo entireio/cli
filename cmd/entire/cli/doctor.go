@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"charm.land/huh/v2"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -40,7 +41,13 @@ Checks performed:
      review hasn't run yet on this machine, or a newer entire release
      added a hook the user hasn't approved yet).
 
-  3. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  For each installed agent that reports hook-config drift:
+  3. Hook config: warn when the installed hooks no longer match what this
+     CLI writes (e.g. an older release wrote Claude Code tool matchers that
+     no longer fire, or a committed Pi/OpenCode extension has gone stale).
+     Fix by re-running 'entire enable --force'.
+
+  4. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -98,6 +105,12 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	// Agent-specific: Codex hook trust state.
 	checkCodexHookTrust(cmd)
+
+	// Agent-specific: Claude Code hook config drift.
+	checkHookDrift(cmd)
+
+	// Where checkpoints land, when the repo's remotes make that ambiguous.
+	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
 
 	// Stuck sessions
 	// Load all session states
@@ -421,6 +434,38 @@ func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, err
 		fmt.Fprintln(w, "  -> Skipped")
 	}
 	return confirmed, nil
+}
+
+// checkHookDrift warns when an installed agent's Entire hook config is out of
+// date — an older release wrote Claude Code tool matchers that no longer fire,
+// or a repo committed a Pi/OpenCode extension that the template has since moved
+// past. Read-only; the fix is `entire enable --force`. Stays silent for agents
+// that aren't installed here or don't implement a drift check.
+func checkHookDrift(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+	for _, name := range GetAgentsWithHooksInstalled(ctx) {
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		hf, ok := agent.AsHookFreshness(ag)
+		if !ok {
+			continue
+		}
+		displayName := string(ag.Type())
+		switch hf.CheckHookConfig(ctx) {
+		case agent.HooksAbsent:
+			// Not installed in this repo — nothing to report.
+		case agent.HooksCurrent:
+			fmt.Fprintf(w, "✓ %s hook config: OK\n", displayName)
+		case agent.HooksOutdated:
+			fmt.Fprintf(w, "%s hooks: OUT OF DATE\n", displayName)
+			fmt.Fprintln(w, "  The installed hook config no longer matches what this CLI writes,")
+			fmt.Fprintln(w, "  so some or all hooks may silently not fire.")
+			fmt.Fprintln(w, "  Run `entire enable --force` to update it.")
+		}
+	}
 }
 
 // checkCodexHookTrust warns about two kinds of drift in the Codex hook

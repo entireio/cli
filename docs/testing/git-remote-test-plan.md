@@ -30,7 +30,7 @@ Scope: e2e (`e2e/tests/`) + integration (`cmd/entire/cli/integration_test/`) cov
 
 - **Destructive local-v1-ref moves** — the single most re-broken area: #953, `96034892c`, #1252, #1251, #1260 (ahead/behind/diverged/disconnected/shallow × resume/explain/doctor/pre-push).
 - **Cross-clone replay fidelity**: no-op commit tree clobber (`743c43f4c` — *no test*), >1000-commit replay cap (`4cf01edb3` — *no test*), stale ls-remote hash TOCTOU (`1e8628ade` — *no test*), double-replay (#1260 has a test).
-- **Remote-target precedence**: hardcoded-origin blob fetch (#976), `entire://`/`file://` non-derivable origin (#1279), token SSH→HTTPS coercion on fetch missing (`7afdaa33e`), silent origin fallback faking success (`53bc37a88`).
+- **Remote-target precedence**: hardcoded-origin blob fetch (#976), `entire://`/`file://` non-derivable origin (#1279 — since superseded: a forge-matching `entire://` origin now derives a mirror checkpoint URL on the same cluster; the provider-host fallback remains for `file://` and forge-mismatched mirrors), token SSH→HTTPS coercion on fetch missing (`7afdaa33e`), silent origin fallback faking success (`53bc37a88`).
 - **Errors masked as not-found**: partial-clone `ErrFileNotFound` (#1069), git-refs read paths (`7bbdad09c`).
 - **Self-inflicted shallow grafts** (#1443), promisor config pollution of `[remote "origin"]` (#934), gc pack race (#1276).
 - **Hook/transport hangs**: grandchild helper holding pipes (#1282), timeout stacking (`2e2c1b73a`), protected-ref GH013 silence (#1033).
@@ -79,7 +79,7 @@ These mostly **pin current behavior first**; several will surface product decisi
 | B2 | Fork triangle (origin = fork, upstream = base): push to origin syncs checkpoints to origin; push to upstream — where do checkpoints go, and do subsequent reads find them? (pin) | integration | both |
 | B3 | No remote at all: pre-push not applicable, but doctor/reconcile OK ("no remote to compare", regression `cac63b010`), `entire api` `{owner}` substitution errors cleanly, status/enable don't crash | integration | both |
 | B4 | `branch.<name>.remote=upstream` with both remotes present: pin that checkpoint reads still target origin; `git push` (no args, tracking-based) routes hook `$1`=upstream — assert consistent checkpoint destination | integration | both |
-| B5 | checkpoint_remote fork detection over HTTPS server: push-remote owner ≠ checkpoint_remote owner → fallback used (today unit-only; run through a real push) | integration (HTTPS) | gb (gr: N/A until checkpoint_remote applies to refs — verify and pin) |
+| B5 | checkpoint_remote inherited-setting detection over HTTPS server: **origin** owner ≠ checkpoint_remote owner → fallback used; and the two cases that must NOT fall back — a differently-owned *push* remote with a matching origin, and a checkpoint_remote set in `settings.local.json` (today unit-only; run through a real push) | integration (HTTPS) | gb (gr: N/A until checkpoint_remote applies to refs — verify and pin) |
 | B6 | `ENTIRE_CHECKPOINT_TOKEN` with SSH-shaped origin URL (`git@host:o/r.git` pointing at the HTTPS test server via insteadOf or URL rewrite): fetch **and** push both coerce to HTTPS (regression `7afdaa33e`) | integration (HTTPS) | both |
 | B7 | Local-path origin (bare dir added as `origin`): `ParseURL` fails → raw-origin fallback still pushes/fetches correctly; no crash in URL derivation (pin; latent gap `isLocalPath`) | integration | both |
 
@@ -127,7 +127,7 @@ Systematize the ahead/behind/diverged/disconnected × operation matrix that item
 | F3 | 401→token-retry over HTTPS for git-refs batch push (v1 version exists: `TestHTTPS_PushFailsWithoutToken`) | integration (HTTPS) | gr |
 | F4 | Checkpoint policy sync in the git-refs pre-push path (regression `7bbdad09c` — policy check was skipped): blocked policy skips checkpoint refs but not the user push | integration | gr |
 | F5 | Detached HEAD: session + checkpoint while detached; `git push origin HEAD:branch`; resume from detached clone (today detach is only setup plumbing) | integration | both |
-| F6 | `entire://` origin with checkpoint_remote configured → provider-host routing, not a push at the helper (regression #1279) — currently unit-only; needs a fake provider mapping or injectable host table | integration | gb |
+| F6 | `entire://` origin with checkpoint_remote configured → checkpoints follow the mirror on the same cluster when the forge matches the provider; provider-host routing only for forge-mismatched mirrors and `file://` (supersedes the #1279 behavior) — currently unit-only; needs a fake provider mapping or injectable host table | integration | gb |
 
 ### G. E2E additions (real agents optional, vogon default) — P1
 

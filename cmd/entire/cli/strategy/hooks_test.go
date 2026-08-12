@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
+
+const goosWindows = "windows"
 
 // readEntireDevScript returns the contents of the committed scripts/entire-dev
 // launcher, located relative to this test file's position in the source tree.
@@ -310,6 +313,133 @@ func TestGetHooksDirInPath_CoreHooksPath(t *testing.T) {
 	}
 	if filepath.Clean(absoluteResult) != filepath.Clean(absHooksPath) {
 		t.Errorf("absolute core.hooksPath expected %s, got %s", absHooksPath, absoluteResult)
+	}
+}
+
+func TestInstallGitHook_HooksPathNotADirectory(t *testing.T) {
+	// core.hooksPath pointing at a non-directory (commonly /dev/null, the
+	// "disable git hooks globally" idiom) must fail with guidance naming
+	// core.hooksPath, not a raw mkdir error.
+	tmpDir := t.TempDir()
+	ctx := context.Background()
+
+	cmd := exec.CommandContext(ctx, "git", "init")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	hooksPath := "/dev/null"
+	if runtime.GOOS == goosWindows {
+		hooksPath = filepath.Join(tmpDir, "not-a-dir")
+		if err := os.WriteFile(hooksPath, []byte("x"), 0o600); err != nil {
+			t.Fatalf("failed to create non-directory hooks path: %v", err)
+		}
+	}
+	cmd = exec.CommandContext(ctx, "git", "config", "core.hooksPath", hooksPath)
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+	ClearHooksDirCache()
+	paths.ClearWorktreeRootCache()
+
+	// Assert against the resolved hooks dir (what the error prints), not the
+	// configured value — git may normalize separators on Windows.
+	resolvedHooksDir, resolveErr := GetHooksDir(ctx)
+	if resolveErr != nil {
+		t.Fatalf("GetHooksDir() failed: %v", resolveErr)
+	}
+
+	_, err := InstallGitHook(ctx, true, false, false)
+	if err == nil {
+		t.Fatal("InstallGitHook() should fail when hooks path is not a directory")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "core.hooksPath") {
+		t.Errorf("error should name core.hooksPath, got: %s", msg)
+	}
+	if !strings.Contains(msg, resolvedHooksDir) {
+		t.Errorf("error should include the resolved hooks path %s, got: %s", resolvedHooksDir, msg)
+	}
+	if !strings.Contains(msg, "git config") {
+		t.Errorf("error should tell the user how to inspect/fix the setting, got: %s", msg)
+	}
+}
+
+func TestInstallGitHook_HooksPathUnderNonDirectory(t *testing.T) {
+	// core.hooksPath pointing below a non-directory (e.g. /dev/null/hooks)
+	// makes os.Stat fail with ENOTDIR instead of succeeding on a non-dir;
+	// the guidance must fire for this variant too.
+	if runtime.GOOS == goosWindows {
+		t.Skip("ENOTDIR detection is POSIX-specific; Windows falls back to the raw mkdir error")
+	}
+	tmpDir := t.TempDir()
+	ctx := context.Background()
+
+	cmd := exec.CommandContext(ctx, "git", "init")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+	cmd = exec.CommandContext(ctx, "git", "config", "core.hooksPath", "/dev/null/hooks")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+	ClearHooksDirCache()
+	paths.ClearWorktreeRootCache()
+
+	_, err := InstallGitHook(ctx, true, false, false)
+	if err == nil {
+		t.Fatal("InstallGitHook() should fail when hooks path is under a non-directory")
+	}
+	if !strings.Contains(err.Error(), "core.hooksPath") {
+		t.Errorf("error should name core.hooksPath, got: %s", err)
+	}
+}
+
+func TestInstallGitHook_HooksPathNonexistentIsCreated(t *testing.T) {
+	// A configured-but-missing core.hooksPath is legitimate: the guard must
+	// not fire, and MkdirAll must create the directory and install hooks.
+	tmpDir := t.TempDir()
+	ctx := context.Background()
+
+	cmd := exec.CommandContext(ctx, "git", "init")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+	hooksPath := filepath.Join(tmpDir, "githooks-not-yet-created")
+	cmd = exec.CommandContext(ctx, "git", "config", "core.hooksPath", hooksPath)
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+	ClearHooksDirCache()
+	paths.ClearWorktreeRootCache()
+
+	count, err := InstallGitHook(ctx, true, false, false)
+	if err != nil {
+		t.Fatalf("InstallGitHook() should create a nonexistent hooks path: %v", err)
+	}
+	if count == 0 {
+		t.Fatal("InstallGitHook() should install hooks into the created directory")
+	}
+	for _, hook := range gitHookNames {
+		data, readErr := os.ReadFile(filepath.Join(hooksPath, hook))
+		if readErr != nil {
+			t.Fatalf("expected hook %s in created hooks dir: %v", hook, readErr)
+		}
+		if !strings.Contains(string(data), entireHookMarker) {
+			t.Errorf("hook %s should contain Entire marker", hook)
+		}
 	}
 }
 
@@ -1698,4 +1828,56 @@ func TestRemoveGitHook_PermissionDenied(t *testing.T) {
 	if !strings.Contains(err.Error(), "failed to remove hooks") {
 		t.Errorf("error should mention 'failed to remove hooks', got: %v", err)
 	}
+}
+
+// TestResolveHookExePath covers the absolute-git-hook-path symlink resolution,
+// including the Windows fallback for NTFS junctions that EvalSymlinks cannot
+// resolve (e.g. Scoop's `…\current\` junction — issue #1424). GOOS and the
+// symlink resolver are injected so every branch runs on any host.
+func TestResolveHookExePath(t *testing.T) {
+	t.Parallel()
+
+	const exe = `C:\Users\admin\scoop\apps\cli\current\entire.exe`
+	// Stand-in for the Windows junction error ("The system cannot find the path
+	// specified") that filepath.EvalSymlinks returns on Scoop's `current\`.
+	junctionErr := errors.New("cannot find the path specified")
+
+	t.Run("resolves normally when EvalSymlinks succeeds", func(t *testing.T) {
+		t.Parallel()
+		got, err := resolveHookExePath("/tmp/linkto", func(string) (string, error) {
+			return "/opt/entire/entire", nil
+		}, "linux")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "/opt/entire/entire" {
+			t.Errorf("got %q, want resolved target", got)
+		}
+	})
+
+	t.Run("windows falls back to unresolved path on EvalSymlinks failure", func(t *testing.T) {
+		t.Parallel()
+		got, err := resolveHookExePath(exe, func(string) (string, error) {
+			return "", junctionErr
+		}, goosWindows)
+		if err != nil {
+			t.Fatalf("windows should fall back, got error: %v", err)
+		}
+		if got != exe {
+			t.Errorf("got %q, want unresolved exe %q", got, exe)
+		}
+	})
+
+	t.Run("non-windows surfaces EvalSymlinks failure", func(t *testing.T) {
+		t.Parallel()
+		_, err := resolveHookExePath("/usr/local/bin/entire", func(string) (string, error) {
+			return "", junctionErr
+		}, "linux")
+		if err == nil {
+			t.Fatal("expected error on non-windows EvalSymlinks failure")
+		}
+		if !strings.Contains(err.Error(), "failed to resolve symlinks") {
+			t.Errorf("error should mention symlink resolution, got: %v", err)
+		}
+	})
 }

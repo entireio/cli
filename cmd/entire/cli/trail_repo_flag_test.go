@@ -136,8 +136,7 @@ func TestTrailSelectorAndBranchAreMutuallyExclusive(t *testing.T) {
 	}
 }
 
-// --repo must not silently fall back to the local checkout's branch: the
-// branch-defaulting commands require an explicit branch or selector alongside it.
+// --repo requires an explicit branch or selector rather than defaulting to the local branch.
 func TestTrailRepoRequiresExplicitTarget(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -149,6 +148,11 @@ func TestTrailRepoRequiresExplicitTarget(t *testing.T) {
 		{name: "update", args: []string{"update", "--repo", "gh/acme/app"}},
 		{name: "delete", args: []string{"delete", "--repo", "gh/acme/app"}},
 		{name: "finding list", args: []string{"finding", "list", "--repo", "gh/acme/app"}},
+		{name: "approve", args: []string{"approve", "--repo", "gh/acme/app"}},
+		{name: "request-changes", args: []string{"request-changes", "--repo", "gh/acme/app", "-m", "why"}},
+		{name: "approvals", args: []string{"approvals", "--repo", "gh/acme/app"}},
+		{name: "comment list", args: []string{"comment", "list", "--repo", "gh/acme/app"}},
+		{name: "comment add", args: []string{"comment", "add", "--repo", "gh/acme/app", "-m", "hi"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

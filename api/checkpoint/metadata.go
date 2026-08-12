@@ -11,6 +11,14 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
+// TranscriptAsset is a binary blob (e.g. an image) lifted out of a transcript
+// and stored raw in the checkpoint, referenced by a placeholder in the log.
+type TranscriptAsset struct {
+	Name      string // stable asset filename / id, also used in the placeholder
+	MediaType string
+	Data      []byte
+}
+
 // WriteOptions contains options for writing a persistent checkpoint.
 type WriteOptions struct {
 	// CheckpointID is the stable 12-hex-char identifier
@@ -29,9 +37,24 @@ type WriteOptions struct {
 	// Branch is the branch name where the checkpoint was created (empty if detached HEAD)
 	Branch string
 
+	// CommitSHA links this checkpoint to an existing commit without a trailer.
+	// It is an anchor — "imported at this point in time" — not attribution.
+	// Currently set only by `entire import`: imported history has no
+	// Entire-Checkpoint trailer (we never rewrite existing commits), so import
+	// stamps the resolved anchor commit here (the default branch head when
+	// resolvable; see resolveImportLinkCommitSHA for the fallback order).
+	// Empty for all other writers. This comment is the canonical description;
+	// Metadata.CommitSHA and CheckpointSummary.CommitSHA point back here.
+	CommitSHA string
+
 	// Transcript is the session transcript content (full.jsonl).
 	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
 	Transcript redact.RedactedBytes
+
+	// Assets are binary blobs (e.g. images) lifted out of Transcript and
+	// referenced by path-bearing placeholders. Stored raw under the session's
+	// assets/ folder. Empty for agents/transcripts with no externalized images.
+	Assets []TranscriptAsset
 
 	// Prompts contains the raw user prompts from the session. Run through
 	// redactedJoinedPrompts before persisting — the writer does this
@@ -182,6 +205,20 @@ type UpdateOptions struct {
 	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
 	Transcript redact.RedactedBytes
 
+	// Assets are the externalized image blobs matching Transcript's placeholders
+	// (see WriteOptions.Assets). Set together with Transcript so the backfill keeps
+	// the stored assets/ folder consistent with the transcript; empty clears any
+	// previously-stored assets when Transcript is replaced.
+	Assets []TranscriptAsset
+
+	// PreserveAssetsWhenEmpty keeps already-stored assets instead of clearing them
+	// when Assets is empty. Set on the finalize path for agents whose assets come
+	// from a best-effort sidecar capture (e.g. Cursor's sqlite3 store read): a
+	// transient capture miss at finalize must not wipe images a prior condensation
+	// successfully stored. Left false for codec agents, where an empty set means
+	// "the transcript has no images" and stale asset blobs should be cleared.
+	PreserveAssetsWhenEmpty bool
+
 	// Prompts contains the raw user prompts (replaces existing).
 	// See WriteOptions.Prompts.
 	Prompts []string
@@ -266,6 +303,14 @@ type CheckpointInfo struct {
 	// Imported is true when this checkpoint was imported from pre-existing
 	// agent history (Kind == "imported"): read-only and commit-less.
 	Imported bool
+
+	// ListedStub is true for names-only remote-discovery List entries that still
+	// need hydration (or have not yet failed a hydration attempt). It is cleared
+	// after a successful hydrate and also after a failed attempt (fail-once), so
+	// callers do not re-fetch forever. A local ref whose root metadata was
+	// unreadable has the same zero SessionID/SessionCount shape but ListedStub
+	// false — do not treat field zero-ness alone as stub-ness.
+	ListedStub bool `json:"-"`
 }
 
 // SessionContent contains the actual content for a session.
@@ -289,13 +334,17 @@ type SessionContent struct {
 
 // Metadata contains the metadata stored in metadata.json for each checkpoint.
 type Metadata struct {
-	CLIVersion       string          `json:"cli_version,omitempty"`
-	CheckpointID     id.CheckpointID `json:"checkpoint_id"`
-	SessionID        string          `json:"session_id"`
-	Strategy         string          `json:"strategy"`
-	CreatedAt        time.Time       `json:"created_at"`
-	Branch           string          `json:"branch,omitempty"` // Branch where checkpoint was created (empty if detached HEAD)
-	CheckpointsCount int             `json:"checkpoints_count"`
+	CLIVersion   string          `json:"cli_version,omitempty"`
+	CheckpointID id.CheckpointID `json:"checkpoint_id"`
+	SessionID    string          `json:"session_id"`
+	Strategy     string          `json:"strategy"`
+	CreatedAt    time.Time       `json:"created_at"`
+	Branch       string          `json:"branch,omitempty"` // Branch where checkpoint was created (empty if detached HEAD)
+	// CommitSHA anchors an imported checkpoint to an existing commit; empty for
+	// non-imported checkpoints, which link via the Entire-Checkpoint trailer.
+	// See WriteOptions.CommitSHA for the full semantics.
+	CommitSHA        string `json:"commit_sha,omitempty"`
+	CheckpointsCount int    `json:"checkpoints_count"`
 	// SaveStepCount is the number of SaveStep-recorded steps for this session.
 	// Honest "real checkpoint work happened" signal (0 = commit-only/fallback
 	// session), kept separate from the displayed CheckpointsCount prompt count.
@@ -422,6 +471,9 @@ type SessionFilePaths struct {
 	CompactTranscript string `json:"compact_transcript,omitempty"`
 	ContentHash       string `json:"content_hash,omitempty"`
 	Prompt            string `json:"prompt"`
+	// AssetsManifest points at assets/manifest.json when images were externalized
+	// out of the transcript into the session's assets/ folder. Omitted otherwise.
+	AssetsManifest string `json:"assets_manifest,omitempty"`
 }
 
 // CheckpointSummary is the root-level metadata.json for a checkpoint.
@@ -444,10 +496,12 @@ type SessionFilePaths struct {
 //
 //nolint:revive // Named CheckpointSummary to avoid conflict with existing Summary struct
 type CheckpointSummary struct {
-	CLIVersion          string             `json:"cli_version,omitempty"`
-	CheckpointID        id.CheckpointID    `json:"checkpoint_id"`
-	Strategy            string             `json:"strategy"`
-	Branch              string             `json:"branch,omitempty"`
+	CLIVersion   string          `json:"cli_version,omitempty"`
+	CheckpointID id.CheckpointID `json:"checkpoint_id"`
+	Strategy     string          `json:"strategy"`
+	Branch       string          `json:"branch,omitempty"`
+	// CommitSHA: import-only anchor; see WriteOptions.CommitSHA.
+	CommitSHA           string             `json:"commit_sha,omitempty"`
 	CheckpointsCount    int                `json:"checkpoints_count"`
 	FilesTouched        []string           `json:"files_touched"`
 	Sessions            []SessionFilePaths `json:"sessions"`

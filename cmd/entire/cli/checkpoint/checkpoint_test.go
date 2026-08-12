@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode" // register claude-code so its .claude protected dir is discoverable
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -101,6 +103,99 @@ func TestCopyMetadataDir_SkipsSymlinks(t *testing.T) {
 	if len(entries) != 1 {
 		t.Errorf("expected 1 entry, got %d", len(entries))
 	}
+}
+
+// fakePluginAgent is a minimal agent stub used to prove that protected dirs
+// and files reported by an external-plugin-style agent (via the AllProtectedDirs
+// / AllProtectedFiles union) are honored by the first-checkpoint path, not just
+// the built-in claude-code .claude dir.
+type fakePluginAgent struct{}
+
+var (
+	_ agent.Agent                  = (*fakePluginAgent)(nil)
+	_ agent.ProtectedFilesProvider = (*fakePluginAgent)(nil)
+)
+
+func (fakePluginAgent) Name() types.AgentName                { return "terminalhire-plugin" }
+func (fakePluginAgent) Type() types.AgentType                { return "TerminalHire" }
+func (fakePluginAgent) Description() string                  { return "fake external plugin for tests" }
+func (fakePluginAgent) IsPreview() bool                      { return true }
+func (fakePluginAgent) ProtectedDirs() []string              { return []string{".terminalhire"} }
+func (fakePluginAgent) ProtectedFiles() []string             { return []string{".terminalhirerc"} }
+func (fakePluginAgent) GetSessionID(*agent.HookInput) string { return "" }
+
+func (fakePluginAgent) DetectPresence(context.Context) (bool, error) { return false, nil }
+func (fakePluginAgent) ReadTranscript(string) ([]byte, error)        { return nil, nil }
+func (fakePluginAgent) ChunkTranscript(_ context.Context, c []byte, _ int) ([][]byte, error) {
+	return [][]byte{c}, nil
+}
+func (fakePluginAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
+	var out []byte
+	for _, c := range chunks {
+		out = append(out, c...)
+	}
+	return out, nil
+}
+func (fakePluginAgent) GetSessionDir(string) (string, error)                      { return "", nil }
+func (fakePluginAgent) ResolveSessionFile(dir, sid string) string                 { return dir + "/" + sid }
+func (fakePluginAgent) ReadSession(*agent.HookInput) (*agent.AgentSession, error) { return nil, nil } //nolint:nilnil // test stub
+func (fakePluginAgent) WriteSession(context.Context, *agent.AgentSession) error   { return nil }
+func (fakePluginAgent) FormatResumeCommand(string) string                         { return "" }
+
+// TestCollectChangedFiles_ExcludesProtectedDirs verifies that the
+// first-checkpoint path keeps agent-protected dirs (e.g. .claude) and the
+// .entire infrastructure dir out of the checkpoint snapshot, while ordinary
+// untracked files are still captured. Regression for protected-dir content
+// leaking into the shadow tree on session start.
+func TestCollectChangedFiles_ExcludesProtectedDirs(t *testing.T) {
+	t.Parallel()
+
+	// Register an external-plugin-style agent so its protected dir/file join the
+	// AllProtectedDirs/AllProtectedFiles union alongside the built-in .claude.
+	// Registration is additive and concurrency-safe; no test asserts the exact set.
+	agent.Register("terminalhire-plugin", func() agent.Agent { return fakePluginAgent{} })
+
+	tempDir := t.TempDir()
+	// Resolve symlinks so the repo root matches git's resolved path.
+	// On macOS, t.TempDir() returns /var/... but git resolves to /private/var/...
+	tempDir, err := filepath.EvalSymlinks(tempDir)
+	require.NoError(t, err)
+
+	testutil.InitRepo(t, tempDir)
+	testutil.WriteFile(t, tempDir, "base.txt", "base")
+	testutil.GitAdd(t, tempDir, "base.txt")
+	testutil.GitCommit(t, tempDir, "init")
+
+	// Disable any global core.excludesFile so a developer/CI-runner gitignore
+	// convention (e.g. one that ignores .claude) can't mask the leak. The fix
+	// must exclude protected dirs on its own, independent of gitignore state.
+	cfgCmd := exec.CommandContext(context.Background(), "git", "config", "core.excludesFile", os.DevNull)
+	cfgCmd.Dir = tempDir
+	require.NoError(t, cfgCmd.Run())
+
+	// Planted untracked, non-gitignored files.
+	testutil.WriteFile(t, tempDir, ".claude/marker.txt", "MARKER-secret")         // built-in agent-protected dir
+	testutil.WriteFile(t, tempDir, ".terminalhire/profile.json", "MARKER-plugin") // plugin-protected dir
+	testutil.WriteFile(t, tempDir, ".terminalhirerc", "MARKER-plugin-file")       // plugin-protected file
+	testutil.WriteFile(t, tempDir, ".entire/state.json", "{}")                    // infrastructure
+	testutil.WriteFile(t, tempDir, "src/keep.txt", "user work")                   // ordinary
+
+	repo, err := git.PlainOpen(tempDir)
+	require.NoError(t, err)
+
+	result, err := collectChangedFiles(context.Background(), repo)
+	require.NoError(t, err)
+
+	require.NotContains(t, result.Changed, ".claude/marker.txt",
+		"built-in agent protected dir content must not be captured into the checkpoint")
+	require.NotContains(t, result.Changed, ".terminalhire/profile.json",
+		"external-plugin protected dir content must not be captured into the checkpoint")
+	require.NotContains(t, result.Changed, ".terminalhirerc",
+		"external-plugin protected file must not be captured into the checkpoint")
+	require.NotContains(t, result.Changed, ".entire/state.json",
+		"infrastructure dir must not be captured into the checkpoint")
+	require.Contains(t, result.Changed, "src/keep.txt",
+		"ordinary untracked files must still be captured")
 }
 
 // TestWriteCommitted_AgentField verifies that the Agent field is written
@@ -1366,10 +1461,17 @@ func TestWriteCommitted_CodexSanitizesPortableTranscript(t *testing.T) {
 
 	got := string(content.Transcript)
 	require.NotContains(t, got, `"encrypted_content":"REDACTED"`)
-	require.NotContains(t, got, `"type":"compaction"`)
-	require.NotContains(t, got, `"type":"compaction_summary"`)
 	require.Contains(t, got, `"summary":[{"text":"brief"}]`)
 	require.Contains(t, got, `"summary":[{"text":"nested"}]`)
+
+	// The top-level compaction item keeps its line (payload stripped) so the stored
+	// transcript stays line-aligned with the agent's rollout. Items nested inside a
+	// compacted line's replacement_history are still removed outright — they are
+	// array elements, so removing them cannot shift line numbers.
+	require.Contains(t, got, `"type":"compaction"`)
+	require.NotContains(t, got, `"type":"compaction_summary"`)
+	require.Len(t, strings.Split(strings.TrimRight(got, "\n"), "\n"), 3,
+		"stored transcript must keep one line per rollout line")
 }
 
 // TestReadSessionContent_InvalidIndex verifies that ReadSessionContent returns
@@ -4695,7 +4797,7 @@ func TestCheckpointSummary_HasReview(t *testing.T) {
 // Summary.Intent and ReviewPrompt that previously bypassed redaction because
 // the dispatcher only matched .jsonl. The PR 1236 fix extended the JSON-aware
 // branch to .json. We assert via a low-entropy AWS-key shaped secret (catches
-// the 7-layer pipeline) so the test stays deterministic without the OPF binary.
+// the regex-only pipeline) so the test stays deterministic without the OPF binary.
 func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -4956,4 +5058,51 @@ func TestCommittedMetadata_InvestigateFieldsRoundTrip(t *testing.T) {
 	if meta.InvestigateTopic != "topic-x" {
 		t.Errorf("InvestigateTopic: got %q", meta.InvestigateTopic)
 	}
+}
+
+// TestWriteCommitted_CodexSanitizesTranscriptFromPath covers writeTranscript's
+// TranscriptPath fallback — the one way raw bytes reach the store, and previously
+// the only transcript path with no test at all.
+//
+// It asserts the stored result: sanitized, line-aligned, conversation intact. It
+// deliberately does NOT claim to pin the sanitize-before-redact ORDER on this path,
+// because the two orders are indistinguishable by output — redaction is JSON-aware,
+// so redact-then-sanitize still ends with the encrypted_content key deleted. Getting
+// the order right there is a wasted-work fix (redaction scanning ciphertext that
+// sanitization discards), not a content fix, and it is not observable from here.
+func TestWriteCommitted_CodexSanitizesTranscriptFromPath(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	checkpointID := id.MustCheckpointID("c0de5a1712ed")
+
+	rollout := `{"timestamp":"2026-03-25T11:31:11.754Z","type":"response_item","payload":{"type":"reasoning","summary":[{"text":"brief"}],"encrypted_content":"Y2lwaGVydGV4dA=="}}
+{"timestamp":"2026-03-25T11:31:11.755Z","type":"response_item","payload":{"type":"compaction","encrypted_content":"Y2lwaGVydGV4dA=="}}
+{"timestamp":"2026-03-25T11:31:11.756Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}
+`
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(rollout), 0o600))
+
+	// No in-memory Transcript: force the TranscriptPath fallback.
+	err := store.Write(context.Background(), Session{
+		CheckpointID:     checkpointID,
+		SessionID:        "codex-session",
+		Strategy:         "manual-commit",
+		Agent:            agent.AgentTypeCodex,
+		TranscriptPath:   path,
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	require.NoError(t, err)
+
+	content, err := store.ReadLatestSessionContent(context.Background(), checkpointID)
+	require.NoError(t, err)
+
+	got := string(content.Transcript)
+	require.NotContains(t, got, "Y2lwaGVydGV4dA==", "ciphertext survived into storage")
+	require.NotContains(t, got, "encrypted_content")
+	require.Contains(t, got, `"type":"compaction"`, "compaction line must survive, payload stripped")
+	require.Contains(t, got, "hello", "conversation content was lost")
+	require.Len(t, strings.Split(strings.TrimRight(got, "\n"), "\n"), 3,
+		"stored transcript must stay line-aligned with the rollout")
 }

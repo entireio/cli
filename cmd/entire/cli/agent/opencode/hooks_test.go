@@ -195,6 +195,23 @@ func TestInstallHooks_AppliesContextInjection(t *testing.T) {
 	if !strings.Contains(content, `output.system.push(pendingInjection)`) {
 		t.Fatal("plugin file should push the injection onto the system prompt")
 	}
+	// Every session-reset site must clear the stashed injection so a session
+	// change cannot leak the prior session's context into the next session.
+	resetSites := []struct{ name, start, end string }{
+		{"resetSessionTracking", "function resetSessionTracking", "return true"},
+		{"session.deleted", `case "session.deleted"`, `callHookSync("session-end"`},
+		{"server.instance.disposed", `case "server.instance.disposed"`, `callHookSync("session-end"`},
+	}
+	for _, site := range resetSites {
+		_, after, found := strings.Cut(content, site.start)
+		if !found {
+			t.Fatalf("plugin file missing reset site %q", site.name)
+		}
+		body, _, _ := strings.Cut(after, site.end)
+		if !strings.Contains(body, `pendingInjection = null`) {
+			t.Fatalf("%s should clear pendingInjection to avoid cross-session leakage", site.name)
+		}
+	}
 }
 
 func TestInstallHooks_MessageUpdatedFallsBackToSessionStart(t *testing.T) {
@@ -365,5 +382,55 @@ func TestAreHooksInstalled(t *testing.T) {
 
 	if ag.AreHooksInstalled(context.Background()) {
 		t.Error("hooks should not be installed after UninstallHooks")
+	}
+}
+
+// TestCheckHookConfig covers the drift states for the generated plugin file.
+// Same exposure as Pi's extension: .opencode/plugins/entire.ts is a generated
+// file repos commit so every clone is covered, and a committed copy goes stale
+// as the template evolves while AreHooksInstalled keeps returning true.
+func TestCheckHookConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ctx := context.Background()
+	a := &OpenCodeAgent{}
+
+	if got := a.CheckHookConfig(ctx); got != agent.HooksAbsent {
+		t.Errorf("no plugin: CheckHookConfig = %v, want HooksAbsent", got)
+	}
+
+	if _, err := a.InstallHooks(ctx, false, false); err != nil {
+		t.Fatalf("InstallHooks: %v", err)
+	}
+	if got := a.CheckHookConfig(ctx); got != agent.HooksCurrent {
+		t.Errorf("fresh install: CheckHookConfig = %v, want HooksCurrent", got)
+	}
+
+	// A local-dev install differs only in the substituted entire command and
+	// must not read as drift.
+	if _, err := a.InstallHooks(ctx, true, false); err != nil {
+		t.Fatalf("InstallHooks localDev: %v", err)
+	}
+	if got := a.CheckHookConfig(ctx); got != agent.HooksCurrent {
+		t.Errorf("local-dev install: CheckHookConfig = %v, want HooksCurrent", got)
+	}
+
+	path := filepath.Join(dir, ".opencode", pluginDirName, pluginFileName)
+	stale := "// " + entireMarker + "\n// an older release wrote this\n"
+	if err := os.WriteFile(path, []byte(stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !a.AreHooksInstalled(ctx) {
+		t.Error("AreHooksInstalled = false; a stale-but-marked plugin is still installed")
+	}
+	if got := a.CheckHookConfig(ctx); got != agent.HooksOutdated {
+		t.Errorf("stale plugin: CheckHookConfig = %v, want HooksOutdated", got)
+	}
+
+	if err := os.WriteFile(path, []byte("// someone else's plugin\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.CheckHookConfig(ctx); got != agent.HooksAbsent {
+		t.Errorf("foreign file: CheckHookConfig = %v, want HooksAbsent", got)
 	}
 }

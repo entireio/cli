@@ -120,6 +120,42 @@ type HookSupport interface {
 	AreHooksInstalled(ctx context.Context) bool
 }
 
+// HookConfigState describes how an agent's installed Entire hook config
+// compares to what InstallHooks would write today.
+type HookConfigState int
+
+const (
+	// HooksAbsent means Entire hooks are not installed for this agent here.
+	HooksAbsent HookConfigState = iota
+	// HooksCurrent means the installed hooks match what would be written today.
+	HooksCurrent
+	// HooksOutdated means Entire hooks are installed but stale — an older CLI
+	// wrote a config that no longer matches the current one. Fix:
+	// `entire enable --force`.
+	HooksOutdated
+)
+
+// HookFreshness is implemented by hook-supporting agents that can report
+// whether their installed config has drifted from the current one.
+//
+// AreHooksInstalled answers "is Entire wired up here at all?" — for agents
+// whose hook config is a generated file checked into the repo, that stays true
+// forever even after the generated content goes stale, because the file is
+// still present and still recognisably Entire's. CheckHookConfig answers the
+// separate question "is what's installed still what we'd write today?", so
+// `entire status` and `entire doctor` can flag a stale config instead of
+// reporting it healthy while its hooks silently no-op.
+//
+// Implementations must be read-only: they are diagnostics and must never
+// modify the agent's config.
+type HookFreshness interface {
+	Agent
+
+	// CheckHookConfig reports whether this agent's Entire hook config is
+	// absent, current, or outdated in the current repo.
+	CheckHookConfig(ctx context.Context) HookConfigState
+}
+
 // FileWatcher is implemented by agents that use file-based detection.
 // Agents like Aider that don't support hooks can use file watching
 // to detect session activity.
@@ -188,6 +224,43 @@ type TranscriptPreparer interface {
 	PrepareTranscript(ctx context.Context, sessionRef string) error
 }
 
+// SidecarImageProvider is implemented by agents that keep images OUTSIDE the
+// transcript Entire condenses — e.g. Cursor stores pasted images in a per-session
+// SQLite blob store, not the JSONL transcript. The strategy layer calls this
+// during condensation/finalize to capture those images as checkpoint assets so
+// they're preserved with the session. Best-effort: returns nil (no error) when
+// the sidecar store is unavailable or unreadable.
+type SidecarImageProvider interface {
+	Agent
+
+	// SidecarImages returns images stored outside the transcript for the session
+	// identified by sessionRef (the transcript path).
+	SidecarImages(ctx context.Context, sessionRef string) ([]CompactedTranscriptAsset, error)
+}
+
+// TranscriptSanitizer is implemented by agents whose native transcript format
+// carries state that Entire must not keep in its own copy — e.g. Codex rollouts
+// embed encrypted reasoning payloads and compaction blobs that are bound to the
+// originating session and cannot be replayed out of a checkpoint.
+//
+// Entire always leaves the agent's own transcript untouched; this transform applies
+// only to the copy Entire stores. Sanitizing before redaction is what keeps
+// non-replayable payloads out of storage AND keeps the redaction layers from
+// scanning megabytes of ciphertext they would only discard afterwards (base64 is
+// the pathological input for the entropy layer).
+//
+// Implementations must be pure byte transforms: idempotent (sanitizing an
+// already-sanitized transcript is a no-op), safe to call from hooks, and never
+// dependent on the agent process being alive.
+type TranscriptSanitizer interface {
+	Agent
+
+	// SanitizeTranscriptForStorage returns the transcript with non-portable state
+	// removed. It must return the input unchanged rather than nil when it cannot
+	// parse the transcript, so a sanitizer failure never loses the session.
+	SanitizeTranscriptForStorage(data []byte) []byte
+}
+
 // TokenCalculator provides token usage calculation for a session.
 // The framework calls this during step save and checkpoint if implemented.
 type TokenCalculator interface {
@@ -220,6 +293,49 @@ type TextGenerator interface {
 	// GenerateText sends a prompt to the agent's CLI and returns the raw text response.
 	// model is a hint (e.g., "haiku", "sonnet"). Implementations may ignore if not applicable.
 	GenerateText(ctx context.Context, prompt string, model string) (string, error)
+}
+
+// ProgressPhase identifies a coarse stage in streaming text generation.
+type ProgressPhase string
+
+const (
+	// PhaseConnecting is emitted once when the CLI signals it is making the upstream request.
+	PhaseConnecting ProgressPhase = "connecting"
+	// PhaseFirstToken is emitted once when the upstream responds with the first event,
+	// carrying TTFT and input/cache token counts.
+	PhaseFirstToken ProgressPhase = "first-token"
+	// PhaseGenerating is emitted repeatedly as text or thinking deltas arrive.
+	// OutputTokens carries a running estimate based on delta sizes.
+	PhaseGenerating ProgressPhase = "generating"
+	// PhaseDone is emitted once when the final result event is received without error.
+	PhaseDone ProgressPhase = "done"
+)
+
+// GenerationProgress reports a snapshot of streaming text generation progress.
+// Fields not relevant to the current Phase may be zero-valued.
+type GenerationProgress struct {
+	Phase             ProgressPhase
+	OutputTokens      int // running estimate during PhaseGenerating; final at PhaseDone
+	InputTokens       int // populated at PhaseFirstToken
+	CachedInputTokens int // populated at PhaseFirstToken
+	TTFTms            int // time-to-first-token, populated at PhaseFirstToken
+	DurationMs        int // populated at PhaseDone (final result event)
+}
+
+// ProgressFn receives streaming progress updates. It must not block — invoke it
+// from the same goroutine that reads the stream and keep handlers fast.
+type ProgressFn func(GenerationProgress)
+
+// StreamingTextGenerator is an optional interface for text generators whose
+// underlying CLI exposes a streaming output mode. Callers can use AsStreamingTextGenerator
+// to detect support and fall back to plain GenerateText when unavailable.
+type StreamingTextGenerator interface {
+	Agent
+
+	// GenerateTextStreaming invokes the agent's streaming text generation and
+	// calls progress for each phase update. progress may be nil to suppress
+	// reporting. The returned string is the final response text.
+	GenerateTextStreaming(ctx context.Context, prompt, model string, progress ProgressFn) (string, error)
 }
 
 // CompactedTranscript contains the result of transcript compaction into Entire
@@ -347,6 +463,24 @@ type SubagentAwareExtractor interface {
 	ExtractAllModifiedFiles(transcriptData []byte, fromOffset int, subagentsDir string) ([]string, error)
 
 	// CalculateTotalTokenUsage computes token usage including all spawned subagents.
-	// The subagentsDir parameter specifies where subagent transcripts are stored.
+	// The subagentsDir parameter specifies where subagent transcripts are stored
+	// (an empty subagentsDir skips subagent accounting and leaves SubagentTokens nil).
+	//
+	// CONTRACT — the returned SubagentTokens is a CUMULATIVE-SINCE-SESSION-START
+	// snapshot, NOT a delta scoped to fromOffset like the main-agent fields
+	// (InputTokens/OutputTokens/...). Implementations MUST discover spawned agent
+	// IDs from the FULL transcript prefix [0,end) — so a subagent spawned before
+	// fromOffset is still found (#329) — and re-read each subagent transcript from
+	// line 0 on every call. Consequently a subagent's full total repeats on every
+	// call after it is first discovered.
+	//
+	// Callers that accumulate across checkpoints/turns therefore MUST NOT sum
+	// SubagentTokens across calls: replace the running total with the latest
+	// snapshot, and rescope any window delta by subtracting a previously captured
+	// baseline (see accumulateTokenUsage / resetCheckpointWindow and
+	// session.State.SubagentTokensBaseline in cmd/entire/cli/strategy, and
+	// rescopeSubagentTokensToDeltas in cmd/entire/cli/agentimport for the import
+	// path). An implementation that instead returned per-window deltas would
+	// silently break that accounting with no compile-time or test signal.
 	CalculateTotalTokenUsage(transcriptData []byte, fromOffset int, subagentsDir string) (*TokenUsage, error)
 }

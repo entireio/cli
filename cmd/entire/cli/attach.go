@@ -52,7 +52,7 @@ type attachOptions struct {
 	ReviewSkillsOverride []string
 	// ReviewPromptOverride, when non-empty, is recorded instead of the
 	// transcript's first user prompt. Set from a pending-review marker when
-	// `entire attach --review` adopts the prompt the user was asked to run.
+	// `entire session attach --review` adopts the prompt the user was asked to run.
 	ReviewPromptOverride string
 }
 
@@ -285,7 +285,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		}
 	}
 
-	meta := extractTranscriptMetadata(transcriptData)
+	meta := extractTranscriptMetadataForAgent(ag, transcriptPath, transcriptData)
 	warnEmptyTranscriptMetadata(errW, ag.Name(), meta, opts)
 
 	// Determine checkpoint ID: reuse from HEAD if one exists, otherwise generate new.

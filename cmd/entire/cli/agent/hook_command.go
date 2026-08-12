@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -11,6 +12,55 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 )
+
+// GeneratedHookFileState reports hook-config drift for agents whose entire
+// Entire integration is one generated file in the repo (Pi's extension,
+// OpenCode's plugin), for use by HookFreshness implementations.
+//
+// The file counts as ours only if it contains marker, and as current only if
+// it matches one of renders — the outputs InstallHooks could have written.
+// Pass both the production and local-dev renders: they differ only in the
+// substituted entire command, and CheckHookConfig cannot know which mode
+// installed the file. Matching on content rather than a stamped version keeps
+// this honest for free — any edit to the embedded template makes installed
+// copies read as outdated without anyone remembering to bump anything.
+//
+// Line endings are normalized before comparing. These files are generated with
+// LF but are typically committed, so on Windows a checkout under the default
+// core.autocrlf=true hands us CRLF and byte equality never holds. That would
+// report permanent drift the user cannot clear: InstallHooks writes LF back,
+// and the next checkout converts it to CRLF again.
+//
+// A file that exists but lacks marker reads as HooksAbsent, not HooksOutdated:
+// InstallHooks refuses to overwrite a foreign file at our path, so there is no
+// Entire config there for us to call stale.
+func GeneratedHookFileState(path, marker string, renders ...string) HookConfigState {
+	data, err := os.ReadFile(path) //nolint:gosec // path constructed from validated repo root
+	if err != nil {
+		return HooksAbsent
+	}
+	content := string(data)
+	if !strings.Contains(content, marker) {
+		return HooksAbsent
+	}
+	normalized := normalizeLineEndings(content)
+	for _, render := range renders {
+		if normalized == normalizeLineEndings(render) {
+			return HooksCurrent
+		}
+	}
+	return HooksOutdated
+}
+
+// normalizeLineEndings rewrites CRLF to LF so content comparison survives a
+// Windows checkout. Lone CR is left alone: no generator here emits it, and
+// touching it would rewrite content that is genuinely different.
+func normalizeLineEndings(s string) string {
+	if !strings.Contains(s, "\r\n") {
+		return s
+	}
+	return strings.ReplaceAll(s, "\r\n", "\n")
+}
 
 type WarningFormat int
 
@@ -91,7 +141,9 @@ func WrapWindowsProductionSilentHookCommand(command string) string {
 
 // WrapWindowsProductionJSONWarningHookCommand emits a JSON hook response with a
 // systemMessage field on stdout when the Entire CLI is missing from PATH. It
-// avoids sh so Codex hooks still work from native Windows shells.
+// avoids sh so Codex hooks still work from native Windows shells. Codex already
+// runs hook commands through cmd.exe /C, so this JSON-bearing command uses that
+// shell directly instead of adding a second quote-parsing layer.
 func WrapWindowsProductionJSONWarningHookCommand(command string, format WarningFormat) string {
 	payload, err := jsonutil.MarshalWithNoHTMLEscape(struct {
 		SystemMessage string `json:"systemMessage,omitempty"`
@@ -103,17 +155,17 @@ func WrapWindowsProductionJSONWarningHookCommand(command string, format WarningF
 	}
 
 	return fmt.Sprintf(
-		`cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (echo %s) else (%s)"`,
+		`where.exe entire >nul 2>nul & if errorlevel 1 (echo %s) else (%s)`,
 		escapeWindowsCMD(string(payload)),
 		command,
 	)
 }
 
-// WrapWindowsProductionPlainTextWarningHookCommand emits the warning as plain
-// text to stdout when the Entire CLI is missing from PATH.
+// WrapWindowsProductionPlainTextWarningHookCommand is the direct-shell fallback
+// for WrapWindowsProductionJSONWarningHookCommand when JSON marshaling fails.
 func WrapWindowsProductionPlainTextWarningHookCommand(command string, format WarningFormat) string {
 	return fmt.Sprintf(
-		`cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (echo %s) else (%s)"`,
+		`where.exe entire >nul 2>nul & if errorlevel 1 (echo %s) else (%s)`,
 		escapeWindowsCMD(windowsPlainTextWarning(format)),
 		command,
 	)
@@ -130,7 +182,8 @@ func WrapProductionPlainTextWarningHookCommand(command string, format WarningFor
 }
 
 const productionHookWrapperPrefix = `sh -c 'if ! command -v entire >/dev/null 2>&1; then `
-const windowsProductionHookWrapperPrefix = `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 `
+const windowsProductionHookWrapperPrefix = `where.exe entire >nul 2>nul & if errorlevel 1 `
+const nestedWindowsProductionHookWrapperPrefix = `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 `
 
 // IsManagedHookCommand reports whether command is either a direct Entire hook
 // command or one of Entire's production wrapper forms that exec that command.
@@ -146,7 +199,8 @@ func IsManagedHookCommand(command string, prefixes []string) bool {
 
 		return hasManagedHookPrefix(wrappedCommand, prefixes)
 	}
-	if strings.HasPrefix(command, windowsProductionHookWrapperPrefix) {
+	if strings.HasPrefix(command, windowsProductionHookWrapperPrefix) ||
+		strings.HasPrefix(command, nestedWindowsProductionHookWrapperPrefix) {
 		// The wrapped command lives in the `else (<command>)` branch. Take the
 		// last ` else (` so a warning string containing the marker can't fool us.
 		const elseMarker = " else ("
@@ -174,13 +228,10 @@ func hasManagedHookPrefix(command string, prefixes []string) bool {
 // escapeWindowsCMD caret-escapes the cmd.exe block metacharacters that would
 // otherwise terminate the `(echo …)` warning block or redirect its output.
 //
-// `%` is deliberately NOT escaped. These wrappers are a `cmd.exe /d /s /c`
-// command line, not a batch script, so batch's `%%` doubling does not apply
-// (it would print a literal `%%`), and caret-escaping `%` is not a thing cmd
-// recognizes — `^%` would leak the caret. On the command line a lone `%` is
-// literal and `%NAME%` only expands for a defined environment variable, so the
-// fixed, %-free warning constant is emitted verbatim. If the warning text ever
-// gains a `%NAME%` that collides with a real env var, revisit this.
+// `%` is deliberately NOT escaped. Hook runners pass these strings to a cmd /c
+// command line, not a batch script, so batch's `%%` doubling does not apply,
+// and caret-escaping `%` would leak the caret. The fixed warning constants are
+// %-free; if that changes, percent expansion needs separate handling.
 func escapeWindowsCMD(s string) string {
 	replacer := strings.NewReplacer(
 		`^`, `^^`,

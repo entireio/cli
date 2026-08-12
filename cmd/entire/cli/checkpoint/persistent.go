@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	transcriptcompact "github.com/entireio/cli/cmd/entire/cli/transcript/compact"
+	"github.com/entireio/cli/cmd/entire/cli/transcript/imageextract"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
@@ -57,6 +59,15 @@ var chunkTranscript = agent.ChunkTranscript
 //   - For incremental checkpoints: checkpoints/NNN-<tool-use-id>.json
 //   - For final checkpoints: checkpoint.json and agent-<agent-id>.jsonl
 func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
+	// Parity with this store's backfill writers and with the git-refs store: a
+	// canceled ctx means stop doing work, and creating a checkpoint is the most
+	// expensive write there is. Nothing below here observes cancellation
+	// (ensureSessionsBranch, tree building and CreateCommit all ignore ctx), so
+	// without this a bulk writer that ignores cancellation keeps minting
+	// checkpoints after Ctrl-C.
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // Propagating context cancellation
+	}
 	// Validate identifiers to prevent path traversal and malformed data
 	if opts.CheckpointID.IsEmpty() {
 		return errors.New("invalid checkpoint options: checkpoint ID is required")
@@ -396,38 +407,57 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 				agentType = sessionMeta.Agent
 			}
 		}
-		if err := s.replaceTranscript(ctx, opts.Transcript, agentType, startLine, opts.PrecomputedBlobs, sessionDir, entries); err != nil {
+		rewrote, err := s.replaceTranscript(ctx, opts.Transcript, agentType, startLine, opts.PrecomputedBlobs, sessionDir, entries)
+		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to replace transcript: %w", err)
 		}
 
-		// Keep the root metadata.json compact_transcript pointer consistent with
-		// the finalized tree. replaceTranscript may have written transcript.jsonl
-		// that the initial write lacked (e.g. compaction was skipped then and
-		// succeeds now), so re-derive the pointer from the tree entry and rewrite
-		// the root summary when it changed.
-		compactPath := ""
-		if _, ok := entries[checkpointSubtreePath(sessionDir, paths.CompactTranscriptFileName)]; ok {
-			compactPath = "/" + checkpointSubtreePath(sessionDir, paths.CompactTranscriptFileName)
-		}
-		if checkpointSummary.Sessions[sessionIndex].CompactTranscript != compactPath {
-			checkpointSummary.Sessions[sessionIndex].CompactTranscript = compactPath
-			summaryJSON, err := jsonutil.MarshalIndentWithNewline(checkpointSummary, "", "  ")
+		// Only touch assets and the root pointers when the transcript was actually
+		// rewritten. If replaceTranscript short-circuited (identical content), the
+		// stored transcript, compact, and assets are all unchanged and already
+		// consistent — clearing/rewriting assets here would strip the blobs a
+		// still-present placeholder depends on, leaving a dangling placeholder.
+		if rewrote {
+			// Keep the externalized image assets consistent with the replaced
+			// transcript: write the new set (clearing any stale ones), so a finalize
+			// that re-externalizes matches its placeholders and one that produces an
+			// inline transcript leaves no orphaned blobs.
+			manifestPath, err := s.writeAssetsForBackfill(opts, sessionDir, entries)
 			if err != nil {
-				return plumbing.ZeroHash, fmt.Errorf("failed to marshal checkpoint summary: %w", err)
+				return plumbing.ZeroHash, fmt.Errorf("failed to write assets: %w", err)
 			}
-			summaryHash, err := CreateBlobFromContent(s.repo, summaryJSON)
-			if err != nil {
-				return plumbing.ZeroHash, fmt.Errorf("failed to create checkpoint summary blob: %w", err)
+
+			// Keep the root metadata.json compact_transcript and assets_manifest
+			// pointers consistent with the finalized tree. replaceTranscript may have
+			// written transcript.jsonl that the initial write lacked (e.g. compaction
+			// was skipped then and succeeds now), so re-derive both pointers from the
+			// tree and rewrite the root summary once when either changed.
+			compactPath := ""
+			if _, ok := entries[checkpointSubtreePath(sessionDir, paths.CompactTranscriptFileName)]; ok {
+				compactPath = "/" + checkpointSubtreePath(sessionDir, paths.CompactTranscriptFileName)
 			}
-			entries[rootMetadataPath] = object.TreeEntry{
-				Name: rootMetadataPath,
-				Mode: filemode.Regular,
-				Hash: summaryHash,
+			sess := &checkpointSummary.Sessions[sessionIndex]
+			if sess.CompactTranscript != compactPath || sess.AssetsManifest != manifestPath {
+				sess.CompactTranscript = compactPath
+				sess.AssetsManifest = manifestPath
+				summaryJSON, err := jsonutil.MarshalIndentWithNewline(checkpointSummary, "", "  ")
+				if err != nil {
+					return plumbing.ZeroHash, fmt.Errorf("failed to marshal checkpoint summary: %w", err)
+				}
+				summaryHash, err := CreateBlobFromContent(s.repo, summaryJSON)
+				if err != nil {
+					return plumbing.ZeroHash, fmt.Errorf("failed to create checkpoint summary blob: %w", err)
+				}
+				entries[rootMetadataPath] = object.TreeEntry{
+					Name: rootMetadataPath,
+					Mode: filemode.Regular,
+					Hash: summaryHash,
+				}
 			}
 		}
 	}
 
-	// Replace prompts with 7-layer-redacted content.
+	// Replace prompts with regex-only-redacted content.
 	if len(opts.Prompts) > 0 {
 		promptContent := RedactedJoinedPrompts(opts.Prompts)
 		blobHash, err := CreateBlobFromContent(s.repo, []byte(promptContent))
@@ -687,7 +717,14 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		}
 	}
 
-	// Write prompts via the 7-layer pipeline. OPF runs only in the
+	// Write externalized image assets (raw binary blobs + manifest), when present.
+	manifestPath, err := s.writeAssets(opts.Assets, sessionDir, entries)
+	if err != nil {
+		return filePaths, err
+	}
+	filePaths.AssetsManifest = manifestPath
+
+	// Write prompts via the regex-only pipeline. OPF runs only in the
 	// pre-push rewrite path (manual_commit_opf_rewrite.go).
 	if len(opts.Prompts) > 0 {
 		promptContent := RedactedJoinedPrompts(opts.Prompts)
@@ -711,6 +748,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		Strategy:                    opts.Strategy,
 		CreatedAt:                   checkpointCreatedAt(opts),
 		Branch:                      opts.Branch,
+		CommitSHA:                   opts.CommitSHA,
 		CheckpointsCount:            opts.CheckpointsCount,
 		SaveStepCount:               opts.SaveStepCount,
 		FilesTouched:                opts.FilesTouched,
@@ -772,6 +810,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 	// was imported (Kind == "imported"). Compared as a literal because the
 	// session package imports checkpoint, so we can't reference its constant.
 	imported := opts.Kind == "imported"
+	commitSHA := opts.CommitSHA
 	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
 	if entry, exists := entries[rootMetadataPath]; exists {
 		existingSummary, readErr := s.readSummaryFromBlob(entry.Hash)
@@ -788,6 +827,12 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 			if !imported {
 				imported = existingSummary.Imported
 			}
+			// A later write to the same checkpoint (e.g. a review session
+			// attached to it) carries no CommitSHA; the imported anchor
+			// must survive that rewrite rather than be cleared.
+			if commitSHA == "" {
+				commitSHA = existingSummary.CommitSHA
+			}
 		}
 	}
 
@@ -796,6 +841,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 		CLIVersion:          versioninfo.Version,
 		Strategy:            opts.Strategy,
 		Branch:              opts.Branch,
+		CommitSHA:           commitSHA,
 		CheckpointsCount:    checkpointsCount,
 		FilesTouched:        filesTouched,
 		Sessions:            sessions,
@@ -829,8 +875,9 @@ func (s *GitStore) backfillAttribution(ctx context.Context, checkpointID id.Chec
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	if err := s.ensureSessionsBranch(ctx); err != nil {
-		return fmt.Errorf("failed to ensure sessions branch: %w", err)
+	// Backfills require the branch to exist; a miss must not create it.
+	if err := s.requireSessionsBranch(); err != nil {
+		return err
 	}
 
 	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
@@ -909,7 +956,7 @@ func (s *treeWriter) reaggregateFromEntries(basePath string, sessionCount int, e
 		}
 		totalCount += meta.CheckpointsCount
 		allFiles = mergeFilesTouched(allFiles, meta.FilesTouched)
-		totalTokens = aggregateTokenUsage(totalTokens, meta.TokenUsage)
+		totalTokens = types.AddTokenUsage(totalTokens, meta.TokenUsage)
 	}
 
 	return totalCount, allFiles, totalTokens, nil
@@ -955,28 +1002,26 @@ func (s *treeWriter) readSummaryFromBlob(hash plumbing.Hash) (*CheckpointSummary
 	return readJSONFromBlob[CheckpointSummary](s.repo, hash)
 }
 
-// aggregateTokenUsage sums two TokenUsage structs.
-// Returns nil if both inputs are nil.
-func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
-	if a == nil && b == nil {
-		return nil
+// SanitizeTranscriptForAgentType strips non-portable agent state from a transcript
+// about to be stored (see agent.TranscriptSanitizer). It exists for callers that work
+// from a types.AgentType rather than a live agent.Agent: the store itself, as a
+// last-resort safety net, and `entire import`, which reads raw third-party rollouts
+// and calls this before its own redaction pass so the sanitize-before-redact order
+// holds there too.
+//
+// It dispatches on agent type explicitly rather than resolving via
+// agent.GetByAgentType: the registry is populated by package init, so that lookup
+// only succeeds when something else in the binary happens to import agent/codex, and
+// when it doesn't, sanitization silently degrades to a no-op — reintroducing the bug
+// this guards against with no signal. A compile-time dependency cannot fail that way.
+func SanitizeTranscriptForAgentType(agentType types.AgentType, data []byte) []byte {
+	if len(data) == 0 {
+		return data
 	}
-	result := &agent.TokenUsage{}
-	if a != nil {
-		result.InputTokens = a.InputTokens
-		result.CacheCreationTokens = a.CacheCreationTokens
-		result.CacheReadTokens = a.CacheReadTokens
-		result.OutputTokens = a.OutputTokens
-		result.APICallCount = a.APICallCount
+	if agentType == agent.AgentTypeCodex {
+		return codex.SanitizePortableTranscript(data)
 	}
-	if b != nil {
-		result.InputTokens += b.InputTokens
-		result.CacheCreationTokens += b.CacheCreationTokens
-		result.CacheReadTokens += b.CacheReadTokens
-		result.OutputTokens += b.OutputTokens
-		result.APICallCount += b.APICallCount
-	}
-	return result
+	return data
 }
 
 // writeTranscript writes the transcript, compact transcript, and content hash
@@ -1000,7 +1045,10 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 			rawData = nil
 		}
 		if len(rawData) > 0 {
-			redacted, redactErr := redact.JSONLBytes(rawData)
+			// Sanitize BEFORE redacting, matching the pipeline order everywhere else:
+			// redaction must not scan ciphertext that sanitization is about to
+			// discard. This is the one path that reaches the store with raw bytes.
+			redacted, redactErr := redact.JSONLBytes(SanitizeTranscriptForAgentType(opts.Agent, rawData))
 			if redactErr != nil {
 				return false, nil, fmt.Errorf("failed to redact transcript from file: %w", redactErr)
 			}
@@ -1011,9 +1059,11 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 		return false, nil, nil
 	}
 
-	if opts.Agent == agent.AgentTypeCodex {
-		transcriptBytes = codex.SanitizePortableTranscript(transcriptBytes)
-	}
+	// Safety net for in-memory callers that reached the store without sanitizing
+	// (notably `entire import`, which writes raw third-party rollouts). Idempotent,
+	// so it is a no-op for the paths that already did it — including the fallback
+	// above.
+	transcriptBytes = SanitizeTranscriptForAgentType(opts.Agent, transcriptBytes)
 
 	// Chunk the transcript if it's too large
 	chunkStart := time.Now()
@@ -1474,7 +1524,7 @@ func readSessionContentFromTree(ctx context.Context, sessionTree *FetchingTree) 
 
 	// Read transcript (auto-fetches blobs if needed)
 	if transcript, transcriptErr := readTranscriptFromTree(ctx, sessionTree, agentType); transcriptErr == nil && transcript != nil {
-		result.Transcript = transcript
+		result.Transcript = reinjectAssets(sessionTree, agentType, transcript)
 		result.TranscriptBlobHashes = transcriptBlobHashesFromTreeEntries(sessionTree.RawEntries())
 	}
 
@@ -1664,9 +1714,9 @@ func (s *GitStore) backfillSummary(ctx context.Context, checkpointID id.Checkpoi
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	// Ensure sessions branch exists
-	if err := s.ensureSessionsBranch(ctx); err != nil {
-		return fmt.Errorf("failed to ensure sessions branch: %w", err)
+	// Backfills require the branch to exist; a miss must not create it.
+	if err := s.requireSessionsBranch(); err != nil {
+		return err
 	}
 
 	// Get branch ref and root tree hash (O(1), no flatten)
@@ -1708,13 +1758,16 @@ func (s *GitStore) backfillSummary(ctx context.Context, checkpointID id.Checkpoi
 //
 // Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
 func (s *GitStore) backfillTranscript(ctx context.Context, opts UpdateOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // Propagating context cancellation
+	}
 	if opts.CheckpointID.IsEmpty() {
 		return errors.New("invalid update options: checkpoint ID is required")
 	}
 
-	// Ensure sessions branch exists
-	if err := s.ensureSessionsBranch(ctx); err != nil {
-		return fmt.Errorf("failed to ensure sessions branch: %w", err)
+	// Backfills require the branch to exist; a miss must not create it.
+	if err := s.requireSessionsBranch(); err != nil {
+		return err
 	}
 
 	// Get branch ref and root tree hash (O(1), no flatten)
@@ -1813,7 +1866,122 @@ func (s *treeWriter) setCompactTranscriptStart(sessionPath string, start *int, e
 // reuse precomputed blobs: each checkpoint in a turn shares the full
 // transcript but has its own start offset, so the compact content differs per
 // checkpoint.
-func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.RedactedBytes, agentType types.AgentType, startLine int, precomputed *PrecomputedTranscriptBlobs, sessionDir string, entries map[string]object.TreeEntry) error {
+// assetManifestEntry describes one externalized asset in assets/manifest.json.
+// Size and SHA256 are descriptive metadata for external tooling and audits; they
+// are not used on reinject (git content-addresses the blobs, which already
+// guarantees their integrity on read).
+type assetManifestEntry struct {
+	Name      string `json:"name"`
+	MediaType string `json:"media_type,omitempty"`
+	Size      int    `json:"size"`
+	SHA256    string `json:"sha256"`
+}
+
+// writeAssetsForBackfill writes the update's assets, but preserves any
+// already-stored assets when the update carries none AND the update opts into
+// preservation (UpdateOptions.PreserveAssetsWhenEmpty). This guards a best-effort
+// sidecar capture (e.g. Cursor's sqlite3 store read) that transiently yields
+// nothing at finalize from wiping images a prior CondenseSession successfully
+// stored: leaving the existing assets/ subtree untouched is strictly safer than
+// clearing it. Returns the (possibly pre-existing) manifest path.
+func (s *treeWriter) writeAssetsForBackfill(opts UpdateOptions, sessionDir string, entries map[string]object.TreeEntry) (string, error) {
+	if len(opts.Assets) == 0 && opts.PreserveAssetsWhenEmpty {
+		manifestKey := checkpointSubtreePath(sessionDir, paths.AssetsManifestFile)
+		if _, ok := entries[manifestKey]; ok {
+			return "/" + manifestKey, nil
+		}
+		return "", nil
+	}
+	return s.writeAssets(opts.Assets, sessionDir, entries)
+}
+
+// writeAssets stores each externalized transcript asset as a raw binary blob
+// under the session's assets/ folder, plus an assets/manifest.json index, in the
+// same tree. Returns the manifest path ("" when there are no assets). git
+// content-addresses the blobs, so identical images dedupe across checkpoints.
+//
+// It first clears any assets already present under the session's assets/ folder,
+// so a re-write (backfill/finalize) replaces rather than accumulates, and an
+// empty asset set leaves no orphaned blobs behind a now-inline transcript.
+func (s *treeWriter) writeAssets(assets []TranscriptAsset, sessionDir string, entries map[string]object.TreeEntry) (string, error) {
+	assetsPrefix := checkpointSubtreePath(sessionDir, paths.AssetsDirName) + "/"
+	for key := range entries {
+		if strings.HasPrefix(key, assetsPrefix) {
+			delete(entries, key)
+		}
+	}
+	if len(assets) == 0 {
+		return "", nil
+	}
+	manifest := struct {
+		Version int                  `json:"version"`
+		Assets  []assetManifestEntry `json:"assets"`
+	}{Version: 1}
+	for _, a := range assets {
+		blobHash, err := CreateBlobFromContent(s.repo, a.Data)
+		if err != nil {
+			return "", err
+		}
+		p := checkpointSubtreePath(sessionDir, paths.AssetsDirName, a.Name)
+		entries[p] = object.TreeEntry{Name: p, Mode: filemode.Regular, Hash: blobHash}
+		sum := sha256.Sum256(a.Data)
+		manifest.Assets = append(manifest.Assets, assetManifestEntry{
+			Name: a.Name, MediaType: a.MediaType, Size: len(a.Data), SHA256: hex.EncodeToString(sum[:]),
+		})
+	}
+	manifestJSON, err := jsonutil.MarshalIndentWithNewline(manifest, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal assets manifest: %w", err)
+	}
+	manifestHash, err := CreateBlobFromContent(s.repo, manifestJSON)
+	if err != nil {
+		return "", err
+	}
+	mp := checkpointSubtreePath(sessionDir, paths.AssetsManifestFile)
+	entries[mp] = object.TreeEntry{Name: mp, Mode: filemode.Regular, Hash: manifestHash}
+	return "/" + mp, nil
+}
+
+// reinjectAssets restores externalized images into a transcript on read, so the
+// returned bytes match what was stored. Best-effort and gated on placeholder
+// presence, not on any config flag: an asset it can't load is left as a
+// placeholder rather than failing the read.
+func reinjectAssets(sessionTree *FetchingTree, agentType types.AgentType, transcript []byte) []byte {
+	if !imageextract.HasPlaceholders(transcript) {
+		return transcript
+	}
+	codec := imageextract.CodecFor(agentType)
+	if codec == nil {
+		return transcript
+	}
+	// No blob-integrity check is needed here: git content-addresses every asset
+	// blob, so a corrupt/truncated fetch fails object verification and Contents()
+	// errors out (leaving the placeholder). The manifest's sha256 is external
+	// metadata, not a second integrity gate — and since writeAssets derives both
+	// the blob and the sha256 from the same bytes, they can never disagree.
+	out, err := codec.ReinjectImages(transcript, func(name string) (agent.CompactedTranscriptAsset, bool) {
+		f, ferr := sessionTree.File(paths.AssetsDir + name)
+		if ferr != nil {
+			return agent.CompactedTranscriptAsset{}, false
+		}
+		content, cerr := f.Contents()
+		if cerr != nil {
+			return agent.CompactedTranscriptAsset{}, false
+		}
+		return agent.CompactedTranscriptAsset{Name: name, Data: []byte(content)}, true
+	})
+	if err != nil {
+		return transcript
+	}
+	return out
+}
+
+// replaceTranscript rewrites the session transcript (full.jsonl chunks +
+// content_hash + compact) in entries. It reports whether it actually rewrote:
+// false means the content-hash matched and everything was left as-is (the
+// caller must then leave coupled artifacts like assets untouched too, so they
+// stay consistent with the unchanged transcript).
+func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.RedactedBytes, agentType types.AgentType, startLine int, precomputed *PrecomputedTranscriptBlobs, sessionDir string, entries map[string]object.TreeEntry) (bool, error) {
 	// Ignore precompute if invariants are violated — fall back to fresh chunking.
 	if precomputed != nil && !precomputed.IsUsable() {
 		precomputed = nil
@@ -1837,7 +2005,7 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 				existingHash, readErr := io.ReadAll(rdr)
 				_ = rdr.Close()
 				if readErr == nil && string(existingHash) == newContentHash {
-					return nil
+					return false, nil
 				}
 			}
 		}
@@ -1858,13 +2026,13 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 	} else {
 		chunks, err := chunkTranscript(ctx, transcript.Bytes(), agentType)
 		if err != nil {
-			return fmt.Errorf("failed to chunk transcript: %w", err)
+			return false, fmt.Errorf("failed to chunk transcript: %w", err)
 		}
 		chunkHashes = make([]plumbing.Hash, len(chunks))
 		for i, chunk := range chunks {
 			blobHash, err := CreateBlobFromContent(s.repo, chunk)
 			if err != nil {
-				return fmt.Errorf("failed to create transcript blob: %w", err)
+				return false, fmt.Errorf("failed to create transcript blob: %w", err)
 			}
 			chunkHashes[i] = blobHash
 		}
@@ -1887,7 +2055,7 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 	} else {
 		h, err := CreateBlobFromContent(s.repo, []byte(newContentHash))
 		if err != nil {
-			return fmt.Errorf("failed to create content hash blob: %w", err)
+			return false, fmt.Errorf("failed to create content hash blob: %w", err)
 		}
 		hashBlob = h
 	}
@@ -1898,13 +2066,10 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 	}
 
 	// Regenerate the compact transcript from the new content so the pushed
-	// transcript.jsonl stays current. Codex transcripts are sanitized first to
-	// match the initial-write path (writeTranscript), which sanitizes before
-	// compaction; this finalize path otherwise passes raw bytes.
-	compactBytes := transcript.Bytes()
-	if agentType == agent.AgentTypeCodex {
-		compactBytes = codex.SanitizePortableTranscript(compactBytes)
-	}
+	// transcript.jsonl stays current. Sanitized first to match the initial-write
+	// path (writeTranscript), which sanitizes before compaction; this finalize path
+	// otherwise passes raw bytes.
+	compactBytes := SanitizeTranscriptForAgentType(agentType, transcript.Bytes())
 	compactStart := s.writeCompactTranscript(ctx, agentType, startLine, compactBytes, sessionDir, entries)
 
 	// If regeneration produced no compact transcript (failure, empty, or
@@ -1922,10 +2087,10 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 	// transcript.jsonl: record the new boundary when one was produced, or clear
 	// it (nil) when the compact transcript was dropped above.
 	if err := s.setCompactTranscriptStart(sessionDir, compactStart, entries); err != nil {
-		return fmt.Errorf("failed to update compact transcript start: %w", err)
+		return false, fmt.Errorf("failed to update compact transcript start: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 // PrecomputeTranscriptBlobs chunks the given transcript and writes each chunk
@@ -1960,6 +2125,23 @@ func PrecomputeTranscriptBlobs(ctx context.Context, repo *git.Repository, transc
 		ContentHashBlob: hashBlob,
 		ContentHash:     contentHash,
 	}, nil
+}
+
+// requireSessionsBranch reports ErrCheckpointNotFound when the primary
+// metadata ref does not exist. Backfills use this instead of
+// ensureSessionsBranch: they target an existing checkpoint, and a missing
+// branch trivially implies the checkpoint is absent — creating an orphan
+// branch as a side effect of that probe would leave a live v1 branch (List
+// union, pre-push) in a repo that never used the git-branch backend.
+func (s *GitStore) requireSessionsBranch() error {
+	_, err := s.repo.Reference(s.refs.Primary, true)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return ErrCheckpointNotFound
+	}
+	return fmt.Errorf("failed to check sessions branch: %w", err)
 }
 
 // ensureSessionsBranch ensures the primary metadata ref exists.
@@ -2111,12 +2293,13 @@ func (s *treeWriter) copyMetadataDir(ctx context.Context, metadataDir, sessionDi
 			return fmt.Errorf("path traversal detected: %s", relPath)
 		}
 
-		// Create blob from file with 7-layer secrets redaction.
-		// Post-commit emits 7-layer-only blobs; the pre-push rewrite
+		// Create blob from file with regex-only secrets redaction (the
+		// eight always-on/opt-in layers).
+		// Post-commit emits regex-only blobs; the pre-push rewrite
 		// (strategy/manual_commit_opf_rewrite.go) walks the resulting
 		// tree, re-redacts these blobs with OPF when enabled, and
-		// rewrites entire/checkpoints/v1 into 8-layer commits before
-		// they leave the local machine.
+		// rewrites entire/checkpoints/v1 into OPF-applied (9-layer)
+		// commits before they leave the local machine.
 		blobHash, mode, err := createRedactedBlobFromFile(ctx, s.repo, path, relPath)
 		if err != nil {
 			return fmt.Errorf("failed to create blob for %s: %w", path, err)
@@ -2138,12 +2321,13 @@ func (s *treeWriter) copyMetadataDir(ctx context.Context, metadataDir, sessionDi
 	return nil
 }
 
-// createRedactedBlobFromFile reads a file, applies the 7-layer redaction
-// pipeline, and creates a git blob. Used by committed-checkpoint writes
-// at post-commit time. The OpenAI Privacy Filter is intentionally NOT
-// run here — OPF lives in the pre-push rewrite path
-// (strategy/manual_commit_opf_rewrite.go), which re-redacts the 7-layer
-// blobs into 8-layer commits before they leave the local machine.
+// createRedactedBlobFromFile reads a file, applies the regex-only redaction
+// pipeline (the eight always-on/opt-in layers), and creates a git blob. Used
+// by committed-checkpoint writes at post-commit time. The OpenAI Privacy
+// Filter is intentionally NOT run here — OPF lives in the pre-push rewrite
+// path (strategy/manual_commit_opf_rewrite.go), which re-redacts the
+// regex-only blobs into OPF-applied (9-layer) commits before they leave the
+// local machine.
 // JSONL files get JSONL-aware redaction; all other files get plain byte redaction.
 func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, filePath, treePath string) (plumbing.Hash, filemode.FileMode, error) {
 	info, err := os.Stat(filePath)
@@ -2185,8 +2369,8 @@ func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, fileP
 // JSON-shaped files (.jsonl or .json) get JSON-aware redaction (falling
 // back to plain bytes on parse failure so regex/credential layers
 // still apply); other files get plain byte redaction. When
-// usePrivacyFilter is true the full 8-layer pipeline (including OPF)
-// runs; otherwise the 7-layer pipeline.
+// usePrivacyFilter is true the full 9-layer pipeline (the eight regex
+// layers plus OPF) runs; otherwise just the eight regex layers.
 //
 // .json is handled alongside .jsonl because checkpoint metadata files
 // (metadata.json, per-session metadata.json) carry free-form fields
@@ -2323,7 +2507,7 @@ func SignCommitBestEffort(ctx context.Context, commit *object.Commit) {
 	}
 	defer r.Close()
 
-	sig, err := signer.Sign(r)
+	sig, err := signer.Sign(ctx, r)
 	if err != nil {
 		logging.Warn(ctx, "failed to sign commit", slog.String("error", err.Error()))
 		return

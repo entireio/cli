@@ -7,21 +7,18 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 )
 
 const (
 	// logsOnlyScanLimit is the maximum number of commits to scan for logs-only points.
 	logsOnlyScanLimit = 50
-
-	// maxLastPromptRunes is the maximum rune length for LastPrompt stored in session state.
-	maxLastPromptRunes = 100
 )
 
 // truncatePromptForStorage collapses whitespace and truncates a user prompt
-// for storage in LastPrompt.
+// for storage in LastPrompt. It delegates to session.TruncatePromptForStorage
+// so imports and live sessions format the field identically.
 func truncatePromptForStorage(prompt string) string {
-	return stringutil.TruncateRunes(stringutil.CollapseWhitespace(prompt), maxLastPromptRunes, "...")
+	return session.TruncatePromptForStorage(prompt)
 }
 
 // SessionState is an alias for session.State.
@@ -55,8 +52,16 @@ type CondenseResult struct {
 	FilesTouched         []string
 	Prompts              []string // User prompts from the condensed session
 	TotalTranscriptLines int      // Total transcript units after this condensation (JSONL line count or message count by agent format)
-	Transcript           []byte   // Raw transcript bytes for downstream consumers (trail title generation)
 	Skipped              bool     // True if condensation was skipped (no transcript or files to condense)
+
+	// TranscriptSizeBaseline is the byte size to record as
+	// SessionState.CheckpointTranscriptSize. It must be measured on the SANITIZED,
+	// pre-externalization transcript so it lives in the same coordinate as the
+	// shadow-branch blob it is later compared against in sessionHasNewContent. A
+	// raw-transcript size makes `blobSize > baseline` false forever for agents with
+	// a TranscriptSanitizer, so the session silently stops condensing after its
+	// first commit.
+	TranscriptSizeBaseline int64
 }
 
 // ExtractedSessionData contains data extracted from a shadow branch.

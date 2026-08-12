@@ -48,7 +48,7 @@ func TestSetupClaudeHooks_AddsAllRequiredHooks(t *testing.T) {
 	env.GitCommit("Initial commit")
 
 	// Run entire enable --agent claude-code (non-interactive)
-	output, err := env.RunCLIWithError("enable", "--agent", "claude-code")
+	output, err := env.RunCLIWithError("enable", "--agent", agentClaudeCode)
 	if err != nil {
 		t.Fatalf("enable claude-hooks command failed: %v\nOutput: %s", err, output)
 	}
@@ -66,16 +66,15 @@ func TestSetupClaudeHooks_AddsAllRequiredHooks(t *testing.T) {
 	if len(settings.Hooks.UserPromptSubmit) == 0 {
 		t.Error("UserPromptSubmit hook should exist")
 	}
-	if !hasHookWithMatcher(settings.Hooks.PreToolUse, "Task") {
-		t.Error("PreToolUse[Task] hook should exist")
+	if !hasHookWithMatcher(settings.Hooks.PreToolUse, "Agent") {
+		t.Error("PreToolUse[Agent] hook should exist")
 	}
-	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "Task") {
-		t.Error("PostToolUse[Task] hook should exist")
+	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "Agent") {
+		t.Error("PostToolUse[Agent] hook should exist")
 	}
-	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "TodoWrite") {
-		t.Error("PostToolUse[TodoWrite] hook should exist")
+	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate") {
+		t.Error("PostToolUse[TaskCreate|TaskUpdate] hook should exist")
 	}
-
 }
 
 // TestSetupClaudeHooks_PreservesExistingSettings is a smoke test verifying that
@@ -118,7 +117,7 @@ func TestSetupClaudeHooks_PreservesExistingSettings(t *testing.T) {
 	}
 
 	// Run enable claude-hooks
-	output, err := env.RunCLIWithError("enable", "--agent", "claude-code")
+	output, err := env.RunCLIWithError("enable", "--agent", agentClaudeCode)
 	if err != nil {
 		t.Fatalf("enable claude-hooks failed: %v\nOutput: %s", err, output)
 	}
@@ -134,7 +133,7 @@ func TestSetupClaudeHooks_PreservesExistingSettings(t *testing.T) {
 		t.Fatalf("failed to parse settings.json: %v", err)
 	}
 
-	if rawSettings["customSetting"] != "should-be-preserved" {
+	if rawSettings["customSetting"] != preservedSetting {
 		t.Error("customSetting should be preserved after enable claude-hooks")
 	}
 
@@ -146,15 +145,15 @@ func TestSetupClaudeHooks_PreservesExistingSettings(t *testing.T) {
 		t.Error("existing CustomTool hook should be preserved")
 	}
 
-	// User's Task hook should be preserved alongside our hook
+	// User's own Task hook should be preserved (enable never removes non-Entire hooks)
 	taskHooks := getAllHookCommands(settings.Hooks.PreToolUse, "Task")
 	if !containsCommand(taskHooks, "echo user-task-hook") {
 		t.Errorf("user's Task hook should be preserved, got: %v", taskHooks)
 	}
 
-	// Our hooks should also be added
-	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "Task") {
-		t.Error("PostToolUse[Task] hook should be added")
+	// Our hooks should be added under the current subagent matcher
+	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "Agent") {
+		t.Error("PostToolUse[Agent] hook should be added")
 	}
 }
 
@@ -168,14 +167,14 @@ func TestSetupClaudeHooks_AgentAddForce_RewritesExistingEntireHooks(t *testing.T
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 
-	output, err := env.RunCLIWithError("agent", "add", "claude-code")
+	output, err := env.RunCLIWithError("agent", "add", agentClaudeCode)
 	if err != nil {
 		t.Fatalf("agent add claude-code command failed: %v\nOutput: %s", err, output)
 	}
 
 	writeStaleClaudeStopHook(t, env)
 
-	output, err = env.RunCLIWithError("agent", "add", "claude-code", "--force")
+	output, err = env.RunCLIWithError("agent", "add", agentClaudeCode, "--force")
 	if err != nil {
 		t.Fatalf("agent add --force claude-code command failed: %v\nOutput: %s", err, output)
 	}
@@ -193,14 +192,14 @@ func TestSetupClaudeHooks_EnableForceWithAgent_RewritesExistingEntireHooks(t *te
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 
-	output, err := env.RunCLIWithError("enable", "--agent", "claude-code")
+	output, err := env.RunCLIWithError("enable", "--agent", agentClaudeCode)
 	if err != nil {
 		t.Fatalf("enable claude-hooks command failed: %v\nOutput: %s", err, output)
 	}
 
 	writeStaleClaudeStopHook(t, env)
 
-	output, err = env.RunCLIWithError("enable", "--agent", "claude-code", "--force")
+	output, err = env.RunCLIWithError("enable", "--agent", agentClaudeCode, "--force")
 	if err != nil {
 		t.Fatalf("enable --agent claude-code --force failed: %v\nOutput: %s", err, output)
 	}

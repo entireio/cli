@@ -22,6 +22,7 @@ type (
 	CheckpointInfo   = apicheckpoint.CheckpointInfo
 	SessionContent   = apicheckpoint.SessionContent
 	SessionFilePaths = apicheckpoint.SessionFilePaths
+	TranscriptAsset  = apicheckpoint.TranscriptAsset
 	SessionMetrics   = apicheckpoint.SessionMetrics
 	Summary          = apicheckpoint.Summary
 	LearningsSummary = apicheckpoint.LearningsSummary

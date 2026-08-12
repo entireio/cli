@@ -188,6 +188,14 @@ type ClonePreferences struct {
 	TrailsEnabledRepoKey   string     `json:"trails_enabled_repo_key,omitempty"`
 	TrailsEnabledAPIBase   string     `json:"trails_enabled_api_base,omitempty"`
 	TrailsEnabledAuthKey   string     `json:"trails_enabled_auth_key,omitempty"`
+
+	// Agent-help refresh failures use a separate, short-lived backoff. Keeping
+	// this out of TrailsEnabled ensures a transient help-command failure cannot
+	// suppress SessionStart's authoritative enablement probe or context injection.
+	TrailsAgentHelpRefreshFailedAt *time.Time `json:"trails_agent_help_refresh_failed_at,omitempty"`
+	TrailsAgentHelpFailureRepoKey  string     `json:"trails_agent_help_failure_repo_key,omitempty"`
+	TrailsAgentHelpFailureAPIBase  string     `json:"trails_agent_help_failure_api_base,omitempty"`
+	TrailsAgentHelpFailureAuthKey  string     `json:"trails_agent_help_failure_auth_key,omitempty"`
 }
 
 // SummaryGenerationSettings configures provider selection for on-demand
@@ -251,6 +259,11 @@ type RedactionSettings struct {
 	// OpenAIPrivacyFilter is the optional 8th redaction layer (opt-in).
 	// See docs/security-and-privacy.md.
 	OpenAIPrivacyFilter *OPFSettings `json:"openai_privacy_filter,omitempty"`
+
+	// ExternalizeImages opts into lifting inline base64 images out of transcripts
+	// into the checkpoint's assets/ store (off by default). Restore re-injects
+	// them regardless of this flag.
+	ExternalizeImages bool `json:"externalize_images,omitempty"`
 }
 
 // PIISettings configures PII detection categories.
@@ -279,7 +292,7 @@ type OPFSettings struct {
 
 	// PromptDefault controls whether the pre-push hook asks the user
 	// before running OPF. "" (default) and "ask" both surface the
-	// interactive prompt; "never" skips OPF and pushes 7-layer content;
+	// interactive prompt; "never" skips OPF and pushes regex-only content;
 	// "always" runs without asking. ENTIRE_OPF=yes|no on the push
 	// invocation overrides this setting per-push.
 	PromptDefault string `json:"prompt_default,omitempty"`
@@ -625,6 +638,13 @@ func saveRaw(path, label string, raw map[string]json.RawMessage) error {
 	if err != nil {
 		return fmt.Errorf("marshal %s settings: %w", label, err)
 	}
+	// Ensure the parent directory exists, mirroring the struct save path
+	// (saveToFile). Without this, the raw save path fails in a repo that has
+	// never created .entire/ — e.g. a bare `entire disable` in a fresh repo,
+	// which resolves to a raw flip before any directory is created.
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("creating %s settings directory: %w", label, err)
+	}
 	if err := jsonutil.WriteFileAtomic(path, data, 0o644); err != nil {
 		return fmt.Errorf("writing %s settings: %w", label, err)
 	}
@@ -647,15 +667,6 @@ func LoadClonePreferences(ctx context.Context) (*ClonePreferences, error) {
 		return nil, err
 	}
 	return loadClonePreferencesFromFile(path)
-}
-
-// SaveClonePreferences saves clone-local preferences to the git common dir.
-func SaveClonePreferences(ctx context.Context, prefs *ClonePreferences) error {
-	path, err := ClonePreferencesPath(ctx)
-	if err != nil {
-		return err
-	}
-	return saveClonePreferencesToFile(prefs, path)
 }
 
 // ModifyClonePreferences runs a read-modify-write under the preferences lock.
@@ -1139,6 +1150,13 @@ func mergeRedaction(dst *RedactionSettings, data json.RawMessage) error {
 			return err
 		}
 	}
+	if extRaw, ok := raw["externalize_images"]; ok {
+		var v bool
+		if err := json.Unmarshal(extRaw, &v); err != nil {
+			return fmt.Errorf("parsing redaction.externalize_images: %w", err)
+		}
+		dst.ExternalizeImages = v
+	}
 	return nil
 }
 
@@ -1298,10 +1316,18 @@ func IsSetUpAny(ctx context.Context) bool {
 }
 
 // IsSetUpAndEnabled returns true if Entire is both set up and enabled.
-// This checks if .entire/settings.json exists AND has enabled: true.
+// "Set up" spans either scope — .entire/settings.json OR
+// .entire/settings.local.json — so it must check IsSetUpAny, not IsSetUp.
+// `entire enable --local` writes only settings.local.json and never creates the
+// base file; gating on the base file alone would treat such a local-only repo
+// as inactive and make every hook a silent no-op, dropping all checkpoint
+// capture for that documented workflow. The IsSetUpAny guard is still required
+// so a never-enabled repo (no settings file in any scope) is not treated as
+// enabled by Load's default Enabled: true. Any settings read error is treated
+// as disabled (fail closed).
 // Use this for hooks that should be no-ops when Entire is not active.
 func IsSetUpAndEnabled(ctx context.Context) bool {
-	if !IsSetUp(ctx) {
+	if !IsSetUpAny(ctx) {
 		return false
 	}
 	s, err := Load(ctx)
@@ -1331,6 +1357,21 @@ func IsSummarizeEnabled(ctx context.Context) bool {
 		return false
 	}
 	return settings.IsSummarizeEnabled()
+}
+
+// IsImageExternalizationEnabled reports whether inline base64 images should be
+// lifted out of transcripts into the checkpoint asset store. Opt-in via
+// redaction.externalize_images, or the ENTIRE_EXTERNALIZE_IMAGES=1 env override
+// (handy for testing/rollout). Off by default.
+func IsImageExternalizationEnabled(ctx context.Context) bool {
+	if v := os.Getenv("ENTIRE_EXTERNALIZE_IMAGES"); v == "1" || v == "true" {
+		return true
+	}
+	s, err := Load(ctx)
+	if err != nil {
+		return false
+	}
+	return s.Redaction != nil && s.Redaction.ExternalizeImages
 }
 
 // IsSummarizeEnabled checks if auto-summarize is enabled in this settings instance.
@@ -1366,6 +1407,47 @@ func (c *CheckpointRemoteConfig) Owner() string {
 	return parts[0]
 }
 
+// HasCheckpointRemoteKey reports whether a checkpoint_remote entry exists in
+// strategy options at all — deliberately including malformed entries that
+// GetCheckpointRemote rejects (it returns nil for absent AND malformed, so it
+// cannot distinguish "no intent" from "botched intent"). Presence in any form
+// means the user intends a checkpoint remote.
+func (s *EntireSettings) HasCheckpointRemoteKey() bool {
+	if s.StrategyOptions == nil {
+		return false
+	}
+	_, ok := s.StrategyOptions["checkpoint_remote"]
+	return ok
+}
+
+// CheckpointRemoteIsLocalOnly reports whether a checkpoint_remote entry is
+// present in .entire/settings.local.json.
+//
+// That file is gitignored and per-clone, so a checkpoint_remote living there
+// cannot have arrived by cloning or forking someone else's project — it is this
+// developer's own explicit choice. Callers use this to distinguish "I configured
+// where my checkpoints go" from "I inherited a committed setting that points at
+// the upstream project's checkpoint repo".
+//
+// Best-effort: an unreadable or malformed local file reports false, which is the
+// conservative answer (callers then fall back to weaker ownership signals).
+func CheckpointRemoteIsLocalOnly(ctx context.Context) bool {
+	_, raw, exists, err := LoadLocalRaw(ctx)
+	if err != nil || !exists {
+		return false
+	}
+	optionsRaw, ok := raw["strategy_options"]
+	if !ok {
+		return false
+	}
+	var options map[string]json.RawMessage
+	if err := json.Unmarshal(optionsRaw, &options); err != nil {
+		return false
+	}
+	_, ok = options["checkpoint_remote"]
+	return ok
+}
+
 // GetCheckpointRemote returns the configured checkpoint remote.
 // Expects a structured object: {"provider": "github", "repo": "org/repo"}.
 // Returns nil if not configured, wrong type, or missing required fields.
@@ -1390,6 +1472,22 @@ func (s *EntireSettings) GetCheckpointRemote() *CheckpointRemoteConfig {
 		return nil
 	}
 	return &CheckpointRemoteConfig{Provider: provider, Repo: repo}
+}
+
+// GetCheckpointPushRemote returns the configured checkpoint push remote name.
+// Stored in strategy_options.checkpoint_push_remote as a plain git remote
+// name (e.g. "origin", "private"). This selects WHICH configured remote
+// carries checkpoint data — distinct from checkpoint_remote, which derives a
+// dedicated URL. Returns "" if unset, empty, or not a string.
+func (s *EntireSettings) GetCheckpointPushRemote() string {
+	if s.StrategyOptions == nil {
+		return ""
+	}
+	val, ok := s.StrategyOptions["checkpoint_push_remote"].(string)
+	if !ok {
+		return ""
+	}
+	return val
 }
 
 // IsFilteredFetchesEnabled checks if fetches should use --filter=blob:none.

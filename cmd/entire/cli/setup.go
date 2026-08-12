@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -48,6 +49,7 @@ const (
 	flagLocalDev             = "local-dev"
 	flagSearchSkill          = "search-skill"
 	flagAgentHelpSkill       = "agent-help-skill"
+	flagImportHistory        = "import-history"
 	checkpointProviderGitHub = "github"
 )
 
@@ -77,8 +79,13 @@ type EnableOptions struct {
 	// presentation of the final state (commit, push, done).
 	SuppressDoneMessage bool
 	Yes                 bool
-	SearchSkill         bool
-	AgentHelpSkill      bool
+	// ImportHistory opts into importing the selected agents' pre-existing
+	// session history during first-time setup. Deliberately NOT implied by
+	// Yes: ingesting a month of local transcripts is not a setup default (see
+	// maybeOfferSessionImport).
+	ImportHistory  bool
+	SearchSkill    bool
+	AgentHelpSkill bool
 }
 
 // applyStrategyOptions sets strategy_options on settings from CLI flags.
@@ -784,7 +791,7 @@ Examples:
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Reinstall the Entire git hook")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
-	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: branch (default) or refs (one git ref per checkpoint)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; recommended) or branch (shared entire/checkpoints/v1 branch)")
 	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, pi, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
 	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears (falls back to 5m default).")
@@ -897,16 +904,42 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				return NewSilentError(errors.New("missing agent name"))
 			}
 
+			// Resolve --agent before logging starts, so a bad agent name is
+			// rejected without touching the repo (see below).
+			var selectedAgent agent.Agent
 			if agentName != "" {
 				ag, err := agent.Get(types.AgentName(agentName))
 				if err != nil {
 					printWrongAgentError(cmd.ErrOrStderr(), agentName)
 					return NewSilentError(errors.New("wrong agent name"))
 				}
+				selectedAgent = ag
+			}
+
+			// Route setup's logging to .entire/logs/ like every other command.
+			// Without Init the package logger stays nil and every logging.*
+			// call under setup — agent detection, hook install, session import,
+			// the checkpoint layer's push/remote warnings — falls back to
+			// slog.Default(), which prints them straight onto the user's
+			// terminal mid-flow (and writes nothing to the log file).
+			//
+			// Placement is load-bearing in both directions: after the git-repo
+			// check above so it cannot create .entire/logs/ outside a
+			// repository, and after every check that can still reject this
+			// invocation, because Init CREATES .entire/logs/ — a rejected
+			// enable must leave a previously untouched repo untouched rather
+			// than seeding it with an untracked directory Entire's gitignore
+			// entry does not exist yet to cover.
+			logging.SetLogLevelGetter(GetLogLevel)
+			if err := logging.Init(ctx, ""); err == nil {
+				defer logging.Close()
+			}
+
+			if selectedAgent != nil {
 				// --agent is a targeted operation: set up this specific agent without
 				// affecting other agents. Unlike the interactive path, it does not
 				// uninstall hooks for other previously-enabled agents.
-				return setupAgentHooksNonInteractive(ctx, cmd.OutOrStdout(), ag, opts)
+				return setupAgentHooksNonInteractive(ctx, cmd.OutOrStdout(), selectedAgent, opts)
 			}
 
 			// Any setup-mutating flags should behave like `configure` on repos that
@@ -930,12 +963,13 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
-	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: branch (default) or refs (one git ref per checkpoint)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; recommended) or branch (shared entire/checkpoints/v1 branch)")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
 	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
-	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit; then enable all agents and accept telemetry)")
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit, and push; then enable all agents and accept telemetry). Does not import existing agent history — see --"+flagImportHistory)
+	cmd.Flags().BoolVar(&opts.ImportHistory, flagImportHistory, false, importHistoryFlagUsage)
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
 	// Bootstrap flags for non-git-repo folders.
@@ -945,10 +979,13 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().StringVar(&bootstrapOpts.RepoOwner, "repo-owner", "", "GitHub user or organization login for the new repo")
 	cmd.Flags().StringVar(&bootstrapOpts.RepoVisibility, "repo-visibility", "", "GitHub repository visibility: public, private, or internal")
 	cmd.Flags().BoolVar(&bootstrapOpts.NoGitHub, "no-github", false, "Initialize local git repo only; skip creating a GitHub remote")
+	cmd.Flags().BoolVar(&bootstrapOpts.Push, "push", false, "When bootstrapping a new repo, push the initial commit to the created GitHub remote (implies creating the remote; without it the repo is created but not pushed)")
 	cmd.Flags().StringVar(&bootstrapOpts.InitialCommitMessage, "initial-commit-message", "", "Commit message for the initial commit when bootstrapping a new repo")
 	cmd.Flags().BoolVar(&bootstrapOpts.SkipInitialCommit, "skip-initial-commit", false, "Don't create the initial commit when bootstrapping a new repo")
 	cmd.MarkFlagsMutuallyExclusive("init-repo", "no-init-repo")
 	cmd.MarkFlagsMutuallyExclusive("initial-commit-message", "skip-initial-commit")
+	cmd.MarkFlagsMutuallyExclusive("push", "no-github")
+	cmd.MarkFlagsMutuallyExclusive("push", "skip-initial-commit")
 
 	// Provide a helpful error when --agent is used without a value
 	defaultFlagErr := cmd.FlagErrorFunc()
@@ -1045,6 +1082,7 @@ func cleanRemoteURLForReport(rawURL string) (string, error) {
 }
 
 func newDisableCmd() *cobra.Command {
+	var useLocalSettings bool
 	var useProjectSettings bool
 	var uninstall bool
 	var force bool
@@ -1068,10 +1106,14 @@ To completely remove Entire integrations from this repository, use --uninstall:
 			if uninstall {
 				return runUninstall(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), force)
 			}
+			if err := validateSetupFlags(useLocalSettings, useProjectSettings); err != nil {
+				return err
+			}
 			return runDisable(ctx, cmd.OutOrStdout(), useProjectSettings)
 		},
 	}
 
+	cmd.Flags().BoolVar(&useLocalSettings, "local", false, "Update .entire/settings.local.json (the default) instead of .entire/settings.json")
 	cmd.Flags().BoolVar(&useProjectSettings, "project", false, "Update .entire/settings.json instead of .entire/settings.local.json")
 	cmd.Flags().BoolVar(&uninstall, "uninstall", false, "Completely remove Entire from this repository")
 	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmation prompt (use with --uninstall)")
@@ -1087,6 +1129,11 @@ To completely remove Entire integrations from this repository, use --uninstall:
 // flag or reports current status.
 func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts EnableOptions) error {
 	w := cmd.OutOrStdout()
+	// This path is by definition not a first run, so it never reaches the
+	// import offer. Say so rather than dropping the flag silently.
+	if opts.ImportHistory {
+		noteImportHistoryNotApplicable(w)
+	}
 	usedSetupFlow := enableUsesSetupFlow(cmd, "")
 	if usedSetupFlow {
 		if hasStrategyFlags(cmd) {
@@ -1110,15 +1157,70 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 		}
 	}
 
+	// `entire enable` is an explicit, user-initiated recovery point. A repo
+	// enabled before the checkpoint_remote bootstrap existed may still carry a
+	// local orphan disjoint from the checkpoint remote (#1374); EnsureSetup with
+	// the bootstrap flag heals it via EnsurePrimaryRef. This is the only path to
+	// the heal for a bare `entire enable` (which otherwise short-circuits on the
+	// already-enabled branch below). EnsureSetup is idempotent and silent on a
+	// healthy repo (hooks stay installed, gitignore/vercel config already present),
+	// so this adds only the heal to the already-configured path.
+	if err := strategy.EnsureSetup(strategy.WithCheckpointRemoteBootstrap(ctx)); err != nil {
+		return fmt.Errorf("failed to setup strategy: %w", err)
+	}
+
+	// Resolve the target scope first, then decide whether there is anything to
+	// do. Enable writes to the scope resolved by settingsTargetFile, which is
+	// also what strategy/checkpoint-backend updates above use. Without this, a
+	// plain `entire enable` (no --project/--local) resolved the strategy write
+	// to the existing project settings.json but wrote the enabled flag to
+	// settings.local.json, leaving the project file the user disabled still
+	// enabled=false.
+	targetFile, _ := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
+	useProject := targetFile == settings.EntireSettingsFile
+
+	// The merged view can report enabled while the resolved target file is
+	// itself still disabled — exactly the legacy split state a pre-fix binary
+	// left on disk (committed settings.json enabled:false masked by
+	// settings.local.json enabled:true, which wins in the merge). In that case
+	// the early "already enabled" return would never flip the target file, even
+	// with an explicit --project, so `enable` could not recover that split
+	// state. Only short-circuit when the merged view is enabled AND the target
+	// file is not itself explicitly disabled.
 	enabled, err := IsEnabled(ctx)
-	if err == nil && enabled {
+	if err == nil && enabled && !scopeExplicitlyDisabled(ctx, useProject) {
 		if !usedSetupFlow {
 			fmt.Fprintln(w, "Entire is already enabled.")
 		}
 		printEnabledStatus(ctx, w)
 		return nil
 	}
-	return runEnable(ctx, w, opts.UseProjectSettings)
+	return runEnable(ctx, w, useProject)
+}
+
+// scopeExplicitlyDisabled reports whether the settings file for the given scope
+// exists and carries an explicit "enabled": false. A missing file or a missing
+// "enabled" key returns false: those default to enabled, so there is nothing to
+// recover. Used to detect the legacy split state where the merged view is
+// enabled but the target file the user cares about is still disabled.
+func scopeExplicitlyDisabled(ctx context.Context, useProject bool) bool {
+	load := settings.LoadLocalRaw
+	if useProject {
+		load = settings.LoadProjectRaw
+	}
+	_, raw, _, err := load(ctx)
+	if err != nil {
+		return false
+	}
+	value, ok := raw["enabled"]
+	if !ok {
+		return false
+	}
+	var enabled bool
+	if err := json.Unmarshal(value, &enabled); err != nil {
+		return false
+	}
+	return !enabled
 }
 
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
@@ -1175,17 +1277,8 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	opts.applyStrategyOptions(settings)
 
-	// Checkpoint storage backend. An explicit --checkpoint-backend always wins.
-	// Otherwise, on the first interactive setup, offer a choice (default: branch).
-	// Non-interactive or --yes first runs keep the default git-branch backend.
-	if opts.CheckpointBackend == "" && firstRun && !opts.Yes && interactive.CanPromptInteractively() {
-		chosen, err := promptCheckpointBackend(ctx, w)
-		if err != nil {
-			return err
-		}
-		opts.CheckpointBackend = chosen // "" keeps the default (or cancelled) backend
-	}
-	if err := applyCheckpointBackendFlag(settings, opts.CheckpointBackend); err != nil {
+	backend := resolveFirstRunCheckpointBackend(opts, firstRun)
+	if err := applyCheckpointBackendFlag(settings, backend); err != nil {
 		return err
 	}
 
@@ -1256,7 +1349,11 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
 
-	if err := strategy.EnsureSetup(ctx); err != nil {
+	// Explicit, user-initiated setup: allow EnsurePrimaryRef to fetch a
+	// missing primary metadata ref from a configured checkpoint_remote
+	// (bootstrapPrimaryFromCheckpointRemote is otherwise a no-op — see
+	// strategy.WithCheckpointRemoteBootstrap).
+	if err := strategy.EnsureSetup(strategy.WithCheckpointRemoteBootstrap(ctx)); err != nil {
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
 
@@ -1282,6 +1379,8 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		}
 	}
 
+	printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
+
 	return nil
 }
 
@@ -1291,20 +1390,48 @@ func printEnabledStatus(ctx context.Context, w io.Writer) {
 		fmt.Fprintf(w, "Agents: %s\n", strings.Join(displayNames, ", "))
 	}
 	fmt.Fprintln(w, "\nTo add more agents, run `entire agent add <name>`.")
+	printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
 }
 
-// runEnable sets the enabled flag in settings.
-// Writes to the target file (local by default, project with --project),
-// and also updates the other file if it exists, so they can't get out of sync.
-func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error {
-	s, err := LoadEntireSettings(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
+// resolveFirstRunCheckpointBackend decides the checkpoint storage backend
+// the setup flow writes. An explicit --checkpoint-backend always wins;
+// otherwise a first run takes the git-refs default silently (branch remains
+// selectable via --checkpoint-backend branch). The choice is written
+// explicitly into the new settings file, and the config-less runtime
+// fallback stays git-branch so existing repos are untouched. The default is
+// empty — write nothing — while ENTIRE_CHECKPOINTS_PRIMARY is active
+// (firstRunCheckpointBackendDefault returns ""): the env fully replaces
+// settings, so persisting a default would only write diverging config.
+func resolveFirstRunCheckpointBackend(opts EnableOptions, firstRun bool) string {
+	if opts.CheckpointBackend != "" {
+		return opts.CheckpointBackend
 	}
+	if firstRun {
+		return firstRunCheckpointBackendDefault()
+	}
+	return ""
+}
 
-	s.Enabled = true
+// firstRunCheckpointBackendDefault is the backend written on first-time
+// setups when --checkpoint-backend wasn't passed: the git-refs store (a
+// storage-topology question is unanswerable during first-time setup). Empty —
+// write nothing — while the ENTIRE_CHECKPOINTS_PRIMARY override is active:
+// the env fully replaces any settings block, so persisting a default here
+// would write config that diverges from the backend actually in use (and
+// break harnesses that pin git-branch via the env).
+func firstRunCheckpointBackendDefault() string {
+	if os.Getenv(settings.EnvCheckpointsPrimary) != "" {
+		return ""
+	}
+	return checkpointBackendRefsAlias
+}
 
-	if err := saveEnabledState(ctx, s, useProjectSettings); err != nil {
+// runEnable flips the enabled flag to true in the scope chosen by the caller
+// (see setEnabledFlag). Callers resolve the scope: runEnableOnConfiguredRepo
+// uses settingsTargetFile so a bare `entire enable` targets the committed
+// settings.json when present and can recover a repo disabled there.
+func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error {
+	if err := setEnabledFlag(ctx, true, useProjectSettings); err != nil {
 		return err
 	}
 
@@ -1313,33 +1440,113 @@ func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error 
 	return nil
 }
 
+// runDisable flips the enabled flag to false in the resolved settings scope.
+//
+// Scope resolution is deliberately asymmetric with enable because
+// settings.local.json overrides settings.json in the merged view:
+//   - bare `entire disable` (and --local) writes settings.local.json — the
+//     minimal, always-effective way to silence Entire on one machine without
+//     editing committed team config;
+//   - --project writes the committed settings.json (and setEnabledFlag also
+//     syncs the local file if present, so a stale local override can't leave
+//     the repo enabled).
+//
+// This restores origin/main's default (bare disable -> local) and matches the
+// --project flag's help text. Enable, by contrast, must reach the committed
+// file to recover a project the user disabled there, so it resolves via
+// settingsTargetFile (see runEnableOnConfiguredRepo). --local is accepted for
+// symmetry with enable; for disable it is the same as the bare default.
 func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error {
-	s, err := LoadEntireSettings(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
+	targetFile := settings.EntireSettingsLocalFile
+	configDisplay := configDisplayLocal
+	if useProjectSettings {
+		targetFile = settings.EntireSettingsFile
+		configDisplay = configDisplayProject
 	}
 
-	s.Enabled = false
-
-	if err := saveEnabledState(ctx, s, useProjectSettings); err != nil {
+	if err := setEnabledFlag(ctx, false, targetFile == settings.EntireSettingsFile); err != nil {
 		return err
 	}
 
-	fmt.Fprintln(w, "Entire is now disabled.")
+	fmt.Fprintf(w, "Entire is now disabled (%s).\n", configDisplay)
 	return nil
 }
 
-// saveEnabledState writes settings to the target file and also updates the
-// other settings file if it exists, preventing local/project from getting
-// out of sync on the enabled field.
+// setEnabledFlag flips only the "enabled" key in the target scope's settings
+// file, and — when writing the project scope — also syncs that one key into
+// settings.local.json if it exists. The sync is one-directional (project ->
+// local) because settings.local.json overrides settings.json in the merged
+// view, so a stale local "enabled": false would otherwise keep the repo
+// disabled after a project-scope re-enable.
+//
+// This is the canonical explanation of the merged-vs-scoped write rule that the
+// whole enable/disable surface follows; other sites point here.
+//
+// The write path stays scoped to a single file's own raw JSON on purpose.
+// Enable/disable *read* current state through the LoadEntireSettings merged
+// view (e.g. IsEnabled), which flattens settings.local.json overrides
+// (local_dev, log_level, personal strategy_options/checkpoint_remote, ...) on
+// top of settings.json. Writing that merged struct back into one file would
+// leak a developer's local-only overrides into the shared, committed project
+// file whenever a write resolves to settings.json. setEnabledRaw
+// therefore edits only the "enabled" key in each file's own content; its
+// sibling saveEnabledState applies the same rule to a caller-provided,
+// already-target-scoped struct.
+func setEnabledFlag(ctx context.Context, enabled, useProjectSettings bool) error {
+	if useProjectSettings {
+		if err := setEnabledRaw(ctx, settings.LoadProjectRaw, settings.SaveProjectRaw, enabled); err != nil {
+			return fmt.Errorf("failed to save settings: %w", err)
+		}
+		// Also update local if it exists, so it doesn't override.
+		if localExists(ctx) {
+			if err := setEnabledRaw(ctx, settings.LoadLocalRaw, settings.SaveLocalRaw, enabled); err != nil {
+				return fmt.Errorf("failed to save local settings: %w", err)
+			}
+		}
+	} else {
+		if err := setEnabledRaw(ctx, settings.LoadLocalRaw, settings.SaveLocalRaw, enabled); err != nil {
+			return fmt.Errorf("failed to save local settings: %w", err)
+		}
+	}
+	return nil
+}
+
+// setEnabledRaw loads a settings file via load, sets its "enabled" key, and
+// writes it back via save, preserving every other key already in that file.
+func setEnabledRaw(
+	ctx context.Context,
+	load func(context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error),
+	save func(path string, raw map[string]json.RawMessage) error,
+	enabled bool,
+) error {
+	path, raw, _, err := load(ctx)
+	if err != nil {
+		return err
+	}
+	value, err := json.Marshal(enabled)
+	if err != nil {
+		return fmt.Errorf("marshal enabled flag: %w", err)
+	}
+	raw["enabled"] = value
+	return save(path, raw)
+}
+
+// saveEnabledState writes the caller-provided, already-target-scoped struct s
+// to the target file, then applies the same one-directional project -> local
+// sync of the "enabled" key as setEnabledFlag (see that function for the full
+// merged-vs-scoped rationale). s must already be scoped to the target file's
+// own content: it is intentionally NOT written into the other scope, which
+// would overwrite that file's own fields (local_dev, log_level, personal
+// strategy_options, ...) — the same leak this rule prevents, in the other
+// direction.
 func saveEnabledState(ctx context.Context, s *EntireSettings, useProjectSettings bool) error {
 	if useProjectSettings {
 		if err := SaveEntireSettings(ctx, s); err != nil {
 			return fmt.Errorf("failed to save settings: %w", err)
 		}
-		// Also update local if it exists, so it doesn't override
+		// Also sync just the enabled key to local if it exists, so it doesn't override.
 		if localExists(ctx) {
-			if err := SaveEntireSettingsLocal(ctx, s); err != nil {
+			if err := setEnabledRaw(ctx, settings.LoadLocalRaw, settings.SaveLocalRaw, s.Enabled); err != nil {
 				return fmt.Errorf("failed to save local settings: %w", err)
 			}
 		}
@@ -1680,29 +1887,54 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		return fmt.Errorf("failed to setup .entire directory: %w", err)
 	}
 
-	// Load existing settings to preserve other options (like strategy_options.push)
-	settings, err := LoadEntireSettings(ctx)
+	// Resolve the target file up front so the load below is scoped to that
+	// file's own content rather than the merged view (see setEnabledFlag for
+	// why: writing the merged struct back into a single scope leaks the other
+	// scope's fields into it).
+	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
+	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
 	if err != nil {
-		// If we can't load, start with defaults
-		settings = &EntireSettings{}
+		targetFileAbs = targetFile
 	}
-	settings.Enabled = true
+
+	// Load existing settings from the target file only, to preserve other
+	// options already set there (like strategy_options.push) without pulling
+	// in the other scope's overrides. The local var is named targetSettings so
+	// it does not shadow the settings package for the rest of the function.
+	//
+	// On a parse/validation failure we refuse rather than start from defaults:
+	// the previous behavior silently replaced a settings.json holding real
+	// content (strategy_options, log_level, and — under DisallowUnknownFields —
+	// any key written by a newer CLI) with a bare {"enabled": true}, destroying
+	// the user's config. A missing file is NOT an error here (LoadFromFile
+	// returns defaults for it), so first-time enable still works. This mirrors
+	// updateStrategyOptions, which already refuses on an unparseable target file.
+	targetSettings, err := settings.LoadFromFile(targetFileAbs)
+	if err != nil {
+		return fmt.Errorf("refusing to enable: %s could not be parsed (invalid JSON, or written by a newer entire version); fix or remove it, or upgrade the CLI, then retry: %w", configDisplay, err)
+	}
+	targetSettings.Enabled = true
 	if opts.LocalDev {
-		settings.LocalDev = true
+		targetSettings.LocalDev = true
 	}
 	if opts.AbsoluteGitHookPath {
-		settings.AbsoluteGitHookPath = true
+		targetSettings.AbsoluteGitHookPath = true
 	}
 
 	// Auto-enable external_agents setting if the agent is external.
 	if external.IsExternal(ag) {
-		settings.ExternalAgents = true
+		targetSettings.ExternalAgents = true
 	}
 
-	opts.applyStrategyOptions(settings)
+	opts.applyStrategyOptions(targetSettings)
 
-	// Apply an explicit --checkpoint-backend (no prompt on this non-interactive path).
-	if err := applyCheckpointBackendFlag(settings, opts.CheckpointBackend); err != nil {
+	// Checkpoint storage backend: an explicit --checkpoint-backend wins; first
+	// runs otherwise get the git-refs backend written explicitly, matching the
+	// interactive setup path (runEnableInteractive).
+	if opts.CheckpointBackend == "" && firstRun {
+		opts.CheckpointBackend = firstRunCheckpointBackendDefault()
+	}
+	if err := applyCheckpointBackendFlag(targetSettings, opts.CheckpointBackend); err != nil {
 		return err
 	}
 
@@ -1710,20 +1942,34 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	// Note: if telemetry is nil (not configured), it defaults to disabled
 	if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
 		f := false
-		settings.Telemetry = &f
+		targetSettings.Telemetry = &f
 	}
 
-	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
-	if err := saveEnabledState(ctx, settings, targetFile == EntireSettingsFile); err != nil {
+	if err := saveEnabledState(ctx, targetSettings, targetFile == EntireSettingsFile); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
 
-	// Use settings values (merged from existing config + flags) for hook installation
-	// This ensures re-running `entire enable --agent X` without flags preserves existing settings
-	if _, err := strategy.InstallGitHook(ctx, true, settings.LocalDev, settings.AbsoluteGitHookPath); err != nil {
+	// Hook installation decisions need the merged view across both settings
+	// files, not just the single scope we wrote to above: local_dev and
+	// absolute_git_hook_path may be set only in settings.local.json while
+	// this enable resolves to settings.json (or vice versa). Using the
+	// target-scoped struct here would silently drop that override when
+	// regenerating the git hook script. This mirrors runEnableInteractive,
+	// which uses the merged view for the same two fields; only the *write*
+	// path (saveEnabledState above) stays scoped to the target file (see
+	// setEnabledFlag for why).
+	mergedSettings, err := LoadEntireSettings(ctx)
+	if err != nil {
+		logging.Warn(ctx, "could not load merged settings for hook installation; proceeding with target-scoped settings only, so local overrides (e.g. local_dev, absolute_git_hook_path) may not be applied to the generated git hook", "error", err)
+		mergedSettings = targetSettings
+	}
+	hookLocalDev := mergedSettings.LocalDev || opts.LocalDev
+	hookAbsoluteGitHookPath := mergedSettings.AbsoluteGitHookPath || opts.AbsoluteGitHookPath
+
+	if _, err := strategy.InstallGitHook(ctx, true, hookLocalDev, hookAbsoluteGitHookPath); err != nil {
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
-	strategy.CheckAndWarnHookManagers(ctx, w, settings.LocalDev, settings.AbsoluteGitHookPath)
+	strategy.CheckAndWarnHookManagers(ctx, w, hookLocalDev, hookAbsoluteGitHookPath)
 
 	if installedHooks == 0 {
 		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())
@@ -1746,7 +1992,11 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		return err
 	}
 
-	if err := strategy.EnsureSetup(ctx); err != nil {
+	// Explicit, user-initiated setup: allow EnsurePrimaryRef to fetch a
+	// missing primary metadata ref from a configured checkpoint_remote
+	// (bootstrapPrimaryFromCheckpointRemote is otherwise a no-op — see
+	// strategy.WithCheckpointRemoteBootstrap).
+	if err := strategy.EnsureSetup(strategy.WithCheckpointRemoteBootstrap(ctx)); err != nil {
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
 

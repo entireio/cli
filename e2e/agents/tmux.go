@@ -240,6 +240,38 @@ func (s *TmuxSession) Close() error {
 	for _, fn := range s.cleanups {
 		fn()
 	}
+	return s.Terminate()
+}
+
+// Quit asks the foreground program to exit the way a user would — by sending
+// Ctrl+C — and waits for the process to actually exit. It sends Ctrl+C again
+// each poll because some TUIs (Codex among them) treat a single Ctrl+C as
+// "cancel the current turn" and need a second press to quit, and that gesture
+// is version-dependent. If the process has still not exited by timeout it falls
+// back to a hard kill: callers use Quit when they need the process gone (e.g.
+// to release a lock it holds) and must not hang on an agent that changed its
+// quit keybinding. Like Terminate, it does NOT run the OnClose cleanups, so a
+// caller that needs a registered resource torn down owns that itself.
+func (s *TmuxSession) Quit(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if s.IsPaneDead() {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return s.Terminate()
+		}
+		_ = s.SendKeys("C-c")
+		time.Sleep(pollInterval)
+	}
+}
+
+// Terminate kills the tmux session (and the process it runs) WITHOUT running
+// the registered OnClose cleanups. Use it when the process must die but a
+// resource it registered for teardown — e.g. an isolated HOME that a later
+// step in the same test still reads — has to outlive the process. Callers that
+// bypass Close this way own the surviving resource's cleanup themselves.
+func (s *TmuxSession) Terminate() error {
 	cmd := exec.Command("tmux", "kill-session", "-t", s.name)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

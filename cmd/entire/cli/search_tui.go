@@ -35,16 +35,18 @@ const (
 
 // searchResultsMsg is sent when a search API call completes.
 type searchResultsMsg struct {
-	results []search.Result
-	total   int
-	counts  *search.TypeCounts
-	err     error
+	results  []search.Result
+	total    int
+	counts   *search.TypeCounts
+	warnings []string
+	err      error
 }
 
 // searchMoreResultsMsg is sent when a fetch-more-results call completes.
 type searchMoreResultsMsg struct {
-	results []search.Result
-	err     error
+	results  []search.Result
+	warnings []string
+	err      error
 }
 
 // codeSearchResultsMsg is sent when an async code search call completes.
@@ -143,6 +145,16 @@ type searchModel struct {
 	browseVP     viewport.Model     // scrollable browse view
 	filterType   typeFilter         // active type tab filter
 	counts       *search.TypeCounts // per-type counts from API
+
+	// semanticSearch performs checkpoint searches (initial, re-search, and
+	// pagination). The command layer injects its session searcher so every
+	// TUI search shares the invocation's discovery cache.
+	semanticSearch semanticSearcher
+
+	// warning is the current search's completeness note (partial cell
+	// failure, truncated repo index), shown in the status row — the TUI
+	// counterpart of the one-shot path's stderr warnings.
+	warning string
 
 	// darkBg is captured once before bubbletea takes over the terminal so the
 	// snippet renderer never re-queries the terminal via OSC during the Update
@@ -279,17 +291,18 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	}
 
 	m := searchModel{
-		results:    results,
-		total:      total,
-		width:      ss.width,
-		mode:       modeBrowse,
-		input:      ti,
-		searchCfg:  cfg,
-		apiPage:    apiPage,
-		styles:     styles,
-		browseVP:   viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
-		darkBg:     termenv.HasDarkBackground(),
-		filterType: typeFilterCheckpoints, // default the results table to checkpoints
+		results:        results,
+		total:          total,
+		width:          ss.width,
+		mode:           modeBrowse,
+		input:          ti,
+		searchCfg:      cfg,
+		apiPage:        apiPage,
+		styles:         styles,
+		browseVP:       viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
+		darkBg:         termenv.HasDarkBackground(),
+		filterType:     typeFilterCheckpoints,      // default the results table to checkpoints
+		semanticSearch: newSemanticSearcher(false), // command layer overrides with its session searcher
 	}
 	if codeOpts != nil {
 		m.codeSearchOpts = *codeOpts
@@ -327,6 +340,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		m.results = msg.results
 		m.total = msg.total
 		m.counts = msg.counts
+		m.warning = strings.Join(msg.warnings, "; ")
 		m.apiPage = 1
 		m.cursor = 0
 		m.page = 0
@@ -341,12 +355,21 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 			m = m.refreshBrowseContent()
 			return m, nil
 		}
+		if len(msg.warnings) > 0 {
+			m.warning = strings.Join(msg.warnings, "; ")
+		}
 		m.apiPage++
 		if len(msg.results) > 0 {
 			m.results = append(m.results, msg.results...)
 		} else {
-			// API returned no more results — cap total to what we have
+			// API returned no more results — cap total to what we have, and
+			// pull the display page back into range (paging forward advanced
+			// it optimistically before the fetch came back empty).
 			m.total = len(m.results)
+			if last := m.totalPages() - 1; m.page > last {
+				m.page = last
+				m.cursor = 0
+			}
 		}
 		m = m.refreshBrowseContent()
 		return m, nil
@@ -410,8 +433,8 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			return m, nil
 		}
 		// Checkpoint search: ParseSearchInput extracts author:/date:/branch:/repo:.
-		// ValidateRepoFilters only applies to checkpoint search (single repo limit);
-		// code search handles multiple repos via fan-out.
+		// ValidateRepoFilters only checks each repo value's shape; both semantic
+		// and code search accept multiple repos and fan out across cells.
 		parsed := search.ParseSearchInput(raw)
 		checkpointRepoErr := search.ValidateRepoFilters(parsed.Repos)
 
@@ -477,7 +500,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			cfg.Branch = parsed.Branch
 			cfg.Repos = parsed.Repos
 			m.searchCfg = cfg
-			cmds = append(cmds, performSearch(cfg))
+			cmds = append(cmds, m.performSearch(cfg))
 		}
 
 		m.mode = modeBrowse
@@ -583,7 +606,7 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			if m.filterType != typeFilterCode && start >= len(m.filteredResults()) && !m.fetchingMore {
 				m.fetchingMore = true
 				m = m.refreshBrowseContent()
-				return m, fetchMoreResults(m.searchCfg, m.apiPage+1)
+				return m, m.fetchMoreResults(m.searchCfg, m.apiPage+1)
 			}
 			m = m.refreshBrowseContent()
 		}
@@ -641,13 +664,14 @@ func (m searchModel) updateDetailMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	return m, cmd
 }
 
-func performSearch(cfg search.Config) tea.Cmd {
+func (m searchModel) performSearch(cfg search.Config) tea.Cmd {
+	searcher := m.semanticSearch
 	return func() tea.Msg {
-		resp, err := search.Search(context.Background(), cfg)
+		resp, err := searcher(context.Background(), cfg)
 		if err != nil {
 			return searchResultsMsg{err: err}
 		}
-		return searchResultsMsg{results: resp.Results, total: resp.Total, counts: resp.Counts}
+		return searchResultsMsg{results: resp.Results, total: resp.Total, counts: resp.Counts, warnings: resp.Warnings}
 	}
 }
 
@@ -658,14 +682,18 @@ func performCodeSearch(opts codeSearchOpts, gen uint64) tea.Cmd {
 	}
 }
 
-func fetchMoreResults(cfg search.Config, page int) tea.Cmd {
+func (m searchModel) fetchMoreResults(cfg search.Config, page int) tea.Cmd {
+	// Pages server-side: the fan-out forwards Page to every cell (each cell's
+	// page N is interleaved by the merge), so results past the first fetch
+	// stay reachable.
+	searcher := m.semanticSearch
 	return func() tea.Msg {
 		cfg.Page = page
-		resp, err := search.Search(context.Background(), cfg)
+		resp, err := searcher(context.Background(), cfg)
 		if err != nil {
 			return searchMoreResultsMsg{err: err}
 		}
-		return searchMoreResultsMsg{results: resp.Results}
+		return searchMoreResultsMsg{results: resp.Results, warnings: resp.Warnings}
 	}
 }
 
@@ -982,6 +1010,9 @@ func (m searchModel) viewListStatusRow() string {
 	right := fmt.Sprintf("%d results", n)
 	if pages := m.totalPages(); pages > 1 {
 		right = fmt.Sprintf("page %d/%d · %d results", m.page+1, pages, n)
+	}
+	if m.warning != "" {
+		right = "⚠ " + m.warning + " · " + right
 	}
 	if lipgloss.Width(right) > contentWidth {
 		right = stringutil.TruncateRunes(right, contentWidth, "…")

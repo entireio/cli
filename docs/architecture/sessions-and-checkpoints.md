@@ -4,6 +4,8 @@
 
 Entire CLI creates checkpoints for AI coding sessions. The system is agent-agnostic - it works with Claude Code, Codex, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, or any tool that triggers Entire hooks.
 
+This document covers the domain model shared by both checkpoint storage backends. For how the **git-refs** backend stores checkpoints as one ref per checkpoint — its layout, push/fetch model, read routing, and configuration — see [Ref-Based Checkpoint Backend](ref-checkpoint-backend.md).
+
 ## Domain Model
 
 ### Session
@@ -144,7 +146,10 @@ func (s *ManualCommitStrategy) CondenseSession(
 |------|----------|----------|
 | Session State | `.git/entire-sessions/<id>.json` | Active session tracking |
 | Ephemeral | `entire/<commit[:7]>-<worktreeHash[:6]>` branch | Full state (code + metadata) |
-| Persistent | `entire/checkpoints/v1` branch (sharded) | Metadata + commit reference |
+| Persistent (git-branch) | `entire/checkpoints/v1` branch, sharded `<id[:2]>/<id[2:]>/` | Metadata + commit reference |
+| Persistent (git-refs) | `refs/entire/checkpoints/<shard>/<id>`, one ref per checkpoint | Metadata + commit reference |
+
+The persistent store is pluggable: `git-branch` stores every committed checkpoint as a subtree of a single `entire/checkpoints/v1` branch, while `git-refs` stores one ref per checkpoint. New setups write an explicit backend choice via `entire enable` (`git-refs` recommended and pre-selected); a repo with no checkpoints config still resolves to `git-branch` (the config-less fallback), so pre-existing repos keep their behavior. Both are git-backed and share the same checkpoint tree layout; they differ only in where that tree is committed. This document describes the git-branch layout; for the ref-based backend — its ref naming, sharding, push/fetch model, read routing, and configuration — see [Ref-Based Checkpoint Backend](ref-checkpoint-backend.md).
 
 ### Session State
 
@@ -185,6 +190,46 @@ Contains full worktree snapshot plus metadata overlay. **Multiple concurrent ses
 
 Tied to a base commit. Condensed to committed on user commit.
 
+**Transcript sanitization (before redaction).** Entire never modifies the agent's
+own transcript, but the copy it stores goes through the agent's optional
+`agent.TranscriptSanitizer` first, at the point Entire takes custody (the Stop path
+in `lifecycle.go`, before `.entire/metadata/<session>/full.jsonl` is written). Codex
+implements it to strip encrypted reasoning payloads and compaction blobs, which are
+bound to the originating session and cannot be replayed out of a checkpoint.
+
+Sanitization always runs before redaction, but the paths differ in whether image
+externalization happens at all:
+
+| Path | Pipeline | Where |
+|---|---|---|
+| Stop (shadow branch) | sanitize → redact | `lifecycle.go` sanitizes before `full.jsonl` is written; the metadata-dir walker (`createRedactedBlobFromFile`) redacts it into the shadow tree |
+| Post-commit condensation | sanitize → externalize → redact | `prepareTranscriptForStorage` in `manual_commit_condensation.go` |
+| Stop finalize (full-session rewrite) | sanitize → externalize → redact | `manual_commit_hooks.go`, before `extractSessionImages` |
+
+**Image externalization runs only on the committed paths** (condensation and
+finalize). The shadow-branch copy is never externalized, so inline images there are
+subject to redaction like any other high-entropy content — do not assume a shadow
+transcript preserves them. Assets and the `assets/manifest.json` index exist only
+under committed checkpoints.
+
+Where all three steps run, each must precede the next. Sanitizing first avoids
+externalizing images out of items that are about to be discarded — that would store
+an asset whose referencing transcript line disappears moments later — and avoids
+redacting megabytes of ciphertext only to throw it away; base64 is the pathological
+input for the entropy layer, so a large Codex rollout otherwise costs tens of seconds
+per Stop *and* per commit. Externalizing before redaction is required because base64
+is high-entropy and redaction would otherwise flag and destroy it.
+
+The sanitize transform is idempotent, so a downstream write path can call it without
+knowing whether an upstream path already did (`checkpoint.sanitizeForAgentType` is
+the store's own belt-and-braces call).
+
+One coupling to respect when changing this: `SessionState.CheckpointTranscriptSize`
+is a growth baseline compared against the shadow transcript blob's size in
+`sessionHasNewContent`, so it must be measured in the same (sanitized) coordinate —
+see `CondenseResult.TranscriptSizeBaseline`. A raw baseline against a sanitized blob
+makes the comparison false forever and the session silently stops condensing.
+
 **Shadow branch lifecycle:**
 - Created on first checkpoint for a base commit
 - Migrated automatically if base commit changes (stash → pull → apply scenario)
@@ -195,6 +240,37 @@ Tied to a base commit. Condensed to committed on user commit.
 
 Branch: `entire/checkpoints/v1`
 
+Committed checkpoints sync to exactly one git remote — the elected checkpoint
+sync remote, resolved in this order:
+
+1. `strategy_options.checkpoint_push_remote` if set — fail-closed when it
+   names a remote that is not configured (checkpoint sync is disabled until
+   fixed, since this is explicit user intent).
+2. `origin`, if configured.
+3. The sole configured remote.
+4. The first remote in `.git/config` order.
+
+The branch's tracking config (`branch.<name>.pushRemote`,
+`remote.pushDefault`, `branch.<name>.remote`) is deliberately **not** a tier.
+Election is compared against the remote of the push being made, so electing
+the tracking remote turns every push to a different remote into a silent
+no-op — `git push <other> HEAD`, a `git clone -o base` whose checkpoints go to
+a separately added `origin`, any repo with `remote.pushDefault` set. It would
+also elect a remote the read paths cannot see, since `resume` and `explain`
+resolve checkpoints through origin's remote-tracking refs.
+
+For the fork setup where `origin` is an unpushable base repo, name the fork
+explicitly with `checkpoint_push_remote` — the only form of it where the
+checkpoints can also be read back.
+
+The pre-push hook carries checkpoint data only when the push targets the
+elected remote; pushes to any other remote or to a raw URL sync nothing, on
+both the git-branch and git-refs backends (git-refs leaves its push queue
+intact for the next elected-remote push). The dedicated `checkpoint_remote`
+URL mode is exempt — it addresses a separate metadata store directly. `entire
+status` shows the sync destination and how many checkpoints have not reached
+it yet.
+
 Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkpoint**:
 
 ```
@@ -202,7 +278,7 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 ├── metadata.json        # CheckpointSummary (aggregated stats)
 ├── 0/                   # First session (0-based indexing)
 │   ├── metadata.json    # Session-specific Metadata
-│   ├── full.jsonl       # Raw agent transcript (CLI rewind/resume/explain)
+│   ├── full.jsonl       # Agent transcript, sanitized + redacted (CLI rewind/resume/explain)
 │   ├── transcript.jsonl # Full compacted session (slice at compact_transcript_start)
 │   ├── prompt.txt       # Checkpoint-scoped user prompts
 │   └── content_hash.txt # sha256 of full.jsonl (dedup short-circuit)
@@ -300,6 +376,21 @@ When condensing multiple concurrent sessions:
 - `sessions` array in `CheckpointSummary` maps each session to its file paths
 - `files_touched` is merged from all sessions
 
+Checkpoints written by `entire import <agent>` additionally carry a `commit_sha`
+(omitempty) on both the session `Metadata` and the root `CheckpointSummary`,
+set to the default branch's head at import time — origin's tip is preferred
+(the commit the server already knows about), falling back to the local branch
+tip, then HEAD, then empty when nothing resolves. When the transcript itself
+records the commit(s) a turn made (Claude Code `gitOperation` records), the
+turn's checkpoint instead anchors to the last such commit that resolves and is
+reachable from the resolved link anchor (the default-branch head when
+resolvable) — see `turnAnchorResolver` (`agentimport/turn_anchor.go`);
+otherwise (older transcripts, or a recorded commit that's been
+squashed/rebased away) it falls back to the default-branch head as described
+above. It is a best-effort anchor for UI display only, not
+an attribution signal, and pre-existing imported checkpoints are not
+backfilled with it.
+
 ### Checkpoint Policy
 
 Repo-wide checkpoint policy lives at `refs/entire/policies/checkpoint`. The ref
@@ -385,8 +476,11 @@ reconfiguring:
 - A **hex** ID is read from the active (configured) primary first; when the
   primary is git-refs it also falls back to the git-branch store (a hex checkpoint
   may still sit on the pre-migration v1 branch, or have been migrated into refs).
-- `List` unions both backends. **Writes are not kind-routed** — they go to the
-  configured primary (+ mirrors); the minted ID already matches the primary.
+- `List` unions both backends. **Creates (`Session`) are not kind-routed** — they
+  go to the configured primary (+ mirrors); the minted ID already matches the
+  primary. **Backfills** (summary/transcript/attribution) update an existing
+  checkpoint and ARE kind-routed: they follow the read order, falling through to
+  the next store only on `ErrCheckpointNotFound`.
 
 **Generation:**
 - Minted by `checkpoint.GenerateCheckpointID`, which picks the format from the
@@ -474,15 +568,24 @@ session/
 ├── phase.go             # Session phase state machine (ACTIVE, IDLE, ENDED, etc.)
 
 checkpoint/
-├── checkpoint.go        # checkpoint.Type, checkpoint.Store interface, CheckpointSummary, etc.
-├── store.go             # GitStore implementation
-├── temporary.go         # Shadow branch storage
-├── committed.go         # Metadata branch storage
-├── id/                  # CheckpointID type and generation
+├── checkpoint.go        # checkpoint.Type, store interfaces, CheckpointSummary, etc.
+├── open.go              # Open() facade: resolves topology, wires stores + fetchers
+├── registry.go          # Backend registry + gitBacked capability (git-branch, git-refs)
+├── routing_store.go     # kindRoutingStore: id-kind read routing across both backends
+├── fanout.go            # Mirror write fan-out (primary + best-effort mirrors)
+├── generate.go          # GenerateCheckpointID (format follows the configured primary)
+├── persistent.go        # git-branch persistent store (entire/checkpoints/v1)
+├── persistent_write.go  # git-branch write path (treeWriter, subtree splicing)
+├── refs_store.go        # git-refs persistent store (one ref per checkpoint)
+├── refs_naming.go       # RefName / ParseRef, CheckpointRefPrefix, sharding
+├── pushqueue.go         # git-refs push-discovery queue (flock JSONL)
+├── ephemeral.go         # Shadow-branch (ephemeral) store
+├── fsstore/             # Filesystem mirror backend (non-git-backed, mirror-only)
+├── id/                  # CheckpointID type, Kind/KindOf, ShardFor, generation
 │   └── id.go
 ```
 
-Strategies use `checkpoint.Store` primitives - storage details are encapsulated.
+Strategies use the `checkpoint.Open` facade and store primitives - backend and storage details are encapsulated.
 
 ## Strategy Role
 
