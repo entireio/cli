@@ -447,6 +447,7 @@ Each agent stores its hook configuration in its own directory. When you run `ent
 | Claude Code      | `.claude/settings.json`       | JSON hooks config |
 | Codex            | `.codex/hooks.json`           | JSON hooks config |
 | Copilot CLI      | `.github/hooks/entire.json`   | JSON hooks config |
+| Copilot (VS Code)| `.github/hooks/entire-vscode.json` | JSON hooks config |
 | Cursor           | `.cursor/hooks.json`          | JSON hooks config |
 | Factory AI Droid | `.factory/settings.json`      | JSON hooks config |
 | Gemini CLI       | `.gemini/settings.json`       | JSON hooks config |
@@ -528,7 +529,7 @@ Local settings override project settings field-by-field. When you run `entire st
 
 - Codex hooks are enabled by default (codex-cli 0.124.0+), so enabling Entire for Codex only installs `.codex/hooks.json` — no `config.toml` is needed and Entire never creates one. If an older Entire version left a `.codex/config.toml` behind and your repo lives inside `~/.codex/agents`, delete that file to stop Codex's "malformed agent role definition" startup warning.
 - Entire supports Cursor IDE and Cursor Agent CLI tool, but `entire rewind` is not available at this time. Other commands (`doctor`, `status` etc.) work the same as all other agents.
-- Entire supports Copilot CLI, but not Copilot in VS Code, in other IDEs, or on github.com.
+- Entire supports GitHub Copilot in two places: the Copilot CLI (`.github/hooks/entire.json`) and Copilot in VS Code via VS Code's agent hooks (Preview), which Entire wires up in `.github/hooks/entire-vscode.json`. Both are installed together by `entire enable`. Copilot in other IDEs, or on github.com, is not supported.
 - Entire supports Pi coding agent (Preview). Pi uses a TypeScript extension instead of a JSON hook config. Subagent capture is not currently available.
 
 ## Security & Privacy
