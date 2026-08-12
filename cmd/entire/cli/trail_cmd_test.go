@@ -994,6 +994,49 @@ func TestPlanTrailBranchChange(t *testing.T) {
 	}
 }
 
+func TestErrAfterBranchAttach(t *testing.T) {
+	t.Parallel()
+
+	t.Run("passes the error through when no branch was attached", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New("boom")
+		if got := errAfterBranchAttach(false, testTrailBranch, inner); !errors.Is(got, inner) || got.Error() != "boom" {
+			t.Fatalf("err = %q, want it unchanged", got)
+		}
+	})
+
+	t.Run("reports the attach that already landed", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New("boom")
+		got := errAfterBranchAttach(true, testTrailBranch, inner)
+		if !errors.Is(got, inner) {
+			t.Fatalf("err = %v, want it to wrap the cause", got)
+		}
+		for _, want := range []string{testTrailBranch, "was attached", "retry without --set-branch"} {
+			if !strings.Contains(got.Error(), want) {
+				t.Fatalf("err = %q, want it to mention %q", got, want)
+			}
+		}
+	})
+}
+
+func TestNewTrailUpdateCmdRejectsTrailAndBranchTogether(t *testing.T) {
+	t.Parallel()
+	// --trail wins outright in resolveTrailBySelector, so accepting both would
+	// silently update a different trail than the --branch the caller named.
+	cmd := newTrailUpdateCmd()
+	cmd.SetArgs([]string{"--trail", "123", "--branch", "some-branch", "--title", "new"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected an error when --trail and --branch are combined, got nil")
+	}
+	if !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("error = %q, want it to mention 'not both'", err)
+	}
+}
+
 func TestSplitTrailUpdateSendsABranchRename(t *testing.T) {
 	t.Parallel()
 	// A rename-only update sets nothing but Branch. It still has to count as

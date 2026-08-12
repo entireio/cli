@@ -1143,6 +1143,13 @@ endpoint, which links an existing branch (--branch-action link, the default) or
 creates it on the forge at the trail's base (--branch-action create).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Both select a trail, and --trail wins outright in
+			// resolveTrailBySelector. Rejecting the pair keeps that from quietly
+			// updating a different trail than the --branch the caller named,
+			// matching show/comment/approval.
+			if strings.TrimSpace(trailSelector) != "" && strings.TrimSpace(branch) != "" {
+				return errors.New("pass --trail or --branch, not both")
+			}
 			hasTarget := strings.TrimSpace(branch) != "" || strings.TrimSpace(trailSelector) != ""
 			if err := ensureTrailRepoHasTarget(cmd, hasTarget, "pass --branch or --trail"); err != nil {
 				return err
@@ -1363,10 +1370,12 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 		// goes first because the PATCH below can carry metadata for the same
 		// trail; doing it here (rather than before validation) keeps a bad
 		// --title or --status from leaving a created forge branch behind.
+		attached := false
 		if branchPlan.Attach {
 			if err := attachTrailBranchPlan(ctx, w, client, forge, owner, repoName, found, branchPlan); err != nil {
 				return err
 			}
+			attached = true
 		}
 
 		// The server rejects body + metadata in one PATCH, so send them as
@@ -1383,15 +1392,15 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 		}
 		if hasMeta {
 			if err := sendTrailPatch(ctx, client, path, meta); err != nil {
-				return err
+				return errAfterBranchAttach(attached, branchPlan.Branch, err)
 			}
 		}
 		if bodyReq != nil {
 			if err := sendTrailPatch(ctx, client, path, *bodyReq); err != nil {
 				if hasMeta {
-					return fmt.Errorf("trail metadata was updated, but the body update failed (the metadata change already applied; retry only the --body change): %w", err)
+					return errAfterBranchAttach(attached, branchPlan.Branch, fmt.Errorf("trail metadata was updated, but the body update failed (the metadata change already applied; retry only the --body change): %w", err))
 				}
-				return err
+				return errAfterBranchAttach(attached, branchPlan.Branch, err)
 			}
 		}
 
@@ -1468,6 +1477,19 @@ func planTrailBranchChange(ctx context.Context, found *api.TrailResource, inputs
 	}
 
 	return trailBranchPlan{Attach: true, Branch: newBranch, Action: action}, nil
+}
+
+// errAfterBranchAttach annotates a failure that happened after the branch was
+// already attached. Without it the error reads as "nothing happened", and the
+// obvious fix — run the same command again — fails differently the second time:
+// the trail now has a branch, so --branch-action is rejected and --set-branch
+// becomes a rename. Naming the branch that did land points at the retry that
+// works, which is the same command minus the branch flags.
+func errAfterBranchAttach(attached bool, branch string, err error) error {
+	if !attached {
+		return err
+	}
+	return fmt.Errorf("branch %s was attached to the trail, but the rest of the update failed (the branch is already set; retry without --set-branch and --branch-action): %w", branch, err)
 }
 
 // attachTrailBranchPlan carries out an Attach plan against the /branch endpoint
