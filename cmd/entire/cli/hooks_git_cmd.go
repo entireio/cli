@@ -125,7 +125,8 @@ func (g *gitHookContext) skipUnreadableCheckpointPolicy(err error) bool {
 
 // initHookLogging initializes logging for hooks by finding the most recent session.
 // Returns a cleanup function that should be deferred.
-// If Entire is not set up or disabled, returns a no-op to avoid creating files.
+// If Entire is not active for this repo (repo-level setup or the user-global
+// tier), returns a no-op to avoid creating files.
 func initHookLogging(ctx context.Context) func() {
 	// Don't create any files if Entire is not active for this repo
 	// (repo-level setup or the user-global tier). On the git-hook route this

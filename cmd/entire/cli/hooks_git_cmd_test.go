@@ -479,3 +479,59 @@ func TestGitHookPolicySkipsWhenRepoCannotOpen(t *testing.T) {
 		t.Fatal("expected git hook to skip when repository cannot be opened")
 	}
 }
+
+// TestHooksGitCmd_PersistentPreRunE_GlobalMode pins the git-hook entry gate
+// on the user-global tier — the third of the three gates that switched to
+// settings.IsActiveForRepo. A repo with no repo-level setup keeps hooks
+// enabled when global mode is on; a globally excluded repo disables them.
+func TestHooksGitCmd_PersistentPreRunE_GlobalMode(t *testing.T) {
+	setupRepo := func(t *testing.T) (repoDir, cfgDir string) {
+		t.Helper()
+		repoDir = t.TempDir()
+		testutil.InitRepo(t, repoDir)
+		t.Chdir(repoDir)
+		paths.ClearWorktreeRootCache()
+		session.ClearGitCommonDirCache()
+		gitHooksDisabled = false
+		t.Cleanup(func() { gitHooksDisabled = false })
+		cfgDir = t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+		return repoDir, cfgDir
+	}
+	runPreRun := func(t *testing.T) {
+		t.Helper()
+		cmd := newHooksGitCmd()
+		cmd.SetContext(context.Background())
+		if err := cmd.PersistentPreRunE(cmd, []string{"post-commit"}); err != nil {
+			t.Fatalf("PersistentPreRunE: %v", err)
+		}
+	}
+
+	t.Run("global on keeps hooks enabled", func(t *testing.T) {
+		_, cfgDir := setupRepo(t)
+		if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"),
+			[]byte(`{"global":{"enabled":true}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runPreRun(t)
+		if gitHooksDisabled {
+			t.Fatal("git hooks must stay enabled under the user-global tier")
+		}
+	})
+
+	t.Run("globally excluded repo disables hooks", func(t *testing.T) {
+		repoDir, cfgDir := setupRepo(t)
+		resolved, err := filepath.EvalSymlinks(repoDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"),
+			[]byte(`{"global":{"enabled":true,"exclude_paths":["`+filepath.ToSlash(resolved)+`"]}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runPreRun(t)
+		if !gitHooksDisabled {
+			t.Fatal("a globally excluded repo must disable git hooks")
+		}
+	})
+}

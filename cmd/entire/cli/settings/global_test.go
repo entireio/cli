@@ -71,6 +71,17 @@ func TestNormalizeOrigin(t *testing.T) {
 		{"https://github.com/acme/widgets", "github.com/acme/widgets"},
 		{"https://github.com/acme/widgets.git", "github.com/acme/widgets"},
 		{"ssh://git@gitlab.example.com/team/proj.git", "gitlab.example.com/team/proj"},
+		// Entire mirror origins canonicalize the forge prefix back to the
+		// forge host, so github patterns cover mirror-origin clones too.
+		{"entire://aws-us-east-2.entire.io/gh/Acme/Widgets.git", "github.com/acme/widgets"},
+		// Subgroups land in the repo part: host/owner/sub.../repo.
+		{"https://gitlab.com/acme/team/proj.git", "gitlab.com/acme/team/proj"},
+		// Present-but-unnormalizable origins → "" (the caller fails closed).
+		{"/srv/git/secret.git", ""},
+		{"file:///srv/git/secret.git", ""},
+		// insteadOf shorthands normalize to the shorthand form — the
+		// ExcludeOrigins contract is "patterns match what git config stores".
+		{"gh:acme/widgets", "gh/acme/widgets"},
 		{"not a url at all", ""},
 		{"", ""},
 	}
@@ -92,40 +103,102 @@ func TestMatchesExcludePath(t *testing.T) {
 		patterns []string
 		root     string
 		want     bool
+		wantErr  bool
 	}{
-		{"tilde doublestar", []string{"~/oss/**"}, filepath.Join(home, "oss", "some", "repo"), true},
-		{"bare dir excludes subtree", []string{"~/oss"}, filepath.Join(home, "oss", "repo"), true},
-		{"exact dir", []string{"~/oss"}, filepath.Join(home, "oss"), true},
-		{"non-match", []string{"~/oss/**"}, filepath.Join(home, "work", "repo"), false},
-		{"absolute pattern", []string{"/tmp/scratch/**"}, "/tmp/scratch/x", true},
-		{"trailing slash excludes subtree", []string{"/tmp/scratch/"}, "/tmp/scratch/x", true},
-		{"tilde-user form skipped", []string{"~scratch"}, "/tmp/scratch", false},
-		{"empty pattern skipped", []string{""}, "/tmp/scratch", false},
-		{"relative pattern skipped", []string{"tmp/scratch"}, "/tmp/scratch", false},
-		{"invalid glob skipped, valid still applies", []string{"[", "/tmp/scratch/**"}, "/tmp/scratch/x", true},
-		{"empty list", nil, "/anywhere", false},
-		{"trailing whitespace trimmed", []string{"/tmp/scratch "}, "/tmp/scratch/x", true},
-		{"tilde with trailing whitespace trimmed", []string{"~/oss "}, filepath.Join(home, "oss"), true},
-		{"tilde with leading whitespace still expands", []string{" ~/oss"}, filepath.Join(home, "oss"), true},
-		{"whitespace-only pattern skipped", []string{"   "}, "/tmp/scratch", false},
+		{"tilde doublestar", []string{"~/oss/**"}, filepath.Join(home, "oss", "some", "repo"), true, false},
+		{"bare dir excludes subtree", []string{"~/oss"}, filepath.Join(home, "oss", "repo"), true, false},
+		{"exact dir", []string{"~/oss"}, filepath.Join(home, "oss"), true, false},
+		{"non-match", []string{"~/oss/**"}, filepath.Join(home, "work", "repo"), false, false},
+		{"absolute pattern", []string{"/tmp/scratch/**"}, "/tmp/scratch/x", true, false},
+		{"trailing slash excludes subtree", []string{"/tmp/scratch/"}, "/tmp/scratch/x", true, false},
+		// The subtree rule is a PATH boundary, not a string prefix: /tmp/scr
+		// must never exclude /tmp/scratch (or ~/work exclude ~/work-oss).
+		{"name prefix does not over-exclude", []string{"/tmp/scr"}, "/tmp/scratch", false, false},
+		// Unusable patterns fail CLOSED (error → caller deactivates global
+		// mode), mirroring the strict-decode rationale in LoadUserSettings: a
+		// typo'd pattern must not silently track a repo the user excluded.
+		{"tilde-user form fails closed", []string{"~scratch"}, "/tmp/scratch", false, true},
+		{"relative pattern fails closed", []string{"tmp/scratch"}, "/tmp/scratch", false, true},
+		{"invalid glob fails closed", []string{"[", "/tmp/scratch/**"}, "/tmp/scratch/x", false, true},
+		// Blank entries carry no intent to honor — skipped, not an error.
+		{"empty pattern skipped", []string{""}, "/tmp/scratch", false, false},
+		{"whitespace-only pattern skipped", []string{"   "}, "/tmp/scratch", false, false},
+		{"empty list", nil, "/anywhere", false, false},
+		{"trailing whitespace trimmed", []string{"/tmp/scratch "}, "/tmp/scratch/x", true, false},
+		{"tilde with trailing whitespace trimmed", []string{"~/oss "}, filepath.Join(home, "oss"), true, false},
+		{"tilde with leading whitespace still expands", []string{" ~/oss"}, filepath.Join(home, "oss"), true, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			if got := matchesExcludePath(t.Context(), c.patterns, c.root); got != c.want {
+			got, err := matchesExcludePath(t.Context(), c.patterns, c.root)
+			if c.wantErr != (err != nil) {
+				t.Fatalf("matchesExcludePath(%v, %q) err = %v, wantErr %v", c.patterns, c.root, err, c.wantErr)
+			}
+			if got != c.want {
 				t.Errorf("matchesExcludePath(%v, %q) = %v, want %v", c.patterns, c.root, got, c.want)
 			}
 		})
 	}
 }
 
+// TestMatchesExcludePath_SymlinkedPrefix pins the logical/physical bridging:
+// a pattern written against a symlinked directory (the logical ~/code) must
+// exclude a worktree root reported in physical form, and vice versa — git
+// reports physical paths while patterns are typed against logical ones.
+func TestMatchesExcludePath_SymlinkedPrefix(t *testing.T) {
+	t.Parallel()
+	base, err := filepath.EvalSymlinks(t.TempDir()) // canonical base (macOS /var → /private/var)
+	if err != nil {
+		t.Fatal(err)
+	}
+	physical := filepath.Join(base, "physical")
+	repo := filepath.Join(physical, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logical := filepath.Join(base, "logical")
+	if err := os.Symlink(physical, logical); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("logical pattern excludes physical root", func(t *testing.T) {
+		t.Parallel()
+		matched, err := matchesExcludePath(t.Context(), []string{filepath.ToSlash(logical) + "/**"}, repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !matched {
+			t.Error("a pattern through the symlink must exclude the physical worktree root")
+		}
+	})
+	t.Run("physical pattern excludes logical root", func(t *testing.T) {
+		t.Parallel()
+		matched, err := matchesExcludePath(t.Context(), []string{filepath.ToSlash(physical) + "/**"}, filepath.Join(logical, "repo"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !matched {
+			t.Error("a physical pattern must exclude a root reached through the symlink")
+		}
+	})
+}
+
 func TestMatchesExcludePathFold(t *testing.T) {
 	t.Parallel()
 	patterns := []string{"/TMP/Scratch/**"}
-	if matchesExcludePathFold(t.Context(), patterns, "/tmp/scratch/x", false) {
+	matched, err := matchesExcludePathFold(t.Context(), patterns, "/tmp/scratch/x", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched {
 		t.Error("without folding, a differently-cased pattern must not match")
 	}
-	if !matchesExcludePathFold(t.Context(), patterns, "/tmp/scratch/x", true) {
+	matched, err = matchesExcludePathFold(t.Context(), patterns, "/tmp/scratch/x", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matched {
 		t.Error("with folding, a differently-cased pattern must match")
 	}
 }
@@ -137,32 +210,59 @@ func TestMatchesExcludeOrigin(t *testing.T) {
 		patterns []string
 		origin   string // already normalized
 		want     bool
+		wantErr  bool
 	}{
-		{"owner wildcard", []string{"github.com/acme/*"}, "github.com/acme/widgets", true},
-		{"exact", []string{"github.com/acme/widgets"}, "github.com/acme/widgets", true},
-		{"different owner", []string{"github.com/acme/*"}, "github.com/other/widgets", false},
-		{"no origin matches nothing", []string{"github.com/acme/*"}, "", false},
-		{"empty list", nil, "github.com/acme/widgets", false},
-		{"trailing whitespace trimmed", []string{"github.com/acme/* "}, "github.com/acme/widgets", true},
-		{"whitespace-only pattern skipped", []string{"   "}, "github.com/acme/widgets", false},
+		{"owner wildcard", []string{"github.com/acme/*"}, "github.com/acme/widgets", true, false},
+		{"exact", []string{"github.com/acme/widgets"}, "github.com/acme/widgets", true, false},
+		{"different owner", []string{"github.com/acme/*"}, "github.com/other/widgets", false, false},
+		// Subgroup hosts: `*` does not cross `/`, `**` does — documented on
+		// ExcludeOrigins. A gitlab.com/acme/* pattern does NOT cover the
+		// namespace; that silence is why the doc steers users to `**`.
+		{"owner wildcard does not cross subgroups", []string{"gitlab.com/acme/*"}, "gitlab.com/acme/team/proj", false, false},
+		{"doublestar covers subgroups", []string{"gitlab.com/acme/**"}, "gitlab.com/acme/team/proj", true, false},
+		{"no origin matches nothing", []string{"github.com/acme/*"}, "", false, false},
+		{"empty list", nil, "github.com/acme/widgets", false, false},
+		{"trailing whitespace trimmed", []string{"github.com/acme/* "}, "github.com/acme/widgets", true, false},
+		{"whitespace-only pattern skipped", []string{"   "}, "github.com/acme/widgets", false, false},
+		{"invalid glob fails closed", []string{"["}, "github.com/acme/widgets", false, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			if got := matchesExcludeOrigin(t.Context(), c.patterns, c.origin); got != c.want {
+			got, err := matchesExcludeOrigin(t.Context(), c.patterns, c.origin)
+			if c.wantErr != (err != nil) {
+				t.Fatalf("matchesExcludeOrigin(%v, %q) err = %v, wantErr %v", c.patterns, c.origin, err, c.wantErr)
+			}
+			if got != c.want {
 				t.Errorf("matchesExcludeOrigin(%v, %q) = %v, want %v", c.patterns, c.origin, got, c.want)
 			}
 		})
 	}
 }
 
-func TestIsActiveForRepo(t *testing.T) {
-	newRepo := func(t *testing.T) string {
-		t.Helper()
-		dir := t.TempDir()
-		testutil.InitRepo(t, dir)
-		return dir
+// newGlobalTestRepo initializes an isolated repo for IsActiveForRepo tests.
+func newGlobalTestRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	return dir
+}
+
+// addTestRemote wires a remote URL with the repo's git config isolated from
+// the developer's global config (an insteadOf rewrite there could otherwise
+// alter what `git config` stores and flake these tests).
+func addTestRemote(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", args...)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
+}
+
+func TestIsActiveForRepo(t *testing.T) {
+	newRepo := newGlobalTestRepo
 
 	t.Run("no setup, global on", func(t *testing.T) {
 		dir := newRepo(t)
@@ -247,11 +347,7 @@ func TestIsActiveForRepo(t *testing.T) {
 
 	t.Run("origin exclusion end-to-end", func(t *testing.T) {
 		dir := newRepo(t)
-		cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", "git@github.com:Acme/Widgets.git")
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git remote add: %v\n%s", err, out)
-		}
+		addTestRemote(t, dir, "remote", "add", "origin", "git@github.com:Acme/Widgets.git")
 		cfg := t.TempDir()
 		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
 		writeUserSettings(t, cfg, `{"global":{"enabled":true,"exclude_origins":["github.com/acme/*"]}}`)
@@ -263,16 +359,8 @@ func TestIsActiveForRepo(t *testing.T) {
 
 	t.Run("origin exclusion matches any configured URL", func(t *testing.T) {
 		dir := newRepo(t)
-		for _, args := range [][]string{
-			{"remote", "add", "origin", "git@gitlab.example.com:team/proj.git"},
-			{"remote", "set-url", "--add", "origin", "git@github.com:Acme/Widgets.git"},
-		} {
-			cmd := exec.CommandContext(t.Context(), "git", args...)
-			cmd.Dir = dir
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("git %v: %v\n%s", args, err, out)
-			}
-		}
+		addTestRemote(t, dir, "remote", "add", "origin", "git@gitlab.example.com:team/proj.git")
+		addTestRemote(t, dir, "remote", "set-url", "--add", "origin", "git@github.com:Acme/Widgets.git")
 		cfg := t.TempDir()
 		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
 		writeUserSettings(t, cfg, `{"global":{"enabled":true,"exclude_origins":["github.com/acme/*"]}}`)
@@ -293,8 +381,33 @@ func TestIsActiveForRepo(t *testing.T) {
 		}
 	})
 
-	t.Run("corrupt repo settings with global on fails closed", func(t *testing.T) {
+	t.Run("local-only repo disable vetoes global", func(t *testing.T) {
 		dir := newRepo(t)
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		writeUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+		if err := os.MkdirAll(filepath.Join(dir, ".entire"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// settings.local.json ONLY — `enable --local` opt-out must be final,
+		// exactly like a base settings.json veto.
+		if err := os.WriteFile(filepath.Join(dir, ".entire", "settings.local.json"), []byte(`{"enabled":false}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		if IsActiveForRepo(t.Context()) {
+			t.Fatal("a local-only repo-level disable must veto global mode")
+		}
+	})
+}
+
+// TestIsActiveForRepo_FailClosed groups the failure-mode legs of the gate
+// predicate: every error path — unreadable or malformed settings at either
+// tier, an unresolvable worktree, an unusable exclude pattern, an origin
+// that cannot be normalized — must deactivate rather than guess.
+func TestIsActiveForRepo_FailClosed(t *testing.T) {
+	t.Run("corrupt repo settings with global on", func(t *testing.T) {
+		dir := newGlobalTestRepo(t)
 		cfg := t.TempDir()
 		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
 		writeUserSettings(t, cfg, `{"global":{"enabled":true}}`)
@@ -310,14 +423,65 @@ func TestIsActiveForRepo(t *testing.T) {
 		}
 	})
 
-	t.Run("malformed global file fails closed", func(t *testing.T) {
-		dir := newRepo(t)
+	t.Run("malformed global file", func(t *testing.T) {
+		dir := newGlobalTestRepo(t)
 		cfg := t.TempDir()
 		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
 		writeUserSettings(t, cfg, `{broken`)
 		t.Chdir(dir)
 		if IsActiveForRepo(t.Context()) {
 			t.Fatal("malformed global settings must fail closed")
+		}
+	})
+
+	t.Run("unreadable global file", func(t *testing.T) {
+		dir := newGlobalTestRepo(t)
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		// settings.json as a DIRECTORY exercises the read-error branch (as
+		// opposed to the decode-error branch above) portably.
+		if err := os.MkdirAll(filepath.Join(cfg, UserSettingsFileName), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		if IsActiveForRepo(t.Context()) {
+			t.Fatal("an unreadable global settings file must fail closed")
+		}
+	})
+
+	t.Run("global on outside any git repo", func(t *testing.T) {
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		writeUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+		t.Chdir(t.TempDir()) // plain directory, no repo
+		if IsActiveForRepo(t.Context()) {
+			t.Fatal("global mode must not activate outside a git repository (worktree unresolvable)")
+		}
+	})
+
+	t.Run("unusable exclude pattern", func(t *testing.T) {
+		dir := newGlobalTestRepo(t)
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		// Relative pattern — a natural mistake (every other glob tool is
+		// repo-relative). It can never match, so honoring it is impossible;
+		// global mode must deactivate rather than track the repo.
+		writeUserSettings(t, cfg, `{"global":{"enabled":true,"exclude_paths":["code/**"]}}`)
+		t.Chdir(dir)
+		if IsActiveForRepo(t.Context()) {
+			t.Fatal("an unusable exclude pattern must deactivate global mode (fail closed)")
+		}
+	})
+
+	t.Run("unparseable present origin", func(t *testing.T) {
+		dir := newGlobalTestRepo(t)
+		addTestRemote(t, dir, "remote", "add", "origin", "/srv/git/secret.git")
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		writeUserSettings(t, cfg, `{"global":{"enabled":true,"exclude_origins":["github.com/acme/*"]}}`)
+		t.Chdir(dir)
+		if IsActiveForRepo(t.Context()) {
+			t.Fatal("an origin that is present but cannot be normalized means exclusion could not be checked — must fail closed")
 		}
 	})
 }
