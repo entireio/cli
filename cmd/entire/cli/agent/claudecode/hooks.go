@@ -533,22 +533,25 @@ func loadClaudeSettings(ctx context.Context) (ClaudeSettings, bool) {
 		repoRoot = "." // Fallback to CWD if not in a git repo
 	}
 	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
-	return loadClaudeSettingsFile(settingsPath)
+	settings, err := loadClaudeSettingsFile(settingsPath)
+	return settings, err == nil
 }
 
-// loadClaudeSettingsFile reads and parses a Claude Code settings file.
-// Returns ok=false when the file is missing or unparseable.
-func loadClaudeSettingsFile(settingsPath string) (ClaudeSettings, bool) {
+// loadClaudeSettingsFile reads and parses a Claude Code settings file. A
+// missing file is an fs.ErrNotExist error; callers that need to distinguish
+// "not installed" from "cannot tell" (a real read or parse failure) branch on
+// errors.Is.
+func loadClaudeSettingsFile(settingsPath string) (ClaudeSettings, error) {
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from a fixed settings location
 	if err != nil {
-		return ClaudeSettings{}, false
+		return ClaudeSettings{}, fmt.Errorf("read %s: %w", settingsPath, err)
 	}
 
 	var settings ClaudeSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		return ClaudeSettings{}, false
+		return ClaudeSettings{}, fmt.Errorf("parse %s: %w", settingsPath, err)
 	}
-	return settings, true
+	return settings, nil
 }
 
 // AreHooksInstalled checks if Entire hooks are installed.

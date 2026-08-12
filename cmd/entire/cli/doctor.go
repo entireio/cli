@@ -525,7 +525,9 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 	}
 }
 
-// checkGlobalTracking runs the global-mode diagnostics. Warn-only:
+// checkGlobalTracking runs the global-mode diagnostics. Read-only except for
+// check 5's drift shape, which clears the clone's global_setup_completed
+// marker (the marker's documented drift contract):
 //
 //  1. The user-global settings file exists but cannot be read or parsed —
 //     global tracking is silently off machine-wide (fail closed). This is
@@ -535,7 +537,9 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 //  2. Global tracking is on but user-level agent hooks are missing for an
 //     agent that supports them — sessions in never-enabled repos cannot fire
 //     a hook for those agents. Fix: `entire enable --global` (idempotent)
-//     re-installs them.
+//     re-installs them. An agent whose user-level config cannot be READ gets
+//     its own warning: it is unverified, not missing, and the missing-hooks
+//     remedy would refuse to run against the broken file anyway.
 //  3. Unusable exclude patterns (relative, unsupported ~user form, invalid
 //     glob) — under the fail-closed rule each one deactivates the tier in
 //     every repo it is checked against.
@@ -550,7 +554,10 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 //     Otherwise it is drift — the marker is a run-once latch, so the lazy
 //     setup would never revisit it; per the marker's contract (any component
 //     detecting drift must clear it) doctor clears it so the next hook
-//     activity re-runs the lazy setup.
+//     activity re-runs the lazy setup. A residency probe that ERRORS is its
+//     own warn with no marker mutation: the same probe error makes the lazy
+//     setup skip hook installation, so clearing would promise a reinstall
+//     that never happens.
 //
 // All checks except 1 stay silent while the global tier is unconfigured or off.
 func checkGlobalTracking(cmd *cobra.Command) {
@@ -562,37 +569,40 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		fmt.Fprintf(w, "  %s cannot be read or parsed: %v\n", settings.UserSettingsPath(), err)
 		fmt.Fprintln(w, "  Global tracking is silently off machine-wide (fail closed), and hook debug logs")
 		fmt.Fprintln(w, "  cannot report it: hook logging starts only after this file has gated the hook off.")
-		fmt.Fprintln(w, "  Fix the JSON by hand, or run `entire enable --global` to rewrite the global section.")
+		fmt.Fprintln(w, "  Fix the JSON by hand or remove the file (an unknown key means a newer entire wrote it — upgrade instead).")
 		return
 	}
 	if !us.GlobalEnabled() {
 		return
 	}
 
-	var missing []string
-	for _, name := range agent.List() {
-		ag, agErr := agent.Get(name)
-		if agErr != nil {
-			continue
-		}
-		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
-			continue
-		}
-		uhs, ok := agent.AsUserHookSupport(ag)
-		if !ok {
-			continue
-		}
-		if !uhs.AreUserHooksInstalled(ctx) {
-			missing = append(missing, string(name))
+	var missing, unverifiable []string
+	supports, _ := agent.UserHookSupports()
+	for _, ua := range supports {
+		installed, hookErr := ua.Support.AreUserHooksInstalled(ctx)
+		switch {
+		case hookErr != nil:
+			unverifiable = append(unverifiable, fmt.Sprintf("%s (%v)", ua.Name, hookErr))
+		case !installed:
+			missing = append(missing, string(ua.Name))
 		}
 	}
-	if len(missing) == 0 {
+	if len(missing) == 0 && len(unverifiable) == 0 {
 		fmt.Fprintln(w, "✓ Global tracking: user-level agent hooks OK")
-	} else {
+	}
+	if len(missing) > 0 {
 		fmt.Fprintln(w, "Global tracking: USER-LEVEL AGENT HOOKS MISSING")
 		fmt.Fprintf(w, "  Global tracking is on, but user-level hooks are not installed for: %s\n", strings.Join(missing, ", "))
 		fmt.Fprintln(w, "  Sessions in repos without repo-level setup are not tracked for those agents.")
 		fmt.Fprintln(w, "  Run `entire enable --global` to install them.")
+	}
+	if len(unverifiable) > 0 {
+		fmt.Fprintln(w, "Global tracking: USER-LEVEL AGENT HOOKS UNVERIFIABLE")
+		fmt.Fprintln(w, "  Could not read the user-level hook config for:")
+		for _, u := range unverifiable {
+			fmt.Fprintf(w, "    - %s\n", u)
+		}
+		fmt.Fprintln(w, "  Fix the named files, then run `entire enable --global` to (re)install the hooks.")
 	}
 
 	if problems, verr := settings.ValidateGlobalConfig(ctx); verr == nil && len(problems) > 0 {
@@ -625,7 +635,18 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		// break invisibility) and still set the marker. Explain instead of
 		// clearing — clearing would just re-run a setup that skips again and
 		// promise a reinstall that never happens.
-		if resident, hooksDir, resErr := strategy.HooksDirIsWorktreeResident(ctx); resErr == nil && resident {
+		resident, hooksDir, resErr := strategy.HooksDirIsWorktreeResident(ctx)
+		if resErr != nil {
+			// A probe ERROR is neither shape: the lazy setup treats the same
+			// error as "skip hook installation", so falling into the drift
+			// branch would clear the marker and promise a reinstall that never
+			// happens — an infinite mis-advice loop. Report, mutate nothing.
+			fmt.Fprintln(w, "Globally tracked clone: GIT HOOK STATE UNVERIFIED")
+			fmt.Fprintf(w, "  Could not resolve this clone's hooks directory: %v\n", resErr)
+			fmt.Fprintln(w, "  Git hooks appear missing but the cause could not be determined; nothing was changed.")
+			return
+		}
+		if resident {
 			fmt.Fprintln(w, "Globally tracked clone: GIT HOOKS SKIPPED (core.hooksPath inside the worktree)")
 			fmt.Fprintf(w, "  core.hooksPath resolves to %s, inside this worktree; global tracking never\n", hooksDir)
 			fmt.Fprintln(w, "  writes worktree files, so its git hooks were deliberately not installed.")

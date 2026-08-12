@@ -2,7 +2,9 @@ package claudecode
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -51,16 +53,31 @@ func (c *ClaudeCodeAgent) UninstallUserHooks(_ context.Context) error {
 	return uninstallHooksFromFile(settingsPath, false)
 }
 
-// AreUserHooksInstalled reports whether Entire's hooks are present in
-// ~/.claude/settings.json.
-func (c *ClaudeCodeAgent) AreUserHooksInstalled(_ context.Context) bool {
+// AreUserHooksInstalled reports whether Entire's hooks are COMPLETELY
+// installed in ~/.claude/settings.json — the same completeness spec as the
+// repo-level CheckHookConfig (Stop present plus the current tool-use
+// matchers), so a partial install reads as not-installed, doctor prompts
+// repair, and the idempotent installer repairs it. A missing file is
+// (false, nil); an unreadable or unparseable one returns the error rather
+// than posing as "not installed".
+func (c *ClaudeCodeAgent) AreUserHooksInstalled(_ context.Context) (bool, error) {
 	settingsPath, err := UserSettingsPath()
 	if err != nil {
-		return false
+		return false, err
 	}
-	settings, ok := loadClaudeSettingsFile(settingsPath)
-	if !ok {
-		return false
+	settings, err := loadClaudeSettingsFile(settingsPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
 	}
-	return hasEntireHook(settings.Hooks.Stop)
+	if !hasEntireHook(settings.Hooks.Stop) {
+		return false, nil
+	}
+	subagentTools := splitMatcherTools(subagentToolMatcher)
+	taskTools := splitMatcherTools(taskToolMatcher)
+	return hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) &&
+		hasEntireHookCoveringTools(settings.Hooks.PostToolUse, subagentTools) &&
+		hasEntireHookCoveringTools(settings.Hooks.PostToolUse, taskTools), nil
 }

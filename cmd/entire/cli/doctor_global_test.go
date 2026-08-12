@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -177,6 +178,72 @@ func TestCheckGlobalTracking_ExplainsWorktreeResidentHooksPath(t *testing.T) {
 	}
 	if !prefs.GlobalSetupCompleted {
 		t.Error("doctor must NOT clear the marker for a worktree-resident hooksPath")
+	}
+}
+
+// TestCheckGlobalTracking_UnverifiableAgentConfigIsNotMissing pins honest
+// error classification: an agent user config that cannot be READ is
+// "unverifiable", not "missing" — the missing-hooks remedy (`entire enable
+// --global`) refuses to run against the broken file, so lumping the two
+// together sends the user to a fix that cannot work. And it must never
+// produce the OK line (the verified failure mode: EACCES read → "✓ OK").
+func TestCheckGlobalTracking_UnverifiableAgentConfigIsNotMissing(t *testing.T) {
+	setupTestRepo(t)
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	home := isolateUserHome(t)
+	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+
+	claudePath := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(claudePath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(claudePath, []byte(`{not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := runCheckGlobalTracking(t)
+	if !strings.Contains(got, "USER-LEVEL AGENT HOOKS UNVERIFIABLE") || !strings.Contains(got, "claude-code") {
+		t.Fatalf("unreadable claude config must be reported unverifiable, got: %q", got)
+	}
+	if !strings.Contains(got, "USER-LEVEL AGENT HOOKS MISSING") || !strings.Contains(got, "gemini") {
+		t.Errorf("gemini (genuinely missing) must still be reported missing, got: %q", got)
+	}
+	if strings.Contains(got, "user-level agent hooks OK") {
+		t.Errorf("OK line must not appear alongside problems, got: %q", got)
+	}
+}
+
+// TestCheckGlobalTracking_MultipleProblemsAllReported guards the section
+// sequence against a stray early return: with a missing agent, an
+// unverifiable agent, AND unusable exclude patterns at once, every section
+// must appear, in the function's stable order.
+func TestCheckGlobalTracking_MultipleProblemsAllReported(t *testing.T) {
+	setupTestRepo(t)
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	home := isolateUserHome(t)
+	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true,"exclude_paths":["relative/path"]}}`)
+
+	claudePath := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(claudePath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(claudePath, []byte(`{not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := runCheckGlobalTracking(t)
+	idxMissing := strings.Index(got, "USER-LEVEL AGENT HOOKS MISSING")
+	idxUnverifiable := strings.Index(got, "USER-LEVEL AGENT HOOKS UNVERIFIABLE")
+	idxPatterns := strings.Index(got, "UNUSABLE EXCLUDE PATTERNS")
+	if idxMissing < 0 || idxUnverifiable < 0 || idxPatterns < 0 {
+		t.Fatalf("all three sections must be reported (missing=%d unverifiable=%d patterns=%d), got: %q",
+			idxMissing, idxUnverifiable, idxPatterns, got)
+	}
+	if idxMissing >= idxUnverifiable || idxUnverifiable >= idxPatterns {
+		t.Errorf("sections out of stable order (missing=%d unverifiable=%d patterns=%d), got: %q",
+			idxMissing, idxUnverifiable, idxPatterns, got)
 	}
 }
 

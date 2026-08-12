@@ -79,8 +79,8 @@ func TestInstallUserHooks_Gemini_MergesWithoutClobberingUnrelatedKeys(t *testing
 	if strings.Contains(content, "entire-dev") || strings.Contains(content, "git rev-parse") {
 		t.Errorf("user-level hooks use a repo-local command form: %s", content)
 	}
-	if !agent.AreUserHooksInstalled(context.Background()) {
-		t.Error("AreUserHooksInstalled() = false after install")
+	if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || !ok {
+		t.Errorf("AreUserHooksInstalled() = (%v, %v) after install, want (true, nil)", ok, err)
 	}
 }
 
@@ -134,8 +134,8 @@ func TestUninstallUserHooks_Gemini_RemovesOnlyOurs(t *testing.T) {
 		t.Fatalf("UninstallUserHooks() error = %v", err)
 	}
 
-	if agent.AreUserHooksInstalled(context.Background()) {
-		t.Error("Entire hooks still installed after uninstall")
+	if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || ok {
+		t.Errorf("AreUserHooksInstalled() = (%v, %v) after uninstall, want (false, nil)", ok, err)
 	}
 	raw := readRawGeminiSettings(t, path)
 	if got := string(raw["theme"]); got != `"GitHub"` {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -23,17 +24,17 @@ func writeGlobalUserSettings(t *testing.T, cfg, content string) {
 	}
 }
 
-// installClaudeUserHooksForTest writes a minimal ~/.claude/settings.json whose
-// Stop hook is recognizably Entire's, marking claude-code as covered.
+// installClaudeUserHooksForTest runs the real user-level installer against
+// the isolated home, so the fixture always satisfies the completeness
+// predicate AreUserHooksInstalled enforces (Stop plus the tool-use matchers)
+// and marks claude-code as covered.
 func installClaudeUserHooksForTest(t *testing.T, home string) {
 	t.Helper()
-	path := filepath.Join(home, ".claude", "settings.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	if _, err := (&claudecode.ClaudeCodeAgent{}).InstallUserHooks(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	content := `{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"entire hooks claude-code stop"}]}]}}`
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); err != nil {
+		t.Fatalf("fixture did not land in the isolated home: %v", err)
 	}
 }
 
@@ -101,6 +102,39 @@ func TestRunStatus_GlobalTrackingLine(t *testing.T) {
 			t.Errorf("missing repo status or global line, got: %s", out.String())
 		}
 	})
+}
+
+// TestRunStatus_GlobalTrackingLine_ExcludedRepo: inside a repo the tier
+// carves out, "on (N agents covered)" reads as covered when no session here
+// is tracked — the line must name the carve-out instead.
+func TestRunStatus_GlobalTrackingLine_ExcludedRepo(t *testing.T) {
+	setupTestRepo(t)
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	home := isolateUserHome(t)
+	excludeJSON, err := json.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true,"exclude_paths":[`+string(excludeJSON)+`]}}`)
+	installClaudeUserHooksForTest(t, home)
+	settings.ClearGlobalModeCache()
+	t.Cleanup(settings.ClearGlobalModeCache)
+
+	var out bytes.Buffer
+	if err := runStatus(context.Background(), &out, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "global tracking: on (this repo is excluded)") {
+		t.Errorf("missing excluded-repo line, got: %s", out.String())
+	}
+	if strings.Contains(out.String(), "covered)") {
+		t.Errorf("excluded repo must not read as covered, got: %s", out.String())
+	}
 }
 
 // TestRunStatus_OutsideGitRepo_GlobalLine: status must work outside a git
@@ -192,6 +226,71 @@ func TestRunStatusJSON_GlobalTracking(t *testing.T) {
 		m := decode(t, &out)
 		if _, ok := m["global_tracking"]; ok {
 			t.Errorf("global_tracking must be omitted while unconfigured: %s", out.String())
+		}
+	})
+
+	// The enabled in-repo shape pins the exact JSON keys: Go's unmarshal is
+	// case-insensitive, so struct-decode assertions would survive a key
+	// rename that breaks every external consumer.
+	t.Run("enabled shape has exact keys, excluded repo carries the reason", func(t *testing.T) {
+		setupTestRepo(t)
+		root, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		home := isolateUserHome(t)
+		excludeJSON, err := json.Marshal(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true,"exclude_paths":[`+string(excludeJSON)+`]}}`)
+		installClaudeUserHooksForTest(t, home)
+		settings.ClearGlobalModeCache()
+		t.Cleanup(settings.ClearGlobalModeCache)
+
+		var out bytes.Buffer
+		if err := runStatus(context.Background(), &out, false, true); err != nil {
+			t.Fatal(err)
+		}
+		m := decode(t, &out)
+		var gt map[string]json.RawMessage
+		if err := json.Unmarshal(m["global_tracking"], &gt); err != nil {
+			t.Fatalf("global_tracking missing: %s", out.String())
+		}
+		for key, want := range map[string]string{
+			"enabled":         "true",
+			"agents_covered":  "1",
+			"active_here":     "false",
+			"inactive_reason": `"repo_excluded"`,
+		} {
+			if got, ok := gt[key]; !ok || string(got) != want {
+				t.Errorf("global_tracking[%q] = %s (present=%v), want %s", key, got, ok, want)
+			}
+		}
+	})
+
+	t.Run("outside a repo omits the per-repo keys", func(t *testing.T) {
+		setupTestDir(t)
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		isolateUserHome(t)
+		writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+
+		var out bytes.Buffer
+		if err := runStatus(context.Background(), &out, false, true); err != nil {
+			t.Fatal(err)
+		}
+		m := decode(t, &out)
+		var gt map[string]json.RawMessage
+		if err := json.Unmarshal(m["global_tracking"], &gt); err != nil {
+			t.Fatalf("global_tracking missing: %s", out.String())
+		}
+		for _, key := range []string{"active_here", "inactive_reason"} {
+			if _, ok := gt[key]; ok {
+				t.Errorf("%q must be omitted outside a repository: %s", key, m["global_tracking"])
+			}
 		}
 	})
 }

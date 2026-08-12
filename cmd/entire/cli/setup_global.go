@@ -51,7 +51,14 @@ func runEnableGlobalMode(ctx context.Context, w io.Writer) error {
 	if kept > 0 {
 		fmt.Fprintf(w, "Keeping %d exclude pattern(s) from your user settings.\n", kept)
 	}
-	installUserAgentHooks(ctx, w)
+	succeeded, supported := installUserAgentHooks(ctx, w)
+	if supported > 0 && succeeded == 0 {
+		// The setting is on, but with zero agents covered no session in a
+		// never-enabled repo can fire a hook: exiting 0 here would report a
+		// tracking state that does not exist. Partial success stays exit 0.
+		fmt.Fprintln(w, "No agent has user-level hooks installed — global tracking will not capture any sessions until the errors above are fixed and 'entire enable --global' is re-run.")
+		return errors.New("user-level agent hooks could not be installed for any agent")
+	}
 	return nil
 }
 
@@ -61,55 +68,34 @@ func runEnableGlobalMode(ctx context.Context, w io.Writer) error {
 // they are the activation step of enable --global. Per-agent failures are
 // reported and skipped: global tracking is already on at this point, and one
 // broken user config file must not block the other agents. Writes only
-// user-scope config — never a repo file.
-func installUserAgentHooks(ctx context.Context, w io.Writer) {
+// user-scope config — never a repo file. Returns how many supporting agents
+// ended up with hooks installed, and how many support them at all, so callers
+// can detect the zero-coverage outcome.
+func installUserAgentHooks(ctx context.Context, w io.Writer) (succeeded, supported int) {
 	fmt.Fprintln(w, "User-level agent hooks:")
-	var unsupported []string
-	for _, name := range agent.List() {
-		ag, err := agent.Get(name)
-		if err != nil {
-			continue
-		}
-		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
-			continue
-		}
-		uhs, ok := agent.AsUserHookSupport(ag)
-		if !ok {
-			unsupported = append(unsupported, string(name))
-			continue
-		}
-		count, err := uhs.InstallUserHooks(ctx)
+	supports, unsupportedNames := agent.UserHookSupports()
+	for _, ua := range supports {
+		supported++
+		count, err := ua.Support.InstallUserHooks(ctx)
 		switch {
 		case err != nil:
-			fmt.Fprintf(w, "  ! %s: install failed: %v\n", name, err)
+			fmt.Fprintf(w, "  ! %s: install failed: %v\n", ua.Name, err)
+			continue
 		case count == 0:
-			fmt.Fprintf(w, "  ✓ %s: already installed\n", name)
+			fmt.Fprintf(w, "  ✓ %s: already installed\n", ua.Name)
 		default:
-			fmt.Fprintf(w, "  ✓ %s: installed\n", name)
+			fmt.Fprintf(w, "  ✓ %s: installed\n", ua.Name)
 		}
+		succeeded++
 	}
-	if len(unsupported) > 0 {
-		fmt.Fprintf(w, "  - user-level hooks not supported: %s\n", strings.Join(unsupported, ", "))
+	if len(unsupportedNames) > 0 {
+		names := make([]string, len(unsupportedNames))
+		for i, n := range unsupportedNames {
+			names[i] = string(n)
+		}
+		fmt.Fprintf(w, "  - user-level hooks not supported: %s\n", strings.Join(names, ", "))
 	}
-}
-
-// installedUserHookAgents returns the registered, non-test agents whose
-// user-level hooks are currently installed.
-func installedUserHookAgents(ctx context.Context) []agent.UserHookSupport {
-	var installed []agent.UserHookSupport
-	for _, name := range agent.List() {
-		ag, err := agent.Get(name)
-		if err != nil {
-			continue
-		}
-		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
-			continue
-		}
-		if uhs, ok := agent.AsUserHookSupport(ag); ok && uhs.AreUserHooksInstalled(ctx) {
-			installed = append(installed, uhs)
-		}
-	}
-	return installed
+	return succeeded, supported
 }
 
 // maybeRemoveUserAgentHooks offers to remove Entire's user-level agent hooks
@@ -117,8 +103,24 @@ func installedUserHookAgents(ctx context.Context) []agent.UserHookSupport {
 // Entire's. Interactive runs confirm first; non-interactive runs remove ours
 // without asking. A declined or aborted prompt leaves the hooks in place —
 // they gate on the (now off) global tier, so they are inert until removed.
+// An agent whose user-level config cannot be read gets a `!` line instead of
+// being silently skipped: its hooks (if any) remain, and the user must know.
 func maybeRemoveUserAgentHooks(ctx context.Context, w io.Writer) {
-	installed := installedUserHookAgents(ctx)
+	supports, _ := agent.UserHookSupports()
+	var installed []agent.UserHookAgent
+	var unreadable []string
+	for _, ua := range supports {
+		ok, err := ua.Support.AreUserHooksInstalled(ctx)
+		switch {
+		case err != nil:
+			unreadable = append(unreadable, fmt.Sprintf("  ! %s: could not remove: %v", ua.Name, err))
+		case ok:
+			installed = append(installed, ua)
+		}
+	}
+	for _, line := range unreadable {
+		fmt.Fprintln(w, line)
+	}
 	if len(installed) == 0 {
 		return
 	}
@@ -145,12 +147,12 @@ func maybeRemoveUserAgentHooks(ctx context.Context, w io.Writer) {
 		fmt.Fprintln(w, "User-level agent hooks left in place (inert while global tracking is off); run 'entire disable --global' again to remove them.")
 		return
 	}
-	for _, uhs := range installed {
-		if err := uhs.UninstallUserHooks(ctx); err != nil {
-			fmt.Fprintf(w, "  ! %s: could not remove user-level hooks: %v\n", uhs.Name(), err)
+	for _, ua := range installed {
+		if err := ua.Support.UninstallUserHooks(ctx); err != nil {
+			fmt.Fprintf(w, "  ! %s: could not remove user-level hooks: %v\n", ua.Name, err)
 			continue
 		}
-		fmt.Fprintf(w, "  ✓ %s: user-level hooks removed\n", uhs.Name())
+		fmt.Fprintf(w, "  ✓ %s: user-level hooks removed\n", ua.Name)
 	}
 }
 
@@ -242,7 +244,12 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 		fmt.Fprintln(w, "  ✓ Global tracking enabled")
 		// The wizard's yes is the same commitment as enable --global, so it
 		// triggers the same user-level hook install (user-scope config only).
-		installUserAgentHooks(ctx, w)
+		// The wizard is best-effort (enable itself already succeeded), so the
+		// zero-coverage outcome warns instead of failing the command.
+		succeeded, supported := installUserAgentHooks(ctx, w)
+		if supported > 0 && succeeded == 0 {
+			fmt.Fprintln(w, "No agent has user-level hooks installed — global tracking will not capture any sessions until the errors above are fixed and 'entire enable --global' is re-run.")
+		}
 	}
 }
 

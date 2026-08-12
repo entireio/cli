@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -161,8 +162,8 @@ func TestInstallUserHooks_MergesWithoutClobberingUnrelatedKeys(t *testing.T) {
 	if !foundEntireStop {
 		t.Errorf("Entire stop hook missing from user settings, commands: %v", cmds)
 	}
-	if !agent.AreUserHooksInstalled(context.Background()) {
-		t.Error("AreUserHooksInstalled() = false after install")
+	if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || !ok {
+		t.Errorf("AreUserHooksInstalled() = (%v, %v) after install, want (true, nil)", ok, err)
 	}
 }
 
@@ -210,8 +211,8 @@ func TestUninstallUserHooks_RemovesOnlyOurs(t *testing.T) {
 		t.Fatalf("UninstallUserHooks() error = %v", err)
 	}
 
-	if agent.AreUserHooksInstalled(context.Background()) {
-		t.Error("Entire hooks still installed after uninstall")
+	if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || ok {
+		t.Errorf("AreUserHooksInstalled() = (%v, %v) after uninstall, want (false, nil)", ok, err)
 	}
 	raw := readRawSettings(t, userSettingsTestPath(t, home))
 	if got := string(raw["model"]); got != `"opus"` {
@@ -466,6 +467,88 @@ func TestInstallUserHooks_WritesThroughSymlink(t *testing.T) {
 	if !strings.Contains(string(data), "entire hooks claude-code stop") || !strings.Contains(string(data), `"opus"`) {
 		t.Errorf("symlink target not rewritten in place: %s", data)
 	}
+}
+
+// TestAreUserHooksInstalled_PartialInstallReadsAsNotInstalled pins the
+// alignment of the user-level predicate with the repo-level completeness spec
+// (CheckHookConfig): a Stop-only file must read as not-installed so doctor
+// flags it and the idempotent installer repairs it, instead of "installed"
+// masking hooks that never fire.
+func TestAreUserHooksInstalled_PartialInstallReadsAsNotInstalled(t *testing.T) {
+	home := setUserHome(t)
+	agent := &ClaudeCodeAgent{}
+	stopOnly := `{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": ` + mustJSON(t, agentWrappedStopCmd()) + `}]}]
+  }
+}`
+	writeUserClaudeSettings(t, home, stopOnly)
+
+	if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || ok {
+		t.Fatalf("Stop-only file: AreUserHooksInstalled() = (%v, %v), want (false, nil)", ok, err)
+	}
+	count, err := agent.InstallUserHooks(context.Background())
+	if err != nil {
+		t.Fatalf("InstallUserHooks() error = %v", err)
+	}
+	if count == 0 {
+		t.Fatal("InstallUserHooks() must repair a partial install, reported nothing to do")
+	}
+	if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || !ok {
+		t.Fatalf("after repair: AreUserHooksInstalled() = (%v, %v), want (true, nil)", ok, err)
+	}
+}
+
+// TestAreUserHooksInstalled_ReadErrorSurfaces pins honest error
+// classification: an unreadable config is "cannot tell", not "not installed"
+// — and the installer must refuse rather than replace the file (verified
+// failure mode: EACCES read → config silently replaced, doctor reported OK).
+func TestAreUserHooksInstalled_ReadErrorSurfaces(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based unreadability is not enforceable on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permissions")
+	}
+	home := setUserHome(t)
+	writeUserClaudeSettings(t, home, `{"model":"opus"}`)
+	path := userSettingsTestPath(t, home)
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Logf("restore permissions: %v", err)
+		}
+	})
+
+	agent := &ClaudeCodeAgent{}
+	if ok, err := agent.AreUserHooksInstalled(context.Background()); err == nil || ok {
+		t.Fatalf("unreadable file: AreUserHooksInstalled() = (%v, %v), want (false, error)", ok, err)
+	}
+	if _, err := agent.InstallUserHooks(context.Background()); err == nil {
+		t.Fatal("InstallUserHooks() must refuse to replace an unreadable settings file")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != `{"model":"opus"}` {
+		t.Fatalf("unreadable file must be left untouched (data=%q err=%v)", data, err)
+	}
+}
+
+func mustJSON(t *testing.T, s string) string {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func agentWrappedStopCmd() string {
+	return buildClaudeHookCommands(false).stop
 }
 
 func entireCommandSet(t *testing.T, path string) map[string]bool {

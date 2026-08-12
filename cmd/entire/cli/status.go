@@ -134,6 +134,14 @@ type globalTrackingInfo struct {
 	// AgentsCovered counts agents whose user-level hooks are installed; only
 	// meaningful when Enabled.
 	AgentsCovered int
+	// InRepo reports whether the per-repo activation could be evaluated (a
+	// worktree resolved); ActiveHere/InactiveReason are meaningless otherwise.
+	InRepo bool
+	// ActiveHere is the hook gate's answer for THIS worktree
+	// (settings.IsActiveForRepoWithReason) — the machine-wide "on" must not
+	// read as coverage in a repo the gate carves out (excluded, disabled).
+	ActiveHere     bool
+	InactiveReason settings.InactiveReason
 }
 
 func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
@@ -145,23 +153,26 @@ func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 	if !info.Enabled {
 		return info
 	}
-	for _, name := range agent.List() {
-		ag, agErr := agent.Get(name)
-		if agErr != nil {
-			continue
-		}
-		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
-			continue
-		}
-		if uhs, ok := agent.AsUserHookSupport(ag); ok && uhs.AreUserHooksInstalled(ctx) {
+	supports, _ := agent.UserHookSupports()
+	for _, ua := range supports {
+		// A config that cannot be read is not verified coverage; doctor
+		// surfaces the error itself.
+		if ok, err := ua.Support.AreUserHooksInstalled(ctx); err == nil && ok {
 			info.AgentsCovered++
 		}
+	}
+	if _, err := paths.WorktreeRoot(ctx); err == nil {
+		info.InRepo = true
+		info.ActiveHere, info.InactiveReason = settings.IsActiveForRepoWithReason(ctx)
 	}
 	return info
 }
 
 // writeGlobalTrackingLine prints the machine-wide tracking line: on with the
 // user-level agent hook coverage count, off, or nothing while unconfigured.
+// In a repo the hook gate carves out of the tier, the parenthetical names the
+// carve-out instead — "on (2 agents covered)" in an excluded repo reads as
+// covered when no session here is tracked.
 func writeGlobalTrackingLine(ctx context.Context, w io.Writer, sty statusStyles) {
 	info := computeGlobalTrackingInfo(ctx)
 	if !info.Configured {
@@ -169,6 +180,10 @@ func writeGlobalTrackingLine(ctx context.Context, w io.Writer, sty statusStyles)
 	}
 	if !info.Enabled {
 		fmt.Fprintln(w, sty.render(sty.dim, "global tracking: off"))
+		return
+	}
+	if info.InRepo && !info.ActiveHere && info.InactiveReason == settings.InactiveReasonGlobalExcluded {
+		fmt.Fprintln(w, sty.render(sty.dim, "global tracking: on (this repo is excluded)"))
 		return
 	}
 	noun := "agents"
@@ -824,6 +839,29 @@ type globalTrackingJSON struct {
 	Enabled bool `json:"enabled"`
 	// AgentsCovered counts agents whose user-level hooks are installed.
 	AgentsCovered int `json:"agents_covered"`
+	// ActiveHere is the hook gate's per-repo answer and InactiveReason names
+	// the carve-out ("repo_excluded", "repo_disabled", "global_off") when it
+	// is false. Both are only meaningful inside a repository and are omitted
+	// outside one.
+	ActiveHere     *bool  `json:"active_here,omitempty"`
+	InactiveReason string `json:"inactive_reason,omitempty"`
+}
+
+// inactiveReasonJSON maps the gate's inactive reason to its stable JSON
+// identifier; "" for none.
+func inactiveReasonJSON(reason settings.InactiveReason) string {
+	switch reason {
+	case settings.InactiveReasonGlobalExcluded:
+		return "repo_excluded"
+	case settings.InactiveReasonRepoDisabled:
+		return "repo_disabled"
+	case settings.InactiveReasonGlobalOff:
+		return "global_off"
+	case settings.InactiveReasonNone:
+		return ""
+	default:
+		return ""
+	}
 }
 
 type sessionBriefJSON struct {
@@ -838,6 +876,13 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 	var gt *globalTrackingJSON
 	if info := computeGlobalTrackingInfo(ctx); info.Configured {
 		gt = &globalTrackingJSON{Enabled: info.Enabled, AgentsCovered: info.AgentsCovered}
+		if info.InRepo {
+			active := info.ActiveHere
+			gt.ActiveHere = &active
+			if !active {
+				gt.InactiveReason = inactiveReasonJSON(info.InactiveReason)
+			}
+		}
 	}
 	writeJSON := func(v statusJSON) error {
 		v.GlobalTracking = gt

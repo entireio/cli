@@ -188,6 +188,153 @@ func TestRunDisableGlobalMode_RemovesUserHooksNonInteractive(t *testing.T) {
 	}
 }
 
+// TestRunEnableGlobalMode_PerAgentFailureIsolation: a corrupt
+// ~/.claude/settings.json must fail ONLY claude-code's install (a `!` line),
+// leave the corrupt file untouched, and let gemini's install land — partial
+// success stays exit 0.
+func TestRunEnableGlobalMode_PerAgentFailureIsolation(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	home := isolateUserHome(t)
+	t.Cleanup(settings.ClearGlobalModeCache)
+
+	claudePath := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(claudePath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	const corrupt = `{not json`
+	if err := os.WriteFile(claudePath, []byte(corrupt), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := runEnableGlobalMode(t.Context(), &buf); err != nil {
+		t.Fatalf("partial success must stay exit 0, got: %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "! claude-code: install failed") {
+		t.Errorf("missing claude-code failure line, got: %q", out)
+	}
+	if !strings.Contains(out, "✓ gemini: installed") {
+		t.Errorf("gemini install must proceed past claude-code's failure, got: %q", out)
+	}
+	data, err := os.ReadFile(claudePath)
+	if err != nil || string(data) != corrupt {
+		t.Errorf("corrupt claude settings must be left untouched (data=%q err=%v)", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".gemini", "settings.json")); err != nil {
+		t.Errorf("gemini user-level hook file not written: %v", err)
+	}
+}
+
+// TestRunEnableGlobalMode_ZeroCoverageIsAnError: when NO supporting agent
+// ends up with hooks installed, "Global tracking enabled" plus exit 0 would
+// report a tracking state that does not exist — the command must say so and
+// return an error. (The setting itself stays persisted; a re-run repairs.)
+func TestRunEnableGlobalMode_ZeroCoverageIsAnError(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	home := isolateUserHome(t)
+	t.Cleanup(settings.ClearGlobalModeCache)
+
+	for _, dir := range []string{".claude", ".gemini"} {
+		path := filepath.Join(home, dir, "settings.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{not json`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var buf bytes.Buffer
+	err := runEnableGlobalMode(t.Context(), &buf)
+	if err == nil {
+		t.Fatalf("zero agents covered must return an error, output: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "will not capture any sessions") {
+		t.Errorf("missing zero-coverage explanation, got: %q", buf.String())
+	}
+	us, loadErr := settings.LoadUserSettings(t.Context())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if us.Global == nil || !us.Global.Enabled {
+		t.Errorf("the enabled setting itself must persist so a re-run repairs: %+v", us.Global)
+	}
+}
+
+// TestRunDisableGlobalMode_UnreadableAgentConfigReported: an agent whose
+// user-level config cannot be read must get a `! ... could not remove` line
+// instead of being silently skipped, while readable agents still get their
+// hooks removed.
+func TestRunDisableGlobalMode_UnreadableAgentConfigReported(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	home := isolateUserHome(t)
+	t.Cleanup(settings.ClearGlobalModeCache)
+
+	if err := runEnableGlobalMode(t.Context(), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	claudePath := filepath.Join(home, ".claude", "settings.json")
+	if err := os.WriteFile(claudePath, []byte(`{not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := runDisableGlobalMode(t.Context(), &buf); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "! claude-code: could not remove:") {
+		t.Errorf("unreadable agent config must be reported, got: %q", out)
+	}
+	if !strings.Contains(out, "✓ gemini: user-level hooks removed") {
+		t.Errorf("gemini removal must proceed, got: %q", out)
+	}
+	gemini, err := os.ReadFile(filepath.Join(home, ".gemini", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(gemini), "entire hooks gemini") {
+		t.Errorf("Entire hooks left in gemini user settings: %s", gemini)
+	}
+}
+
+// TestMaybeAskGlobalTracking_YesInstallsUserHooks pins the wizard's yes path
+// end to end: the stubbed confirm answers yes and the user-level hooks must
+// actually land in the isolated home — deleting the install call (not just
+// the report line) fails this test.
+func TestMaybeAskGlobalTracking_YesInstallsUserHooks(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	home := isolateUserHome(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	t.Cleanup(settings.ClearGlobalModeCache)
+	restore := askGlobalTrackingConfirm
+	askGlobalTrackingConfirm = func(context.Context) (bool, error) { return true, nil }
+	t.Cleanup(func() { askGlobalTrackingConfirm = restore })
+
+	var buf bytes.Buffer
+	maybeAskGlobalTracking(t.Context(), &buf, EnableOptions{})
+	if !strings.Contains(buf.String(), "Global tracking enabled") {
+		t.Fatalf("missing enable confirmation, got: %q", buf.String())
+	}
+	us, err := settings.LoadUserSettings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if us.Global == nil || !us.Global.Enabled {
+		t.Fatalf("wizard yes must persist enabled, got %+v", us.Global)
+	}
+	claude, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil || !strings.Contains(string(claude), "entire hooks claude-code stop") {
+		t.Errorf("claude user-level hooks not installed by the wizard yes (err=%v): %s", err, claude)
+	}
+	gemini, err := os.ReadFile(filepath.Join(home, ".gemini", "settings.json"))
+	if err != nil || !strings.Contains(string(gemini), "entire hooks gemini session-start") {
+		t.Errorf("gemini user-level hooks not installed by the wizard yes (err=%v): %s", err, gemini)
+	}
+}
+
 func TestMaybeAskGlobalTracking_NonInteractiveHintsWithoutWriting(t *testing.T) {
 	cfg := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfg)

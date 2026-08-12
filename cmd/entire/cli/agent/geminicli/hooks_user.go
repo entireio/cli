@@ -2,7 +2,9 @@ package geminicli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -47,11 +49,19 @@ func (g *GeminiCLIAgent) UninstallUserHooks(ctx context.Context) error {
 }
 
 // AreUserHooksInstalled reports whether Entire's hooks are present in
-// ~/.gemini/settings.json.
-func (g *GeminiCLIAgent) AreUserHooksInstalled(_ context.Context) bool {
+// ~/.gemini/settings.json. A missing file is (false, nil); an unreadable or
+// unparseable one returns the error rather than posing as "not installed".
+func (g *GeminiCLIAgent) AreUserHooksInstalled(_ context.Context) (bool, error) {
 	settingsPath, err := UserSettingsPath()
 	if err != nil {
-		return false
+		return false, err
 	}
-	return areHooksInstalledInFile(settingsPath)
+	installed, err := areHooksInstalledInFile(settingsPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return installed, nil
 }

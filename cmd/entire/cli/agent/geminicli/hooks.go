@@ -486,20 +486,23 @@ func (g *GeminiCLIAgent) AreHooksInstalled(ctx context.Context) bool {
 		repoRoot = "." // Fallback to CWD if not in a git repo
 	}
 	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
-	return areHooksInstalledInFile(settingsPath)
+	installed, err := areHooksInstalledInFile(settingsPath)
+	return err == nil && installed
 }
 
 // areHooksInstalledInFile reports whether any Entire hook is present in the
-// settings file at settingsPath.
-func areHooksInstalledInFile(settingsPath string) bool {
+// settings file at settingsPath. A missing file is an fs.ErrNotExist error;
+// callers that need to distinguish "not installed" from "cannot tell" branch
+// on errors.Is.
+func areHooksInstalledInFile(settingsPath string) (bool, error) {
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from a fixed settings location
 	if err != nil {
-		return false
+		return false, fmt.Errorf("read %s: %w", settingsPath, err)
 	}
 
 	var settings GeminiSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		return false
+		return false, fmt.Errorf("parse %s: %w", settingsPath, err)
 	}
 
 	// Check for at least one of our hooks using isEntireHook (works for both localDev and production)
@@ -513,7 +516,7 @@ func areHooksInstalledInFile(settingsPath string) bool {
 		hasEntireHook(settings.Hooks.BeforeTool) ||
 		hasEntireHook(settings.Hooks.AfterTool) ||
 		hasEntireHook(settings.Hooks.PreCompress) ||
-		hasEntireHook(settings.Hooks.Notification)
+		hasEntireHook(settings.Hooks.Notification), nil
 }
 
 // Helper functions for hook management
