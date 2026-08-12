@@ -158,6 +158,128 @@ func TestUninstallUserHooks_Gemini_MissingFileIsNoError(t *testing.T) {
 	}
 }
 
+// TestUserAuthoredEntireCLIHookSurvives_Gemini pins verb-scoped hook
+// recognition: a USER-AUTHORED hook whose command merely invokes the entire
+// binary must survive both install (whose remove-then-add cycle deleted it
+// under the old `entire ` prefix on a plain enable) and uninstall.
+func TestUserAuthoredEntireCLIHookSurvives_Gemini(t *testing.T) {
+	home := setUserHome(t)
+	path := userGeminiSettingsPath(t, home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	const userCmd = "entire status --json > /tmp/entire-status.json"
+	existing := `{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"name": "my-status", "type": "command", "command": "` + userCmd + `"}]}]
+  }
+}`
+	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := &GeminiCLIAgent{}
+	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
+		t.Fatalf("InstallUserHooks() error = %v", err)
+	}
+	raw := readRawGeminiSettings(t, path)
+	if !strings.Contains(string(raw["hooks"]), userCmd) {
+		t.Fatalf("install removed the user-authored entire-CLI hook: %s", raw["hooks"])
+	}
+
+	if err := agent.UninstallUserHooks(context.Background()); err != nil {
+		t.Fatalf("UninstallUserHooks() error = %v", err)
+	}
+	raw = readRawGeminiSettings(t, path)
+	if !strings.Contains(string(raw["hooks"]), userCmd) {
+		t.Errorf("uninstall removed the user-authored entire-CLI hook: %s", raw["hooks"])
+	}
+	if strings.Contains(string(raw["hooks"]), "entire hooks gemini") {
+		t.Errorf("Entire hooks left behind: %s", raw["hooks"])
+	}
+}
+
+// TestInstallUserHooks_Gemini_PreservesUnknownKeysInHooksConfigAndHooks pins
+// the "preserves every unrelated key" contract: unknown members of
+// hooksConfig (formerly decoded into a struct holding only `enabled`) and
+// non-array members of hooks (formerly stripped wholesale) must round-trip.
+func TestInstallUserHooks_Gemini_PreservesUnknownKeysInHooksConfigAndHooks(t *testing.T) {
+	home := setUserHome(t)
+	path := userGeminiSettingsPath(t, home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	existing := `{
+  "hooksConfig": {"enabled": true, "timeout": 30, "customField": "x"},
+  "hooks": {
+    "myOwnMap": {"a": 1}
+  }
+}`
+	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := &GeminiCLIAgent{}
+	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
+		t.Fatalf("InstallUserHooks() error = %v", err)
+	}
+
+	raw := readRawGeminiSettings(t, path)
+	var hc map[string]json.RawMessage
+	if err := json.Unmarshal(raw["hooksConfig"], &hc); err != nil {
+		t.Fatalf("parse hooksConfig: %v", err)
+	}
+	if string(hc["enabled"]) != "true" {
+		t.Errorf("hooksConfig.enabled = %s, want true", hc["enabled"])
+	}
+	if string(hc["timeout"]) != "30" || string(hc["customField"]) != `"x"` {
+		t.Errorf("hooksConfig unknown keys dropped: %s", raw["hooksConfig"])
+	}
+	var hooks map[string]json.RawMessage
+	if err := json.Unmarshal(raw["hooks"], &hooks); err != nil {
+		t.Fatalf("parse hooks: %v", err)
+	}
+	var myOwnMap map[string]int
+	if err := json.Unmarshal(hooks["myOwnMap"], &myOwnMap); err != nil || myOwnMap["a"] != 1 {
+		t.Errorf("non-array hooks member dropped or rewritten (err=%v): %s", err, hooks["myOwnMap"])
+	}
+}
+
+// TestInstallUserHooks_Gemini_UnparseableHookSectionErrorsCleanly: a managed
+// hook section in an unexpected shape must abort install and uninstall with
+// an error naming the section, leaving the file byte-identical.
+func TestInstallUserHooks_Gemini_UnparseableHookSectionErrorsCleanly(t *testing.T) {
+	home := setUserHome(t)
+	path := userGeminiSettingsPath(t, home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	original := `{
+  "hooks": {
+    "SessionStart": {"unexpected": "shape"}
+  }
+}`
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := &GeminiCLIAgent{}
+	_, err := agent.InstallUserHooks(context.Background())
+	if err == nil {
+		t.Fatal("InstallUserHooks() must error on an unparseable hook section")
+	}
+	if !strings.Contains(err.Error(), "SessionStart") || !strings.Contains(err.Error(), path) {
+		t.Errorf("install error must name the section and file, got: %v", err)
+	}
+	if err := agent.UninstallUserHooks(context.Background()); err == nil {
+		t.Fatal("UninstallUserHooks() must error on an unparseable hook section")
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil || string(data) != original {
+		t.Errorf("refused write must leave the file byte-identical (err=%v):\n%s", readErr, data)
+	}
+}
+
 func TestInstallUserHooks_Gemini_NeverWritesRepoFiles(t *testing.T) {
 	home := setUserHome(t)
 	work := t.TempDir()

@@ -28,6 +28,19 @@ import (
 //
 // perm is applied to the temp file via Chmod before rename so the final file
 // lands with the requested permission regardless of the temp file's default.
+// WriteFileAtomicFollowingSymlinks writes like WriteFileAtomic but resolves a
+// symlinked filePath first and writes through to its target. The atomic
+// rename would otherwise replace the symlink with a regular file — dotfile
+// managers commonly symlink user-level config files, and replacing the link
+// silently detaches the managed target. Falls back to the literal path when
+// resolution fails (typically: the file does not exist yet).
+func WriteFileAtomicFollowingSymlinks(filePath string, data []byte, perm fs.FileMode) error {
+	if resolved, err := filepath.EvalSymlinks(filePath); err == nil {
+		filePath = resolved
+	}
+	return WriteFileAtomic(filePath, data, perm)
+}
+
 func WriteFileAtomic(filePath string, data []byte, perm fs.FileMode) error {
 	dir := filepath.Dir(filePath)
 	base := filepath.Base(filePath)

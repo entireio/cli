@@ -176,17 +176,10 @@ func persistUserSettings(us *UserSettings) error {
 	if err != nil {
 		return fmt.Errorf("encoding user settings: %w", err)
 	}
-	// The atomic write renames a temp file over the target, which would
-	// replace a symlinked settings.json (common with dotfile managers — the
-	// same reason LoadUserSettings avoids readConfined) with a regular file,
-	// silently detaching the managed target. Resolve the symlink and write
-	// through to its target; fall back to the literal path when resolution
-	// fails (typically: the file does not exist yet).
-	path := UserSettingsPath()
-	if resolved, symErr := filepath.EvalSymlinks(path); symErr == nil {
-		path = resolved
-	}
-	if err := jsonutil.WriteFileAtomic(path, data, 0o600); err != nil {
+	// Symlink-following write: a settings.json symlinked by a dotfile manager
+	// (the same reason LoadUserSettings avoids readConfined) must be rewritten
+	// through to its target, not replaced by the atomic rename.
+	if err := jsonutil.WriteFileAtomicFollowingSymlinks(UserSettingsPath(), data, 0o600); err != nil {
 		return fmt.Errorf("writing user settings: %w", err)
 	}
 	ClearGlobalModeCache()

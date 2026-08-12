@@ -301,6 +301,173 @@ func TestInstallUserHooks_CommandsMatchRepoProductionForms(t *testing.T) {
 	}
 }
 
+// TestUserAuthoredEntireCLIHookSurvivesInstallAndUninstall pins verb-scoped
+// hook recognition: a USER-AUTHORED hook that merely invokes the entire
+// binary (`entire status ...`) must never be claimed as ours — an earlier
+// prefix (`entire `) matched it, so UninstallUserHooks deleted it.
+func TestUserAuthoredEntireCLIHookSurvivesInstallAndUninstall(t *testing.T) {
+	home := setUserHome(t)
+	const userCmd = "entire status --json > /tmp/entire-status.json"
+	writeUserClaudeSettings(t, home, `{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "`+userCmd+`"}]}],
+    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "`+userCmd+`"}]}]
+  }
+}`)
+
+	agent := &ClaudeCodeAgent{}
+	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
+		t.Fatalf("InstallUserHooks() error = %v", err)
+	}
+	cmds := collectHookCommands(t, userSettingsTestPath(t, home))
+	if got := countOf(cmds, userCmd); got != 2 {
+		t.Fatalf("user-authored entire-CLI hook count after install = %d, want 2 (commands: %v)", got, cmds)
+	}
+
+	if err := agent.UninstallUserHooks(context.Background()); err != nil {
+		t.Fatalf("UninstallUserHooks() error = %v", err)
+	}
+	cmds = collectHookCommands(t, userSettingsTestPath(t, home))
+	if got := countOf(cmds, userCmd); got != 2 {
+		t.Errorf("user-authored entire-CLI hook count after uninstall = %d, want 2 (commands: %v)", got, cmds)
+	}
+	for _, c := range cmds {
+		if isEntireHook(c) {
+			t.Errorf("Entire hook left behind after uninstall: %s", c)
+		}
+	}
+}
+
+func countOf(cmds []string, want string) int {
+	n := 0
+	for _, c := range cmds {
+		if c == want {
+			n++
+		}
+	}
+	return n
+}
+
+// TestInstallUserHooks_RepairsAlternateFormEntireHook pins the user-level
+// self-heal: a pre-existing Entire hook in a different command form (bare
+// `entire hooks claude-code stop`) must be replaced, not joined — the
+// exact-string dedup check otherwise appended a second wrapped entry and both
+// fired on every Stop machine-wide.
+func TestInstallUserHooks_RepairsAlternateFormEntireHook(t *testing.T) {
+	home := setUserHome(t)
+	writeUserClaudeSettings(t, home, `{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "entire hooks claude-code stop"}]}]
+  }
+}`)
+
+	agent := &ClaudeCodeAgent{}
+	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
+		t.Fatalf("InstallUserHooks() error = %v", err)
+	}
+
+	raw := readRawSettings(t, userSettingsTestPath(t, home))
+	var hooks map[string][]ClaudeHookMatcher
+	if err := json.Unmarshal(raw["hooks"], &hooks); err != nil {
+		t.Fatalf("parse hooks: %v", err)
+	}
+	for hookType, matchers := range hooks {
+		entireEntries := 0
+		for _, m := range matchers {
+			for _, h := range m.Hooks {
+				if isEntireHook(h.Command) {
+					entireEntries++
+				}
+			}
+		}
+		want := 1
+		if hookType == "PostToolUse" {
+			want = 2 // post-task (Agent) + post-todo (TaskCreate|TaskUpdate)
+		}
+		if entireEntries != want {
+			t.Errorf("hook type %s has %d Entire entries after install, want exactly %d", hookType, entireEntries, want)
+		}
+	}
+	if got := countOf(collectHookCommands(t, userSettingsTestPath(t, home)), "entire hooks claude-code stop"); got != 0 {
+		t.Errorf("bare-form Entire hook still present after repair (count %d)", got)
+	}
+}
+
+// TestInstallUserHooks_UnparseableHookSectionErrorsCleanly pins item "never
+// clobber unparseable hook sections": a managed hook section in an unexpected
+// shape must abort install AND uninstall with an error naming the section,
+// leaving the file byte-identical — the old parse path silently treated it as
+// empty, clobbering it on install and deleting it on disable --global.
+func TestInstallUserHooks_UnparseableHookSectionErrorsCleanly(t *testing.T) {
+	home := setUserHome(t)
+	original := `{
+  "hooks": {
+    "Stop": {"unexpected": "shape"}
+  }
+}`
+	writeUserClaudeSettings(t, home, original)
+
+	agent := &ClaudeCodeAgent{}
+	_, err := agent.InstallUserHooks(context.Background())
+	if err == nil {
+		t.Fatal("InstallUserHooks() must error on an unparseable hook section")
+	}
+	if !strings.Contains(err.Error(), "Stop") || !strings.Contains(err.Error(), userSettingsTestPath(t, home)) {
+		t.Errorf("install error must name the section and file, got: %v", err)
+	}
+
+	if err := agent.UninstallUserHooks(context.Background()); err == nil {
+		t.Fatal("UninstallUserHooks() must error on an unparseable hook section")
+	}
+
+	data, readErr := os.ReadFile(userSettingsTestPath(t, home))
+	if readErr != nil || string(data) != original {
+		t.Errorf("refused write must leave the file byte-identical (err=%v):\n%s", readErr, data)
+	}
+}
+
+// TestInstallUserHooks_WritesThroughSymlink pins the dotfile-manager case: a
+// symlinked ~/.claude/settings.json must be rewritten through to its target —
+// a naive temp+rename write replaces the link with a regular file, silently
+// detaching the managed target.
+func TestInstallUserHooks_WritesThroughSymlink(t *testing.T) {
+	home := setUserHome(t)
+	target := filepath.Join(home, "dotfiles", "claude-settings.json")
+	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(`{"model":"opus"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := userSettingsTestPath(t, home)
+	if err := os.MkdirAll(filepath.Dir(link), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	agent := &ClaudeCodeAgent{}
+	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
+		t.Fatalf("InstallUserHooks() error = %v", err)
+	}
+
+	fi, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("install replaced the settings.json symlink with a regular file")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "entire hooks claude-code stop") || !strings.Contains(string(data), `"opus"`) {
+		t.Errorf("symlink target not rewritten in place: %s", data)
+	}
+}
+
 func entireCommandSet(t *testing.T, path string) map[string]bool {
 	t.Helper()
 	set := make(map[string]bool)

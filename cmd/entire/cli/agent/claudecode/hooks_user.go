@@ -28,7 +28,11 @@ func UserSettingsPath() (string, error) {
 // Always the plain production `entire` command form — byte-identical to the
 // repo-level production entries, so Claude Code's cross-scope dedup of
 // identical hook commands keeps a repo with both installs firing each hook
-// once. Never touches user-level permissions and preserves unrelated keys.
+// once. It self-heals: existing Entire entries in any other command form
+// (bare, legacy go-run) are removed and re-added in the current form, so a
+// pre-existing alternate-form entry can never double-fire alongside the one
+// this install writes. Never touches user-level permissions and preserves
+// unrelated keys.
 func (c *ClaudeCodeAgent) InstallUserHooks(_ context.Context) (int, error) {
 	settingsPath, err := UserSettingsPath()
 	if err != nil {
