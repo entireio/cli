@@ -483,6 +483,38 @@ func TestMaybeAskGlobalTracking_AnswerPersistence(t *testing.T) {
 		}
 	})
 
+	t.Run("mid-prompt configuration is not overturned", func(t *testing.T) {
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		t.Setenv("ENTIRE_TEST_TTY", "1")
+		t.Cleanup(settings.ClearGlobalModeCache)
+		restore := askGlobalTrackingConfirm
+		askGlobalTrackingConfirm = func(context.Context) (bool, error) {
+			// While this prompt is open, another terminal answers the
+			// machine-wide question with an explicit `disable --global`.
+			if err := os.WriteFile(filepath.Join(cfg, settings.UserSettingsFileName), []byte(`{"global":{"enabled":false}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return true, nil // this prompt's "yes" arrives too late
+		}
+		t.Cleanup(func() { askGlobalTrackingConfirm = restore })
+
+		var buf bytes.Buffer
+		maybeAskGlobalTracking(t.Context(), &buf, EnableOptions{})
+		us, err := settings.LoadUserSettings(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Explicit off is durable: the by-then-invalid prompt answer must
+		// not be persisted over the configuration made during the window.
+		if us.Global == nil || us.Global.Enabled {
+			t.Fatalf("mid-prompt explicit answer must win, got %+v", us.Global)
+		}
+		if strings.Contains(buf.String(), "Global tracking enabled") {
+			t.Fatalf("superseded answer must not report success, got: %q", buf.String())
+		}
+	})
+
 	t.Run("cancel saves nothing", func(t *testing.T) {
 		cfg := t.TempDir()
 		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
