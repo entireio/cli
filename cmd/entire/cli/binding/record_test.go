@@ -79,9 +79,14 @@ func TestRecordBinding_CreatesRecordOnFirstWrite(t *testing.T) {
 	if br.FirstEvidenceAt.IsZero() || br.LastEvidenceAt.IsZero() {
 		t.Error("evidence timestamps must be set")
 	}
-	if rec.UpdatedAt.Before(br.LastEvidenceAt) {
-		t.Errorf("UpdatedAt %v predates LastEvidenceAt %v — the mutation must use a single clock reading",
-			rec.UpdatedAt, br.LastEvidenceAt)
+	// Equality, not ordering: the single-clock contract means every timestamp
+	// in one mutation is the SAME reading. Note the real enforcement is the
+	// mutateRecord callback signature (callers receive the reading instead of
+	// calling time.Now); this assertion documents the contract but two fast
+	// consecutive Now() calls can land on one tick, so it may not bite alone.
+	if !rec.UpdatedAt.Equal(br.LastEvidenceAt) || !rec.UpdatedAt.Equal(br.FirstEvidenceAt) {
+		t.Errorf("first-write timestamps must be one clock reading: UpdatedAt %v, LastEvidenceAt %v, FirstEvidenceAt %v",
+			rec.UpdatedAt, br.LastEvidenceAt, br.FirstEvidenceAt)
 	}
 
 	if runtime.GOOS != "windows" {
@@ -221,9 +226,16 @@ func TestMutateRecord_LockContentionErrorsInsteadOfHanging(t *testing.T) {
 	}
 	defer release()
 
+	// Pin the ceiling itself: the 2s value is part of the never-block
+	// contract this test exists for; a silently raised ceiling would pass a
+	// loose elapsed check.
+	if recordLockTimeout != 2*time.Second {
+		t.Fatalf("recordLockTimeout = %v, the never-block contract assumes 2s — update this test deliberately if the ceiling changes", recordLockTimeout)
+	}
+
 	// Hook contexts carry no deadline; the record write must still give up
-	// instead of blocking the hook behind another lock holder. The internal
-	// ceiling is 2s — the assertion window is generous to avoid flake.
+	// instead of blocking the hook behind another lock holder. This runs the
+	// real ceiling once (~2s) because the deadline-less ctx IS the contract.
 	start := time.Now()
 	err = RecordBinding(ctx, "sess-1", testMeta(), testEvidence("b", true))
 	elapsed := time.Since(start)
@@ -233,8 +245,8 @@ func TestMutateRecord_LockContentionErrorsInsteadOfHanging(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("error must carry context.DeadlineExceeded, got %v", err)
 	}
-	if elapsed > 10*time.Second {
-		t.Errorf("lock wait took %v, must be bounded (~2s ceiling)", elapsed)
+	if elapsed > recordLockTimeout+2*time.Second {
+		t.Errorf("lock wait took %v, must be bounded near the %v ceiling", elapsed, recordLockTimeout)
 	}
 }
 
