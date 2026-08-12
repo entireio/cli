@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
@@ -65,11 +66,65 @@ func emitSearchPerformed(ctx context.Context, searchID, query, mode string, resu
 	}, versioninfo.Version)
 }
 
+// parseExplainSearchHit validates a --search-id token ("<ulid>" or
+// "<ulid>:<rank>") from a compact search hint. Anything that is not a strict
+// 26-char ULID is dropped entirely — the flag value is agent-controlled
+// free text and must never flow into telemetry unvalidated. A malformed or
+// non-positive rank is dropped while the valid search id is kept.
+func parseExplainSearchHit(token string) (searchID string, rank int) {
+	if token == "" {
+		return "", 0
+	}
+	idPart, rankPart, hasRank := strings.Cut(token, ":")
+	if _, err := ulid.ParseStrict(idPart); err != nil {
+		return "", 0
+	}
+	if hasRank {
+		if n, err := strconv.Atoi(rankPart); err == nil && n > 0 {
+			rank = n
+		}
+	}
+	return idPart, rank
+}
+
+// explainSearchHitKey carries a validated --search-id token through the
+// context, so the attribution reaches the emit sites without threading a
+// parameter through explain's deep call chains (same pattern as
+// withCrossRepoRead).
+type explainSearchHitKey struct{}
+
+type explainSearchHit struct {
+	searchID string
+	rank     int
+}
+
+// withExplainSearchHit validates and attaches a --search-id token to the
+// context. Invalid tokens attach nothing.
+func withExplainSearchHit(ctx context.Context, token string) context.Context {
+	searchID, rank := parseExplainSearchHit(token)
+	if searchID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, explainSearchHitKey{}, explainSearchHit{searchID: searchID, rank: rank})
+}
+
+// explainSearchHitFrom returns the validated search attribution attached by
+// withExplainSearchHit, or empty values when none is present.
+func explainSearchHitFrom(ctx context.Context) (searchID string, rank int) {
+	hit, ok := ctx.Value(explainSearchHitKey{}).(explainSearchHit)
+	if !ok {
+		return "", 0
+	}
+	return hit.searchID, hit.rank
+}
+
 // emitCheckpointExplained reports a cli_checkpoint_explained telemetry event
 // when telemetry is opted in — the "click" that follows a search impression
-// (ENT-1528). Zero agent cooperation: it fires on every successful explain
-// id resolution, and the search→explain funnel is assembled in the analytics
-// layer. Best-effort and non-blocking; explain output is never affected.
+// (ENT-1528). It fires on every successful explain id resolution; when the
+// invocation carried a --search-id token (embedded in compact search hints),
+// the event links to its search deterministically, otherwise the funnel is
+// assembled by time proximity in the analytics layer. Best-effort and
+// non-blocking; explain output is never affected.
 func emitCheckpointExplained(ctx context.Context, checkpointID, source string) {
 	if checkpointID == "" {
 		return
@@ -78,8 +133,11 @@ func emitCheckpointExplained(ctx context.Context, checkpointID, source string) {
 	if err != nil || s.Telemetry == nil || !*s.Telemetry {
 		return
 	}
+	searchID, rank := explainSearchHitFrom(ctx)
 	telemetry.TrackCheckpointExplained(telemetry.CheckpointExplainedEvent{
 		CheckpointID: checkpointID,
 		Source:       source,
+		SearchID:     searchID,
+		Rank:         rank,
 	}, versioninfo.Version)
 }

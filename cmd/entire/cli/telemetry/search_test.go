@@ -68,4 +68,48 @@ func TestBuildCheckpointExplainedPayload(t *testing.T) {
 	if got := p["source"]; got != "prose" {
 		t.Errorf("source = %v, want prose", got)
 	}
+	// Without a search-hit token, the deterministic-link fields are omitted.
+	for _, key := range []string{"search_id", "rank"} {
+		if _, ok := p[key]; ok {
+			t.Errorf("property %q should be omitted when no search hit is attributed", key)
+		}
+	}
+}
+
+func TestBuildCheckpointExplainedPayload_WithSearchAttribution(t *testing.T) {
+	t.Parallel()
+	payload := BuildCheckpointExplainedPayload(CheckpointExplainedEvent{
+		CheckpointID: "01JRESULT0000000000000000",
+		Source:       "export",
+		SearchID:     "01JXK9RSTQ4B7NW2VYFCH6M3DZ",
+		Rank:         3,
+	}, "1.2.3")
+	if payload == nil {
+		t.Fatal("expected payload, got nil")
+	}
+	p := payload.Properties
+	if got := p["search_id"]; got != "01JXK9RSTQ4B7NW2VYFCH6M3DZ" {
+		t.Errorf("search_id = %v", got)
+	}
+	if got := p["rank"]; got != 3 {
+		t.Errorf("rank = %v, want 3", got)
+	}
+}
+
+func TestBuildCheckpointExplainedPayload_SearchIDWithoutRank(t *testing.T) {
+	t.Parallel()
+	payload := BuildCheckpointExplainedPayload(CheckpointExplainedEvent{
+		CheckpointID: "01JRESULT0000000000000000",
+		Source:       "prose",
+		SearchID:     "01JXK9RSTQ4B7NW2VYFCH6M3DZ",
+	}, "1.2.3")
+	if payload == nil {
+		t.Fatal("expected payload, got nil")
+	}
+	if _, ok := payload.Properties["search_id"]; !ok {
+		t.Error("search_id should be present")
+	}
+	if _, ok := payload.Properties["rank"]; ok {
+		t.Error("rank should be omitted when unknown")
+	}
 }

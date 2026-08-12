@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -1050,24 +1051,34 @@ type compactSearchHit struct {
 // types `explain` cannot resolve. Checkpoint hits from another repo get
 // --repo (cross-repo explain, ENT-1523); commit hits resolve via the local
 // Entire-Checkpoint trailer only, so they get a hint only in the current
-// repo.
-func explainHint(r *search.Result, hitRepo, currentRepo string) string {
+// repo. The trailing --search-id <searchID>:<rank> token is what makes the
+// search→explain link deterministic: agents copy the hint verbatim, explain
+// passes the token through to the cli_checkpoint_explained event, and the
+// funnel joins on search_id instead of time proximity (ENT-1528).
+func explainHint(r *search.Result, hitRepo, currentRepo, searchID string, rank int) string {
 	resultID := r.ResultID()
 	if resultID == "" {
 		return ""
 	}
+	var cmd string
 	switch r.Type {
 	case search.TypeCheckpoint:
+		cmd = "entire checkpoint explain " + resultID
 		if hitRepo != "" && !strings.EqualFold(hitRepo, currentRepo) {
-			return "entire checkpoint explain " + resultID + " --repo " + hitRepo
+			cmd += " --repo " + hitRepo
 		}
-		return "entire checkpoint explain " + resultID
 	case search.TypeCommit:
-		if hitRepo == "" || strings.EqualFold(hitRepo, currentRepo) {
-			return "entire checkpoint explain " + resultID
+		if hitRepo != "" && !strings.EqualFold(hitRepo, currentRepo) {
+			return ""
 		}
+		cmd = "entire checkpoint explain " + resultID
+	default:
+		return ""
 	}
-	return ""
+	if searchID != "" {
+		cmd += " --search-id " + searchID + ":" + strconv.Itoa(rank)
+	}
+	return cmd
 }
 
 // compactSnippet drops a truncated snippet that duplicates the truncated
@@ -1117,7 +1128,7 @@ func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int,
 			Score:           r.Meta.Score,
 			Snippet:         compactSnippet(title, truncateOneLine(r.Meta.Snippet, compactTitleMaxLen)),
 			MatchType:       r.Meta.MatchType,
-			Explain:         explainHint(r, repo, currentRepo),
+			Explain:         explainHint(r, repo, currentRepo, searchID, (page-1)*limit+i+1),
 		}
 		if r.Checkpoint != nil {
 			hit.FilesTouched = r.Checkpoint.FilesTouched

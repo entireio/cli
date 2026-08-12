@@ -187,8 +187,13 @@ func TestWriteSearchCompactJSON_SearchIDAndSameRepoExplainHint(t *testing.T) {
 	if !strings.Contains(output, `"search_id": "`+testSearchID+`"`) {
 		t.Errorf("compact envelope missing search_id:\n%s", output)
 	}
-	if !strings.Contains(output, `"explain": "entire checkpoint explain a3b2c4d5e6f7"`) {
-		t.Errorf("compact hit missing same-repo explain hint:\n%s", output)
+	// The hint embeds the search_id:rank token so the explain event links to
+	// this search deterministically.
+	if !strings.Contains(output, `"explain": "entire checkpoint explain a3b2c4d5e6f7 --search-id `+testSearchID+`:1"`) {
+		t.Errorf("compact hit missing same-repo explain hint with search token:\n%s", output)
+	}
+	if !strings.Contains(output, `--search-id `+testSearchID+`:2"`) {
+		t.Errorf("second hit must carry rank 2:\n%s", output)
 	}
 	if strings.Contains(output, "--repo") {
 		t.Errorf("same-repo hint must not carry --repo:\n%s", output)
@@ -207,8 +212,22 @@ func TestWriteSearchCompactJSON_CrossRepoExplainHint(t *testing.T) {
 	if _, err := writeSearchCompactJSON(&buf, &search.Response{Results: testResults()}, 10, 1, testSearchID, "other/elsewhere"); err != nil {
 		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
 	}
-	if !strings.Contains(buf.String(), `"explain": "entire checkpoint explain a3b2c4d5e6f7 --repo entirehq/entire.io"`) {
-		t.Errorf("cross-repo checkpoint hint must carry --repo:\n%s", buf.String())
+	if !strings.Contains(buf.String(), `"explain": "entire checkpoint explain a3b2c4d5e6f7 --repo entirehq/entire.io --search-id `+testSearchID+`:1"`) {
+		t.Errorf("cross-repo checkpoint hint must carry --repo and the search token:\n%s", buf.String())
+	}
+}
+
+// Hint ranks are absolute across pages, matching what a ranking dashboard
+// needs (page 2 of limit 1 starts at rank 2).
+func TestWriteSearchCompactJSON_HintRankIsAbsolute(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	if _, err := writeSearchCompactJSON(&buf, &search.Response{Results: testResults()}, 1, 2, testSearchID, testCurrentRepo); err != nil {
+		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+	}
+	if !strings.Contains(buf.String(), `--search-id `+testSearchID+`:2"`) {
+		t.Errorf("page-2 hit must carry absolute rank 2:\n%s", buf.String())
 	}
 }
 

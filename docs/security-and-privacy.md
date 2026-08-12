@@ -396,6 +396,11 @@ Two additional events measure search result relevance for agent-driven search
   never sent), the output mode, and result counts/pagination.
 - `cli_checkpoint_explained` — one per successful `entire checkpoint explain`
   id resolution: the opaque checkpoint id and which resolution path handled it.
+  When the invocation carried the `--search-id` token that compact search
+  hints embed (`search-id[:rank]`, both opaque values minted by the CLI
+  itself), the event also carries that `search_id` and `rank`, linking the
+  explain to its search deterministically. The token is strictly validated
+  (26-char ULID) so free-form flag text never reaches telemetry.
 
 No correlation state is stored locally; the funnel is assembled in the
 analytics layer from the events above. Both events honor the same opt-outs as
