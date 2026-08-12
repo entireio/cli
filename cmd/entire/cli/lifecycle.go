@@ -604,8 +604,9 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	// EnsureSetupForHook (not EnsureSetup): a repo with no repo-level setup —
 	// reachable here only via the user-global tier — must never receive
 	// worktree writes like .entire/.gitignore; it gets the invisible
-	// MaybeEnsureGlobalSetup instead, which writes only inside .git/ and so
-	// also keeps the status-cache window valid.
+	// MaybeEnsureGlobalSetup instead, which never creates worktree files (it
+	// even skips hook installation when core.hooksPath resolves inside the
+	// worktree) and so also keeps the status-cache window valid.
 	_, setupSpan := perf.Start(ctx, "ensure_setup")
 	if err := strategy.EnsureSetupForHook(ctx); err != nil {
 		logging.Warn(logCtx, "failed to ensure strategy setup",
@@ -775,6 +776,14 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	_, copySpan := perf.Start(ctx, "copy_transcript")
 	sessionDir := paths.SessionMetadataDirFromSessionID(sessionID)
 	sessionDirAbs, err := paths.AbsPath(ctx, sessionDir)
+	if paths.IsUnroutableRuntimePath(err) {
+		// Tier-owned repo, git-side location unresolvable: the relative
+		// fallback below would MkdirAll .entire into the worktree of a repo
+		// that must stay invisible. Fail the capture instead.
+		copySpan.RecordError(err)
+		copySpan.End()
+		return fmt.Errorf("resolving session metadata dir: %w", err)
+	}
 	if err != nil {
 		sessionDirAbs = sessionDir
 	}

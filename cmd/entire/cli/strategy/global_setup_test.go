@@ -1,8 +1,11 @@
 package strategy
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -76,8 +79,8 @@ func TestMaybeEnsureGlobalSetup_GloballyTracked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load clone preferences: %v", err)
 	}
-	if !prefs.GloballyEnabled {
-		t.Error("clone preferences not marked globally_enabled")
+	if !prefs.GlobalSetupCompleted {
+		t.Error("clone preferences not marked global_setup_completed")
 	}
 	// The invisible guarantee: setup must not create any worktree file.
 	if _, err := os.Lstat(filepath.Join(repoDir, ".entire")); !os.IsNotExist(err) {
@@ -100,7 +103,7 @@ func TestMaybeEnsureGlobalSetup_MarkerShortCircuits(t *testing.T) {
 	ctx := t.Context()
 
 	if err := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
-		p.GloballyEnabled = true
+		p.GlobalSetupCompleted = true
 		return nil
 	}); err != nil {
 		t.Fatalf("pre-mark clone preferences: %v", err)
@@ -148,8 +151,173 @@ func TestMaybeEnsureGlobalSetup_RepoLevelSetupWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load clone preferences: %v", err)
 	}
-	if prefs.GloballyEnabled {
-		t.Error("clone preferences marked globally_enabled in a repo-enabled repo")
+	if prefs.GlobalSetupCompleted {
+		t.Error("clone preferences marked global_setup_completed in a repo-enabled repo")
+	}
+}
+
+// TestMaybeEnsureGlobalSetup_WorktreeHooksPath pins the hooksPath guard: when
+// core.hooksPath resolves inside the worktree (e.g. a committed .husky dir),
+// the lazy setup must not install hooks there — a worktree write would break
+// invisibility. The rest of the setup still runs, and the marker IS set:
+// worktree-resident hooksPath is a stable repo property, not a transient
+// failure, and `entire doctor` is the surface that explains it.
+func TestMaybeEnsureGlobalSetup_WorktreeHooksPath(t *testing.T) {
+	repoDir := newGlobalSetupRepo(t)
+	gitCfg := exec.CommandContext(t.Context(), "git", "config", "core.hooksPath", ".husky")
+	gitCfg.Dir = repoDir
+	if out, err := gitCfg.CombinedOutput(); err != nil {
+		t.Fatalf("git config core.hooksPath: %v\n%s", err, out)
+	}
+	ClearHooksDirCache()
+	t.Cleanup(ClearHooksDirCache)
+	enableGlobalTier(t)
+	ctx := t.Context()
+
+	MaybeEnsureGlobalSetup(ctx)
+
+	// No worktree writes: neither the hooks dir nor .entire may appear.
+	if _, err := os.Lstat(filepath.Join(repoDir, ".husky")); !os.IsNotExist(err) {
+		t.Errorf(".husky created in the worktree by lazy setup (err=%v)", err)
+	}
+	if _, err := os.Lstat(filepath.Join(repoDir, ".entire")); !os.IsNotExist(err) {
+		t.Errorf(".entire exists in worktree (err=%v)", err)
+	}
+	if IsGitHookInstalledInDir(ctx, repoDir) {
+		t.Error("git hooks reported installed despite worktree-resident hooksPath")
+	}
+	// The ref half still ran, and the marker is set (documented choice).
+	if !primaryRefExists(t, repoDir) {
+		t.Error("primary metadata ref not created")
+	}
+	prefs, err := settings.LoadClonePreferences(ctx)
+	if err != nil {
+		t.Fatalf("load clone preferences: %v", err)
+	}
+	if !prefs.GlobalSetupCompleted {
+		t.Error("marker not set: setup did everything it safely could and must not retry forever")
+	}
+}
+
+// TestMaybeEnsureGlobalSetup_CorruptPreferences pins the repair path: a
+// corrupt clone preferences file must not permanently kill the lazy setup.
+// Setup treats it as fresh, proceeds, and the marker write recreates the
+// file as valid JSON.
+func TestMaybeEnsureGlobalSetup_CorruptPreferences(t *testing.T) {
+	repoDir := newGlobalSetupRepo(t)
+	enableGlobalTier(t)
+	ctx := t.Context()
+
+	prefsPath := filepath.Join(repoDir, ".git", "entire", "preferences.json")
+	if err := os.MkdirAll(filepath.Dir(prefsPath), 0o750); err != nil {
+		t.Fatalf("mkdir prefs dir: %v", err)
+	}
+	if err := os.WriteFile(prefsPath, []byte(`{not json`), 0o644); err != nil {
+		t.Fatalf("write corrupt prefs: %v", err)
+	}
+
+	MaybeEnsureGlobalSetup(ctx)
+
+	if !IsGitHookInstalledInDir(ctx, repoDir) {
+		t.Error("git hooks not installed despite corrupt preferences (setup permanently wedged)")
+	}
+	prefs, err := settings.LoadClonePreferences(ctx)
+	if err != nil {
+		t.Fatalf("clone preferences not repaired: %v", err)
+	}
+	if !prefs.GlobalSetupCompleted {
+		t.Error("repaired clone preferences not marked global_setup_completed")
+	}
+}
+
+// TestMaybeEnsureGlobalSetup_PartialFailureRetries pins the marker's
+// only-after-success contract: when part of the setup fails (here: an
+// unwritable hooks dir), the marker must NOT be set, and the next hook
+// activity retries and completes.
+func TestMaybeEnsureGlobalSetup_PartialFailureRetries(t *testing.T) {
+	if runtime.GOOS == goosWindows {
+		t.Skip("chmod-based read-only directory is POSIX-specific")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory write permissions are not enforced")
+	}
+	repoDir := newGlobalSetupRepo(t)
+	enableGlobalTier(t)
+	ctx := t.Context()
+
+	hooksDir := filepath.Join(repoDir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("mkdir hooks dir: %v", err)
+	}
+	if err := os.Chmod(hooksDir, 0o500); err != nil {
+		t.Fatalf("chmod hooks dir: %v", err)
+	}
+	restored := false
+	restore := func() {
+		if !restored {
+			if chmodErr := os.Chmod(hooksDir, 0o755); chmodErr != nil {
+				t.Logf("restore hooks dir permissions: %v", chmodErr)
+			}
+			restored = true
+		}
+	}
+	t.Cleanup(restore)
+
+	MaybeEnsureGlobalSetup(ctx)
+
+	prefs, err := settings.LoadClonePreferences(ctx)
+	if err != nil {
+		t.Fatalf("load clone preferences: %v", err)
+	}
+	if prefs.GlobalSetupCompleted {
+		t.Fatal("marker set despite hook install failure — partial failure latched as done")
+	}
+
+	restore()
+	MaybeEnsureGlobalSetup(ctx)
+
+	if !IsGitHookInstalledInDir(ctx, repoDir) {
+		t.Error("git hooks not installed on retry")
+	}
+	prefs, err = settings.LoadClonePreferences(ctx)
+	if err != nil {
+		t.Fatalf("load clone preferences after retry: %v", err)
+	}
+	if !prefs.GlobalSetupCompleted {
+		t.Error("marker not set after successful retry")
+	}
+}
+
+// TestMaybeEnsureGlobalSetup_ExcludedRepo pins the exclude-list interplay:
+// with the tier on but the repo matching exclude_paths, the strict gate
+// (settings.GlobalModeActive) keeps the lazy setup out entirely — no hooks,
+// no ref, no marker.
+//
+// Documented acceptance: the invisible ROUTING probe in paths deliberately
+// ignores exclude lists (see userGlobalTierEnabled — a strict superset of
+// the strict gate), so a non-hook `entire` command run inside an excluded
+// repo may still write its log under .git/entire/worktree/. That write is
+// inside .git — invisible by construction — and is accepted.
+func TestMaybeEnsureGlobalSetup_ExcludedRepo(t *testing.T) {
+	repoDir := newGlobalSetupRepo(t)
+	configDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", configDir)
+	userSettings := fmt.Sprintf(`{"global":{"enabled":true,"exclude_paths":[%q]}}`, repoDir)
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(userSettings), 0o600); err != nil {
+		t.Fatalf("write user settings: %v", err)
+	}
+	ctx := t.Context()
+
+	MaybeEnsureGlobalSetup(ctx)
+
+	if IsGitHookInstalledInDir(ctx, repoDir) {
+		t.Error("git hooks installed in an excluded repo")
+	}
+	if primaryRefExists(t, repoDir) {
+		t.Error("primary metadata ref created in an excluded repo")
+	}
+	if _, err := os.Lstat(filepath.Join(repoDir, ".git", "entire", "preferences.json")); !os.IsNotExist(err) {
+		t.Errorf("clone preferences created in an excluded repo (err=%v)", err)
 	}
 }
 

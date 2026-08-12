@@ -546,10 +546,10 @@ func TestGetGitCommonDir_ReturnsValidPath(t *testing.T) {
 	commonDir, err := getGitCommonDir(context.Background())
 	require.NoError(t, err)
 
-	// getGitCommonDir returns a relative path from cwd; resolve it to absolute for comparison
-	absCommonDir, err := filepath.Abs(commonDir)
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(dir, ".git"), absCommonDir)
+	// getGitCommonDir returns an absolute path (a relative rev-parse result is
+	// absolutized against the cwd it was resolved in).
+	assert.True(t, filepath.IsAbs(commonDir), "getGitCommonDir returned a relative path: %s", commonDir)
+	assert.Equal(t, filepath.Join(dir, ".git"), commonDir)
 
 	// The path should actually exist
 	info, err := os.Stat(commonDir)

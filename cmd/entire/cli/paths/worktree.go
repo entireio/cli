@@ -10,8 +10,9 @@ import (
 )
 
 // WorktreeIDHashLength is the number of hex characters HashWorktreeID
-// returns (mirrored by checkpoint.WorktreeIDHashLength for shadow branch
-// name parsing).
+// returns. checkpoint.WorktreeIDHashLength aliases it for package locality;
+// that mirror currently has no consumers of its own — nothing parses shadow
+// branch names by hash length.
 const WorktreeIDHashLength = 6
 
 // HashWorktreeID returns a short stable hash of a worktree identifier (a
@@ -26,7 +27,8 @@ func HashWorktreeID(worktreeID string) string {
 }
 
 // GetWorktreeID returns the internal git worktree identifier for the given path.
-// For the main worktree (where .git is a directory), returns empty string.
+// For the main worktree, returns empty string — whether .git is a directory or
+// a `git init/clone --separate-git-dir` .git file pointing at a full git dir.
 // For linked worktrees (where .git is a file), extracts the name from
 // .git/worktrees/<name>/ path. This name is stable across `git worktree move`.
 func GetWorktreeID(worktreePath string) (string, error) {
@@ -58,7 +60,74 @@ func GetWorktreeID(worktreePath string) (string, error) {
 		return worktreeID, nil
 	}
 
+	// A .git file whose gitdir matches no known linked-worktree layout is not
+	// automatically an error: `git init/clone --separate-git-dir` produces
+	// exactly this shape for a MAIN worktree (a .git file pointing at a full
+	// git dir at an arbitrary path), whose worktree ID is "". Distinguish on
+	// disk rather than lexically: a linked-worktree admin dir
+	// (<commondir>/worktrees/<id>) always contains a `commondir` file, a full
+	// git dir never does.
+	resolved := resolveGitdirPath(worktreePath, gitdir)
+	if isMainWorktreeGitDir(resolved) {
+		return "", nil
+	}
+
+	// A LINKED worktree of a separate-git-dir repo also matches no lexical
+	// marker (its admin dir is <sepdir>/worktrees/<id>, and <sepdir> is not
+	// named .git or .bare). When the resolved dir is a worktree admin dir
+	// (has a commondir file), the ID is whatever follows the last
+	// /worktrees/ segment — git always places admin dirs there.
+	if isLinkedWorktreeAdminDir(resolved) {
+		normalized := strings.TrimSuffix(strings.ReplaceAll(gitdir, "\\", "/"), "/")
+		if idx := strings.LastIndex(normalized, "/worktrees/"); idx >= 0 {
+			return normalized[idx+len("/worktrees/"):], nil
+		}
+	}
+
 	return "", fmt.Errorf("unexpected gitdir format (no worktrees): %s", gitdir)
+}
+
+// resolveGitdirPath resolves a .git-file gitdir value (which may be relative
+// to the worktree root) to a filesystem path suitable for probing.
+func resolveGitdirPath(worktreePath, gitdir string) string {
+	gitdir = filepath.FromSlash(strings.ReplaceAll(gitdir, "\\", "/"))
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(worktreePath, gitdir)
+	}
+	return filepath.Clean(gitdir)
+}
+
+// isMainWorktreeGitDir reports whether path is a full (main-worktree) git
+// directory, as opposed to a linked-worktree admin dir. Both contain HEAD;
+// only linked-worktree admin dirs contain a `commondir` file pointing back at
+// the shared git dir. A path that is missing or has no HEAD is neither.
+func isMainWorktreeGitDir(path string) bool {
+	info, err := os.Stat(path) //nolint:gosec // path comes from the repo's own .git file; read-only probe
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(path, "HEAD")); err != nil { //nolint:gosec // read-only probe of the repo's own gitdir
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(path, "commondir")); err == nil { //nolint:gosec // read-only probe of the repo's own gitdir
+		return false // linked-worktree admin dir with an unrecognized layout
+	}
+	return true
+}
+
+// isLinkedWorktreeAdminDir reports whether path is a linked-worktree admin
+// dir (<commondir>/worktrees/<id>): a directory with both HEAD and the
+// commondir file pointing back at the shared git dir.
+func isLinkedWorktreeAdminDir(path string) bool {
+	info, err := os.Stat(path) //nolint:gosec // path comes from the repo's own .git file; read-only probe
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(path, "HEAD")); err != nil { //nolint:gosec // read-only probe of the repo's own gitdir
+		return false
+	}
+	_, err = os.Stat(filepath.Join(path, "commondir")) //nolint:gosec // read-only probe of the repo's own gitdir
+	return err == nil
 }
 
 func parseWorktreeID(gitdir string) (string, bool) {

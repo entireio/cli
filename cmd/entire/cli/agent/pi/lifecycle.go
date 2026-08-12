@@ -276,11 +276,19 @@ const piHookCacheSubdir = "pi"
 // firing; the framework records the cached path as SessionRef in
 // checkpoint metadata, so subsequent operations on hooked sessions go
 // through the recorded path rather than re-resolving via GetSessionDir.
+// resolveSessionDir returns "" when the runtime path is unroutable in a
+// tier-owned repo (paths.IsUnroutableRuntimePath): the cwd fallback below
+// would place the cache in the worktree of a repo the global tier must keep
+// invisible. Callers skip the cache operation on "".
 func resolveSessionDir(ctx context.Context) string {
 	// AbsPath (not a bare WorktreeRoot join) so globally tracked repos keep
 	// this cache out of the worktree (invisible-mode routing in paths).
-	if dir, err := paths.AbsPath(ctx, paths.EntireTmpDir+"/"+piHookCacheSubdir); err == nil {
+	dir, err := paths.AbsPath(ctx, paths.EntireTmpDir+"/"+piHookCacheSubdir)
+	if err == nil {
 		return dir
+	}
+	if paths.IsUnroutableRuntimePath(err) {
+		return ""
 	}
 	//nolint:forbidigo // fallback when no git repo (tests run outside repos)
 	wd, wdErr := os.Getwd()
@@ -295,6 +303,9 @@ func cacheSessionID(ctx context.Context, id string) {
 		return
 	}
 	dir := resolveSessionDir(ctx)
+	if dir == "" {
+		return
+	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		logging.Debug(ctx, "pi: cache session id mkdir", slog.String("err", err.Error()))
 		return
@@ -323,6 +334,9 @@ func extractModelFromPiSessionFile(path string) string {
 
 func readCachedSessionID(ctx context.Context) string {
 	dir := resolveSessionDir(ctx)
+	if dir == "" {
+		return ""
+	}
 	//nolint:gosec // path constructed from validated repo root
 	data, err := os.ReadFile(filepath.Join(dir, activeSessionFile))
 	if err != nil {
@@ -333,6 +347,9 @@ func readCachedSessionID(ctx context.Context) string {
 
 func clearCachedSessionID(ctx context.Context) {
 	dir := resolveSessionDir(ctx)
+	if dir == "" {
+		return
+	}
 	_ = os.Remove(filepath.Join(dir, activeSessionFile))
 }
 
@@ -355,6 +372,9 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 		return ""
 	}
 	dir := resolveSessionDir(ctx)
+	if dir == "" {
+		return ""
+	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		logging.Warn(ctx, "pi: capture transcript mkdir failed",
 			slog.String("dir", dir), slog.String("err", err.Error()))

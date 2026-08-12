@@ -135,17 +135,22 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		return nil
 	}
 
-	// Lazy invisible setup for globally tracked repos (no repo-level setup,
-	// user-global tier active): first hook activity installs the git hooks and
-	// seeds the checkpoint metadata ref, entirely inside .git/. Cheap no-op
-	// once the clone-prefs marker is set or when repo-level setup exists. The
-	// git-hook route triggers the same setup (hooks_git_cmd.go).
-	strategy.MaybeEnsureGlobalSetup(cmd.Context())
-
 	if initLogging {
 		cleanup := initHookLogging(cmd.Context())
 		defer cleanup()
 	}
+
+	// Lazy invisible setup for globally tracked repos (no repo-level setup,
+	// user-global tier active): first hook activity installs the git hooks
+	// (skipped when core.hooksPath resolves inside the worktree — see
+	// MaybeEnsureGlobalSetup) and seeds the checkpoint metadata ref; nothing
+	// it does creates a worktree file. Cheap no-op once the clone-prefs
+	// marker is set or when repo-level setup exists. Runs after logging is
+	// initialized — on the built-in agent route the parent command's
+	// PersistentPreRunE did that, on the RunE fallback the block above did —
+	// so its Debug-level failure ladder is recorded. The git-hook route
+	// triggers the same setup (hooks_git_cmd.go).
+	strategy.MaybeEnsureGlobalSetup(cmd.Context())
 
 	// Initialize logging context with agent name
 	ctx := logging.WithAgent(logging.WithComponent(cmd.Context(), "hooks"), agentName)

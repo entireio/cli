@@ -126,6 +126,96 @@ func TestAbsPath_InvisibleRouting_GlobalTierOff(t *testing.T) {
 	}
 }
 
+// TestAbsPath_InvisibleRouting_ProbeFailure pins the fail-toward-invisibility
+// contract: when the global tier owns the repo but the routing probe fails,
+// AbsPath must ERROR for runtime-data paths (ErrUnroutableRuntimePath), never
+// fall open into the worktree. Non-runtime paths keep resolving normally.
+func TestAbsPath_InvisibleRouting_ProbeFailure(t *testing.T) {
+	repo := newInvisibleTestRepo(t)
+	setGlobalTier(t, `{"global":{"enabled":true}}`)
+	paths.SetInvisibleProbeFailureForTesting(true)
+	t.Cleanup(func() {
+		paths.SetInvisibleProbeFailureForTesting(false)
+		paths.ClearInvisibleRuntimeCache()
+	})
+
+	for _, rel := range []string{".entire/metadata/s1/prompt.txt", ".entire/logs", ".entire/tmp"} {
+		_, err := paths.AbsPath(t.Context(), rel)
+		if err == nil {
+			t.Errorf("AbsPath(%q) succeeded; want ErrUnroutableRuntimePath", rel)
+			continue
+		}
+		if !paths.IsUnroutableRuntimePath(err) {
+			t.Errorf("AbsPath(%q) error %v does not carry ErrUnroutableRuntimePath", rel, err)
+		}
+	}
+
+	// Non-runtime paths are unaffected by the probe failure.
+	want := filepath.Join(repo, ".entire", "settings.json")
+	if got := mustAbsPath(t, ".entire/settings.json"); got != want {
+		t.Errorf("AbsPath(.entire/settings.json) = %q, want %q", got, want)
+	}
+	if got := mustAbsPath(t, "src/main.go"); got != filepath.Join(repo, "src", "main.go") {
+		t.Errorf("AbsPath(src/main.go) = %q", got)
+	}
+}
+
+// TestAbsPath_InvisibleRouting_SeparateGitDir pins that the common
+// `git init --separate-git-dir` layout routes CORRECTLY (to the separate git
+// dir) rather than failing: its .git-file gitdir matches no lexical worktree
+// marker, which previously errored the worktree-ID probe and dropped routing
+// into the worktree.
+func TestAbsPath_InvisibleRouting_SeparateGitDir(t *testing.T) {
+	repoDir, gitDir := initSeparateGitDirRepo(t)
+	t.Chdir(repoDir)
+	paths.ClearWorktreeRootCache()
+	paths.ClearInvisibleRuntimeCache()
+	t.Cleanup(func() {
+		paths.ClearWorktreeRootCache()
+		paths.ClearInvisibleRuntimeCache()
+	})
+	setGlobalTier(t, `{"global":{"enabled":true}}`)
+
+	want := filepath.Join(gitDir, "entire", "worktree", paths.HashWorktreeID(""), "logs")
+	if got := mustAbsPath(t, ".entire/logs"); got != want {
+		t.Errorf("AbsPath(.entire/logs) = %q, want separate-git-dir path %q", got, want)
+	}
+}
+
+// TestAbsPath_InvisibleRouting_WorktreeMoveStable pins that the routed base
+// survives `git worktree move`: the namespace key hashes git's internal
+// worktree ID, which is stable across moves, so runtime data written before
+// a move stays reachable after it.
+func TestAbsPath_InvisibleRouting_WorktreeMoveStable(t *testing.T) {
+	repo := newInvisibleTestRepo(t)
+	testutil.WriteFile(t, repo, "f.txt", "init")
+	testutil.GitAdd(t, repo, "f.txt")
+	testutil.GitCommit(t, repo, "init")
+	setGlobalTier(t, `{"global":{"enabled":true}}`)
+
+	linked := filepath.Join(repo, ".worktrees", "wt-move")
+	runGit(t, repo, "worktree", "add", linked)
+
+	t.Chdir(linked)
+	paths.ClearWorktreeRootCache()
+	paths.ClearInvisibleRuntimeCache()
+	baseBefore := mustAbsPath(t, ".entire/logs")
+
+	// Move from outside the worktree, then resolve from its new location.
+	t.Chdir(repo)
+	moved := filepath.Join(repo, ".worktrees", "wt-moved")
+	runGit(t, repo, "worktree", "move", linked, moved)
+
+	t.Chdir(moved)
+	paths.ClearWorktreeRootCache()
+	paths.ClearInvisibleRuntimeCache()
+	baseAfter := mustAbsPath(t, ".entire/logs")
+
+	if baseBefore != baseAfter {
+		t.Errorf("routed base changed across git worktree move:\n before: %s\n after:  %s", baseBefore, baseAfter)
+	}
+}
+
 // TestAbsPath_InvisibleRouting_LinkedWorktree pins two properties of the
 // routed base in a linked worktree: it lives under the git COMMON dir (the
 // main repository's .git, not the per-worktree .git/worktrees/<name>/ dir),

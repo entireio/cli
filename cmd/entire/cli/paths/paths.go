@@ -116,6 +116,12 @@ func ClearWorktreeRootCache() {
 // dir instead of the worktree, so a globally tracked repo never gains worktree
 // files (see invisibleRuntimeBase in invisible.go). Repos with any repo-level
 // setup resolve every path to the worktree, exactly as before.
+//
+// When the global tier owns the repo but the git-side location cannot be
+// resolved, runtime-data paths return an error carrying
+// ErrUnroutableRuntimePath instead of a worktree path: tier-owned + unroutable
+// must never produce worktree writes. Callers detect it with
+// IsUnroutableRuntimePath and skip the operation.
 func AbsPath(ctx context.Context, relPath string) (string, error) {
 	if filepath.IsAbs(relPath) {
 		return relPath, nil
@@ -127,7 +133,11 @@ func AbsPath(ctx context.Context, relPath string) (string, error) {
 	}
 
 	if sub, ok := runtimeDataSubpath(relPath); ok {
-		if base := invisibleRuntimeBase(ctx, root); base != "" {
+		base, baseErr := invisibleRuntimeBase(ctx, root)
+		if baseErr != nil {
+			return "", fmt.Errorf("resolving runtime path %s: %w", relPath, baseErr)
+		}
+		if base != "" {
 			return filepath.Join(base, filepath.FromSlash(sub)), nil
 		}
 	}

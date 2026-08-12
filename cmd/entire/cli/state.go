@@ -105,7 +105,10 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 	}
 
 	// Get absolute path for tmp directory
-	tmpDirAbs := resolveTmpDir(ctx)
+	tmpDirAbs, err := resolveTmpDir(ctx)
+	if err != nil {
+		return err
+	}
 
 	// Create tmp directory if it doesn't exist
 	if err := os.MkdirAll(tmpDirAbs, 0o750); err != nil {
@@ -167,7 +170,10 @@ func LoadPrePromptState(ctx context.Context, sessionID string) (*PrePromptState,
 		return nil, fmt.Errorf("invalid session ID for pre-prompt state: %w", err)
 	}
 
-	tmpDirAbs := resolveTmpDir(ctx)
+	tmpDirAbs, err := resolveTmpDir(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	root, err := os.OpenRoot(tmpDirAbs)
 	if err != nil {
@@ -209,7 +215,10 @@ func CleanupPrePromptState(ctx context.Context, sessionID string) error {
 // cleanupTmpStateFile removes one state file from .entire/tmp, treating a
 // missing directory as already clean.
 func cleanupTmpStateFile(ctx context.Context, fileName string) error {
-	tmpDirAbs := resolveTmpDir(ctx)
+	tmpDirAbs, err := resolveTmpDir(ctx)
+	if err != nil {
+		return nil // unroutable: nothing was ever written there, nothing to clean
+	}
 
 	root, err := os.OpenRoot(tmpDirAbs)
 	if err != nil {
@@ -417,12 +426,20 @@ func mergeUnique(base, extra []string) []string {
 
 // resolveTmpDir returns the absolute path to the .entire/tmp directory,
 // falling back to a relative path if the repo root can't be determined.
-func resolveTmpDir(ctx context.Context) string {
+//
+// Exception to the fallback: when the runtime path is unroutable in a
+// tier-owned repo (paths.IsUnroutableRuntimePath), the error is returned —
+// a relative fallback there would create worktree files in a repo the global
+// tier must keep invisible. Callers skip the tmp-state operation instead.
+func resolveTmpDir(ctx context.Context) (string, error) {
 	abs, err := paths.AbsPath(ctx, paths.EntireTmpDir)
-	if err != nil {
-		return paths.EntireTmpDir
+	if paths.IsUnroutableRuntimePath(err) {
+		return "", fmt.Errorf("resolving tmp dir: %w", err)
 	}
-	return abs
+	if err != nil {
+		return paths.EntireTmpDir, nil //nolint:nilerr // deliberate legacy fallback: outside a repo the relative path preserves historical behavior
+	}
+	return abs, nil
 }
 
 // getUntrackedFilesForState returns a list of untracked files using go-git
@@ -483,7 +500,10 @@ func CapturePreTaskState(ctx context.Context, toolUseID string) error {
 	}
 
 	// Get absolute path for tmp directory
-	tmpDirAbs := resolveTmpDir(ctx)
+	tmpDirAbs, err := resolveTmpDir(ctx)
+	if err != nil {
+		return err
+	}
 
 	// Create tmp directory if it doesn't exist
 	if err := os.MkdirAll(tmpDirAbs, 0o750); err != nil {
@@ -531,7 +551,10 @@ func LoadPreTaskState(ctx context.Context, toolUseID string) (*PreTaskState, err
 		return nil, fmt.Errorf("invalid tool use ID for pre-task state: %w", err)
 	}
 
-	tmpDirAbs := resolveTmpDir(ctx)
+	tmpDirAbs, err := resolveTmpDir(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	root, err := os.OpenRoot(tmpDirAbs)
 	if err != nil {
@@ -576,7 +599,10 @@ const preTaskFilePrefix = "pre-task-"
 // modified one.
 // Works correctly from any subdirectory within the repository.
 func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found bool) {
-	tmpDirAbs := resolveTmpDir(ctx)
+	tmpDirAbs, err := resolveTmpDir(ctx)
+	if err != nil {
+		return "", false
+	}
 	entries, err := os.ReadDir(tmpDirAbs)
 	if err != nil {
 		return "", false
@@ -633,8 +659,15 @@ func GetNextCheckpointSequence(ctx context.Context, sessionID, taskToolUseID str
 	// Resolve via AbsPath: it anchors the read at the repo root regardless of
 	// the hook's cwd, and in globally tracked repos it follows the
 	// invisible-mode metadata location under the git common dir.
-	if abs, err := paths.AbsPath(ctx, checkpointsDir); err == nil {
+	abs, err := paths.AbsPath(ctx, checkpointsDir)
+	switch {
+	case err == nil:
 		checkpointsDir = abs
+	case paths.IsUnroutableRuntimePath(err):
+		// Tier-owned repo with an unresolvable git-side location: the legacy
+		// cwd-relative read below would look inside the worktree of a repo
+		// that must stay invisible. Skip the read; the sequence starts at 1.
+		return 1
 	}
 
 	entries, err := os.ReadDir(checkpointsDir)

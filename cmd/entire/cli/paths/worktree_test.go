@@ -121,6 +121,46 @@ func TestGetWorktreeID(t *testing.T) {
 			wantErr:    true,
 			errContain: "unexpected gitdir format",
 		},
+		{
+			// git init --separate-git-dir shape: gitdir points at a full git
+			// dir (has HEAD, no commondir file) at a path that matches no
+			// lexical worktree marker — a MAIN worktree, ID "".
+			name: "separate-git-dir main worktree (on-disk git dir)",
+			setupFunc: func(dir string) error {
+				gd := filepath.Join(dir, "sep-gitdir")
+				if err := os.MkdirAll(gd, 0o755); err != nil {
+					return err
+				}
+				if err := os.WriteFile(filepath.Join(gd, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+					return err
+				}
+				content := "gitdir: " + gd + "\n"
+				return os.WriteFile(filepath.Join(dir, ".git"), []byte(content), 0o644)
+			},
+			wantID: "",
+		},
+		{
+			// A worktree admin dir (has HEAD and a commondir file) reached
+			// through a gitdir with no /worktrees/ segment at all: git never
+			// produces this, so it stays an error rather than guessing an ID.
+			name: "admin dir without worktrees segment stays an error",
+			setupFunc: func(dir string) error {
+				adm := filepath.Join(dir, "adm")
+				if err := os.MkdirAll(adm, 0o755); err != nil {
+					return err
+				}
+				if err := os.WriteFile(filepath.Join(adm, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+					return err
+				}
+				if err := os.WriteFile(filepath.Join(adm, "commondir"), []byte("../..\n"), 0o644); err != nil {
+					return err
+				}
+				content := "gitdir: " + adm + "\n"
+				return os.WriteFile(filepath.Join(dir, ".git"), []byte(content), 0o644)
+			},
+			wantErr:    true,
+			errContain: "unexpected gitdir format",
+		},
 	}
 
 	for _, tt := range tests {

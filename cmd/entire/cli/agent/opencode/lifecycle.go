@@ -176,6 +176,11 @@ func sessionTranscriptPath(ctx context.Context, sessionID string) (string, error
 	// AbsPath (not a bare WorktreeRoot join) so globally tracked repos keep
 	// this cache out of the worktree (invisible-mode routing in paths).
 	tmpFile, err := paths.AbsPath(ctx, paths.EntireTmpDir+"/"+sessionID+".json")
+	if paths.IsUnroutableRuntimePath(err) {
+		// Tier-owned repo, git-side location unresolvable: the relative
+		// fallback would place the cache in the worktree — refuse instead.
+		return "", fmt.Errorf("resolving transcript cache path: %w", err)
+	}
 	if err != nil {
 		tmpFile = filepath.Join(".", paths.EntireTmpDir, sessionID+".json")
 	}
@@ -197,6 +202,11 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 	// Resolve the temp directory via AbsPath so globally tracked repos keep
 	// this cache out of the worktree (invisible-mode routing in paths).
 	tmpDir, err := paths.AbsPath(ctx, paths.EntireTmpDir)
+	if paths.IsUnroutableRuntimePath(err) {
+		// Tier-owned repo, git-side location unresolvable: the relative
+		// fallback would place the cache in the worktree — refuse instead.
+		return "", fmt.Errorf("resolving transcript cache dir: %w", err)
+	}
 	if err != nil {
 		tmpDir = filepath.Join(".", paths.EntireTmpDir)
 	}

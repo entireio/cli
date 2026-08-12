@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 // Test constants to avoid goconst warnings
@@ -87,6 +89,44 @@ func TestInit_CreatesLogFile(t *testing.T) {
 
 	if _, err := os.Stat(testLogFilePath(tmpDir)); os.IsNotExist(err) {
 		t.Errorf("Init() did not create log file at %s", testLogFilePath(tmpDir))
+	}
+}
+
+// TestInit_UnroutableRuntimePath_SkipsFileLogging pins the
+// fail-toward-invisibility contract for logging: when the global tier owns
+// the repo but the routing probe fails, Init must NOT fall back to creating
+// ./.entire/logs in the worktree — it skips file logging (stderr logger).
+func TestInit_UnroutableRuntimePath_SkipsFileLogging(t *testing.T) {
+	tmpDir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(tmpDir); err == nil {
+		tmpDir = resolved
+	}
+	initGitRepo(t, tmpDir)
+
+	// Global tier on, no repo-level settings.
+	configDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", configDir)
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"),
+		[]byte(`{"global":{"enabled":true}}`), 0o600); err != nil {
+		t.Fatalf("write user settings: %v", err)
+	}
+
+	paths.ClearWorktreeRootCache()
+	paths.ClearInvisibleRuntimeCache()
+	paths.SetInvisibleProbeFailureForTesting(true)
+	t.Cleanup(func() {
+		paths.SetInvisibleProbeFailureForTesting(false)
+		paths.ClearInvisibleRuntimeCache()
+		paths.ClearWorktreeRootCache()
+	})
+
+	if err := Init(context.Background(), testSessionID); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	defer Close()
+
+	if _, err := os.Lstat(filepath.Join(tmpDir, ".entire")); !os.IsNotExist(err) {
+		t.Errorf("Init created a worktree .entire dir despite unroutable runtime path (err=%v)", err)
 	}
 }
 

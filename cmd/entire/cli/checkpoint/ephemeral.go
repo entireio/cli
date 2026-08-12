@@ -37,13 +37,17 @@ const (
 	ShadowBranchHashLength = 7
 
 	// WorktreeIDHashLength is the number of hex characters used for worktree ID hash.
+	// Permanent alias of paths.WorktreeIDHashLength for package locality —
+	// checkpoint callers read the shadow-branch naming constants from this
+	// block; do not "clean it up" back to a direct paths reference.
 	WorktreeIDHashLength = paths.WorktreeIDHashLength
 )
 
 // HashWorktreeID returns a short hash of the worktree identifier.
-// Used to create unique shadow branch names per worktree. The derivation
-// lives in paths (which this package imports) so invisible routing can share
-// the exact same per-worktree namespace key.
+// Used to create unique shadow branch names per worktree. Permanent alias
+// for package locality: the derivation lives in paths (which this package
+// imports) so invisible routing shares the exact same per-worktree
+// namespace key, while checkpoint callers keep a local name.
 func HashWorktreeID(worktreeID string) string {
 	return paths.HashWorktreeID(worktreeID)
 }

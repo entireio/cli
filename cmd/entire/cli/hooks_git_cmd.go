@@ -177,6 +177,9 @@ func newHooksGitCmd() *cobra.Command {
 				gitHooksDisabled = true
 				return nil
 			}
+			// Logging first: the lazy setup below reports every failure at
+			// Debug, which is lost if logging isn't initialized yet.
+			hookLogCleanup = initHookLogging(ctx)
 			// Lazy invisible setup for globally tracked repos — the git-hook
 			// half of the trigger (agent hooks run it in executeAgentHook).
 			// Cheap no-op once the clone-prefs marker is set.
@@ -188,7 +191,6 @@ func newHooksGitCmd() *cobra.Command {
 			discoveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			external.DiscoverAndRegister(discoveryCtx)
-			hookLogCleanup = initHookLogging(ctx)
 			return nil
 		},
 		PersistentPostRunE: func(_ *cobra.Command, _ []string) error {
