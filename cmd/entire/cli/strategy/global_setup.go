@@ -29,7 +29,8 @@ import (
 // this, so those Debug lines reach the routed log file; globally tracked
 // repos have no repo settings to raise log_level, so set ENTIRE_LOG_LEVEL=debug
 // to see them. The clone-prefs marker makes the repeat call cheap: one
-// preferences read, no git work.
+// preferences read and no git mutations (locating the preferences file spawns
+// one `git rev-parse --git-common-dir`).
 func MaybeEnsureGlobalSetup(ctx context.Context) {
 	logCtx := logging.WithComponent(ctx, "global-setup")
 
@@ -60,7 +61,7 @@ func MaybeEnsureGlobalSetup(ctx context.Context) {
 	}
 
 	if !IsGitHookInstalled(ctx) {
-		worktreeResident, hooksDir, resolveErr := hooksDirIsWorktreeResident(ctx)
+		worktreeResident, hooksDir, resolveErr := HooksDirIsWorktreeResident(ctx)
 		switch {
 		case resolveErr != nil:
 			// Can't tell where the hooks would land — installing anyway could
@@ -122,13 +123,13 @@ func MaybeEnsureGlobalSetup(ctx context.Context) {
 	logging.Debug(logCtx, "global lazy setup completed")
 }
 
-// hooksDirIsWorktreeResident reports whether the repo's active hooks
+// HooksDirIsWorktreeResident reports whether the repo's active hooks
 // directory (after core.hooksPath resolution) lives in the WORKING TREE —
 // inside the worktree root but outside the git dir. The default .git/hooks is
 // under the worktree root lexically but inside the git dir, so it is not
 // worktree-resident; a committed hooks dir like core.hooksPath=.husky is.
 // Returns the resolved hooks dir for logging.
-func hooksDirIsWorktreeResident(ctx context.Context) (bool, string, error) {
+func HooksDirIsWorktreeResident(ctx context.Context) (bool, string, error) {
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
 		return false, "", err

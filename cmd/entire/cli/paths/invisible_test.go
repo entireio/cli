@@ -182,6 +182,40 @@ func TestAbsPath_InvisibleRouting_SeparateGitDir(t *testing.T) {
 	}
 }
 
+// TestAbsPath_InvisibleRouting_WorktreeMoveStable pins that the routed base
+// survives `git worktree move`: the namespace key hashes git's internal
+// worktree ID, which is stable across moves, so runtime data written before
+// a move stays reachable after it.
+func TestAbsPath_InvisibleRouting_WorktreeMoveStable(t *testing.T) {
+	repo := newInvisibleTestRepo(t)
+	testutil.WriteFile(t, repo, "f.txt", "init")
+	testutil.GitAdd(t, repo, "f.txt")
+	testutil.GitCommit(t, repo, "init")
+	setGlobalTier(t, `{"global":{"enabled":true}}`)
+
+	linked := filepath.Join(repo, ".worktrees", "wt-move")
+	runGit(t, repo, "worktree", "add", linked)
+
+	t.Chdir(linked)
+	paths.ClearWorktreeRootCache()
+	paths.ClearInvisibleRuntimeCache()
+	baseBefore := mustAbsPath(t, ".entire/logs")
+
+	// Move from outside the worktree, then resolve from its new location.
+	t.Chdir(repo)
+	moved := filepath.Join(repo, ".worktrees", "wt-moved")
+	runGit(t, repo, "worktree", "move", linked, moved)
+
+	t.Chdir(moved)
+	paths.ClearWorktreeRootCache()
+	paths.ClearInvisibleRuntimeCache()
+	baseAfter := mustAbsPath(t, ".entire/logs")
+
+	if baseBefore != baseAfter {
+		t.Errorf("routed base changed across git worktree move:\n before: %s\n after:  %s", baseBefore, baseAfter)
+	}
+}
+
 // TestAbsPath_InvisibleRouting_LinkedWorktree pins two properties of the
 // routed base in a linked worktree: it lives under the git COMMON dir (the
 // main repository's .git, not the per-worktree .git/worktrees/<name>/ dir),

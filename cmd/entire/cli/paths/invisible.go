@@ -66,12 +66,16 @@ const invisibleRuntimeSubdir = "entire/worktree"
 
 // InvisibleRuntimeDir returns the directory invisible routing resolves
 // runtime data under for the worktree rooted at root, given the repo's
-// absolute git common dir: <commonDir>/entire/worktree/<worktree-key>.
+// git common dir: <commonDir>/entire/worktree/<worktree-key>.
+// Precondition: commonDir must be absolute — the result is joined onto it
+// verbatim, so a relative commonDir would silently produce a cwd-relative
+// runtime dir.
 // The key is HashWorktreeID over the worktree's git identifier ("" for the
 // main worktree), so every worktree of a clone gets its own namespace.
 // This is the single source of truth for the layout — the enable-time
-// migration (setup_global.go) uses it to move only the current worktree's
-// namespace.
+// migration (setup_global.go, arriving with the enable --global layer) uses
+// it to move only the current worktree's namespace, and
+// InvisibleRuntimeSubdirs enumerates the subtrees below it.
 func InvisibleRuntimeDir(commonDir, root string) (string, error) {
 	worktreeID, err := GetWorktreeID(root)
 	if err != nil {
@@ -87,12 +91,32 @@ const settingsLocalFileName = "settings.local.json"
 // runtimeDataPrefixes are the .entire subtrees that hold runtime data (as
 // opposed to configuration). Only these are ever rerouted: settings files,
 // .entire/.gitignore, and redactor packs must stay worktree-resolved — the
-// settings files' worktree presence is itself the routing discriminator.
+// settings files' worktree presence is itself the routing discriminator —
+// and .entire/worktrees (trail checkout worktrees) stays too: those are
+// working trees the user deliberately checks out and cds into, so hiding
+// them under .git would defeat their purpose, and a repo with trail
+// worktrees has repo-level setup anyway.
 var runtimeDataPrefixes = []string{EntireMetadataDir, EntireLogsDir, EntireTmpDir}
+
+// InvisibleRuntimeSubdirs returns the subtree names invisible routing places
+// under InvisibleRuntimeDir — the layout's single source of truth, derived
+// from runtimeDataPrefixes ("metadata", "logs", "tmp"). The enable-time
+// migration iterates exactly these when moving a namespace back into the
+// worktree.
+func InvisibleRuntimeSubdirs() []string {
+	subs := make([]string, len(runtimeDataPrefixes))
+	for i, prefix := range runtimeDataPrefixes {
+		subs[i] = strings.TrimPrefix(prefix, EntireDir+"/")
+	}
+	return subs
+}
 
 // runtimeDataSubpath reports whether relPath addresses runtime data and, if
 // so, returns its path relative to the .entire directory (slash-separated,
-// e.g. "metadata/<session>/prompt.txt").
+// e.g. "metadata/<session>/prompt.txt"). It assumes every entry in
+// runtimeDataPrefixes lives directly under EntireDir — the TrimPrefix below
+// strips exactly that one leading component, so a prefix outside .entire (or
+// nested deeper) would produce a wrong subpath rather than fail loudly.
 func runtimeDataSubpath(relPath string) (string, bool) {
 	rel := filepath.ToSlash(relPath)
 	for _, prefix := range runtimeDataPrefixes {
@@ -103,9 +127,14 @@ func runtimeDataSubpath(relPath string) (string, bool) {
 	return "", false
 }
 
-// invisibleBaseCache caches the routing decision per worktree root. Hooks are
-// one-shot processes, so one probe per process is enough; the root key keeps
-// in-process tests with multiple temp repos isolated.
+// invisibleCache caches the routing decision per worktree root. The root key
+// keeps in-process tests with multiple temp repos isolated. A long-lived
+// process can therefore hold a stale decision after a discriminator file
+// (.entire/settings*.json, the user-global settings file) changes; that
+// staleness is accepted for hook processes, which are short-lived, and
+// production code paths that write or delete a discriminator file must call
+// ClearInvisibleRuntimeCache — that is the invalidation contract, and the
+// enable/disable layers upstack already do so.
 var (
 	invisibleMu    sync.Mutex
 	invisibleCache struct {
@@ -188,8 +217,8 @@ func computeInvisibleRuntimeBase(ctx context.Context, root string) (string, erro
 //
 // Divergence from the strict gate is deliberately one-sided: lenient
 // decoding and no exclude lists make this probe a strict superset of the
-// strict gate, so divergence can only route reads to an empty .git-side
-// location, never produce worktree writes.
+// strict gate, so divergence can only route runtime I/O to an empty
+// .git-side location, never produce worktree writes.
 func userGlobalTierEnabled() bool {
 	// settings.json inside userdirs.Config() = settings.UserSettingsFileName.
 	data, err := os.ReadFile(filepath.Join(userdirs.Config(), "settings.json"))

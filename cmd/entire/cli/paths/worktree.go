@@ -10,8 +10,9 @@ import (
 )
 
 // WorktreeIDHashLength is the number of hex characters HashWorktreeID
-// returns (mirrored by checkpoint.WorktreeIDHashLength for shadow branch
-// name parsing).
+// returns. checkpoint.WorktreeIDHashLength aliases it for package locality;
+// that mirror currently has no consumers of its own — nothing parses shadow
+// branch names by hash length.
 const WorktreeIDHashLength = 6
 
 // HashWorktreeID returns a short stable hash of a worktree identifier (a

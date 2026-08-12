@@ -162,13 +162,79 @@ func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 	// A user commit through the installed hooks links the checkpoint.
 	env.GitCommitWithShadowHooksAsAgent("Add hello file", "hello.txt")
 	commitMsg := env.GetCommitMessage(env.GetHeadHash())
-	if _, found := trailers.ParseCheckpoint(commitMsg); !found {
+	checkpointID, found := trailers.ParseCheckpoint(commitMsg)
+	if !found {
 		t.Errorf("commit has no Entire-Checkpoint trailer:\n%s", commitMsg)
 	}
 	assertNoWorktreeEntireDir(t, env)
 	if status := gitStatusPorcelain(t, env); status != "" {
 		t.Errorf("git status not empty after commit:\n%s", status)
 	}
+
+	// Read-back through the CLI: routed data must be visible to the commands
+	// users actually run, not just present on disk.
+	statusOut, statusErr := env.RunCLIWithError("status")
+	if statusErr != nil {
+		t.Errorf("entire status failed in a globally tracked repo: %v\n%s", statusErr, statusOut)
+	}
+	listOut := env.RunCLI("checkpoint", "list", "--json")
+	if !strings.Contains(listOut, string(checkpointID)) {
+		t.Errorf("checkpoint list --json does not show the condensed checkpoint %s:\n%s", checkpointID, listOut)
+	}
+	if !strings.Contains(listOut, sessionID) {
+		t.Errorf("checkpoint list --json does not attribute the checkpoint to session %s:\n%s", sessionID, listOut)
+	}
+	// The read commands themselves must not break invisibility either.
+	assertNoWorktreeEntireDir(t, env)
+	if status := gitStatusPorcelain(t, env); status != "" {
+		t.Errorf("git status not empty after CLI read-back:\n%s", status)
+	}
+}
+
+// TestGlobalEnable_GitHookRouteTriggersSetup pins the git-hook half of the
+// lazy-setup trigger: with hooks already present but the clone-prefs marker
+// absent (e.g. cleared by doctor after drift), a plain git-hook invocation —
+// no agent hook involved — re-runs the setup and restores the marker.
+func TestGlobalEnable_GitHookRouteTriggersSetup(t *testing.T) {
+	t.Parallel()
+	env, extraEnv := newGloballyTrackedEnv(t, true)
+	ctx := context.Background()
+
+	// First agent-hook activity performs the initial setup.
+	runClaudeHook(t, env, extraEnv, "user-prompt-submit", map[string]string{
+		"session_id":      "global-test-session-3",
+		"transcript_path": "",
+		"prompt":          "Prime the lazy setup",
+	})
+	if !strategy.IsGitHookInstalledInDir(ctx, env.RepoDir) {
+		t.Fatal("git hooks not installed after first hook event")
+	}
+
+	// Clear the marker, keep the hooks — the doctor-after-drift shape.
+	prefsPath := filepath.Join(env.RepoDir, ".git", "entire", "preferences.json")
+	if err := os.Remove(prefsPath); err != nil {
+		t.Fatalf("remove clone preferences: %v", err)
+	}
+
+	// A plain git commit through the installed hooks (prepare-commit-msg +
+	// post-commit route) must re-run the setup and restore the marker.
+	env.WriteFile("hook-route.txt", "via git hooks\n")
+	env.GitCommitWithShadowHooksAsAgent("Add file via git hook route", "hook-route.txt")
+
+	prefsData, err := os.ReadFile(prefsPath)
+	if err != nil {
+		t.Fatalf("clone preferences not rewritten by the git-hook route: %v", err)
+	}
+	var prefs struct {
+		GlobalSetupCompleted bool `json:"global_setup_completed"`
+	}
+	if err := json.Unmarshal(prefsData, &prefs); err != nil {
+		t.Fatalf("parse clone preferences: %v", err)
+	}
+	if !prefs.GlobalSetupCompleted {
+		t.Errorf("git-hook route did not restore the setup marker: %s", prefsData)
+	}
+	assertNoWorktreeEntireDir(t, env)
 }
 
 // TestGlobalEnable_TierAbsent_CreatesNothing is the negative: with no
