@@ -779,10 +779,17 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	if paths.IsUnroutableRuntimePath(err) {
 		// Tier-owned repo, git-side location unresolvable: the relative
 		// fallback below would MkdirAll .entire into the worktree of a repo
-		// that must stay invisible. Fail the capture instead.
+		// that must stay invisible. Per the sentinel's contract every
+		// consumer SKIPS — returning an error here would fail the user's
+		// agent turn (non-zero hook exit) every turn-end for a machine-wide
+		// feature they never repo-enabled. Skip the capture and return nil;
+		// hook logging is initialized on both routes by this point, so this
+		// Warn is the live, visible record of the lost capture.
+		logging.Warn(logCtx, "skipping checkpoint capture: runtime path unroutable for globally tracked repo",
+			slog.String("error", err.Error()))
 		copySpan.RecordError(err)
 		copySpan.End()
-		return fmt.Errorf("resolving session metadata dir: %w", err)
+		return nil
 	}
 	if err != nil {
 		sessionDirAbs = sessionDir

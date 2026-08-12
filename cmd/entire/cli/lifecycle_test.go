@@ -394,6 +394,58 @@ func TestDispatchLifecycleEvent_RejectsTraversalSessionID(t *testing.T) {
 	}
 }
 
+// TestHandleLifecycleTurnEnd_UnroutableRuntimePath_SkipsWithoutError pins the
+// sentinel's skip contract at the turn-end capture: with the global tier
+// owning the repo and the routing probe failing, the handler must return nil
+// — a returned error becomes a non-zero hook exit plus sentinel text on the
+// agent's stderr EVERY turn-end while the condition persists, failing the
+// user's agent turn for a machine-wide feature they never repo-enabled — and
+// must create no capture artifacts in the worktree. The lost capture is
+// recorded via logging.Warn (live at this point: both hook routes initialize
+// logging before dispatch).
+// No t.Parallel: uses t.Chdir, t.Setenv, and process-global paths caches/seam.
+func TestHandleLifecycleTurnEnd_UnroutableRuntimePath_SkipsWithoutError(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	// A commit, so the empty-repo early return cannot mask the branch under test.
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+
+	configDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", configDir)
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "settings.json"),
+		[]byte(`{"global":{"enabled":true}}`), 0o600))
+
+	paths.ClearWorktreeRootCache()
+	paths.ClearInvisibleRuntimeCache()
+	paths.SetInvisibleProbeFailureForTesting(true)
+	t.Cleanup(func() {
+		paths.SetInvisibleProbeFailureForTesting(false)
+		paths.ClearInvisibleRuntimeCache()
+		paths.ClearWorktreeRootCache()
+	})
+
+	transcript := filepath.Join(t.TempDir(), "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcript, []byte(`{"type":"user"}`+"\n"), 0o600))
+
+	err := handleLifecycleTurnEnd(context.Background(), newMockAgent(), &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "unroutable-session",
+		SessionRef: transcript,
+	})
+	if err != nil {
+		t.Fatalf("turn-end must skip (hook exit 0) on an unroutable runtime path, got error: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".entire")); !os.IsNotExist(err) {
+		t.Errorf("capture artifacts created in the worktree despite the skip (err=%v)", err)
+	}
+}
+
 // --- handleLifecycleSessionStart tests ---
 
 func TestHandleLifecycleSessionStart_EmptySessionID(t *testing.T) {
