@@ -220,15 +220,22 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 	// Persist through a locked read-modify-write of the CURRENT file state:
 	// the prompt can stay open for a while, and saving the pre-prompt
 	// snapshot would clobber anything (say, exclude lists) another process
-	// wrote in that window.
-	if err := settings.ModifyUserSettings(ctx, func(cur *settings.UserSettings) error {
-		if cur.Global == nil {
-			cur.Global = &settings.GlobalConfig{}
+	// wrote in that window. And if the tier became CONFIGURED in that window
+	// (e.g. `entire disable --global` in another terminal), the question
+	// this prompt answered no longer exists — persisting would overturn
+	// that explicit choice. Explicit off is durable.
+	saveErr := settings.ModifyUserSettings(ctx, func(cur *settings.UserSettings) error {
+		if cur.GlobalConfigured() {
+			return errGlobalAnswerSuperseded
 		}
-		cur.Global.Enabled = enable
+		cur.Global = &settings.GlobalConfig{Enabled: enable}
 		return nil
-	}); err != nil {
-		fmt.Fprintf(w, "Warning: could not save the global tracking answer: %v\n", err)
+	})
+	if errors.Is(saveErr, errGlobalAnswerSuperseded) {
+		return
+	}
+	if saveErr != nil {
+		fmt.Fprintf(w, "Warning: could not save the global tracking answer: %v\n", saveErr)
 		return
 	}
 	if enable {
@@ -238,6 +245,13 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 		installUserAgentHooks(ctx, w)
 	}
 }
+
+// errGlobalAnswerSuperseded aborts the wizard's locked write when the global
+// tier became configured while the prompt was open: the answer is stale, and
+// writing it would overturn the configuration made in that window. Checked
+// inside the ModifyUserSettings callback, so the race is closed under the
+// user-settings lock, not merely narrowed.
+var errGlobalAnswerSuperseded = errors.New("global tier configured while the prompt was open")
 
 // askGlobalTrackingConfirm runs the machine-wide tracking confirm prompt and
 // returns the answer. A package var (same seam pattern as migrateRenameFile)
@@ -300,7 +314,7 @@ func ensureRepoLevelTakeover(ctx context.Context, w io.Writer) {
 		return
 	}
 	if err := strategy.EnsureEntireGitignore(ctx); err != nil {
-		logging.Warn(ctx, "repo takeover: could not ensure .entire/.gitignore before migrating runtime data", "error", err)
+		logging.Warn(ctx, "repo takeover: could not ensure .entire/.gitignore before migrating runtime data; runtime files will appear untracked in git status until .entire/.gitignore exists — create it or re-run enable", "error", err)
 	}
 	maybeMigrateGlobalRuntimeData(ctx, w)
 	clearGlobalSetupMarker(ctx)
@@ -398,12 +412,14 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 	}
 
 	var moved, skipped, failed int
+	warnLog := &migrationWarnLog{}
 	for _, sub := range paths.InvisibleRuntimeSubdirs() {
-		m, s, f := moveDirContents(ctx, filepath.Join(source, sub), filepath.Join(root, paths.EntireDir, sub))
+		m, s, f := moveDirContents(ctx, warnLog, filepath.Join(source, sub), filepath.Join(root, paths.EntireDir, sub))
 		moved += m
 		skipped += s
 		failed += f
 	}
+	warnLog.flush(ctx)
 	removeEmptyDirTree(source)
 	// The parent (<git-common-dir>/entire/worktree) is shared with sibling
 	// worktrees' namespaces; os.Remove only succeeds once the last namespace
@@ -433,28 +449,59 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 // can force the cross-device (EXDEV) fallback deterministically.
 var migrateRenameFile = os.Rename
 
+// migrationWarnLimit caps the per-file Warn records one migration emits. The
+// one-line summary carries the user-facing signal (counts + source path); the
+// first few Warns carry the diagnosable which/why. Past the cap, a mass
+// failure (say, a read-only .entire) would only repeat the same reason per
+// file, so the remainder collapses into a single suppression Warn.
+const migrationWarnLimit = 5
+
+// migrationWarnLog is the capped Warn sink shared across one migration's
+// recursive moveDirContents walk.
+type migrationWarnLog struct {
+	emitted    int
+	suppressed int
+}
+
+func (l *migrationWarnLog) warn(ctx context.Context, msg string, args ...any) {
+	if l.emitted >= migrationWarnLimit {
+		l.suppressed++
+		return
+	}
+	l.emitted++
+	logging.Warn(ctx, msg, args...)
+}
+
+// flush emits the one collapsed record for warnings past the cap.
+func (l *migrationWarnLog) flush(ctx context.Context) {
+	if l.suppressed > 0 {
+		logging.Warn(ctx, "global runtime data migration: further failures suppressed (counts in the summary line)", "count", l.suppressed)
+	}
+}
+
 // moveDirContents moves every file under src into the same relative location
 // under dst, creating directories as needed. Files already present in dst are
 // skipped (left in src). Returns moved/skipped/failed counts; a missing src is
 // (0, 0, 0), while any other ReadDir failure counts as one failure — an
 // unreadable source is not "nothing to move", and the summary must not claim
-// unqualified success over it. The summary line keeps the counts; every
-// individual failure is logged here with its path and reason, so "1 could not
-// be moved" is diagnosable from the log.
-func moveDirContents(ctx context.Context, src, dst string) (moved, skipped, failed int) {
+// unqualified success over it. The summary line keeps the counts; individual
+// failures are logged with their path and reason through the caller's capped
+// warnLog, so "N could not be moved" is diagnosable from the log without a
+// mass failure flooding it.
+func moveDirContents(ctx context.Context, warnLog *migrationWarnLog, src, dst string) (moved, skipped, failed int) {
 	entries, err := os.ReadDir(src)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return 0, 0, 0
 		}
-		logging.Warn(ctx, "global runtime data migration: source directory unreadable", "path", src, "error", err)
+		warnLog.warn(ctx, "global runtime data migration: source directory unreadable", "path", src, "error", err)
 		return 0, 0, 1
 	}
 	for _, entry := range entries {
 		srcPath := filepath.Join(src, entry.Name())
 		dstPath := filepath.Join(dst, entry.Name())
 		if entry.IsDir() {
-			m, s, f := moveDirContents(ctx, srcPath, dstPath)
+			m, s, f := moveDirContents(ctx, warnLog, srcPath, dstPath)
 			moved, skipped, failed = moved+m, skipped+s, failed+f
 			continue
 		}
@@ -464,7 +511,7 @@ func moveDirContents(ctx context.Context, src, dst string) (moved, skipped, fail
 		}
 		//nolint:gosec // G301: runtime-data dirs match the .entire directory permissions
 		if mkErr := os.MkdirAll(dst, 0o755); mkErr != nil {
-			logging.Warn(ctx, "global runtime data migration: cannot create destination directory", "path", dst, "error", mkErr)
+			warnLog.warn(ctx, "global runtime data migration: cannot create destination directory", "path", dst, "error", mkErr)
 			failed++
 			continue
 		}
@@ -481,9 +528,9 @@ func moveDirContents(ctx context.Context, src, dst string) (moved, skipped, fail
 				// failed. The data IS where the user needs it, so count it
 				// moved — claiming it "could not be moved" would be false —
 				// and record the residue left under .git.
-				logging.Warn(ctx, "global runtime data migration: file copied but source residue remains", "path", srcPath, "error", copyErr)
+				warnLog.warn(ctx, "global runtime data migration: file copied but source residue remains", "path", srcPath, "error", copyErr)
 			default:
-				logging.Warn(ctx, "global runtime data migration: file could not be moved", "path", srcPath, "rename_error", renameErr, "copy_error", copyErr)
+				warnLog.warn(ctx, "global runtime data migration: file could not be moved", "path", srcPath, "rename_error", renameErr, "copy_error", copyErr)
 				failed++
 				continue
 			}
