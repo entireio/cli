@@ -104,6 +104,9 @@ func TestMatchesExcludePath(t *testing.T) {
 		{"relative pattern skipped", []string{"tmp/scratch"}, "/tmp/scratch", false},
 		{"invalid glob skipped, valid still applies", []string{"[", "/tmp/scratch/**"}, "/tmp/scratch/x", true},
 		{"empty list", nil, "/anywhere", false},
+		{"trailing whitespace trimmed", []string{"/tmp/scratch "}, "/tmp/scratch/x", true},
+		{"tilde with trailing whitespace trimmed", []string{"~/oss "}, filepath.Join(home, "oss"), true},
+		{"whitespace-only pattern skipped", []string{"   "}, "/tmp/scratch", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -139,6 +142,8 @@ func TestMatchesExcludeOrigin(t *testing.T) {
 		{"different owner", []string{"github.com/acme/*"}, "github.com/other/widgets", false},
 		{"no origin matches nothing", []string{"github.com/acme/*"}, "", false},
 		{"empty list", nil, "github.com/acme/widgets", false},
+		{"trailing whitespace trimmed", []string{"github.com/acme/* "}, "github.com/acme/widgets", true},
+		{"whitespace-only pattern skipped", []string{"   "}, "github.com/acme/widgets", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
