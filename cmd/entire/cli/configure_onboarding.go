@@ -1003,7 +1003,8 @@ func configureQuestionTitle(question string, focused bool) string {
 		color = palette.Warning
 	}
 	marker := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render("?")
-	return marker + " " + question
+	heading := lipgloss.NewStyle().Bold(true).Render(question)
+	return marker + " " + heading
 }
 
 func configureAgentOptions(options []huh.Option[string], selected map[types.AgentName]struct{}) []huh.Option[string] {
