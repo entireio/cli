@@ -1289,6 +1289,14 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	opts.applyStrategyOptions(settings)
 
+	if opts.SuppressAdditionalSetup {
+		// Focused authenticated onboarding does not ask a telemetry question, but
+		// it must still resolve the documented default instead of persisting nil
+		// (which downstream consumers interpret as disabled). Explicit opt-out and
+		// an existing repository choice always win.
+		applyTelemetryDefault(settings, opts.Telemetry)
+	}
+
 	backend := resolveFirstRunCheckpointBackend(opts, firstRun)
 	if err := applyCheckpointBackendFlag(settings, backend); err != nil {
 		return err
@@ -1349,13 +1357,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		// --yes skips the interactive prompt but still respects --telemetry=false
 		// and ENTIRE_TELEMETRY_OPTOUT.
 		if opts.Yes {
-			if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
-				f := false
-				settings.Telemetry = &f
-			} else if settings.Telemetry == nil {
-				t := true
-				settings.Telemetry = &t
-			}
+			applyTelemetryDefault(settings, opts.Telemetry)
 		} else if err := promptTelemetryConsent(settings, opts.Telemetry); err != nil {
 			return fmt.Errorf("telemetry consent: %w", err)
 		}
@@ -2235,6 +2237,16 @@ func appendShellCompletion(rcFile, completionLine string) error {
 		return fmt.Errorf("writing completion: %w", err)
 	}
 	return nil
+}
+
+func applyTelemetryDefault(settings *EntireSettings, telemetryFlag bool) {
+	if !telemetryFlag || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+		f := false
+		settings.Telemetry = &f
+	} else if settings.Telemetry == nil {
+		t := true
+		settings.Telemetry = &t
+	}
 }
 
 // promptTelemetryConsent asks the user if they want to enable telemetry.

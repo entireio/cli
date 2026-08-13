@@ -230,8 +230,9 @@ func configureOnboardingEnableOptions(opts EnableOptions) EnableOptions {
 	opts.UseLocalSettings = false
 	opts.SuppressDoneMessage = true
 	opts.SuppressAdditionalSetup = true
-	// Login already establishes the user's account context, so this flow does
-	// not ask for or modify repository-local anonymous telemetry consent.
+	// Logged-in onboarding does not ask a separate telemetry question. The
+	// documented default is applied without prompting; existing settings and
+	// ENTIRE_TELEMETRY_OPTOUT remain authoritative.
 	return opts
 }
 

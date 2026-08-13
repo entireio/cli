@@ -3489,15 +3489,8 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 
 	t.Run("yes with telemetry=false", func(t *testing.T) {
 		s := &EntireSettings{}
-		opts := EnableOptions{Telemetry: false}
-		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
-			f := false
-			s.Telemetry = &f
-		} else if s.Telemetry == nil {
-			tr := true
-			s.Telemetry = &tr
-		}
-		if s.Telemetry == nil || *s.Telemetry != false {
+		applyTelemetryDefault(s, false)
+		if s.Telemetry == nil || *s.Telemetry {
 			t.Errorf("expected telemetry=false when --yes --telemetry=false, got %v", s.Telemetry)
 		}
 	})
@@ -3505,30 +3498,16 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 	t.Run("yes with ENTIRE_TELEMETRY_OPTOUT", func(t *testing.T) {
 		t.Setenv("ENTIRE_TELEMETRY_OPTOUT", "1")
 		s := &EntireSettings{}
-		opts := EnableOptions{Telemetry: true}
-		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
-			f := false
-			s.Telemetry = &f
-		} else if s.Telemetry == nil {
-			tr := true
-			s.Telemetry = &tr
-		}
-		if s.Telemetry == nil || *s.Telemetry != false {
+		applyTelemetryDefault(s, true)
+		if s.Telemetry == nil || *s.Telemetry {
 			t.Errorf("expected telemetry=false with ENTIRE_TELEMETRY_OPTOUT, got %v", s.Telemetry)
 		}
 	})
 
 	t.Run("yes defaults to telemetry enabled", func(t *testing.T) {
 		s := &EntireSettings{}
-		opts := EnableOptions{Telemetry: true}
-		if !opts.Telemetry {
-			f := false
-			s.Telemetry = &f
-		} else if s.Telemetry == nil {
-			tr := true
-			s.Telemetry = &tr
-		}
-		if s.Telemetry == nil || *s.Telemetry != true {
+		applyTelemetryDefault(s, true)
+		if s.Telemetry == nil || !*s.Telemetry {
 			t.Errorf("expected telemetry=true with --yes (default), got %v", s.Telemetry)
 		}
 	})
@@ -3536,15 +3515,8 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 	t.Run("yes preserves existing telemetry setting", func(t *testing.T) {
 		existing := false
 		s := &EntireSettings{Telemetry: &existing}
-		opts := EnableOptions{Telemetry: true}
-		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
-			f := false
-			s.Telemetry = &f
-		} else if s.Telemetry == nil {
-			tr := true
-			s.Telemetry = &tr
-		}
-		if *s.Telemetry != false {
+		applyTelemetryDefault(s, true)
+		if *s.Telemetry {
 			t.Errorf("expected existing telemetry=false to be preserved, got %v", *s.Telemetry)
 		}
 	})
@@ -3636,7 +3608,7 @@ func TestEnableCmd_YesOnConfiguredRepo_ManagesAgents(t *testing.T) {
 	}
 }
 
-func TestRunEnableInteractiveSuppressAdditionalSetupLeavesTelemetryUnset(t *testing.T) {
+func TestRunEnableInteractiveSuppressAdditionalSetupAppliesTelemetryDefault(t *testing.T) {
 	setupTestRepo(t)
 	ag, err := agent.Get(types.AgentName("claude-code"))
 	if err != nil {
@@ -3656,8 +3628,8 @@ func TestRunEnableInteractiveSuppressAdditionalSetupLeavesTelemetryUnset(t *test
 	if err != nil {
 		t.Fatalf("LoadEntireSettings() error = %v", err)
 	}
-	if s.Telemetry != nil {
-		t.Fatalf("suppressed telemetry consent was modified: %v", *s.Telemetry)
+	if s.Telemetry == nil || !*s.Telemetry {
+		t.Fatalf("suppressed telemetry prompt did not apply enabled default: %v", s.Telemetry)
 	}
 }
 
