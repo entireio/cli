@@ -221,6 +221,24 @@ func TestEnsureConfigureRepoAccessUnknownAdminStillAllowsInstall(t *testing.T) {
 	}
 }
 
+func TestConfigureSuccessfulMirrorPlacementsKeepsPartialSuccess(t *testing.T) {
+	selected := []regionChoice{
+		{host: "au.entire.io", slug: "au", jurisdiction: "au"},
+		{host: "eu.entire.io", slug: "eu", jurisdiction: "eu"},
+	}
+	results := []mirrorResult{
+		{cloneURL: "entire://au.entire.io/gh/acme/widget", status: mirrorStatusReady},
+		{status: mirrorStatusError, err: errors.New("region unavailable")},
+	}
+	placements := configureSuccessfulMirrorPlacements(selected, results)
+	if len(placements) != 1 {
+		t.Fatalf("successful placements = %d, want 1", len(placements))
+	}
+	if placements[0].ClusterHost != "au.entire.io" {
+		t.Fatalf("successful placement host = %q", placements[0].ClusterHost)
+	}
+}
+
 func TestConfigureOnboardingSuppressesTelemetryPrompt(t *testing.T) {
 	opts := configureOnboardingEnableOptions(EnableOptions{Telemetry: true})
 	if !opts.Yes {

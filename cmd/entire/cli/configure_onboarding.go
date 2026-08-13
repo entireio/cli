@@ -391,12 +391,24 @@ func configureCreateMirrors(ctx context.Context, outW, errW io.Writer, client *c
 		return nil, err
 	}
 	results := createMirrors(ctx, errW, mirrorTargets([]coreapi.AvailableMirror{{Owner: owner, Repo: repo}}, selected), false, 30*time.Minute)
-	if err := reportMirrorResults(outW, errW, results); err != nil {
-		return nil, err
+	reportErr := reportMirrorResults(outW, errW, results)
+	placements := configureSuccessfulMirrorPlacements(selected, results)
+	if len(placements) > 0 {
+		if reportErr != nil {
+			fmt.Fprintf(errW, "Continuing with %d mirror(s) that succeeded.\n", len(placements))
+		}
+		return placements, nil
 	}
+	if reportErr != nil {
+		return nil, reportErr
+	}
+	return nil, errors.New("no usable mirrors were created")
+}
+
+func configureSuccessfulMirrorPlacements(selected []regionChoice, results []mirrorResult) []coreapi.ResolvedPlacement {
 	placements := make([]coreapi.ResolvedPlacement, 0, len(results))
 	for i, result := range results {
-		if result.err != nil || result.cloneURL == "" {
+		if i >= len(selected) || result.err != nil || result.cloneURL == "" {
 			continue
 		}
 		region := selected[i]
@@ -406,7 +418,7 @@ func configureCreateMirrors(ctx context.Context, outW, errW io.Writer, client *c
 			Jurisdiction: coreapi.NewOptString(region.jurisdiction),
 		})
 	}
-	return placements, nil
+	return placements
 }
 
 func pickConfigureRegions(ctx context.Context, outW io.Writer, regions []regionChoice, jurisdiction string) ([]regionChoice, error) {
