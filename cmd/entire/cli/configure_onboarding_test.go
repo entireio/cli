@@ -508,9 +508,9 @@ func TestConfigureSaveOptionsAreDynamic(t *testing.T) {
 	push := configureSaveOptions("main", false, true, true, configureSaveDirect)
 	got := []string{ansi.Strip(push[0].Key), ansi.Strip(push[1].Key), ansi.Strip(push[2].Key)}
 	want := []string{
-		"● Save — push to main",
-		"○ Save — push to a new branch, review before it lands",
-		"○ Cancel",
+		"Save — push to main",
+		"Save — push to a new branch, review before it lands",
+		"Cancel",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("push save options = %v, want %v", got, want)
@@ -518,7 +518,7 @@ func TestConfigureSaveOptionsAreDynamic(t *testing.T) {
 
 	local := configureSaveOptions("main", false, false, true, configureSaveLocal)
 	got = []string{ansi.Strip(local[0].Key), ansi.Strip(local[1].Key)}
-	want = []string{"● Save", "○ Cancel"}
+	want = []string{"Save", "Cancel"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("local save options = %v, want %v", got, want)
 	}
@@ -527,7 +527,7 @@ func TestConfigureSaveOptionsAreDynamic(t *testing.T) {
 	if len(protected) != 2 {
 		t.Fatalf("protected save options = %d, want new branch and cancel", len(protected))
 	}
-	if got := ansi.Strip(protected[0].Key); got != "● Save — push to a new branch, review before it lands" {
+	if got := ansi.Strip(protected[0].Key); got != "Save — push to a new branch, review before it lands" {
 		t.Fatalf("selected new-branch option = %q", got)
 	}
 	description := ansi.Strip(configureSaveDescription("main", true, true, true))

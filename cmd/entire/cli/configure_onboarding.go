@@ -596,12 +596,7 @@ func (field *configureAgentField) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
 
 type configureSaveField struct {
 	*huh.Select[string]
-
-	value       *string
-	committed   string
-	highlighted string
-	refresh     func()
-	focused     bool
+	focused bool
 }
 
 func (field *configureSaveField) Focus() tea.Cmd {
@@ -614,48 +609,12 @@ func (field *configureSaveField) Blur() tea.Cmd {
 	return field.Select.Blur()
 }
 
-func (field *configureSaveField) KeyBinds() []key.Binding {
-	return configureRadioKeyBinds(field.Select)
-}
-
 func (field *configureSaveField) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
-	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
-		switch {
-		case configureRadioSelectKey(keyMsg.String()):
-			field.commitHighlighted()
-			return field, nil
-		case configureNextKey(keyMsg.String()):
-			return field, huh.NextField
-		}
-	}
 	model, cmd := field.Select.Update(msg)
 	if updated, ok := model.(*huh.Select[string]); ok {
 		field.Select = updated
 	}
-	_, movedCursor := msg.(tea.KeyPressMsg)
-	field.preserveCommittedSelection(movedCursor)
 	return field, cmd
-}
-
-func (field *configureSaveField) preserveCommittedSelection(movedCursor bool) {
-	if field.value == nil {
-		return
-	}
-	if movedCursor {
-		field.highlighted = *field.value
-	}
-	*field.value = field.committed
-}
-
-func (field *configureSaveField) commitHighlighted() {
-	if field.value == nil {
-		return
-	}
-	field.committed = field.highlighted
-	*field.value = field.committed
-	if field.refresh != nil {
-		field.refresh()
-	}
 }
 
 func configureWindowResize(size tea.WindowSizeMsg) tea.Cmd {
@@ -796,11 +755,7 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 
 	previousHasChanges := hasChanges()
 	saveChoice := defaultConfigureSaveChoice(previousHasChanges, requiresPush(), protected)
-	saveControl := &configureSaveField{
-		value:       &saveChoice,
-		committed:   saveChoice,
-		highlighted: saveChoice,
-	}
+	saveControl := &configureSaveField{}
 	saveOptions := func() []huh.Option[string] {
 		return configureSaveOptions(branch, protected, requiresPush(), hasChanges(), saveChoice)
 	}
@@ -817,8 +772,6 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		options := saveOptions()
 		if changed != previousHasChanges || !configureOptionsContain(options, saveChoice) {
 			saveChoice = defaultConfigureSaveChoice(changed, requiresPush(), protected)
-			saveControl.committed = saveChoice
-			saveControl.highlighted = saveChoice
 			options = saveOptions()
 		}
 		previousHasChanges = changed
@@ -828,7 +781,6 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 			Height(configureFieldHeight(len(options), description)).
 			Options(options...)
 	}
-	saveControl.refresh = refreshSave
 	upstreamControl.layoutChanged = refreshSave
 	agentControl.selectionChanged = refreshSave
 	agentControl.showSave = func() bool { return true }
@@ -904,29 +856,26 @@ func defaultConfigureSaveChoice(hasChanges, requiresPush, protected bool) string
 	return configureSaveDirect
 }
 
-func configureSaveOptions(branch string, protected, requiresPush, hasChanges bool, selected string) []huh.Option[string] {
-	cancel := huh.NewOption(configureRadioLabel("Cancel", selected == configureSaveCancel), configureSaveCancel)
+func configureSaveOptions(branch string, protected, requiresPush, hasChanges bool, _ string) []huh.Option[string] {
+	cancel := huh.NewOption("Cancel", configureSaveCancel)
 	if !hasChanges {
 		return []huh.Option[string]{cancel}
 	}
 	if !requiresPush {
 		return []huh.Option[string]{
-			huh.NewOption(configureRadioLabel("Save", selected == configureSaveLocal), configureSaveLocal),
+			huh.NewOption("Save", configureSaveLocal),
 			cancel,
 		}
 	}
 
-	newBranch := huh.NewOption(
-		configureRadioLabel("Save — push to a new branch, review before it lands", selected == configureSaveNewBranch),
-		configureSaveNewBranch,
-	)
+	newBranch := huh.NewOption("Save — push to a new branch, review before it lands", configureSaveNewBranch)
 	if protected {
 		// huh has no disabled-option primitive. Keep the protected destination
 		// visible in the description, but omit it from keyboard navigation.
 		return []huh.Option[string]{newBranch, cancel}
 	}
 	return []huh.Option[string]{
-		huh.NewOption(configureRadioLabel("Save — push to "+branch, selected == configureSaveDirect), configureSaveDirect),
+		huh.NewOption("Save — push to "+branch, configureSaveDirect),
 		newBranch,
 		cancel,
 	}
