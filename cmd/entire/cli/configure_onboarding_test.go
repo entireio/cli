@@ -136,6 +136,19 @@ func TestEnsureConfigureRepoAccessNonAdminPrintsShareableLink(t *testing.T) {
 	}
 }
 
+func TestConfigureOnboardingDoesNotAutoAcceptTelemetry(t *testing.T) {
+	opts := configureOnboardingEnableOptions(EnableOptions{Telemetry: true})
+	if !opts.Yes {
+		t.Fatal("onboarding must auto-answer setup choices it already presented")
+	}
+	if !opts.PromptTelemetryConsent {
+		t.Fatal("onboarding must exclude telemetry from automatic yes answers")
+	}
+	if !opts.SuppressAdditionalSetup {
+		t.Fatal("onboarding must suppress unrelated setup prompts")
+	}
+}
+
 func TestConfigureFieldFocusChangesActiveQuestion(t *testing.T) {
 	selected := testConfigureUSHost
 	upstream := &configureUpstreamField{Select: huh.NewSelect[string]().Options(huh.NewOption("US", selected)).Value(&selected)}

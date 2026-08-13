@@ -166,11 +166,7 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 	// the user move back to it before submitting. runEnableInteractive applies
 	// the complete agent selection, writes settings, and installs hooks.
 
-	opts.Yes = true
-	opts.UseProjectSettings = true
-	opts.UseLocalSettings = false
-	opts.SuppressDoneMessage = true
-	opts.SuppressAdditionalSetup = true
+	opts = configureOnboardingEnableOptions(opts)
 	if err := runEnableInteractive(ctx, outW, selectedAgents, opts); err != nil {
 		return err
 	}
@@ -196,6 +192,19 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 	fmt.Fprintln(outW, "  You're set. Start a session with any selected agent —")
 	fmt.Fprintf(outW, "  checkpoints will show up on %s/gh/%s/%s\n", configureWebBaseURL(), url.PathEscape(owner), url.PathEscape(repo))
 	return nil
+}
+
+func configureOnboardingEnableOptions(opts EnableOptions) EnableOptions {
+	opts.Yes = true
+	opts.UseProjectSettings = true
+	opts.UseLocalSettings = false
+	opts.SuppressDoneMessage = true
+	opts.SuppressAdditionalSetup = true
+	// Yes bypasses setup questions already covered by onboarding, but telemetry
+	// remains an independent consent decision. Existing consent and
+	// ENTIRE_TELEMETRY_OPTOUT are still respected by promptTelemetryConsent.
+	opts.PromptTelemetryConsent = true
+	return opts
 }
 
 func configureWebBaseURL() string {
