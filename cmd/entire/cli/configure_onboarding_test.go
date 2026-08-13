@@ -294,7 +294,7 @@ func TestConfigureSaveIsSkippedWithoutGeneratedChanges(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(io.Discard)
-	if err := configureSaveAndPush(cmd, t.TempDir(), "owner", "repo", nil, nil, time.Now); err != nil {
+	if err := configureSaveAndPush(cmd, t.TempDir(), "owner", "repo", nil, nil, "main", false, configureSaveDirect, time.Now); err != nil {
 		t.Fatalf("configureSaveAndPush() error = %v", err)
 	}
 	if strings.Contains(out.String(), "Save configuration") {
@@ -305,23 +305,69 @@ func TestConfigureSaveIsSkippedWithoutGeneratedChanges(t *testing.T) {
 	}
 }
 
-func TestConfigureSaveOptionsShowBothChoices(t *testing.T) {
-	options := configureSaveOptions("main", false, configureSaveDirect)
-	got := []string{ansi.Strip(options[0].Key), ansi.Strip(options[1].Key)}
-	want := []string{"● Push to main", "○ Push to a new branch — review before it lands"}
+func TestConfigureSelectionChangesDistinguishLocalAndPushChanges(t *testing.T) {
+	tests := []struct {
+		name                      string
+		selectedHost, currentHost string
+		selectedAgents, installed []string
+		wantMirror, wantAgents    bool
+	}{
+		{
+			name:         "unchanged",
+			selectedHost: "eu.entire.io", currentHost: "eu.entire.io",
+			selectedAgents: []string{"claude-code"}, installed: []string{"claude-code"},
+		},
+		{
+			name:         "mirror only",
+			selectedHost: "au.entire.io", currentHost: "eu.entire.io",
+			selectedAgents: []string{"claude-code"}, installed: []string{"claude-code"},
+			wantMirror: true,
+		},
+		{
+			name:         "agents require push",
+			selectedHost: "eu.entire.io", currentHost: "eu.entire.io",
+			selectedAgents: []string{"claude-code", "codex"}, installed: []string{"claude-code"},
+			wantAgents: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mirror, agents := configureSelectionChanges(tt.selectedHost, tt.currentHost, tt.selectedAgents, tt.installed)
+			if mirror != tt.wantMirror || agents != tt.wantAgents {
+				t.Fatalf("changes = (mirror %v, agents %v), want (%v, %v)", mirror, agents, tt.wantMirror, tt.wantAgents)
+			}
+		})
+	}
+}
+
+func TestConfigureSaveOptionsAreDynamic(t *testing.T) {
+	push := configureSaveOptions("main", false, true, configureSaveDirect)
+	got := []string{ansi.Strip(push[0].Key), ansi.Strip(push[1].Key), ansi.Strip(push[2].Key)}
+	want := []string{
+		"● Save — push to main",
+		"○ Save — push to a new branch, review before it lands",
+		"○ Cancel",
+	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("save options = %v, want %v", got, want)
+		t.Fatalf("push save options = %v, want %v", got, want)
 	}
 
-	protected := configureSaveOptions("main", true, configureSaveNewBranch)
-	if len(protected) != 1 {
-		t.Fatalf("protected save options = %d, want only the enabled destination", len(protected))
+	local := configureSaveOptions("main", false, false, configureSaveLocal)
+	got = []string{ansi.Strip(local[0].Key), ansi.Strip(local[1].Key)}
+	want = []string{"● Save", "○ Cancel"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("local save options = %v, want %v", got, want)
 	}
-	if got := ansi.Strip(protected[0].Key); got != "● Push to a new branch — review before it lands" {
+
+	protected := configureSaveOptions("main", true, true, configureSaveNewBranch)
+	if len(protected) != 2 {
+		t.Fatalf("protected save options = %d, want new branch and cancel", len(protected))
+	}
+	if got := ansi.Strip(protected[0].Key); got != "● Save — push to a new branch, review before it lands" {
 		t.Fatalf("selected new-branch option = %q", got)
 	}
-	description := ansi.Strip(configureSaveDescription("main", true))
-	if !strings.Contains(description, "○ Push to main — protected branch") {
+	description := ansi.Strip(configureSaveDescription("main", true, true))
+	if !strings.Contains(description, "○ Save — push to main — protected branch") {
 		t.Fatalf("protected destination is not shown as disabled: %q", description)
 	}
 }

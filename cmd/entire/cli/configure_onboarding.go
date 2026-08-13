@@ -37,6 +37,8 @@ const (
 	configureBranchBase         = "configure-entire"
 	configureSaveDirect         = "direct"
 	configureSaveNewBranch      = "new-branch"
+	configureSaveLocal          = "local"
+	configureSaveCancel         = "cancel"
 )
 
 // configureAccessReporter is the small part of the authenticated API used by
@@ -146,35 +148,52 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 		manageRegionsHint = fmt.Sprintf("Manage regions: entire repo mirror create · or %s/gh/%s/%s/settings",
 			configureWebBaseURL(), url.PathEscape(owner), url.PathEscape(repo))
 	}
-	chosen, selectedAgents, err := promptConfigureUpstreamAndAgents(
+	before, err := configureGitChanges(ctx, repoRoot)
+	if err != nil {
+		return err
+	}
+	branch, branchErr := gitRunner(ctx, repoRoot, "branch", "--show-current")
+	if branchErr != nil {
+		// Best-effort: local-only saves do not need a branch.
+		branch = ""
+	}
+	protected := false
+	if branch != "" {
+		if detected, protectionErr := configureBranchProtected(ctx, owner, repo, branch); protectionErr == nil {
+			// Advisory only; git push remains authoritative.
+			protected = detected
+		}
+	}
+	chosen, selectedAgents, saveChoice, agentsChanged, err := promptConfigureUpstreamAndAgents(
 		ctx, errW, repoRoot, placements, profile.Jurisdiction, manageRegionsHint,
+		branch, protected, len(before) == 0,
 	)
 	if err != nil {
 		return err
+	}
+	if saveChoice == configureSaveCancel {
+		fmt.Fprintln(outW, "Configuration cancelled.")
+		return nil
+	}
+	if saveChoice == "" {
+		fmt.Fprintln(outW, "No configuration changes.")
+		return nil
 	}
 	if err := configureUseMirror(ctx, repoRoot, owner, repo, chosen); err != nil {
 		return err
 	}
 
-	before, err := configureGitChanges(ctx, repoRoot)
-	if err != nil {
-		return err
-	}
-
-	// The combined form above owns both independent choices. Keeping them in a
-	// single group leaves the upstream visible while agents are focused and lets
-	// the user move back to it before submitting. runEnableInteractive applies
-	// the complete agent selection, writes settings, and installs hooks.
-
-	opts = configureOnboardingEnableOptions(opts)
-	if err := runEnableInteractive(ctx, outW, selectedAgents, opts); err != nil {
-		return err
-	}
-	// A local enabled:false override must not win over the newly written project
-	// configuration. setEnabledFlag updates the project and synchronizes an
-	// existing local override without replacing its other local-only fields.
-	if err := setEnabledFlag(ctx, true, true); err != nil {
-		return err
+	if agentsChanged {
+		opts = configureOnboardingEnableOptions(opts)
+		if err := runEnableInteractive(ctx, outW, selectedAgents, opts); err != nil {
+			return err
+		}
+		// A local enabled:false override must not win over the newly written project
+		// configuration. setEnabledFlag updates the project and synchronizes an
+		// existing local override without replacing its other local-only fields.
+		if err := setEnabledFlag(ctx, true, true); err != nil {
+			return err
+		}
 	}
 
 	after, err := configureGitChanges(ctx, repoRoot)
@@ -182,10 +201,16 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 		return err
 	}
 	generated := newConfigureChanges(before, after)
-	fmt.Fprintf(outW, "✓ Wrote %s\n", configDisplayProject)
+	if agentsChanged {
+		fmt.Fprintf(outW, "✓ Wrote %s\n", configDisplayProject)
+	}
 
-	if err := configureSaveAndPush(cmd, repoRoot, owner, repo, before, generated, deps.now); err != nil {
-		return err
+	if saveChoice == configureSaveDirect || saveChoice == configureSaveNewBranch {
+		if err := configureSaveAndPush(cmd, repoRoot, owner, repo, before, generated, branch, protected, saveChoice, deps.now); err != nil {
+			return err
+		}
+	} else if agentsChanged && len(generated) > 0 {
+		fmt.Fprintln(outW, "  Configuration was saved locally. Review and commit it normally when ready.")
 	}
 	fmt.Fprintln(outW, "✓ Configuration complete")
 	fmt.Fprintln(outW)
@@ -401,11 +426,13 @@ func configureRefreshFocus() tea.Cmd {
 type configureUpstreamField struct {
 	*huh.Select[string]
 
-	value       *string
-	committed   string
-	highlighted string
-	refresh     func()
-	focused     bool
+	value         *string
+	committed     string
+	highlighted   string
+	refresh       func()
+	layoutChanged func()
+	window        tea.WindowSizeMsg
+	focused       bool
 }
 
 func (field *configureUpstreamField) Focus() tea.Cmd {
@@ -422,17 +449,24 @@ func (field *configureUpstreamField) KeyBinds() []key.Binding {
 	return configureRadioKeyBinds(field.Select)
 }
 
+func (field *configureUpstreamField) View() string {
+	return field.Select.View() + "\n\n"
+}
+
 func (field *configureUpstreamField) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
 		switch {
 		case configureRadioSelectKey(keyMsg.String()):
 			field.commitHighlighted()
-			return field, nil
+			return field, configureWindowResize(field.window)
 		case configureNextKey(keyMsg.String()):
 			// Enter continues with the intentionally selected value. Merely moving
 			// the cursor does not change the radio selection.
 			return field, huh.NextField
 		}
+	}
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		field.window = size
 	}
 	model, cmd := field.Select.Update(msg)
 	if updated, ok := model.(*huh.Select[string]); ok {
@@ -462,12 +496,19 @@ func (field *configureUpstreamField) commitHighlighted() {
 	if field.refresh != nil {
 		field.refresh()
 	}
+	if field.layoutChanged != nil {
+		field.layoutChanged()
+	}
 }
 
 type configureAgentField struct {
 	*huh.MultiSelect[string]
 
-	focused bool
+	value            *[]string
+	selectionChanged func()
+	showSave         func() bool
+	window           tea.WindowSizeMsg
+	focused          bool
 }
 
 func (field *configureAgentField) Focus() tea.Cmd {
@@ -480,10 +521,31 @@ func (field *configureAgentField) Blur() tea.Cmd {
 	return field.MultiSelect.Blur()
 }
 
+func (field *configureAgentField) View() string {
+	view := field.MultiSelect.View()
+	if field.showSave != nil && field.showSave() {
+		view += "\n\n"
+	}
+	return view
+}
+
 func (field *configureAgentField) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		field.window = size
+	}
+	var before []string
+	if field.value != nil {
+		before = append(before, (*field.value)...)
+	}
 	model, cmd := field.MultiSelect.Update(msg)
 	if updated, ok := model.(*huh.MultiSelect[string]); ok {
 		field.MultiSelect = updated
+	}
+	if _, keyPress := msg.(tea.KeyPressMsg); keyPress && field.value != nil && !sameStrings(before, *field.value) {
+		if field.selectionChanged != nil {
+			field.selectionChanged()
+		}
+		cmd = tea.Batch(cmd, configureWindowResize(field.window))
 	}
 	return field, cmd
 }
@@ -495,6 +557,7 @@ type configureSaveField struct {
 	committed   string
 	highlighted string
 	refresh     func()
+	hidden      func() bool
 	focused     bool
 }
 
@@ -510,6 +573,17 @@ func (field *configureSaveField) Blur() tea.Cmd {
 
 func (field *configureSaveField) KeyBinds() []key.Binding {
 	return configureRadioKeyBinds(field.Select)
+}
+
+func (field *configureSaveField) Skip() bool {
+	return field.hidden != nil && field.hidden()
+}
+
+func (field *configureSaveField) View() string {
+	if field.Skip() {
+		return ""
+	}
+	return field.Select.View()
 }
 
 func (field *configureSaveField) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
@@ -552,6 +626,30 @@ func (field *configureSaveField) commitHighlighted() {
 	}
 }
 
+func configureWindowResize(size tea.WindowSizeMsg) tea.Cmd {
+	if size.Width <= 0 || size.Height <= 0 {
+		return nil
+	}
+	return func() tea.Msg { return size }
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, value := range a {
+		seen[value]++
+	}
+	for _, value := range b {
+		seen[value]--
+		if seen[value] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func configureRadioKeyBinds(selectField *huh.Select[string]) []key.Binding {
 	bindings := selectField.KeyBinds()
 	for i := range bindings {
@@ -571,14 +669,15 @@ func configureNextKey(key string) bool {
 	return key == "enter" || key == "tab"
 }
 
-// promptConfigureUpstreamAndAgents presents upstream and agents as one
-// persistent form. Arrow keys stay within the active section; Enter confirms a
-// section and advances, while shift+tab revisits the previous section.
-func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoRoot string, placements []coreapi.ResolvedPlacement, jurisdiction, manageRegionsHint string) (coreapi.ResolvedPlacement, []agent.Agent, error) {
+// promptConfigureUpstreamAndAgents presents upstream, agents, and the dynamic
+// save action as one persistent form. Save stays hidden until a choice differs
+// from the repository's current state. Arrow keys stay within the active
+// section; Enter advances, while shift+tab revisits the previous section.
+func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoRoot string, placements []coreapi.ResolvedPlacement, jurisdiction, manageRegionsHint, branch string, protected, cleanWorktree bool) (coreapi.ResolvedPlacement, []agent.Agent, string, bool, error) {
 	currentHost := configureCurrentUpstream(ctx, repoRoot)
 	placements = configurePlacementOrder(placements, currentHost, jurisdiction)
 	if len(placements) == 0 {
-		return coreapi.ResolvedPlacement{}, nil, errors.New("no upstreams available")
+		return coreapi.ResolvedPlacement{}, nil, "", false, errors.New("no upstreams available")
 	}
 
 	// configurePlacementOrder puts the configured upstream first, so it is also
@@ -597,7 +696,11 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 	preselected := configureAgentPreselection(ctx)
 	agentOptions := configureAgentOptions(hookAgentOptions(preselected), preselected)
 	if len(agentOptions) == 0 {
-		return coreapi.ResolvedPlacement{}, nil, errors.New("no agents with hook support available")
+		return coreapi.ResolvedPlacement{}, nil, "", false, errors.New("no agents with hook support available")
+	}
+	installedAgentNames := make([]string, 0)
+	for _, name := range GetAgentsWithHooksInstalled(ctx) {
+		installedAgentNames = append(installedAgentNames, string(name))
 	}
 	selectedAgentNames := make([]string, 0, len(preselected))
 	for _, option := range agentOptions {
@@ -623,10 +726,10 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		Height(configureFieldHeight(len(placements), upstreamDescription)).
 		Value(&selectedHost)
 	upstreamControl.refresh = func() {
-		upstreamControl.Select.Options(upstreamOptions()...)
+		upstreamControl.Options(upstreamOptions()...)
 	}
 
-	agentControl := &configureAgentField{}
+	agentControl := &configureAgentField{value: &selectedAgentNames}
 	agentControl.MultiSelect = huh.NewMultiSelect[string]().
 		TitleFunc(func() string {
 			return configureQuestionTitle("Select the agents you want to use", agentControl.focused)
@@ -643,30 +746,86 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		}).
 		Value(&selectedAgentNames)
 
-	group := huh.NewGroup(upstreamControl, agentControl)
+	mirrorChanged := func() bool {
+		mirror, _ := configureSelectionChanges(selectedHost, currentHost, selectedAgentNames, installedAgentNames)
+		return mirror
+	}
+	agentsChanged := func() bool {
+		_, agents := configureSelectionChanges(selectedHost, currentHost, selectedAgentNames, installedAgentNames)
+		return agents
+	}
+	requiresPush := func() bool {
+		return agentsChanged() && cleanWorktree && branch != ""
+	}
+	hasChanges := func() bool {
+		return mirrorChanged() || agentsChanged()
+	}
+
+	saveChoice := defaultConfigureSaveChoice(requiresPush(), protected)
+	saveControl := &configureSaveField{
+		value:       &saveChoice,
+		committed:   saveChoice,
+		highlighted: saveChoice,
+		hidden: func() bool {
+			return !hasChanges()
+		},
+	}
+	saveOptions := func() []huh.Option[string] {
+		return configureSaveOptions(branch, protected, requiresPush(), saveChoice)
+	}
+	saveControl.Select = huh.NewSelect[string]().
+		TitleFunc(func() string {
+			return configureQuestionTitle("Save configuration", saveControl.focused)
+		}, &saveControl.focused).
+		Description(configureSaveDescription(branch, protected, requiresPush())).
+		Options(saveOptions()...).
+		Height(configureFieldHeight(len(saveOptions()), configureSaveDescription(branch, protected, requiresPush()))).
+		Value(&saveChoice)
+	refreshSave := func() {
+		options := saveOptions()
+		if !configureOptionsContain(options, saveChoice) {
+			saveChoice = defaultConfigureSaveChoice(requiresPush(), protected)
+			saveControl.committed = saveChoice
+			saveControl.highlighted = saveChoice
+			options = saveOptions()
+		}
+		saveControl.Select.
+			Description(configureSaveDescription(branch, protected, requiresPush())).
+			Height(configureFieldHeight(len(options), configureSaveDescription(branch, protected, requiresPush()))).
+			Options(options...)
+	}
+	saveControl.refresh = refreshSave
+	upstreamControl.layoutChanged = refreshSave
+	agentControl.selectionChanged = refreshSave
+	agentControl.showSave = hasChanges
+
+	group := huh.NewGroup(upstreamControl, agentControl, saveControl)
 	form := newConfigureForm(group)
 	// Separate the form from the shell prompt or preceding onboarding status.
 	fmt.Fprintln(errW)
 	if err := form.RunWithContext(ctx); err != nil {
 		if cancelErr := handleFormCancellation(errW, "Configure", err); cancelErr != nil {
-			return coreapi.ResolvedPlacement{}, nil, cancelErr
+			return coreapi.ResolvedPlacement{}, nil, "", false, cancelErr
 		}
-		return coreapi.ResolvedPlacement{}, nil, NewSilentError(errors.New("configure cancelled"))
+		return coreapi.ResolvedPlacement{}, nil, "", false, NewSilentError(errors.New("configure cancelled"))
 	}
 
 	chosen, ok := placementByHost[selectedHost]
 	if !ok {
-		return coreapi.ResolvedPlacement{}, nil, errors.New("selected upstream is no longer available")
+		return coreapi.ResolvedPlacement{}, nil, "", false, errors.New("selected upstream is no longer available")
 	}
 	selectedAgents := make([]agent.Agent, 0, len(selectedAgentNames))
 	for _, name := range selectedAgentNames {
 		ag, err := agent.Get(types.AgentName(name))
 		if err != nil {
-			return coreapi.ResolvedPlacement{}, nil, fmt.Errorf("load selected agent %q: %w", name, err)
+			return coreapi.ResolvedPlacement{}, nil, "", false, fmt.Errorf("load selected agent %q: %w", name, err)
 		}
 		selectedAgents = append(selectedAgents, ag)
 	}
-	return chosen, selectedAgents, nil
+	if !hasChanges() {
+		saveChoice = ""
+	}
+	return chosen, selectedAgents, saveChoice, agentsChanged(), nil
 }
 
 func configureUpstreamOptions(placements []coreapi.ResolvedPlacement, selectedHost, currentHost string) []huh.Option[string] {
@@ -694,65 +853,59 @@ func configureFieldHeight(optionCount int, description string) int {
 	return height
 }
 
-func promptConfigureSave(ctx context.Context, errW io.Writer, branch string, protected bool) (string, error) {
-	choice := configureSaveDirect
-	if protected {
-		choice = configureSaveNewBranch
-	}
-	options := func() []huh.Option[string] {
-		return configureSaveOptions(branch, protected, choice)
-	}
-	control := &configureSaveField{
-		value:       &choice,
-		committed:   choice,
-		highlighted: choice,
-	}
-	control.Select = huh.NewSelect[string]().
-		TitleFunc(func() string {
-			return configureQuestionTitle("Save configuration", control.focused)
-		}, &control.focused).
-		Description(configureSaveDescription(branch, protected)).
-		Options(options()...).
-		Height(configureFieldHeight(len(options()), configureSaveDescription(branch, protected))).
-		Value(&choice)
-	control.refresh = func() {
-		control.Select.Options(options()...)
-	}
-
-	fmt.Fprintln(errW)
-	if err := newConfigureForm(huh.NewGroup(control)).RunWithContext(ctx); err != nil {
-		if cancelErr := handleFormCancellation(errW, "Configure", err); cancelErr != nil {
-			return "", cancelErr
-		}
-		return "", NewSilentError(errors.New("configure cancelled"))
-	}
-	return choice, nil
+func configureSelectionChanges(selectedHost, currentHost string, selectedAgents, installedAgents []string) (mirrorChanged, agentsChanged bool) {
+	return !strings.EqualFold(selectedHost, currentHost), !sameStrings(selectedAgents, installedAgents)
 }
 
-func configureSaveOptions(branch string, protected bool, selected string) []huh.Option[string] {
+func defaultConfigureSaveChoice(requiresPush, protected bool) string {
+	if !requiresPush {
+		return configureSaveLocal
+	}
+	if protected {
+		return configureSaveNewBranch
+	}
+	return configureSaveDirect
+}
+
+func configureSaveOptions(branch string, protected, requiresPush bool, selected string) []huh.Option[string] {
+	cancel := huh.NewOption(configureRadioLabel("Cancel", selected == configureSaveCancel), configureSaveCancel)
+	if !requiresPush {
+		return []huh.Option[string]{
+			huh.NewOption(configureRadioLabel("Save", selected == configureSaveLocal), configureSaveLocal),
+			cancel,
+		}
+	}
+
 	newBranch := huh.NewOption(
-		configureRadioLabel("Push to a new branch — review before it lands", selected == configureSaveNewBranch),
+		configureRadioLabel("Save — push to a new branch, review before it lands", selected == configureSaveNewBranch),
 		configureSaveNewBranch,
 	)
 	if protected {
 		// huh has no disabled-option primitive. Keep the protected destination
-		// visible in the description, but omit it from the selectable options so
-		// keyboard navigation can never focus or choose it.
-		return []huh.Option[string]{newBranch}
+		// visible in the description, but omit it from keyboard navigation.
+		return []huh.Option[string]{newBranch, cancel}
 	}
 	return []huh.Option[string]{
-		huh.NewOption(configureRadioLabel("Push to "+branch, selected == configureSaveDirect), configureSaveDirect),
+		huh.NewOption(configureRadioLabel("Save — push to "+branch, selected == configureSaveDirect), configureSaveDirect),
 		newBranch,
+		cancel,
 	}
 }
 
-func configureSaveDescription(branch string, protected bool) string {
-	if !protected {
+func configureSaveDescription(branch string, protected, requiresPush bool) string {
+	if !requiresPush || !protected {
 		return ""
 	}
-	// The huh help bar already documents navigation and submission. The only
-	// description needed here is the visible but non-selectable destination.
-	return lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Render("  ○ Push to " + branch + " — protected branch")
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Render("  ○ Save — push to " + branch + " — protected branch")
+}
+
+func configureOptionsContain(options []huh.Option[string], value string) bool {
+	for _, option := range options {
+		if option.Value == value {
+			return true
+		}
+	}
+	return false
 }
 
 func configureRadioLabel(label string, selected bool) string {
@@ -782,6 +935,7 @@ func configureFormTheme() huh.Theme {
 
 		// Radio and checkbox lists use the same active-row indicator. Selection
 		// remains green and independent from the orange `>` cursor.
+		theme.FieldSeparator = lipgloss.NewStyle().SetString("")
 		theme.Focused.Base = lipgloss.NewStyle()
 		theme.Blurred.Base = lipgloss.NewStyle()
 		theme.Focused.SelectSelector = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Warning)).SetString("> ")
@@ -956,7 +1110,7 @@ func newConfigureChanges(before, after map[string]string) []string {
 	return paths
 }
 
-func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, before map[string]string, generated []string, now func() time.Time) error {
+func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, before map[string]string, generated []string, branch string, protected bool, choice string, now func() time.Time) error {
 	outW := cmd.OutOrStdout()
 	if len(generated) == 0 {
 		fmt.Fprintln(outW, "  No new configuration changes to commit.")
@@ -968,19 +1122,8 @@ func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, befo
 		return nil
 	}
 
-	branch, err := gitRunner(cmd.Context(), repoRoot, "branch", "--show-current")
-	if err != nil || branch == "" {
+	if branch == "" {
 		return errors.New("cannot save configuration from a detached HEAD")
-	}
-	protected, protectionErr := configureBranchProtected(cmd.Context(), owner, repo, branch)
-	if protectionErr != nil {
-		// Protection discovery is advisory; a rejected direct push still fails
-		// safely at git push.
-		protected = false
-	}
-	choice, err := promptConfigureSave(cmd.Context(), cmd.ErrOrStderr(), branch, protected)
-	if err != nil {
-		return err
 	}
 	if protected && choice == configureSaveDirect {
 		return fmt.Errorf("%s is protected; push to a new branch", branch)
