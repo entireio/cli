@@ -123,12 +123,12 @@ type TrailUpdateRequest struct {
 	RequestedReviewers *[]string `json:"requested_reviewers,omitempty"`
 	Type               *string   `json:"type,omitempty"`
 	Priority           *string   `json:"priority,omitempty"`
-	// Branch changes the branch a trail that already has one points at. The
-	// server writes it straight to the trail row (a raw metadata rename); it
-	// does not create or verify the branch on the forge. To attach a branch to
-	// a branchless trail (with forge create/link), use TrailBranchRequest
-	// against the /branch endpoint instead.
-	Branch *string `json:"branch,omitempty"`
+	// There is deliberately no Branch field. A trail's branch cannot be changed
+	// once set, and the /branch endpoint enforces that with a 409. The PATCH
+	// endpoint does accept a raw `branch` write, but it neither checks that the
+	// trail is branchless nor that another trail already holds the name, so
+	// sending it would route around the rule. Attach a branch to a branchless
+	// trail with TrailBranchRequest against /branch instead.
 }
 
 // TrailUpdateResponse is the response from PATCH /api/v1/trails/:org/:repo/:trailId.

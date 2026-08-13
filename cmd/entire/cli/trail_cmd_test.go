@@ -851,31 +851,47 @@ func TestAttachTrailBranch(t *testing.T) {
 		}
 	})
 
-	t.Run("surfaces a 409 when the trail already has a branch", func(t *testing.T) {
-		t.Parallel()
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusConflict)
-			if err := json.NewEncoder(w).Encode(map[string]string{"error": "Trail already has a linked branch"}); err != nil {
-				t.Errorf("encode response: %v", err)
+	// The server's two 409s, verbatim from the /branch handler. Each says what
+	// happened but not what to do, so the CLI explains the rule behind it.
+	conflicts := []struct {
+		name       string
+		serverMsg  string
+		wantPhrase []string
+	}{
+		{
+			name:       "the trail gained a branch since it was read",
+			serverMsg:  "Trail already has a linked branch",
+			wantPhrase: []string{"#575", "cannot be changed once set"},
+		},
+		{
+			name:       "the branch already backs another trail",
+			serverMsg:  "This branch is already linked to another trail",
+			wantPhrase: []string{testTrailBranch, "can back only one trail"},
+		},
+	}
+	for _, tc := range conflicts {
+		t.Run("explains the 409 when "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusConflict)
+				if err := json.NewEncoder(w).Encode(map[string]string{"error": tc.serverMsg}); err != nil {
+					t.Errorf("encode response: %v", err)
+				}
+			}))
+			defer srv.Close()
+
+			client := api.NewClientWithBaseURL("tok", srv.URL)
+			_, err := attachTrailBranch(t.Context(), client, "gh", "acme", "repo", 575, "link", testTrailBranch)
+			if err == nil {
+				t.Fatal("expected error for 409, got nil")
 			}
-		}))
-		defer srv.Close()
-
-		client := api.NewClientWithBaseURL("tok", srv.URL)
-		if _, err := attachTrailBranch(t.Context(), client, "gh", "acme", "repo", 575, "link", testTrailBranch); err == nil {
-			t.Fatal("expected error for 409, got nil")
-		}
-	})
-}
-
-func TestBuildTrailUpdateRequestOmitsBranchByDefault(t *testing.T) {
-	t.Parallel()
-	// buildTrailUpdateRequest never sets Branch; a rename is folded in by the
-	// caller via updateReq.Branch. Guard that a plain metadata update omits it so
-	// it is never sent unintentionally.
-	req := buildTrailUpdateRequest(&api.TrailResource{Branch: "old"}, trailUpdateInputs{TitleChanged: true, Title: "new"})
-	if req.Branch != nil {
-		t.Fatalf("Branch = %v, want nil", *req.Branch)
+			// The server's own wording is kept so the cause stays visible.
+			for _, want := range append(tc.wantPhrase, tc.serverMsg) {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error = %q, want it to mention %q", err, want)
+				}
+			}
+		})
 	}
 }
 
@@ -900,16 +916,36 @@ func TestPlanTrailBranchChange(t *testing.T) {
 		}
 	})
 
-	t.Run("a trail that already has a branch is renamed via PATCH", func(t *testing.T) {
+	t.Run("refuses to move a trail that already has a branch", func(t *testing.T) {
 		t.Parallel()
-		plan, err := planTrailBranchChange(t.Context(), withBranch, trailUpdateInputs{
+		// The server rule: a trail's branch cannot be changed once set. Catch it
+		// here rather than sending a PATCH, which would take a raw branch write
+		// and repoint the trail behind the rule's back.
+		_, err := planTrailBranchChange(t.Context(), withBranch, trailUpdateInputs{
 			SetBranch: testTrailBranch, SetBranchChanged: true,
+		})
+		if err == nil {
+			t.Fatal("expected an error when moving an existing branch, got nil")
+		}
+		for _, want := range []string{"old-branch", testTrailBranch, "cannot be changed once set"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %q, want it to mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("setting the branch a trail already has does nothing", func(t *testing.T) {
+		t.Parallel()
+		// Not a change, so it must not error — re-running the same command has
+		// to stay safe.
+		plan, err := planTrailBranchChange(t.Context(), withBranch, trailUpdateInputs{
+			SetBranch: withBranch.Branch, SetBranchChanged: true,
 		})
 		if err != nil {
 			t.Fatalf("planTrailBranchChange: %v", err)
 		}
-		if !plan.Rename || plan.Attach || plan.Branch != testTrailBranch {
-			t.Fatalf("plan = %+v, want rename to feature/x", plan)
+		if plan != (trailBranchPlan{}) {
+			t.Fatalf("plan = %+v, want zero value", plan)
 		}
 	})
 
@@ -922,7 +958,7 @@ func TestPlanTrailBranchChange(t *testing.T) {
 		if err != nil {
 			t.Fatalf("planTrailBranchChange: %v", err)
 		}
-		if !plan.Attach || plan.Rename || plan.Branch != testTrailBranch || plan.Action != "create" {
+		if !plan.Attach || plan.Branch != testTrailBranch || plan.Action != "create" {
 			t.Fatalf("plan = %+v, want attach feature/x with action create", plan)
 		}
 	})
@@ -979,9 +1015,11 @@ func TestPlanTrailBranchChange(t *testing.T) {
 			inputs: trailUpdateInputs{SetBranch: "bad branch~name", SetBranchChanged: true},
 		},
 		{
+			// Names the branch the trail already has, so this reaches the
+			// --branch-action guard instead of the "cannot be changed" rule.
 			name:   "--branch-action on a trail that already has a branch",
 			found:  withBranch,
-			inputs: trailUpdateInputs{SetBranch: testTrailBranch, SetBranchChanged: true, BranchAction: "create", BranchActionChanged: true},
+			inputs: trailUpdateInputs{SetBranch: withBranch.Branch, SetBranchChanged: true, BranchAction: "create", BranchActionChanged: true},
 		},
 	}
 	for _, tc := range rejects {
@@ -1034,23 +1072,6 @@ func TestNewTrailUpdateCmdRejectsTrailAndBranchTogether(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not both") {
 		t.Fatalf("error = %q, want it to mention 'not both'", err)
-	}
-}
-
-func TestSplitTrailUpdateSendsABranchRename(t *testing.T) {
-	t.Parallel()
-	// A rename-only update sets nothing but Branch. It still has to count as
-	// metadata, or the PATCH is skipped and the rename silently does nothing.
-	branch := testTrailBranch
-	meta, hasMeta, bodyReq := splitTrailUpdate(api.TrailUpdateRequest{Branch: &branch})
-	if !hasMeta {
-		t.Fatal("hasMeta = false, want true for a branch-only update")
-	}
-	if meta.Branch == nil || *meta.Branch != branch {
-		t.Fatalf("meta.Branch = %v, want %q", meta.Branch, branch)
-	}
-	if bodyReq != nil {
-		t.Fatalf("bodyReq = %+v, want nil", bodyReq)
 	}
 }
 

@@ -1136,11 +1136,12 @@ By default the trail for the current branch is updated; --branch selects it by
 another branch, or --trail selects it by number, id, or branch. A branchless
 trail has no branch to match, so reach it with --trail and a number or id.
 
---set-branch changes which branch the trail points at. If the trail already has
-a branch this is a metadata rename on the server (the branch is not created on
-the forge). If the trail is branchless the branch is attached via the /branch
-endpoint, which links an existing branch (--branch-action link, the default) or
-creates it on the forge at the trail's base (--branch-action create).`,
+--set-branch attaches a branch to a branchless trail, via the /branch endpoint:
+it links an existing branch (--branch-action link, the default) or creates it on
+the forge at the trail's base (--branch-action create). A trail's branch cannot
+be changed once set, so --set-branch on a trail that already has one is an error
+(asking for the branch it already has does nothing). One branch backs one trail,
+so a branch another trail already holds is rejected too.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Both select a trail, and --trail wins outright in
@@ -1187,7 +1188,7 @@ creates it on the forge at the trail's base (--branch-action create).`,
 	cmd.Flags().StringVar(&body, "body", "", "Update body")
 	cmd.Flags().StringVar(&branch, "branch", "", "Branch that selects the trail to update (defaults to current); cannot be combined with --trail")
 	cmd.Flags().StringVar(&trailSelector, "trail", "", "Trail to update, by number, id, or branch; give a branchless trail by number or id")
-	cmd.Flags().StringVar(&setBranch, "set-branch", "", "Set the trail's branch: renames an existing branch, or attaches one to a branchless trail")
+	cmd.Flags().StringVar(&setBranch, "set-branch", "", "Attach a branch to a branchless trail; a trail's branch cannot be changed once set")
 	cmd.Flags().StringVar(&branchAction, "branch-action", trailBranchActionLink, "How --set-branch attaches to a branchless trail: 'link' an existing branch or 'create' it on the forge")
 	cmd.Flags().StringSliceVar(&labelAdd, "add-label", nil, "Add label(s)")
 	cmd.Flags().StringSliceVar(&labelRemove, "remove-label", nil, "Remove label(s)")
@@ -1215,8 +1216,8 @@ type trailUpdateInputs struct {
 	// trail has no branch for either this or Branch to match, so it is reachable
 	// only by the number or id form here.
 	TrailSelector string
-	// SetBranch is the new branch to point the trail at (a PATCH rename) or to
-	// attach to a branchless trail (a POST to the /branch endpoint).
+	// SetBranch is the branch to attach to a branchless trail (a POST to the
+	// /branch endpoint). It cannot repoint a trail that already has a branch.
 	SetBranch           string
 	SetBranchChanged    bool
 	BranchAction        string
@@ -1360,10 +1361,6 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 			Priority:        inputs.Priority,
 			PriorityChanged: inputs.PriorityChanged,
 		})
-		// Renaming an existing branch rides on the same PATCH as any metadata.
-		if branchPlan.Rename {
-			updateReq.Branch = &branchPlan.Branch
-		}
 		path := trailNumberPath(forge, owner, repoName, found.Number)
 
 		// Every input is validated by this point, so it is safe to start
@@ -1405,11 +1402,7 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 			}
 		}
 
-		if branchPlan.Rename {
-			fmt.Fprintf(w, "Updated trail #%d (branch set to %s)\n", found.Number, branchPlan.Branch)
-		} else {
-			fmt.Fprintf(w, "Updated trail #%d\n", found.Number)
-		}
+		fmt.Fprintf(w, "Updated trail #%d\n", found.Number)
 		return nil
 	})
 }
@@ -1426,11 +1419,9 @@ const (
 // that a later validation failure cannot leave a half-applied update behind.
 // The zero value means --set-branch was not given and the branch is untouched.
 type trailBranchPlan struct {
-	// Rename is set when the trail already has a branch: the new name rides on
-	// the metadata PATCH, which neither creates nor verifies it on the forge.
-	Rename bool
 	// Attach is set when the trail is branchless: the branch is attached
-	// through the /branch endpoint, which may create it on the forge.
+	// through the /branch endpoint, which may create it on the forge. There is
+	// no rename counterpart — a trail that already has a branch keeps it.
 	Attach bool
 	// Branch is the new branch name (trimmed and validated).
 	Branch string
@@ -1468,13 +1459,20 @@ func planTrailBranchChange(ctx context.Context, found *api.TrailResource, inputs
 		return trailBranchPlan{}, fmt.Errorf("invalid --branch-action %q: must be %q or %q", inputs.BranchAction, trailBranchActionLink, trailBranchActionCreate)
 	}
 
-	// A trail that already has a branch is renamed by a plain PATCH, which neither
-	// links nor creates on the forge; --branch-action has no meaning there.
+	// A trail's branch cannot be changed once set: the /branch endpoint answers
+	// 409 "Trail already has a linked branch". Refuse here rather than sending
+	// anything, because the PATCH endpoint would take a raw `branch` write and
+	// quietly repoint the trail, skipping both that rule and the one-trail-per-
+	// branch check. Asking for the branch it already has is not a change, so
+	// that stays a no-op and re-running the same command is not an error.
 	if found.Branch != "" {
+		if found.Branch != newBranch {
+			return trailBranchPlan{}, fmt.Errorf("trail %s is already on branch %s and a trail's branch cannot be changed once set; create a trail for %s instead", trailRefLabel(found), found.Branch, newBranch)
+		}
 		if inputs.BranchActionChanged {
 			return trailBranchPlan{}, errors.New("--branch-action only applies when attaching a branch to a branchless trail (this trail already has one)")
 		}
-		return trailBranchPlan{Rename: true, Branch: newBranch}, nil
+		return trailBranchPlan{}, nil
 	}
 
 	return trailBranchPlan{Attach: true, Branch: newBranch, Action: action}, nil
@@ -1522,6 +1520,24 @@ func trailRefLabel(t *api.TrailResource) string {
 	}
 }
 
+// explainTrailBranchConflict says what a 409 from the /branch endpoint means.
+// The server has two of them and its wording alone doesn't say what to do
+// next: "Trail already has a linked branch" (the trail gained a branch after
+// planTrailBranchChange read it — a second writer got there first) and "This
+// branch is already linked to another trail" (one branch backs one trail).
+// Both are permanent for these inputs, so the message names the way forward
+// rather than inviting a retry that will fail the same way.
+func explainTrailBranchConflict(err error, number int, branch string) error {
+	switch msg := err.Error(); {
+	case strings.Contains(msg, "already has a linked branch"):
+		return fmt.Errorf("trail #%d already has a branch, and a trail's branch cannot be changed once set: %w", number, err)
+	case strings.Contains(msg, "already linked to another trail"):
+		return fmt.Errorf("branch %s already backs another trail in this repo, and a branch can back only one trail (attach a different branch, or update that trail instead): %w", branch, err)
+	default:
+		return err
+	}
+}
+
 // attachTrailBranch attaches a branch to a branchless trail via
 // POST /api/v1/trails/:forge/:owner/:repo/:number/branch. action is "link"
 // (attach an existing branch) or "create" (backfill it on the forge at base).
@@ -1534,6 +1550,9 @@ func attachTrailBranch(ctx context.Context, client *api.Client, forge, owner, re
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
+		if resp.StatusCode == http.StatusConflict {
+			return api.TrailBranchResponse{}, explainTrailBranchConflict(err, number, branchName)
+		}
 		return api.TrailBranchResponse{}, err
 	}
 	var branchResp api.TrailBranchResponse
@@ -1667,7 +1686,7 @@ func splitTrailUpdate(full api.TrailUpdateRequest) (meta api.TrailUpdateRequest,
 	meta.Body = nil
 	hasMeta = meta.Status != nil || meta.Title != nil || meta.Labels != nil ||
 		meta.Assignees != nil || meta.RequestedReviewers != nil ||
-		meta.Type != nil || meta.Priority != nil || meta.Branch != nil
+		meta.Type != nil || meta.Priority != nil
 	return meta, hasMeta, bodyReq
 }
 
