@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/internal/coreapi"
 )
@@ -426,7 +428,7 @@ func TestConfigureSaveIsSkippedWithoutGeneratedChanges(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(io.Discard)
-	if err := configureSaveAndPush(cmd, t.TempDir(), "owner", "repo", nil, nil, "main", false, configureSaveDirect, time.Now); err != nil {
+	if err := configureSaveAndPush(cmd, t.TempDir(), "owner", "repo", nil, nil, "main", false, configureSaveDirect, mirrorCloneProviderGitHub, time.Now); err != nil {
 		t.Fatalf("configureSaveAndPush() error = %v", err)
 	}
 	if strings.Contains(out.String(), "Save configuration") {
@@ -536,7 +538,39 @@ func TestConfigureSaveOptionsAreDynamic(t *testing.T) {
 	}
 }
 
-func TestConfigureUseMirrorWarnsWhenOriginCannotBePreserved(t *testing.T) {
+func TestConfigureSaveAndPushUsesForgeRemote(t *testing.T) {
+	dir := t.TempDir()
+	cmd := &cobra.Command{}
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	previous := gitRunner
+	t.Cleanup(func() { gitRunner = previous })
+	var pushArgs []string
+	gitRunner = func(_ context.Context, _ string, args ...string) (string, error) {
+		switch args[0] {
+		case "add", "commit":
+			return "", nil
+		case "rev-parse":
+			return "abc123", nil
+		case "push":
+			pushArgs = append([]string(nil), args...)
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git args: %v", args)
+		}
+	}
+	generated := []string{".entire/settings.json"}
+	if err := configureSaveAndPush(cmd, dir, "acme", "widget", nil, generated, "feature", false, configureSaveDirect, mirrorCloneProviderGitHub, time.Now); err != nil {
+		t.Fatalf("configureSaveAndPush() error = %v", err)
+	}
+	want := []string{"push", "-u", mirrorCloneProviderGitHub, "feature"}
+	if !reflect.DeepEqual(pushArgs, want) {
+		t.Fatalf("push args = %v, want %v", pushArgs, want)
+	}
+}
+
+func TestConfigureUseMirrorPreservesOriginUnderAvailableForgeRemote(t *testing.T) {
 	setupTestRepo(t)
 	ctx := context.Background()
 	const oldOrigin = "https://github.com/acme/widget.git"
@@ -549,16 +583,25 @@ func TestConfigureUseMirrorWarnsWhenOriginCannotBePreserved(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	chosen := coreapi.ResolvedPlacement{ClusterHost: testConfigureUSHost}
-	if err := configureUseMirror(ctx, &out, &errOut, ".", "acme", "widget", chosen); err != nil {
+	forgeRemote, err := configureUseMirror(ctx, &out, &errOut, ".", "acme", "widget", chosen)
+	if err != nil {
 		t.Fatalf("configureUseMirror() error = %v", err)
+	}
+	if forgeRemote != mirrorCloneProviderGitHub {
+		t.Fatalf("forge remote = %q, want preserved %q", forgeRemote, mirrorCloneProviderGitHub)
 	}
 	if !strings.Contains(out.String(), "was: "+oldOrigin) {
 		t.Fatalf("former origin URL was not reported:\n%s", out.String())
 	}
-	for _, want := range []string{"WARNING", `remote "upstream" already exists`, "git remote add <name> " + oldOrigin} {
-		if !strings.Contains(errOut.String(), want) {
-			t.Errorf("warning missing %q:\n%s", want, errOut.String())
-		}
+	if errOut.Len() != 0 {
+		t.Fatalf("preservation unexpectedly warned:\n%s", errOut.String())
+	}
+	githubURL, err := gitremote.GetRemoteURLInDir(ctx, ".", forgeRemote)
+	if err != nil {
+		t.Fatalf("read preserved forge remote: %v", err)
+	}
+	if githubURL != oldOrigin {
+		t.Fatalf("preserved forge URL = %q, want %q", githubURL, oldOrigin)
 	}
 }
 

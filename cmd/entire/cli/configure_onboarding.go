@@ -185,7 +185,8 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 		fmt.Fprintln(outW, "No configuration changes.")
 		return nil
 	}
-	if err := configureUseMirror(ctx, outW, errW, repoRoot, owner, repo, chosen); err != nil {
+	forgeRemote, err := configureUseMirror(ctx, outW, errW, repoRoot, owner, repo, chosen)
+	if err != nil {
 		return err
 	}
 
@@ -212,7 +213,7 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 	}
 
 	if saveChoice == configureSaveDirect || saveChoice == configureSaveNewBranch {
-		if err := configureSaveAndPush(cmd, repoRoot, owner, repo, before, generated, branch, protected, saveChoice, deps.now); err != nil {
+		if err := configureSaveAndPush(cmd, repoRoot, owner, repo, before, generated, branch, protected, saveChoice, forgeRemote, deps.now); err != nil {
 			return err
 		}
 	} else if agentsChanged && len(generated) > 0 {
@@ -596,6 +597,7 @@ func (field *configureAgentField) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
 
 type configureSaveField struct {
 	*huh.Select[string]
+
 	focused bool
 }
 
@@ -1055,35 +1057,101 @@ func configureAgentPreselection(ctx context.Context) map[types.AgentName]struct{
 	return selected
 }
 
-func configureUseMirror(ctx context.Context, outW, errW io.Writer, repoRoot, owner, repo string, chosen coreapi.ResolvedPlacement) error {
+func configureUseMirror(ctx context.Context, outW, errW io.Writer, repoRoot, owner, repo string, chosen coreapi.ResolvedPlacement) (string, error) {
 	remotes, err := listGitRemotes(ctx, repoRoot)
 	if err != nil {
-		return err
+		return "", err
 	}
 	current := ""
 	if remotes[defaultMirrorRemote] {
 		current, err = gitremote.GetRemoteURLInDir(ctx, repoRoot, defaultMirrorRemote)
 		if err != nil {
-			return fmt.Errorf("read origin remote URL: %w", err)
+			return "", fmt.Errorf("read origin remote URL: %w", err)
 		}
 	}
-	mirrorURL := mirrorCloneURL(chosen.ClusterHost, owner, repo)
-	preserve := defaultMirrorUpstreamRemote
-	// An existing forge alias already preserves direct GitHub access. Avoid
-	// manufacturing another alias, and never preserve an old Entire placement
-	// under the misleading name "upstream".
-	if info, parseErr := gitremote.ParseURL(current); parseErr == nil && info.Protocol == gitremote.ProtocolEntire {
-		preserve = ""
+
+	forgeRemote, err := configureExistingForgeRemote(ctx, repoRoot, owner, repo, remotes, defaultMirrorRemote)
+	if err != nil {
+		return "", err
 	}
+	preserve := ""
+	if info, parseErr := gitremote.ParseURL(current); parseErr == nil && info.Protocol != gitremote.ProtocolEntire {
+		if forgeRemote == "" {
+			preserve = availableConfigureRemoteName(remotes, defaultMirrorUpstreamRemote, "github")
+			forgeRemote = preserve
+		}
+	}
+	if forgeRemote == "" {
+		forgeRemote = availableConfigureRemoteName(remotes, "github")
+		forgeURL := fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
+		if _, err := gitRunner(ctx, repoRoot, "remote", "add", forgeRemote, forgeURL); err != nil {
+			return "", fmt.Errorf("add GitHub push remote %q: %w", forgeRemote, err)
+		}
+		remotes[forgeRemote] = true
+		fmt.Fprintf(outW, "✓ Added GitHub push remote %q\n  %s\n", forgeRemote, forgeURL)
+	}
+
+	mirrorURL := mirrorCloneURL(chosen.ClusterHost, owner, repo)
 	plan := planMirrorRemote(defaultMirrorRemote, mirrorURL, current, preserve, remotes)
 	if err := applyMirrorRemotePlan(ctx, repoRoot, plan); err != nil {
-		return err
+		return "", err
 	}
-	// Repointing origin can be lossy when the usual preservation name already
-	// exists. Report the complete plan just like `repo mirror use`, including the
-	// redacted former URL and its recovery command.
+	// Report the replaced URL and where it remains reachable. The returned
+	// forgeRemote is deliberately separate from the mirror fetch remote: config
+	// commits must land on GitHub, never in the one-way Entire mirror.
 	reportMirrorRemotePlan(outW, errW, plan)
-	return nil
+	return forgeRemote, nil
+}
+
+func configureExistingForgeRemote(ctx context.Context, repoRoot, owner, repo string, remotes map[string]bool, exclude string) (string, error) {
+	names := make([]string, 0, len(remotes))
+	for name := range remotes {
+		if name != exclude {
+			names = append(names, name)
+		}
+	}
+	sort.SliceStable(names, func(i, j int) bool {
+		priority := func(name string) int {
+			switch name {
+			case "github":
+				return 0
+			case defaultMirrorUpstreamRemote:
+				return 1
+			default:
+				return 2
+			}
+		}
+		if priority(names[i]) != priority(names[j]) {
+			return priority(names[i]) < priority(names[j])
+		}
+		return names[i] < names[j]
+	})
+	for _, name := range names {
+		raw, err := gitremote.GetRemoteURLInDir(ctx, repoRoot, name)
+		if err != nil {
+			return "", fmt.Errorf("read remote %q URL: %w", name, err)
+		}
+		info, err := gitremote.ParseURL(raw)
+		if err == nil && info.Protocol != gitremote.ProtocolEntire && info.Forge == mirrorUseForge &&
+			strings.EqualFold(info.Owner, owner) && strings.EqualFold(info.Repo, repo) {
+			return name, nil
+		}
+	}
+	return "", nil
+}
+
+func availableConfigureRemoteName(remotes map[string]bool, candidates ...string) string {
+	for _, candidate := range candidates {
+		if !remotes[candidate] {
+			return candidate
+		}
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("github-%d", i)
+		if !remotes[candidate] {
+			return candidate
+		}
+	}
 }
 
 // configureGitChanges returns porcelain status keyed by path. Its values retain
@@ -1120,7 +1188,7 @@ func newConfigureChanges(before, after map[string]string) []string {
 	return paths
 }
 
-func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, before map[string]string, generated []string, branch string, protected bool, choice string, now func() time.Time) error {
+func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, before map[string]string, generated []string, branch string, protected bool, choice, forgeRemote string, now func() time.Time) error {
 	outW := cmd.OutOrStdout()
 	if len(generated) == 0 {
 		fmt.Fprintln(outW, "  No new configuration changes to commit.")
@@ -1140,6 +1208,9 @@ func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, befo
 	}
 	if choice != configureSaveDirect && choice != configureSaveNewBranch {
 		return fmt.Errorf("unknown save choice %q", choice)
+	}
+	if forgeRemote == "" {
+		return errors.New("no GitHub remote available for configuration push")
 	}
 
 	pushBranch := branch
@@ -1167,10 +1238,10 @@ func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, befo
 		return fmt.Errorf("read configuration commit: %w", err)
 	}
 	fmt.Fprintf(outW, "✓ Committed %s · %s\n", configureCommitMessage, sha)
-	if _, err := gitRunner(cmd.Context(), repoRoot, "push", "-u", defaultMirrorRemote, pushBranch); err != nil {
-		return fmt.Errorf("push configuration: %w", err)
+	if _, err := gitRunner(cmd.Context(), repoRoot, "push", "-u", forgeRemote, pushBranch); err != nil {
+		return fmt.Errorf("push configuration to GitHub remote %q: %w", forgeRemote, err)
 	}
-	fmt.Fprintf(outW, "✓ Pushed to %s/%s\n", defaultMirrorRemote, pushBranch)
+	fmt.Fprintf(outW, "✓ Pushed to %s/%s\n", forgeRemote, pushBranch)
 	if choice == configureSaveNewBranch {
 		fmt.Fprintln(outW, "  Open a trail to merge it:")
 		fmt.Fprintf(outW, "  %s/gh/%s/%s/trails/new?branch=%s\n", configureWebBaseURL(), url.PathEscape(owner), url.PathEscape(repo), url.QueryEscape(pushBranch))
