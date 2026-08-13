@@ -1185,7 +1185,7 @@ creates it on the forge at the trail's base (--branch-action create).`,
 	cmd.Flags().StringVar(&statusStr, "status", "", "Update status")
 	cmd.Flags().StringVar(&title, "title", "", "Update title")
 	cmd.Flags().StringVar(&body, "body", "", "Update body")
-	cmd.Flags().StringVar(&branch, "branch", "", "Branch that selects the trail to update (defaults to current)")
+	cmd.Flags().StringVar(&branch, "branch", "", "Branch that selects the trail to update (defaults to current); cannot be combined with --trail")
 	cmd.Flags().StringVar(&trailSelector, "trail", "", "Trail to update, by number, id, or branch; give a branchless trail by number or id")
 	cmd.Flags().StringVar(&setBranch, "set-branch", "", "Set the trail's branch: renames an existing branch, or attaches one to a branchless trail")
 	cmd.Flags().StringVar(&branchAction, "branch-action", trailBranchActionLink, "How --set-branch attaches to a branchless trail: 'link' an existing branch or 'create' it on the forge")
