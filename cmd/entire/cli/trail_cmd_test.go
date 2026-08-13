@@ -12,8 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,6 +39,10 @@ const (
 	trailListTestAuthorBob   = "bob"
 	// testTrailBranch is the stand-in branch name for trail branch tests.
 	testTrailBranch = "feature/x"
+	// trailTestBasePath is the trails endpoint for the gh/acme/repo fixture.
+	trailTestBasePath = "/api/v1/trails/gh/acme/repo"
+	// trailBodyField is the PATCH field name carrying a trail's description.
+	trailBodyField = "body"
 )
 
 func TestNewTrailCreateRequestUsesLinkBranchAction(t *testing.T) {
@@ -1674,6 +1680,155 @@ func TestPrintTrailDetailsRendersURLAndDescription(t *testing.T) {
 	}
 }
 
+// trailShowTestServer serves the two endpoints `trail show` reads: the list
+// (which resolves the selector and omits the description) and the detail (which
+// carries body_document). detailStatus > 0 makes the detail fetch fail so the
+// best-effort path can be exercised.
+func trailShowTestServer(t *testing.T, resource api.TrailResource, detailSnapshot string, detailStatus int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath:
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{resource}, Total: 1}); err != nil {
+				t.Errorf("encode list response: %v", err)
+			}
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath+"/"+strconv.Itoa(resource.Number):
+			if detailStatus > 0 {
+				w.WriteHeader(detailStatus)
+				if err := json.NewEncoder(w).Encode(map[string]string{"error": "boom"}); err != nil {
+					t.Errorf("encode detail error: %v", err)
+				}
+				return
+			}
+			detail := resource
+			detail.BodyDocument = &api.TrailBodyDocument{TextSnapshot: detailSnapshot}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]any{"trail": detail}); err != nil {
+				t.Errorf("encode detail response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestRunTrailShowJSONEmitsOneTrailObject(t *testing.T) {
+	t.Parallel()
+
+	alice := trailListTestAuthorAlice
+	created := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	resource := api.TrailResource{
+		ID:        "trl_1",
+		Number:    7,
+		URL:       "https://entire.io/gh/acme/repo/trails/7",
+		Branch:    "feature/x",
+		Base:      "main",
+		Title:     "Shown trail",
+		Status:    string(trail.StatusOpen),
+		Phase:     "building",
+		Author:    &trail.Author{ID: "u1", Login: &alice},
+		Assignees: []string{"bob"},
+		Labels:    []string{"cli"},
+		Type:      string(trail.TypeBug),
+		Priority:  string(trail.PriorityHigh),
+		Reviewers: []trail.Reviewer{{Login: "rev1", Status: trail.ReviewerApproved}},
+		CreatedAt: created,
+		UpdatedAt: created,
+	}
+	srv := trailShowTestServer(t, resource, "detail body", 0)
+
+	var out, errOut bytes.Buffer
+	err := runTrailShowWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
+
+	require.NoError(t, err)
+	require.Empty(t, errOut.String())
+
+	var got trail.Metadata
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got), "output must be a single JSON object: %s", out.String())
+	require.Equal(t, 7, got.Number)
+	require.Equal(t, trail.ID("trl_1"), got.TrailID)
+	require.Equal(t, "https://entire.io/gh/acme/repo/trails/7", got.URL)
+	require.Equal(t, "feature/x", got.Branch)
+	require.Equal(t, "main", got.Base)
+	require.Equal(t, "Shown trail", got.Title)
+	require.Equal(t, trail.StatusOpen, got.Status)
+	require.Equal(t, "building", got.Phase)
+	require.Equal(t, alice, got.AuthorLogin())
+	require.Equal(t, []string{"bob"}, got.Assignees)
+	require.Equal(t, []string{"cli"}, got.Labels)
+	require.Equal(t, trail.TypeBug, got.Type)
+	require.Equal(t, trail.PriorityHigh, got.Priority)
+	require.Equal(t, []trail.Reviewer{{Login: "rev1", Status: trail.ReviewerApproved}}, got.Reviewers)
+	// The description lives on the detail endpoint only; JSON must carry it, not
+	// the empty list body.
+	require.Equal(t, "detail body", got.Body)
+	// Human-only decoration must not leak into the data.
+	require.NotContains(t, out.String(), noTrailDescription)
+	require.NotContains(t, out.String(), "Trail: ")
+}
+
+func TestRunTrailShowJSONLeavesBodyEmptyWithoutDescription(t *testing.T) {
+	t.Parallel()
+
+	srv := trailShowTestServer(t, api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x", Status: string(trail.StatusOpen)}, "", 0)
+
+	var out, errOut bytes.Buffer
+	err := runTrailShowWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
+
+	require.NoError(t, err)
+	require.Empty(t, errOut.String())
+
+	var got trail.Metadata
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	require.Empty(t, got.Body, "an empty description must stay empty in JSON, not become the display placeholder")
+	require.NotContains(t, out.String(), noTrailDescription)
+}
+
+// A failed description fetch is best-effort: the warning belongs on stderr so
+// stdout stays parseable.
+func TestRunTrailShowJSONKeepsStdoutParseableWhenDescriptionFetchFails(t *testing.T) {
+	t.Parallel()
+
+	srv := trailShowTestServer(t, api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x", Title: "T", Body: "list body", Status: string(trail.StatusOpen)}, "", http.StatusInternalServerError)
+
+	var out, errOut bytes.Buffer
+	err := runTrailShowWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
+
+	require.NoError(t, err)
+	require.Contains(t, errOut.String(), "could not load trail description")
+
+	var got trail.Metadata
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got), "stdout must stay valid JSON: %s", out.String())
+	require.Equal(t, "list body", got.Body, "the list body is the fallback when the detail fetch fails")
+}
+
+func TestRunTrailShowTextStillRendersTheHumanView(t *testing.T) {
+	t.Parallel()
+
+	srv := trailShowTestServer(t, api.TrailResource{
+		ID: "trl_1", Number: 7, URL: "https://entire.io/gh/acme/repo/trails/7",
+		Branch: "feature/x", Base: "main", Title: "Shown trail", Status: string(trail.StatusOpen),
+	}, "detail body", 0)
+
+	var out, errOut bytes.Buffer
+	err := runTrailShowWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailShowOptions{Selector: "7"})
+
+	require.NoError(t, err)
+	require.Empty(t, errOut.String())
+	text := out.String()
+	for _, want := range []string{"Trail: Shown trail", "Number:", "feature/x", "https://entire.io/gh/acme/repo/trails/7", "Description:", "detail body"} {
+		require.Containsf(t, text, want, "text output missing %q:\n%s", want, text)
+	}
+}
+
+func TestTrailShowCmdHasJSONFlag(t *testing.T) {
+	t.Parallel()
+	require.NotNil(t, newTrailShowCmd().Flags().Lookup("json"), "trail show must offer --json so agents can read it non-interactively")
+}
+
 func TestPrintTrailListShowsPhaseWhenPresent(t *testing.T) {
 	t.Parallel()
 	alice := trailListTestAuthorAlice
@@ -1950,6 +2105,258 @@ func TestSplitTrailUpdateSeparatesBodyFromMetadata(t *testing.T) {
 	if bodyReq2 == nil {
 		t.Error("body-only update must produce a body request")
 	}
+}
+
+// TestSplitTrailUpdateCountsEveryNonBodyFieldAsMetadata pins the structural
+// rule splitTrailUpdate relies on: any field other than Body makes a metadata
+// PATCH. Naming the fields by hand is how a later addition (a branch rename,
+// say) gets dropped silently — hasMeta stays false, no PATCH is sent, and the
+// command still reports success. This test grows with the struct instead.
+func TestSplitTrailUpdateCountsEveryNonBodyFieldAsMetadata(t *testing.T) {
+	t.Parallel()
+	typ := reflect.TypeOf(api.TrailUpdateRequest{})
+	for i := range typ.NumField() {
+		field := typ.Field(i)
+		if field.Name == "Body" {
+			continue
+		}
+		t.Run(field.Name, func(t *testing.T) {
+			t.Parallel()
+			// Fail rather than skip: a skipped subtest passes quietly, so a
+			// non-pointer field would silently retire the guarantee this test
+			// exists to provide, exactly when it starts mattering.
+			require.Equalf(t, reflect.Ptr, field.Type.Kind(),
+				"field %s is not a pointer; decide its zero/set semantics and extend this test before adding it", field.Name)
+			var req api.TrailUpdateRequest
+			// A pointer to the zero value is still "provided" — that is how a
+			// field is cleared (e.g. an empty title, an emptied assignee list).
+			reflect.ValueOf(&req).Elem().Field(i).Set(reflect.New(field.Type.Elem()))
+
+			_, hasMeta, _ := splitTrailUpdate(req)
+
+			require.Truef(t, hasMeta, "field %s must count as metadata, otherwise splitTrailUpdate drops it without sending a PATCH", field.Name)
+		})
+	}
+}
+
+// TestRunTrailUpdateSendsTitleAndBodyAsSeparatePatches drives the whole update
+// path against a server that rejects body+metadata in one PATCH exactly as
+// production does, so `trail update --title X --body Y` stays working end to
+// end and not just in splitTrailUpdate's unit test.
+func TestRunTrailUpdateSendsTitleAndBodyAsSeparatePatches(t *testing.T) {
+	t.Parallel()
+
+	// patches is written from the handler goroutine and read from the test
+	// goroutine, so it is guarded — the counter-based tests in this file use
+	// sync/atomic for the same reason; a slice needs a mutex instead.
+	var mu sync.Mutex
+	var patches []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath:
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+				Trails: []api.TrailResource{{ID: "trl_1", Number: 7, Branch: "feature/x", Title: "old title", Status: string(trail.StatusOpen)}},
+				Total:  1,
+			}); err != nil {
+				t.Errorf("encode list response: %v", err)
+			}
+		case r.Method == http.MethodPatch && r.URL.Path == trailTestBasePath+"/7":
+			var got map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Errorf("decode patch request: %v", err)
+				return
+			}
+			mu.Lock()
+			patches = append(patches, got)
+			mu.Unlock()
+			// Mirror the server's own rule ("Body updates cannot be combined
+			// with metadata updates").
+			_, hasBody := got[trailBodyField]
+			hasMeta := false
+			for key := range got {
+				if key != trailBodyField {
+					hasMeta = true
+				}
+			}
+			if hasBody && hasMeta {
+				w.WriteHeader(http.StatusBadRequest)
+				if err := json.NewEncoder(w).Encode(map[string]string{"error": "Body updates cannot be combined with metadata updates"}); err != nil {
+					t.Errorf("encode rejection: %v", err)
+				}
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailUpdateResponse{Trail: api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x"}}); err != nil {
+				t.Errorf("encode update response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	err := runTrailUpdateWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+		Branch:       "feature/x",
+		Title:        "new title",
+		TitleChanged: true,
+		Body:         "new body",
+		BodyChanged:  true,
+	})
+
+	require.NoError(t, err)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, patches, 2, "title and body must go out as two PATCHes")
+	require.Equal(t, map[string]any{"title": "new title"}, patches[0])
+	require.Equal(t, map[string]any{trailBodyField: "new body"}, patches[1])
+	// The trail is addressed by number now, not by branch: --trail can select a
+	// trail with no branch at all, which "for branch %s" would render blank.
+	require.Contains(t, out.String(), "Updated trail #7")
+	require.Empty(t, errOut.String())
+}
+
+// TestRunTrailUpdateReportsNoChangesWhenNothingWasSent pins that an update
+// which sends no PATCH does not claim success — agents read the success line as
+// confirmation the write landed.
+func TestRunTrailUpdateReportsNoChangesWhenNothingWasSent(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != trailTestBasePath {
+			t.Errorf("no PATCH should be sent, got: %s %s", r.Method, r.URL.Path)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+			Trails: []api.TrailResource{{ID: "trl_1", Number: 7, Branch: "feature/x", Status: string(trail.StatusOpen)}},
+			Total:  1,
+		}); err != nil {
+			t.Errorf("encode list response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	// The real source of an empty update is the interactive form closing
+	// untouched, which leaves every *Changed flag false. That exact input would
+	// re-open the form here (noFlags), so stand in with a non-nil but empty
+	// label slice: it clears noFlags, and buildTrailUpdateRequest still returns
+	// an empty request — the same state the split has to refuse to report as a
+	// success.
+	err := runTrailUpdateWithClient(t.Context(), &out, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+		Branch:   "feature/x",
+		LabelAdd: []string{},
+	})
+
+	require.NoError(t, err)
+	require.Contains(t, out.String(), "No changes to apply")
+	require.NotContains(t, out.String(), "Updated trail")
+}
+
+// TestRunTrailUpdateAttachesABranchWithoutClaimingAMetadataUpdate covers the
+// one path that reports success without any PATCH: attaching a branch to a
+// branchless trail. The attach prints its own line, so the no-PATCH branch must
+// stay quiet rather than adding "No changes to apply" underneath it.
+func TestRunTrailUpdateAttachesABranchWithoutClaimingAMetadataUpdate(t *testing.T) {
+	t.Parallel()
+
+	var attachBody api.TrailBranchRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath:
+			w.Header().Set("Content-Type", "application/json")
+			// Branchless, so --trail is the only way to reach it.
+			if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+				Trails: []api.TrailResource{{ID: "trl_1", Number: 7, Status: string(trail.StatusOpen)}},
+				Total:  1,
+			}); err != nil {
+				t.Errorf("encode list response: %v", err)
+			}
+		case r.Method == http.MethodPost && r.URL.Path == trailTestBasePath+"/7/branch":
+			if err := json.NewDecoder(r.Body).Decode(&attachBody); err != nil {
+				t.Errorf("decode attach body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailBranchResponse{
+				Trail:         api.TrailResource{ID: "trl_1", Number: 7, Branch: testTrailBranch},
+				BranchCreated: true,
+			}); err != nil {
+				t.Errorf("encode branch response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	err := runTrailUpdateWithClient(t.Context(), &out, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+		TrailSelector:       "7",
+		SetBranch:           testTrailBranch,
+		SetBranchChanged:    true,
+		BranchAction:        trailBranchActionCreate,
+		BranchActionChanged: true,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, trailBranchActionCreate, attachBody.Action)
+	require.Equal(t, testTrailBranch, attachBody.BranchName)
+	require.Contains(t, out.String(), "Created and attached branch "+testTrailBranch)
+	// No PATCH went out, but the attach did, so neither line applies.
+	require.NotContains(t, out.String(), "No changes to apply")
+	require.NotContains(t, out.String(), "Updated trail")
+}
+
+// TestRunTrailUpdateReportsAppliedMetadataWhenBodyPatchFails covers the
+// non-atomic half of the two-PATCH split: the metadata already landed, so the
+// error has to say so rather than reading as "nothing changed".
+func TestRunTrailUpdateReportsAppliedMetadataWhenBodyPatchFails(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath:
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+				Trails: []api.TrailResource{{ID: "trl_1", Number: 7, Branch: "feature/x", Status: string(trail.StatusOpen)}},
+				Total:  1,
+			}); err != nil {
+				t.Errorf("encode list response: %v", err)
+			}
+		case r.Method == http.MethodPatch:
+			var got map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Errorf("decode patch request: %v", err)
+				return
+			}
+			if _, hasBody := got[trailBodyField]; hasBody {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				if err := json.NewEncoder(w).Encode(map[string]string{"error": "Editor collaboration not configured"}); err != nil {
+					t.Errorf("encode rejection: %v", err)
+				}
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailUpdateResponse{Trail: api.TrailResource{ID: "trl_1", Number: 7}}); err != nil {
+				t.Errorf("encode update response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	err := runTrailUpdateWithClient(t.Context(), io.Discard, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+		Branch:       "feature/x",
+		Title:        "new title",
+		TitleChanged: true,
+		Body:         "new body",
+		BodyChanged:  true,
+	})
+
+	require.ErrorContains(t, err, "trail metadata was updated, but the body update failed")
 }
 
 func TestTrailUpdateCmdHasCollaborationFlags(t *testing.T) {

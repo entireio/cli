@@ -78,22 +78,26 @@ func v4ResultIDs(t *testing.T, results []search.Result) []string {
 // --- merge: tier ordering ------------------------------------------------------
 
 // TestMergeSemanticV4Responses_TierOrdering verifies the cross-cell interleave
-// applies query-serve's own ordering: repos first, then tier-0 by BM25 desc,
-// tier-1 by rerank score desc, then promoted tier-2 by ANN asc — regardless of
-// which cell each result came from.
+// applies query-serve's own ordering: repos first, then tier 0 and tier 1 EACH
+// by rerank score desc (ENT-1425/ENT-1431), then promoted tier-2 by ANN asc —
+// regardless of which cell each result came from. The BM25/Score values are set
+// to the OPPOSITE order from the rerank scores so the assertion fails if the
+// merge ever regresses to sorting by BM25 (tier 0) or Score (tier 1).
 func TestMergeSemanticV4Responses_TierOrdering(t *testing.T) {
 	t.Parallel()
 
 	cellA := &search.Response{Results: []search.Result{
-		v4Ckpt("a-t1-low", 1, search.Meta{Score: 0.5}),
-		v4Ckpt("a-t0-high", 0, search.Meta{BM25Score: fptr(9.0)}),
+		// tier-1: high Score but LOW rerank → must sort below b-t1 (higher rerank).
+		v4Ckpt("a-t1-rr-lo", 1, search.Meta{Score: 0.9, RerankScore: fptr(0.20)}),
+		// tier-0: high BM25 but LOW rerank → must sort below b-t0 (higher rerank).
+		v4Ckpt("a-t0-rr-lo", 0, search.Meta{BM25Score: fptr(9.0), RerankScore: fptr(0.20)}),
 		// tier-2 alongside upper tiers in the same cell → promoted.
 		v4Ckpt("a-t2", 2, search.Meta{ANNScore: fptr(0.30)}),
 	}, Total: 3}
 	cellB := &search.Response{Results: []search.Result{
 		v4RepoRow(t, "repo-1", 0.9),
-		v4Ckpt("b-t0-low", 0, search.Meta{BM25Score: fptr(3.0)}),
-		v4Ckpt("b-t1-high", 1, search.Meta{Score: 0.8}),
+		v4Ckpt("b-t0-rr-hi", 0, search.Meta{BM25Score: fptr(3.0), RerankScore: fptr(0.80)}),
+		v4Ckpt("b-t1-rr-hi", 1, search.Meta{Score: 0.1, RerankScore: fptr(0.90)}),
 		v4Ckpt("b-t2", 2, search.Meta{ANNScore: fptr(0.10)}),
 	}, Total: 4}
 
@@ -104,7 +108,7 @@ func TestMergeSemanticV4Responses_TierOrdering(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"repo-1", "a-t0-high", "b-t0-low", "b-t1-high", "a-t1-low", "b-t2", "a-t2"}
+	want := []string{"repo-1", "b-t0-rr-hi", "a-t0-rr-lo", "b-t1-rr-hi", "a-t1-rr-lo", "b-t2", "a-t2"}
 	got := v4ResultIDs(t, resp.Results)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("merged order = %v, want %v", got, want)
@@ -114,6 +118,69 @@ func TestMergeSemanticV4Responses_TierOrdering(t *testing.T) {
 	}
 	if resp.Page != 1 {
 		t.Errorf("page = %d, want 1", resp.Page)
+	}
+}
+
+// TestMergeSemanticV4Responses_Tier0MixedCapabilityFallback verifies the tier-0
+// fallback used when not every row was reranked (a cell predating tier-0
+// reranking): rows interleave positionally by their rank within their own cell
+// (each cell's #1, then each cell's #2, …), BM25 breaking ties between same-rank
+// rows — never a global rerank sort that would demote the un-scored cell's hits.
+func TestMergeSemanticV4Responses_Tier0MixedCapabilityFallback(t *testing.T) {
+	t.Parallel()
+
+	// cellA is a current cell (rows carry a rerank score); cellB predates tier-0
+	// reranking (no rerank score) — so the whole band uses the positional fallback.
+	cellA := &search.Response{Results: []search.Result{
+		v4Ckpt("a0", 0, search.Meta{BM25Score: fptr(1.0), RerankScore: fptr(0.90)}), // cellRank 0
+		v4Ckpt("a1", 0, search.Meta{BM25Score: fptr(2.0), RerankScore: fptr(0.80)}), // cellRank 1
+	}, Total: 2}
+	cellB := &search.Response{Results: []search.Result{
+		v4Ckpt("b0", 0, search.Meta{BM25Score: fptr(5.0)}), // cellRank 0, no rerank score
+		v4Ckpt("b1", 0, search.Meta{BM25Score: fptr(4.0)}), // cellRank 1, no rerank score
+	}, Total: 2}
+
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellOK(cellA), v4CellOK(cellB),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// rank 0: b0 (BM25 5) before a0 (BM25 1); rank 1: b1 (BM25 4) before a1 (BM25 2).
+	want := []string{"b0", "a0", "b1", "a1"}
+	got := v4ResultIDs(t, resp.Results)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("merged order = %v, want %v", got, want)
+	}
+}
+
+// TestMergeSemanticV4Responses_EqualRerankTieBreaks verifies the secondary keys
+// when rerank scores tie: tier 0 falls back to BM25 desc and tier 1 to retrieval
+// Score desc, matching the BFF's `|| bm25Of` / `|| scoreOf` tie-breaks.
+func TestMergeSemanticV4Responses_EqualRerankTieBreaks(t *testing.T) {
+	t.Parallel()
+
+	cell := &search.Response{Results: []search.Result{
+		// tier 0, equal rerank → BM25 desc decides: t0-hi before t0-lo.
+		v4Ckpt("t0-lo", 0, search.Meta{RerankScore: fptr(0.50), BM25Score: fptr(2.0)}),
+		v4Ckpt("t0-hi", 0, search.Meta{RerankScore: fptr(0.50), BM25Score: fptr(8.0)}),
+		// tier 1, equal rerank → Score desc decides: t1-hi before t1-lo.
+		v4Ckpt("t1-lo", 1, search.Meta{RerankScore: fptr(0.30), Score: 0.1}),
+		v4Ckpt("t1-hi", 1, search.Meta{RerankScore: fptr(0.30), Score: 0.9}),
+	}, Total: 4}
+
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellOK(cell),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"t0-hi", "t0-lo", "t1-hi", "t1-lo"}
+	got := v4ResultIDs(t, resp.Results)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("merged order = %v, want %v", got, want)
 	}
 }
 

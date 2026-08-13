@@ -638,7 +638,7 @@ func TestSearchModel_BrowseFooterHelp(t *testing.T) {
 		"/ search",
 		"↑/↓, j/k scroll",
 		"home/end, g/G top/bottom",
-		"1-3 type",
+		"1-4 type",
 		"q quit",
 	}
 	lastIndex := -1
@@ -680,7 +680,7 @@ func TestSearchModel_BrowseFooterHelpIncludesPagingForMultiplePages(t *testing.T
 		"↑/↓, j/k scroll",
 		"home/end, g/G top/bottom",
 		"n/p page",
-		"1-3 type",
+		"1-4 type",
 		"q quit",
 	}
 	lastIndex := -1

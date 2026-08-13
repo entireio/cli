@@ -65,13 +65,20 @@ const DefaultLimit = 100
 
 // Meta contains search ranking metadata for a result.
 type Meta struct {
-	MatchType string   `json:"matchType"`
-	Score     float64  `json:"score"`
-	Tier      *int     `json:"tier,omitempty"`
-	Snippet   string   `json:"snippet,omitempty"`
-	Summary   string   `json:"summary,omitempty"`
-	BM25Score *float64 `json:"bm25Score,omitempty"`
-	ANNScore  *float64 `json:"annScore,omitempty"`
+	MatchType string  `json:"matchType"`
+	Score     float64 `json:"score"`
+	Tier      *int    `json:"tier,omitempty"`
+	Snippet   string  `json:"snippet,omitempty"`
+	Summary   string  `json:"summary,omitempty"`
+	// RerankScore is query-serve's cross-encoder (Cohere) relevance judgement,
+	// present only on results that went through reranking. Where present it is
+	// the signal the final ordering was built from and the only score
+	// comparable across repos — Score is per-namespace retrieval strength, so
+	// sorting by it undoes reranking. The cross-cell merge orders tier 0 and
+	// tier 1 by this field, matching the BFF (ENT-1425/ENT-1431).
+	RerankScore *float64 `json:"rerankScore,omitempty"`
+	BM25Score   *float64 `json:"bm25Score,omitempty"`
+	ANNScore    *float64 `json:"annScore,omitempty"`
 }
 
 // CheckpointResult represents a checkpoint returned by the search service.

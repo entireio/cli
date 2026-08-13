@@ -458,6 +458,35 @@ func TestSearch_ResultJSONRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSearch_MetaDecodesRerankScore guards that query-serve's rerankScore is
+// actually parsed off the wire — the cross-cell merge orders tier 0/1 by it, so
+// a dropped field silently reverts the CLI to pre-rerank ordering.
+func TestSearch_MetaDecodesRerankScore(t *testing.T) {
+	t.Parallel()
+
+	raw := `{"type":"commit","data":{"commitSha":"abc123","org":"o","repo":"r"},"searchMeta":{"matchType":"both","score":6,"tier":1,"rerankScore":0.42,"bm25Score":6}}`
+	var r Result
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Meta.RerankScore == nil {
+		t.Fatal("rerankScore decoded as nil, want 0.42")
+	}
+	if *r.Meta.RerankScore != 0.42 {
+		t.Errorf("decoded rerankScore = %f, want 0.42", *r.Meta.RerankScore)
+	}
+
+	// Absent rerankScore must stay nil (a cell whose rerank fell back), not 0,
+	// so rerankOf can distinguish "unscored" from a genuine 0 score.
+	var noRerank Result
+	if err := json.Unmarshal([]byte(`{"type":"commit","data":{"commitSha":"d","org":"o","repo":"r"},"searchMeta":{"score":1,"tier":1}}`), &noRerank); err != nil {
+		t.Fatal(err)
+	}
+	if noRerank.Meta.RerankScore != nil {
+		t.Errorf("absent rerankScore = %v, want nil", *noRerank.Meta.RerankScore)
+	}
+}
+
 // -- HasFilters tests --
 
 func TestConfig_HasFilters(t *testing.T) {

@@ -418,14 +418,22 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 // entireTrailContextInjection is the one-time, model-facing pointer Entire
 // injects on the first turn of a session. It points at `entire agent-help` for
 // the full flag/subcommand surface — fetched on demand so that surface never goes
-// stale here as it grows — and adds only a small, stable behavioral invariant an
-// agent must know even if it never drills in: commits auto-capture checkpoints,
-// the two stable query anchors (`why`, `checkpoint search`) for recovering intent
-// before edits, and that setup/destructive commands belong to the user. It also
-// names the auto-detected repo (from the already-loaded session scope, no IO) and
-// the standing rule that the agent is inside the repo and must never ask the user
-// for the repo name. Kept terse: it costs context-window tokens on the first turn
-// of every session.
+// stale here as it grows — and adds only what an agent must know even if it never
+// drills in: commits auto-capture checkpoints, and setup/destructive commands
+// belong to the user. It also names the auto-detected repo (from the
+// already-loaded session scope, no IO) and the standing rule that the agent is
+// inside the repo and must never ask the user for the repo name. Kept terse: it
+// costs context-window tokens on the first turn of every session.
+//
+// Deliberately NOT here: per-task command recommendations. An earlier revision
+// urged `entire why <file>:<line>` and `entire checkpoint search` "before large
+// edits". A census of 963 agent transcripts on a heavy-use machine found zero
+// invocations of either against 25 calls to the agent-help pointer above, so the
+// recommendation only ever cost tokens. It also mis-framed a
+// sometimes-appropriate query as an always-do step. Which commands suit a given
+// task is agent-help's job, where it is pulled on demand and grouped by who
+// should initiate the command (see agentHelpAudience); this string carries only
+// invariants that hold on every turn of every session.
 func entireTrailContextInjection(scope trailEnablementScope) string {
 	repo := ""
 	if scope.Forge != "" && scope.Owner != "" && scope.Repo != "" {
@@ -433,7 +441,7 @@ func entireTrailContextInjection(scope trailEnablementScope) string {
 	}
 	var b strings.Builder
 	b.WriteString("Entire is enabled for this repo. Run `entire agent-help` to see what entire does and which subcommand to use, then `entire agent-help <command>` for that command's exact, current flags. ")
-	b.WriteString("Commits automatically capture the AI session as a checkpoint, so never create checkpoints by hand — just commit normally. Before large edits, `entire why <file>:<line>` and `entire checkpoint search` recover the intent behind existing code. Leave setup and destructive commands (enable, disable, clean, rewind, auth) to the user. ")
+	b.WriteString("Commits automatically capture the AI session as a checkpoint, so never create checkpoints by hand — just commit normally. Leave setup and destructive commands (enable, disable, clean, rewind, auth) to the user. ")
 	// Mirror agentHelpRepoBlock's defense-in-depth: this string is injected raw
 	// into the agent's model context (no escaping), so a repo key carrying control
 	// characters (e.g. an <sessionID>.trail-scope.json cache written by a pre-fix

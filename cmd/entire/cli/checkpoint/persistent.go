@@ -741,6 +741,19 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		filePaths.Prompt = "/" + promptPath
 	}
 
+	// The write boundary dedupes as a last line of defense, but duplicates
+	// reaching it mean an upstream producer skipped mergeFilesTouched — warn
+	// so that producer can be found rather than silently masked.
+	filesTouched := NormalizeFilesTouched(opts.FilesTouched)
+	if len(filesTouched) < len(opts.FilesTouched) {
+		logging.Warn(logging.WithComponent(ctx, "checkpoint"),
+			"files_touched reached the write boundary with duplicates",
+			slog.String("session_id", opts.SessionID),
+			slog.Int("reported", len(opts.FilesTouched)),
+			slog.Int("unique", len(filesTouched)),
+		)
+	}
+
 	// Write session-level metadata.json (Metadata with all fields including initial_attribution)
 	sessionMetadata := Metadata{
 		CheckpointID:                opts.CheckpointID,
@@ -751,7 +764,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		CommitSHA:                   opts.CommitSHA,
 		CheckpointsCount:            opts.CheckpointsCount,
 		SaveStepCount:               opts.SaveStepCount,
-		FilesTouched:                opts.FilesTouched,
+		FilesTouched:                filesTouched,
 		Agent:                       opts.Agent,
 		Model:                       opts.Model,
 		TurnID:                      opts.TurnID,
@@ -1204,6 +1217,21 @@ func (s *treeWriter) writeCompactTranscript(ctx context.Context, agentType types
 		Hash: blobHash,
 	}
 	return &boundary
+}
+
+// NormalizeFilesTouched returns files deduplicated, sorted, and normalized to
+// forward slashes, for writing into persistent checkpoint records. It
+// preserves the nil-versus-empty distinction of its input: files_touched is
+// marshaled without omitempty, so nil-in stays nil (JSON null, as before) and
+// a non-nil empty input stays non-nil (JSON []), keeping the wire format
+// unchanged for callers that send an empty list. Exported so alternate
+// persistent backends enforce the same write-boundary invariant.
+func NormalizeFilesTouched(files []string) []string {
+	merged := mergeFilesTouched(files, nil)
+	if merged == nil && files != nil {
+		return []string{}
+	}
+	return merged
 }
 
 // mergeFilesTouched combines two file lists, removing duplicates.

@@ -161,7 +161,7 @@ type searchModel struct {
 	// loop (which would race against bubbletea's stdin reader and stall).
 	darkBg bool
 
-	// Code search state (behind ENTIRE_CODE_SEARCH=1 feature flag).
+	// Code search state.
 	codeResults    []codesearch.Result // results from peregrine
 	codeStats      codesearch.Stats    // aggregate stats
 	codeLoading    bool                // true while async code search runs
@@ -446,37 +446,35 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		// Code search uses extractInlineRepoFilters (not ParseSearchInput)
 		// so author:/date:/branch: tokens are preserved as literal search
 		// text, matching the --code CLI path.
-		if codeSearchEnabled() {
-			codeQuery, inlineRepos := extractInlineRepoFilters(raw)
-			if codeQuery != "" {
-				willFireCodeSearch = true
-				opts := m.codeSearchOpts
-				opts.query = codeQuery
-				// Always reset to the model's default repo scope, then apply
-				// inline overrides. This prevents a stale repo list from a
-				// previous query leaking into the next one.
-				opts.repoFilters = m.codeSearchOpts.repoFilters
-				if len(inlineRepos) > 0 {
-					if hasAllReposFilter(inlineRepos) {
-						opts.repoFilters = nil
-					} else {
-						opts.repoFilters = filterRepoWildcards(inlineRepos)
-					}
+		codeQuery, inlineRepos := extractInlineRepoFilters(raw)
+		if codeQuery != "" {
+			willFireCodeSearch = true
+			opts := m.codeSearchOpts
+			opts.query = codeQuery
+			// Always reset to the model's default repo scope, then apply
+			// inline overrides. This prevents a stale repo list from a
+			// previous query leaking into the next one.
+			opts.repoFilters = m.codeSearchOpts.repoFilters
+			if len(inlineRepos) > 0 {
+				if hasAllReposFilter(inlineRepos) {
+					opts.repoFilters = nil
+				} else {
+					opts.repoFilters = filterRepoWildcards(inlineRepos)
 				}
-				m.codeSearchGen++
-				m.codeLoading = true
-				m.codeResults = nil
-				m.codeSearchErr = ""
-				cmds = append(cmds, performCodeSearch(opts, m.codeSearchGen))
-			} else {
-				// No code query (e.g. repo-only input) — clear stale code
-				// results and bump the generation so any in-flight search
-				// from a prior query is discarded when it completes.
-				m.codeSearchGen++
-				m.codeLoading = false
-				m.codeResults = nil
-				m.codeSearchErr = ""
 			}
+			m.codeSearchGen++
+			m.codeLoading = true
+			m.codeResults = nil
+			m.codeSearchErr = ""
+			cmds = append(cmds, performCodeSearch(opts, m.codeSearchGen))
+		} else {
+			// No code query (e.g. repo-only input) — clear stale code
+			// results and bump the generation so any in-flight search
+			// from a prior query is discarded when it completes.
+			m.codeSearchGen++
+			m.codeLoading = false
+			m.codeResults = nil
+			m.codeSearchErr = ""
 		}
 
 		// Checkpoint search (only if repo filters are valid for the checkpoint API).
@@ -539,14 +537,12 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		m = m.refreshBrowseContent()
 		return m, nil
 	case "4":
-		if codeSearchEnabled() {
-			m.filterType = typeFilterCode
-			m.cursor = 0
-			m.page = 0
-			m.browseVP.GotoTop()
-			m = m.refreshBrowseContent()
-			return m, nil
-		}
+		m.filterType = typeFilterCode
+		m.cursor = 0
+		m.page = 0
+		m.browseVP.GotoTop()
+		m = m.refreshBrowseContent()
+		return m, nil
 	}
 
 	var pageLen int
@@ -818,9 +814,7 @@ func (m searchModel) viewTypeTabs() string {
 		renderTab("Checkpoints", typeFilterCheckpoints, cpCount, "1"),
 		renderTab("Sessions", typeFilterSessions, ssCount, "2"),
 		renderTab("Commits", typeFilterCommits, cmCount, "3"),
-	}
-	if codeSearchEnabled() {
-		tabs = append(tabs, renderTab("Code", typeFilterCode, len(m.codeResults), "4"))
+		renderTab("Code", typeFilterCode, len(m.codeResults), "4"),
 	}
 
 	return strings.Join(tabs, "  ")
@@ -840,23 +834,9 @@ func (m searchModel) viewBrowseHeader() (string, bool) {
 	b.WriteString(pad + m.styles.render(m.styles.sectionTitle, "›") + " " + m.styles.render(m.styles.bold, query))
 	b.WriteString("\n\n")
 
-	// When code search is available, always show type tabs so the user can
-	// switch to the Code tab even when checkpoint search is loading/errored/empty.
-	hasCodeTab := codeSearchEnabled()
+	// Always show type tabs so the user can switch to the Code tab even when
+	// checkpoint search is loading/errored/empty.
 	checkpointBlocked := m.loading || m.searchErr != "" || len(m.results) == 0
-
-	if checkpointBlocked && !hasCodeTab {
-		// No code tab — show the checkpoint-only loading/error/empty state.
-		switch {
-		case m.loading:
-			b.WriteString(pad + m.styles.render(m.styles.dim, "Searching..."))
-		case m.searchErr != "":
-			b.WriteString(pad + m.styles.render(m.styles.red, "Error: "+m.searchErr))
-		default:
-			b.WriteString(pad + m.styles.render(m.styles.dim, "No results found."))
-		}
-		return b.String(), false
-	}
 
 	// Type tabs
 	b.WriteString(pad + m.viewTypeTabs())
@@ -1578,11 +1558,7 @@ func (m searchModel) viewHelp() string {
 	if pages > 1 {
 		left += dot + m.styles.helpItem("n/p", "page")
 	}
-	typeHint := "1-3"
-	if codeSearchEnabled() {
-		typeHint = "1-4"
-	}
-	left += dot + m.styles.helpItem(typeHint, "type") + dot +
+	left += dot + m.styles.helpItem("1-4", "type") + dot +
 		m.styles.helpItem(keys.Quit.Help().Key, keys.Quit.Help().Desc)
 
 	// The page / results count lives on the status row beneath the list
