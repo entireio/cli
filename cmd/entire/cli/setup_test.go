@@ -3636,6 +3636,31 @@ func TestEnableCmd_YesOnConfiguredRepo_ManagesAgents(t *testing.T) {
 	}
 }
 
+func TestRunEnableInteractiveSuppressAdditionalSetupLeavesTelemetryUnset(t *testing.T) {
+	setupTestRepo(t)
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+	var out bytes.Buffer
+	opts := EnableOptions{
+		Yes:                     true,
+		Telemetry:               true,
+		UseProjectSettings:      true,
+		SuppressAdditionalSetup: true,
+	}
+	if err := runEnableInteractive(context.Background(), &out, []agent.Agent{ag}, opts); err != nil {
+		t.Fatalf("runEnableInteractive() error = %v", err)
+	}
+	s, err := LoadEntireSettings(context.Background())
+	if err != nil {
+		t.Fatalf("LoadEntireSettings() error = %v", err)
+	}
+	if s.Telemetry != nil {
+		t.Fatalf("suppressed telemetry consent was modified: %v", *s.Telemetry)
+	}
+}
+
 func TestEnableCmd_YesWithTelemetryFalse(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)

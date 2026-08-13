@@ -167,16 +167,13 @@ func TestEnsureConfigureRepoAccessUnknownAdminStillAllowsInstall(t *testing.T) {
 	}
 }
 
-func TestConfigureOnboardingDoesNotAutoAcceptTelemetry(t *testing.T) {
+func TestConfigureOnboardingSuppressesTelemetryPrompt(t *testing.T) {
 	opts := configureOnboardingEnableOptions(EnableOptions{Telemetry: true})
 	if !opts.Yes {
 		t.Fatal("onboarding must auto-answer setup choices it already presented")
 	}
-	if !opts.PromptTelemetryConsent {
-		t.Fatal("onboarding must exclude telemetry from automatic yes answers")
-	}
 	if !opts.SuppressAdditionalSetup {
-		t.Fatal("onboarding must suppress unrelated setup prompts")
+		t.Fatal("onboarding must suppress telemetry and unrelated setup prompts")
 	}
 }
 

@@ -79,14 +79,11 @@ type EnableOptions struct {
 	// presentation of the final state (commit, push, done).
 	SuppressDoneMessage bool
 	// SuppressAdditionalSetup keeps focused callers (the configure onboarding
-	// flow) from offering Vercel changes or history import after their own
-	// explicitly presented choices. The normal enable flow leaves this false.
+	// flow) from offering telemetry, Vercel changes, or history import after
+	// their own explicitly presented choices. The normal enable flow leaves this
+	// false.
 	SuppressAdditionalSetup bool
-	// PromptTelemetryConsent excludes telemetry from Yes's automatic answers.
-	// Interactive orchestration can use Yes for its already-presented choices
-	// without silently opting a first-time user into telemetry.
-	PromptTelemetryConsent bool
-	Yes                    bool
+	Yes                     bool
 	// ImportHistory opts into importing the selected agents' pre-existing
 	// session history during first-time setup. Deliberately NOT implied by
 	// Yes: ingesting a month of local transcripts is not a setup default (see
@@ -1347,24 +1344,25 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		}
 	}
 
-	// Ask about telemetry consent (only if not already asked).
-	// --yes normally skips the interactive prompt but still respects
-	// --telemetry=false and ENTIRE_TELEMETRY_OPTOUT. Interactive orchestrators
-	// can explicitly keep consent separate with PromptTelemetryConsent.
-	if opts.Yes && !opts.PromptTelemetryConsent {
-		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
-			f := false
-			settings.Telemetry = &f
-		} else if settings.Telemetry == nil {
-			t := true
-			settings.Telemetry = &t
+	if !opts.SuppressAdditionalSetup {
+		// Ask about telemetry consent (only if not already asked).
+		// --yes skips the interactive prompt but still respects --telemetry=false
+		// and ENTIRE_TELEMETRY_OPTOUT.
+		if opts.Yes {
+			if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+				f := false
+				settings.Telemetry = &f
+			} else if settings.Telemetry == nil {
+				t := true
+				settings.Telemetry = &t
+			}
+		} else if err := promptTelemetryConsent(settings, opts.Telemetry); err != nil {
+			return fmt.Errorf("telemetry consent: %w", err)
 		}
-	} else if err := promptTelemetryConsent(settings, opts.Telemetry); err != nil {
-		return fmt.Errorf("telemetry consent: %w", err)
-	}
-	// Save again to persist telemetry choice
-	if err := saveSettings(); err != nil {
-		return fmt.Errorf("failed to save settings: %w", err)
+		// Save again to persist telemetry choice.
+		if err := saveSettings(); err != nil {
+			return fmt.Errorf("failed to save settings: %w", err)
+		}
 	}
 
 	// Explicit, user-initiated setup: allow EnsurePrimaryRef to fetch a
