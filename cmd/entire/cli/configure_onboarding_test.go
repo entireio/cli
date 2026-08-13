@@ -73,6 +73,60 @@ func TestEnsureConfigureLoginUsesExistingSession(t *testing.T) {
 	}
 }
 
+func TestEnsureConfigureLoginRejectsInsecureURLBeforeSendingToken(t *testing.T) {
+	fetchCalled := false
+	loginCalled := false
+	deps := configureFlowDeps{
+		resolveAuth: func(context.Context) (statusTarget, error) {
+			return statusTarget{coreURL: "http://auth.example", token: "secret"}, nil
+		},
+		fetchProfile: func(context.Context, string, string) (*authProfile, error) {
+			fetchCalled = true
+			return nil, errors.New("profile fetch should not run")
+		},
+		runLogin: func(context.Context, io.Writer, io.Writer) error {
+			loginCalled = true
+			return nil
+		},
+	}
+	_, err := ensureConfigureLogin(context.Background(), io.Discard, io.Discard, deps)
+	if !errors.Is(err, api.ErrInsecureHTTP) {
+		t.Fatalf("error = %v, want ErrInsecureHTTP", err)
+	}
+	if fetchCalled {
+		t.Fatal("profile request sent bearer to insecure URL")
+	}
+	if loginCalled {
+		t.Fatal("insecure existing session incorrectly started login")
+	}
+}
+
+func TestEnsureConfigureLoginRejectsInsecureURLAfterLogin(t *testing.T) {
+	var resolves int
+	fetchCalled := false
+	deps := configureFlowDeps{
+		resolveAuth: func(context.Context) (statusTarget, error) {
+			resolves++
+			if resolves == 1 {
+				return statusTarget{}, nil
+			}
+			return statusTarget{coreURL: "http://auth.example", token: "secret"}, nil
+		},
+		fetchProfile: func(context.Context, string, string) (*authProfile, error) {
+			fetchCalled = true
+			return nil, errors.New("profile fetch should not run")
+		},
+		runLogin: func(context.Context, io.Writer, io.Writer) error { return nil },
+	}
+	_, err := ensureConfigureLogin(context.Background(), io.Discard, io.Discard, deps)
+	if !errors.Is(err, api.ErrInsecureHTTP) {
+		t.Fatalf("error = %v, want ErrInsecureHTTP", err)
+	}
+	if fetchCalled {
+		t.Fatal("post-login profile request sent bearer to insecure URL")
+	}
+}
+
 func TestEnsureConfigureLoginCreatesMissingSession(t *testing.T) {
 	var resolves int
 	deps := configureFlowDeps{
@@ -319,11 +373,7 @@ func TestConfigureFormThemeHasNoFocusedRail(t *testing.T) {
 
 func TestConfigureSaveFieldIsAlwaysVisible(t *testing.T) {
 	choice := configureSaveLocal
-	field := &configureSaveField{
-		value:       &choice,
-		committed:   choice,
-		highlighted: choice,
-	}
+	field := &configureSaveField{}
 	field.Select = huh.NewSelect[string]().
 		Title("Save configuration").
 		Description(configureSaveDescription("main", false, false, false)).

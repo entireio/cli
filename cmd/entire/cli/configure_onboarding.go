@@ -265,6 +265,9 @@ func ensureConfigureLogin(ctx context.Context, outW, errW io.Writer, deps config
 		return nil, err
 	}
 	if target.token != "" {
+		if err := api.RequireSecureURL(target.coreURL); err != nil {
+			return nil, fmt.Errorf("context login server URL check: %w", err)
+		}
 		if profile, profileErr := deps.fetchProfile(ctx, target.coreURL, target.token); profileErr == nil {
 			return profile, nil
 		} else if !isKeychainTokenRejected(profileErr) {
@@ -281,6 +284,9 @@ func ensureConfigureLogin(ctx context.Context, outW, errW io.Writer, deps config
 	}
 	if target.token == "" {
 		return nil, errors.New("login completed without an active session")
+	}
+	if err := api.RequireSecureURL(target.coreURL); err != nil {
+		return nil, fmt.Errorf("context login server URL check: %w", err)
 	}
 	profile, err := deps.fetchProfile(ctx, target.coreURL, target.token)
 	if err != nil {
