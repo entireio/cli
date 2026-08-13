@@ -136,6 +136,37 @@ func TestEnsureConfigureRepoAccessNonAdminPrintsShareableLink(t *testing.T) {
 	}
 }
 
+func TestEnsureConfigureRepoAccessUnknownAdminStillAllowsInstall(t *testing.T) {
+	opened := false
+	deps := configureFlowDeps{
+		githubAdmin: func(context.Context, string, string) (bool, error) {
+			return false, errConfigureGHUnavailable
+		},
+		openURL: func(context.Context, string) error {
+			opened = true
+			return nil
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	var out, errOut bytes.Buffer
+	err := ensureConfigureRepoAccess(ctx, &out, &errOut, configureAccessReporterStub{},
+		&api.EnableRepoResponse{InstallURL: "https://entire.io/install?repo=acme%2Fwidget"},
+		"https://github.com/acme/widget.git", "acme", "widget", deps)
+	if err == nil {
+		t.Fatal("expected the installation wait to end with the test deadline")
+	}
+	if !opened {
+		t.Fatal("an unknown admin state should still open the installation URL")
+	}
+	if !strings.Contains(errOut.String(), "gh CLI is not installed") {
+		t.Fatalf("missing actionable gh guidance:\n%s", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "An admin needs to install") {
+		t.Fatalf("unknown admin state was misreported as non-admin:\n%s", errOut.String())
+	}
+}
+
 func TestConfigureOnboardingDoesNotAutoAcceptTelemetry(t *testing.T) {
 	opts := configureOnboardingEnableOptions(EnableOptions{Telemetry: true})
 	if !opts.Yes {

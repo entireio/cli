@@ -30,6 +30,11 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
+var (
+	errConfigureGHUnavailable     = errors.New("gh CLI is not installed")
+	errConfigureGHUnauthenticated = errors.New("gh CLI is not authenticated")
+)
+
 const (
 	configureAccessPollInterval = 2 * time.Second
 	configureAccessWaitTimeout  = 5 * time.Minute
@@ -294,11 +299,25 @@ func ensureConfigureRepoAccess(ctx context.Context, outW, errW io.Writer, report
 	}
 
 	admin, adminErr := deps.githubAdmin(ctx, owner, repo)
-	if adminErr != nil || !admin {
+	if adminErr == nil && !admin {
 		fmt.Fprintln(errW, "  An admin needs to install the GitHub app first.")
 		fmt.Fprintln(errW, "  Send them this link to continue:")
 		fmt.Fprintf(errW, "\n  %s\n", installURL)
 		return NewSilentError(errors.New("GitHub app installation required"))
+	}
+	if adminErr != nil {
+		switch {
+		case errors.Is(adminErr, errConfigureGHUnavailable):
+			fmt.Fprintln(errW, "  Could not verify GitHub admin access because the gh CLI is not installed.")
+			fmt.Fprintln(errW, "  Install it from https://cli.github.com/ and run `gh auth login` for future checks.")
+		case errors.Is(adminErr, errConfigureGHUnauthenticated):
+			fmt.Fprintln(errW, "  Could not verify GitHub admin access because the gh CLI is not authenticated.")
+			fmt.Fprintln(errW, "  Run `gh auth login` for future checks.")
+		default:
+			fmt.Fprintf(errW, "  Could not verify GitHub admin access: %v\n", adminErr)
+		}
+		fmt.Fprintln(errW, "  If you administer this repository, you can still continue with the installation link.")
+		fmt.Fprintln(errW)
 	}
 
 	fmt.Fprintln(outW, "  Install the GitHub app to grant access:")
@@ -335,11 +354,18 @@ func ensureConfigureRepoAccess(ctx context.Context, outW, errW io.Writer, report
 }
 
 func configureGitHubAdmin(ctx context.Context, owner, repo string) (bool, error) {
-	out, err := exec.CommandContext(ctx, "gh", "api", "repos/"+owner+"/"+repo, "--jq", ".permissions.admin").Output()
+	runner := execRunner{}
+	if !ghAvailable(ctx, runner) {
+		return false, errConfigureGHUnavailable
+	}
+	if !ghAuthenticated(ctx, runner) {
+		return false, errConfigureGHUnauthenticated
+	}
+	out, err := runner.Run(ctx, "gh", "api", "repos/"+owner+"/"+repo, "--jq", ".permissions.admin")
 	if err != nil {
 		return false, fmt.Errorf("check GitHub admin permission: %w", err)
 	}
-	admin, err := strconv.ParseBool(strings.TrimSpace(string(out)))
+	admin, err := strconv.ParseBool(strings.TrimSpace(out))
 	if err != nil {
 		return false, fmt.Errorf("parse GitHub admin permission: %w", err)
 	}
