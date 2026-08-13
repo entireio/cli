@@ -22,7 +22,10 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-const testConfigureUSHost = "us.entire.io"
+const (
+	testConfigureUSHost = "us.entire.io"
+	testGitRevParse     = "rev-parse"
+)
 
 func TestConfigureCmdBareInteractiveRunsOnboarding(t *testing.T) {
 	setupTestRepo(t)
@@ -474,6 +477,51 @@ func TestConfigureSelectionChangesDistinguishLocalAndPushChanges(t *testing.T) {
 	}
 }
 
+func TestConfigureBranchHasNoUnpushedCommits(t *testing.T) {
+	previous := gitRunner
+	t.Cleanup(func() { gitRunner = previous })
+
+	t.Run("up to date", func(t *testing.T) {
+		gitRunner = func(_ context.Context, _ string, args ...string) (string, error) {
+			switch args[0] {
+			case testGitRevParse:
+				return "origin/main", nil
+			case "rev-list":
+				if got := args[len(args)-1]; got != "origin/main..HEAD" {
+					t.Fatalf("rev-list range = %q", got)
+				}
+				return "0", nil
+			default:
+				return "", fmt.Errorf("unexpected git args: %v", args)
+			}
+		}
+		if !configureBranchHasNoUnpushedCommits(context.Background(), ".") {
+			t.Fatal("up-to-date branch reported unsafe")
+		}
+	})
+
+	t.Run("ahead", func(t *testing.T) {
+		gitRunner = func(_ context.Context, _ string, args ...string) (string, error) {
+			if args[0] == testGitRevParse {
+				return "origin/main", nil
+			}
+			return "2", nil
+		}
+		if configureBranchHasNoUnpushedCommits(context.Background(), ".") {
+			t.Fatal("branch with unpushed commits reported safe")
+		}
+	})
+
+	t.Run("no upstream", func(t *testing.T) {
+		gitRunner = func(context.Context, string, ...string) (string, error) {
+			return "", errors.New("no upstream")
+		}
+		if configureBranchHasNoUnpushedCommits(context.Background(), ".") {
+			t.Fatal("branch without upstream reported safe")
+		}
+	})
+}
+
 func TestConfigureRulesBlockDirectPush(t *testing.T) {
 	tests := []struct {
 		name string
@@ -549,9 +597,9 @@ func TestConfigureSaveAndPushUsesForgeRemote(t *testing.T) {
 	var pushArgs []string
 	gitRunner = func(_ context.Context, _ string, args ...string) (string, error) {
 		switch args[0] {
-		case "add", "commit":
+		case "add", gitCmdCommit:
 			return "", nil
-		case "rev-parse":
+		case testGitRevParse:
 			return "abc123", nil
 		case "push":
 			pushArgs = append([]string(nil), args...)

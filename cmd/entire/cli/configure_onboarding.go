@@ -170,9 +170,13 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 			protected = detected
 		}
 	}
+	branchPushSafe := false
+	if branch != "" && len(before) == 0 {
+		branchPushSafe = configureBranchHasNoUnpushedCommits(ctx, repoRoot)
+	}
 	chosen, selectedAgents, saveChoice, agentsChanged, err := promptConfigureUpstreamAndAgents(
 		ctx, errW, repoRoot, placements, profile.Jurisdiction, manageRegionsHint,
-		branch, protected, len(before) == 0,
+		branch, protected, branchPushSafe,
 	)
 	if err != nil {
 		return err
@@ -1077,12 +1081,12 @@ func configureUseMirror(ctx context.Context, outW, errW io.Writer, repoRoot, own
 	preserve := ""
 	if info, parseErr := gitremote.ParseURL(current); parseErr == nil && info.Protocol != gitremote.ProtocolEntire {
 		if forgeRemote == "" {
-			preserve = availableConfigureRemoteName(remotes, defaultMirrorUpstreamRemote, "github")
+			preserve = availableConfigureRemoteName(remotes, defaultMirrorUpstreamRemote, mirrorCloneProviderGitHub)
 			forgeRemote = preserve
 		}
 	}
 	if forgeRemote == "" {
-		forgeRemote = availableConfigureRemoteName(remotes, "github")
+		forgeRemote = availableConfigureRemoteName(remotes, mirrorCloneProviderGitHub)
 		forgeURL := fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
 		if _, err := gitRunner(ctx, repoRoot, "remote", "add", forgeRemote, forgeURL); err != nil {
 			return "", fmt.Errorf("add GitHub push remote %q: %w", forgeRemote, err)
@@ -1113,7 +1117,7 @@ func configureExistingForgeRemote(ctx context.Context, repoRoot, owner, repo str
 	sort.SliceStable(names, func(i, j int) bool {
 		priority := func(name string) int {
 			switch name {
-			case "github":
+			case mirrorCloneProviderGitHub:
 				return 0
 			case defaultMirrorUpstreamRemote:
 				return 1
@@ -1247,6 +1251,22 @@ func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, befo
 		fmt.Fprintf(outW, "  %s/gh/%s/%s/trails/new?branch=%s\n", configureWebBaseURL(), url.PathEscape(owner), url.PathEscape(repo), url.QueryEscape(pushBranch))
 	}
 	return nil
+}
+
+func configureBranchHasNoUnpushedCommits(ctx context.Context, repoRoot string) bool {
+	// @{u} is the branch's configured upstream before configure rewrites any
+	// remotes. If it does not exist, we cannot prove a direct push is isolated to
+	// the generated config commit, so only the new-branch action is safe.
+	upstream, err := gitRunner(ctx, repoRoot, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	if err != nil || upstream == "" {
+		return false
+	}
+	ahead, err := gitRunner(ctx, repoRoot, "rev-list", "--count", upstream+"..HEAD")
+	if err != nil {
+		return false
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(ahead))
+	return err == nil && count == 0
 }
 
 func configureBranchProtected(ctx context.Context, owner, repo, branch string) (bool, error) {
