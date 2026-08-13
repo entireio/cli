@@ -317,6 +317,22 @@ func TestConfigureFormThemeHasNoFocusedRail(t *testing.T) {
 	}
 }
 
+func TestConfigureSaveFieldIsAlwaysVisible(t *testing.T) {
+	choice := configureSaveLocal
+	field := &configureSaveField{
+		value:       &choice,
+		committed:   choice,
+		highlighted: choice,
+	}
+	field.Select = huh.NewSelect[string]().
+		Title("Save configuration").
+		Options(configureSaveOptions("main", false, false, choice)...).
+		Value(&choice)
+	if got := ansi.Strip(field.View()); !strings.Contains(got, "Save configuration") || !strings.Contains(got, "Save") {
+		t.Fatalf("save field is not visible without changes:\n%s", got)
+	}
+}
+
 func TestConfigureSaveIsSkippedWithoutGeneratedChanges(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer

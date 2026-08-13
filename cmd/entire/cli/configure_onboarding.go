@@ -582,7 +582,6 @@ type configureSaveField struct {
 	committed   string
 	highlighted string
 	refresh     func()
-	hidden      func() bool
 	focused     bool
 }
 
@@ -598,17 +597,6 @@ func (field *configureSaveField) Blur() tea.Cmd {
 
 func (field *configureSaveField) KeyBinds() []key.Binding {
 	return configureRadioKeyBinds(field.Select)
-}
-
-func (field *configureSaveField) Skip() bool {
-	return field.hidden != nil && field.hidden()
-}
-
-func (field *configureSaveField) View() string {
-	if field.Skip() {
-		return ""
-	}
-	return field.Select.View()
 }
 
 func (field *configureSaveField) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
@@ -695,9 +683,10 @@ func configureNextKey(key string) bool {
 }
 
 // promptConfigureUpstreamAndAgents presents upstream, agents, and the dynamic
-// save action as one persistent form. Save stays hidden until a choice differs
-// from the repository's current state. Arrow keys stay within the active
-// section; Enter advances, while shift+tab revisits the previous section.
+// save action as one persistent form. Save is always visible, while its actions
+// change based on whether the choices require only local state or a commit and
+// push. Arrow keys stay within the active section; Enter advances, while
+// shift+tab revisits the previous section.
 func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoRoot string, placements []coreapi.ResolvedPlacement, jurisdiction, manageRegionsHint, branch string, protected, cleanWorktree bool) (coreapi.ResolvedPlacement, []agent.Agent, string, bool, error) {
 	currentHost := configureCurrentUpstream(ctx, repoRoot)
 	placements = configurePlacementOrder(placements, currentHost, jurisdiction)
@@ -791,9 +780,6 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		value:       &saveChoice,
 		committed:   saveChoice,
 		highlighted: saveChoice,
-		hidden: func() bool {
-			return !hasChanges()
-		},
 	}
 	saveOptions := func() []huh.Option[string] {
 		return configureSaveOptions(branch, protected, requiresPush(), saveChoice)
@@ -822,7 +808,7 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 	saveControl.refresh = refreshSave
 	upstreamControl.layoutChanged = refreshSave
 	agentControl.selectionChanged = refreshSave
-	agentControl.showSave = hasChanges
+	agentControl.showSave = func() bool { return true }
 
 	group := huh.NewGroup(upstreamControl, agentControl, saveControl)
 	form := newConfigureForm(group)
@@ -847,7 +833,7 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		}
 		selectedAgents = append(selectedAgents, ag)
 	}
-	if !hasChanges() {
+	if !hasChanges() && saveChoice != configureSaveCancel {
 		saveChoice = ""
 	}
 	return chosen, selectedAgents, saveChoice, agentsChanged(), nil
