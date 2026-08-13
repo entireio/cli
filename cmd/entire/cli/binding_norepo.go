@@ -64,7 +64,7 @@ func recordNoRepoEvidence(ctx context.Context, agentName types.AgentName, hookNa
 	}
 	// Require a real session ID: an empty ID has nothing to key the record on,
 	// and the tap's unknownSessionID guard only covers its own entry point —
-	// the cursor write below bypasses it.
+	// the turn-end evidence+cursor write below bypasses it.
 	if event.SessionID == "" || event.SessionID == unknownSessionID {
 		return
 	}
@@ -87,7 +87,25 @@ func recordNoRepoEvidence(ctx context.Context, agentName types.AgentName, hookNa
 		if event.SessionRef == "" {
 			return
 		}
-		recordForeignEvidence(ctx, event.SessionID, meta, "", scanTranscriptForeign(logCtx, ag, event, meta))
+		scan, ok := scanTranscriptForeign(logCtx, ag, event)
+		if !ok {
+			return
+		}
+		// currentWorktreeRoot="" — there is no current repo, so every resolved
+		// repo is foreign and the same-worktree skip can never match.
+		evs := resolveForeignRepos(logCtx, event.SessionID, "", scan.files)
+		// Evidence and cursor commit in ONE locked mutation. Advancing the
+		// cursor in its own earlier write let a failed evidence write (lock
+		// timeout, transient I/O, killed hook) leave the cursor past
+		// transcript lines whose evidence never persisted — silently skipped
+		// forever. A failure here writes neither, so the next turn-end
+		// rescans the same span; nothing was recorded, so the retry cannot
+		// double-count.
+		if err := binding.RecordEvidenceAndAdvanceCursor(logCtx, event.SessionID, meta, evs, scan.nextCursor, scan.reset); err != nil {
+			logging.Debug(logCtx, "no-repo evidence: failed to record transcript scan",
+				slog.String("session_id", event.SessionID),
+				slog.String("error", err.Error()))
+		}
 	case agent.SessionStart, agent.TurnStart, agent.Compaction, agent.SessionEnd,
 		agent.SubagentStart, agent.SubagentEnd, agent.ModelUpdate:
 		// No path evidence; the session-start notice UX is a separate slice.
@@ -117,6 +135,15 @@ func absoluteToolUsePaths(event *agent.Event) []string {
 	return out
 }
 
+// transcriptScan is one completed transcript scan: the foreign-path evidence
+// found in the newly scanned span, plus the cursor position the caller must
+// commit ATOMICALLY with that evidence (binding.RecordEvidenceAndAdvanceCursor).
+type transcriptScan struct {
+	files      []string // absolute foreign paths extracted from the scanned span
+	nextCursor int      // extractor-native position the scan reached
+	reset      bool     // transcript truncated/rotated: cursor may regress
+}
+
 // scanTranscriptForeign extracts modified-file evidence from the turn's new
 // transcript span and returns only ABSOLUTE paths: transcript-level extraction
 // has no safe join base — the hook's cwd is the launch dir, but tool calls in
@@ -129,12 +156,18 @@ func absoluteToolUsePaths(event *agent.Event) []string {
 // transcript (its extractor interprets startOffset as a message index and
 // returns a message count). Cursor advancement means each transcript unit is
 // scanned at most once across the session, so the tap's per-turn bounds
-// compose with a per-unit-once guarantee. The cursor is ALWAYS advanced, even
-// when no paths were found, to keep repeat scans cheap for chatty no-repo
-// sessions — consequence: every no-repo session with a turn-end creates a
-// cursor-only record on its first Stop, even if it never touches a repo
-// (retention for these is part of slice 2's parked retention story).
-func scanTranscriptForeign(logCtx context.Context, ag agent.Agent, event *agent.Event, meta binding.SessionMeta) []string {
+// compose with a per-unit-once guarantee. This function only READS: the
+// returned nextCursor is committed by the caller together with the evidence
+// derived from the scan — never in a separate earlier write, which would let
+// a failed evidence write skip the scanned span forever. ok=false means
+// nothing was scanned (unreadable/unextractable transcript, no extractor):
+// the cursor must not move, so the span is retried next turn. On a
+// successful scan the cursor advances even when no paths were found, to keep
+// repeat scans cheap for chatty no-repo sessions — consequence: every no-repo
+// session with a turn-end creates a cursor-only record on its first Stop,
+// even if it never touches a repo (retention for these is part of slice 2's
+// parked retention story).
+func scanTranscriptForeign(logCtx context.Context, ag agent.Agent, event *agent.Event) (transcriptScan, bool) {
 	cursor := 0
 	rec, err := binding.LoadRecord(logCtx, event.SessionID)
 	switch {
@@ -154,7 +187,7 @@ func scanTranscriptForeign(logCtx context.Context, ag agent.Agent, event *agent.
 		// Claude-shaped JSONL: read once, count complete lines ourselves.
 		data, readErr := os.ReadFile(event.SessionRef)
 		if readErr != nil {
-			return nil
+			return transcriptScan{}, false
 		}
 		// No +1 for a trailing partial line — transcript.SliceFromLine skips
 		// exactly N complete lines, so an uncounted partial line is included
@@ -173,7 +206,7 @@ func scanTranscriptForeign(logCtx context.Context, ag agent.Agent, event *agent.
 			logging.Debug(logCtx, "no-repo evidence: transcript extraction failed",
 				slog.String("session_id", event.SessionID),
 				slog.String("error", exErr.Error()))
-			return nil
+			return transcriptScan{}, false
 		}
 	} else if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
 		// The extractor reads the file itself and its RETURNED position is the
@@ -190,16 +223,10 @@ func scanTranscriptForeign(logCtx context.Context, ag agent.Agent, event *agent.
 			logging.Debug(logCtx, "no-repo evidence: transcript extraction failed",
 				slog.String("session_id", event.SessionID),
 				slog.String("error", exErr.Error()))
-			return nil
+			return transcriptScan{}, false
 		}
 	} else {
-		return nil
-	}
-
-	if err := binding.AdvanceTranscriptCursor(logCtx, event.SessionID, meta, nextCursor, truncated); err != nil {
-		logging.Debug(logCtx, "no-repo evidence: failed to advance transcript cursor",
-			slog.String("session_id", event.SessionID),
-			slog.String("error", err.Error()))
+		return transcriptScan{}, false
 	}
 
 	absolute := make([]string, 0, len(files))
@@ -208,5 +235,5 @@ func scanTranscriptForeign(logCtx context.Context, ag agent.Agent, event *agent.
 			absolute = append(absolute, f)
 		}
 	}
-	return absolute
+	return transcriptScan{files: absolute, nextCursor: nextCursor, reset: truncated}, true
 }

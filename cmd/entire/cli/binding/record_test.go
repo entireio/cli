@@ -351,11 +351,38 @@ func TestRecordBinding_RefusesNewerRecordVersion(t *testing.T) {
 	}
 }
 
-func TestAdvanceTranscriptCursor_CreatesRecordOnFirstCall(t *testing.T) {
+func TestRecordEvidenceAndAdvanceCursor_WritesEvidenceAndCursorTogether(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	ctx := context.Background()
 
-	if err := AdvanceTranscriptCursor(ctx, "sess-1", testMeta(), 42, false); err != nil {
+	evs := []Evidence{testEvidence("b", true), testEvidence("c", false)}
+	if err := RecordEvidenceAndAdvanceCursor(ctx, "sess-1", testMeta(), evs, 5, false); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := LoadRecord(ctx, "sess-1")
+	if err != nil || rec == nil {
+		t.Fatalf("load: rec=%v err=%v", rec, err)
+	}
+	if len(rec.BoundRepos) != 2 {
+		t.Fatalf("bound repos = %d, want 2 (evidence must land in the same mutation as the cursor)", len(rec.BoundRepos))
+	}
+	if rec.LastScannedTranscriptCursor != 5 {
+		t.Errorf("cursor = %d, want 5", rec.LastScannedTranscriptCursor)
+	}
+	if rec.BoundRepos[0].CommonDir != testRepoIdentity("b").CommonDir || rec.BoundRepos[1].CommonDir != testRepoIdentity("c").CommonDir {
+		t.Errorf("bound repos out of first-seen order: %+v", rec.BoundRepos)
+	}
+	if !rec.BoundRepos[0].Enabled || rec.BoundRepos[1].Enabled {
+		t.Errorf("enabled flags not preserved per evidence: %+v", rec.BoundRepos)
+	}
+}
+
+func TestRecordEvidenceAndAdvanceCursor_NoEvidenceCreatesCursorOnlyRecord(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+
+	if err := RecordEvidenceAndAdvanceCursor(ctx, "sess-1", testMeta(), nil, 42, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -380,15 +407,15 @@ func TestAdvanceTranscriptCursor_CreatesRecordOnFirstCall(t *testing.T) {
 	}
 }
 
-func TestAdvanceTranscriptCursor_MonotonicWithoutReset(t *testing.T) {
+func TestRecordEvidenceAndAdvanceCursor_MonotonicWithoutReset(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	ctx := context.Background()
 
-	if err := AdvanceTranscriptCursor(ctx, "sess-1", testMeta(), 50, false); err != nil {
+	if err := RecordEvidenceAndAdvanceCursor(ctx, "sess-1", testMeta(), nil, 50, false); err != nil {
 		t.Fatal(err)
 	}
 	// A racing hook reporting an older position must never regress the cursor.
-	if err := AdvanceTranscriptCursor(ctx, "sess-1", testMeta(), 30, false); err != nil {
+	if err := RecordEvidenceAndAdvanceCursor(ctx, "sess-1", testMeta(), nil, 30, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -401,16 +428,16 @@ func TestAdvanceTranscriptCursor_MonotonicWithoutReset(t *testing.T) {
 	}
 }
 
-func TestAdvanceTranscriptCursor_ResetPermitsRegression(t *testing.T) {
+func TestRecordEvidenceAndAdvanceCursor_ResetPermitsRegression(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	ctx := context.Background()
 
-	if err := AdvanceTranscriptCursor(ctx, "sess-1", testMeta(), 50, false); err != nil {
+	if err := RecordEvidenceAndAdvanceCursor(ctx, "sess-1", testMeta(), nil, 50, false); err != nil {
 		t.Fatal(err)
 	}
 	// Truncated/rotated transcript: the caller passes reset=true and the
 	// cursor must follow it down, or later turns full-rescan forever.
-	if err := AdvanceTranscriptCursor(ctx, "sess-1", testMeta(), 3, true); err != nil {
+	if err := RecordEvidenceAndAdvanceCursor(ctx, "sess-1", testMeta(), nil, 3, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -423,14 +450,14 @@ func TestAdvanceTranscriptCursor_ResetPermitsRegression(t *testing.T) {
 	}
 }
 
-func TestAdvanceTranscriptCursor_DoesNotClobberMeta(t *testing.T) {
+func TestRecordEvidenceAndAdvanceCursor_DoesNotClobberMeta(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	ctx := context.Background()
 
 	if err := RecordBinding(ctx, "sess-1", testMeta(), testEvidence("b", true)); err != nil {
 		t.Fatal(err)
 	}
-	if err := AdvanceTranscriptCursor(ctx, "sess-1", SessionMeta{AgentType: "other"}, 7, false); err != nil {
+	if err := RecordEvidenceAndAdvanceCursor(ctx, "sess-1", SessionMeta{AgentType: "other"}, nil, 7, false); err != nil {
 		t.Fatal(err)
 	}
 

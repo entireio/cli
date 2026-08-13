@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/binding"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -383,9 +384,10 @@ func TestRecordNoRepoEvidence_RelativeTranscriptPathsDropped(t *testing.T) {
 
 // Branch-level guard: an event without a real session ID records nothing.
 // The unknownSessionID case matters independently of the tap's own guard: the
-// cursor write (AdvanceTranscriptCursor) bypasses the tap, so without the
-// branch-level guard a payload carrying the literal fallback ID would mint a
-// sessions/unknown.json (plus its lock file) aggregating unrelated sessions.
+// turn-end evidence+cursor write (RecordEvidenceAndAdvanceCursor) bypasses the
+// tap, so without the branch-level guard a payload carrying the literal
+// fallback ID would mint a sessions/unknown.json (plus its lock file)
+// aggregating unrelated sessions.
 func TestRecordNoRepoEvidence_EmptySessionIDRecordsNothing(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	launchDir := chdirNonRepo(t)
@@ -405,6 +407,59 @@ func TestRecordNoRepoEvidence_EmptySessionIDRecordsNothing(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(sessionsDir, name)); !os.IsNotExist(err) {
 			t.Errorf("%s must not be created for the fallback session ID: %v", name, err)
 		}
+	}
+}
+
+// Regression (trail finding 019ff775-9965): scanTranscriptForeign used to
+// advance the cursor in its own write BEFORE the evidence derived from the
+// scanned span was recorded. A failed evidence write (lock contention,
+// transient I/O) then left the cursor past transcript lines whose evidence
+// never persisted — silently lost, because an advanced cursor means those
+// lines are never rescanned. Evidence and cursor now commit in ONE locked
+// mutation: a failed write must leave the cursor untouched so the next
+// turn-end rescans the same span and records the evidence, without
+// double-counting (nothing was recorded, so the retry is the first count).
+// Runs the real 2s lock-timeout ceiling once, like the record store's
+// lock-contention test.
+func TestRecordNoRepoEvidence_FailedWriteLeavesCursorForRescan(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	launchDir := chdirNonRepo(t)
+	rootB := newBindingRepo(t)
+
+	transcriptPath := filepath.Join(launchDir, "transcript.jsonl")
+	writeClaudeTranscript(t, transcriptPath, claudeWriteLine(filepath.Join(rootB, "f.go")))
+
+	// Hold the record flock so the evidence+cursor write times out.
+	lockPath := filepath.Join(userdirs.Config(), "sessions", "sess-1.json.lock")
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	release, err := flock.Acquire(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordNoRepoEvidence(context.Background(), agent.AgentNameClaudeCode, claudecode.HookNameStop,
+		claudeStopPayload(t, "sess-1", transcriptPath))
+	release()
+
+	if rec := loadNoRepoRecord(t); rec != nil {
+		t.Fatalf("failed write must advance nothing — a persisted cursor here means the scanned span's evidence is lost forever, got %+v", rec)
+	}
+
+	// Next turn-end: same transcript, cursor still 0 → the span is rescanned
+	// and the evidence lands exactly once.
+	recordNoRepoEvidence(context.Background(), agent.AgentNameClaudeCode, claudecode.HookNameStop,
+		claudeStopPayload(t, "sess-1", transcriptPath))
+
+	rec := loadNoRepoRecord(t)
+	if rec == nil || len(rec.BoundRepos) != 1 || rec.BoundRepos[0].WorktreeRoot != rootB {
+		t.Fatalf("rescan after a failed write must record the evidence, got %+v", rec)
+	}
+	if rec.BoundRepos[0].EvidenceCount != 1 {
+		t.Errorf("evidence count = %d, want 1 (atomic commit means the retry cannot double-count)", rec.BoundRepos[0].EvidenceCount)
+	}
+	if rec.LastScannedTranscriptCursor != 1 {
+		t.Errorf("cursor = %d, want 1", rec.LastScannedTranscriptCursor)
 	}
 }
 

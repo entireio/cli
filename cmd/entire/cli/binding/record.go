@@ -92,47 +92,65 @@ type Evidence struct {
 func RecordBinding(ctx context.Context, sessionID string, meta SessionMeta, ev Evidence) error {
 	return mutateRecord(ctx, sessionID, func(now time.Time, rec *SessionRecord) error {
 		fillMetaIfEmpty(rec, meta)
-		for i := range rec.BoundRepos {
-			if rec.BoundRepos[i].CommonDir == ev.Repo.CommonDir {
-				// Enabled is computed at the observed worktree root, and linked
-				// worktrees of one clone can differ (.entire/settings.local.json
-				// is worktree-local) — update the identity WITH the flag so the
-				// stored pair always reflects the same (latest) observation.
-				rec.BoundRepos[i].RepoIdentity = ev.Repo
-				rec.BoundRepos[i].LastEvidenceAt = now
-				rec.BoundRepos[i].EvidenceCount++
-				rec.BoundRepos[i].Enabled = ev.Enabled
-				return nil
-			}
-		}
-		rec.BoundRepos = append(rec.BoundRepos, BoundRepo{
-			RepoIdentity:    ev.Repo,
-			FirstEvidenceAt: now,
-			LastEvidenceAt:  now,
-			EvidenceCount:   1,
-			Enabled:         ev.Enabled,
-		})
+		upsertBoundRepo(rec, now, ev)
 		return nil
 	})
 }
 
-// AdvanceTranscriptCursor records that the no-repo evidence path has scanned
-// sessionID's transcript up to cursor (in the owning agent's extractor-native
-// unit — see SessionRecord.LastScannedTranscriptCursor). It creates the record
-// if absent ("scanned, nothing found yet"), so repeat scans stay cheap even
-// for sessions that never touch a repo. When reset is false the cursor only
-// moves forward — max(current, cursor) — so a racing hook reporting an older
-// position can never regress it. reset=true (caller detected a truncated or
-// rotated transcript) stores cursor directly, permitting regression: without
-// it a shrunk transcript leaves the cursor stuck at its high watermark and
-// every later turn full-rescans and re-records.
-func AdvanceTranscriptCursor(ctx context.Context, sessionID string, meta SessionMeta, cursor int, reset bool) error {
-	return mutateRecord(ctx, sessionID, func(_ time.Time, rec *SessionRecord) error {
+// RecordEvidenceAndAdvanceCursor persists one transcript scan's outcome —
+// every evidence observation plus the new scan cursor — in a SINGLE locked
+// mutation. The atomicity is the point: the cursor marks transcript content as
+// scanned-and-recorded, so committing it in a separate write from the evidence
+// would let a failure between the two (lock timeout, transient I/O, killed
+// hook) advance the cursor past lines whose evidence was never persisted —
+// silently lost, because an advanced cursor means those lines are never
+// rescanned. A failure here leaves BOTH unwritten: the next turn-end rescans
+// the same span, and because nothing was recorded a retry cannot double-count.
+//
+// The record is created if absent even with no evidence ("scanned, nothing
+// found yet"), so repeat scans stay cheap for sessions that never touch a
+// repo. Cursor semantics (in the owning agent's extractor-native unit — see
+// SessionRecord.LastScannedTranscriptCursor): when reset is false the cursor
+// only moves forward — max(current, cursor) — so a racing hook reporting an
+// older position can never regress it. reset=true (caller detected a truncated
+// or rotated transcript) stores cursor directly, permitting regression:
+// without it a shrunk transcript leaves the cursor stuck at its high watermark
+// and every later turn full-rescans and re-records.
+func RecordEvidenceAndAdvanceCursor(ctx context.Context, sessionID string, meta SessionMeta, evs []Evidence, cursor int, reset bool) error {
+	return mutateRecord(ctx, sessionID, func(now time.Time, rec *SessionRecord) error {
 		fillMetaIfEmpty(rec, meta)
+		for _, ev := range evs {
+			upsertBoundRepo(rec, now, ev)
+		}
 		if reset || cursor > rec.LastScannedTranscriptCursor {
 			rec.LastScannedTranscriptCursor = cursor
 		}
 		return nil
+	})
+}
+
+// upsertBoundRepo applies one evidence observation: bump the BoundRepo keyed
+// by the evidence's CommonDir, or append a new entry.
+func upsertBoundRepo(rec *SessionRecord, now time.Time, ev Evidence) {
+	for i := range rec.BoundRepos {
+		if rec.BoundRepos[i].CommonDir == ev.Repo.CommonDir {
+			// Enabled is computed at the observed worktree root, and linked
+			// worktrees of one clone can differ (.entire/settings.local.json
+			// is worktree-local) — update the identity WITH the flag so the
+			// stored pair always reflects the same (latest) observation.
+			rec.BoundRepos[i].RepoIdentity = ev.Repo
+			rec.BoundRepos[i].LastEvidenceAt = now
+			rec.BoundRepos[i].EvidenceCount++
+			rec.BoundRepos[i].Enabled = ev.Enabled
+			return
+		}
+	}
+	rec.BoundRepos = append(rec.BoundRepos, BoundRepo{
+		RepoIdentity:    ev.Repo,
+		FirstEvidenceAt: now,
+		LastEvidenceAt:  now,
+		EvidenceCount:   1,
+		Enabled:         ev.Enabled,
 	})
 }
 

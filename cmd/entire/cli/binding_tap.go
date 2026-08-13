@@ -80,6 +80,34 @@ func recordForeignEvidence(ctx context.Context, sessionID string, meta binding.S
 		return
 	}
 
+	for _, ev := range resolveForeignRepos(ctx, sessionID, currentWorktreeRoot, foreignPaths) {
+		if err := binding.RecordBinding(ctx, sessionID, meta, ev); err != nil {
+			logging.Debug(logCtx, "failed to record session binding",
+				slog.String("session_id", sessionID),
+				slog.String("repo", ev.Repo.WorktreeRoot),
+				slog.String("error", err.Error()))
+			continue
+		}
+		logging.Debug(logCtx, "recorded foreign repo evidence",
+			slog.String("session_id", sessionID),
+			slog.String("repo", ev.Repo.WorktreeRoot),
+			slog.Bool("enabled", ev.Enabled))
+	}
+}
+
+// resolveForeignRepos resolves evidence paths to the distinct foreign repos
+// they live in — first-seen order, deduped by CommonDir, budget-capped — with
+// each repo's Enabled flag computed at its worktree root. It only resolves;
+// recording is the caller's: the in-repo tap writes each result with its own
+// RecordBinding, while the no-repo turn-end path needs the resolved evidence
+// BEFORE any write so it can commit evidence and transcript cursor in one
+// locked mutation (binding.RecordEvidenceAndAdvanceCursor).
+func resolveForeignRepos(ctx context.Context, sessionID, currentWorktreeRoot string, foreignPaths []string) []binding.Evidence {
+	if len(foreignPaths) == 0 {
+		return nil
+	}
+	logCtx := logging.WithComponent(ctx, "binding")
+
 	// The resolver returns symlink-canonical roots; canonicalize ours the
 	// same way (best-effort) so a symlink-aliased cwd cannot defeat the
 	// own-worktree skip below.
@@ -133,21 +161,12 @@ func recordForeignEvidence(ctx context.Context, sessionID string, meta binding.S
 		}
 	}
 
+	evs := make([]binding.Evidence, 0, len(order))
 	for _, commonDir := range order {
 		id := found[commonDir]
-		enabled := settings.IsSetUpAtRoot(id.WorktreeRoot)
-		if err := binding.RecordBinding(ctx, sessionID, meta, binding.Evidence{Repo: id, Enabled: enabled}); err != nil {
-			logging.Debug(logCtx, "failed to record session binding",
-				slog.String("session_id", sessionID),
-				slog.String("repo", id.WorktreeRoot),
-				slog.String("error", err.Error()))
-			continue
-		}
-		logging.Debug(logCtx, "recorded foreign repo evidence",
-			slog.String("session_id", sessionID),
-			slog.String("repo", id.WorktreeRoot),
-			slog.Bool("enabled", enabled))
+		evs = append(evs, binding.Evidence{Repo: id, Enabled: settings.IsSetUpAtRoot(id.WorktreeRoot)})
 	}
+	return evs
 }
 
 func anyPaths(groups [][]string) bool {
