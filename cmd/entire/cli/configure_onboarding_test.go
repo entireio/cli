@@ -581,6 +581,8 @@ func TestConfigureRulesBlockDirectPush(t *testing.T) {
 		{name: "copilot review is advisory", raw: `[{"type":"copilot_code_review"}]`},
 		{name: "required reviews block", raw: `[{"type":"pull_request"}]`, want: true},
 		{name: "required checks block", raw: `[{"type":"required_status_checks"}]`, want: true},
+		{name: "required signatures block", raw: `[{"type":"required_signatures"}]`, want: true},
+		{name: "merge queue blocks", raw: `[{"type":"merge_queue"}]`, want: true},
 		{name: "no rules", raw: `[]`},
 	}
 	for _, tt := range tests {

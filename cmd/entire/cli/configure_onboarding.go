@@ -1367,7 +1367,7 @@ func configureRulesBlockDirectPush(raw []byte) (bool, error) {
 	}
 	for _, rule := range rules {
 		switch rule.Type {
-		case "pull_request", "required_status_checks", "required_deployments", "update", "workflows":
+		case "pull_request", "required_status_checks", "required_deployments", "required_signatures", "merge_queue", "update", "workflows":
 			return true, nil
 		}
 	}
