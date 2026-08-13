@@ -351,9 +351,27 @@ func TestConfigureUpstreamOptionsUsePrototypeLabels(t *testing.T) {
 	for i, option := range options {
 		got[i] = ansi.Strip(option.Key)
 	}
-	want := []string{"○ AU — current", "● EU", "○ US"}
+	want := []string{"○ Australia — current", "● European Union", "○ United States"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("option labels = %v, want %v", got, want)
+	}
+}
+
+func TestConfigurePlacementLabelUsesProductionRegionNames(t *testing.T) {
+	tests := []struct {
+		jurisdiction string
+		want         string
+	}{
+		{jurisdiction: "au", want: "Australia"},
+		{jurisdiction: "eu", want: "European Union"},
+		{jurisdiction: "in", want: "India"},
+		{jurisdiction: "us", want: "United States"},
+	}
+	for _, tt := range tests {
+		placement := coreapi.ResolvedPlacement{Jurisdiction: coreapi.NewOptString(tt.jurisdiction)}
+		if got := configurePlacementLabel(placement); got != tt.want {
+			t.Errorf("configurePlacementLabel(%q) = %q, want %q", tt.jurisdiction, got, tt.want)
+		}
 	}
 }
 

@@ -1070,13 +1070,23 @@ func configurePlacementOrder(placements []coreapi.ResolvedPlacement, currentHost
 }
 
 func configurePlacementLabel(placement coreapi.ResolvedPlacement) string {
-	if jurisdiction := strings.TrimSpace(placement.Jurisdiction.Or("")); jurisdiction != "" {
+	if jurisdiction := strings.ToLower(strings.TrimSpace(placement.Jurisdiction.Or(""))); jurisdiction != "" {
+		if name, ok := configureJurisdictionNames[jurisdiction]; ok {
+			return name
+		}
 		return strings.ToUpper(jurisdiction)
 	}
 	if cell := strings.TrimSpace(placement.Cell.Or("")); cell != "" {
 		return cell
 	}
 	return placement.ClusterHost
+}
+
+var configureJurisdictionNames = map[string]string{ //nolint:gochecknoglobals // immutable display-name lookup
+	"au": "Australia",
+	"eu": "European Union",
+	"in": "India",
+	"us": "United States",
 }
 
 func configureAgentPreselection(ctx context.Context) map[types.AgentName]struct{} {
