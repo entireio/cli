@@ -752,7 +752,7 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 	}
 	upstreamControl.Select = huh.NewSelect[string]().
 		TitleFunc(func() string {
-			return configureQuestionTitle("Which upstream do you want to use?", upstreamControl.focused)
+			return configureQuestionTitle("Select your upstream", upstreamControl.focused)
 		}, &upstreamControl.focused).
 		Description(upstreamDescription).
 		Options(upstreamOptions()...).
@@ -765,7 +765,7 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 	agentControl := &configureAgentField{value: &selectedAgentNames}
 	agentControl.MultiSelect = huh.NewMultiSelect[string]().
 		TitleFunc(func() string {
-			return configureQuestionTitle("Select the agents you want to use", agentControl.focused)
+			return configureQuestionTitle("Select the agents for this repository", agentControl.focused)
 		}, &agentControl.focused).
 		Options(agentOptions...).
 		// MultiSelect subtracts its title from an implicit viewport height, so
