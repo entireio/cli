@@ -3677,8 +3677,8 @@ func TestConfigureCmd_BarePrintsHelpHint(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "entire agent") {
-		t.Errorf("expected hint about 'entire agent' in help output, got: %s", output)
+	if !strings.Contains(output, "entire configure --yes") {
+		t.Errorf("expected non-interactive onboarding hint, got: %s", output)
 	}
 	// Bare configure must not run the agent picker.
 	if strings.Contains(output, "Cannot show agent selection in non-interactive mode") {
@@ -3695,8 +3695,8 @@ func TestConfigureCmd_AgentFlagRemoved(t *testing.T) {
 	if cmd.Flags().Lookup("remove") != nil {
 		t.Error("'configure' must not expose --remove (use 'entire agent remove')")
 	}
-	if cmd.Flags().Lookup("yes") != nil {
-		t.Error("'configure' must not expose --yes (lives on 'entire enable')")
+	if cmd.Flags().Lookup("yes") == nil {
+		t.Error("'configure' must expose --yes for non-interactive onboarding")
 	}
 }
 

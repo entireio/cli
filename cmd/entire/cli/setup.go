@@ -731,6 +731,7 @@ telemetry, git-hook installation mode, strategy options, and summary providers.
 
 Examples:
   entire configure                                # Run interactive onboarding
+  entire configure --yes                          # Run onboarding non-interactively with defaults
   entire configure --telemetry=false              # Opt out of telemetry
   entire configure --absolute-git-hook-path       # Reinstall git hook with absolute path
   entire configure --force                        # Reinstall git hook
@@ -748,16 +749,16 @@ Examples:
 			}
 
 			if !hasConfigureSettingsFlags(cmd) {
-				// Bare configure is the onboarding entry point on a terminal. Keep
-				// help as the deterministic fallback for pipes and automation; all
-				// existing flag-based forms remain non-interactive below.
-				if interactive.CanPromptInteractively() {
+				// Bare configure is interactive by default. --yes provides the same
+				// combined repo/mirror/agent/save workflow to scripts and agents,
+				// accepting deterministic defaults without constructing huh forms.
+				if interactive.CanPromptInteractively() || opts.Yes {
 					return runConfigureOnboarding(cmd, opts)
 				}
 				if err := cmd.Help(); err != nil {
 					return fmt.Errorf("failed to render help: %w", err)
 				}
-				fmt.Fprintln(cmd.OutOrStdout(), "\nInteractive onboarding requires a terminal. For agent-only setup, use 'entire agent'.")
+				fmt.Fprintln(cmd.OutOrStdout(), "\nInteractive onboarding requires a terminal. Use 'entire configure --yes' for non-interactive onboarding.")
 				return nil
 			}
 
@@ -809,6 +810,7 @@ Examples:
 	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears (falls back to 5m default).")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Run onboarding non-interactively and accept its defaults")
 
 	return cmd
 }

@@ -55,6 +55,33 @@ func TestConfigureCmdBareInteractiveRunsOnboarding(t *testing.T) {
 	}
 }
 
+func TestConfigureCmdYesRunsOnboardingWithoutTTY(t *testing.T) {
+	setupTestRepo(t)
+	t.Setenv(interactive.EnvTestTTY, "0")
+
+	previous := runConfigureOnboarding
+	t.Cleanup(func() { runConfigureOnboarding = previous })
+	called := false
+	runConfigureOnboarding = func(_ *cobra.Command, opts EnableOptions) error {
+		called = true
+		if !opts.Yes {
+			t.Error("--yes was not passed to onboarding")
+		}
+		return nil
+	}
+
+	cmd := newSetupCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--yes"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --yes: %v", err)
+	}
+	if !called {
+		t.Fatal("configure --yes did not run non-interactive onboarding")
+	}
+}
+
 func TestEnsureConfigureLoginUsesExistingSession(t *testing.T) {
 	profile := &authProfile{Handle: "dipree", Jurisdiction: "eu"}
 	loginCalled := false
@@ -183,7 +210,7 @@ func TestEnsureConfigureRepoAccessNonAdminPrintsShareableLink(t *testing.T) {
 	var out, errOut bytes.Buffer
 	err := ensureConfigureRepoAccess(context.Background(), &out, &errOut, configureAccessReporterStub{},
 		&api.EnableRepoResponse{InstallURL: "https://entire.io/install?repo=acme%2Fwidget"},
-		"https://github.com/acme/widget.git", "acme", "widget", deps)
+		"https://github.com/acme/widget.git", "acme", "widget", false, deps)
 	if err == nil {
 		t.Fatal("non-admin access branch should stop configure")
 	}
@@ -213,7 +240,7 @@ func TestEnsureConfigureRepoAccessUnknownAdminStillAllowsInstall(t *testing.T) {
 	var out, errOut bytes.Buffer
 	err := ensureConfigureRepoAccess(ctx, &out, &errOut, configureAccessReporterStub{},
 		&api.EnableRepoResponse{InstallURL: "https://entire.io/install?repo=acme%2Fwidget"},
-		"https://github.com/acme/widget.git", "acme", "widget", deps)
+		"https://github.com/acme/widget.git", "acme", "widget", false, deps)
 	if err == nil {
 		t.Fatal("expected the installation wait to end with the test deadline")
 	}

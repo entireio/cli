@@ -126,7 +126,7 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 		return fmt.Errorf("check repository access: %w", err)
 	}
 	if !access.Connected {
-		if err := ensureConfigureRepoAccess(ctx, outW, errW, reporter, access, cleanRemote, owner, repo, deps); err != nil {
+		if err := ensureConfigureRepoAccess(ctx, outW, errW, reporter, access, cleanRemote, owner, repo, opts.Yes, deps); err != nil {
 			return err
 		}
 	}
@@ -140,7 +140,7 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 		return renderCoreError(err)
 	}
 	if len(placements) == 0 {
-		placements, err = configureCreateMirrors(ctx, outW, errW, client, owner, repo, profile.Jurisdiction)
+		placements, err = configureCreateMirrors(ctx, outW, errW, client, owner, repo, profile.Jurisdiction, opts.Yes)
 		if err != nil {
 			return err
 		}
@@ -176,7 +176,7 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 	}
 	chosen, selectedAgents, saveChoice, agentsChanged, err := promptConfigureUpstreamAndAgents(
 		ctx, errW, repoRoot, placements, profile.Jurisdiction, manageRegionsHint,
-		branch, protected, branchPushSafe,
+		branch, protected, branchPushSafe, opts.Yes,
 	)
 	if err != nil {
 		return err
@@ -317,7 +317,7 @@ func ensureConfigureLogin(ctx context.Context, outW, errW io.Writer, deps config
 	return profile, nil
 }
 
-func ensureConfigureRepoAccess(ctx context.Context, outW, errW io.Writer, reporter configureAccessReporter, initial *api.EnableRepoResponse, cleanRemote, owner, repo string, deps configureFlowDeps) error {
+func ensureConfigureRepoAccess(ctx context.Context, outW, errW io.Writer, reporter configureAccessReporter, initial *api.EnableRepoResponse, cleanRemote, owner, repo string, nonInteractive bool, deps configureFlowDeps) error {
 	fmt.Fprintf(errW, "✗ Entire has no access to %s/%s\n\n", owner, repo)
 	installURL := strings.TrimSpace(initial.InstallURL)
 	if installURL == "" {
@@ -348,6 +348,9 @@ func ensureConfigureRepoAccess(ctx context.Context, outW, errW io.Writer, report
 
 	fmt.Fprintln(outW, "  Install the GitHub app to grant access:")
 	fmt.Fprintf(outW, "  %s\n\n", installURL)
+	if nonInteractive {
+		return NewSilentError(errors.New("GitHub app installation required; install it with the URL above, then rerun 'entire configure --yes'"))
+	}
 	if err := deps.openURL(ctx, installURL); err != nil {
 		fmt.Fprintln(outW, "  Open the link above in your browser.")
 	}
@@ -398,7 +401,7 @@ func configureGitHubAdmin(ctx context.Context, owner, repo string) (bool, error)
 	return admin, nil
 }
 
-func configureCreateMirrors(ctx context.Context, outW, errW io.Writer, client *coreapi.Client, owner, repo, jurisdiction string) ([]coreapi.ResolvedPlacement, error) {
+func configureCreateMirrors(ctx context.Context, outW, errW io.Writer, client *coreapi.Client, owner, repo, jurisdiction string, nonInteractive bool) ([]coreapi.ResolvedPlacement, error) {
 	regions, err := availableRegions(ctx, client)
 	if err != nil {
 		return nil, fmt.Errorf("list regions: %w", err)
@@ -406,7 +409,7 @@ func configureCreateMirrors(ctx context.Context, outW, errW io.Writer, client *c
 	if len(regions) == 0 {
 		return nil, errors.New("no regions available to mirror into")
 	}
-	selected, err := pickConfigureRegions(ctx, outW, regions, jurisdiction)
+	selected, err := pickConfigureRegions(ctx, outW, regions, jurisdiction, nonInteractive)
 	if err != nil {
 		return nil, err
 	}
@@ -441,13 +444,25 @@ func configureSuccessfulMirrorPlacements(selected []regionChoice, results []mirr
 	return placements
 }
 
-func pickConfigureRegions(ctx context.Context, outW io.Writer, regions []regionChoice, jurisdiction string) ([]regionChoice, error) {
+func pickConfigureRegions(ctx context.Context, outW io.Writer, regions []regionChoice, jurisdiction string, nonInteractive bool) ([]regionChoice, error) {
 	opts, defaults := clusterChoices(regions, jurisdiction)
 	byHost := make(map[string]regionChoice, len(regions))
 	for _, region := range regions {
 		byHost[region.host] = region
 	}
 	selected := append([]string(nil), defaults...)
+	if nonInteractive {
+		if len(selected) == 0 && len(opts) > 0 {
+			selected = append(selected, opts[0].Value)
+		}
+		chosen := make([]regionChoice, 0, len(selected))
+		for _, host := range selected {
+			if region, ok := byHost[host]; ok {
+				chosen = append(chosen, region)
+			}
+		}
+		return chosen, nil
+	}
 	form := NewAccessibleForm(huh.NewGroup(
 		huh.NewMultiSelect[string]().
 			Title("Which regions should this repository live in?").
@@ -686,7 +701,7 @@ func configureNextKey(key string) bool {
 // change based on whether the choices require only local state or a commit and
 // push. Arrow keys stay within the active section; Enter advances, while
 // shift+tab revisits the previous section.
-func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoRoot string, placements []coreapi.ResolvedPlacement, jurisdiction, manageRegionsHint, branch string, protected, cleanWorktree bool) (coreapi.ResolvedPlacement, []agent.Agent, string, bool, error) {
+func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoRoot string, placements []coreapi.ResolvedPlacement, jurisdiction, manageRegionsHint, branch string, protected, cleanWorktree, nonInteractive bool) (coreapi.ResolvedPlacement, []agent.Agent, string, bool, error) {
 	currentHost := configureCurrentUpstream(ctx, repoRoot)
 	placements = configurePlacementOrder(placements, currentHost, jurisdiction)
 	if len(placements) == 0 {
@@ -806,6 +821,18 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 	agentControl.selectionChanged = refreshSave
 	agentControl.showSave = func() bool { return true }
 
+	if nonInteractive {
+		chosen, ok := placementByHost[selectedHost]
+		if !ok {
+			return coreapi.ResolvedPlacement{}, nil, "", false, errors.New("default upstream is no longer available")
+		}
+		selectedAgents, err := configureSelectedAgents(selectedAgentNames)
+		if err != nil {
+			return coreapi.ResolvedPlacement{}, nil, "", false, err
+		}
+		return chosen, selectedAgents, defaultConfigureSaveChoice(hasChanges(), requiresPush(), protected), agentsChanged(), nil
+	}
+
 	group := huh.NewGroup(upstreamControl, agentControl, saveControl)
 	form := newConfigureForm(group)
 	// Separate the form from the shell prompt or preceding onboarding status.
@@ -821,18 +848,26 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 	if !ok {
 		return coreapi.ResolvedPlacement{}, nil, "", false, errors.New("selected upstream is no longer available")
 	}
-	selectedAgents := make([]agent.Agent, 0, len(selectedAgentNames))
-	for _, name := range selectedAgentNames {
-		ag, err := agent.Get(types.AgentName(name))
-		if err != nil {
-			return coreapi.ResolvedPlacement{}, nil, "", false, fmt.Errorf("load selected agent %q: %w", name, err)
-		}
-		selectedAgents = append(selectedAgents, ag)
+	selectedAgents, err := configureSelectedAgents(selectedAgentNames)
+	if err != nil {
+		return coreapi.ResolvedPlacement{}, nil, "", false, err
 	}
 	if !hasChanges() && saveChoice != configureSaveCancel {
 		saveChoice = ""
 	}
 	return chosen, selectedAgents, saveChoice, agentsChanged(), nil
+}
+
+func configureSelectedAgents(names []string) ([]agent.Agent, error) {
+	selected := make([]agent.Agent, 0, len(names))
+	for _, name := range names {
+		ag, err := agent.Get(types.AgentName(name))
+		if err != nil {
+			return nil, fmt.Errorf("load selected agent %q: %w", name, err)
+		}
+		selected = append(selected, ag)
+	}
+	return selected, nil
 }
 
 func configureUpstreamOptions(placements []coreapi.ResolvedPlacement, selectedHost, currentHost string) []huh.Option[string] {
