@@ -50,6 +50,19 @@ type GlobalConfig struct {
 	// covers them, since all worktrees of a clone share git config.
 	ExcludePaths []string `json:"exclude_paths,omitempty"`
 
+	// ExcludePathsExact are plain paths (NOT globs — meta characters have no
+	// special meaning) excluded exactly: an entry matches only when it IS the
+	// worktree root, with no subtree cascade. This closes an expressiveness
+	// gap: a bare exclude_paths directory pattern always excludes its whole
+	// subtree (p or p/**), so it cannot exclude exactly $HOME — the
+	// home-as-dotfiles-repo case — without also excluding every repo beneath
+	// it, and such no-origin repos cannot be caught by exclude_origins
+	// either. Entries are whitespace-trimmed (blank entries skipped),
+	// ~-expanded, cleaned, case-folded per platform, and matched
+	// symlink-robustly like exclude_paths; an unusable entry (relative,
+	// unsupported ~user form) fails closed the same way.
+	ExcludePathsExact []string `json:"exclude_paths_exact,omitempty"`
+
 	// ExcludeOrigins are doublestar globs matched against the origin remote
 	// URL normalized to host/owner/repo. A repo without an origin matches
 	// no origin pattern, but a repo whose origin is PRESENT and cannot be
@@ -66,6 +79,12 @@ type GlobalConfig struct {
 
 // UserSettings is the root of the user-global settings file.
 type UserSettings struct {
+	// Global == nil is load-bearing: it means the global tier has never
+	// been configured (nobody has answered the global-enable question),
+	// which is distinct from a configured-but-disabled tier (non-nil with
+	// Enabled == false — a recorded "no"). Writers must preserve the
+	// distinction: never materialize an empty GlobalConfig as a side
+	// effect of an unrelated write.
 	Global *GlobalConfig `json:"global,omitempty"`
 }
 
@@ -206,12 +225,7 @@ func matchesExcludePath(ctx context.Context, patterns []string, worktreeRoot str
 // expanded and glob-prefix-resolved forms — four combinations, so a logical
 // pattern still matches a physical root and vice versa.
 func matchesExcludePathFold(_ context.Context, patterns []string, worktreeRoot string, fold bool) (bool, error) {
-	roots := []string{filepath.ToSlash(worktreeRoot)}
-	if resolved, err := filepath.EvalSymlinks(worktreeRoot); err == nil {
-		if s := filepath.ToSlash(resolved); s != roots[0] {
-			roots = append(roots, s)
-		}
-	}
+	roots := rootMatchForms(worktreeRoot)
 	for i, p := range patterns {
 		expanded, err := expandTilde(p)
 		if err != nil {
@@ -241,6 +255,65 @@ func matchesExcludePathFold(_ context.Context, patterns []string, worktreeRoot s
 				}
 				// If pv was a valid pattern, pv+"/**" is too — no error path.
 				if ok, _ := doublestar.Match(pv+"/**", root); ok { //nolint:errcheck // validity established by the bare-pattern Match above
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
+}
+
+// rootMatchForms returns the worktree root in its given and (when distinct)
+// symlink-resolved forms, slash-normalized, so a logical pattern still
+// matches a physical root and vice versa.
+func rootMatchForms(worktreeRoot string) []string {
+	roots := []string{filepath.ToSlash(worktreeRoot)}
+	if resolved, err := filepath.EvalSymlinks(worktreeRoot); err == nil {
+		if s := filepath.ToSlash(resolved); s != roots[0] {
+			roots = append(roots, s)
+		}
+	}
+	return roots
+}
+
+// matchesExcludePathExact reports whether worktreeRoot IS one of the
+// exclude_paths_exact entries. Entries are plain paths, not globs, and there
+// is deliberately no subtree cascade — a repo checked out BENEATH an
+// excluded-exact path is not excluded (that is the whole point; see the
+// ExcludePathsExact field doc). Blank entries are skipped; an unusable entry
+// returns an error so the caller fails closed, exactly like exclude_paths.
+func matchesExcludePathExact(ctx context.Context, entries []string, worktreeRoot string) (bool, error) {
+	return matchesExcludePathExactFold(ctx, entries, worktreeRoot, caseInsensitivePaths)
+}
+
+// matchesExcludePathExactFold is the fold-explicit seam behind
+// matchesExcludePathExact. Both the root and the entry are tried in given and
+// symlink-resolved forms, mirroring matchesExcludePathFold, so an entry typed
+// against a logical (symlinked) path still matches the physical worktree root
+// git reports, and vice versa.
+func matchesExcludePathExactFold(_ context.Context, entries []string, worktreeRoot string, fold bool) (bool, error) {
+	roots := rootMatchForms(worktreeRoot)
+	for i, e := range entries {
+		expanded, err := expandTilde(e)
+		if err != nil {
+			return false, fmt.Errorf("exclude_paths_exact[%d]: %w", i, err)
+		}
+		if expanded == "" {
+			continue // blank entry — no intent to honor
+		}
+		variants := []string{expanded}
+		if resolved, symErr := filepath.EvalSymlinks(filepath.FromSlash(expanded)); symErr == nil {
+			if s := filepath.ToSlash(resolved); s != expanded {
+				variants = append(variants, s)
+			}
+		}
+		for _, v := range variants {
+			for _, root := range roots {
+				if fold {
+					v = strings.ToLower(v)
+					root = strings.ToLower(root)
+				}
+				if v == root {
 					return true, nil
 				}
 			}
@@ -314,6 +387,15 @@ func GlobalModeActive(ctx context.Context) bool {
 	if excluded {
 		return false
 	}
+	excludedExact, err := matchesExcludePathExact(ctx, us.Global.ExcludePathsExact, root)
+	if err != nil {
+		logging.Debug(ctx, "unusable exclude_paths_exact entry; treating global mode as inactive (fail closed)",
+			slog.String("error", err.Error()))
+		return false
+	}
+	if excludedExact {
+		return false
+	}
 	if len(us.Global.ExcludeOrigins) > 0 {
 		origins, found, err := gitremote.GetRemoteURLsInDirIfSet(ctx, root, "origin")
 		if err != nil {
@@ -364,7 +446,10 @@ func GlobalModeActive(ctx context.Context) bool {
 // (either settings file) makes the repo-level answer final.
 func IsActiveForRepo(ctx context.Context) bool {
 	if IsSetUpAny(ctx) {
-		return IsSetUpAndEnabled(ctx)
+		// IsSetUpAny just established setup exists; going through
+		// IsSetUpAndEnabled here would repeat its Lstat pair on every hook
+		// invocation.
+		return repoSettingsEnabled(ctx)
 	}
 	return GlobalModeActive(ctx)
 }
