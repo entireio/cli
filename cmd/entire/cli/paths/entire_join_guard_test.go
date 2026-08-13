@@ -17,37 +17,27 @@ import (
 // a repo that must stay invisible.
 //
 // The test scans non-test production sources under cmd/ and internal/ and
-// fails on any new bypass. Deliberate, audited call sites are allowlisted
-// below with their rationale. Joins whose FIRST argument is itself an
-// Entire* constant only build a relative subpath (which is then fed to
-// AbsPath) and are not flagged. (.entire/worktrees — trail checkout
-// worktrees — is deliberately worktree-resolved and documented on
-// runtimeDataPrefixes; it is referenced via its own constant, not these
-// patterns.)
+// fails on any new bypass. A deliberate, audited call site is exempted by an
+// inline marker on its own line:
+//
+//	x := filepath.Join(root, paths.EntireDir, "runners") // entire-join-ok: <reason>
+//
+// The marker is per-call-site, not per-file, so a new bypass added to a file
+// that already contains an audited join is still flagged; deleting a marker
+// re-flags its call site. Joins whose FIRST argument is itself an Entire*
+// constant only build a relative subpath (which is then fed to AbsPath) and
+// are not flagged. (.entire/worktrees — trail checkout worktrees — is
+// deliberately worktree-resolved and documented on runtimeDataPrefixes; it is
+// referenced via its own constant, not these patterns.)
 func TestNoDirectEntireJoins(t *testing.T) {
 	t.Parallel()
-
-	// Audited-deliberate bypasses, by path suffix (slash-separated).
-	allowlist := map[string]string{
-		// The routing implementation itself: the settings-file Lstat is the
-		// discriminator that DECIDES whether rerouting applies.
-		"cmd/entire/cli/paths/invisible.go": "routing discriminator",
-		// Runner definitions are repo-level configuration (like settings and
-		// redactor packs), only meaningful with repo-level setup.
-		"cmd/entire/cli/runner_prompt.go": "repo-level runner config, config-class not runtime",
-		// Doctor bundle collects the repo-level settings files for support
-		// bundles; a globally tracked repo has none by definition.
-		"cmd/entire/cli/doctor_bundle.go": "collects repo-level settings files",
-		// Legacy no-repo fallbacks, guarded by paths.IsUnroutableRuntimePath
-		// so a tier-owned repo can never reach them.
-		"cmd/entire/cli/agent/pi/lifecycle.go":       "sentinel-guarded no-repo fallback",
-		"cmd/entire/cli/agent/opencode/lifecycle.go": "sentinel-guarded no-repo fallback",
-	}
 
 	// filepath.Join(...) with no nested calls; args inspected afterwards.
 	joinCall := regexp.MustCompile(`filepath\.Join\(([^()]*)\)`)
 	entireToken := regexp.MustCompile(`"\.entire|\bEntire(?:Dir|TmpDir|MetadataDir|LogsDir)\b`)
 	entireConstFirst := regexp.MustCompile(`^\s*(?:paths\.)?Entire(?:Dir|TmpDir|MetadataDir|LogsDir)\b`)
+	// Inline audited-bypass marker; requires a non-empty rationale.
+	joinOKMarker := regexp.MustCompile(`//\s*entire-join-ok:\s*\S`)
 
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -77,8 +67,9 @@ func TestNoDirectEntireJoins(t *testing.T) {
 			if readErr != nil {
 				return readErr
 			}
-			for _, m := range joinCall.FindAllStringSubmatch(string(data), -1) {
-				args := m[1]
+			src := string(data)
+			for _, idx := range joinCall.FindAllStringSubmatchIndex(src, -1) {
+				args := src[idx[2]:idx[3]]
 				firstArg, rest, found := strings.Cut(args, ",")
 				if !found {
 					continue // single-arg join cannot combine a base with .entire
@@ -89,10 +80,10 @@ func TestNoDirectEntireJoins(t *testing.T) {
 				if entireConstFirst.MatchString(firstArg) {
 					continue // builds a relative .entire subpath, not a resolved location
 				}
-				if _, allowed := allowlist[rel]; allowed {
-					continue
+				if joinOKMarker.MatchString(sourceLine(src, idx[0])) {
+					continue // audited-deliberate bypass, marked at the call site
 				}
-				violations = append(violations, rel+": "+strings.TrimSpace(m[0]))
+				violations = append(violations, rel+": "+strings.TrimSpace(src[idx[0]:idx[1]]))
 			}
 			return nil
 		})
@@ -103,8 +94,18 @@ func TestNoDirectEntireJoins(t *testing.T) {
 
 	if len(violations) > 0 {
 		t.Errorf("found filepath.Join calls that bypass paths.AbsPath for .entire runtime paths.\n"+
-			"Resolve runtime paths through paths.AbsPath (invisible routing), or add an\n"+
-			"audited allowlist entry in this test with a rationale:\n  %s",
+			"Resolve runtime paths through paths.AbsPath (invisible routing), or mark the\n"+
+			"call site as audited with an inline `// entire-join-ok: <reason>` comment:\n  %s",
 			strings.Join(violations, "\n  "))
 	}
+}
+
+// sourceLine returns the full source line containing byte offset off.
+func sourceLine(src string, off int) string {
+	start := strings.LastIndexByte(src[:off], '\n') + 1
+	end := strings.IndexByte(src[off:], '\n')
+	if end < 0 {
+		return src[start:]
+	}
+	return src[start : off+end]
 }

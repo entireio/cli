@@ -101,8 +101,10 @@ func MaybeEnsureGlobalSetup(ctx context.Context) {
 	}
 	defer repo.Close()
 	// Same ref bootstrap as EnsureSetup; no WithCheckpointRemoteBootstrap —
-	// this runs on the hook hot path, which must stay network-free.
-	if err := EnsurePrimaryRef(ctx, repo); err != nil {
+	// this runs on the hook hot path, which must stay network-free. Notices go
+	// to io.Discard for the same reason installGitHooks above discards them:
+	// a "✓ Created local ref ..." line would leak into the agent's hook output.
+	if err := EnsurePrimaryRefTo(ctx, repo, io.Discard); err != nil {
 		logging.Debug(logCtx, "global lazy setup: ensure primary metadata ref failed",
 			slog.String("error", err.Error()))
 		return
@@ -205,5 +207,7 @@ func EnsureSetupForHook(ctx context.Context) error {
 		MaybeEnsureGlobalSetup(ctx)
 		return nil
 	}
-	return EnsureSetup(ctx)
+	// Hook context: discard ref-bootstrap notices — a ✓ line on stderr here
+	// would leak into the agent's hook output.
+	return ensureSetup(ctx, io.Discard)
 }

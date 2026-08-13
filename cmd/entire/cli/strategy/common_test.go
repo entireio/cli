@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -987,6 +988,30 @@ func TestEnsurePrimaryRef(t *testing.T) {
 		if len(tree.Entries) != 0 {
 			t.Errorf("expected empty tree, got %d entries", len(tree.Entries))
 		}
+	})
+
+	// Pins the hook-leak fix: every bootstrap notice must go to the injected
+	// writer, so hook-context callers (EnsureSetupForHook,
+	// MaybeEnsureGlobalSetup) passing io.Discard produce no stderr output
+	// during an agent hook. A regression back to fmt.Fprintf(os.Stderr, ...)
+	// leaves this buffer empty.
+	t.Run("bootstrap notices go to the provided writer", func(t *testing.T) {
+		t.Parallel()
+		bareDir := initBareWithMetadataBranch(t)
+		cloneDir := filepath.Join(t.TempDir(), "clone")
+		cmd := exec.CommandContext(context.Background(), "git", "clone", bareDir, cloneDir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("clone failed: %v\n%s", err, out)
+		}
+		repo, err := git.PlainOpen(cloneDir)
+		if err != nil {
+			t.Fatalf("failed to open repo: %v", err)
+		}
+
+		var buf bytes.Buffer
+		require.NoError(t, EnsurePrimaryRefTo(t.Context(), repo, &buf))
+		require.Contains(t, buf.String(), "✓ Created local ref",
+			"the created-from-origin notice must be written to the injected writer")
 	})
 
 	t.Run("skips empty orphan when primary is git-refs", func(t *testing.T) {

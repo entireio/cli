@@ -394,17 +394,13 @@ func TestDispatchLifecycleEvent_RejectsTraversalSessionID(t *testing.T) {
 	}
 }
 
-// TestHandleLifecycleTurnEnd_UnroutableRuntimePath_SkipsWithoutError pins the
-// sentinel's skip contract at the turn-end capture: with the global tier
-// owning the repo and the routing probe failing, the handler must return nil
-// — a returned error becomes a non-zero hook exit plus sentinel text on the
-// agent's stderr EVERY turn-end while the condition persists, failing the
-// user's agent turn for a machine-wide feature they never repo-enabled — and
-// must create no capture artifacts in the worktree. The lost capture is
-// recorded via logging.Warn (live at this point: both hook routes initialize
-// logging before dispatch).
-// No t.Parallel: uses t.Chdir, t.Setenv, and process-global paths caches/seam.
-func TestHandleLifecycleTurnEnd_UnroutableRuntimePath_SkipsWithoutError(t *testing.T) {
+// setupUnroutableGlobalRepo prepares an isolated repo (with one commit) that
+// the user-global tier owns, with the invisible-routing probe forced to fail,
+// and chdirs into it. Shared by the TurnStart/TurnEnd/SubagentStart skip
+// tests below. Callers must not use t.Parallel: t.Chdir, t.Setenv, and
+// process-global paths caches/seam.
+func setupUnroutableGlobalRepo(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
 	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = resolved
@@ -429,6 +425,21 @@ func TestHandleLifecycleTurnEnd_UnroutableRuntimePath_SkipsWithoutError(t *testi
 		paths.ClearInvisibleRuntimeCache()
 		paths.ClearWorktreeRootCache()
 	})
+	return dir
+}
+
+// TestHandleLifecycleTurnEnd_UnroutableRuntimePath_SkipsWithoutError pins the
+// sentinel's skip contract at the turn-end capture: with the global tier
+// owning the repo and the routing probe failing, the handler must return nil
+// — a returned error becomes a non-zero hook exit plus sentinel text on the
+// agent's stderr EVERY turn-end while the condition persists, failing the
+// user's agent turn for a machine-wide feature they never repo-enabled — and
+// must create no capture artifacts in the worktree. The lost capture is
+// recorded via logging.Warn (live at this point: both hook routes initialize
+// logging before dispatch).
+// No t.Parallel: uses t.Chdir, t.Setenv, and process-global paths caches/seam.
+func TestHandleLifecycleTurnEnd_UnroutableRuntimePath_SkipsWithoutError(t *testing.T) {
+	dir := setupUnroutableGlobalRepo(t)
 
 	transcript := filepath.Join(t.TempDir(), "transcript.jsonl")
 	require.NoError(t, os.WriteFile(transcript, []byte(`{"type":"user"}`+"\n"), 0o600))
@@ -443,6 +454,91 @@ func TestHandleLifecycleTurnEnd_UnroutableRuntimePath_SkipsWithoutError(t *testi
 	}
 	if _, err := os.Lstat(filepath.Join(dir, ".entire")); !os.IsNotExist(err) {
 		t.Errorf("capture artifacts created in the worktree despite the skip (err=%v)", err)
+	}
+}
+
+// TestHandleLifecycleTurnStart_UnroutableRuntimePath_SkipsWithoutError pins
+// the same skip contract at the TurnStart pre-state capture:
+// CapturePrePromptState surfaces the unroutable sentinel, and the handler
+// must treat it as "pre-state capture skipped this turn" (Warn + continue)
+// rather than failing the hook — the regression this guards is TurnStart
+// propagating the sentinel and exiting non-zero on every prompt.
+// No t.Parallel: uses t.Chdir, t.Setenv, and process-global paths caches/seam.
+func TestHandleLifecycleTurnStart_UnroutableRuntimePath_SkipsWithoutError(t *testing.T) {
+	dir := setupUnroutableGlobalRepo(t)
+
+	err := handleLifecycleTurnStart(context.Background(), newMockAgent(), &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: "unroutable-session",
+		Prompt:    "hello",
+	})
+	if err != nil {
+		t.Fatalf("turn-start must skip pre-state capture (hook exit 0) on an unroutable runtime path, got error: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".entire")); !os.IsNotExist(err) {
+		t.Errorf("capture artifacts created in the worktree despite the skip (err=%v)", err)
+	}
+}
+
+// TestHandleLifecycleSubagentStart_UnroutableRuntimePath_SkipsWithoutError is
+// the SubagentStart leg of the same contract: CapturePreTaskState surfacing
+// the sentinel must not fail the hook.
+// No t.Parallel: uses t.Chdir, t.Setenv, and process-global paths caches/seam.
+func TestHandleLifecycleSubagentStart_UnroutableRuntimePath_SkipsWithoutError(t *testing.T) {
+	dir := setupUnroutableGlobalRepo(t)
+
+	err := handleLifecycleSubagentStart(context.Background(), newMockAgent(), &agent.Event{
+		Type:      agent.SubagentStart,
+		SessionID: "unroutable-session",
+		ToolUseID: "toolu-unroutable",
+	})
+	if err != nil {
+		t.Fatalf("subagent-start must skip pre-task capture (hook exit 0) on an unroutable runtime path, got error: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".entire")); !os.IsNotExist(err) {
+		t.Errorf("capture artifacts created in the worktree despite the skip (err=%v)", err)
+	}
+}
+
+// TestLifecycle_UnroutableSkippedPreState_DoesNotClaimUntracked runs the full
+// TurnStart→TurnEnd pair under a persistent unroutable condition with a
+// pre-existing untracked file in the worktree. With the pre-state baseline
+// skipped at TurnStart, the paired turn-end must not degrade into claiming
+// that pre-existing file as agent work: it skips checkpoint capture entirely
+// (before attribution), so no shadow branch may appear.
+// No t.Parallel: uses t.Chdir, t.Setenv, and process-global paths caches/seam.
+func TestLifecycle_UnroutableSkippedPreState_DoesNotClaimUntracked(t *testing.T) {
+	dir := setupUnroutableGlobalRepo(t)
+	// Untracked before the turn: must not be attributed to the agent.
+	testutil.WriteFile(t, dir, "pre-existing.txt", "user file")
+
+	transcript := filepath.Join(t.TempDir(), "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcript, []byte(`{"type":"user"}`+"\n"), 0o600))
+
+	ag := newMockAgent()
+	require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: "unroutable-session",
+		Prompt:    "hello",
+	}))
+	require.NoError(t, handleLifecycleTurnEnd(context.Background(), ag, &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "unroutable-session",
+		SessionRef: transcript,
+	}))
+
+	// No checkpoint may have been written: a shadow branch would mean the
+	// turn-end claimed changes (including the pre-existing untracked file).
+	// The entire/checkpoints/* metadata ref is expected — lazy global setup
+	// bootstraps it (empty) and it carries no claim.
+	out, err := exec.CommandContext(context.Background(), "git", "-C", dir,
+		"for-each-ref", "refs/heads/entire").CombinedOutput()
+	require.NoError(t, err, string(out))
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+		if line == "" || strings.Contains(line, "refs/heads/entire/checkpoints/") {
+			continue
+		}
+		t.Errorf("shadow ref created despite skipped capture: %s", line)
 	}
 }
 
