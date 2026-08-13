@@ -82,14 +82,7 @@ func runAgentList(ctx context.Context, w io.Writer, externalOnly bool) error {
 	}
 
 	hasSomeInstalled := false
-	// Count agents actually rendered so the --external empty-state can tell
-	// "found plugins on $PATH, none installed" apart from "nothing on $PATH".
-	listed := 0
-	header := "Agents:"
-	if externalOnly {
-		header = "External agents:"
-	}
-	fmt.Fprintln(w, header)
+	fmt.Fprintln(w, "Agents:")
 	for _, name := range agent.List() {
 		ag, err := agent.Get(name)
 		if err != nil {
@@ -100,11 +93,11 @@ func runAgentList(ctx context.Context, w io.Writer, externalOnly bool) error {
 		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
 			continue
 		}
-		// Default lists built-in agents; --external lists external plugins.
-		if external.IsExternal(ag) != externalOnly {
+		// Default lists built-ins only; --external is a superset that also
+		// includes external plugins discovered above.
+		if !externalOnly && external.IsExternal(ag) {
 			continue
 		}
-		listed++
 		installed := false
 		if hs, ok := agent.AsHookSupport(ag); ok && hs.AreHooksInstalled(ctx) {
 			installed = true
@@ -117,19 +110,16 @@ func runAgentList(ctx context.Context, w io.Writer, externalOnly bool) error {
 		fmt.Fprintf(w, "  %s%s\n", marker, name)
 	}
 
-	if externalOnly {
-		switch {
-		case listed == 0:
-			fmt.Fprintln(w, "\nNo external agent plugins found on your PATH.")
-		case !hasSomeInstalled:
-			fmt.Fprintln(w, "\nNo external agent plugins installed. Use 'entire agent add <name>' to install hooks.")
-		}
-		fmt.Fprintln(w, "\nRun 'entire agent list' to list built-in agents.")
-	} else {
-		if !hasSomeInstalled {
+	if !hasSomeInstalled {
+		if externalOnly {
+			// --external is the complete view, so "No agents installed" is accurate.
 			fmt.Fprintln(w, "\nNo agents installed. Use 'entire agent add <name>' to install hooks.")
+		} else {
+			fmt.Fprintln(w, "\nNo built-in agents installed. Use 'entire agent add <name>' to install hooks.")
 		}
-		fmt.Fprintln(w, "\nRun 'entire agent list --external' to list external agent plugins on your PATH.")
+	}
+	if !externalOnly {
+		fmt.Fprintln(w, "\nRun 'entire agent list --external' to also list external plugins on your PATH.")
 	}
 	return nil
 }

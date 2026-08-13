@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -87,7 +88,12 @@ func TestAgentGroupBareCommandRunsAgentMenu(t *testing.T) {
 
 // TestRunAgentList_ExternalFlagListsAvailablePlugin verifies that an
 // available-but-uninstalled external plugin on $PATH is listed under
-// `--external`, and that the default (built-in) listing does not touch $PATH.
+// `--external`, and that the default (built-in) listing does not surface it.
+//
+// The default-listing absence check here is filter-driven (agent.List is
+// filtered by external.IsExternal), so it does NOT by itself prove the default
+// path skips the $PATH scan — TestRunAgentList_DefaultPathDoesNotScanPath owns
+// that guarantee via an exec-count assertion.
 func TestRunAgentList_ExternalFlagListsAvailablePlugin(t *testing.T) {
 	// Cannot use t.Parallel because we modify PATH via t.Setenv and cwd via t.Chdir.
 	// The mock agent is a #!/bin/sh script run by the install-state probe, so skip
@@ -130,6 +136,58 @@ func TestRunAgentList_ExternalFlagListsAvailablePlugin(t *testing.T) {
 	}
 }
 
+// TestRunAgentList_DefaultPathDoesNotScanPath proves the guarantee that the
+// filter-driven absence check in TestRunAgentList_ExternalFlagListsAvailablePlugin
+// cannot: the default `agent list` path never executes any external plugin on
+// $PATH, while `--external` does. It asserts on an exec log the mock plugin
+// appends to, so reintroducing an unconditional $PATH scan on the default path
+// would fail here even though the plugin is filtered out of the output.
+func TestRunAgentList_DefaultPathDoesNotScanPath(t *testing.T) {
+	// Cannot use t.Parallel: mutates PATH via t.Setenv and cwd via t.Chdir.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	t.Cleanup(agent.SnapshotForTesting())
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, ".entire/settings.json", `{"enabled":true,"external_agents":true}`)
+	t.Chdir(repoDir)
+
+	const agentName = "ext-execlog-test"
+	externalDir := t.TempDir()
+	writeExternalAgentBinary(t, externalDir, agentName)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// The mock appends each invoked subcommand to this file when the env var is set.
+	execLog := filepath.Join(t.TempDir(), "exec.log")
+	t.Setenv("ENTIRE_TEST_EXEC_LOG", execLog)
+
+	// Default listing must never exec the plugin: the exec log stays empty.
+	var def bytes.Buffer
+	if err := runAgentList(context.Background(), &def, false); err != nil {
+		t.Fatalf("runAgentList (default): %v", err)
+	}
+	if data, err := os.ReadFile(execLog); err == nil && len(data) > 0 {
+		t.Errorf("default listing executed external plugin (exec log non-empty):\n%s", data)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("reading exec log after default call: %v", err)
+	}
+
+	// --external must scan $PATH, executing the plugin at least once.
+	var ext bytes.Buffer
+	if err := runAgentList(context.Background(), &ext, true); err != nil {
+		t.Fatalf("runAgentList (--external): %v", err)
+	}
+	data, err := os.ReadFile(execLog)
+	if err != nil {
+		t.Fatalf("reading exec log after --external call: %v", err)
+	}
+	if len(data) == 0 {
+		t.Errorf("--external listing did not execute external plugin (exec log empty)")
+	}
+}
+
 // TestRunAgentList_ExternalFlagMarksInstalled verifies that an INSTALLED external
 // plugin is listed and marked installed (✓) under `--external`.
 func TestRunAgentList_ExternalFlagMarksInstalled(t *testing.T) {
@@ -162,81 +220,31 @@ func TestRunAgentList_ExternalFlagMarksInstalled(t *testing.T) {
 	}
 }
 
-// TestRunAgentList_ExternalHeaderAndReciprocalFooter verifies that `--external`
-// uses a distinguishable "External agents:" header and points back to the
-// built-in listing, while the default listing keeps "Agents:" and points at
-// `--external`.
-func TestRunAgentList_ExternalHeaderAndReciprocalFooter(t *testing.T) {
-	t.Parallel()
-
-	var def bytes.Buffer
-	if err := runAgentList(context.Background(), &def, false); err != nil {
-		t.Fatalf("runAgentList (default): %v", err)
-	}
-	if !strings.Contains(def.String(), "Agents:") {
-		t.Errorf("default listing missing 'Agents:' header:\n%s", def.String())
-	}
-	if strings.Contains(def.String(), "External agents:") {
-		t.Errorf("default listing must not use the external header:\n%s", def.String())
-	}
-	if !strings.Contains(def.String(), "entire agent list --external") {
-		t.Errorf("default listing should point at --external:\n%s", def.String())
-	}
-
-	var ext bytes.Buffer
-	if err := runAgentList(context.Background(), &ext, true); err != nil {
-		t.Fatalf("runAgentList (--external): %v", err)
-	}
-	if !strings.Contains(ext.String(), "External agents:") {
-		t.Errorf("--external listing missing 'External agents:' header:\n%s", ext.String())
-	}
-	if !strings.Contains(ext.String(), "Run 'entire agent list' to list built-in agents.") {
-		t.Errorf("--external listing should point back at the built-in listing:\n%s", ext.String())
-	}
-}
-
-// TestRunAgentList_ExternalEmptyStateNonePlugins verifies that when no external
-// plugins are on $PATH, `--external` prints a distinct "found on your PATH"
-// message rather than the "installed" empty-state used when plugins exist but
-// none are installed.
-func TestRunAgentList_ExternalEmptyStateNonePlugins(t *testing.T) {
-	// Cannot use t.Parallel: mutates PATH via t.Setenv.
-	// Point PATH at an empty dir so discovery finds no entire-agent-* binaries.
-	emptyDir := t.TempDir()
-	t.Setenv("PATH", emptyDir)
-
-	var ext bytes.Buffer
-	if err := runAgentList(context.Background(), &ext, true); err != nil {
-		t.Fatalf("runAgentList (--external): %v", err)
-	}
-	out := ext.String()
-	if !strings.Contains(out, "No external agent plugins found on your PATH.") {
-		t.Errorf("expected 'found on your PATH' empty-state, got:\n%s", out)
-	}
-	if strings.Contains(out, "No external agent plugins installed.") {
-		t.Errorf("must not print the 'installed' empty-state when nothing is on PATH:\n%s", out)
-	}
-}
-
-// TestRunAgentList_ExternalEmptyStateNoneInstalled verifies that when external
-// plugins ARE on $PATH but none have hooks installed, `--external` prints the
-// mode-scoped "No external agent plugins installed" message (finding #3) rather
-// than the global "No agents installed" wording.
-func TestRunAgentList_ExternalEmptyStateNoneInstalled(t *testing.T) {
+// TestRunAgentList_ExternalIsSuperset verifies that `--external` is a superset:
+// its output includes external plugins on $PATH AND the built-in agents, while
+// the default listing shows built-ins only.
+func TestRunAgentList_ExternalIsSuperset(t *testing.T) {
 	// Cannot use t.Parallel: mutates PATH via t.Setenv and cwd via t.Chdir.
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
 	t.Cleanup(agent.SnapshotForTesting())
 
+	// A built-in agent name to look for in both listings.
+	builtins := agent.StringList()
+	if len(builtins) == 0 {
+		t.Skip("no built-in agents registered in this build")
+	}
+	builtin := builtins[0]
+
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
 	testutil.WriteFile(t, repoDir, ".entire/settings.json", `{"enabled":true,"external_agents":true}`)
 	t.Chdir(repoDir)
 
-	const agentName = "ext-noneinstalled-test"
+	const agentName = "ext-superset-test"
 	externalDir := t.TempDir()
-	writeExternalAgentBinary(t, externalDir, agentName) // are-hooks-installed => false
+	writeExternalAgentBinary(t, externalDir, agentName)
 	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var ext bytes.Buffer
@@ -244,13 +252,41 @@ func TestRunAgentList_ExternalEmptyStateNoneInstalled(t *testing.T) {
 		t.Fatalf("runAgentList (--external): %v", err)
 	}
 	out := ext.String()
-	if !strings.Contains(out, "No external agent plugins installed.") {
-		t.Errorf("expected mode-scoped 'installed' empty-state, got:\n%s", out)
+	if !strings.Contains(out, agentName) {
+		t.Errorf("--external should include external plugin %q, got:\n%s", agentName, out)
 	}
-	if strings.Contains(out, "No agents installed.") {
-		t.Errorf("must not use the global 'No agents installed' wording under --external:\n%s", out)
+	if !strings.Contains(out, builtin) {
+		t.Errorf("--external should ALSO include built-in agent %q (superset), got:\n%s", builtin, out)
 	}
-	if strings.Contains(out, "No external agent plugins found on your PATH.") {
-		t.Errorf("must not print the 'found on PATH' state when a plugin is present:\n%s", out)
+}
+
+// TestRunAgentList_EmptyStateWording verifies the mode-scoped empty-state: the
+// default path says "No built-in agents installed" while `--external`, being the
+// complete view, says "No agents installed".
+func TestRunAgentList_EmptyStateWording(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd via t.Chdir (no agent hooks installed
+	// in the fresh repo, so both paths hit the empty-state).
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, ".entire/settings.json", `{"enabled":true}`)
+	t.Chdir(repoDir)
+
+	var def bytes.Buffer
+	if err := runAgentList(context.Background(), &def, false); err != nil {
+		t.Fatalf("runAgentList (default): %v", err)
+	}
+	if !strings.Contains(def.String(), "No built-in agents installed.") {
+		t.Errorf("default empty-state should say 'No built-in agents installed.', got:\n%s", def.String())
+	}
+
+	var ext bytes.Buffer
+	if err := runAgentList(context.Background(), &ext, true); err != nil {
+		t.Fatalf("runAgentList (--external): %v", err)
+	}
+	if !strings.Contains(ext.String(), "No agents installed.") {
+		t.Errorf("--external empty-state should say 'No agents installed.', got:\n%s", ext.String())
+	}
+	if strings.Contains(ext.String(), "No built-in agents installed.") {
+		t.Errorf("--external empty-state must not scope to built-ins, got:\n%s", ext.String())
 	}
 }

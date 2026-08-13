@@ -144,7 +144,12 @@ func writeExternalAgentBinaryEx(t *testing.T, dir, name string, hooksInstalled b
 
 	installed := strconv.FormatBool(hooksInstalled)
 
+	// When ENTIRE_TEST_EXEC_LOG is set, record every invocation's subcommand so a
+	// test can assert whether the binary was executed at all (used to prove the
+	// default `agent list` path performs no $PATH scan). Unset in other tests, so
+	// they are undisturbed.
 	script := `#!/bin/sh
+[ -n "$ENTIRE_TEST_EXEC_LOG" ] && echo "$1" >> "$ENTIRE_TEST_EXEC_LOG"
 case "$1" in
   info)
     echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External test agent","is_preview":false,"protected_dirs":[],"hook_names":["stop"],"capabilities":{"hooks":true}}'
