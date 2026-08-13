@@ -82,7 +82,14 @@ func runAgentList(ctx context.Context, w io.Writer, externalOnly bool) error {
 	}
 
 	hasSomeInstalled := false
-	fmt.Fprintln(w, "Agents:")
+	// Count agents actually rendered so the --external empty-state can tell
+	// "found plugins on $PATH, none installed" apart from "nothing on $PATH".
+	listed := 0
+	header := "Agents:"
+	if externalOnly {
+		header = "External agents:"
+	}
+	fmt.Fprintln(w, header)
 	for _, name := range agent.List() {
 		ag, err := agent.Get(name)
 		if err != nil {
@@ -97,6 +104,7 @@ func runAgentList(ctx context.Context, w io.Writer, externalOnly bool) error {
 		if external.IsExternal(ag) != externalOnly {
 			continue
 		}
+		listed++
 		installed := false
 		if hs, ok := agent.AsHookSupport(ag); ok && hs.AreHooksInstalled(ctx) {
 			installed = true
@@ -109,10 +117,18 @@ func runAgentList(ctx context.Context, w io.Writer, externalOnly bool) error {
 		fmt.Fprintf(w, "  %s%s\n", marker, name)
 	}
 
-	if !hasSomeInstalled {
-		fmt.Fprintln(w, "\nNo agents installed. Use 'entire agent add <name>' to install hooks.")
-	}
-	if !externalOnly {
+	if externalOnly {
+		switch {
+		case listed == 0:
+			fmt.Fprintln(w, "\nNo external agent plugins found on your PATH.")
+		case !hasSomeInstalled:
+			fmt.Fprintln(w, "\nNo external agent plugins installed. Use 'entire agent add <name>' to install hooks.")
+		}
+		fmt.Fprintln(w, "\nRun 'entire agent list' to list built-in agents.")
+	} else {
+		if !hasSomeInstalled {
+			fmt.Fprintln(w, "\nNo agents installed. Use 'entire agent add <name>' to install hooks.")
+		}
 		fmt.Fprintln(w, "\nRun 'entire agent list --external' to list external agent plugins on your PATH.")
 	}
 	return nil
