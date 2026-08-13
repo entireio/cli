@@ -1,6 +1,8 @@
 package settings
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -319,6 +321,34 @@ func addTestRemote(t *testing.T, dir string, args ...string) {
 	cmd.Env = testutil.GitIsolatedEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// TestGlobalModeActive_FastPathNeverResolvesWorktreeRoot pins the gate's
+// fork-avoidance invariant: with the global tier unconfigured or disabled —
+// the machine-wide common case, hit on every hook invocation in every repo
+// without repo-level setup — GlobalModeActive must answer from the settings
+// file alone, never resolving the worktree root (a `git rev-parse`
+// subprocess fork).
+// No t.Parallel: swaps the package-level worktreeRootFn seam and uses
+// t.Setenv; every other caller of the gate is serial for the same reason.
+func TestGlobalModeActive_FastPathNeverResolvesWorktreeRoot(t *testing.T) {
+	restore := SetWorktreeRootFnForTesting(func(context.Context) (string, error) {
+		t.Error("worktree root resolved on the unconfigured/disabled fast path — this forks git on every hook invocation")
+		return "", errors.New("forbidden fork")
+	})
+	t.Cleanup(restore)
+
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir()) // unconfigured tier
+	if GlobalModeActive(t.Context()) {
+		t.Fatal("unconfigured tier must be inactive")
+	}
+
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	writeUserSettings(t, cfg, `{"global":{"enabled":false}}`) // recorded "no"
+	if GlobalModeActive(t.Context()) {
+		t.Fatal("disabled tier must be inactive")
 	}
 }
 
