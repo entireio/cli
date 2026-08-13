@@ -436,6 +436,30 @@ func TestConfigureSelectionChangesDistinguishLocalAndPushChanges(t *testing.T) {
 	}
 }
 
+func TestConfigureRulesBlockDirectPush(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "copilot review is advisory", raw: `[{"type":"copilot_code_review"}]`},
+		{name: "required reviews block", raw: `[{"type":"pull_request"}]`, want: true},
+		{name: "required checks block", raw: `[{"type":"required_status_checks"}]`, want: true},
+		{name: "no rules", raw: `[]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := configureRulesBlockDirectPush([]byte(tt.raw))
+			if err != nil {
+				t.Fatalf("configureRulesBlockDirectPush() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("configureRulesBlockDirectPush() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConfigureSaveOptionsAreDynamic(t *testing.T) {
 	unchanged := configureSaveOptions("main", false, false, false, configureSaveCancel)
 	if len(unchanged) != 1 || unchanged[0].Value != configureSaveCancel {

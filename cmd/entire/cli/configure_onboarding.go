@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1206,15 +1207,31 @@ func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, befo
 }
 
 func configureBranchProtected(ctx context.Context, owner, repo, branch string) (bool, error) {
-	out, err := exec.CommandContext(ctx, "gh", "api", "repos/"+owner+"/"+repo+"/branches/"+url.PathEscape(branch), "--jq", ".protected").Output()
+	// GitHub's branch `.protected` flag is true for *any* active ruleset rule.
+	// A non-blocking rule such as Copilot code review therefore made ordinary
+	// feature branches look push-protected. Inspect the effective rules instead
+	// and only require a new branch for rules that can reject a direct update.
+	out, err := exec.CommandContext(ctx, "gh", "api", "repos/"+owner+"/"+repo+"/rules/branches/"+url.PathEscape(branch)).Output()
 	if err != nil {
-		return false, fmt.Errorf("check GitHub branch protection: %w", err)
+		return false, fmt.Errorf("check GitHub branch rules: %w", err)
 	}
-	protected, err := strconv.ParseBool(strings.TrimSpace(string(out)))
-	if err != nil {
-		return false, fmt.Errorf("parse GitHub branch protection: %w", err)
+	return configureRulesBlockDirectPush(out)
+}
+
+func configureRulesBlockDirectPush(raw []byte) (bool, error) {
+	var rules []struct {
+		Type string `json:"type"`
 	}
-	return protected, nil
+	if err := json.Unmarshal(raw, &rules); err != nil {
+		return false, fmt.Errorf("parse GitHub branch rules: %w", err)
+	}
+	for _, rule := range rules {
+		switch rule.Type {
+		case "pull_request", "required_status_checks", "required_deployments", "update", "workflows":
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func availableConfigureBranch(ctx context.Context, repoRoot string, now func() time.Time) (string, error) {
