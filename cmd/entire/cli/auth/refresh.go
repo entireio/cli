@@ -166,6 +166,22 @@ func ReauthMessage(err error) (string, bool) {
 	return "", false
 }
 
+// ReauthError returns the *reauthError carried anywhere in err's chain as an
+// error whose Error() is the clean, context-named re-login message (stripped of
+// the ogen `security "BearerAuth"` and command `%w` wrappers that sit on top of
+// it) while still errors.Is-matching the underlying sentinel (ErrReauthRequired
+// or ErrNotLoggedIn); nil when err is not a re-auth error. Prefer this over
+// ReauthMessage at choke points that must both display cleanly and preserve the
+// chain, so callers can still classify (and, e.g., retry-after-login) the
+// failure rather than receiving a flat string.
+func ReauthError(err error) error {
+	var re *reauthError
+	if errors.As(err, &re) {
+		return re
+	}
+	return nil
+}
+
 // contextReauthError maps the two re-auth sentinels a per-context manager can
 // return into a friendly message that names the context and its core (so a
 // multi-core user logs back into the right one — matching the

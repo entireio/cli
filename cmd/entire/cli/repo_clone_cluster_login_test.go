@@ -96,6 +96,25 @@ func TestEnsureClusterCloneSession(t *testing.T) {
 		require.Equal(t, []string{testCloneLoginServer}, gotServers)
 	})
 
+	t.Run("no eligible context, interactive but no advertised cores, surfaces the friendly hint", func(t *testing.T) {
+		unsetCloneEnvToken(t)
+		t.Setenv(interactive.EnvTestTTY, "1")
+		swapProbeClusterCloneSession(t, func(context.Context, string) ([]string, error) {
+			return nil, auth.ErrNoEligibleContext // no cores to log into in-process
+		})
+		swapInteractiveClusterLogin(t, func(*cobra.Command, []string, string) (bool, error) {
+			t.Fatal("interactiveClusterLogin must not run with no advertised cores")
+			return false, nil
+		})
+		err := ensureClusterCloneSession(newCmd(t), testClusterHost)
+		require.Error(t, err)
+		// The composed friendly hint (not the raw "no login server" internal error).
+		require.Contains(t, err.Error(), "no auth context for cluster "+testClusterHost)
+		require.Contains(t, err.Error(), "Log in with `entire login`")
+		var silentErr *SilentError
+		require.NotErrorAs(t, err, &silentErr) // non-silent: main.go prints it
+	})
+
 	t.Run("no eligible context, interactive multi core, passes all servers", func(t *testing.T) {
 		unsetCloneEnvToken(t)
 		t.Setenv(interactive.EnvTestTTY, "1")

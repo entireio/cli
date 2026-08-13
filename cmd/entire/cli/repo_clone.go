@@ -213,6 +213,7 @@ func newRepoCloneCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&cluster, "cluster", "", "Cluster host to clone from when the repo is mirrored on more than one (may belong to another auth context)")
+	cmd.Flags().Bool("device", false, "Use the device-code flow (enter a code in your browser) for any inline re-login this clone prompts for, instead of the browser redirect")
 	return cmd
 }
 
@@ -315,7 +316,7 @@ func defaultInteractiveClusterLogin(cmd *cobra.Command, servers []string, hint s
 	if !confirmed {
 		return false, nil
 	}
-	if err := runLoginToServer(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), server, insecureHTTPRequested(cmd), false); err != nil {
+	if err := runLoginToServer(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), server, insecureHTTPRequested(cmd), deviceLoginRequested(cmd)); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -422,7 +423,13 @@ func ensureClusterCloneSession(cmd *cobra.Command, clusterHost string) error {
 		return probeErr
 	}
 
-	if !interactive.CanPromptInteractively() {
+	if !interactive.CanPromptInteractively() || len(servers) == 0 {
+		// No TTY, or no advertised region to log into in-process (the servers==0
+		// ErrNoEligibleContext case — the cluster names no core to authenticate
+		// against): surface the friendly hint (which already says "log in with
+		// `entire login`") rather than falling into interactiveClusterLogin, whose
+		// empty-slice guard would leak the raw "no login server" internal error.
+		// main.go prints it; nothing has echoed it yet on this path.
 		return errors.New(hint)
 	}
 	loggedIn, err := interactiveClusterLogin(cmd, servers, hint)
@@ -541,6 +548,21 @@ var cloneHomeJurisdiction = defaultCloneHomeJurisdiction
 // the token is warm). Returns "" on any uncertainty so the picker falls back to
 // showing every placement rather than hiding one.
 func defaultCloneHomeJurisdiction(ctx context.Context) string {
+	// Match coreapi's presence-based env-token precedence: when ENTIRE_TOKEN is
+	// set it is the bearer the placement lookup actually used, so derive the
+	// home jurisdiction from it, not from the stored active context.
+	if raw, ok := os.LookupEnv(auth.EnvTokenVar); ok {
+		_, token, err := auth.ParseEnvToken(raw)
+		if err != nil {
+			return ""
+		}
+		jur, err := auth.HomeJurisdictionFromLoginJWT(token)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(jur)
+	}
+
 	target, err := auth.ResolveControlPlaneTarget()
 	if err != nil {
 		return ""
@@ -582,7 +604,12 @@ func preferHomeJurisdiction(placements []coreapi.ResolvedPlacement, home string)
 // explicit --cluster it first narrows to the caller's home jurisdiction so a
 // repo mirrored across many regions defaults to the user's own.
 func selectCloneTarget(cmd *cobra.Command, placements []coreapi.ResolvedPlacement, clusterFlag string) (coreapi.ResolvedPlacement, error) {
-	if clusterFlag == "" {
+	// Only resolve the home jurisdiction when it can actually narrow the choice:
+	// with 0-1 placements there's nothing to filter (preferHomeJurisdiction would
+	// return the input unchanged), so skip the extra control-plane target
+	// resolution + login-token read on the common single-mirror clone. An
+	// explicit --cluster bypasses the filter entirely.
+	if clusterFlag == "" && len(placements) >= 2 {
 		placements = preferHomeJurisdiction(placements, cloneHomeJurisdiction(cmd.Context()))
 	}
 	return selectPlacement(cmd, placements, clusterFlag, placementPicker{

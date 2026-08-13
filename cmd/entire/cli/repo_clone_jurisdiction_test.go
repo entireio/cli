@@ -57,6 +57,21 @@ func TestPreferHomeJurisdiction(t *testing.T) {
 	})
 }
 
+func TestDefaultCloneHomeJurisdiction_EnvTokenWins(t *testing.T) {
+	// Sets ENTIRE_TOKEN, so no t.Parallel().
+	t.Run("env token drives the default, not the stored context", func(t *testing.T) {
+		t.Setenv("ENTIRE_TOKEN", makeTestJWT(t, `{"sub":"ci-runner","aud":"https://core.eu.entire.io","home_jurisdiction":"eu"}`))
+		// A stored US context could exist, but the env token is the bearer the
+		// placement lookup actually used, so its "eu" claim must win.
+		require.Equal(t, "eu", defaultCloneHomeJurisdiction(context.Background()))
+	})
+
+	t.Run("blank env token is best-effort empty", func(t *testing.T) {
+		t.Setenv("ENTIRE_TOKEN", "  ")
+		require.Empty(t, defaultCloneHomeJurisdiction(context.Background()))
+	})
+}
+
 func swapCloneHomeJurisdiction(t *testing.T, fn func(context.Context) string) {
 	t.Helper()
 	orig := cloneHomeJurisdiction
@@ -86,5 +101,17 @@ func TestSelectCloneTarget_HomeJurisdictionDefault(t *testing.T) {
 		got, err := selectCloneTarget(newCloneTestCmd(), []coreapi.ResolvedPlacement{us, eu, usWest}, "aws-us-west-1.entire.io")
 		require.NoError(t, err)
 		require.Equal(t, "aws-us-west-1.entire.io", got.ClusterHost)
+	})
+
+	t.Run("single placement never resolves the home jurisdiction", func(t *testing.T) {
+		// With nothing to narrow, the home-region lookup (a control-plane target
+		// resolution + login-token read) is pure waste, so it must be skipped.
+		swapCloneHomeJurisdiction(t, func(context.Context) string {
+			t.Fatal("home jurisdiction must not be consulted for a single placement")
+			return ""
+		})
+		got, err := selectCloneTarget(newCloneTestCmd(), []coreapi.ResolvedPlacement{us}, "")
+		require.NoError(t, err)
+		require.Equal(t, "aws-us-east-2.entire.io", got.ClusterHost)
 	})
 }
