@@ -1233,6 +1233,7 @@ func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, befo
 	}
 
 	pushBranch := branch
+	switchedBranch := false
 	if choice == configureSaveNewBranch {
 		var err error
 		pushBranch, err = availableConfigureBranch(cmd.Context(), repoRoot, now)
@@ -1242,6 +1243,16 @@ func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, befo
 		if _, err := gitRunner(cmd.Context(), repoRoot, "switch", "-c", pushBranch); err != nil {
 			return fmt.Errorf("create configuration branch: %w", err)
 		}
+		switchedBranch = true
+		defer func() {
+			if switchedBranch {
+				// Best-effort fallback for failures after branch creation. Successful
+				// paths switch explicitly below so a restore error can be returned.
+				if _, restoreErr := gitRunner(context.WithoutCancel(cmd.Context()), repoRoot, "switch", branch); restoreErr != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not return to original branch %q: %v\n", branch, restoreErr)
+				}
+			}
+		}()
 	}
 
 	args := []string{"add", "--"}
@@ -1262,6 +1273,11 @@ func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, befo
 	}
 	fmt.Fprintf(outW, "✓ Pushed to %s/%s\n", forgeRemote, pushBranch)
 	if choice == configureSaveNewBranch {
+		if _, err := gitRunner(cmd.Context(), repoRoot, "switch", branch); err != nil {
+			return fmt.Errorf("return to original branch %q: %w", branch, err)
+		}
+		switchedBranch = false
+		fmt.Fprintf(outW, "✓ Returned to %s\n", branch)
 		fmt.Fprintln(outW, "  Open a trail to merge it:")
 		fmt.Fprintf(outW, "  %s/gh/%s/%s/trails/new?branch=%s\n", configureWebBaseURL(), url.PathEscape(owner), url.PathEscape(repo), url.QueryEscape(pushBranch))
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -25,6 +26,7 @@ import (
 const (
 	testConfigureUSHost = "us.entire.io"
 	testGitRevParse     = "rev-parse"
+	testConfigureSHA    = "abc123"
 )
 
 func TestConfigureCmdBareInteractiveRunsOnboarding(t *testing.T) {
@@ -600,7 +602,7 @@ func TestConfigureSaveAndPushUsesForgeRemote(t *testing.T) {
 		case "add", gitCmdCommit:
 			return "", nil
 		case testGitRevParse:
-			return "abc123", nil
+			return testConfigureSHA, nil
 		case "push":
 			pushArgs = append([]string(nil), args...)
 			return "", nil
@@ -615,6 +617,38 @@ func TestConfigureSaveAndPushUsesForgeRemote(t *testing.T) {
 	want := []string{"push", "-u", mirrorCloneProviderGitHub, "feature"}
 	if !reflect.DeepEqual(pushArgs, want) {
 		t.Fatalf("push args = %v, want %v", pushArgs, want)
+	}
+}
+
+func TestConfigureSaveNewBranchReturnsToOriginalBranch(t *testing.T) {
+	dir := t.TempDir()
+	cmd := &cobra.Command{}
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	previous := gitRunner
+	t.Cleanup(func() { gitRunner = previous })
+	var calls [][]string
+	gitRunner = func(_ context.Context, _ string, args ...string) (string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		switch args[0] {
+		case "show-ref":
+			cmd := exec.CommandContext(context.Background(), "sh", "-c", "exit 1")
+			return "", cmd.Run()
+		case "switch", "add", gitCmdCommit, "push":
+			return "", nil
+		case testGitRevParse:
+			return testConfigureSHA, nil
+		default:
+			return "", fmt.Errorf("unexpected git args: %v", args)
+		}
+	}
+	generated := []string{".entire/settings.json"}
+	if err := configureSaveAndPush(cmd, dir, "acme", "widget", nil, generated, "feature", false, configureSaveNewBranch, mirrorCloneProviderGitHub, time.Now); err != nil {
+		t.Fatalf("configureSaveAndPush() error = %v", err)
+	}
+	if got := calls[len(calls)-1]; !reflect.DeepEqual(got, []string{"switch", "feature"}) {
+		t.Fatalf("last git call = %v, want return to original branch", got)
 	}
 }
 
