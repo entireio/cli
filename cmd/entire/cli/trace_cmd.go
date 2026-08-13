@@ -31,14 +31,14 @@ Examples:
 				return fmt.Errorf("--last must be at least 1, got %d", last)
 			}
 
-			repoRoot, err := paths.WorktreeRoot(cmd.Context())
+			// AbsPath (not a bare WorktreeRoot join): globally tracked
+			// repos route .entire/logs under the git common dir.
+			logFile, err := paths.AbsPath(cmd.Context(), filepath.Join(logging.LogsDir, "entire.log"))
 			if err != nil {
 				cmd.SilenceUsage = true
 				fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Please run from within a git repository.")
 				return NewSilentError(fmt.Errorf("not a git repository: %w", err))
 			}
-
-			logFile := filepath.Join(repoRoot, logging.LogsDir, "entire.log")
 
 			entries, err := collectTraceEntries(logFile, last, hookFilter)
 			if err != nil {

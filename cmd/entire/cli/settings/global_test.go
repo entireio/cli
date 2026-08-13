@@ -2,12 +2,14 @@ package settings
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -610,4 +612,69 @@ func TestIsActiveForRepo_FailClosed(t *testing.T) {
 			t.Fatal("an origin that is present but cannot be normalized means exclusion could not be checked — must fail closed")
 		}
 	})
+}
+
+// TestRepoSettingsWrites_ClearInvisibleRoutingCache pins the invalidation
+// contract documented on paths' invisibleCache: creating a repo settings
+// file — through the struct save path (saveToFile) or the raw path (saveRaw)
+// — is a discriminator write, so the writer process must observe runtime-data
+// routing flip from the git common dir back to the worktree. Without the
+// clear, `entire enable` latches the pre-write routing decision (logging.Init
+// resolves .entire/logs before settings.json exists) for the whole process.
+func TestRepoSettingsWrites_ClearInvisibleRoutingCache(t *testing.T) {
+	cases := []struct {
+		name  string
+		write func(ctx context.Context) error
+	}{
+		{"struct save (saveToFile)", func(ctx context.Context) error {
+			return Save(ctx, &EntireSettings{Enabled: true})
+		}},
+		{"raw save (saveRaw)", func(ctx context.Context) error {
+			path, raw, _, err := LoadLocalRaw(ctx)
+			if err != nil {
+				return err
+			}
+			raw["enabled"] = json.RawMessage("false")
+			return SaveLocalRaw(path, raw)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := newGlobalTestRepo(t)
+			// Resolve symlinks so the routed-path comparison below is not
+			// tripped by macOS's /var -> /private/var tempdir indirection.
+			if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+				dir = resolved
+			}
+			t.Chdir(dir)
+			cfg := t.TempDir()
+			t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+			writeUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+			reset := func() {
+				paths.ClearWorktreeRootCache()
+				paths.ClearInvisibleRuntimeCache()
+			}
+			reset()
+			t.Cleanup(reset)
+
+			routed, err := paths.AbsPath(t.Context(), paths.EntireMetadataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			worktreeMeta := filepath.Join(dir, ".entire", "metadata")
+			if routed == worktreeMeta {
+				t.Fatalf("precondition: a globally tracked repo must route runtime data into .git, got %s", routed)
+			}
+			if err := tc.write(t.Context()); err != nil {
+				t.Fatalf("settings write: %v", err)
+			}
+			after, err := paths.AbsPath(t.Context(), paths.EntireMetadataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after != worktreeMeta {
+				t.Fatalf("settings write must flip routing worktree-ward in-process: got %s, want %s", after, worktreeMeta)
+			}
+		})
+	}
 }

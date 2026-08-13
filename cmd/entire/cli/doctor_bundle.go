@@ -59,7 +59,14 @@ that path is printed to stdout. Use --out to choose a specific path.`,
 				outPath = filepath.Join(os.TempDir(), fmt.Sprintf("entire-bundle-%s.zip", time.Now().UTC().Format("20060102-150405")))
 			}
 
-			if err := writeDoctorBundle(ctx, repoRoot, outPath, rawFlag); err != nil {
+			// AbsPath (not a bare repoRoot join): globally tracked repos
+			// route .entire/logs under the git common dir.
+			logsDir, err := paths.AbsPath(ctx, logging.LogsDir)
+			if err != nil {
+				return fmt.Errorf("resolve logs directory: %w", err)
+			}
+
+			if err := writeDoctorBundle(ctx, repoRoot, logsDir, outPath, rawFlag); err != nil {
 				return err
 			}
 
@@ -78,7 +85,11 @@ that path is printed to stdout. Use --out to choose a specific path.`,
 	return cmd
 }
 
-func writeDoctorBundle(ctx context.Context, repoRoot, outPath string, raw bool) error {
+// writeDoctorBundle writes the diagnostic zip. logsDir is resolved by the
+// caller (via paths.AbsPath, so globally tracked repos contribute their
+// routed logs); repoRoot anchors the settings files and git commands, which
+// are worktree-resolved by design.
+func writeDoctorBundle(ctx context.Context, repoRoot, logsDir, outPath string, raw bool) error {
 	out, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // user-provided output path is intentional
 	if err != nil {
 		return fmt.Errorf("create bundle: %w", err)
@@ -102,7 +113,6 @@ func writeDoctorBundle(ctx context.Context, repoRoot, outPath string, raw bool) 
 		}
 	}()
 
-	logsDir := filepath.Join(repoRoot, logging.LogsDir)
 	if err := addDirToZip(zw, logsDir, "logs", raw); err != nil {
 		return err
 	}

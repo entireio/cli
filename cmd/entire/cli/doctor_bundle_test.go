@@ -36,7 +36,7 @@ func TestWriteDoctorBundle_ContainsExpectedEntries(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, filepath.Join(dir, logging.LogsDir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 	info, err := os.Stat(out)
@@ -89,7 +89,7 @@ func TestWriteDoctorBundle_CapturesEntireRefs(t *testing.T) {
 	runDoctorBundleGit(t, dir, "update-ref", "refs/heads/entire/checkpoints/v1", "HEAD")
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, filepath.Join(dir, logging.LogsDir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestWriteDoctorBundle_RedactsCredentialedRemote(t *testing.T) {
 	runDoctorBundleGit(t, dir, "remote", "add", "origin", "https://user:s3cr3tTOKEN12345@example.com/owner/repo.git")
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, filepath.Join(dir, logging.LogsDir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 
@@ -124,7 +124,7 @@ func TestWriteDoctorBundle_OmitsAbsentLogsDirectory(t *testing.T) {
 	testutil.InitRepo(t, dir)
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, filepath.Join(dir, logging.LogsDir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 
@@ -206,7 +206,7 @@ func TestWriteDoctorBundle_RedactsLogContents(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, filepath.Join(dir, logging.LogsDir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 
@@ -239,7 +239,7 @@ func TestWriteDoctorBundle_RedactsSettings(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, filepath.Join(dir, logging.LogsDir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 
@@ -268,7 +268,7 @@ func TestWriteDoctorBundle_RawSkipsRedaction(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, out, true); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, filepath.Join(dir, logging.LogsDir), out, true); err != nil {
 		t.Fatalf("writeDoctorBundle raw: %v", err)
 	}
 
@@ -287,6 +287,28 @@ func TestDoctorBundleCmd_HelpAdvertisesRedaction(t *testing.T) {
 		if !strings.Contains(help, want) {
 			t.Errorf("doctor bundle help text missing %q. Help:\n%s", want, help)
 		}
+	}
+}
+
+// TestDoctorBundleCmd_IncludesRoutedLogsInGloballyTrackedRepo pins that
+// `entire doctor bundle` collects logs through paths.AbsPath: in a globally
+// tracked repo the logs live under the git common dir, and a worktree-only
+// join would silently produce a bundle without logs for exactly these repos.
+// No t.Parallel: the fixture uses t.Chdir and t.Setenv.
+func TestDoctorBundleCmd_IncludesRoutedLogsInGloballyTrackedRepo(t *testing.T) {
+	newGloballyTrackedDiagRepo(t, "routed-log-line-doctor-bundle")
+
+	outZip := filepath.Join(t.TempDir(), "bundle.zip")
+	cmd := newDoctorBundleCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--out", outZip})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("doctor bundle: %v", err)
+	}
+
+	if got := readZipEntry(t, outZip, "logs/entire.log"); !strings.Contains(got, "routed-log-line-doctor-bundle") {
+		t.Fatalf("bundle logs/entire.log missing routed log line, got: %q", got)
 	}
 }
 

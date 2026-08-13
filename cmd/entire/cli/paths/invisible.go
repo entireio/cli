@@ -136,8 +136,10 @@ func runtimeDataSubpath(relPath string) (string, bool) {
 // (.entire/settings*.json, the user-global settings file) changes; that
 // staleness is accepted for hook processes, which are short-lived, and
 // production code paths that write or delete a discriminator file must call
-// ClearInvisibleRuntimeCache — that is the invalidation contract, and the
-// enable/disable layers upstack already do so.
+// ClearInvisibleRuntimeCache — that is the invalidation contract. The repo
+// settings save paths (settings.saveToFile, settings.saveRaw) honor it after
+// every write; flows that delete discriminator files or write the user-global
+// settings land upstack and clear at their own sites.
 var (
 	invisibleMu    sync.Mutex
 	invisibleCache struct {
@@ -149,7 +151,9 @@ var (
 )
 
 // ClearInvisibleRuntimeCache clears the cached invisible-routing decision.
-// Primarily useful for tests that change global settings for one repo root.
+// Called by discriminator-file writers so a process observes its own write
+// (see the invalidation contract on invisibleCache above); also used by
+// tests that change global settings for one repo root.
 func ClearInvisibleRuntimeCache() {
 	invisibleMu.Lock()
 	invisibleCache.valid = false
