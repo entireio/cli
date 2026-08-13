@@ -1282,7 +1282,7 @@ func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, befo
 	switchedBranch := false
 	if choice == configureSaveNewBranch {
 		var err error
-		pushBranch, err = availableConfigureBranch(cmd.Context(), repoRoot, now)
+		pushBranch, err = availableConfigureBranch(cmd.Context(), repoRoot, forgeRemote, now)
 		if err != nil {
 			return err
 		}
@@ -1374,18 +1374,51 @@ func configureRulesBlockDirectPush(raw []byte) (bool, error) {
 	return false, nil
 }
 
-func availableConfigureBranch(ctx context.Context, repoRoot string, now func() time.Time) (string, error) {
+func availableConfigureBranch(ctx context.Context, repoRoot, forgeRemote string, now func() time.Time) (string, error) {
 	candidates := []string{configureBranchBase, configureBranchBase + "-" + now().Format("20060102-150405")}
 	for _, candidate := range candidates {
-		_, err := gitRunner(ctx, repoRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+candidate)
-		if err == nil {
-			continue // branch already exists
+		localExists, err := configureLocalBranchExists(ctx, repoRoot, candidate)
+		if err != nil {
+			return "", err
 		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-			return candidate, nil // show-ref uses 1 for a missing ref
+		if localExists {
+			continue
 		}
-		return "", fmt.Errorf("check configuration branch %q: %w", candidate, err)
+		remoteExists, err := configureRemoteBranchExists(ctx, repoRoot, forgeRemote, candidate)
+		if err != nil {
+			return "", err
+		}
+		if !remoteExists {
+			return candidate, nil
+		}
 	}
 	return "", errors.New("could not choose an unused configuration branch name")
+}
+
+func configureLocalBranchExists(ctx context.Context, repoRoot, branch string) (bool, error) {
+	_, err := gitRunner(ctx, repoRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("check local configuration branch %q: %w", branch, err)
+}
+
+func configureRemoteBranchExists(ctx context.Context, repoRoot, forgeRemote, branch string) (bool, error) {
+	// Query the forge directly instead of relying on remote-tracking refs, which
+	// may be stale or absent in a fresh clone. --exit-code returns 2 when no ref
+	// matches, and any connectivity/auth failure is treated as an error rather
+	// than risking reuse of another user's branch.
+	_, err := gitRunner(ctx, repoRoot, "ls-remote", "--exit-code", "--heads", forgeRemote, "refs/heads/"+branch)
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
+		return false, nil
+	}
+	return false, fmt.Errorf("check remote configuration branch %q on %q: %w", branch, forgeRemote, err)
 }

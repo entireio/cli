@@ -27,6 +27,7 @@ const (
 	testConfigureUSHost = "us.entire.io"
 	testGitRevParse     = "rev-parse"
 	testConfigureSHA    = "abc123"
+	testGitLSRemote     = "ls-remote"
 )
 
 func TestConfigureCmdBareInteractiveRunsOnboarding(t *testing.T) {
@@ -667,6 +668,41 @@ func TestConfigureSaveAndPushUsesForgeRemote(t *testing.T) {
 	}
 }
 
+func TestAvailableConfigureBranchSkipsRemoteCollision(t *testing.T) {
+	previous := gitRunner
+	t.Cleanup(func() { gitRunner = previous })
+	var remoteChecks []string
+	gitRunner = func(_ context.Context, _ string, args ...string) (string, error) {
+		switch args[0] {
+		case "show-ref":
+			cmd := exec.CommandContext(context.Background(), "sh", "-c", "exit 1")
+			return "", cmd.Run()
+		case testGitLSRemote:
+			branch := strings.TrimPrefix(args[len(args)-1], "refs/heads/")
+			remoteChecks = append(remoteChecks, branch)
+			if branch == configureBranchBase {
+				return "deadbeef\trefs/heads/" + branch, nil
+			}
+			cmd := exec.CommandContext(context.Background(), "sh", "-c", "exit 2")
+			return "", cmd.Run()
+		default:
+			return "", fmt.Errorf("unexpected git args: %v", args)
+		}
+	}
+	now := func() time.Time { return time.Date(2026, 8, 12, 14, 30, 45, 0, time.UTC) }
+	got, err := availableConfigureBranch(context.Background(), ".", mirrorCloneProviderGitHub, now)
+	if err != nil {
+		t.Fatalf("availableConfigureBranch() error = %v", err)
+	}
+	want := configureBranchBase + "-20260812-143045"
+	if got != want {
+		t.Fatalf("branch = %q, want %q", got, want)
+	}
+	if !reflect.DeepEqual(remoteChecks, []string{configureBranchBase, want}) {
+		t.Fatalf("remote checks = %v", remoteChecks)
+	}
+}
+
 func TestConfigureSaveNewBranchReturnsToOriginalBranch(t *testing.T) {
 	dir := t.TempDir()
 	cmd := &cobra.Command{}
@@ -681,6 +717,9 @@ func TestConfigureSaveNewBranchReturnsToOriginalBranch(t *testing.T) {
 		switch args[0] {
 		case "show-ref":
 			cmd := exec.CommandContext(context.Background(), "sh", "-c", "exit 1")
+			return "", cmd.Run()
+		case testGitLSRemote:
+			cmd := exec.CommandContext(context.Background(), "sh", "-c", "exit 2")
 			return "", cmd.Run()
 		case "switch", "add", gitCmdCommit, "push":
 			return "", nil
