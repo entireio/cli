@@ -137,6 +137,32 @@ func TestRunStatus_GlobalTrackingLine_ExcludedRepo(t *testing.T) {
 	}
 }
 
+// TestRunStatus_GlobalTrackingLine_RepoDisabled: a repo-level veto
+// (settings.json enabled=false) carves this repo out of the tier exactly
+// like an exclusion — the line must say so instead of reading as covered.
+func TestRunStatus_GlobalTrackingLine_RepoDisabled(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsDisabled)
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	home := isolateUserHome(t)
+	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+	installClaudeUserHooksForTest(t, home)
+	settings.ClearGlobalModeCache()
+	t.Cleanup(settings.ClearGlobalModeCache)
+
+	var out bytes.Buffer
+	if err := runStatus(context.Background(), &out, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "global tracking: on (inactive here: repo-level setup has Entire disabled)") {
+		t.Errorf("missing repo-disabled carve-out, got: %s", out.String())
+	}
+	if strings.Contains(out.String(), "covered)") {
+		t.Errorf("repo-disabled repo must not read as covered, got: %s", out.String())
+	}
+}
+
 // TestRunStatus_OutsideGitRepo_GlobalLine: status must work outside a git
 // repository and report the machine-wide tier there.
 func TestRunStatus_OutsideGitRepo_GlobalLine(t *testing.T) {
@@ -268,6 +294,34 @@ func TestRunStatusJSON_GlobalTracking(t *testing.T) {
 			if got, ok := gt[key]; !ok || string(got) != want {
 				t.Errorf("global_tracking[%q] = %s (present=%v), want %s", key, got, ok, want)
 			}
+		}
+	})
+
+	t.Run("repo-level disable carries inactive_reason repo_disabled", func(t *testing.T) {
+		setupTestRepo(t)
+		writeSettings(t, testSettingsDisabled)
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		isolateUserHome(t)
+		writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+		settings.ClearGlobalModeCache()
+		t.Cleanup(settings.ClearGlobalModeCache)
+
+		var out bytes.Buffer
+		if err := runStatus(context.Background(), &out, false, true); err != nil {
+			t.Fatal(err)
+		}
+		m := decode(t, &out)
+		var gt map[string]json.RawMessage
+		if err := json.Unmarshal(m["global_tracking"], &gt); err != nil {
+			t.Fatalf("global_tracking missing: %s", out.String())
+		}
+		var activeHere bool
+		if err := json.Unmarshal(gt["active_here"], &activeHere); err != nil || activeHere {
+			t.Errorf("active_here = %s, want false", gt["active_here"])
+		}
+		if got := string(gt["inactive_reason"]); got != `"repo_disabled"` {
+			t.Errorf("inactive_reason = %s, want \"repo_disabled\"", got)
 		}
 	})
 

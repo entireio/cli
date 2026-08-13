@@ -182,8 +182,8 @@ func writeGlobalTrackingLine(ctx context.Context, w io.Writer, sty statusStyles)
 		fmt.Fprintln(w, sty.render(sty.dim, "global tracking: off"))
 		return
 	}
-	if info.InRepo && !info.ActiveHere && info.InactiveReason == settings.InactiveReasonGlobalExcluded {
-		fmt.Fprintln(w, sty.render(sty.dim, "global tracking: on (this repo is excluded)"))
+	if info.InRepo && !info.ActiveHere {
+		fmt.Fprintln(w, sty.render(sty.dim, "global tracking: on ("+globalInactiveHereText(info.InactiveReason)+")"))
 		return
 	}
 	noun := "agents"
@@ -191,6 +191,23 @@ func writeGlobalTrackingLine(ctx context.Context, w io.Writer, sty statusStyles)
 		noun = "agent"
 	}
 	fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("global tracking: on (%d %s covered)", info.AgentsCovered, noun)))
+}
+
+// globalInactiveHereText renders the hook gate's per-repo carve-out for the
+// human tracking line, covering every inactive reason — not just exclusion —
+// so a repo the gate carves out never reads as covered. Mirrors the JSON
+// identifiers in inactiveReasonJSON.
+func globalInactiveHereText(reason settings.InactiveReason) string {
+	switch reason {
+	case settings.InactiveReasonGlobalExcluded:
+		return "this repo is excluded"
+	case settings.InactiveReasonRepoDisabled:
+		return "inactive here: repo-level setup has Entire disabled"
+	case settings.InactiveReasonGlobalOff, settings.InactiveReasonNone:
+		return "inactive here"
+	default:
+		return "inactive here"
+	}
 }
 
 // agentHelpCommand is the invocation a coding agent runs to get machine-readable
