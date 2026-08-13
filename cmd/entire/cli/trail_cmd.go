@@ -1461,10 +1461,10 @@ func planTrailBranchChange(ctx context.Context, found *api.TrailResource, inputs
 
 	// A trail's branch cannot be changed once set: the /branch endpoint answers
 	// 409 "Trail already has a linked branch". Refuse here rather than sending
-	// anything, because the PATCH endpoint would take a raw `branch` write and
-	// quietly repoint the trail, skipping both that rule and the one-trail-per-
-	// branch check. Asking for the branch it already has is not a change, so
-	// that stays a no-op and re-running the same command is not an error.
+	// anything, because the PATCH endpoint takes a raw `branch` write with no
+	// such check and would quietly repoint the trail. Asking for the branch it
+	// already has is not a change, so that stays a no-op and re-running the
+	// same command is not an error.
 	if found.Branch != "" {
 		if found.Branch != newBranch {
 			return trailBranchPlan{}, fmt.Errorf("trail %s is already on branch %s and a trail's branch cannot be changed once set; create a trail for %s instead", trailRefLabel(found), found.Branch, newBranch)

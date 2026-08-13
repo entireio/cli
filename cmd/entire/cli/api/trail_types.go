@@ -125,10 +125,13 @@ type TrailUpdateRequest struct {
 	Priority           *string   `json:"priority,omitempty"`
 	// There is deliberately no Branch field. A trail's branch cannot be changed
 	// once set, and the /branch endpoint enforces that with a 409. The PATCH
-	// endpoint does accept a raw `branch` write, but it neither checks that the
-	// trail is branchless nor that another trail already holds the name, so
-	// sending it would route around the rule. Attach a branch to a branchless
-	// trail with TrailBranchRequest against /branch instead.
+	// endpoint accepts a raw `branch` write and does not, so sending it would
+	// repoint a trail the rule says must keep its branch. Pointing two trails
+	// at one branch that way fails instead of succeeding, but only because the
+	// database has a unique (repo_id, branch) index; the update path does not
+	// catch that violation the way the create path does, so it surfaces as a
+	// server error rather than a clean conflict. Attach a branch to a
+	// branchless trail with TrailBranchRequest against /branch instead.
 }
 
 // TrailUpdateResponse is the response from PATCH /api/v1/trails/:org/:repo/:trailId.
