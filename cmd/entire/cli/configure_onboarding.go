@@ -184,7 +184,7 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 		fmt.Fprintln(outW, "No configuration changes.")
 		return nil
 	}
-	if err := configureUseMirror(ctx, repoRoot, owner, repo, chosen); err != nil {
+	if err := configureUseMirror(ctx, outW, errW, repoRoot, owner, repo, chosen); err != nil {
 		return err
 	}
 
@@ -1077,7 +1077,7 @@ func configureAgentPreselection(ctx context.Context) map[types.AgentName]struct{
 	return selected
 }
 
-func configureUseMirror(ctx context.Context, repoRoot, owner, repo string, chosen coreapi.ResolvedPlacement) error {
+func configureUseMirror(ctx context.Context, outW, errW io.Writer, repoRoot, owner, repo string, chosen coreapi.ResolvedPlacement) error {
 	remotes, err := listGitRemotes(ctx, repoRoot)
 	if err != nil {
 		return err
@@ -1098,7 +1098,14 @@ func configureUseMirror(ctx context.Context, repoRoot, owner, repo string, chose
 		preserve = ""
 	}
 	plan := planMirrorRemote(defaultMirrorRemote, mirrorURL, current, preserve, remotes)
-	return applyMirrorRemotePlan(ctx, repoRoot, plan)
+	if err := applyMirrorRemotePlan(ctx, repoRoot, plan); err != nil {
+		return err
+	}
+	// Repointing origin can be lossy when the usual preservation name already
+	// exists. Report the complete plan just like `repo mirror use`, including the
+	// redacted former URL and its recovery command.
+	reportMirrorRemotePlan(outW, errW, plan)
+	return nil
 }
 
 // configureGitChanges returns porcelain status keyed by path. Its values retain

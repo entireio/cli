@@ -400,6 +400,32 @@ func TestConfigureSaveOptionsAreDynamic(t *testing.T) {
 	}
 }
 
+func TestConfigureUseMirrorWarnsWhenOriginCannotBePreserved(t *testing.T) {
+	setupTestRepo(t)
+	ctx := context.Background()
+	const oldOrigin = "https://github.com/acme/widget.git"
+	if _, err := gitRunner(ctx, ".", "remote", "add", defaultMirrorRemote, oldOrigin); err != nil {
+		t.Fatalf("add origin: %v", err)
+	}
+	if _, err := gitRunner(ctx, ".", "remote", "add", defaultMirrorUpstreamRemote, "https://github.com/upstream/widget.git"); err != nil {
+		t.Fatalf("add upstream: %v", err)
+	}
+
+	var out, errOut bytes.Buffer
+	chosen := coreapi.ResolvedPlacement{ClusterHost: testConfigureUSHost}
+	if err := configureUseMirror(ctx, &out, &errOut, ".", "acme", "widget", chosen); err != nil {
+		t.Fatalf("configureUseMirror() error = %v", err)
+	}
+	if !strings.Contains(out.String(), "was: "+oldOrigin) {
+		t.Fatalf("former origin URL was not reported:\n%s", out.String())
+	}
+	for _, want := range []string{"WARNING", `remote "upstream" already exists`, "git remote add <name> " + oldOrigin} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("warning missing %q:\n%s", want, errOut.String())
+		}
+	}
+}
+
 func TestNewConfigureChangesExcludesPreexistingWork(t *testing.T) {
 	before := map[string]string{"README.md": " M", "already-staged": "M "}
 	after := map[string]string{
