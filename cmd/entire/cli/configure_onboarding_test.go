@@ -326,10 +326,12 @@ func TestConfigureSaveFieldIsAlwaysVisible(t *testing.T) {
 	}
 	field.Select = huh.NewSelect[string]().
 		Title("Save configuration").
-		Options(configureSaveOptions("main", false, false, choice)...).
+		Description(configureSaveDescription("main", false, false, false)).
+		Options(configureSaveOptions("main", false, false, false, choice)...).
 		Value(&choice)
-	if got := ansi.Strip(field.View()); !strings.Contains(got, "Save configuration") || !strings.Contains(got, "Save") {
-		t.Fatalf("save field is not visible without changes:\n%s", got)
+	got := ansi.Strip(field.View())
+	if !strings.Contains(got, "Save configuration") || !strings.Contains(got, "Save — no changes") {
+		t.Fatalf("save field does not show its disabled no-change state:\n%s", got)
 	}
 }
 
@@ -385,7 +387,15 @@ func TestConfigureSelectionChangesDistinguishLocalAndPushChanges(t *testing.T) {
 }
 
 func TestConfigureSaveOptionsAreDynamic(t *testing.T) {
-	push := configureSaveOptions("main", false, true, configureSaveDirect)
+	unchanged := configureSaveOptions("main", false, false, false, configureSaveCancel)
+	if len(unchanged) != 1 || unchanged[0].Value != configureSaveCancel {
+		t.Fatalf("unchanged selectable options = %v, want only Cancel", unchanged)
+	}
+	if got := ansi.Strip(configureSaveDescription("main", false, false, false)); got != "  ○ Save — no changes" {
+		t.Fatalf("unchanged disabled save = %q", got)
+	}
+
+	push := configureSaveOptions("main", false, true, true, configureSaveDirect)
 	got := []string{ansi.Strip(push[0].Key), ansi.Strip(push[1].Key), ansi.Strip(push[2].Key)}
 	want := []string{
 		"● Save — push to main",
@@ -396,21 +406,21 @@ func TestConfigureSaveOptionsAreDynamic(t *testing.T) {
 		t.Fatalf("push save options = %v, want %v", got, want)
 	}
 
-	local := configureSaveOptions("main", false, false, configureSaveLocal)
+	local := configureSaveOptions("main", false, false, true, configureSaveLocal)
 	got = []string{ansi.Strip(local[0].Key), ansi.Strip(local[1].Key)}
 	want = []string{"● Save", "○ Cancel"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("local save options = %v, want %v", got, want)
 	}
 
-	protected := configureSaveOptions("main", true, true, configureSaveNewBranch)
+	protected := configureSaveOptions("main", true, true, true, configureSaveNewBranch)
 	if len(protected) != 2 {
 		t.Fatalf("protected save options = %d, want new branch and cancel", len(protected))
 	}
 	if got := ansi.Strip(protected[0].Key); got != "● Save — push to a new branch, review before it lands" {
 		t.Fatalf("selected new-branch option = %q", got)
 	}
-	description := ansi.Strip(configureSaveDescription("main", true, true))
+	description := ansi.Strip(configureSaveDescription("main", true, true, true))
 	if !strings.Contains(description, "○ Save — push to main — protected branch") {
 		t.Fatalf("protected destination is not shown as disabled: %q", description)
 	}

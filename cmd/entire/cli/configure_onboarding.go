@@ -775,34 +775,38 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		return mirrorChanged() || agentsChanged()
 	}
 
-	saveChoice := defaultConfigureSaveChoice(requiresPush(), protected)
+	previousHasChanges := hasChanges()
+	saveChoice := defaultConfigureSaveChoice(previousHasChanges, requiresPush(), protected)
 	saveControl := &configureSaveField{
 		value:       &saveChoice,
 		committed:   saveChoice,
 		highlighted: saveChoice,
 	}
 	saveOptions := func() []huh.Option[string] {
-		return configureSaveOptions(branch, protected, requiresPush(), saveChoice)
+		return configureSaveOptions(branch, protected, requiresPush(), hasChanges(), saveChoice)
 	}
 	saveControl.Select = huh.NewSelect[string]().
 		TitleFunc(func() string {
 			return configureQuestionTitle("Save configuration", saveControl.focused)
 		}, &saveControl.focused).
-		Description(configureSaveDescription(branch, protected, requiresPush())).
+		Description(configureSaveDescription(branch, protected, requiresPush(), hasChanges())).
 		Options(saveOptions()...).
-		Height(configureFieldHeight(len(saveOptions()), configureSaveDescription(branch, protected, requiresPush()))).
+		Height(configureFieldHeight(len(saveOptions()), configureSaveDescription(branch, protected, requiresPush(), hasChanges()))).
 		Value(&saveChoice)
 	refreshSave := func() {
+		changed := hasChanges()
 		options := saveOptions()
-		if !configureOptionsContain(options, saveChoice) {
-			saveChoice = defaultConfigureSaveChoice(requiresPush(), protected)
+		if changed != previousHasChanges || !configureOptionsContain(options, saveChoice) {
+			saveChoice = defaultConfigureSaveChoice(changed, requiresPush(), protected)
 			saveControl.committed = saveChoice
 			saveControl.highlighted = saveChoice
 			options = saveOptions()
 		}
+		previousHasChanges = changed
+		description := configureSaveDescription(branch, protected, requiresPush(), changed)
 		saveControl.Select.
-			Description(configureSaveDescription(branch, protected, requiresPush())).
-			Height(configureFieldHeight(len(options), configureSaveDescription(branch, protected, requiresPush()))).
+			Description(description).
+			Height(configureFieldHeight(len(options), description)).
 			Options(options...)
 	}
 	saveControl.refresh = refreshSave
@@ -868,7 +872,10 @@ func configureSelectionChanges(selectedHost, currentHost string, selectedAgents,
 	return !strings.EqualFold(selectedHost, currentHost), !sameStrings(selectedAgents, installedAgents)
 }
 
-func defaultConfigureSaveChoice(requiresPush, protected bool) string {
+func defaultConfigureSaveChoice(hasChanges, requiresPush, protected bool) string {
+	if !hasChanges {
+		return configureSaveCancel
+	}
 	if !requiresPush {
 		return configureSaveLocal
 	}
@@ -878,8 +885,11 @@ func defaultConfigureSaveChoice(requiresPush, protected bool) string {
 	return configureSaveDirect
 }
 
-func configureSaveOptions(branch string, protected, requiresPush bool, selected string) []huh.Option[string] {
+func configureSaveOptions(branch string, protected, requiresPush, hasChanges bool, selected string) []huh.Option[string] {
 	cancel := huh.NewOption(configureRadioLabel("Cancel", selected == configureSaveCancel), configureSaveCancel)
+	if !hasChanges {
+		return []huh.Option[string]{cancel}
+	}
 	if !requiresPush {
 		return []huh.Option[string]{
 			huh.NewOption(configureRadioLabel("Save", selected == configureSaveLocal), configureSaveLocal),
@@ -903,7 +913,10 @@ func configureSaveOptions(branch string, protected, requiresPush bool, selected 
 	}
 }
 
-func configureSaveDescription(branch string, protected, requiresPush bool) string {
+func configureSaveDescription(branch string, protected, requiresPush, hasChanges bool) string {
+	if !hasChanges {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Render("  ○ Save — no changes")
+	}
 	if !requiresPush || !protected {
 		return ""
 	}
