@@ -64,7 +64,7 @@ func TestRunAuthStatus_NotLoggedIn(t *testing.T) {
 func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	t.Parallel()
 
-	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "eu.auth.entire.io", totalContexts: 1}
+	target := statusTarget{coreURL: testCoreURL, token: "tok"}
 
 	var out bytes.Buffer
 	if err := runAuthStatus(context.Background(), &out, okProfile, noSessions, target); err != nil {
@@ -81,8 +81,8 @@ func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	if !strings.Contains(got, "github/alice") {
 		t.Fatalf("output = %q, want provider identity", got)
 	}
-	if !strings.Contains(got, "Context:") || !strings.Contains(got, "eu.auth.entire.io") {
-		t.Fatalf("output = %q, want active-context line", got)
+	if strings.Contains(got, "Context:") {
+		t.Fatalf("output = %q, context management should not be exposed", got)
 	}
 	// noSessions returns an empty list, so no table is rendered.
 	if strings.Contains(got, "Active sessions") {
@@ -187,7 +187,7 @@ func TestResolveEnvTokenStatusTarget(t *testing.T) {
 func TestRunAuthStatus_RendersSessionsTable(t *testing.T) {
 	t.Parallel()
 
-	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "eu.auth.entire.io", totalContexts: 1}
+	target := statusTarget{coreURL: testCoreURL, token: "tok"}
 	lastUsed := "2026-05-01T00:00:00Z"
 	listSessions := func(_ context.Context, coreURL, token string) ([]api.AuthSession, error) {
 		if coreURL != testCoreURL || token != "tok" {
@@ -233,7 +233,7 @@ func TestFormatAuthDate_DoesNotShiftUTCDateToLocalTimezone(t *testing.T) {
 func TestRunAuthStatus_SessionListFailureIsSoftNote(t *testing.T) {
 	t.Parallel()
 
-	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "eu.auth.entire.io", totalContexts: 1}
+	target := statusTarget{coreURL: testCoreURL, token: "tok"}
 	listSessions := func(context.Context, string, string) ([]api.AuthSession, error) {
 		return nil, errors.New("sessions endpoint unreachable")
 	}
@@ -262,7 +262,7 @@ func TestRunAuthStatus_QueriesActiveContextCore(t *testing.T) {
 		gotCoreURL, gotToken = coreURL, token
 		return &authProfile{Handle: "alice"}, nil
 	}
-	target := statusTarget{coreURL: testCoreURL, token: "eu-session-tok", activeContext: "eu.auth.entire.io", totalContexts: 1}
+	target := statusTarget{coreURL: testCoreURL, token: "eu-session-tok"}
 
 	var out bytes.Buffer
 	if err := runAuthStatus(context.Background(), &out, fetch, noSessions, target); err != nil {
@@ -273,20 +273,6 @@ func TestRunAuthStatus_QueriesActiveContextCore(t *testing.T) {
 	}
 	if gotToken != "eu-session-tok" {
 		t.Errorf("fetchProfile token = %q, want the active context's token", gotToken)
-	}
-}
-
-func TestRunAuthStatus_MultipleContextsHint(t *testing.T) {
-	t.Parallel()
-
-	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "a", totalContexts: 3}
-
-	var out bytes.Buffer
-	if err := runAuthStatus(context.Background(), &out, okProfile, noSessions, target); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(out.String(), "3 login contexts saved") {
-		t.Fatalf("output = %q, want multi-context hint", out.String())
 	}
 }
 
@@ -363,10 +349,13 @@ func TestAuthCmd_RegistersExpectedSubcommands(t *testing.T) {
 				name := strings.Fields(sub.Use)[0]
 				subcommands[name] = true
 			}
-			for _, want := range []string{"login", "logout", "status", "contexts", "use"} {
+			for _, want := range []string{"login", "logout", "status", "token"} {
 				if !subcommands[want] {
 					t.Errorf("auth missing subcommand %q (got: %v)", want, subcommands)
 				}
+			}
+			if subcommands["contexts"] || subcommands["use"] {
+				t.Errorf("auth still exposes context management (got: %v)", subcommands)
 			}
 		}
 	}
@@ -441,7 +430,7 @@ func TestRunAuthStatus_FileTokenStoreProvenance(t *testing.T) {
 	t.Setenv("ENTIRE_TOKEN_STORE", "file")
 	t.Setenv("ENTIRE_TOKEN_STORE_PATH", "/ci/secrets/tokens.json")
 
-	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "core"}
+	target := statusTarget{coreURL: testCoreURL, token: "tok"}
 	listSessions := func(context.Context, string, string) ([]api.AuthSession, error) { return nil, nil }
 
 	var out bytes.Buffer

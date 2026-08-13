@@ -14,7 +14,7 @@ const schemeHTTP = "http"
 var ErrNotLoggedIn = tokenmanager.ErrNotLoggedIn
 
 // insecureHTTPOverride records the --insecure-http-auth opt-in. Read by
-// every per-context token manager as it is built; call EnableInsecureHTTP
+// every login-bound token manager as it is built; call EnableInsecureHTTP
 // before resolving tokens in the same process or the override has no
 // effect. Loopback hosts are always permitted regardless of this flag.
 var insecureHTTPOverride atomic.Bool
@@ -30,7 +30,7 @@ func EnableInsecureHTTP() {
 }
 
 // insecureHTTPEnabled reports whether EnableInsecureHTTP was called. The
-// per-context providers read this so --insecure-http-auth still relaxes
+// login-bound providers read this so --insecure-http-auth still relaxes
 // the HTTPS guard for a non-loopback http:// core.
 func insecureHTTPEnabled() bool {
 	return insecureHTTPOverride.Load()

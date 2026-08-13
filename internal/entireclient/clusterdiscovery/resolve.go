@@ -5,50 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
 	"strings"
 
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/discovery"
 )
 
-// ResolveContextForCluster picks the local login context to authenticate
-// git operations against clusterHost.
-//
-// It separates two concerns that used to be conflated in a single
-// cluster→context binding:
-//
-//   - Which control plane(s) front the cluster — an objective infra fact.
-//     Discovered from the cluster's /.well-known/entire-cluster.json and
-//     cached in cluster_cores.json (see discovery.ClusterCoresCache) with
-//     a long TTL, since a cluster's home core is near-static. On a cache
-//     miss or expiry we re-fetch; if the re-fetch fails we fall back to
-//     the stale cached cores rather than break the op.
-//
-//   - Which of the user's accounts to use — recomputed every call from the
-//     live contexts, never persisted. So a user with several accounts is
-//     never silently pinned to one identity.
-//
-// Account selection (selectContext):
-//
-//  1. If the active context (current_context) is issued by one of the
-//     cluster's cores, use it. This is the explicit lever: `entire auth
-//     use <name>` chooses the identity for every cluster that context's
-//     core fronts.
-//  2. Otherwise gather every local context eligible for the cluster (its
-//     CoreURL is among the advertised cores):
-//     - exactly one  → use it (the common single-account case);
-//     - none         → error with the login hint listing the cluster's cores;
-//     - more than one → error asking the user to pick with `entire auth use`,
-//     rather than silently guessing an account.
-//
-// We never fall back to an active context whose core does NOT front the
-// cluster: the cluster would reject the exchanged token as "unknown
-// cluster_host", and silently authenticating a staging identity against a
-// prod cluster (or vice versa) is exactly the confusion the /.well-known
-// lookup exists to prevent.
-//
-// debugf is optional; nil suppresses debug output.
+// ResolveContextForCluster verifies that the current login can authenticate
+// git operations against clusterHost. The cluster advertises its trusted login
+// servers through /.well-known/entire-cluster.json; those facts are cached in
+// cluster_cores.json. A login issued by any other server is rejected with a
+// fresh-login hint. debugf is optional; nil suppresses debug output.
 func ResolveContextForCluster(ctx context.Context, configDir, cacheDir, clusterHost string, httpClient *http.Client, debugf DebugFunc) (*contexts.Context, error) {
 	a, err := resolveClusterAuth(ctx, configDir, cacheDir, clusterHost, false, httpClient, debugf)
 	if err != nil {
@@ -57,7 +24,7 @@ func ResolveContextForCluster(ctx context.Context, configDir, cacheDir, clusterH
 	return a.Context, nil
 }
 
-// ClusterAuth is ResolveClusterAuth's result: the selected login context
+// ClusterAuth is ResolveClusterAuth's result: the selected login
 // plus the cluster facts a caller needs to mint credentials for it.
 type ClusterAuth struct {
 	Context *contexts.Context
@@ -79,7 +46,7 @@ func ResolveClusterAuth(ctx context.Context, configDir, cacheDir, clusterHost st
 
 // resolveClusterAuth is the shared body of ResolveContextForCluster and
 // ResolveClusterAuth: load contexts, resolve the cluster's cores entry,
-// select the login context.
+// select the login.
 func resolveClusterAuth(ctx context.Context, configDir, cacheDir, clusterHost string, requireAudience bool, httpClient *http.Client, debugf DebugFunc) (*ClusterAuth, error) {
 	if debugf == nil {
 		debugf = func(string, ...any) {}
@@ -219,64 +186,20 @@ func resolveClusterCores(ctx context.Context, cacheDir, clusterHost string, requ
 		}, debugf)
 }
 
-// selectContext applies the account-selection rules over a resource's
-// advertised trusted issuers. subject is a noun phrase identifying the
-// resource ("cluster nyc.entire.io" / "API host partial.to") used in
-// messages, so the same rules serve both the git-cluster and data-API
-// resolvers. See ResolveContextForCluster for the rationale.
+// selectContext verifies that the one current login is accepted by the
+// resource's advertised login servers.
 func selectContext(f *contexts.File, subject string, coreURLs []string, debugf DebugFunc) (*contexts.Context, error) {
-	eligible := eligibleContexts(f, coreURLs)
-
-	// 1. Active context wins when it's eligible for this resource.
-	if current := f.Find(f.CurrentContext); current != nil {
-		for _, c := range eligible {
-			if c.Name == current.Name {
-				debugf("%s -> active context %s", subject, current.Name)
-				return current, nil
-			}
-		}
-	}
-
-	// 2. Otherwise the eligible set decides.
-	switch len(eligible) {
-	case 0:
+	current := f.Find(f.CurrentContext)
+	if current == nil {
 		return nil, errors.New(renderLoginHint(subject, coreURLs))
-	case 1:
-		debugf("%s -> sole eligible context %s", subject, eligible[0].Name)
-		return eligible[0], nil
-	default:
-		return nil, ambiguousContextError(subject, eligible)
 	}
-}
-
-// eligibleContexts returns the local contexts whose core is among coreURLs,
-// de-duplicated by name. Order is unspecified — callers either use the sole
-// element or report the whole set, never index [0] as a silent winner.
-func eligibleContexts(f *contexts.File, coreURLs []string) []*contexts.Context {
-	seen := make(map[string]bool)
-	var out []*contexts.Context
 	for _, coreURL := range coreURLs {
-		for _, c := range f.ContextsForIssuer(coreURL) {
-			if !seen[c.Name] {
-				seen[c.Name] = true
-				out = append(out, c)
-			}
+		if strings.TrimRight(current.CoreURL, "/") == strings.TrimRight(coreURL, "/") {
+			debugf("%s -> current login", subject)
+			return current, nil
 		}
 	}
-	return out
-}
-
-// ambiguousContextError is returned when more than one local context could
-// authenticate against the resource and none is active. We refuse to guess —
-// the user picks explicitly. Names are sorted so the message is stable.
-func ambiguousContextError(subject string, eligible []*contexts.Context) error {
-	names := make([]string, len(eligible))
-	for i, c := range eligible {
-		names[i] = c.Name
-	}
-	sort.Strings(names)
-	return fmt.Errorf("multiple login contexts can authenticate against %s (%s); choose one with `entire auth use <context>` and re-run",
-		subject, strings.Join(names, ", "))
+	return nil, errors.New(renderLoginHint(subject, coreURLs))
 }
 
 // formatDiscoveryError turns a Discover error into the message

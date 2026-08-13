@@ -166,18 +166,25 @@ func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL str
 	service := tokenstore.CoreKeyringService(coreURL)
 	handle := "tester"
 
-	if err := contexts.Save(configDir, &contexts.File{
+	// Seed the legacy file so the spawned CLI also exercises one-time migration
+	// into its isolated file credential store.
+	legacyLogin, err := json.Marshal(&contexts.File{
 		CurrentContext: "tester@trail-resume",
-		Contexts: []*contexts.Context{
-			{
-				Name:            "tester@trail-resume",
-				CoreURL:         coreURL,
-				Handle:          handle,
-				KeychainService: service,
-			},
-		},
-	}); err != nil {
-		t.Fatalf("save auth context: %v", err)
+		Contexts: []*contexts.Context{{
+			Name:            "tester@trail-resume",
+			CoreURL:         coreURL,
+			Handle:          handle,
+			KeychainService: service,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal legacy login: %v", err)
+	}
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("create auth config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "contexts.json"), legacyLogin, 0o600); err != nil {
+		t.Fatalf("seed legacy login: %v", err)
 	}
 
 	host := mustTrailResumeIntegrationHost(t, coreURL)

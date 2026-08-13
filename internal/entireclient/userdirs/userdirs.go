@@ -2,7 +2,7 @@
 // keep global state. It is the single implementation of that resolution —
 // don't derive ~/.config/entire or ~/.cache/entire paths anywhere else.
 //
-//   - Config: contexts.json, version_check.json, the file-backed token
+//   - Config: login locks, version_check.json, the file-backed token
 //     store. $ENTIRE_CONFIG_DIR if set, else ~/.config/entire.
 //   - Cache: discovery caches (nodes.json, cluster_cores.json,
 //     api_discovery.json). $XDG_CACHE_HOME/entire if set, else

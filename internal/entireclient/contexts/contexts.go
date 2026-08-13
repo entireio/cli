@@ -1,21 +1,17 @@
-// Package contexts is the kubectl-style context store for the Entire CLIs.
+// Package contexts stores the CLI's current login metadata.
 //
-// One on-disk file at $ENTIRE_CONFIG_DIR/contexts.json (default
-// ~/.config/entire/contexts.json) holds:
+// The metadata is kept in the same credential backend as the tokens (the OS
+// keychain by default), under one fixed logical entry per Entire config dir.
+// contexts.json is read only once to migrate existing installations.
 //
-//   - a list of named contexts, each pairing a core URL, principal handle,
-//     and OS-keychain slot where the access + refresh tokens live;
-//   - current_context, the active login: the preferred identity for cluster
-//     operations and the default for direct CLI commands not tied to a
-//     cluster.
-//
-// File invariants: 0600, atomic temp+rename, exclusive flock under load.
-// Both CLIs share the same file so a login from either is visible to the
-// other.
+// Context and File remain as compatibility shapes while consumers move to the
+// single-login model; production writes contain at most one context.
 package contexts
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,14 +20,13 @@ import (
 	"slices"
 	"time"
 
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
 	"github.com/gofrs/flock"
 )
 
-// Context is a single kubectl-style entry: which core to talk to, as
-// whom, and where the credentials are stored.
+// Context is the legacy-compatible shape of the current login.
 type Context struct {
-	// Name is the user-facing identifier. Defaults to the issuer host on
-	// auto-creation; overridable via login --name.
+	// Name is retained only to decode and migrate the former context format.
 	Name string `json:"name"`
 	// CoreURL is the JWT issuer URL — what STS exchanges hit. Set from
 	// the access token's signed iss claim, not the typed login URL.
@@ -47,19 +42,25 @@ type Context struct {
 	JurisdictionAudiences []string `json:"jurisdiction_audiences,omitempty"`
 }
 
-// File is the on-disk shape of contexts.json.
+// File is the legacy-compatible serialized shape stored in the credential
+// backend. New writes contain exactly one current login.
 type File struct {
-	// CurrentContext is the active login; preferred identity for cluster
-	// operations (used when its CoreURL is eligible for the target cluster)
-	// and the default for direct CLI commands. Empty until the first login.
+	// Version identifies the keychain metadata format. Legacy contexts.json
+	// files omit it and are treated as version zero during migration.
+	Version int `json:"version,omitempty"`
+	// CurrentContext points to the sole login for legacy format compatibility.
 	CurrentContext string `json:"current_context,omitempty"`
-	// Contexts is the list of stored credentials. Order is preserved on
-	// disk so list output stays stable across saves.
+	// Contexts contains zero or one login in all new writes.
 	Contexts []*Context `json:"contexts,omitempty"`
 }
 
-// FilePath returns $configDir/contexts.json after ensuring the directory
-// exists with 0700 perms.
+const (
+	loginMetadataService = "entire-login"
+	loginMetadataVersion = 1
+)
+
+// FilePath returns the former contexts.json path. It is retained only for the
+// one-time migration and can be removed after the compatibility window.
 func FilePath(configDir string) (string, error) {
 	if err := os.MkdirAll(configDir, 0700); err != nil {
 		return "", fmt.Errorf("create config dir: %w", err)
@@ -67,61 +68,41 @@ func FilePath(configDir string) (string, error) {
 	return filepath.Join(configDir, "contexts.json"), nil
 }
 
-// Load reads contexts.json under configDir, returning an empty *File
-// when the file doesn't exist yet (a fresh user). Holds an exclusive
-// flock for the duration of the read.
+// metadataAccount scopes the fixed "current" entry to ENTIRE_CONFIG_DIR. This
+// preserves config-dir isolation for development, CI, and parallel test runs
+// while giving normal installations one stable keychain item.
+func metadataAccount(configDir string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(configDir)))
+	return "current:" + hex.EncodeToString(sum[:8])
+}
+
+// Load reads the current login metadata from the credential backend. A missing
+// entry means logged out. Existing contexts.json data is migrated on first use.
 func Load(configDir string) (*File, error) {
 	path, err := FilePath(configDir)
 	if err != nil {
 		return nil, err
 	}
-	unlock, err := lockFile(path)
+	unlock, err := lockFile(filepath.Join(configDir, "login"))
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	return readNoLock(path)
+	return readNoLock(configDir, path)
 }
 
-// Save writes f to contexts.json atomically (temp+rename) under an
-// exclusive flock.
+// Save writes login metadata to the credential backend under its fixed entry.
 func Save(configDir string, f *File) error {
 	path, err := FilePath(configDir)
 	if err != nil {
 		return err
 	}
-	unlock, err := lockFile(path)
+	unlock, err := lockFile(filepath.Join(configDir, "login"))
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	return writeNoLock(path, f)
-}
-
-// ContextsForIssuer returns every context whose CoreURL matches issuer
-// after trimming. Used by CLI flows that prompt the operator when
-// multiple sessions are stored against the same core (logout, entiredb's
-// admin/repo prompts). Order matches the on-disk order so prompt
-// numbering is stable across saves.
-func (f *File) ContextsForIssuer(issuer string) []*Context {
-	if f == nil {
-		return nil
-	}
-	want := trimURL(issuer)
-	var out []*Context
-	for _, c := range f.Contexts {
-		if trimURL(c.CoreURL) == want {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-func trimURL(u string) string {
-	for len(u) > 0 && u[len(u)-1] == '/' {
-		u = u[:len(u)-1]
-	}
-	return u
+	return writeNoLock(configDir, path, f)
 }
 
 // Find returns the context with the given name, or nil.
@@ -137,31 +118,7 @@ func (f *File) Find(name string) *Context {
 	return nil
 }
 
-// Upsert replaces the context with matching Name, or appends. Sets the
-// current context when there isn't one already (first login).
-func (f *File) Upsert(c *Context) {
-	if c == nil || c.Name == "" {
-		return
-	}
-	for i, existing := range f.Contexts {
-		if existing.Name == c.Name {
-			f.Contexts[i] = c
-			if f.CurrentContext == "" {
-				f.CurrentContext = c.Name
-			}
-			return
-		}
-	}
-	f.Contexts = append(f.Contexts, c)
-	if f.CurrentContext == "" {
-		f.CurrentContext = c.Name
-	}
-}
-
-// Delete drops the context with the given name. If it was the current
-// context, current_context is cleared — never reassigned to another
-// context, so deleting your active login never silently switches you to a
-// different identity.
+// Delete clears the matching current login.
 func (f *File) Delete(name string) {
 	if f == nil || name == "" {
 		return
@@ -175,11 +132,11 @@ func (f *File) Delete(name string) {
 	}
 }
 
-// Modify atomically applies fn to contexts.json under a single
+// Modify atomically applies fn to the keychain metadata under a single
 // exclusive flock — load, mutate, write all happen with the lock held.
 // Use this for any read-modify-write sequence; calling Load and Save
 // separately releases the lock between them and races concurrent
-// writers (e.g. a parallel login recording a context).
+// writers (e.g. a parallel login and logout).
 //
 // fn returns (changed, err). When changed is false the file isn't
 // rewritten — useful for idempotent operations that often have
@@ -189,13 +146,13 @@ func Modify(configDir string, fn func(*File) (changed bool, err error)) error {
 	if err != nil {
 		return err
 	}
-	unlock, err := lockFile(path)
+	unlock, err := lockFile(filepath.Join(configDir, "login"))
 	if err != nil {
 		return err
 	}
 	defer unlock()
 
-	f, err := readNoLock(path)
+	f, err := readNoLock(configDir, path)
 	if err != nil {
 		return err
 	}
@@ -206,7 +163,7 @@ func Modify(configDir string, fn func(*File) (changed bool, err error)) error {
 	if !changed {
 		return nil
 	}
-	return writeNoLock(path, f)
+	return writeNoLock(configDir, path, f)
 }
 
 func lockFile(path string) (func(), error) {
@@ -216,70 +173,125 @@ func lockFile(path string) (func(), error) {
 	defer cancel()
 	locked, err := fl.TryLockContext(ctx, 100*time.Millisecond)
 	if err != nil {
-		return nil, fmt.Errorf("acquire contexts lock: %w", err)
+		return nil, fmt.Errorf("acquire login lock: %w", err)
 	}
 	if !locked {
-		return nil, errors.New("timeout acquiring lock on contexts file")
+		return nil, errors.New("timeout acquiring login lock")
 	}
 	return func() {
 		if unlockErr := fl.Unlock(); unlockErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to unlock contexts file: %v\n", unlockErr)
+			fmt.Fprintf(os.Stderr, "Warning: failed to unlock login store: %v\n", unlockErr)
 		}
 	}, nil
 }
 
-func readNoLock(path string) (*File, error) {
-	// #nosec G304 -- path comes from ENTIRE_CONFIG_DIR or the user's home,
-	// the same trust boundary credentials.go runs under.
+func readNoLock(configDir, legacyPath string) (*File, error) {
+	encoded, err := tokenstore.Get(loginMetadataService, metadataAccount(configDir))
+	if err == nil {
+		var f File
+		if jsonErr := json.Unmarshal([]byte(encoded), &f); jsonErr != nil {
+			return nil, fmt.Errorf("parse login metadata: %w", jsonErr)
+		}
+		if f.Version > loginMetadataVersion {
+			return nil, fmt.Errorf("login metadata version %d is newer than this CLI supports", f.Version)
+		}
+		return &f, nil
+	}
+	if !errors.Is(err, tokenstore.ErrNotFound) {
+		return nil, fmt.Errorf("read login metadata: %w", err)
+	}
+
+	// One-time migration from contexts.json. Only the active login survives;
+	// the old multi-login list is intentionally collapsed.
+	legacy, err := readLegacyFile(legacyPath)
+	if err != nil {
+		return nil, err
+	}
+	current := legacy.Find(legacy.CurrentContext)
+	if current == nil {
+		_ = os.Remove(legacyPath)
+		return &File{}, nil
+	}
+	// Old non-current logins are no longer addressable. Remove their access
+	// and refresh credentials while their metadata is still available.
+	currentAudiences := make(map[string]bool, len(current.JurisdictionAudiences))
+	for _, audience := range current.JurisdictionAudiences {
+		currentAudiences[audience] = true
+	}
+	for _, old := range legacy.Contexts {
+		if old == nil || old.Name == current.Name || old.Handle == "" {
+			continue
+		}
+		if old.KeychainService != "" {
+			_ = tokenstore.Delete(tokenstore.RefreshService(old.KeychainService), old.Handle) //nolint:errcheck // best-effort migration cleanup
+			_ = tokenstore.Delete(old.KeychainService, old.Handle)                            //nolint:errcheck // best-effort migration cleanup
+		}
+		for _, audience := range old.JurisdictionAudiences {
+			if audience == "" || (old.Handle == current.Handle && currentAudiences[audience]) {
+				continue
+			}
+			_ = tokenstore.Delete(tokenstore.JurisdictionService(audience), old.Handle) //nolint:errcheck // best-effort migration cleanup
+		}
+	}
+	migrated := &File{Version: loginMetadataVersion, CurrentContext: current.Name, Contexts: []*Context{current}}
+	if err := writeCredential(configDir, migrated); err != nil {
+		return nil, err
+	}
+	if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("remove migrated contexts file: %w", err)
+	}
+	return migrated, nil
+}
+
+func readLegacyFile(path string) (*File, error) {
+	// #nosec G304 -- path comes from ENTIRE_CONFIG_DIR or the user's home.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &File{}, nil
 		}
-		return nil, fmt.Errorf("read contexts file: %w", err)
+		return nil, fmt.Errorf("read legacy contexts file: %w", err)
 	}
 	if len(data) == 0 {
 		return &File{}, nil
 	}
 	var f File
 	if err := json.Unmarshal(data, &f); err != nil {
-		return nil, fmt.Errorf("parse contexts file: %w", err)
+		return nil, fmt.Errorf("parse legacy contexts file: %w", err)
 	}
 	return &f, nil
 }
 
-func writeNoLock(path string, f *File) error {
-	data, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal contexts: %w", err)
+func writeNoLock(configDir, legacyPath string, f *File) error {
+	if err := writeCredential(configDir, f); err != nil {
+		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".contexts.json.tmp.*")
-	if err != nil {
-		return fmt.Errorf("create temp contexts file: %w", err)
+	if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove legacy contexts file: %w", err)
 	}
-	tmpPath := tmp.Name()
-	cleanup := func() {
-		if tmp != nil {
-			_ = tmp.Close()
-			_ = os.Remove(tmpPath)
+	return nil
+}
+
+func writeCredential(configDir string, f *File) error {
+	if f == nil || len(f.Contexts) == 0 || f.CurrentContext == "" {
+		if err := tokenstore.Delete(loginMetadataService, metadataAccount(configDir)); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
+			return fmt.Errorf("delete login metadata: %w", err)
 		}
+		return nil
 	}
-	defer cleanup()
-	if _, err := tmp.Write(data); err != nil {
-		return fmt.Errorf("write temp contexts file: %w", err)
+	current := f.Find(f.CurrentContext)
+	if current == nil {
+		return errors.New("current login metadata points to a missing entry")
 	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync temp contexts file: %w", err)
+	// Enforce the single-login invariant even when a legacy-shaped caller
+	// supplies more than one entry.
+	stored := &File{Version: loginMetadataVersion, CurrentContext: current.Name, Contexts: []*Context{current}}
+	data, err := json.Marshal(stored)
+	if err != nil {
+		return fmt.Errorf("marshal login metadata: %w", err)
 	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp contexts file: %w", err)
+	if err := tokenstore.Set(loginMetadataService, metadataAccount(configDir), string(data)); err != nil {
+		return fmt.Errorf("store login metadata: %w", err)
 	}
-	if err := os.Chmod(tmpPath, 0600); err != nil {
-		return fmt.Errorf("chmod temp contexts file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("rename temp contexts file: %w", err)
-	}
-	tmp = nil
 	return nil
 }

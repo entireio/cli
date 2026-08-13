@@ -61,9 +61,9 @@ the commands are always runnable in every build.
 - `configure`: bare prints help and a hint pointing at `entire agent`; flags
   manage non-agent settings (telemetry, git-hook installation mode, strategy
   options, summary provider). Agent CRUD lives under `entire agent`.
-- `auth`: `login`, `logout`, `status`, `contexts`, `use`, plus
+- `auth`: `login`, `logout`, `status`, plus
   `token` (prints the active control-plane bearer to stdout for scripting/curl;
-  honors `ENTIRE_TOKEN`, else the refreshed active-context login JWT). `token`
+  honors `ENTIRE_TOKEN`, else the refreshed current-login JWT). `token`
   also takes `--jurisdiction <slug>` (e.g. `us`, `eu`), which instead mints a
   jurisdictional identity token (RFC 8693 exchange, `scope=openid`,
   `aud=<jurisdiction host>`) for that jurisdiction's entire-api cells (e.g.
@@ -71,8 +71,8 @@ the commands are always runnable in every build.
   bearer; it exchanges `ENTIRE_TOKEN` when set (deriving the environment from the
   env token's `aud`), else the active login. `auth status` shows the caller's
   home jurisdiction so the slug is discoverable. `logout`
-  takes `--everywhere` (revoke every session on the active core, not just the
-  current one) and `--all-contexts` (log out of every saved login)
+  takes `--everywhere` (revoke every session on the current login server, not
+  just the current device).
 - `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
 - `org`: control-plane organization management — `create`, `list`, `get`, `delete`
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`
@@ -282,7 +282,7 @@ t.Chdir(tmpDir)                                 // redirect CWD-based git resolu
 ### Config/Cache/Keyring Isolation in Tests
 
 Tests must never read or write the developer's real `~/.config/entire`
-(contexts.json, version_check.json), `~/.cache/entire` (nodes.json,
+(login metadata, version_check.json), `~/.cache/entire` (nodes.json,
 cluster_cores.json, api_discovery.json), or OS keychain. The developer may be
 using `entire` for real while tests run.
 
@@ -588,7 +588,7 @@ Test case in `state_test.go`: `TestFilterAndNormalizePaths_SiblingDirectories` d
 
 ### Control-Plane Core Resolution (which core am I talking to?)
 
-Control-plane commands dial one of three cores: the active context's
+Control-plane commands dial one of three cores: the current login's
 (`coreapi.New`), a specific cluster's (`coreapi.NewForCluster`), or — when
 `ENTIRE_TOKEN` is set — the env token's `aud` (the bypass inside `New`/
 `NewForCluster`). This precedence lives **only** inside `coreapi`; nothing else
@@ -606,9 +606,9 @@ When a command resolves auth *outside* a `coreapi.Client` (e.g. `entire auth
 status`, which builds its own `/me` client), it must apply the same
 env-token-first precedence itself — see `resolveAuthStatusTarget` /
 `resolveEnvTokenStatusTarget` in `auth.go`, which branch on
-`auth.EnvTokenVar` before falling back to the active context. `logout` is the
+`auth.EnvTokenVar` before falling back to the current login. `logout` is the
 deliberate exception: it manages a *stored* login session, which an ephemeral
-env token has none of, so it stays on the active context.
+env token has none of, so it stays on the current login.
 
 ### Entire-API Cell Routing (which cell does a data-plane request go to?)
 

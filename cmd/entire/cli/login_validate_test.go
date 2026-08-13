@@ -24,7 +24,7 @@ func makeJWT(t *testing.T, headerJSON, payloadJSON string) string {
 }
 
 // Opaque and otherwise claim-free tokens are rejected up front with an
-// error naming the requirement: RecordLoginContext (the sole persistence
+// error naming the requirement: RecordLogin (the sole persistence
 // path) keys the context on iss/handle claims, so they could never
 // complete a login anyway.
 func TestValidateReceivedToken_RejectsClaimFreeTokens(t *testing.T) {

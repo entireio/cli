@@ -26,7 +26,7 @@ func failingTokenStore(t *testing.T) {
 }
 
 // loginTestJWT builds a token that passes validateReceivedToken and carries
-// the iss/handle claims RecordLoginContext keys on.
+// the iss/handle claims RecordLogin keys on.
 func loginTestJWT(t *testing.T, issuer string) string {
 	t.Helper()
 	exp := time.Now().Add(time.Hour).Unix()

@@ -10,6 +10,7 @@
 // directory — see internal/entireclient/userdirs).
 //
 // Service-name conventions:
+//   - "entire-login"                   — current-login metadata
 //   - "entire:<cluster-host>"          — entiredb cluster login tokens
 //   - "entire-core:<core-base-url>"    — entire-core control-plane tokens
 //   - "entire-jurisdiction:<audience>" — jurisdiction (data-plane) access

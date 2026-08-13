@@ -6,7 +6,7 @@
 // directory (~/.config/entire, ~/.cache/entire, the OS keyring). A test that
 // forgets to set the explicit override (ENTIRE_CONFIG_DIR, XDG_CACHE_HOME,
 // ENTIRE_TOKEN_STORE, ...) would silently read and write the developer's
-// real configuration — real auth contexts have been polluted with test
+// real configuration — real login metadata has been polluted with test
 // fixtures this way. Dir gives the resolution functions a safe default under
 // test: a throwaway directory under os.TempDir, never the real config/cache
 // locations. (os.TempDir respects TMPDIR and may itself live under $HOME;

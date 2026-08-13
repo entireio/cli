@@ -117,15 +117,14 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 		t.Fatalf("output missing login complete message (token save likely failed):\n%s", output)
 	}
 
-	// The login is recorded as a contexts.json context — the only
-	// credential store.
-	contextsPath := filepath.Join(proc.configDir, "contexts.json")
-	data, readErr := os.ReadFile(contextsPath)
+	// Login metadata and tokens are both in the configured credential store.
+	tokensPath := filepath.Join(filepath.Dir(proc.configDir), ".entire-test-tokens.json")
+	data, readErr := os.ReadFile(tokensPath)
 	if readErr != nil {
-		t.Fatalf("read %s after login: %v", contextsPath, readErr)
+		t.Fatalf("read %s after login: %v", tokensPath, readErr)
 	}
 	if !strings.Contains(string(data), server.URL) {
-		t.Fatalf("contexts.json does not reference login server %s:\n%s", server.URL, data)
+		t.Fatalf("credential store does not reference login server %s:\n%s", server.URL, data)
 	}
 
 	serverState.Lock()
@@ -273,8 +272,7 @@ func TestLogin_BrowserFlow_SavesToken(t *testing.T) {
 
 type loginProcess struct {
 	stdout *bufio.Reader
-	// configDir is the sandboxed ENTIRE_CONFIG_DIR the spawned binary writes
-	// contexts.json into; tests can assert on its contents after login.
+	// configDir is the sandboxed ENTIRE_CONFIG_DIR used by the spawned binary.
 	configDir string
 	waitFn    func() (string, error)
 }
@@ -293,8 +291,8 @@ func startLoginProcess(t *testing.T, apiBaseURL string, extraEnv []string, args 
 	configDir := filepath.Join(env.RepoDir, ".entire-test-config")
 
 	// --server pins the login at the in-process test server instead of the
-	// production default. The login lands in contexts.json + the file token
-	// store, both sandboxed below so the test never touches the developer's
+	// production default. The login lands in the file credential store,
+	// sandboxed below so the test never touches the developer's
 	// real config or OS keychain.
 	args = append(args, "--server", apiBaseURL)
 	cmd := execx.NonInteractive(context.Background(), getTestBinary(), args...)
@@ -304,8 +302,7 @@ func startLoginProcess(t *testing.T, apiBaseURL string, extraEnv []string, args 
 		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_API_BASE_URL="+apiBaseURL,
-		// The login records its credential in contexts.json and the token
-		// store; point both at the test sandbox so the spawned binary can't
+		// Point config and credential storage at the test sandbox so the binary can't
 		// touch the real ~/.config/entire or the OS keychain.
 		"ENTIRE_CONFIG_DIR="+configDir,
 		"ENTIRE_TOKEN_STORE=file",

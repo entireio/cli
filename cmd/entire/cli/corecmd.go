@@ -171,7 +171,7 @@ func runCoreList[T any](cmd *cobra.Command, empty string, headers []string, row 
 
 // runCoreListForCluster is runCoreList for a resource-provider command (see
 // runCoreForCluster): identical table/JSON/empty-state rendering, but dialing
-// the core that fronts clusterHost rather than the active context.
+// the core that fronts clusterHost rather than the current login.
 func runCoreListForCluster[T any](cmd *cobra.Command, clusterHost, empty string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
 	return runCoreForCluster(cmd, clusterHost, renderCoreList(cmd, empty, headers, row, fn))
 }
@@ -346,7 +346,7 @@ func runCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []st
 
 // runCoreObjectForCluster is runCoreObject for a resource-provider command (see
 // runCoreForCluster): identical field/JSON rendering, but dialing the core that
-// fronts clusterHost rather than the active context.
+// fronts clusterHost rather than the current login.
 func runCoreObjectForCluster[T any](cmd *cobra.Command, clusterHost string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) error {
 	return runCoreForCluster(cmd, clusterHost, renderCoreObject(cmd, headers, row, fn))
 }
@@ -557,7 +557,7 @@ func runCoreMutation(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi
 	})
 }
 
-// activeCoreClient builds the control-plane client for active-context
+// activeCoreClient builds the control-plane client for current-login
 // commands. A package-level seam (production wiring is coreapi.New) so
 // command-level tests can point the whole command tree at an httptest server
 // without standing up the auth/context/TLS stack.
@@ -569,12 +569,12 @@ var activeCoreClient = func(context.Context) (*coreapi.Client, error) { return c
 // discovery that command-level tests must not reach.
 var clusterCoreClient func(ctx context.Context, clusterHost string) (*coreapi.Client, error) = coreapi.NewForCluster
 
-// runCore is the shared base for every active-context control-plane command:
+// runCore is the shared base for every current-login control-plane command:
 // it owns the preamble only — silence usage, build the client, map API
 // errors — and leaves all rendering to fn. The delete/revoke verbs call it
 // directly and render their own output; runCoreList, runCoreObject, and
 // runCoreMutation build on it to add their table/JSON/confirmation
-// rendering. The client dials the active context's core (coreapi.New); use
+// rendering. The client dials the current login's core (coreapi.New); use
 // runCoreForCluster for commands addressed at a specific cluster.
 func runCore(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client) error) error {
 	return runCoreClient(cmd, activeCoreClient, fn)
@@ -584,7 +584,7 @@ func runCore(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client)
 // specific cluster (mirror create/remove, mirror collaborators list):
 // it dials the core that fronts clusterHost — discovered from the cluster's
 // /.well-known/entire-cluster.json, authenticating with the matching local
-// context — instead of the active context. So the command works on a cluster in
+// context — instead of the current login. So the command works on a cluster in
 // a federation other than the active login, instead of failing with "unknown
 // cluster_host". See coreapi.NewForCluster.
 func runCoreForCluster(cmd *cobra.Command, clusterHost string, fn func(ctx context.Context, c *coreapi.Client) error) error {
@@ -593,7 +593,7 @@ func runCoreForCluster(cmd *cobra.Command, clusterHost string, fn func(ctx conte
 	}, fn)
 }
 
-// runCoreClient owns the control-plane preamble shared by the active-context
+// runCoreClient owns the control-plane preamble shared by the current-login
 // (runCore) and cluster-addressed (runCoreForCluster) variants: silence usage,
 // opt into plain-HTTP token exchange if requested, build the client via
 // newClient, run fn, and map API errors. The only difference between the two

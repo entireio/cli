@@ -47,26 +47,26 @@ func TestWarnIfImportNotSynced(t *testing.T) {
 // but has no stored token must NOT count as logged in, so the sync notice still
 // fires. Mutates package-level seams, so no t.Parallel.
 func TestImportLoggedIn(t *testing.T) {
-	origCtx, origTok := importListContexts, importTokenForContext
-	t.Cleanup(func() { importListContexts, importTokenForContext = origCtx, origTok })
+	origLogin, origToken := importCurrentLogin, importLoginToken
+	t.Cleanup(func() { importCurrentLogin, importLoginToken = origLogin, origToken })
 	// Ensure no env token leaks in from the environment for the context cases.
 	t.Setenv(auth.EnvTokenVar, "")
 
-	withCurrent := func() ([]*contexts.Context, string, error) {
-		return []*contexts.Context{{Name: "prod"}}, "prod", nil
+	withCurrent := func() (*contexts.Context, error) {
+		return &contexts.Context{Name: "current"}, nil
 	}
 
 	t.Run("current context with a stored token is logged in", func(t *testing.T) {
-		importListContexts = withCurrent
-		importTokenForContext = func(*contexts.Context) (string, error) { return "stored-token", nil }
+		importCurrentLogin = withCurrent
+		importLoginToken = func(*contexts.Context) (string, error) { return "stored-token", nil }
 		if !importLoggedIn() {
 			t.Fatal("context with a token should count as logged in")
 		}
 	})
 
 	t.Run("current context with a missing token is NOT logged in", func(t *testing.T) {
-		importListContexts = withCurrent
-		importTokenForContext = func(*contexts.Context) (string, error) {
+		importCurrentLogin = withCurrent
+		importLoginToken = func(*contexts.Context) (string, error) {
 			return "", errors.New("no token stored")
 		}
 		if importLoggedIn() {
@@ -75,8 +75,8 @@ func TestImportLoggedIn(t *testing.T) {
 	})
 
 	t.Run("no current context is not logged in", func(t *testing.T) {
-		importListContexts = func() ([]*contexts.Context, string, error) { return nil, "", nil }
-		importTokenForContext = func(*contexts.Context) (string, error) { return "stored-token", nil }
+		importCurrentLogin = func() (*contexts.Context, error) { return nil, errors.New("no current login") }
+		importLoginToken = func(*contexts.Context) (string, error) { return "stored-token", nil }
 		if importLoggedIn() {
 			t.Fatal("no current context should not count as logged in")
 		}
@@ -84,7 +84,7 @@ func TestImportLoggedIn(t *testing.T) {
 
 	t.Run("env token counts as logged in even with no context", func(t *testing.T) {
 		t.Setenv(auth.EnvTokenVar, "env-token")
-		importListContexts = func() ([]*contexts.Context, string, error) { return nil, "", nil }
+		importCurrentLogin = func() (*contexts.Context, error) { return nil, errors.New("no current login") }
 		if !importLoggedIn() {
 			t.Fatal("ENTIRE_TOKEN should count as logged in")
 		}

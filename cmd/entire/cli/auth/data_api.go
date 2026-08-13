@@ -45,12 +45,12 @@ func SetResolveContextForAPIForTest(t interface{ Helper() }, fn resolveContextFu
 // It dials the API's /.well-known/entire-api.json to learn which login
 // server(s) the API trusts and which audience to exchange for, picks the
 // matching local auth context (active-wins-if-eligible → sole → explicit
-// choice), and exchanges that context's login JWT for the advertised audience
-// at that context's core. This is what makes
+// choice), and exchanges that login's login JWT for the advertised audience
+// at that login's core. This is what makes
 //
 //	ENTIRE_API_BASE_URL=https://partial.to entire activity
 //
-// authenticate as the partial.to login even while the active context is a
+// authenticate as the partial.to login even while the current login is a
 // prod entire.io login — with no per-command override needed.
 //
 // Discovery is the only path: an API host that doesn't advertise
@@ -59,7 +59,7 @@ func SetResolveContextForAPIForTest(t interface{ Helper() }, fn resolveContextFu
 // guessing risks exchanging a token at a core the host doesn't accept.
 //
 // Callers that honour --insecure-http-auth must call EnableInsecureHTTP before
-// invoking this (as they already do); the per-context exchange reads that
+// invoking this (as they already do); the login-bound exchange reads that
 // global opt-in.
 func ResolveDataAPIToken(ctx context.Context, dataBaseURL string) (string, error) {
 	dataOrigin := api.OriginOnly(dataBaseURL)

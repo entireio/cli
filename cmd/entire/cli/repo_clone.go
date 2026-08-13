@@ -134,13 +134,13 @@ func newRepoCloneCmd() *cobra.Command {
 				return nil
 			}
 			// An explicit --cluster may name a cluster in a different federation
-			// than the active context, whose mirrors the active-context core can't
+			// than the current login, whose mirrors the current-login core can't
 			// see (the original bug: cloning a royalcanin.partial.to mirror while a
 			// different context is active failed with "not mirrored on ..."). Dial
 			// the core fronting that cluster — discovered from its well-known and
 			// authenticated with the matching local context, the same path
 			// `mirror create <url> [cluster]` uses — so the lookup resolves against
-			// the right federation. With no --cluster, list from the active context.
+			// the right federation. With no --cluster, list from the current login.
 			runWithCore := runCore
 			if cluster != "" {
 				if err := validateClusterHost(cluster); err != nil {

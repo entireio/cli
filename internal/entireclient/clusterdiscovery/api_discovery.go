@@ -20,7 +20,7 @@ import (
 const APIPath = "/.well-known/entire-api.json"
 
 // APIResponse is the parsed shape of /.well-known/entire-api.json. The CLI reads
-// only trusted_issuers (to pick the login context); issuer/audience/jwks_uris
+// only trusted_issuers (to pick the login); issuer/audience/jwks_uris
 // are server-side concerns and ignored on decode.
 type APIResponse struct {
 	// TrustedIssuers is every core whose JWTs the API accepts. Used the same way
@@ -83,17 +83,11 @@ func resolveAPICores(ctx context.Context, cacheDir, apiHost string, httpClient *
 	return entry.CoreURLs, nil
 }
 
-// ResolveContextForAPI picks the local login context to authenticate data-API
-// calls against apiHost.
-//
-// It mirrors ResolveContextForCluster: active context wins when its CoreURL is
-// among the API's trusted issuers, else the sole eligible context, else an
-// explicit-choice / login error — sourcing the trusted issuers from
-// /.well-known/entire-api.json (cached in api_discovery.json, long TTL,
-// re-fetched on expiry with stale fallback) instead of entire-cluster.json.
-// Account selection is recomputed every call from the live contexts, never
-// persisted. The caller exchanges the chosen context's token for the data host
-// origin (which is the audience the API requires); no audience is read here.
+// ResolveContextForAPI verifies that the current login can authenticate data-
+// API calls against apiHost. Trusted issuers come from
+// /.well-known/entire-api.json (cached in api_discovery.json with stale
+// fallback). The caller exchanges the current login token for the data host
+// origin; no audience is read here.
 //
 // When the API doesn't advertise discovery (404 / unreachable / 503 /
 // malformed) and no cache entry exists, the returned error wraps
@@ -113,7 +107,7 @@ func ResolveContextForAPI(ctx context.Context, configDir, cacheDir, apiHost stri
 	}
 	f, err := contexts.Load(configDir)
 	if err != nil {
-		return nil, fmt.Errorf("load contexts: %w", err)
+		return nil, fmt.Errorf("load current login: %w", err)
 	}
 	return selectContext(f, "API host "+apiHost, trustedIssuers, debugf)
 }

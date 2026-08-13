@@ -316,18 +316,16 @@ func runBrowserLogin(ctx context.Context, outW, errW io.Writer, flow browserAuth
 	return persistLogin(outW, baseURL, token, refreshToken)
 }
 
-// persistLogin validates the freshly-issued access token and records it in
-// the shared contexts.json credential model. Shared by the device-code and
-// browser flows.
+// persistLogin validates the freshly-issued access token and replaces the
+// current credential-store login. Shared by the device-code and browser flows.
 func persistLogin(outW io.Writer, baseURL, token, refreshToken string) error {
 	if err := validateReceivedToken(token, baseURL, time.Now()); err != nil {
 		return fmt.Errorf("reject login token: %w", err)
 	}
 
-	// Record the login in the shared contexts.json credential model — the
-	// single store every consumer (control plane, data API, git remote
-	// helper, entiredb's CLIs) resolves against.
-	if _, err := auth.RecordLoginContext(token, refreshToken, true); err != nil {
+	// Record the one current login in the credential backend used by every
+	// consumer (control plane, data API, and git remote helper).
+	if err := auth.RecordLogin(token, refreshToken); err != nil {
 		return fmt.Errorf("save login: %w", withHeadlessStoreHint(err))
 	}
 
@@ -357,9 +355,9 @@ func withHeadlessStoreHint(err error) error {
 // a token from a different issuer than the one we asked, or one whose
 // claims are already-expired).
 //
-// It also enforces what the contexts model needs up front:
-// RecordLoginContext — the sole persistence path — keys the context and
-// keychain slot on the token's iss and handle/sub claims, so a token
+// It also enforces what the login store needs up front:
+// RecordLogin — the sole persistence path — keys the login and
+// credential slot on the token's iss and handle/sub claims, so a token
 // without parseable claims can never complete a login. Rejecting it here
 // names the requirement instead of surfacing a parse error from the save
 // step. Entire-core always issues claim-bearing JWTs; opaque-token-only
@@ -373,10 +371,10 @@ func validateReceivedToken(rawToken, issuerURL string, now time.Time) error {
 		return fmt.Errorf("login server issued a token without parseable JWT claims (claim-bearing JWTs are required): %w", err)
 	}
 	if claims.Issuer == "" {
-		return errors.New("token has no iss claim; cannot record a login context")
+		return errors.New("token has no iss claim; cannot record the login server")
 	}
 	if claims.Handle == "" && claims.Subject == "" {
-		return errors.New("token has no handle or sub claim; cannot record a login context")
+		return errors.New("token has no handle or sub claim; cannot record the login identity")
 	}
 
 	// iss check: the token must claim to come from the issuer we sent

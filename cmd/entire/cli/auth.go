@@ -39,7 +39,7 @@ const (
 // applyInsecureHTTPAuth relaxes the tokenmanager's HTTP guard when the user
 // passed --insecure-http-auth, and reports whether per-target TLS checks
 // should be skipped. status/logout enforce TLS on the specific core they
-// dial (the active context's), not on any global origin.
+// dial (the current login's), not on any global origin.
 func applyInsecureHTTPAuth(insecureHTTPAuth bool) bool {
 	if insecureHTTPAuth {
 		auth.EnableInsecureHTTP()
@@ -49,8 +49,8 @@ func applyInsecureHTTPAuth(insecureHTTPAuth bool) bool {
 
 // newAuthSessionsClient builds an api.Client for entire-core's login-session
 // endpoints (coreAuthSessionsPath) on coreURL, authenticated with the
-// session-scoped login JWT. coreURL is the active context's CoreURL (or the
-// configured auth host when no context is active) — session management always
+// session-scoped login JWT. coreURL is the current login's CoreURL (or the
+// configured auth host when logged out) — session management always
 // targets a login server, never the data host.
 func newAuthSessionsClient(coreURL, token string) *api.Client {
 	return api.NewClientWithBaseURL(token, coreURL).WithAuthSessionsPath(coreAuthSessionsPath)
@@ -111,7 +111,7 @@ func newAuthCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "auth",
 		Short: "Manage authentication",
-		Long:  "Authentication subcommands. Includes login, logout, status, and login-context management (contexts, use).",
+		Long:  "Log in, log out, inspect authentication status, or print the current bearer token.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
@@ -121,8 +121,6 @@ func newAuthCmd() *cobra.Command {
 	cmd.AddCommand(newLogoutCmd())
 	cmd.AddCommand(newAuthStatusCmd())
 	cmd.AddCommand(newAuthTokenCmd())
-	cmd.AddCommand(newAuthContextsCmd())
-	cmd.AddCommand(newAuthUseCmd())
 	return cmd
 }
 
@@ -130,7 +128,7 @@ func newAuthCmd() *cobra.Command {
 
 // newAuthTokenCmd prints an Entire bearer to stdout for scripting. By default
 // that's the active control-plane bearer (resolved the same way the API client's
-// is: ENTIRE_TOKEN verbatim when set, otherwise the active context's login JWT,
+// is: ENTIRE_TOKEN verbatim when set, otherwise the current login's login JWT,
 // refreshed if near expiry); with --jurisdiction it mints a data-plane cell
 // identity token for that jurisdiction instead. The user-facing Long and Example
 // carry the detail and the "treat the output as a secret" caveat; only the token
@@ -145,7 +143,7 @@ func newAuthTokenCmd() *cobra.Command {
 		Long: "Print an Entire bearer token to stdout so scripts and ad-hoc curl can\n" +
 			"authenticate without plumbing auth themselves.\n\n" +
 			"By default it prints the control-plane bearer: the same one the API client\n" +
-			"uses (ENTIRE_TOKEN verbatim when set, otherwise the active context's login\n" +
+			"uses (ENTIRE_TOKEN verbatim when set, otherwise the current login's login\n" +
 			"JWT, refreshed if near expiry), for the control-plane API (orgs, repos,\n" +
 			"clusters, /me).\n\n" +
 			"With --jurisdiction <slug> it instead mints a jurisdictional identity token\n" +
@@ -183,7 +181,7 @@ func newAuthTokenCmd() *cobra.Command {
 				return nil
 			}
 
-			target, err := resolveAuthStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)
+			target, err := resolveAuthStatusTarget(cmd.Context(), auth.CurrentLogin, auth.RefreshedLoginToken)
 			if err != nil {
 				return err
 			}
@@ -218,14 +216,14 @@ func newAuthStatusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Show authentication status",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			target, err := resolveAuthStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)
+			target, err := resolveAuthStatusTarget(cmd.Context(), auth.CurrentLogin, auth.RefreshedLoginToken)
 			if err != nil {
 				return err
 			}
 			// We send the session token to target.coreURL; enforce TLS on it.
 			if !applyInsecureHTTPAuth(insecureHTTPAuth) && target.coreURL != "" {
 				if err := api.RequireSecureURL(target.coreURL); err != nil {
-					return fmt.Errorf("context login server URL check: %w", err)
+					return fmt.Errorf("login server URL check: %w", err)
 				}
 			}
 			return runAuthStatus(cmd.Context(), cmd.OutOrStdout(), defaultFetchProfile, defaultListAuthSessions, target)
@@ -257,50 +255,47 @@ type profileFetcher func(ctx context.Context, coreURL, token string) (*authProfi
 // defaultListAuthSessions.
 type authSessionLister func(ctx context.Context, coreURL, token string) ([]api.AuthSession, error)
 
-// contextsProvider returns the stored login contexts and the active context
-// name. Injected for testability; production wires auth.Contexts.
-type contextsProvider func() ([]*contexts.Context, string, error)
+// currentLoginProvider returns the one stored login. Injected for testability.
+type currentLoginProvider func() (*contexts.Context, error)
 
-// loginTokenResolver returns a usable login JWT for a context, transparently
+// loginTokenResolver returns a usable JWT for the current login, transparently
 // re-minting an expired one from the stored refresh token. Injected so status
 // tests don't reach the network; production wires auth.RefreshedLoginToken.
 type loginTokenResolver func(ctx context.Context, c *contexts.Context) (string, error)
 
-// statusTarget is the resolved core to act against: the active context's
+// statusTarget is the resolved core to act against: the current login's
 // CoreURL + its session token. Zero coreURL/token means not logged in.
 // Shared by `auth status` (profile + session list) and `logout`
 // (revocation) so both hit the same login server.
 //
 // envToken marks the target as resolved from ENTIRE_TOKEN rather than a stored
-// context: the bearer is the env token itself, sent verbatim to its own aud,
+// login: the bearer is the env token itself, sent verbatim to its own aud,
 // and there is no stored session to manage — so status renders it without the
-// context/keychain/session lines.
+// keychain/session lines.
 type statusTarget struct {
-	coreURL       string
-	token         string
-	activeContext string
-	totalContexts int
-	envToken      bool
+	coreURL  string
+	token    string
+	envToken bool
 }
 
 // resolveAuthStatusTarget picks the target for `entire auth status`, honouring
 // ENTIRE_TOKEN: when it is set the request dials the token's own aud (exactly
-// as coreapi.New does), so status must report that core, not a stored context
+// as coreapi.New does), so status must report that core, not the stored login
 // that the request never touches. `logout` deliberately does NOT use this —
 // logout manages a stored login session, which an ephemeral env token has none
-// of, so it stays on resolveStatusTarget (the active context).
-func resolveAuthStatusTarget(ctx context.Context, listContexts contextsProvider, resolveLogin loginTokenResolver) (statusTarget, error) {
+// of, so it stays on resolveStatusTarget (the current login).
+func resolveAuthStatusTarget(ctx context.Context, currentLogin currentLoginProvider, resolveLogin loginTokenResolver) (statusTarget, error) {
 	if raw, ok := os.LookupEnv(auth.EnvTokenVar); ok {
 		return resolveEnvTokenStatusTarget(raw)
 	}
-	return resolveStatusTarget(ctx, listContexts, resolveLogin)
+	return resolveStatusTarget(ctx, currentLogin, resolveLogin)
 }
 
 // resolveEnvTokenStatusTarget builds the status target from ENTIRE_TOKEN via the
 // shared auth.ParseEnvToken — the same trim/blank/aud validation coreapi.New
 // applies — so status reports exactly the core a request would dial. The token
 // is the bearer; fail-closed (a blank or malformed value errors, never falls
-// back to a stored context).
+// back to the stored login).
 func resolveEnvTokenStatusTarget(raw string) (statusTarget, error) {
 	coreURL, token, err := auth.ParseEnvToken(raw)
 	if err != nil {
@@ -309,10 +304,9 @@ func resolveEnvTokenStatusTarget(raw string) (statusTarget, error) {
 	return statusTarget{coreURL: coreURL, token: token, envToken: true}, nil
 }
 
-// resolveStatusTarget picks the core + token for `entire auth status` (and
-// `logout`) from the active contexts.json context (so `auth use` retargets
-// status onto that login server). No active context means not logged in —
-// the zero-token target renders the `entire login` hint.
+// resolveStatusTarget picks the login server and token for `entire auth
+// status` and `logout` from the one current login. No current login returns a
+// zero target, which renders the `entire login` hint.
 //
 // The token is resolved through resolveLogin, which transparently re-mints
 // an expired login JWT from the stored refresh token: an
@@ -322,30 +316,24 @@ func resolveEnvTokenStatusTarget(raw string) (statusTarget, error) {
 // token is used and the /me liveness probe is the arbiter — preserving the
 // accurate "no longer valid" outcome for a genuinely dead session.
 //
-// A genuine contexts.json read/parse error is surfaced, not swallowed — a
-// missing file reads as "no contexts" (no error), so an error here means the
-// file is corrupt or unreadable, which the user must see.
-func resolveStatusTarget(ctx context.Context, listContexts contextsProvider, resolveLogin loginTokenResolver) (statusTarget, error) {
-	all, current, err := listContexts()
+// Credential-store errors are surfaced rather than treated as logged out.
+func resolveStatusTarget(ctx context.Context, currentLogin currentLoginProvider, resolveLogin loginTokenResolver) (statusTarget, error) {
+	login, err := currentLogin()
 	if err != nil {
-		return statusTarget{}, fmt.Errorf("load contexts: %w", err)
+		return statusTarget{}, err
 	}
-	total := len(all)
-	for _, c := range all {
-		if c.Name != current || c.CoreURL == "" {
-			continue
-		}
-		if tok, terr := resolveLogin(ctx, c); terr == nil && tok != "" {
-			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total}, nil
-		}
-		if tok, terr := auth.LoginTokenForContext(c); terr == nil && tok != "" {
-			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total}, nil
-		}
-		// Active context with no readable token: report against its core so
-		// the not-logged-in message names the right login server.
-		return statusTarget{coreURL: c.CoreURL, activeContext: c.Name, totalContexts: total}, nil
+	if login == nil || login.CoreURL == "" {
+		return statusTarget{}, nil
 	}
-	return statusTarget{totalContexts: total}, nil
+	if tok, refreshErr := resolveLogin(ctx, login); refreshErr == nil && tok != "" {
+		return statusTarget{coreURL: login.CoreURL, token: tok}, nil
+	}
+	if tok, storedErr := auth.StoredLoginToken(login); storedErr == nil && tok != "" {
+		return statusTarget{coreURL: login.CoreURL, token: tok}, nil
+	}
+	// Metadata without a readable token still names the server in the status
+	// message, while correctly reporting that the user is logged out.
+	return statusTarget{coreURL: login.CoreURL}, nil
 }
 
 // defaultFetchProfile fetches a user's profile from coreURL's GET /me with the
@@ -380,8 +368,8 @@ func defaultListAuthSessions(ctx context.Context, coreURL, token string) ([]api.
 }
 
 // runAuthStatus reports auth state against the target core: GET /me validates
-// the token and supplies the profile header, the active login context is shown
-// locally, and the active sessions (refresh-token families) on that core are
+// the token and supplies the profile header, and the active sessions
+// (refresh-token families) on that core are
 // listed so the effect of `logout` / `logout --everywhere` is visible.
 func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher, listSessions authSessionLister, t statusTarget) error {
 	if t.token == "" {
@@ -407,17 +395,14 @@ func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher
 	fmt.Fprintf(w, "Logged in to %s\n", t.coreURL)
 	writeProfileLines(w, profile)
 
-	// ENTIRE_TOKEN mode: no stored context, keychain slot, or revocable
+	// ENTIRE_TOKEN mode: no stored login, keychain slot, or revocable
 	// session — the bearer is the env var itself. Name that and stop, rather
-	// than printing context/keychain/session lines that don't apply.
+	// than printing keychain/session lines that don't apply.
 	if t.envToken {
 		writeAuthStatusLine(w, "Token:", auth.EnvTokenVar+" environment variable")
 		return nil
 	}
 
-	if t.activeContext != "" {
-		writeAuthStatusLine(w, "Context:", t.activeContext)
-	}
 	writeAuthStatusLine(w, "Token:", "stored in "+tokenstore.BackendDescription())
 
 	// Active sessions on this core. The token is already known good, so a
@@ -431,11 +416,6 @@ func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher
 		fmt.Fprintf(w, "\nActive sessions (%d):\n", len(sessions))
 		renderAuthSessionsTable(w, newAuthTableStyles(w), sessions)
 		fmt.Fprintln(w, "\nRun 'entire logout' to end this session, or 'entire logout --everywhere' to end all of them.")
-	}
-
-	if t.totalContexts > 1 {
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "%d login contexts saved; run 'entire auth contexts' to list or 'entire auth use <name>' to switch.\n", t.totalContexts)
 	}
 	return nil
 }
@@ -480,15 +460,15 @@ func writeProfileLines(w io.Writer, p *authProfile) {
 
 // --- auth tables -------------------------------------------------------------
 
-// authTableStyles holds the lipgloss styles for the `entire auth contexts`
-// table. Mirrors the approach in activity_render.go: keep style construction
+// authTableStyles holds the lipgloss styles for authentication tables.
+// Mirrors the approach in activity_render.go: keep style construction
 // tied to color detection, and render plain text when color is disabled.
 type authTableStyles struct {
 	colorEnabled bool
 
 	header lipgloss.Style // bold + dim, used for column headers
-	id     lipgloss.Style // yellow accent (active-context marker)
-	name   lipgloss.Style // bold (active context name)
+	id     lipgloss.Style // yellow accent (current-login marker)
+	name   lipgloss.Style // bold (current login name)
 	value  lipgloss.Style // default fg
 }
 

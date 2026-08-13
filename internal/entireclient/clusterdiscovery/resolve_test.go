@@ -55,10 +55,9 @@ func TestResolve_ActiveContextWinsWhenEligible(t *testing.T) {
 	assert.Equal(t, "bob@eu", c.Name, "active eligible context must win over other same-core accounts")
 }
 
-// TestResolve_SoleEligibleContextUsedDespiteUnrelatedActive: the active
-// context is on an unrelated core, but the user has exactly one context
-// eligible for the cluster — use it (the 99% single-account case).
-func TestResolve_SoleEligibleContextUsedDespiteUnrelatedActive(t *testing.T) {
+// TestResolve_UnrelatedCurrentLoginIsRejected verifies that resolution never
+// reaches into an old saved login after the CLI moved to one current login.
+func TestResolve_UnrelatedCurrentLoginIsRejected(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(coresHandler(t, nil, "https://eu.auth.entire.io"))
 	defer srv.Close()
@@ -72,12 +71,12 @@ func TestResolve_SoleEligibleContextUsedDespiteUnrelatedActive(t *testing.T) {
 		},
 	}))
 
-	c, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
-	require.NoError(t, err)
-	assert.Equal(t, "prod-eu", c.Name)
+	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "entire login")
 }
 
-// TestResolve_AmbiguousMultipleEligibleErrors: two same-core accounts are
+// TestResolve_AmbiguousMultipleEligibleErrors: legacy multi-login metadata
 // eligible and neither is active — refuse to guess, list both, and tell the
 // user to pick. This is the footgun this redesign closes.
 func TestResolve_AmbiguousMultipleEligibleErrors(t *testing.T) {
@@ -97,10 +96,8 @@ func TestResolve_AmbiguousMultipleEligibleErrors(t *testing.T) {
 
 	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "cluster1.entire.io", hostPinningClient(t, srv), t.Logf)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "multiple login contexts")
-	assert.Contains(t, err.Error(), "admin@core-us")
-	assert.Contains(t, err.Error(), "alice@core-us")
-	assert.Contains(t, err.Error(), "entire auth use")
+	assert.Contains(t, err.Error(), "entire login")
+	assert.NotContains(t, err.Error(), "entire auth use")
 }
 
 // TestResolve_NoEligibleContextReturnsLoginHint: discovery succeeds but the
@@ -120,7 +117,7 @@ func TestResolve_NoEligibleContextReturnsLoginHint(t *testing.T) {
 
 	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no auth context for cluster aws-eu-central-1.entire.io")
+	assert.Contains(t, err.Error(), "not logged in for cluster aws-eu-central-1.entire.io")
 	assert.Contains(t, err.Error(), "entire login")
 	// Advertised login servers + the `entire auth use` hint are intentionally
 	// squashed for now (see renderLoginHint).

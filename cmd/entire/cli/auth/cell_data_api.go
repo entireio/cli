@@ -206,9 +206,9 @@ type cellSubject struct {
 // resolveCellSubject picks the jurisdiction-exchange subject for
 // JurisdictionToken (the `entire auth token --jurisdiction` scripting helper):
 // ENTIRE_TOKEN when set (exclusive, fail-closed), otherwise the ACTIVE stored
-// login context.
+// login.
 //
-// It deliberately uses the active context — the same login `entire auth token`
+// It deliberately uses the current login — the same login `entire auth token`
 // (no flag) prints a bearer for — rather than resolveStoredCellSubject's
 // data-host discovery. `--jurisdiction` mints a token for the caller's SELECTED
 // environment, so with (say) a partial.to context active it must mint a
@@ -224,15 +224,15 @@ func resolveCellSubject(ctx context.Context, insecureHTTP bool) (cellSubject, er
 }
 
 // resolveActiveContextCellSubject builds the exchange subject from the active
-// stored login context: it refreshes that context's login JWT and uses the
+// stored login: it refreshes that login's login JWT and uses the
 // context's own core as both the environment signal (dataOrigin) and the
 // exchange target. See resolveCellSubject for why `--jurisdiction` follows the
-// active context instead of discovering one against the data host.
+// current login instead of discovering one against the data host.
 func resolveActiveContextCellSubject(ctx context.Context, insecureHTTP bool) (cellSubject, error) {
 	if insecureHTTP {
 		EnableInsecureHTTP()
 	}
-	c, ok, err := activeContext()
+	c, ok, err := usableCurrentLogin()
 	if err != nil {
 		return cellSubject{}, err
 	}
@@ -255,7 +255,7 @@ func resolveActiveContextCellSubject(ctx context.Context, insecureHTTP bool) (ce
 }
 
 // resolveStoredCellSubject resolves the exchange subject from the active stored
-// login context: it discovers the data host's trusted login servers and
+// login: it discovers the data host's trusted login servers and
 // mints/refreshes the context's login JWT.
 func resolveStoredCellSubject(ctx context.Context, insecureHTTP bool) (cellSubject, error) {
 	dataURL := api.BaseURL()
@@ -297,7 +297,7 @@ func resolveStoredCellSubject(ctx context.Context, insecureHTTP bool) (cellSubje
 }
 
 // refreshCellLoginJWT returns c's login JWT, transparently re-minting it from the
-// stored refresh token. Shared by the active-context and discovered-context cell
+// stored refresh token. Shared by the current-login and discovered-login cell
 // subject resolvers, which differ only in how they pick c.
 func refreshCellLoginJWT(ctx context.Context, c *contexts.Context) (string, error) {
 	// Gate the login provider's HTTPS relaxation on the core it actually dials

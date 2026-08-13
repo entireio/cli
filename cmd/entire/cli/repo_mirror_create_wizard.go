@@ -402,7 +402,7 @@ func runMirrorCreateWizard(cmd *cobra.Command, noWait bool, waitTimeout time.Dur
 // jurisdiction (from /me, may be "") so the region picker can pre-select that
 // jurisdiction's default cluster.
 func ensureMirrorWizardAuth(ctx context.Context, errW io.Writer, insecure bool) (string, error) {
-	target, err := resolveAuthStatusTarget(ctx, auth.Contexts, auth.RefreshedLoginToken)
+	target, err := resolveAuthStatusTarget(ctx, auth.CurrentLogin, auth.RefreshedLoginToken)
 	if err != nil {
 		return "", err
 	}

@@ -1,7 +1,7 @@
 // Package clusterdiscovery resolves the trusted entire-core URLs that a
 // given entire-server cluster will accept JWTs from, by hitting the
 // cluster's /.well-known/entire-cluster.json endpoint. Used on the
-// cold-boot path where contexts.json doesn't yet bind a cluster to a
+// cold-boot path where no cached cluster mapping exists for a
 // context, so we can tell the user *which* core(s) to log into instead
 // of leaving them to guess --base-url.
 package clusterdiscovery
@@ -145,7 +145,7 @@ func Discover(ctx context.Context, clusterHost string, c *http.Client, debugf De
 	return &body, nil
 }
 
-// renderLoginHint formats a fatal-ready "no auth context for <subject>"
+// renderLoginHint formats a fatal-ready "not logged in for <subject>"
 // message telling the operator to run `entire login`. subject is a noun
 // phrase like "cluster nyc.entire.io" or "API host partial.to" so the same
 // hint serves both the git-cluster and data-API resolvers.
@@ -153,7 +153,7 @@ func Discover(ctx context.Context, clusterHost string, c *http.Client, debugf De
 // We'll display coreURLs (2nd param) to the user as a hint at a later stage.
 func renderLoginHint(subject string, _ []string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "no auth context for %s.\n", subject)
+	fmt.Fprintf(&b, "not logged in for %s.\n", subject)
 	fmt.Fprint(&b, "Log in with `entire login`, then re-run your command.")
 	return b.String()
 }

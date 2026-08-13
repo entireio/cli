@@ -170,10 +170,7 @@ func TestResolveContextForAPI(t *testing.T) {
 		assert.Equal(t, "me@us-partial", c.Name)
 	})
 
-	// The cross-core case the slice exists to fix: the active context is a prod
-	// login, but the only context eligible for the partial.to API is the
-	// staging one — pick it without any operator-side configuration.
-	t.Run("sole eligible context used despite unrelated active", func(t *testing.T) {
+	t.Run("unrelated current login is rejected", func(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(apiHandler(t, "https://us.auth.partial.to", "https://eu.auth.partial.to"))
 		defer srv.Close()
@@ -187,9 +184,9 @@ func TestResolveContextForAPI(t *testing.T) {
 			},
 		}))
 
-		c, err := ResolveContextForAPI(t.Context(), configDir, t.TempDir(), "partial.to", hostPinningClient(t, srv), t.Logf)
-		require.NoError(t, err)
-		assert.Equal(t, "me@staging", c.Name)
+		_, err := ResolveContextForAPI(t.Context(), configDir, t.TempDir(), "partial.to", hostPinningClient(t, srv), t.Logf)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "entire login")
 	})
 
 	t.Run("no eligible context → login hint naming the API host", func(t *testing.T) {
@@ -206,10 +203,10 @@ func TestResolveContextForAPI(t *testing.T) {
 		_, err := ResolveContextForAPI(t.Context(), configDir, t.TempDir(), "partial.to", hostPinningClient(t, srv), t.Logf)
 		require.Error(t, err)
 		require.NotErrorIs(t, err, ErrDiscoveryUnavailable, "a reachable-but-unmatched API is a real login error, not a fallback case")
-		assert.Contains(t, err.Error(), "no auth context for API host partial.to")
+		assert.Contains(t, err.Error(), "not logged in for API host partial.to")
 	})
 
-	t.Run("ambiguous eligible contexts → explicit-choice error", func(t *testing.T) {
+	t.Run("legacy extra logins are ignored", func(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(apiHandler(t, "https://us.auth.partial.to"))
 		defer srv.Close()
@@ -226,8 +223,8 @@ func TestResolveContextForAPI(t *testing.T) {
 
 		_, err := ResolveContextForAPI(t.Context(), configDir, t.TempDir(), "partial.to", hostPinningClient(t, srv), t.Logf)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "multiple login contexts")
-		assert.Contains(t, err.Error(), "API host partial.to")
+		assert.Contains(t, err.Error(), "entire login")
+		assert.NotContains(t, err.Error(), "entire auth use")
 	})
 
 	t.Run("unadvertised → ErrDiscoveryUnavailable for fallback", func(t *testing.T) {

@@ -80,26 +80,8 @@ if ! wait "${LOGIN_PID}"; then
   exit 1
 fi
 
-# A --server login is recorded as a contexts.json context (the legacy
-# keyring/auth.json entry is only written for the default login server).
-CONTEXTS_FILE="${ENTIRE_CONFIG_DIR:-${HOME}/.config/entire}/contexts.json"
-
-python3 - <<'PY' "${CONTEXTS_FILE}" "${ENTIRE_LOGIN_SERVER}"
-import json
-import pathlib
-import sys
-
-contexts_file = pathlib.Path(sys.argv[1])
-server = sys.argv[2].rstrip("/")
-
-if not contexts_file.exists():
-    raise SystemExit(f"Contexts file not found: {contexts_file}")
-
-data = json.loads(contexts_file.read_text())
-if not any(c.get("core_url", "").rstrip("/") == server for c in data.get("contexts", [])):
-    raise SystemExit(f"No login context for {server} in {contexts_file}")
-
-print(f"Verified login context for {server} in {contexts_file}")
-PY
+echo "Verifying the current login from the credential store"
+ENTIRE_API_BASE_URL="${ENTIRE_API_BASE_URL}" \
+  go run ./cmd/entire auth status --insecure-http-auth
 
 cat "${LOG_FILE}"

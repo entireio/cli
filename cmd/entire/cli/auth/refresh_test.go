@@ -19,14 +19,14 @@ import (
 )
 
 // testCoreService is the keychain access-token service used across the
-// contextTokenStore tests (paired refresh slot is RefreshService(it)).
+// loginTokenStore tests (paired refresh slot is RefreshService(it)).
 const testCoreService = "entire-core:https://core.example"
 
 func TestContextTokenStore_RoundTrip(t *testing.T) {
 	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
 	t.Cleanup(restore)
 
-	st := contextTokenStore{service: testCoreService, handle: "alice"}
+	st := loginTokenStore{service: testCoreService, handle: "alice"}
 
 	// Missing → ErrNotFound.
 	if _, err := st.LoadTokens(""); !errors.Is(err, authtokenstore.ErrNotFound) {
@@ -84,7 +84,7 @@ func TestContextTokenStore_LoadTokens_RefreshReadErrorSurfaces(t *testing.T) {
 	restore := tokenstore.UseFailingGetBackendForTesting(path, failRefreshGet)
 	t.Cleanup(restore)
 
-	st := contextTokenStore{service: svc, handle: "alice"}
+	st := loginTokenStore{service: svc, handle: "alice"}
 	if _, err := st.LoadTokens(""); err == nil {
 		t.Fatal("LoadTokens: want error when the refresh-slot read fails, got nil")
 	}
@@ -291,7 +291,7 @@ func TestContextTokenStore_SaveTokens_RefreshFirstOrdering(t *testing.T) {
 		restore := tokenstore.UseFailingBackendForTesting(path, failRefresh)
 		t.Cleanup(restore)
 
-		st := contextTokenStore{service: svc, handle: "alice"}
+		st := loginTokenStore{service: svc, handle: "alice"}
 		newAccess := makeJWT(t, fmt.Sprintf(`{"iss":"https://core.example","handle":"alice","exp":%d}`, time.Now().Add(2*time.Hour).Unix()))
 		err := st.SaveTokens("", tokens.TokenSet{AccessToken: newAccess, RefreshToken: "entr_new", ExpiresAt: time.Now().Add(2 * time.Hour)})
 		if err == nil {
@@ -311,7 +311,7 @@ func TestContextTokenStore_SaveTokens_RefreshFirstOrdering(t *testing.T) {
 		restore := tokenstore.UseFailingBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"), failAccess)
 		t.Cleanup(restore)
 
-		st := contextTokenStore{service: svc, handle: "alice"}
+		st := loginTokenStore{service: svc, handle: "alice"}
 		newAccess := makeJWT(t, fmt.Sprintf(`{"iss":"https://core.example","handle":"alice","exp":%d}`, time.Now().Add(2*time.Hour).Unix()))
 		err := st.SaveTokens("", tokens.TokenSet{AccessToken: newAccess, RefreshToken: "entr_new", ExpiresAt: time.Now().Add(2 * time.Hour)})
 		if err == nil {

@@ -11,11 +11,9 @@
 // or log line corrupts the transfer. Diagnostics go to stderr (and the
 // ENTIRE_DEBUG-gated debuglog).
 //
-// Authentication resolves the login context for the target cluster from the
-// shared contexts.json: the cluster's cores come from the cluster_cores.json
-// cache (or a live /.well-known fetch on miss), then the account is selected
-// from local contexts. It uses that context's login JWT (or ENTIRE_TOKEN in
-// CI) directly as the git-transport bearer.
+// Authentication verifies the current stored login against the target
+// cluster's advertised login servers (cached in cluster_cores.json), then uses
+// its login JWT—or ENTIRE_TOKEN in CI—as the git-transport bearer.
 package main
 
 import (
@@ -348,11 +346,10 @@ func parseProtocolVersion(raw string, warn io.Writer) int {
 
 // resolveCreds returns the credential provider used by the git transport:
 //
-//   - ENTIRE_TOKEN set: use the env JWT verbatim. Skips contexts.json and the
-//     keyring entirely — the CI / workload path. A non-URL aud is a hard error,
-//     never a silent fallback to context resolution.
-//   - otherwise: resolve the login context for this cluster from contexts.json
-//     and use its refreshed login JWT.
+//   - ENTIRE_TOKEN set: use the env JWT verbatim. Skips the stored login — the
+//     CI / workload path. A non-URL aud is a hard error, never a silent fallback.
+//   - otherwise: verify the current login for this cluster and use its refreshed
+//     login JWT.
 func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (credentialProvider, func(), error) {
 	// Presence of ENTIRE_TOKEN is the signal: if it's set at all (LookupEnv,
 	// not Getenv, so we can tell set-empty from unset), we commit to the
@@ -370,11 +367,8 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 		return resolveEnvTokenCreds(ctx, envToken, parsedURL.Host, userdirs.Cache(), httpClient)
 	}
 
-	// Resolve which login context authenticates this cluster: the cluster's
-	// login servers are taken from the cluster_cores.json cache (or a live
-	// /.well-known fetch on miss/expiry), then the account is selected from
-	// local contexts — active context if eligible, else the sole eligible
-	// one, else an explicit-choice error.
+	// Verify that the current login's issuer is trusted by this cluster. Login
+	// servers come from the cluster_cores.json cache or live discovery.
 	cfgDir := userdirs.Config()
 	clusterAuth, err := clusterdiscovery.ResolveClusterAuth(ctx, cfgDir, userdirs.Cache(), parsedURL.Host, httpClient, debuglog.Printf)
 	if err != nil {
@@ -434,7 +428,7 @@ func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir s
 
 // coreTrusted reports whether coreURL is in the cluster's advertised core
 // set, comparing on trailing-slash-insensitive equality to match how core
-// URLs are compared elsewhere (contexts.ContextsForIssuer, auth.sameIssuer).
+// URLs are compared elsewhere in login and resource resolution.
 func coreTrusted(coreURL string, trusted []string) bool {
 	want := strings.TrimRight(coreURL, "/")
 	for _, t := range trusted {

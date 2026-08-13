@@ -12,17 +12,17 @@ import (
 // testable without a real keyring or config dir. Production wiring is the real
 // auth functions.
 var (
-	importListContexts    = auth.Contexts
-	importTokenForContext = auth.LoginTokenForContext
+	importCurrentLogin = auth.CurrentLogin
+	importLoginToken   = auth.StoredLoginToken
 )
 
 // importLoggedIn reports whether there is an active login the imported history
-// could sync under: an ENTIRE_TOKEN env token, or a current stored login context
-// that still has a token in the token store. It is local-only (env, contexts.json,
-// and a token-store read) and never makes a network call, so it is safe on the
+// could sync under: an ENTIRE_TOKEN env token, or the current stored login with
+// a token in the credential store. It is local-only and never makes a network
+// call, so it is safe on the
 // import path.
 //
-// This is a presence check, not a liveness check. LoginTokenForContext returns a
+// This is a presence check, not a liveness check. StoredLoginToken returns a
 // present-but-expired token without error, so a dead-but-not-removed login can
 // still read as "logged in": confirming a token is actually usable needs a
 // network refresh, which we deliberately avoid here (same reason the pre-push
@@ -36,17 +36,12 @@ var importLoggedIn = func() bool {
 	if os.Getenv(auth.EnvTokenVar) != "" {
 		return true
 	}
-	ctxs, current, err := importListContexts()
-	if err != nil || current == "" {
+	login, err := importCurrentLogin()
+	if err != nil || login == nil {
 		return false
 	}
-	for _, c := range ctxs {
-		if c.Name == current {
-			tok, terr := importTokenForContext(c)
-			return terr == nil && tok != ""
-		}
-	}
-	return false
+	tok, tokenErr := importLoginToken(login)
+	return tokenErr == nil && tok != ""
 }
 
 // warnIfImportNotSynced prints a one-time notice, when the user is not logged

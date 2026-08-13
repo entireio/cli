@@ -28,7 +28,7 @@ var resolveContextForCluster resolveContextFunc = clusterdiscovery.ResolveContex
 //
 // CoreURL is an origin (no /api/v1 suffix); the caller appends the API base
 // path. TokenSource returns a bearer valid for CoreURL, re-minting silently
-// from the stored refresh token when the active context drives resolution.
+// from the stored refresh token when the current login drives resolution.
 type ControlPlaneTarget struct {
 	CoreURL     string
 	TokenSource func(context.Context) (string, error)
@@ -36,16 +36,15 @@ type ControlPlaneTarget struct {
 
 // ResolveControlPlaneTarget chooses which core the control-plane commands talk
 // to and how their bearer is obtained. The control-plane host *is* a core, so
-// there is no /.well-known discovery here — the active context names the core,
-// which is what makes `entire auth use <ctx>` retarget the control plane onto
-// that login server. The bearer is a per-context refreshing provider (silent
+// there is no /.well-known discovery here — the current login names the core.
+// The bearer is a refreshing provider (silent
 // JWT re-mint from the stored refresh token).
 //
-// No active context means not logged in: the error wraps ErrNotLoggedIn so
+// No current login means not logged in: the error wraps ErrNotLoggedIn so
 // callers render the `entire login` hint. There is no fallback host — a
 // control-plane command without a login has no identity to act as.
 func ResolveControlPlaneTarget() (ControlPlaneTarget, error) {
-	c, ok, err := activeContext()
+	c, ok, err := usableCurrentLogin()
 	if err != nil {
 		return ControlPlaneTarget{}, err
 	}
@@ -56,7 +55,7 @@ func ResolveControlPlaneTarget() (ControlPlaneTarget, error) {
 		}
 	}
 
-	return targetForContext(c)
+	return targetForLogin(c)
 }
 
 // ResolveControlPlaneTargetForCluster chooses which core a *resource-provider*
@@ -77,7 +76,7 @@ func ResolveControlPlaneTarget() (ControlPlaneTarget, error) {
 // With no eligible local context the discovery resolver returns its login hint
 // naming the cluster's cores, so the user logs in to the right federation
 // rather than seeing an opaque "unknown cluster_host" 400 from the active
-// context's core.
+// login's core.
 func ResolveControlPlaneTargetForCluster(ctx context.Context, clusterHost string) (ControlPlaneTarget, error) {
 	if clusterHost == "" {
 		return ControlPlaneTarget{}, errors.New("cluster-addressed control-plane command requires a target cluster host")
@@ -87,29 +86,27 @@ func ResolveControlPlaneTargetForCluster(ctx context.Context, clusterHost string
 	if err != nil {
 		return ControlPlaneTarget{}, err
 	}
-	return targetForContext(c)
+	return targetForLogin(c)
 }
 
-// targetForContext builds the ControlPlaneTarget for an already-chosen context:
+// targetForLogin builds the ControlPlaneTarget for an already-chosen context:
 // a refreshing login provider (silent JWT re-mint from the stored refresh
-// token) bound to that context's core. Shared by the active-context and
+// token) bound to that login's core. Shared by the current-login and
 // cluster-addressed resolvers, which differ only in how they pick c.
-func targetForContext(c *contexts.Context) (ControlPlaneTarget, error) {
+func targetForLogin(c *contexts.Context) (ControlPlaneTarget, error) {
 	src, err := NewRefreshingLoginProvider(c, nil, insecureHTTPEnabled() || isLoopbackHTTP(c.CoreURL))
 	if err != nil {
-		return ControlPlaneTarget{}, fmt.Errorf("build token source for context %q: %w", c.Name, err)
+		return ControlPlaneTarget{}, fmt.Errorf("build token source for current login: %w", err)
 	}
 	return ControlPlaneTarget{CoreURL: strings.TrimRight(c.CoreURL, "/"), TokenSource: src}, nil
 }
 
-// activeContext returns the active contexts.json login and ok=true, or
-// ok=false when there is no current context or it carries no CoreURL (an
-// unusable pointer we treat as "no active context" rather than dialing an
-// empty host).
-func activeContext() (c *contexts.Context, ok bool, err error) {
+// usableCurrentLogin returns the current stored login and ok=true, or false
+// when logged out or when its metadata has no login-server URL.
+func usableCurrentLogin() (c *contexts.Context, ok bool, err error) {
 	f, err := contexts.Load(userdirs.Config())
 	if err != nil {
-		return nil, false, fmt.Errorf("load contexts: %w", err)
+		return nil, false, fmt.Errorf("load current login: %w", err)
 	}
 	c = f.Find(f.CurrentContext)
 	if c == nil || c.CoreURL == "" {

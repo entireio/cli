@@ -22,9 +22,8 @@ const apiBasePath = "/api/v1"
 //
 // The host and bearer come from auth.ResolveControlPlaneTarget. Control-plane
 // commands target a login server directly — unlike `git clone` or the data
-// API, there's no resource host to match a context against — so the active
-// contexts.json login is used as-is, and `entire auth use <ctx>` retargets the
-// control plane onto that login server; with no active context this errors
+// API, there's no resource host to match — so the current stored login is used
+// as-is. With no current login this errors
 // with the `entire login` hint. The Core API is served at <host>/api/v1. The
 // bearer is resolved lazily per request, re-minting silently from the stored
 // refresh token.
@@ -47,14 +46,11 @@ func New() (*Client, error) {
 // whose subject is a mirror on clusterHost (mirror create/remove, mirror
 // collaborators list).
 //
-// Unlike New — which dials the active context — the core is discovered from the
-// cluster's /.well-known/entire-cluster.json and the matching local context
-// supplies the bearer (see auth.ResolveControlPlaneTargetForCluster). This is
-// what lets a command act on a cluster fronted by a federation other than the
-// active login, e.g. running `repo mirror collaborators list … aws-us-east-2.entire.io`
-// while the active context is a partial.to login: without it the active
-// context's core 400s with "unknown cluster_host" because it doesn't front the
-// cluster. ENTIRE_TOKEN is honoured identically to New.
+// Unlike New, the core is verified against the cluster's
+// /.well-known/entire-cluster.json before the current login supplies the bearer
+// (see auth.ResolveControlPlaneTargetForCluster). An incompatible login gets a
+// fresh-login hint instead of being sent to the wrong federation. ENTIRE_TOKEN
+// is honoured identically to New.
 func NewForCluster(ctx context.Context, clusterHost string) (*Client, error) {
 	if client, ok, err := clientFromEnvToken(); ok {
 		return client, err
@@ -68,15 +64,15 @@ func NewForCluster(ctx context.Context, clusterHost string) (*Client, error) {
 
 // clientFromEnvToken handles the ENTIRE_TOKEN bypass shared by New and
 // NewForCluster. ok=true commits the caller to this mode (the var is present);
-// ok=false means no env token, so fall through to context resolution.
+// ok=false means no env token, so fall through to stored-login resolution.
 //
 // CI / workload-identity runners inject a short-lived login or sa-session JWT
-// and want control-plane commands to use it verbatim, with no contexts.json
-// (the runner never ran `entire login`) and no keyring (the runner has none).
+// and want control-plane commands to use it verbatim without a stored login
+// (the runner never ran `entire login` and has no keyring).
 // Presence of the var (LookupEnv, including blank) commits the CLI to this mode.
 //
 // Fail-closed: a blank or malformed value is fatal rather than a silent
-// fallback to contexts.json, which would mask a misconfigured runner. The
+// fallback to the stored login, which would mask a misconfigured runner. The
 // token's own aud claim becomes the control-plane origin we dial —
 // CoreURLFromEnvToken validates aud is a https bare-origin URL, and makes that
 // the resource the static bearer is sent to.
@@ -140,7 +136,7 @@ func (c *Client) CoreOrigin() string {
 // fixed bearer token: the token is sent verbatim, not re-resolved or
 // re-minted per request. Used when a command must hit a specific login
 // server with a token already in hand: e.g. `entire auth status` querying
-// /me on the active context's core with that context's session token. A
+// /me on the current login's core with that login's session token. A
 // cross-jurisdiction call still follows the home core's 421 and exchanges
 // this token for that core's audience (see newCrossJurisHTTPClient).
 func NewWithBearer(coreBaseURL, token string) (*Client, error) {
@@ -180,7 +176,7 @@ type providerSource struct {
 func (p *providerSource) BearerAuth(ctx context.Context, _ OperationName) (BearerAuth, error) {
 	token, err := p.provide(ctx)
 	if err != nil {
-		// The per-context provider returns a tailored message that already
+		// The login-bound provider returns a tailored message that already
 		// names the context, its login server, and the exact re-login command
 		// — surface it verbatim rather than burying it under a generic prefix;
 		// other failures (STS rejection, network) are likewise

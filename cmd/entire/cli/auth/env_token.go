@@ -9,7 +9,7 @@ import (
 )
 
 // EnvTokenVar is the environment variable that, when set, bypasses
-// contexts.json and the keyring entirely: its value is used verbatim as the
+// the stored login entirely: its value is used verbatim as the
 // bearer for control-plane and git data-plane requests. This is the CI /
 // workload-identity path — a runner injects a short-lived login or sa-session
 // JWT and clones without an interactive `entire login`. The explicit

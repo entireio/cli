@@ -162,7 +162,7 @@ func resolveAPITarget(f *apiFlags, toExplicit bool) (to, jurisdiction string, er
 func resolveAPIClient(ctx context.Context, to, jurisdiction string, insecure bool) (*api.Client, error) {
 	switch strings.ToLower(strings.TrimSpace(to)) {
 	case "", apiTargetCore:
-		target, err := resolveAuthStatusTarget(ctx, auth.Contexts, auth.RefreshedLoginToken)
+		target, err := resolveAuthStatusTarget(ctx, auth.CurrentLogin, auth.RefreshedLoginToken)
 		if err != nil {
 			return nil, err
 		}
