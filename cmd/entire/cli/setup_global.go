@@ -27,20 +27,26 @@ const globalTrackingHint = "To track every repo on this machine automatically, r
 // the user settings file (preserving existing exclude lists) and never touches
 // repo-level settings, so it works outside a git repository too.
 func runEnableGlobalMode(ctx context.Context, w io.Writer) error {
-	us, err := settings.LoadUserSettings(ctx)
-	if err != nil {
+	// Load first for the actionable unreadable-file message. The write below
+	// re-loads under the user-settings lock, so this is a UX probe, not the
+	// consistency mechanism.
+	if _, err := settings.LoadUserSettings(ctx); err != nil {
 		return unreadableUserSettingsError(err)
 	}
-	if us.Global == nil {
-		us.Global = &settings.GlobalConfig{}
-	}
-	us.Global.Enabled = true
-	if err := settings.SaveUserSettings(ctx, us); err != nil {
+	kept := 0
+	if err := settings.ModifyUserSettings(ctx, func(us *settings.UserSettings) error {
+		if us.Global == nil {
+			us.Global = &settings.GlobalConfig{}
+		}
+		us.Global.Enabled = true
+		kept = len(us.Global.ExcludePaths) + len(us.Global.ExcludeOrigins)
+		return nil
+	}); err != nil {
 		return fmt.Errorf("saving user settings: %w", err)
 	}
 	fmt.Fprintln(w, "Global tracking enabled.")
 	fmt.Fprintln(w, "Entire now tracks agent sessions in every repo on this machine that has no repo-level setup and matches no exclude pattern.")
-	if kept := len(us.Global.ExcludePaths) + len(us.Global.ExcludeOrigins); kept > 0 {
+	if kept > 0 {
 		fmt.Fprintf(w, "Keeping %d exclude pattern(s) from your user settings.\n", kept)
 	}
 	return nil
@@ -50,15 +56,18 @@ func runEnableGlobalMode(ctx context.Context, w io.Writer) error {
 // durable: the file keeps global.enabled=false (rather than being removed), so
 // the setup wizard never re-asks. Repo-level settings are not touched.
 func runDisableGlobalMode(ctx context.Context, w io.Writer) error {
-	us, err := settings.LoadUserSettings(ctx)
-	if err != nil {
+	// Load first for the actionable unreadable-file message,
+	// then read-modify-write under the user-settings lock.
+	if _, err := settings.LoadUserSettings(ctx); err != nil {
 		return unreadableUserSettingsError(err)
 	}
-	if us.Global == nil {
-		us.Global = &settings.GlobalConfig{}
-	}
-	us.Global.Enabled = false
-	if err := settings.SaveUserSettings(ctx, us); err != nil {
+	if err := settings.ModifyUserSettings(ctx, func(us *settings.UserSettings) error {
+		if us.Global == nil {
+			us.Global = &settings.GlobalConfig{}
+		}
+		us.Global.Enabled = false
+		return nil
+	}); err != nil {
 		return fmt.Errorf("saving user settings: %w", err)
 	}
 	fmt.Fprintln(w, "Global tracking disabled.")
@@ -105,23 +114,38 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 		}
 		return
 	}
-	// Re-check before persisting: the prompt can stay open for a while, and
-	// if the tier became configured in that window (e.g. `entire disable
-	// --global` in another terminal), the question this prompt answered no
-	// longer exists — persisting would overturn that explicit choice.
-	// Explicit off is durable.
-	if cur, reErr := settings.LoadUserSettings(ctx); reErr != nil || cur.Global != nil {
+	// Persist through a locked read-modify-write of the CURRENT file state:
+	// the prompt can stay open for a while, and saving the pre-prompt
+	// snapshot would clobber anything (say, exclude lists) another process
+	// wrote in that window. And if the tier became CONFIGURED in that window
+	// (e.g. `entire disable --global` in another terminal), the question
+	// this prompt answered no longer exists — persisting would overturn
+	// that explicit choice. Explicit off is durable.
+	saveErr := settings.ModifyUserSettings(ctx, func(cur *settings.UserSettings) error {
+		if cur.Global != nil {
+			return errGlobalAnswerSuperseded
+		}
+		cur.Global = &settings.GlobalConfig{Enabled: enable}
+		return nil
+	})
+	if errors.Is(saveErr, errGlobalAnswerSuperseded) {
 		return
 	}
-	us.Global = &settings.GlobalConfig{Enabled: enable}
-	if err := settings.SaveUserSettings(ctx, us); err != nil {
-		fmt.Fprintf(w, "Warning: could not save the global tracking answer: %v\n", err)
+	if saveErr != nil {
+		fmt.Fprintf(w, "Warning: could not save the global tracking answer: %v\n", saveErr)
 		return
 	}
 	if enable {
 		fmt.Fprintln(w, "  ✓ Global tracking enabled")
 	}
 }
+
+// errGlobalAnswerSuperseded aborts the wizard's locked write when the global
+// tier became configured while the prompt was open: the answer is stale, and
+// writing it would overturn the configuration made in that window. Checked
+// inside the ModifyUserSettings callback, so the race is closed under the
+// user-settings lock, not merely narrowed.
+var errGlobalAnswerSuperseded = errors.New("global tier configured while the prompt was open")
 
 // askGlobalTrackingConfirm runs the machine-wide tracking confirm prompt and
 // returns the answer. A package var (same seam pattern as migrateRenameFile)
