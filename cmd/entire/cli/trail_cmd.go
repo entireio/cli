@@ -1155,7 +1155,7 @@ so a branch another trail already holds is rejected too.`,
 			if err := ensureTrailRepoHasTarget(cmd, hasTarget, "pass --branch or --trail"); err != nil {
 				return err
 			}
-			return runTrailUpdate(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailUpdateInputs{
+			inputs := trailUpdateInputs{
 				Status:              statusStr,
 				StatusChanged:       cmd.Flags().Changed("status"),
 				Title:               title,
@@ -1179,7 +1179,13 @@ so a branch another trail already holds is rejected too.`,
 				TypeChanged:         cmd.Flags().Changed("type"),
 				Priority:            priorityStr,
 				PriorityChanged:     cmd.Flags().Changed("priority"),
-			})
+			}
+			// These say nothing about the trail, so they can fail here rather
+			// than after authenticating and resolving one.
+			if err := validateTrailBranchFlags(inputs); err != nil {
+				return err
+			}
+			return runTrailUpdate(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), inputs)
 		},
 	}
 
@@ -1368,6 +1374,16 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 		// goes first because the PATCH below can carry metadata for the same
 		// trail; doing it here (rather than before validation) keeps a bad
 		// --title or --status from leaving a created forge branch behind.
+		//
+		// updateReq above was built from the pre-attach `found`, and stays that
+		// way on purpose. The attach responds with the updated trail, but that
+		// payload omits labels entirely and marks requested_reviewers optional,
+		// while buildTrailUpdateRequest treats all three as replace-sets it
+		// computes from the current lists. Refreshing `found` from the response
+		// would therefore turn `--add-label x --set-branch y` into a PATCH of
+		// labels:["x"], dropping every label the trail already had. The stale
+		// snapshot is harmless by comparison: an attach changes none of the
+		// fields that request reads.
 		attached := false
 		if branchPlan.Attach {
 			if err := attachTrailBranchPlan(ctx, w, client, forge, owner, repoName, found, branchPlan); err != nil {
@@ -1441,18 +1457,38 @@ type trailBranchPlan struct {
 // the forge, so the decision is separated from the act, letting the caller
 // finish validating every other input first. Use attachTrailBranchPlan to carry
 // out an Attach plan.
-func planTrailBranchChange(ctx context.Context, found *api.TrailResource, inputs trailUpdateInputs) (trailBranchPlan, error) {
+// validateTrailBranchFlags checks what the branch flags say about each other,
+// which depends on no server state at all. RunE calls it so a missing or
+// misspelled flag fails immediately instead of after authenticating and
+// listing trails; planTrailBranchChange calls it again so the rule holds for
+// every caller rather than only the one that remembers to check first.
+func validateTrailBranchFlags(inputs trailUpdateInputs) error {
 	if inputs.BranchActionChanged && !inputs.SetBranchChanged {
-		return trailBranchPlan{}, errors.New("--branch-action requires --set-branch")
+		return errors.New("--branch-action requires --set-branch")
+	}
+	if !inputs.SetBranchChanged {
+		return nil
+	}
+	if strings.TrimSpace(inputs.SetBranch) == "" {
+		return errors.New("--set-branch requires a branch name")
+	}
+	// An unset --branch-action means link, so only a non-empty wrong one fails.
+	action := strings.TrimSpace(inputs.BranchAction)
+	if action != "" && action != trailBranchActionLink && action != trailBranchActionCreate {
+		return fmt.Errorf("invalid --branch-action %q: must be %q or %q", inputs.BranchAction, trailBranchActionLink, trailBranchActionCreate)
+	}
+	return nil
+}
+
+func planTrailBranchChange(ctx context.Context, found *api.TrailResource, inputs trailUpdateInputs) (trailBranchPlan, error) {
+	if err := validateTrailBranchFlags(inputs); err != nil {
+		return trailBranchPlan{}, err
 	}
 	if !inputs.SetBranchChanged {
 		return trailBranchPlan{}, nil
 	}
 
 	newBranch := strings.TrimSpace(inputs.SetBranch)
-	if newBranch == "" {
-		return trailBranchPlan{}, errors.New("--set-branch requires a branch name")
-	}
 	if err := ValidateBranchName(ctx, newBranch); err != nil {
 		return trailBranchPlan{}, fmt.Errorf("invalid --set-branch value %q: %w", newBranch, err)
 	}
@@ -1460,9 +1496,6 @@ func planTrailBranchChange(ctx context.Context, found *api.TrailResource, inputs
 	action := strings.TrimSpace(inputs.BranchAction)
 	if action == "" {
 		action = trailBranchActionLink
-	}
-	if action != trailBranchActionLink && action != trailBranchActionCreate {
-		return trailBranchPlan{}, fmt.Errorf("invalid --branch-action %q: must be %q or %q", inputs.BranchAction, trailBranchActionLink, trailBranchActionCreate)
 	}
 
 	// A trail's branch cannot be changed once set: the /branch endpoint answers
@@ -1533,6 +1566,12 @@ func trailRefLabel(t *api.TrailResource) string {
 // branch is already linked to another trail" (one branch backs one trail).
 // Both are permanent for these inputs, so the message names the way forward
 // rather than inviting a retry that will fail the same way.
+//
+// The two matched phrases are a contract with the server's /branch handler
+// (entire.io api/src/routes/trails.ts), which answers with prose and no error
+// code to key on. A reword there costs the specific message but not the
+// guidance: the fallback names both rules, because a 409 from this endpoint
+// can only mean one of them.
 func explainTrailBranchConflict(err error, number int, branch string) error {
 	switch msg := err.Error(); {
 	case strings.Contains(msg, "already has a linked branch"):
@@ -1540,7 +1579,7 @@ func explainTrailBranchConflict(err error, number int, branch string) error {
 	case strings.Contains(msg, "already linked to another trail"):
 		return fmt.Errorf("branch %s already backs another trail in this repo, and a branch can back only one trail (attach a different branch, or update that trail instead): %w", branch, err)
 	default:
-		return err
+		return fmt.Errorf("branch %s could not be attached to trail #%d: a trail's branch cannot be changed once set, and a branch can back only one trail: %w", branch, number, err)
 	}
 }
 

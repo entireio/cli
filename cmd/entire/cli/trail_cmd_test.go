@@ -869,6 +869,18 @@ func TestAttachTrailBranch(t *testing.T) {
 			wantPhrase: []string{testTrailBranch, "can back only one trail"},
 		},
 	}
+	conflicts = append(conflicts, struct {
+		name       string
+		serverMsg  string
+		wantPhrase []string
+	}{
+		// The two matched phrases are server prose with no error code behind
+		// them. If they are reworded, the specific message is lost but the
+		// guidance must not be: a 409 here can only mean one of the two rules.
+		name:       "the server reworded its conflict",
+		serverMsg:  "Branch conflict",
+		wantPhrase: []string{testTrailBranch, "cannot be changed once set", "can back only one trail"},
+	})
 	for _, tc := range conflicts {
 		t.Run("explains the 409 when "+tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1069,6 +1081,50 @@ func TestErrAfterBranchAttach(t *testing.T) {
 			}
 		}
 	})
+}
+
+// The branch flags say nothing about the trail, so a bad combination must fail
+// on the flags alone. Reaching auth or trail resolution would surface a
+// different error, so asserting the flag message is what proves it failed early.
+func TestNewTrailUpdateCmdRejectsBranchFlagsBeforeAnyRequest(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "--branch-action without --set-branch",
+			args: []string{"--trail", "3", "--branch-action", "create"},
+			want: "--branch-action requires --set-branch",
+		},
+		{
+			name: "an empty --set-branch",
+			args: []string{"--trail", "3", "--set-branch", "   "},
+			want: "--set-branch requires a branch name",
+		},
+		{
+			name: "an unknown --branch-action",
+			args: []string{"--trail", "3", "--set-branch", testTrailBranch, "--branch-action", "nope"},
+			want: "invalid --branch-action",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := newTrailUpdateCmd()
+			cmd.SetArgs(tc.args)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want it to mention %q", err, tc.want)
+			}
+		})
+	}
 }
 
 func TestNewTrailUpdateCmdRejectsTrailAndBranchTogether(t *testing.T) {
