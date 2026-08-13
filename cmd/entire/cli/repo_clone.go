@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -11,6 +13,8 @@ import (
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/internal/coreapi"
 )
@@ -114,6 +118,15 @@ func newRepoCloneCmd() *cobra.Command {
 			// where we *synthesize* the URL from a --cluster flag or an API-supplied
 			// host — values that flow into the STS audience under our own construction.
 			if isEntireCloneURL(ref) {
+				// Ensure a session for the cluster named in the URL before handing
+				// off to git-remote-entire (which can't prompt). Only when the URL
+				// parses cleanly — otherwise preserve the verbatim-forward contract
+				// and let git surface its own error.
+				if host, _, _, _, perr := parseMirrorCloneURL(ref); perr == nil {
+					if err := ensureClusterCloneSession(cmd, host); err != nil {
+						return err
+					}
+				}
 				return runGitClone(cmd.Context(), cmd, ref, targetDir)
 			}
 
@@ -122,6 +135,17 @@ func newRepoCloneCmd() *cobra.Command {
 			_, owner, repo, err := parseMirrorCloneRef(ref)
 			if err != nil {
 				return fmt.Errorf("invalid <repo>: %w", err)
+			}
+
+			// Make a usable active-context login a precondition: fail fast with a
+			// clean re-login hint (never the noisy wrapped auth chain), and
+			// interactively offer to log in and continue, before diving into the
+			// mirror lookup. Scoped to the active-context path; --cluster dials a
+			// different context and relies on renderCoreError's clean fallback.
+			if cluster == "" {
+				if err := ensureCloneSession(cmd); err != nil {
+					return err
+				}
 			}
 
 			var placements []coreapi.ResolvedPlacement
@@ -145,6 +169,11 @@ func newRepoCloneCmd() *cobra.Command {
 			if cluster != "" {
 				if err := validateClusterHost(cluster); err != nil {
 					return fmt.Errorf("invalid --cluster: %w", err)
+				}
+				// The lookup dials this cluster's core and the clone targets it too,
+				// so one cluster-session precondition covers both.
+				if err := ensureClusterCloneSession(cmd, cluster); err != nil {
+					return err
 				}
 				runWithCore = func(cmd *cobra.Command, fn func(context.Context, *coreapi.Client) error) error {
 					return runCoreForCluster(cmd, cluster, fn)
@@ -170,12 +199,264 @@ func newRepoCloneCmd() *cobra.Command {
 			if err := validateClusterHost(chosen.ClusterHost); err != nil {
 				return fmt.Errorf("mirror has an invalid cluster host %q: %w", chosen.ClusterHost, err)
 			}
+			// Ensure a session for the cluster the placement resolved to (may be a
+			// different federation than the active login used for the lookup above).
+			// The --cluster path already ran this on its flag host, which equals the
+			// chosen host, so only the no-flag path needs it here.
+			if cluster == "" {
+				if err := ensureClusterCloneSession(cmd, chosen.ClusterHost); err != nil {
+					return err
+				}
+			}
 			cloneURL := mirrorCloneURL(chosen.ClusterHost, owner, repo)
 			return runGitClone(cmd.Context(), cmd, cloneURL, targetDir)
 		},
 	}
 	cmd.Flags().StringVar(&cluster, "cluster", "", "Cluster host to clone from when the repo is mirrored on more than one (may belong to another auth context)")
+	cmd.Flags().Bool("device", false, "Use the device-code flow (enter a code in your browser) for any inline re-login this clone prompts for, instead of the browser redirect")
 	return cmd
+}
+
+// Seams so ensureCloneSession is testable without the real keychain, network,
+// or a TTY (mirrors the activeCoreClient seam in corecmd.go). Tests swap these.
+var (
+	// probeCloneSession resolves the active control-plane target and checks its
+	// login by minting a token. It returns the login server to re-authenticate
+	// against (the context's core, or the default when there is no context) and
+	// the probe result: nil when the session is usable, a *reauthError (via the
+	// token source) when re-login is needed, or a transient error otherwise.
+	probeCloneSession = defaultProbeCloneSession
+	// interactiveReauthLogin prompts the user to re-authenticate and, on
+	// confirmation, logs in against loginServer. It reports whether a login was
+	// performed (false when the user declines).
+	interactiveReauthLogin = defaultInteractiveReauthLogin
+	// probeClusterCloneSession checks whether a login eligible for the TARGET
+	// cluster exists. It returns the candidate login servers (the cluster's
+	// core_urls, or the single eligible context's core) and the probe result:
+	// nil when a usable session exists, a *reauthError when an eligible context's
+	// token is expired, an auth.ErrNoEligibleContext error when none is eligible,
+	// or an ambiguous/discovery error otherwise.
+	probeClusterCloneSession = defaultProbeClusterCloneSession
+	// interactiveClusterLogin prompts (optionally picking among regions) and, on
+	// confirmation, logs in against one of servers. Reports whether a login ran.
+	interactiveClusterLogin = defaultInteractiveClusterLogin
+)
+
+func defaultProbeCloneSession(ctx context.Context) (loginServer string, err error) {
+	target, err := auth.ResolveControlPlaneTarget()
+	if err != nil {
+		// No active context surfaces as a *reauthError wrapping ErrNotLoggedIn;
+		// re-login against the default login server. Wrapped with %w so the
+		// caller's auth.ReauthMessage (errors.As) still finds it.
+		return api.DefaultAuthBaseURL, fmt.Errorf("resolve control-plane target: %w", err)
+	}
+	// Client construction does no network I/O — the bearer is lazy per-request —
+	// so mint a token explicitly to detect an expired/absent session up front.
+	if _, err := target.TokenSource(ctx); err != nil {
+		return target.CoreURL, fmt.Errorf("mint login token: %w", err)
+	}
+	return target.CoreURL, nil
+}
+
+// defaultInteractiveReauthLogin adapts the single-server active-context path
+// onto the shared cluster-login flow.
+func defaultInteractiveReauthLogin(cmd *cobra.Command, loginServer, hint string) (bool, error) {
+	return defaultInteractiveClusterLogin(cmd, []string{loginServer}, hint)
+}
+
+// defaultInteractiveClusterLogin prints the hint, lets the user pick a region
+// when the cluster trusts more than one core, confirms, and logs in in-process.
+// Reports whether a login was performed (false when the user declines/aborts).
+func defaultInteractiveClusterLogin(cmd *cobra.Command, servers []string, hint string) (bool, error) {
+	if len(servers) == 0 {
+		return false, errors.New("no login server to authenticate against")
+	}
+	ctx := cmd.Context()
+	// huh opens the TTY during form startup regardless of context state, so
+	// guard explicitly to honor an already-cancelled command context.
+	if ctx.Err() != nil {
+		return false, nil //nolint:nilerr // cancelled context is a clean decline, not an error
+	}
+	// Show why we're prompting (the hint names the cluster/context), then offer
+	// to fix it in-process.
+	fmt.Fprintln(cmd.ErrOrStderr(), hint)
+
+	server := servers[0]
+	if len(servers) > 1 {
+		// A cluster that trusts several cores — let the user pick which region's
+		// login to establish.
+		pick := NewAccessibleForm(
+			huh.NewGroup(huh.NewSelect[string]().
+				Title("Pick the region to log in to:").
+				Options(huh.NewOptions(servers...)...).
+				Value(&server)),
+		)
+		if err := pick.RunWithContext(ctx); err != nil {
+			if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
+				return false, nil
+			}
+			return false, fmt.Errorf("region prompt: %w", err)
+		}
+	}
+
+	confirmed := false
+	form := NewAccessibleForm(
+		huh.NewGroup(huh.NewConfirm().
+			Title("Log in now and continue the clone?").
+			Value(&confirmed)),
+	)
+	if err := form.RunWithContext(ctx); err != nil {
+		// A user abort (Esc) or context cancel (Ctrl+C) is a clean decline, not
+		// an error — mirror confirmControlPlaneDeletion.
+		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
+			return false, nil
+		}
+		return false, fmt.Errorf("login prompt: %w", err)
+	}
+	if !confirmed {
+		return false, nil
+	}
+	if err := runLoginToServer(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), server, insecureHTTPRequested(cmd), deviceLoginRequested(cmd)); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ensureCloneSession makes a usable active-context login a precondition of the
+// clone. On a missing/expired session it surfaces the clean, context-named
+// re-login hint (never the noisy wrapped chain); interactively it also offers
+// to run the login flow in-process and continue. Non-interactive callers
+// (agents, CI) get the hint and a non-zero exit without ever blocking on a
+// prompt. A fresh coreapi client built afterward re-reads the newly stored
+// token, so the clone proceeds in the same process.
+func ensureCloneSession(cmd *cobra.Command) error {
+	// ENTIRE_TOKEN supplies a verbatim bearer with no refreshable session to
+	// probe; leave any failure, including a blank token, to the normal flow
+	// (renderCoreError still cleans the message). Match coreapi's presence-based
+	// env-token precedence so this precondition never probes a stored session.
+	if _, ok := os.LookupEnv(auth.EnvTokenVar); ok {
+		return nil
+	}
+	if insecureHTTPRequested(cmd) {
+		auth.EnableInsecureHTTP()
+	}
+	loginServer, probeErr := probeCloneSession(cmd.Context())
+	if probeErr == nil {
+		return nil // session usable
+	}
+	msg, isReauth := auth.ReauthMessage(probeErr)
+	if !isReauth {
+		// Transient (network/STS) failure — not a re-auth prompt. Let the normal
+		// command flow surface it in its own terms.
+		return probeErr
+	}
+	if !interactive.CanPromptInteractively() {
+		return errors.New(msg)
+	}
+	loggedIn, err := interactiveReauthLogin(cmd, loginServer, msg)
+	if err != nil {
+		return err
+	}
+	if !loggedIn {
+		return NewSilentError(errors.New(msg))
+	}
+	return nil
+}
+
+// defaultProbeClusterCloneSession deliberately propagates the resolver's errors
+// unwrapped: ensureClusterCloneSession classifies them (errors.Is / ReauthMessage)
+// and surfaces the discovery/ambiguous ones verbatim (they are already
+// user-facing), so wrapping would corrupt the classification and prefix the
+// message. Hence the nolint:wrapcheck on the return sites below.
+func defaultProbeClusterCloneSession(ctx context.Context, clusterHost string) (servers []string, err error) {
+	target, terr := auth.ResolveControlPlaneTargetForCluster(ctx, clusterHost)
+	if terr == nil {
+		// An eligible context exists; mint a token to detect an expired session.
+		if _, tkErr := target.TokenSource(ctx); tkErr != nil {
+			return []string{target.CoreURL}, tkErr //nolint:wrapcheck // *reauthError (expired)/transient, classified by caller
+		}
+		return nil, nil // usable — the clone's helper will authenticate the same way
+	}
+	if errors.Is(terr, auth.ErrNoEligibleContext) {
+		// Discovery succeeded but no local login is eligible; surface the cluster's
+		// trusted cores as the login targets (cache hit — the resolve above warmed
+		// cluster_cores.json).
+		cores, cerr := auth.ClusterLoginServers(ctx, clusterHost)
+		if cerr != nil {
+			return nil, cerr //nolint:wrapcheck // already a user-facing discovery message
+		}
+		return cores, terr //nolint:wrapcheck // terr carries auth.ErrNoEligibleContext for the caller
+	}
+	// Ambiguous (needs `entire auth use`) or a discovery/transient failure —
+	// surface verbatim; not something a fresh login fixes.
+	return nil, terr //nolint:wrapcheck // already user-facing / classified by caller
+}
+
+// ensureClusterCloneSession makes a login eligible for the TARGET cluster a
+// precondition of the clone: it never lets `git clone` reach git-remote-entire
+// (which cannot prompt) without a usable session. Missing/expired + interactive
+// → offer to log in to the cluster's region and continue; non-interactive →
+// clean hint + non-zero exit. Ambiguous and discovery failures are surfaced
+// as-is (a fresh login wouldn't fix them).
+func ensureClusterCloneSession(cmd *cobra.Command, clusterHost string) error {
+	// A present ENTIRE_TOKEN is a verbatim bearer git-remote-entire validates
+	// itself (and can't prompt for); match coreapi's presence-based precedence.
+	if _, ok := os.LookupEnv(auth.EnvTokenVar); ok {
+		return nil
+	}
+	if insecureHTTPRequested(cmd) {
+		auth.EnableInsecureHTTP()
+	}
+	servers, probeErr := probeClusterCloneSession(cmd.Context(), clusterHost)
+	if probeErr == nil {
+		return nil // a usable, cluster-eligible session exists
+	}
+
+	var hint string
+	switch msg, isReauth := auth.ReauthMessage(probeErr); {
+	case isReauth:
+		hint = msg // expired eligible context; servers == [that context's core]
+	case errors.Is(probeErr, auth.ErrNoEligibleContext):
+		hint = noEligibleClusterHint(clusterHost, servers)
+	default:
+		// Ambiguous (`entire auth use`) or discovery/transient — already friendly.
+		return probeErr
+	}
+
+	if !interactive.CanPromptInteractively() || len(servers) == 0 {
+		// No TTY, or no advertised region to log into in-process (the servers==0
+		// ErrNoEligibleContext case — the cluster names no core to authenticate
+		// against): surface the friendly hint (which already says "log in with
+		// `entire login`") rather than falling into interactiveClusterLogin, whose
+		// empty-slice guard would leak the raw "no login server" internal error.
+		// main.go prints it; nothing has echoed it yet on this path.
+		return errors.New(hint)
+	}
+	loggedIn, err := interactiveClusterLogin(cmd, servers, hint)
+	if err != nil {
+		return err
+	}
+	if !loggedIn {
+		return NewSilentError(errors.New(hint))
+	}
+	return nil
+}
+
+// noEligibleClusterHint composes the "log in to the cluster's region" message,
+// naming the cluster's advertised cores as the `entire login --server` targets
+// (which is exactly what makes a context eligible for the cluster).
+func noEligibleClusterHint(clusterHost string, servers []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "no auth context for cluster %s.\n", clusterHost)
+	switch len(servers) {
+	case 0:
+		b.WriteString("Log in with `entire login`, then re-run.")
+	case 1:
+		fmt.Fprintf(&b, "Log in to its region with `entire login --server %s`, then re-run.", servers[0])
+	default:
+		fmt.Fprintf(&b, "Log in to one of its regions, e.g. `entire login --server %s`, then re-run.", servers[0])
+	}
+	return b.String()
 }
 
 // mirrorLister is the subset of the control-plane client listMirrorsForRepo
@@ -257,9 +538,80 @@ type placementPicker struct {
 	action string
 }
 
+// cloneHomeJurisdiction reports the caller's home jurisdiction for narrowing the
+// placement picker. A package seam so tests can drive the filter without the
+// real auth stack.
+var cloneHomeJurisdiction = defaultCloneHomeJurisdiction
+
+// defaultCloneHomeJurisdiction reads the home_jurisdiction claim off the active
+// login (best-effort — the placements lookup just ran on this same context, so
+// the token is warm). Returns "" on any uncertainty so the picker falls back to
+// showing every placement rather than hiding one.
+func defaultCloneHomeJurisdiction(ctx context.Context) string {
+	// Match coreapi's presence-based env-token precedence: when ENTIRE_TOKEN is
+	// set it is the bearer the placement lookup actually used, so derive the
+	// home jurisdiction from it, not from the stored active context.
+	if raw, ok := os.LookupEnv(auth.EnvTokenVar); ok {
+		_, token, err := auth.ParseEnvToken(raw)
+		if err != nil {
+			return ""
+		}
+		jur, err := auth.HomeJurisdictionFromLoginJWT(token)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(jur)
+	}
+
+	target, err := auth.ResolveControlPlaneTarget()
+	if err != nil {
+		return ""
+	}
+	jwt, err := target.TokenSource(ctx)
+	if err != nil {
+		return ""
+	}
+	jur, err := auth.HomeJurisdictionFromLoginJWT(jwt)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(jur)
+}
+
+// preferHomeJurisdiction narrows placements to those in the caller's home
+// jurisdiction, so the picker isn't cluttered with regions the user doesn't
+// belong to (and auto-selects when that leaves exactly one). Best-effort: an
+// unknown home, or a home that matches no placement, returns the input
+// unchanged so a clonable target is never silently hidden.
+func preferHomeJurisdiction(placements []coreapi.ResolvedPlacement, home string) []coreapi.ResolvedPlacement {
+	if home == "" || len(placements) < 2 {
+		return placements
+	}
+	kept := make([]coreapi.ResolvedPlacement, 0, len(placements))
+	for _, p := range placements {
+		if strings.EqualFold(strings.TrimSpace(p.Jurisdiction.Or("")), home) {
+			kept = append(kept, p)
+		}
+	}
+	if len(kept) == 0 {
+		return placements
+	}
+	return kept
+}
+
 // selectCloneTarget resolves which mirror placement to clone from, with the
-// clone verb's wording. See selectPlacement for the selection rules.
+// clone verb's wording. See selectPlacement for the selection rules. With no
+// explicit --cluster it first narrows to the caller's home jurisdiction so a
+// repo mirrored across many regions defaults to the user's own.
 func selectCloneTarget(cmd *cobra.Command, placements []coreapi.ResolvedPlacement, clusterFlag string) (coreapi.ResolvedPlacement, error) {
+	// Only resolve the home jurisdiction when it can actually narrow the choice:
+	// with 0-1 placements there's nothing to filter (preferHomeJurisdiction would
+	// return the input unchanged), so skip the extra control-plane target
+	// resolution + login-token read on the common single-mirror clone. An
+	// explicit --cluster bypasses the filter entirely.
+	if clusterFlag == "" && len(placements) >= 2 {
+		placements = preferHomeJurisdiction(placements, cloneHomeJurisdiction(cmd.Context()))
+	}
 	return selectPlacement(cmd, placements, clusterFlag, placementPicker{
 		selector: "--cluster",
 		title:    "This repo is mirrored on more than one cluster — pick one to clone from",

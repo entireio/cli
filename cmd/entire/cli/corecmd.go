@@ -64,6 +64,14 @@ func insecureHTTPRequested(cmd *cobra.Command) bool {
 	return err == nil && v
 }
 
+// deviceLoginRequested reports whether --device was set on cmd or an ancestor,
+// so an inline re-login (e.g. the repo clone precondition) honors the same
+// device-code preference `entire login --device` offers. Absent flag → false.
+func deviceLoginRequested(cmd *cobra.Command) bool {
+	v, err := cmd.Flags().GetBool("device")
+	return err == nil && v
+}
+
 // addForceFlag registers the standard confirmation bypass on a destructive
 // control-plane command: --force/-f, with --yes/-y as an alias. Either skips
 // the prompt. Read the combined value with forceRequested.
@@ -608,6 +616,14 @@ func runCoreClient(cmd *cobra.Command, newClient func(context.Context) (*coreapi
 	}
 	client, err := newClient(cmd.Context())
 	if err != nil {
+		// Client construction resolves the active login (coreapi.New →
+		// ResolveControlPlaneTarget), so a not-logged-in/expired session fails
+		// here — before any API call reaches renderCoreError. Surface the same
+		// clean re-login hint rather than the wrapper-prefixed chain, keeping the
+		// *reauthError chain intact so callers can still errors.Is the sentinel.
+		if reErr := auth.ReauthError(err); reErr != nil {
+			return reErr //nolint:wrapcheck // deliberately surface auth's clean, sentinel-preserving reauth error verbatim
+		}
 		return fmt.Errorf("connect to Entire control plane: %w", err)
 	}
 	if err := fn(cmd.Context(), client); err != nil {
@@ -642,6 +658,15 @@ func renderCoreError(err error) error {
 	}
 	if msg := coreapi.APIError(err); msg != "" {
 		return errors.New(msg)
+	}
+	// An expired/absent login surfaces as a *reauthError buried under ogen's
+	// `security "BearerAuth"` wrappers and the command's own `%w` prefix. Surface
+	// just its clean, context-named "run `entire login`" hint instead of the
+	// full noisy chain (the reported `entire repo clone` failure), keeping the
+	// *reauthError chain intact so callers can still errors.Is the sentinel.
+	// Covers every control-plane command, since they all funnel through here.
+	if reErr := auth.ReauthError(err); reErr != nil {
+		return reErr //nolint:wrapcheck // deliberately surface auth's clean, sentinel-preserving reauth error verbatim
 	}
 	return err
 }

@@ -132,6 +132,25 @@ func newCloneTestCmd() *cobra.Command {
 	return cmd
 }
 
+// TestCloneDeviceFlagWiring verifies the clone command exposes --device and that
+// deviceLoginRequested reflects it, so an inline re-login can honor the
+// device-code flow instead of being pinned to the browser redirect.
+func TestCloneDeviceFlagWiring(t *testing.T) {
+	t.Parallel()
+
+	t.Run("default is browser redirect (device off)", func(t *testing.T) {
+		t.Parallel()
+		require.False(t, deviceLoginRequested(newCloneTestCmd()))
+	})
+
+	t.Run("--device flips deviceLoginRequested on", func(t *testing.T) {
+		t.Parallel()
+		cmd := newCloneTestCmd()
+		require.NoError(t, cmd.Flags().Set("device", "true"))
+		require.True(t, deviceLoginRequested(cmd))
+	})
+}
+
 type nopWriter struct{}
 
 func (*nopWriter) Write(p []byte) (int, error) { return len(p), nil }

@@ -90,6 +90,35 @@ func ResolveControlPlaneTargetForCluster(ctx context.Context, clusterHost string
 	return targetForContext(c)
 }
 
+// ClusterLoginServers returns the origin(s) a user may pass to
+// `entire login --server` to become eligible for clusterHost. It prefers the
+// cluster's own jurisdiction core (jurisdiction_core_url) — the single OAuth
+// server for the cluster's region, i.e. exactly where the user should log in —
+// so a repo on an EU cluster sends them to the EU login server rather than the
+// whole federation trust list. It falls back to the full core_urls only when
+// the cluster advertises no jurisdiction core. Cache-first (a prior
+// ResolveControlPlaneTargetForCluster in the same run warms cluster_cores.json),
+// one /.well-known GET otherwise.
+func ClusterLoginServers(ctx context.Context, clusterHost string) ([]string, error) {
+	httpClient := &http.Client{Timeout: controlPlaneClusterDiscoveryTimeout}
+	entry, err := clusterdiscovery.ResolveClusterCores(ctx, userdirs.Cache(), clusterHost, httpClient, nil)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // ResolveClusterCores already returns a user-facing discovery message
+	}
+	if region := strings.TrimSpace(entry.JurisdictionCoreURL); region != "" {
+		return []string{region}, nil
+	}
+	return entry.CoreURLs, nil
+}
+
+// ErrNoEligibleContext and ErrAmbiguousContext re-export the clusterdiscovery
+// classification sentinels so cli callers can errors.Is a cluster session probe
+// without importing clusterdiscovery directly.
+var (
+	ErrNoEligibleContext = clusterdiscovery.ErrNoEligibleContext
+	ErrAmbiguousContext  = clusterdiscovery.ErrAmbiguousContext
+)
+
 // targetForContext builds the ControlPlaneTarget for an already-chosen context:
 // a refreshing login provider (silent JWT re-mint from the stored refresh
 // token) bound to that context's core. Shared by the active-context and
