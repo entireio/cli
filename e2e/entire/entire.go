@@ -1,9 +1,7 @@
 package entire
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"log"
 	"os"
 	"strings"
@@ -20,19 +18,6 @@ func BinPath() string {
 		log.Fatal("entire: E2E_ENTIRE_BIN not set — run tests via `mise run test:e2e`")
 	}
 	return p
-}
-
-// RewindPoint represents a single entry from `entire checkpoint list --pending --json`.
-type RewindPoint struct {
-	ID               string `json:"id"`
-	Message          string `json:"message"`
-	MetadataDir      string `json:"metadata_dir"`
-	Date             string `json:"date"`
-	IsTaskCheckpoint bool   `json:"is_task_checkpoint"`
-	ToolUseID        string `json:"tool_use_id"`
-	IsLogsOnly       bool   `json:"is_logs_only"`
-	CondensationID   string `json:"condensation_id"`
-	SessionID        string `json:"session_id"`
 }
 
 // Enable runs `entire enable` for the given agent with telemetry disabled.
@@ -65,31 +50,6 @@ func CleanForce(t *testing.T, dir string) string {
 	return run(t, dir, "clean", "--force")
 }
 
-// RewindList runs `entire checkpoint list --pending --json` and parses the JSON output.
-func RewindList(t *testing.T, dir string) []RewindPoint {
-	t.Helper()
-	out := runStdout(t, dir, "checkpoint", "list", "--pending", "--json")
-
-	var points []RewindPoint
-	if err := json.Unmarshal([]byte(out), &points); err != nil {
-		t.Fatalf("parse rewind list: %v\nraw output: %s", err, out)
-	}
-	return points
-}
-
-// Rewind runs `entire rewind --to <id>`. Returns an error instead of
-// failing the test, since callers may test failure cases.
-func Rewind(t *testing.T, dir, id string) error {
-	t.Helper()
-	return runErr(dir, "checkpoint", "rewind", "--to", id)
-}
-
-// RewindLogsOnly runs `entire rewind --to <id> --logs-only`.
-func RewindLogsOnly(t *testing.T, dir, id string) error {
-	t.Helper()
-	return runErr(dir, "checkpoint", "rewind", "--to", id, "--logs-only")
-}
-
 // run executes an `entire` subcommand in dir and fails the test on error.
 func run(t *testing.T, dir string, args ...string) string {
 	t.Helper()
@@ -102,41 +62,6 @@ func run(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("entire %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return strings.TrimSpace(string(out))
-}
-
-// runStdout executes an `entire` subcommand in dir and fails the test on
-// error, returning stdout only. Use for commands whose stdout is parsed
-// (e.g. JSON) and must not be mixed with stderr notices.
-func runStdout(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := execx.NonInteractive(context.Background(), BinPath(), args...)
-	cmd.Dir = dir
-	cmd.Env = os.Environ()
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("entire %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, out, stderr.String())
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// runErr executes an `entire` subcommand in dir and returns any error.
-func runErr(dir string, args ...string) error {
-	cmd := execx.NonInteractive(context.Background(), BinPath(), args...)
-	cmd.Dir = dir
-	cmd.Env = os.Environ()
-
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return &ExecError{
-			Args:   args,
-			Err:    err,
-			Output: string(out),
-		}
-	}
-	return nil
 }
 
 // ExecError wraps an entire CLI execution failure with its output.

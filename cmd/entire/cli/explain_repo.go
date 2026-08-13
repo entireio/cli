@@ -47,9 +47,8 @@ var newCrossRepoReader = func(ctx context.Context, insecureHTTP bool, owner, rep
 }
 
 // crossRepoReadKey marks a context as rendering a checkpoint read from another
-// repo. Context-scoped like gitrepo.WithStatusCache / checkpoint's remote-list
-// discovery, so the renderers can adjust their guidance without an extra
-// positional parameter through every formatCheckpointOutput call site.
+// repo. Context-scoped so the renderers can adjust their guidance without an
+// extra positional parameter through every formatCheckpointOutput call site.
 type crossRepoReadKey struct{}
 
 // withCrossRepoRead marks ctx as reading ownerRepo's checkpoint from that

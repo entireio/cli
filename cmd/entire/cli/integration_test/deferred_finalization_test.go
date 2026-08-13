@@ -956,7 +956,7 @@ func TestShadow_RevertedFiles_ManualEditNoCheckpoint(t *testing.T) {
 // Flow:
 // 1. Agent starts working (ACTIVE)
 // 2. User commits mid-turn → TurnCheckpointIDs populated
-// 3. User calls "entire reset --session <id> --force"
+// 3. User calls "entire clean --session <id> --force"
 // 4. Session state file should be deleted
 // 5. A new session can start cleanly without orphaned state
 func TestShadow_ResetSession_ClearsTurnCheckpointIDs(t *testing.T) {
@@ -995,8 +995,8 @@ func TestShadow_ResetSession_ClearsTurnCheckpointIDs(t *testing.T) {
 	}
 	t.Logf("TurnCheckpointIDs before reset: %v", state.TurnCheckpointIDs)
 
-	// Reset the session using the CLI
-	output, resetErr := env.RunCLIWithError("reset", "--session", sess.ID, "--force")
+	// Clean the session using the CLI
+	output, resetErr := env.RunCLIWithError("clean", "--session", sess.ID, "--force")
 	t.Logf("Reset output: %s", output)
 	if resetErr != nil {
 		t.Fatalf("Reset failed: %v", resetErr)

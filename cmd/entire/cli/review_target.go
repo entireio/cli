@@ -139,7 +139,7 @@ func normalizeReviewTargetSelector(raw, forge, owner, repo string) (string, bool
 	if parseErr != nil || u.Scheme == "" || u.Host == "" {
 		return "", true, fmt.Errorf("invalid review target URL %q", raw)
 	}
-	if u.Scheme != "https" && u.Scheme != "http" {
+	if u.Scheme != schemeHTTPS && u.Scheme != schemeHTTP {
 		return "", true, fmt.Errorf("unsupported review target URL scheme %q", u.Scheme)
 	}
 	host := strings.ToLower(u.Hostname())

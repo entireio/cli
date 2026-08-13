@@ -659,7 +659,7 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 	fmt.Fprintf(w, "Status:      %s\n", status)
 
 	if state.Kind.IsImported() {
-		fmt.Fprintf(w, "Note:        imported history — read-only (not resumable or rewindable)\n")
+		fmt.Fprintf(w, "Note:        imported history — read-only (not resumable)\n")
 	}
 
 	wt := sessionWorktreeLabel(state)

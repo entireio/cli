@@ -87,6 +87,9 @@ func (s *PrePromptState) normalizePrePromptState() {
 	s.StartMessageIndex = 0
 }
 
+// unknownSessionID is the fallback session ID used when no session ID is provided.
+const unknownSessionID = "unknown"
+
 // CapturePrePromptState captures current untracked files and transcript position before a prompt
 // and saves them to a state file.
 //

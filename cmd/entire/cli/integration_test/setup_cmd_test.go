@@ -98,7 +98,7 @@ func TestEnableDisable(t *testing.T) {
 	}
 }
 
-func TestRewindBlockedWhenDisabled(t *testing.T) {
+func TestCheckpointListPendingBlockedWhenDisabled(t *testing.T) {
 	t.Parallel()
 	env := NewRepoWithCommit(t)
 	// Disable Entire

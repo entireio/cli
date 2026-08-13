@@ -440,7 +440,7 @@ func writeMinimalEntireSettings(dir, bareURL string) error {
 // tests) so the child has no controlling terminal.
 func runExplainInDir(t *testing.T, dir, checkpointID string) string {
 	t.Helper()
-	cmd := execx.NonInteractive(t.Context(), getTestBinary(), "explain", "--checkpoint", checkpointID)
+	cmd := execx.NonInteractive(t.Context(), getTestBinary(), "checkpoint", "explain", "--checkpoint", checkpointID)
 	cmd.Dir = dir
 	cmd.Env = testutil.GitIsolatedEnv()
 	out, err := cmd.CombinedOutput()

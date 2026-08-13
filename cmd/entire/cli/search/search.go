@@ -32,6 +32,16 @@ const v4ServicePath = "/api/v1/semantic-search/search/v1/search"
 // a "failed" region.
 var ErrCellUnavailable = errors.New("semantic search is not available in this cell")
 
+// ErrRepoFilterUnmatched reports that query-serve answered (the route exists)
+// but the explicit repo filter matched nothing the caller can search — the
+// repo isn't indexed yet, or its owner org isn't enabled on the
+// semantic-search feature flag (entire-search fails closed with a JSON 404,
+// existence not disclosed). A typo'd repo can't produce this from the CLI:
+// the slug was already resolved against the control-plane index before any
+// cell was contacted. Distinct from ErrCellUnavailable so fan-out callers
+// don't misreport a repo-level miss as a region without query-serve.
+var ErrRepoFilterUnmatched = errors.New("no requested repo was found in this cell")
+
 // WildcardQuery is the query string used when only filters are provided (no search terms).
 const WildcardQuery = "*"
 
@@ -55,13 +65,20 @@ const DefaultLimit = 100
 
 // Meta contains search ranking metadata for a result.
 type Meta struct {
-	MatchType string   `json:"matchType"`
-	Score     float64  `json:"score"`
-	Tier      *int     `json:"tier,omitempty"`
-	Snippet   string   `json:"snippet,omitempty"`
-	Summary   string   `json:"summary,omitempty"`
-	BM25Score *float64 `json:"bm25Score,omitempty"`
-	ANNScore  *float64 `json:"annScore,omitempty"`
+	MatchType string  `json:"matchType"`
+	Score     float64 `json:"score"`
+	Tier      *int    `json:"tier,omitempty"`
+	Snippet   string  `json:"snippet,omitempty"`
+	Summary   string  `json:"summary,omitempty"`
+	// RerankScore is query-serve's cross-encoder (Cohere) relevance judgement,
+	// present only on results that went through reranking. Where present it is
+	// the signal the final ordering was built from and the only score
+	// comparable across repos — Score is per-namespace retrieval strength, so
+	// sorting by it undoes reranking. The cross-cell merge orders tier 0 and
+	// tier 1 by this field, matching the BFF (ENT-1425/ENT-1431).
+	RerankScore *float64 `json:"rerankScore,omitempty"`
+	BM25Score   *float64 `json:"bm25Score,omitempty"`
+	ANNScore    *float64 `json:"annScore,omitempty"`
 }
 
 // CheckpointResult represents a checkpoint returned by the search service.
@@ -649,9 +666,11 @@ func CellV4(ctx context.Context, client *api.Client, cfg Config, repoIDs []strin
 
 	q := url.Values{}
 	q.Set("q", cfg.Query)
+	filtered := false
 	for _, id := range repoIDs {
 		if id != "" {
 			q.Add("repo", id)
+			filtered = true
 		}
 	}
 	addCommonSearchParams(q, cfg)
@@ -667,10 +686,25 @@ func CellV4(ctx context.Context, client *api.Client, cfg Config, repoIDs []strin
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
 	if resp.StatusCode == http.StatusNotFound {
-		// The gateway has no semantic-search route (plain "404 page not
-		// found") — query-serve isn't deployed in this cell. Deployed cells
-		// answer unknown repos with an empty 200, so a route-level 404 is
-		// distinctive.
+		// Two distinct 404s share this status. A JSON error body is
+		// query-serve answering through the gateway: the route exists but the
+		// repo filter matched nothing the caller may search (not indexed, or
+		// the owner org isn't flag-enabled — entire-search fails closed,
+		// existence not disclosed). A plain "404 page not found" is the
+		// gateway itself: no semantic-search route, query-serve not deployed
+		// in this cell. Deployed cells answer unfiltered searches of unknown
+		// repos with an empty 200, so the split is unambiguous. The
+		// repo-filter-miss reading only holds when a filter was actually sent
+		// — an unfiltered call named no repo to blame, so its JSON 404
+		// (whatever produced it) degrades to the ErrCellUnavailable fail-safe.
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		if filtered && json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			// Wrap rather than return the bare sentinel so the server's own
+			// message survives into debug logs; errors.Is still matches.
+			return nil, fmt.Errorf("%w: %s", ErrRepoFilterUnmatched, errResp.Error)
+		}
 		return nil, ErrCellUnavailable
 	}
 	return parseSearchResponse(resp.StatusCode, body)

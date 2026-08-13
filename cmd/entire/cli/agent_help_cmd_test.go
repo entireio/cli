@@ -541,3 +541,299 @@ func TestAgentHelpCmd_Execute(t *testing.T) {
 		t.Errorf("json command = %q, want %q", parsed.Command, "entire status")
 	}
 }
+
+// Every advertised top-level command must be classified, and so must every
+// child of a LISTED group — a listed group renders "read-only except: X" from
+// its children's classifications, so an unclassified child is silently dropped
+// from that note and the line quietly understates what the group can do.
+// agentHelpFactsFor defaults the unclassified case to user-owned/unlisted, which
+// is the safe direction but the wrong answer for a new read-only command; this
+// guard makes forgetting a CI failure instead. Both trails states are checked
+// because the gate changes which commands are advertised.
+func TestAgentHelpClassification_CoversEveryAdvertisedCommand(t *testing.T) {
+	t.Parallel()
+
+	for _, trailsEnabled := range []bool{true, false} {
+		for _, sub := range agentHelpCommands(NewRootCmd(), trailsEnabled) {
+			path := agentHelpPath(sub)
+			facts, ok := agentHelpClassified(path)
+			if !ok {
+				t.Errorf("command %q (trailsEnabled=%v) is advertised but unclassified; "+
+					"add it to agentHelpClassification", path, trailsEnabled)
+				continue
+			}
+			if !facts.listed {
+				continue
+			}
+			for _, child := range agentHelpCommands(sub, trailsEnabled) {
+				childPath := agentHelpPath(child)
+				if _, ok := agentHelpClassified(childPath); !ok {
+					t.Errorf("subcommand %q of listed group %q is unclassified; "+
+						"add it to agentHelpClassification", childPath, path)
+				}
+			}
+		}
+	}
+}
+
+// A group's audience is a claim about all of its subcommands, so a read-only
+// group may not contain a subcommand that writes. checkpoint and session read
+// as read-only from their Short help but are not (`checkpoint policy` updates
+// policy; session carries adopt/attach/resume/stop) — both were misclassified
+// read-only in an earlier revision of this table.
+func TestAgentHelpClassification_ReadOnlyGroupsHaveNoWritingChildren(t *testing.T) {
+	t.Parallel()
+
+	for _, sub := range agentHelpCommands(NewRootCmd(), true) {
+		facts, ok := agentHelpClassified(agentHelpPath(sub))
+		if !ok || facts.audience != agentHelpAudienceReadOnly {
+			continue
+		}
+		for _, child := range agentHelpCommands(sub, true) {
+			cf, ok := agentHelpClassified(agentHelpPath(child))
+			if ok && cf.audience != agentHelpAudienceReadOnly {
+				t.Errorf("%q is classified read-only but child %q is %s",
+					agentHelpPath(sub), agentHelpPath(child), agentHelpAudienceSlug(cf.audience))
+			}
+		}
+	}
+	for name, why := range map[string]string{
+		"checkpoint": "`checkpoint policy` updates policy",
+		"session":    "adopt/attach/resume/stop mutate session state",
+	} {
+		if agentHelpFactsFor(name).audience == agentHelpAudienceReadOnly {
+			t.Errorf("%q must not be classified read-only: %s", name, why)
+		}
+	}
+}
+
+// The bare listing shows a curated subset. An exhaustive listing answers "what
+// exists?", not the question an agent mid-task has, and it grew past the length
+// at which it gets read — so this pins that the listing stays short, that
+// user-owned commands are named without spending an entry apiece, and that a
+// mixed group states its exceptions on ONE line rather than per subcommand.
+func TestRenderAgentHelpTop_ListsCuratedSubsetWithInlineAudience(t *testing.T) {
+	t.Parallel()
+
+	out := renderAgentHelpTop(NewRootCmd(), agentHelpTestRepo, true)
+
+	// Listed commands appear with their audience.
+	for _, want := range []string{
+		"status", "trail", "checkpoint", "session", "why", "search",
+		"read-only except: policy",                      // checkpoint, one line
+		"read-only except: adopt, attach, resume, stop", // session, one line
+		"read-only: approvals, list, show, watch",       // trail: minority side named
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("listing missing %q:\n%s", want, out)
+		}
+	}
+
+	// Unlisted commands are named in the footer index, not given entries.
+	for _, name := range []string{"enable", "review", "investigate", "org", "api"} {
+		if !strings.Contains(out, name) {
+			t.Errorf("unlisted command %q should still be named in the footer:\n%s", name, out)
+		}
+		if strings.Contains(out, "  "+name+"  ") {
+			t.Errorf("unlisted command %q should not get a full listing entry:\n%s", name, out)
+		}
+	}
+	// The footer is split by audience on purpose: one bucket would have to
+	// caption itself with the most restrictive rule, telling an agent not to run
+	// `activity` or `blame` uninvited when the table says they are safe.
+	if !strings.Contains(out, "the user's — suggest, don't run:") {
+		t.Errorf("footer must carry the do-not-run rule for user-owned commands:\n%s", out)
+	}
+	readOnlyIdx := strings.Index(out, "read-only, safe to run:")
+	userOwnedIdx := strings.Index(out, "the user's — suggest, don't run:")
+	if readOnlyIdx < 0 || userOwnedIdx < 0 {
+		t.Fatalf("footer is missing an audience bucket:\n%s", out)
+	}
+	for _, safe := range []string{"activity", "blame", "experts"} {
+		idx := strings.Index(out, safe)
+		if idx < readOnlyIdx || idx > userOwnedIdx {
+			t.Errorf("read-only command %q must not sit under the do-not-run caption:\n%s", safe, out)
+		}
+	}
+
+	// Length is the whole point of the curation: guard it directly.
+	if got := strings.Count(out, "\n"); got > 34 {
+		t.Errorf("listing grew to %d lines; it is curated to stay readable:\n%s", got, out)
+	}
+}
+
+// The text drill-down must carry the same "may I run this?" answer as --json:
+// a bare subcommand list hides which subcommands write.
+func TestRenderAgentHelpCommand_SubcommandsCarryAudienceNote(t *testing.T) {
+	t.Parallel()
+
+	child := agentHelpFindChild(NewRootCmd(), "checkpoint")
+	if child == nil {
+		t.Fatal("checkpoint command not found")
+	}
+	out := renderAgentHelpCommand(child, agentHelpTestRepo, true)
+	if !strings.Contains(out, "read-only except: policy") {
+		t.Errorf("text drill-down must state which subcommands write:\n%s", out)
+	}
+}
+
+// A --json consumer must get the same answer as a text reader (the repo's
+// agent-safe-fallback rule): top-level commands and the children of listed
+// groups carry an audience; anything the table makes no claim about omits the
+// field rather than asserting the user-owned default.
+func TestRenderAgentHelpJSON_CarriesAudienceWhereClassified(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+	raw, err := renderAgentHelpJSON(root, root, agentHelpTestRepo, true)
+	if err != nil {
+		t.Fatalf("render top json: %v", err)
+	}
+	var top agentHelpJSON
+	if err := json.Unmarshal([]byte(raw), &top); err != nil {
+		t.Fatalf("unmarshal top json: %v", err)
+	}
+	seen := map[string]string{}
+	for _, sub := range top.Subcommands {
+		if sub.Audience == "" {
+			t.Errorf("top-level command %q has no audience in --json", sub.Name)
+		}
+		seen[sub.Name] = sub.Audience
+	}
+	if got := seen["enable"]; got != agentHelpUserOwnedSlug {
+		t.Errorf("enable audience = %q, want user-owned", got)
+	}
+	if got := seen["status"]; got != "read-only" {
+		t.Errorf("status audience = %q, want read-only", got)
+	}
+	if got := seen["review"]; got != agentHelpUserOwnedSlug {
+		t.Errorf("review audience = %q, want user-owned (paid multi-agent run)", got)
+	}
+
+	drill := drillJSON(t, root, "checkpoint")
+	want := map[string]string{
+		"list": "read-only", "explain": "read-only", "search": "read-only",
+		"tokens": "read-only", "policy": "task-driven",
+	}
+	for _, sub := range drill.Subcommands {
+		if w, ok := want[sub.Name]; ok && sub.Audience != w {
+			t.Errorf("checkpoint %s audience = %q, want %q", sub.Name, sub.Audience, w)
+		}
+	}
+
+	drill = drillJSON(t, root, "org")
+	for _, sub := range drill.Subcommands {
+		if sub.Audience != "" {
+			t.Errorf("unclassified subcommand org %s should omit audience, got %q", sub.Name, sub.Audience)
+		}
+	}
+}
+
+// drillJSON renders one command's --json drill-down for assertions.
+func drillJSON(t *testing.T, root *cobra.Command, name string) agentHelpJSON {
+	t.Helper()
+	child := agentHelpFindChild(root, name)
+	if child == nil {
+		t.Fatalf("%s command not found", name)
+	}
+	raw, err := renderAgentHelpJSON(root, child, agentHelpTestRepo, true)
+	if err != nil {
+		t.Fatalf("render %s drill json: %v", name, err)
+	}
+	var doc agentHelpJSON
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("unmarshal %s drill json: %v", name, err)
+	}
+	return doc
+}
+
+// wrapIndented keeps the footer index compact as the command set grows.
+func TestWrapIndented_WrapsAndIndents(t *testing.T) {
+	t.Parallel()
+
+	out := wrapIndented("alpha · beta · gamma · delta", "  ", 20)
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if !strings.HasPrefix(line, "  ") {
+			t.Errorf("line %q is not indented", line)
+		}
+		if len(line) > 20 {
+			t.Errorf("line %q exceeds width 20", line)
+		}
+	}
+	for _, name := range []string{"alpha", "beta", "gamma", "delta"} {
+		if !strings.Contains(out, name) {
+			t.Errorf("wrapping dropped %q:\n%s", name, out)
+		}
+	}
+}
+
+// `entire api` is an escape hatch, not a front-line command: it is the right
+// tool when developing against Entire's own APIs or when no first-class command
+// covers the need, and the wrong tool during ordinary work in a repo that has
+// Entire enabled. It stays discoverable (footer index, `entire help`) so an
+// agent that genuinely needs raw access finds it instead of hand-rolling curl
+// with a token, which is the failure the command exists to prevent.
+func TestAgentHelpAPI_IsUnlistedAndFramedAsLastResort(t *testing.T) {
+	t.Parallel()
+
+	if agentHelpFactsFor("api").listed {
+		t.Error("api must not be in the curated listing; it is an escape hatch")
+	}
+
+	root := NewRootCmd()
+	child := agentHelpFindChild(root, "api")
+	if child == nil {
+		t.Fatal("api command not found")
+	}
+	if !isAgentHelpAdvertised(child, true) {
+		t.Error("api must stay advertised so agents can drill into it")
+	}
+
+	out := renderAgentHelpCommand(child, agentHelpTestRepo, true)
+	for _, want := range []string{
+		"LAST RESORT",
+		"no first-class command covers",
+		"rather than hand-rolling curl",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("agent-facing api help missing %q:\n%s", want, out)
+		}
+	}
+
+	// The same fact has opposite value for a human, who typed `entire api --help`
+	// on purpose and does not need talking out of it. Guidance ships on the agent
+	// channel only; cobra's Long must stay a reference.
+	if strings.Contains(child.Long, "LAST RESORT") {
+		t.Errorf("agent guidance leaked into human help (cobra Long):\n%s", child.Long)
+	}
+	if strings.Contains(child.Short, "Escape hatch") {
+		t.Errorf("agent framing leaked into Short, which `entire help` shows: %q", child.Short)
+	}
+	// What IS true for both audiences stays in Long, where both see it.
+	if !strings.Contains(child.Long, "can change shape without notice") {
+		t.Errorf("human help should still carry the stability caveat:\n%s", child.Long)
+	}
+}
+
+// Guidance is agent-only by construction: nothing in agentHelpGuidance may be
+// duplicated into the command's cobra help, or humans get the lecture too.
+func TestAgentHelpGuidance_NeverLeaksIntoCobraHelp(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+	for path, guidance := range agentHelpGuidance {
+		cmd := root
+		for _, name := range strings.Fields(path) {
+			cmd = agentHelpFindChild(cmd, name)
+			if cmd == nil {
+				t.Fatalf("agentHelpGuidance names unknown command %q", path)
+			}
+		}
+		// Compare on the first line, which is the distinctive part; whole-string
+		// equality would miss a partial paste.
+		firstLine := strings.SplitN(guidance, "\n", 2)[0]
+		if strings.Contains(cmd.Long, firstLine) || strings.Contains(cmd.Short, firstLine) {
+			t.Errorf("guidance for %q is duplicated into its cobra help; keep it agent-only", path)
+		}
+	}
+}

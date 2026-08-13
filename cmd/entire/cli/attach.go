@@ -52,7 +52,7 @@ type attachOptions struct {
 	ReviewSkillsOverride []string
 	// ReviewPromptOverride, when non-empty, is recorded instead of the
 	// transcript's first user prompt. Set from a pending-review marker when
-	// `entire attach --review` adopts the prompt the user was asked to run.
+	// `entire session attach --review` adopts the prompt the user was asked to run.
 	ReviewPromptOverride string
 }
 

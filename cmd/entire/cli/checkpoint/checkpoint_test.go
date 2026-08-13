@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1196,6 +1197,137 @@ func TestWriteCommitted_MultipleSessionsSameCheckpoint(t *testing.T) {
 	if content1.Metadata.SessionID != "session-two" {
 		t.Errorf("session 1 SessionID = %q, want %q", content1.Metadata.SessionID, "session-two")
 	}
+}
+
+// sessionMetadataStore is the slice of the store surface the dedup tests
+// need. Both persistent backends satisfy it; testing each one directly (not
+// just the shared treeWriter) guards against a backend later shadowing or
+// de-embedding the shared write path.
+type sessionMetadataStore interface {
+	Write(ctx context.Context, req WriteRequest) error
+	ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*Metadata, error)
+}
+
+// TestWriteCommitted_DeduplicatesFilesTouched verifies the write boundary
+// enforces uniqueness on files_touched instead of trusting the caller. Every
+// known producer dedupes before writing, yet duplicated paths have reached the
+// permanent record in the wild until a session's metadata.json exceeded
+// GitHub's 100 MB blob limit and the checkpoints branch became unpushable —
+// so the invariant is enforced where the record is written, and verified
+// against each live backend rather than only the shared implementation.
+func TestWriteCommitted_DeduplicatesFilesTouched(t *testing.T) {
+	tests := []struct {
+		name     string
+		newStore func(repo *git.Repository) sessionMetadataStore
+	}{
+		{
+			name:     "git-branch store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return NewGitStore(repo, DefaultV1Refs()) },
+		},
+		{
+			name:     "git-refs store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return newGitRefsStore(repo) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, _ := setupBranchTestRepo(t)
+			store := tt.newStore(repo)
+			checkpointID := id.MustCheckpointID("c1c2c3c4c5c6")
+
+			err := store.Write(context.Background(), Session{
+				CheckpointID:     checkpointID,
+				SessionID:        "session-dup",
+				Strategy:         "manual-commit",
+				Transcript:       redact.AlreadyRedacted([]byte(`{"message": "dup session"}`)),
+				FilesTouched:     []string{"b.go", "a.go", "b.go", "a.go", "a.go"},
+				CheckpointsCount: 1,
+				AuthorName:       "Test Author",
+				AuthorEmail:      "test@example.com",
+			})
+			if err != nil {
+				t.Fatalf("Write() error = %v", err)
+			}
+
+			metadata, err := store.ReadSessionMetadata(context.Background(), checkpointID, 0)
+			if err != nil {
+				t.Fatalf("ReadSessionMetadata() error = %v", err)
+			}
+			want := []string{"a.go", "b.go"}
+			if !slices.Equal(metadata.FilesTouched, want) {
+				t.Errorf("FilesTouched = %v, want %v", metadata.FilesTouched, want)
+			}
+		})
+	}
+}
+
+// TestWriteCommitted_FilesTouchedPreservesEmptyVsNil pins the wire format of
+// files_touched, which is marshaled without omitempty: a non-nil empty input
+// must stay [] and a nil input must stay null. Normalizing at the write
+// boundary must not silently rewrite one into the other — readers outside Go
+// distinguish them. Asserted on the raw JSON because unmarshaling into
+// []string erases exactly the difference under test.
+func TestWriteCommitted_FilesTouchedPreservesEmptyVsNil(t *testing.T) {
+	tests := []struct {
+		name         string
+		filesTouched []string
+		want         string
+	}{
+		{name: "empty stays []", filesTouched: []string{}, want: `"files_touched": []`},
+		{name: "nil stays null", filesTouched: nil, want: `"files_touched": null`},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, _ := setupBranchTestRepo(t)
+			store := NewGitStore(repo, DefaultV1Refs())
+			checkpointID := id.MustCheckpointID(fmt.Sprintf("d%dd2d3d4d5d6", i))
+
+			err := store.Write(context.Background(), Session{
+				CheckpointID: checkpointID,
+				SessionID:    "session-empty",
+				Strategy:     "manual-commit",
+				Transcript:   redact.AlreadyRedacted([]byte(`{"message": "m"}`)),
+				FilesTouched: tt.filesTouched,
+				AuthorName:   "Test Author",
+				AuthorEmail:  "test@example.com",
+			})
+			if err != nil {
+				t.Fatalf("Write() error = %v", err)
+			}
+
+			raw := readRawSessionMetadata(t, repo, checkpointID)
+			if !strings.Contains(raw, tt.want) {
+				t.Errorf("session metadata JSON does not contain %q:\n%s", tt.want, raw)
+			}
+		})
+	}
+}
+
+// readRawSessionMetadata returns session 0's metadata.json contents verbatim
+// from the metadata branch, for tests asserting on the wire format itself.
+func readRawSessionMetadata(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID) string {
+	t.Helper()
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("metadata branch reference: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("metadata branch commit: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("metadata branch tree: %v", err)
+	}
+	file, err := tree.File(checkpointID.Path() + "/0/" + paths.MetadataFileName)
+	if err != nil {
+		t.Fatalf("session metadata not found: %v", err)
+	}
+	content, err := file.Contents()
+	if err != nil {
+		t.Fatalf("session metadata contents: %v", err)
+	}
+	return content
 }
 
 // TestWriteCommitted_Aggregation verifies that CheckpointSummary correctly

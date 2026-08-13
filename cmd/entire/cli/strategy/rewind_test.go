@@ -607,6 +607,125 @@ func TestShadowStrategy_Rewind_FromRepoRoot(t *testing.T) {
 	}
 }
 
+// TestShadowStrategy_Rewind_PreservesIgnoredFiles guards the restore path
+// against wiping gitignored files. Rewind writes the checkpoint tree over the
+// worktree; if it ever reaches for go-git's Worktree.Reset/Checkout instead,
+// those delete ignored directories even when .gitignore lists them (see the Git
+// Operations section in CLAUDE.md), which would take out `.entire/` — the
+// session state and logs the CLI needs in order to keep working after the
+// restore.
+//
+// Scope: this covers what survives an actual execution, which is the half where
+// the go-git hazard lives. Which *untracked* files get deleted is a separate
+// question driven by SessionState.UntrackedFilesAtStart and covered by the
+// PreviewRewind tests above — with no session state every untracked file reads
+// as created-since-the-checkpoint, so this test deliberately asserts nothing
+// about them.
+func TestShadowStrategy_Rewind_PreservesIgnoredFiles(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	author := &object.Signature{
+		Name:  "Test",
+		Email: "test@example.com",
+		When:  time.Now(),
+	}
+
+	// Commit a .gitignore up front so its rules are in effect during Rewind.
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".entire/\n*.log\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .gitignore: %v", err)
+	}
+	for _, f := range []string{"README.md", ".gitignore"} {
+		if _, err := worktree.Add(f); err != nil {
+			t.Fatalf("failed to add %s: %v", f, err)
+		}
+	}
+	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{Author: author})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	// A checkpoint that adds a tracked file, so Rewind has something to restore.
+	trackedContent := "const app = 'restored';\n"
+	if err := os.WriteFile(filepath.Join(dir, "app.js"), []byte(trackedContent), 0o644); err != nil {
+		t.Fatalf("failed to write app.js: %v", err)
+	}
+	if _, err := worktree.Add("app.js"); err != nil {
+		t.Fatalf("failed to add app.js: %v", err)
+	}
+	checkpointHash, err := worktree.Commit("Checkpoint", &git.CommitOptions{Author: author})
+	if err != nil {
+		t.Fatalf("failed to create checkpoint: %v", err)
+	}
+
+	if err := worktree.Reset(&git.ResetOptions{Commit: initialCommit, Mode: git.HardReset}); err != nil {
+		t.Fatalf("failed to reset to initial: %v", err)
+	}
+
+	// Create the ignored and untracked files only now, after the hard reset.
+	// go-git's own HardReset is one of the calls that deletes ignored
+	// directories, so writing them earlier would test that reset rather than
+	// Rewind.
+	entireDir := filepath.Join(dir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("failed to create .entire dir: %v", err)
+	}
+	ignoredPaths := map[string]string{
+		filepath.Join(entireDir, "settings.json"): `{"enabled": true}`,
+		filepath.Join(dir, "debug.log"):           "log line\n",
+	}
+	for path, content := range ignoredPaths {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to write %s: %v", path, err)
+		}
+	}
+	s := NewManualCommitStrategy()
+	point := RewindPoint{
+		ID:      checkpointHash.String(),
+		Message: "Checkpoint",
+		Date:    time.Now(),
+	}
+	if err := s.Rewind(context.Background(), io.Discard, io.Discard, point); err != nil {
+		t.Fatalf("Rewind() error = %v", err)
+	}
+
+	// The checkpoint's tracked file came back.
+	content, err := os.ReadFile(filepath.Join(dir, "app.js"))
+	if err != nil {
+		t.Fatalf("expected app.js to be restored: %v", err)
+	}
+	if string(content) != trackedContent {
+		t.Errorf("app.js content = %q, want %q", string(content), trackedContent)
+	}
+
+	// Ignored files survived, including the whole .entire/ directory.
+	for path, want := range ignoredPaths {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("ignored file %s should survive Rewind, got error: %v", path, err)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("ignored file %s content = %q, want %q", path, string(got), want)
+		}
+	}
+}
+
 func writeCommittedRewindCheckpoint(
 	t *testing.T,
 	repo *git.Repository,

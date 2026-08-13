@@ -114,7 +114,7 @@ linters:
           msg: "go-git Checkout deletes .gitignored dirs - use CheckoutBranch() from git_operations.go"
           pkg: 'github\.com/go-git/go-git'
         - pattern: '^.*Worktree\.Status$'
-          msg: "go-git Worktree.Status() walks ignored subtrees (seconds in this repo) - use gitrepo.Status(ctx, repo)"
+          msg: "go-git Worktree.Status() walks the whole worktree - use gitrepo.Status(ctx, repo)"
           pkg: 'github\.com/go-git/go-git'
         - pattern: '^.*\.(Print|Println|Printf)$'
           msg: "cobra's Print* writes to OutOrStderr (stderr in production); use fmt.Fprint*(cmd.OutOrStdout(), ...)"

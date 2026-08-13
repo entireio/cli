@@ -44,10 +44,13 @@ func TestOpenCodeHookFlow(t *testing.T) {
 		t.Fatalf("turn-end error: %v", err)
 	}
 
-	// 6. Verify checkpoint was created
-	points := env.GetRewindPoints()
-	if len(points) == 0 {
-		t.Fatal("expected at least 1 rewind point after turn-end")
+	// 6. Verify checkpoint was created on the shadow branch
+	shadowBranch := env.GetShadowBranchName()
+	if !env.BranchExists(shadowBranch) {
+		t.Fatalf("shadow branch %s should exist after turn-end", shadowBranch)
+	}
+	if !env.FileExistsInBranch(shadowBranch, "feature.go") {
+		t.Fatal("feature.go should exist on shadow branch after turn-end")
 	}
 
 	// 7. For manual-commit, user commits manually (triggers condensation).
@@ -73,7 +76,7 @@ func TestOpenCodeHookFlow(t *testing.T) {
 }
 
 // TestOpenCodeAgentStrategyComposition verifies that the OpenCode agent and strategy
-// work together correctly — agent parses session, strategy saves checkpoint, rewind works.
+// work together correctly — agent parses session, strategy saves checkpoint on the shadow branch.
 func TestOpenCodeAgentStrategyComposition(t *testing.T) {
 	t.Parallel()
 
@@ -122,85 +125,13 @@ func TestOpenCodeAgentStrategyComposition(t *testing.T) {
 		t.Fatalf("turn-end error = %v", err)
 	}
 
-	// Verify checkpoint was created
-	points := env.GetRewindPoints()
-	if len(points) == 0 {
-		t.Fatal("expected at least 1 rewind point after turn-end")
+	// Verify checkpoint was created on the shadow branch
+	shadowBranch := env.GetShadowBranchName()
+	if !env.BranchExists(shadowBranch) {
+		t.Fatalf("shadow branch %s should exist after turn-end", shadowBranch)
 	}
-}
-
-// TestOpenCodeRewind verifies that rewind works with OpenCode checkpoints.
-func TestOpenCodeRewind(t *testing.T) {
-	t.Parallel()
-
-	env := NewFeatureBranchEnv(t)
-	// Test with manual-commit strategy as it has full file restoration on rewind
-	env.InitEntireWithAgent(agent.AgentNameOpenCode)
-
-	// First session
-	session := env.NewOpenCodeSession()
-	transcriptPath := session.TranscriptPath
-
-	if err := env.SimulateOpenCodeSessionStart(session.ID, transcriptPath); err != nil {
-		t.Fatalf("session-start error: %v", err)
-	}
-
-	// Turn 1: create file1.go (AFTER turn-start so it's detected as new)
-	if err := env.SimulateOpenCodeTurnStart(session.ID, transcriptPath, "Create file1"); err != nil {
-		t.Fatalf("turn-start error: %v", err)
-	}
-
-	env.WriteFile("file1.go", "package main\n// file1 v1")
-	session.CreateOpenCodeTranscript("Create file1", []FileChange{
-		{Path: "file1.go", Content: "package main\n// file1 v1"},
-	})
-
-	if err := env.SimulateOpenCodeTurnEnd(session.ID, transcriptPath); err != nil {
-		t.Fatalf("turn-end error: %v", err)
-	}
-
-	points1 := env.GetRewindPoints()
-	if len(points1) == 0 {
-		t.Fatal("no rewind point after first turn")
-	}
-	checkpoint1ID := points1[0].ID
-
-	// Turn 2: modify file1 and create file2 (AFTER turn-start)
-	if err := env.SimulateOpenCodeTurnStart(session.ID, transcriptPath, "Modify file1"); err != nil {
-		t.Fatalf("turn-start error: %v", err)
-	}
-
-	env.WriteFile("file1.go", "package main\n// file1 v2")
-	env.WriteFile("file2.go", "package main\n// file2")
-	session.CreateOpenCodeTranscript("Modify file1, create file2", []FileChange{
-		{Path: "file1.go", Content: "package main\n// file1 v2"},
-		{Path: "file2.go", Content: "package main\n// file2"},
-	})
-
-	if err := env.SimulateOpenCodeTurnEnd(session.ID, transcriptPath); err != nil {
-		t.Fatalf("turn-end error: %v", err)
-	}
-
-	// Verify 2 checkpoints
-	points2 := env.GetRewindPoints()
-	if len(points2) < 2 {
-		t.Fatalf("expected at least 2 rewind points, got %d", len(points2))
-	}
-
-	// Rewind to first checkpoint
-	if err := env.Rewind(checkpoint1ID); err != nil {
-		t.Fatalf("Rewind() error = %v", err)
-	}
-
-	// Verify file1 is restored to v1
-	content := env.ReadFile("file1.go")
-	if content != "package main\n// file1 v1" {
-		t.Errorf("file1.go after rewind = %q, want v1 content", content)
-	}
-
-	// file2 should not exist after rewind to checkpoint 1
-	if env.FileExists("file2.go") {
-		t.Error("file2.go should not exist after rewind to checkpoint 1")
+	if !env.FileExistsInBranch(shadowBranch, "feature.go") {
+		t.Fatal("feature.go should exist on shadow branch after turn-end")
 	}
 }
 
@@ -234,10 +165,13 @@ func TestOpenCodeMultiTurnCondensation(t *testing.T) {
 		t.Fatalf("turn-end error: %v", err)
 	}
 
-	// Verify checkpoint
-	points := env.GetRewindPoints()
-	if len(points) == 0 {
-		t.Fatal("expected rewind point after first turn")
+	// Verify checkpoint was created on the shadow branch
+	shadowBranch := env.GetShadowBranchName()
+	if !env.BranchExists(shadowBranch) {
+		t.Fatalf("shadow branch %s should exist after first turn", shadowBranch)
+	}
+	if !env.FileExistsInBranch(shadowBranch, "app.go") {
+		t.Fatal("app.go should exist on shadow branch after first turn")
 	}
 
 	// Commit with hooks (triggers condensation)
@@ -366,9 +300,9 @@ func TestOpenCodeResumedSessionAfterCommit(t *testing.T) {
 		t.Fatalf("turn-end 1 error: %v", err)
 	}
 
-	points1 := env.GetRewindPoints()
-	if len(points1) == 0 {
-		t.Fatal("expected rewind point after turn 1")
+	shadowBranch1 := env.GetShadowBranchName()
+	if !env.BranchExists(shadowBranch1) {
+		t.Fatalf("shadow branch %s should exist after turn 1", shadowBranch1)
 	}
 
 	// === User commits (triggers condensation) ===
@@ -394,10 +328,17 @@ func TestOpenCodeResumedSessionAfterCommit(t *testing.T) {
 		t.Fatalf("turn-end 2 error: %v", err)
 	}
 
-	// === Verify: a new checkpoint was created for turn 2 ===
-	points2 := env.GetRewindPoints()
-	if len(points2) == 0 {
-		t.Fatal("expected rewind point after turn 2 (resumed session), got none")
+	// === Verify: a new checkpoint was created for turn 2 on the new shadow branch ===
+	shadowBranch2 := env.GetShadowBranchName()
+	if !env.BranchExists(shadowBranch2) {
+		t.Fatalf("shadow branch %s should exist after turn 2 (resumed session)", shadowBranch2)
+	}
+	content, found := env.ReadFileFromBranch(shadowBranch2, "app.go")
+	if !found {
+		t.Fatal("app.go should exist on shadow branch after turn 2 (resumed session)")
+	}
+	if content != "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"hello\") }" {
+		t.Errorf("app.go on shadow branch = %q, want turn 2 content", content)
 	}
 
 	// For manual-commit: commit turn 2 and verify second condensation

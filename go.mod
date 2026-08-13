@@ -16,7 +16,15 @@ require (
 	github.com/go-faster/errors v0.8.0
 	github.com/go-faster/jx v1.2.0
 	github.com/go-git/go-billy/v6 v6.0.0-alpha.2
-	github.com/go-git/go-git/v6 v6.0.0-alpha.5
+	// Floor, not just a bump, for two reasons. go-git#2309 (per-directory
+	// ignore Scope): the root-level e2e/artifacts/ rule only prunes the status
+	// walk from that commit onward. go-git#2312 (record partial clones): a
+	// go-git filtered fetch used to write no promisor bookkeeping, leaving a
+	// repository git calls corrupt and can never gc again; the same commits
+	// also fix RepackObjects/Prune failing with "object not found" on any
+	// partial clone, including one made by the git binary.
+	// Move to a plain tag once alpha.6 ships.
+	github.com/go-git/go-git/v6 v6.0.0-alpha.5.0.20260812155443-34770e01d7c2
 	github.com/go-git/x/plugin/objectsigner/auto v0.1.1-0.20260624122410-382b2905c041
 	github.com/go-git/x/plugin/objectsigner/program v0.0.0-20260624122410-382b2905c041
 	github.com/gofrs/flock v0.13.0
@@ -32,7 +40,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1
 	github.com/zalando/go-keyring v0.2.8
-	golang.org/x/crypto v0.54.0
+	golang.org/x/crypto v0.55.0
 	golang.org/x/mod v0.38.0
 	golang.org/x/net v0.57.0
 	golang.org/x/sync v0.22.0
@@ -134,7 +142,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
 	golang.org/x/exp v0.0.0-20250218142911-aa4b98e5adaa // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251222181119-0a764e51fe1b // indirect
 	google.golang.org/protobuf v1.36.11 // indirect

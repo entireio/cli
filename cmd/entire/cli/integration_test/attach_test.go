@@ -283,7 +283,7 @@ func TestAttach_DifferentWorkingDirectory(t *testing.T) {
 	// Set ENTIRE_TEST_CLAUDE_PROJECT_DIR to an empty dir so the primary lookup fails,
 	// and set HOME to fakeHome so the fallback search finds our transcript.
 	emptyProjectDir := t.TempDir()
-	cmd := exec.CommandContext(t.Context(), getTestBinary(), "attach", sessionID, "-a", agentClaudeCode, "-f")
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "session", "attach", sessionID, "-a", agentClaudeCode, "-f")
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(env.cliEnv(),
 		"HOME="+fakeHome,
@@ -325,7 +325,7 @@ func TestAttach_CodexSessionTreeLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.CommandContext(t.Context(), getTestBinary(), "attach", sessionID, "-a", "codex", "-f")
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "session", "attach", sessionID, "-a", "codex", "-f")
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(env.cliEnv(),
 		"ENTIRE_TEST_CODEX_SESSION_DIR="+codexDir,

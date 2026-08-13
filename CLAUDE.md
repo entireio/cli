@@ -23,11 +23,9 @@ This repo contains the CLI for Entire.
 ### Command Layout
 
 The visible CLI is organized around a set of noun groups plus a small set of
-top-level verbs. The groups are the canonical home for each verb; legacy
-top-level shortcuts remain functional but hidden, and emit a deprecation hint
-pointing at the canonical group form. Newer experimental command families are
-discoverable through `entire labs` and their canonical paths are always
-runnable.
+top-level verbs. The groups are the canonical home for each verb. Newer
+experimental command families are discoverable through `entire labs` and
+their canonical paths are always runnable.
 
 Experimental commands are gated by a build-time visibility flag (the
 `cmd/entire/cli/experimental` package): they are shown — grouped under an
@@ -48,9 +46,7 @@ the commands are always runnable in every build.
   `adopt` moves an active session from another repo or worktree into the current
   worktree and resets target-local checkpoint bookkeeping so future commits link
   to the adopted session from the new location.
-- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`, plus
-  the deprecated `rewind` (functional, prints a cobra deprecation message, will
-  be removed in a future release).
+- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`.
   `explain` also takes `--repo <owner/name>`, the drill-down for a cross-repo
   `search` hit: it reads the checkpoint from that repo's entire-api cell over
   HTTP (`/repos/{repo_id}/checkpoints/{id}` plus `.../transcript/raw`) rather
@@ -96,13 +92,14 @@ the commands are always runnable in every build.
 Experimental commands (gated by the build-time visibility flag above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden
 in stable releases, always runnable): `tokens`, `import`, `review`,
-`investigate`, `blame`, `why`, the top-level `search` shortcut, `experts`,
-`runner`, and `checkpoint policy`. `tokens` is also advertised through `entire
-labs`. The canonical `checkpoint search` is not gated and stays visible.
+`investigate`, `blame`, `why`, `experts`, `runner`, and `checkpoint policy`.
+`tokens` is also advertised through `entire labs`.
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
-`configure`, `agent-help`, `api`.
+`configure`, `agent-help`, `api`, `search`. `search` is the canonical
+spelling (visible in every build, grouped with Sessions & Checkpoints);
+`checkpoint search` stays a working alias of the same command.
 
 `api` is an authenticated passthrough to Entire's HTTP APIs (gh-style): it
 attaches the right bearer and dials the right host so callers don't plumb auth
@@ -111,15 +108,39 @@ entire-api cell. `--jurisdiction <slug>` (e.g. `us`, `eu`) targets a specific
 jurisdiction's cell instead of the caller's home cell and implies `--to cell`
 (cell routing + identity-token exchange live in `auth.NewEntireAPICellClient`
 via `auth.CellTarget`). `{owner}`/`{repo}`/`{repo_id}` in the path are filled
-from the current repo's origin remote. It is visible in `entire help` and
-`entire agent-help`, so agents discover it as the supported way to call the API.
+from the current repo's origin remote. It is an escape hatch, so it is absent
+from `agent-help`'s curated listing but stays in `entire help` and agent-help's
+footer — an agent that needs raw access must find it rather than hand-roll curl
+with a token.
 
 `agent-help` renders machine-readable, agent-facing usage live from the Cobra
-command tree (so it always matches the installed binary): bare prints a
-"when to use entire / which subcommand" map; `agent-help <command>` drills into
-one command's current flags; `--json` emits structured output. It is the single
-source of truth the first-turn context injection and the `--agent-help-skill`
-skill point agents at, instead of enumerating a surface that goes stale.
+command tree (so it always matches the installed binary): bare prints a curated
+"when to use entire" map; `agent-help <command>` drills into one command's
+current flags; `--json` emits structured output. It is the single source of
+truth the first-turn context injection and the `--agent-help-skill` skill point
+agents at, instead of enumerating a surface that goes stale.
+
+#### Where agent-facing text goes
+
+| What you have | Where it goes |
+| --- | --- |
+| A new command | `agentHelpClassification` in `agent_help_cmd.go` — one entry, keyed by command path, carrying `audience` and `listed` |
+| "When to use this at all" advice for agents | `agentHelpGuidance` — **never** cobra `Short`/`Long` |
+| A fact humans need too (e.g. "this output is not stable") | cobra `Long`. Human help is a reference, not a lecture: whoever typed `--help` already chose the command |
+| A per-task command recommendation | `agent-help`, which is pulled on demand. **Never** the first-turn injection, which carries only invariants true on every turn |
+
+**Flag it; don't decide it.** Whether a command is `listed`, and whether it is
+read-only / task-driven / user-owned, are product judgment calls — they change
+what agents do unprompted in every user's repo. Take the safe default
+(unlisted, user-owned), then say in the PR what you picked and why so a human
+can move it. Never quietly promote a command into the listing or into
+read-only.
+
+CI enforces the mechanical parts, so trust these rather than re-deriving them:
+every advertised top-level command and every child of a listed group is
+classified; a read-only group contains no writing subcommand; guidance text
+never appears in a command's `Short`/`Long`.
+
 Hidden commands opt into being advertised here by setting
 `Annotations[agentHelpAnnotation] = "true"` (e.g. `trail`). Because `agent-help`
 renders live and lists non-hidden commands, the experimental commands appear in
@@ -136,25 +157,13 @@ MCP-host agents can launch the hidden `entire mcp` stdio server, which exposes
 Enabling a no-channel agent with `--agent-help-skill` reports the skill
 unsupported and points the agent at this passive path instead.
 
-Hidden top-level shortcuts (functional, emit a one-line deprecation hint):
-`resume` → `session resume`, `attach` → `session attach`, `explain` →
-`checkpoint explain`, `trace` → `doctor trace`.
 Cobra-native aliases (no hint): `sessions` → `session`, `cp`/`checkpoints` →
-`checkpoint`. The `search` top-level is experimental (see the visibility gate
-above), so it follows the build-dependent visibility rather than being
-unconditionally hidden.
-
-Deprecated top-level commands (functional, print a cobra deprecation message):
-`reset` → `clean`, and `rewind` (no replacement, announces removal — same
-deprecation as `checkpoint rewind`).
+`checkpoint`.
 
 Hidden infrastructure commands: `hooks`, `trail`,
 `curl-bash-post-install`, `__send_analytics`, `mcp` (MCP stdio server for
 MCP-host agents).
 
-The `hideAsAlias(cmd, canonical)` helper in `cmd/entire/cli/aliascmd.go`
-marks a command Hidden and sets cobra's `Deprecated` field so the hint
-renders to stderr on every invocation while the command stays functional.
 Diagnostic subcommands live alongside `doctor.go` as `doctor_logs.go` and
 `doctor_bundle.go`. Group roots and noun-group children live in files
 named `<noun>_group.go` and `<noun>_<verb>.go` respectively.
@@ -513,43 +522,14 @@ reftable and sha256 repositories. Reviewers should flag any new
 `gitrepo.Status(ctx, repo)`; a `forbidigo` rule in `.golangci.yaml` enforces
 this, and `gitrepo/status.go` is the only sanctioned call site.
 
-`Worktree.Status()` walks the whole worktree twice — once in
-`gitignore.ReadPatterns` collecting patterns, once diffing. `ReadPatterns` does
-**not** thread a parent directory's patterns into its recursive walk: each
-recursive call rebuilds its pattern set from that directory's own ignore files,
-so the prune check only ever matches patterns declared by the directory being
-scanned.
-
-**Consequence for `.gitignore` layout:** a rule prunes a subtree only when its
-target is a *direct child* of the `.gitignore` declaring it. A root-level
-`e2e/artifacts/` rule is one level too deep and never prunes, so every
-`Status()` descended ~15k artifact directories and cost 5.25s (against 0.013s
-for `git status --porcelain`), which timed out agent hooks. The rule therefore
-lives in `e2e/.gitignore` as `/artifacts/`. When adding a new ignored directory,
-declare it in a `.gitignore` in its parent directory rather than as a nested
-path from the root — reviewers should flag multi-component directory patterns
-added to the root `.gitignore`.
-
-Anchor the relocated pattern with a leading slash. Moving `a/b/` to a
-`.gitignore` in `a/` as bare `b/` also drops git's root anchoring, so it would
-newly match `b` at any depth below `a/`; `/b/` preserves the original scope and
-prunes identically.
-
-`gitrepo.WithStatusCache(ctx)` memoizes the walk for callers that read status
-more than once. Install it **only** across a window that neither writes tracked
-files nor stages anything: the TurnStart hook qualifies (it runs before the agent
-acts and writes only session metadata under `.entire/` and refs under `.git/`),
-post-agent hooks such as TurnEnd do not — `DetectFileChanges` there must observe
-the agent's edits.
-
-Staging counts as invalidation even though `.git/index` sits inside `.git/`: the
-index feeds the status diff, so an index write makes a cached result stale. Entire
-performs no index writes today — there are no `SetIndex` calls, the single
-`Storer.Index()` use (`strategy/content_overlap.go`) is a read, and the git
-subcommands on the hook paths are all index-read-only. **If you add an
-index-mutating operation, check whether it lands inside a status-cache window.**
-The cache is context-scoped to one short-lived hook process, so it cannot go
-stale across turns.
+`Worktree.Status()` walks the worktree, so its cost scales with working-set size
+rather than with the size of the change being inspected, which makes it the most
+expensive git read on the hook paths. Avoid calling it more than once per hook.
+Do not memoize it either: a context-scoped cache was tried and removed, because
+the write-free window it required cost more to maintain than the walk saved (see
+`git log` on `gitrepo/status.go` for the measurements). The turn-start hook
+currently walks twice — `CapturePrePromptState` and the strategy's prompt
+attribution each read their own status.
 
 #### go-git v5 Bugs - Use CLI Instead
 
@@ -672,6 +652,18 @@ The `Strategy` interface provides:
 - `GetRewindPoints()` / `Rewind()` - List and restore to checkpoints
 - `GetSessionLog()` / `GetSessionInfo()` - Retrieve session data
 
+`Rewind()` has **no CLI surface**. The `rewind` commands were removed, so
+nothing outside tests calls it; `GetRewindPoints()` is still live, feeding
+`checkpoint list --pending`. Treat the restore path as machinery pending
+removal rather than as a supported entry point — do not build on it, and do not
+re-expose it without deciding whether the removal was meant to be permanent.
+Mind the split in its test coverage: `PreviewRewind` tests cover which untracked
+files are *planned* for deletion, while
+`TestShadowStrategy_Rewind_PreservesIgnoredFiles` covers what survives an actual
+execution — that ignored paths such as `.entire/` are still there afterwards.
+The second half is where the go-git hazard lives, so keep it covered for as long
+as the restore path exists.
+
 #### How It Works
 
 The manual-commit strategy (`manual_commit*.go`) does not modify the active branch - no commits are created on the working branch. Instead it:
@@ -681,7 +673,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - **Supports multiple concurrent sessions** - checkpoints from different sessions in the same directory interleave on the same shadow branch
 - Condenses session logs to permanent `entire/checkpoints/v1` branch on user commits
 - Every path that builds a stored transcript sanitizes before redacting; the committed paths also externalize images in between, giving **sanitize → externalize images → redact**. Sanitization is the agent's optional `agent.TranscriptSanitizer` capability, applied via `agent.SanitizeTranscriptForStorage`; it strips non-portable agent state (Codex's encrypted reasoning payloads and compaction blobs, which are bound to the originating session and cannot be replayed out of a checkpoint). The three paths are the Stop/shadow write (`lifecycle.go` sanitizes before `.entire/metadata/<session>/full.jsonl` is written, then the metadata-dir walker redacts it into the shadow tree — **no externalization**, so inline images in a shadow transcript are subject to redaction and assets exist only under committed checkpoints), post-commit condensation (`prepareTranscriptForStorage` in `manual_commit_condensation.go`), and the Stop finalize full-session rewrite (`manual_commit_hooks.go`). Where all three steps run, order is load-bearing at each step: sanitizing first avoids externalizing images out of items about to be discarded (storing an asset whose referencing line disappears) and avoids redacting megabytes of ciphertext only to discard it — base64 is the pathological input for the entropy layer, so a large Codex rollout otherwise costs tens of seconds per Stop *and* per commit; externalizing before redaction is required because redaction would otherwise flag and destroy the high-entropy base64. Sanitization is idempotent, so downstream paths call it without knowing whether an upstream path already did (`checkpoint.sanitizeForAgentType` is the store's belt-and-braces call). The agent's own transcript is never modified. Coupling to respect: `SessionState.CheckpointTranscriptSize` is a growth baseline compared against the shadow transcript blob size in `sessionHasNewContent`, so it must be measured in the same sanitized (pre-externalization) coordinate — that is `CondenseResult.TranscriptSizeBaseline`; using the raw size makes the comparison false forever and the session silently stops condensing.
-- Each committed session stores the (sanitized, redacted) transcript (`full.jsonl`, read by CLI rewind/resume/explain) plus a best-effort compact transcript (`transcript.jsonl`, generated via `transcript/compact`). Like `full.jsonl`, `transcript.jsonl` stores the **full compacted session** on every checkpoint (via `compact.FullWithBoundary`), so each checkpoint is self-contained and the session survives a mid-history checkpoint being lost/reverted/rebased. This checkpoint's slice begins at the session metadata's `compact_transcript_start` (a line offset in compact-output coordinates, distinct from `checkpoint_transcript_start` which indexes raw `full.jsonl` lines); a nil/absent marker means a legacy delta-only `transcript.jsonl` (read from line 0). The marker rounds toward inclusion when a streaming message straddles the boundary, so the slice never drops this checkpoint's content but may repeat ≤1 merged line at its head. Compact generation is best-effort and is skipped when the compacted output exceeds the 50MB blob cap (unlike `full.jsonl`, `transcript.jsonl` is not chunked — `full.jsonl` stays authoritative and the compact is regenerable); in the OPF finalize rewrite a failed/skipped regeneration drops the prior `transcript.jsonl` and clears the marker rather than shipping a stale, less-redacted compact. Both files are pushed with the v1 branch. The root `metadata.json` `sessions[].transcript` pointer keeps targeting `full.jsonl`; when the compact transcript was generated the session entry also carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted otherwise) so external readers can locate it next to `full.jsonl`.
+- Each committed session stores the (sanitized, redacted) transcript (`full.jsonl`, read by CLI resume/explain) plus a best-effort compact transcript (`transcript.jsonl`, generated via `transcript/compact`). Like `full.jsonl`, `transcript.jsonl` stores the **full compacted session** on every checkpoint (via `compact.FullWithBoundary`), so each checkpoint is self-contained and the session survives a mid-history checkpoint being lost/reverted/rebased. This checkpoint's slice begins at the session metadata's `compact_transcript_start` (a line offset in compact-output coordinates, distinct from `checkpoint_transcript_start` which indexes raw `full.jsonl` lines); a nil/absent marker means a legacy delta-only `transcript.jsonl` (read from line 0). The marker rounds toward inclusion when a streaming message straddles the boundary, so the slice never drops this checkpoint's content but may repeat ≤1 merged line at its head. Compact generation is best-effort and is skipped when the compacted output exceeds the 50MB blob cap (unlike `full.jsonl`, `transcript.jsonl` is not chunked — `full.jsonl` stays authoritative and the compact is regenerable); in the OPF finalize rewrite a failed/skipped regeneration drops the prior `transcript.jsonl` and clears the marker rather than shipping a stale, less-redacted compact. Both files are pushed with the v1 branch. The root `metadata.json` `sessions[].transcript` pointer keeps targeting `full.jsonl`; when the compact transcript was generated the session entry also carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted otherwise) so external readers can locate it next to `full.jsonl`.
 - Uses the `post-rewrite` Git hook to keep local session linkage aligned after amend/rebase rewrites
 - Builds git trees in-memory using go-git plumbing APIs
 - Rewind restores files from shadow branch commit tree (does not use `git reset`)

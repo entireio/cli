@@ -771,62 +771,6 @@ func (env *TestEnv) GetRewindPoints() []RewindPoint {
 	return points
 }
 
-// Rewind performs a rewind to the specified commit ID using the CLI.
-func (env *TestEnv) Rewind(commitID string) error {
-	env.T.Helper()
-
-	// Run rewind --to <commitID> using the shared binary
-	cmd := exec.CommandContext(env.T.Context(), getTestBinary(), "checkpoint", "rewind", "--to", commitID)
-	cmd.Dir = env.RepoDir
-	cmd.Env = env.cliEnv()
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return errors.New("rewind failed: " + string(output))
-	}
-
-	env.T.Logf("Rewind output: %s", output)
-	return nil
-}
-
-// RewindLogsOnly performs a logs-only rewind using the CLI.
-// This restores session logs without modifying the working directory.
-func (env *TestEnv) RewindLogsOnly(commitID string) error {
-	env.T.Helper()
-
-	// Run rewind --to <commitID> --logs-only using the shared binary
-	cmd := exec.CommandContext(env.T.Context(), getTestBinary(), "checkpoint", "rewind", "--to", commitID, "--logs-only")
-	cmd.Dir = env.RepoDir
-	cmd.Env = env.cliEnv()
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return errors.New("rewind logs-only failed: " + string(output))
-	}
-
-	env.T.Logf("Rewind logs-only output: %s", output)
-	return nil
-}
-
-// RewindReset performs a reset rewind using the CLI.
-// This resets the branch to the specified commit (destructive).
-func (env *TestEnv) RewindReset(commitID string) error {
-	env.T.Helper()
-
-	// Run rewind --to <commitID> --reset using the shared binary
-	cmd := exec.CommandContext(env.T.Context(), getTestBinary(), "checkpoint", "rewind", "--to", commitID, "--reset")
-	cmd.Dir = env.RepoDir
-	cmd.Env = env.cliEnv()
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return errors.New("rewind reset failed: " + string(output))
-	}
-
-	env.T.Logf("Rewind reset output: %s", output)
-	return nil
-}
-
 // BranchExists checks if a branch exists in the repository.
 func (env *TestEnv) BranchExists(branchName string) bool {
 	env.T.Helper()
