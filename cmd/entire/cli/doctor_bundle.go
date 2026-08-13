@@ -118,7 +118,7 @@ func writeDoctorBundle(ctx context.Context, repoRoot, logsDir, outPath string, r
 	}
 
 	for _, name := range []string{"settings.json", "settings.local.json"} {
-		src := filepath.Join(repoRoot, ".entire", name)
+		src := filepath.Join(repoRoot, ".entire", name) // entire-join-ok: collects repo-level settings files; a globally tracked repo has none
 		if err := addFileToZip(zw, src, path.Join("settings", name), raw); err != nil {
 			return err
 		}

@@ -618,8 +618,19 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	_, captureSpan := perf.Start(ctx, "capture_pre_prompt_state")
 	if err := CapturePrePromptState(ctx, ag, sessionID, event.SessionRef); err != nil {
 		captureSpan.RecordError(err)
-		captureSpan.End()
-		return err
+		if !paths.IsUnroutableRuntimePath(err) {
+			captureSpan.End()
+			return err
+		}
+		// Tier-owned repo, git-side location unresolvable: per the sentinel's
+		// contract every consumer SKIPS — returning the error would fail the
+		// user's agent turn (non-zero hook exit) every TurnStart for a
+		// machine-wide feature they never repo-enabled. The pre-state capture
+		// is skipped this turn, so turn-end has no untracked-file/transcript
+		// baseline; hook logging is live here, so this Warn is the visible
+		// record of the lost baseline.
+		logging.Warn(logCtx, "skipping pre-prompt state capture: runtime path unroutable for globally tracked repo",
+			slog.String("error", err.Error()))
 	}
 	captureSpan.End()
 
@@ -1152,6 +1163,14 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 
 	// Capture pre-task state
 	if err := CapturePreTaskState(ctx, event.ToolUseID); err != nil {
+		if paths.IsUnroutableRuntimePath(err) {
+			// Same skip contract as TurnStart above: unroutable in a
+			// tier-owned repo must not fail the hook — the pre-task baseline
+			// is skipped for this task.
+			logging.Warn(logCtx, "skipping pre-task state capture: runtime path unroutable for globally tracked repo",
+				slog.String("error", err.Error()))
+			return nil
+		}
 		return fmt.Errorf("failed to capture pre-task state: %w", err)
 	}
 

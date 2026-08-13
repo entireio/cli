@@ -295,7 +295,7 @@ func resolveSessionDir(ctx context.Context) string {
 	if wdErr != nil {
 		return filepath.Join(paths.EntireTmpDir, piHookCacheSubdir)
 	}
-	return filepath.Join(wd, paths.EntireTmpDir, piHookCacheSubdir)
+	return filepath.Join(wd, paths.EntireTmpDir, piHookCacheSubdir) // entire-join-ok: sentinel-guarded no-repo fallback
 }
 
 func cacheSessionID(ctx context.Context, id string) {

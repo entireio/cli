@@ -194,7 +194,7 @@ func computeInvisibleRuntimeBase(ctx context.Context, root string) (string, erro
 	// worktree. Lstat (not Stat) matches settings.IsSetUpAny: a dangling
 	// symlink still counts as setup.
 	for _, name := range []string{SettingsFileName, settingsLocalFileName} {
-		if _, err := os.Lstat(filepath.Join(root, EntireDir, name)); err == nil {
+		if _, err := os.Lstat(filepath.Join(root, EntireDir, name)); err == nil { // entire-join-ok: routing discriminator — this Lstat DECIDES whether rerouting applies
 			return "", nil
 		}
 	}

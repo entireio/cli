@@ -182,7 +182,7 @@ func sessionTranscriptPath(ctx context.Context, sessionID string) (string, error
 		return "", fmt.Errorf("resolving transcript cache path: %w", err)
 	}
 	if err != nil {
-		tmpFile = filepath.Join(".", paths.EntireTmpDir, sessionID+".json")
+		tmpFile = filepath.Join(".", paths.EntireTmpDir, sessionID+".json") // entire-join-ok: sentinel-guarded no-repo fallback
 	}
 	return tmpFile, nil
 }
@@ -208,7 +208,7 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 		return "", fmt.Errorf("resolving transcript cache dir: %w", err)
 	}
 	if err != nil {
-		tmpDir = filepath.Join(".", paths.EntireTmpDir)
+		tmpDir = filepath.Join(".", paths.EntireTmpDir) // entire-join-ok: sentinel-guarded no-repo fallback
 	}
 	tmpFile := filepath.Join(tmpDir, sessionID+".json")
 

@@ -14,7 +14,7 @@ import (
 
 // runnersDir is the canonical location of the trail runner configs for a repo.
 func runnersDir(repoRoot string) string {
-	return filepath.Join(repoRoot, paths.EntireDir, "runners")
+	return filepath.Join(repoRoot, paths.EntireDir, "runners") // entire-join-ok: repo-level runner config, config-class not runtime
 }
 
 // tuneRunner is one .entire/runners/*.json file loaded for tuning. Raw holds
