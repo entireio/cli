@@ -154,7 +154,7 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 		manageRegionsHint = fmt.Sprintf("Manage regions: entire repo mirror create · or %s/gh/%s/%s/settings",
 			configureWebBaseURL(), url.PathEscape(owner), url.PathEscape(repo))
 	}
-	before, err := configureGitChanges(ctx, repoRoot)
+	initialChanges, err := configureGitChanges(ctx, repoRoot)
 	if err != nil {
 		return err
 	}
@@ -171,7 +171,7 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 		}
 	}
 	branchPushSafe := false
-	if branch != "" && len(before) == 0 {
+	if branch != "" && len(initialChanges) == 0 {
 		branchPushSafe = configureBranchHasNoUnpushedCommits(ctx, repoRoot)
 	}
 	chosen, selectedAgents, saveChoice, agentsChanged, err := promptConfigureUpstreamAndAgents(
@@ -189,6 +189,21 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 		fmt.Fprintln(outW, "No configuration changes.")
 		return nil
 	}
+
+	// Snapshot immediately before applying our changes. The form may have been
+	// open for an arbitrary amount of time, so the pre-form status is not a safe
+	// commit baseline: editor autosaves or another process may have changed files
+	// while the user was choosing options. Anything already dirty now is excluded
+	// from generated and disables automatic commit/push below.
+	beforeApply, err := configureGitChanges(ctx, repoRoot)
+	if err != nil {
+		return err
+	}
+	if (saveChoice == configureSaveDirect || saveChoice == configureSaveNewBranch) &&
+		(len(beforeApply) != 0 || !configureBranchHasNoUnpushedCommits(ctx, repoRoot)) {
+		saveChoice = configureSaveLocal
+	}
+
 	forgeRemote, err := configureUseMirror(ctx, outW, errW, repoRoot, owner, repo, chosen)
 	if err != nil {
 		return err
@@ -211,13 +226,13 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 	if err != nil {
 		return err
 	}
-	generated := newConfigureChanges(before, after)
+	generated := newConfigureChanges(beforeApply, after)
 	if agentsChanged {
 		fmt.Fprintf(outW, "✓ Wrote %s\n", configDisplayProject)
 	}
 
 	if saveChoice == configureSaveDirect || saveChoice == configureSaveNewBranch {
-		if err := configureSaveAndPush(cmd, repoRoot, owner, repo, before, generated, branch, protected, saveChoice, forgeRemote, deps.now); err != nil {
+		if err := configureSaveAndPush(cmd, repoRoot, owner, repo, beforeApply, generated, branch, protected, saveChoice, forgeRemote, deps.now); err != nil {
 			return err
 		}
 	} else if agentsChanged && len(generated) > 0 {

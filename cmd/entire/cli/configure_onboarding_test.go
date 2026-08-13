@@ -653,6 +653,22 @@ func TestConfigureUseMirrorPreservesOriginUnderAvailableForgeRemote(t *testing.T
 	}
 }
 
+func TestNewConfigureChangesExcludesWorkAppearingWhileFormWasOpen(t *testing.T) {
+	// beforeApply is intentionally captured after the form returns. A file that
+	// appeared while the form was open must be treated as pre-existing work, not
+	// as onboarding output eligible for automatic commit.
+	beforeApply := map[string]string{"notes-from-another-process.md": "??"}
+	after := map[string]string{
+		"notes-from-another-process.md": "??",
+		".entire/settings.json":         "??",
+	}
+	got := newConfigureChanges(beforeApply, after)
+	want := []string{".entire/settings.json"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("new changes = %v, want %v", got, want)
+	}
+}
+
 func TestNewConfigureChangesExcludesPreexistingWork(t *testing.T) {
 	before := map[string]string{"README.md": " M", "already-staged": "M "}
 	after := map[string]string{
