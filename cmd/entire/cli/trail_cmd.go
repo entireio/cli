@@ -1133,8 +1133,8 @@ func newTrailUpdateCmd() *cobra.Command {
 		Long: `Update trail metadata.
 
 By default the trail for the current branch is updated; --branch selects it by
-another branch, or --trail selects it by number, id, or branch (the only way to
-reach a branchless trail).
+another branch, or --trail selects it by number, id, or branch. A branchless
+trail has no branch to match, so reach it with --trail and a number or id.
 
 --set-branch changes which branch the trail points at. If the trail already has
 a branch this is a metadata rename on the server (the branch is not created on
@@ -1186,7 +1186,7 @@ creates it on the forge at the trail's base (--branch-action create).`,
 	cmd.Flags().StringVar(&title, "title", "", "Update title")
 	cmd.Flags().StringVar(&body, "body", "", "Update body")
 	cmd.Flags().StringVar(&branch, "branch", "", "Branch that selects the trail to update (defaults to current)")
-	cmd.Flags().StringVar(&trailSelector, "trail", "", "Trail to update, by number, id, or branch (required to reach a branchless trail)")
+	cmd.Flags().StringVar(&trailSelector, "trail", "", "Trail to update, by number, id, or branch; give a branchless trail by number or id")
 	cmd.Flags().StringVar(&setBranch, "set-branch", "", "Set the trail's branch: renames an existing branch, or attaches one to a branchless trail")
 	cmd.Flags().StringVar(&branchAction, "branch-action", trailBranchActionLink, "How --set-branch attaches to a branchless trail: 'link' an existing branch or 'create' it on the forge")
 	cmd.Flags().StringSliceVar(&labelAdd, "add-label", nil, "Add label(s)")
@@ -1211,8 +1211,9 @@ type trailUpdateInputs struct {
 	// Branch selects the trail to update by the branch it points at (used when
 	// TrailSelector is empty). It is a selector, not a new value.
 	Branch string
-	// TrailSelector selects the trail by number, id, or branch. It is the only
-	// way to reach a branchless trail (which cannot be matched by branch).
+	// TrailSelector selects the trail by number, id, or branch. A branchless
+	// trail has no branch for either this or Branch to match, so it is reachable
+	// only by the number or id form here.
 	TrailSelector string
 	// SetBranch is the new branch to point the trail at (a PATCH rename) or to
 	// attach to a branchless trail (a POST to the /branch endpoint).
@@ -1241,8 +1242,8 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 		}
 
 		// Resolve the target trail. --trail (number/id/branch) wins; otherwise
-		// fall back to --branch or the current branch. Only --trail can reach a
-		// branchless trail, which has no branch to match.
+		// fall back to --branch or the current branch. A branchless trail matches
+		// no branch at all, so only --trail's number/id form finds one.
 		found, err := resolveTrailBySelector(ctx, client, forge, owner, repoName, inputs.TrailSelector, inputs.Branch)
 		if err != nil {
 			return err
