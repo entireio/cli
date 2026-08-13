@@ -501,7 +501,7 @@ func TestConfigureSaveOptionsAreDynamic(t *testing.T) {
 	if len(unchanged) != 1 || unchanged[0].Value != configureSaveCancel {
 		t.Fatalf("unchanged selectable options = %v, want only Cancel", unchanged)
 	}
-	if got := ansi.Strip(configureSaveDescription("main", false, false, false)); got != "  ○ Save — no changes" {
+	if got := ansi.Strip(configureSaveDescription("main", false, false, false)); got != "  Save — no changes" {
 		t.Fatalf("unchanged disabled save = %q", got)
 	}
 
@@ -531,7 +531,7 @@ func TestConfigureSaveOptionsAreDynamic(t *testing.T) {
 		t.Fatalf("selected new-branch option = %q", got)
 	}
 	description := ansi.Strip(configureSaveDescription("main", true, true, true))
-	if !strings.Contains(description, "○ Save — push to main — protected branch") {
+	if !strings.Contains(description, "Save — push to main — protected branch") {
 		t.Fatalf("protected destination is not shown as disabled: %q", description)
 	}
 }

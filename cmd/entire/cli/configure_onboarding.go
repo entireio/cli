@@ -883,12 +883,12 @@ func configureSaveOptions(branch string, protected, requiresPush, hasChanges boo
 
 func configureSaveDescription(branch string, protected, requiresPush, hasChanges bool) string {
 	if !hasChanges {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Render("  ○ Save — no changes")
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Render("  Save — no changes")
 	}
 	if !requiresPush || !protected {
 		return ""
 	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Render("  ○ Save — push to " + branch + " — protected branch")
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Render("  Save — push to " + branch + " — protected branch")
 }
 
 func configureOptionsContain(options []huh.Option[string], value string) bool {
