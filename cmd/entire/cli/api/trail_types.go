@@ -144,9 +144,12 @@ type TrailUpdateResponse struct {
 // the trail already has a branch. Action is required: "create" backfills the
 // branch on the forge at the trail's base if it is missing (needs App write
 // permission); "link" attaches an already-pushed branch and never backfills it.
+// BranchName carries no omitempty on purpose: the endpoint has nothing to
+// attach without it, so it is always sent and an empty one reaches the server
+// as an empty value rather than vanishing from the body.
 type TrailBranchRequest struct {
 	Action     string `json:"action"`
-	BranchName string `json:"branch_name,omitempty"`
+	BranchName string `json:"branch_name"`
 }
 
 // TrailBranchResponse is the response from POST /api/v1/trails/:host/:owner/:repo/:number/branch.

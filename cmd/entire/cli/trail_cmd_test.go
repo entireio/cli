@@ -1032,6 +1032,19 @@ func TestPlanTrailBranchChange(t *testing.T) {
 	}
 }
 
+func TestTrailBranchRequestAlwaysSendsBranchName(t *testing.T) {
+	t.Parallel()
+	// The /branch endpoint has nothing to attach without a branch name, so the
+	// key must survive marshalling even when empty rather than being dropped.
+	out, err := json.Marshal(api.TrailBranchRequest{Action: "link"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(out), `"branch_name"`) {
+		t.Fatalf("body = %s, want it to carry branch_name", out)
+	}
+}
+
 func TestErrAfterBranchAttach(t *testing.T) {
 	t.Parallel()
 

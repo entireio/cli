@@ -1384,8 +1384,14 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 		// retry, rather than assuming nothing changed.
 		meta, hasMeta, bodyReq := splitTrailUpdate(updateReq)
 		if !hasMeta && bodyReq == nil {
-			// Nothing left to PATCH — a branchless attach with no other changes
-			// was already handled above via the /branch endpoint.
+			// Nothing left to PATCH. An attach already printed its own line; any
+			// other way of getting here means the command was asked for a change
+			// it already has (--set-branch naming the current branch, an
+			// interactive edit the user left untouched), so say that rather than
+			// exiting silently and looking like nothing ran.
+			if !attached {
+				fmt.Fprintf(w, "Trail #%d is already up to date\n", found.Number)
+			}
 			return nil
 		}
 		if hasMeta {
