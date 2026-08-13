@@ -284,7 +284,14 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 	var moved, skipped, failed int
 	warnLog := &migrationWarnLog{}
 	for _, sub := range paths.InvisibleRuntimeSubdirs() {
-		m, s, f := moveDirContents(ctx, warnLog, filepath.Join(source, sub), filepath.Join(root, paths.EntireDir, sub))
+		// The migration's DESTINATION is deliberately the literal worktree
+		// .entire dir, in both of its states: on a fresh enable this runs
+		// before .entire/settings.json exists, when AbsPath still routes to
+		// the git common dir — resolving through AbsPath would move files
+		// onto themselves; on a takeover recovery routing already points at
+		// the worktree, and the destination must be that same literal dir
+		// regardless. Routing-independent by design.
+		m, s, f := moveDirContents(ctx, warnLog, filepath.Join(source, sub), filepath.Join(root, paths.EntireDir, sub)) // entire-join-ok: migration destination, routing-independent by design
 		moved += m
 		skipped += s
 		failed += f
