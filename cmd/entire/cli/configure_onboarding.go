@@ -837,7 +837,7 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		if err != nil {
 			return coreapi.ResolvedPlacement{}, nil, "", false, err
 		}
-		return chosen, selectedAgents, defaultConfigureSaveChoice(hasChanges(), requiresPush(), protected), agentsChanged(), nil
+		return chosen, selectedAgents, configureNonInteractiveSaveChoice(hasChanges(), requiresPush(), protected), agentsChanged(), nil
 	}
 
 	group := huh.NewGroup(upstreamControl, agentControl, saveControl)
@@ -904,6 +904,13 @@ func configureFieldHeight(optionCount int, description string) int {
 
 func configureSelectionChanges(selectedHost, currentHost string, selectedAgents, installedAgents []string) (mirrorChanged, agentsChanged bool) {
 	return !strings.EqualFold(selectedHost, currentHost), !sameStrings(selectedAgents, installedAgents)
+}
+
+func configureNonInteractiveSaveChoice(hasChanges, requiresPush, protected bool) string {
+	if !hasChanges {
+		return ""
+	}
+	return defaultConfigureSaveChoice(true, requiresPush, protected)
 }
 
 func configureEffectiveProtection(protected, known, nonInteractive bool) bool {

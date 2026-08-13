@@ -552,6 +552,15 @@ func TestConfigureBranchHasNoUnpushedCommits(t *testing.T) {
 	})
 }
 
+func TestConfigureNoChangeSaveChoices(t *testing.T) {
+	if got := defaultConfigureSaveChoice(false, false, false); got != configureSaveCancel {
+		t.Fatalf("default no-change form choice = %q, want Cancel", got)
+	}
+	if got := configureNonInteractiveSaveChoice(false, false, false); got != "" {
+		t.Fatalf("non-interactive no-change action = %q, want successful no-op", got)
+	}
+}
+
 func TestConfigureEffectiveProtectionFailsClosedNonInteractively(t *testing.T) {
 	tests := []struct {
 		name                             string
