@@ -347,6 +347,18 @@ func matchesExcludeOrigin(_ context.Context, patterns []string, normalizedOrigin
 	return false, nil
 }
 
+// worktreeRootFn is an indirection over paths.WorktreeRoot so tests can pin
+// the gate's fork-avoidance invariant (see GlobalModeActive).
+var worktreeRootFn = paths.WorktreeRoot
+
+// SetWorktreeRootFnForTesting overrides the gate's worktree-root resolver and
+// returns a restore func. Test-only.
+func SetWorktreeRootFnForTesting(fn func(context.Context) (string, error)) func() {
+	old := worktreeRootFn
+	worktreeRootFn = fn
+	return func() { worktreeRootFn = old }
+}
+
 // GlobalModeActive reports whether the user-global tier activates Entire for
 // the current worktree: the global tier is configured and enabled, the
 // worktree is resolvable, and no exclude pattern matches. Every error path
@@ -356,6 +368,15 @@ func matchesExcludeOrigin(_ context.Context, patterns []string, normalizedOrigin
 // "could not check the exclusion" must not degrade into "track the repo the
 // user meant to exclude". A repo with no origin remote stays active (it
 // matches no origin pattern).
+//
+// Ordering invariant (perf): the settings read and the nil/disabled check
+// come FIRST; the worktree root — a `git rev-parse` subprocess fork — is
+// resolved only once the tier is known to be enabled. IsActiveForRepo
+// reaches this gate on every hook invocation in every repo without
+// repo-level setup, and the global tier is unconfigured or disabled for
+// most of those, so putting the fork first taxes the machine-wide common
+// case with a subprocess it never needed. Memoizing variants upstack must
+// keep this order too, even though the root is their cache key.
 //
 // The Debug logs below are best-effort traces, NOT a diagnostic channel: on
 // the hook paths that call this predicate, logging.Init runs only after the
@@ -372,7 +393,7 @@ func GlobalModeActive(ctx context.Context) bool {
 	if us.Global == nil || !us.Global.Enabled {
 		return false
 	}
-	root, err := paths.WorktreeRoot(ctx)
+	root, err := worktreeRootFn(ctx)
 	if err != nil {
 		logging.Debug(ctx, "worktree unresolvable; treating global mode as inactive",
 			slog.String("error", err.Error()))
