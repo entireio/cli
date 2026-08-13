@@ -605,7 +605,10 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		fmt.Fprintln(w, "  Fix the named files, then run `entire enable --global` to (re)install the hooks.")
 	}
 
-	if problems, verr := settings.ValidateGlobalConfig(ctx); verr == nil && len(problems) > 0 {
+	// us was loaded (and the tier confirmed enabled) at the top of this
+	// function; the pure validators take it directly instead of re-reading
+	// the settings file per check.
+	if problems := settings.ValidateGlobalPatterns(us.Global); len(problems) > 0 {
 		fmt.Fprintln(w, "Global tracking: UNUSABLE EXCLUDE PATTERNS")
 		fmt.Fprintln(w, "  Fail closed: each of these deactivates global tracking in every repo it is checked against.")
 		for _, p := range problems {
@@ -614,7 +617,7 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		fmt.Fprintf(w, "  Fix the listed entries in %s: use absolute or ~/ paths and valid doublestar globs.\n", settings.UserSettingsPath())
 	}
 
-	if bad := settings.UnnormalizableOrigins(ctx); len(bad) > 0 {
+	if bad := settings.UnnormalizableOrigins(ctx, us.Global); len(bad) > 0 {
 		fmt.Fprintln(w, "Global tracking: origin not checkable in this repo (informational)")
 		fmt.Fprintln(w, "  exclude_origins is configured, but this repo's origin cannot be normalized to host/owner/repo:")
 		for _, o := range bad {

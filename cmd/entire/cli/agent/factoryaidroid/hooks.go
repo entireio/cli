@@ -36,13 +36,19 @@ const FactorySettingsFileName = "settings.json"
 // metadataDenyRule blocks Factory Droid from reading Entire session metadata
 const metadataDenyRule = "Read(./.entire/metadata/**)"
 
-// entireHookPrefixes are command prefixes that identify Entire hooks. The
-// "go run" prefix is retained so hooks installed by older versions are still
-// recognized.
+// entireHookPrefixes are command prefixes that identify Entire hooks. Each
+// prefix is scoped to the `hooks` verb: recognition by binary name alone
+// (`entire `) would claim user-authored hooks that merely invoke the entire
+// CLI (e.g. `entire status --json > /tmp/s.json`) as ours and destroy them
+// on uninstall or a force reinstall. Every install this agent ever wrote
+// starts `... hooks factoryai-droid `; the "go run" prefixes are retained
+// (unquoted then quoted rev-parse) so hooks installed by older versions are
+// still recognized.
 var entireHookPrefixes = []string{
-	"entire ",
-	agent.LocalDevHookScript + " ",
-	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
+	"entire hooks ",
+	agent.LocalDevHookScript + " hooks ",
+	"go run $(git rev-parse --show-toplevel)/cmd/entire/main.go hooks ",
+	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks `,
 }
 
 // InstallHooks installs Factory AI Droid hooks in .factory/settings.json.

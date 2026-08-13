@@ -125,6 +125,18 @@ func MaybeEnsureGlobalSetup(ctx context.Context) {
 	logging.Debug(logCtx, "global lazy setup completed")
 }
 
+// errHooksDirProbeForTesting, when non-nil, forces HooksDirIsWorktreeResident
+// to fail. Its real failure modes (git exec failing while git otherwise keeps
+// working) cannot be produced portably on disk, so tests inject the failure
+// here — same convention as paths.SetInvisibleProbeFailureForTesting.
+var errHooksDirProbeForTesting error
+
+// SetHooksDirProbeErrorForTesting forces HooksDirIsWorktreeResident to fail
+// with err; nil restores real probing. Test-only.
+func SetHooksDirProbeErrorForTesting(err error) {
+	errHooksDirProbeForTesting = err
+}
+
 // HooksDirIsWorktreeResident reports whether the repo's active hooks
 // directory (after core.hooksPath resolution) lives in the WORKING TREE —
 // inside the worktree root but outside the git dir. The default .git/hooks is
@@ -132,6 +144,9 @@ func MaybeEnsureGlobalSetup(ctx context.Context) {
 // worktree-resident; a committed hooks dir like core.hooksPath=.husky is.
 // Returns the resolved hooks dir for logging.
 func HooksDirIsWorktreeResident(ctx context.Context) (bool, string, error) {
+	if errHooksDirProbeForTesting != nil {
+		return false, "", errHooksDirProbeForTesting
+	}
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
 		return false, "", err

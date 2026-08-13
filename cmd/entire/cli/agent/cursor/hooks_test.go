@@ -531,3 +531,53 @@ func assertEntryWithMatcher(t *testing.T, entries []CursorHookEntry, matcher, co
 	}
 	t.Errorf("hook with matcher=%q command=%q not found", matcher, command)
 }
+
+// TestUserAuthoredEntireCLIHookSurvives_Cursor pins verb-scoped hook
+// recognition at repo scope: a USER-AUTHORED hook whose command merely
+// invokes the entire binary must survive a force install's remove-then-add
+// cycle and uninstall — under the old bare "entire " prefix both destroyed it.
+func TestUserAuthoredEntireCLIHookSurvives_Cursor(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	const userCmd = "entire status --json > /tmp/entire-status.json"
+	cursorDir := filepath.Join(tempDir, ".cursor")
+	if err := os.MkdirAll(cursorDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	existing := `{"version":1,"hooks":{"stop":[{"command":"` + userCmd + `"}]}}`
+	if err := os.WriteFile(filepath.Join(cursorDir, HooksFileName), []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ag := &CursorAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false, true); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	hooksFile := readHooksFile(t, tempDir)
+	if !cursorEntriesContainCommand(hooksFile.Hooks.Stop, userCmd) {
+		t.Fatalf("force install removed the user-authored entire-CLI hook: %+v", hooksFile.Hooks.Stop)
+	}
+
+	if err := ag.UninstallHooks(context.Background()); err != nil {
+		t.Fatalf("UninstallHooks() error = %v", err)
+	}
+	hooksFile = readHooksFile(t, tempDir)
+	if !cursorEntriesContainCommand(hooksFile.Hooks.Stop, userCmd) {
+		t.Errorf("uninstall removed the user-authored entire-CLI hook: %+v", hooksFile.Hooks.Stop)
+	}
+	for _, e := range hooksFile.Hooks.Stop {
+		if strings.Contains(e.Command, "entire hooks cursor") {
+			t.Errorf("Entire hook left behind: %s", e.Command)
+		}
+	}
+}
+
+func cursorEntriesContainCommand(entries []CursorHookEntry, cmd string) bool {
+	for _, e := range entries {
+		if e.Command == cmd {
+			return true
+		}
+	}
+	return false
+}

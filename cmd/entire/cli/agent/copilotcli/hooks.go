@@ -21,12 +21,18 @@ const HooksFileName = "entire.json"
 const hooksDir = ".github/hooks"
 
 // entireHookPrefixes are command prefixes that identify Entire hooks in the
-// bash field. The "go run" prefix is retained so hooks installed by older
+// bash field. Each prefix is scoped to the `hooks` verb: recognition by
+// binary name alone (`entire `) would claim user-authored hooks that merely
+// invoke the entire CLI (e.g. `entire status --json > /tmp/s.json`) as ours
+// and destroy them on uninstall or a force reinstall. Every install this
+// agent ever wrote starts `... hooks copilot-cli `; the "go run" prefixes
+// are retained (unquoted then quoted rev-parse) so hooks installed by older
 // versions are still recognized.
 var entireHookPrefixes = []string{
-	"entire ",
-	agent.LocalDevHookScript + " ",
-	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
+	"entire hooks ",
+	agent.LocalDevHookScript + " hooks ",
+	"go run $(git rev-parse --show-toplevel)/cmd/entire/main.go hooks ",
+	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks `,
 }
 
 // hookConfigKey maps our kebab-case hook names to camelCase JSON keys.

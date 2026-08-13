@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -178,6 +179,52 @@ func TestCheckGlobalTracking_ExplainsWorktreeResidentHooksPath(t *testing.T) {
 	}
 	if !prefs.GlobalSetupCompleted {
 		t.Error("doctor must NOT clear the marker for a worktree-resident hooksPath")
+	}
+}
+
+// TestCheckGlobalTracking_ProbeErrorReportsUnverifiedWithoutClearing pins the
+// third missing-hooks shape: when the hooksPath residency probe itself fails,
+// doctor must print the UNVERIFIED warning and mutate nothing — the lazy
+// setup treats the same error as "skip installation", so clearing the marker
+// would promise a reinstall that never happens (an infinite mis-advice loop).
+func TestCheckGlobalTracking_ProbeErrorReportsUnverifiedWithoutClearing(t *testing.T) {
+	setupTestRepo(t)
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	isolateUserHome(t)
+	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+	var buf bytes.Buffer
+	installUserAgentHooks(t.Context(), &buf)
+
+	// The drift-suspect shape: marker set, git hooks never installed.
+	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
+		p.GlobalSetupCompleted = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	strategy.SetHooksDirProbeErrorForTesting(errors.New("forced probe failure (test seam)"))
+	t.Cleanup(func() { strategy.SetHooksDirProbeErrorForTesting(nil) })
+
+	got := runCheckGlobalTracking(t)
+	if !strings.Contains(got, "GIT HOOK STATE UNVERIFIED") {
+		t.Fatalf("probe error must report UNVERIFIED, got: %q", got)
+	}
+	if !strings.Contains(got, "forced probe failure (test seam)") {
+		t.Errorf("warning must carry the probe error, got: %q", got)
+	}
+	for _, banned := range []string{"GIT HOOKS MISSING", "Marker cleared", "GIT HOOKS SKIPPED"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("probe-error shape must not be treated as drift (%q), got: %q", banned, got)
+		}
+	}
+	prefs, err := settings.LoadClonePreferences(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prefs.GlobalSetupCompleted {
+		t.Error("doctor must NOT clear the marker when the residency probe fails")
 	}
 }
 

@@ -107,6 +107,15 @@ Contract:
 - Implement the interface only for agents with a verified user/repo dedup
   story (both scopes installed must never double-fire hooks); never fake it
   for agents without a real user-level surface.
+- Before any THIRD agent gains `UserHookSupport`, `enable --global` must grow
+  an agent-availability gate — install user-level hooks only for agents whose
+  config surface is detected (e.g. `~/.claude`, `~/.gemini` exist), or via a
+  picker — and doctor's USER-LEVEL AGENT HOOKS MISSING check must scope
+  itself to detected agents. With today's two near-universal agents,
+  install-for-all deliberately errs toward coverage; at three-plus agents it
+  starts creating home-dir config for tools the user doesn't have, and doctor
+  would warn about never-used agents. The availability gate is the recorded
+  consent story (trail 968 finding 019fef03-2ad1).
 
 Audit of built-in agents (2026-08), recorded per the global-enable design:
 

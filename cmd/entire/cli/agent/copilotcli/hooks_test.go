@@ -686,3 +686,58 @@ func assertEntryComment(t *testing.T, entries []CopilotHookEntry, comment string
 	}
 	t.Errorf("hook with comment %q not found", comment)
 }
+
+// TestUserAuthoredEntireCLIHookSurvives_CopilotCLI pins verb-scoped hook
+// recognition at repo scope: a USER-AUTHORED hook whose bash command merely
+// invokes the entire binary must survive a force install's remove-then-add
+// cycle and uninstall — under the old bare "entire " prefix both destroyed it.
+func TestUserAuthoredEntireCLIHookSurvives_CopilotCLI(t *testing.T) {
+	// Cannot use t.Parallel() because t.Chdir is required.
+	tempDir := t.TempDir()
+	initGitRepo(t, tempDir)
+	t.Chdir(tempDir)
+
+	const userCmd = "entire status --json > /tmp/entire-status.json"
+	existingJSON := `{
+  "version": 1,
+  "hooks": {
+    "agentStop": [
+      {"type": "command", "bash": "` + userCmd + `", "comment": "User custom"}
+    ]
+  }
+}`
+	githubHooksDir := filepath.Join(tempDir, ".github", "hooks")
+	if err := os.MkdirAll(githubHooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hooksPath := filepath.Join(githubHooksDir, HooksFileName)
+	if err := os.WriteFile(hooksPath, []byte(existingJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ag := &CopilotCLIAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false, true); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), userCmd) {
+		t.Fatalf("force install removed the user-authored entire-CLI hook: %s", data)
+	}
+
+	if err := ag.UninstallHooks(context.Background()); err != nil {
+		t.Fatalf("UninstallHooks() error = %v", err)
+	}
+	data, err = os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), userCmd) {
+		t.Errorf("uninstall removed the user-authored entire-CLI hook: %s", data)
+	}
+	if strings.Contains(string(data), "entire hooks copilot-cli") {
+		t.Errorf("Entire hooks left behind: %s", data)
+	}
+}
