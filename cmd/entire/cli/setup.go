@@ -78,7 +78,11 @@ type EnableOptions struct {
 	// when the caller is running the bootstrap flow, which takes over
 	// presentation of the final state (commit, push, done).
 	SuppressDoneMessage bool
-	Yes                 bool
+	// SuppressAdditionalSetup keeps focused callers (the configure onboarding
+	// flow) from offering Vercel changes or history import after their own
+	// explicitly presented choices. The normal enable flow leaves this false.
+	SuppressAdditionalSetup bool
+	Yes                     bool
 	// ImportHistory opts into importing the selected agents' pre-existing
 	// session history during first-time setup. Deliberately NOT implied by
 	// Yes: ingesting a month of local transcripts is not a setup default (see
@@ -718,13 +722,14 @@ func newSetupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "configure",
 		Short: "Update Entire settings in the current repository",
-		Long: `Update non-agent Entire settings in the current repository.
+		Long: `Interactively connect the current repository to Entire, choose a mirror,
+select agent integrations, and save the resulting configuration.
 
-Manages telemetry, git-hook installation mode, strategy options, and summary
-provider configuration. Agent installation is handled by 'entire agent'.
+When flags are supplied, configure remains a non-interactive settings editor for
+telemetry, git-hook installation mode, strategy options, and summary providers.
 
 Examples:
-  entire configure                                # Show this help
+  entire configure                                # Run interactive onboarding
   entire configure --telemetry=false              # Opt out of telemetry
   entire configure --absolute-git-hook-path       # Reinstall git hook with absolute path
   entire configure --force                        # Reinstall git hook
@@ -742,10 +747,16 @@ Examples:
 			}
 
 			if !hasConfigureSettingsFlags(cmd) {
+				// Bare configure is the onboarding entry point on a terminal. Keep
+				// help as the deterministic fallback for pipes and automation; all
+				// existing flag-based forms remain non-interactive below.
+				if interactive.CanPromptInteractively() {
+					return runConfigureOnboarding(cmd, opts)
+				}
 				if err := cmd.Help(); err != nil {
 					return fmt.Errorf("failed to render help: %w", err)
 				}
-				fmt.Fprintln(cmd.OutOrStdout(), "\nFor agent setup, use 'entire agent' (e.g. 'entire agent add claude-code').")
+				fmt.Fprintln(cmd.OutOrStdout(), "\nInteractive onboarding requires a terminal. For agent-only setup, use 'entire agent'.")
 				return nil
 			}
 
@@ -1322,12 +1333,14 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	fmt.Fprintln(w, "  ✓ Configured project")
 	fmt.Fprintf(w, "    %s\n", configDisplay)
 
-	var vercelPromptFn func() (bool, error)
-	if opts.Yes {
-		vercelPromptFn = func() (bool, error) { return true, nil }
-	}
-	if _, err := maybePromptVercelDeploymentDisable(ctx, w, targetFile, vercelPromptFn); err != nil {
-		return err
+	if !opts.SuppressAdditionalSetup {
+		var vercelPromptFn func() (bool, error)
+		if opts.Yes {
+			vercelPromptFn = func() (bool, error) { return true, nil }
+		}
+		if _, err := maybePromptVercelDeploymentDisable(ctx, w, targetFile, vercelPromptFn); err != nil {
+			return err
+		}
 	}
 
 	// Ask about telemetry consent (only if not already asked).
@@ -1359,7 +1372,9 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Offer to import pre-existing agent history for the just-selected agents.
 	// First-run only; best-effort (never fails enable).
-	maybeOfferSessionImport(ctx, w, agents, opts, firstRun)
+	if !opts.SuppressAdditionalSetup {
+		maybeOfferSessionImport(ctx, w, agents, opts, firstRun)
+	}
 
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary after
