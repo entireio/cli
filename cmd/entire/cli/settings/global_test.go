@@ -203,6 +203,67 @@ func TestMatchesExcludePathFold(t *testing.T) {
 	}
 }
 
+func TestMatchesExcludePathExact(t *testing.T) {
+	t.Parallel()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	cases := []struct {
+		name    string
+		entries []string
+		root    string
+		want    bool
+		wantErr bool
+	}{
+		{"exact match excludes", []string{"/tmp/scratch"}, "/tmp/scratch", true, false},
+		// The defining difference from exclude_paths: no subtree cascade.
+		{"child repo of excluded-exact path is NOT excluded", []string{"/tmp/scratch"}, "/tmp/scratch/repo", false, false},
+		{"tilde expands to home", []string{"~"}, home, true, false},
+		{"tilde child not excluded by bare ~", []string{"~"}, filepath.Join(home, "oss", "repo"), false, false},
+		{"tilde path expands", []string{"~/dotfiles"}, filepath.Join(home, "dotfiles"), true, false},
+		{"trailing slash cleaned", []string{"/tmp/scratch/"}, "/tmp/scratch", true, false},
+		// Entries are plain paths: glob meta characters have no meaning.
+		{"glob chars are literal", []string{"/tmp/scratch/*"}, "/tmp/scratch/x", false, false},
+		// Unusable entries fail CLOSED, same discipline as exclude_paths.
+		{"relative entry fails closed", []string{"tmp/scratch"}, "/tmp/scratch", false, true},
+		{"tilde-user form fails closed", []string{"~scratch"}, "/tmp/scratch", false, true},
+		{"blank entry skipped", []string{"", "   "}, "/tmp/scratch", false, false},
+		{"empty list", nil, "/anywhere", false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := matchesExcludePathExact(t.Context(), c.entries, c.root)
+			if c.wantErr != (err != nil) {
+				t.Fatalf("matchesExcludePathExact(%v, %q) err = %v, wantErr %v", c.entries, c.root, err, c.wantErr)
+			}
+			if got != c.want {
+				t.Errorf("matchesExcludePathExact(%v, %q) = %v, want %v", c.entries, c.root, got, c.want)
+			}
+		})
+	}
+}
+
+func TestMatchesExcludePathExactFold(t *testing.T) {
+	t.Parallel()
+	entries := []string{"/TMP/Scratch"}
+	matched, err := matchesExcludePathExactFold(t.Context(), entries, "/tmp/scratch", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched {
+		t.Error("without folding, a differently-cased entry must not match")
+	}
+	matched, err = matchesExcludePathExactFold(t.Context(), entries, "/tmp/scratch", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matched {
+		t.Error("with folding, a differently-cased entry must match")
+	}
+}
+
 func TestMatchesExcludeOrigin(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -342,6 +403,41 @@ func TestIsActiveForRepo(t *testing.T) {
 		t.Chdir(dir)
 		if IsActiveForRepo(t.Context()) {
 			t.Fatal("excluded path must not activate")
+		}
+	})
+
+	t.Run("exact path exclusion", func(t *testing.T) {
+		dir := newRepo(t)
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		writeUserSettings(t, cfg, `{"global":{"enabled":true,"exclude_paths_exact":["`+filepath.ToSlash(resolved)+`"]}}`)
+		t.Chdir(dir)
+		if IsActiveForRepo(t.Context()) {
+			t.Fatal("a worktree root listed in exclude_paths_exact must not activate")
+		}
+	})
+
+	t.Run("exact path exclusion does not cascade to child repos", func(t *testing.T) {
+		parent := t.TempDir()
+		dir := filepath.Join(parent, "repo")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		testutil.InitRepo(t, dir)
+		resolvedParent, err := filepath.EvalSymlinks(parent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		writeUserSettings(t, cfg, `{"global":{"enabled":true,"exclude_paths_exact":["`+filepath.ToSlash(resolvedParent)+`"]}}`)
+		t.Chdir(dir)
+		if !IsActiveForRepo(t.Context()) {
+			t.Fatal("exclude_paths_exact must not exclude repos beneath the listed path")
 		}
 	})
 

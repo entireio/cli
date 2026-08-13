@@ -1356,9 +1356,17 @@ func IsSetUpAny(ctx context.Context) bool {
 // as disabled (fail closed).
 // Use this for hooks that should be no-ops when Entire is not active.
 func IsSetUpAndEnabled(ctx context.Context) bool {
-	if !IsSetUpAny(ctx) {
-		return false
-	}
+	return IsSetUpAny(ctx) && repoSettingsEnabled(ctx)
+}
+
+// repoSettingsEnabled loads the repo settings and reports Enabled, treating
+// any read error as disabled (fail closed). Callers must have already
+// established that some settings file exists (IsSetUpAny) — without that
+// guard, Load's default Enabled: true would report a never-enabled repo as
+// enabled. Split out so gates that have just called IsSetUpAny (e.g.
+// IsActiveForRepo) don't pay its Lstat pair a second time via
+// IsSetUpAndEnabled on every hook invocation.
+func repoSettingsEnabled(ctx context.Context) bool {
 	s, err := Load(ctx)
 	if err != nil {
 		return false
