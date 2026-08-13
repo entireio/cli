@@ -164,12 +164,19 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 		branch = ""
 	}
 	protected := false
+	protectionKnown := branch == ""
 	if branch != "" {
 		if detected, protectionErr := configureBranchProtected(ctx, owner, repo, branch); protectionErr == nil {
-			// Advisory only; git push remains authoritative.
 			protected = detected
+			protectionKnown = true
 		}
 	}
+	// Non-interactive onboarding has no confirmation step. If GitHub protection
+	// cannot be checked (common when gh is unavailable in CI), fail closed and
+	// use the review branch rather than pushing directly to the checked-out
+	// branch. Interactive users can still explicitly choose a direct push when
+	// protection is known not to block it.
+	protected = configureEffectiveProtection(protected, protectionKnown, opts.Yes)
 	branchPushSafe := false
 	if branch != "" && len(initialChanges) == 0 {
 		branchPushSafe = configureBranchHasNoUnpushedCommits(ctx, repoRoot)
@@ -897,6 +904,10 @@ func configureFieldHeight(optionCount int, description string) int {
 
 func configureSelectionChanges(selectedHost, currentHost string, selectedAgents, installedAgents []string) (mirrorChanged, agentsChanged bool) {
 	return !strings.EqualFold(selectedHost, currentHost), !sameStrings(selectedAgents, installedAgents)
+}
+
+func configureEffectiveProtection(protected, known, nonInteractive bool) bool {
+	return protected || (nonInteractive && !known)
 }
 
 func defaultConfigureSaveChoice(hasChanges, requiresPush, protected bool) string {

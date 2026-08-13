@@ -551,6 +551,26 @@ func TestConfigureBranchHasNoUnpushedCommits(t *testing.T) {
 	})
 }
 
+func TestConfigureEffectiveProtectionFailsClosedNonInteractively(t *testing.T) {
+	tests := []struct {
+		name                             string
+		protected, known, nonInteractive bool
+		want                             bool
+	}{
+		{name: "known unprotected", known: true, nonInteractive: true},
+		{name: "known protected", protected: true, known: true, nonInteractive: true, want: true},
+		{name: "unknown interactive remains advisory"},
+		{name: "unknown non-interactive fails closed", nonInteractive: true, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := configureEffectiveProtection(tt.protected, tt.known, tt.nonInteractive); got != tt.want {
+				t.Fatalf("configureEffectiveProtection() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConfigureRulesBlockDirectPush(t *testing.T) {
 	tests := []struct {
 		name string
