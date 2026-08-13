@@ -475,16 +475,19 @@ const (
 	InactiveReasonGlobalOff
 )
 
-// globalModeCache memoizes the global-mode probe per worktree root. Hooks are
+// globalModeCache memoizes the global-mode probe per working directory. Hooks are
 // one-shot processes that evaluate the gate more than once (logging init plus
 // the entry gate), and the exclude_origins check forks git each time; one
 // probe per process removes that cost and guarantees every gate in the
-// process sees one consistent answer. The root key keeps in-process tests
-// with multiple temp repos isolated (same pattern as the invisible-routing
-// cache in paths).
+// process sees one consistent answer. The key is the CWD, not the worktree
+// root: resolving the root is itself a `git rev-parse` fork, and keying on it
+// would force that fork even on the unconfigured/disabled fast path (see the
+// ordering invariant on GlobalModeActive). The CWD key still keeps in-process
+// tests with multiple temp repos isolated (same pattern as the
+// invisible-routing cache in paths, whose worktree cache is also CWD-keyed).
 var (
 	globalModeMu     sync.Mutex
-	globalModeRoot   string
+	globalModeKey    string
 	globalModeCached bool
 	globalModeActive bool
 	globalModeReason InactiveReason
@@ -496,11 +499,23 @@ var (
 // SaveUserSettings alike) so a writer process observes its own write.
 func ClearGlobalModeCache() {
 	globalModeMu.Lock()
-	globalModeRoot = ""
+	globalModeKey = ""
 	globalModeCached = false
 	globalModeActive = false
 	globalModeReason = InactiveReasonNone
 	globalModeMu.Unlock()
+}
+
+// worktreeRootFn is an indirection over paths.WorktreeRoot so tests can pin
+// the gate's fork-avoidance invariant (see GlobalModeActive).
+var worktreeRootFn = paths.WorktreeRoot
+
+// SetWorktreeRootFnForTesting overrides the gate's worktree-root resolver and
+// returns a restore func. Test-only.
+func SetWorktreeRootFnForTesting(fn func(context.Context) (string, error)) func() {
+	old := worktreeRootFn
+	worktreeRootFn = fn
+	return func() { worktreeRootFn = old }
 }
 
 // GlobalModeActive reports whether the user-global tier activates Entire for
@@ -514,6 +529,15 @@ func ClearGlobalModeCache() {
 // matches no origin pattern).
 //
 // The result is memoized per process (see globalModeCache above).
+//
+// Ordering invariant (perf): on a cache miss, the settings read and the
+// nil/disabled check come FIRST; the worktree root — a `git rev-parse`
+// subprocess fork — is resolved only once the tier is known to be enabled.
+// IsActiveForRepo reaches this gate on every hook invocation in every repo
+// without repo-level setup, and the global tier is unconfigured or disabled
+// for most of those, so putting the fork first taxes the machine-wide common
+// case with a subprocess it never needed (that is also why the memo is keyed
+// on the CWD rather than the root).
 //
 // The Debug logs here and in computeGlobalModeStatus are best-effort traces,
 // NOT a diagnostic channel: on the hook paths that call this predicate,
@@ -531,27 +555,28 @@ func GlobalModeActive(ctx context.Context) bool {
 // globalModeStatus is GlobalModeActive plus the inactive reason, memoized
 // together so both callers observe one consistent answer per process.
 func globalModeStatus(ctx context.Context) (bool, InactiveReason) {
-	root, err := paths.WorktreeRoot(ctx)
+	cwd, err := os.Getwd() //nolint:forbidigo // memo key only; resolving the worktree root here would fork git on the fast path
 	if err != nil {
-		logging.Debug(ctx, "worktree unresolvable; treating global mode as inactive",
-			slog.String("error", err.Error()))
-		return false, InactiveReasonGlobalOff
+		cwd = ""
 	}
 	globalModeMu.Lock()
 	defer globalModeMu.Unlock()
-	if globalModeCached && globalModeRoot == root {
+	if globalModeCached && globalModeKey == cwd {
 		return globalModeActive, globalModeReason
 	}
-	active, reason := computeGlobalModeStatus(ctx, root)
-	globalModeRoot = root
+	active, reason := computeGlobalModeStatus(ctx)
+	globalModeKey = cwd
 	globalModeCached = true
 	globalModeActive = active
 	globalModeReason = reason
 	return active, reason
 }
 
-// computeGlobalModeStatus is the uncached evaluation behind globalModeStatus.
-func computeGlobalModeStatus(ctx context.Context, root string) (bool, InactiveReason) {
+// computeGlobalModeStatus is the uncached evaluation behind globalModeStatus:
+// settings and the nil/disabled check first — the machine-wide common case
+// answers without any subprocess — then root resolution and exclusion
+// matching only for an enabled tier.
+func computeGlobalModeStatus(ctx context.Context) (bool, InactiveReason) {
 	us, err := LoadUserSettings(ctx)
 	if err != nil {
 		logging.Debug(ctx, "user settings unreadable; treating global mode as inactive",
@@ -559,6 +584,12 @@ func computeGlobalModeStatus(ctx context.Context, root string) (bool, InactiveRe
 		return false, InactiveReasonGlobalOff
 	}
 	if !us.GlobalEnabled() {
+		return false, InactiveReasonGlobalOff
+	}
+	root, err := worktreeRootFn(ctx)
+	if err != nil {
+		logging.Debug(ctx, "worktree unresolvable; treating global mode as inactive",
+			slog.String("error", err.Error()))
 		return false, InactiveReasonGlobalOff
 	}
 	excluded, err := matchesExcludePath(ctx, us.Global.ExcludePaths, root)
