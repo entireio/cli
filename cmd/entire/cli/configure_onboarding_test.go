@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -28,6 +30,9 @@ const (
 	testGitRevParse     = "rev-parse"
 	testConfigureSHA    = "abc123"
 	testGitLSRemote     = "ls-remote"
+	testGitShowRef      = "show-ref"
+	testGitPush         = "push"
+	testGitAdd          = "add"
 )
 
 func TestConfigureCmdBareInteractiveRunsOnboarding(t *testing.T) {
@@ -658,11 +663,11 @@ func TestConfigureSaveAndPushUsesForgeRemote(t *testing.T) {
 	var pushArgs []string
 	gitRunner = func(_ context.Context, _ string, args ...string) (string, error) {
 		switch args[0] {
-		case "add", gitCmdCommit:
+		case testGitAdd, gitCmdCommit:
 			return "", nil
 		case testGitRevParse:
 			return testConfigureSHA, nil
-		case "push":
+		case testGitPush:
 			pushArgs = append([]string(nil), args...)
 			return "", nil
 		default:
@@ -673,7 +678,7 @@ func TestConfigureSaveAndPushUsesForgeRemote(t *testing.T) {
 	if err := configureSaveAndPush(cmd, dir, "acme", "widget", nil, generated, "feature", false, configureSaveDirect, mirrorCloneProviderGitHub, time.Now); err != nil {
 		t.Fatalf("configureSaveAndPush() error = %v", err)
 	}
-	want := []string{"push", "-u", mirrorCloneProviderGitHub, "feature"}
+	want := []string{testGitPush, "-u", mirrorCloneProviderGitHub, "feature"}
 	if !reflect.DeepEqual(pushArgs, want) {
 		t.Fatalf("push args = %v, want %v", pushArgs, want)
 	}
@@ -685,7 +690,7 @@ func TestAvailableConfigureBranchSkipsRemoteCollision(t *testing.T) {
 	var remoteChecks []string
 	gitRunner = func(_ context.Context, _ string, args ...string) (string, error) {
 		switch args[0] {
-		case "show-ref":
+		case testGitShowRef:
 			cmd := exec.CommandContext(context.Background(), "sh", "-c", "exit 1")
 			return "", cmd.Run()
 		case testGitLSRemote:
@@ -726,13 +731,13 @@ func TestConfigureSaveNewBranchReturnsToOriginalBranch(t *testing.T) {
 	gitRunner = func(_ context.Context, _ string, args ...string) (string, error) {
 		calls = append(calls, append([]string(nil), args...))
 		switch args[0] {
-		case "show-ref":
+		case testGitShowRef:
 			cmd := exec.CommandContext(context.Background(), "sh", "-c", "exit 1")
 			return "", cmd.Run()
 		case testGitLSRemote:
 			cmd := exec.CommandContext(context.Background(), "sh", "-c", "exit 2")
 			return "", cmd.Run()
-		case "switch", "add", gitCmdCommit, "push":
+		case "switch", testGitAdd, gitCmdCommit, testGitPush, "restore":
 			return "", nil
 		case testGitRevParse:
 			return testConfigureSHA, nil
@@ -744,8 +749,108 @@ func TestConfigureSaveNewBranchReturnsToOriginalBranch(t *testing.T) {
 	if err := configureSaveAndPush(cmd, dir, "acme", "widget", nil, generated, "feature", false, configureSaveNewBranch, mirrorCloneProviderGitHub, time.Now); err != nil {
 		t.Fatalf("configureSaveAndPush() error = %v", err)
 	}
-	if got := calls[len(calls)-1]; !reflect.DeepEqual(got, []string{"switch", "feature"}) {
-		t.Fatalf("last git call = %v, want return to original branch", got)
+	wantRestore := []string{"restore", "--source", configureBranchBase, "--worktree", "--", ".entire/settings.json"}
+	if got := calls[len(calls)-1]; !reflect.DeepEqual(got, wantRestore) {
+		t.Fatalf("last git call = %v, want configuration restored on original branch as %v", got, wantRestore)
+	}
+}
+
+func TestConfigureSaveNewBranchPushFailureRestoresConfiguration(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	previous := gitRunner
+	t.Cleanup(func() { gitRunner = previous })
+	var calls [][]string
+	gitRunner = func(_ context.Context, _ string, args ...string) (string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		switch args[0] {
+		case testGitShowRef:
+			exit := exec.CommandContext(context.Background(), "sh", "-c", "exit 1")
+			return "", exit.Run()
+		case testGitLSRemote:
+			exit := exec.CommandContext(context.Background(), "sh", "-c", "exit 2")
+			return "", exit.Run()
+		case "switch", testGitAdd, gitCmdCommit, "restore":
+			return "", nil
+		case testGitRevParse:
+			return testConfigureSHA, nil
+		case testGitPush:
+			return "", errors.New("push rejected")
+		default:
+			return "", fmt.Errorf("unexpected git args: %v", args)
+		}
+	}
+	generated := []string{".entire/settings.json"}
+	err := configureSaveAndPush(cmd, t.TempDir(), "acme", "widget", nil, generated, "feature", false, configureSaveNewBranch, mirrorCloneProviderGitHub, time.Now)
+	if err == nil || !strings.Contains(err.Error(), "push rejected") {
+		t.Fatalf("configureSaveAndPush() error = %v, want push failure", err)
+	}
+	wantRestore := []string{"restore", "--source", configureBranchBase, "--worktree", "--", generated[0]}
+	if got := calls[len(calls)-1]; !reflect.DeepEqual(got, wantRestore) {
+		t.Fatalf("last git call after push failure = %v, want %v", got, wantRestore)
+	}
+}
+
+func TestConfigureSaveNewBranchKeepsConfigurationOnOriginalBranch(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "repo")
+	remoteDir := filepath.Join(root, "forge.git")
+	if err := os.Mkdir(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	runGit := func(dir string, args ...string) string {
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	runGit(repoDir, "init", "--quiet")
+	runGit(repoDir, "config", "user.name", "Configure Test")
+	runGit(repoDir, "config", "user.email", "configure@example.com")
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base file: %v", err)
+	}
+	runGit(repoDir, testGitAdd, "README.md")
+	runGit(repoDir, "commit", "--quiet", "-m", "base")
+	originalBranch := runGit(repoDir, "branch", "--show-current")
+	runGit(root, "init", "--bare", "--quiet", remoteDir)
+	runGit(repoDir, "remote", testGitAdd, mirrorCloneProviderGitHub, remoteDir)
+
+	generatedPath := filepath.Join(repoDir, ".entire", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(generatedPath), 0o755); err != nil {
+		t.Fatalf("mkdir generated config: %v", err)
+	}
+	if err := os.WriteFile(generatedPath, []byte("{\"enabled\":true}\n"), 0o644); err != nil {
+		t.Fatalf("write generated config: %v", err)
+	}
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	generated := []string{".entire/settings.json"}
+	if err := configureSaveAndPush(cmd, repoDir, "acme", "widget", nil, generated, originalBranch, false, configureSaveNewBranch, mirrorCloneProviderGitHub, time.Now); err != nil {
+		t.Fatalf("configureSaveAndPush() error = %v", err)
+	}
+	if got := runGit(repoDir, "branch", "--show-current"); got != originalBranch {
+		t.Fatalf("current branch = %q, want %q", got, originalBranch)
+	}
+	contents, err := os.ReadFile(generatedPath)
+	if err != nil {
+		t.Fatalf("configuration disappeared after returning to original branch: %v", err)
+	}
+	if got, want := string(contents), "{\"enabled\":true}\n"; got != want {
+		t.Fatalf("configuration contents = %q, want %q", got, want)
+	}
+	if got := runGit(repoDir, "status", "--porcelain", "--", generated[0]); got != "?? .entire/settings.json" {
+		t.Fatalf("configuration status on original branch = %q, want uncommitted generated file", got)
 	}
 }
 
@@ -753,10 +858,10 @@ func TestConfigureUseMirrorPreservesOriginUnderAvailableForgeRemote(t *testing.T
 	setupTestRepo(t)
 	ctx := context.Background()
 	const oldOrigin = "https://github.com/acme/widget.git"
-	if _, err := gitRunner(ctx, ".", "remote", "add", defaultMirrorRemote, oldOrigin); err != nil {
+	if _, err := gitRunner(ctx, ".", "remote", testGitAdd, defaultMirrorRemote, oldOrigin); err != nil {
 		t.Fatalf("add origin: %v", err)
 	}
-	if _, err := gitRunner(ctx, ".", "remote", "add", defaultMirrorUpstreamRemote, "https://github.com/upstream/widget.git"); err != nil {
+	if _, err := gitRunner(ctx, ".", "remote", testGitAdd, defaultMirrorUpstreamRemote, "https://github.com/upstream/widget.git"); err != nil {
 		t.Fatalf("add upstream: %v", err)
 	}
 
@@ -788,7 +893,7 @@ func TestConfigureUseMirrorCreatesForgeRemoteWithGHProtocolPreference(t *testing
 	setupTestRepo(t)
 	ctx := context.Background()
 	mirrorURL := mirrorCloneURL(testConfigureUSHost, "acme", "widget")
-	if _, err := gitRunner(ctx, ".", "remote", "add", defaultMirrorRemote, mirrorURL); err != nil {
+	if _, err := gitRunner(ctx, ".", "remote", testGitAdd, defaultMirrorRemote, mirrorURL); err != nil {
 		t.Fatalf("add mirror origin: %v", err)
 	}
 

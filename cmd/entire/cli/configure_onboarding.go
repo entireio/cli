@@ -1327,6 +1327,7 @@ func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, befo
 
 	pushBranch := branch
 	switchedBranch := false
+	configurationCommitted := false
 	if choice == configureSaveNewBranch {
 		var err error
 		pushBranch, err = availableConfigureBranch(cmd.Context(), repoRoot, forgeRemote, now)
@@ -1340,9 +1341,9 @@ func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, befo
 		defer func() {
 			if switchedBranch {
 				// Best-effort fallback for failures after branch creation. Successful
-				// paths switch explicitly below so a restore error can be returned.
-				if _, restoreErr := gitRunner(context.WithoutCancel(cmd.Context()), repoRoot, "switch", branch); restoreErr != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not return to original branch %q: %v\n", branch, restoreErr)
+				// paths restore explicitly below so an error can be returned.
+				if restoreErr := restoreConfigureOriginalBranch(context.WithoutCancel(cmd.Context()), repoRoot, pushBranch, branch, generated, configurationCommitted); restoreErr != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not return configuration to original branch %q: %v\n", branch, restoreErr)
 				}
 			}
 		}()
@@ -1356,6 +1357,7 @@ func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, befo
 	if _, err := gitRunner(cmd.Context(), repoRoot, "commit", "-m", configureCommitMessage); err != nil {
 		return fmt.Errorf("commit configuration: %w", err)
 	}
+	configurationCommitted = true
 	sha, err := gitRunner(cmd.Context(), repoRoot, "rev-parse", "--short", "HEAD")
 	if err != nil {
 		return fmt.Errorf("read configuration commit: %w", err)
@@ -1366,13 +1368,37 @@ func configureSaveAndPush(cmd *cobra.Command, repoRoot, owner, repo string, befo
 	}
 	fmt.Fprintf(outW, "✓ Pushed to %s/%s\n", forgeRemote, pushBranch)
 	if choice == configureSaveNewBranch {
-		if _, err := gitRunner(cmd.Context(), repoRoot, "switch", branch); err != nil {
-			return fmt.Errorf("return to original branch %q: %w", branch, err)
+		if err := restoreConfigureOriginalBranch(cmd.Context(), repoRoot, pushBranch, branch, generated, configurationCommitted); err != nil {
+			return err
 		}
 		switchedBranch = false
-		fmt.Fprintf(outW, "✓ Returned to %s\n", branch)
+		fmt.Fprintf(outW, "✓ Returned to %s with configuration applied locally\n", branch)
 		fmt.Fprintln(outW, "  Open a trail to merge it:")
 		fmt.Fprintf(outW, "  %s/gh/%s/%s/trails/new?branch=%s\n", configureWebBaseURL(), url.PathEscape(owner), url.PathEscape(repo), url.QueryEscape(pushBranch))
+	}
+	return nil
+}
+
+func restoreConfigureOriginalBranch(ctx context.Context, repoRoot, sourceBranch, originalBranch string, generated []string, committed bool) error {
+	if _, err := gitRunner(ctx, repoRoot, "switch", originalBranch); err != nil {
+		return fmt.Errorf("return to original branch %q: %w", originalBranch, err)
+	}
+
+	var args []string
+	if committed {
+		// Switching to the original branch removes files introduced by the
+		// configuration commit. Restore only the generated paths from the review
+		// branch into the worktree, without touching the original branch's index,
+		// so the repository remains configured while awaiting review.
+		args = []string{"restore", "--source", sourceBranch, "--worktree", "--"}
+	} else {
+		// A failure before commit can carry staged generated files across the
+		// switch. Unstage those paths while preserving their worktree contents.
+		args = []string{"reset", "--"}
+	}
+	args = append(args, generated...)
+	if _, err := gitRunner(ctx, repoRoot, args...); err != nil {
+		return fmt.Errorf("restore configuration on original branch %q: %w", originalBranch, err)
 	}
 	return nil
 }
