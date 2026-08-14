@@ -597,6 +597,7 @@ func TestConfigureRulesBlockDirectPush(t *testing.T) {
 		{name: "required checks block", raw: `[{"type":"required_status_checks"}]`, want: true},
 		{name: "required signatures block", raw: `[{"type":"required_signatures"}]`, want: true},
 		{name: "merge queue blocks", raw: `[{"type":"merge_queue"}]`, want: true},
+		{name: "locked branch blocks", raw: `[{"type":"lock_branch"}]`, want: true},
 		{name: "no rules", raw: `[]`},
 	}
 	for _, tt := range tests {
