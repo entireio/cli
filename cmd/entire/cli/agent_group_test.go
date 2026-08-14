@@ -260,6 +260,51 @@ func TestRunAgentList_ExternalIsSuperset(t *testing.T) {
 	}
 }
 
+// TestRunAgentList_MarksExternalProvenance verifies that the superset listing
+// distinguishes external plugins from built-ins: external agents are arbitrary
+// executables resolved from $PATH, so rendering them identically to shipped
+// agents would hide a trust-relevant distinction.
+func TestRunAgentList_MarksExternalProvenance(t *testing.T) {
+	// Cannot use t.Parallel: mutates PATH via t.Setenv and cwd via t.Chdir.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	t.Cleanup(agent.SnapshotForTesting())
+
+	builtins := agent.StringList()
+	if len(builtins) == 0 {
+		t.Skip("no built-in agents registered in this build")
+	}
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, ".entire/settings.json", `{"enabled":true,"external_agents":true}`)
+	t.Chdir(repoDir)
+
+	const agentName = "ext-provenance-test"
+	externalDir := t.TempDir()
+	writeExternalAgentBinary(t, externalDir, agentName)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var ext bytes.Buffer
+	if err := runAgentList(context.Background(), &ext, true); err != nil {
+		t.Fatalf("runAgentList (--external): %v", err)
+	}
+
+	for _, line := range strings.Split(ext.String(), "\n") {
+		switch {
+		case strings.Contains(line, agentName):
+			if !strings.Contains(line, "(external)") {
+				t.Errorf("external plugin line should be marked (external), got: %q", line)
+			}
+		case strings.Contains(line, builtins[0]):
+			if strings.Contains(line, "(external)") {
+				t.Errorf("built-in agent line must not be marked (external), got: %q", line)
+			}
+		}
+	}
+}
+
 // TestRunAgentList_EmptyStateWording verifies the mode-scoped empty-state: the
 // default path says "No built-in agents installed" while `--external`, being the
 // complete view, says "No agents installed".

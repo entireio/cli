@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"maps"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -27,30 +26,6 @@ func Register(name types.AgentName, factory Factory) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 	registry[name] = factory
-}
-
-// SnapshotForTesting captures the registry's current contents and returns a
-// function that restores it to exactly that state.
-//
-// Tests that trigger agent registration as a side effect — external-agent
-// discovery via runAgentList, for example — must defer or t.Cleanup the
-// returned restore. Otherwise mock agents backed by t.TempDir binaries leak
-// into the process-global registry and corrupt later tests in the package:
-// GetAgentsWithHooksInstalled would exec their now-deleted binaries, and only
-// TempDir cleanup ordering keeps that from mis-reporting installed agents.
-//
-// Both capture and restore hold registryMu, so it is safe against concurrent
-// registry readers.
-func SnapshotForTesting() func() {
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	snapshot := make(map[types.AgentName]Factory, len(registry))
-	maps.Copy(snapshot, registry)
-	return func() {
-		registryMu.Lock()
-		defer registryMu.Unlock()
-		registry = snapshot
-	}
 }
 
 // Get retrieves an agent by name.
@@ -80,19 +55,47 @@ func List() []types.AgentName {
 	return names
 }
 
-// StringList returns user-facing agent names, excluding test-only agents.
-func StringList() []string {
-	registryMu.RLock()
-	defer registryMu.RUnlock()
+// ResolvedAgent pairs an agent with the registry name it is addressed by.
+// The registry name — not Agent.Name() — is the identity users type and
+// Get accepts; an external plugin's self-reported name can differ from the
+// name derived from its binary, which is what it is registered under.
+type ResolvedAgent struct {
+	Name  types.AgentName
+	Agent Agent
+}
 
-	names := make([]string, 0, len(registry))
-	for name, factory := range registry {
-		if to, ok := factory().(TestOnly); ok && to.IsTestOnly() {
+// ListResolved returns the resolved, user-facing agents in sorted name order:
+// every registered agent except the test-only ones. It is the single place the
+// test-only filter is applied, so callers that need the Agent value (to check
+// hook support or externality) get the same answer as callers that only need
+// names via StringList.
+//
+// Agents that vanish from the registry between listing and resolving (a
+// concurrent restore of a testing snapshot is the only way that happens) are
+// skipped.
+func ListResolved() []ResolvedAgent {
+	names := List()
+	agents := make([]ResolvedAgent, 0, len(names))
+	for _, name := range names {
+		ag, err := Get(name)
+		if err != nil {
 			continue
 		}
-		names = append(names, string(name))
+		if to, ok := ag.(TestOnly); ok && to.IsTestOnly() {
+			continue
+		}
+		agents = append(agents, ResolvedAgent{Name: name, Agent: ag})
 	}
-	slices.Sort(names)
+	return agents
+}
+
+// StringList returns user-facing agent names, excluding test-only agents.
+func StringList() []string {
+	resolved := ListResolved()
+	names := make([]string, 0, len(resolved))
+	for _, ra := range resolved {
+		names = append(names, string(ra.Name))
+	}
 	return names
 }
 

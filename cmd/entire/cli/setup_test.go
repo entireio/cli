@@ -1563,8 +1563,8 @@ func TestPrintMissingAgentError(t *testing.T) {
 	if !strings.Contains(output, "Missing agent name") {
 		t.Error("expected 'Missing agent name' in output")
 	}
-	for _, a := range agent.List() {
-		if !strings.Contains(output, string(a)) {
+	for _, a := range agent.StringList() {
+		if !strings.Contains(output, a) {
 			t.Errorf("expected agent %q listed in output", a)
 		}
 	}
@@ -1580,22 +1580,63 @@ func TestPrintWrongAgentError(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	printWrongAgentError(&buf, "not-an-agent")
+	printWrongAgentError(&buf, "not-an-agent", "Usage: entire agent add <agent-name>")
 	output := buf.String()
 
 	if !strings.Contains(output, `Unknown agent "not-an-agent"`) {
 		t.Error("expected unknown agent name in output")
 	}
-	for _, a := range agent.List() {
-		if !strings.Contains(output, string(a)) {
+	for _, a := range agent.StringList() {
+		if !strings.Contains(output, a) {
 			t.Errorf("expected agent %q listed in output", a)
 		}
 	}
 	if !strings.Contains(output, "(default)") {
 		t.Error("expected default annotation in output")
 	}
-	if !strings.Contains(output, "Usage: entire enable --agent") {
-		t.Error("expected usage line in output")
+	// The usage line follows the caller's command surface, not a hardcoded
+	// `entire enable`.
+	if !strings.Contains(output, "Usage: entire agent add <agent-name>") {
+		t.Error("expected the caller's usage line in output")
+	}
+}
+
+// TestPrintAgentError_ExcludesTestOnlyAgents pins that the error listing and
+// `entire agent list` give the same answer to "what agents are available":
+// test-only agents (vogon) belong in neither.
+func TestPrintAgentError_ExcludesTestOnlyAgents(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	printMissingAgentError(&buf)
+	output := buf.String()
+
+	for _, name := range agent.List() {
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		to, ok := ag.(agent.TestOnly)
+		if !ok || !to.IsTestOnly() {
+			continue
+		}
+		if strings.Contains(output, string(name)) {
+			t.Errorf("test-only agent %q must not be listed as available, got:\n%s", name, output)
+		}
+	}
+}
+
+// TestPrintAgentError_PointsAtExternalListing pins the discoverability fix for
+// #1928: the error path does not scan $PATH, so it must tell the user where
+// external plugins are listed instead of implying built-ins are all there is.
+func TestPrintAgentError_PointsAtExternalListing(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	printWrongAgentError(&buf, "zedd", "Usage: entire agent add <agent-name>")
+
+	if !strings.Contains(buf.String(), "entire agent list --external") {
+		t.Errorf("expected a pointer at 'entire agent list --external', got:\n%s", buf.String())
 	}
 }
 

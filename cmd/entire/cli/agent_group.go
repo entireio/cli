@@ -5,12 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/spf13/cobra"
@@ -59,47 +57,39 @@ func runAgentMenu(ctx context.Context, w io.Writer) error {
 }
 
 func newAgentListCmd() *cobra.Command {
-	var externalOnly bool
+	var includeExternal bool
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List built-in agents (use --external to list external plugins on your PATH)",
+		Short: "List built-in agents (use --external to also list external plugins on your PATH)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAgentList(cmd.Context(), cmd.OutOrStdout(), externalOnly)
+			return runAgentList(cmd.Context(), cmd.OutOrStdout(), includeExternal)
 		},
 	}
-	cmd.Flags().BoolVar(&externalOnly, "external", false,
-		"List external agent plugins found on your PATH instead of built-in agents")
+	cmd.Flags().BoolVar(&includeExternal, "external", false,
+		"Also list external agent plugins found on your PATH")
 	return cmd
 }
 
-func runAgentList(ctx context.Context, w io.Writer, externalOnly bool) error {
+func runAgentList(ctx context.Context, w io.Writer, includeExternal bool) error {
 	// --external is the explicit opt-in to the costly path: register external
 	// plugins from $PATH so they list through the same rendering as built-ins
 	// (real names, capabilities, test-only filtering). The default path never
 	// discovers, so it stays fast regardless of how many plugins are on $PATH.
-	if externalOnly {
+	if includeExternal {
 		external.DiscoverAndRegisterAlways(ctx)
 	}
 
 	hasSomeInstalled := false
 	fmt.Fprintln(w, "Agents:")
-	for _, name := range agent.List() {
-		ag, err := agent.Get(name)
-		if err != nil {
-			logging.Debug(ctx, "agent registered but unresolvable, skipping",
-				slog.String("agent", string(name)), slog.String("error", err.Error()))
-			continue
-		}
-		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
-			continue
-		}
+	for _, ra := range agent.ListResolved() {
+		isExternal := external.IsExternal(ra.Agent)
 		// Default lists built-ins only; --external is a superset that also
 		// includes external plugins discovered above.
-		if !externalOnly && external.IsExternal(ag) {
+		if !includeExternal && isExternal {
 			continue
 		}
 		installed := false
-		if hs, ok := agent.AsHookSupport(ag); ok && hs.AreHooksInstalled(ctx) {
+		if hs, ok := agent.AsHookSupport(ra.Agent); ok && hs.AreHooksInstalled(ctx) {
 			installed = true
 			hasSomeInstalled = true
 		}
@@ -107,18 +97,25 @@ func runAgentList(ctx context.Context, w io.Writer, externalOnly bool) error {
 		if installed {
 			marker = "✓ "
 		}
-		fmt.Fprintf(w, "  %s%s\n", marker, name)
+		// Mark provenance: external agents are arbitrary executables resolved
+		// from $PATH, not code shipped in this binary, so the superset listing
+		// must not render them identically to built-ins.
+		suffix := ""
+		if isExternal {
+			suffix = "    (external)"
+		}
+		fmt.Fprintf(w, "  %s%s%s\n", marker, ra.Name, suffix)
 	}
 
 	if !hasSomeInstalled {
-		if externalOnly {
+		if includeExternal {
 			// --external is the complete view, so "No agents installed" is accurate.
 			fmt.Fprintln(w, "\nNo agents installed. Use 'entire agent add <name>' to install hooks.")
 		} else {
 			fmt.Fprintln(w, "\nNo built-in agents installed. Use 'entire agent add <name>' to install hooks.")
 		}
 	}
-	if !externalOnly {
+	if !includeExternal {
 		fmt.Fprintln(w, "\nRun 'entire agent list --external' to also list external plugins on your PATH.")
 	}
 	return nil
@@ -153,7 +150,7 @@ Examples:
 			}
 			ag, err := agent.Get(types.AgentName(name))
 			if err != nil {
-				printWrongAgentError(cmd.OutOrStdout(), name)
+				printWrongAgentError(cmd.OutOrStdout(), name, "Usage: entire agent add <agent-name>")
 				return NewSilentError(errors.New("wrong agent name"))
 			}
 			opts := EnableOptions{

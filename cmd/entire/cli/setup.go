@@ -910,7 +910,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 			if agentName != "" {
 				ag, err := agent.Get(types.AgentName(agentName))
 				if err != nil {
-					printWrongAgentError(cmd.ErrOrStderr(), agentName)
+					printWrongAgentError(cmd.ErrOrStderr(), agentName, enableAgentUsage)
 					return NewSilentError(errors.New("wrong agent name"))
 				}
 				selectedAgent = ag
@@ -1572,7 +1572,7 @@ func localExists(ctx context.Context) bool {
 func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 	ag, err := agent.Get(types.AgentName(name))
 	if err != nil {
-		printWrongAgentError(w, name)
+		printWrongAgentError(w, name, "Usage: entire agent remove <agent-name>")
 		return NewSilentError(errors.New("wrong agent name"))
 	}
 
@@ -1829,30 +1829,44 @@ func isBuiltInAgent(ag agent.Agent) bool {
 	return !external.IsExternal(ag)
 }
 
-// printAgentError writes an error message followed by available agents and usage.
-func printAgentError(w io.Writer, message string) {
-	agents := agent.List()
+// enableAgentUsage is the usage line for the `entire enable --agent` surface.
+const enableAgentUsage = "Usage: entire enable --agent <agent-name>"
+
+// printAgentError writes an error message followed by available agents and the
+// given usage line.
+//
+// The listing goes through agent.ListResolved so test-only agents (vogon) stay
+// out of it, matching `entire agent list`. External plugins are only listed if
+// something already registered them — this path deliberately does not scan
+// $PATH — so it points at `entire agent list --external` instead.
+func printAgentError(w io.Writer, message, usage string) {
 	fmt.Fprintf(w, "%s Available agents:\n", message)
 	fmt.Fprintln(w)
-	for _, a := range agents {
+	for _, ra := range agent.ListResolved() {
 		suffix := ""
-		if a == agent.DefaultAgentName {
+		switch {
+		case external.IsExternal(ra.Agent):
+			suffix = "    (external)"
+		case ra.Name == agent.DefaultAgentName:
 			suffix = "    (default)"
 		}
-		fmt.Fprintf(w, "  %s%s\n", a, suffix)
+		fmt.Fprintf(w, "  %s%s\n", ra.Name, suffix)
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Usage: entire enable --agent <agent-name>")
+	fmt.Fprintln(w, "External agent plugins on your PATH are also available: run 'entire agent list --external' to see them.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, usage)
 }
 
 // printMissingAgentError writes a helpful error listing available agents.
 func printMissingAgentError(w io.Writer) {
-	printAgentError(w, "Missing agent name.")
+	printAgentError(w, "Missing agent name.", enableAgentUsage)
 }
 
-// printWrongAgentError writes a helpful error when an unknown agent name is provided.
-func printWrongAgentError(w io.Writer, name string) {
-	printAgentError(w, fmt.Sprintf("Unknown agent %q.", name))
+// printWrongAgentError writes a helpful error when an unknown agent name is
+// provided. usage is the command surface the caller was reached from.
+func printWrongAgentError(w io.Writer, name, usage string) {
+	printAgentError(w, fmt.Sprintf("Unknown agent %q.", name), usage)
 }
 
 // setupAgentHooksNonInteractive sets up hooks for a specific agent non-interactively.
