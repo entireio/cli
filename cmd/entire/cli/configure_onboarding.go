@@ -180,7 +180,7 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 	protected = configureEffectiveProtection(protected, protectionKnown, opts.Yes)
 	branchPushSafe := false
 	if branch != "" && len(initialChanges) == 0 {
-		branchPushSafe = configureBranchHasNoUnpushedCommits(ctx, repoRoot)
+		branchPushSafe = configureBranchHasNoUnpushedCommits(ctx, repoRoot, branch)
 	}
 	chosen, selectedAgents, saveChoice, agentsChanged, err := promptConfigureUpstreamAndAgents(
 		ctx, errW, repoRoot, placements, profile.Jurisdiction, manageRegionsHint,
@@ -208,7 +208,7 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 		return err
 	}
 	if (saveChoice == configureSaveDirect || saveChoice == configureSaveNewBranch) &&
-		(len(beforeApply) != 0 || !configureBranchHasNoUnpushedCommits(ctx, repoRoot)) {
+		(len(beforeApply) != 0 || !configureBranchHasNoUnpushedCommits(ctx, repoRoot, branch)) {
 		saveChoice = configureSaveLocal
 	}
 
@@ -1189,6 +1189,9 @@ func configureUseMirror(ctx context.Context, outW, errW io.Writer, repoRoot, own
 	if err := applyMirrorRemotePlan(ctx, repoRoot, plan); err != nil {
 		return "", err
 	}
+	if err := configureRetargetCurrentBranch(ctx, repoRoot, forgeRemote); err != nil {
+		return "", err
+	}
 	// Report the replaced URL and where it remains reachable. The returned
 	// forgeRemote is deliberately separate from the mirror fetch remote: config
 	// commits must land on GitHub, never in the one-way Entire mirror.
@@ -1403,20 +1406,57 @@ func restoreConfigureOriginalBranch(ctx context.Context, repoRoot, sourceBranch,
 	return nil
 }
 
-func configureBranchHasNoUnpushedCommits(ctx context.Context, repoRoot string) bool {
-	// @{u} is the branch's configured upstream before configure rewrites any
-	// remotes. If it does not exist, we cannot prove a direct push is isolated to
-	// the generated config commit, so only the new-branch action is safe.
-	upstream, err := gitRunner(ctx, repoRoot, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
-	if err != nil || upstream == "" {
+func configureRetargetCurrentBranch(ctx context.Context, repoRoot, forgeRemote string) error {
+	branch, err := gitRunner(ctx, repoRoot, "branch", "--show-current")
+	if err != nil {
+		return fmt.Errorf("read current branch before retargeting upstream: %w", err)
+	}
+	if branch == "" {
+		return nil // detached HEAD; no branch to retarget
+	}
+	key := "branch." + branch + ".remote"
+	trackingRemote, err := gitRunner(ctx, repoRoot, "config", "--get", key)
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return nil // branch has no configured upstream
+		}
+		return fmt.Errorf("read tracking remote for branch %q: %w", branch, err)
+	}
+	if trackingRemote != defaultMirrorRemote || trackingRemote == forgeRemote {
+		return nil
+	}
+	if _, err := gitRunner(ctx, repoRoot, "config", "--local", key, forgeRemote); err != nil {
+		return fmt.Errorf("retarget branch %q to GitHub remote %q: %w", branch, forgeRemote, err)
+	}
+	return nil
+}
+
+func configureBranchHasNoUnpushedCommits(ctx context.Context, repoRoot, branch string) bool {
+	if branch == "" {
 		return false
 	}
-	ahead, err := gitRunner(ctx, repoRoot, "rev-list", "--count", upstream+"..HEAD")
+	// Compare HEAD with the live branch on the configured tracking remote. A
+	// remote-tracking ref can remain stale after origin is repointed to the Entire
+	// mirror, incorrectly making every later configure run look ahead forever.
+	remote, err := gitRunner(ctx, repoRoot, "config", "--get", "branch."+branch+".remote")
+	if err != nil || remote == "" || remote == "." {
+		return false
+	}
+	mergeRef, err := gitRunner(ctx, repoRoot, "config", "--get", "branch."+branch+".merge")
+	if err != nil || !strings.HasPrefix(mergeRef, "refs/heads/") {
+		return false
+	}
+	remoteHead, err := gitRunner(ctx, repoRoot, "ls-remote", "--exit-code", "--heads", remote, mergeRef)
 	if err != nil {
 		return false
 	}
-	count, err := strconv.Atoi(strings.TrimSpace(ahead))
-	return err == nil && count == 0
+	fields := strings.Fields(remoteHead)
+	if len(fields) < 2 || fields[1] != mergeRef {
+		return false
+	}
+	head, err := gitRunner(ctx, repoRoot, "rev-parse", "HEAD")
+	return err == nil && strings.TrimSpace(head) == fields[0]
 }
 
 func configureBranchProtected(ctx context.Context, owner, repo, branch string) (bool, error) {

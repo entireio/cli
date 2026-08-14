@@ -516,33 +516,35 @@ func TestConfigureBranchHasNoUnpushedCommits(t *testing.T) {
 	previous := gitRunner
 	t.Cleanup(func() { gitRunner = previous })
 
-	t.Run("up to date", func(t *testing.T) {
-		gitRunner = func(_ context.Context, _ string, args ...string) (string, error) {
+	const headSHA = "0123456789abcdef"
+	gitWithRemoteHead := func(localSHA string) func(context.Context, string, ...string) (string, error) {
+		return func(_ context.Context, _ string, args ...string) (string, error) {
 			switch args[0] {
-			case testGitRevParse:
-				return "origin/main", nil
-			case "rev-list":
-				if got := args[len(args)-1]; got != "origin/main..HEAD" {
-					t.Fatalf("rev-list range = %q", got)
+			case "config":
+				if strings.HasSuffix(args[len(args)-1], ".remote") {
+					return mirrorCloneProviderGitHub, nil
 				}
-				return "0", nil
+				return "refs/heads/main", nil
+			case testGitLSRemote:
+				return headSHA + "\trefs/heads/main", nil
+			case testGitRevParse:
+				return localSHA, nil
 			default:
 				return "", fmt.Errorf("unexpected git args: %v", args)
 			}
 		}
-		if !configureBranchHasNoUnpushedCommits(context.Background(), ".") {
-			t.Fatal("up-to-date branch reported unsafe")
+	}
+
+	t.Run("matches live remote despite stale tracking ref", func(t *testing.T) {
+		gitRunner = gitWithRemoteHead(headSHA)
+		if !configureBranchHasNoUnpushedCommits(context.Background(), ".", "main") {
+			t.Fatal("branch matching the live forge head reported unsafe")
 		}
 	})
 
-	t.Run("ahead", func(t *testing.T) {
-		gitRunner = func(_ context.Context, _ string, args ...string) (string, error) {
-			if args[0] == testGitRevParse {
-				return "origin/main", nil
-			}
-			return "2", nil
-		}
-		if configureBranchHasNoUnpushedCommits(context.Background(), ".") {
+	t.Run("ahead of live remote", func(t *testing.T) {
+		gitRunner = gitWithRemoteHead("fedcba9876543210")
+		if configureBranchHasNoUnpushedCommits(context.Background(), ".", "main") {
 			t.Fatal("branch with unpushed commits reported safe")
 		}
 	})
@@ -551,7 +553,7 @@ func TestConfigureBranchHasNoUnpushedCommits(t *testing.T) {
 		gitRunner = func(context.Context, string, ...string) (string, error) {
 			return "", errors.New("no upstream")
 		}
-		if configureBranchHasNoUnpushedCommits(context.Background(), ".") {
+		if configureBranchHasNoUnpushedCommits(context.Background(), ".", "main") {
 			t.Fatal("branch without upstream reported safe")
 		}
 	})
@@ -887,6 +889,40 @@ func TestConfigureUseMirrorPreservesOriginUnderAvailableForgeRemote(t *testing.T
 	}
 	if githubURL != oldOrigin {
 		t.Fatalf("preserved forge URL = %q, want %q", githubURL, oldOrigin)
+	}
+}
+
+func TestConfigureUseMirrorRetargetsCurrentBranchFromMirrorToForge(t *testing.T) {
+	setupTestRepo(t)
+	ctx := context.Background()
+	branch, err := gitRunner(ctx, ".", "branch", "--show-current")
+	if err != nil || branch == "" {
+		t.Fatalf("current branch = %q, error = %v", branch, err)
+	}
+	mirrorURL := mirrorCloneURL(testConfigureUSHost, "acme", "widget")
+	if _, err := gitRunner(ctx, ".", "remote", testGitAdd, defaultMirrorRemote, mirrorURL); err != nil {
+		t.Fatalf("add mirror origin: %v", err)
+	}
+	if _, err := gitRunner(ctx, ".", "remote", testGitAdd, mirrorCloneProviderGitHub, "https://github.com/acme/widget.git"); err != nil {
+		t.Fatalf("add forge remote: %v", err)
+	}
+	if _, err := gitRunner(ctx, ".", "config", "--local", "branch."+branch+".remote", defaultMirrorRemote); err != nil {
+		t.Fatalf("set tracking remote: %v", err)
+	}
+	if _, err := gitRunner(ctx, ".", "config", "--local", "branch."+branch+".merge", "refs/heads/"+branch); err != nil {
+		t.Fatalf("set tracking merge ref: %v", err)
+	}
+
+	chosen := coreapi.ResolvedPlacement{ClusterHost: testConfigureUSHost}
+	if _, err := configureUseMirror(ctx, io.Discard, io.Discard, ".", "acme", "widget", chosen); err != nil {
+		t.Fatalf("configureUseMirror() error = %v", err)
+	}
+	trackingRemote, err := gitRunner(ctx, ".", "config", "--get", "branch."+branch+".remote")
+	if err != nil {
+		t.Fatalf("read tracking remote: %v", err)
+	}
+	if trackingRemote != mirrorCloneProviderGitHub {
+		t.Fatalf("tracking remote = %q, want forge remote %q", trackingRemote, mirrorCloneProviderGitHub)
 	}
 }
 
