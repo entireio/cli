@@ -27,26 +27,37 @@ func newDoctorCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "doctor",
-		Short: "Diagnose and fix session issues",
-		Long: `Scan for session issues and offer to fix them.
+		Short: "Diagnose and fix environment, configuration, and session issues",
+		Long: `Diagnose your Entire setup, then scan for session issues and offer to fix them.
 
-Checks performed:
-  1. Disconnected metadata branches: detects when local and remote
+First, a flutter-doctor-style sweep checks the environment, installation, and
+configuration:
+  1. Entire CLI version and whether an update is available
+  2. Git, the core runtime dependency
+  3. Repository state (inside a git repo? Entire enabled?)
+  4. Installed agent hooks and whether each agent's CLI is on PATH
+  5. Configuration files (.entire/settings.json, settings.local.json)
+  6. Authentication (login contexts or ENTIRE_TOKEN)
+
+The sweep is read-only; issues come with the command to fix them.
+
+Then, session repair checks run:
+  7. Disconnected metadata branches: detects when local and remote
      entire/checkpoints/v1 branches share no common ancestor (caused by a
      previous bug). Fixes by cherry-picking local checkpoints onto remote tip.
 
   When Codex hooks are installed:
-  2. Codex hook trust: warn when hooks declared in .codex/hooks.json
+  8. Codex hook trust: warn when hooks declared in .codex/hooks.json
      lack a trusted_hash entry in the user's Codex config (i.e. /hooks
      review hasn't run yet on this machine, or a newer entire release
      added a hook the user hasn't approved yet).
 
   When Claude Code hooks are installed:
-  3. Claude Code hook config: warn when the installed hooks are out of
+  9. Claude Code hook config: warn when the installed hooks are out of
      date (e.g. an older release wrote tool matchers that no longer fire).
      Fix by re-running 'entire enable --force'.
 
-  4. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  10. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -90,6 +101,11 @@ type stuckSession struct {
 
 func runSessionsFix(cmd *cobra.Command, force bool) error {
 	var finalErr error
+
+	// Environment / installation / configuration sweep (flutter-doctor-style,
+	// read-only). Reports issues and the commands to fix them, then the
+	// session repair checks below run as before.
+	runDoctorChecks(cmd)
 
 	// Check 1: Disconnected metadata branches
 	metadataErr := checkDisconnectedMetadata(cmd, force)

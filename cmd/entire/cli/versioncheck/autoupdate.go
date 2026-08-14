@@ -107,7 +107,7 @@ func realChooseUpdate(ctx context.Context, currentVersion, latestVersion, cmdStr
 	action := autoUpdateActionUpdate
 	sel := huh.NewSelect[AutoUpdateAction]().
 		Title(fmt.Sprintf("Update available! %s -> %s",
-			displayVersion(currentVersion), displayVersion(latestVersion))).
+			DisplayVersion(currentVersion), DisplayVersion(latestVersion))).
 		Description("Release notes: "+releaseNotesURL(latestVersion)).
 		Options(
 			huh.NewOption(fmt.Sprintf("Update now (runs `%s`)", cmdStr), autoUpdateActionUpdate),

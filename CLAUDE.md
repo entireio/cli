@@ -67,7 +67,10 @@ the commands are always runnable in every build.
   home jurisdiction so the slug is discoverable. `logout`
   takes `--everywhere` (revoke every session on the active core, not just the
   current one) and `--all-contexts` (log out of every saved login)
-- `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
+- `doctor`: bare runs a flutter-doctor-style environment/install/config sweep
+  (CLI version + update, git, repository/enablement, agent CLIs, settings,
+  authentication) followed by the scan-and-fix flow, plus `trace`, `logs`,
+  `bundle`
 - `org`: control-plane organization management — `create`, `list`, `get`, `delete`
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`
 - `repo`: control-plane repository lifecycle — `create`, `list`, `get`, `delete`,

@@ -294,7 +294,7 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | `entire agent`   | Add, remove, or list agent integrations for the current repository                                |
 | `entire configure` | Update non-agent settings (telemetry, git hook, strategy options, summary provider)            |
 | `entire disable` | Remove Entire hooks from repository                                                               |
-| `entire doctor`  | Fix or clean up stuck sessions                                                                    |
+| `entire doctor`  | Diagnose environment, installation, and config issues; fix or clean up stuck sessions                  |
 | `entire enable`  | Enable Entire in your repository                                                                  |
 | `entire checkpoint`        | List, explain, and search checkpoints                                                   |
 | `entire checkpoint explain` | Explain a session, commit, or checkpoint                                               |

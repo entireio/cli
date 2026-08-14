@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `entire doctor` now starts with a flutter-doctor-style environment sweep: CLI version and update availability, git installation, repository/enablement, installed agent hooks and their CLIs, settings validity, and authentication status. Read-only — each finding comes with the command to fix it — followed by the existing session repair flow.
+
 ## [0.9.0] - 2026-07-27
 
 ### Added

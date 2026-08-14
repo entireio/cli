@@ -106,10 +106,117 @@ func TestIsDevBuild(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.version, func(t *testing.T) {
 			t.Parallel()
-			if got := isDevBuild(tt.version); got != tt.want {
-				t.Errorf("isDevBuild(%q) = %v, want %v", tt.version, got, tt.want)
+			if got := IsDevBuild(tt.version); got != tt.want {
+				t.Errorf("IsDevBuild(%q) = %v, want %v", tt.version, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCheckForUpdate_DevBuildSkipsFetch(t *testing.T) {
+	server := newVersionServer(t, "v9.9.9")
+	original := githubAPIURL
+	githubAPIURL = server.URL
+	t.Cleanup(func() { githubAPIURL = original })
+
+	latest, outdated, err := CheckForUpdate(context.Background(), "dev")
+	if err != nil {
+		t.Fatalf("CheckForUpdate() error = %v", err)
+	}
+	if latest != "" || outdated {
+		t.Errorf(`CheckForUpdate(dev) = (%q, %v), want ("", false)`, latest, outdated)
+	}
+}
+
+// stableLatest is the fake latest version served by newVersionServer in
+// TestCheckForUpdate_StableChannel. Hoisted to avoid tripping goconst on
+// repeated string literals.
+const stableLatest = "v2.0.0"
+
+func TestCheckForUpdate_StableChannel(t *testing.T) {
+	server := newVersionServer(t, stableLatest)
+	original := githubAPIURL
+	githubAPIURL = server.URL
+	t.Cleanup(func() { githubAPIURL = original })
+
+	latest, outdated, err := CheckForUpdate(context.Background(), "1.0.0")
+	if err != nil {
+		t.Fatalf("CheckForUpdate() error = %v", err)
+	}
+	if latest != stableLatest || !outdated {
+		t.Errorf("CheckForUpdate() = (%q, %v), want (%s, true)", latest, outdated, stableLatest)
+	}
+}
+
+func TestCheckForUpdate_UpToDate(t *testing.T) {
+	server := newVersionServer(t, "v1.0.0")
+	original := githubAPIURL
+	githubAPIURL = server.URL
+	t.Cleanup(func() { githubAPIURL = original })
+
+	latest, outdated, err := CheckForUpdate(context.Background(), "1.0.0")
+	if err != nil {
+		t.Fatalf("CheckForUpdate() error = %v", err)
+	}
+	if latest != "v1.0.0" || outdated {
+		t.Errorf("CheckForUpdate() = (%q, %v), want (v1.0.0, false)", latest, outdated)
+	}
+}
+
+func TestCheckForUpdate_NightlyChannel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		releases := []GitHubRelease{
+			{TagName: "v0.5.4", Prerelease: false},
+			{TagName: "v0.5.4-nightly.202604061200.abc1234", Prerelease: true},
+			{TagName: "v0.5.4-nightly.202604051159.def5678", Prerelease: true},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		//nolint:errcheck // test helper
+		json.NewEncoder(w).Encode(releases)
+	}))
+	t.Cleanup(server.Close)
+
+	original := githubReleasesURL
+	githubReleasesURL = server.URL
+	t.Cleanup(func() { githubReleasesURL = original })
+
+	latest, outdated, err := CheckForUpdate(context.Background(), "0.5.3-nightly.202604051159.abc1234")
+	if err != nil {
+		t.Fatalf("CheckForUpdate() error = %v", err)
+	}
+	if latest != "v0.5.4-nightly.202604061200.abc1234" || !outdated {
+		t.Errorf("CheckForUpdate() = (%q, %v), want (v0.5.4-nightly.202604061200.abc1234, true)", latest, outdated)
+	}
+}
+
+func TestCheckForUpdate_FetchFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+
+	original := githubAPIURL
+	githubAPIURL = server.URL
+	t.Cleanup(func() { githubAPIURL = original })
+
+	_, _, err := CheckForUpdate(context.Background(), "1.0.0")
+	if err == nil {
+		t.Fatal("CheckForUpdate() expected error on fetch failure, got nil")
+	}
+}
+
+func TestDisplayVersion(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"v1.2.3":                              "1.2.3",
+		"1.2.3":                               "1.2.3",
+		"v0.6.3-nightly.202604061200.abc1234": "0.6.3-nightly.202604061200.abc1234",
+		"":                                    "",
+	}
+	for in, want := range cases {
+		if got := DisplayVersion(in); got != want {
+			t.Errorf("DisplayVersion(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

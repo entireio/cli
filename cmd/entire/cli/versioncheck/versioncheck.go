@@ -35,12 +35,34 @@ const (
 	installChannelNightly = "nightly"
 )
 
+// CheckForUpdate performs an explicit, uncached version check: it fetches the
+// latest release for the channel matching currentVersion (nightly vs stable)
+// and reports whether an update is available. Unlike CheckAndNotify it always
+// fetches (no 24h cache, no notification) and is the check behind
+// `entire doctor`. Dev builds (empty, "dev", pseudo-versions) return
+// outdated=false with no error.
+func CheckForUpdate(ctx context.Context, currentVersion string) (latest string, outdated bool, err error) {
+	if IsDevBuild(currentVersion) {
+		return "", false, nil
+	}
+	var latestVersion string
+	if isNightly(currentVersion) {
+		latestVersion, err = fetchLatestNightlyVersion(ctx)
+	} else {
+		latestVersion, err = fetchLatestVersion(ctx)
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return latestVersion, isOutdated(currentVersion, latestVersion), nil
+}
+
 // CheckAndNotify performs a version check and notifies the user if a newer version is available.
 // This is the main entry point for the version check system.
 // The function is silent on all errors to avoid interrupting CLI operations.
 func CheckAndNotify(ctx context.Context, w io.Writer, currentVersion string) {
 	// Skip checks for local/unreleased builds.
-	if isDevBuild(currentVersion) {
+	if IsDevBuild(currentVersion) {
 		return
 	}
 
@@ -293,7 +315,7 @@ func isOutdated(current, latest string) bool {
 
 	// Local/unreleased builds shouldn't trigger update notifications.
 	// Normal prereleases (e.g., "1.0.0-rc1") should still be compared normally.
-	if isDevBuild(current) {
+	if IsDevBuild(current) {
 		return false
 	}
 
@@ -301,13 +323,13 @@ func isOutdated(current, latest string) bool {
 	return semver.Compare(current, latest) < 0
 }
 
-// isDevBuild reports whether v identifies a local, unreleased build that
+// IsDevBuild reports whether v identifies a local, unreleased build that
 // should not be nagged to update. This covers the "dev" sentinel and empty
 // string (an unstamped binary), a Go pseudo-version (built from a commit that
 // isn't a tagged release), and any build carrying +metadata such as "+dirty".
 // Released builds — stable tags, nightly tags, and `go install ...@<tag>` —
 // have clean semver and return false.
-func isDevBuild(v string) bool {
+func IsDevBuild(v string) bool {
 	if v == "" || v == "dev" {
 		return true
 	}
@@ -324,7 +346,9 @@ func versionCacheKey(version string) string {
 	return "v" + version
 }
 
-func displayVersion(version string) string {
+// DisplayVersion strips the leading "v" from a version tag for user-facing
+// output (e.g. "v1.2.3" -> "1.2.3").
+func DisplayVersion(version string) string {
 	return strings.TrimPrefix(version, "v")
 }
 
@@ -420,5 +444,5 @@ func UpdateCommandForCurrentBinary(currentVersion string) string {
 // printNotification prints the version update notification to the user.
 func printNotification(w io.Writer, current, latest string) {
 	fmt.Fprintf(w, "\nUpdate available! %s -> %s\nRelease notes: %s\n",
-		displayVersion(current), displayVersion(latest), releaseNotesURL(latest))
+		DisplayVersion(current), DisplayVersion(latest), releaseNotesURL(latest))
 }
