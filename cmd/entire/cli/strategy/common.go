@@ -702,7 +702,13 @@ func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Reposit
 
 	branchName := primary.Short()
 	tmpRefName := plumbing.ReferenceName(FetchTmpRefPrefix + branchName)
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true); err != nil {
+	// noFilter=false: adopting the remote branch needs its commit graph and trees
+	// (SafelyAdvanceLocalRef walks commits, metadataBranchHasData reads tree
+	// entries) but never blob content. An unfiltered fetch here pulls every stored
+	// transcript in the branch's history, which on a real checkpoint repo overruns
+	// checkpointRemoteFetchTimeout and drops the caller into the empty orphan this
+	// function exists to avoid.
+	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", false); err != nil {
 		logging.Debug(ctx, "checkpoint-remote: enable bootstrap fetch failed; creating empty orphan",
 			slog.String("url", remote.RedactURL(url)),
 			slog.String("error", err.Error()),
@@ -788,7 +794,9 @@ func healEmptyOrphanFromCheckpointRemote(ctx context.Context, repo *git.Reposito
 	tmpRefName := plumbing.ReferenceName(FetchTmpRefPrefix + primary.Short())
 	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
 
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true); err != nil {
+	// noFilter=false for the same reason as the bootstrap above: the heal only
+	// inspects the fetched branch's trees before replacing the data-free orphan.
+	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", false); err != nil {
 		logging.Debug(ctx, "checkpoint-remote: empty-orphan heal fetch failed; keeping local orphan",
 			slog.String("url", remote.RedactURL(url)),
 			slog.String("error", err.Error()),

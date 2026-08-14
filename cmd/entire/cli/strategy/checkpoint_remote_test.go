@@ -1027,6 +1027,83 @@ func TestEnsurePrimaryRef_FetchesFromCheckpointRemoteInsteadOfOrphan(t *testing.
 		"the bootstrapped branch should contain the checkpoint committed on the remote")
 }
 
+// TestEnsurePrimaryRef_BootstrapFetchIsFiltered pins the enable-time bootstrap
+// fetch to --filter=blob:none when filtered_fetches is enabled.
+//
+// The bootstrap exists only to establish shared ancestry with the checkpoint
+// remote so the local ref is not a divergent orphan (#1374). Proving that needs
+// the commit graph and the trees — never blob content. Fetching blobs pulls every
+// stored transcript in the branch's history, which on a real checkpoint repo
+// overruns checkpointRemoteFetchTimeout and lands the caller in the empty orphan
+// this path was built to prevent.
+//
+// The assertion is that the metadata blob is a partial-clone placeholder while
+// the tree that names it is local: correct ancestry, no payload.
+//
+// Not parallel: uses t.Chdir().
+func TestEnsurePrimaryRef_BootstrapFetchIsFiltered(t *testing.T) {
+	ctx := context.Background()
+
+	// Checkpoint remote holding a real entire/checkpoints/v1, as device A left it.
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	remoteDefaultBranch := checkpointRemoteCurrentBranch(ctx, t, remoteDir)
+
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, remoteDir, "aaaaaaaaaaaa", "device-a")
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", remoteDefaultBranch)
+
+	// Serving a filtered fetch over file:// requires opting the source repo in;
+	// without this git quietly ignores --filter and sends every blob, which would
+	// make this test pass against the unfiltered code path too.
+	runCheckpointRemoteGit(ctx, t, remoteDir, "config", "uploadpack.allowFilter", "true")
+
+	// Local repo (device B): origin is the main repo, checkpoints live elsewhere,
+	// and the local metadata branch does not exist yet.
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	runCheckpointRemoteGit(ctx, t, localDir, "remote", "add", "origin", "git@github.com:org/main-repo.git")
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}, "filtered_fetches": true}}`),
+		0o644,
+	))
+
+	redirectGitURL(t, localDir, "git@github.com:org/checkpoints.git", "file://"+remoteDir)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	require.NoError(t, EnsurePrimaryRef(WithCheckpointRemoteBootstrap(ctx), repo))
+
+	// Ancestry and trees arrived: the branch still names the remote's checkpoint.
+	metadataPath := "aa/aaaaaaaaaa/" + paths.MetadataFileName
+	files := checkpointRemoteMetadataFiles(ctx, t, localDir)
+	require.Contains(t, files, metadataPath,
+		"a filtered bootstrap must still fetch the trees naming the remote's checkpoints")
+
+	// The payload did not: its blob is a placeholder, so the fetch was filtered.
+	blobHash := checkpointRemoteRevParse(ctx, t, localDir,
+		"refs/heads/"+paths.MetadataBranchName+":"+metadataPath)
+	missing := checkpointRemoteMissingObjects(ctx, t, localDir, paths.MetadataBranchName)
+	assert.Contains(t, missing, "?"+blobHash,
+		"the enable bootstrap must fetch --filter=blob:none; pulling transcript blobs overruns the fetch timeout on a real checkpoint repo")
+}
+
 // TestEnsurePrimaryRef_ReplacesExistingEmptyOrphanFromCheckpointRemote verifies
 // that a *pre-existing* local empty orphan (the exact shape a pre-#1374
 // `entire enable` left behind) is still healed on a later run of an explicit
@@ -1442,6 +1519,23 @@ func commitCheckpointRemoteMetadata(ctx context.Context, t *testing.T, dir, chec
 	))
 	runCheckpointRemoteGit(ctx, t, dir, "add", ".")
 	runCheckpointRemoteGit(ctx, t, dir, "commit", "-m", "Checkpoint: "+checkpointID+" "+label)
+}
+
+// checkpointRemoteMissingObjects lists objects reachable from ref that are absent
+// locally — the partial-clone placeholders a --filter=blob:none fetch leaves
+// behind. `--missing=print` reports them instead of lazily fetching them, so this
+// stays a local read even with a promisor remote configured.
+//
+// Every reachable object is listed; only the absent ones carry a "?" prefix, so
+// callers must match on "?"+hash rather than the bare hash.
+func checkpointRemoteMissingObjects(ctx context.Context, t *testing.T, dir, ref string) string {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "git", "rev-list", "--objects", "--missing=print", ref)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	return string(out)
 }
 
 func checkpointRemoteMetadataFiles(ctx context.Context, t *testing.T, dir string) string {
