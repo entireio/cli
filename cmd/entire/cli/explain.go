@@ -2494,7 +2494,7 @@ func walkFirstParentCommits(ctx context.Context, repo *git.Repository, from plum
 // entries without anything being dropped).
 func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) ([]strategy.RewindPoint, bool, error) {
 	// Warn (once per process) if metadata branches are disconnected
-	strategy.WarnIfMetadataDisconnected()
+	strategy.WarnIfMetadataDisconnected(ctx)
 
 	// This is a user-facing enumeration (`entire checkpoint list` / the branch
 	// `explain` view), so opt into git-refs remote discovery: List enumerates

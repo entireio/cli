@@ -414,10 +414,16 @@ func fetchMetadataFromReadRemotes(ctx context.Context, noFilter bool) error {
 		return errors.New("no git remotes configured to fetch checkpoint metadata from")
 	}
 
+	// Per-candidate budgets (inside fetchMetadataFromRemote) nested in one chain
+	// ceiling, so a stalled candidate cannot starve the rest and the total stays
+	// bounded — these read paths have no outer deadline above them.
+	chainCtx, cancelChain := context.WithTimeout(ctx, remote.ReadChainBudget)
+	defer cancelChain()
+
 	var firstErr error
 	fetched := false
 	for i, remoteName := range candidates {
-		err := fetchMetadataFromRemote(ctx, remoteName, noFilter, resolution.ElectedName != "" && remoteName == resolution.ElectedName)
+		err := fetchMetadataFromRemote(chainCtx, remoteName, noFilter, resolution.ElectedName != "" && remoteName == resolution.ElectedName)
 		if err == nil {
 			fetched = true
 			continue
@@ -688,18 +694,28 @@ func parseCheckpointRefNames(output []byte) []plumbing.ReferenceName {
 // If fetching by hash fails on every target, falls back to a full metadata
 // branch fetch.
 func FetchBlobsByHash(ctx context.Context, hashes []plumbing.Hash) error {
-	return fetchBlobsByHash(ctx, hashes, 2*time.Minute, remote.FetchBlobs)
+	return fetchBlobsByHash(ctx, hashes, 2*time.Minute, remote.ReadChainBudget, remote.FetchBlobs)
 }
 
 func fetchBlobsByHash(
 	ctx context.Context,
 	hashes []plumbing.Hash,
 	fetchTimeout time.Duration,
+	chainBudget time.Duration,
 	fetchBlobs func(context.Context, string, []string) error,
 ) error {
 	if len(hashes) == 0 {
 		return nil
 	}
+
+	// One ceiling over the whole operation — the per-target loop AND the
+	// fallback fetches below. Before the read-candidate chain this function was
+	// wrapped in a single 2-minute budget that covered its fallbacks; moving to
+	// per-target budgets dropped that, leaving the fallbacks on the caller's
+	// uncapped context, so a fully-stalled hydration could run per-target
+	// budgets and then a fresh per-candidate metadata chain on top.
+	ctx, cancelChain := context.WithTimeout(ctx, chainBudget)
+	defer cancelChain()
 
 	targets := checkpointBlobFetchTargets(ctx)
 

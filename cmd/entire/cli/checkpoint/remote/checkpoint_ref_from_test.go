@@ -94,7 +94,7 @@ func TestFetchCheckpointRefFrom_EachCandidateGetsItsOwnTimeout(t *testing.T) {
 	out, err := exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "set-url", "upstream", server.URL+"/repo.git").CombinedOutput()
 	require.NoError(t, err, "%s", out)
 
-	require.NoError(t, fetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, time.Second, nil))
+	require.NoError(t, fetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, time.Second, 10*time.Second, nil))
 	require.Equal(t, originHash, localRefHash(t, workDir, ref))
 }
 

@@ -628,7 +628,7 @@ func TestFetchBlobsByHash_FetchesMissingBlob(t *testing.T) {
 		}
 		return candidateCtx.Err()
 	}
-	require.NoError(t, fetchBlobsByHash(ctx, []plumbing.Hash{blobHash}, 10*time.Millisecond, fetch))
+	require.NoError(t, fetchBlobsByHash(ctx, []plumbing.Hash{blobHash}, 10*time.Millisecond, time.Second, fetch))
 	require.Equal(t, []string{upstreamDir, originDir}, attempted)
 }
 
@@ -938,4 +938,52 @@ func TestListCheckpointRefsOnRemote_HonorsCanceledContext(t *testing.T) {
 
 	_, err := ListCheckpointRefsOnRemote(ctx)
 	require.Error(t, err, "canceled context must reach ls-remote (regression: deleting WithTimeout would still pass a constant-only test)")
+}
+
+// TestFetchBlobsByHash_ChainBudgetBoundsTheWholeOperation pins the ceiling that
+// per-target budgets alone do not give. Before the read-candidate chain this
+// function was wrapped in one 2-minute budget covering its fallbacks; per-target
+// budgets replaced it, so worst-case latency scaled with the target count and the
+// fallback metadata chain ran on the caller's uncapped context on top of that.
+//
+// Every target here stalls until its context expires, so without the ceiling the
+// elapsed time would be at least perTarget × len(targets).
+func TestFetchBlobsByHash_ChainBudgetBoundsTheWholeOperation(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir modifies process-global state.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "x")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, dir, "fork", "https://example.com/fork.git")
+	t.Chdir(dir)
+
+	// perTarget deliberately dwarfs chainBudget: with the ceiling in place the
+	// first stalled target is cut off at the ceiling, so the whole call returns in
+	// ~chainBudget. Without it, that single target alone would stall for perTarget
+	// and the assertion below fails decisively rather than marginally.
+	const perTarget = 5 * time.Second
+	const chainBudget = 300 * time.Millisecond
+
+	var attempts int
+	stall := func(ctx context.Context, _ string, _ []string) error {
+		attempts++
+		<-ctx.Done() // hang until this attempt's budget expires
+		return ctx.Err()
+	}
+
+	start := time.Now()
+	err := fetchBlobsByHash(t.Context(), []plumbing.Hash{plumbing.NewHash(
+		"1111111111111111111111111111111111111111")}, perTarget, chainBudget, stall)
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "every target stalled, so hydration cannot succeed")
+	assert.GreaterOrEqual(t, attempts, 1, "at least one target must be attempted")
+
+	// The ceiling, not the per-target budget times the target count, decides how
+	// long the user waits. Generous upper bound so a loaded CI box does not flake;
+	// the point is that it does not scale with target count.
+	assert.Less(t, elapsed, 2*time.Second,
+		"the chain ceiling must bound the whole operation including fallbacks (elapsed %s)", elapsed)
 }

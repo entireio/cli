@@ -27,6 +27,22 @@ const WriteProbeFetchBudget = 15 * time.Second
 // readFetchTimeout bounds each interactive read-candidate attempt.
 const readFetchTimeout = 2 * time.Minute
 
+// ReadChainBudget bounds a complete read-candidate chain — every candidate
+// attempt inside it, and for blob hydration its fallback fetches too.
+//
+// Per-candidate budgets alone are not enough: they stop a hung leader from
+// starving the legacy tier (which one shared budget did), but they make the
+// worst-case stall scale with the number of candidates, and the read paths have
+// no outer deadline to catch that — `entire resume` sets none, and main() uses
+// context.WithCancel, not WithTimeout. Nesting per-candidate budgets inside this
+// ceiling keeps both properties: every candidate gets its own window, and the
+// total a user can wait stays bounded.
+//
+// Sized at twice readFetchTimeout: enough for both of today's tiers (elected
+// sync remote, then the legacy origin tier) to use a full window, while capping
+// a chain that grows past them.
+const ReadChainBudget = 2 * readFetchTimeout
+
 // CheckpointFetchTarget returns the git remote (URL or name) that checkpoint
 // data is fetched from. It prefers the effective URL resolved by FetchURL,
 // which is the source of truth for checkpoint fetch location. If URL
@@ -170,7 +186,7 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 // electionErr is non-nil, the fail-open origin candidate may still satisfy a
 // read, but its emptiness cannot certify global absence.
 func FetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, readRemotes []string, electionErr error) error {
-	return fetchCheckpointRefFrom(ctx, ref, readRemotes, readFetchTimeout, electionErr)
+	return fetchCheckpointRefFrom(ctx, ref, readRemotes, readFetchTimeout, ReadChainBudget, electionErr)
 }
 
 func fetchCheckpointRefFrom(
@@ -178,6 +194,7 @@ func fetchCheckpointRefFrom(
 	ref plumbing.ReferenceName,
 	readRemotes []string,
 	fetchTimeout time.Duration,
+	chainBudget time.Duration,
 	electionErr error,
 ) error {
 	s, loadErr := settings.Load(ctx)
@@ -199,10 +216,16 @@ func fetchCheckpointRefFrom(
 		return fmt.Errorf("checkpoint ref %s: no checkpoint read candidates available and the repository is not provably remoteless; refusing to treat this as absence", ref)
 	}
 
+	// Per-candidate budgets nested inside one chain ceiling: a hung candidate
+	// burns only its own window, and the total stall stays bounded (see
+	// ReadChainBudget).
+	chainCtx, cancelChain := context.WithTimeout(ctx, chainBudget)
+	defer cancelChain()
+
 	var firstErr error
 	var firstUncertainErr error
 	for i, remoteName := range readRemotes {
-		candidateCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+		candidateCtx, cancel := context.WithTimeout(chainCtx, fetchTimeout)
 		target, authoritative := checkpointFetchTargetFrom(candidateCtx, remoteName)
 		err := probeAndFetchCheckpointRef(candidateCtx, ref, target, authoritative)
 		cancel()

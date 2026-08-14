@@ -241,11 +241,13 @@ func isConfiguredRemote(ctx context.Context, name string) bool {
 	if name == "" {
 		return false
 	}
-	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", name)
-	if worktreeRoot, ok := settings.WorktreeRoot(ctx); ok {
-		cmd.Dir = worktreeRoot
-	}
-	return cmd.Run() == nil
+	return cachedIsConfiguredRemote(ctx, name, func() bool {
+		cmd := exec.CommandContext(ctx, "git", "remote", "get-url", name)
+		if worktreeRoot, ok := settings.WorktreeRoot(ctx); ok {
+			cmd.Dir = worktreeRoot
+		}
+		return cmd.Run() == nil
+	})
 }
 
 // remoteHasTrackingRefs reports whether any refs/remotes/<remote>/* ref exists

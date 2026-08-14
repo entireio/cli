@@ -79,12 +79,16 @@ func FirstReadCandidateTrackingRef(ctx context.Context, repo *git.Repository, pr
 // exists (pure read across both tiers).
 // It does NOT fix the problem — users are directed to 'entire doctor'.
 //
+// Takes the caller's context rather than context.Background(): the probe below
+// reads git, so a detached context ignored both interrupt cancellation and the
+// invocation-scoped remote-read cache, re-shelling out for answers the caller
+// already had.
+//
 // Uses sync.Once, so a transient failure on the first call permanently suppresses
 // the warning. This is acceptable because the check is advisory only and
 // 'entire doctor' is the authoritative repair path.
-func WarnIfMetadataDisconnected() {
+func WarnIfMetadataDisconnected(ctx context.Context) {
 	disconnectedOnce.Do(func() {
-		ctx := context.Background()
 		repo, err := OpenRepository(ctx)
 		if err != nil {
 			logging.Debug(ctx, "metadata disconnection check: could not open repository",

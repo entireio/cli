@@ -295,7 +295,7 @@ func ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
 	defer repo.Close()
 
 	// Warn (once per process) if metadata branches are disconnected
-	WarnIfMetadataDisconnected()
+	WarnIfMetadataDisconnected(ctx)
 
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: CheckpointReadRemotes(ctx)})
 	if err != nil {
