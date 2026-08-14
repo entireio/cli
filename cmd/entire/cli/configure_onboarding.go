@@ -981,11 +981,6 @@ func runConfigureAgentManagement(cmd *cobra.Command, opts EnableOptions) error {
 		if err != nil {
 			return err
 		}
-		if forgeRemote != "" {
-			if err := configureRetargetCurrentBranch(ctx, repoRoot, forgeRemote); err != nil {
-				return err
-			}
-		}
 	}
 	protected := false
 	if branch != "" && identityErr == nil {
@@ -994,7 +989,7 @@ func runConfigureAgentManagement(cmd *cobra.Command, opts EnableOptions) error {
 		}
 	}
 	pushSafe := branch != "" && forgeRemote != "" && len(initialChanges) == 0 &&
-		configureBranchHasNoUnpushedCommits(ctx, repoRoot, branch)
+		configureBranchMatchesRemoteHead(ctx, repoRoot, forgeRemote, "refs/heads/"+branch)
 	installedNames := GetAgentsWithHooksInstalled(ctx)
 	selectedNames, saveChoice, changed, err := promptConfigureAgentsAndSave(ctx, errW, installedNames, branch, protected, pushSafe)
 	if err != nil {
@@ -1014,7 +1009,7 @@ func runConfigureAgentManagement(cmd *cobra.Command, opts EnableOptions) error {
 		return err
 	}
 	if (saveChoice == configureSaveDirect || saveChoice == configureSaveNewBranch) &&
-		(len(beforeApply) != 0 || !configureBranchHasNoUnpushedCommits(ctx, repoRoot, branch)) {
+		(len(beforeApply) != 0 || !configureBranchMatchesRemoteHead(ctx, repoRoot, forgeRemote, "refs/heads/"+branch)) {
 		saveChoice = configureSaveLocal
 	}
 	if err := applyAgentChanges(ctx, outW, selectedNames, installedNames, opts); err != nil {
@@ -1592,12 +1587,19 @@ func configureBranchHasNoUnpushedCommits(ctx context.Context, repoRoot, branch s
 	if err != nil || !strings.HasPrefix(mergeRef, "refs/heads/") {
 		return false
 	}
-	remoteHead, err := gitRunner(ctx, repoRoot, "ls-remote", "--exit-code", "--heads", remote, mergeRef)
+	return configureBranchMatchesRemoteHead(ctx, repoRoot, remote, mergeRef)
+}
+
+func configureBranchMatchesRemoteHead(ctx context.Context, repoRoot, remote, branchRef string) bool {
+	if remote == "" || !strings.HasPrefix(branchRef, "refs/heads/") {
+		return false
+	}
+	remoteHead, err := gitRunner(ctx, repoRoot, "ls-remote", "--exit-code", "--heads", remote, branchRef)
 	if err != nil {
 		return false
 	}
 	fields := strings.Fields(remoteHead)
-	if len(fields) < 2 || fields[1] != mergeRef {
+	if len(fields) < 2 || fields[1] != branchRef {
 		return false
 	}
 	head, err := gitRunner(ctx, repoRoot, "rev-parse", "HEAD")
