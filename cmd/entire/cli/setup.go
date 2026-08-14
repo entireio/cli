@@ -465,8 +465,9 @@ func hookAgentOptions(selected map[types.AgentName]struct{}) []huh.Option[string
 func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selectFn func(available []string) ([]string, error)) error {
 	installedNames := GetAgentsWithHooksInstalled(ctx)
 
-	// Show currently installed agents
-	if len(installedNames) > 0 {
+	// The configure-style interactive checklist already shows installed state.
+	// Keep the textual summary for non-interactive/selectFn callers only.
+	if len(installedNames) > 0 && (selectFn != nil || !interactive.CanPromptInteractively()) {
 		fmt.Fprintf(w, "Enabled agents: %s\n\n", strings.Join(agentDisplayNames(installedNames), ", "))
 	}
 
@@ -525,17 +526,13 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 			return fmt.Errorf("agent selection cancelled: %w", err)
 		}
 	} else {
-		form := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewMultiSelect[string]().
-					Title("Manage agents").
-					Description("Use space to select/deselect, enter to confirm.").
-					Options(options...).
-					Value(&selectedAgentNames),
-			),
-		)
-		if err := form.Run(); err != nil {
-			return fmt.Errorf("agent selection cancelled: %w", err)
+		selectedAgentNames = make([]string, 0, len(installedNames))
+		for _, name := range installedNames {
+			selectedAgentNames = append(selectedAgentNames, string(name))
+		}
+		styledOptions := configureAgentOptions(options, installedSet)
+		if err := promptConfigureAgentSelection(ctx, w, styledOptions, &selectedAgentNames); err != nil {
+			return err
 		}
 	}
 

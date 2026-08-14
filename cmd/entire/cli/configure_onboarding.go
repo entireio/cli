@@ -764,22 +764,7 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		upstreamControl.Options(upstreamOptions()...)
 	}
 
-	agentControl := &configureAgentField{value: &selectedAgentNames}
-	agentControl.MultiSelect = huh.NewMultiSelect[string]().
-		TitleFunc(func() string {
-			return configureQuestionTitle("Select the agents for this repository", agentControl.focused)
-		}, &agentControl.focused).
-		Options(agentOptions...).
-		// MultiSelect subtracts its title from an implicit viewport height, so
-		// include exactly one title row to show every option without padding.
-		Height(len(agentOptions) + 1).
-		Validate(func(values []string) error {
-			if len(values) == 0 {
-				return errors.New("select at least one agent")
-			}
-			return nil
-		}).
-		Value(&selectedAgentNames)
+	agentControl := newConfigureAgentControl(agentOptions, &selectedAgentNames, true)
 
 	mirrorChanged := func() bool {
 		mirror, _ := configureSelectionChanges(selectedHost, currentHost, selectedAgentNames, installedAgentNames)
@@ -863,6 +848,41 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		saveChoice = ""
 	}
 	return chosen, selectedAgents, saveChoice, agentsChanged(), nil
+}
+
+func newConfigureAgentControl(options []huh.Option[string], selected *[]string, requireOne bool) *configureAgentField {
+	control := &configureAgentField{value: selected}
+	field := huh.NewMultiSelect[string]().
+		TitleFunc(func() string {
+			return configureQuestionTitle("Select the agents for this repository", control.focused)
+		}, &control.focused).
+		Options(options...).
+		// MultiSelect subtracts its title from an implicit viewport height, so
+		// include exactly one title row to show every option without padding.
+		Height(len(options) + 1).
+		Value(selected)
+	if requireOne {
+		field = field.Validate(func(values []string) error {
+			if len(values) == 0 {
+				return errors.New("select at least one agent")
+			}
+			return nil
+		})
+	}
+	control.MultiSelect = field
+	return control
+}
+
+func promptConfigureAgentSelection(ctx context.Context, errW io.Writer, options []huh.Option[string], selected *[]string) error {
+	control := newConfigureAgentControl(options, selected, false)
+	fmt.Fprintln(errW)
+	if err := newConfigureForm(huh.NewGroup(control)).RunWithContext(ctx); err != nil {
+		if cancelErr := handleFormCancellation(errW, "Agent selection", err); cancelErr != nil {
+			return cancelErr
+		}
+		return NewSilentError(errors.New("agent selection cancelled"))
+	}
+	return nil
 }
 
 func configureSelectedAgents(names []string) ([]agent.Agent, error) {
