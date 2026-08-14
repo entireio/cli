@@ -120,7 +120,7 @@ func setRunner(tg agent.TextGenerator, runner agent.TextCommandRunner) {
 func TestLauncher_AtLeastOneImplementor(t *testing.T) {
 	t.Parallel()
 	var found bool
-	for _, name := range agent.List() {
+	for _, name := range agent.ListAll() {
 		a, err := agent.Get(name)
 		if err != nil {
 			t.Fatalf("get %q: %v", name, err)

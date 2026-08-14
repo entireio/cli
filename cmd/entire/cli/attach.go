@@ -822,7 +822,7 @@ func resolveAndValidateTranscript(ctx context.Context, sessionID string, ag agen
 // detectAgentByTranscript tries all registered agents (except skip) to find one whose
 // transcript resolution succeeds for the given session ID.
 func detectAgentByTranscript(ctx context.Context, sessionID string, skip types.AgentName) (agent.Agent, string, error) {
-	for _, name := range agent.List() {
+	for _, name := range agent.ListAll() {
 		if name == skip {
 			continue
 		}

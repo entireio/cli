@@ -85,7 +85,7 @@ func GetLogLevel() string {
 // GetAgentsWithHooksInstalled returns names of agents that have hooks installed.
 func GetAgentsWithHooksInstalled(ctx context.Context) []types.AgentName {
 	var installed []types.AgentName
-	for _, name := range agent.List() {
+	for _, name := range agent.ListAll() {
 		ag, err := agent.Get(name)
 		if err != nil {
 			continue

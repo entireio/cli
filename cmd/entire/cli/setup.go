@@ -433,21 +433,14 @@ func selectAllAgents(available []string) ([]string, error) {
 // supports hooks and isn't test-only (e.g. the Vogon canary), preselecting
 // the names in selected.
 func hookAgentOptions(selected map[types.AgentName]struct{}) []huh.Option[string] {
-	agentNames := agent.List()
-	options := make([]huh.Option[string], 0, len(agentNames))
-	for _, name := range agentNames {
-		ag, err := agent.Get(name)
-		if err != nil {
+	available := agent.ListAvailable()
+	options := make([]huh.Option[string], 0, len(available))
+	for _, ra := range available {
+		if _, ok := agent.AsHookSupport(ra.Agent); !ok {
 			continue
 		}
-		if _, ok := agent.AsHookSupport(ag); !ok {
-			continue
-		}
-		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
-			continue
-		}
-		opt := huh.NewOption(string(ag.Type()), string(name))
-		if _, ok := selected[name]; ok {
+		opt := huh.NewOption(string(ra.Agent.Type()), string(ra.Name))
+		if _, ok := selected[ra.Name]; ok {
 			opt = opt.Selected(true)
 		}
 		options = append(options, opt)
@@ -959,7 +952,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().MarkHidden("ignore-untracked") //nolint:errcheck,gosec // flag is defined above
 	cmd.Flags().BoolVar(&opts.UseLocalSettings, "local", false, "Write settings to .entire/settings.local.json instead of .entire/settings.json")
 	cmd.Flags().BoolVar(&opts.UseProjectSettings, "project", false, "Write settings to .entire/settings.json even if it already exists")
-	cmd.Flags().StringVar(&agentName, agentFlagName, "", "Agent to set up hooks for (e.g., "+strings.Join(agent.StringList(), ", ")+"; external agents on $PATH are also available). Enables non-interactive mode.")
+	cmd.Flags().StringVar(&agentName, agentFlagName, "", "Agent to set up hooks for (e.g., "+strings.Join(agent.AvailableNames(), ", ")+"; external agents on $PATH are also available). Enables non-interactive mode.")
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
@@ -1835,14 +1828,14 @@ const enableAgentUsage = "Usage: entire enable --agent <agent-name>"
 // printAgentError writes an error message followed by available agents and the
 // given usage line.
 //
-// The listing goes through agent.ListResolved so test-only agents (vogon) stay
+// The listing goes through agent.ListAvailable so test-only agents (vogon) stay
 // out of it, matching `entire agent list`. External plugins are only listed if
 // something already registered them — this path deliberately does not scan
 // $PATH — so it points at `entire agent list --external` instead.
 func printAgentError(w io.Writer, message, usage string) {
 	fmt.Fprintf(w, "%s Available agents:\n", message)
 	fmt.Fprintln(w)
-	for _, ra := range agent.ListResolved() {
+	for _, ra := range agent.ListAvailable() {
 		suffix := ""
 		switch {
 		case external.IsExternal(ra.Agent):
@@ -2520,7 +2513,7 @@ func checkEntireDirExists(ctx context.Context) bool {
 // removeAgentHooks removes hooks from all agents that support hooks.
 func removeAgentHooks(ctx context.Context, w io.Writer) error {
 	var errs []error
-	for _, name := range agent.List() {
+	for _, name := range agent.ListAll() {
 		ag, err := agent.Get(name)
 		if err != nil {
 			continue

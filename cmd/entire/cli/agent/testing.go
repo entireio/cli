@@ -1,11 +1,5 @@
 package agent
 
-// This file holds registry helpers that exist only for tests. They cannot live
-// in a _test.go file: the registry is process-global and package cli's tests
-// (which trigger external-agent discovery through `entire agent list
-// --external`) need to restore it. Keeping them in a separate file makes the
-// testing-only intent legible at the call site.
-
 import (
 	"maps"
 

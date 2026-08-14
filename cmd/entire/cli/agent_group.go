@@ -81,7 +81,7 @@ func runAgentList(ctx context.Context, w io.Writer, includeExternal bool) error 
 
 	hasSomeInstalled := false
 	fmt.Fprintln(w, "Agents:")
-	for _, ra := range agent.ListResolved() {
+	for _, ra := range agent.ListAvailable() {
 		isExternal := external.IsExternal(ra.Agent)
 		// Default lists built-ins only; --external is a superset that also
 		// includes external plugins discovered above.

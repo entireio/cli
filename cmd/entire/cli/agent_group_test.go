@@ -27,7 +27,7 @@ func TestRunAgentList_ListsAvailableAgents(t *testing.T) {
 	}
 
 	// At least one of the well-known built-in agents must appear in the listing.
-	registered := agent.StringList()
+	registered := agent.AvailableNames()
 	if len(registered) == 0 {
 		t.Skip("no agents registered in this build")
 	}
@@ -90,7 +90,7 @@ func TestAgentGroupBareCommandRunsAgentMenu(t *testing.T) {
 // available-but-uninstalled external plugin on $PATH is listed under
 // `--external`, and that the default (built-in) listing does not surface it.
 //
-// The default-listing absence check here is filter-driven (agent.List is
+// The default-listing absence check here is filter-driven (agent.ListAll is
 // filtered by external.IsExternal), so it does NOT by itself prove the default
 // path skips the $PATH scan — TestRunAgentList_DefaultPathDoesNotScanPath owns
 // that guarantee via an exec-count assertion.
@@ -231,7 +231,7 @@ func TestRunAgentList_ExternalIsSuperset(t *testing.T) {
 	t.Cleanup(agent.SnapshotForTesting())
 
 	// A built-in agent name to look for in both listings.
-	builtins := agent.StringList()
+	builtins := agent.AvailableNames()
 	if len(builtins) == 0 {
 		t.Skip("no built-in agents registered in this build")
 	}
@@ -271,7 +271,7 @@ func TestRunAgentList_MarksExternalProvenance(t *testing.T) {
 	}
 	t.Cleanup(agent.SnapshotForTesting())
 
-	builtins := agent.StringList()
+	builtins := agent.AvailableNames()
 	if len(builtins) == 0 {
 		t.Skip("no built-in agents registered in this build")
 	}

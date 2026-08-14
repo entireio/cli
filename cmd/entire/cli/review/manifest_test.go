@@ -100,7 +100,7 @@ func TestHydrateReviewSummaryTokensFromStates_FallsBackToTranscript(t *testing.T
 	if tokens.In != 150 || tokens.Out != 50 {
 		t.Fatalf("tokens = {%d %d}, want {150 50}", tokens.In, tokens.Out)
 	}
-	if slices.Contains(agent.List(), manifestTokenTestAgentName) {
+	if slices.Contains(agent.ListAll(), manifestTokenTestAgentName) {
 		t.Fatalf("test agent %q leaked into global registry", manifestTokenTestAgentName)
 	}
 }

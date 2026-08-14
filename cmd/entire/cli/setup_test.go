@@ -1563,7 +1563,7 @@ func TestPrintMissingAgentError(t *testing.T) {
 	if !strings.Contains(output, "Missing agent name") {
 		t.Error("expected 'Missing agent name' in output")
 	}
-	for _, a := range agent.StringList() {
+	for _, a := range agent.AvailableNames() {
 		if !strings.Contains(output, a) {
 			t.Errorf("expected agent %q listed in output", a)
 		}
@@ -1586,7 +1586,7 @@ func TestPrintWrongAgentError(t *testing.T) {
 	if !strings.Contains(output, `Unknown agent "not-an-agent"`) {
 		t.Error("expected unknown agent name in output")
 	}
-	for _, a := range agent.StringList() {
+	for _, a := range agent.AvailableNames() {
 		if !strings.Contains(output, a) {
 			t.Errorf("expected agent %q listed in output", a)
 		}
@@ -1611,7 +1611,7 @@ func TestPrintAgentError_ExcludesTestOnlyAgents(t *testing.T) {
 	printMissingAgentError(&buf)
 	output := buf.String()
 
-	for _, name := range agent.List() {
+	for _, name := range agent.ListAll() {
 		ag, err := agent.Get(name)
 		if err != nil {
 			continue
