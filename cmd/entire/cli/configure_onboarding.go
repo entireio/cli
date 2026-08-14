@@ -45,6 +45,7 @@ const (
 	configureSaveNewBranch      = "new-branch"
 	configureSaveLocal          = "local"
 	configureSaveCancel         = "cancel"
+	configureGitProtocolSSH     = "ssh"
 )
 
 // configureAccessReporter is the small part of the authenticated API used by
@@ -1175,7 +1176,7 @@ func configureUseMirror(ctx context.Context, outW, errW io.Writer, repoRoot, own
 	}
 	if forgeRemote == "" {
 		forgeRemote = availableConfigureRemoteName(remotes, mirrorCloneProviderGitHub)
-		forgeURL := fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
+		forgeURL := configureGitHubForgeURL(ctx, owner, repo)
 		if _, err := gitRunner(ctx, repoRoot, "remote", "add", forgeRemote, forgeURL); err != nil {
 			return "", fmt.Errorf("add GitHub push remote %q: %w", forgeRemote, err)
 		}
@@ -1193,6 +1194,25 @@ func configureUseMirror(ctx context.Context, outW, errW io.Writer, repoRoot, own
 	// commits must land on GitHub, never in the one-way Entire mirror.
 	reportMirrorRemotePlan(outW, errW, plan)
 	return forgeRemote, nil
+}
+
+var configureGitHubProtocol = func(ctx context.Context) string { //nolint:gochecknoglobals // test seam for the user's gh protocol preference
+	out, err := exec.CommandContext(ctx, "gh", "config", "get", "git_protocol", "--host", "github.com").Output()
+	if err != nil {
+		return "https"
+	}
+	protocol := strings.ToLower(strings.TrimSpace(string(out)))
+	if protocol == configureGitProtocolSSH {
+		return protocol
+	}
+	return "https"
+}
+
+func configureGitHubForgeURL(ctx context.Context, owner, repo string) string {
+	if configureGitHubProtocol(ctx) == configureGitProtocolSSH {
+		return fmt.Sprintf("git@github.com:%s/%s.git", owner, repo)
+	}
+	return fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
 }
 
 func configureExistingForgeRemote(ctx context.Context, repoRoot, owner, repo string, remotes map[string]bool, exclude string) (string, error) {

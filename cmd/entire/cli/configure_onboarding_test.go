@@ -784,6 +784,33 @@ func TestConfigureUseMirrorPreservesOriginUnderAvailableForgeRemote(t *testing.T
 	}
 }
 
+func TestConfigureUseMirrorCreatesForgeRemoteWithGHProtocolPreference(t *testing.T) {
+	setupTestRepo(t)
+	ctx := context.Background()
+	mirrorURL := mirrorCloneURL(testConfigureUSHost, "acme", "widget")
+	if _, err := gitRunner(ctx, ".", "remote", "add", defaultMirrorRemote, mirrorURL); err != nil {
+		t.Fatalf("add mirror origin: %v", err)
+	}
+
+	previousProtocol := configureGitHubProtocol
+	t.Cleanup(func() { configureGitHubProtocol = previousProtocol })
+	configureGitHubProtocol = func(context.Context) string { return configureGitProtocolSSH }
+
+	var out, errOut bytes.Buffer
+	chosen := coreapi.ResolvedPlacement{ClusterHost: testConfigureUSHost}
+	forgeRemote, err := configureUseMirror(ctx, &out, &errOut, ".", "acme", "widget", chosen)
+	if err != nil {
+		t.Fatalf("configureUseMirror() error = %v", err)
+	}
+	forgeURL, err := gitremote.GetRemoteURLInDir(ctx, ".", forgeRemote)
+	if err != nil {
+		t.Fatalf("read forge remote: %v", err)
+	}
+	if want := "git@github.com:acme/widget.git"; forgeURL != want {
+		t.Fatalf("forge URL = %q, want SSH preference %q", forgeURL, want)
+	}
+}
+
 func TestNewConfigureChangesExcludesWorkAppearingWhileFormWasOpen(t *testing.T) {
 	// beforeApply is intentionally captured after the form returns. A file that
 	// appeared while the form was open must be treated as pre-existing work, not
