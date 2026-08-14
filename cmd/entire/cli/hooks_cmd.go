@@ -61,7 +61,7 @@ func newHooksCmd() *cobra.Command {
 
 	// Only built-in agents are registered eagerly (no process spawning).
 	// External agents are discovered lazily via the RunE fallback above.
-	for _, agentName := range agent.ListAll() {
+	for _, agentName := range agent.List() {
 		ag, err := agent.Get(agentName)
 		if err != nil {
 			continue

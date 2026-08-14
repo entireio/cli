@@ -61,7 +61,7 @@ func TestRegistryOperations(t *testing.T) {
 		Register(types.AgentName("agent-b"), func() Agent { return &mockAgent{} })
 		Register(types.AgentName("agent-a"), func() Agent { return &mockAgent{} })
 
-		names := ListAll()
+		names := List()
 		if len(names) != 2 {
 			t.Errorf("expected 2 agents, got %d", len(names))
 		}
@@ -79,13 +79,13 @@ func TestSnapshotForTesting_RestoresRegistry(t *testing.T) {
 
 	const probe types.AgentName = "snapshot-probe-agent"
 	Register(probe, func() Agent { return &mockAgent{} })
-	if !slices.Contains(ListAll(), probe) {
+	if !slices.Contains(List(), probe) {
 		t.Fatalf("probe agent %q was not registered before restore", probe)
 	}
 
 	restore()
 
-	if slices.Contains(ListAll(), probe) {
+	if slices.Contains(List(), probe) {
 		t.Fatalf("probe agent %q leaked past restore()", probe)
 	}
 }

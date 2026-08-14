@@ -141,7 +141,7 @@ func discoverAndRegister(ctx context.Context) {
 
 	// Collect already-registered names to avoid conflicts.
 	registered := make(map[types.AgentName]bool)
-	for _, name := range agent.ListAll() {
+	for _, name := range agent.List() {
 		registered[name] = true
 	}
 

@@ -37,23 +37,15 @@ func Get(name types.AgentName) (Agent, error) {
 
 	factory, ok := registry[name]
 	if !ok {
-		return nil, fmt.Errorf("unknown agent: %s (available: %v)", name, ListAll())
+		return nil, fmt.Errorf("unknown agent: %s (available: %v)", name, List())
 	}
 	return factory(), nil
 }
 
-// ListAll returns every registered agent name in sorted order, test-only
-// agents included.
-//
-// Use it to act on or report the state of what is actually registered:
-// installing and uninstalling hooks, detecting which agent owns a transcript,
-// listing agents whose hooks are installed. The Vogon canary must appear
-// there — e2e installs its hooks, and omitting it would misreport the repo.
-//
-// Anything that offers the user a choice of agent wants ListAvailable or
-// AvailableNames instead; no picker, prompt, or "available agents" listing
-// should advertise a test-only agent.
-func ListAll() []types.AgentName {
+// List returns all registered agent names in sorted order, test-only agents
+// included. Anything that offers the user a choice of agent wants
+// ListAvailable or StringList instead.
+func List() []types.AgentName {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
 
@@ -78,13 +70,13 @@ type ResolvedAgent struct {
 // order: every registered agent except the test-only ones. It is the single
 // place the test-only filter is applied, so callers that need the Agent value
 // (to check hook support or externality) get the same answer as callers that
-// only need names via AvailableNames.
+// only need names via StringList.
 //
 // Agents that vanish from the registry between listing and resolving (a
 // concurrent restore of a testing snapshot is the only way that happens) are
 // skipped.
 func ListAvailable() []ResolvedAgent {
-	names := ListAll()
+	names := List()
 	agents := make([]ResolvedAgent, 0, len(names))
 	for _, name := range names {
 		ag, err := Get(name)
@@ -99,8 +91,8 @@ func ListAvailable() []ResolvedAgent {
 	return agents
 }
 
-// AvailableNames returns the names of ListAvailable, for display.
-func AvailableNames() []string {
+// StringList returns the names of ListAvailable, for display.
+func StringList() []string {
 	resolved := ListAvailable()
 	names := make([]string, 0, len(resolved))
 	for _, ra := range resolved {
@@ -110,10 +102,10 @@ func AvailableNames() []string {
 }
 
 // DetectAll returns all agents whose DetectPresence reports true.
-// Agents are checked in sorted name order (via ListAll()) for deterministic results.
+// Agents are checked in sorted name order (via List()) for deterministic results.
 // Returns an empty slice when no agent is detected.
 func DetectAll(ctx context.Context) []Agent {
-	names := ListAll() // sorted, lock-safe
+	names := List() // sorted, lock-safe
 
 	var detected []Agent
 	for _, name := range names {
@@ -148,7 +140,7 @@ func AgentForTranscriptPath(transcriptPath, repoPath string) (Agent, bool) {
 	if err != nil {
 		abs = transcriptPath
 	}
-	for _, name := range ListAll() {
+	for _, name := range List() {
 		ag, err := Get(name)
 		if err != nil {
 			continue

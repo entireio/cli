@@ -557,7 +557,7 @@ func availableReviewAgents(installed []types.AgentName, reviewerFor func(string)
 		installedSet[string(n)] = struct{}{}
 	}
 	var out []reviewAgentCatalogEntry
-	for _, name := range agent.ListAll() {
+	for _, name := range agent.List() {
 		ns := string(name)
 		if reviewerFor(ns) == nil {
 			continue
@@ -740,7 +740,7 @@ func buildConfiguredProfile(ctx context.Context, profileName string, opts review
 
 func reviewAgentNames(deps Deps) []string {
 	var names []string
-	for _, name := range agent.ListAll() {
+	for _, name := range agent.List() {
 		if deps.ReviewerFor(string(name)) != nil {
 			names = append(names, string(name))
 		}

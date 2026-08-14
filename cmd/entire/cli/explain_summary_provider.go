@@ -24,7 +24,7 @@ var (
 	loadSummarySettingsFromFile     = settings.LoadFromFile
 	saveLocalSummarySettings        = SaveEntireSettingsLocal
 	getSummaryAgent                 = agent.Get
-	listRegisteredAgents            = agent.ListAll
+	listRegisteredAgents            = agent.List
 	isSummaryCLIAvailable           = agent.IsSummaryCLIAvailable
 	discoverSummaryProviders        = external.DiscoverAndRegister
 	discoverSummaryProvidersAlways  = external.DiscoverAndRegisterAlways

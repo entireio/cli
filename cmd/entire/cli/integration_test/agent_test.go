@@ -72,7 +72,7 @@ func TestAgentDetection(t *testing.T) {
 	t.Run("agent registry lists claude-code", func(t *testing.T) {
 		t.Parallel()
 
-		agents := agent.ListAll()
+		agents := agent.List()
 		found := false
 		for _, name := range agents {
 			if name == agentClaudeCode {
@@ -81,7 +81,7 @@ func TestAgentDetection(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("agent.ListAll() = %v, want to contain 'claude-code'", agents)
+			t.Errorf("agent.List() = %v, want to contain 'claude-code'", agents)
 		}
 	})
 }
@@ -420,7 +420,7 @@ func TestGeminiCLIAgentDetection(t *testing.T) {
 	t.Run("gemini agent is registered", func(t *testing.T) {
 		t.Parallel()
 
-		agents := agent.ListAll()
+		agents := agent.List()
 		found := false
 		for _, name := range agents {
 			if name == "gemini" {
@@ -429,7 +429,7 @@ func TestGeminiCLIAgentDetection(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("agent.ListAll() = %v, want to contain 'gemini'", agents)
+			t.Errorf("agent.List() = %v, want to contain 'gemini'", agents)
 		}
 	})
 
@@ -837,7 +837,7 @@ func TestFactoryAIDroidAgentDetection(t *testing.T) {
 	t.Run("agent is registered", func(t *testing.T) {
 		t.Parallel()
 
-		agents := agent.ListAll()
+		agents := agent.List()
 		found := false
 		for _, name := range agents {
 			if name == "factoryai-droid" {
@@ -846,7 +846,7 @@ func TestFactoryAIDroidAgentDetection(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("agent.ListAll() = %v, want to contain 'factoryai-droid'", agents)
+			t.Errorf("agent.List() = %v, want to contain 'factoryai-droid'", agents)
 		}
 	})
 
@@ -1215,7 +1215,7 @@ func TestOpenCodeAgentDetection(t *testing.T) {
 	t.Run("opencode agent is registered", func(t *testing.T) {
 		t.Parallel()
 
-		agents := agent.ListAll()
+		agents := agent.List()
 		found := false
 		for _, name := range agents {
 			if name == "opencode" {
@@ -1224,7 +1224,7 @@ func TestOpenCodeAgentDetection(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("agent.ListAll() = %v, want to contain 'opencode'", agents)
+			t.Errorf("agent.List() = %v, want to contain 'opencode'", agents)
 		}
 	})
 
