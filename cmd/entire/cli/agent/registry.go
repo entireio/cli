@@ -30,14 +30,16 @@ func Register(name types.AgentName, factory Factory) {
 
 // Get retrieves an agent by name.
 //
-
+// The lock is released before building the error so the "available" list can
+// go through StringList, which resolves each agent to apply the test-only
+// filter and would otherwise re-enter registryMu underneath us.
 func Get(name types.AgentName) (Agent, error) {
 	registryMu.RLock()
-	defer registryMu.RUnlock()
-
 	factory, ok := registry[name]
+	registryMu.RUnlock()
+
 	if !ok {
-		return nil, fmt.Errorf("unknown agent: %s (available: %v)", name, List())
+		return nil, fmt.Errorf("unknown agent: %s (available: %v)", name, StringList())
 	}
 	return factory(), nil
 }

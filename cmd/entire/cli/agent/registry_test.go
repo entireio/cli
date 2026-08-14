@@ -72,6 +72,35 @@ func TestRegistryOperations(t *testing.T) {
 	})
 }
 
+// testOnlyAgent is a mock that reports itself test-only, like the Vogon canary.
+type testOnlyAgent struct{ mockAgent }
+
+func (testOnlyAgent) IsTestOnly() bool { return true }
+
+// TestGet_UnknownAgentErrorExcludesTestOnly pins that the "available" list in
+// Get's error is a user-facing listing and therefore filtered: the error is
+// printed verbatim by main.go on paths that do not intercept it.
+func TestGet_UnknownAgentErrorExcludesTestOnly(t *testing.T) {
+	// Not parallel: mutates the process-global registry.
+	t.Cleanup(SnapshotForTesting())
+
+	const canary types.AgentName = "get-error-testonly-probe"
+	const shipped types.AgentName = "get-error-real-probe"
+	Register(canary, func() Agent { return &testOnlyAgent{} })
+	Register(shipped, func() Agent { return &mockAgent{} })
+
+	_, err := Get("no-such-agent")
+	if err == nil {
+		t.Fatal("expected an error for an unregistered agent")
+	}
+	if strings.Contains(err.Error(), string(canary)) {
+		t.Errorf("test-only agent %q must not be advertised in Get's error: %v", canary, err)
+	}
+	if !strings.Contains(err.Error(), string(shipped)) {
+		t.Errorf("expected real agent %q in Get's error: %v", shipped, err)
+	}
+}
+
 func TestSnapshotForTesting_RestoresRegistry(t *testing.T) {
 	// Not parallel: mutates the process-global registry.
 	restore := SnapshotForTesting()
