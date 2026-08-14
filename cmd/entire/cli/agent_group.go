@@ -37,7 +37,7 @@ Examples:
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAgentMenu(cmd.Context(), cmd.OutOrStdout())
+			return runAgentMenu(cmd)
 		},
 	}
 
@@ -47,12 +47,13 @@ Examples:
 	return cmd
 }
 
-func runAgentMenu(ctx context.Context, w io.Writer) error {
+func runAgentMenu(cmd *cobra.Command) error {
+	ctx := cmd.Context()
 	opts := EnableOptions{Telemetry: true}
 	if settings.IsSetUpAny(ctx) {
-		return runManageAgents(ctx, w, opts, nil)
+		return runConfigureAgentManagement(cmd, opts)
 	}
-	return runSetupFlow(ctx, w, opts)
+	return runSetupFlow(ctx, cmd.OutOrStdout(), opts)
 }
 
 func newAgentListCmd() *cobra.Command {

@@ -25,6 +25,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
@@ -884,6 +885,150 @@ func promptConfigureAgentSelection(ctx context.Context, errW io.Writer, options 
 		return NewSilentError(errors.New("agent selection cancelled"))
 	}
 	return nil
+}
+
+func promptConfigureAgentsAndSave(ctx context.Context, errW io.Writer, installedNames []types.AgentName, branch string, protected, pushSafe bool) ([]string, string, bool, error) {
+	external.DiscoverAndRegisterAlways(ctx)
+	installedSet := make(map[types.AgentName]struct{}, len(installedNames))
+	selectedNames := make([]string, 0, len(installedNames))
+	for _, name := range installedNames {
+		installedSet[name] = struct{}{}
+		selectedNames = append(selectedNames, string(name))
+	}
+	options := configureAgentOptions(hookAgentOptions(installedSet), installedSet)
+	if len(options) == 0 {
+		return nil, "", false, errors.New("no agents with hook support available")
+	}
+
+	agentsChanged := func() bool {
+		installed := make([]string, 0, len(installedNames))
+		for _, name := range installedNames {
+			installed = append(installed, string(name))
+		}
+		return !sameStrings(selectedNames, installed)
+	}
+	requiresPush := func() bool { return agentsChanged() && pushSafe && branch != "" }
+
+	agentControl := newConfigureAgentControl(options, &selectedNames, false)
+	previousHasChanges := agentsChanged()
+	saveChoice := defaultConfigureSaveChoice(previousHasChanges, requiresPush(), protected)
+	saveControl := &configureSaveField{}
+	saveOptions := func() []huh.Option[string] {
+		return configureSaveOptions(branch, protected, requiresPush(), agentsChanged(), saveChoice)
+	}
+	saveControl.Select = huh.NewSelect[string]().
+		TitleFunc(func() string {
+			return configureQuestionTitle("Save configuration", saveControl.focused)
+		}, &saveControl.focused).
+		Description(configureSaveDescription(branch, protected, requiresPush(), agentsChanged())).
+		Options(saveOptions()...).
+		Height(configureFieldHeight(len(saveOptions()), configureSaveDescription(branch, protected, requiresPush(), agentsChanged()))).
+		Value(&saveChoice)
+	refreshSave := func() {
+		changed := agentsChanged()
+		options := saveOptions()
+		if changed != previousHasChanges || !configureOptionsContain(options, saveChoice) {
+			saveChoice = defaultConfigureSaveChoice(changed, requiresPush(), protected)
+			options = saveOptions()
+		}
+		previousHasChanges = changed
+		description := configureSaveDescription(branch, protected, requiresPush(), changed)
+		saveControl.Select.Description(description).
+			Height(configureFieldHeight(len(options), description)).
+			Options(options...)
+	}
+	agentControl.selectionChanged = refreshSave
+	agentControl.showSave = func() bool { return true }
+
+	fmt.Fprintln(errW)
+	if err := newConfigureForm(huh.NewGroup(agentControl, saveControl)).RunWithContext(ctx); err != nil {
+		if cancelErr := handleFormCancellation(errW, "Agent configuration", err); cancelErr != nil {
+			return nil, "", false, cancelErr
+		}
+		return nil, "", false, NewSilentError(errors.New("agent configuration cancelled"))
+	}
+	return selectedNames, saveChoice, agentsChanged(), nil
+}
+
+func runConfigureAgentManagement(cmd *cobra.Command, opts EnableOptions) error {
+	cmd.SilenceUsage = true
+	ctx := cmd.Context()
+	outW, errW := cmd.OutOrStdout(), cmd.ErrOrStderr()
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return errors.New("not a git repository")
+	}
+	if !interactive.CanPromptInteractively() {
+		return runManageAgents(ctx, outW, opts, nil)
+	}
+
+	initialChanges, err := configureGitChanges(ctx, repoRoot)
+	if err != nil {
+		return err
+	}
+	branch, branchErr := gitRunner(ctx, repoRoot, "branch", "--show-current")
+	if branchErr != nil {
+		branch = ""
+	}
+	owner, repo, _, identityErr := configureRepoIdentity(ctx)
+	forgeRemote := ""
+	if identityErr == nil {
+		remotes, remotesErr := listGitRemotes(ctx, repoRoot)
+		if remotesErr != nil {
+			return remotesErr
+		}
+		forgeRemote, err = configureExistingForgeRemote(ctx, repoRoot, owner, repo, remotes, "")
+		if err != nil {
+			return err
+		}
+		if forgeRemote != "" {
+			if err := configureRetargetCurrentBranch(ctx, repoRoot, forgeRemote); err != nil {
+				return err
+			}
+		}
+	}
+	protected := false
+	if branch != "" && identityErr == nil {
+		if detected, protectionErr := configureBranchProtected(ctx, owner, repo, branch); protectionErr == nil {
+			protected = detected
+		}
+	}
+	pushSafe := branch != "" && forgeRemote != "" && len(initialChanges) == 0 &&
+		configureBranchHasNoUnpushedCommits(ctx, repoRoot, branch)
+	installedNames := GetAgentsWithHooksInstalled(ctx)
+	selectedNames, saveChoice, changed, err := promptConfigureAgentsAndSave(ctx, errW, installedNames, branch, protected, pushSafe)
+	if err != nil {
+		return err
+	}
+	if saveChoice == configureSaveCancel {
+		fmt.Fprintln(outW, "Agent configuration cancelled.")
+		return nil
+	}
+	if !changed {
+		fmt.Fprintln(outW, "No agent configuration changes.")
+		return nil
+	}
+
+	beforeApply, err := configureGitChanges(ctx, repoRoot)
+	if err != nil {
+		return err
+	}
+	if (saveChoice == configureSaveDirect || saveChoice == configureSaveNewBranch) &&
+		(len(beforeApply) != 0 || !configureBranchHasNoUnpushedCommits(ctx, repoRoot, branch)) {
+		saveChoice = configureSaveLocal
+	}
+	if err := applyAgentChanges(ctx, outW, selectedNames, installedNames, opts); err != nil {
+		return err
+	}
+	if saveChoice != configureSaveDirect && saveChoice != configureSaveNewBranch {
+		return nil
+	}
+	afterApply, err := configureGitChanges(ctx, repoRoot)
+	if err != nil {
+		return err
+	}
+	generated := newConfigureChanges(beforeApply, afterApply)
+	return configureSaveAndPush(cmd, repoRoot, owner, repo, beforeApply, generated, branch, protected, saveChoice, forgeRemote, time.Now)
 }
 
 func configureSelectedAgents(names []string) ([]agent.Agent, error) {
