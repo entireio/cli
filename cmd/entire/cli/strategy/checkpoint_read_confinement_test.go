@@ -25,13 +25,15 @@ func initRemoteElectionRepo(t *testing.T) string {
 	return tmpDir
 }
 
-func electionRevParse(t *testing.T, dir, ref string) string {
+// electionHeadHash returns dir's HEAD commit hash. Every caller wanted HEAD, so
+// the ref is not a parameter.
+func electionHeadHash(t *testing.T, dir string) string {
 	t.Helper()
-	cmd := exec.CommandContext(t.Context(), "git", "rev-parse", ref)
+	cmd := exec.CommandContext(t.Context(), "git", "rev-parse", "HEAD")
 	cmd.Dir = dir
 	cmd.Env = testutil.GitIsolatedEnv()
 	out, err := cmd.Output()
-	require.NoError(t, err, "git rev-parse %s", ref)
+	require.NoError(t, err, "git rev-parse HEAD")
 	return strings.TrimSpace(string(out))
 }
 
@@ -64,7 +66,7 @@ func TestEnsurePrimaryRef_NonElectedOriginNeverSeedsLocal(t *testing.T) {
 			testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
 			tt.configure(t, tmpDir)
 
-			staleHash := electionRevParse(t, tmpDir, "HEAD")
+			staleHash := electionHeadHash(t, tmpDir)
 			testutil.GitUpdateRef(t, tmpDir, "refs/remotes/origin/"+paths.MetadataBranchName, staleHash)
 
 			t.Chdir(tmpDir)
@@ -89,7 +91,7 @@ func TestEnsurePrimaryRef_ElectedUpstreamTrackingSeedsLocal(t *testing.T) {
 	testutil.AddRemote(t, tmpDir, "upstream", "https://example.com/upstream.git")
 	testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, "upstream")
 
-	headHash := electionRevParse(t, tmpDir, "HEAD")
+	headHash := electionHeadHash(t, tmpDir)
 	testutil.GitUpdateRef(t, tmpDir, "refs/remotes/upstream/"+paths.MetadataBranchName, headHash)
 
 	t.Chdir(tmpDir)

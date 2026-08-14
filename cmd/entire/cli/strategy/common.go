@@ -207,7 +207,7 @@ func replayLocalRefFromBase(ctx context.Context, repo *git.Repository, repoPath 
 	if err != nil {
 		return fmt.Errorf("failed to load shallow boundaries for %s: %w", localRefName, err)
 	}
-	return replayLocalCommits(ctx, repo, localRefName, targetHash, localCommits, shallow)
+	return replayLocalCommits(ctx, repo, "diverged", localRefName, localHash, targetHash, localCommits, shallow)
 }
 
 func replayDisconnectedLocalRef(ctx context.Context, repo *git.Repository, repoPath string, localRefName plumbing.ReferenceName, localHash, targetHash plumbing.Hash) error {
@@ -219,10 +219,30 @@ func replayDisconnectedLocalRef(ctx context.Context, repo *git.Repository, repoP
 	if err != nil {
 		return fmt.Errorf("failed to collect disconnected local commits for %s: %w", localRefName, err)
 	}
-	return replayLocalCommits(ctx, repo, localRefName, targetHash, localCommits, shallow)
+	return replayLocalCommits(ctx, repo, "disconnected", localRefName, localHash, targetHash, localCommits, shallow)
 }
 
-func replayLocalCommits(ctx context.Context, repo *git.Repository, localRefName plumbing.ReferenceName, targetHash plumbing.Hash, localCommits []*object.Commit, shallow map[plumbing.Hash]bool) error {
+func replayLocalCommits(ctx context.Context, repo *git.Repository, reason string, localRefName plumbing.ReferenceName, localHash, targetHash plumbing.Hash, localCommits []*object.Commit, shallow map[plumbing.Hash]bool) error {
+	// Logged here rather than in each caller: this is the function that performs
+	// the rewrite, so a future third caller cannot silently skip the trace.
+	//
+	// A replay rewrites the local ref to the fetched remote tip with the local
+	// commits re-applied on top: no checkpoint is lost, but the ref no longer
+	// points where it did and the local commits have new hashes. That is the one
+	// place a fetch reaches past remote-tracking refs into local state, so it must
+	// leave a trace — the whole advance/replay chain was previously silent, which
+	// made an invisible rewrite impossible to reconstruct afterwards from
+	// .entire/logs/. Info rather than Debug: the default log level has to carry it
+	// for a post-hoc investigation to find it.
+	//
+	// Metadata only (ref names, hashes, counts) per the logging privacy rule.
+	logging.Info(ctx, "replaying local commits onto fetched tip; local ref will be rewritten",
+		slog.String("reason", reason),
+		slog.String("ref", localRefName.String()),
+		slog.String("local_tip", localHash.String()),
+		slog.String("target_tip", targetHash.String()),
+		slog.Int("commits_replayed", len(localCommits)))
+
 	if len(localCommits) == 0 {
 		return setRefHash(repo, localRefName, targetHash)
 	}

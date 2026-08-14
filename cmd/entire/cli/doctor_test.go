@@ -308,7 +308,11 @@ func TestClassifySession_WorktreeIDInShadowBranch(t *testing.T) {
 }
 
 // Distinct parentless commits have no common ancestor.
-func writeRootlessMetadataCommit(t *testing.T, repo *git.Repository, message string) plumbing.Hash {
+// writeRootlessMetadataCommit builds a metadata commit with an empty tree.
+// parents is variadic so a test can build connected history (shared base, two
+// children) without a second copy of the go-git plumbing dance; passing none
+// yields the rootless commit the disconnection tests want.
+func writeRootlessMetadataCommit(t *testing.T, repo *git.Repository, message string, parents ...plumbing.Hash) plumbing.Hash {
 	t.Helper()
 	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
 	treeObj := repo.Storer.NewEncodedObject()
@@ -321,6 +325,8 @@ func writeRootlessMetadataCommit(t *testing.T, repo *git.Repository, message str
 		Committer: object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
 		Message:   message,
 		TreeHash:  treeHash,
+
+		ParentHashes: parents,
 	}
 	enc := repo.Storer.NewEncodedObject()
 	require.NoError(t, commitObj.Encode(enc))
@@ -678,4 +684,105 @@ func TestConfirmDoctorFix_CancelledContext(t *testing.T) {
 	proceed, err := confirmDoctorFix(ctx, &out, "Apply fix?")
 	require.NoError(t, err)
 	assert.False(t, proceed)
+}
+
+// setupDivergedMetadata points local v1 and origin's tracking ref at two
+// different children of one base commit, and returns both tips.
+func setupDivergedMetadata(t *testing.T, repo *git.Repository) (local, remote plumbing.Hash) {
+	t.Helper()
+	base := writeRootlessMetadataCommit(t, repo, "shared base")
+	local = writeRootlessMetadataCommit(t, repo, "local checkpoint", base)
+	remote = writeRootlessMetadataCommit(t, repo, "remote checkpoint", base)
+
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName(paths.MetadataBranchName), local)))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), remote)))
+	return local, remote
+}
+
+func runCheckDisconnectedMetadata(t *testing.T) string {
+	t.Helper()
+	cmd, stdout := newTestCmd(t)
+	require.NoError(t, checkDisconnectedMetadata(cmd, true))
+	return stdout.String()
+}
+
+// TestCheckDisconnectedMetadata_Diverged_ReportedAsSelfHealing covers the state
+// that previously printed a bare "OK": local and remote both advanced, so the
+// next fetch rewrites the local ref by replaying local commits. Nothing else
+// surfaces that, since the replay itself only logs.
+func TestCheckDisconnectedMetadata_Diverged_ReportedAsSelfHealing(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir and IsolateGitConfigEnv modify globals.
+	testutil.IsolateGitConfigEnv(t)
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	local, remote := setupDivergedMetadata(t, repo)
+
+	// origin is the elected remote here, so the replay really will happen.
+	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
+
+	output := runCheckDisconnectedMetadata(t)
+
+	assert.Contains(t, output, "Metadata branches: DIVERGED")
+	assert.NotContains(t, output, "DISCONNECTED", "shared ancestry is not a disconnection")
+	assert.Contains(t, output, local.String()[:12], "the local tip must be shown")
+	assert.Contains(t, output, remote.String()[:12], "the remote tip must be shown")
+	assert.Contains(t, output, "No action needed", "divergence against the elected remote self-heals")
+	assert.Contains(t, output, "new hashes", "the user must learn the replayed commits are re-hashed")
+
+	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	assert.Equal(t, local, localRef.Hash(), "reporting must not move any ref")
+}
+
+// TestCheckDisconnectedMetadata_Diverged_LegacyTierWontReconcile is the other
+// half: the confinement rule means a diverged legacy-tier ref never advances the
+// local ref, so promising self-healing there would be a lie.
+func TestCheckDisconnectedMetadata_Diverged_LegacyTierWontReconcile(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	setupDivergedMetadata(t, repo)
+
+	// Election picks upstream; origin carries the diverged tracking ref.
+	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, dir, "upstream", "https://example.com/upstream.git")
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "upstream")
+
+	output := runCheckDisconnectedMetadata(t)
+
+	assert.Contains(t, output, "Metadata branches: DIVERGED")
+	assert.Contains(t, output, "legacy read tier")
+	assert.Contains(t, output, "Nothing will reconcile this on its own.")
+	assert.NotContains(t, output, "No action needed",
+		"a legacy-tier divergence does not self-heal; saying so would be wrong")
+}
+
+// TestCheckDisconnectedMetadata_Aligned_StaysQuiet pins that the common case is
+// unchanged — the divergence check must not add noise to a healthy repo.
+func TestCheckDisconnectedMetadata_Aligned_StaysQuiet(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	tip := writeRootlessMetadataCommit(t, repo, "agreed metadata")
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName(paths.MetadataBranchName), tip)))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), tip)))
+	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
+
+	output := runCheckDisconnectedMetadata(t)
+
+	assert.Contains(t, output, "✓ Metadata branches: OK")
+	assert.NotContains(t, output, "DIVERGED")
 }
