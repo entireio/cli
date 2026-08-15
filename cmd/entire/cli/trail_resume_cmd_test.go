@@ -58,9 +58,8 @@ func TestValidateTrailResumeOptions(t *testing.T) {
 			wantErr: "cannot combine --session and --checkpoint",
 		},
 		{
-			name:    "json requires no resume",
-			opts:    trailResumeOptions{JSON: true},
-			wantErr: "--json can only be used with --no-resume",
+			name: "json alone accepted (action report)",
+			opts: trailResumeOptions{JSON: true},
 		},
 		{
 			name: "json no resume accepted",

@@ -195,8 +195,14 @@ func resumeSessionOnBranch(ctx context.Context, cmd *cobra.Command, branchName s
 // resume, so two sessions on the same branch resume independently.
 func resumeByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID id.CheckpointID, force bool) error {
 	sessions, err := restoreByCheckpointID(ctx, w, errW, checkpointID, force)
-	if err != nil || len(sessions) == 0 {
+	if err != nil {
 		return err
+	}
+	if err := ensureSessionsRestored(sessions, force); err != nil {
+		return err
+	}
+	if len(sessions) == 0 {
+		return nil
 	}
 	return continueSessionRestoredSessions(ctx, w, sessions)
 }
@@ -235,11 +241,31 @@ func restoreByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID 
 }
 
 func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName string, force bool) error {
-	sessions, err := restoreFromCurrentBranch(ctx, w, errW, branchName, force)
-	if err != nil || len(sessions) == 0 {
+	sessions, err := restoreFromCurrentBranch(ctx, w, errW, branchName, force, true)
+	if err != nil {
 		return err
 	}
+	if err := ensureSessionsRestored(sessions, force); err != nil {
+		return err
+	}
+	if len(sessions) == 0 {
+		return nil
+	}
 	return continueSessionRestoredSessions(ctx, w, sessions)
+}
+
+// ensureSessionsRestored enforces the shared resume contract: zero restored
+// sessions is a failure for scripted callers. When prompts were possible the
+// zero is treated as a decline and exits 0 — the guard cannot distinguish a
+// genuine empty restore there (the user saw the restore messages).
+func ensureSessionsRestored(sessions []strategy.RestoredSession, force bool) error {
+	if len(sessions) > 0 {
+		return nil
+	}
+	if !force && interactive.CanPromptInteractively() {
+		return nil
+	}
+	return &ResumeNoSessionsRestoredError{}
 }
 
 func continueSessionRestoredSessions(ctx context.Context, w io.Writer, sessions []strategy.RestoredSession) error {
@@ -251,7 +277,11 @@ func continueSessionRestoredSessions(ctx context.Context, w io.Writer, sessions 
 	})
 }
 
-func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName string, force bool) ([]strategy.RestoredSession, error) {
+// restoreFromCurrentBranch restores the latest checkpoint's sessions on
+// branchName. allowPrompts=false suppresses the older-checkpoint confirmation
+// even on a real terminal (the --json path, whose stdout must carry only
+// JSON) without implying --force's log-overwrite semantics.
+func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName string, force, allowPrompts bool) ([]strategy.RestoredSession, error) {
 	logCtx := logging.WithComponent(ctx, "resume")
 
 	repo, err := openRepository(ctx)
@@ -266,8 +296,7 @@ func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName
 		return nil, err
 	}
 	if len(result.checkpointIDs) == 0 {
-		fmt.Fprintf(w, "No Entire checkpoint found on branch '%s'\n", branchName)
-		return nil, nil
+		return nil, &ResumeNoCheckpointError{Branch: branchName}
 	}
 
 	logging.Debug(logCtx, "found checkpoint(s) on branch",
@@ -277,20 +306,26 @@ func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName
 		slog.Bool("newer_commits_exist", result.newerCommitsExist),
 	)
 
-	// If there are newer commits without checkpoints, ask for confirmation.
-	// Merge commits (e.g., from merging main) don't count as "work" and are skipped silently.
+	// If there are newer commits without checkpoints, ask for confirmation;
+	// when prompting isn't possible or allowed, proceed with a notice. Merge
+	// commits (e.g., from merging main) don't count as "work" and are
+	// skipped silently.
 	if result.newerCommitsExist && !force {
-		fmt.Fprintf(w, "Found checkpoint in an older commit.\n")
-		fmt.Fprintf(w, "There are %d newer commit(s) on this branch without checkpoints.\n", result.newerCommitCount)
-		fmt.Fprintf(w, "Checkpoint from: %s %s\n\n", result.commitHash[:7], firstLine(result.commitMessage))
+		if !allowPrompts || !interactive.CanPromptInteractively() {
+			fmt.Fprintln(w, olderCheckpointNotice(repo, result))
+		} else {
+			fmt.Fprintf(w, "Found checkpoint in an older commit.\n")
+			fmt.Fprintf(w, "There are %d newer commit(s) on this branch without checkpoints.\n", result.newerCommitCount)
+			fmt.Fprintf(w, "Checkpoint from: %s %s\n\n", result.commitHash[:7], firstLine(result.commitMessage))
 
-		shouldResume, err := promptResumeFromOlderCheckpoint()
-		if err != nil {
-			return nil, err
-		}
-		if !shouldResume {
-			fmt.Fprintf(w, "Resume cancelled.\n")
-			return nil, nil
+			shouldResume, err := promptResumeFromOlderCheckpoint()
+			if err != nil {
+				return nil, err
+			}
+			if !shouldResume {
+				fmt.Fprintf(w, "Resume cancelled.\n")
+				return nil, nil
+			}
 		}
 	}
 
@@ -726,6 +761,26 @@ func findCheckpointInHistory(start *object.Commit, stopAt *plumbing.Hash) *branc
 	return result
 }
 
+// headCommitLabel names the current commit in resume notices. Not
+// detachedHEADDisplay: that labels a detached HEAD and may diverge, while
+// this notice fires on attached branch tips too.
+const headCommitLabel = "HEAD"
+
+// olderCheckpointNotice describes proceeding from a checkpoint older than
+// HEAD, for non-interactive runs where the confirmation prompt cannot fire.
+func olderCheckpointNotice(repo *git.Repository, result *branchCheckpointsResult) string {
+	headLabel := headCommitLabel
+	if head, err := repo.Head(); err == nil {
+		headLabel += " " + head.Hash().String()[:7]
+	}
+	plural := "s"
+	if result.newerCommitCount == 1 {
+		plural = ""
+	}
+	return fmt.Sprintf("%s has no checkpoint; resuming from %s (%d commit%s newer than the checkpoint)",
+		headLabel, result.commitHash[:7], result.newerCommitCount, plural)
+}
+
 // promptResumeFromOlderCheckpoint asks the user if they want to resume from an older checkpoint.
 func promptResumeFromOlderCheckpoint() (bool, error) {
 	var confirmed bool
@@ -761,7 +816,7 @@ func checkRemoteMetadata(
 	if !refs.ReadBootstrappableFromOrigin() {
 		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but metadata is not available in %s.\n", checkpointID, refs.Read)
 		fmt.Fprintf(errW, "This ref is local-only. Try: entire checkpoint explain %s\n", checkpointID)
-		return nil, nil
+		return nil, NewSilentError(&ResumeMetadataUnavailableError{CheckpointID: checkpointID})
 	}
 
 	// Open a fresh repo to avoid stale packfile index issues
@@ -771,7 +826,7 @@ func checkRemoteMetadata(
 			slog.String("error", repoErr.Error()),
 		)
 		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but session metadata not available\n", checkpointID)
-		return nil, nil
+		return nil, NewSilentError(&ResumeMetadataUnavailableError{CheckpointID: checkpointID})
 	}
 	defer repo.Close()
 
@@ -857,7 +912,7 @@ func checkRemoteMetadata(
 		fmt.Fprintf(errW, "This can happen if the metadata branch was not pushed. Try:\n")
 		fmt.Fprintf(errW, "  git fetch origin entire/checkpoints/v1:entire/checkpoints/v1\n")
 	}
-	return nil, nil
+	return nil, NewSilentError(&ResumeMetadataUnavailableError{CheckpointID: checkpointID})
 }
 
 // promoteRemoteTrackingPrimary advances the local primary ref to match origin's

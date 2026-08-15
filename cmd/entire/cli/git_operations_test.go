@@ -113,7 +113,7 @@ func TestGetCurrentBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCurrentBranch(context.Background()) error = %v", err)
 	}
-	if branch != "feature" {
+	if branch != testFeatureBranch {
 		t.Errorf("GetCurrentBranch(context.Background()) = %v, want feature", branch)
 	}
 }

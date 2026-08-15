@@ -150,14 +150,15 @@ func TestResume_NoCheckpointOnBranch(t *testing.T) {
 	// Switch back to master
 	env.GitCheckoutBranch(masterBranch)
 
-	// Resume to the plain branch - should indicate no checkpoint found
+	// Resume to the plain branch - nothing was resumed, so the command must
+	// exit non-zero with the typed no-checkpoint message.
 	output, err := env.RunResume(plainBranch)
-	if err != nil {
-		t.Fatalf("resume failed: %v\nOutput: %s", err, output)
+	if err == nil {
+		t.Fatalf("resume succeeded for branch without checkpoints, want non-zero exit\nOutput: %s", output)
 	}
 
 	// Should indicate no checkpoint found
-	if !strings.Contains(output, "No Entire checkpoint found") {
+	if !strings.Contains(output, "no Entire checkpoint found") {
 		t.Errorf("output should indicate no checkpoint found, got: %s", output)
 	}
 
@@ -388,10 +389,16 @@ func TestResume_CheckpointWithoutMetadata(t *testing.T) {
 	// Switch to main
 	env.GitCheckoutBranch(masterBranch)
 
-	// Resume - should not error but indicate no session available
+	// Resume - nothing can be restored (the checkpoint's metadata is missing),
+	// so the command must exit non-zero after printing its guidance.
 	output, err := env.RunResume(featureBranch)
-	if err != nil {
-		t.Fatalf("resume failed: %v\nOutput: %s", err, output)
+	if err == nil {
+		t.Fatalf("resume succeeded despite missing checkpoint metadata, want non-zero exit\nOutput: %s", output)
+	}
+
+	// The guidance for fetching the metadata branch should still be printed.
+	if !strings.Contains(output, "metadata branch was not pushed") {
+		t.Errorf("output should retain the fetch guidance, got: %s", output)
 	}
 
 	// Verify we switched to the feature branch
@@ -400,7 +407,6 @@ func TestResume_CheckpointWithoutMetadata(t *testing.T) {
 	}
 
 	// Should NOT show session info since metadata is missing
-	// The resume command should silently skip commits without valid metadata
 	if strings.Contains(output, "Restored session") {
 		t.Errorf("output should not contain 'Restored session' when metadata is missing, got: %s", output)
 	}
@@ -703,6 +709,47 @@ func TestResume_LocalLogNewerTimestamp_ForceOverwrites(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "Create hello method") {
 		t.Errorf("restored log should contain checkpoint transcript, got: %s", string(data))
+	}
+}
+
+// TestResume_RerunIsIdempotent verifies that resuming the same branch twice
+// succeeds both times: agents retry, so a repeated resume must be a clean
+// no-op success (already on the branch, existing restored log kept).
+func TestResume_RerunIsIdempotent(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	session := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	content := "def hello; end"
+	env.WriteFile("hello.rb", content)
+	session.CreateTranscript(
+		"Create hello method",
+		[]FileChange{{Path: "hello.rb", Content: content}},
+	)
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+	env.GitCommitWithShadowHooks("Create hello method", "hello.rb")
+
+	featureBranch := env.GetCurrentBranch()
+	env.GitCheckoutBranch(masterBranch)
+
+	output, err := env.RunResume(featureBranch)
+	if err != nil {
+		t.Fatalf("first resume failed: %v\nOutput: %s", err, output)
+	}
+
+	// Second run: already on the branch, log already restored. Must still
+	// succeed and keep the existing log (no --force given).
+	output, err = env.RunResume(featureBranch)
+	if err != nil {
+		t.Fatalf("second resume failed (must be an idempotent success): %v\nOutput: %s", err, output)
+	}
+	if !strings.Contains(output, "Keeping existing") {
+		t.Errorf("second resume should keep the existing restored log, got: %s", output)
 	}
 }
 
