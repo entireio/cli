@@ -233,9 +233,7 @@ func TestBuildTrailReviewCommentInput(t *testing.T) {
 		Body:        "Token refresh should allow clock skew.",
 		Severity:    "HIGH",
 		Confidence:  0.94,
-		FilePath:    "src/auth/session.ts",
-		StartLine:   88,
-		EndLine:     91,
+		FilePath:    "src/auth/session.ts:88-91",
 		ClientID:    "agent-run-1:finding-7",
 		Instruction: "Allow a five minute skew.",
 	})
@@ -262,6 +260,109 @@ func TestBuildTrailReviewCommentInput(t *testing.T) {
 	}
 	if input.SuggestedChange == nil || input.SuggestedChange.ChangeType != "manual_instruction" {
 		t.Fatalf("SuggestedChange = %#v", input.SuggestedChange)
+	}
+}
+
+func TestBuildTrailReviewCommentLocationFileLineSpec(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		opts        trailReviewCommentAddOptions
+		granularity string
+		filePath    string
+		startLine   int
+		endLine     int
+	}{
+		{
+			name:        "file only",
+			opts:        trailReviewCommentAddOptions{FilePath: "src/auth/session.ts"},
+			granularity: reviewTrailGranularityFile,
+			filePath:    "src/auth/session.ts",
+		},
+		{
+			name:        "colon line",
+			opts:        trailReviewCommentAddOptions{FilePath: "src/auth/session.ts:88"},
+			granularity: reviewTrailGranularityLine,
+			filePath:    "src/auth/session.ts",
+			startLine:   88,
+		},
+		{
+			name:        "colon range",
+			opts:        trailReviewCommentAddOptions{FilePath: "src/auth/session.ts:88-91"},
+			granularity: reviewTrailGranularityRange,
+			filePath:    "src/auth/session.ts",
+			startLine:   88,
+			endLine:     91,
+		},
+		{
+			name:        "legacy line flag",
+			opts:        trailReviewCommentAddOptions{FilePath: "src/auth/session.ts", Line: 88},
+			granularity: reviewTrailGranularityLine,
+			filePath:    "src/auth/session.ts",
+			startLine:   88,
+		},
+		{
+			name:        "legacy range flags",
+			opts:        trailReviewCommentAddOptions{FilePath: "src/auth/session.ts", StartLine: 88, EndLine: 91},
+			granularity: reviewTrailGranularityRange,
+			filePath:    "src/auth/session.ts",
+			startLine:   88,
+			endLine:     91,
+		},
+		{
+			name:        "non numeric colon stays file path",
+			opts:        trailReviewCommentAddOptions{FilePath: "docs/release:v2.md"},
+			granularity: reviewTrailGranularityFile,
+			filePath:    "docs/release:v2.md",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := buildTrailReviewCommentLocation(tt.opts)
+			if err != nil {
+				t.Fatalf("buildTrailReviewCommentLocation: %v", err)
+			}
+			if got.Granularity != tt.granularity {
+				t.Fatalf("Granularity = %q, want %q", got.Granularity, tt.granularity)
+			}
+			if got.FilePath == nil || *got.FilePath != tt.filePath {
+				t.Fatalf("FilePath = %#v, want %q", got.FilePath, tt.filePath)
+			}
+			if tt.startLine == 0 {
+				if got.StartLine != nil {
+					t.Fatalf("StartLine = %#v, want nil", got.StartLine)
+				}
+			} else if got.StartLine == nil || *got.StartLine != tt.startLine {
+				t.Fatalf("StartLine = %#v, want %d", got.StartLine, tt.startLine)
+			}
+			if tt.endLine == 0 {
+				if got.EndLine != nil {
+					t.Fatalf("EndLine = %#v, want nil", got.EndLine)
+				}
+			} else if got.EndLine == nil || *got.EndLine != tt.endLine {
+				t.Fatalf("EndLine = %#v, want %d", got.EndLine, tt.endLine)
+			}
+		})
+	}
+}
+
+func TestBuildTrailReviewCommentLocationRejectsMixedLineSyntax(t *testing.T) {
+	t.Parallel()
+	_, err := buildTrailReviewCommentLocation(trailReviewCommentAddOptions{
+		FilePath: "src/auth/session.ts:88",
+		Line:     89,
+	})
+	if err == nil || !strings.Contains(err.Error(), "pass either --file path:line[-end]") {
+		t.Fatalf("error = %v, want mixed syntax error", err)
+	}
+}
+
+func TestBuildTrailReviewCommentLocationRejectsInvalidFileLineSpec(t *testing.T) {
+	t.Parallel()
+	_, err := buildTrailReviewCommentLocation(trailReviewCommentAddOptions{FilePath: "src/auth/session.ts:88-12"})
+	if err == nil || !strings.Contains(err.Error(), "invalid --file location") {
+		t.Fatalf("error = %v, want invalid --file location error", err)
 	}
 }
 
@@ -531,6 +632,7 @@ func TestPrintTrailReviewDashboard(t *testing.T) {
 		"src/auth/session.ts:88",
 		"Missing expiry skew handling",
 		"Actions:",
+		"entire trail finding add -m \"finding body\" --file path:42",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("dashboard missing %q:\n%s", want, text)
