@@ -123,11 +123,41 @@ type TrailUpdateRequest struct {
 	RequestedReviewers *[]string `json:"requested_reviewers,omitempty"`
 	Type               *string   `json:"type,omitempty"`
 	Priority           *string   `json:"priority,omitempty"`
+	// There is deliberately no Branch field. A trail's branch cannot be changed
+	// once set, and the /branch endpoint enforces that with a 409. The PATCH
+	// endpoint accepts a raw `branch` write and does not, so sending it would
+	// repoint a trail the rule says must keep its branch. Pointing two trails
+	// at one branch that way fails instead of succeeding, but only because the
+	// database has a unique (repo_id, branch) index; the update path does not
+	// catch that violation the way the create path does, so it surfaces as a
+	// server error rather than a clean conflict. Attach a branch to a
+	// branchless trail with TrailBranchRequest against /branch instead.
 }
 
 // TrailUpdateResponse is the response from PATCH /api/v1/trails/:org/:repo/:trailId.
 type TrailUpdateResponse struct {
 	Trail TrailResource `json:"trail"`
+}
+
+// TrailBranchRequest is the body for POST /api/v1/trails/:host/:owner/:repo/:number/branch.
+// It attaches a branch to a branchless trail; the server rejects it (409) when
+// the trail already has a branch. Action is required: "create" backfills the
+// branch on the forge at the trail's base if it is missing (needs App write
+// permission); "link" attaches an already-pushed branch and never backfills it.
+// BranchName carries no omitempty on purpose: the endpoint has nothing to
+// attach without it, so it is always sent and an empty one reaches the server
+// as an empty value rather than vanishing from the body.
+type TrailBranchRequest struct {
+	Action     string `json:"action"`
+	BranchName string `json:"branch_name"`
+}
+
+// TrailBranchResponse is the response from POST /api/v1/trails/:host/:owner/:repo/:number/branch.
+// BranchCreated reports whether the server created the branch on the forge
+// (true for a "create" action that backfilled a missing branch).
+type TrailBranchResponse struct {
+	Trail         TrailResource `json:"trail"`
+	BranchCreated bool          `json:"branch_created"`
 }
 
 // TrailDeleteResponse is the response from DELETE /api/v1/trails/:host/:owner/:repo/:number.

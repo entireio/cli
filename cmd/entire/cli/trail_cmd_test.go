@@ -37,6 +37,8 @@ import (
 const (
 	trailListTestAuthorAlice = "alice"
 	trailListTestAuthorBob   = "bob"
+	// testTrailBranch is the stand-in branch name for trail branch tests.
+	testTrailBranch = "feature/x"
 	// trailTestBasePath is the trails endpoint for the gh/acme/repo fixture.
 	trailTestBasePath = "/api/v1/trails/gh/acme/repo"
 	// trailBodyField is the PATCH field name carrying a trail's description.
@@ -44,12 +46,12 @@ const (
 )
 
 func TestNewTrailCreateRequestUsesLinkBranchAction(t *testing.T) {
-	req := newTrailCreateRequest("title", "body", "feature/x", "main", "open", "", "", nil)
+	req := newTrailCreateRequest("title", "body", testTrailBranch, "main", "open", "", "", nil)
 
 	require.Equal(t, api.TrailCreateRequest{
 		Title:        "title",
 		Body:         "body",
-		BranchName:   "feature/x",
+		BranchName:   testTrailBranch,
 		BranchAction: "link",
 		Base:         "main",
 		Status:       "open",
@@ -101,7 +103,7 @@ func TestValidateTrailCreateFlagCombosRejectsBranchlessConflicts(t *testing.T) {
 	t.Run("branch", func(t *testing.T) {
 		t.Parallel()
 		cmd := newTrailCreateCmd()
-		require.NoError(t, cmd.Flags().Set("branch", "feature/x"))
+		require.NoError(t, cmd.Flags().Set("branch", testTrailBranch))
 
 		err := validateTrailCreateFlagCombos(cmd, false, true)
 
@@ -128,7 +130,7 @@ func TestTrailCreateCommandRejectsBranchlessFlagConflictsBeforeRepoLookup(t *tes
 	}{
 		{
 			name:    "branch",
-			args:    []string{"--no-branch", "--branch", "feature/x", "--title", "Branchless"},
+			args:    []string{"--no-branch", "--branch", testTrailBranch, "--title", "Branchless"},
 			wantErr: "cannot combine --no-branch with --branch",
 		},
 		{
@@ -813,6 +815,352 @@ func TestDeleteTrailByNumber(t *testing.T) {
 			t.Fatal("expected error for 404, got nil")
 		}
 	})
+}
+
+func TestAttachTrailBranch(t *testing.T) {
+	t.Parallel()
+
+	t.Run("posts action and branch_name to the /branch path and decodes the response", func(t *testing.T) {
+		t.Parallel()
+		var gotMethod, gotPath string
+		var gotBody api.TrailBranchRequest
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotMethod, gotPath = r.Method, r.URL.Path
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Errorf("decode request body: %v", err)
+			}
+			if err := json.NewEncoder(w).Encode(api.TrailBranchResponse{
+				Trail:         api.TrailResource{Number: 575, Branch: testTrailBranch},
+				BranchCreated: true,
+			}); err != nil {
+				t.Errorf("encode response: %v", err)
+			}
+		}))
+		defer srv.Close()
+
+		client := api.NewClientWithBaseURL("tok", srv.URL)
+		resp, err := attachTrailBranch(t.Context(), client, "gh", "acme", "repo", 575, "create", testTrailBranch)
+		if err != nil {
+			t.Fatalf("attachTrailBranch: %v", err)
+		}
+		if gotMethod != http.MethodPost {
+			t.Fatalf("method = %q, want POST", gotMethod)
+		}
+		if want := "/api/v1/trails/gh/acme/repo/575/branch"; gotPath != want {
+			t.Fatalf("path = %q, want %q", gotPath, want)
+		}
+		if gotBody.Action != "create" || gotBody.BranchName != testTrailBranch {
+			t.Fatalf("body = %+v, want {create feature/x}", gotBody)
+		}
+		if !resp.BranchCreated {
+			t.Fatal("BranchCreated = false, want true")
+		}
+	})
+
+	// The server's two 409s, verbatim from the /branch handler. Each says what
+	// happened but not what to do, so the CLI explains the rule behind it.
+	conflicts := []struct {
+		name       string
+		serverMsg  string
+		wantPhrase []string
+	}{
+		{
+			name:       "the trail gained a branch since it was read",
+			serverMsg:  "Trail already has a linked branch",
+			wantPhrase: []string{"#575", "cannot be changed once set"},
+		},
+		{
+			name:       "the branch already backs another trail",
+			serverMsg:  "This branch is already linked to another trail",
+			wantPhrase: []string{testTrailBranch, "can back only one trail"},
+		},
+	}
+	conflicts = append(conflicts, struct {
+		name       string
+		serverMsg  string
+		wantPhrase []string
+	}{
+		// The two matched phrases are server prose with no error code behind
+		// them. If they are reworded, the specific message is lost but the
+		// guidance must not be: a 409 here can only mean one of the two rules.
+		name:       "the server reworded its conflict",
+		serverMsg:  "Branch conflict",
+		wantPhrase: []string{testTrailBranch, "cannot be changed once set", "can back only one trail"},
+	})
+	for _, tc := range conflicts {
+		t.Run("explains the 409 when "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusConflict)
+				if err := json.NewEncoder(w).Encode(map[string]string{"error": tc.serverMsg}); err != nil {
+					t.Errorf("encode response: %v", err)
+				}
+			}))
+			defer srv.Close()
+
+			client := api.NewClientWithBaseURL("tok", srv.URL)
+			_, err := attachTrailBranch(t.Context(), client, "gh", "acme", "repo", 575, "link", testTrailBranch)
+			if err == nil {
+				t.Fatal("expected error for 409, got nil")
+			}
+			// The server's own wording is kept so the cause stays visible.
+			for _, want := range append(tc.wantPhrase, tc.serverMsg) {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error = %q, want it to mention %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// planTrailBranchChange takes no API client on purpose: deciding what
+// --set-branch means must not touch the forge, so that a later validation
+// failure (a bad --title or --status) cannot leave a created branch behind.
+// These cases cover the decision; attaching is exercised by TestAttachTrailBranch.
+func TestPlanTrailBranchChange(t *testing.T) {
+	t.Parallel()
+
+	withBranch := &api.TrailResource{Number: 575, Branch: "old-branch"}
+	branchless := &api.TrailResource{Number: 575}
+
+	t.Run("no --set-branch leaves the branch alone", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planTrailBranchChange(t.Context(), withBranch, trailUpdateInputs{TitleChanged: true, Title: "new"})
+		if err != nil {
+			t.Fatalf("planTrailBranchChange: %v", err)
+		}
+		if plan != (trailBranchPlan{}) {
+			t.Fatalf("plan = %+v, want zero value", plan)
+		}
+	})
+
+	t.Run("refuses to move a trail that already has a branch", func(t *testing.T) {
+		t.Parallel()
+		// The server rule: a trail's branch cannot be changed once set. Catch it
+		// here rather than sending a PATCH, which would take a raw branch write
+		// and repoint the trail behind the rule's back.
+		_, err := planTrailBranchChange(t.Context(), withBranch, trailUpdateInputs{
+			SetBranch: testTrailBranch, SetBranchChanged: true,
+		})
+		if err == nil {
+			t.Fatal("expected an error when moving an existing branch, got nil")
+		}
+		for _, want := range []string{"old-branch", testTrailBranch, "cannot be changed once set"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %q, want it to mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("setting the branch a trail already has does nothing", func(t *testing.T) {
+		t.Parallel()
+		// Not a change, so it must not error — re-running the same command has
+		// to stay safe.
+		plan, err := planTrailBranchChange(t.Context(), withBranch, trailUpdateInputs{
+			SetBranch: withBranch.Branch, SetBranchChanged: true,
+		})
+		if err != nil {
+			t.Fatalf("planTrailBranchChange: %v", err)
+		}
+		if plan != (trailBranchPlan{}) {
+			t.Fatalf("plan = %+v, want zero value", plan)
+		}
+	})
+
+	t.Run("a branchless trail is attached via the /branch endpoint", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planTrailBranchChange(t.Context(), branchless, trailUpdateInputs{
+			SetBranch: testTrailBranch, SetBranchChanged: true,
+			BranchAction: "create", BranchActionChanged: true,
+		})
+		if err != nil {
+			t.Fatalf("planTrailBranchChange: %v", err)
+		}
+		if !plan.Attach || plan.Branch != testTrailBranch || plan.Action != "create" {
+			t.Fatalf("plan = %+v, want attach feature/x with action create", plan)
+		}
+	})
+
+	t.Run("an attach defaults to linking an existing branch", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planTrailBranchChange(t.Context(), branchless, trailUpdateInputs{
+			SetBranch: testTrailBranch, SetBranchChanged: true,
+		})
+		if err != nil {
+			t.Fatalf("planTrailBranchChange: %v", err)
+		}
+		if plan.Action != "link" {
+			t.Fatalf("Action = %q, want %q", plan.Action, "link")
+		}
+	})
+
+	t.Run("surrounding whitespace is trimmed off the branch name", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planTrailBranchChange(t.Context(), branchless, trailUpdateInputs{
+			SetBranch: "  feature/x  ", SetBranchChanged: true,
+		})
+		if err != nil {
+			t.Fatalf("planTrailBranchChange: %v", err)
+		}
+		if plan.Branch != testTrailBranch {
+			t.Fatalf("Branch = %q, want %q", plan.Branch, testTrailBranch)
+		}
+	})
+
+	rejects := []struct {
+		name   string
+		found  *api.TrailResource
+		inputs trailUpdateInputs
+	}{
+		{
+			name:   "--branch-action without --set-branch",
+			found:  branchless,
+			inputs: trailUpdateInputs{BranchAction: "create", BranchActionChanged: true},
+		},
+		{
+			name:   "an empty --set-branch",
+			found:  branchless,
+			inputs: trailUpdateInputs{SetBranch: "   ", SetBranchChanged: true},
+		},
+		{
+			name:   "an unknown --branch-action",
+			found:  branchless,
+			inputs: trailUpdateInputs{SetBranch: testTrailBranch, SetBranchChanged: true, BranchAction: "nope", BranchActionChanged: true},
+		},
+		{
+			name:   "a branch name git rejects",
+			found:  branchless,
+			inputs: trailUpdateInputs{SetBranch: "bad branch~name", SetBranchChanged: true},
+		},
+		{
+			// Names the branch the trail already has, so this reaches the
+			// --branch-action guard instead of the "cannot be changed" rule.
+			name:   "--branch-action on a trail that already has a branch",
+			found:  withBranch,
+			inputs: trailUpdateInputs{SetBranch: withBranch.Branch, SetBranchChanged: true, BranchAction: "create", BranchActionChanged: true},
+		},
+	}
+	for _, tc := range rejects {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := planTrailBranchChange(t.Context(), tc.found, tc.inputs); err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+		})
+	}
+}
+
+func TestTrailBranchRequestAlwaysSendsBranchName(t *testing.T) {
+	t.Parallel()
+	// The /branch endpoint has nothing to attach without a branch name, so the
+	// key must survive marshalling even when empty rather than being dropped.
+	out, err := json.Marshal(api.TrailBranchRequest{Action: "link"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(out), `"branch_name"`) {
+		t.Fatalf("body = %s, want it to carry branch_name", out)
+	}
+}
+
+func TestErrAfterBranchAttach(t *testing.T) {
+	t.Parallel()
+
+	t.Run("passes the error through when no branch was attached", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New("boom")
+		if got := errAfterBranchAttach(false, testTrailBranch, inner); !errors.Is(got, inner) || got.Error() != "boom" {
+			t.Fatalf("err = %q, want it unchanged", got)
+		}
+	})
+
+	t.Run("reports the attach that already landed", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New("boom")
+		got := errAfterBranchAttach(true, testTrailBranch, inner)
+		if !errors.Is(got, inner) {
+			t.Fatalf("err = %v, want it to wrap the cause", got)
+		}
+		for _, want := range []string{testTrailBranch, "was attached", "retry without --set-branch"} {
+			if !strings.Contains(got.Error(), want) {
+				t.Fatalf("err = %q, want it to mention %q", got, want)
+			}
+		}
+	})
+}
+
+// The branch flags say nothing about the trail, so a bad combination must fail
+// on the flags alone. Reaching auth or trail resolution would surface a
+// different error, so asserting the flag message is what proves it failed early.
+func TestNewTrailUpdateCmdRejectsBranchFlagsBeforeAnyRequest(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "--branch-action without --set-branch",
+			args: []string{"--trail", "3", "--branch-action", "create"},
+			want: "--branch-action requires --set-branch",
+		},
+		{
+			name: "an empty --set-branch",
+			args: []string{"--trail", "3", "--set-branch", "   "},
+			want: "--set-branch requires a branch name",
+		},
+		{
+			name: "an unknown --branch-action",
+			args: []string{"--trail", "3", "--set-branch", testTrailBranch, "--branch-action", "nope"},
+			want: "invalid --branch-action",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := newTrailUpdateCmd()
+			cmd.SetArgs(tc.args)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewTrailUpdateCmdRejectsTrailAndBranchTogether(t *testing.T) {
+	t.Parallel()
+	// --trail wins outright in resolveTrailBySelector, so accepting both would
+	// silently update a different trail than the --branch the caller named.
+	cmd := newTrailUpdateCmd()
+	cmd.SetArgs([]string{"--trail", "123", "--branch", "some-branch", "--title", "new"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected an error when --trail and --branch are combined, got nil")
+	}
+	if !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("error = %q, want it to mention 'not both'", err)
+	}
+}
+
+func TestNewTrailUpdateCmdBranchFlags(t *testing.T) {
+	t.Parallel()
+	cmd := newTrailUpdateCmd()
+	for _, name := range []string{"set-branch", "trail", "branch-action", "branch"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Fatalf("update command is missing the --%s flag", name)
+		}
+	}
+	if got := cmd.Flags().Lookup("branch-action").DefValue; got != "link" {
+		t.Fatalf("--branch-action default = %q, want %q", got, "link")
+	}
 }
 
 // Not parallel: uses t.Chdir() to point ResolveRemoteRepo at a fake repo.
@@ -1863,7 +2211,9 @@ func TestRunTrailUpdateSendsTitleAndBodyAsSeparatePatches(t *testing.T) {
 	require.Len(t, patches, 2, "title and body must go out as two PATCHes")
 	require.Equal(t, map[string]any{"title": "new title"}, patches[0])
 	require.Equal(t, map[string]any{trailBodyField: "new body"}, patches[1])
-	require.Contains(t, out.String(), "Updated trail for branch feature/x")
+	// The trail is addressed by number now, not by branch: --trail can select a
+	// trail with no branch at all, which "for branch %s" would render blank.
+	require.Contains(t, out.String(), "Updated trail #7")
 	require.Empty(t, errOut.String())
 }
 
@@ -1902,6 +2252,60 @@ func TestRunTrailUpdateReportsNoChangesWhenNothingWasSent(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Contains(t, out.String(), "No changes to apply")
+	require.NotContains(t, out.String(), "Updated trail")
+}
+
+// TestRunTrailUpdateAttachesABranchWithoutClaimingAMetadataUpdate covers the
+// one path that reports success without any PATCH: attaching a branch to a
+// branchless trail. The attach prints its own line, so the no-PATCH branch must
+// stay quiet rather than adding "No changes to apply" underneath it.
+func TestRunTrailUpdateAttachesABranchWithoutClaimingAMetadataUpdate(t *testing.T) {
+	t.Parallel()
+
+	var attachBody api.TrailBranchRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath:
+			w.Header().Set("Content-Type", "application/json")
+			// Branchless, so --trail is the only way to reach it.
+			if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+				Trails: []api.TrailResource{{ID: "trl_1", Number: 7, Status: string(trail.StatusOpen)}},
+				Total:  1,
+			}); err != nil {
+				t.Errorf("encode list response: %v", err)
+			}
+		case r.Method == http.MethodPost && r.URL.Path == trailTestBasePath+"/7/branch":
+			if err := json.NewDecoder(r.Body).Decode(&attachBody); err != nil {
+				t.Errorf("decode attach body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailBranchResponse{
+				Trail:         api.TrailResource{ID: "trl_1", Number: 7, Branch: testTrailBranch},
+				BranchCreated: true,
+			}); err != nil {
+				t.Errorf("encode branch response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	err := runTrailUpdateWithClient(t.Context(), &out, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+		TrailSelector:       "7",
+		SetBranch:           testTrailBranch,
+		SetBranchChanged:    true,
+		BranchAction:        trailBranchActionCreate,
+		BranchActionChanged: true,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, trailBranchActionCreate, attachBody.Action)
+	require.Equal(t, testTrailBranch, attachBody.BranchName)
+	require.Contains(t, out.String(), "Created and attached branch "+testTrailBranch)
+	// No PATCH went out, but the attach did, so neither line applies.
+	require.NotContains(t, out.String(), "No changes to apply")
 	require.NotContains(t, out.String(), "Updated trail")
 }
 

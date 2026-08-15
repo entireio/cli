@@ -1141,7 +1141,7 @@ func newTrailCreateRequest(title, body, branch, base, statusStr, typeStr, priori
 	}
 	if branch != "" {
 		req.BranchName = branch
-		req.BranchAction = "link"
+		req.BranchAction = trailBranchActionLink
 	}
 	return req
 }
@@ -1171,44 +1171,78 @@ func resolveTrailUpdateBody(ctx context.Context, client *api.Client, forge, owne
 }
 
 func newTrailUpdateCmd() *cobra.Command {
-	var statusStr, title, body, branch, typeStr, priorityStr string
+	var statusStr, title, body, branch, trailSelector, setBranch, branchAction, typeStr, priorityStr string
 	var labelAdd, labelRemove, assigneeAdd, assigneeRemove, reviewerAdd, reviewerRemove []string
 
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Update trail metadata",
-		Args:  cobra.NoArgs,
+		Long: `Update trail metadata.
+
+By default the trail for the current branch is updated; --branch selects it by
+another branch, or --trail selects it by number, id, or branch. A branchless
+trail has no branch to match, so reach it with --trail and a number or id.
+
+--set-branch attaches a branch to a branchless trail, via the /branch endpoint:
+it links an existing branch (--branch-action link, the default) or creates it on
+the forge at the trail's base (--branch-action create). A trail's branch cannot
+be changed once set, so --set-branch on a trail that already has one is an error
+(asking for the branch it already has does nothing). One branch backs one trail,
+so a branch another trail already holds is rejected too.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := ensureTrailRepoHasTarget(cmd, strings.TrimSpace(branch) != "", "pass --branch"); err != nil {
+			// Both select a trail, and --trail wins outright in
+			// resolveTrailBySelector. Rejecting the pair keeps that from quietly
+			// updating a different trail than the --branch the caller named,
+			// matching show/comment/approval.
+			if strings.TrimSpace(trailSelector) != "" && strings.TrimSpace(branch) != "" {
+				return errors.New("pass --trail or --branch, not both")
+			}
+			hasTarget := strings.TrimSpace(branch) != "" || strings.TrimSpace(trailSelector) != ""
+			if err := ensureTrailRepoHasTarget(cmd, hasTarget, "pass --branch or --trail"); err != nil {
 				return err
 			}
-			return runTrailUpdate(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailUpdateInputs{
-				Status:          statusStr,
-				StatusChanged:   cmd.Flags().Changed("status"),
-				Title:           title,
-				TitleChanged:    cmd.Flags().Changed("title"),
-				Body:            body,
-				BodyChanged:     cmd.Flags().Changed("body"),
-				Branch:          branch,
-				Repo:            trailRepoFlag(cmd),
-				LabelAdd:        labelAdd,
-				LabelRemove:     labelRemove,
-				AssigneeAdd:     assigneeAdd,
-				AssigneeRemove:  assigneeRemove,
-				ReviewerAdd:     reviewerAdd,
-				ReviewerRemove:  reviewerRemove,
-				Type:            typeStr,
-				TypeChanged:     cmd.Flags().Changed("type"),
-				Priority:        priorityStr,
-				PriorityChanged: cmd.Flags().Changed("priority"),
-			})
+			inputs := trailUpdateInputs{
+				Status:              statusStr,
+				StatusChanged:       cmd.Flags().Changed("status"),
+				Title:               title,
+				TitleChanged:        cmd.Flags().Changed("title"),
+				Body:                body,
+				BodyChanged:         cmd.Flags().Changed("body"),
+				Branch:              branch,
+				TrailSelector:       trailSelector,
+				SetBranch:           setBranch,
+				SetBranchChanged:    cmd.Flags().Changed("set-branch"),
+				BranchAction:        branchAction,
+				BranchActionChanged: cmd.Flags().Changed("branch-action"),
+				Repo:                trailRepoFlag(cmd),
+				LabelAdd:            labelAdd,
+				LabelRemove:         labelRemove,
+				AssigneeAdd:         assigneeAdd,
+				AssigneeRemove:      assigneeRemove,
+				ReviewerAdd:         reviewerAdd,
+				ReviewerRemove:      reviewerRemove,
+				Type:                typeStr,
+				TypeChanged:         cmd.Flags().Changed("type"),
+				Priority:            priorityStr,
+				PriorityChanged:     cmd.Flags().Changed("priority"),
+			}
+			// These say nothing about the trail, so they can fail here rather
+			// than after authenticating and resolving one.
+			if err := validateTrailBranchFlags(inputs); err != nil {
+				return err
+			}
+			return runTrailUpdate(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), inputs)
 		},
 	}
 
 	cmd.Flags().StringVar(&statusStr, "status", "", "Update status")
 	cmd.Flags().StringVar(&title, "title", "", "Update title")
 	cmd.Flags().StringVar(&body, "body", "", "Update body")
-	cmd.Flags().StringVar(&branch, "branch", "", "Branch to update trail for (defaults to current)")
+	cmd.Flags().StringVar(&branch, "branch", "", "Branch that selects the trail to update (defaults to current); cannot be combined with --trail")
+	cmd.Flags().StringVar(&trailSelector, "trail", "", "Trail to update, by number, id, or branch; give a branchless trail by number or id")
+	cmd.Flags().StringVar(&setBranch, "set-branch", "", "Attach a branch to a branchless trail; a trail's branch cannot be changed once set")
+	cmd.Flags().StringVar(&branchAction, "branch-action", trailBranchActionLink, "How --set-branch attaches to a branchless trail: 'link' an existing branch or 'create' it on the forge")
 	cmd.Flags().StringSliceVar(&labelAdd, "add-label", nil, "Add label(s)")
 	cmd.Flags().StringSliceVar(&labelRemove, "remove-label", nil, "Remove label(s)")
 	cmd.Flags().StringSliceVar(&assigneeAdd, "add-assignee", nil, "Add assignee(s) by login")
@@ -1222,24 +1256,36 @@ func newTrailUpdateCmd() *cobra.Command {
 }
 
 type trailUpdateInputs struct {
-	Status          string
-	StatusChanged   bool
-	Title           string
-	TitleChanged    bool
-	Body            string
-	BodyChanged     bool
-	Branch          string
-	Repo            string
-	LabelAdd        []string
-	LabelRemove     []string
-	AssigneeAdd     []string
-	AssigneeRemove  []string
-	ReviewerAdd     []string
-	ReviewerRemove  []string
-	Type            string
-	TypeChanged     bool
-	Priority        string
-	PriorityChanged bool
+	Status        string
+	StatusChanged bool
+	Title         string
+	TitleChanged  bool
+	Body          string
+	BodyChanged   bool
+	// Branch selects the trail to update by the branch it points at (used when
+	// TrailSelector is empty). It is a selector, not a new value.
+	Branch string
+	// TrailSelector selects the trail by number, id, or branch. A branchless
+	// trail has no branch for either this or Branch to match, so it is reachable
+	// only by the number or id form here.
+	TrailSelector string
+	// SetBranch is the branch to attach to a branchless trail (a POST to the
+	// /branch endpoint). It cannot repoint a trail that already has a branch.
+	SetBranch           string
+	SetBranchChanged    bool
+	BranchAction        string
+	BranchActionChanged bool
+	Repo                string
+	LabelAdd            []string
+	LabelRemove         []string
+	AssigneeAdd         []string
+	AssigneeRemove      []string
+	ReviewerAdd         []string
+	ReviewerRemove      []string
+	Type                string
+	TypeChanged         bool
+	Priority            string
+	PriorityChanged     bool
 }
 
 func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, inputs trailUpdateInputs) error {
@@ -1255,23 +1301,27 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 // runTrailUpdateWithClient applies a trail update once the repo and API client
 // are resolved.
 func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *api.Client, forge, owner, repoName string, inputs trailUpdateInputs) error {
-	// Determine branch.
-	branch := inputs.Branch
-	if branch == "" {
-		current, err := GetCurrentBranch(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to determine current branch: %w", err)
-		}
-		branch = current
-	}
-
-	// Find the trail by branch.
-	found, err := findTrailByBranch(ctx, client, forge, owner, repoName, branch)
+	// Resolve the target trail. --trail (number/id/branch) wins; otherwise
+	// fall back to --branch or the current branch. A branchless trail matches
+	// no branch at all, so only --trail's number/id form finds one.
+	found, err := resolveTrailBySelector(ctx, client, forge, owner, repoName, inputs.TrailSelector, inputs.Branch)
 	if err != nil {
 		return err
 	}
-	if found == nil {
-		return fmt.Errorf("no trail found for branch %q", branch)
+
+	// The single-trail endpoints are keyed by integer trail number, not id;
+	// the server rejects a UUID here with "Invalid trail number format".
+	if found.Number <= 0 {
+		return fmt.Errorf("trail %s has no number yet; cannot update", trailRefLabel(found))
+	}
+
+	// Decide what --set-branch means for this trail, without touching the
+	// server yet: attaching a branch to a branchless trail creates it on the
+	// forge, so it must not happen until every other input has been
+	// validated (see the branch plan/apply split below).
+	branchPlan, err := planTrailBranchChange(ctx, found, inputs)
+	if err != nil {
+		return err
 	}
 
 	// Interactive mode when no update flags are provided.
@@ -1279,6 +1329,7 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 	title := inputs.Title
 	body := inputs.Body
 	noFlags := !inputs.StatusChanged && !inputs.TitleChanged && !inputs.BodyChanged &&
+		!inputs.SetBranchChanged &&
 		inputs.LabelAdd == nil && inputs.LabelRemove == nil &&
 		inputs.AssigneeAdd == nil && inputs.AssigneeRemove == nil &&
 		inputs.ReviewerAdd == nil && inputs.ReviewerRemove == nil &&
@@ -1369,13 +1420,30 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 		Priority:        inputs.Priority,
 		PriorityChanged: inputs.PriorityChanged,
 	})
-
-	// The single-trail endpoint is keyed by trail number, not id; the server
-	// rejects an id here with "Invalid trail number format".
-	if found.Number <= 0 {
-		return fmt.Errorf("trail for branch %q has no number yet; cannot update", branch)
-	}
 	path := trailNumberPath(forge, owner, repoName, found.Number)
+
+	// Every input is validated by this point, so it is safe to start
+	// changing things on the server. Attaching a branch to a branchless trail
+	// goes first because the PATCH below can carry metadata for the same
+	// trail; doing it here (rather than before validation) keeps a bad
+	// --title or --status from leaving a created forge branch behind.
+	//
+	// updateReq above was built from the pre-attach `found`, and stays that
+	// way on purpose. The attach responds with the updated trail, but that
+	// payload omits labels entirely and marks requested_reviewers optional,
+	// while buildTrailUpdateRequest treats all three as replace-sets it
+	// computes from the current lists. Refreshing `found` from the response
+	// would therefore turn `--add-label x --set-branch y` into a PATCH of
+	// labels:["x"], dropping every label the trail already had. The stale
+	// snapshot is harmless by comparison: an attach changes none of the
+	// fields that request reads.
+	attached := false
+	if branchPlan.Attach {
+		if err := attachTrailBranchPlan(ctx, w, client, forge, owner, repoName, found, branchPlan); err != nil {
+			return err
+		}
+		attached = true
+	}
 
 	// The server rejects body + metadata in one PATCH, so send them as
 	// separate requests when both are present. These two calls are not
@@ -1385,30 +1453,211 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 	// retry, rather than assuming nothing changed.
 	meta, hasMeta, bodyReq := splitTrailUpdate(updateReq)
 	if !hasMeta && bodyReq == nil {
-		// Nothing changed — most often the interactive form opened and closed
-		// untouched. Say so instead of printing the success line: no PATCH went
-		// out, and agents read that line as confirmation the write landed.
-		fmt.Fprintf(w, "No changes to apply to the trail for branch %s\n", branch)
+		// Nothing left to PATCH — most often the interactive form opened and
+		// closed untouched, or --set-branch named the branch the trail already
+		// has. Say so instead of printing the success line: no PATCH went out,
+		// and agents read that line as confirmation the write landed. An attach
+		// already printed its own line, so it stays quiet here.
+		if !attached {
+			fmt.Fprintf(w, "No changes to apply to trail #%d\n", found.Number)
+		}
 		return nil
 	}
 	if hasMeta {
 		if err := sendTrailPatch(ctx, client, path, meta); err != nil {
-			return err
+			return errAfterBranchAttach(attached, branchPlan.Branch, err)
 		}
 	}
 	if bodyReq != nil {
 		if err := sendTrailPatch(ctx, client, path, *bodyReq); err != nil {
 			if hasMeta {
-				return fmt.Errorf("trail metadata was updated, but the body update failed (the metadata change already applied; retry only the --body change): %w", err)
+				return errAfterBranchAttach(attached, branchPlan.Branch, fmt.Errorf("trail metadata was updated, but the body update failed (the metadata change already applied; retry only the --body change): %w", err))
 			}
-			return err
+			return errAfterBranchAttach(attached, branchPlan.Branch, err)
 		}
 	}
 
-	fmt.Fprintf(w, "Updated trail for branch %s\n", branch)
+	fmt.Fprintf(w, "Updated trail #%d\n", found.Number)
 	return nil
 }
 
+// Trail branch actions for the /branch endpoint. "link" attaches an
+// already-pushed branch; "create" backfills it on the forge at the trail's base.
+const (
+	trailBranchActionLink   = "link"
+	trailBranchActionCreate = "create"
+)
+
+// trailBranchPlan is what a --set-branch request resolves to for a given trail.
+// It is decided up front, before the command changes anything on the server, so
+// that a later validation failure cannot leave a half-applied update behind.
+// The zero value means --set-branch was not given and the branch is untouched.
+type trailBranchPlan struct {
+	// Attach is set when the trail is branchless: the branch is attached
+	// through the /branch endpoint, which may create it on the forge. There is
+	// no rename counterpart — a trail that already has a branch keeps it.
+	Attach bool
+	// Branch is the new branch name (trimmed and validated).
+	Branch string
+	// Action is the /branch action to use when Attach is set: "link" or "create".
+	Action string
+}
+
+// planTrailBranchChange validates a --set-branch request against the located
+// trail and decides how to apply it. It makes no network calls and changes
+// nothing: attaching a branch to a branchless trail can create that branch on
+// the forge, so the decision is separated from the act, letting the caller
+// finish validating every other input first. Use attachTrailBranchPlan to carry
+// out an Attach plan.
+// validateTrailBranchFlags checks what the branch flags say about each other,
+// which depends on no server state at all. RunE calls it so a missing or
+// misspelled flag fails immediately instead of after authenticating and
+// listing trails; planTrailBranchChange calls it again so the rule holds for
+// every caller rather than only the one that remembers to check first.
+func validateTrailBranchFlags(inputs trailUpdateInputs) error {
+	if inputs.BranchActionChanged && !inputs.SetBranchChanged {
+		return errors.New("--branch-action requires --set-branch")
+	}
+	if !inputs.SetBranchChanged {
+		return nil
+	}
+	if strings.TrimSpace(inputs.SetBranch) == "" {
+		return errors.New("--set-branch requires a branch name")
+	}
+	// An unset --branch-action means link, so only a non-empty wrong one fails.
+	action := strings.TrimSpace(inputs.BranchAction)
+	if action != "" && action != trailBranchActionLink && action != trailBranchActionCreate {
+		return fmt.Errorf("invalid --branch-action %q: must be %q or %q", inputs.BranchAction, trailBranchActionLink, trailBranchActionCreate)
+	}
+	return nil
+}
+
+func planTrailBranchChange(ctx context.Context, found *api.TrailResource, inputs trailUpdateInputs) (trailBranchPlan, error) {
+	if err := validateTrailBranchFlags(inputs); err != nil {
+		return trailBranchPlan{}, err
+	}
+	if !inputs.SetBranchChanged {
+		return trailBranchPlan{}, nil
+	}
+
+	newBranch := strings.TrimSpace(inputs.SetBranch)
+	if err := ValidateBranchName(ctx, newBranch); err != nil {
+		return trailBranchPlan{}, fmt.Errorf("invalid --set-branch value %q: %w", newBranch, err)
+	}
+
+	action := strings.TrimSpace(inputs.BranchAction)
+	if action == "" {
+		action = trailBranchActionLink
+	}
+
+	// A trail's branch cannot be changed once set: the /branch endpoint answers
+	// 409 "Trail already has a linked branch". Refuse here rather than sending
+	// anything, because the PATCH endpoint takes a raw `branch` write with no
+	// such check and would quietly repoint the trail. Asking for the branch it
+	// already has is not a change, so that stays a no-op and re-running the
+	// same command is not an error.
+	if found.Branch != "" {
+		if found.Branch != newBranch {
+			return trailBranchPlan{}, fmt.Errorf("trail %s is already on branch %s and a trail's branch cannot be changed once set; create a trail for %s instead", trailRefLabel(found), found.Branch, newBranch)
+		}
+		if inputs.BranchActionChanged {
+			return trailBranchPlan{}, errors.New("--branch-action only applies when attaching a branch to a branchless trail (this trail already has one)")
+		}
+		return trailBranchPlan{}, nil
+	}
+
+	return trailBranchPlan{Attach: true, Branch: newBranch, Action: action}, nil
+}
+
+// errAfterBranchAttach annotates a failure that happened after the branch was
+// already attached. Without it the error reads as "nothing happened", and the
+// obvious fix — run the same command again — fails differently the second time:
+// the trail now has a branch, so --branch-action is rejected and --set-branch
+// becomes a rename. Naming the branch that did land points at the retry that
+// works, which is the same command minus the branch flags.
+func errAfterBranchAttach(attached bool, branch string, err error) error {
+	if !attached {
+		return err
+	}
+	return fmt.Errorf("branch %s was attached to the trail, but the rest of the update failed (the branch is already set; retry without --set-branch and --branch-action): %w", branch, err)
+}
+
+// attachTrailBranchPlan carries out an Attach plan against the /branch endpoint
+// and reports what happened. This is the first server-changing step of an
+// update, so callers must have validated every other input before calling it.
+func attachTrailBranchPlan(ctx context.Context, w io.Writer, client *api.Client, forge, owner, repo string, found *api.TrailResource, plan trailBranchPlan) error {
+	branchResp, err := attachTrailBranch(ctx, client, forge, owner, repo, found.Number, plan.Action, plan.Branch)
+	if err != nil {
+		return err
+	}
+	if branchResp.BranchCreated {
+		fmt.Fprintf(w, "Created and attached branch %s to trail #%d\n", plan.Branch, found.Number)
+	} else {
+		fmt.Fprintf(w, "Attached branch %s to trail #%d\n", plan.Branch, found.Number)
+	}
+	return nil
+}
+
+// trailRefLabel renders a short human reference for a trail for error messages,
+// preferring its number, then branch, then id.
+func trailRefLabel(t *api.TrailResource) string {
+	switch {
+	case t.Number > 0:
+		return fmt.Sprintf("#%d", t.Number)
+	case t.Branch != "":
+		return fmt.Sprintf("for branch %q", t.Branch)
+	default:
+		return fmt.Sprintf("%q", t.ID)
+	}
+}
+
+// explainTrailBranchConflict says what a 409 from the /branch endpoint means.
+// The server has two of them and its wording alone doesn't say what to do
+// next: "Trail already has a linked branch" (the trail gained a branch after
+// planTrailBranchChange read it — a second writer got there first) and "This
+// branch is already linked to another trail" (one branch backs one trail).
+// Both are permanent for these inputs, so the message names the way forward
+// rather than inviting a retry that will fail the same way.
+//
+// The two matched phrases are a contract with the server's /branch handler
+// (entire.io api/src/routes/trails.ts), which answers with prose and no error
+// code to key on. A reword there costs the specific message but not the
+// guidance: the fallback names both rules, because a 409 from this endpoint
+// can only mean one of them.
+func explainTrailBranchConflict(err error, number int, branch string) error {
+	switch msg := err.Error(); {
+	case strings.Contains(msg, "already has a linked branch"):
+		return fmt.Errorf("trail #%d already has a branch, and a trail's branch cannot be changed once set: %w", number, err)
+	case strings.Contains(msg, "already linked to another trail"):
+		return fmt.Errorf("branch %s already backs another trail in this repo, and a branch can back only one trail (attach a different branch, or update that trail instead): %w", branch, err)
+	default:
+		return fmt.Errorf("branch %s could not be attached to trail #%d: a trail's branch cannot be changed once set, and a branch can back only one trail: %w", branch, number, err)
+	}
+}
+
+// attachTrailBranch attaches a branch to a branchless trail via
+// POST /api/v1/trails/:forge/:owner/:repo/:number/branch. action is "link"
+// (attach an existing branch) or "create" (backfill it on the forge at base).
+// The server returns 409 if the trail already has a branch.
+func attachTrailBranch(ctx context.Context, client *api.Client, forge, owner, repo string, number int, action, branchName string) (api.TrailBranchResponse, error) {
+	req := api.TrailBranchRequest{Action: action, BranchName: branchName}
+	resp, err := client.Post(ctx, trailNumberPath(forge, owner, repo, number)+"/branch", req)
+	if err != nil {
+		return api.TrailBranchResponse{}, fmt.Errorf("failed to attach branch: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		if resp.StatusCode == http.StatusConflict {
+			return api.TrailBranchResponse{}, explainTrailBranchConflict(err, number, branchName)
+		}
+		return api.TrailBranchResponse{}, err
+	}
+	var branchResp api.TrailBranchResponse
+	if err := api.DecodeJSON(resp, &branchResp); err != nil {
+		return api.TrailBranchResponse{}, fmt.Errorf("failed to decode branch response: %w", err)
+	}
+	return branchResp, nil
+}
 func validateTrailUpdateFields(inputs trailUpdateInputs) error {
 	if inputs.TitleChanged && strings.TrimSpace(inputs.Title) == "" {
 		return errors.New("trail title is required")
