@@ -595,9 +595,16 @@ func saveActiveSourceSession(t *testing.T, repo, sessionID string, claim *sessio
 		AttributionBaseCommit: testutil.GetHeadHash(t, repo),
 		WorktreePath:          repo,
 		LastPrompt:            "cross-repo work",
-		AdoptClaim:            claim,
 	}); err != nil {
 		t.Fatal(err)
+	}
+	// The claim lives in the cross-repo live-session registry, not on the source
+	// state — that is what lets two repos racing to adopt the same session both
+	// see it. Seed it there so these tests exercise the real store.
+	if claim != nil {
+		if _, err := session.ClaimLiveSession(sessionID, claim.ByCommonDir, claim.ByWorktreePath, claim.At); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -615,7 +622,7 @@ func TestAdoptClaimBlocks(t *testing.T) {
 	}{
 		{"nil claim", nil, false},
 		{"zero time", &session.AdoptClaim{ByCommonDir: other, At: time.Time{}}, false},
-		{"stale different target", &session.AdoptClaim{ByCommonDir: other, At: now.Add(-2 * adoptClaimWindow)}, false},
+		{"stale different target", &session.AdoptClaim{ByCommonDir: other, At: now.Add(-2 * session.AdoptClaimMaxAge)}, false},
 		{"fresh same target idempotent", &session.AdoptClaim{ByCommonDir: target, At: now}, false},
 		{"fresh different target blocks", &session.AdoptClaim{ByCommonDir: other, At: now}, true},
 	}
@@ -681,11 +688,20 @@ func TestAutoAdopt_ConcurrentClaimAdoptsExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sourceAfter1.AdoptClaim == nil {
-		t.Fatal("winning adopt must stamp an AdoptClaim on the source")
+	claim1, err := session.LiveSessionClaim(sessionID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !sameAdoptStore(sourceAfter1.AdoptClaim.ByCommonDir, target1CommonDir) {
-		t.Fatalf("claim ByCommonDir = %q, want target1 %q", sourceAfter1.AdoptClaim.ByCommonDir, target1CommonDir)
+	if claim1 == nil {
+		t.Fatal("winning adopt must record an AdoptClaim in the live-session registry")
+	}
+	if !sameAdoptStore(claim1.ByCommonDir, target1CommonDir) {
+		t.Fatalf("claim ByCommonDir = %q, want target1 %q", claim1.ByCommonDir, target1CommonDir)
+	}
+	// The claim must NOT be on the source state any more — that second store is
+	// exactly what this change removed.
+	if sourceAfter1.AdoptClaim != nil {
+		t.Error("claim must live only in the registry, not on the source session state")
 	}
 	if !isAdoptableSourceSession(sourceAfter1) {
 		t.Fatal("deferred adopt must leave the source ACTIVE (the claim is non-destructive)")
@@ -720,12 +736,12 @@ func TestAutoAdopt_ConcurrentClaimAdoptsExactlyOnce(t *testing.T) {
 	}
 
 	// The loser must not mutate the winner's claim.
-	sourceAfter2, err := sourceStore.Load(context.Background(), sessionID)
+	claim2, err := session.LiveSessionClaim(sessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sourceAfter2.AdoptClaim == nil || !sameAdoptStore(sourceAfter2.AdoptClaim.ByCommonDir, target1CommonDir) {
-		t.Fatalf("loser mutated the source claim: %#v", sourceAfter2.AdoptClaim)
+	if claim2 == nil || !sameAdoptStore(claim2.ByCommonDir, target1CommonDir) {
+		t.Fatalf("loser mutated the winner's registry claim: %#v", claim2)
 	}
 }
 
@@ -746,7 +762,7 @@ func TestAutoAdopt_StaleClaimDoesNotBlockAdoption(t *testing.T) {
 	staleClaim := &session.AdoptClaim{
 		ByCommonDir:    filepath.Join(base, "repo-abandoned", ".git"),
 		ByWorktreePath: filepath.Join(base, "repo-abandoned"),
-		At:             time.Now().Add(-2 * adoptClaimWindow),
+		At:             time.Now().Add(-2 * session.AdoptClaimMaxAge),
 	}
 	saveActiveSourceSession(t, sourceRepo, sessionID, staleClaim)
 
@@ -778,17 +794,17 @@ func TestAutoAdopt_StaleClaimDoesNotBlockAdoption(t *testing.T) {
 		t.Fatal("adopt over a stale claim must still register the target with a PendingSourceRetire marker")
 	}
 
-	sourceAfter, err := sourceStore.Load(context.Background(), sessionID)
+	regClaim, err := session.LiveSessionClaim(sessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sourceAfter.AdoptClaim == nil {
+	if regClaim == nil {
 		t.Fatal("adopt must stamp a fresh claim on the source")
 	}
-	if !sameAdoptStore(sourceAfter.AdoptClaim.ByCommonDir, targetCommonDir) {
-		t.Fatalf("claim ByCommonDir = %q, want target %q (stale claim not replaced)", sourceAfter.AdoptClaim.ByCommonDir, targetCommonDir)
+	if !sameAdoptStore(regClaim.ByCommonDir, targetCommonDir) {
+		t.Fatalf("claim ByCommonDir = %q, want target %q (stale claim not replaced)", regClaim.ByCommonDir, targetCommonDir)
 	}
-	if time.Since(sourceAfter.AdoptClaim.At) > adoptClaimWindow {
+	if time.Since(regClaim.At) > session.AdoptClaimMaxAge {
 		t.Fatal("refreshed claim must be within the adopt-claim window")
 	}
 }
@@ -861,7 +877,11 @@ func TestManualAdopt_FreshClaimBlocksForcedAdopt(t *testing.T) {
 	if !isAdoptableSourceSession(sourceAfter) {
 		t.Fatal("refused adopt must leave the source adoptable, not retired")
 	}
-	if sourceAfter.AdoptClaim == nil || !sameAdoptStore(sourceAfter.AdoptClaim.ByCommonDir, freshClaim.ByCommonDir) {
+	regClaim, err := session.LiveSessionClaim(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if regClaim == nil || !sameAdoptStore(regClaim.ByCommonDir, freshClaim.ByCommonDir) {
 		t.Fatal("refused adopt must leave the original claim in place")
 	}
 

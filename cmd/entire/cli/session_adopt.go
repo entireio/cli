@@ -49,15 +49,6 @@ type adoptOptions struct {
 // (an entry swept from the registry is also too old to adopt).
 const adoptRecentWindow = session.LiveSessionMaxAge
 
-// adoptClaimWindow bounds how long a source's in-flight adoption claim keeps
-// blocking other targets. It is deliberately NOT adoptRecentWindow: a claim only
-// has to bridge prepare-commit-msg → post-commit within a single commit, not the
-// lifetime of a live session, and because the claim gates the manual adopt path
-// too, an over-long window turns an aborted commit into a lockout on
-// `entire session adopt`. One hour covers even a commit left sitting in an editor
-// by a wide margin while keeping the self-heal from an aborted commit bounded.
-const adoptClaimWindow = time.Hour
-
 func newAdoptCmd() *cobra.Command {
 	var opts adoptOptions
 
@@ -195,8 +186,16 @@ func adoptFromExternalSessionStore(
 		// the same double-adopt this claim exists to prevent, via the manual door.
 		// --force is scoped to replacing the target's own session below; it is not
 		// a license to steal another repo's claim.
-		if adoptClaimBlocks(sourceState.AdoptClaim, targetCommonDir) {
-			return &sourceClaimedError{sessionID: sessionID, claimedBy: adoptClaimLabel(sourceState.AdoptClaim)}
+		// The claim lives in the cross-repo live-session registry, which is keyed by
+		// session ID alone — one file every repo on the machine shares — so it is the
+		// only store both racers can see. Reading it here (under the shared source
+		// lock) is what makes the loser OBSERVE the winner and refuse.
+		claim, err := session.LiveSessionClaim(sessionID)
+		if err != nil {
+			return fmt.Errorf("read adopt claim: %w", err)
+		}
+		if adoptClaimBlocks(claim, targetCommonDir) {
+			return &sourceClaimedError{sessionID: sessionID, claimedBy: adoptClaimLabel(claim)}
 		}
 		if !sessionBelongsToSourceWorktree(sourceState, sourceWorktree, sourceWorktreeID) {
 			return fmt.Errorf("session %s belongs to %s, not %s",
@@ -232,33 +231,40 @@ func adoptFromExternalSessionStore(
 				SourceWorktreePath: sourceWorktree,
 			}
 		}
-		if err := targetStore.Save(ctx, next); err != nil {
-			return fmt.Errorf("save adopted session state: %w", err)
-		}
 		if opts.DeferSourceRetire {
-			// Non-destructive prepare phase: stamp a claim on the SOURCE (under the
-			// shared source lock) so a concurrent adopt by a different target sees
-			// it and skips, then leave the source otherwise ACTIVE so it keeps
-			// checkpointing until post-commit finalizes the retire. The claim is
-			// recency-bounded, so an aborted commit (no post-commit) self-heals once
-			// it ages out.
-			sourceState.AdoptClaim = &session.AdoptClaim{
-				ByCommonDir:    targetCommonDir,
-				ByWorktreePath: next.WorktreePath,
-				At:             time.Now(),
+			// Non-destructive prepare phase: take the claim in the shared registry
+			// BEFORE registering the target, so a concurrent adopt by a different
+			// target sees it and skips, while the source stays ACTIVE and keeps
+			// checkpointing until post-commit finalizes the retire.
+			//
+			// Claiming first is what removes the rollback: the old order registered the
+			// target and only then wrote the claim to a second store, so a failed claim
+			// left a claimless double-adopt window that had to be compensated. With one
+			// store, claimed first, a later failure leaves at worst a recency-bounded
+			// claim held by US — which self-heals and which our own re-adopt treats as
+			// idempotent.
+			claimed, err := session.ClaimLiveSession(sessionID, targetCommonDir, next.WorktreePath, time.Now())
+			if err != nil {
+				return fmt.Errorf("claim source session: %w", err)
 			}
-			if err := sourceStore.Save(ctx, sourceState); err != nil {
-				// Roll back the target registration so a failed claim never leaves a
-				// claimless double-adopt window. Use a non-cancelable context for the
-				// same reason the retire path does (the caller's ctx may be timed out).
-				if rollbackErr := rollbackExternalAdoptTarget(context.WithoutCancel(ctx), targetStore, next.SessionID, existing); rollbackErr != nil {
-					return &adoptRollbackFailedError{retireErr: err, rollbackErr: rollbackErr}
+			if !claimed {
+				// Lost the race between the read above and here. The registry claim is
+				// authoritative; the earlier read is only a fast path.
+				current, readErr := session.LiveSessionClaim(sessionID)
+				if readErr != nil {
+					return fmt.Errorf("read adopt claim: %w", readErr)
 				}
-				return fmt.Errorf("claim source session state: %w", err)
+				return &sourceClaimedError{sessionID: sessionID, claimedBy: adoptClaimLabel(current)}
+			}
+			if err := targetStore.Save(ctx, next); err != nil {
+				return fmt.Errorf("save adopted session state: %w", err)
 			}
 			adopted = next
 			filesTouched = touched
 			return nil
+		}
+		if err := targetStore.Save(ctx, next); err != nil {
+			return fmt.Errorf("save adopted session state: %w", err)
 		}
 		retired := retireAdoptedSourceSession(sourceState, next)
 		if err := sourceStore.Save(ctx, &retired); err != nil {
@@ -572,7 +578,7 @@ func adoptClaimBlocks(claim *session.AdoptClaim, targetCommonDir string) bool {
 	if claim == nil || claim.At.IsZero() {
 		return false
 	}
-	if time.Since(claim.At) > adoptClaimWindow {
+	if time.Since(claim.At) > session.AdoptClaimMaxAge {
 		return false
 	}
 	return !sameAdoptStore(claim.ByCommonDir, targetCommonDir)
