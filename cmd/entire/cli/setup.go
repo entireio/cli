@@ -893,7 +893,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 
 			// Non-interactive mode if --agent flag is provided
 			if cmd.Flags().Changed(agentFlagName) && agentName == "" {
-				printMissingAgentError(cmd.ErrOrStderr())
+				printMissingAgentErrorPostDiscovery(cmd.ErrOrStderr())
 				return NewSilentError(errors.New("missing agent name"))
 			}
 
@@ -903,7 +903,9 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 			if agentName != "" {
 				ag, err := agent.Get(types.AgentName(agentName))
 				if err != nil {
-					printWrongAgentError(cmd.ErrOrStderr(), agentName, externalAgentHint, enableAgentUsage)
+					// The scan above already registered every plugin on $PATH, so
+					// the listing is complete: no hint.
+					printWrongAgentError(cmd.ErrOrStderr(), agentName, "", enableAgentUsage)
 					return NewSilentError(errors.New("wrong agent name"))
 				}
 				selectedAgent = ag
@@ -985,7 +987,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
 		var valErr *pflag.ValueRequiredError
 		if errors.As(err, &valErr) && valErr.GetSpecifiedName() == agentFlagName {
-			printMissingAgentError(c.ErrOrStderr())
+			printMissingAgentErrorPreDiscovery(c.ErrOrStderr())
 			return NewSilentError(errors.New("missing agent name"))
 		}
 		return defaultFlagErr(c, err)
@@ -1829,8 +1831,21 @@ const (
 	agentRemoveUsage = "Usage: entire agent remove <agent-name>"
 )
 
-// externalAgentHint is the trailing hint for surfaces that did not look at
-// $PATH at all, so the user still has a search to run.
+// The rule for the trailing hint: it exists only to cover a listing that is
+// knowably incomplete. What the caller did about $PATH before reaching the
+// error decides which hint, if any, is honest.
+//
+//   - A full $PATH scan already ran, so the listing is complete: no hint. The
+//     plugins are already in it, marked (external), and pointing at a search
+//     whose results are on screen is noise.
+//   - A targeted single-name lookup ran: externalAgentSearchedHint, which names
+//     the one plugin that came up missing.
+//   - No lookup at all: externalAgentHint, the only case where the user still
+//     has a search left to run.
+
+// externalAgentHint covers a listing built without looking at $PATH at all.
+// Exactly one surface qualifies: the `--agent` FlagErrorFunc, which cobra
+// invokes during flag parsing — before enable's RunE, and so before its scan.
 const externalAgentHint = "External agent plugins on your PATH are also available: run 'entire agent list --external' to see them."
 
 // externalAgentSearchedHint is the trailing hint for `entire agent add`/`remove`,
@@ -1845,9 +1860,9 @@ func externalAgentSearchedHint(name string) string {
 // given hint, and the given usage line.
 //
 // The listing goes through agent.ListAvailable so test-only agents (vogon) stay
-// out of it, matching `entire agent list`. External plugins are only listed if
-// something already registered them — this path deliberately does not scan
-// $PATH — hence the hint.
+// out of it, matching `entire agent list`. An empty hint is omitted entirely —
+// callers whose listing is already complete pass "" and get no stray blank line
+// between the listing and the usage.
 func printAgentError(w io.Writer, message, hint, usage string) {
 	fmt.Fprintf(w, "%s Available agents:\n", message)
 	fmt.Fprintln(w)
@@ -1862,19 +1877,31 @@ func printAgentError(w io.Writer, message, hint, usage string) {
 		fmt.Fprintf(w, "  %s%s\n", ra.Name, suffix)
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, hint)
-	fmt.Fprintln(w)
+	if hint != "" {
+		fmt.Fprintln(w, hint)
+		fmt.Fprintln(w)
+	}
 	fmt.Fprintln(w, usage)
 }
 
-// printMissingAgentError writes a helpful error listing available agents.
-func printMissingAgentError(w io.Writer) {
+// printMissingAgentErrorPreDiscovery reports a missing --agent value from flag
+// parsing, which cobra runs before enable's RunE and therefore before its $PATH
+// scan. Nothing has looked for plugins yet, so the listing needs the hint.
+func printMissingAgentErrorPreDiscovery(w io.Writer) {
 	printAgentError(w, "Missing agent name.", externalAgentHint, enableAgentUsage)
+}
+
+// printMissingAgentErrorPostDiscovery reports a missing --agent value from
+// inside enable's RunE, where the full $PATH scan has already registered every
+// plugin it found. The listing is complete, so it carries no hint.
+func printMissingAgentErrorPostDiscovery(w io.Writer) {
+	printAgentError(w, "Missing agent name.", "", enableAgentUsage)
 }
 
 // printWrongAgentError writes a helpful error when an unknown agent name is
 // provided. hint and usage describe the command surface the caller was reached
-// from: whether it already searched $PATH for the name, and how it is invoked.
+// from: what it did about $PATH before giving up on the name (see the hint rule
+// above), and how it is invoked.
 func printWrongAgentError(w io.Writer, name, hint, usage string) {
 	printAgentError(w, fmt.Sprintf("Unknown agent %q.", name), hint, usage)
 }

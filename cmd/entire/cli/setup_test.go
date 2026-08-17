@@ -1557,7 +1557,7 @@ func TestPrintMissingAgentError(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	printMissingAgentError(&buf)
+	printMissingAgentErrorPreDiscovery(&buf)
 	output := buf.String()
 
 	if !strings.Contains(output, "Missing agent name") {
@@ -1608,7 +1608,7 @@ func TestPrintAgentError_ExcludesTestOnlyAgents(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	printMissingAgentError(&buf)
+	printMissingAgentErrorPreDiscovery(&buf)
 	output := buf.String()
 
 	for _, name := range agent.List() {
@@ -1640,26 +1640,73 @@ func TestPrintAgentError_PointsAtExternalListing(t *testing.T) {
 	}
 }
 
-// TestPrintAgentError_HintReflectsWhetherPathWasSearched pins that the two
-// surfaces describe different situations: `entire enable --agent` never looked
-// at $PATH, while `entire agent add`/`remove` already resolved the name against
-// it, so the latter must not read as if a search is still pending.
-func TestPrintAgentError_HintReflectsWhetherPathWasSearched(t *testing.T) {
+// TestPrintAgentError_HintReflectsWhatWasSearched pins the hint rule: the hint
+// exists only to cover a listing that is knowably incomplete.
+func TestPrintAgentError_HintReflectsWhatWasSearched(t *testing.T) {
 	t.Parallel()
 
-	var notSearched bytes.Buffer
-	printWrongAgentError(&notSearched, "zedd", externalAgentHint, enableAgentUsage)
-	if strings.Contains(notSearched.String(), "was found on your PATH either") {
-		t.Errorf("enable --agent does not search $PATH, so it must not claim it did:\n%s", notSearched.String())
+	// A full $PATH scan already ran, so the listing is complete and any hint is
+	// noise — the plugins are in the listing above it.
+	var complete bytes.Buffer
+	printWrongAgentError(&complete, "zedd", "", enableAgentUsage)
+	if strings.Contains(complete.String(), "are also available") {
+		t.Errorf("the listing is complete, so it must not point at a further search:\n%s", complete.String())
 	}
-	if !strings.Contains(notSearched.String(), "are also available") {
-		t.Errorf("expected the open-ended external hint, got:\n%s", notSearched.String())
+	if strings.Contains(complete.String(), "was found on your PATH either") {
+		t.Errorf("a complete listing must not report a targeted lookup it never made:\n%s", complete.String())
+	}
+	if strings.Contains(complete.String(), "\n\n\n") {
+		t.Errorf("omitting the hint must not leave a doubled blank line:\n%q", complete.String())
 	}
 
+	// A targeted lookup ran for one name: report that, naming the plugin.
 	var searched bytes.Buffer
 	printWrongAgentError(&searched, "zedd", externalAgentSearchedHint("zedd"), agentAddUsage)
 	if !strings.Contains(searched.String(), `No external agent plugin named "zedd" was found on your PATH`) {
 		t.Errorf("expected the hint to report the $PATH lookup that already happened, got:\n%s", searched.String())
+	}
+
+	// Nothing looked at $PATH: the user still has a search to run.
+	var unsearched bytes.Buffer
+	printMissingAgentErrorPreDiscovery(&unsearched)
+	if !strings.Contains(unsearched.String(), "are also available") {
+		t.Errorf("expected the open-ended external hint before any discovery, got:\n%s", unsearched.String())
+	}
+}
+
+// TestEnableCmd_UnknownAgent_ListsPluginsAndOmitsHint runs the real
+// `entire enable --agent <typo>` so discovery actually happens, which a direct
+// printAgentError call cannot do — and that gap is what let the wrong hint ship.
+// enable scans $PATH before resolving the name, so the external plugin belongs
+// in the listing, and a pointer at a further search does not.
+func TestEnableCmd_UnknownAgent_ListsPluginsAndOmitsHint(t *testing.T) {
+	// Cannot use t.Parallel: see withExternalAgentPlugin.
+	const agentName = "ext-enable-listing-test"
+	withExternalAgentPlugin(t, agentName, externalAgentsUnsetSettings, false)
+
+	cmd := newEnableCmd()
+	var stderr, stdout bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"--agent", "no-such-agent"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("expected an error for an unknown agent, stderr:\n%s", stderr.String())
+	}
+
+	out := stderr.String()
+	if !strings.Contains(out, `Unknown agent "no-such-agent"`) {
+		t.Fatalf("expected the unknown-agent listing, got:\n%s", out)
+	}
+	// enable discovers before resolving, so the plugin is already registered.
+	if !strings.Contains(out, agentName) {
+		t.Errorf("enable scans $PATH, so external plugin %q belongs in the listing, got:\n%s", agentName, out)
+	}
+	if !strings.Contains(out, "(external)") {
+		t.Errorf("external plugins in the listing must be marked (external), got:\n%s", out)
+	}
+	// The listing is complete, so neither hint is honest here.
+	if strings.Contains(out, "are also available") || strings.Contains(out, "was found on your PATH either") {
+		t.Errorf("a complete listing must not point at a further $PATH search, got:\n%s", out)
 	}
 }
 
