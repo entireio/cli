@@ -71,9 +71,12 @@ func TestBuildCheckpointExplainedPayload(t *testing.T) {
 	if got := p["source"]; got != "prose" {
 		t.Errorf("source = %v, want prose", got)
 	}
-	// Privacy: the raw checkpoint id must never be a property.
-	if _, ok := p["checkpoint_id"]; ok {
-		t.Error("forbidden property \"checkpoint_id\" present")
+	// Privacy: the raw query, its hash, impression tuples, session
+	// identifiers, and raw checkpoint ids must never be properties.
+	for _, key := range []string{"query", "query_hash", "impressions", "results", "session_id", "checkpoint_id"} {
+		if _, ok := p[key]; ok {
+			t.Errorf("forbidden property %q present", key)
+		}
 	}
 	// Without a search-hit token, the deterministic-link fields are omitted.
 	for _, key := range []string{"search_id", "rank"} {
@@ -101,6 +104,13 @@ func TestBuildCheckpointExplainedPayload_WithSearchAttribution(t *testing.T) {
 	if got := p["rank"]; got != 3 {
 		t.Errorf("rank = %v, want 3", got)
 	}
+	// Privacy: the raw query, its hash, impression tuples, session
+	// identifiers, and raw checkpoint ids must never be properties.
+	for _, key := range []string{"query", "query_hash", "impressions", "results", "session_id", "checkpoint_id"} {
+		if _, ok := p[key]; ok {
+			t.Errorf("forbidden property %q present", key)
+		}
+	}
 }
 
 func TestBuildCheckpointExplainedPayload_SearchIDWithoutRank(t *testing.T) {
@@ -118,5 +128,12 @@ func TestBuildCheckpointExplainedPayload_SearchIDWithoutRank(t *testing.T) {
 	}
 	if _, ok := payload.Properties["rank"]; ok {
 		t.Error("rank should be omitted when unknown")
+	}
+	// Privacy: the raw query, its hash, impression tuples, session
+	// identifiers, and raw checkpoint ids must never be properties.
+	for _, key := range []string{"query", "query_hash", "impressions", "results", "session_id", "checkpoint_id"} {
+		if _, ok := payload.Properties[key]; ok {
+			t.Errorf("forbidden property %q present", key)
+		}
 	}
 }
