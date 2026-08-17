@@ -17,6 +17,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -386,7 +387,7 @@ func filterByName[T any](items []T, nameOf func(T) string, substr string) []T {
 // when the caller omits the <cluster-host> argument. The no-arg create wizard
 // and the interactive one-shot `create <github-url>` instead enumerate real
 // clusters from the catalog (GET /api/v1/clusters, see availableRegions and
-// resolveOneShotClusterHost in repo_mirror_create_wizard.go); this stays as
+// runMirrorRegionManager in repo_mirror_create_wizard.go); this stays as
 // the fixed fallback for non-interactive invocations, so scripts keep a
 // stable, offline-resolvable default.
 const defaultClusterHost = "aws-us-east-2.entire.io"
@@ -483,8 +484,9 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 			"to finish so `git clone` works on return. Pass --no-wait to return " +
 			"as soon as the placement is registered. Idempotent on " +
 			"(upstream, cluster). When the cluster-host is omitted, an " +
-			"interactive terminal offers the available clusters as a picker; " +
-			"non-interactive runs default to " + defaultClusterHost + ".",
+			"interactive terminal shows live placements in a region checklist; " +
+			"checking creates and unchecking removes placements. Non-interactive " +
+			"runs default to " + defaultClusterHost + ".",
 		Example: "  entire repo mirror create\n" +
 			"  entire repo mirror create github.com/octocat/hello-world\n" +
 			"  entire repo mirror create github.com/octocat/hello-world aws-us-east-2.entire.io",
@@ -503,13 +505,13 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 			// is-a-choice shape as `repo clone`); non-interactive invocations
 			// keep the fixed defaultClusterHost so scripts get stable behavior.
 			var clusterHost string
-			if len(args) > 1 {
+			switch {
+			case len(args) > 1:
 				clusterHost = args[1]
-			} else {
-				var rerr error
-				if clusterHost, rerr = resolveOneShotClusterHost(cmd); rerr != nil {
-					return rerr
-				}
+			case interactive.CanPromptInteractively():
+				return runMirrorRegionManager(cmd, owner, repo, noWait, waitTimeout)
+			default:
+				clusterHost = defaultClusterHost
 			}
 			if err := validateClusterHost(clusterHost); err != nil {
 				cmd.SilenceUsage = true
