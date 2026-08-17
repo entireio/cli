@@ -44,6 +44,7 @@ const (
 	configureSaveNewBranch      = "new-branch"
 	configureSaveLocal          = "local"
 	configureSaveCancel         = "cancel"
+	configureSaveMaxFieldHeight = 4 // title plus the maximum three visible actions
 	configureGitProtocolSSH     = "ssh"
 )
 
@@ -565,9 +566,7 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		return configureSaveOptions(branch, protected, requiresPush(), hasChanges(), saveChoice)
 	}
 	saveDescription := configureSaveDescription(branch, protected, requiresPush(), hasChanges())
-	saveControl := uiform.NewActionSelect(
-		"Save configuration", saveDescription, saveOptions(), &saveChoice,
-	)
+	saveControl := newConfigureSaveControl(saveDescription, saveOptions(), &saveChoice)
 	refreshSave := func() {
 		changed := hasChanges()
 		options := saveOptions()
@@ -577,10 +576,7 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		}
 		previousHasChanges = changed
 		description := configureSaveDescription(branch, protected, requiresPush(), changed)
-		saveControl.Select.
-			Description(description).
-			Height(uiform.FieldHeight(len(options), description)).
-			Options(options...)
+		updateConfigureSaveControl(saveControl, description, options)
 	}
 	upstreamControl.OnLayoutChanged(refreshSave)
 	agentControl.OnSelectionChanged(refreshSave)
@@ -673,9 +669,7 @@ func promptConfigureAgentsAndSave(ctx context.Context, errW io.Writer, installed
 		return configureSaveOptions(branch, protected, requiresPush(), agentsChanged(), saveChoice)
 	}
 	saveDescription := configureSaveDescription(branch, protected, requiresPush(), agentsChanged())
-	saveControl := uiform.NewActionSelect(
-		"Save configuration", saveDescription, saveOptions(), &saveChoice,
-	)
+	saveControl := newConfigureSaveControl(saveDescription, saveOptions(), &saveChoice)
 	refreshSave := func() {
 		changed := agentsChanged()
 		options := saveOptions()
@@ -685,9 +679,7 @@ func promptConfigureAgentsAndSave(ctx context.Context, errW io.Writer, installed
 		}
 		previousHasChanges = changed
 		description := configureSaveDescription(branch, protected, requiresPush(), changed)
-		saveControl.Select.Description(description).
-			Height(uiform.FieldHeight(len(options), description)).
-			Options(options...)
+		updateConfigureSaveControl(saveControl, description, options)
 	}
 	agentControl.OnSelectionChanged(refreshSave)
 	agentControl.ShowSectionGapWhen(func() bool { return true })
@@ -872,6 +864,21 @@ func configureSaveOptions(branch string, protected, requiresPush, hasChanges boo
 		newBranch,
 		cancel,
 	}
+}
+
+func newConfigureSaveControl(description string, options []huh.Option[string], value *string) *uiform.ActionSelect[string] {
+	control := uiform.NewActionSelect("Save configuration", description, options, value)
+	// Reserve room for the largest action set so a third action grows into the
+	// blank row below instead of moving the whole form upward.
+	control.Height(configureSaveMaxFieldHeight)
+	return control
+}
+
+func updateConfigureSaveControl(control *uiform.ActionSelect[string], description string, options []huh.Option[string]) {
+	control.Select.
+		Description(description).
+		Height(configureSaveMaxFieldHeight).
+		Options(options...)
 }
 
 func configureSaveDescription(branch string, protected, requiresPush, hasChanges bool) string {

@@ -356,8 +356,7 @@ func TestConfigurePlacementOrderPrefersCurrentThenHome(t *testing.T) {
 
 func TestConfigureSaveNoChangesStateIsAlwaysVisible(t *testing.T) {
 	choice := configureSaveLocal
-	field := uiform.NewActionSelect(
-		"Save configuration",
+	field := newConfigureSaveControl(
 		configureSaveDescription("main", false, false, false),
 		configureSaveOptions("main", false, false, false, choice),
 		&choice,
@@ -367,6 +366,26 @@ func TestConfigureSaveNoChangesStateIsAlwaysVisible(t *testing.T) {
 	got := ansi.Strip(form.View())
 	if !strings.Contains(got, "Save — no changes") {
 		t.Fatalf("save field does not show its disabled no-change state:\n%s", got)
+	}
+}
+
+func TestConfigureSaveFieldKeepsMaximumHeight(t *testing.T) {
+	unchangedChoice := configureSaveCancel
+	unchanged := newConfigureSaveControl(
+		configureSaveDescription("main", false, false, false),
+		configureSaveOptions("main", false, false, false, unchangedChoice),
+		&unchangedChoice,
+	)
+	changedChoice := configureSaveDirect
+	changed := newConfigureSaveControl(
+		configureSaveDescription("main", false, true, true),
+		configureSaveOptions("main", false, true, true, changedChoice),
+		&changedChoice,
+	)
+	unchangedHeight := strings.Count(unchanged.View(), "\n") + 1
+	changedHeight := strings.Count(changed.View(), "\n") + 1
+	if unchangedHeight != changedHeight {
+		t.Fatalf("save height changes from %d to %d when a third action appears", unchangedHeight, changedHeight)
 	}
 }
 
