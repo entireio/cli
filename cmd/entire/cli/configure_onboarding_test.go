@@ -16,6 +16,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 
@@ -458,6 +459,9 @@ func TestConfigureFormThemeHasNoFocusedRail(t *testing.T) {
 	}
 	if got := ansi.Strip(styles.Focused.SelectedPrefix.String()); got != "◼ " {
 		t.Fatalf("selected agent marker = %q, want prototype checkbox", got)
+	}
+	if _, ok := styles.Focused.UnselectedOption.GetForeground().(lipgloss.NoColor); !ok {
+		t.Fatalf("unselected agent label should use normal text color, got %v", styles.Focused.UnselectedOption.GetForeground())
 	}
 }
 

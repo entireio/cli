@@ -1176,8 +1176,11 @@ func configureFormTheme() huh.Theme {
 		theme.Blurred.UnselectedPrefix = lipgloss.NewStyle().Foreground(muted).SetString("◻ ")
 		theme.Focused.SelectedOption = theme.Focused.SelectedOption.UnsetForeground()
 		theme.Blurred.SelectedOption = theme.Blurred.SelectedOption.UnsetForeground()
-		theme.Focused.UnselectedOption = theme.Focused.UnselectedOption.Foreground(muted)
-		theme.Blurred.UnselectedOption = theme.Blurred.UnselectedOption.Foreground(muted)
+		// Enabled options keep normal text contrast whether selected or not.
+		// Muting the empty checkbox is sufficient; muting the label itself can
+		// incorrectly communicate that the option is disabled.
+		theme.Focused.UnselectedOption = theme.Focused.UnselectedOption.UnsetForeground()
+		theme.Blurred.UnselectedOption = theme.Blurred.UnselectedOption.UnsetForeground()
 		return theme
 	})
 }
