@@ -9,8 +9,32 @@ The Entire CLI supports external agent plugins — standalone binaries that impl
 The CLI discovers external agents by scanning `$PATH` for executables matching the pattern `entire-agent-<name>`. For example, `entire-agent-cursor` would register as the "cursor" agent.
 
 - Binaries whose `<name>` conflicts with an already-registered built-in agent are skipped.
-- Discovery runs once during CLI initialization (before building the hooks command tree).
 - The binary must be executable and respond to the `info` subcommand.
+
+Discovery is **per-command**, not a one-time CLI initialization step: each
+command that needs external agents runs it itself, in one of three shapes.
+
+| Entry point | Scope | Gate | Used by |
+|---|---|---|---|
+| `external.DiscoverAndRegister` | Full `$PATH` scan | Skipped unless `external_agents` is enabled | Most commands: `status`, `review`, `explain`, `resume`, `attach`, `rewind`, the `hooks` command trees, and post-commit condensation |
+| `external.DiscoverAndRegisterAlways` | Full `$PATH` scan | Bypassed | Interactive setup flows and `entire agent list --external` |
+| `external.DiscoverAndRegisterNamedAlways` | Looks up `entire-agent-<name>` only | Bypassed | `entire agent add` / `entire agent remove` |
+
+Consequences worth knowing:
+
+- The `external_agents` setting gates discovery. With it off, a full scan is
+  skipped entirely and external agents are invisible to the gated commands.
+- The `…Always` variants bypass that gate because the user's action *is* the
+  opt-in. `entire agent add <external-name>` therefore auto-persists
+  `external_agents: true`, so the hooks it installs are still resolvable on
+  later, gated runs.
+- The named variant executes only the plugin being addressed, so `entire agent
+  add`/`remove` never run unrelated `entire-agent-*` binaries, and a plugin
+  that fails to load surfaces its real error rather than a generic
+  "unknown agent".
+- `entire agent list` lists built-in agents only and performs no scan;
+  `entire agent list --external` is the superset — built-ins plus the plugins
+  found on `$PATH`, with external entries marked `(external)`.
 
 ## Environment
 
