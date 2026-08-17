@@ -63,7 +63,6 @@ type Radio[T comparable] struct {
 	highlighted   T
 	refresh       func()
 	layoutChanged func()
-	window        tea.WindowSizeMsg
 	title         string
 	sectionGap    bool
 }
@@ -128,13 +127,10 @@ func (field *Radio[T]) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
 		switch keyMsg.String() {
 		case "space", " ":
 			field.commitHighlighted()
-			return field, windowResize(field.window)
+			return field, nil
 		case keyEnter, "tab":
 			return field, huh.NextField
 		}
-	}
-	if size, ok := msg.(tea.WindowSizeMsg); ok {
-		field.window = size
 	}
 	model, cmd := field.Select.Update(msg)
 	if updated, ok := model.(*huh.Select[T]); ok {
@@ -176,7 +172,6 @@ type Checklist[T comparable] struct {
 	value            *[]T
 	selectionChanged func()
 	showSectionGap   func() bool
-	window           tea.WindowSizeMsg
 	title            string
 }
 
@@ -229,9 +224,6 @@ func (field *Checklist[T]) View() string {
 }
 
 func (field *Checklist[T]) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
-	if size, ok := msg.(tea.WindowSizeMsg); ok {
-		field.window = size
-	}
 	var before []T
 	if field.value != nil {
 		before = append(before, (*field.value)...)
@@ -244,7 +236,6 @@ func (field *Checklist[T]) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
 		if field.selectionChanged != nil {
 			field.selectionChanged()
 		}
-		cmd = tea.Batch(cmd, windowResize(field.window))
 	}
 	return field, cmd
 }
@@ -284,11 +275,4 @@ func (field *ActionSelect[T]) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
 		field.Select = updated
 	}
 	return field, cmd
-}
-
-func windowResize(size tea.WindowSizeMsg) tea.Cmd {
-	if size.Width <= 0 || size.Height <= 0 {
-		return nil
-	}
-	return func() tea.Msg { return size }
 }

@@ -46,7 +46,10 @@ func TestChecklistReportsSelectionChanges(t *testing.T) {
 	}, &selected, false).OnSelectionChanged(func() { changed = true })
 	field.WithKeyMap(huh.NewDefaultKeyMap())
 	field.Focus()
-	field.Update(tea.KeyPressMsg{Code: ' '})
+	_, cmd := field.Update(tea.KeyPressMsg{Code: ' '})
+	if cmd != nil {
+		t.Fatal("checklist toggle scheduled an extra render command")
+	}
 	if !changed {
 		t.Fatal("checklist did not report a changed selection")
 	}
