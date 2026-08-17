@@ -13,6 +13,44 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
+// Settings bodies for withExternalAgentPlugin. The difference is deliberate:
+// the listing tests run under the external_agents gate the way a user who
+// opted in would, while `agent add`/`remove` must work with the gate unset —
+// naming a plugin on those commands is itself the opt-in.
+const (
+	externalAgentsEnabledSettings = `{"enabled":true,"external_agents":true}`
+	externalAgentsUnsetSettings   = `{"enabled":true}`
+)
+
+// withExternalAgentPlugin prepares an isolated repo with the given settings and
+// puts a mock external agent plugin named agentName on $PATH. hooksInstalled is
+// what the mock's are-hooks-installed subcommand reports, so callers can
+// simulate an installed plugin as well as an available one.
+//
+// setupTestRepo scrubs $PATH down to git and sh, so a real entire-agent-*
+// binary on the developer's machine cannot leak into the assertions. Discovery
+// registers the mock into the process-global registry, so the registry is
+// snapshotted and restored — otherwise a mock backed by a t.TempDir binary
+// outlives the test and later ones exec a deleted file.
+//
+// Callers cannot use t.Parallel: this mutates $PATH, cwd, and the registry.
+func withExternalAgentPlugin(t *testing.T, agentName, settings string, hooksInstalled bool) {
+	t.Helper()
+
+	// The mock is a #!/bin/sh script.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	t.Cleanup(agent.SnapshotForTesting())
+
+	setupTestRepo(t)
+	writeSettings(t, settings)
+
+	externalDir := t.TempDir()
+	writeExternalAgentBinaryEx(t, externalDir, agentName, hooksInstalled)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func TestRunAgentList_ListsAvailableAgents(t *testing.T) {
 	t.Parallel()
 
@@ -95,27 +133,10 @@ func TestAgentGroupBareCommandRunsAgentMenu(t *testing.T) {
 // path skips the $PATH scan — TestRunAgentList_DefaultPathDoesNotScanPath owns
 // that guarantee via an exec-count assertion.
 func TestRunAgentList_ExternalFlagListsAvailablePlugin(t *testing.T) {
-	// Cannot use t.Parallel because we modify PATH via t.Setenv and cwd via t.Chdir.
-	// The mock agent is a #!/bin/sh script run by the install-state probe, so skip
-	// on environments without a POSIX shell (matching sibling external-agent tests).
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not available")
-	}
-
-	// --external registers the mock into the process-global registry; restore it
-	// so the temp-binary-backed agent doesn't leak into later package tests.
-	t.Cleanup(agent.SnapshotForTesting())
-
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	testutil.WriteFile(t, repoDir, ".entire/settings.json", `{"enabled":true,"external_agents":true}`)
-	t.Chdir(repoDir)
-
+	// Cannot use t.Parallel: see withExternalAgentPlugin.
 	// Unique name so parallel package tests can't collide on $PATH.
 	const agentName = "ext-available-test"
-	externalDir := t.TempDir()
-	writeExternalAgentBinary(t, externalDir, agentName) // are-hooks-installed => false
-	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	withExternalAgentPlugin(t, agentName, externalAgentsEnabledSettings, false)
 
 	// Default listing is built-ins only — never scans $PATH, so no external.
 	var def bytes.Buffer
@@ -143,21 +164,9 @@ func TestRunAgentList_ExternalFlagListsAvailablePlugin(t *testing.T) {
 // appends to, so reintroducing an unconditional $PATH scan on the default path
 // would fail here even though the plugin is filtered out of the output.
 func TestRunAgentList_DefaultPathDoesNotScanPath(t *testing.T) {
-	// Cannot use t.Parallel: mutates PATH via t.Setenv and cwd via t.Chdir.
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not available")
-	}
-	t.Cleanup(agent.SnapshotForTesting())
-
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	testutil.WriteFile(t, repoDir, ".entire/settings.json", `{"enabled":true,"external_agents":true}`)
-	t.Chdir(repoDir)
-
+	// Cannot use t.Parallel: see withExternalAgentPlugin.
 	const agentName = "ext-execlog-test"
-	externalDir := t.TempDir()
-	writeExternalAgentBinary(t, externalDir, agentName)
-	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	withExternalAgentPlugin(t, agentName, externalAgentsEnabledSettings, false)
 
 	// The mock appends each invoked subcommand to this file when the env var is set.
 	execLog := filepath.Join(t.TempDir(), "exec.log")
@@ -191,25 +200,10 @@ func TestRunAgentList_DefaultPathDoesNotScanPath(t *testing.T) {
 // TestRunAgentList_ExternalFlagMarksInstalled verifies that an INSTALLED external
 // plugin is listed and marked installed (✓) under `--external`.
 func TestRunAgentList_ExternalFlagMarksInstalled(t *testing.T) {
-	// Cannot use t.Parallel because we modify PATH via t.Setenv and cwd via t.Chdir.
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not available")
-	}
-
-	// --external registers the mock into the process-global registry; restore it
-	// so the installed-reporting mock doesn't leak into later package tests.
-	t.Cleanup(agent.SnapshotForTesting())
-
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	testutil.WriteFile(t, repoDir, ".entire/settings.json", `{"enabled":true,"external_agents":true}`)
-	t.Chdir(repoDir)
-
+	// Cannot use t.Parallel: see withExternalAgentPlugin.
 	// Unique name; the mock reports its hooks ARE installed.
 	const agentName = "ext-installed-test"
-	externalDir := t.TempDir()
-	writeExternalAgentBinaryEx(t, externalDir, agentName, true) // are-hooks-installed => true
-	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	withExternalAgentPlugin(t, agentName, externalAgentsEnabledSettings, true)
 
 	var ext bytes.Buffer
 	if err := runAgentList(context.Background(), &ext, true); err != nil {
@@ -224,12 +218,7 @@ func TestRunAgentList_ExternalFlagMarksInstalled(t *testing.T) {
 // its output includes external plugins on $PATH AND the built-in agents, while
 // the default listing shows built-ins only.
 func TestRunAgentList_ExternalIsSuperset(t *testing.T) {
-	// Cannot use t.Parallel: mutates PATH via t.Setenv and cwd via t.Chdir.
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not available")
-	}
-	t.Cleanup(agent.SnapshotForTesting())
-
+	// Cannot use t.Parallel: see withExternalAgentPlugin.
 	// A built-in agent name to look for in both listings.
 	builtins := agent.StringList()
 	if len(builtins) == 0 {
@@ -237,15 +226,8 @@ func TestRunAgentList_ExternalIsSuperset(t *testing.T) {
 	}
 	builtin := builtins[0]
 
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	testutil.WriteFile(t, repoDir, ".entire/settings.json", `{"enabled":true,"external_agents":true}`)
-	t.Chdir(repoDir)
-
 	const agentName = "ext-superset-test"
-	externalDir := t.TempDir()
-	writeExternalAgentBinary(t, externalDir, agentName)
-	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	withExternalAgentPlugin(t, agentName, externalAgentsEnabledSettings, false)
 
 	var ext bytes.Buffer
 	if err := runAgentList(context.Background(), &ext, true); err != nil {
@@ -265,26 +247,14 @@ func TestRunAgentList_ExternalIsSuperset(t *testing.T) {
 // executables resolved from $PATH, so rendering them identically to shipped
 // agents would hide a trust-relevant distinction.
 func TestRunAgentList_MarksExternalProvenance(t *testing.T) {
-	// Cannot use t.Parallel: mutates PATH via t.Setenv and cwd via t.Chdir.
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not available")
-	}
-	t.Cleanup(agent.SnapshotForTesting())
-
+	// Cannot use t.Parallel: see withExternalAgentPlugin.
 	builtins := agent.StringList()
 	if len(builtins) == 0 {
 		t.Skip("no built-in agents registered in this build")
 	}
 
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	testutil.WriteFile(t, repoDir, ".entire/settings.json", `{"enabled":true,"external_agents":true}`)
-	t.Chdir(repoDir)
-
 	const agentName = "ext-provenance-test"
-	externalDir := t.TempDir()
-	writeExternalAgentBinary(t, externalDir, agentName)
-	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	withExternalAgentPlugin(t, agentName, externalAgentsEnabledSettings, false)
 
 	var ext bytes.Buffer
 	if err := runAgentList(context.Background(), &ext, true); err != nil {
@@ -336,36 +306,15 @@ func TestRunAgentList_EmptyStateWording(t *testing.T) {
 	}
 }
 
-// externalAgentRepo prepares a repo with settings, puts a mock external plugin
-// named agentName on $PATH, and restores the agent registry afterwards. The
-// settings deliberately leave external_agents unset: `agent add`/`remove` are
-// themselves the opt-in, so they must work without it.
-func externalAgentRepo(t *testing.T, agentName string) {
-	t.Helper()
-
-	// The mock is a #!/bin/sh script, and $PATH/cwd are process-global.
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not available")
-	}
-	t.Cleanup(agent.SnapshotForTesting())
-
-	setupTestRepo(t)
-	writeSettings(t, `{"enabled":true}`)
-
-	externalDir := t.TempDir()
-	writeExternalAgentBinary(t, externalDir, agentName)
-	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
 // TestAgentAdd_InstallsExternalPluginFromPath is the core of #1928 for `add`:
 // a plugin that is only discoverable by scanning $PATH must install through
 // `entire agent add <name>`, which previously failed with "unknown agent"
 // because the command never ran discovery.
 func TestAgentAdd_InstallsExternalPluginFromPath(t *testing.T) {
-	// Cannot use t.Parallel: mutates PATH via t.Setenv, cwd via t.Chdir, and the
-	// process-global agent registry.
+	// Cannot use t.Parallel: see withExternalAgentPlugin. The settings leave
+	// external_agents unset on purpose: `add` is itself the opt-in.
 	const agentName = "ext-add-test"
-	externalAgentRepo(t, agentName)
+	withExternalAgentPlugin(t, agentName, externalAgentsUnsetSettings, false)
 
 	cmd := newAgentAddCmd()
 	var out bytes.Buffer
@@ -392,9 +341,10 @@ func TestAgentAdd_InstallsExternalPluginFromPath(t *testing.T) {
 // #1928: uninstalling must reach the same $PATH-discovered plugin that `add`
 // installed, rather than reporting it unknown.
 func TestAgentRemove_ResolvesExternalPluginFromPath(t *testing.T) {
-	// Cannot use t.Parallel: see TestAgentAdd_InstallsExternalPluginFromPath.
+	// Cannot use t.Parallel: see withExternalAgentPlugin. As with `add`,
+	// external_agents stays unset — `remove` must reach the plugin without it.
 	const agentName = "ext-remove-test"
-	externalAgentRepo(t, agentName)
+	withExternalAgentPlugin(t, agentName, externalAgentsUnsetSettings, false)
 
 	add := newAgentAddCmd()
 	var addOut bytes.Buffer
