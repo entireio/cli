@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -113,11 +115,10 @@ func hasMultipleSessions(points []strategy.RewindPoint) bool {
 	return len(sessionIDs) > 1
 }
 
-// rewindPointLabel renders a single rewind point as a display label. Shared by
-// the interactive rewind picker (runRewindInteractive) and the
-// `checkpoint list --pending` human view so both stay in sync. When
-// hasMultipleSessions is true, a sanitized session prompt is appended to help
-// disambiguate concurrent sessions.
+// rewindPointLabel renders a single rewind point as a display label for the
+// `checkpoint list --pending` human view. When hasMultipleSessions is true, a
+// sanitized session prompt is appended to help disambiguate concurrent
+// sessions.
 func rewindPointLabel(p strategy.RewindPoint, hasMultipleSessions bool) string {
 	timestamp := p.Date.Format("2006-01-02 15:04")
 
@@ -141,4 +142,33 @@ func rewindPointLabel(p strategy.RewindPoint, hasMultipleSessions bool) string {
 		// Shadow checkpoint (uncommitted) - no sha shown (internal commit)
 		return fmt.Sprintf("        (%s) %s%s", timestamp, sanitizeForTerminal(p.Message), sessionLabel)
 	}
+}
+
+// sanitizeForTerminal removes or replaces characters that cause rendering issues
+// in terminal UI components. This includes emojis with skin-tone modifiers and
+// other multi-codepoint characters that confuse width calculations.
+func sanitizeForTerminal(s string) string {
+	var result strings.Builder
+	result.Grow(len(s))
+
+	for _, r := range s {
+		// Skip emoji skin tone modifiers (U+1F3FB to U+1F3FF)
+		if r >= 0x1F3FB && r <= 0x1F3FF {
+			continue
+		}
+		// Skip zero-width joiners used in emoji sequences
+		if r == 0x200D {
+			continue
+		}
+		// Skip variation selectors (U+FE00 to U+FE0F)
+		if r >= 0xFE00 && r <= 0xFE0F {
+			continue
+		}
+		// Keep printable characters and common whitespace
+		if unicode.IsPrint(r) || r == '\t' || r == '\n' {
+			result.WriteRune(r)
+		}
+	}
+
+	return result.String()
 }

@@ -384,25 +384,25 @@ func printSSEEvent(w, errW io.Writer, eventName, data string, jsonOutput bool) {
 }
 
 type reviewReadyPayload struct {
-	TrailID string `json:"trail_id"`
-	Cursor  int    `json:"cursor"`
+	TrailID string `json:"trailId"`
+	Cursor  int64  `json:"cursor"`
 }
 
 type reviewStreamEvent struct {
 	ID              any            `json:"id"`
-	TrailID         string         `json:"trail_id"`
-	ReviewSessionID *string        `json:"review_session_id"`
-	ActorID         string         `json:"actor_id"`
-	EventType       string         `json:"event_type"`
-	TargetType      string         `json:"target_type"`
-	TargetID        string         `json:"target_id"`
+	TrailID         string         `json:"trailId"`
+	ReviewSessionID *string        `json:"reviewId"`
+	ActorID         string         `json:"actorId"`
+	EventType       string         `json:"eventType"`
+	TargetType      string         `json:"targetType"`
+	TargetID        string         `json:"targetId"`
 	Payload         map[string]any `json:"payload"`
-	CreatedAt       time.Time      `json:"created_at"`
+	CreatedAt       time.Time      `json:"createdAt"`
 }
 
 func printReadyEvent(w io.Writer, data string) {
 	var p reviewReadyPayload
-	if err := json.Unmarshal([]byte(data), &p); err == nil {
+	if err := unmarshalTrailEventJSON(data, &p); err == nil {
 		parts := []string{"● connected"}
 		if p.TrailID != "" {
 			parts = append(parts, "to trail "+p.TrailID)
@@ -434,7 +434,7 @@ func printStreamError(errW io.Writer, data string) {
 
 func parseReviewStreamEvent(eventName, data string) (reviewStreamEvent, bool) {
 	var ev reviewStreamEvent
-	if err := json.Unmarshal([]byte(data), &ev); err != nil {
+	if err := unmarshalTrailEventJSON(data, &ev); err != nil {
 		return ev, false
 	}
 	if ev.EventType == "" {
@@ -444,6 +444,46 @@ func parseReviewStreamEvent(eventName, data string) (reviewStreamEvent, bool) {
 		return ev, false
 	}
 	return ev, true
+}
+
+func unmarshalTrailEventJSON(data string, dest any) error {
+	var value any
+	if err := json.Unmarshal([]byte(data), &value); err != nil {
+		return fmt.Errorf("decode trail event: %w", err)
+	}
+	value = normalizeTrailEventValue(value)
+	normalized, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("normalize trail event: %w", err)
+	}
+	if err := json.Unmarshal(normalized, dest); err != nil {
+		return fmt.Errorf("decode normalized trail event: %w", err)
+	}
+	return nil
+}
+
+func normalizeTrailEventValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, child := range v {
+			if key == "payload" {
+				out[key] = child
+				continue
+			}
+			out[trailEventCamelKey(key)] = normalizeTrailEventValue(child)
+		}
+		return out
+	case []any:
+		for i := range v {
+			v[i] = normalizeTrailEventValue(v[i])
+		}
+	}
+	return value
+}
+
+func trailEventCamelKey(key string) string {
+	return api.NormalizeTrailJSONKey(key)
 }
 
 func printReviewStreamEvent(w io.Writer, ev reviewStreamEvent) {
@@ -513,6 +553,11 @@ func payloadString(payload map[string]any, key string) string {
 		return ""
 	}
 	v, ok := payload[key]
+	if !ok && strings.ContainsRune(key, '_') {
+		// Historical event payloads used snake_case while entire-api emits
+		// camelCase. Human rendering accepts both during the migration.
+		v, ok = payload[trailEventCamelKey(key)]
+	}
 	if !ok || v == nil {
 		return ""
 	}

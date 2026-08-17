@@ -48,7 +48,14 @@ func newAPICmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "api <path>",
 		Short: "Make an authenticated request to an Entire API and print the response",
+		// Human-facing help stays a reference, not a lecture: someone who typed
+		// this command chose it deliberately. The one caveat kept here is a real
+		// compatibility fact rather than advice — raw endpoints are internal. The
+		// "prefer a first-class command" steer is agent-facing guidance and lives
+		// in agentHelpGuidance, which only agent-help renders.
 		Long: "Make an authenticated HTTP request to an Entire API and print the JSON response.\n\n" +
+			"These endpoints are internal and can change shape without notice; where a\n" +
+			"purpose-built command exists, its output is the stable interface.\n\n" +
 			"The CLI attaches the right bearer token and dials the right host for the\n" +
 			"chosen backend, so you don't have to plumb auth yourself:\n\n" +
 			"  --to core   the control plane (default): orgs, repos, mirrors, clusters, /me\n" +

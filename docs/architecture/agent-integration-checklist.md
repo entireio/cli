@@ -69,6 +69,25 @@ Map agent-native hooks to these `EventType` constants (see `agent/event.go`):
 - [ ] **SessionStart**: Fire when a new session begins
 - [ ] **SessionEnd**: Fire when session is explicitly ended (optional but recommended)
 
+### Hook Installation
+
+See Guide: [Step 6 - InstallHooks](agent-guide.md)
+
+- [ ] **Hook commands name the `entire` binary**, resolved through PATH — never a
+      path that resolves inside the working tree. A repo-relative command runs
+      whatever the checked-out branch contains, on every agent turn, and any repo
+      could opt its cloners into it. This is why `local_dev` was removed.
+- [ ] **Stale Entire hooks are dropped on every install, not just `--force`**, via
+      `agent.DropStaleManagedHooks`. Adding the current hook without removing an
+      older one leaves both firing. Two agents got this wrong independently, so
+      route through the shared helper rather than re-deriving the loop.
+- [ ] **Legacy command shapes stay in `entireHookPrefixes`** (including
+      `agent.LegacyLocalDevHookScript`) so hooks written by older versions are
+      recognized as ours and replaced instead of being left in place.
+- [ ] **A committed generated config is drift-guarded** — see
+      `testutil.AssertCommittedDogfoodFile` / `AssertCommittedDogfoodConfigStable`
+      if this repo commits the agent's config for its own dogfooding.
+
 ### Rewind/Resume Support
 
 - [ ] **Rewind restores full state**: After rewind, agent can continue from that point with full context

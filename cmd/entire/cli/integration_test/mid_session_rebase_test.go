@@ -89,10 +89,9 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 	}
 	t.Logf("Checkpoint 1 created on shadow branch: %s", originalShadowBranch)
 
-	// Verify 1 rewind point
-	points := env.GetRewindPoints()
-	if len(points) != 1 {
-		t.Fatalf("Expected 1 rewind point after first checkpoint, got %d", len(points))
+	// Verify checkpoint 1 content landed on the shadow branch
+	if !env.FileExistsInBranch(originalShadowBranch, "a.go") {
+		t.Fatalf("a.go should exist on shadow branch %s after first checkpoint", originalShadowBranch)
 	}
 
 	// ========================================
@@ -185,36 +184,17 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 		t.Logf("✓ Session BaseCommit updated to: %s", state.BaseCommit[:7])
 	}
 
-	// Verify we have 2 checkpoints (both should be on the new shadow branch)
-	points = env.GetRewindPoints()
-	if len(points) != 2 {
-		t.Errorf("Expected 2 rewind points, got %d", len(points))
+	// Verify both checkpoints' content is on the new shadow branch
+	if !env.FileExistsInBranch(newShadowBranch, "a.go") {
+		t.Error("a.go (checkpoint 1) should exist on migrated shadow branch")
+	}
+	if !env.FileExistsInBranch(newShadowBranch, "b.go") {
+		t.Error("b.go (checkpoint 2) should exist on migrated shadow branch")
+	}
+	if state.StepCount != 2 {
+		t.Errorf("Expected 2 checkpoints after migration, got %d", state.StepCount)
 	} else {
-		t.Logf("✓ Found %d rewind points after migration", len(points))
-	}
-
-	// ========================================
-	// Phase 6: Verify rewind still works
-	// ========================================
-	t.Log("Phase 6: Verifying rewind still works after migration")
-
-	// Find checkpoint 1 (before rebase) — it is the oldest rewind point.
-	// Points are sorted most recent first, so checkpoint 1 is the last entry.
-	checkpoint1ID := points[len(points)-1].ID
-
-	// Rewind to checkpoint 1
-	if err := env.Rewind(checkpoint1ID); err != nil {
-		t.Fatalf("Rewind to checkpoint 1 failed: %v", err)
-	}
-
-	// Verify b.go is gone (it was created after checkpoint 1)
-	if env.FileExists("b.go") {
-		t.Error("b.go should NOT exist after rewind to checkpoint 1")
-	}
-
-	// Verify a.go exists
-	if !env.FileExists("a.go") {
-		t.Error("a.go should exist after rewind to checkpoint 1")
+		t.Logf("✓ Found %d checkpoints after migration", state.StepCount)
 	}
 
 	t.Log("Mid-session rebase migration test completed successfully!")
@@ -403,12 +383,11 @@ func TestShadow_CommitThenRebaseMidSession(t *testing.T) {
 		t.Logf("✓ Session BaseCommit updated to: %s", state.BaseCommit[:7])
 	}
 
-	// Should have rewind points (at least the new checkpoint)
-	points := env.GetRewindPoints()
-	if len(points) == 0 {
-		t.Error("Expected at least 1 rewind point")
+	// The new checkpoint's content should be on the new shadow branch
+	if !env.FileExistsInBranch(newShadowBranch, "b.go") {
+		t.Error("b.go should exist on the new shadow branch")
 	} else {
-		t.Logf("✓ Found %d rewind point(s)", len(points))
+		t.Log("✓ b.go found on the new shadow branch")
 	}
 
 	t.Log("Commit-then-rebase mid-session test completed successfully!")

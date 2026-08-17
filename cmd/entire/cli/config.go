@@ -102,6 +102,38 @@ func InstalledAgentDisplayNames(ctx context.Context) []string {
 	return agentDisplayNames(GetAgentsWithHooksInstalled(ctx))
 }
 
+// OutdatedHookAgents returns installed agents whose Entire hook config has
+// drifted from what the CLI would write today, for `entire status` and
+// `entire doctor` to surface. Agents that don't implement agent.HookFreshness
+// are skipped: absence of a drift check reads as "nothing to report", never as
+// a warning.
+//
+// Scoped to agents AreHooksInstalled reports as installed here. Note what that
+// means for generated-file agents (Pi, OpenCode): the committed file *is* the
+// installation, so a repo that ships one gets drift warnings even where nobody
+// ran `entire agent add`. That is the intent — such a repo is relying on the
+// committed file to work — but it does mean this is not scoped to people who
+// opted in on this machine.
+func OutdatedHookAgents(ctx context.Context) []types.AgentName {
+	var outdated []types.AgentName
+	for _, name := range GetAgentsWithHooksInstalled(ctx) {
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		if hf, ok := agent.AsHookFreshness(ag); ok && hf.CheckHookConfig(ctx) == agent.HooksOutdated {
+			outdated = append(outdated, name)
+		}
+	}
+	return outdated
+}
+
+// OutdatedHookAgentDisplayNames returns user-facing display names for agents
+// whose hook config is out of date.
+func OutdatedHookAgentDisplayNames(ctx context.Context) []string {
+	return agentDisplayNames(OutdatedHookAgents(ctx))
+}
+
 // agentDisplayNames maps agent names to their user-facing display names,
 // skipping names that aren't registered.
 func agentDisplayNames(names []types.AgentName) []string {

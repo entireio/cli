@@ -48,11 +48,8 @@ mise.local.toml
 /dist/
 /completions/
 
-
-# E2E test artifacts are ignored by e2e/.gitignore, not from here. go-git's
-# gitignore walk only prunes a directory when the matching pattern comes from
-# that directory's own .gitignore, so a nested "e2e/artifacts/" rule here would
-# leave go-git descending every artifact directory on each Worktree.Status().
+# E2E test artifacts
+e2e/artifacts/
 
 # worktrees
 .worktrees/

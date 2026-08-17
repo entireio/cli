@@ -10,11 +10,13 @@ import (
 	"time"
 
 	"charm.land/huh/v2"
-	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v6"
@@ -41,9 +43,10 @@ Checks performed:
      review hasn't run yet on this machine, or a newer entire release
      added a hook the user hasn't approved yet).
 
-  When Claude Code hooks are installed:
-  3. Claude Code hook config: warn when the installed hooks are out of
-     date (e.g. an older release wrote tool matchers that no longer fire).
+  For each installed agent that reports hook-config drift:
+  3. Hook config: warn when the installed hooks no longer match what this
+     CLI writes (e.g. an older release wrote Claude Code tool matchers that
+     no longer fire, or a committed Pi/OpenCode extension has gone stale).
      Fix by re-running 'entire enable --force'.
 
   4. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
@@ -102,11 +105,19 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	ctx := cmd.Context()
 
+	// The git hook surface. Checked before the agent hook checks because it is
+	// the more fundamental one: if git hooks are broken, commits are not captured
+	// at all and agent-config drift is noise by comparison.
+	if hooksErr := checkGitHooks(cmd, force); hooksErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Error: git hook check failed: %v\n", hooksErr)
+		finalErr = NewSilentError(fmt.Errorf("git hook check failed: %w", hooksErr))
+	}
+
 	// Agent-specific: Codex hook trust state.
 	checkCodexHookTrust(cmd)
 
 	// Agent-specific: Claude Code hook config drift.
-	checkClaudeCodeHookDrift(cmd)
+	checkHookDrift(cmd)
 
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
 	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
@@ -435,21 +446,113 @@ func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, err
 	return confirmed, nil
 }
 
-// checkClaudeCodeHookDrift warns when Entire's Claude Code hooks are installed
-// but out of date — e.g. an older release wrote tool matchers that no longer
-// fire on current Claude Code. Read-only; the fix is `entire enable --force`.
-// Stays silent when Claude Code hooks aren't installed here.
-func checkClaudeCodeHookDrift(cmd *cobra.Command) {
+// checkGitHooks reports whether Entire's git hooks are installed and current,
+// and offers to reinstall them when they are not.
+//
+// This is the one hook surface a user cannot see going wrong. Agent hook configs
+// are committed files that turn up in a diff; .git/hooks is per-clone and
+// untracked, so pulling a release that changes hook generation never touches it.
+// A hook left by the removed local-dev mode still carries Entire's marker, so it
+// looks installed while naming a launcher inside the working tree that no longer
+// exists — and because that shape got no availability guard while pre-push
+// deliberately propagates exit codes, the symptom a user actually sees is `git
+// push` being rejected.
+//
+// Unlike the agent hook checks this one repairs rather than only warning: the
+// reinstall is content-idempotent, backs up any foreign hook it displaces, and
+// writes exactly what the next turn-start would write anyway. Someone reaching
+// for doctor after a rejected push wants to be unblocked, not handed a second
+// command to run.
+func checkGitHooks(cmd *cobra.Command, force bool) error {
+	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
-	switch claudecode.CheckHookConfig(cmd.Context()) {
-	case claudecode.HooksAbsent:
-		// Not installed in this repo — nothing to report.
-	case claudecode.HooksCurrent:
-		fmt.Fprintln(w, "✓ Claude Code hook config: OK")
-	case claudecode.HooksOutdated:
-		fmt.Fprintln(w, "Claude Code hooks: OUT OF DATE")
-		fmt.Fprintln(w, "  The installed hooks use outdated tool matchers and no longer fire.")
-		fmt.Fprintln(w, "  Run `entire enable --force` to update the hooks file.")
+
+	switch strategy.CheckGitHookState(ctx) {
+	case strategy.GitHooksCurrent:
+		fmt.Fprintln(w, "✓ Git hooks: OK")
+		return nil
+
+	case strategy.GitHooksAbsent:
+		// Missing hooks are only a problem where Entire was actually set up.
+		// doctor runs in any git repo, so treating this as actionable would let
+		// `entire doctor --force` install hooks into — and back up the existing
+		// hooks of — a repo that never opted in. That is the loudest possible
+		// surprise from a diagnostic command. The sibling checks already hold this
+		// line: checkHookDrift stays silent on HooksAbsent, and
+		// checkCodexHookTrust returns early when there is no codex hooks file.
+		//
+		// IsSetUpAny rather than IsSetUpAndEnabled: a repo that ran `entire
+		// disable` still wants working hooks, because the hooks themselves are
+		// what no-op while disabled.
+		if !settings.IsSetUpAny(ctx) {
+			return nil
+		}
+		fmt.Fprintln(w, "Git hooks: NOT INSTALLED")
+		fmt.Fprintln(w, "  Commits in this repository are not captured as checkpoints.")
+
+	case strategy.GitHooksOutdated:
+		// Actionable whatever the settings say: a hook carrying Entire's marker
+		// means this repo opted in at some point, and a stale one is actively
+		// broken rather than merely missing.
+		fmt.Fprintln(w, "Git hooks: OUT OF DATE")
+		fmt.Fprintln(w, "  A hook still runs Entire from the working tree instead of the installed")
+		fmt.Fprintln(w, "  binary. This can reject `git push`, because the path it names is gone.")
+	}
+	fmt.Fprintln(w, "  Fix: reinstall the managed git hooks (any non-Entire hook is backed up).")
+
+	if !force {
+		// Degrade to warn-only when there is nobody to ask. An agent or CI run
+		// must not be blocked on a prompt, and rewriting a repo's hooks
+		// unasked is worse than naming the command that does it.
+		if !interactive.CanPromptInteractively() {
+			fmt.Fprintln(w, "  Run `entire doctor --force` to apply it.")
+			return nil
+		}
+		proceed, promptErr := confirmDoctorFix(ctx, w, "Reinstall Entire git hooks?")
+		if promptErr != nil {
+			return promptErr
+		}
+		if !proceed {
+			return nil
+		}
+	}
+
+	if _, err := strategy.ReinstallGitHooks(ctx); err != nil {
+		return fmt.Errorf("failed to reinstall git hooks: %w", err)
+	}
+	fmt.Fprintln(w, "  ✓ Fixed: git hooks reinstalled")
+	return nil
+}
+
+// checkHookDrift warns when an installed agent's Entire hook config is out of
+// date — an older release wrote Claude Code tool matchers that no longer fire,
+// or a repo committed a Pi/OpenCode extension that the template has since moved
+// past. Read-only; the fix is `entire enable --force`. Stays silent for agents
+// that aren't installed here or don't implement a drift check.
+func checkHookDrift(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+	for _, name := range GetAgentsWithHooksInstalled(ctx) {
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		hf, ok := agent.AsHookFreshness(ag)
+		if !ok {
+			continue
+		}
+		displayName := string(ag.Type())
+		switch hf.CheckHookConfig(ctx) {
+		case agent.HooksAbsent:
+			// Not installed in this repo — nothing to report.
+		case agent.HooksCurrent:
+			fmt.Fprintf(w, "✓ %s hook config: OK\n", displayName)
+		case agent.HooksOutdated:
+			fmt.Fprintf(w, "%s hooks: OUT OF DATE\n", displayName)
+			fmt.Fprintln(w, "  The installed hook config no longer matches what this CLI writes,")
+			fmt.Fprintln(w, "  so some or all hooks may silently not fire.")
+			fmt.Fprintln(w, "  Run `entire enable --force` to update it.")
+		}
 	}
 }
 

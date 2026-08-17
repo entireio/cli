@@ -328,6 +328,13 @@ func resolveEnvTokenStatusTarget(raw string) (statusTarget, error) {
 func resolveStatusTarget(ctx context.Context, listContexts contextsProvider, resolveLogin loginTokenResolver) (statusTarget, error) {
 	all, current, err := listContexts()
 	if err != nil {
+		// A bad --context/$ENTIRE_CONTEXT is not a load failure, and prefixing it
+		// with one ("load contexts: --context selected …") describes the wrong
+		// problem. Its own message is already complete.
+		var unknown *contexts.UnknownContextError
+		if errors.As(err, &unknown) {
+			return statusTarget{}, err
+		}
 		return statusTarget{}, fmt.Errorf("load contexts: %w", err)
 	}
 	total := len(all)

@@ -6,10 +6,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/entireio/cli/e2e/entire"
 	"github.com/entireio/cli/e2e/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,7 +36,7 @@ func TestFactoryTaskCheckpointExistsBeforeCommit(t *testing.T) {
 		// file wait must absorb the Worker's runtime (60-120s turns on CI).
 		testutil.WaitForFileExists(t, s.Dir, "docs/factory-hook-check.md", 120*time.Second)
 
-		waitForTaskRewindPoint(t, s.Dir, 30*time.Second)
+		waitForTaskCheckpoint(t, s.Dir, 30*time.Second)
 	})
 }
 
@@ -63,7 +63,7 @@ func TestFactoryCommittedCheckpointExcludesPreExistingUntrackedFiles(t *testing.
 		// See TestFactoryTaskCheckpointExistsBeforeCommit: the file wait must
 		// absorb the Worker's runtime because WaitFor can return mid-turn.
 		testutil.WaitForFileExists(t, s.Dir, "docs/factory-prehook-worker.md", 120*time.Second)
-		waitForTaskRewindPoint(t, s.Dir, 30*time.Second)
+		waitForTaskCheckpoint(t, s.Dir, 30*time.Second)
 
 		s.Git(t, "add", "docs/factory-prehook-worker.md")
 		s.Git(t, "commit", "-m", "Add factory worker checkpoint regression fixtures")
@@ -79,23 +79,26 @@ func TestFactoryCommittedCheckpointExcludesPreExistingUntrackedFiles(t *testing.
 	})
 }
 
-func waitForTaskRewindPoint(t *testing.T, dir string, timeout time.Duration) {
+// waitForTaskCheckpoint polls the shadow branches until a task checkpoint
+// (metadata under a tasks/<tool-use-id>/ directory) appears.
+func waitForTaskCheckpoint(t *testing.T, dir string, timeout time.Duration) {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		points := entire.RewindList(t, dir)
-		for _, point := range points {
-			if point.IsLogsOnly || !point.IsTaskCheckpoint {
+		for _, branch := range testutil.ShadowBranches(t, dir) {
+			out, err := testutil.GitOutputErr(dir, "ls-tree", "-r", "--name-only", branch)
+			if err != nil {
 				continue
 			}
-			if point.ToolUseID == "" {
-				continue
+			for _, path := range strings.Split(out, "\n") {
+				if strings.Contains(path, "/tasks/") {
+					return
+				}
 			}
-			return
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	t.Fatalf("expected task rewind point within %s", timeout)
+	t.Fatalf("expected task checkpoint within %s", timeout)
 }

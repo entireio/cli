@@ -12,8 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,6 +37,10 @@ import (
 const (
 	trailListTestAuthorAlice = "alice"
 	trailListTestAuthorBob   = "bob"
+	// trailTestBasePath is the trails endpoint for the gh/acme/repo fixture.
+	trailTestBasePath = "/api/v1/trails/gh/acme/repo"
+	// trailBodyField is the PATCH field name carrying a trail's description.
+	trailBodyField = "body"
 )
 
 func TestNewTrailCreateRequestUsesLinkBranchAction(t *testing.T) {
@@ -197,6 +203,15 @@ func TestRunTrailCreateInteractiveBranchlessSkipsBranchPrompt(t *testing.T) {
 
 func TestRunTrailCreateBranchlessHappyPath(t *testing.T) {
 	// No t.Parallel: uses t.Chdir plus auth/tokenstore package-level test seams.
+	prevTrailClient := newTrailAPIClient
+	newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, _ string) (*api.Client, error) {
+		client, err := NewAuthenticatedAPIClient(ctx, insecureHTTP)
+		if err != nil {
+			return nil, err
+		}
+		return client.WithTrailBackend("legacy"), nil
+	}
+	t.Cleanup(func() { newTrailAPIClient = prevTrailClient })
 	var gotCreate map[string]any
 	var gotCreateAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -370,6 +385,12 @@ func gitBranchExistsTrailTest(t *testing.T, repoDir, branch string) bool {
 
 func TestRunTrailListAll_PrintsLoginHintWhenNotLoggedIn(t *testing.T) {
 	// No t.Parallel: SetResolveContextForAPIForTest and
+	prevTrailClient := newTrailAPIClient
+	newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, _ string) (*api.Client, error) {
+		return NewAuthenticatedAPIClient(ctx, insecureHTTP)
+	}
+	t.Cleanup(func() { newTrailAPIClient = prevTrailClient })
+	//
 	// tokenstore.UseFileBackendForTesting mutate package-level state.
 	//
 	// Discovery selects a context whose keyring slot holds nothing, so the
@@ -565,6 +586,28 @@ func TestTrailDescriptionForDisplay(t *testing.T) {
 	}
 }
 
+func TestDecodeTrailResourceAcceptsDirectAndLegacyShapes(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, payload string
+	}{
+		{name: "direct", payload: `{"id":"trl_direct","number":7,"branch":"feat/direct"}`},
+		{name: "legacy envelope", payload: `{"trail":{"id":"trl_legacy","number":8,"branch":"feat/legacy"}}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			resp := &http.Response{Body: io.NopCloser(strings.NewReader(tt.payload))}
+			got, err := decodeTrailResource(resp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ID == "" || got.Number == 0 || got.Branch == "" {
+				t.Fatalf("decoded resource = %#v", got)
+			}
+		})
+	}
+}
+
 func TestFetchTrailDescription_ReadsNestedBodyDocument(t *testing.T) {
 	t.Parallel()
 	var gotPath string
@@ -754,14 +797,12 @@ func TestConfirmTrailDeletion(t *testing.T) {
 func TestDeleteTrailByNumber(t *testing.T) {
 	t.Parallel()
 
-	t.Run("deletes via the integer number path and accepts ok:true", func(t *testing.T) {
+	t.Run("deletes via the integer number path and accepts 204", func(t *testing.T) {
 		t.Parallel()
 		var gotMethod, gotPath string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			gotMethod, gotPath = r.Method, r.URL.Path
-			if err := json.NewEncoder(w).Encode(api.TrailDeleteResponse{OK: true}); err != nil {
-				t.Errorf("encode response: %v", err)
-			}
+			w.WriteHeader(http.StatusNoContent)
 		}))
 		defer srv.Close()
 
@@ -777,18 +818,17 @@ func TestDeleteTrailByNumber(t *testing.T) {
 		}
 	})
 
-	t.Run("treats a 2xx without ok:true as failure", func(t *testing.T) {
+	t.Run("accepts the legacy ok response", func(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			if err := json.NewEncoder(w).Encode(api.TrailDeleteResponse{OK: false}); err != nil {
+			if err := json.NewEncoder(w).Encode(api.TrailDeleteResponse{OK: true}); err != nil {
 				t.Errorf("encode response: %v", err)
 			}
 		}))
 		defer srv.Close()
-
-		client := api.NewClientWithBaseURL("tok", srv.URL)
-		if err := deleteTrailByNumber(t.Context(), client, "gh", "acme", "repo", 575); err == nil {
-			t.Fatal("expected error for 2xx without ok:true, got nil")
+		client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("legacy")
+		if err := deleteTrailByNumber(t.Context(), client, "gh", "acme", "repo", 575); err != nil {
+			t.Fatalf("deleteTrailByNumber: %v", err)
 		}
 	})
 
@@ -977,37 +1017,169 @@ func TestTrailListQueryWithOffsetIncludesOffset(t *testing.T) {
 	}
 }
 
-func TestFindTrailPaginatesPastServerMax(t *testing.T) {
+func TestListTrailResourcesRejectsNonPositiveLimit(t *testing.T) {
 	t.Parallel()
-	var offsets []int
+	for _, limit := range []int{0, -1} {
+		_, _, err := listTrailResources(t.Context(), nil, "gh", "acme", "repo", nil, "", limit)
+		if err == nil || err.Error() != "limit must be greater than 0" {
+			t.Fatalf("limit %d error = %v, want limit validation error", limit, err)
+		}
+	}
+}
+
+func TestListTrailResourcesUsesLegacyQueryByDefault(t *testing.T) {
+	t.Parallel()
+	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		offsetStr := r.URL.Query().Get("offset")
-		offset := 0
-		if offsetStr != "" {
-			var err error
-			offset, err = strconv.Atoi(offsetStr)
+		gotQuery = r.URL.RawQuery
+		_, _ = fmt.Fprint(w, `{"trails":[{"id":"trl_1","number":1,"branch":"feature/x"}],"total":1}`)
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("legacy")
+	items, total, err := listTrailResources(t.Context(), client, "gh", "acme", "repo", []trail.Status{trail.StatusOpen}, "alice", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || total != 1 {
+		t.Fatalf("items=%d total=%d", len(items), total)
+	}
+	if want := "author=alice&limit=10&status=open"; gotQuery != want {
+		t.Fatalf("query = %q, want %q", gotQuery, want)
+	}
+}
+
+func TestRunTrailListAllNotesLegacyLimitCapOnly(t *testing.T) {
+	t.Parallel()
+	for _, backend := range []string{"legacy", "entire-api"} {
+		t.Run(backend, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if backend == "legacy" {
+					_, _ = fmt.Fprint(w, `{"trails":[{"id":"trl_1","number":1,"branch":"feature/x","status":"open"}],"total":1033}`)
+					return
+				}
+				_, _ = fmt.Fprint(w, `{"items":[{"id":"trl_1","number":1,"branch":"feature/x","status":"open"}],"totalCount":1033}`)
+			}))
+			defer srv.Close()
+
+			client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend(backend)
+			var out bytes.Buffer
+			err := runTrailListAllWithClient(t.Context(), &out, client, trailListOptions{
+				Repo: "gh/acme/repo", Limit: 500,
+			}, []trail.Status{trail.StatusOpen})
 			if err != nil {
-				t.Fatalf("parse offset %q: %v", offsetStr, err)
+				t.Fatal(err)
+			}
+			wantNote := backend == "legacy"
+			note := "Note: --limit 500 exceeds the server maximum of 200 trails per request."
+			if got := strings.Contains(out.String(), note); got != wantNote {
+				t.Fatalf("note present = %v, want %v; output:\n%s", got, wantNote, out.String())
+			}
+		})
+	}
+}
+
+func TestListTrailResourcesStopsWhenAuthorLimitIsSatisfied(t *testing.T) {
+	t.Parallel()
+	requests := 0
+	login := "alice"
+	next := "should-not-be-requested"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests > 1 {
+			t.Errorf("unexpected extra page request with token %q", r.URL.Query().Get("pageToken"))
+		}
+		trails := make([]api.TrailResource, trailListServerMaxLimit)
+		for i := range trails {
+			trails[i] = api.TrailResource{
+				ID:     "trl_" + strconv.Itoa(i),
+				Number: i + 1,
+				Author: &trail.Author{Login: &login},
 			}
 		}
-		offsets = append(offsets, offset)
-		trails := []api.TrailResource{}
-		switch offset {
-		case 0:
-			trails = make([]api.TrailResource, trailListServerMaxLimit)
-			for i := range trails {
-				trails[i] = api.TrailResource{ID: "trl_first_" + strconv.Itoa(i), Number: i + 1, Branch: "old/" + strconv.Itoa(i)}
-			}
-		case trailListServerMaxLimit:
-			trails = []api.TrailResource{{ID: "trl_target", Number: 201, Branch: "target"}}
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+			Trails: trails, NextPageToken: &next, Total: 10_000,
+		}); err != nil {
+			t.Errorf("encode response: %v", err)
 		}
-		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails, Total: trailListServerMaxLimit + 1}); err != nil {
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
+
+	items, total, err := listTrailResources(t.Context(), client, "gh", "acme", "repo", nil, login, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+	if len(items) != 5 || total != 5 {
+		t.Fatalf("items=%d total=%d, want 5/5", len(items), total)
+	}
+}
+
+func TestTrailListPageQueryUsesEntireAPIPagination(t *testing.T) {
+	t.Parallel()
+	got := trailListPageQuery([]trail.Status{trail.StatusOpen}, 100, "next page")
+	want := "?pageSize=100&pageToken=next+page&status=open"
+	if got != want {
+		t.Fatalf("trailListPageQuery = %q, want %q", got, want)
+	}
+}
+
+func TestFindTrailByNumberUsesDirectEntireAPIRoute(t *testing.T) {
+	t.Parallel()
+	const trailNumber = 1201
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.URL.Path, "/api/v1/trails/gh/acme/repo/1201"; got != want {
+			t.Fatalf("path = %q, want %q", got, want)
+		}
+		if r.URL.RawQuery != "" {
+			t.Fatalf("query = %q, want empty", r.URL.RawQuery)
+		}
+		if err := json.NewEncoder(w).Encode(api.TrailResource{ID: "trl_old", Number: trailNumber, Branch: "old/trail"}); err != nil {
 			t.Fatalf("encode response: %v", err)
 		}
 	}))
 	defer srv.Close()
 
-	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
+	found, err := findTrailByNumber(t.Context(), client, "gh", "acme", "repo", trailNumber)
+	if err != nil {
+		t.Fatalf("findTrailByNumber: %v", err)
+	}
+	if found == nil || found.ID != "trl_old" {
+		t.Fatalf("found = %#v, want trl_old", found)
+	}
+}
+
+func TestFindTrailPaginatesPastServerMax(t *testing.T) {
+	t.Parallel()
+	const nextPage = "next-page"
+	var tokens []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := r.URL.Query().Get("pageToken")
+		tokens = append(tokens, token)
+		trails := []api.TrailResource{}
+		var next *string
+		switch token {
+		case "":
+			trails = make([]api.TrailResource, trailListServerMaxLimit)
+			for i := range trails {
+				trails[i] = api.TrailResource{ID: "trl_first_" + strconv.Itoa(i), Number: i + 1, Branch: "old/" + strconv.Itoa(i)}
+			}
+			n := nextPage
+			next = &n
+		case nextPage:
+			trails = []api.TrailResource{{ID: "trl_target", Number: 201, Branch: "target"}}
+		}
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails, Total: trailListServerMaxLimit + 1, NextPageToken: next}); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
 	found, err := findTrailByBranch(context.Background(), client, "gh", "acme", "repo", "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
@@ -1015,8 +1187,45 @@ func TestFindTrailPaginatesPastServerMax(t *testing.T) {
 	if found == nil || found.ID != "trl_target" {
 		t.Fatalf("found = %#v, want trl_target", found)
 	}
-	if len(offsets) != 2 || offsets[0] != 0 || offsets[1] != trailListServerMaxLimit {
-		t.Fatalf("offsets = %v, want [0 %d]", offsets, trailListServerMaxLimit)
+	if len(tokens) != 2 || tokens[0] != "" || tokens[1] != nextPage {
+		t.Fatalf("page tokens = %v, want [\"\" next-page]", tokens)
+	}
+}
+
+func TestFindTrailPaginatesPastLegacyPageCount(t *testing.T) {
+	t.Parallel()
+	const targetPage = trailFindLegacyMaxPages + 1
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		page := int(atomic.AddInt32(&requests, 1))
+		response := api.TrailListResponse{}
+		if page == targetPage {
+			response.Trails = []api.TrailResource{{ID: "trl_target", Number: 1001, Branch: "target"}}
+		} else {
+			response.Trails = make([]api.TrailResource, trailListServerMaxLimit)
+			for i := range response.Trails {
+				number := (page-1)*trailListServerMaxLimit + i + 1
+				response.Trails[i] = api.TrailResource{ID: "trl_" + strconv.Itoa(number), Number: number, Branch: "old/" + strconv.Itoa(number)}
+			}
+			next := "page-" + strconv.Itoa(page+1)
+			response.NextPageToken = &next
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
+	found, err := findTrailByBranch(t.Context(), client, "gh", "acme", "repo", "target")
+	if err != nil {
+		t.Fatalf("findTrailByBranch: %v", err)
+	}
+	if found == nil || found.ID != "trl_target" {
+		t.Fatalf("found = %#v, want trl_target", found)
+	}
+	if got := atomic.LoadInt32(&requests); got != targetPage {
+		t.Fatalf("requests = %d, want %d", got, targetPage)
 	}
 }
 
@@ -1029,13 +1238,14 @@ func TestFindTrailStopsWhenServerRepeatsUnpaginatedFullPage(t *testing.T) {
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&requests, 1)
-		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails}); err != nil {
+		next := "same-page"
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails, NextPageToken: &next}); err != nil {
 			t.Fatalf("encode response: %v", err)
 		}
 	}))
 	defer srv.Close()
 
-	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
 	found, err := findTrailByBranch(context.Background(), client, "gh", "acme", "repo", "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
@@ -1058,13 +1268,14 @@ func TestFindTrailStopsAtMaxPagesWithoutTotal(t *testing.T) {
 			trailNumber := (requestNumber-1)*trailListServerMaxLimit + i + 1
 			trails[i] = api.TrailResource{ID: "trl_" + strconv.Itoa(trailNumber), Number: trailNumber, Branch: "old/" + strconv.Itoa(trailNumber)}
 		}
-		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails}); err != nil {
+		next := "page-" + strconv.Itoa(requestNumber)
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails, NextPageToken: &next}); err != nil {
 			t.Fatalf("encode response: %v", err)
 		}
 	}))
 	defer srv.Close()
 
-	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
 	found, err := findTrailByBranch(context.Background(), client, "gh", "acme", "repo", "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
@@ -1072,8 +1283,8 @@ func TestFindTrailStopsAtMaxPagesWithoutTotal(t *testing.T) {
 	if found != nil {
 		t.Fatalf("found = %#v, want nil", found)
 	}
-	if got := atomic.LoadInt32(&requests); got != trailFindMaxPages {
-		t.Fatalf("requests = %d, want %d", got, trailFindMaxPages)
+	if got := atomic.LoadInt32(&requests); got != trailFindEntireAPIMaxPages {
+		t.Fatalf("requests = %d, want %d", got, trailFindEntireAPIMaxPages)
 	}
 }
 
@@ -1324,6 +1535,155 @@ func TestPrintTrailDetailsRendersURLAndDescription(t *testing.T) {
 	if text := out.String(); strings.Contains(text, "URL:") || strings.Contains(text, "Description:") {
 		t.Fatalf("expected URL/Description omitted for empty values, got:\n%s", text)
 	}
+}
+
+// trailShowTestServer serves the two endpoints `trail show` reads: the list
+// (which resolves the selector and omits the description) and the detail (which
+// carries body_document). detailStatus > 0 makes the detail fetch fail so the
+// best-effort path can be exercised.
+func trailShowTestServer(t *testing.T, resource api.TrailResource, detailSnapshot string, detailStatus int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath:
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{resource}, Total: 1}); err != nil {
+				t.Errorf("encode list response: %v", err)
+			}
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath+"/"+strconv.Itoa(resource.Number):
+			if detailStatus > 0 {
+				w.WriteHeader(detailStatus)
+				if err := json.NewEncoder(w).Encode(map[string]string{"error": "boom"}); err != nil {
+					t.Errorf("encode detail error: %v", err)
+				}
+				return
+			}
+			detail := resource
+			detail.BodyDocument = &api.TrailBodyDocument{TextSnapshot: detailSnapshot}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]any{"trail": detail}); err != nil {
+				t.Errorf("encode detail response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestRunTrailShowJSONEmitsOneTrailObject(t *testing.T) {
+	t.Parallel()
+
+	alice := trailListTestAuthorAlice
+	created := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	resource := api.TrailResource{
+		ID:        "trl_1",
+		Number:    7,
+		URL:       "https://entire.io/gh/acme/repo/trails/7",
+		Branch:    "feature/x",
+		Base:      "main",
+		Title:     "Shown trail",
+		Status:    string(trail.StatusOpen),
+		Phase:     "building",
+		Author:    &trail.Author{ID: "u1", Login: &alice},
+		Assignees: []string{"bob"},
+		Labels:    []string{"cli"},
+		Type:      string(trail.TypeBug),
+		Priority:  string(trail.PriorityHigh),
+		Reviewers: []trail.Reviewer{{Login: "rev1", Status: trail.ReviewerApproved}},
+		CreatedAt: created,
+		UpdatedAt: created,
+	}
+	srv := trailShowTestServer(t, resource, "detail body", 0)
+
+	var out, errOut bytes.Buffer
+	err := runTrailShowWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
+
+	require.NoError(t, err)
+	require.Empty(t, errOut.String())
+
+	var got trail.Metadata
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got), "output must be a single JSON object: %s", out.String())
+	require.Equal(t, 7, got.Number)
+	require.Equal(t, trail.ID("trl_1"), got.TrailID)
+	require.Equal(t, "https://entire.io/gh/acme/repo/trails/7", got.URL)
+	require.Equal(t, "feature/x", got.Branch)
+	require.Equal(t, "main", got.Base)
+	require.Equal(t, "Shown trail", got.Title)
+	require.Equal(t, trail.StatusOpen, got.Status)
+	require.Equal(t, "building", got.Phase)
+	require.Equal(t, alice, got.AuthorLogin())
+	require.Equal(t, []string{"bob"}, got.Assignees)
+	require.Equal(t, []string{"cli"}, got.Labels)
+	require.Equal(t, trail.TypeBug, got.Type)
+	require.Equal(t, trail.PriorityHigh, got.Priority)
+	require.Equal(t, []trail.Reviewer{{Login: "rev1", Status: trail.ReviewerApproved}}, got.Reviewers)
+	// The description lives on the detail endpoint only; JSON must carry it, not
+	// the empty list body.
+	require.Equal(t, "detail body", got.Body)
+	// Human-only decoration must not leak into the data.
+	require.NotContains(t, out.String(), noTrailDescription)
+	require.NotContains(t, out.String(), "Trail: ")
+}
+
+func TestRunTrailShowJSONLeavesBodyEmptyWithoutDescription(t *testing.T) {
+	t.Parallel()
+
+	srv := trailShowTestServer(t, api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x", Status: string(trail.StatusOpen)}, "", 0)
+
+	var out, errOut bytes.Buffer
+	err := runTrailShowWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
+
+	require.NoError(t, err)
+	require.Empty(t, errOut.String())
+
+	var got trail.Metadata
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	require.Empty(t, got.Body, "an empty description must stay empty in JSON, not become the display placeholder")
+	require.NotContains(t, out.String(), noTrailDescription)
+}
+
+// A failed description fetch is best-effort: the warning belongs on stderr so
+// stdout stays parseable.
+func TestRunTrailShowJSONKeepsStdoutParseableWhenDescriptionFetchFails(t *testing.T) {
+	t.Parallel()
+
+	srv := trailShowTestServer(t, api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x", Title: "T", Body: "list body", Status: string(trail.StatusOpen)}, "", http.StatusInternalServerError)
+
+	var out, errOut bytes.Buffer
+	err := runTrailShowWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
+
+	require.NoError(t, err)
+	require.Contains(t, errOut.String(), "could not load trail description")
+
+	var got trail.Metadata
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got), "stdout must stay valid JSON: %s", out.String())
+	require.Equal(t, "list body", got.Body, "the list body is the fallback when the detail fetch fails")
+}
+
+func TestRunTrailShowTextStillRendersTheHumanView(t *testing.T) {
+	t.Parallel()
+
+	srv := trailShowTestServer(t, api.TrailResource{
+		ID: "trl_1", Number: 7, URL: "https://entire.io/gh/acme/repo/trails/7",
+		Branch: "feature/x", Base: "main", Title: "Shown trail", Status: string(trail.StatusOpen),
+	}, "detail body", 0)
+
+	var out, errOut bytes.Buffer
+	err := runTrailShowWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailShowOptions{Selector: "7"})
+
+	require.NoError(t, err)
+	require.Empty(t, errOut.String())
+	text := out.String()
+	for _, want := range []string{"Trail: Shown trail", "Number:", "feature/x", "https://entire.io/gh/acme/repo/trails/7", "Description:", "detail body"} {
+		require.Containsf(t, text, want, "text output missing %q:\n%s", want, text)
+	}
+}
+
+func TestTrailShowCmdHasJSONFlag(t *testing.T) {
+	t.Parallel()
+	require.NotNil(t, newTrailShowCmd().Flags().Lookup("json"), "trail show must offer --json so agents can read it non-interactively")
 }
 
 func TestPrintTrailListShowsPhaseWhenPresent(t *testing.T) {
@@ -1602,6 +1962,202 @@ func TestSplitTrailUpdateSeparatesBodyFromMetadata(t *testing.T) {
 	if bodyReq2 == nil {
 		t.Error("body-only update must produce a body request")
 	}
+}
+
+// TestSplitTrailUpdateCountsEveryNonBodyFieldAsMetadata pins the structural
+// rule splitTrailUpdate relies on: any field other than Body makes a metadata
+// PATCH. Naming the fields by hand is how a later addition (a branch rename,
+// say) gets dropped silently — hasMeta stays false, no PATCH is sent, and the
+// command still reports success. This test grows with the struct instead.
+func TestSplitTrailUpdateCountsEveryNonBodyFieldAsMetadata(t *testing.T) {
+	t.Parallel()
+	typ := reflect.TypeOf(api.TrailUpdateRequest{})
+	for i := range typ.NumField() {
+		field := typ.Field(i)
+		if field.Name == "Body" {
+			continue
+		}
+		t.Run(field.Name, func(t *testing.T) {
+			t.Parallel()
+			// Fail rather than skip: a skipped subtest passes quietly, so a
+			// non-pointer field would silently retire the guarantee this test
+			// exists to provide, exactly when it starts mattering.
+			require.Equalf(t, reflect.Ptr, field.Type.Kind(),
+				"field %s is not a pointer; decide its zero/set semantics and extend this test before adding it", field.Name)
+			var req api.TrailUpdateRequest
+			// A pointer to the zero value is still "provided" — that is how a
+			// field is cleared (e.g. an empty title, an emptied assignee list).
+			reflect.ValueOf(&req).Elem().Field(i).Set(reflect.New(field.Type.Elem()))
+
+			_, hasMeta, _ := splitTrailUpdate(req)
+
+			require.Truef(t, hasMeta, "field %s must count as metadata, otherwise splitTrailUpdate drops it without sending a PATCH", field.Name)
+		})
+	}
+}
+
+// TestRunTrailUpdateSendsTitleAndBodyAsSeparatePatches drives the whole update
+// path against a server that rejects body+metadata in one PATCH exactly as
+// production does, so `trail update --title X --body Y` stays working end to
+// end and not just in splitTrailUpdate's unit test.
+func TestRunTrailUpdateSendsTitleAndBodyAsSeparatePatches(t *testing.T) {
+	t.Parallel()
+
+	// patches is written from the handler goroutine and read from the test
+	// goroutine, so it is guarded — the counter-based tests in this file use
+	// sync/atomic for the same reason; a slice needs a mutex instead.
+	var mu sync.Mutex
+	var patches []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath:
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+				Trails: []api.TrailResource{{ID: "trl_1", Number: 7, Branch: "feature/x", Title: "old title", Status: string(trail.StatusOpen)}},
+				Total:  1,
+			}); err != nil {
+				t.Errorf("encode list response: %v", err)
+			}
+		case r.Method == http.MethodPatch && r.URL.Path == trailTestBasePath+"/7":
+			var got map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Errorf("decode patch request: %v", err)
+				return
+			}
+			mu.Lock()
+			patches = append(patches, got)
+			mu.Unlock()
+			// Mirror the server's own rule ("Body updates cannot be combined
+			// with metadata updates").
+			_, hasBody := got[trailBodyField]
+			hasMeta := false
+			for key := range got {
+				if key != trailBodyField {
+					hasMeta = true
+				}
+			}
+			if hasBody && hasMeta {
+				w.WriteHeader(http.StatusBadRequest)
+				if err := json.NewEncoder(w).Encode(map[string]string{"error": "Body updates cannot be combined with metadata updates"}); err != nil {
+					t.Errorf("encode rejection: %v", err)
+				}
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailUpdateResponse{Trail: api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x"}}); err != nil {
+				t.Errorf("encode update response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	err := runTrailUpdateWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+		Branch:       "feature/x",
+		Title:        "new title",
+		TitleChanged: true,
+		Body:         "new body",
+		BodyChanged:  true,
+	})
+
+	require.NoError(t, err)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, patches, 2, "title and body must go out as two PATCHes")
+	require.Equal(t, map[string]any{"title": "new title"}, patches[0])
+	require.Equal(t, map[string]any{trailBodyField: "new body"}, patches[1])
+	require.Contains(t, out.String(), "Updated trail for branch feature/x")
+	require.Empty(t, errOut.String())
+}
+
+// TestRunTrailUpdateReportsNoChangesWhenNothingWasSent pins that an update
+// which sends no PATCH does not claim success — agents read the success line as
+// confirmation the write landed.
+func TestRunTrailUpdateReportsNoChangesWhenNothingWasSent(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != trailTestBasePath {
+			t.Errorf("no PATCH should be sent, got: %s %s", r.Method, r.URL.Path)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+			Trails: []api.TrailResource{{ID: "trl_1", Number: 7, Branch: "feature/x", Status: string(trail.StatusOpen)}},
+			Total:  1,
+		}); err != nil {
+			t.Errorf("encode list response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	// The real source of an empty update is the interactive form closing
+	// untouched, which leaves every *Changed flag false. That exact input would
+	// re-open the form here (noFlags), so stand in with a non-nil but empty
+	// label slice: it clears noFlags, and buildTrailUpdateRequest still returns
+	// an empty request — the same state the split has to refuse to report as a
+	// success.
+	err := runTrailUpdateWithClient(t.Context(), &out, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+		Branch:   "feature/x",
+		LabelAdd: []string{},
+	})
+
+	require.NoError(t, err)
+	require.Contains(t, out.String(), "No changes to apply")
+	require.NotContains(t, out.String(), "Updated trail")
+}
+
+// TestRunTrailUpdateReportsAppliedMetadataWhenBodyPatchFails covers the
+// non-atomic half of the two-PATCH split: the metadata already landed, so the
+// error has to say so rather than reading as "nothing changed".
+func TestRunTrailUpdateReportsAppliedMetadataWhenBodyPatchFails(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath:
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+				Trails: []api.TrailResource{{ID: "trl_1", Number: 7, Branch: "feature/x", Status: string(trail.StatusOpen)}},
+				Total:  1,
+			}); err != nil {
+				t.Errorf("encode list response: %v", err)
+			}
+		case r.Method == http.MethodPatch:
+			var got map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Errorf("decode patch request: %v", err)
+				return
+			}
+			if _, hasBody := got[trailBodyField]; hasBody {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				if err := json.NewEncoder(w).Encode(map[string]string{"error": "Editor collaboration not configured"}); err != nil {
+					t.Errorf("encode rejection: %v", err)
+				}
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailUpdateResponse{Trail: api.TrailResource{ID: "trl_1", Number: 7}}); err != nil {
+				t.Errorf("encode update response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	err := runTrailUpdateWithClient(t.Context(), io.Discard, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+		Branch:       "feature/x",
+		Title:        "new title",
+		TitleChanged: true,
+		Body:         "new body",
+		BodyChanged:  true,
+	})
+
+	require.ErrorContains(t, err, "trail metadata was updated, but the body update failed")
 }
 
 func TestTrailUpdateCmdHasCollaborationFlags(t *testing.T) {

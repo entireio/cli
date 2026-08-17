@@ -10,6 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
@@ -39,7 +40,7 @@ func (claudeImporter) Discover(repoRoot, overridePath string, now time.Time, ses
 // rescopeSubagentTokensToDeltas). tool_result lines (Type == "user" but no text
 // content) do not start a turn.
 func (claudeImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
-	subagentsDir := filepath.Join(filepath.Dir(sf.Path), sf.SessionID, "subagents")
+	subagentsDir := paths.SubagentsDir(filepath.Dir(sf.Path), sf.SessionID)
 	ag := &claudecode.ClaudeCodeAgent{}
 	return splitLineTurns(splitRawLines(full), isUserPromptLine,
 		func(rawLines [][]byte, start, end int, truncated []byte) (*Turn, error) {

@@ -1,6 +1,5 @@
 {
   "enabled": true,
-  "local_dev": true,
   "strategy_options": {
     "checkpoint_remote": {
       "provider": "github",

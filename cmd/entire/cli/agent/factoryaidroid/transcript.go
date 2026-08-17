@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -394,7 +395,7 @@ func CalculateTotalTokenUsageFromBytes(data []byte, startLine int, subagentsDir 
 	if len(agentIDs) > 0 {
 		subagentUsage := &agent.TokenUsage{}
 		for agentID := range agentIDs {
-			agentPath := filepath.Join(subagentsDir, fmt.Sprintf("agent-%s.jsonl", agentID))
+			agentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
 			agentUsage, err := CalculateTokenUsageFromFile(agentPath, 0)
 			if err != nil {
 				continue
@@ -451,7 +452,7 @@ func ExtractAllModifiedFilesFromBytes(data []byte, startLine int, subagentsDir s
 	}
 	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
 	for agentID := range agentIDs {
-		agentPath := filepath.Join(subagentsDir, fmt.Sprintf("agent-%s.jsonl", agentID))
+		agentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
 		agentLines, _, agentErr := ParseDroidTranscript(agentPath, 0)
 		if agentErr != nil {
 			continue
