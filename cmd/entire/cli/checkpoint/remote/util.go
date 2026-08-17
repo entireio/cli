@@ -30,6 +30,15 @@ type Info = gitremote.Info
 // FetchURLOptions configures FetchURL.
 type FetchURLOptions struct {
 	WorktreeRoot string
+
+	// LeadReadRemote is the checkpoint read candidate the caller wants the
+	// fetch URL derived from (the elected sync remote, or one entry of the
+	// read-candidate chain while iterating it), supplied by cli/strategy
+	// callers — this package cannot resolve the election itself. When set and
+	// NO checkpoint_remote is configured, the base fetch URL is derived from
+	// it instead of unconditionally from origin. The dedicated
+	// checkpoint_remote derivation path ignores it entirely.
+	LeadReadRemote string
 }
 
 // FetchURL returns the effective checkpoint fetch URL for the current repository.
@@ -91,10 +100,34 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 
 	config := s.GetCheckpointRemote()
 	if config == nil {
+		// No checkpoint_remote configured: the caller-supplied read candidate
+		// (the elected checkpoint sync remote, or the chain entry being
+		// tried) is the checkpoint host; without one, origin is.
+		if lead := opt.LeadReadRemote; lead != "" && lead != originRemote {
+			leadURL, leadErr := getRemoteURL(ctx, lead)
+			if leadErr == nil && leadURL == "" {
+				leadErr = fmt.Errorf("remote %q has an empty URL", lead)
+			}
+			if leadErr == nil {
+				if withToken {
+					if tokenURL, ok := deriveTokenOriginURL(leadURL); ok {
+						leadURL = tokenURL
+					}
+				}
+				return leadURL, true, nil
+			}
+			if originURL != "" {
+				// The lead candidate's URL could not be resolved; fall back to
+				// origin but do not certify it as the checkpoint host.
+				logFallback(ctx, "fetch", originURL, "resolve read candidate remote URL", leadErr,
+					slog.String("read_candidate", lead))
+				return originURL, false, nil
+			}
+			return "", false, fmt.Errorf("no fetch URL found for read candidate %q: %w", lead, leadErr)
+		}
 		if originURL == "" {
 			return "", false, fmt.Errorf("no fetch URL found: %w", originErr)
 		}
-		// No checkpoint_remote configured: origin IS the checkpoint host.
 		return originURL, true, nil
 	}
 

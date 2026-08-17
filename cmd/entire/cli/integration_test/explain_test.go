@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -416,9 +415,8 @@ func writeMinimalEntireSettings(dir, bareURL string) error {
 		return err
 	}
 	settings := map[string]any{
-		"enabled":   true,
-		"local_dev": true,
-		"strategy":  "manual-commit",
+		"enabled":  true,
+		"strategy": "manual-commit",
 		"strategy_options": map[string]any{
 			"filtered_fetches": true,
 			"checkpoint_remote": map[string]any{
@@ -434,20 +432,11 @@ func writeMinimalEntireSettings(dir, bareURL string) error {
 	return os.WriteFile(filepath.Join(entireDir, paths.SettingsFileName), data, 0o644)
 }
 
-// runExplainInDir runs `entire explain --checkpoint <id>` in dir and
-// returns combined output. Fails the test if the command errors. Uses
-// execx.NonInteractive (project rule for spawning the entire binary in
-// tests) so the child has no controlling terminal.
+// runExplainInDir runs `entire checkpoint explain --checkpoint <id>` in dir and
+// returns combined output. Fails the test if the command errors.
 func runExplainInDir(t *testing.T, dir, checkpointID string) string {
 	t.Helper()
-	cmd := execx.NonInteractive(t.Context(), getTestBinary(), "explain", "--checkpoint", checkpointID)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("explain failed: %v\n%s", err, out)
-	}
-	return string(out)
+	return runEntireInDir(t, dir, "checkpoint", "explain", "--checkpoint", checkpointID)
 }
 
 // requireBlobMissing asserts that at least one metadata blob for the

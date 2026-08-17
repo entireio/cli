@@ -177,12 +177,16 @@ func newWhyCmd() *cobra.Command {
 		Use: "why <file>[:line]",
 		// Hidden from `entire help` while the feature is still maturing —
 		// advertised under `entire labs`, and `entire why` / `entire why
-		// --help` keep working normally.
-		Hidden:  true,
-		Short:   "Show why a line exists",
-		Long:    "Explain the commit, checkpoint, prompt, and session behind a file or line.\n\nTarget a specific line with <file>:12 or the --line flag.",
-		Example: "  entire why src/auth.go:42\n  entire why src/auth.go:42 --json",
-		Args:    cobra.ExactArgs(1),
+		// --help` keep working normally. The agent-help annotation keeps
+		// `entire agent-help why` resolving in stable builds: agents that
+		// learn of `why` (labs, docs, a user's prompt) verify commands
+		// against agent-help, so it must know the command exists.
+		Annotations: map[string]string{agentHelpAnnotation: agentHelpAnnotationEnabled},
+		Hidden:      true,
+		Short:       "Show why a line exists",
+		Long:        "Explain the commit, checkpoint, prompt, and session behind a file or line.\n\nTarget a specific line with <file>:12 or the --line flag.",
+		Example:     "  entire why src/auth.go:42\n  entire why src/auth.go:42 --json",
+		Args:        cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAttributionWhy(cmd.Context(), cmd.OutOrStdout(), args[0], attributionWhyOptions{
 				LineFlag: lineFlag,

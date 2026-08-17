@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -16,6 +17,20 @@ import (
 // degrading to home-jurisdiction routing — the "any failure falls back" contract
 // must hold for slow cores, not just erroring ones.
 const cellResolveTimeout = 5 * time.Second
+
+// requiredCellResolveTimeout bounds the control-plane lookups a repo-scoped
+// cell read cannot proceed without (resolveRepoCellPlacement).
+//
+// Deliberately not cellResolveTimeout: that budget bounds *best-effort* lookups
+// whose failure silently degrades to home-jurisdiction routing, so it can be
+// aggressive. Here a timeout is a visible command failure, and the budget has
+// to cover two sequential control-plane round trips (the repo's mirrors, then
+// the cluster catalog), so it is more patient.
+//
+// Some deadline is required: the coreapi HTTP client sets only a dial timeout,
+// so a reachable-but-slow core is otherwise unbounded, and this runs before the
+// command's spinner starts — the user would sit in front of a silent terminal.
+const requiredCellResolveTimeout = 15 * time.Second
 
 // cellCoreClient is the control-plane surface the cell-target resolver needs.
 // An interface (with a swappable constructor) so the resolver is unit-testable
@@ -65,6 +80,14 @@ func resolveRepoCellTarget(ctx context.Context, fullName, ulid string) *auth.Cel
 		return nil
 	}
 
+	return cellTargetForClusterHost(ctx, c, clusterHost)
+}
+
+// cellTargetForClusterHost maps a known cluster host to a cell apiUrl +
+// jurisdiction via the coreapi cluster catalog, the authoritative source for a
+// jurisdiction's cell URL. Returns nil for every unresolvable case so callers
+// fall back to home-jurisdiction routing.
+func cellTargetForClusterHost(ctx context.Context, c cellCoreClient, clusterHost string) *auth.CellTarget {
 	clusters, err := c.ListClusters(ctx)
 	if err != nil {
 		logging.Debug(ctx, "cell target: list clusters failed, using home-jurisdiction routing", "error", err.Error())
@@ -85,6 +108,74 @@ func resolveRepoCellTarget(ctx context.Context, fullName, ulid string) *auth.Cel
 		return nil
 	}
 	return &auth.CellTarget{BaseURL: apiURL, Jurisdiction: jurisdiction}
+}
+
+// repoCellPlacement is one active mirror placement: the id entire-api keys
+// repo-scoped routes on, paired with the cell that actually holds it.
+type repoCellPlacement struct {
+	// RepoID is the mirror id, which entire-api uses as its repo_id.
+	RepoID string
+	// Target is the cell hosting THIS placement.
+	Target *auth.CellTarget
+}
+
+// resolveRepoCellPlacement resolves a GitHub repo to one active placement's
+// (repo_id, cell) pair for repo-scoped cell reads.
+//
+// The pair must come from the same placement: each placement has its own mirror
+// id, and only the cell hosting that placement can resolve it. Taking the id
+// from one placement and routing to a cell chosen some other way — the caller's
+// home cell, say — asks a cell about an id it has never seen, which comes back
+// as an indistinguishable 404. That is also why this does not reuse
+// resolveRepoCellTarget's owner/repo path: that one deliberately refuses to pick
+// among multi-region placements and falls back to the home cell, which is
+// exactly the mismatch to avoid here.
+func resolveRepoCellPlacement(ctx context.Context, owner, repo string) (repoCellPlacement, error) {
+	ctx, cancel := context.WithTimeout(ctx, requiredCellResolveTimeout)
+	defer cancel()
+
+	c, err := newCellCoreClient()
+	if err != nil {
+		return repoCellPlacement{}, fmt.Errorf("control plane unavailable: %w", err)
+	}
+	mirrors, err := listMirrorsForRepo(ctx, c, mirrorCloneProviderGitHub, strings.ToLower(owner), strings.ToLower(repo))
+	if err != nil {
+		return repoCellPlacement{}, cellPlacementError(ctx, owner, repo, fmt.Errorf("list mirrors for %s/%s: %w", owner, repo, err))
+	}
+	for i := range mirrors {
+		if !isActiveMirror(mirrors[i]) {
+			continue
+		}
+		repoID := strings.TrimSpace(mirrors[i].MirrorId)
+		clusterHost := strings.TrimSpace(mirrors[i].ClusterHost)
+		if repoID == "" || clusterHost == "" {
+			continue
+		}
+		target := cellTargetForClusterHost(ctx, c, clusterHost)
+		if target == nil {
+			// The catalog can't place this cluster; try the next placement
+			// rather than falling back to a cell that doesn't know this id.
+			continue
+		}
+		return repoCellPlacement{RepoID: repoID, Target: target}, nil
+	}
+	// A deadline that fired mid-loop leaves cellTargetForClusterHost returning
+	// nil for every placement, which would otherwise be reported as "no
+	// reachable mirror" — a wrong diagnosis for a slow control plane.
+	return repoCellPlacement{}, cellPlacementError(ctx, owner, repo,
+		fmt.Errorf("no reachable Entire mirror for %s/%s", owner, repo))
+}
+
+// cellPlacementError reports a timeout as a timeout. The underlying lookups
+// degrade quietly (cellTargetForClusterHost logs and returns nil), so without
+// this a fired deadline surfaces as whichever "not found" message the caller
+// reached, and the user goes looking for a missing mirror instead of a slow
+// control plane.
+func cellPlacementError(ctx context.Context, owner, repo string, fallback error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("resolving the Entire mirror for %s/%s timed out: %w", owner, repo, ctxErr)
+	}
+	return fallback
 }
 
 // resolveRepoClusterHost finds the public cluster host that owns the repo. It

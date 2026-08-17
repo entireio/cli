@@ -15,16 +15,8 @@ import (
 // HooksFileName is the hooks config file used by Codex.
 const HooksFileName = "hooks.json"
 
-// entireHookPrefixes identifies Entire hook commands. The "go run" prefix is
-// retained so hooks installed by older versions are still recognized.
-var entireHookPrefixes = []string{
-	"entire ",
-	agent.LocalDevHookScript + " ",
-	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
-}
-
 // InstallHooks installs Codex hooks in .codex/hooks.json.
-func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
+func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests)
@@ -77,25 +69,12 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 	}
 
 	// Build hook commands
-	var cmdPrefix string
-	if localDev {
-		cmdPrefix = agent.LocalDevHookScript + " hooks codex "
-	} else {
-		cmdPrefix = "entire hooks codex "
-	}
-	sessionStartCmd := cmdPrefix + "session-start"
-	useWindowsProductionHooks := agent.UseWindowsProductionHooks(ctx, localDev)
-	if !localDev {
-		sessionStartCmd = agent.WrapProductionJSONWarningHookCommandForOS(sessionStartCmd, agent.WarningFormatSingleLine, useWindowsProductionHooks)
-	}
-	userPromptSubmitCmd := cmdPrefix + "user-prompt-submit"
-	stopCmd := cmdPrefix + "stop"
-	postToolUseCmd := cmdPrefix + "post-tool-use"
-	if !localDev {
-		userPromptSubmitCmd = agent.WrapProductionSilentHookCommandForOS(userPromptSubmitCmd, useWindowsProductionHooks)
-		stopCmd = agent.WrapProductionSilentHookCommandForOS(stopCmd, useWindowsProductionHooks)
-		postToolUseCmd = agent.WrapProductionSilentHookCommandForOS(postToolUseCmd, useWindowsProductionHooks)
-	}
+	const cmdPrefix = "entire hooks codex "
+	useWindowsProductionHooks := agent.UseWindowsProductionHooks(ctx)
+	sessionStartCmd := agent.WrapProductionJSONWarningHookCommandForOS(cmdPrefix+"session-start", agent.WarningFormatSingleLine, useWindowsProductionHooks)
+	userPromptSubmitCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+"user-prompt-submit", useWindowsProductionHooks)
+	stopCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+"stop", useWindowsProductionHooks)
+	postToolUseCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+"post-tool-use", useWindowsProductionHooks)
 
 	count := 0
 
@@ -290,15 +269,45 @@ func hookCommandExists(groups []MatcherGroup, command string) bool {
 	return false
 }
 
+// syncHookCommand ensures groups contains exactly the given Entire hook command
+// and no other Entire-owned entry, reporting whether the config changed.
+//
+// Stale entries are dropped even when command is already present. Checking
+// presence first (as this did before) left a hook written by an older version
+// sitting next to the current one, so both fired — for the removed local-dev mode
+// that meant a script inside the working tree kept running on every agent turn.
 func syncHookCommand(groups []MatcherGroup, command string) ([]MatcherGroup, bool) {
+	groups, dropped := dropStaleEntireHooks(groups, command)
 	if hookCommandExists(groups, command) {
-		return groups, false
-	}
-	if hasEntireHook(groups) {
-		groups = removeEntireHooks(groups)
+		return groups, dropped
 	}
 	return addHook(groups, command), true
 }
+
+// dropStaleEntireHooks removes Entire-owned hooks whose command is not one of
+// want, per matcher group, pruning groups left with no hooks. See
+// agent.DropStaleManagedHooks for why this runs on every install.
+func dropStaleEntireHooks(groups []MatcherGroup, want ...string) ([]MatcherGroup, bool) {
+	result := make([]MatcherGroup, 0, len(groups))
+	dropped := false
+	for _, group := range groups {
+		kept, d := agent.DropStaleManagedHooks(group.Hooks, hookEntryCommand, want)
+		if d {
+			dropped = true
+		}
+		if len(kept) > 0 {
+			group.Hooks = kept
+			result = append(result, group)
+		}
+	}
+	if !dropped {
+		return groups, false
+	}
+	return result, true
+}
+
+// hookEntryCommand reads the command off a hook entry for the shared helpers.
+func hookEntryCommand(e HookEntry) string { return e.Command }
 
 func addHook(groups []MatcherGroup, command string) []MatcherGroup {
 	entry := HookEntry{
@@ -321,7 +330,7 @@ func addHook(groups []MatcherGroup, command string) []MatcherGroup {
 }
 
 func isEntireHook(command string) bool {
-	return agent.IsManagedHookCommand(command, entireHookPrefixes)
+	return agent.IsManagedHookCommand(command)
 }
 
 func hasEntireHook(groups []MatcherGroup) bool {

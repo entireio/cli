@@ -46,7 +46,6 @@ const (
 	flagTelemetry            = "telemetry"
 	flagAbsoluteGitHookPath  = "absolute-git-hook-path"
 	flagForce                = "force"
-	flagLocalDev             = "local-dev"
 	flagSearchSkill          = "search-skill"
 	flagAgentHelpSkill       = "agent-help-skill"
 	flagImportHistory        = "import-history"
@@ -61,7 +60,6 @@ const externalAgentsAutoEnabledNotice = "Note: external agents are now enabled f
 
 // EnableOptions holds the flags for `entire enable`.
 type EnableOptions struct {
-	LocalDev           bool
 	UseLocalSettings   bool
 	UseProjectSettings bool
 	ForceHooks         bool
@@ -129,12 +127,11 @@ func hasSummaryTimeoutFlag(cmd *cobra.Command) bool {
 }
 
 // hasGlobalSettingsFlags reports whether any flag affects telemetry or
-// the entire-managed git hook (force / absolute path / local-dev).
+// the entire-managed git hook (force / absolute path).
 func hasGlobalSettingsFlags(cmd *cobra.Command) bool {
 	return cmd.Flags().Changed(flagTelemetry) ||
 		cmd.Flags().Changed(flagAbsoluteGitHookPath) ||
-		cmd.Flags().Changed(flagForce) ||
-		cmd.Flags().Changed(flagLocalDev)
+		cmd.Flags().Changed(flagForce)
 }
 
 // hasConfigureSettingsFlags reports whether configure was invoked with any
@@ -293,7 +290,7 @@ func updateSummaryTimeoutSetting(ctx context.Context, w io.Writer, timeoutSecond
 }
 
 // updateGlobalSettings persists telemetry / hook-mode flags and reinstalls the
-// Entire git hook when --force, --absolute-git-hook-path, or --local-dev is set.
+// Entire git hook when --force or --absolute-git-hook-path is set.
 func updateGlobalSettings(ctx context.Context, cmd *cobra.Command, w io.Writer, opts EnableOptions) error {
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
 	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
@@ -312,19 +309,16 @@ func updateGlobalSettings(ctx context.Context, cmd *cobra.Command, w io.Writer, 
 	if cmd.Flags().Changed(flagAbsoluteGitHookPath) {
 		s.AbsoluteGitHookPath = opts.AbsoluteGitHookPath
 	}
-	if cmd.Flags().Changed(flagLocalDev) {
-		s.LocalDev = opts.LocalDev
-	}
 
 	if err := saveSettingsToTarget(ctx, s, targetFile); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
 
-	if cmd.Flags().Changed(flagForce) || cmd.Flags().Changed(flagAbsoluteGitHookPath) || cmd.Flags().Changed(flagLocalDev) {
-		if _, err := strategy.InstallGitHook(ctx, true, s.LocalDev, s.AbsoluteGitHookPath); err != nil {
+	if cmd.Flags().Changed(flagForce) || cmd.Flags().Changed(flagAbsoluteGitHookPath) {
+		if _, err := strategy.InstallGitHook(ctx, true, s.AbsoluteGitHookPath); err != nil {
 			return fmt.Errorf("failed to reinstall git hook: %w", err)
 		}
-		strategy.CheckAndWarnHookManagers(ctx, w, s.LocalDev, s.AbsoluteGitHookPath)
+		strategy.CheckAndWarnHookManagers(ctx, w, s.AbsoluteGitHookPath)
 		fmt.Fprintln(w, "  ✓ Reinstalled git hook")
 	}
 
@@ -613,7 +607,7 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 	}
 	var successfullyAddedAgents []agent.Agent
 	for _, ag := range addedAgents {
-		if _, err := setupAgentHooks(ctx, ag, opts.LocalDev, opts.ForceHooks); err != nil {
+		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
 		} else {
 			successfullyAddedAgents = append(successfullyAddedAgents, ag)
@@ -622,7 +616,7 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 
 	var successfullyReinstalledAgents []agent.Agent
 	for _, ag := range reinstalledAgents {
-		if _, err := setupAgentHooks(ctx, ag, opts.LocalDev, opts.ForceHooks); err != nil {
+		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
 		} else {
 			successfullyReinstalledAgents = append(successfullyReinstalledAgents, ag)
@@ -784,8 +778,6 @@ Examples:
 		},
 	}
 
-	cmd.Flags().BoolVar(&opts.LocalDev, flagLocalDev, false, "Use go run instead of entire binary for hooks")
-	cmd.Flags().MarkHidden(flagLocalDev) //nolint:errcheck,gosec // flag is defined above
 	cmd.Flags().BoolVar(&opts.UseLocalSettings, "local", false, "Write settings to .entire/settings.local.json instead of .entire/settings.json")
 	cmd.Flags().BoolVar(&opts.UseProjectSettings, "project", false, "Write settings to .entire/settings.json even if it already exists")
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Reinstall the Entire git hook")
@@ -953,8 +945,6 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 		},
 	}
 
-	cmd.Flags().BoolVar(&opts.LocalDev, flagLocalDev, false, "Use go run instead of entire binary for hooks")
-	cmd.Flags().MarkHidden(flagLocalDev) //nolint:errcheck,gosec // flag is defined above
 	cmd.Flags().BoolVar(&ignoreUntracked, "ignore-untracked", false, "Commit all new files without tracking pre-existing untracked files")
 	cmd.Flags().MarkHidden("ignore-untracked") //nolint:errcheck,gosec // flag is defined above
 	cmd.Flags().BoolVar(&opts.UseLocalSettings, "local", false, "Write settings to .entire/settings.local.json instead of .entire/settings.json")
@@ -1236,7 +1226,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Setup agent hooks for all selected agents
 	for _, ag := range agents {
-		if _, err := setupAgentHooks(ctx, ag, opts.LocalDev, opts.ForceHooks); err != nil {
+		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
 		}
 		if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
@@ -1260,9 +1250,6 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	}
 	// Update the specific fields
 	settings.Enabled = true
-	if opts.LocalDev {
-		settings.LocalDev = true
-	}
 	if opts.AbsoluteGitHookPath {
 		settings.AbsoluteGitHookPath = true
 	}
@@ -1309,10 +1296,10 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Use settings values (merged from existing config + flags) for hook installation
 	// This ensures re-running `entire enable` without flags preserves existing settings
-	if _, err := strategy.InstallGitHook(ctx, true, settings.LocalDev, settings.AbsoluteGitHookPath); err != nil {
+	if _, err := strategy.InstallGitHook(ctx, true, settings.AbsoluteGitHookPath); err != nil {
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
-	strategy.CheckAndWarnHookManagers(ctx, w, settings.LocalDev, settings.AbsoluteGitHookPath)
+	strategy.CheckAndWarnHookManagers(ctx, w, settings.AbsoluteGitHookPath)
 	fmt.Fprintln(w, "  ✓ Installed hooks")
 
 	configDisplay := configDisplayProject
@@ -1485,7 +1472,7 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 // The write path stays scoped to a single file's own raw JSON on purpose.
 // Enable/disable *read* current state through the LoadEntireSettings merged
 // view (e.g. IsEnabled), which flattens settings.local.json overrides
-// (local_dev, log_level, personal strategy_options/checkpoint_remote, ...) on
+// (log_level, absolute_git_hook_path, personal strategy_options/checkpoint_remote, ...) on
 // top of settings.json. Writing that merged struct back into one file would
 // leak a developer's local-only overrides into the shared, committed project
 // file whenever a write resolves to settings.json. setEnabledRaw
@@ -1536,7 +1523,7 @@ func setEnabledRaw(
 // sync of the "enabled" key as setEnabledFlag (see that function for the full
 // merged-vs-scoped rationale). s must already be scoped to the target file's
 // own content: it is intentionally NOT written into the other scope, which
-// would overwrite that file's own fields (local_dev, log_level, personal
+// would overwrite that file's own fields (log_level, absolute_git_hook_path, personal
 // strategy_options, ...) — the same leak this rule prevents, in the other
 // direction.
 func saveEnabledState(ctx context.Context, s *EntireSettings, useProjectSettings bool) error {
@@ -1651,13 +1638,13 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 
 // setupAgentHooks sets up hooks for a given agent.
 // Returns the number of hooks installed (0 if already installed).
-func setupAgentHooks(ctx context.Context, ag agent.Agent, localDev, forceHooks bool) (int, error) {
+func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int, error) {
 	hookAgent, ok := agent.AsHookSupport(ag)
 	if !ok {
 		return 0, fmt.Errorf("agent %s does not support hooks", ag.Name())
 	}
 
-	count, err := hookAgent.InstallHooks(ctx, localDev, forceHooks)
+	count, err := hookAgent.InstallHooks(ctx, forceHooks)
 	if err != nil {
 		return 0, fmt.Errorf("failed to install %s hooks: %w", ag.Name(), err)
 	}
@@ -1871,7 +1858,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	fmt.Fprintf(w, "  Agent: %s\n", ag.Type())
 
 	// Install agent hooks (agent hooks don't depend on settings)
-	installedHooks, err := setupAgentHooks(ctx, ag, opts.LocalDev, opts.ForceHooks)
+	installedHooks, err := setupAgentHooks(ctx, ag, opts.ForceHooks)
 	if err != nil {
 		return fmt.Errorf("failed to setup %s hooks: %w", agentName, err)
 	}
@@ -1914,9 +1901,6 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		return fmt.Errorf("refusing to enable: %s could not be parsed (invalid JSON, or written by a newer entire version); fix or remove it, or upgrade the CLI, then retry: %w", configDisplay, err)
 	}
 	targetSettings.Enabled = true
-	if opts.LocalDev {
-		targetSettings.LocalDev = true
-	}
 	if opts.AbsoluteGitHookPath {
 		targetSettings.AbsoluteGitHookPath = true
 	}
@@ -1950,26 +1934,24 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	}
 
 	// Hook installation decisions need the merged view across both settings
-	// files, not just the single scope we wrote to above: local_dev and
-	// absolute_git_hook_path may be set only in settings.local.json while
-	// this enable resolves to settings.json (or vice versa). Using the
-	// target-scoped struct here would silently drop that override when
-	// regenerating the git hook script. This mirrors runEnableInteractive,
-	// which uses the merged view for the same two fields; only the *write*
-	// path (saveEnabledState above) stays scoped to the target file (see
-	// setEnabledFlag for why).
+	// files, not just the single scope we wrote to above: absolute_git_hook_path
+	// may be set only in settings.local.json while this enable resolves to
+	// settings.json (or vice versa). Using the target-scoped struct here would
+	// silently drop that override when regenerating the git hook script. This
+	// mirrors runEnableInteractive, which uses the merged view for the same
+	// field; only the *write* path (saveEnabledState above) stays scoped to the
+	// target file (see setEnabledFlag for why).
 	mergedSettings, err := LoadEntireSettings(ctx)
 	if err != nil {
-		logging.Warn(ctx, "could not load merged settings for hook installation; proceeding with target-scoped settings only, so local overrides (e.g. local_dev, absolute_git_hook_path) may not be applied to the generated git hook", "error", err)
+		logging.Warn(ctx, "could not load merged settings for hook installation; proceeding with target-scoped settings only, so a local override (absolute_git_hook_path) may not be applied to the generated git hook", "error", err)
 		mergedSettings = targetSettings
 	}
-	hookLocalDev := mergedSettings.LocalDev || opts.LocalDev
 	hookAbsoluteGitHookPath := mergedSettings.AbsoluteGitHookPath || opts.AbsoluteGitHookPath
 
-	if _, err := strategy.InstallGitHook(ctx, true, hookLocalDev, hookAbsoluteGitHookPath); err != nil {
+	if _, err := strategy.InstallGitHook(ctx, true, hookAbsoluteGitHookPath); err != nil {
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
-	strategy.CheckAndWarnHookManagers(ctx, w, hookLocalDev, hookAbsoluteGitHookPath)
+	strategy.CheckAndWarnHookManagers(ctx, w, hookAbsoluteGitHookPath)
 
 	if installedHooks == 0 {
 		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())
@@ -2377,7 +2359,10 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// Gather counts for display
 	sessionStateCount := countSessionStates(ctx)
 	shadowBranchCount := countShadowBranches(ctx)
-	gitHooksInstalled := strategy.IsGitHookInstalled(ctx)
+	// AnyGitHookInstalled, not IsGitHookInstalled: a hook left by an older
+	// version is stale but still ours, and uninstall must still offer to remove
+	// it rather than reporting that Entire is not installed here.
+	gitHooksInstalled := strategy.AnyGitHookInstalled(ctx)
 	agentsWithInstalledHooks := GetAgentsWithHooksInstalled(ctx)
 	entireDirExists := checkEntireDirExists(ctx)
 

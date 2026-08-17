@@ -67,6 +67,15 @@ func AsHookSupport(ag Agent) (HookSupport, bool) {
 	return declaredCapability[HookSupport](ag, func(c DeclaredCaps) bool { return c.Hooks })
 }
 
+// AsHookFreshness returns the agent as HookFreshness if it implements the
+// interface. No capability declaration is needed: hook-config drift detection
+// is built-in only, since it compares against a template the CLI itself
+// embeds. External agents own their hook config and report installation state
+// through their own protocol.
+func AsHookFreshness(ag Agent) (HookFreshness, bool) {
+	return builtinCapability[HookFreshness](ag)
+}
+
 // AsTranscriptAnalyzer returns the agent as TranscriptAnalyzer if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTranscriptAnalyzer(ag Agent) (TranscriptAnalyzer, bool) {
@@ -179,6 +188,15 @@ func AsPromptExtractor(ag Agent) (PromptExtractor, bool) {
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsSubagentAwareExtractor(ag Agent) (SubagentAwareExtractor, bool) {
 	return declaredCapability[SubagentAwareExtractor](ag, func(c DeclaredCaps) bool { return c.SubagentAwareExtractor })
+}
+
+// AsSubagentSessionResolver returns the agent as SubagentSessionResolver if it
+// implements the interface. No capability declaration is needed: whether an
+// agent's subagents run as sessions of their own is a property of the agent's
+// own hook protocol, which only built-in agents model. External agents report
+// subagent boundaries through their own hooks.
+func AsSubagentSessionResolver(ag Agent) (SubagentSessionResolver, bool) {
+	return builtinCapability[SubagentSessionResolver](ag)
 }
 
 // AsSessionBaseDirProvider returns the agent as SessionBaseDirProvider if it implements

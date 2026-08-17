@@ -11,6 +11,17 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 
 export default function (pi: ExtensionAPI) {
+  // A Pi subagent is a nested `pi` process (subagent extensions spawn one per task
+  // with cwd inside the project, where Pi auto-discovers this same project-local
+  // extension), so it would otherwise forward its own lifecycle as the user's
+  // session. Mark this process so any Pi it spawns knows it is nested.
+  //
+  // WARNING: Entire's own hook subprocesses inherit this marker from the parent, so
+  // the CLI side must never treat it as a skip signal — it would disable tracking
+  // for everyone. See docs/architecture/agent-guide.md.
+  const nested = Boolean(process.env.ENTIRE_PI_NESTED);
+  process.env.ENTIRE_PI_NESTED = "1";
+
   const ENTIRE_CMD = '__ENTIRE_CMD__';
   let pendingSkillEvents: Array<{ skill_name: string; invocation: string; timestamp: string }> = [];
 
@@ -60,17 +71,14 @@ export default function (pi: ExtensionAPI) {
     return { skill_name: match[1], invocation };
   }
 
-  pi.on("input", async (event) => {
-    const skill = parseSkillInvocation(event.text);
-    if (skill) {
-      pendingSkillEvents.push({ ...skill, timestamp: new Date().toISOString() });
-    }
-    return { action: "continue" };
-  });
-
   // Agent-driven bash subprocesses inherit a real TTY but cannot answer
   // hook prompts. Disable git/Entire terminal prompts for bash calls so
   // Entire treats agent-driven commits as non-interactive.
+  //
+  // Registered even when nested: a nested Pi is non-interactive by construction
+  // while still inheriting the parent's TTY, and Entire's git hooks live in
+  // .git/hooks independently of this extension, so a nested subagent that commits
+  // needs this hardening at least as much as the parent does.
   pi.on("tool_call", async (event) => {
     if (event.toolName !== "bash") return;
     const input = event.input as { command?: string };
@@ -78,6 +86,18 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     input.command = "export GIT_TERMINAL_PROMPT=0\n" + input.command;
+  });
+
+  // Everything below forwards session lifecycle to Entire, which only the
+  // top-level Pi may do.
+  if (nested) return;
+
+  pi.on("input", async (event) => {
+    const skill = parseSkillInvocation(event.text);
+    if (skill) {
+      pendingSkillEvents.push({ ...skill, timestamp: new Date().toISOString() });
+    }
+    return { action: "continue" };
   });
 
   pi.on("session_start", async (_event, ctx) => {

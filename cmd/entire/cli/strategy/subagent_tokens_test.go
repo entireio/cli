@@ -10,6 +10,8 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
@@ -512,4 +514,53 @@ func TestCondenseSessionByID_CapturesSubagentBaselineViaRealResetPath(t *testing
 	require.Equal(t, 120, state2.CheckpointTokenUsage.SubagentTokens.InputTokens,
 		"checkpoint delta must be rescoped against the real-path baseline")
 	require.Equal(t, 60, state2.CheckpointTokenUsage.SubagentTokens.OutputTokens)
+
+	// Condense the second window and assert the *committed* checkpoint carries that
+	// same window delta. Condensation recomputes usage with subagentsDir="", which
+	// leaves SubagentTokens nil and would otherwise replace the rescoped total —
+	// which is why committed checkpoints reported "subagent_tokens": null. Sourcing
+	// the fill from state.TokenUsage instead of CheckpointTokenUsage would put the
+	// 620 cumulative here, and every checkpoint would re-report the session total.
+	secondID := id.MustCheckpointID("aabbccdd7788")
+	_, err = s.CondenseSession(ctx, repo, secondID, state2, nil)
+	require.NoError(t, err)
+
+	summary := readCommittedSummary(t, repo, secondID)
+	require.NotNil(t, summary.TokenUsage)
+	require.NotNil(t, summary.TokenUsage.SubagentTokens,
+		"committed checkpoint must carry the subagent total")
+	require.Equal(t, 120, summary.TokenUsage.SubagentTokens.InputTokens,
+		"committed value must be this window's delta, not the session cumulative")
+	require.Equal(t, 60, summary.TokenUsage.SubagentTokens.OutputTokens)
+}
+
+// TestWithSubagentTokensFrom_DoesNotMutateInput guards the copy semantics directly.
+// The condensation tests cannot: applyBackfilledSessionTokenUsage already hands back
+// a copy on that path, so a mutate-in-place implementation passes them. Mutating
+// would overwrite the session-wide cumulative with a window delta and make
+// resetCheckpointWindow snapshot a too-small baseline for the next window.
+func TestWithSubagentTokensFrom_DoesNotMutateInput(t *testing.T) {
+	t.Parallel()
+
+	usage := &agent.TokenUsage{InputTokens: 1}
+	src := &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 9}}
+
+	got := withSubagentTokensFrom(usage, src)
+
+	require.Nil(t, usage.SubagentTokens, "must not mutate the input")
+	require.NotNil(t, got.SubagentTokens)
+	require.Equal(t, 9, got.SubagentTokens.InputTokens)
+}
+
+// readCommittedSummary reads a committed checkpoint's root CheckpointSummary through
+// the store's own read path, rather than walking the metadata branch by hand — the
+// sharded tree layout is the git-branch backend's business, not the test's.
+func readCommittedSummary(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID) *cpkg.CheckpointSummary {
+	t.Helper()
+
+	store := cpkg.NewGitStore(repo, cpkg.DefaultV1Refs())
+	summary, err := store.Read(context.Background(), checkpointID)
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	return summary
 }

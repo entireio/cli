@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -199,9 +198,9 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		}
 
 		// Warn when installed hooks are out of date (read-only; fix is manual).
-		if claudecode.CheckHookConfig(ctx) == claudecode.HooksOutdated {
+		for _, displayName := range OutdatedHookAgentDisplayNames(ctx) {
 			b.WriteString("\n")
-			b.WriteString(sty.render(sty.yellow, "  ! Claude Code hooks out of date"))
+			b.WriteString(sty.render(sty.yellow, "  ! "+displayName+" hooks out of date"))
 			b.WriteString(sty.render(sty.dim, " · run 'entire enable --force'"))
 		}
 	}
@@ -803,8 +802,8 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 			result.Agents = names
 		}
 
-		if claudecode.CheckHookConfig(ctx) == claudecode.HooksOutdated {
-			result.HooksOutdated = append(result.HooksOutdated, "claude-code")
+		for _, name := range OutdatedHookAgents(ctx) {
+			result.HooksOutdated = append(result.HooksOutdated, string(name))
 		}
 
 		// Same computation as the text path (writeCheckpointSyncLines);

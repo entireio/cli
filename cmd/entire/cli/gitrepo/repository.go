@@ -20,6 +20,11 @@ import (
 
 const gitDir = ".git"
 
+// sharedObjectCache is one process-wide object cache. go-git uses the cache
+// passed to the storage as its delta-base cache, so a per-open cache makes
+// every open re-read pack data from scratch.
+var sharedObjectCache = cache.NewObjectLRUDefault()
+
 // OpenCurrent opens the current git worktree with object alternates enabled.
 // The caller owns the returned repository and must close it.
 func OpenCurrent(ctx context.Context) (*git.Repository, error) {
@@ -113,7 +118,7 @@ func openPathWithAlternates(repoRoot string) (*git.Repository, error) {
 	// an OS-rooted filesystem lets go-git follow those paths outside .git.
 	storage := gitfilesystem.NewStorageWithOptions(
 		repositoryFS,
-		cache.NewObjectLRUDefault(),
+		sharedObjectCache,
 		gitfilesystem.Options{
 			AlternatesFS: newAlternatesFilesystem(),
 		},

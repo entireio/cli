@@ -231,23 +231,6 @@ func TestCheckoutBranch(t *testing.T) {
 	})
 }
 
-func TestPerformGitResetHard_RejectsArgumentInjection(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	setupResumeTestRepo(t, tmpDir, false)
-
-	// "git reset --hard -q" would silently reset to HEAD in quiet mode instead
-	// of failing, because git interprets "-q" as the --quiet flag.
-	err := performGitResetHard(context.Background(), "-q")
-	if err == nil {
-		t.Fatal("performGitResetHard() should reject hashes starting with '-', got nil")
-	}
-	if !strings.Contains(err.Error(), "invalid commit hash") {
-		t.Errorf("performGitResetHard() error = %q, want error containing 'invalid commit hash'", err.Error())
-	}
-}
-
 func TestResumeFromCurrentBranch_NoCheckpoint(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -1428,84 +1411,6 @@ func TestDisplayRestoredSessions_CodexShowsResumeCommand(t *testing.T) {
 	wantCommand := "  " + ag.FormatResumeCommand(session.SessionID) + "  # Can you take a look at the go code\n"
 	if !strings.Contains(got, wantCommand) {
 		t.Fatalf("displayRestoredSessions() missing command %q in %q", wantCommand, got)
-	}
-}
-
-func TestPrintMultiSessionResumeCommands_SingleSessionHasCheckmark(t *testing.T) {
-	t.Parallel()
-
-	sessions := []strategy.RestoredSession{
-		{
-			SessionID: "2026-02-02-rewind-single",
-			Agent:     "Claude Code",
-			Prompt:    "Fix the bug",
-		},
-	}
-
-	ag, err := strategy.ResolveAgentForRewind("Claude Code")
-	if err != nil {
-		t.Fatalf("ResolveAgentForRewind() error = %v", err)
-	}
-
-	var output bytes.Buffer
-	var errOutput bytes.Buffer
-	printMultiSessionResumeCommands(&output, &errOutput, sessions)
-
-	got := output.String()
-	if !strings.Contains(got, "✓ Restored session 2026-02-02-rewind-single.\n") {
-		t.Fatalf("printMultiSessionResumeCommands() single session missing ✓ header, got: %q", got)
-	}
-	if !strings.Contains(got, "\nTo continue this session:\n") {
-		t.Fatalf("printMultiSessionResumeCommands() missing continuation line, got: %q", got)
-	}
-	wantCommand := "  " + ag.FormatResumeCommand("2026-02-02-rewind-single") + "  # Fix the bug\n"
-	if !strings.Contains(got, wantCommand) {
-		t.Fatalf("printMultiSessionResumeCommands() missing command %q in %q", wantCommand, got)
-	}
-	if errOutput.Len() != 0 {
-		t.Fatalf("printMultiSessionResumeCommands() unexpected stderr: %q", errOutput.String())
-	}
-}
-
-func TestPrintMultiSessionResumeCommands_OutputMatchesResumeStyle(t *testing.T) {
-	t.Parallel()
-
-	sessions := []strategy.RestoredSession{
-		{
-			SessionID: "2026-02-02-rewind-old",
-			Agent:     "Claude Code",
-			Prompt:    "Old prompt",
-		},
-		{
-			SessionID: "2026-02-02-rewind-new",
-			Agent:     "Claude Code",
-			Prompt:    "Most recent prompt",
-		},
-	}
-
-	ag, err := strategy.ResolveAgentForRewind("Claude Code")
-	if err != nil {
-		t.Fatalf("ResolveAgentForRewind() error = %v", err)
-	}
-
-	var output bytes.Buffer
-	var errOutput bytes.Buffer
-	printMultiSessionResumeCommands(&output, &errOutput, sessions)
-
-	got := output.String()
-	if !strings.Contains(got, "\n✓ Restored 2 sessions. To continue:\n") {
-		t.Fatalf("printMultiSessionResumeCommands() missing multi-session header, got: %q", got)
-	}
-	oldCommand := "  " + ag.FormatResumeCommand("2026-02-02-rewind-old") + "  # Old prompt\n"
-	if !strings.Contains(got, oldCommand) {
-		t.Fatalf("printMultiSessionResumeCommands() missing older command %q in %q", oldCommand, got)
-	}
-	newCommand := "  " + ag.FormatResumeCommand("2026-02-02-rewind-new") + "  # Most recent prompt (most recent)\n"
-	if !strings.Contains(got, newCommand) {
-		t.Fatalf("printMultiSessionResumeCommands() missing latest command %q in %q", newCommand, got)
-	}
-	if errOutput.Len() != 0 {
-		t.Fatalf("printMultiSessionResumeCommands() unexpected stderr: %q", errOutput.String())
 	}
 }
 

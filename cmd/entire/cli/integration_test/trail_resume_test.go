@@ -4,7 +4,9 @@ package integration
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -125,22 +127,24 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == pathOAuthToken:
-			writeTrailResumeIntegrationJSON(t, w, http.StatusOK, map[string]any{
+			writeTrailResumeIntegrationJSON(t, w, map[string]any{
 				"access_token": "trail-resume-data-token",
 				"token_type":   "Bearer",
 				"expires_in":   3600,
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli":
-			writeTrailResumeIntegrationJSON(t, w, http.StatusOK, api.TrailListResponse{
+			writeTrailResumeIntegrationJSON(t, w, api.TrailListResponse{
 				Trails:       []api.TrailResource{trail},
 				Total:        1,
 				Limit:        200,
 				RepoFullName: "entireio/cli",
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/"+url.PathEscape(trail.ID)+"/reviews/comments":
-			writeTrailResumeIntegrationJSON(t, w, http.StatusOK, map[string]any{
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/321":
+			writeTrailResumeIntegrationJSON(t, w, trail)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/321/reviews/comments":
+			writeTrailResumeIntegrationJSON(t, w, map[string]any{
 				"comments": []any{},
-				"has_more": false,
+				"hasMore":  false,
 			})
 		default:
 			http.NotFound(w, r)
@@ -148,10 +152,10 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 	}))
 }
 
-func writeTrailResumeIntegrationJSON(t *testing.T, w http.ResponseWriter, status int, body any) {
+func writeTrailResumeIntegrationJSON(t *testing.T, w http.ResponseWriter, body any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		t.Fatalf("encode JSON response: %v", err)
 	}
@@ -191,7 +195,7 @@ func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL str
 
 	tokenStore := map[string]map[string]string{
 		service: {
-			handle: tokenstore.EncodeTokenWithExpiration(fakeLoginJWT(coreURL), 7200),
+			handle: tokenstore.EncodeTokenWithExpiration(fakeTrailCellLoginJWT(coreURL), 7200),
 		},
 	}
 	tokenData, err := json.Marshal(tokenStore)
@@ -204,11 +208,21 @@ func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL str
 
 	env.ExtraEnv = append(env.ExtraEnv,
 		"ENTIRE_API_BASE_URL="+coreURL,
+		"ENTIRE_TRAILS_BACKEND=entire-api",
 		"ENTIRE_CONFIG_DIR="+configDir,
 		"XDG_CACHE_HOME="+xdgCacheHome,
 		"ENTIRE_TOKEN_STORE=file",
 		"ENTIRE_TOKEN_STORE_PATH="+tokenStorePath,
 	)
+}
+
+func fakeTrailCellLoginJWT(iss string) string {
+	enc := base64.RawURLEncoding
+	header := enc.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+	payload := enc.EncodeToString(fmt.Appendf(nil,
+		`{"iss":%q,"sub":"user-123","home_jurisdiction":"us","exp":%d}`,
+		iss, time.Now().Add(time.Hour).Unix()))
+	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"))
 }
 
 func mustTrailResumeIntegrationHost(t *testing.T, rawURL string) string {

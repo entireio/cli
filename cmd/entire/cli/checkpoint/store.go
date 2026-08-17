@@ -33,8 +33,12 @@ type treeWriter struct {
 type GitStore struct {
 	*treeWriter
 
-	refs        PersistentRefs
-	blobFetcher BlobFetchFunc
+	refs                  PersistentRefs
+	blobFetcher           BlobFetchFunc
+	metadataBranchFetcher MetadataBranchFetchFunc
+	// metadataBranchFetchTried latches the one recovery attempt per store; see
+	// tryFetchMetadataBranch.
+	metadataBranchFetchTried bool
 }
 
 // ephemeralStore is the git shadow-branch (temporary) checkpoint store. It is
@@ -70,6 +74,13 @@ func NewGitStore(repo *git.Repository, refs PersistentRefs) *GitStore {
 // on demand when reading from metadata trees.
 func (s *GitStore) SetBlobFetcher(f BlobFetchFunc) {
 	s.blobFetcher = f
+}
+
+// SetMetadataBranchFetcher configures the store to fetch the metadata branch
+// from the checkpoint remote when it is missing both locally and on origin.
+// See MetadataBranchFetchFunc for when it is appropriate to wire this.
+func (s *GitStore) SetMetadataBranchFetcher(f MetadataBranchFetchFunc) {
+	s.metadataBranchFetcher = f
 }
 
 // Repository returns the underlying git repository.

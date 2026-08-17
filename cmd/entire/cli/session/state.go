@@ -256,8 +256,9 @@ type State struct {
 	// successful condensation). Prevents repeated warnings on every commit.
 	DivergenceNoticeShown bool `json:"divergence_notice_shown,omitempty"`
 
-	// AttachedManually indicates this session was imported via `entire attach` rather
-	// than being captured by hooks during normal agent execution.
+	// AttachedManually indicates this session was imported via
+	// `entire session attach` rather than being captured by hooks during
+	// normal agent execution.
 	AttachedManually bool `json:"attached_manually,omitempty"`
 
 	// ContextInjectionDecided records that the once-per-session model-context

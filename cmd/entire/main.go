@@ -123,7 +123,10 @@ func main() {
 			// deepest matched command, which is the one that failed.
 			showSuggestion(executed, err)
 		default:
-			fmt.Fprintln(rootCmd.OutOrStderr(), err)
+			// The choke point for everything a command returns rather than
+			// prints itself: see cli.RenderUserFacingError for what it strips
+			// and which other render sites exist.
+			fmt.Fprintln(rootCmd.OutOrStderr(), cli.RenderUserFacingError(err))
 		}
 
 		cancel()

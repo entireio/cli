@@ -24,6 +24,13 @@ type OpenOptions struct {
 	// reads local-only; ignored by the git-branch backend.
 	RefFetcher RefFetchFunc
 
+	// MetadataBranchFetcher is the CLI-level v1-metadata-branch fetcher, used by
+	// the git-branch backend to resolve a metadata branch missing both locally
+	// and on origin (the shape a fresh clone with a dedicated checkpoint_remote
+	// has). nil leaves reads local-only; ignored by the git-refs backend. Wire it
+	// only on foreground read paths — see MetadataBranchFetchFunc.
+	MetadataBranchFetcher MetadataBranchFetchFunc
+
 	// RemoteRefLister is the CLI-level checkpoint-ref enumerator, used by the
 	// git-refs backend's List to discover checkpoints present on the checkpoint
 	// remote but not yet local (see RemoteRefListFunc). It only fires on a
@@ -69,7 +76,7 @@ type Stores struct {
 // default git-branch backend with no mirrors, preserving default behavior.
 func Open(ctx context.Context, repo *git.Repository, opts OpenOptions) (*Stores, error) {
 	refs := resolveOpenRefs(ctx, opts)
-	env := OpenEnv{Repo: repo, BlobFetcher: opts.BlobFetcher, RefFetcher: opts.RefFetcher, RemoteRefLister: opts.RemoteRefLister, Refs: refs}
+	env := OpenEnv{Repo: repo, BlobFetcher: opts.BlobFetcher, RefFetcher: opts.RefFetcher, RemoteRefLister: opts.RemoteRefLister, MetadataBranchFetcher: opts.MetadataBranchFetcher, Refs: refs}
 
 	cfg, err := settings.LoadCheckpointsConfig(ctx)
 	if err != nil {

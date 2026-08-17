@@ -76,9 +76,4 @@ func TestImportClaudeCode_EndToEnd(t *testing.T) {
 	// 5. Re-running import is idempotent.
 	out = env.RunCLI("import", agentClaudeCode)
 	require.Contains(t, out, "(2 already imported)", "re-run should skip already-imported turns; got: %s", out)
-
-	// 6. Rewinding to an imported checkpoint is refused with a clear message.
-	rewindOut, rewindErr := env.RunCLIWithError("checkpoint", "rewind", "--to", importedID)
-	require.Error(t, rewindErr, "rewind to imported checkpoint should fail")
-	require.Contains(t, rewindOut, "read-only and not rewindable", "got: %s", rewindOut)
 }

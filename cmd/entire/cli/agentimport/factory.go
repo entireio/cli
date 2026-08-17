@@ -10,6 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
@@ -42,7 +43,7 @@ func (factoryImporter) Discover(repoRoot, overridePath string, now time.Time, se
 // time.Now() at hook time), so every turn falls back to the transcript file's
 // modtime — the same fallback the Gemini importer uses.
 func (factoryImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
-	subagentsDir := filepath.Join(filepath.Dir(sf.Path), sf.SessionID, "subagents")
+	subagentsDir := paths.SubagentsDir(filepath.Dir(sf.Path), sf.SessionID)
 	model := factoryaidroid.ExtractModelFromTranscript(sf.Path)
 	var createdAt time.Time
 	if info, statErr := os.Stat(sf.Path); statErr == nil {

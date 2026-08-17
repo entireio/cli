@@ -131,7 +131,7 @@ func TestMigrateBranchToRefs(t *testing.T) {
 
 	// Each ref carries the branch subtree with a normalized root metadata.json
 	// and reads back through the git-refs store.
-	branchTree, err := branch.getSessionsBranchTree()
+	branchTree, err := branch.getSessionsBranchTree(t.Context())
 	require.NoError(t, err)
 	refsStore := newGitRefsStore(repo)
 	for _, cid := range []id.CheckpointID{cid1, cid2} {

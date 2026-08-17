@@ -31,11 +31,12 @@ const BackendTypeGitRefs = "git-refs"
 // RemoteRefLister; other backends ignore the git-shaped fields and read their
 // own configuration from cfg.
 type OpenEnv struct {
-	Repo            *git.Repository
-	BlobFetcher     BlobFetchFunc
-	RefFetcher      RefFetchFunc
-	RemoteRefLister RemoteRefListFunc
-	Refs            PersistentRefs
+	Repo                  *git.Repository
+	BlobFetcher           BlobFetchFunc
+	RefFetcher            RefFetchFunc
+	RemoteRefLister       RemoteRefListFunc
+	MetadataBranchFetcher MetadataBranchFetchFunc
+	Refs                  PersistentRefs
 }
 
 // Factory constructs a persistent store for one backend type. cfg is the
@@ -147,6 +148,9 @@ func gitBranchBackendFactory(_ context.Context, env OpenEnv, _ json.RawMessage) 
 	store := NewGitStore(env.Repo, env.Refs)
 	if env.BlobFetcher != nil {
 		store.SetBlobFetcher(env.BlobFetcher)
+	}
+	if env.MetadataBranchFetcher != nil {
+		store.SetMetadataBranchFetcher(env.MetadataBranchFetcher)
 	}
 	return store, nil
 }

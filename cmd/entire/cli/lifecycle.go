@@ -22,7 +22,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
@@ -96,13 +95,6 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 
-	// Memoize worktree status for the handlers whose window is provably stable.
-	// Centralized here rather than inside a handler so that no handler can opt
-	// itself in without the precondition being reviewed (see statusCacheSafe).
-	if statusCacheSafe(event.Type) {
-		ctx = gitrepo.WithStatusCache(ctx)
-	}
-
 	switch event.Type {
 	case agent.SessionStart:
 		return handleLifecycleSessionStart(ctx, ag, event)
@@ -124,33 +116,6 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return handleLifecycleToolUse(ctx, ag, event)
 	default:
 		return fmt.Errorf("unknown lifecycle event type: %d", event.Type)
-	}
-}
-
-// statusCacheSafe reports whether t's handler is guaranteed to neither write
-// tracked files nor stage anything for the duration of the handler, which is the
-// precondition for reusing one worktree status across it (see
-// gitrepo.WithStatusCache).
-//
-// This is a closed allowlist and must stay one. Post-agent handlers — TurnEnd,
-// SubagentEnd — run after the agent has edited files, and DetectFileChanges
-// there must observe those edits. Before adding an event, check that its handler
-// performs no tracked-file write between its first and last status read;
-// TurnStart only qualifies because EnsureSetup (which can rewrite the tracked
-// .entire/.gitignore) was hoisted above its first read.
-//
-// Every event is listed explicitly rather than folded into the default so the
-// exhaustive linter fails the build when a new EventType is added, forcing that
-// review to happen. The default stays as a belt-and-braces deny.
-func statusCacheSafe(t agent.EventType) bool {
-	switch t {
-	case agent.TurnStart:
-		return true
-	case agent.SessionStart, agent.TurnEnd, agent.Compaction, agent.SessionEnd,
-		agent.SubagentStart, agent.SubagentEnd, agent.ModelUpdate, agent.ToolUse:
-		return false
-	default:
-		return false
 	}
 }
 
@@ -453,14 +418,22 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 // entireTrailContextInjection is the one-time, model-facing pointer Entire
 // injects on the first turn of a session. It points at `entire agent-help` for
 // the full flag/subcommand surface — fetched on demand so that surface never goes
-// stale here as it grows — and adds only a small, stable behavioral invariant an
-// agent must know even if it never drills in: commits auto-capture checkpoints,
-// the two stable query anchors (`why`, `checkpoint search`) for recovering intent
-// before edits, and that setup/destructive commands belong to the user. It also
-// names the auto-detected repo (from the already-loaded session scope, no IO) and
-// the standing rule that the agent is inside the repo and must never ask the user
-// for the repo name. Kept terse: it costs context-window tokens on the first turn
-// of every session.
+// stale here as it grows — and adds only what an agent must know even if it never
+// drills in: commits auto-capture checkpoints, and setup/destructive commands
+// belong to the user. It also names the auto-detected repo (from the
+// already-loaded session scope, no IO) and the standing rule that the agent is
+// inside the repo and must never ask the user for the repo name. Kept terse: it
+// costs context-window tokens on the first turn of every session.
+//
+// Deliberately NOT here: per-task command recommendations. An earlier revision
+// urged `entire why <file>:<line>` and `entire checkpoint search` "before large
+// edits". A census of 963 agent transcripts on a heavy-use machine found zero
+// invocations of either against 25 calls to the agent-help pointer above, so the
+// recommendation only ever cost tokens. It also mis-framed a
+// sometimes-appropriate query as an always-do step. Which commands suit a given
+// task is agent-help's job, where it is pulled on demand and grouped by who
+// should initiate the command (see agentHelpAudience); this string carries only
+// invariants that hold on every turn of every session.
 func entireTrailContextInjection(scope trailEnablementScope) string {
 	repo := ""
 	if scope.Forge != "" && scope.Owner != "" && scope.Repo != "" {
@@ -468,7 +441,7 @@ func entireTrailContextInjection(scope trailEnablementScope) string {
 	}
 	var b strings.Builder
 	b.WriteString("Entire is enabled for this repo. Run `entire agent-help` to see what entire does and which subcommand to use, then `entire agent-help <command>` for that command's exact, current flags. ")
-	b.WriteString("Commits automatically capture the AI session as a checkpoint, so never create checkpoints by hand — just commit normally. Before large edits, `entire why <file>:<line>` and `entire checkpoint search` recover the intent behind existing code. Leave setup and destructive commands (enable, disable, clean, rewind, auth) to the user. ")
+	b.WriteString("Commits automatically capture the AI session as a checkpoint, so never create checkpoints by hand — just commit normally. Leave setup and destructive commands (enable, disable, clean, rewind, auth) to the user. ")
 	// Mirror agentHelpRepoBlock's defense-in-depth: this string is injected raw
 	// into the agent's model context (no escaping), so a repo key carrying control
 	// characters (e.g. an <sessionID>.trail-scope.json cache written by a pre-fix
@@ -593,13 +566,9 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		}
 	}
 
-	// Strategy setup runs before the first worktree-status read below.
-	// EnsureEntireGitignore can append entries to .entire/.gitignore, which is
-	// tracked, and the dispatcher has already installed a status cache for this
-	// event (see statusCacheSafe). The cache fills on first read rather than at
-	// install, so doing this write first keeps every cached read consistent with
-	// the worktree. Moving this back below CapturePrePromptState would reintroduce
-	// a tracked-file write between two cached reads.
+	// EnsureEntireGitignore can append to the tracked .entire/.gitignore, so run
+	// it before CapturePrePromptState: the snapshot should describe the tree the
+	// agent starts from, not one setup is about to change.
 	_, setupSpan := perf.Start(ctx, "ensure_setup")
 	if err := strategy.EnsureSetup(ctx); err != nil {
 		logging.Warn(logCtx, "failed to ensure strategy setup",
@@ -844,8 +813,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 
 	// Compute subagents directory for agents that support subagent extraction.
-	// Subagent transcripts live in <transcriptDir>/<modelSessionID>/subagents/
-	subagentsDir := filepath.Join(filepath.Dir(transcriptRef), event.SessionID, "subagents")
+	subagentsDir := paths.SubagentsDir(filepath.Dir(transcriptRef), event.SessionID)
 
 	// Extract metadata via agent interface (modified files)
 	var modifiedFiles []string
@@ -984,6 +952,25 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Get strategy and agent type
 	strat := GetStrategy(ctx)
 	agentType := ag.Type()
+
+	// Agents that run subagents as sessions of their own (Factory AI Droid's
+	// Workers) reach turn-end here for the subagent's own turn. Attribute that
+	// work to the parent task invocation instead of minting a top-level session
+	// checkpoint unrelated to the session the user is actually driving.
+	if link, isSubagent := resolveSubagentSessionLink(ctx, ag, transcriptRef); isSubagent {
+		return saveSubagentSessionTaskStep(ctx, subagentSessionStep{
+			link:          link,
+			sessionID:     sessionID,
+			event:         event,
+			transcriptRef: transcriptRef,
+			modifiedFiles: relModifiedFiles,
+			newFiles:      relNewFiles,
+			deletedFiles:  relDeletedFiles,
+			author:        author,
+			agentType:     agentType,
+			strat:         strat,
+		})
+	}
 
 	// Get transcript position/identifier from pre-prompt state
 	var transcriptIdentifierAtStart string
@@ -1186,15 +1173,8 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		event.SubagentType, event.TaskDescription = ParseSubagentTypeAndDescription(event.ToolInput)
 	}
 
-	// Determine subagent transcript path
-	transcriptDir := filepath.Dir(event.SessionRef)
-	var subagentTranscriptPath string
-	if event.SubagentID != "" {
-		subagentTranscriptPath = AgentTranscriptPath(transcriptDir, event.SubagentID)
-		if !fileExists(subagentTranscriptPath) {
-			subagentTranscriptPath = ""
-		}
-	}
+	// Determine subagent transcript path (empty when the agent stores none).
+	subagentTranscriptPath := ResolveAgentTranscriptPath(filepath.Dir(event.SessionRef), event.SessionID, event.SubagentID)
 
 	// Log context
 	subagentEndAttrs := []any{
@@ -1252,9 +1232,22 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		return fmt.Errorf("failed to get worktree root: %w", err)
 	}
 
-	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
+	// The transcript records what the subagent wrote at some point in its run, not
+	// what is still uncommitted. When the subagent committed its own work mid-turn
+	// (the scenario TestSingleSessionSubagentCommitInTurn covers), that commit has
+	// already condensed the session and deleted the shadow branch, so there is
+	// nothing left to snapshot. Keeping those paths defeats the "no changes, skip"
+	// gate below and mints a *new* shadow branch after condensation — which nothing
+	// then condenses away, because turn-end skips when no files changed, so it
+	// outlives the session.
+	//
+	// filterToUncommittedFiles is the same guard the turn-end path already applies
+	// for this exact reason; it fails open, so a git error keeps the list as-is
+	// rather than silently dropping a real checkpoint.
+	relModifiedFiles := filterToUncommittedFiles(ctx, FilterAndNormalizePaths(modifiedFiles, repoRoot), repoRoot)
 	var relNewFiles, relDeletedFiles []string
 	if changes != nil {
+		// changes come from git status, so they are uncommitted by construction.
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
 		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
 		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
@@ -1307,6 +1300,115 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	}
 
 	_ = CleanupPreTaskState(ctx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+	return nil
+}
+
+// resolveSubagentSessionLink reports whether this turn belongs to a subagent
+// session spawned by a parent task invocation. It fails closed: an agent that
+// does not model detached subagent sessions, or a link that cannot be read,
+// leaves the turn on the ordinary session-checkpoint path.
+func resolveSubagentSessionLink(
+	ctx context.Context,
+	ag agent.Agent,
+	transcriptRef string,
+) (agent.SubagentSessionLink, bool) {
+	resolver, ok := agent.AsSubagentSessionResolver(ag)
+	if !ok {
+		return agent.SubagentSessionLink{}, false
+	}
+	link, isSubagent := resolver.ResolveSubagentSession(transcriptRef)
+	if !isSubagent {
+		return agent.SubagentSessionLink{}, false
+	}
+	// Both IDs are interpolated into metadata paths by
+	// SessionMetadataDirFromSessionID and TaskMetadataDir, neither of which
+	// sanitizes. Enforce it here rather than trusting each implementation: this
+	// is the one choke point every SubagentSessionResolver passes through, and
+	// it mirrors the ValidateSessionID checks the hook dispatcher already
+	// applies to IDs arriving from an agent.
+	logCtx := logging.WithComponent(ctx, "lifecycle")
+	if err := validation.ValidateAgentSessionID(link.ParentSessionID); err != nil {
+		logging.Warn(logCtx, "ignoring subagent session link with invalid parent session ID",
+			slog.String("error", err.Error()))
+		return agent.SubagentSessionLink{}, false
+	}
+	if err := validation.ValidateToolUseID(link.ToolUseID); err != nil {
+		logging.Warn(logCtx, "ignoring subagent session link with invalid tool use ID",
+			slog.String("error", err.Error()))
+		return agent.SubagentSessionLink{}, false
+	}
+	// An empty tool-use ID passes ValidateToolUseID (the field is optional
+	// elsewhere) but cannot name a task directory here.
+	if link.ToolUseID == "" {
+		logging.Warn(logCtx, "ignoring subagent session link with empty tool use ID")
+		return agent.SubagentSessionLink{}, false
+	}
+	logging.Debug(logCtx, "resolved subagent session",
+		slog.String("parent_session_id", link.ParentSessionID),
+		slog.String("tool_use_id", link.ToolUseID),
+		slog.String("subagent_type", link.SubagentType))
+	return link, true
+}
+
+// subagentSessionStep carries the turn-end inputs needed to record a detached
+// subagent session as a task checkpoint on its parent.
+type subagentSessionStep struct {
+	link          agent.SubagentSessionLink
+	sessionID     string
+	event         *agent.Event
+	transcriptRef string
+	modifiedFiles []string
+	newFiles      []string
+	deletedFiles  []string
+	author        *GitAuthor
+	agentType     types.AgentType
+	strat         *strategy.ManualCommitStrategy
+}
+
+// saveSubagentSessionTaskStep writes a subagent session's turn as a task
+// checkpoint under its parent session.
+//
+// The checkpoint is keyed by the parent's session and tool-use ID, so the
+// subagent's files land in the parent's FilesTouched and its work condenses with
+// the parent's next commit. The subagent's own session ID doubles as the agent
+// ID, which is what stores its transcript beside the parent's in the checkpoint.
+func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) error {
+	logCtx := logging.WithComponent(ctx, "lifecycle")
+	logging.Info(logCtx, "recording subagent session as task checkpoint",
+		slog.String("subagent_session_id", step.sessionID),
+		slog.String("parent_session_id", step.link.ParentSessionID),
+		slog.String("tool_use_id", step.link.ToolUseID),
+		slog.Int("modified_files", len(step.modifiedFiles)),
+		slog.Int("new_files", len(step.newFiles)),
+		slog.Int("deleted_files", len(step.deletedFiles)))
+
+	taskStepCtx := strategy.TaskStepContext{
+		SessionID:              step.link.ParentSessionID,
+		ToolUseID:              step.link.ToolUseID,
+		AgentID:                step.sessionID,
+		ModifiedFiles:          step.modifiedFiles,
+		NewFiles:               step.newFiles,
+		DeletedFiles:           step.deletedFiles,
+		TranscriptPath:         step.link.ParentTranscriptPath,
+		SubagentTranscriptPath: step.transcriptRef,
+		AuthorName:             step.author.Name,
+		AuthorEmail:            step.author.Email,
+		SubagentType:           step.link.SubagentType,
+		TaskDescription:        step.link.TaskDescription,
+		AgentType:              step.agentType,
+	}
+
+	if err := step.strat.SaveTaskStep(ctx, taskStepCtx); err != nil {
+		return fmt.Errorf("failed to save subagent session task step: %w", err)
+	}
+
+	// Retire the subagent's own session the same way an ordinary turn-end does,
+	// so its phase and pre-prompt state do not linger as an active session.
+	transitionSessionTurnEnd(ctx, step.sessionID, step.event)
+	if cleanupErr := CleanupPrePromptState(ctx, step.sessionID); cleanupErr != nil {
+		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
+			slog.String("error", cleanupErr.Error()))
+	}
 	return nil
 }
 

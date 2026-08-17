@@ -12,7 +12,7 @@ import (
 // token of Use).
 var experimentalRootCommands = []string{
 	"tokens", "import", "review", "investigate",
-	"blame", "why", "search", "experts", "runner",
+	"blame", "why", "experts", "runner",
 }
 
 // withVisible sets the experimental visibility flag for the test and restores
