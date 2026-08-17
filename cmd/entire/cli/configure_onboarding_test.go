@@ -91,48 +91,6 @@ func TestConfigureCmdYesRunsOnboardingWithoutTTY(t *testing.T) {
 	}
 }
 
-func TestEnableCmdFreshRepoDelegatesToConfigureOnboarding(t *testing.T) {
-	setupTestRepo(t)
-	t.Setenv(interactive.EnvTestTTY, "1")
-	if _, err := gitRunner(context.Background(), ".", "remote", testGitAdd, defaultMirrorRemote, "https://github.com/acme/widget.git"); err != nil {
-		t.Fatalf("add GitHub origin: %v", err)
-	}
-
-	previous := runConfigureOnboarding
-	t.Cleanup(func() { runConfigureOnboarding = previous })
-	called := false
-	runConfigureOnboarding = func(_ *cobra.Command, opts EnableOptions) error {
-		called = true
-		if opts.Yes {
-			t.Error("bare enable unexpectedly enabled non-interactive mode")
-		}
-		return nil
-	}
-
-	cmd := newEnableCmd()
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("enable: %v", err)
-	}
-	if !called {
-		t.Fatal("fresh-repository enable did not delegate to configure onboarding")
-	}
-}
-
-func TestEnableCmdYesDoesNotDelegateToAuthenticatedOnboarding(t *testing.T) {
-	setupTestRepo(t)
-	t.Setenv(interactive.EnvTestTTY, "0")
-	if _, err := gitRunner(context.Background(), ".", "remote", testGitAdd, defaultMirrorRemote, "https://github.com/acme/widget.git"); err != nil {
-		t.Fatalf("add GitHub origin: %v", err)
-	}
-	cmd := newEnableCmd()
-	cmd.SetArgs([]string{"--yes"})
-	if enableUsesConfigureOnboarding(context.Background(), cmd, EnableOptions{Yes: true}) {
-		t.Fatal("enable --yes must retain the offline setup path")
-	}
-}
-
 func TestEnsureConfigureLoginUsesExistingSession(t *testing.T) {
 	profile := &authProfile{Handle: "dipree", Jurisdiction: "eu"}
 	loginCalled := false

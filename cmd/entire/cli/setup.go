@@ -161,50 +161,6 @@ func enableNeedsAgentManagement(cmd *cobra.Command) bool {
 	return hasGlobalSettingsFlags(cmd) || cmd.Flags().Changed("yes") || cmd.Flags().Changed(flagSearchSkill) || cmd.Flags().Changed(flagAgentHelpSkill)
 }
 
-// enableUsesConfigureOnboarding makes the standard first-run `entire enable`
-// entry point an alias for the configure onboarding experience. Specialized
-// setup/bootstrap flags retain the legacy enable flow.
-type enableAgentResolution struct {
-	agent agent.Agent
-	err   error
-}
-
-func resolveEnableAgent(name string) enableAgentResolution {
-	if name == "" {
-		return enableAgentResolution{}
-	}
-	resolved, err := agent.Get(types.AgentName(name))
-	if err != nil {
-		return enableAgentResolution{err: fmt.Errorf("resolve agent %q: %w", name, err)}
-	}
-	return enableAgentResolution{agent: resolved}
-}
-
-func enableUsesConfigureOnboarding(ctx context.Context, cmd *cobra.Command, opts EnableOptions) bool {
-	// Keep `enable --yes` offline-friendly. Configure onboarding requires an
-	// authenticated Entire session and an unattended login can otherwise wait
-	// for device approval for many minutes. Scripts that explicitly want the
-	// connected onboarding flow use `entire configure --yes`.
-	if opts.Yes || !interactive.CanPromptInteractively() {
-		return false
-	}
-	allowedFlags := map[string]bool{"yes": true, flagTelemetry: true}
-	unsupportedFlag := false
-	cmd.Flags().Visit(func(flag *pflag.Flag) {
-		if !allowedFlags[flag.Name] {
-			unsupportedFlag = true
-		}
-	})
-	if unsupportedFlag {
-		return false
-	}
-	if _, err := paths.WorktreeRoot(ctx); err != nil {
-		return false
-	}
-	_, _, _, err := configureRepoIdentity(ctx)
-	return err == nil
-}
-
 // updateStrategyOptions applies strategy flags to settings without re-running agent setup.
 // Loads and writes only the target file to avoid leaking settings between layers.
 func updateStrategyOptions(ctx context.Context, w io.Writer, opts EnableOptions) error {
@@ -940,19 +896,14 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 
 			// Resolve --agent before logging starts, so a bad agent name is
 			// rejected without touching the repo (see below).
-			resolvedAgent := resolveEnableAgent(agentName)
-			if resolvedAgent.err != nil {
-				printWrongAgentError(cmd.ErrOrStderr(), agentName)
-				return NewSilentError(errors.New("wrong agent name"))
-			}
-			selectedAgent := resolvedAgent.agent
-
-			// A standard first run shares the configure onboarding rather than
-			// maintaining a second interactive setup experience. Route before
-			// logging initialization so merely delegating does not create setup
-			// files that onboarding could mistake for generated configuration.
-			if selectedAgent == nil && !settings.IsSetUpAny(ctx) && enableUsesConfigureOnboarding(ctx, cmd, opts) {
-				return runConfigureOnboarding(cmd, opts)
+			var selectedAgent agent.Agent
+			if agentName != "" {
+				ag, err := agent.Get(types.AgentName(agentName))
+				if err != nil {
+					printWrongAgentError(cmd.ErrOrStderr(), agentName)
+					return NewSilentError(errors.New("wrong agent name"))
+				}
+				selectedAgent = ag
 			}
 
 			// Route setup's logging to .entire/logs/ like every other command.
