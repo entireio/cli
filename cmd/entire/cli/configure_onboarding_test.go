@@ -14,9 +14,7 @@ import (
 	"testing"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 
@@ -25,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -292,97 +291,6 @@ func TestConfigureOnboardingSuppressesTelemetryPrompt(t *testing.T) {
 	}
 }
 
-func TestConfigureFieldFocusChangesActiveQuestion(t *testing.T) {
-	selected := testConfigureUSHost
-	upstream := &configureUpstreamField{Select: huh.NewSelect[string]().Options(huh.NewOption("US", selected)).Value(&selected)}
-	if cmd := upstream.Focus(); cmd == nil {
-		t.Fatal("focus must schedule a title refresh")
-	}
-	if !upstream.focused {
-		t.Fatal("upstream did not become focused")
-	}
-	active := configureQuestionTitle("Upstream", upstream.focused)
-	upstream.Blur()
-	inactive := configureQuestionTitle("Upstream", upstream.focused)
-	if active == inactive {
-		t.Fatal("active and inactive section titles are visually identical")
-	}
-}
-
-func TestConfigureUpstreamFieldEnterAdvancesToAgents(t *testing.T) {
-	selected := testConfigureUSHost
-	field := &configureUpstreamField{
-		Select: huh.NewSelect[string]().
-			Options(huh.NewOption("US", selected)).
-			Value(&selected),
-	}
-	_, cmd := field.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if cmd == nil {
-		t.Fatal("enter did not emit a transition to the agent field")
-	}
-}
-
-func TestConfigureUpstreamArrowsMoveCursorWithoutSelecting(t *testing.T) {
-	const euHost = "eu.entire.io"
-	selected := euHost
-	field := &configureUpstreamField{
-		value:       &selected,
-		committed:   selected,
-		highlighted: selected,
-	}
-	field.Select = huh.NewSelect[string]().
-		Options(
-			huh.NewOption("US", testConfigureUSHost),
-			huh.NewOption("EU", euHost),
-		).
-		Value(&selected)
-	field.WithKeyMap(huh.NewDefaultKeyMap())
-	field.Focus()
-	_, cmd := field.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	if cmd != nil {
-		t.Fatal("down arrow emitted a section transition")
-	}
-	if selected != euHost {
-		t.Fatalf("down arrow changed radio selection to %q", selected)
-	}
-	if field.highlighted != testConfigureUSHost {
-		t.Fatalf("down arrow cursor = %q, want US", field.highlighted)
-	}
-
-	field.Update(tea.KeyPressMsg{Code: ' '})
-	if selected != testConfigureUSHost {
-		t.Fatalf("space did not intentionally select highlighted radio: %q", selected)
-	}
-}
-
-func TestConfigureAgentFieldHasActiveCursorAndEnterAdvances(t *testing.T) {
-	selected := []string{"claude-code"}
-	field := &configureAgentField{MultiSelect: huh.NewMultiSelect[string]().
-		Options(huh.NewOption("Claude Code", "claude-code")).
-		Value(&selected)}
-	field.WithKeyMap(huh.NewDefaultKeyMap())
-	field.WithPosition(huh.FieldPosition{Field: 1, FirstField: 0, LastField: 2, LastGroup: 0})
-	field.Focus()
-	_, cmd := field.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if cmd == nil {
-		t.Fatal("enter did not advance from agents to save")
-	}
-}
-
-func TestConfigureSaveFieldEnterSubmits(t *testing.T) {
-	choice := configureSaveNewBranch
-	field := &configureSaveField{Select: huh.NewSelect[string]().
-		Options(huh.NewOption("Push to a new branch", choice)).
-		Value(&choice)}
-	field.WithKeyMap(huh.NewDefaultKeyMap())
-	field.WithPosition(huh.FieldPosition{Field: 2, FirstField: 0, LastField: 2, LastGroup: 0})
-	field.Focus()
-	_, cmd := field.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if cmd == nil {
-		t.Fatal("enter did not submit the save field")
-	}
-}
-
 func TestConfigureAgentOptionsUsePlainLabels(t *testing.T) {
 	selected := map[types.AgentName]struct{}{agent.AgentNameClaudeCode: {}}
 	options := configureAgentOptions([]huh.Option[string]{
@@ -446,35 +354,18 @@ func TestConfigurePlacementOrderPrefersCurrentThenHome(t *testing.T) {
 	}
 }
 
-func TestConfigureFormThemeHasNoFocusedRail(t *testing.T) {
-	styles := configureFormTheme().Theme(true)
-	if got := styles.Focused.Base.Render("upstream"); got != "upstream" {
-		t.Fatalf("focused field renders %q; configure theme should not add a rail", got)
-	}
-	if got := ansi.Strip(styles.Focused.SelectSelector.String()); got != "> " {
-		t.Fatalf("radio cursor = %q, want active-row indicator only", got)
-	}
-	if got := ansi.Strip(styles.Focused.MultiSelectSelector.String()); got != "> " {
-		t.Fatalf("agent cursor = %q, want the same active-row indicator", got)
-	}
-	if got := ansi.Strip(styles.Focused.SelectedPrefix.String()); got != "◼ " {
-		t.Fatalf("selected agent marker = %q, want prototype checkbox", got)
-	}
-	if _, ok := styles.Focused.UnselectedOption.GetForeground().(lipgloss.NoColor); !ok {
-		t.Fatalf("unselected agent label should use normal text color, got %v", styles.Focused.UnselectedOption.GetForeground())
-	}
-}
-
-func TestConfigureSaveFieldIsAlwaysVisible(t *testing.T) {
+func TestConfigureSaveNoChangesStateIsAlwaysVisible(t *testing.T) {
 	choice := configureSaveLocal
-	field := &configureSaveField{}
-	field.Select = huh.NewSelect[string]().
-		Title("Save configuration").
-		Description(configureSaveDescription("main", false, false, false)).
-		Options(configureSaveOptions("main", false, false, false, choice)...).
-		Value(&choice)
-	got := ansi.Strip(field.View())
-	if !strings.Contains(got, "Save configuration") || !strings.Contains(got, "Save — no changes") {
+	field := uiform.NewActionSelect(
+		"Save configuration",
+		configureSaveDescription("main", false, false, false),
+		configureSaveOptions("main", false, false, false, choice),
+		&choice,
+	)
+	form := uiform.New(huh.NewGroup(field))
+	form.Init()
+	got := ansi.Strip(form.View())
+	if !strings.Contains(got, "Save — no changes") {
 		t.Fatalf("save field does not show its disabled no-change state:\n%s", got)
 	}
 }

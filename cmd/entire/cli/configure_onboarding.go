@@ -13,8 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/key"
-	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
@@ -47,7 +45,6 @@ const (
 	configureSaveLocal          = "local"
 	configureSaveCancel         = "cancel"
 	configureGitProtocolSSH     = "ssh"
-	configureKeyEnter           = "enter"
 )
 
 // configureAccessReporter is the small part of the authenticated API used by
@@ -473,13 +470,13 @@ func pickConfigureRegions(ctx context.Context, outW io.Writer, regions []regionC
 		}
 		return chosen, nil
 	}
-	control := newConfigureChecklistControl(
+	control := uiform.NewChecklist(
 		"Which regions should this repository live in?",
 		"Your data stays in the selected regions.",
 		opts, &selected, true,
 	)
 	fmt.Fprintln(outW)
-	if err := newConfigureForm(huh.NewGroup(control)).RunWithContext(ctx); err != nil {
+	if err := uiform.New(huh.NewGroup(control)).RunWithContext(ctx); err != nil {
 		if cancelErr := handleFormCancellation(outW, "Configure", err); cancelErr != nil {
 			return nil, cancelErr
 		}
@@ -492,210 +489,6 @@ func pickConfigureRegions(ctx context.Context, outW io.Writer, regions []regionC
 		}
 	}
 	return chosen, nil
-}
-
-// configureFocusChangedMsg forces huh's dynamic titles to re-evaluate after a
-// field transition. huh evaluates TitleFunc before it calls Blur/Focus while
-// handling NextField, so without this follow-up frame the help bar changes but
-// the old section keeps the active-colored question mark until another keypress.
-type configureFocusChangedMsg struct{}
-
-func configureRefreshFocus() tea.Cmd {
-	return func() tea.Msg { return configureFocusChangedMsg{} }
-}
-
-type configureUpstreamField struct {
-	*huh.Select[string]
-
-	value         *string
-	committed     string
-	highlighted   string
-	refresh       func()
-	layoutChanged func()
-	window        tea.WindowSizeMsg
-	focused       bool
-}
-
-func (field *configureUpstreamField) Focus() tea.Cmd {
-	field.focused = true
-	return tea.Batch(field.Select.Focus(), configureRefreshFocus())
-}
-
-func (field *configureUpstreamField) Blur() tea.Cmd {
-	field.focused = false
-	return field.Select.Blur()
-}
-
-func (field *configureUpstreamField) KeyBinds() []key.Binding {
-	return configureRadioKeyBinds(field.Select)
-}
-
-func (field *configureUpstreamField) View() string {
-	return field.Select.View() + "\n\n"
-}
-
-func (field *configureUpstreamField) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
-	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
-		switch {
-		case configureRadioSelectKey(keyMsg.String()):
-			field.commitHighlighted()
-			return field, configureWindowResize(field.window)
-		case configureNextKey(keyMsg.String()):
-			// Enter continues with the intentionally selected value. Merely moving
-			// the cursor does not change the radio selection.
-			return field, huh.NextField
-		}
-	}
-	if size, ok := msg.(tea.WindowSizeMsg); ok {
-		field.window = size
-	}
-	model, cmd := field.Select.Update(msg)
-	if updated, ok := model.(*huh.Select[string]); ok {
-		field.Select = updated
-	}
-	_, movedCursor := msg.(tea.KeyPressMsg)
-	field.preserveCommittedSelection(movedCursor)
-	return field, cmd
-}
-
-func (field *configureUpstreamField) preserveCommittedSelection(movedCursor bool) {
-	if field.value == nil {
-		return
-	}
-	if movedCursor {
-		field.highlighted = *field.value
-	}
-	*field.value = field.committed
-}
-
-func (field *configureUpstreamField) commitHighlighted() {
-	if field.value == nil {
-		return
-	}
-	field.committed = field.highlighted
-	*field.value = field.committed
-	if field.refresh != nil {
-		field.refresh()
-	}
-	if field.layoutChanged != nil {
-		field.layoutChanged()
-	}
-}
-
-type configureAgentField struct {
-	*huh.MultiSelect[string]
-
-	value            *[]string
-	selectionChanged func()
-	showSave         func() bool
-	window           tea.WindowSizeMsg
-	focused          bool
-}
-
-func (field *configureAgentField) Focus() tea.Cmd {
-	field.focused = true
-	return tea.Batch(field.MultiSelect.Focus(), configureRefreshFocus())
-}
-
-func (field *configureAgentField) Blur() tea.Cmd {
-	field.focused = false
-	return field.MultiSelect.Blur()
-}
-
-func (field *configureAgentField) View() string {
-	view := field.MultiSelect.View()
-	if field.showSave != nil && field.showSave() {
-		view += "\n\n"
-	}
-	return view
-}
-
-func (field *configureAgentField) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
-	if size, ok := msg.(tea.WindowSizeMsg); ok {
-		field.window = size
-	}
-	var before []string
-	if field.value != nil {
-		before = append(before, (*field.value)...)
-	}
-	model, cmd := field.MultiSelect.Update(msg)
-	if updated, ok := model.(*huh.MultiSelect[string]); ok {
-		field.MultiSelect = updated
-	}
-	if _, keyPress := msg.(tea.KeyPressMsg); keyPress && field.value != nil && !sameStrings(before, *field.value) {
-		if field.selectionChanged != nil {
-			field.selectionChanged()
-		}
-		cmd = tea.Batch(cmd, configureWindowResize(field.window))
-	}
-	return field, cmd
-}
-
-type configureSaveField struct {
-	*huh.Select[string]
-
-	focused bool
-}
-
-func (field *configureSaveField) Focus() tea.Cmd {
-	field.focused = true
-	return tea.Batch(field.Select.Focus(), configureRefreshFocus())
-}
-
-func (field *configureSaveField) Blur() tea.Cmd {
-	field.focused = false
-	return field.Select.Blur()
-}
-
-func (field *configureSaveField) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
-	model, cmd := field.Select.Update(msg)
-	if updated, ok := model.(*huh.Select[string]); ok {
-		field.Select = updated
-	}
-	return field, cmd
-}
-
-func configureWindowResize(size tea.WindowSizeMsg) tea.Cmd {
-	if size.Width <= 0 || size.Height <= 0 {
-		return nil
-	}
-	return func() tea.Msg { return size }
-}
-
-func sameStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	seen := make(map[string]int, len(a))
-	for _, value := range a {
-		seen[value]++
-	}
-	for _, value := range b {
-		seen[value]--
-		if seen[value] < 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func configureRadioKeyBinds(selectField *huh.Select[string]) []key.Binding {
-	bindings := selectField.KeyBinds()
-	for i := range bindings {
-		help := bindings[i].Help()
-		if help.Key == configureKeyEnter && help.Desc == "select" {
-			bindings[i].SetHelp(configureKeyEnter, "continue")
-		}
-	}
-	return append(bindings, key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "select")))
-}
-
-func configureRadioSelectKey(key string) bool {
-	return key == "space" || key == " "
-}
-
-func configureNextKey(key string) bool {
-	return key == configureKeyEnter || key == "tab"
 }
 
 // promptConfigureUpstreamAndAgents presents upstream, agents, and the dynamic
@@ -742,22 +535,12 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 	// huh's footer already documents navigation. Keep field descriptions for
 	// contextual information only, rather than repeating keyboard controls.
 	upstreamDescription := manageRegionsHint
-	upstreamControl := &configureUpstreamField{
-		value:       &selectedHost,
-		committed:   selectedHost,
-		highlighted: selectedHost,
-	}
-	upstreamControl.Select = huh.NewSelect[string]().
-		TitleFunc(func() string {
-			return configureQuestionTitle("Select your upstream", upstreamControl.focused)
-		}, &upstreamControl.focused).
-		Description(upstreamDescription).
-		Options(upstreamOptions()...).
-		Height(configureFieldHeight(len(placements), upstreamDescription)).
-		Value(&selectedHost)
-	upstreamControl.refresh = func() {
+	upstreamControl := uiform.NewRadio(
+		"Select your upstream", upstreamDescription, upstreamOptions(), &selectedHost,
+	)
+	upstreamControl.OnRefresh(func() {
 		upstreamControl.Options(upstreamOptions()...)
-	}
+	})
 
 	agentControl := newConfigureAgentControl(agentOptions, &selectedAgentNames, true)
 
@@ -778,18 +561,13 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 
 	previousHasChanges := hasChanges()
 	saveChoice := defaultConfigureSaveChoice(previousHasChanges, requiresPush(), protected)
-	saveControl := &configureSaveField{}
 	saveOptions := func() []huh.Option[string] {
 		return configureSaveOptions(branch, protected, requiresPush(), hasChanges(), saveChoice)
 	}
-	saveControl.Select = huh.NewSelect[string]().
-		TitleFunc(func() string {
-			return configureQuestionTitle("Save configuration", saveControl.focused)
-		}, &saveControl.focused).
-		Description(configureSaveDescription(branch, protected, requiresPush(), hasChanges())).
-		Options(saveOptions()...).
-		Height(configureFieldHeight(len(saveOptions()), configureSaveDescription(branch, protected, requiresPush(), hasChanges()))).
-		Value(&saveChoice)
+	saveDescription := configureSaveDescription(branch, protected, requiresPush(), hasChanges())
+	saveControl := uiform.NewActionSelect(
+		"Save configuration", saveDescription, saveOptions(), &saveChoice,
+	)
 	refreshSave := func() {
 		changed := hasChanges()
 		options := saveOptions()
@@ -801,12 +579,12 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		description := configureSaveDescription(branch, protected, requiresPush(), changed)
 		saveControl.Select.
 			Description(description).
-			Height(configureFieldHeight(len(options), description)).
+			Height(uiform.FieldHeight(len(options), description)).
 			Options(options...)
 	}
-	upstreamControl.layoutChanged = refreshSave
-	agentControl.selectionChanged = refreshSave
-	agentControl.showSave = func() bool { return true }
+	upstreamControl.OnLayoutChanged(refreshSave)
+	agentControl.OnSelectionChanged(refreshSave)
+	agentControl.ShowSectionGapWhen(func() bool { return true })
 
 	if nonInteractive {
 		chosen, ok := placementByHost[selectedHost]
@@ -826,7 +604,7 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 	}
 
 	group := huh.NewGroup(upstreamControl, agentControl, saveControl)
-	form := newConfigureForm(group)
+	form := uiform.New(group)
 	// Separate the form from the shell prompt or preceding onboarding status.
 	fmt.Fprintln(errW)
 	if err := form.RunWithContext(ctx); err != nil {
@@ -850,39 +628,14 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 	return chosen, selectedAgents, saveChoice, agentsChanged(), nil
 }
 
-func newConfigureAgentControl(options []huh.Option[string], selected *[]string, requireOne bool) *configureAgentField {
-	return newConfigureChecklistControl("Select the agents for this repository", "", options, selected, requireOne)
-}
-
-func newConfigureChecklistControl(title, description string, options []huh.Option[string], selected *[]string, requireOne bool) *configureAgentField {
-	control := &configureAgentField{value: selected}
-	field := huh.NewMultiSelect[string]().
-		TitleFunc(func() string {
-			return configureQuestionTitle(title, control.focused)
-		}, &control.focused).
-		Description(description).
-		Options(options...).
-		// MultiSelect subtracts its title from an implicit viewport height, so
-		// include the title and description rows to show every option without
-		// padding or scrolling.
-		Height(configureFieldHeight(len(options), description)).
-		Value(selected)
-	if requireOne {
-		field = field.Validate(func(values []string) error {
-			if len(values) == 0 {
-				return errors.New("select at least one agent")
-			}
-			return nil
-		})
-	}
-	control.MultiSelect = field
-	return control
+func newConfigureAgentControl(options []huh.Option[string], selected *[]string, requireOne bool) *uiform.Checklist[string] {
+	return uiform.NewChecklist("Select the agents for this repository", "", options, selected, requireOne)
 }
 
 func promptConfigureAgentSelection(ctx context.Context, errW io.Writer, options []huh.Option[string], selected *[]string) error {
 	control := newConfigureAgentControl(options, selected, false)
 	fmt.Fprintln(errW)
-	if err := newConfigureForm(huh.NewGroup(control)).RunWithContext(ctx); err != nil {
+	if err := uiform.New(huh.NewGroup(control)).RunWithContext(ctx); err != nil {
 		if cancelErr := handleFormCancellation(errW, "Agent selection", err); cancelErr != nil {
 			return cancelErr
 		}
@@ -909,25 +662,20 @@ func promptConfigureAgentsAndSave(ctx context.Context, errW io.Writer, installed
 		for _, name := range installedNames {
 			installed = append(installed, string(name))
 		}
-		return !sameStrings(selectedNames, installed)
+		return !uiform.EqualValues(selectedNames, installed)
 	}
 	requiresPush := func() bool { return agentsChanged() && pushSafe && branch != "" }
 
 	agentControl := newConfigureAgentControl(options, &selectedNames, false)
 	previousHasChanges := agentsChanged()
 	saveChoice := defaultConfigureSaveChoice(previousHasChanges, requiresPush(), protected)
-	saveControl := &configureSaveField{}
 	saveOptions := func() []huh.Option[string] {
 		return configureSaveOptions(branch, protected, requiresPush(), agentsChanged(), saveChoice)
 	}
-	saveControl.Select = huh.NewSelect[string]().
-		TitleFunc(func() string {
-			return configureQuestionTitle("Save configuration", saveControl.focused)
-		}, &saveControl.focused).
-		Description(configureSaveDescription(branch, protected, requiresPush(), agentsChanged())).
-		Options(saveOptions()...).
-		Height(configureFieldHeight(len(saveOptions()), configureSaveDescription(branch, protected, requiresPush(), agentsChanged()))).
-		Value(&saveChoice)
+	saveDescription := configureSaveDescription(branch, protected, requiresPush(), agentsChanged())
+	saveControl := uiform.NewActionSelect(
+		"Save configuration", saveDescription, saveOptions(), &saveChoice,
+	)
 	refreshSave := func() {
 		changed := agentsChanged()
 		options := saveOptions()
@@ -938,14 +686,14 @@ func promptConfigureAgentsAndSave(ctx context.Context, errW io.Writer, installed
 		previousHasChanges = changed
 		description := configureSaveDescription(branch, protected, requiresPush(), changed)
 		saveControl.Select.Description(description).
-			Height(configureFieldHeight(len(options), description)).
+			Height(uiform.FieldHeight(len(options), description)).
 			Options(options...)
 	}
-	agentControl.selectionChanged = refreshSave
-	agentControl.showSave = func() bool { return true }
+	agentControl.OnSelectionChanged(refreshSave)
+	agentControl.ShowSectionGapWhen(func() bool { return true })
 
 	fmt.Fprintln(errW)
-	if err := newConfigureForm(huh.NewGroup(agentControl, saveControl)).RunWithContext(ctx); err != nil {
+	if err := uiform.New(huh.NewGroup(agentControl, saveControl)).RunWithContext(ctx); err != nil {
 		if cancelErr := handleFormCancellation(errW, "Agent configuration", err); cancelErr != nil {
 			return nil, "", false, cancelErr
 		}
@@ -1073,19 +821,8 @@ func configureUpstreamOptions(placements []coreapi.ResolvedPlacement, selectedHo
 	return options
 }
 
-func configureFieldHeight(optionCount int, description string) int {
-	// One title row, the explicit description rows, and exactly one row per
-	// option. huh otherwise gives dynamic Select fields spare viewport rows,
-	// which accumulate as increasingly large gaps between form sections.
-	height := optionCount + 1
-	if description != "" {
-		height += lipgloss.Height(description)
-	}
-	return height
-}
-
 func configureSelectionChanges(selectedHost, currentHost string, selectedAgents, installedAgents []string) (mirrorChanged, agentsChanged bool) {
-	return !strings.EqualFold(selectedHost, currentHost), !sameStrings(selectedAgents, installedAgents)
+	return !strings.EqualFold(selectedHost, currentHost), !uiform.EqualValues(selectedAgents, installedAgents)
 }
 
 func configureNonInteractiveSaveChoice(hasChanges, requiresPush, protected bool) string {
@@ -1162,57 +899,6 @@ func configureRadioLabel(label string, selected bool) string {
 		marker = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Success)).Render("●")
 	}
 	return marker + " " + label
-}
-
-func newConfigureForm(groups ...*huh.Group) *huh.Form {
-	// Do not start with NewAccessibleForm here: huh fields retain the first
-	// theme assigned to them, so applying configureFormTheme afterward would
-	// leave the standard rail and `>` cursor in place. Install this theme first.
-	form := huh.NewForm(groups...).WithTheme(configureFormTheme())
-	if IsAccessibleMode() {
-		form = form.WithAccessible(true)
-	}
-	return form
-}
-
-func configureFormTheme() huh.Theme {
-	return huh.ThemeFunc(func(isDark bool) *huh.Styles {
-		theme := uiform.Theme().Theme(isDark)
-		success := lipgloss.Color(palette.Success)
-		muted := lipgloss.Color(palette.Muted)
-
-		// Radio and checkbox lists use the same active-row indicator. Selection
-		// remains green and independent from the orange `>` cursor.
-		theme.FieldSeparator = lipgloss.NewStyle().SetString("")
-		theme.Focused.Base = lipgloss.NewStyle()
-		theme.Blurred.Base = lipgloss.NewStyle()
-		theme.Focused.SelectSelector = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Warning)).SetString("> ")
-		theme.Blurred.SelectSelector = lipgloss.NewStyle().SetString("  ")
-		theme.Focused.MultiSelectSelector = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Warning)).SetString("> ")
-		theme.Blurred.MultiSelectSelector = lipgloss.NewStyle().SetString("  ")
-		theme.Focused.SelectedPrefix = lipgloss.NewStyle().Foreground(success).SetString("◼ ")
-		theme.Blurred.SelectedPrefix = lipgloss.NewStyle().Foreground(success).SetString("◼ ")
-		theme.Focused.UnselectedPrefix = lipgloss.NewStyle().Foreground(muted).SetString("◻ ")
-		theme.Blurred.UnselectedPrefix = lipgloss.NewStyle().Foreground(muted).SetString("◻ ")
-		theme.Focused.SelectedOption = theme.Focused.SelectedOption.UnsetForeground()
-		theme.Blurred.SelectedOption = theme.Blurred.SelectedOption.UnsetForeground()
-		// Enabled options keep normal text contrast whether selected or not.
-		// Muting the empty checkbox is sufficient; muting the label itself can
-		// incorrectly communicate that the option is disabled.
-		theme.Focused.UnselectedOption = theme.Focused.UnselectedOption.UnsetForeground()
-		theme.Blurred.UnselectedOption = theme.Blurred.UnselectedOption.UnsetForeground()
-		return theme
-	})
-}
-
-func configureQuestionTitle(question string, focused bool) string {
-	color := palette.Muted
-	if focused {
-		color = palette.Warning
-	}
-	marker := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render("?")
-	heading := lipgloss.NewStyle().Bold(true).Render(question)
-	return marker + " " + heading
 }
 
 func configureAgentOptions(options []huh.Option[string], selected map[types.AgentName]struct{}) []huh.Option[string] {

@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -519,13 +520,13 @@ func pickRegions(ctx context.Context, w io.Writer, regions []regionChoice, juris
 	if len(selected) == 0 {
 		selected = append(selected, defaults...)
 	}
-	control := newConfigureChecklistControl(
+	control := uiform.NewChecklist(
 		"Which regions should this repository live in?",
 		"Repository: "+repoLabel+". Checked regions are live; uncheck one to remove it.",
 		opts, &selected, len(currentHosts) == 0,
 	)
 	fmt.Fprintln(w)
-	if err := newConfigureForm(huh.NewGroup(control)).RunWithContext(ctx); err != nil {
+	if err := uiform.New(huh.NewGroup(control)).RunWithContext(ctx); err != nil {
 		return nil, handleFormCancellation(w, "Mirror create", err)
 	}
 
