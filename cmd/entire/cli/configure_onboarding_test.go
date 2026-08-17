@@ -120,6 +120,19 @@ func TestEnableCmdFreshRepoDelegatesToConfigureOnboarding(t *testing.T) {
 	}
 }
 
+func TestEnableCmdYesDoesNotDelegateToAuthenticatedOnboarding(t *testing.T) {
+	setupTestRepo(t)
+	t.Setenv(interactive.EnvTestTTY, "0")
+	if _, err := gitRunner(context.Background(), ".", "remote", testGitAdd, defaultMirrorRemote, "https://github.com/acme/widget.git"); err != nil {
+		t.Fatalf("add GitHub origin: %v", err)
+	}
+	cmd := newEnableCmd()
+	cmd.SetArgs([]string{"--yes"})
+	if enableUsesConfigureOnboarding(context.Background(), cmd, EnableOptions{Yes: true}) {
+		t.Fatal("enable --yes must retain the offline setup path")
+	}
+}
+
 func TestEnsureConfigureLoginUsesExistingSession(t *testing.T) {
 	profile := &authProfile{Handle: "dipree", Jurisdiction: "eu"}
 	loginCalled := false

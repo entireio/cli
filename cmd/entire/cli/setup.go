@@ -183,7 +183,11 @@ func resolveEnableAgent(name string) enableAgentResolution {
 }
 
 func enableUsesConfigureOnboarding(ctx context.Context, cmd *cobra.Command, opts EnableOptions) bool {
-	if !opts.Yes && !interactive.CanPromptInteractively() {
+	// Keep `enable --yes` offline-friendly. Configure onboarding requires an
+	// authenticated Entire session and an unattended login can otherwise wait
+	// for device approval for many minutes. Scripts that explicitly want the
+	// connected onboarding flow use `entire configure --yes`.
+	if opts.Yes || !interactive.CanPromptInteractively() {
 		return false
 	}
 	allowedFlags := map[string]bool{"yes": true, flagTelemetry: true}
