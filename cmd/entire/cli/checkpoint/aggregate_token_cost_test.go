@@ -16,7 +16,7 @@ func TestAggregateTokenUsage_SumsCost(t *testing.T) {
 	t.Parallel()
 	a := &agent.TokenUsage{InputTokens: 1, CostUSD: costPtr(0.75), CostSource: types.CostSourceReported}
 	b := &agent.TokenUsage{InputTokens: 2, CostUSD: costPtr(0.25), CostSource: types.CostSourceReported}
-	got := aggregateTokenUsage(a, b)
+	got := types.AddTokenUsage(a, b)
 	if got.CostUSD == nil || *got.CostUSD != 1.0 {
 		t.Fatalf("CostUSD = %v, want 1.0", got.CostUSD)
 	}
@@ -29,7 +29,7 @@ func TestAggregateTokenUsage_MixedSource(t *testing.T) {
 	t.Parallel()
 	a := &agent.TokenUsage{CostUSD: costPtr(1), CostSource: types.CostSourceReported}
 	b := &agent.TokenUsage{CostUSD: costPtr(1), CostSource: types.CostSourceEstimated}
-	got := aggregateTokenUsage(a, b)
+	got := types.AddTokenUsage(a, b)
 	if got.CostSource != types.CostSourceMixed {
 		t.Fatalf("CostSource = %q, want mixed", got.CostSource)
 	}
@@ -40,7 +40,7 @@ func TestAggregateTokenUsage_NilCostSideIgnoredForSource(t *testing.T) {
 	// b has an estimated label but nil cost, so it contributes no source.
 	a := &agent.TokenUsage{CostUSD: costPtr(1), CostSource: types.CostSourceReported}
 	b := &agent.TokenUsage{CostSource: types.CostSourceEstimated}
-	got := aggregateTokenUsage(a, b)
+	got := types.AddTokenUsage(a, b)
 	if got.CostUSD == nil || *got.CostUSD != 1 {
 		t.Fatalf("CostUSD = %v, want 1", got.CostUSD)
 	}
@@ -55,7 +55,7 @@ func TestAggregateTokenUsage_PricedPlusUnpricedTokensMixed(t *testing.T) {
 	t.Parallel()
 	sessionA := &agent.TokenUsage{InputTokens: 1000, CostUSD: costPtr(0.50), CostSource: types.CostSourceEstimated}
 	sessionB := &agent.TokenUsage{InputTokens: 200} // token-bearing, no cost
-	got := aggregateTokenUsage(sessionA, sessionB)
+	got := types.AddTokenUsage(sessionA, sessionB)
 	if got.CostUSD == nil || *got.CostUSD != 0.50 {
 		t.Fatalf("CostUSD = %v, want 0.50", got.CostUSD)
 	}
@@ -63,7 +63,7 @@ func TestAggregateTokenUsage_PricedPlusUnpricedTokensMixed(t *testing.T) {
 		t.Fatalf("CostSource = %q, want mixed", got.CostSource)
 	}
 	// Order must not matter.
-	rev := aggregateTokenUsage(sessionB, sessionA)
+	rev := types.AddTokenUsage(sessionB, sessionA)
 	if rev.CostSource != types.CostSourceMixed {
 		t.Fatalf("reversed CostSource = %q, want mixed", rev.CostSource)
 	}
@@ -73,7 +73,7 @@ func TestAggregateTokenUsage_BothNilCost(t *testing.T) {
 	t.Parallel()
 	a := &agent.TokenUsage{InputTokens: 1}
 	b := &agent.TokenUsage{InputTokens: 2}
-	got := aggregateTokenUsage(a, b)
+	got := types.AddTokenUsage(a, b)
 	if got.CostUSD != nil {
 		t.Fatalf("CostUSD = %v, want nil", got.CostUSD)
 	}
