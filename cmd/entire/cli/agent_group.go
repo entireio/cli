@@ -120,6 +120,24 @@ func runAgentList(ctx context.Context, w io.Writer, includeExternal bool) error 
 	return nil
 }
 
+// resolveNamedExternalAgent registers the external agent plugin named name, if
+// one is on $PATH, so `entire agent add`/`remove` can address it the way
+// `entire enable --agent <name>` already could.
+//
+// Targeting the single name (rather than a full $PATH scan) avoids executing
+// every unrelated entire-agent-* binary and surfaces a real load error instead
+// of a generic "unknown agent". A name that matches no plugin is not an error:
+// it falls through to the caller's agent.Get, which reports it against the
+// built-ins too. Bypasses the external_agents gate because invoking these
+// commands with a plugin name is itself the explicit opt-in.
+func resolveNamedExternalAgent(cmd *cobra.Command, name string) error {
+	if err := external.DiscoverAndRegisterNamedAlways(cmd.Context(), types.AgentName(name)); err != nil {
+		cmd.SilenceUsage = true
+		return fmt.Errorf("loading external agent %q: %w", name, err)
+	}
+	return nil
+}
+
 func newAgentAddCmd() *cobra.Command {
 	var localDev bool
 	var forceHooks bool
@@ -137,15 +155,8 @@ Examples:
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-			// Resolve the named external agent plugin so `add` works like
-			// `entire enable --agent <name>`. Targeting the single name (rather
-			// than a full $PATH scan) avoids executing every unrelated
-			// entire-agent-* binary and surfaces a real load error instead of a
-			// generic "unknown agent". Bypasses the setting gate because this
-			// command is itself the explicit opt-in.
-			if err := external.DiscoverAndRegisterNamedAlways(cmd.Context(), types.AgentName(name)); err != nil {
-				cmd.SilenceUsage = true
-				return fmt.Errorf("loading external agent %q: %w", name, err)
+			if err := resolveNamedExternalAgent(cmd, name); err != nil {
+				return err
 			}
 			ag, err := agent.Get(types.AgentName(name))
 			if err != nil {
@@ -180,11 +191,8 @@ Examples:
   entire agent remove claude-code`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Resolve the named external agent plugin so `remove` can find it,
-			// executing only that binary rather than scanning all of $PATH.
-			if err := external.DiscoverAndRegisterNamedAlways(cmd.Context(), types.AgentName(args[0])); err != nil {
-				cmd.SilenceUsage = true
-				return fmt.Errorf("loading external agent %q: %w", args[0], err)
+			if err := resolveNamedExternalAgent(cmd, args[0]); err != nil {
+				return err
 			}
 			return runRemoveAgent(cmd.Context(), cmd.OutOrStdout(), args[0])
 		},
