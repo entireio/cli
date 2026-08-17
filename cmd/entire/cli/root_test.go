@@ -349,3 +349,27 @@ func containsString(values []string, want string) bool {
 	}
 	return false
 }
+
+// TestVersionString_IncludesCommitWhenStamped pins that a release build reports
+// the commit it came from. The dev channel keeps one release that is replaced on
+// every merge to main, so the version alone cannot identify a dev build and a bug
+// report against one would be untraceable without this.
+func TestVersionString_IncludesCommitWhenStamped(t *testing.T) {
+	origVersion, origCommit := versioninfo.Version, versioninfo.Commit
+	t.Cleanup(func() { versioninfo.Version, versioninfo.Commit = origVersion, origCommit })
+
+	versioninfo.Version, versioninfo.Commit = "0.5.5-dev.202608171200.abc1234", "abc1234"
+	if got := versionString(); !strings.Contains(got, "0.5.5-dev.202608171200.abc1234 (abc1234)") {
+		t.Errorf("version output should carry the commit, got:\n%s", got)
+	}
+
+	// A local build with nothing stamped must not print "(unknown)".
+	versioninfo.Version, versioninfo.Commit = "dev", "unknown"
+	got := versionString()
+	if strings.Contains(got, "unknown") || strings.Contains(got, "(") {
+		t.Errorf("unstamped build should omit the commit entirely, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Entire CLI dev") {
+		t.Errorf("unstamped build should still report its version, got:\n%s", got)
+	}
+}

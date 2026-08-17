@@ -169,9 +169,24 @@ func NewRootCmd() *cobra.Command {
 	return cmd
 }
 
+// versionString reports the running build.
+//
+// The commit is included because the version alone does not always identify a
+// build: the dev channel keeps a single release that is replaced on every merge
+// to main, so every dev build would otherwise report the same string and a bug
+// report could not say which one it came from. Both goreleaser configs already
+// stamp versioninfo.Commit, and versioninfo.Load falls back to the embedded build
+// info, so this is surfacing a value we already have rather than a new one.
 func versionString() string {
+	build := versioninfo.Version
+	// Omitted rather than printed as "(unknown)": a local `go build` outside a
+	// detectable checkout has no commit to report, and noise there is worse than
+	// silence. Release builds always carry the stamp.
+	if c := versioninfo.Commit; c != "" && c != "unknown" {
+		build = fmt.Sprintf("%s (%s)", build, c)
+	}
 	return fmt.Sprintf("Entire CLI %s\nGo version: %s\nOS/Arch: %s/%s\n",
-		versioninfo.Version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+		build, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
 func newVersionCmd() *cobra.Command {

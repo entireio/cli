@@ -112,10 +112,11 @@ After the initial setup, use `entire agent` to add or remove agents, `entire con
 
 ## Release Channels
 
-Entire currently ships two release channels:
+Entire ships three release channels:
 
 - `stable`: recommended for most users. Stable releases change less often and are the default for Homebrew, Scoop, and `install.sh`.
-- `nightly`: prerelease builds for users who want the latest changes earlier. Nightlies are published more frequently and may include newer, less-proven changes than stable.
+- `nightly`: prerelease builds for users who want the latest changes earlier. Nightlies are published daily and may include newer, less-proven changes than stable.
+- `dev`: current `main`, rebuilt on every merge that passes tests. Intended for developing Entire itself — it moves many times a day and is the least proven of the three. Only one dev release exists at a time; it is replaced rather than accumulated, so you cannot install an older dev build (use `mise run dev:publish` from a checkout for that). `entire version` reports the commit a build came from.
 
 How to use each channel:
 
@@ -124,6 +125,7 @@ How to use each channel:
 - Homebrew nightly: `brew install --cask entire@nightly`
 - `install.sh` stable: `curl -fsSL https://entire.io/install.sh | bash`
 - `install.sh` nightly: `curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly`
+- `install.sh` dev: `curl -fsSL https://entire.io/install.sh | bash -s -- --channel dev` (or `mise run dev:sync` in a checkout)
 - Scoop: currently supports `stable` only via `scoop install entire/entire`
 
 ## Typical Workflow

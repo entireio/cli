@@ -1,0 +1,124 @@
+name: Dev Release
+
+# Publishes the dev channel: one release that tracks main, replaced on every
+# merge that passes tests. `install.sh --channel dev` therefore always fetches
+# current main, which is how this repo's own developers dogfood it now that
+# local-dev hooks are gone.
+#
+# Deliberately separate from nightly.yml. Nightly is a daily, externally consumed
+# channel and stays exactly as it is; firing it per merge would make its name a
+# lie and flood the releases list.
+#
+# Keeping only one dev release is what keeps this cheap: install.sh's nightly
+# lookup reads `releases?per_page=20` and takes the first nightly match, so a
+# channel that accumulated a release per merge (6-21/day in this repo) would push
+# the newest nightly off that page and silently break `--channel nightly`.
+on:
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dev-release
+  # Not cancel-in-progress: a run publishes a tag and then retires the previous
+  # release. Cancelling midway could leave both, or neither.
+  cancel-in-progress: false
+
+jobs:
+  publish-dev:
+    # Only green main. Tests is the gate rather than Lint as well: a lint failure
+    # does not produce a broken binary, and waiting on two independent
+    # workflow_run events would need its own coordination.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate token
+        id: app-token
+        # The tag push must come from an app token: a push made with the default
+        # GITHUB_TOKEN does not trigger other workflows, so release.yml would
+        # never fire and no release would be built.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.HOMEBREW_TAP_APP_ID }}
+          private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: cli
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit Tests actually ran against, not main's tip: main may have
+          # moved on, and tagging an untested commit is the one thing this gate
+          # exists to prevent. Falls back to the ref for a manual dispatch.
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          # create-dev-tag.sh needs the full tag history for `git describe`.
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Record the dev releases present before this run
+        id: existing
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          # Captured before the new tag exists, so the retire step below can never
+          # delete the release it just created.
+          gh release list --limit 100 --json tagName \
+            --jq '.[] | select(.tagName | test("-dev\\.")) | .tagName' > existing-dev-tags.txt || true
+          echo "count=$(wc -l < existing-dev-tags.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Create dev tag
+        id: tag
+        run: |
+          TAG=$(scripts/create-dev-tag.sh) && EXIT_CODE=0 || EXIT_CODE=$?
+          if [ "$EXIT_CODE" -eq 2 ]; then
+            echo "Skipping — this commit already has a dev tag."
+            exit 0
+          elif [ "$EXIT_CODE" -ne 0 ] || [ -z "$TAG" ]; then
+            echo "::error::Failed to generate dev tag"
+            exit 1
+          fi
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the release to be published
+        id: wait
+        if: steps.tag.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          # release.yml runs asynchronously off the tag push. Retire the previous
+          # release only once the new one exists, so `--channel dev` never sees
+          # zero releases. 20 minutes is well clear of a normal release build.
+          for _ in $(seq 1 80); do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::warning::$TAG was not published within 20 minutes; keeping the previous dev release."
+          echo "published=false" >> "$GITHUB_OUTPUT"
+
+      - name: Retire superseded dev releases
+        if: steps.wait.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          # --cleanup-tag removes the git tag too, so neither releases nor tags
+          # accumulate. Failing to delete one is not worth failing the run over:
+          # the next merge retries, and an extra release is harmless.
+          while read -r tag; do
+            [ -n "$tag" ] || continue
+            echo "Retiring superseded dev release $tag"
+            gh release delete "$tag" --yes --cleanup-tag || \
+              echo "::warning::could not delete $tag"
+          done < existing-dev-tags.txt
