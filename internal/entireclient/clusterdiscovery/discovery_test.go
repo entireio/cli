@@ -122,3 +122,12 @@ func TestDiscover(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
+
+// TestTrustedLoginServers normalises the advertised cores for display: whitespace
+// and trailing slashes trimmed, blanks dropped, duplicates collapsed, advertised
+// order kept (the resource lists its preferred core first).
+func TestTrustedLoginServers(t *testing.T) {
+	t.Parallel()
+	got := trustedLoginServers([]string{"https://us.entire.io/", " ", " https://eu.entire.io ", "https://us.entire.io", ""})
+	assert.Equal(t, []string{"https://us.entire.io", "https://eu.entire.io"}, got)
+}

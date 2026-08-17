@@ -332,7 +332,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		m.loading = false
 		m.fetchingMore = false
 		if msg.err != nil {
-			m.searchErr = msg.err.Error()
+			m.searchErr = RenderUserFacingError(msg.err).Error()
 			m = m.refreshBrowseContent()
 			return m, nil
 		}
@@ -351,7 +351,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 	case searchMoreResultsMsg:
 		m.fetchingMore = false
 		if msg.err != nil {
-			m.searchErr = msg.err.Error()
+			m.searchErr = RenderUserFacingError(msg.err).Error()
 			m = m.refreshBrowseContent()
 			return m, nil
 		}
@@ -393,7 +393,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		}
 		m.codeLoading = false
 		if msg.err != nil {
-			m.codeSearchErr = msg.err.Error()
+			m.codeSearchErr = RenderUserFacingError(msg.err).Error()
 		} else if msg.resp != nil {
 			m.codeResults = msg.resp.Results
 			m.codeStats = msg.resp.Stats

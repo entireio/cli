@@ -91,7 +91,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// branch — the empty-remote guard below is unnecessary for this backend.
 	// (A configured git-branch mirror's v1 ref is not pushed here yet — mirror
 	// push for downgrade safety is a later step.)
-	if cpCfg, _ := settings.LoadCheckpointsConfig(ctx); checkpoint.PrimaryIsRefs(cpCfg) { //nolint:errcheck // fail-soft: a bad checkpoints block already surfaces via Open; default to no refs push
+	if ps.primaryIsRefs {
 		return s.prePushCheckpointRefs(ctx, ps)
 	}
 

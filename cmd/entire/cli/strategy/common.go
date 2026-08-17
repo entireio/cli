@@ -493,10 +493,12 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 	// branch. Seeding an empty orphan v1 here would leave a vestigial,
 	// never-written branch — the surprise a user hit when `entire enable`
 	// selected git-refs yet still created entire/checkpoints/v1. We still adopt
-	// real v1 data that already exists on origin or a checkpoint_remote below
-	// (so legacy checkpoints stay readable); we only suppress the empty-orphan
-	// fallback. Resolution is fail-soft: an unreadable config keeps the legacy
-	// git-branch seeding behavior.
+	// real v1 data that already exists on origin below; we suppress the
+	// empty-orphan fallback and, since there is no orphan that could diverge,
+	// the checkpoint-remote bootstrap fetch too. Legacy checkpoints stay
+	// readable either way — the read path recovers the branch on demand (see
+	// checkpoint.MetadataBranchFetchFunc). Resolution is fail-soft: an
+	// unreadable config keeps the legacy git-branch seeding behavior.
 	skipEmptyOrphan := primaryIsGitRefs(ctx)
 
 	localRef, localErr := repo.Reference(refs.Primary, true)
@@ -530,7 +532,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 		// Local ref missing — fetch the real branch before creating a fresh
 		// orphan: an orphan would diverge from it, hide existing checkpoints, and
 		// be rejected non-fast-forward on later syncs.
-		if bootstrapPrimaryFromCheckpointRemote(ctx, repo, refs.Primary) {
+		if bootstrapPrimaryFromCheckpointRemote(ctx, repo, refs.Primary, skipEmptyOrphan) {
 			fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from checkpoint remote\n", primaryName)
 			return nil
 		}
@@ -671,13 +673,29 @@ func createOrphanMetadataRef(ctx context.Context, repo *git.Repository, refs che
 // points at the remote branch. Every failure is non-fatal and returns false so
 // the caller creates the empty orphan: `entire enable` must never break on a
 // missing checkpoint remote, an unresolvable URL, or a network/auth error.
-func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Repository, primary plumbing.ReferenceName) bool {
+func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Repository, primary plumbing.ReferenceName, primaryIsRefs bool) bool {
 	if !checkpointRemoteBootstrapAllowed(ctx) {
 		// Not an explicit setup flow (e.g. the per-turn hook hot path via
 		// EnsureSetup). Never fetch here: hook execution has a hard timeout,
 		// and a slow/unreachable checkpoint remote must not stall every turn.
 		// Fall back to the empty orphan, which self-heals immediately.
 		logging.Debug(ctx, "checkpoint-remote: skipping bootstrap fetch outside explicit enable flow")
+		return false
+	}
+
+	if primaryIsRefs {
+		// The whole point of this bootstrap is to stop a fresh local orphan from
+		// diverging from the real v1 branch. Under the git-refs primary backend
+		// no orphan is ever created and nothing is ever written to v1, so there
+		// is no divergence to prevent and the fetch buys nothing at enable time.
+		//
+		// It is not free, either: v1 holds the full legacy transcript history, so
+		// this would make every `entire enable` on a fresh clone download the
+		// entire checkpoint archive before doing anything else. Legacy hex-ID
+		// checkpoints stay readable — the read path recovers the branch on demand
+		// (checkpoint.MetadataBranchFetchFunc), fetching individual blobs by hash
+		// rather than the whole archive.
+		logging.Debug(ctx, "checkpoint-remote: skipping bootstrap fetch under git-refs primary")
 		return false
 	}
 
@@ -702,11 +720,25 @@ func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Reposit
 
 	branchName := primary.Short()
 	tmpRefName := plumbing.ReferenceName(FetchTmpRefPrefix + branchName)
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true); err != nil {
-		logging.Debug(ctx, "checkpoint-remote: enable bootstrap fetch failed; creating empty orphan",
+	// Unfiltered. The bootstrap itself only needs the ref, but it is only ever
+	// reached under the git-branch primary (git-refs returns above), and there
+	// the branch it lands IS the repo's checkpoint store — refs.Read and
+	// refs.Primary are the same v1 branch. GitStore.List reads each checkpoint's
+	// metadata.json through a plain tree with no blob fetcher, and once this ref
+	// resolves the recovery tier never fires again, so a blob-filtered bootstrap
+	// would leave `checkpoint list` permanently showing bare IDs with no prompt,
+	// date, or counts.
+	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, checkpointRemoteForegroundFetchTimeout); err != nil {
+		// Warn, not Debug: `entire enable` is an explicit user action, and this
+		// failure means existing checkpoints stay unreachable until a read
+		// re-fetches them. At Debug the command looked like it had simply
+		// paused, then succeeded.
+		logging.Warn(ctx, "checkpoint-remote: enable bootstrap fetch failed; creating empty orphan",
 			slog.String("url", remote.RedactURL(url)),
 			slog.String("error", err.Error()),
 		)
+		fmt.Fprintf(os.Stderr, "  ! Could not fetch existing checkpoints from %s\n", remote.RedactURL(url))
+		fmt.Fprintln(os.Stderr, "    Continuing — they will be fetched on demand when a command needs them.")
 		return false
 	}
 	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
@@ -756,6 +788,19 @@ func healPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Repository, 
 		logging.Debug(ctx, "checkpoint-remote: skipping empty-orphan heal outside explicit enable flow")
 		return false, nil
 	}
+	if primaryIsGitRefs(ctx) {
+		// Same reasoning as the bootstrap: under git-refs nothing writes v1, so a
+		// data-free orphan cannot diverge from the remote and there is nothing to
+		// protect at enable time. Healing it here would make `entire enable` pull
+		// the whole transcript archive — the exact cost this backend's gating
+		// exists to avoid — for a branch only legacy reads consult.
+		//
+		// The orphan does hide those legacy reads (it makes the ref resolve), so
+		// the read path treats a data-free branch as a miss and recovers it on
+		// demand; see checkpoint.getSessionsBranchTree.
+		logging.Debug(ctx, "checkpoint-remote: skipping empty-orphan heal under git-refs primary")
+		return false, nil
+	}
 	return healEmptyOrphanFromCheckpointRemote(ctx, repo, primary)
 }
 
@@ -788,8 +833,13 @@ func healEmptyOrphanFromCheckpointRemote(ctx context.Context, repo *git.Reposito
 	tmpRefName := plumbing.ReferenceName(FetchTmpRefPrefix + primary.Short())
 	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
 
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true); err != nil {
-		logging.Debug(ctx, "checkpoint-remote: empty-orphan heal fetch failed; keeping local orphan",
+	// Unfiltered, for the same reason as the bootstrap fetch above: this heal
+	// replaces a data-free orphan with the real branch, which readers then treat
+	// as the checkpoint store.
+	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, checkpointRemoteForegroundFetchTimeout); err != nil {
+		// Warn for the same reason as the bootstrap fetch: this only runs from an
+		// explicit setup flow, and failing leaves the repo on a data-free orphan.
+		logging.Warn(ctx, "checkpoint-remote: empty-orphan heal fetch failed; keeping local orphan",
 			slog.String("url", remote.RedactURL(url)),
 			slog.String("error", err.Error()),
 		)

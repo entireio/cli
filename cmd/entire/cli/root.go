@@ -102,6 +102,8 @@ func NewRootCmd() *cobra.Command {
 		},
 	}
 
+	addContextFlag(cmd)
+
 	// Help groups; AddGroup order is display order in `entire --help`.
 	cmd.AddGroup(
 		&cobra.Group{ID: groupSetup, Title: "Entire Setup:"},

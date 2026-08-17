@@ -372,9 +372,9 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 
 	// Resolve which login context authenticates this cluster: the cluster's
 	// login servers are taken from the cluster_cores.json cache (or a live
-	// /.well-known fetch on miss/expiry), then the account is selected from
-	// local contexts — active context if eligible, else the sole eligible
-	// one, else an explicit-choice error.
+	// /.well-known fetch on miss/expiry), and the ACTIVE context must be issued
+	// by one of them. No other saved login is substituted, so which identity
+	// pushed or fetched is always readable from current_context.
 	cfgDir := userdirs.Config()
 	clusterAuth, err := clusterdiscovery.ResolveClusterAuth(ctx, cfgDir, userdirs.Cache(), parsedURL.Host, httpClient, debuglog.Printf)
 	if err != nil {

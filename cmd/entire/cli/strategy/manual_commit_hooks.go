@@ -2337,6 +2337,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		}
 		captureSessionBranch(repo, state)
 		captureSessionOwner(state)
+		reconcileWorktreePathForResumedTurn(ctx, state)
 
 		// ORDERING: attribution runs BEFORE migrate to use the pre-migration
 		// BaseCommit as the base tree (preserving correct agent-line counts

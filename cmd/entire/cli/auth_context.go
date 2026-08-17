@@ -15,18 +15,26 @@ import (
 // (it authenticates any cluster fronted by its login server) and the
 // control-plane commands (auth status, org/project/repo/grant), which dial the
 // context's core. Switching takes effect on the next operation; resolution
-// recomputes every time. Data-API commands (activity/search/trail/dispatch)
-// still target ENTIRE_API_BASE_URL and do not follow the active context yet.
+// recomputes every time. Data-API commands (activity/search/trail/dispatch) take
+// their HOST from ENTIRE_API_BASE_URL, but their identity from the active context
+// like everything else.
 func newAuthUseCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "use <context>",
 		Short: "Switch the active login context",
 		Long: "Switch the active login context.\n\n" +
-			"The active context is the preferred identity for `git clone entire://…` and\n" +
-			"the control-plane commands (auth status, org/project/repo/grant), which dial\n" +
-			"the context's login server. The switch takes effect on the next operation.\n\n" +
-			"Data-API commands (activity/search/trail/dispatch) still target\n" +
-			"ENTIRE_API_BASE_URL and do not follow the active context yet.",
+			"The active context is the identity for every authenticated operation:\n" +
+			"`git clone entire://…`, the control-plane commands (auth status,\n" +
+			"org/project/repo/grant), and the data-API commands (activity, search,\n" +
+			"trail, dispatch). The switch takes effect on the next operation.\n\n" +
+			"This is persistent and machine-wide — it changes the identity for every\n" +
+			"shell, worktree, and background git hook until you switch back. To act as\n" +
+			"another login for a single command instead, pass --context, or set\n" +
+			"ENTIRE_CONTEXT for one shell or one git operation:\n\n" +
+			"  entire --context staging activity\n" +
+			"  ENTIRE_CONTEXT=staging git push\n\n" +
+			"Data-API commands still take their HOST from ENTIRE_API_BASE_URL; the\n" +
+			"context supplies the identity, and the host must trust its login server.",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeContextNames,
 		RunE: func(cmd *cobra.Command, args []string) error {

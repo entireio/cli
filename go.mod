@@ -8,6 +8,7 @@ require (
 	charm.land/glamour/v2 v2.0.1
 	charm.land/huh/v2 v2.0.3
 	charm.land/lipgloss/v2 v2.0.5
+	github.com/atotto/clipboard v0.1.4
 	github.com/betterleaks/betterleaks v1.5.0
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/creack/pty v1.1.24
@@ -32,16 +33,16 @@ require (
 	github.com/mattn/go-isatty v0.0.24
 	github.com/mattn/go-runewidth v0.0.27
 	github.com/muesli/termenv v0.16.0
-	github.com/ogen-go/ogen v1.23.0
+	github.com/ogen-go/ogen v1.24.0
 	github.com/oklog/ulid/v2 v2.1.2
-	github.com/posthog/posthog-go v1.22.0
+	github.com/posthog/posthog-go v1.23.0
 	github.com/sergi/go-diff v1.4.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/crypto v0.55.0
-	golang.org/x/mod v0.38.0
+	golang.org/x/mod v0.39.0
 	golang.org/x/net v0.57.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/sys v0.47.0
@@ -58,9 +59,8 @@ require (
 	github.com/ProtonMail/go-crypto v1.4.1 // indirect
 	github.com/STARRY-S/zip v0.2.3 // indirect
 	github.com/alecthomas/chroma/v2 v2.14.0 // indirect
-	github.com/andybalholm/brotli v1.2.1 // indirect
+	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
-	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/bodgit/plumbing v1.3.0 // indirect
@@ -105,7 +105,7 @@ require (
 	github.com/hiddeco/sshsig v0.2.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/kevinburke/ssh_config v1.6.0 // indirect
-	github.com/klauspost/compress v1.18.6 // indirect
+	github.com/klauspost/compress v1.19.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
