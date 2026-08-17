@@ -3610,6 +3610,9 @@ func TestEnableCmd_YesOnConfiguredRepo_ManagesAgents(t *testing.T) {
 
 func TestRunEnableInteractiveSuppressAdditionalSetupAppliesTelemetryDefault(t *testing.T) {
 	setupTestRepo(t)
+	if err := os.Mkdir(".vercel", 0o755); err != nil {
+		t.Fatalf("create Vercel marker: %v", err)
+	}
 	ag, err := agent.Get(types.AgentName("claude-code"))
 	if err != nil {
 		t.Fatalf("agent.Get(claude-code) error = %v", err)
@@ -3630,6 +3633,9 @@ func TestRunEnableInteractiveSuppressAdditionalSetupAppliesTelemetryDefault(t *t
 	}
 	if s.Telemetry == nil || !*s.Telemetry {
 		t.Fatalf("suppressed telemetry prompt did not apply enabled default: %v", s.Telemetry)
+	}
+	if !s.Vercel {
+		t.Fatal("focused onboarding suppressed Vercel deployment protection")
 	}
 }
 

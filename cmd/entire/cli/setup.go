@@ -79,9 +79,10 @@ type EnableOptions struct {
 	// presentation of the final state (commit, push, done).
 	SuppressDoneMessage bool
 	// SuppressAdditionalSetup keeps focused callers (the configure onboarding
-	// flow) from offering telemetry, Vercel changes, or history import after
-	// their own explicitly presented choices. The normal enable flow leaves this
-	// false.
+	// flow) from offering telemetry consent or history import after their own
+	// explicitly presented choices. Vercel safety setup still runs because a
+	// configuration push can otherwise trigger an unwanted deployment. The
+	// normal enable flow leaves this false.
 	SuppressAdditionalSetup bool
 	Yes                     bool
 	// ImportHistory opts into importing the selected agents' pre-existing
@@ -1391,14 +1392,15 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	fmt.Fprintln(w, "  ✓ Configured project")
 	fmt.Fprintf(w, "    %s\n", configDisplay)
 
-	if !opts.SuppressAdditionalSetup {
-		var vercelPromptFn func() (bool, error)
-		if opts.Yes {
-			vercelPromptFn = func() (bool, error) { return true, nil }
-		}
-		if _, err := maybePromptVercelDeploymentDisable(ctx, w, targetFile, vercelPromptFn); err != nil {
-			return err
-		}
+	// Always offer Vercel deployment protection, including focused configure
+	// onboarding. Unlike telemetry/history, this directly protects the save step
+	// below from triggering a deployment of generated configuration commits.
+	var vercelPromptFn func() (bool, error)
+	if opts.Yes {
+		vercelPromptFn = func() (bool, error) { return true, nil }
+	}
+	if _, err := maybePromptVercelDeploymentDisable(ctx, w, targetFile, vercelPromptFn); err != nil {
+		return err
 	}
 
 	if !opts.SuppressAdditionalSetup {
