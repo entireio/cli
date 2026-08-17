@@ -45,23 +45,18 @@ func docRef(checkpointID string) string {
 // emitSearchPerformed reports a cli_search_performed telemetry event when
 // telemetry is opted in (settings.Telemetry == true). Best-effort and
 // non-blocking; search output has already been written, so failures simply
-// suppress the event.
-func emitSearchPerformed(ctx context.Context, searchID, mode string, resultCount, total, page, limit int) {
-	if searchID == "" {
+// suppress the event. Fires on both success ("ok") and request failure
+// ("error_request", ...) outcomes; callers assemble the event (see
+// buildSearchPerformedEvent).
+func emitSearchPerformed(ctx context.Context, event telemetry.SearchPerformedEvent) {
+	if event.SearchID == "" {
 		return
 	}
 	s, err := LoadEntireSettings(ctx)
 	if err != nil || s.Telemetry == nil || !*s.Telemetry {
 		return
 	}
-	telemetry.TrackSearchPerformed(telemetry.SearchPerformedEvent{
-		SearchID:    searchID,
-		Mode:        mode,
-		ResultCount: resultCount,
-		Total:       total,
-		Page:        page,
-		Limit:       limit,
-	}, versioninfo.Version)
+	telemetry.TrackSearchPerformed(event, versioninfo.Version)
 }
 
 // parseExplainSearchHit validates a --search-id token ("<ulid>" or

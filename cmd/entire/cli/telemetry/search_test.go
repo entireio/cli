@@ -5,12 +5,23 @@ import "testing"
 func TestBuildSearchPerformedPayload(t *testing.T) {
 	t.Parallel()
 	event := SearchPerformedEvent{
-		SearchID:    "01JXAMPLE0000000000000000",
-		Mode:        "compact",
-		ResultCount: 5,
-		Total:       42,
-		Page:        1,
-		Limit:       5,
+		SearchID:     "01JXAMPLE0000000000000000",
+		Mode:         "compact",
+		Outcome:      "ok",
+		QueryLength:  12,
+		FetchedCount: 5,
+		Total:        42,
+		ZeroResults:  false,
+		Page:         1,
+		Limit:        5,
+		AllRepos:     true,
+		FilterAuthor: true,
+		FilterDate:   false,
+		FilterBranch: true,
+		FilterRepo:   false,
+		Reranked:     true,
+		TotalMS:      123,
+		Degraded:     false,
 	}
 	payload := BuildSearchPerformedPayload(event, "1.2.3")
 	if payload == nil {
@@ -23,7 +34,12 @@ func TestBuildSearchPerformedPayload(t *testing.T) {
 		t.Error("distinct_id must be set")
 	}
 	p := payload.Properties
-	for _, key := range []string{"search_id", "mode", "result_count", "total", "page", "limit", "cli_version", "os", "arch"} {
+	for _, key := range []string{
+		"search_id", "mode", "outcome", "query_length", "fetched_count", "total",
+		"zero_results", "page", "limit", "all_repos", "f_author", "f_date",
+		"f_branch", "f_repo", "reranked", "total_ms", "degraded",
+		"cli_version", "os", "arch",
+	} {
 		if _, ok := p[key]; !ok {
 			t.Errorf("missing property %q", key)
 		}
@@ -35,8 +51,14 @@ func TestBuildSearchPerformedPayload(t *testing.T) {
 			t.Errorf("forbidden property %q present", key)
 		}
 	}
-	if got := p["result_count"]; got != 5 {
-		t.Errorf("result_count = %v, want 5", got)
+	if got := p["fetched_count"]; got != 5 {
+		t.Errorf("fetched_count = %v, want 5", got)
+	}
+	if got := p["total"]; got != 42 {
+		t.Errorf("total = %v, want 42", got)
+	}
+	if got := p["outcome"]; got != "ok" {
+		t.Errorf("outcome = %v, want ok", got)
 	}
 }
 

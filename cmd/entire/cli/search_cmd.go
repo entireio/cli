@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/spf13/cobra"
 )
@@ -273,8 +274,22 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				searchCfg.ClientSurface = "cli-tui"
 			}
 
+			// Mode is fixed by compactOutput before the request goes out, so
+			// the error path below (no response yet) can still tag its event
+			// correctly.
+			mode := "json"
+			if compactOutput {
+				mode = "compact"
+			}
+
 			resp, err := searcher(ctx, searchCfg)
 			if err != nil {
+				// Only JSON-mode invocations emit telemetry (mirrors the
+				// success-path guard below): the interactive TUI handles its
+				// own re-search failures and shouldn't double-emit.
+				if jsonOutput || !isTerminal {
+					emitSearchPerformed(ctx, buildSearchPerformedEvent(searchCfg, mode, "error_request", nil, 0, 0, 0))
+				}
 				return fmt.Errorf("search failed: %w", err)
 			}
 			for _, warning := range resp.Warnings {
@@ -283,19 +298,17 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			// JSON output: explicit flag or piped/redirected stdout
 			if jsonOutput || !isTerminal {
-				mode := "json"
-				var served int
+				var served, normLimit, normPage int
 				var writeErr error
 				if compactOutput {
-					mode = "compact"
-					served, writeErr = writeSearchCompactJSON(w, resp, requestedLimit, requestedPage, searchID, owner+"/"+repoName)
+					served, normLimit, normPage, writeErr = writeSearchCompactJSON(w, resp, requestedLimit, requestedPage, searchID, owner+"/"+repoName)
 				} else {
-					served, writeErr = writeSearchJSON(w, resp, requestedLimit, requestedPage, searchID)
+					served, normLimit, normPage, writeErr = writeSearchJSON(w, resp, requestedLimit, requestedPage, searchID)
 				}
 				if writeErr != nil {
 					return writeErr
 				}
-				emitSearchPerformed(ctx, searchID, mode, served, len(resp.Results), requestedPage, requestedLimit)
+				emitSearchPerformed(ctx, buildSearchPerformedEvent(searchCfg, mode, "ok", resp, served, normLimit, normPage))
 				return nil
 			}
 
@@ -969,6 +982,44 @@ func isASCII(s string) bool {
 	return true
 }
 
+// buildSearchPerformedEvent assembles a cli_search_performed telemetry event
+// (ENT-1528) from the request config, the (optional) server response, and
+// the writer-normalized pagination. Shared by RunE's two emit sites — the
+// success path passes the real resp/served/normLimit/normPage, the error
+// path (search failed before any response existed) passes resp == nil and
+// zero counts. Total is always resp.Total, the server's honest match count —
+// never derived from served/len(results), so a short or filtered page never
+// masquerades as "few matches". AllRepos is ScopeSlugs' second return: an
+// explicit --repo filter beats --all-repos.
+func buildSearchPerformedEvent(cfg search.Config, mode, outcome string, resp *search.Response, served, normLimit, normPage int) telemetry.SearchPerformedEvent {
+	_, allRepos := cfg.ScopeSlugs()
+	event := telemetry.SearchPerformedEvent{
+		SearchID:     cfg.SearchID,
+		Mode:         mode,
+		Outcome:      outcome,
+		QueryLength:  utf8.RuneCountInString(cfg.Query),
+		Page:         normPage,
+		Limit:        normLimit,
+		AllRepos:     allRepos,
+		FilterAuthor: cfg.Author != "",
+		FilterDate:   cfg.Date != "",
+		FilterBranch: cfg.Branch != "",
+		FilterRepo:   len(cfg.Repos) > 0,
+	}
+	if resp == nil {
+		return event
+	}
+	event.FetchedCount = served
+	event.Total = resp.Total
+	event.ZeroResults = resp.Total == 0
+	event.Reranked = resp.Reranked != nil && *resp.Reranked
+	if resp.Timing != nil && resp.Timing.TotalMs != nil {
+		event.TotalMS = int(*resp.Timing.TotalMs)
+	}
+	event.Degraded = len(resp.Warnings) > 0
+	return event
+}
+
 // paginateSearchResults slices results for the requested client-side page,
 // normalizing limit and page, and returns the page slice (never nil) plus the
 // normalized pagination values.
@@ -999,11 +1050,13 @@ func paginateSearchResults(results []search.Result, limit, page int) (pageResult
 }
 
 // writeSearchJSON writes client-side paginated search results as JSON and
-// returns the number of results served. searchID ties the response to its
-// cli_search_performed telemetry event (ENT-1528); it is minted client-side
-// because the server response carries no request id and the CLI merges
-// several cell responses into one page.
-func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int, searchID string) (int, error) {
+// returns the number of results served plus the normalized limit/page
+// (paginateSearchResults already computes both; the caller needs them for
+// the cli_search_performed telemetry event, ENT-1528). searchID ties the
+// response to that event; it is minted client-side because the server
+// response carries no request id and the CLI merges several cell responses
+// into one page.
+func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int, searchID string) (served, normLimit, normPage int, err error) {
 	pageResults, total, totalPages, limit, page := paginateSearchResults(resp.Results, limit, page)
 
 	out := struct {
@@ -1023,12 +1076,12 @@ func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int, search
 		SearchID:   searchID,
 		Counts:     resp.Counts,
 	}
-	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
-	if err != nil {
-		return 0, fmt.Errorf("marshaling results: %w", err)
+	data, marshalErr := jsonutil.MarshalIndentWithNewline(out, "", "  ")
+	if marshalErr != nil {
+		return 0, limit, page, fmt.Errorf("marshaling results: %w", marshalErr)
 	}
 	fmt.Fprint(w, string(data))
-	return len(pageResults), nil
+	return len(pageResults), limit, page, nil
 }
 
 // compactTitleMaxLen caps the title snippet length (in runes) in --compact
@@ -1118,8 +1171,9 @@ func compactSnippet(title, snippet string) string {
 // truncated title snippet — never the full prompt. Agents fetch full detail
 // for a single hit via the per-hit explain hint (add --full for the
 // checkpoint's entire session transcript). Returns the number of results
-// served. currentRepo ("org/name") decides which hints need --repo.
-func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int, searchID, currentRepo string) (int, error) {
+// served plus the normalized limit/page (see writeSearchJSON). currentRepo
+// ("org/name") decides which hints need --repo.
+func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int, searchID, currentRepo string) (served, normLimit, normPage int, err error) {
 	pageResults, total, totalPages, limit, page := paginateSearchResults(resp.Results, limit, page)
 
 	hits := make([]compactSearchHit, 0, len(pageResults))
@@ -1168,10 +1222,10 @@ func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int,
 		SearchID:   searchID,
 		Counts:     resp.Counts,
 	}
-	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
-	if err != nil {
-		return 0, fmt.Errorf("marshaling compact results: %w", err)
+	data, marshalErr := jsonutil.MarshalIndentWithNewline(out, "", "  ")
+	if marshalErr != nil {
+		return 0, limit, page, fmt.Errorf("marshaling compact results: %w", marshalErr)
 	}
 	fmt.Fprint(w, string(data))
-	return len(hits), nil
+	return len(hits), limit, page, nil
 }

@@ -18,14 +18,31 @@ const (
 )
 
 // SearchPerformedEvent carries the fields for a cli_search_performed event
-// (ENT-1528).
+// (ENT-1528). Outcome distinguishes a served response ("ok") from a request
+// that failed before any results existed ("error_request", "error_auth",
+// ...); on an error path the count fields are zero. FetchedCount and Total
+// are deliberately distinct: FetchedCount is what this page served
+// client-side, Total is the server's true match count (resp.Total) — never
+// derived from len(results), so a filtered/short page doesn't masquerade as
+// "few matches". Page and Limit are the normalized values the envelope
+// reports (paginateSearchResults), not the raw --page/--limit flags.
 type SearchPerformedEvent struct {
-	SearchID    string
-	Mode        string // "json" or "compact"
-	ResultCount int    // results served on this page
-	Total       int    // total results before client-side pagination
-	Page        int
-	Limit       int
+	SearchID     string
+	Mode         string // "json" | "compact"
+	Outcome      string // "ok" | "error_request" | "error_auth" | ...
+	QueryLength  int    // rune count of the query text, never the text itself
+	FetchedCount int    // results served on this page (client-side)
+	Total        int    // server's true total match count (resp.Total)
+	ZeroResults  bool
+	Page, Limit  int // normalized values the envelope reports
+	AllRepos     bool
+	FilterAuthor bool
+	FilterDate   bool
+	FilterBranch bool
+	FilterRepo   bool
+	Reranked     bool
+	TotalMS      int
+	Degraded     bool // response carried completeness warnings
 }
 
 // CheckpointExplainedEvent carries the fields for a cli_checkpoint_explained
@@ -54,15 +71,26 @@ func BuildSearchPerformedPayload(event SearchPerformedEvent, version string) *Ev
 		Event:      "cli_search_performed",
 		DistinctID: machineID,
 		Properties: map[string]any{
-			"search_id":    event.SearchID,
-			"mode":         event.Mode,
-			"result_count": event.ResultCount,
-			"total":        event.Total,
-			"page":         event.Page,
-			"limit":        event.Limit,
-			"cli_version":  version,
-			"os":           runtime.GOOS,
-			"arch":         runtime.GOARCH,
+			"search_id":     event.SearchID,
+			"mode":          event.Mode,
+			"outcome":       event.Outcome,
+			"query_length":  event.QueryLength,
+			"fetched_count": event.FetchedCount,
+			"total":         event.Total,
+			"zero_results":  event.ZeroResults,
+			"page":          event.Page,
+			"limit":         event.Limit,
+			"all_repos":     event.AllRepos,
+			"f_author":      event.FilterAuthor,
+			"f_date":        event.FilterDate,
+			"f_branch":      event.FilterBranch,
+			"f_repo":        event.FilterRepo,
+			"reranked":      event.Reranked,
+			"total_ms":      event.TotalMS,
+			"degraded":      event.Degraded,
+			"cli_version":   version,
+			"os":            runtime.GOOS,
+			"arch":          runtime.GOARCH,
 		},
 		Timestamp: time.Now(),
 	}
