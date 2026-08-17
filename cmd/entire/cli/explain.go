@@ -429,10 +429,6 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.Flags().BoolVar(&insecureHTTPFlag, "insecure-http-auth", false, "Allow plain-HTTP auth for --repo (local dev only)")
 	cmd.Flags().IntVar(&summaryTimeoutSecondsFlag, "summary-timeout-seconds", 0, "Hard deadline in seconds for --generate summary generation; overrides summary_timeout_seconds setting. 0 = use setting; if setting is also unset or 0, no automatic deadline applies.")
 	cmd.Flags().StringVar(&searchIDFlag, "search-id", "", "Search attribution token from a search result's explain hint (search-id[:rank]); used only for relevance telemetry")
-	// Attribution metadata, not a behavior switch — hidden to keep help focused.
-	if err := cmd.Flags().MarkHidden("search-id"); err != nil {
-		panic(fmt.Sprintf("hide search-id flag: %v", err))
-	}
 
 	// Verbosity / transcript output modes are mutually exclusive
 	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript", "transcript", "json")

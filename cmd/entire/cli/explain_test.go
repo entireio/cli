@@ -1586,6 +1586,18 @@ func TestExplainCmd_HasRawTranscriptFlag(t *testing.T) {
 	}
 }
 
+func TestExplainCmd_SearchIDFlagNotHidden(t *testing.T) {
+	cmd := newExplainCmd()
+
+	flag := cmd.Flags().Lookup("search-id")
+	if flag == nil {
+		t.Fatal("expected --search-id flag to exist")
+	}
+	if flag.Hidden {
+		t.Error("expected --search-id to be visible in help/agent-help, got Hidden=true")
+	}
+}
+
 func TestRunExplain_MutualExclusivityError(t *testing.T) {
 	var buf, errBuf bytes.Buffer
 
