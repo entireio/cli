@@ -345,6 +345,40 @@ func TestTrustCurrentRepo(t *testing.T) {
 	})
 }
 
+func TestTrustAllRepos(t *testing.T) {
+	t.Run("sets trust_all machine-wide", func(t *testing.T) {
+		_, cfg := newTrustTestRepo(t)
+		writeUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+		if err := TrustAllRepos(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		us, err := LoadUserSettings(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !us.Global.TrustAll {
+			t.Fatal("TrustAllRepos must persist trust_all")
+		}
+		if CurrentTrustSource(t.Context()) != TrustSourceAll {
+			t.Fatal("trust_all consent must be attributed to TrustSourceAll")
+		}
+	})
+
+	t.Run("unconfigured global tier errors without materializing the block", func(t *testing.T) {
+		newTrustTestRepo(t)
+		if err := TrustAllRepos(t.Context()); err == nil {
+			t.Fatal("trust_all with no global block must error, not invent one")
+		}
+		us, err := LoadUserSettings(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if us.Global != nil {
+			t.Fatal("a failed trust_all write must not materialize the global block (it would suppress the ask-once global-enable question)")
+		}
+	})
+}
+
 func TestRevokeCurrentRepo(t *testing.T) {
 	t.Run("revoke then remove origin keeps the gate closed", func(t *testing.T) {
 		// The resurrection regression: revoke must ALSO drop any trusted_paths

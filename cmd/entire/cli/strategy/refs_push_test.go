@@ -217,6 +217,7 @@ func enqueueRefs(t *testing.T, repo *git.Repository, refs []plumbing.ReferenceNa
 
 func TestPushQueuedCheckpointRefs(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	writeEnabledRepoSettings(t, workDir)
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
 
@@ -235,6 +236,36 @@ func TestPushQueuedCheckpointRefs(t *testing.T) {
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
 	assert.Empty(t, remaining, "pushed refs are removed from the queue")
+}
+
+// PushQueuedCheckpointRefs is the second egress entry point (the migration
+// flow's opt-in "push now", which bypasses prePush) — an untrusted globally
+// enrolled repo must be held here too, with the refs left queued and an error
+// pointing at `entire trust`. Catches the gate being wired into prePush only.
+func TestPushQueuedCheckpointRefs_EgressGateHoldsUntrustedRepo(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	enrollRepoGlobally(t, `{"global":{"enabled":true}}`)
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.ErrorContains(t, err, "refs stay queued")
+	require.ErrorContains(t, err, "entire trust")
+	assert.False(t, pushDisabled, "a trust hold is not push_sessions=false")
+	assert.Equal(t, 0, pushed)
+
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining, "a held push leaves refs queued")
+
+	remoteRefs := lsRemoteOutput(t, bareDir)
+	for _, ref := range refs {
+		assert.NotContains(t, remoteRefs, ref.String(), "a held push must not reach the remote")
+	}
 }
 
 func TestPushQueuedCheckpointRefs_PushDisabled(t *testing.T) {
@@ -267,6 +298,7 @@ func TestPushQueuedCheckpointRefs_PushDisabled(t *testing.T) {
 
 func TestPushQueuedCheckpointRefs_PolicyBlocked(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	writeEnabledRepoSettings(t, workDir)
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
 
@@ -294,6 +326,7 @@ func TestPushQueuedCheckpointRefs_PolicyBlocked(t *testing.T) {
 
 func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
 	workDir, _, refs := setupRepoWithCheckpointRefs(t)
+	writeEnabledRepoSettings(t, workDir)
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
 

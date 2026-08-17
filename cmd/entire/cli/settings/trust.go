@@ -135,10 +135,8 @@ func TrustCurrentRepo(ctx context.Context) (TrustIdentity, error) {
 		return TrustIdentity{}, err
 	}
 	err = ModifyUserSettings(ctx, func(us *UserSettings) error {
-		if us.Global == nil {
-			// Materializing the block here would flip GlobalConfigured() and
-			// silently suppress the ask-once global-enable question.
-			return errors.New("global mode is not configured; nothing to trust")
+		if err := requireConfiguredGlobal(us); err != nil {
+			return err
 		}
 		g := us.Global
 		if len(id.OriginKeys) > 0 {
@@ -159,6 +157,31 @@ func TrustCurrentRepo(ctx context.Context) (TrustIdentity, error) {
 		return TrustIdentity{}, err
 	}
 	return id, nil
+}
+
+// requireConfiguredGlobal is the single guard shared by every trust writer:
+// materializing the global block on a machine whose global tier was never
+// configured would flip GlobalConfigured() and silently suppress the ask-once
+// global-enable question.
+func requireConfiguredGlobal(us *UserSettings) error {
+	if us.Global == nil {
+		return errors.New("global mode is not configured; nothing to trust")
+	}
+	return nil
+}
+
+// TrustAllRepos records machine-wide egress consent (trust_all): every
+// globally enrolled repo on this machine — current and future — syncs
+// checkpoints. Per-repo keys are left untouched, so disabling trust_all later
+// restores the per-repo consent state.
+func TrustAllRepos(ctx context.Context) error {
+	return ModifyUserSettings(ctx, func(us *UserSettings) error {
+		if err := requireConfiguredGlobal(us); err != nil {
+			return err
+		}
+		us.Global.TrustAll = true
+		return nil
+	})
 }
 
 // RevokeCurrentRepo withdraws egress consent for the current repository's

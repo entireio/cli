@@ -1709,3 +1709,57 @@ func TestEnsureEntireGitignore_IncludesRedactorsLocal(t *testing.T) {
 		t.Errorf(".entire/.gitignore missing redactors/local/ entry; got:\n%s", body)
 	}
 }
+
+// enrollRepoGlobally points the user-global settings tier at a fresh config
+// dir with the given settings JSON and leaves the current repo without
+// repo-level setup, so settings.CheckpointEgressAllowed is decided purely by
+// the global trust store. Returns the config dir. Callers must already have
+// chdir'd into the repo (the cache resets here are keyed off CWD). Not
+// parallel-safe: t.Setenv.
+func enrollRepoGlobally(t *testing.T, userSettingsJSON string) string {
+	t.Helper()
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(userSettingsJSON), 0o600))
+	paths.ClearWorktreeRootCache()
+	paths.ClearInvisibleRuntimeCache()
+	t.Cleanup(func() {
+		paths.ClearWorktreeRootCache()
+		paths.ClearInvisibleRuntimeCache()
+	})
+	return cfgDir
+}
+
+// captureStderrWriter redirects the strategy package's user-facing warning
+// writer into a buffer for the duration of the test.
+func captureStderrWriter(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := stderrWriter
+	stderrWriter = &buf
+	t.Cleanup(func() { stderrWriter = old })
+	return &buf
+}
+
+// writeEnabledRepoSettings gives a fixture repo explicit repo-level setup,
+// which is consent under the egress trust gate (IsSetUpAny short-circuit).
+func writeEnabledRepoSettings(t *testing.T, dir string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true}`), 0o600))
+}
+
+const heldMessageFragment = "checkpoint sync held"
+
+// lsRemoteOutput returns `git ls-remote <bareDir>` for asserting which refs a
+// push did (not) deliver.
+func lsRemoteOutput(t *testing.T, bareDir string) string {
+	t.Helper()
+	lsCmd := exec.CommandContext(context.Background(), "git", "ls-remote", bareDir)
+	lsCmd.Env = testutil.GitIsolatedEnv()
+	out, err := lsCmd.CombinedOutput()
+	require.NoError(t, err, "ls-remote failed: %s", out)
+	return string(out)
+}

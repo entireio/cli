@@ -241,6 +241,7 @@ func TestPrePushFromGitHook_DeferralStillRunsOPF(t *testing.T) {
 	configureFakeOPF(t, fake)
 
 	dir, repo, originalTip := setupV1RepoInDir(t)
+	writeEnabledRepoSettings(t, dir)
 	remoteDir := filepath.Join(t.TempDir(), "origin.git")
 	_, err := git.PlainInit(remoteDir, true)
 	require.NoError(t, err)
