@@ -69,3 +69,13 @@ func TestQuestionTitleChangesWithFocus(t *testing.T) {
 		t.Fatal("focused and blurred question titles are identical")
 	}
 }
+
+func TestFocusRefreshDoesNotResizeTerminal(t *testing.T) {
+	msg := refreshFocus()()
+	if _, ok := msg.(tea.WindowSizeMsg); ok {
+		t.Fatal("focus refresh must not send a window-size message")
+	}
+	if _, ok := msg.(focusChangedMsg); !ok {
+		t.Fatalf("focus refresh sent %T, want focusChangedMsg", msg)
+	}
+}

@@ -286,8 +286,13 @@ func (field *ActionSelect[T]) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
 	return field, cmd
 }
 
+// focusChangedMsg gives Huh a follow-up frame after a field transition so
+// dynamic titles are re-evaluated. It must not be a zero-sized WindowSizeMsg:
+// Huh interprets that as a real terminal resize and collapses the form.
+type focusChangedMsg struct{}
+
 func refreshFocus() tea.Cmd {
-	return func() tea.Msg { return tea.WindowSizeMsg{} }
+	return func() tea.Msg { return focusChangedMsg{} }
 }
 
 func windowResize(size tea.WindowSizeMsg) tea.Cmd {
