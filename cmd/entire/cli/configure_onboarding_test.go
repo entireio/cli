@@ -606,6 +606,48 @@ func TestConfigureEffectiveProtectionFailsClosedNonInteractively(t *testing.T) {
 	}
 }
 
+func TestConfigureBranchProtectedChecksRulesetsAndClassicProtection(t *testing.T) {
+	previous := configureGitHubAPI
+	t.Cleanup(func() { configureGitHubAPI = previous })
+
+	tests := []struct {
+		name        string
+		rules       string
+		classicErr  error
+		want        bool
+		wantClassic bool
+	}{
+		{name: "classic protection blocks", rules: `[]`, want: true, wantClassic: true},
+		{name: "no classic or ruleset protection", rules: `[{"type":"copilot_code_review"}]`, classicErr: errors.New("HTTP 404: branch not protected"), wantClassic: true},
+		{name: "blocking ruleset short circuits", rules: `[{"type":"pull_request"}]`, classicErr: errors.New("classic endpoint should not be called"), want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			classicCalled := false
+			configureGitHubAPI = func(_ context.Context, endpoint string) ([]byte, error) {
+				if strings.Contains(endpoint, "/rules/branches/") {
+					return []byte(tt.rules), nil
+				}
+				classicCalled = true
+				if tt.classicErr != nil {
+					return nil, tt.classicErr
+				}
+				return []byte(`{"required_pull_request_reviews":{}}`), nil
+			}
+			got, err := configureBranchProtected(context.Background(), "acme", "widget", "main")
+			if err != nil {
+				t.Fatalf("configureBranchProtected() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("configureBranchProtected() = %v, want %v", got, tt.want)
+			}
+			if classicCalled != tt.wantClassic {
+				t.Fatalf("classic endpoint called = %v, want %v", classicCalled, tt.wantClassic)
+			}
+		})
+	}
+}
+
 func TestConfigureRulesBlockDirectPush(t *testing.T) {
 	tests := []struct {
 		name string

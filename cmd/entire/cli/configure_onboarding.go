@@ -1589,16 +1589,55 @@ func configureBranchMatchesRemoteHead(ctx context.Context, repoRoot, remote, bra
 	return err == nil && strings.TrimSpace(head) == fields[0]
 }
 
+var configureGitHubAPI = func(ctx context.Context, endpoint string) ([]byte, error) { //nolint:gochecknoglobals // test seam for GitHub protection APIs
+	cmd := exec.CommandContext(ctx, "gh", "api", endpoint)
+	out, err := cmd.Output()
+	if err == nil {
+		return out, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && len(exitErr.Stderr) != 0 {
+		return nil, fmt.Errorf("%s: %w", strings.TrimSpace(string(exitErr.Stderr)), err)
+	}
+	return nil, fmt.Errorf("gh api %s: %w", endpoint, err)
+}
+
 func configureBranchProtected(ctx context.Context, owner, repo, branch string) (bool, error) {
+	base := "repos/" + owner + "/" + repo
+	escapedBranch := url.PathEscape(branch)
+
 	// GitHub's branch `.protected` flag is true for *any* active ruleset rule.
 	// A non-blocking rule such as Copilot code review therefore made ordinary
-	// feature branches look push-protected. Inspect the effective rules instead
-	// and only require a new branch for rules that can reject a direct update.
-	out, err := exec.CommandContext(ctx, "gh", "api", "repos/"+owner+"/"+repo+"/rules/branches/"+url.PathEscape(branch)).Output()
-	if err != nil {
-		return false, fmt.Errorf("check GitHub branch rules: %w", err)
+	// feature branches look push-protected. Inspect effective rulesets first and
+	// only treat rules that can reject a direct update as blocking.
+	rules, rulesErr := configureGitHubAPI(ctx, base+"/rules/branches/"+escapedBranch)
+	if rulesErr == nil {
+		blocked, err := configureRulesBlockDirectPush(rules)
+		if err != nil {
+			rulesErr = err
+		} else if blocked {
+			return true, nil
+		}
 	}
-	return configureRulesBlockDirectPush(out)
+
+	// Effective rulesets do not include classic branch-protection rules. A 200
+	// from the classic endpoint means protection is configured; conservatively
+	// use a review branch because its requirements may reject this user's push.
+	_, classicErr := configureGitHubAPI(ctx, base+"/branches/"+escapedBranch+"/protection")
+	if classicErr == nil {
+		return true, nil
+	}
+	if !configureGitHubAPINotFound(classicErr) {
+		return false, fmt.Errorf("check classic GitHub branch protection: %w", classicErr)
+	}
+	if rulesErr != nil {
+		return false, fmt.Errorf("check GitHub branch rules: %w", rulesErr)
+	}
+	return false, nil
+}
+
+func configureGitHubAPINotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "HTTP 404")
 }
 
 func configureRulesBlockDirectPush(raw []byte) (bool, error) {
