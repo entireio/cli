@@ -1027,27 +1027,19 @@ func (s *treeWriter) readSummaryFromBlob(hash plumbing.Hash) (*CheckpointSummary
 // 2x input instead of 1.25x, so dropping it makes any re-priced aggregate
 // silently undercount.
 func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
-	if a == nil && b == nil {
+	// Tokens (including the subagent chain) come from the shared summer; this
+	// wrapper exists only to layer cost on top, which AddTokenUsage does not
+	// carry. Summing the fields here instead would silently drop SubagentTokens
+	// and every committed checkpoint would report "subagent_tokens": null.
+	result := types.AddTokenUsage(a, b)
+	if result == nil {
 		return nil
 	}
-	result := &agent.TokenUsage{}
 	var aCost, bCost *float64
 	if a != nil {
-		result.InputTokens = a.InputTokens
-		result.CacheCreationTokens = a.CacheCreationTokens
-		result.CacheCreation1hTokens = a.CacheCreation1hTokens
-		result.CacheReadTokens = a.CacheReadTokens
-		result.OutputTokens = a.OutputTokens
-		result.APICallCount = a.APICallCount
 		aCost = a.CostUSD
 	}
 	if b != nil {
-		result.InputTokens += b.InputTokens
-		result.CacheCreationTokens += b.CacheCreationTokens
-		result.CacheCreation1hTokens += b.CacheCreation1hTokens
-		result.CacheReadTokens += b.CacheReadTokens
-		result.OutputTokens += b.OutputTokens
-		result.APICallCount += b.APICallCount
 		bCost = b.CostUSD
 	}
 	result.CostUSD = types.AddCostUSD(aCost, bCost)

@@ -885,7 +885,10 @@ func backfillModelAndReprice(ctx context.Context, ag agent.Agent, sessionData *E
 		hasTokenUsageData(state.TokenUsage) && state.TokenUsage.CostUSD == nil {
 		fullUsage, _ := tokenUsageWithCost(ctx, ag, sessionData.Transcript, 0, state.ModelName, state.AgentType)
 		if hasTokenUsageData(fullUsage) {
-			state.TokenUsage = fullUsage
+			// The reprice recomputes with subagentsDir="" and so drops the
+			// cumulative subagent total; carry it across, same as the backfill
+			// path does (finding 019f5ebf-a57e).
+			state.TokenUsage = withSubagentTokensFrom(fullUsage, state.TokenUsage)
 		}
 	}
 
@@ -896,10 +899,15 @@ func backfillModelAndReprice(ctx context.Context, ag agent.Agent, sessionData *E
 	if !hasTokenUsageData(usage) {
 		return
 	}
+	// The reprice runs after CondenseSession has already refilled the subagent
+	// total that the subagentsDir="" recompute drops, and it replaces the whole
+	// value — so carry that total across or the committed checkpoint reports
+	// "subagent_tokens": null again.
+	priced := withSubagentTokensFrom(usage, sessionData.TokenUsage)
 	if state.TokenUsage == sessionData.TokenUsage {
-		state.TokenUsage = usage
+		state.TokenUsage = priced
 	}
-	sessionData.TokenUsage = usage
+	sessionData.TokenUsage = priced
 	sessionData.ModelUsage = buckets
 }
 
@@ -908,12 +916,14 @@ func backfillModelAndReprice(ctx context.Context, ag agent.Agent, sessionData *E
 // with subagentsDir="" and so always yields a nil SubagentTokens (see
 // extractSessionData), which would otherwise replace a total already computed.
 //
-// The caller picks the source, and the two callers deliberately pick differently:
+// The caller picks the source, and the callers deliberately pick differently:
 // condensation passes state.CheckpointTokenUsage (this window's total, already
 // rescoped by SaveStep, so committed checkpoints stay summable rather than each
 // re-reporting the session total), while applyBackfilledSessionTokenUsage passes
 // state.TokenUsage (the session-wide cumulative, which is what
 // resetCheckpointWindow must later snapshot as the next baseline).
+// backfillModelAndReprice passes whichever value it is about to replace, so a
+// reprice preserves the total the earlier fill established.
 //
 // Copies rather than mutates: applyBackfilledSessionTokenUsage can adopt the
 // checkpoint usage as state.TokenUsage (Copilot CLI), so mutating in place would
