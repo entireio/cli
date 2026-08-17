@@ -125,9 +125,9 @@ func (q *PushQueue) Peek() ([]plumbing.ReferenceName, error) {
 	return refs, err
 }
 
-// Remove deletes the given refs from the queue, preserving any entries appended
-// after a Drain (e.g. a write that landed during the push). Called after a
-// confirmed push.
+// Remove deletes one queued entry for each given ref, preserving any entries
+// appended after a Drain (including a newer entry for the same ref). Called
+// after a confirmed push.
 func (q *PushQueue) Remove(refs []plumbing.ReferenceName) error {
 	if len(refs) == 0 {
 		return nil
@@ -138,17 +138,18 @@ func (q *PushQueue) Remove(refs []plumbing.ReferenceName) error {
 	}
 	defer release()
 
-	current, _, err := q.readLocked()
+	current, err := q.readEntriesLocked()
 	if err != nil {
 		return err
 	}
-	removed := make(map[string]struct{}, len(refs))
+	removed := make(map[string]int, len(refs))
 	for _, r := range refs {
-		removed[r.String()] = struct{}{}
+		removed[r.String()]++
 	}
 	kept := make([]plumbing.ReferenceName, 0, len(current))
 	for _, r := range current {
-		if _, drop := removed[r.String()]; drop {
+		if remaining := removed[r.String()]; remaining > 0 {
+			removed[r.String()] = remaining - 1
 			continue
 		}
 		kept = append(kept, r)
@@ -191,6 +192,27 @@ func (q *PushQueue) rewriteLocked(refs []plumbing.ReferenceName) error {
 // de-duplicated set and is worth compacting: rawLines > len(refs) exactly when
 // there were redundant lines.
 func (q *PushQueue) readLocked() (refs []plumbing.ReferenceName, rawLines int, err error) {
+	entries, rawLines, err := q.readEntriesWithRawLinesLocked()
+	if err != nil {
+		return nil, 0, err
+	}
+	seen := make(map[string]struct{})
+	for _, ref := range entries {
+		if _, dup := seen[ref.String()]; dup {
+			continue
+		}
+		seen[ref.String()] = struct{}{}
+		refs = append(refs, ref)
+	}
+	return refs, rawLines, nil
+}
+
+func (q *PushQueue) readEntriesLocked() ([]plumbing.ReferenceName, error) {
+	entries, _, err := q.readEntriesWithRawLinesLocked()
+	return entries, err
+}
+
+func (q *PushQueue) readEntriesWithRawLinesLocked() (refs []plumbing.ReferenceName, rawLines int, err error) {
 	f, err := os.Open(q.queuePath())
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -200,7 +222,6 @@ func (q *PushQueue) readLocked() (refs []plumbing.ReferenceName, rawLines int, e
 	}
 	defer f.Close()
 
-	seen := make(map[string]struct{})
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -213,10 +234,6 @@ func (q *PushQueue) readLocked() (refs []plumbing.ReferenceName, rawLines int, e
 		if err := json.Unmarshal(line, &entry); err != nil || entry.Ref == "" {
 			continue
 		}
-		if _, dup := seen[entry.Ref]; dup {
-			continue
-		}
-		seen[entry.Ref] = struct{}{}
 		refs = append(refs, plumbing.ReferenceName(entry.Ref))
 	}
 	if err := scanner.Err(); err != nil {

@@ -143,6 +143,23 @@ func TestPushQueue_RemovePreservesLaterEntries(t *testing.T) {
 	assert.Equal(t, []plumbing.ReferenceName{b}, refs)
 }
 
+func TestPushQueue_RemovePreservesNewerSameRefEntry(t *testing.T) {
+	t.Parallel()
+	q := NewPushQueue(t.TempDir())
+	ref := mustRefName(t, "a1b2c3d4e5f6")
+
+	// Simulate the same ref advancing and being enqueued during the push.
+	require.NoError(t, q.Enqueue(ref))
+	drained, err := q.Drain()
+	require.NoError(t, err)
+	require.NoError(t, q.Enqueue(ref))
+	require.NoError(t, q.Remove(drained))
+
+	remaining, err := q.Peek()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{ref}, remaining)
+}
+
 func TestPushQueue_SkipsMalformedLines(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
