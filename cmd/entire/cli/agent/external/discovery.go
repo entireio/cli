@@ -94,7 +94,7 @@ func discoverAndRegisterNamed(ctx context.Context, name types.AgentName, timeout
 	if strings.ContainsAny(string(name), `/\`) {
 		return fmt.Errorf("invalid external agent name %q: contains path separators", name)
 	}
-	if _, err := agent.Get(name); err == nil {
+	if agent.IsRegistered(name) {
 		return nil
 	}
 

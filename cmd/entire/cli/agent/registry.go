@@ -44,6 +44,19 @@ func Get(name types.AgentName) (Agent, error) {
 	return factory(), nil
 }
 
+// IsRegistered reports whether name is in the registry.
+//
+// Existence probes belong here rather than on a discarded Get error: Get's
+// miss path resolves every registered agent to build its "available: ..."
+// listing, which is wasted work when the caller only wants a yes/no.
+func IsRegistered(name types.AgentName) bool {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	_, ok := registry[name]
+	return ok
+}
+
 // List returns all registered agent names in sorted order, test-only agents
 // included. Anything that offers the user a choice of agent wants
 // ListAvailable or StringList instead.

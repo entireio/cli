@@ -101,6 +101,32 @@ func TestGet_UnknownAgentErrorExcludesTestOnly(t *testing.T) {
 	}
 }
 
+// TestIsRegistered pins the existence probe, including that it answers for
+// test-only agents: it reports registry membership, not user-facing
+// availability, so external discovery's "already loaded?" check cannot be
+// fooled into re-registering over the Vogon canary.
+func TestIsRegistered(t *testing.T) {
+	// Not parallel: mutates the process-global registry.
+	t.Cleanup(SnapshotForTesting())
+
+	const probe types.AgentName = "is-registered-probe"
+	const canary types.AgentName = "is-registered-testonly-probe"
+
+	if IsRegistered(probe) {
+		t.Fatalf("agent %q should not be registered yet", probe)
+	}
+
+	Register(probe, func() Agent { return &mockAgent{} })
+	Register(canary, func() Agent { return &testOnlyAgent{} })
+
+	if !IsRegistered(probe) {
+		t.Errorf("agent %q should be registered", probe)
+	}
+	if !IsRegistered(canary) {
+		t.Errorf("test-only agent %q is registered, so IsRegistered must say so", canary)
+	}
+}
+
 func TestSnapshotForTesting_RestoresRegistry(t *testing.T) {
 	// Not parallel: mutates the process-global registry.
 	restore := SnapshotForTesting()
