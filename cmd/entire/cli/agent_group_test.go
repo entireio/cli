@@ -60,8 +60,10 @@ func TestRunAgentList_ListsAvailableAgents(t *testing.T) {
 	}
 	out := buf.String()
 
-	if !strings.Contains(out, "Agents:") {
-		t.Errorf("missing 'Agents:' header in output:\n%s", out)
+	// The default listing omits external plugins, so its header is scoped to
+	// what it actually shows — see TestRunAgentList_HeaderScopedToMode.
+	if !strings.Contains(out, "Built-in agents:") {
+		t.Errorf("missing 'Built-in agents:' header in output:\n%s", out)
 	}
 
 	// At least one of the well-known built-in agents must appear in the listing.
@@ -272,6 +274,67 @@ func TestRunAgentList_MarksExternalProvenance(t *testing.T) {
 				t.Errorf("built-in agent line must not be marked (external), got: %q", line)
 			}
 		}
+	}
+}
+
+// TestRunAgentList_HeaderScopedToMode verifies that the header names the set
+// being listed. The default view is built-ins only, so printing the `--external`
+// header over it would let a partial listing read as the complete one — the way
+// a user who just installed an external plugin would read it.
+func TestRunAgentList_HeaderScopedToMode(t *testing.T) {
+	// Cannot use t.Parallel: setupTestRepo mutates cwd and $PATH.
+	setupTestRepo(t)
+	writeSettings(t, externalAgentsUnsetSettings)
+
+	var def bytes.Buffer
+	if err := runAgentList(context.Background(), &def, false); err != nil {
+		t.Fatalf("runAgentList (default): %v", err)
+	}
+	if !strings.Contains(def.String(), "Built-in agents:") {
+		t.Errorf("default header should scope itself to built-ins, got:\n%s", def.String())
+	}
+
+	var ext bytes.Buffer
+	if err := runAgentList(context.Background(), &ext, true); err != nil {
+		t.Fatalf("runAgentList (--external): %v", err)
+	}
+	if strings.Contains(ext.String(), "Built-in agents:") {
+		t.Errorf("--external is the complete view, so its header must not scope to built-ins, got:\n%s", ext.String())
+	}
+	if !strings.Contains(ext.String(), "Agents:") {
+		t.Errorf("--external should print the unscoped header, got:\n%s", ext.String())
+	}
+}
+
+// TestRunAgentList_DefaultFooterNamesEnabledGate verifies that the default
+// listing reports when it is omitting something the user opted into. Reading the
+// external_agents setting costs one file read and no plugin exec, so the
+// no-scan guarantee survives (TestRunAgentList_DefaultPathDoesNotScanPath still
+// holds); without it, a user whose `entire agent add <plugin>` turned the gate
+// on gets a listing that silently excludes the agent they just installed.
+func TestRunAgentList_DefaultFooterNamesEnabledGate(t *testing.T) {
+	// Cannot use t.Parallel: setupTestRepo mutates cwd and $PATH.
+	setupTestRepo(t)
+
+	writeSettings(t, externalAgentsEnabledSettings)
+	var enabled bytes.Buffer
+	if err := runAgentList(context.Background(), &enabled, false); err != nil {
+		t.Fatalf("runAgentList (gate enabled): %v", err)
+	}
+	if !strings.Contains(enabled.String(), "External agent plugins are enabled for this repo but are not listed above.") {
+		t.Errorf("default listing should report the enabled gate it is omitting, got:\n%s", enabled.String())
+	}
+
+	writeSettings(t, externalAgentsUnsetSettings)
+	var unset bytes.Buffer
+	if err := runAgentList(context.Background(), &unset, false); err != nil {
+		t.Fatalf("runAgentList (gate unset): %v", err)
+	}
+	if strings.Contains(unset.String(), "are enabled for this repo") {
+		t.Errorf("gate is unset, so the listing must not claim it is enabled, got:\n%s", unset.String())
+	}
+	if !strings.Contains(unset.String(), "Run 'entire agent list --external' to also list external plugins on your PATH.") {
+		t.Errorf("expected the plain --external pointer when the gate is unset, got:\n%s", unset.String())
 	}
 }
 

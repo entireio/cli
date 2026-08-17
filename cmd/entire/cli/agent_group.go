@@ -79,8 +79,17 @@ func runAgentList(ctx context.Context, w io.Writer, includeExternal bool) error 
 		external.DiscoverAndRegisterAlways(ctx)
 	}
 
+	// Scope the header to what is actually listed. The default view omits
+	// external plugins, so printing the same "Agents:" over both sets would let
+	// the partial listing read as the complete one — and the user most likely to
+	// be missing an agent here is the one who just installed an external plugin.
+	header := "Built-in agents:"
+	if includeExternal {
+		header = "Agents:"
+	}
+
 	hasSomeInstalled := false
-	fmt.Fprintln(w, "Agents:")
+	fmt.Fprintln(w, header)
 	for _, ra := range agent.ListAvailable() {
 		isExternal := external.IsExternal(ra.Agent)
 		// Default lists built-ins only; --external is a superset that also
@@ -115,7 +124,17 @@ func runAgentList(ctx context.Context, w io.Writer, includeExternal bool) error 
 		}
 	}
 	if !includeExternal {
-		fmt.Fprintln(w, "\nRun 'entire agent list --external' to also list external plugins on your PATH.")
+		// Reading the setting costs one file read and no plugin exec, so the
+		// default path can report that it is omitting something the user opted
+		// into without giving up its no-scan guarantee. `entire agent add
+		// <plugin>` turns external_agents on, which makes the user who has an
+		// external agent installed exactly the user whose agent is missing here.
+		if settings.IsExternalAgentsEnabled(ctx) {
+			fmt.Fprintln(w, "\nExternal agent plugins are enabled for this repo but are not listed above."+
+				"\nRun 'entire agent list --external' to include them.")
+		} else {
+			fmt.Fprintln(w, "\nRun 'entire agent list --external' to also list external plugins on your PATH.")
+		}
 	}
 	return nil
 }
