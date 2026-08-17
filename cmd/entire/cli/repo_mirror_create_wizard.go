@@ -173,7 +173,7 @@ func clusterChoices(regions []regionChoice, jurisdiction string) (opts []huh.Opt
 	}
 	opts = make([]huh.Option[string], 0, len(ordered))
 	for _, r := range ordered {
-		opts = append(opts, huh.NewOption(regionLabel(r), r.host))
+		opts = append(opts, huh.NewOption(regionPickerLabel(r), r.host))
 		if jurisdiction != "" && r.isDefault && r.jurisdiction == jurisdiction {
 			defaults = append(defaults, r.host)
 		}
@@ -181,9 +181,23 @@ func clusterChoices(regions []regionChoice, jurisdiction string) (opts []huh.Opt
 	return opts, defaults
 }
 
-// regionLabel is the human label for a region in the picker and the results
-// table: "slug (jurisdiction)" when both are known, else whatever identifier we
-// have, falling back to the bare host.
+func regionPickerLabel(r regionChoice) string {
+	switch strings.ToLower(r.jurisdiction) {
+	case "au":
+		return "AU — Sydney"
+	case "eu":
+		return "EU — Frankfurt"
+	case "in":
+		return "IN — Mumbai"
+	case "us":
+		return "US — Virginia"
+	default:
+		return regionLabel(r)
+	}
+}
+
+// regionLabel is the human label used in results: "slug (jurisdiction)" when
+// both are known, else whatever identifier we have, falling back to the host.
 func regionLabel(r regionChoice) string {
 	switch {
 	case r.slug != "" && r.jurisdiction != "":
@@ -483,23 +497,13 @@ func pickRegions(ctx context.Context, w io.Writer, regions []regionChoice, juris
 
 	// Pre-fill with the default hosts so they start checked.
 	selected := append([]string(nil), defaults...)
-	form := NewAccessibleForm(
-		huh.NewGroup(
-			huh.NewMultiSelect[string]().
-				Title("Select regions to mirror into").
-				Description("Each repo is mirrored into every selected region.").
-				Options(opts...).
-				Height(multiSelectHeight(len(opts))).
-				Validate(func(s []string) error {
-					if len(s) == 0 {
-						return errors.New("select at least one region")
-					}
-					return nil
-				}).
-				Value(&selected),
-		),
+	control := newConfigureChecklistControl(
+		"Which regions should this repository live in?",
+		"Each repository is mirrored into every selected region.",
+		opts, &selected, true,
 	)
-	if err := form.RunWithContext(ctx); err != nil {
+	fmt.Fprintln(w)
+	if err := newConfigureForm(huh.NewGroup(control)).RunWithContext(ctx); err != nil {
 		return nil, handleFormCancellation(w, "Mirror create", err)
 	}
 

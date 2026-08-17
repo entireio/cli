@@ -187,7 +187,7 @@ func TestClusterChoices(t *testing.T) {
 	opts, defaults := clusterChoices(regions, "eu")
 
 	require.Len(t, opts, 3)
-	require.Equal(t, "eu-west (eu)", opts[0].Key, "caller's jurisdiction listed first")
+	require.Equal(t, "EU — Frankfurt", opts[0].Key, "caller's jurisdiction listed first")
 	require.Equal(t, "eu-west-1.entire.io", opts[0].Value)
 	require.Equal(t, []string{"eu-west-1.entire.io"}, defaults)
 	// The other jurisdictions are still present, in their original relative order.
@@ -195,16 +195,20 @@ func TestClusterChoices(t *testing.T) {
 	for _, o := range opts {
 		keys = append(keys, o.Key)
 	}
-	require.ElementsMatch(t, []string{"us-east (us)", "eu-west (eu)", "bare.entire.io"}, keys)
+	require.ElementsMatch(t, []string{"US — Virginia", "EU — Frankfurt", "bare.entire.io"}, keys)
 
 	// Unknown jurisdiction: all still listed, original order, nothing pre-selected.
 	noOpts, noneDefault := clusterChoices(regions, "")
 	require.Empty(t, noneDefault)
-	require.Equal(t, "us-east (us)", noOpts[0].Key)
+	require.Equal(t, "US — Virginia", noOpts[0].Key)
 }
 
 func TestRegionLabel(t *testing.T) {
 	t.Parallel()
+	require.Equal(t, "AU — Sydney", regionPickerLabel(regionChoice{jurisdiction: "au"}))
+	require.Equal(t, "EU — Frankfurt", regionPickerLabel(regionChoice{jurisdiction: "eu"}))
+	require.Equal(t, "IN — Mumbai", regionPickerLabel(regionChoice{jurisdiction: "in"}))
+	require.Equal(t, "US — Virginia", regionPickerLabel(regionChoice{jurisdiction: "us"}))
 	require.Equal(t, "us-east (us)", regionLabel(regionChoice{slug: "us-east", jurisdiction: "us", host: "h"}))
 	require.Equal(t, "us-east", regionLabel(regionChoice{slug: "us-east", host: "h"}))
 	require.Equal(t, "h", regionLabel(regionChoice{host: "h"}))

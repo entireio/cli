@@ -473,21 +473,13 @@ func pickConfigureRegions(ctx context.Context, outW io.Writer, regions []regionC
 		}
 		return chosen, nil
 	}
-	form := NewAccessibleForm(huh.NewGroup(
-		huh.NewMultiSelect[string]().
-			Title("Which regions should this repository live in?").
-			Description("Space to select, enter to confirm — your data stays in the selected regions.").
-			Options(opts...).
-			Height(multiSelectHeight(len(opts))).
-			Validate(func(values []string) error {
-				if len(values) == 0 {
-					return errors.New("select at least one region")
-				}
-				return nil
-			}).
-			Value(&selected),
-	))
-	if err := form.RunWithContext(ctx); err != nil {
+	control := newConfigureChecklistControl(
+		"Which regions should this repository live in?",
+		"Your data stays in the selected regions.",
+		opts, &selected, true,
+	)
+	fmt.Fprintln(outW)
+	if err := newConfigureForm(huh.NewGroup(control)).RunWithContext(ctx); err != nil {
 		if cancelErr := handleFormCancellation(outW, "Configure", err); cancelErr != nil {
 			return nil, cancelErr
 		}
@@ -859,15 +851,21 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 }
 
 func newConfigureAgentControl(options []huh.Option[string], selected *[]string, requireOne bool) *configureAgentField {
+	return newConfigureChecklistControl("Select the agents for this repository", "", options, selected, requireOne)
+}
+
+func newConfigureChecklistControl(title, description string, options []huh.Option[string], selected *[]string, requireOne bool) *configureAgentField {
 	control := &configureAgentField{value: selected}
 	field := huh.NewMultiSelect[string]().
 		TitleFunc(func() string {
-			return configureQuestionTitle("Select the agents for this repository", control.focused)
+			return configureQuestionTitle(title, control.focused)
 		}, &control.focused).
+		Description(description).
 		Options(options...).
 		// MultiSelect subtracts its title from an implicit viewport height, so
-		// include exactly one title row to show every option without padding.
-		Height(len(options) + 1).
+		// include the title and description rows to show every option without
+		// padding or scrolling.
+		Height(configureFieldHeight(len(options), description)).
 		Value(selected)
 	if requireOne {
 		field = field.Validate(func(values []string) error {
