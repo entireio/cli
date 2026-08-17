@@ -18,11 +18,9 @@ const (
 )
 
 // SearchPerformedEvent carries the fields for a cli_search_performed event
-// (ENT-1528). QueryHash is a non-reversible fingerprint — the raw query is
-// never sent.
+// (ENT-1528).
 type SearchPerformedEvent struct {
 	SearchID    string
-	QueryHash   string
 	Mode        string // "json" or "compact"
 	ResultCount int    // results served on this page
 	Total       int    // total results before client-side pagination
@@ -32,16 +30,17 @@ type SearchPerformedEvent struct {
 
 // CheckpointExplainedEvent carries the fields for a cli_checkpoint_explained
 // event (ENT-1528): a successful `entire checkpoint explain` id resolution,
-// the "click" that follows a search impression. CheckpointID is an opaque
-// identifier (ULID or 12-hex); Source is one of the ExplainSource* constants.
-// SearchID and Rank come from the --search-id token embedded in compact
-// search hints; when present they link the click to its search
-// deterministically. Both optional (empty/zero = omitted).
+// the "click" that follows a search impression. DocRef is a truncated
+// SHA-256 of the checkpoint id — the raw id itself never reaches analytics
+// (trail 1019 high finding: "drop or hash"). Source is one of the
+// ExplainSource* constants. SearchID and Rank come from the --search-id
+// token embedded in compact search hints; when present they link the click
+// to its search deterministically. Both optional (empty/zero = omitted).
 type CheckpointExplainedEvent struct {
-	CheckpointID string
-	Source       string
-	SearchID     string
-	Rank         int
+	DocRef   string
+	Source   string
+	SearchID string
+	Rank     int
 }
 
 // BuildSearchPerformedPayload constructs a cli_search_performed event payload.
@@ -56,7 +55,6 @@ func BuildSearchPerformedPayload(event SearchPerformedEvent, version string) *Ev
 		DistinctID: machineID,
 		Properties: map[string]any{
 			"search_id":    event.SearchID,
-			"query_hash":   event.QueryHash,
 			"mode":         event.Mode,
 			"result_count": event.ResultCount,
 			"total":        event.Total,
@@ -96,11 +94,11 @@ func BuildCheckpointExplainedPayload(event CheckpointExplainedEvent, version str
 		return nil
 	}
 	properties := map[string]any{
-		"checkpoint_id": event.CheckpointID,
-		"source":        event.Source,
-		"cli_version":   version,
-		"os":            runtime.GOOS,
-		"arch":          runtime.GOARCH,
+		"doc_ref":     event.DocRef,
+		"source":      event.Source,
+		"cli_version": version,
+		"os":          runtime.GOOS,
+		"arch":        runtime.GOARCH,
 	}
 	if event.SearchID != "" {
 		properties["search_id"] = event.SearchID

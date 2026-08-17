@@ -6,7 +6,6 @@ func TestBuildSearchPerformedPayload(t *testing.T) {
 	t.Parallel()
 	event := SearchPerformedEvent{
 		SearchID:    "01JXAMPLE0000000000000000",
-		QueryHash:   "abcd1234abcd1234",
 		Mode:        "compact",
 		ResultCount: 5,
 		Total:       42,
@@ -24,14 +23,14 @@ func TestBuildSearchPerformedPayload(t *testing.T) {
 		t.Error("distinct_id must be set")
 	}
 	p := payload.Properties
-	for _, key := range []string{"search_id", "query_hash", "mode", "result_count", "total", "page", "limit", "cli_version", "os", "arch"} {
+	for _, key := range []string{"search_id", "mode", "result_count", "total", "page", "limit", "cli_version", "os", "arch"} {
 		if _, ok := p[key]; !ok {
 			t.Errorf("missing property %q", key)
 		}
 	}
-	// Privacy: the raw query, impression tuples, and session identifiers must
-	// never be properties.
-	for _, key := range []string{"query", "impressions", "results", "session_id"} {
+	// Privacy: the raw query, its hash, impression tuples, session
+	// identifiers, and raw checkpoint ids must never be properties.
+	for _, key := range []string{"query", "query_hash", "impressions", "results", "session_id", "checkpoint_id"} {
 		if _, ok := p[key]; ok {
 			t.Errorf("forbidden property %q present", key)
 		}
@@ -44,8 +43,8 @@ func TestBuildSearchPerformedPayload(t *testing.T) {
 func TestBuildCheckpointExplainedPayload(t *testing.T) {
 	t.Parallel()
 	payload := BuildCheckpointExplainedPayload(CheckpointExplainedEvent{
-		CheckpointID: "01JRESULT0000000000000000",
-		Source:       "prose",
+		DocRef: "abcd1234abcd1234",
+		Source: "prose",
 	}, "1.2.3")
 	if payload == nil {
 		t.Fatal("expected payload, got nil")
@@ -57,16 +56,24 @@ func TestBuildCheckpointExplainedPayload(t *testing.T) {
 		t.Error("distinct_id must be set")
 	}
 	p := payload.Properties
-	for _, key := range []string{"checkpoint_id", "source", "cli_version", "os", "arch"} {
+	for _, key := range []string{"doc_ref", "source", "cli_version", "os", "arch"} {
 		if _, ok := p[key]; !ok {
 			t.Errorf("missing property %q", key)
 		}
 	}
-	if got := p["checkpoint_id"]; got != "01JRESULT0000000000000000" {
-		t.Errorf("checkpoint_id = %v", got)
+	docRef, ok := p["doc_ref"].(string)
+	if !ok {
+		t.Fatalf("doc_ref = %v, want string", p["doc_ref"])
+	}
+	if len(docRef) != 16 {
+		t.Errorf("doc_ref len = %d, want 16", len(docRef))
 	}
 	if got := p["source"]; got != "prose" {
 		t.Errorf("source = %v, want prose", got)
+	}
+	// Privacy: the raw checkpoint id must never be a property.
+	if _, ok := p["checkpoint_id"]; ok {
+		t.Error("forbidden property \"checkpoint_id\" present")
 	}
 	// Without a search-hit token, the deterministic-link fields are omitted.
 	for _, key := range []string{"search_id", "rank"} {
@@ -79,10 +86,10 @@ func TestBuildCheckpointExplainedPayload(t *testing.T) {
 func TestBuildCheckpointExplainedPayload_WithSearchAttribution(t *testing.T) {
 	t.Parallel()
 	payload := BuildCheckpointExplainedPayload(CheckpointExplainedEvent{
-		CheckpointID: "01JRESULT0000000000000000",
-		Source:       "export",
-		SearchID:     "01JXK9RSTQ4B7NW2VYFCH6M3DZ",
-		Rank:         3,
+		DocRef:   "abcd1234abcd1234",
+		Source:   "export",
+		SearchID: "01JXK9RSTQ4B7NW2VYFCH6M3DZ",
+		Rank:     3,
 	}, "1.2.3")
 	if payload == nil {
 		t.Fatal("expected payload, got nil")
@@ -99,9 +106,9 @@ func TestBuildCheckpointExplainedPayload_WithSearchAttribution(t *testing.T) {
 func TestBuildCheckpointExplainedPayload_SearchIDWithoutRank(t *testing.T) {
 	t.Parallel()
 	payload := BuildCheckpointExplainedPayload(CheckpointExplainedEvent{
-		CheckpointID: "01JRESULT0000000000000000",
-		Source:       "prose",
-		SearchID:     "01JXK9RSTQ4B7NW2VYFCH6M3DZ",
+		DocRef:   "abcd1234abcd1234",
+		Source:   "prose",
+		SearchID: "01JXK9RSTQ4B7NW2VYFCH6M3DZ",
 	}, "1.2.3")
 	if payload == nil {
 		t.Fatal("expected payload, got nil")

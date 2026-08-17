@@ -33,13 +33,12 @@ func newSearchID() string {
 	return u.String()
 }
 
-// hashSearchQuery returns a short, non-reversible fingerprint of the query
-// for telemetry: SHA-256 of the lowercased, whitespace-collapsed query,
-// truncated to 16 hex chars. Raw query text is never sent (privacy
-// convention: operational metadata only).
-func hashSearchQuery(query string) string {
-	normalized := strings.ToLower(strings.Join(strings.Fields(query), " "))
-	sum := sha256.Sum256([]byte(normalized))
+// docRef is a truncated SHA-256 of a checkpoint id: a deterministic,
+// content-opaque reference. Resolvable ONLY by hashing candidate ids from
+// server-side search_event records — raw content identifiers never reach
+// analytics (trail 1019 high finding: "drop or hash").
+func docRef(checkpointID string) string {
+	sum := sha256.Sum256([]byte(checkpointID))
 	return hex.EncodeToString(sum[:8])
 }
 
@@ -47,7 +46,7 @@ func hashSearchQuery(query string) string {
 // telemetry is opted in (settings.Telemetry == true). Best-effort and
 // non-blocking; search output has already been written, so failures simply
 // suppress the event.
-func emitSearchPerformed(ctx context.Context, searchID, query, mode string, resultCount, total, page, limit int) {
+func emitSearchPerformed(ctx context.Context, searchID, mode string, resultCount, total, page, limit int) {
 	if searchID == "" {
 		return
 	}
@@ -57,7 +56,6 @@ func emitSearchPerformed(ctx context.Context, searchID, query, mode string, resu
 	}
 	telemetry.TrackSearchPerformed(telemetry.SearchPerformedEvent{
 		SearchID:    searchID,
-		QueryHash:   hashSearchQuery(query),
 		Mode:        mode,
 		ResultCount: resultCount,
 		Total:       total,
@@ -135,9 +133,9 @@ func emitCheckpointExplained(ctx context.Context, checkpointID, source string) {
 	}
 	searchID, rank := explainSearchHitFrom(ctx)
 	telemetry.TrackCheckpointExplained(telemetry.CheckpointExplainedEvent{
-		CheckpointID: checkpointID,
-		Source:       source,
-		SearchID:     searchID,
-		Rank:         rank,
+		DocRef:   docRef(checkpointID),
+		Source:   source,
+		SearchID: searchID,
+		Rank:     rank,
 	}, versioninfo.Version)
 }

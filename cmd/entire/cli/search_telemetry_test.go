@@ -2,21 +2,21 @@ package cli
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
-func TestHashSearchQuery_NormalizesAndTruncates(t *testing.T) {
+func TestDocRef_DeterministicAndOpaque(t *testing.T) {
 	t.Parallel()
-	a := hashSearchQuery("  Foo   BAR ")
-	b := hashSearchQuery("foo bar")
-	if a != b {
-		t.Errorf("normalized hashes differ: %q vs %q", a, b)
+	a := docRef("01JRESULT0000000000000000")
+	if a != docRef("01JRESULT0000000000000000") {
+		t.Error("docRef must be deterministic")
 	}
 	if len(a) != 16 {
-		t.Errorf("hash length = %d, want 16", len(a))
+		t.Errorf("len = %d, want 16", len(a))
 	}
-	if a == hashSearchQuery("foo baz") {
-		t.Error("different queries must hash differently")
+	if strings.Contains(a, "01JRESULT") {
+		t.Error("docRef must not embed the raw id")
 	}
 }
 

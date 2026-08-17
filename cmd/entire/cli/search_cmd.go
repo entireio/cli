@@ -280,7 +280,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				if writeErr != nil {
 					return writeErr
 				}
-				emitSearchPerformed(ctx, searchID, searchCfg.Query, mode, served, len(resp.Results), requestedPage, requestedLimit)
+				emitSearchPerformed(ctx, searchID, mode, served, len(resp.Results), requestedPage, requestedLimit)
 				return nil
 			}
 
