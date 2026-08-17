@@ -64,14 +64,14 @@ type Radio[T comparable] struct {
 	refresh       func()
 	layoutChanged func()
 	window        tea.WindowSizeMsg
-	focused       bool
+	title         string
 	sectionGap    bool
 }
 
 func NewRadio[T comparable](title, description string, options []huh.Option[T], value *T) *Radio[T] {
-	field := &Radio[T]{value: value, committed: *value, highlighted: *value, sectionGap: true}
+	field := &Radio[T]{value: value, committed: *value, highlighted: *value, title: title, sectionGap: true}
 	field.Select = huh.NewSelect[T]().
-		TitleFunc(func() string { return QuestionTitle(title, field.focused) }, &field.focused).
+		Title(QuestionTitle(title, false)).
 		Description(description).
 		Options(options...).
 		Height(FieldHeight(len(options), description)).
@@ -95,12 +95,12 @@ func (field *Radio[T]) WithSectionGap(enabled bool) *Radio[T] {
 }
 
 func (field *Radio[T]) Focus() tea.Cmd {
-	field.focused = true
-	return tea.Batch(field.Select.Focus(), refreshFocus())
+	field.Title(QuestionTitle(field.title, true))
+	return field.Select.Focus()
 }
 
 func (field *Radio[T]) Blur() tea.Cmd {
-	field.focused = false
+	field.Title(QuestionTitle(field.title, false))
 	return field.Select.Blur()
 }
 
@@ -177,13 +177,13 @@ type Checklist[T comparable] struct {
 	selectionChanged func()
 	showSectionGap   func() bool
 	window           tea.WindowSizeMsg
-	focused          bool
+	title            string
 }
 
 func NewChecklist[T comparable](title, description string, options []huh.Option[T], selected *[]T, requireOne bool) *Checklist[T] {
-	field := &Checklist[T]{value: selected}
+	field := &Checklist[T]{value: selected, title: title}
 	multi := huh.NewMultiSelect[T]().
-		TitleFunc(func() string { return QuestionTitle(title, field.focused) }, &field.focused).
+		Title(QuestionTitle(title, false)).
 		Description(description).
 		Options(options...).
 		Height(FieldHeight(len(options), description)).
@@ -211,12 +211,12 @@ func (field *Checklist[T]) ShowSectionGapWhen(fn func() bool) *Checklist[T] {
 }
 
 func (field *Checklist[T]) Focus() tea.Cmd {
-	field.focused = true
-	return tea.Batch(field.MultiSelect.Focus(), refreshFocus())
+	field.Title(QuestionTitle(field.title, true))
+	return field.MultiSelect.Focus()
 }
 
 func (field *Checklist[T]) Blur() tea.Cmd {
-	field.focused = false
+	field.Title(QuestionTitle(field.title, false))
 	return field.MultiSelect.Blur()
 }
 
@@ -254,13 +254,13 @@ func (field *Checklist[T]) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
 type ActionSelect[T comparable] struct {
 	*huh.Select[T]
 
-	focused bool
+	title string
 }
 
 func NewActionSelect[T comparable](title, description string, options []huh.Option[T], value *T) *ActionSelect[T] {
-	field := &ActionSelect[T]{}
+	field := &ActionSelect[T]{title: title}
 	field.Select = huh.NewSelect[T]().
-		TitleFunc(func() string { return QuestionTitle(title, field.focused) }, &field.focused).
+		Title(QuestionTitle(title, false)).
 		Description(description).
 		Options(options...).
 		Height(FieldHeight(len(options), description)).
@@ -269,12 +269,12 @@ func NewActionSelect[T comparable](title, description string, options []huh.Opti
 }
 
 func (field *ActionSelect[T]) Focus() tea.Cmd {
-	field.focused = true
-	return tea.Batch(field.Select.Focus(), refreshFocus())
+	field.Title(QuestionTitle(field.title, true))
+	return field.Select.Focus()
 }
 
 func (field *ActionSelect[T]) Blur() tea.Cmd {
-	field.focused = false
+	field.Title(QuestionTitle(field.title, false))
 	return field.Select.Blur()
 }
 
@@ -284,15 +284,6 @@ func (field *ActionSelect[T]) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
 		field.Select = updated
 	}
 	return field, cmd
-}
-
-// focusChangedMsg gives Huh a follow-up frame after a field transition so
-// dynamic titles are re-evaluated. It must not be a zero-sized WindowSizeMsg:
-// Huh interprets that as a real terminal resize and collapses the form.
-type focusChangedMsg struct{}
-
-func refreshFocus() tea.Cmd {
-	return func() tea.Msg { return focusChangedMsg{} }
 }
 
 func windowResize(size tea.WindowSizeMsg) tea.Cmd {

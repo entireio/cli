@@ -70,12 +70,10 @@ func TestQuestionTitleChangesWithFocus(t *testing.T) {
 	}
 }
 
-func TestFocusRefreshDoesNotResizeTerminal(t *testing.T) {
-	msg := refreshFocus()()
-	if _, ok := msg.(tea.WindowSizeMsg); ok {
-		t.Fatal("focus refresh must not send a window-size message")
-	}
-	if _, ok := msg.(focusChangedMsg); !ok {
-		t.Fatalf("focus refresh sent %T, want focusChangedMsg", msg)
+func TestFocusDoesNotScheduleAnExtraRender(t *testing.T) {
+	choice := "save"
+	field := NewActionSelect("Save", "", []huh.Option[string]{huh.NewOption("Save", choice)}, &choice)
+	if cmd := field.Focus(); cmd != nil {
+		t.Fatal("focus scheduled an extra render")
 	}
 }
