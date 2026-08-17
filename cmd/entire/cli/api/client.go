@@ -145,6 +145,14 @@ func (c *Client) GetStream(ctx context.Context, path string, headers http.Header
 	return c.do(ctx, http.MethodGet, path, nil, headers)
 }
 
+// GetWithHeaders sends an authenticated GET request with extra request
+// headers (e.g. correlation ids) and returns the fully-buffered-by-caller
+// response. Intended for normal (non-streaming) JSON endpoints that still
+// need to send headers beyond what Get sends; for streaming use GetStream.
+func (c *Client) GetWithHeaders(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
+	return c.do(ctx, http.MethodGet, path, nil, headers)
+}
+
 // doJSON sends an authenticated request with an optional JSON-marshaled body.
 func (c *Client) doJSON(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var reader io.Reader

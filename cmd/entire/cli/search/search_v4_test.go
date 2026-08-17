@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -137,6 +139,33 @@ func TestCellV4_ErrorForwarded(t *testing.T) {
 	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
 	if err == nil {
 		t.Fatal("expected an error for a 400 response")
+	}
+}
+
+// TestCellV4_SendsSearchCorrelationHeaders confirms the pre-request-minted
+// search_id and the client-surface identifier travel as headers (never as
+// query params) so the search service can log the same id server-side.
+func TestCellV4_SendsSearchCorrelationHeaders(t *testing.T) {
+	t.Parallel()
+
+	var gotID, gotClient string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotID = r.Header.Get("X-Entire-Search-Id")
+		gotClient = r.Header.Get("X-Entire-Client")
+		fmt.Fprint(w, `{"results":[],"total":0,"page":1}`)
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	cfg := Config{Query: "x", SearchID: "01JXK9RSTQ4B7NW2VYFCH6M3DZ", ClientSurface: "cli-compact"}
+	if _, err := CellV4(context.Background(), client, cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+	if gotID != cfg.SearchID {
+		t.Errorf("X-Entire-Search-Id = %q, want %q", gotID, cfg.SearchID)
+	}
+	if !strings.HasPrefix(gotClient, "cli-compact/") {
+		t.Errorf("X-Entire-Client = %q, want prefix 'cli-compact/'", gotClient)
 	}
 }
 

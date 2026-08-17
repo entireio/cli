@@ -257,6 +257,22 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			searchCfg.Limit = search.DefaultLimit
 			searchCfg.Page = 0 // let API default to page 1
 
+			// Mint the search_id before the request (not after the response
+			// comes back) so it travels as a request header and the search
+			// service can log the same id server-side. ClientSurface
+			// identifies which CLI output mode issued the request; check
+			// compactOutput first since it implies jsonOutput.
+			searchID := newSearchID()
+			searchCfg.SearchID = searchID
+			switch {
+			case compactOutput:
+				searchCfg.ClientSurface = "cli-compact"
+			case jsonOutput || !isTerminal:
+				searchCfg.ClientSurface = "cli-json"
+			default:
+				searchCfg.ClientSurface = "cli-tui"
+			}
+
 			resp, err := searcher(ctx, searchCfg)
 			if err != nil {
 				return fmt.Errorf("search failed: %w", err)
@@ -267,7 +283,6 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			// JSON output: explicit flag or piped/redirected stdout
 			if jsonOutput || !isTerminal {
-				searchID := newSearchID()
 				mode := "json"
 				var served int
 				var writeErr error
