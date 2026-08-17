@@ -520,7 +520,7 @@ func (env *TestEnv) GitMerge(branchName string) {
 	env.T.Helper()
 
 	ctx := env.T.Context()
-	// Use --no-verify to skip hooks - the hooks use local_dev paths that don't work
+	// Use --no-verify to skip hooks - git-triggered hooks are not exercised here
 	// from test temp directories. This is fine since we're testing merge behavior,
 	// not hook execution during merge.
 	cmd := exec.CommandContext(ctx, "git", "merge", branchName, "-m", "Merge branch '"+branchName+"'", "--no-verify")

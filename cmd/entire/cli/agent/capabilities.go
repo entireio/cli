@@ -183,6 +183,15 @@ func AsSubagentAwareExtractor(ag Agent) (SubagentAwareExtractor, bool) {
 	return declaredCapability[SubagentAwareExtractor](ag, func(c DeclaredCaps) bool { return c.SubagentAwareExtractor })
 }
 
+// AsSubagentSessionResolver returns the agent as SubagentSessionResolver if it
+// implements the interface. No capability declaration is needed: whether an
+// agent's subagents run as sessions of their own is a property of the agent's
+// own hook protocol, which only built-in agents model. External agents report
+// subagent boundaries through their own hooks.
+func AsSubagentSessionResolver(ag Agent) (SubagentSessionResolver, bool) {
+	return builtinCapability[SubagentSessionResolver](ag)
+}
+
 // AsSessionBaseDirProvider returns the agent as SessionBaseDirProvider if it implements
 // the interface. No capability declaration is needed since this is a built-in-only feature
 // (external agents use the agent binary's own session resolution).

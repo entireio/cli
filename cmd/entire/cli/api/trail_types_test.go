@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/trail"
@@ -42,6 +43,46 @@ func TestTrailResourceDecodesServerURL(t *testing.T) {
 	}
 	if oldClient.Number != 640 || oldClient.Title != "T" {
 		t.Fatalf("old client decoded wrong values: %+v", oldClient)
+	}
+}
+
+func TestTrailListResponseDecodesEntireAPIContract(t *testing.T) {
+	t.Parallel()
+	payload := []byte(`{
+		"items":[{
+			"id":"01JTRAIL","number":7,"title":"Native trail","status":"open",
+			"branch":null,"originalBranch":"feature/native","base":"main",
+			"requestedReviewers":["reviewer"],"phase":"reviewing",
+			"createdAt":"2026-08-10T10:00:00.000Z","updatedAt":"2026-08-10T11:00:00.000Z"
+		}],
+		"nextPageToken":"cursor-2","totalCount":12
+	}`)
+	var got TrailListResponse
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatalf("decode native list: %v", err)
+	}
+	if got.Total != 12 || got.NextPageToken == nil || *got.NextPageToken != "cursor-2" {
+		t.Fatalf("pagination = total %d token %v", got.Total, got.NextPageToken)
+	}
+	if len(got.Trails) != 1 || got.Trails[0].Branch != "" || got.Trails[0].OriginalBranch != "feature/native" || got.Trails[0].Phase != "reviewing" {
+		t.Fatalf("trail = %#v", got.Trails)
+	}
+}
+
+func TestTrailRequestsUseEntireAPICasing(t *testing.T) {
+	t.Parallel()
+	body, err := json.Marshal(TrailCreateRequest{Title: "T", BranchName: "feature/x", BranchAction: "link"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, want := range []string{`"branchName"`, `"branchAction"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("request %s missing %s", text, want)
+		}
+	}
+	if strings.Contains(text, "branch_name") || strings.Contains(text, "branch_action") {
+		t.Fatalf("request still uses BFF casing: %s", text)
 	}
 }
 

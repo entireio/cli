@@ -849,6 +849,39 @@ func (s *FactoryDroidSession) CreateDroidTranscript(prompt string, changes []Fil
 	}
 }
 
+// MarkAsWorkerSession prepends the session_start entry Droid writes at the head
+// of a Worker transcript, naming the session and tool use that spawned it.
+// Droid dispatches Workers as detached sessions, so this line is what ties the
+// Worker's work back to its parent turn.
+//
+// Call after CreateDroidTranscript — it rewrites the file in place.
+func (s *FactoryDroidSession) MarkAsWorkerSession(parentSessionID, toolUseID, sessionTitle string) {
+	s.env.T.Helper()
+
+	existing, err := os.ReadFile(s.TranscriptPath)
+	if err != nil {
+		s.env.T.Fatalf("failed to read transcript to mark as worker: %v", err)
+	}
+
+	sessionStart, err := json.Marshal(map[string]interface{}{
+		"type":             "session_start",
+		"id":               s.ID,
+		"title":            "# Task Tool Invocation Subagent type: worker",
+		"sessionTitle":     sessionTitle,
+		"callingSessionId": parentSessionID,
+		"callingToolUseId": toolUseID,
+		"version":          2,
+	})
+	if err != nil {
+		s.env.T.Fatalf("failed to encode session_start: %v", err)
+	}
+
+	updated := append(append(sessionStart, '\n'), existing...)
+	if err := os.WriteFile(s.TranscriptPath, updated, 0o600); err != nil {
+		s.env.T.Fatalf("failed to write worker transcript: %v", err)
+	}
+}
+
 // SimulateFactoryDroidUserPromptSubmit is a convenience method on TestEnv.
 func (env *TestEnv) SimulateFactoryDroidUserPromptSubmit(sessionID string) error {
 	env.T.Helper()

@@ -80,9 +80,7 @@ func TestDiscoverAPI(t *testing.T) {
 
 	t.Run("transport error → ErrDiscoveryUnavailable", func(t *testing.T) {
 		t.Parallel()
-		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-		client := hostPinningClient(t, srv)
-		srv.Close()
+		client := deadPinningClient(t)
 
 		_, err := DiscoverAPI(t.Context(), "partial.to", client, t.Logf)
 		assert.ErrorIs(t, err, ErrDiscoveryUnavailable)
@@ -115,7 +113,7 @@ func TestDiscoverAPI(t *testing.T) {
 		// schemeRewriteClient rewrites the hard-coded https:// to http:// but
 		// leaves the host alone, so the redirect actually reaches `target`
 		// rather than being pinned back to `redirector`.
-		client := &http.Client{Transport: schemeRewriteTransport{base: http.DefaultTransport}}
+		client := &http.Client{Transport: schemeRewriteTransport{base: newTestTransport(t)}}
 		host := strings.TrimPrefix(redirector.URL, "http://")
 
 		doc, err := DiscoverAPI(t.Context(), host, client, t.Logf)

@@ -208,6 +208,18 @@ func resolveClusterCores(ctx context.Context, cacheDir, clusterHost string, requ
 		}, debugf)
 }
 
+// ErrNoAuthContext marks the case where no selected or saved login can
+// authenticate a discovered resource. The returned error retains the complete,
+// actionable login hint while allowing callers to use errors.Is.
+var ErrNoAuthContext = errors.New("no auth context")
+
+type noAuthContextError struct {
+	message string
+}
+
+func (e *noAuthContextError) Error() string { return e.message }
+func (e *noAuthContextError) Unwrap() error { return ErrNoAuthContext }
+
 // requireActiveContext resolves the login context for a resource from the ACTIVE
 // context alone, and is the one place the CLI's account-selection policy lives.
 // subject is a noun phrase identifying the resource ("cluster nyc.entire.io" /
@@ -244,7 +256,12 @@ func requireActiveContext(f *contexts.File, subject string, coreURLs []string, d
 	if sel.Context != nil {
 		debugf("%s -> %s (%s) is not trusted here", subject, describeSelection(sel), sel.Context.CoreURL)
 	}
-	return nil, errors.New(renderUnusableActiveContext(subject, sel, eligibleContexts(f, coreURLs), coreURLs))
+	eligible := eligibleContexts(f, coreURLs)
+	message := renderUnusableActiveContext(subject, sel, eligible, coreURLs)
+	if sel.Context == nil && len(eligible) == 0 {
+		return nil, &noAuthContextError{message: message}
+	}
+	return nil, errors.New(message)
 }
 
 // describeSelection labels a resolved identity for debug output, naming the

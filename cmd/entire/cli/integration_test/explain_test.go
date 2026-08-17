@@ -415,9 +415,8 @@ func writeMinimalEntireSettings(dir, bareURL string) error {
 		return err
 	}
 	settings := map[string]any{
-		"enabled":   true,
-		"local_dev": true,
-		"strategy":  "manual-commit",
+		"enabled":  true,
+		"strategy": "manual-commit",
 		"strategy_options": map[string]any{
 			"filtered_fetches": true,
 			"checkpoint_remote": map[string]any{

@@ -3,12 +3,13 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"testing"
-
-	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/stretchr/testify/require"
 )
 
 // setupTestEnv creates a temp dir, sets CWD and CODEX_HOME for test isolation.
@@ -25,7 +26,7 @@ func TestInstallHooks_CreatesHooksJSONOnly(t *testing.T) {
 	tempDir := setupTestEnv(t)
 
 	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 	require.Equal(t, 4, count) // SessionStart, UserPromptSubmit, Stop, PostToolUse
 
@@ -56,7 +57,7 @@ func TestInstallHooks_WindowsWrapperProbeSuccessKeepsWrappedCommands(t *testing.
 	withCodexHookEnvironment(t, "windows", true)
 
 	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 	require.Equal(t, 4, count)
 
@@ -78,7 +79,7 @@ func TestInstallHooks_WindowsWrapperProbeFailureUsesWindowsCommands(t *testing.T
 	withCodexHookEnvironment(t, "windows", false)
 
 	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 	require.Equal(t, 4, count)
 
@@ -106,12 +107,12 @@ func TestInstallHooks_WindowsWrapperProbeFailureMigratesToWindowsCommands(t *tes
 	})
 
 	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 	require.Equal(t, 4, count)
 
 	wrapperWorks = false
-	count, err = ag.InstallHooks(context.Background(), false, false)
+	count, err = ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 	require.Equal(t, 4, count)
 
@@ -136,28 +137,29 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 
 	ag := &CodexAgent{}
 
-	count1, err := ag.InstallHooks(context.Background(), false, false)
+	count1, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 	require.Equal(t, 4, count1)
 
-	count2, err := ag.InstallHooks(context.Background(), false, false)
+	count2, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 	require.Equal(t, 0, count2)
 }
 
-func TestInstallHooks_LocalDev(t *testing.T) {
+func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 	tempDir := setupTestEnv(t)
-
+	ctx := context.Background()
 	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), true, false)
-	require.NoError(t, err)
-	require.Equal(t, 4, count)
 
-	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
-	data, err := os.ReadFile(hooksPath)
-	require.NoError(t, err)
-	require.Contains(t, string(data), `\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks codex session-start`)
-	require.Contains(t, string(data), `\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks codex post-tool-use`)
+	testutil.AssertLegacyHookReplaced(t,
+		filepath.Join(tempDir, ".codex", HooksFileName),
+		agentpkg.WrapProductionSilentHookCommandForOS("entire hooks codex stop", agentpkg.UseWindowsProductionHooks(ctx)),
+		testutil.LegacyLocalDevCommand("hooks codex stop"),
+		func() {
+			if _, err := ag.InstallHooks(ctx, false); err != nil {
+				t.Fatalf("InstallHooks() error = %v", err)
+			}
+		})
 }
 
 func TestInstallHooks_Force(t *testing.T) {
@@ -165,10 +167,10 @@ func TestInstallHooks_Force(t *testing.T) {
 
 	ag := &CodexAgent{}
 
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 
-	count, err := ag.InstallHooks(context.Background(), false, true)
+	count, err := ag.InstallHooks(context.Background(), true)
 	require.NoError(t, err)
 	require.Equal(t, 4, count)
 }
@@ -178,7 +180,7 @@ func TestUninstallHooks(t *testing.T) {
 
 	ag := &CodexAgent{}
 
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 
 	err = ag.UninstallHooks(context.Background())
@@ -208,7 +210,7 @@ func TestUninstallHooks_PreservesUserHookContainingEntireSubstring(t *testing.T)
 	require.NoError(t, os.WriteFile(hooksPath, []byte(existingConfig), 0o600))
 
 	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 
 	err = ag.UninstallHooks(context.Background())
@@ -231,7 +233,7 @@ func TestAreHooksInstalled_WithHooks(t *testing.T) {
 	setupTestEnv(t)
 
 	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 
 	require.True(t, ag.AreHooksInstalled(context.Background()))
@@ -280,7 +282,7 @@ func TestInstallHooks_PreservesExistingHooksJSON(t *testing.T) {
 	}`
 	require.NoError(t, os.WriteFile(filepath.Join(codexDir, HooksFileName), []byte(existingConfig), 0o600))
 
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(codexDir, HooksFileName))
@@ -311,7 +313,7 @@ func TestInstallHooks_ErrorsOnMalformedManagedHook(t *testing.T) {
 	require.NoError(t, os.WriteFile(hooksPath, []byte(existingConfig), 0o600))
 
 	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "failed to parse SessionStart hooks")
 
@@ -352,7 +354,7 @@ func TestInstallHooks_DoesNotModifyUserConfig(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(existingConfig), 0o600))
 
 	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 
 	configData, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
@@ -381,7 +383,7 @@ func TestInstallHooks_LeavesExistingLocalConfigUntouched(t *testing.T) {
 			require.NoError(t, os.WriteFile(configPath, []byte(content), 0o600))
 
 			ag := &CodexAgent{}
-			_, err := ag.InstallHooks(context.Background(), false, false)
+			_, err := ag.InstallHooks(context.Background(), false)
 			require.NoError(t, err)
 
 			data, err := os.ReadFile(configPath)
@@ -414,4 +416,60 @@ func withCodexHookEnvironment(t *testing.T, goos string, wrapperWorks bool) {
 func withCodexHookEnvironmentFunc(t *testing.T, goos string, wrapperWorks func(context.Context, string) bool) {
 	t.Helper()
 	t.Cleanup(agentpkg.SetWindowsHookProbeForTesting(goos, wrapperWorks))
+}
+
+// TestInstallHooks_DropsLegacyHookAlongsideCurrent is the regression test for
+// syncHookCommand returning early when the current command was already present,
+// which left a legacy local-dev hook beside it so both fired.
+func TestInstallHooks_DropsLegacyHookAlongsideCurrent(t *testing.T) {
+	tempDir := setupTestEnv(t)
+	ctx := context.Background()
+	ag := &CodexAgent{}
+
+	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
+	current := agentpkg.WrapProductionSilentHookCommandForOS("entire hooks codex stop", agentpkg.UseWindowsProductionHooks(ctx))
+	legacy := testutil.LegacyLocalDevCommand("hooks codex stop")
+
+	testutil.AssertStaleHookDroppedAlongsideCurrent(t, hooksPath, current, legacy,
+		func() {
+			// Install, then append the legacy hook into the same Stop group.
+			if _, err := ag.InstallHooks(ctx, false); err != nil {
+				t.Fatalf("seed InstallHooks() error = %v", err)
+			}
+			raw, err := os.ReadFile(hooksPath)
+			require.NoError(t, err)
+			var topLevel map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(raw, &topLevel))
+			var rawHooks map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(topLevel["hooks"], &rawHooks))
+			var stop []MatcherGroup
+			require.NoError(t, parseHookType(rawHooks, "Stop", &stop))
+			require.NotEmpty(t, stop)
+			stop[0].Hooks = append(stop[0].Hooks, HookEntry{Type: "command", Command: legacy, Timeout: 30})
+			marshalHookType(rawHooks, "Stop", stop)
+			// Same marshaller InstallHooks uses: the production command contains
+			// `>`, which encoding/json would escape to >.
+			hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
+			require.NoError(t, err)
+			topLevel["hooks"] = hooksJSON
+			out, err := jsonutil.MarshalIndentWithNewline(topLevel, "", "  ")
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(hooksPath, out, 0o600))
+		},
+		func() {
+			if _, err := ag.InstallHooks(ctx, false); err != nil {
+				t.Fatalf("InstallHooks() error = %v", err)
+			}
+		})
+}
+
+// TestCommittedDogfoodHooksIsCurrent guards this repo's own committed agent config against drifting from what
+// InstallHooks writes. A stale committed config is how the pi extension ended up
+// invoking a launcher script that had been deleted.
+func TestCommittedDogfoodHooksIsCurrent(t *testing.T) {
+	testutil.AssertCommittedDogfoodConfigStable(t, ".codex/hooks.json", func(t *testing.T, dir string) (int, error) {
+		t.Helper()
+		t.Chdir(dir)
+		return (&CodexAgent{}).InstallHooks(context.Background(), false)
+	})
 }

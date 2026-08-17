@@ -203,6 +203,15 @@ func TestRunTrailCreateInteractiveBranchlessSkipsBranchPrompt(t *testing.T) {
 
 func TestRunTrailCreateBranchlessHappyPath(t *testing.T) {
 	// No t.Parallel: uses t.Chdir plus auth/tokenstore package-level test seams.
+	prevTrailClient := newTrailAPIClient
+	newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, _ string) (*api.Client, error) {
+		client, err := NewAuthenticatedAPIClient(ctx, insecureHTTP)
+		if err != nil {
+			return nil, err
+		}
+		return client.WithTrailBackend("legacy"), nil
+	}
+	t.Cleanup(func() { newTrailAPIClient = prevTrailClient })
 	var gotCreate map[string]any
 	var gotCreateAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -376,6 +385,12 @@ func gitBranchExistsTrailTest(t *testing.T, repoDir, branch string) bool {
 
 func TestRunTrailListAll_PrintsLoginHintWhenNotLoggedIn(t *testing.T) {
 	// No t.Parallel: SetResolveContextForAPIForTest and
+	prevTrailClient := newTrailAPIClient
+	newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, _ string) (*api.Client, error) {
+		return NewAuthenticatedAPIClient(ctx, insecureHTTP)
+	}
+	t.Cleanup(func() { newTrailAPIClient = prevTrailClient })
+	//
 	// tokenstore.UseFileBackendForTesting mutate package-level state.
 	//
 	// Discovery selects a context whose keyring slot holds nothing, so the
@@ -571,6 +586,28 @@ func TestTrailDescriptionForDisplay(t *testing.T) {
 	}
 }
 
+func TestDecodeTrailResourceAcceptsDirectAndLegacyShapes(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, payload string
+	}{
+		{name: "direct", payload: `{"id":"trl_direct","number":7,"branch":"feat/direct"}`},
+		{name: "legacy envelope", payload: `{"trail":{"id":"trl_legacy","number":8,"branch":"feat/legacy"}}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			resp := &http.Response{Body: io.NopCloser(strings.NewReader(tt.payload))}
+			got, err := decodeTrailResource(resp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ID == "" || got.Number == 0 || got.Branch == "" {
+				t.Fatalf("decoded resource = %#v", got)
+			}
+		})
+	}
+}
+
 func TestFetchTrailDescription_ReadsNestedBodyDocument(t *testing.T) {
 	t.Parallel()
 	var gotPath string
@@ -760,14 +797,12 @@ func TestConfirmTrailDeletion(t *testing.T) {
 func TestDeleteTrailByNumber(t *testing.T) {
 	t.Parallel()
 
-	t.Run("deletes via the integer number path and accepts ok:true", func(t *testing.T) {
+	t.Run("deletes via the integer number path and accepts 204", func(t *testing.T) {
 		t.Parallel()
 		var gotMethod, gotPath string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			gotMethod, gotPath = r.Method, r.URL.Path
-			if err := json.NewEncoder(w).Encode(api.TrailDeleteResponse{OK: true}); err != nil {
-				t.Errorf("encode response: %v", err)
-			}
+			w.WriteHeader(http.StatusNoContent)
 		}))
 		defer srv.Close()
 
@@ -783,18 +818,17 @@ func TestDeleteTrailByNumber(t *testing.T) {
 		}
 	})
 
-	t.Run("treats a 2xx without ok:true as failure", func(t *testing.T) {
+	t.Run("accepts the legacy ok response", func(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			if err := json.NewEncoder(w).Encode(api.TrailDeleteResponse{OK: false}); err != nil {
+			if err := json.NewEncoder(w).Encode(api.TrailDeleteResponse{OK: true}); err != nil {
 				t.Errorf("encode response: %v", err)
 			}
 		}))
 		defer srv.Close()
-
-		client := api.NewClientWithBaseURL("tok", srv.URL)
-		if err := deleteTrailByNumber(t.Context(), client, "gh", "acme", "repo", 575); err == nil {
-			t.Fatal("expected error for 2xx without ok:true, got nil")
+		client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("legacy")
+		if err := deleteTrailByNumber(t.Context(), client, "gh", "acme", "repo", 575); err != nil {
+			t.Fatalf("deleteTrailByNumber: %v", err)
 		}
 	})
 
@@ -983,37 +1017,169 @@ func TestTrailListQueryWithOffsetIncludesOffset(t *testing.T) {
 	}
 }
 
-func TestFindTrailPaginatesPastServerMax(t *testing.T) {
+func TestListTrailResourcesRejectsNonPositiveLimit(t *testing.T) {
 	t.Parallel()
-	var offsets []int
+	for _, limit := range []int{0, -1} {
+		_, _, err := listTrailResources(t.Context(), nil, "gh", "acme", "repo", nil, "", limit)
+		if err == nil || err.Error() != "limit must be greater than 0" {
+			t.Fatalf("limit %d error = %v, want limit validation error", limit, err)
+		}
+	}
+}
+
+func TestListTrailResourcesUsesLegacyQueryByDefault(t *testing.T) {
+	t.Parallel()
+	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		offsetStr := r.URL.Query().Get("offset")
-		offset := 0
-		if offsetStr != "" {
-			var err error
-			offset, err = strconv.Atoi(offsetStr)
+		gotQuery = r.URL.RawQuery
+		_, _ = fmt.Fprint(w, `{"trails":[{"id":"trl_1","number":1,"branch":"feature/x"}],"total":1}`)
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("legacy")
+	items, total, err := listTrailResources(t.Context(), client, "gh", "acme", "repo", []trail.Status{trail.StatusOpen}, "alice", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || total != 1 {
+		t.Fatalf("items=%d total=%d", len(items), total)
+	}
+	if want := "author=alice&limit=10&status=open"; gotQuery != want {
+		t.Fatalf("query = %q, want %q", gotQuery, want)
+	}
+}
+
+func TestRunTrailListAllNotesLegacyLimitCapOnly(t *testing.T) {
+	t.Parallel()
+	for _, backend := range []string{"legacy", "entire-api"} {
+		t.Run(backend, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if backend == "legacy" {
+					_, _ = fmt.Fprint(w, `{"trails":[{"id":"trl_1","number":1,"branch":"feature/x","status":"open"}],"total":1033}`)
+					return
+				}
+				_, _ = fmt.Fprint(w, `{"items":[{"id":"trl_1","number":1,"branch":"feature/x","status":"open"}],"totalCount":1033}`)
+			}))
+			defer srv.Close()
+
+			client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend(backend)
+			var out bytes.Buffer
+			err := runTrailListAllWithClient(t.Context(), &out, client, trailListOptions{
+				Repo: "gh/acme/repo", Limit: 500,
+			}, []trail.Status{trail.StatusOpen})
 			if err != nil {
-				t.Fatalf("parse offset %q: %v", offsetStr, err)
+				t.Fatal(err)
+			}
+			wantNote := backend == "legacy"
+			note := "Note: --limit 500 exceeds the server maximum of 200 trails per request."
+			if got := strings.Contains(out.String(), note); got != wantNote {
+				t.Fatalf("note present = %v, want %v; output:\n%s", got, wantNote, out.String())
+			}
+		})
+	}
+}
+
+func TestListTrailResourcesStopsWhenAuthorLimitIsSatisfied(t *testing.T) {
+	t.Parallel()
+	requests := 0
+	login := "alice"
+	next := "should-not-be-requested"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests > 1 {
+			t.Errorf("unexpected extra page request with token %q", r.URL.Query().Get("pageToken"))
+		}
+		trails := make([]api.TrailResource, trailListServerMaxLimit)
+		for i := range trails {
+			trails[i] = api.TrailResource{
+				ID:     "trl_" + strconv.Itoa(i),
+				Number: i + 1,
+				Author: &trail.Author{Login: &login},
 			}
 		}
-		offsets = append(offsets, offset)
-		trails := []api.TrailResource{}
-		switch offset {
-		case 0:
-			trails = make([]api.TrailResource, trailListServerMaxLimit)
-			for i := range trails {
-				trails[i] = api.TrailResource{ID: "trl_first_" + strconv.Itoa(i), Number: i + 1, Branch: "old/" + strconv.Itoa(i)}
-			}
-		case trailListServerMaxLimit:
-			trails = []api.TrailResource{{ID: "trl_target", Number: 201, Branch: "target"}}
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+			Trails: trails, NextPageToken: &next, Total: 10_000,
+		}); err != nil {
+			t.Errorf("encode response: %v", err)
 		}
-		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails, Total: trailListServerMaxLimit + 1}); err != nil {
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
+
+	items, total, err := listTrailResources(t.Context(), client, "gh", "acme", "repo", nil, login, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+	if len(items) != 5 || total != 5 {
+		t.Fatalf("items=%d total=%d, want 5/5", len(items), total)
+	}
+}
+
+func TestTrailListPageQueryUsesEntireAPIPagination(t *testing.T) {
+	t.Parallel()
+	got := trailListPageQuery([]trail.Status{trail.StatusOpen}, 100, "next page")
+	want := "?pageSize=100&pageToken=next+page&status=open"
+	if got != want {
+		t.Fatalf("trailListPageQuery = %q, want %q", got, want)
+	}
+}
+
+func TestFindTrailByNumberUsesDirectEntireAPIRoute(t *testing.T) {
+	t.Parallel()
+	const trailNumber = 1201
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.URL.Path, "/api/v1/trails/gh/acme/repo/1201"; got != want {
+			t.Fatalf("path = %q, want %q", got, want)
+		}
+		if r.URL.RawQuery != "" {
+			t.Fatalf("query = %q, want empty", r.URL.RawQuery)
+		}
+		if err := json.NewEncoder(w).Encode(api.TrailResource{ID: "trl_old", Number: trailNumber, Branch: "old/trail"}); err != nil {
 			t.Fatalf("encode response: %v", err)
 		}
 	}))
 	defer srv.Close()
 
-	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
+	found, err := findTrailByNumber(t.Context(), client, "gh", "acme", "repo", trailNumber)
+	if err != nil {
+		t.Fatalf("findTrailByNumber: %v", err)
+	}
+	if found == nil || found.ID != "trl_old" {
+		t.Fatalf("found = %#v, want trl_old", found)
+	}
+}
+
+func TestFindTrailPaginatesPastServerMax(t *testing.T) {
+	t.Parallel()
+	const nextPage = "next-page"
+	var tokens []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := r.URL.Query().Get("pageToken")
+		tokens = append(tokens, token)
+		trails := []api.TrailResource{}
+		var next *string
+		switch token {
+		case "":
+			trails = make([]api.TrailResource, trailListServerMaxLimit)
+			for i := range trails {
+				trails[i] = api.TrailResource{ID: "trl_first_" + strconv.Itoa(i), Number: i + 1, Branch: "old/" + strconv.Itoa(i)}
+			}
+			n := nextPage
+			next = &n
+		case nextPage:
+			trails = []api.TrailResource{{ID: "trl_target", Number: 201, Branch: "target"}}
+		}
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails, Total: trailListServerMaxLimit + 1, NextPageToken: next}); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
 	found, err := findTrailByBranch(context.Background(), client, "gh", "acme", "repo", "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
@@ -1021,8 +1187,45 @@ func TestFindTrailPaginatesPastServerMax(t *testing.T) {
 	if found == nil || found.ID != "trl_target" {
 		t.Fatalf("found = %#v, want trl_target", found)
 	}
-	if len(offsets) != 2 || offsets[0] != 0 || offsets[1] != trailListServerMaxLimit {
-		t.Fatalf("offsets = %v, want [0 %d]", offsets, trailListServerMaxLimit)
+	if len(tokens) != 2 || tokens[0] != "" || tokens[1] != nextPage {
+		t.Fatalf("page tokens = %v, want [\"\" next-page]", tokens)
+	}
+}
+
+func TestFindTrailPaginatesPastLegacyPageCount(t *testing.T) {
+	t.Parallel()
+	const targetPage = trailFindLegacyMaxPages + 1
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		page := int(atomic.AddInt32(&requests, 1))
+		response := api.TrailListResponse{}
+		if page == targetPage {
+			response.Trails = []api.TrailResource{{ID: "trl_target", Number: 1001, Branch: "target"}}
+		} else {
+			response.Trails = make([]api.TrailResource, trailListServerMaxLimit)
+			for i := range response.Trails {
+				number := (page-1)*trailListServerMaxLimit + i + 1
+				response.Trails[i] = api.TrailResource{ID: "trl_" + strconv.Itoa(number), Number: number, Branch: "old/" + strconv.Itoa(number)}
+			}
+			next := "page-" + strconv.Itoa(page+1)
+			response.NextPageToken = &next
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
+	found, err := findTrailByBranch(t.Context(), client, "gh", "acme", "repo", "target")
+	if err != nil {
+		t.Fatalf("findTrailByBranch: %v", err)
+	}
+	if found == nil || found.ID != "trl_target" {
+		t.Fatalf("found = %#v, want trl_target", found)
+	}
+	if got := atomic.LoadInt32(&requests); got != targetPage {
+		t.Fatalf("requests = %d, want %d", got, targetPage)
 	}
 }
 
@@ -1035,13 +1238,14 @@ func TestFindTrailStopsWhenServerRepeatsUnpaginatedFullPage(t *testing.T) {
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&requests, 1)
-		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails}); err != nil {
+		next := "same-page"
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails, NextPageToken: &next}); err != nil {
 			t.Fatalf("encode response: %v", err)
 		}
 	}))
 	defer srv.Close()
 
-	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
 	found, err := findTrailByBranch(context.Background(), client, "gh", "acme", "repo", "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
@@ -1064,13 +1268,14 @@ func TestFindTrailStopsAtMaxPagesWithoutTotal(t *testing.T) {
 			trailNumber := (requestNumber-1)*trailListServerMaxLimit + i + 1
 			trails[i] = api.TrailResource{ID: "trl_" + strconv.Itoa(trailNumber), Number: trailNumber, Branch: "old/" + strconv.Itoa(trailNumber)}
 		}
-		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails}); err != nil {
+		next := "page-" + strconv.Itoa(requestNumber)
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails, NextPageToken: &next}); err != nil {
 			t.Fatalf("encode response: %v", err)
 		}
 	}))
 	defer srv.Close()
 
-	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
 	found, err := findTrailByBranch(context.Background(), client, "gh", "acme", "repo", "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
@@ -1078,8 +1283,8 @@ func TestFindTrailStopsAtMaxPagesWithoutTotal(t *testing.T) {
 	if found != nil {
 		t.Fatalf("found = %#v, want nil", found)
 	}
-	if got := atomic.LoadInt32(&requests); got != trailFindMaxPages {
-		t.Fatalf("requests = %d, want %d", got, trailFindMaxPages)
+	if got := atomic.LoadInt32(&requests); got != trailFindEntireAPIMaxPages {
+		t.Fatalf("requests = %d, want %d", got, trailFindEntireAPIMaxPages)
 	}
 }
 

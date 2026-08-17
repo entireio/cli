@@ -56,39 +56,10 @@ const ClaudeSettingsFileName = "settings.json"
 // metadataDenyRule blocks Claude from reading Entire session metadata
 const metadataDenyRule = "Read(./.entire/metadata/**)"
 
-// localDevHookCmdPrefix is the command prefix used for hooks in local-dev mode.
-// It points at scripts/entire-dev, which compiles the CLI on demand and falls
-// back to the entire binary on PATH when the tree does not build (e.g. mid
-// merge-conflict-fix). ${CLAUDE_PROJECT_DIR} is set by Claude Code to the
-// repository root when it runs hooks.
-const localDevHookCmdPrefix = "${CLAUDE_PROJECT_DIR}/scripts/entire-dev "
-
-// localDevSessionEndTimeoutSecs gives the local-dev SessionEnd hook an explicit
-// timeout (seconds) so Claude Code waits for it on exit instead of cancelling it
-// after its short default exit-grace, which the build-from-source dev launcher
-// (scripts/entire-dev) can exceed. Only set in local-dev mode; production leaves
-// Claude Code's default in place.
-const localDevSessionEndTimeoutSecs = 60
-
-// entireHookPrefixes are command prefixes that identify Entire hooks. The
-// "go run" prefix is retained so hooks installed by older versions are still
-// recognized for removal/upgrade.
-var entireHookPrefixes = []string{
-	"entire ",
-	localDevHookCmdPrefix,
-	"go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go ",
-}
-
-// localDevHookCommand builds a local-dev hook command for the given hook name,
-// delegating to scripts/entire-dev for the build-probe-and-fallback logic.
-func localDevHookCommand(hookName string) string {
-	return fmt.Sprintf("%shooks claude-code %s", localDevHookCmdPrefix, hookName)
-}
-
 // InstallHooks installs Claude Code hooks in .claude/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
-func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
+func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	// Use repo root instead of CWD to find .claude directory
 	// This ensures hooks are installed correctly when run from a subdirectory
 	repoRoot, err := paths.WorktreeRoot(ctx)
@@ -157,62 +128,62 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 	}
 
 	// Define hook commands
-	var sessionStartCmd, sessionEndCmd, stopCmd, userPromptSubmitCmd, preTaskCmd, postTaskCmd, postTodoCmd string
-	if localDev {
-		sessionStartCmd = localDevHookCommand(HookNameSessionStart)
-		sessionEndCmd = localDevHookCommand(HookNameSessionEnd)
-		stopCmd = localDevHookCommand(HookNameStop)
-		userPromptSubmitCmd = localDevHookCommand(HookNameUserPromptSubmit)
-		preTaskCmd = localDevHookCommand(HookNamePreTask)
-		postTaskCmd = localDevHookCommand(HookNamePostTask)
-		postTodoCmd = localDevHookCommand(HookNamePostTodo)
-	} else {
-		sessionStartCmd = agent.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agent.WarningFormatMultiLine)
-		sessionEndCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code session-end")
-		stopCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code stop")
-		userPromptSubmitCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit")
-		preTaskCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
-		postTaskCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
-		postTodoCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
-	}
+	sessionStartCmd := agent.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agent.WarningFormatMultiLine)
+	sessionEndCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code session-end")
+	stopCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	userPromptSubmitCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit")
+	preTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
+	postTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+	postTodoCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
 
 	count := 0
 
-	// The local-dev SessionEnd hook gets an explicit timeout so Claude Code
-	// waits for it on exit; every other hook (and all production hooks) keeps
-	// Claude Code's default.
-	sessionEndTimeoutSecs := 0
-	if localDev {
-		sessionEndTimeoutSecs = localDevSessionEndTimeoutSecs
+	// Drop Entire hooks left by older versions before adding the current ones,
+	// so a stale command (e.g. the removed local-dev launcher, which ran a
+	// script inside the working tree) does not survive alongside them.
+	// Unconditional: a plain `entire enable` must migrate too, not just --force.
+	staleDropped := false
+	drop := func(matchers []ClaudeHookMatcher, want ...string) []ClaudeHookMatcher {
+		out, dropped := dropStaleEntireHooks(matchers, want...)
+		if dropped {
+			staleDropped = true
+		}
+		return out
 	}
+	sessionStart = drop(sessionStart, sessionStartCmd)
+	sessionEnd = drop(sessionEnd, sessionEndCmd)
+	stop = drop(stop, stopCmd)
+	userPromptSubmit = drop(userPromptSubmit, userPromptSubmitCmd)
+	preToolUse = drop(preToolUse, preTaskCmd)
+	postToolUse = drop(postToolUse, postTaskCmd, postTodoCmd)
 
 	// Add hooks if they don't exist
 	if !hookCommandExists(sessionStart, sessionStartCmd) {
-		sessionStart = addHookToMatcher(sessionStart, "", sessionStartCmd, 0)
+		sessionStart = addHookToMatcher(sessionStart, "", sessionStartCmd)
 		count++
 	}
 	if !hookCommandExists(sessionEnd, sessionEndCmd) {
-		sessionEnd = addHookToMatcher(sessionEnd, "", sessionEndCmd, sessionEndTimeoutSecs)
+		sessionEnd = addHookToMatcher(sessionEnd, "", sessionEndCmd)
 		count++
 	}
 	if !hookCommandExists(stop, stopCmd) {
-		stop = addHookToMatcher(stop, "", stopCmd, 0)
+		stop = addHookToMatcher(stop, "", stopCmd)
 		count++
 	}
 	if !hookCommandExists(userPromptSubmit, userPromptSubmitCmd) {
-		userPromptSubmit = addHookToMatcher(userPromptSubmit, "", userPromptSubmitCmd, 0)
+		userPromptSubmit = addHookToMatcher(userPromptSubmit, "", userPromptSubmitCmd)
 		count++
 	}
 	if !hookCommandExistsWithMatcher(preToolUse, subagentToolMatcher, preTaskCmd) {
-		preToolUse = addHookToMatcher(preToolUse, subagentToolMatcher, preTaskCmd, 0)
+		preToolUse = addHookToMatcher(preToolUse, subagentToolMatcher, preTaskCmd)
 		count++
 	}
 	if !hookCommandExistsWithMatcher(postToolUse, subagentToolMatcher, postTaskCmd) {
-		postToolUse = addHookToMatcher(postToolUse, subagentToolMatcher, postTaskCmd, 0)
+		postToolUse = addHookToMatcher(postToolUse, subagentToolMatcher, postTaskCmd)
 		count++
 	}
 	if !hookCommandExistsWithMatcher(postToolUse, taskToolMatcher, postTodoCmd) {
-		postToolUse = addHookToMatcher(postToolUse, taskToolMatcher, postTodoCmd, 0)
+		postToolUse = addHookToMatcher(postToolUse, taskToolMatcher, postTodoCmd)
 		count++
 	}
 
@@ -234,7 +205,10 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 		permissionsChanged = true
 	}
 
-	if count == 0 && !permissionsChanged {
+	// staleDropped forces a write even when nothing was added: a file holding
+	// both a stale and a current hook adds nothing, and returning early here
+	// would leave the stale hook on disk.
+	if count == 0 && !permissionsChanged && !staleDropped {
 		return 0, nil // All hooks and permissions already installed
 	}
 
@@ -575,11 +549,15 @@ func hookCommandExistsWithMatcher(matchers []ClaudeHookMatcher, matcherName, com
 	return false
 }
 
-func addHookToMatcher(matchers []ClaudeHookMatcher, matcherName, command string, timeoutSecs int) []ClaudeHookMatcher {
+// addHookToMatcher appends command to the matcher named matcherName, creating it
+// if absent. No timeout is set: Timeout exists on ClaudeHookEntry to round-trip
+// settings files that carry one, but Entire's own hooks all keep Claude Code's
+// default. (The removed local-dev mode was the only thing that needed a longer
+// SessionEnd budget, because it compiled the CLI from source.)
+func addHookToMatcher(matchers []ClaudeHookMatcher, matcherName, command string) []ClaudeHookMatcher {
 	entry := ClaudeHookEntry{
 		Type:    "command",
 		Command: command,
-		Timeout: timeoutSecs,
 	}
 
 	// If no matcher name, add to a matcher with empty string
@@ -612,26 +590,42 @@ func addHookToMatcher(matchers []ClaudeHookMatcher, matcherName, command string,
 
 // isEntireHook checks if a command is an Entire hook (old or new format)
 func isEntireHook(command string) bool {
-	return agent.IsManagedHookCommand(command, entireHookPrefixes)
+	return agent.IsManagedHookCommand(command)
 }
 
-// removeEntireHooks removes all Entire hooks from a list of matchers (for simple hooks like Stop)
-func removeEntireHooks(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
+// dropStaleEntireHooks removes Entire-owned hooks whose command is not one of
+// want, per matcher, pruning matchers left with no hooks. want is a set because
+// one hook list can hold several Entire commands (PostToolUse carries both
+// post-task and post-todo). See agent.DropStaleManagedHooks for why this runs on
+// every install and why the dropped flag matters.
+func dropStaleEntireHooks(matchers []ClaudeHookMatcher, want ...string) ([]ClaudeHookMatcher, bool) {
 	result := make([]ClaudeHookMatcher, 0, len(matchers))
+	dropped := false
 	for _, matcher := range matchers {
-		filteredHooks := make([]ClaudeHookEntry, 0, len(matcher.Hooks))
-		for _, hook := range matcher.Hooks {
-			if !isEntireHook(hook.Command) {
-				filteredHooks = append(filteredHooks, hook)
-			}
+		kept, d := agent.DropStaleManagedHooks(matcher.Hooks, hookEntryCommand, want)
+		if d {
+			dropped = true
 		}
-		// Only keep the matcher if it has hooks remaining
-		if len(filteredHooks) > 0 {
-			matcher.Hooks = filteredHooks
+		if len(kept) > 0 {
+			matcher.Hooks = kept
 			result = append(result, matcher)
 		}
 	}
-	return result
+	if !dropped {
+		return matchers, false
+	}
+	return result, true
+}
+
+// hookEntryCommand reads the command off a hook entry for the shared helpers.
+func hookEntryCommand(e ClaudeHookEntry) string { return e.Command }
+
+// removeEntireHooks removes all Entire hooks from a list of matchers (for simple
+// hooks like Stop). It is dropStaleEntireHooks with an empty want set: nothing is
+// wanted, so every managed hook is stale.
+func removeEntireHooks(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
+	out, _ := dropStaleEntireHooks(matchers)
+	return out
 }
 
 // removeEntireHooksFromMatchers removes Entire hooks from tool-use matchers (PreToolUse, PostToolUse)

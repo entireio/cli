@@ -97,12 +97,16 @@ func currentTrailEnablementScope(ctx context.Context) (trailEnablementScope, err
 	if err != nil {
 		return trailEnablementScope{}, fmt.Errorf("resolve auth cache key: %w", err)
 	}
+	apiBase, err := trailBackendScopedAPIBase()
+	if err != nil {
+		return trailEnablementScope{}, err
+	}
 	return trailEnablementScope{
 		Forge:     info.Forge,
 		Owner:     info.Owner,
 		Repo:      info.Repo,
 		RepoKey:   trailEnablementRepoKey(info.Forge, info.Owner, info.Repo),
-		APIBase:   api.BaseURL(),
+		APIBase:   apiBase,
 		AuthKey:   authKey,
 		Supported: info.Forge != "",
 	}, nil
@@ -110,6 +114,14 @@ func currentTrailEnablementScope(ctx context.Context) (trailEnablementScope, err
 
 func trailEnablementRepoKey(forge, owner, repo string) string {
 	return strings.Join([]string{forge, owner, repo}, "/")
+}
+
+func trailBackendScopedAPIBase() (string, error) {
+	backend, err := configuredTrailBackend()
+	if err != nil {
+		return "", err
+	}
+	return string(backend) + ":" + api.BaseURL(), nil
 }
 
 func saveTrailEnablementScopeHint(ctx context.Context, sessionID string, scope trailEnablementScope) error {
@@ -173,12 +185,16 @@ func saveTrailsEnabledForRemote(ctx context.Context, forge, owner, repo string, 
 	if err != nil {
 		return fmt.Errorf("resolve auth cache key: %w", err)
 	}
+	apiBase, err := trailBackendScopedAPIBase()
+	if err != nil {
+		return err
+	}
 	scope := trailEnablementScope{
 		Forge:     forge,
 		Owner:     owner,
 		Repo:      repo,
 		RepoKey:   trailEnablementRepoKey(forge, owner, repo),
-		APIBase:   api.BaseURL(),
+		APIBase:   apiBase,
 		AuthKey:   authKey,
 		Supported: forge != "",
 	}
@@ -259,9 +275,11 @@ func refreshTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEn
 // trailRefreshAPIClient is the authenticated-client seam used by
 // runTrailEnablementRefresh, swapped in tests so they can force the
 // refreshTrailsEnabledCacheForScope error branch (e.g. a broken API host)
-// without a real login context. Production code always uses
-// NewAuthenticatedAPIClient.
-var trailRefreshAPIClient = NewAuthenticatedAPIClient
+// without a real login context. Production code always uses the repo-routed
+// entire-api cell client.
+var trailRefreshAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
+	return newTrailAPIClient(ctx, insecureHTTP, fullName)
+}
 
 // runTrailEnablementRefresh performs the actual (potentially slow) network
 // refresh. It is invoked from the detached `__refresh_trail_enablement`
@@ -293,7 +311,7 @@ func runTrailEnablementRefresh(ctx context.Context) error {
 		}
 		return nil
 	}
-	client, err := trailRefreshAPIClient(ctx, false)
+	client, err := trailRefreshAPIClient(ctx, false, scope.Owner+"/"+scope.Repo)
 	if err != nil {
 		logging.Debug(logCtx, "trails enablement refresh skipped: authenticated client unavailable", "error", err.Error())
 		return nil
@@ -472,17 +490,22 @@ func noteTrailCommandEnablement(ctx context.Context, client *api.Client, command
 	refreshTrailsEnabledCacheBestEffort(ctx, client)
 }
 
-// runAuthenticatedTrailAPI runs fn against the data API as the current user.
-// repoOverride is the raw --repo flag: when non-empty the trails-enablement
-// cache is skipped, because that cache is keyed to the local clone's origin and
-// a cross-repo query says nothing about the local clone (recording it would
-// mis-attribute enablement to the wrong repo).
+// runAuthenticatedTrailAPI runs fn against the entire-api cell that owns the
+// target repository. repoOverride is the raw --repo flag: when non-empty the
+// local clone's enablement cache is skipped because the result belongs to a
+// different repository.
 func runAuthenticatedTrailAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, repoOverride string, fn func(context.Context, *api.Client) error) error {
-	return runAuthenticatedDataAPI(ctx, errW, insecureHTTP, func(ctx context.Context, client *api.Client) error {
-		err := fn(ctx, client)
-		if repoOverride == "" {
-			noteTrailCommandEnablement(ctx, client, err)
-		}
+	_, owner, repo, err := resolveTrailRepoOrRemote(ctx, repoOverride)
+	if err != nil {
 		return err
-	})
+	}
+	client, err := newTrailAPIClient(ctx, insecureHTTP, owner+"/"+repo)
+	if err != nil {
+		return renderDataAPIAuthError(errW, err)
+	}
+	err = fn(ctx, client)
+	if repoOverride == "" {
+		noteTrailCommandEnablement(ctx, client, err)
+	}
+	return err
 }

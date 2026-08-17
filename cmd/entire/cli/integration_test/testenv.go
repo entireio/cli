@@ -370,9 +370,11 @@ func (env *TestEnv) initEntireInternal(strategyOptions map[string]any) {
 	// Note: The agent name is NOT stored in settings.json — the CLI determines
 	// the agent from installed hooks (detect presence) or checkpoint metadata.
 	// The settings parser uses DisallowUnknownFields(), so only recognized fields are allowed.
+	// Tests invoke hooks explicitly via getTestBinary() rather than relying on
+	// git-triggered ones, which resolve "entire" through PATH and would run
+	// whatever build happens to be installed.
 	settings := map[string]any{
-		"enabled":   true,
-		"local_dev": true, // Note: git-triggered hooks won't work (path is relative); tests call hooks via getTestBinary() instead
+		"enabled": true,
 	}
 	if strategyOptions == nil {
 		strategyOptions = make(map[string]any)

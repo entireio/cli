@@ -2377,7 +2377,7 @@ func TestNewRefreshTrailEnablementCmd_APIFailureExitsZero(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	prevClient := trailRefreshAPIClient
-	trailRefreshAPIClient = func(context.Context, bool) (*api.Client, error) {
+	trailRefreshAPIClient = func(context.Context, bool, string) (*api.Client, error) {
 		return api.NewClientWithBaseURL("test-token", srv.URL), nil
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = prevClient })
@@ -2469,5 +2469,86 @@ func TestSpawnDetachedTrailEnablementRefresh_CollapsesBurst(t *testing.T) {
 
 	if got := atomic.LoadInt32(&spawnCount); got != 1 {
 		t.Fatalf("expected the burst to collapse to a single detached spawn, got %d", got)
+	}
+}
+
+// resolvingSubagentAgent is a mockLifecycleAgent that also reports a subagent
+// session link, standing in for an agent whose subagents run as their own
+// sessions (Factory AI Droid's Workers).
+type resolvingSubagentAgent struct {
+	mockLifecycleAgent
+
+	link agent.SubagentSessionLink
+	ok   bool
+}
+
+var _ agent.SubagentSessionResolver = (*resolvingSubagentAgent)(nil)
+
+func (r *resolvingSubagentAgent) ResolveSubagentSession(_ string) (agent.SubagentSessionLink, bool) {
+	return r.link, r.ok
+}
+
+// TestResolveSubagentSessionLink_RejectsPathUnsafeIDs pins the choke point every
+// SubagentSessionResolver passes through. The IDs it returns are interpolated
+// into metadata paths by SessionMetadataDirFromSessionID and TaskMetadataDir,
+// neither of which sanitizes, so validation cannot be left to implementations.
+func TestResolveSubagentSessionLink_RejectsPathUnsafeIDs(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]agent.SubagentSessionLink{
+		"parent traverses":   {ParentSessionID: "../../etc", ToolUseID: "toolu_1"},
+		"parent separator":   {ParentSessionID: "a/b", ToolUseID: "toolu_1"},
+		"tool use traverses": {ParentSessionID: "parent-1", ToolUseID: "../../etc"},
+		"tool use separator": {ParentSessionID: "parent-1", ToolUseID: "a/b"},
+		"empty parent":       {ParentSessionID: "", ToolUseID: "toolu_1"},
+		"empty tool use":     {ParentSessionID: "parent-1", ToolUseID: ""},
+	}
+
+	for name, link := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ag := &resolvingSubagentAgent{link: link, ok: true}
+
+			_, ok := resolveSubagentSessionLink(context.Background(), ag, "transcript.jsonl")
+
+			if ok {
+				t.Errorf("link %+v must be rejected, not used to build a metadata path", link)
+			}
+		})
+	}
+}
+
+// TestResolveSubagentSessionLink_AcceptsValidLink guards against the validation
+// above rejecting everything, which would silently restore the original bug.
+func TestResolveSubagentSessionLink_AcceptsValidLink(t *testing.T) {
+	t.Parallel()
+
+	want := agent.SubagentSessionLink{
+		ParentSessionID: "0b34cbcb-108c-4800-b68e-af7093c8cae9",
+		ToolUseID:       "toolu_01SC9sRHSef1vtNFtMrX9w6T",
+		SubagentType:    "worker",
+	}
+	ag := &resolvingSubagentAgent{link: want, ok: true}
+
+	got, ok := resolveSubagentSessionLink(context.Background(), ag, "transcript.jsonl")
+
+	if !ok {
+		t.Fatal("a well-formed link must be accepted")
+	}
+	if got.ParentSessionID != want.ParentSessionID || got.ToolUseID != want.ToolUseID {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+// TestResolveSubagentSessionLink_AgentWithoutCapability confirms the default
+// path: an agent whose subagents block the parent turn (Claude Code) is left on
+// the ordinary session-checkpoint path.
+func TestResolveSubagentSessionLink_AgentWithoutCapability(t *testing.T) {
+	t.Parallel()
+
+	ag := &mockLifecycleAgent{name: "mock", agentType: "mock"}
+
+	if _, ok := resolveSubagentSessionLink(context.Background(), ag, "transcript.jsonl"); ok {
+		t.Error("an agent without the capability must never resolve a subagent link")
 	}
 }

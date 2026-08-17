@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 )
 
 // NewAuthenticatedAPIClient creates an API client targeting api.BaseURL()
@@ -65,4 +68,52 @@ func NewAuthenticatedEntireAPICellClient(ctx context.Context, insecureHTTP bool,
 	// (login hint, discovery-unavailable, region guidance); re-wrapping here
 	// would bury them, so surface them verbatim.
 	return auth.NewEntireAPICellClient(ctx, insecureHTTP, target) //nolint:wrapcheck // pass through contextual auth errors
+}
+
+type trailBackend string
+
+const (
+	trailBackendEnvVar    = "ENTIRE_TRAILS_BACKEND"
+	trailBackendLegacy    = trailBackend("legacy")
+	trailBackendEntireAPI = trailBackend("entire-api")
+)
+
+func configuredTrailBackend() (trailBackend, error) {
+	switch value := strings.ToLower(strings.TrimSpace(os.Getenv(trailBackendEnvVar))); value {
+	case "", string(trailBackendLegacy), "bff":
+		return trailBackendLegacy, nil
+	case string(trailBackendEntireAPI), "native":
+		return trailBackendEntireAPI, nil
+	default:
+		return "", fmt.Errorf("invalid %s value %q: expected legacy or entire-api", trailBackendEnvVar, value)
+	}
+}
+
+func isEntireAPITrailClient(client *api.Client) bool {
+	return client != nil && client.TrailBackend() == string(trailBackendEntireAPI)
+}
+
+// newTrailAPIClient selects the legacy BFF by default. Setting
+// ENTIRE_TRAILS_BACKEND=entire-api opts into direct, owning-cell routing.
+var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
+	backend, err := configuredTrailBackend()
+	if err != nil {
+		return nil, err
+	}
+	if backend == trailBackendLegacy {
+		client, err := NewAuthenticatedAPIClient(ctx, insecureHTTP)
+		if err != nil {
+			return nil, err
+		}
+		return client.WithTrailBackend(string(backend)), nil
+	}
+
+	client, err := NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, fullName, "")
+	if errors.Is(err, clusterdiscovery.ErrNoAuthContext) {
+		return nil, fmt.Errorf("%w: %w", auth.ErrNotLoggedIn, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return client.WithTrailBackend(string(backend)), nil
 }

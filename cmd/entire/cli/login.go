@@ -718,12 +718,9 @@ func readLoginURLAction(ctx context.Context, errW io.Writer) (loginURLAction, er
 }
 
 // readLoginURLActionFromTTY takes ownership of tty. Bubble Tea handles raw mode,
-// escape-sequence decoding, cancellation, and terminal restoration. If the
-// terminal cannot provide single-key input, disable key actions.
+// escape-sequence decoding, and terminal restoration. If the terminal cannot
+// provide single-key input, disable key actions.
 func readLoginURLActionFromTTY(ctx context.Context, errW io.Writer, tty *os.File) (loginURLAction, error) {
-	// Normally this function owns tty and closes it on the way out. The one
-	// exception is a cancelled context — see the comment below — so the close is
-	// conditional rather than a plain defer.
 	closeTTY := true
 	defer func() {
 		if closeTTY {
@@ -735,29 +732,34 @@ func readLoginURLActionFromTTY(ctx context.Context, errW io.Writer, tty *os.File
 		return loginURLNone, nil
 	}
 
-	model := loginURLActionModel{}
-	finalModel, err := tea.NewProgram(
-		model,
-		tea.WithContext(ctx),
+	// Fast path: don't put the terminal in raw mode for a read we would abandon.
+	if err := ctx.Err(); err != nil {
+		return loginURLNone, fmt.Errorf("interrupted: %w", err)
+	}
+
+	program := tea.NewProgram(
+		loginURLActionModel{},
 		tea.WithInput(tty),
 		tea.WithOutput(io.Discard),
 		tea.WithoutSignalHandler(),
-	).Run()
-	if ctx.Err() != nil {
-		// Do NOT close tty here. When the program is killed by context
-		// cancellation, Bubble Tea's shutdown(kill=true) deliberately skips
-		// waitForReadLoop(), so its input reader goroutine can still be running
-		// after Run returns. On Linux that reader is cancelreader's epoll
-		// implementation, whose wait loop reads tty.Fd() — closing the descriptor
-		// underneath it is a data race (the race detector catches it as
-		// poll.(*FD).destroy vs os.(*File).Fd), and freeing the number lets an
-		// unrelated open reuse it while a live reader still holds the File.
-		//
-		// Bubble Tea exposes nothing to join that goroutine: Program.Wait only
-		// waits on a channel Run already closed via defer. So leave the descriptor
-		// for process exit to reclaim. `entire login` is short-lived and cancels
-		// at most once per sign-in, so this is bounded to a single descriptor.
+	)
+
+	// Cancellation must reach Bubble Tea as a Quit, never as its context: Run
+	// treats a cancelled context as a kill, and shutdown(kill=true) skips
+	// waitForReadLoop() before closing its cancelreader — closing tty, and
+	// cancelreader's own cancel-signal pipe, under a live reader. A QuitMsg leaves
+	// `killed` false, so the read loop is joined before anything closes.
+	stopQuit := context.AfterFunc(ctx, program.Quit)
+	defer stopQuit()
+
+	finalModel, err := program.Run()
+	if errors.Is(err, tea.ErrProgramKilled) {
+		// Bubble Tea reports any event-loop error this way, input-stream failures
+		// included, and a killed Run skipped waitForReadLoop — so the reader may
+		// still hold tty. Let process exit reclaim the fd rather than race for it.
 		closeTTY = false
+	}
+	if ctx.Err() != nil {
 		return loginURLNone, fmt.Errorf("interrupted: %w", ctx.Err())
 	}
 	if err != nil {
@@ -767,14 +769,11 @@ func readLoginURLActionFromTTY(ctx context.Context, errW io.Writer, tty *os.File
 		return loginURLNone, nil
 	}
 
-	// Defensive: unreachable as configured. Run() only returns a nil error via a
-	// graceful QuitMsg, whose sole source here is the tea.Quit below — returned
-	// only once selected is set — because WithoutSignalHandler removes
-	// InterruptMsg and eventLoop's other nil returns imply a cancelled context,
-	// which the check above already caught. Degrade rather than abort anyway: a
-	// future keybinding, filter, or signal handler could arm this branch, and
-	// losing keyboard access must never kill a sign-in the visible URL can still
-	// complete.
+	// Defensive: unreachable as configured — a nil error means a graceful QuitMsg,
+	// and both sources are handled above (the model's tea.Quit sets selected; the
+	// cancellation Quit is caught by the ctx.Err() check). Degrade anyway: a future
+	// keybinding or filter could arm this, and losing keys must never kill a
+	// sign-in the visible URL can still complete.
 	result, ok := finalModel.(loginURLActionModel)
 	if !ok || !result.selected {
 		fmt.Fprintln(errW, "Warning: keyboard actions unavailable; open the login URL above to continue.")

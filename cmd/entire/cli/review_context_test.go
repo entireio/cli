@@ -423,7 +423,7 @@ func installReviewContextClaudeHooks(t *testing.T) {
 	if !ok {
 		t.Fatalf("agent %q does not support hooks", agent.AgentNameClaudeCode)
 	}
-	if _, err := hs.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := hs.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks(%q): %v", agent.AgentNameClaudeCode, err)
 	}
 }

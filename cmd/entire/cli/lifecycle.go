@@ -940,6 +940,25 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	strat := GetStrategy(ctx)
 	agentType := ag.Type()
 
+	// Agents that run subagents as sessions of their own (Factory AI Droid's
+	// Workers) reach turn-end here for the subagent's own turn. Attribute that
+	// work to the parent task invocation instead of minting a top-level session
+	// checkpoint unrelated to the session the user is actually driving.
+	if link, isSubagent := resolveSubagentSessionLink(ctx, ag, transcriptRef); isSubagent {
+		return saveSubagentSessionTaskStep(ctx, subagentSessionStep{
+			link:          link,
+			sessionID:     sessionID,
+			event:         event,
+			transcriptRef: transcriptRef,
+			modifiedFiles: relModifiedFiles,
+			newFiles:      relNewFiles,
+			deletedFiles:  relDeletedFiles,
+			author:        author,
+			agentType:     agentType,
+			strat:         strat,
+		})
+	}
+
 	// Get transcript position/identifier from pre-prompt state
 	var transcriptIdentifierAtStart string
 	var transcriptLinesAtStart int
@@ -1240,6 +1259,115 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	}
 
 	_ = CleanupPreTaskState(ctx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+	return nil
+}
+
+// resolveSubagentSessionLink reports whether this turn belongs to a subagent
+// session spawned by a parent task invocation. It fails closed: an agent that
+// does not model detached subagent sessions, or a link that cannot be read,
+// leaves the turn on the ordinary session-checkpoint path.
+func resolveSubagentSessionLink(
+	ctx context.Context,
+	ag agent.Agent,
+	transcriptRef string,
+) (agent.SubagentSessionLink, bool) {
+	resolver, ok := agent.AsSubagentSessionResolver(ag)
+	if !ok {
+		return agent.SubagentSessionLink{}, false
+	}
+	link, isSubagent := resolver.ResolveSubagentSession(transcriptRef)
+	if !isSubagent {
+		return agent.SubagentSessionLink{}, false
+	}
+	// Both IDs are interpolated into metadata paths by
+	// SessionMetadataDirFromSessionID and TaskMetadataDir, neither of which
+	// sanitizes. Enforce it here rather than trusting each implementation: this
+	// is the one choke point every SubagentSessionResolver passes through, and
+	// it mirrors the ValidateSessionID checks the hook dispatcher already
+	// applies to IDs arriving from an agent.
+	logCtx := logging.WithComponent(ctx, "lifecycle")
+	if err := validation.ValidateAgentSessionID(link.ParentSessionID); err != nil {
+		logging.Warn(logCtx, "ignoring subagent session link with invalid parent session ID",
+			slog.String("error", err.Error()))
+		return agent.SubagentSessionLink{}, false
+	}
+	if err := validation.ValidateToolUseID(link.ToolUseID); err != nil {
+		logging.Warn(logCtx, "ignoring subagent session link with invalid tool use ID",
+			slog.String("error", err.Error()))
+		return agent.SubagentSessionLink{}, false
+	}
+	// An empty tool-use ID passes ValidateToolUseID (the field is optional
+	// elsewhere) but cannot name a task directory here.
+	if link.ToolUseID == "" {
+		logging.Warn(logCtx, "ignoring subagent session link with empty tool use ID")
+		return agent.SubagentSessionLink{}, false
+	}
+	logging.Debug(logCtx, "resolved subagent session",
+		slog.String("parent_session_id", link.ParentSessionID),
+		slog.String("tool_use_id", link.ToolUseID),
+		slog.String("subagent_type", link.SubagentType))
+	return link, true
+}
+
+// subagentSessionStep carries the turn-end inputs needed to record a detached
+// subagent session as a task checkpoint on its parent.
+type subagentSessionStep struct {
+	link          agent.SubagentSessionLink
+	sessionID     string
+	event         *agent.Event
+	transcriptRef string
+	modifiedFiles []string
+	newFiles      []string
+	deletedFiles  []string
+	author        *GitAuthor
+	agentType     types.AgentType
+	strat         *strategy.ManualCommitStrategy
+}
+
+// saveSubagentSessionTaskStep writes a subagent session's turn as a task
+// checkpoint under its parent session.
+//
+// The checkpoint is keyed by the parent's session and tool-use ID, so the
+// subagent's files land in the parent's FilesTouched and its work condenses with
+// the parent's next commit. The subagent's own session ID doubles as the agent
+// ID, which is what stores its transcript beside the parent's in the checkpoint.
+func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) error {
+	logCtx := logging.WithComponent(ctx, "lifecycle")
+	logging.Info(logCtx, "recording subagent session as task checkpoint",
+		slog.String("subagent_session_id", step.sessionID),
+		slog.String("parent_session_id", step.link.ParentSessionID),
+		slog.String("tool_use_id", step.link.ToolUseID),
+		slog.Int("modified_files", len(step.modifiedFiles)),
+		slog.Int("new_files", len(step.newFiles)),
+		slog.Int("deleted_files", len(step.deletedFiles)))
+
+	taskStepCtx := strategy.TaskStepContext{
+		SessionID:              step.link.ParentSessionID,
+		ToolUseID:              step.link.ToolUseID,
+		AgentID:                step.sessionID,
+		ModifiedFiles:          step.modifiedFiles,
+		NewFiles:               step.newFiles,
+		DeletedFiles:           step.deletedFiles,
+		TranscriptPath:         step.link.ParentTranscriptPath,
+		SubagentTranscriptPath: step.transcriptRef,
+		AuthorName:             step.author.Name,
+		AuthorEmail:            step.author.Email,
+		SubagentType:           step.link.SubagentType,
+		TaskDescription:        step.link.TaskDescription,
+		AgentType:              step.agentType,
+	}
+
+	if err := step.strat.SaveTaskStep(ctx, taskStepCtx); err != nil {
+		return fmt.Errorf("failed to save subagent session task step: %w", err)
+	}
+
+	// Retire the subagent's own session the same way an ordinary turn-end does,
+	// so its phase and pre-prompt state do not linger as an active session.
+	transitionSessionTurnEnd(ctx, step.sessionID, step.event)
+	if cleanupErr := CleanupPrePromptState(ctx, step.sessionID); cleanupErr != nil {
+		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
+			slog.String("error", cleanupErr.Error()))
+	}
 	return nil
 }
 

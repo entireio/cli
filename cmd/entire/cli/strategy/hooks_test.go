@@ -16,33 +16,6 @@ import (
 
 const goosWindows = "windows"
 
-// readEntireDevScript returns the contents of the committed scripts/entire-dev
-// launcher, located relative to this test file's position in the source tree.
-func readEntireDevScript(t *testing.T) string {
-	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	// cmd/entire/cli/strategy/hooks_test.go -> repo root is four levels up.
-	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..", "..", "..")
-	data, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "entire-dev"))
-	if err != nil {
-		t.Fatalf("failed to read scripts/entire-dev: %v", err)
-	}
-	return string(data)
-}
-
-// goBinDir returns the directory containing the go binary.
-func goBinDir(t *testing.T) string {
-	t.Helper()
-	goPath, err := exec.LookPath("go")
-	if err != nil {
-		t.Skip("go not available")
-	}
-	return filepath.Dir(goPath)
-}
-
 // clearGlobalHooksPath overrides any global core.hooksPath setting so that
 // test repos use their default .git/hooks directory. Setting the local value
 // takes precedence over the global one.
@@ -353,7 +326,7 @@ func TestInstallGitHook_HooksPathNotADirectory(t *testing.T) {
 		t.Fatalf("GetHooksDir() failed: %v", resolveErr)
 	}
 
-	_, err := InstallGitHook(ctx, true, false, false)
+	_, err := InstallGitHook(ctx, true, false)
 	if err == nil {
 		t.Fatal("InstallGitHook() should fail when hooks path is not a directory")
 	}
@@ -394,7 +367,7 @@ func TestInstallGitHook_HooksPathUnderNonDirectory(t *testing.T) {
 	ClearHooksDirCache()
 	paths.ClearWorktreeRootCache()
 
-	_, err := InstallGitHook(ctx, true, false, false)
+	_, err := InstallGitHook(ctx, true, false)
 	if err == nil {
 		t.Fatal("InstallGitHook() should fail when hooks path is under a non-directory")
 	}
@@ -425,7 +398,7 @@ func TestInstallGitHook_HooksPathNonexistentIsCreated(t *testing.T) {
 	ClearHooksDirCache()
 	paths.ClearWorktreeRootCache()
 
-	count, err := InstallGitHook(ctx, true, false, false)
+	count, err := InstallGitHook(ctx, true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() should create a nonexistent hooks path: %v", err)
 	}
@@ -448,7 +421,7 @@ func TestInstallGitHook_WorktreeInstallsInCommonHooks(t *testing.T) {
 	t.Chdir(worktreeDir)
 	paths.ClearWorktreeRootCache()
 
-	count, err := InstallGitHook(context.Background(), true, false, false)
+	count, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() in worktree failed: %v", err)
 	}
@@ -706,7 +679,7 @@ func TestInstallGitHook_Idempotent(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
 	// First install should install hooks
-	firstCount, err := InstallGitHook(context.Background(), true, false, false)
+	firstCount, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("First InstallGitHook() error = %v", err)
 	}
@@ -728,7 +701,7 @@ func TestInstallGitHook_Idempotent(t *testing.T) {
 	}
 
 	// Second install should return 0 (all hooks already up to date)
-	secondCount, err := InstallGitHook(context.Background(), true, false, false)
+	secondCount, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("Second InstallGitHook() error = %v", err)
 	}
@@ -748,39 +721,197 @@ func TestInstallGitHook_Idempotent(t *testing.T) {
 	}
 }
 
-func TestInstallGitHook_LocalDevCommandPrefix(t *testing.T) {
+// TestIsGitHookInstalled_LegacyLocalDevCountsAsNotInstalled pins the trigger that
+// makes the migration actually happen. EnsureSetup (every turn-start) reinstalls
+// only when IsGitHookInstalled reports false, so a legacy local-dev hook — which
+// still carries entireHookMarker — would otherwise read as installed forever
+// while invoking a launcher script that no longer exists. Because a repo-relative
+// prefix gets no availability guard and pre-push propagates exit codes, that
+// state rejects `git push`.
+// TestCheckGitHookState covers the three states, and specifically that a legacy
+// hook is Outdated rather than Absent. The distinction is load-bearing: uninstall
+// asks "is there anything of ours to remove" and would skip a stale hook if it
+// read as Absent, while EnsureSetup asks "are these current" and would leave a
+// stale hook forever if it read as Current.
+func TestCheckGitHookState(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no hooks at all is Absent", func(t *testing.T) {
+		t.Parallel()
+		if got := gitHookStateInHooksDir(t.TempDir()); got != GitHooksAbsent {
+			t.Errorf("empty hooks dir = %v, want GitHooksAbsent", got)
+		}
+	})
+
+	t.Run("a foreign hook at our path is Absent", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeCurrentManagedHooks(t, dir)
+		// Overwrite one with somebody else's hook.
+		if err := os.WriteFile(filepath.Join(dir, "pre-push"), []byte("#!/bin/sh\necho lefthook\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if got := gitHookStateInHooksDir(dir); got != GitHooksAbsent {
+			t.Errorf("foreign hook = %v, want GitHooksAbsent", got)
+		}
+	})
+
+	t.Run("an incomplete set is Absent", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeCurrentManagedHooks(t, dir)
+		if err := os.Remove(filepath.Join(dir, "post-commit")); err != nil {
+			t.Fatal(err)
+		}
+		if got := gitHookStateInHooksDir(dir); got != GitHooksAbsent {
+			t.Errorf("incomplete set = %v, want GitHooksAbsent", got)
+		}
+	})
+
+	// Kept filesystem-only rather than installing for real: initHooksTestRepo
+	// chdirs, which cannot combine with t.Parallel. A real install is already
+	// asserted to read Current by
+	// TestIsGitHookInstalled_LegacyLocalDevCountsAsNotInstalled.
+	t.Run("hooks in the current shape are Current", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeCurrentManagedHooks(t, dir)
+		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
+			t.Errorf("current-shape hooks = %v, want GitHooksCurrent", got)
+		}
+	})
+
+	t.Run("a single legacy hook makes the set Outdated", func(t *testing.T) {
+		t.Parallel()
+		for _, legacy := range []string{
+			"./scripts/entire-dev hooks git pre-push",
+			`go run ./cmd/entire/main.go hooks git pre-push "$1" || true`,
+		} {
+			dir := t.TempDir()
+			writeCurrentManagedHooks(t, dir)
+			legacyContent := "#!/bin/sh\n# " + entireHookMarker + "\n" + legacy + "\n"
+			if err := os.WriteFile(filepath.Join(dir, "pre-push"), []byte(legacyContent), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
+				t.Errorf("legacy hook %q = %v, want GitHooksOutdated", legacy, got)
+			}
+		}
+	})
+}
+
+// TestCheckGitHookState_UserAdditionsAreNotDrift pins that a hook Entire
+// installed and the user then hand-edited is not classified as stale just because
+// one of their own lines mentions `go run` or the old launcher path.
+//
+// The classification decides whether EnsureSetup rewrites the file, and
+// InstallGitHook only backs up a hook that does NOT carry entireHookMarker — so a
+// hand-edited hook is overwritten with no backup. A whole-file substring match
+// would therefore silently discard the user's additions.
+func TestCheckGitHookState_UserAdditionsAreNotDrift(t *testing.T) {
+	t.Parallel()
+
+	for _, userLine := range []string{
+		"go run ./tools/mylint.go",
+		"sh ./scripts/entire-dev-notes.sh",
+	} {
+		dir := t.TempDir()
+		for _, hook := range gitHookNames {
+			content := "#!/bin/sh\n# " + entireHookMarker + "\n" +
+				"if command -v entire >/dev/null 2>&1; then entire hooks git " + hook + "; else :; fi\n" +
+				userLine + "\n"
+			if err := os.WriteFile(filepath.Join(dir, hook), []byte(content), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
+			t.Errorf("a hook whose own Entire line is current must read Current despite the user line %q, got %v", userLine, got)
+		}
+	}
+}
+
+// TestCheckGitHookState_LegacyEntireLineIsStillDrift is the other half: when the
+// legacy launcher is on Entire's OWN invocation line, that is genuinely our stale
+// hook and must be replaced, user additions around it notwithstanding.
+func TestCheckGitHookState_LegacyEntireLineIsStillDrift(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	for _, hook := range gitHookNames {
+		content := "#!/bin/sh\n# " + entireHookMarker + "\n" +
+			"./scripts/entire-dev hooks git " + hook + "\n" +
+			"echo my own step\n"
+		if err := os.WriteFile(filepath.Join(dir, hook), []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
+		t.Errorf("a legacy launcher on Entire's own invocation line must read Outdated, got %v", got)
+	}
+}
+
+// writeCurrentManagedHooks writes every managed hook in the shape this version
+// installs. Tests that need a variant overwrite an individual hook afterwards.
+func writeCurrentManagedHooks(t *testing.T, dir string) {
+	t.Helper()
+	for _, hook := range gitHookNames {
+		content := "#!/bin/sh\n# " + entireHookMarker + "\nentire hooks git " + hook + "\n"
+		if err := os.WriteFile(filepath.Join(dir, hook), []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestIsGitHookInstalled_LegacyLocalDevCountsAsNotInstalled(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
-	// Install with localDev=true
-	count, err := InstallGitHook(context.Background(), true, true, false)
-	if err != nil {
-		t.Fatalf("InstallGitHook(localDev=true) error = %v", err)
+	// A current install must read as installed.
+	if _, err := InstallGitHook(context.Background(), true, false); err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
 	}
-	if count == 0 {
-		t.Fatal("InstallGitHook(localDev=true) should install hooks")
+	if got := gitHookStateInHooksDir(hooksDir); got != GitHooksCurrent {
+		t.Fatalf("a freshly installed hook set should read as current, got %v", got)
 	}
 
+	// Rewriting a single hook into either legacy shape must flip that to false,
+	// so the next EnsureSetup replaces it. Both forms were written by local-dev
+	// mode over time; a real clone was found still carrying the `go run` one.
+	for _, legacyCmd := range []string{
+		"./scripts/entire-dev hooks git pre-push",
+		`go run ./cmd/entire/main.go hooks git pre-push "$1" || true`,
+	} {
+		if _, err := InstallGitHook(context.Background(), true, false); err != nil {
+			t.Fatalf("reinstall before seeding: %v", err)
+		}
+		legacy := "#!/bin/sh\n# " + entireHookMarker + "\n" + legacyCmd + "\n"
+		if err := os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(legacy), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if got := gitHookStateInHooksDir(hooksDir); got != GitHooksOutdated {
+			t.Errorf("a hook running Entire from the working tree must read as outdated, got %v: %s", got, legacyCmd)
+		}
+	}
+}
+
+func TestInstallGitHook_RewritesLegacyLocalDevHooks(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	// Seed hooks in the shape the removed local-dev mode wrote: a repo-relative
+	// launcher script. They carry entireHookMarker, so they are ours to replace.
+	const legacyPrefix = "./scripts/entire-dev"
 	for _, hook := range gitHookNames {
-		data, err := os.ReadFile(filepath.Join(hooksDir, hook))
-		if err != nil {
-			t.Fatalf("hook %s should exist: %v", hook, err)
-		}
-		content := string(data)
-		if !strings.Contains(content, localDevHookCmdPrefix+" hooks git") {
-			t.Errorf("hook %s should delegate to %s when localDev=true, got:\n%s", hook, localDevHookCmdPrefix, content)
-		}
-		if strings.Contains(content, "\nentire ") {
-			t.Errorf("hook %s should not use bare 'entire' prefix when localDev=true", hook)
+		content := "#!/bin/sh\n# " + entireHookMarker + "\n" + legacyPrefix + " hooks git " + hook + "\n"
+		if err := os.WriteFile(filepath.Join(hooksDir, hook), []byte(content), 0o755); err != nil {
+			t.Fatalf("seed %s: %v", hook, err)
 		}
 	}
 
-	// Reinstall with localDev=false — hooks should update to use "entire" prefix
-	count, err = InstallGitHook(context.Background(), true, false, false)
+	count, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
-		t.Fatalf("InstallGitHook(localDev=false) error = %v", err)
+		t.Fatalf("InstallGitHook() error = %v", err)
 	}
 	if count == 0 {
-		t.Fatal("InstallGitHook(localDev=false) should reinstall hooks (content changed)")
+		t.Fatal("InstallGitHook() should rewrite legacy local-dev hooks (content changed)")
 	}
 
 	for _, hook := range gitHookNames {
@@ -790,92 +921,76 @@ func TestInstallGitHook_LocalDevCommandPrefix(t *testing.T) {
 		}
 		content := string(data)
 		if strings.Contains(content, "scripts/entire-dev") {
-			t.Errorf("hook %s should not reference the local-dev script when localDev=false, got:\n%s", hook, content)
+			t.Errorf("hook %s still runs a script inside the working tree, got:\n%s", hook, content)
 		}
 		if !strings.Contains(content, "entire hooks git") {
-			t.Errorf("hook %s should use bare 'entire' prefix when localDev=false", hook)
+			t.Errorf("hook %s should invoke the entire binary, got:\n%s", hook, content)
 		}
 	}
 }
 
-func TestGitHookCommand_LocalDevDelegatesToScript(t *testing.T) {
+func TestGitHookCommand_GuardsEveryInstallablePrefix(t *testing.T) {
 	t.Parallel()
 
-	command := gitHookCommand(localDevHookCmdPrefix, `prepare-commit-msg "$1" "$2" 2>/dev/null || true`, false)
+	const args = `prepare-commit-msg "$1" "$2" 2>/dev/null || true`
 
-	want := localDevHookCmdPrefix + ` hooks git prepare-commit-msg "$1" "$2" 2>/dev/null || true`
-	if command != want {
-		t.Fatalf("local-dev git hook should delegate to the script verbatim:\ngot:  %s\nwant: %s", command, want)
+	cases := []struct {
+		name      string
+		prefix    string
+		wantGuard string
+	}{
+		{"bare binary on PATH", "entire", "command -v entire >/dev/null 2>&1"},
+		{"absolute unix path", "'/opt/homebrew/bin/entire'", "[ -x '/opt/homebrew/bin/entire' ]"},
+		{"windows absolute path", `'C:\Users\me\entire.exe'`, `[ -f 'C:\Users\me\entire.exe' ]`},
+		// An unclassifiable absolute form (UNC / network share) must still be
+		// guarded rather than falling through unguarded.
+		{"windows UNC path", `'\\server\share\entire.exe'`, `[ -x '\\server\share\entire.exe' ]`},
 	}
-	if strings.Contains(command, "go build") || strings.Contains(command, "elif") {
-		t.Fatalf("build-probe/fallback logic must live in the script, not the hook command: %s", command)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			command := gitHookCommand(tc.prefix, args, false)
+
+			if !strings.Contains(command, tc.wantGuard) {
+				t.Errorf("command should guard on %q, got: %s", tc.wantGuard, command)
+			}
+			if !strings.HasPrefix(command, "if ") {
+				t.Errorf("every hook command must be guarded by an existence test, got: %s", command)
+			}
+			if !strings.Contains(command, tc.prefix+" hooks git "+args) {
+				t.Errorf("command should invoke the prefix verbatim, got: %s", command)
+			}
+			// No build-probe or fallback logic belongs in a hook command.
+			if strings.Contains(command, "go build") || strings.Contains(command, "go run") {
+				t.Errorf("hook command must not build or run from source: %s", command)
+			}
+		})
 	}
 }
 
-func TestEntireDevScript_FallsBackToBinaryWhenBuildFails(t *testing.T) {
+// TestHookCmdPrefix_NeverNamesRepoContent enforces the invariant the local-dev
+// removal was about: the prefix embedded in a git hook must name a binary outside
+// the repository, never a path that resolves inside the working tree. A
+// repo-relative prefix would run whatever the checked-out branch contains on every
+// git operation.
+func TestHookCmdPrefix_NeverNamesRepoContent(t *testing.T) {
 	t.Parallel()
 
-	shPath := requireShell(t)
-
-	// A repo layout where cmd/entire/main.go is absent, so the script's build
-	// probe fails and it must fall back to the entire binary on PATH.
-	root := t.TempDir()
-	scriptPath := filepath.Join(root, "scripts", "entire-dev")
-	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
-		t.Fatalf("failed to create scripts dir: %v", err)
-	}
-	if err := os.WriteFile(scriptPath, []byte(readEntireDevScript(t)), 0o755); err != nil {
-		t.Fatalf("failed to write script: %v", err)
-	}
-
-	binDir := t.TempDir()
-	markerFile := filepath.Join(root, "entire-ran")
-	fakeEntire := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + shellQuote(markerFile) + "\n"
-	if err := os.WriteFile(filepath.Join(binDir, "entire"), []byte(fakeEntire), 0o755); err != nil {
-		t.Fatalf("failed to write fake entire: %v", err)
-	}
-
-	cmd := exec.CommandContext(context.Background(), shPath, scriptPath, "hooks", "git", "post-commit")
-	cmd.Env = envWithPath(binDir + string(os.PathListSeparator) + goBinDir(t))
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("script should exit 0 when the build is broken: %v\n%s", err, output)
-	}
-
-	got, err := os.ReadFile(markerFile)
-	if err != nil {
-		t.Fatalf("expected fallback to the entire binary on PATH, marker missing: %v\noutput:\n%s", err, output)
-	}
-	if strings.TrimSpace(string(got)) != "hooks git post-commit" {
-		t.Fatalf("fallback should forward args verbatim, got %q", got)
-	}
-	if !strings.Contains(string(output), "falling back to the entire binary on PATH") {
-		t.Fatalf("script should log the fallback to stderr, got:\n%s", output)
-	}
-}
-
-func TestEntireDevScript_ExitsZeroWhenNothingAvailable(t *testing.T) {
-	t.Parallel()
-
-	shPath := requireShell(t)
-
-	root := t.TempDir() // no cmd/entire/main.go, no entire on PATH
-	scriptPath := filepath.Join(root, "scripts", "entire-dev")
-	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
-		t.Fatalf("failed to create scripts dir: %v", err)
-	}
-	if err := os.WriteFile(scriptPath, []byte(readEntireDevScript(t)), 0o755); err != nil {
-		t.Fatalf("failed to write script: %v", err)
-	}
-
-	cmd := exec.CommandContext(context.Background(), shPath, scriptPath, "hooks", "git", "post-commit")
-	cmd.Env = envWithPath(t.TempDir()) // empty PATH: no go, no entire
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("script should exit 0 when neither a buildable tree nor entire is available: %v\n%s", err, output)
-	}
-	if !strings.Contains(string(output), "no entire binary on PATH") {
-		t.Fatalf("script should log that it is skipping, got:\n%s", output)
+	for _, absolutePath := range []bool{false, true} {
+		prefix, err := hookCmdPrefix(absolutePath)
+		if err != nil {
+			t.Fatalf("hookCmdPrefix(%v) error = %v", absolutePath, err)
+		}
+		if prefix == "entire" {
+			continue // resolved through PATH, not the repo
+		}
+		unquoted := strings.Trim(prefix, "'")
+		if !filepath.IsAbs(unquoted) {
+			t.Errorf("hookCmdPrefix(%v) = %q, which is not absolute — a relative prefix resolves inside the repo", absolutePath, prefix)
+		}
+		if strings.HasPrefix(unquoted, ".") || strings.Contains(unquoted, "$(") {
+			t.Errorf("hookCmdPrefix(%v) = %q must not reference repository content or resolve a path at hook runtime", absolutePath, prefix)
+		}
 	}
 }
 
@@ -883,7 +998,7 @@ func TestInstallGitHook_AbsoluteGitHookPath(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
 	// Install with absolutePath=true
-	count, err := InstallGitHook(context.Background(), true, false, true)
+	count, err := InstallGitHook(context.Background(), true, true)
 	if err != nil {
 		t.Fatalf("InstallGitHook(absolutePath=true) error = %v", err)
 	}
@@ -971,10 +1086,7 @@ func TestGitHookCommandAvailableTest_WindowsAbsolutePath(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, ok := gitHookCommandAvailableTest(tt.cmdPrefix)
-			if !ok {
-				t.Fatalf("gitHookCommandAvailableTest(%q) ok = false, want true", tt.cmdPrefix)
-			}
+			got := gitHookCommandAvailableTest(tt.cmdPrefix)
 			if got != tt.want {
 				t.Fatalf("gitHookCommandAvailableTest(%q) = %q, want %q", tt.cmdPrefix, got, tt.want)
 			}
@@ -993,7 +1105,7 @@ func TestInstallGitHook_CoreHooksPathRelative(t *testing.T) {
 		t.Fatalf("failed to set core.hooksPath: %v", err)
 	}
 
-	count, err := InstallGitHook(context.Background(), true, false, false)
+	count, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1037,7 +1149,7 @@ func TestRemoveGitHook_CoreHooksPathRelative(t *testing.T) {
 		t.Fatalf("failed to set core.hooksPath: %v", err)
 	}
 
-	installCount, err := InstallGitHook(context.Background(), true, false, false)
+	installCount, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1078,7 +1190,7 @@ func TestRemoveGitHook_RemovesInstalledHooks(t *testing.T) {
 	tmpDir, _ := initHooksTestRepo(t)
 
 	// Install hooks first
-	installCount, err := InstallGitHook(context.Background(), true, false, false)
+	installCount, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1178,7 +1290,7 @@ func TestInstallGitHook_BacksUpCustomHook(t *testing.T) {
 		t.Fatalf("failed to create custom hook: %v", err)
 	}
 
-	count, err := InstallGitHook(context.Background(), true, false, false)
+	count, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1225,7 +1337,7 @@ func TestManagedGitHookNames_IncludesPostRewrite(t *testing.T) {
 func TestInstallGitHook_InstallsPostRewrite(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
-	count, err := InstallGitHook(context.Background(), true, false, false)
+	count, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1420,7 +1532,7 @@ func TestInstallGitHook_DoesNotOverwriteExistingBackup(t *testing.T) {
 		t.Fatalf("failed to create second custom hook: %v", err)
 	}
 
-	_, err := InstallGitHook(context.Background(), true, false, false)
+	_, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1456,7 +1568,7 @@ func TestInstallGitHook_IdempotentWithChaining(t *testing.T) {
 		t.Fatalf("failed to create custom hook: %v", err)
 	}
 
-	firstCount, err := InstallGitHook(context.Background(), true, false, false)
+	firstCount, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("first InstallGitHook() error = %v", err)
 	}
@@ -1465,7 +1577,7 @@ func TestInstallGitHook_IdempotentWithChaining(t *testing.T) {
 	}
 
 	// Re-install should return 0 (idempotent)
-	secondCount, err := InstallGitHook(context.Background(), true, false, false)
+	secondCount, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("second InstallGitHook() error = %v", err)
 	}
@@ -1477,7 +1589,7 @@ func TestInstallGitHook_IdempotentWithChaining(t *testing.T) {
 func TestInstallGitHook_NoBackupWhenNoExistingHook(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
-	_, err := InstallGitHook(context.Background(), true, false, false)
+	_, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1515,7 +1627,7 @@ func TestInstallGitHook_MixedHooks(t *testing.T) {
 		}
 	}
 
-	_, err := InstallGitHook(context.Background(), true, false, false)
+	_, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1564,7 +1676,7 @@ func TestRemoveGitHook_RestoresBackup(t *testing.T) {
 		t.Fatalf("failed to create custom hook: %v", err)
 	}
 
-	_, err := InstallGitHook(context.Background(), true, false, false)
+	_, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1603,7 +1715,7 @@ func TestRemoveGitHook_RestoresBackupWhenHookAlreadyGone(t *testing.T) {
 		t.Fatalf("failed to create custom hook: %v", err)
 	}
 
-	_, err := InstallGitHook(context.Background(), true, false, false)
+	_, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1699,7 +1811,7 @@ func TestInstallGitHook_InstallRemoveReinstall(t *testing.T) {
 	}
 
 	// Install: should back up and chain
-	count, err := InstallGitHook(context.Background(), true, false, false)
+	count, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("first install error: %v", err)
 	}
@@ -1728,7 +1840,7 @@ func TestInstallGitHook_InstallRemoveReinstall(t *testing.T) {
 	}
 
 	// Reinstall: should back up again and chain
-	count, err = InstallGitHook(context.Background(), true, false, false)
+	count, err = InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("reinstall error: %v", err)
 	}
@@ -1761,7 +1873,7 @@ func TestRemoveGitHook_DoesNotOverwriteReplacedHook(t *testing.T) {
 	}
 
 	// entire enable: backs up A, installs our hook with chain
-	_, err := InstallGitHook(context.Background(), true, false, false)
+	_, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1802,7 +1914,7 @@ func TestRemoveGitHook_PermissionDenied(t *testing.T) {
 	tmpDir, _ := initHooksTestRepo(t)
 
 	// Install hooks first
-	_, err := InstallGitHook(context.Background(), true, false, false)
+	_, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}

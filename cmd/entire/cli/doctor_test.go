@@ -525,7 +525,7 @@ func TestCheckHookDrift_ClaudeCodeOKWhenCurrent(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 
-	if _, err := (&claudecode.ClaudeCodeAgent{}).InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := (&claudecode.ClaudeCodeAgent{}).InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 

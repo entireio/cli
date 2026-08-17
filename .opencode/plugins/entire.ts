@@ -5,7 +5,6 @@
 import type { Plugin } from "@opencode-ai/plugin"
 
 export const EntirePlugin: Plugin = async ({ directory }) => {
-  const ENTIRE_CMD = '"$(git rev-parse --show-toplevel)"/scripts/entire-dev'
   // Track seen user messages to fire turn-start only once per message
   const seenUserMessages = new Set<string>()
   // Track current session ID for message events (which don't include sessionID)
@@ -20,13 +19,11 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
 
   /**
    * Build the shell command for a hook invocation.
-   * Uses sh -c so that shell command substitution in ENTIRE_CMD
-   * (e.g., $(git rev-parse --show-toplevel) for local-dev) is interpreted.
+   * Uses sh -c so the command is guarded by a `command -v` probe: when the
+   * entire binary is not on PATH the hook exits 0 rather than failing the
+   * surrounding OpenCode operation.
    */
   function hookCmd(hookName: string): string[] {
-    if (ENTIRE_CMD !== "entire") {
-      return ["sh", "-c", `${ENTIRE_CMD} hooks opencode ${hookName}`]
-    }
     return ["sh", "-c", `if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks opencode ${hookName}`]
   }
 
