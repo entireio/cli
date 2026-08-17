@@ -62,7 +62,13 @@ For each stuck session, you can choose to:
 
 Use --force to condense all fixable sessions without prompting.  Sessions that can't
 be condensed will be discarded.`,
-		PreRun: func(_ *cobra.Command, _ []string) {
+		// Redaction config must be loaded for the whole doctor subtree —
+		// `doctor bundle` redacts everything it collects, and the bare scan
+		// condenses sessions. Cobra runs only the NEAREST ancestor's
+		// persistent pre-run: a subcommand that declares its own would
+		// silently drop this and ship bundles without user-defined rules
+		// (see TestDoctorSubtree_NoPersistentPreRunShadowing).
+		PersistentPreRun: func(_ *cobra.Command, _ []string) {
 			strategy.EnsureRedactionConfigured()
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {

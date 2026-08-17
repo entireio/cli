@@ -620,3 +620,24 @@ func TestConfirmDoctorFix_CancelledContext(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, proceed)
 }
+
+// TestDoctorSubtree_NoPersistentPreRunShadowing guards the redaction-loading
+// invariant on the doctor command tree: EnsureRedactionConfigured runs from
+// the doctor root's PersistentPreRun, and cobra executes only the NEAREST
+// ancestor's persistent pre-run. A subcommand that declares its own would
+// silently stop loading user-defined redaction rules for its process — the
+// exact leak behind the doctor-bundle support report — with no compile error
+// and no unit-test failure outside this one.
+func TestDoctorSubtree_NoPersistentPreRunShadowing(t *testing.T) {
+	t.Parallel()
+
+	root := newDoctorCmd()
+	if root.PersistentPreRun == nil && root.PersistentPreRunE == nil {
+		t.Fatal("doctor root lost its PersistentPreRun — redaction config no longer loads for any doctor subcommand")
+	}
+	for _, sub := range root.Commands() {
+		if sub.PersistentPreRun != nil || sub.PersistentPreRunE != nil {
+			t.Errorf("doctor subcommand %q declares its own persistent pre-run, shadowing the root's redaction setup; call strategy.EnsureRedactionConfigured from it or restructure", sub.Name())
+		}
+	}
+}
