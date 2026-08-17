@@ -903,7 +903,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 			if agentName != "" {
 				ag, err := agent.Get(types.AgentName(agentName))
 				if err != nil {
-					printWrongAgentError(cmd.ErrOrStderr(), agentName, enableAgentUsage)
+					printWrongAgentError(cmd.ErrOrStderr(), agentName, externalAgentHint, enableAgentUsage)
 					return NewSilentError(errors.New("wrong agent name"))
 				}
 				selectedAgent = ag
@@ -1565,7 +1565,7 @@ func localExists(ctx context.Context) bool {
 func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 	ag, err := agent.Get(types.AgentName(name))
 	if err != nil {
-		printWrongAgentError(w, name, "Usage: entire agent remove <agent-name>")
+		printWrongAgentError(w, name, externalAgentSearchedHint(name), agentRemoveUsage)
 		return NewSilentError(errors.New("wrong agent name"))
 	}
 
@@ -1822,17 +1822,33 @@ func isBuiltInAgent(ag agent.Agent) bool {
 	return !external.IsExternal(ag)
 }
 
-// enableAgentUsage is the usage line for the `entire enable --agent` surface.
-const enableAgentUsage = "Usage: entire enable --agent <agent-name>"
+// Usage lines for each surface that reports an unusable agent name.
+const (
+	enableAgentUsage = "Usage: entire enable --agent <agent-name>"
+	agentAddUsage    = "Usage: entire agent add <agent-name>"
+	agentRemoveUsage = "Usage: entire agent remove <agent-name>"
+)
 
-// printAgentError writes an error message followed by available agents and the
-// given usage line.
+// externalAgentHint is the trailing hint for surfaces that did not look at
+// $PATH at all, so the user still has a search to run.
+const externalAgentHint = "External agent plugins on your PATH are also available: run 'entire agent list --external' to see them."
+
+// externalAgentSearchedHint is the trailing hint for `entire agent add`/`remove`,
+// which resolve the given name against $PATH before reporting it unknown.
+// Phrased in the past tense so it reports the search that already happened
+// instead of sending the user off to repeat it.
+func externalAgentSearchedHint(name string) string {
+	return fmt.Sprintf("No external agent plugin named %q was found on your PATH either; run 'entire agent list --external' to see the ones that were.", name)
+}
+
+// printAgentError writes an error message followed by available agents, the
+// given hint, and the given usage line.
 //
 // The listing goes through agent.ListAvailable so test-only agents (vogon) stay
 // out of it, matching `entire agent list`. External plugins are only listed if
 // something already registered them — this path deliberately does not scan
-// $PATH — so it points at `entire agent list --external` instead.
-func printAgentError(w io.Writer, message, usage string) {
+// $PATH — hence the hint.
+func printAgentError(w io.Writer, message, hint, usage string) {
 	fmt.Fprintf(w, "%s Available agents:\n", message)
 	fmt.Fprintln(w)
 	for _, ra := range agent.ListAvailable() {
@@ -1846,20 +1862,21 @@ func printAgentError(w io.Writer, message, usage string) {
 		fmt.Fprintf(w, "  %s%s\n", ra.Name, suffix)
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "External agent plugins on your PATH are also available: run 'entire agent list --external' to see them.")
+	fmt.Fprintln(w, hint)
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, usage)
 }
 
 // printMissingAgentError writes a helpful error listing available agents.
 func printMissingAgentError(w io.Writer) {
-	printAgentError(w, "Missing agent name.", enableAgentUsage)
+	printAgentError(w, "Missing agent name.", externalAgentHint, enableAgentUsage)
 }
 
 // printWrongAgentError writes a helpful error when an unknown agent name is
-// provided. usage is the command surface the caller was reached from.
-func printWrongAgentError(w io.Writer, name, usage string) {
-	printAgentError(w, fmt.Sprintf("Unknown agent %q.", name), usage)
+// provided. hint and usage describe the command surface the caller was reached
+// from: whether it already searched $PATH for the name, and how it is invoked.
+func printWrongAgentError(w io.Writer, name, hint, usage string) {
+	printAgentError(w, fmt.Sprintf("Unknown agent %q.", name), hint, usage)
 }
 
 // setupAgentHooksNonInteractive sets up hooks for a specific agent non-interactively.

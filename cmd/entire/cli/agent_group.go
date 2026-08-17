@@ -88,9 +88,8 @@ func runAgentList(ctx context.Context, w io.Writer, includeExternal bool) error 
 		if !includeExternal && isExternal {
 			continue
 		}
-		installed := false
-		if hs, ok := agent.AsHookSupport(ra.Agent); ok && hs.AreHooksInstalled(ctx) {
-			installed = true
+		installed := hooksInstalled(ctx, ra.Agent)
+		if installed {
 			hasSomeInstalled = true
 		}
 		marker := "  "
@@ -150,7 +149,7 @@ Examples:
 			}
 			ag, err := agent.Get(types.AgentName(name))
 			if err != nil {
-				printWrongAgentError(cmd.OutOrStdout(), name, "Usage: entire agent add <agent-name>")
+				printWrongAgentError(cmd.OutOrStdout(), name, externalAgentSearchedHint(name), agentAddUsage)
 				return NewSilentError(errors.New("wrong agent name"))
 			}
 			opts := EnableOptions{

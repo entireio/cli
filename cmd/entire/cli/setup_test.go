@@ -1580,7 +1580,7 @@ func TestPrintWrongAgentError(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	printWrongAgentError(&buf, "not-an-agent", "Usage: entire agent add <agent-name>")
+	printWrongAgentError(&buf, "not-an-agent", externalAgentSearchedHint("not-an-agent"), agentAddUsage)
 	output := buf.String()
 
 	if !strings.Contains(output, `Unknown agent "not-an-agent"`) {
@@ -1633,10 +1633,33 @@ func TestPrintAgentError_PointsAtExternalListing(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	printWrongAgentError(&buf, "zedd", "Usage: entire agent add <agent-name>")
+	printWrongAgentError(&buf, "zedd", externalAgentSearchedHint("zedd"), agentAddUsage)
 
 	if !strings.Contains(buf.String(), "entire agent list --external") {
 		t.Errorf("expected a pointer at 'entire agent list --external', got:\n%s", buf.String())
+	}
+}
+
+// TestPrintAgentError_HintReflectsWhetherPathWasSearched pins that the two
+// surfaces describe different situations: `entire enable --agent` never looked
+// at $PATH, while `entire agent add`/`remove` already resolved the name against
+// it, so the latter must not read as if a search is still pending.
+func TestPrintAgentError_HintReflectsWhetherPathWasSearched(t *testing.T) {
+	t.Parallel()
+
+	var notSearched bytes.Buffer
+	printWrongAgentError(&notSearched, "zedd", externalAgentHint, enableAgentUsage)
+	if strings.Contains(notSearched.String(), "was found on your PATH either") {
+		t.Errorf("enable --agent does not search $PATH, so it must not claim it did:\n%s", notSearched.String())
+	}
+	if !strings.Contains(notSearched.String(), "are also available") {
+		t.Errorf("expected the open-ended external hint, got:\n%s", notSearched.String())
+	}
+
+	var searched bytes.Buffer
+	printWrongAgentError(&searched, "zedd", externalAgentSearchedHint("zedd"), agentAddUsage)
+	if !strings.Contains(searched.String(), `No external agent plugin named "zedd" was found on your PATH`) {
+		t.Errorf("expected the hint to report the $PATH lookup that already happened, got:\n%s", searched.String())
 	}
 }
 
