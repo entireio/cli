@@ -103,6 +103,15 @@ func CurrentTrustSource(ctx context.Context) TrustSource {
 	return globalTrustSource(ctx)
 }
 
+// RepoUntrustedEnrolled reports the held state: the current repo is enrolled
+// by the global tier (active here, no repo-level setup) and checkpoint egress
+// is not consented. It is the ONE predicate behind every untrusted-enrolled
+// surface (session-start banner line, status trust state, doctor's hold
+// note), so the three cannot drift into disagreeing about who is held.
+func RepoUntrustedEnrolled(ctx context.Context) bool {
+	return !IsSetUpAny(ctx) && GlobalModeActive(ctx) && globalTrustSource(ctx) == TrustSourceNone
+}
+
 // globalTrustSource is the single trust decision tree behind both
 // CheckpointEgressAllowed and CurrentTrustSource. Every error path resolves
 // to TrustSourceNone (fail closed).
@@ -159,13 +168,18 @@ func TrustCurrentRepo(ctx context.Context) (TrustIdentity, error) {
 	return id, nil
 }
 
+// ErrGlobalModeUnconfigured is returned by the trust writers when the global
+// tier was never configured. Exported as a sentinel so `entire trust` can
+// swap it for a friendly message without string-matching.
+var ErrGlobalModeUnconfigured = errors.New("global mode is not configured; nothing to trust")
+
 // requireConfiguredGlobal is the single guard shared by every trust writer:
 // materializing the global block on a machine whose global tier was never
 // configured would flip GlobalConfigured() and silently suppress the ask-once
 // global-enable question.
 func requireConfiguredGlobal(us *UserSettings) error {
 	if us.Global == nil {
-		return errors.New("global mode is not configured; nothing to trust")
+		return ErrGlobalModeUnconfigured
 	}
 	return nil
 }
@@ -189,17 +203,20 @@ func TrustAllRepos(ctx context.Context) error {
 // AND any trusted_paths entry for this root regardless of which side the
 // identity is on — leaving the path entry behind would resurrect trust once
 // the origin is removed. Other repos' keys, the exclude lists, and trust_all
-// are never touched. Idempotent; not retroactive (pushed data stays pushed).
+// are never touched. Idempotent for a configured tier (revoking an untrusted
+// repo is a no-op); an unconfigured tier returns ErrGlobalModeUnconfigured —
+// there was never anything to revoke, and a silent success would read as a
+// withdrawal that happened. Not retroactive (pushed data stays pushed).
 func RevokeCurrentRepo(ctx context.Context) (TrustIdentity, error) {
 	id, root, err := currentTrustIdentity(ctx)
 	if err != nil {
 		return TrustIdentity{}, err
 	}
 	err = ModifyUserSettings(ctx, func(us *UserSettings) error {
-		g := us.Global
-		if g == nil {
-			return nil // no trust store — nothing recorded, nothing to revoke
+		if err := requireConfiguredGlobal(us); err != nil {
+			return err
 		}
+		g := us.Global
 		if len(id.OriginKeys) > 0 {
 			var kept []string
 			for _, e := range g.TrustedOrigins {

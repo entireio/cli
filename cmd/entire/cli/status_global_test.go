@@ -186,6 +186,69 @@ func TestRunStatus_OutsideGitRepo_GlobalLine(t *testing.T) {
 	}
 }
 
+// setupGloballyEnrolledStatusRepo puts the test in a fresh repo enrolled by
+// the global tier (isolated config dir with the given user settings, no
+// repo-level setup), shared by the trust-state status tests. Not
+// parallel-safe: t.Chdir/t.Setenv.
+func setupGloballyEnrolledStatusRepo(t *testing.T, userSettings string) {
+	t.Helper()
+	setupTestRepo(t)
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	isolateUserHome(t)
+	writeGlobalUserSettings(t, cfg, userSettings)
+	settings.ClearGlobalModeCache()
+	t.Cleanup(settings.ClearGlobalModeCache)
+}
+
+// TestRunStatus_GlobalTrustLine: an enrolled repo's status must say whether
+// checkpoint sync runs and why. Untrusted repos hold ("sync held" + the trust
+// pointer); trusted repos name their consent SOURCE, so a revoke masked by
+// trust_all is auditable from status alone.
+func TestRunStatus_GlobalTrustLine(t *testing.T) {
+	statusOutput := func(t *testing.T) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := runStatus(context.Background(), &out, false, false); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+
+	t.Run("untrusted enrolled repo shows sync held", func(t *testing.T) {
+		setupGloballyEnrolledStatusRepo(t, `{"global":{"enabled":true}}`)
+		got := statusOutput(t)
+		if !strings.Contains(got, "sync held — repo not trusted · run `entire trust`") {
+			t.Errorf("missing sync-held line, got: %s", got)
+		}
+		if strings.Contains(got, "trusted (") {
+			t.Errorf("untrusted repo must not read as trusted, got: %s", got)
+		}
+	})
+
+	t.Run("trusted repo names the per-repo source", func(t *testing.T) {
+		setupGloballyEnrolledStatusRepo(t, `{"global":{"enabled":true}}`)
+		if _, err := settings.TrustCurrentRepo(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		got := statusOutput(t)
+		if !strings.Contains(got, "trusted (this repo)") {
+			t.Errorf("missing per-repo trust source, got: %s", got)
+		}
+		if strings.Contains(got, "sync held") {
+			t.Errorf("trusted repo must not read as held, got: %s", got)
+		}
+	})
+
+	t.Run("trust_all names trust_all", func(t *testing.T) {
+		setupGloballyEnrolledStatusRepo(t, `{"global":{"enabled":true,"trust_all":true}}`)
+		got := statusOutput(t)
+		if !strings.Contains(got, "trusted (trust_all)") {
+			t.Errorf("missing trust_all source, got: %s", got)
+		}
+	})
+}
+
 func TestRunStatusJSON_GlobalTracking(t *testing.T) {
 	decode := func(t *testing.T, out *bytes.Buffer) map[string]json.RawMessage {
 		t.Helper()
@@ -341,10 +404,68 @@ func TestRunStatusJSON_GlobalTracking(t *testing.T) {
 		if err := json.Unmarshal(m["global_tracking"], &gt); err != nil {
 			t.Fatalf("global_tracking missing: %s", out.String())
 		}
-		for _, key := range []string{"active_here", "inactive_reason"} {
+		for _, key := range []string{"active_here", "inactive_reason", "trust_state", "trust_source"} {
 			if _, ok := gt[key]; ok {
 				t.Errorf("%q must be omitted outside a repository: %s", key, m["global_tracking"])
 			}
+		}
+	})
+}
+
+// TestRunStatusJSON_TrustState pins the trust_state/trust_source JSON keys by
+// raw string (unmarshal is case-insensitive, so struct decoding would survive
+// a key rename that breaks external consumers). Split from
+// TestRunStatusJSON_GlobalTracking to keep each function's complexity in
+// bounds.
+func TestRunStatusJSON_TrustState(t *testing.T) {
+	globalTrackingJSONOutput := func(t *testing.T) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := runStatus(context.Background(), &out, false, true); err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(out.Bytes(), &m); err != nil {
+			t.Fatalf("parse status JSON: %v (%s)", err, out.String())
+		}
+		gt, ok := m["global_tracking"]
+		if !ok {
+			t.Fatalf("global_tracking missing: %s", out.String())
+		}
+		return string(gt)
+	}
+	t.Run("untrusted enrolled repo", func(t *testing.T) {
+		setupGloballyEnrolledStatusRepo(t, `{"global":{"enabled":true}}`)
+		got := globalTrackingJSONOutput(t)
+		for _, want := range []string{`"trust_state":"untrusted"`, `"trust_source":"none"`} {
+			if !strings.Contains(got, want) {
+				t.Errorf("global_tracking missing %s, got: %s", want, got)
+			}
+		}
+	})
+
+	t.Run("trusted repo names its source", func(t *testing.T) {
+		setupGloballyEnrolledStatusRepo(t, `{"global":{"enabled":true,"trust_all":true}}`)
+		got := globalTrackingJSONOutput(t)
+		for _, want := range []string{`"trust_state":"trusted"`, `"trust_source":"trust_all"`} {
+			if !strings.Contains(got, want) {
+				t.Errorf("global_tracking missing %s, got: %s", want, got)
+			}
+		}
+	})
+
+	t.Run("repo-level setup is not_applicable", func(t *testing.T) {
+		setupGloballyEnrolledStatusRepo(t, `{"global":{"enabled":true}}`)
+		writeSettings(t, testSettingsEnabled)
+		if got := globalTrackingJSONOutput(t); !strings.Contains(got, `"trust_state":"not_applicable"`) {
+			t.Errorf("repo-level setup must be not_applicable, got: %s", got)
+		}
+	})
+
+	t.Run("off tier in a repo is not_applicable", func(t *testing.T) {
+		setupGloballyEnrolledStatusRepo(t, `{"global":{"enabled":false}}`)
+		if got := globalTrackingJSONOutput(t); !strings.Contains(got, `"trust_state":"not_applicable"`) {
+			t.Errorf("off tier must be not_applicable, got: %s", got)
 		}
 	})
 }

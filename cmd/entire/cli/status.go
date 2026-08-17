@@ -142,7 +142,24 @@ type globalTrackingInfo struct {
 	// read as coverage in a repo the gate carves out (excluded, disabled).
 	ActiveHere     bool
 	InactiveReason settings.InactiveReason
+	// TrustState is the per-repo checkpoint egress consent
+	// (trustStateTrusted/Untrusted/NotApplicable), "" outside a repository.
+	// not_applicable covers repo-level setups (already consented), carved-out
+	// repos, and a disabled tier — there is no per-repo trust decision there.
+	TrustState  string
+	TrustSource settings.TrustSource
+	// HeldCheckpoints counts checkpoints held locally; computed only for the
+	// untrusted state (elsewhere the generic unpushed counter applies).
+	HeldCheckpoints int
 }
+
+// Trust-state identifiers, shared between the human line and the JSON field so
+// the two outputs cannot drift.
+const (
+	trustStateTrusted       = "trusted"
+	trustStateUntrusted     = "untrusted"
+	trustStateNotApplicable = "not_applicable"
+)
 
 func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 	us, err := settings.LoadUserSettings(ctx)
@@ -151,6 +168,10 @@ func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 	}
 	info := globalTrackingInfo{Configured: true, Enabled: us.GlobalEnabled()}
 	if !info.Enabled {
+		if _, err := paths.WorktreeRoot(ctx); err == nil {
+			info.TrustState = trustStateNotApplicable
+			info.TrustSource = settings.TrustSourceNone
+		}
 		return info
 	}
 	supports, _ := agent.UserHookSupports()
@@ -164,8 +185,39 @@ func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 	if _, err := paths.WorktreeRoot(ctx); err == nil {
 		info.InRepo = true
 		info.ActiveHere, info.InactiveReason = settings.IsActiveForRepoWithReason(ctx)
+		info.TrustState, info.TrustSource = computeRepoTrustState(ctx, info.ActiveHere)
+		if info.TrustState == trustStateUntrusted {
+			info.HeldCheckpoints = heldCheckpointCount(ctx)
+		}
 	}
 	return info
+}
+
+// computeRepoTrustState classifies THIS repo's egress consent for status.
+// Only a globally enrolled repo (active here, no repo-level setup) has a
+// per-repo trust decision; everything else is not_applicable. The held state
+// comes from the shared settings.RepoUntrustedEnrolled predicate, so status
+// can never disagree with the banner and doctor about who is held.
+func computeRepoTrustState(ctx context.Context, activeHere bool) (string, settings.TrustSource) {
+	if settings.RepoUntrustedEnrolled(ctx) {
+		return trustStateUntrusted, settings.TrustSourceNone
+	}
+	if !activeHere || settings.IsSetUpAny(ctx) {
+		return trustStateNotApplicable, settings.TrustSourceNone
+	}
+	return trustStateTrusted, settings.CurrentTrustSource(ctx)
+}
+
+// heldCheckpointCount counts checkpoints held locally against the elected
+// checkpoint sync remote — the untrusted-repo counter shared by status,
+// doctor, and `entire trust`. Best-effort: resolution or count failure reads
+// as 0 (callers omit the count rather than fail).
+func heldCheckpointCount(ctx context.Context) int {
+	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
+	if err != nil || elected.Name == "" {
+		return 0
+	}
+	return countUnpushedCheckpointsForStatus(ctx, elected.Name)
 }
 
 // writeGlobalTrackingLine prints the machine-wide tracking line: on with the
@@ -191,6 +243,28 @@ func writeGlobalTrackingLine(ctx context.Context, w io.Writer, sty statusStyles)
 		noun = "agent"
 	}
 	fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("global tracking: on (%d %s covered)", info.AgentsCovered, noun)))
+	writeGlobalTrustLine(w, sty, info)
+}
+
+// writeGlobalTrustLine renders the per-repo egress consent under the tracking
+// line. The trusted line names its SOURCE so a revoke masked by trust_all is
+// auditable from status; not_applicable states stay silent — the tracking
+// line above already tells the whole story there.
+func writeGlobalTrustLine(w io.Writer, sty statusStyles, info globalTrackingInfo) {
+	switch info.TrustState {
+	case trustStateUntrusted:
+		line := "  sync held — repo not trusted · run `entire trust`"
+		if info.HeldCheckpoints > 0 {
+			line += fmt.Sprintf(" (%d held)", info.HeldCheckpoints)
+		}
+		fmt.Fprintln(w, sty.render(sty.yellow, line))
+	case trustStateTrusted:
+		label := "this repo"
+		if info.TrustSource == settings.TrustSourceAll {
+			label = "trust_all"
+		}
+		fmt.Fprintln(w, sty.render(sty.dim, "  checkpoint sync: trusted ("+label+")"))
+	}
 }
 
 // globalInactiveHereText renders the hook gate's per-repo carve-out for the
@@ -862,6 +936,12 @@ type globalTrackingJSON struct {
 	// outside one.
 	ActiveHere     *bool  `json:"active_here,omitempty"`
 	InactiveReason string `json:"inactive_reason,omitempty"`
+	// TrustState is the per-repo checkpoint egress consent:
+	// "trusted"|"untrusted"|"not_applicable" (repo-level setups, carved-out
+	// repos, disabled tier). TrustSource names what grants consent:
+	// "trust_all"|"repo"|"none". Both omitted outside a repository.
+	TrustState  string `json:"trust_state,omitempty"`
+	TrustSource string `json:"trust_source,omitempty"`
 }
 
 // inactiveReasonJSON maps the gate's inactive reason to its stable JSON
@@ -899,6 +979,12 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 			if !active {
 				gt.InactiveReason = inactiveReasonJSON(info.InactiveReason)
 			}
+		}
+		// TrustState is set inside a repository even for the disabled tier
+		// (not_applicable) — the string doubles as the in-repo marker.
+		if info.TrustState != "" {
+			gt.TrustState = info.TrustState
+			gt.TrustSource = string(info.TrustSource)
 		}
 	}
 	writeJSON := func(v statusJSON) error {

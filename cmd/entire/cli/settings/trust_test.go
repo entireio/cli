@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -438,6 +439,15 @@ func TestRevokeCurrentRepo(t *testing.T) {
 			if _, err := RevokeCurrentRepo(t.Context()); err != nil {
 				t.Fatal(err)
 			}
+		}
+	})
+
+	t.Run("unconfigured tier returns the sentinel", func(t *testing.T) {
+		// A silent no-op here let `trust --revoke` print a full "revoked"
+		// confirmation on a machine where nothing was ever trustable.
+		newTrustTestRepo(t)
+		if _, err := RevokeCurrentRepo(t.Context()); !errors.Is(err, ErrGlobalModeUnconfigured) {
+			t.Fatalf("want ErrGlobalModeUnconfigured, got %v", err)
 		}
 	})
 }

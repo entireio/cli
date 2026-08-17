@@ -626,6 +626,22 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		fmt.Fprintln(w, "  Global tracking stays off in this repo (fail closed).")
 	}
 
+	// Untrusted enrolled repo: informational, never a failure — holding
+	// checkpoint sync is the intended state until the user opts in. RED here
+	// would train users to treat the consent gate as breakage.
+	if settings.RepoUntrustedEnrolled(ctx) {
+		fmt.Fprintln(w, "Global tracking: checkpoint sync held in this repo (informational)")
+		switch n := heldCheckpointCount(ctx); {
+		case n == 1:
+			fmt.Fprintln(w, "  This repo is enrolled but not trusted; 1 checkpoint is held locally.")
+		case n > 1:
+			fmt.Fprintf(w, "  This repo is enrolled but not trusted; %d checkpoints are held locally.\n", n)
+		default:
+			fmt.Fprintln(w, "  This repo is enrolled but not trusted.")
+		}
+		fmt.Fprintln(w, "  This is intended until you opt in; run `entire trust` to sync.")
+	}
+
 	// Clone-local check: only meaningful when the lazy setup already ran here.
 	prefs, prefsErr := settings.LoadClonePreferences(ctx)
 	if prefsErr != nil || !prefs.GlobalSetupCompleted {

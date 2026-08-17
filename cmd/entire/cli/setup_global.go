@@ -51,6 +51,9 @@ func runEnableGlobalMode(ctx context.Context, w io.Writer) error {
 	if kept > 0 {
 		fmt.Fprintf(w, "Keeping %d exclude pattern(s) from your user settings.\n", kept)
 	}
+	// This confirmation IS the generation's announcement: ack the detection
+	// marker so PersistentPostRun doesn't stack the warn on top of it.
+	ackGlobalWarnMarker(ctx)
 	succeeded, supported := installUserAgentHooks(ctx, w)
 	if supported > 0 && succeeded == 0 {
 		// The setting is on, but with zero agents covered no session in a
@@ -179,6 +182,10 @@ func runDisableGlobalMode(ctx context.Context, w io.Writer) error {
 		return fmt.Errorf("saving user settings: %w", err)
 	}
 	fmt.Fprintln(w, "Global tracking disabled.")
+	fmt.Fprintln(w, "Locally captured checkpoints in untrusted repos will not sync.")
+	// The held-data line above replaces the off-detection note: retire the
+	// marker so PersistentPostRun doesn't repeat it, now or next command.
+	retireGlobalWarnMarker(ctx)
 	maybeRemoveUserAgentHooks(ctx, w)
 	return nil
 }

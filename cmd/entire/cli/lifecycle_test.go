@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
@@ -806,6 +807,94 @@ func TestHandleLifecycleSessionStart_CodexConcurrentSessionsStaySingleLine(t *te
 	if strings.Contains(msg, "  ") {
 		t.Fatalf("expected Codex concurrent-session message to avoid repeated spaces, got %q", msg)
 	}
+}
+
+// setupGloballyEnrolledRepo puts the test in a fresh repo (with one commit)
+// enrolled by the global tier: user settings written into an isolated
+// ENTIRE_CONFIG_DIR, no repo-level setup. Not parallel-safe: t.Chdir/t.Setenv.
+func setupGloballyEnrolledRepo(t *testing.T, userSettingsJSON string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	if err := os.WriteFile(filepath.Join(cfg, settings.UserSettingsFileName), []byte(userSettingsJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settings.ClearGlobalModeCache()
+	paths.ClearInvisibleRuntimeCache()
+	t.Cleanup(func() {
+		settings.ClearGlobalModeCache()
+		paths.ClearInvisibleRuntimeCache()
+	})
+}
+
+// TestGlobalTrustBannerSuffix pins the untrusted-global-mode banner line to
+// exactly the unconsented state: present only while the repo is enrolled by
+// the global tier AND checkpoint egress is held. Every consent shape
+// (per-repo trust, trust_all, repo-level setup) and the off tier must return
+// "" — a stray line would nag on every session in repos that already sync.
+func TestGlobalTrustBannerSuffix(t *testing.T) {
+	t.Run("untrusted enrolled repo gets the line", func(t *testing.T) {
+		setupGloballyEnrolledRepo(t, `{"global":{"enabled":true}}`)
+		got := globalTrustBannerSuffix(context.Background(), agent.AgentNameClaudeCode)
+		require.Contains(t, got, "run `entire trust`")
+		require.True(t, strings.HasPrefix(got, "\n"), "must join the multiline banner as its own line: %q", got)
+	})
+
+	t.Run("codex variant stays single-line", func(t *testing.T) {
+		setupGloballyEnrolledRepo(t, `{"global":{"enabled":true}}`)
+		got := globalTrustBannerSuffix(context.Background(), agent.AgentNameCodex)
+		require.Contains(t, got, "entire trust")
+		require.NotContains(t, got, "\n", "Codex banners are single-line")
+	})
+
+	t.Run("trusted repo gets no line", func(t *testing.T) {
+		setupGloballyEnrolledRepo(t, `{"global":{"enabled":true}}`)
+		_, err := settings.TrustCurrentRepo(context.Background())
+		require.NoError(t, err)
+		require.Empty(t, globalTrustBannerSuffix(context.Background(), agent.AgentNameClaudeCode))
+	})
+
+	t.Run("trust_all gets no line", func(t *testing.T) {
+		setupGloballyEnrolledRepo(t, `{"global":{"enabled":true,"trust_all":true}}`)
+		require.Empty(t, globalTrustBannerSuffix(context.Background(), agent.AgentNameClaudeCode))
+	})
+
+	t.Run("repo-level setup gets no line", func(t *testing.T) {
+		setupGloballyEnrolledRepo(t, `{"global":{"enabled":true}}`)
+		writeSettings(t, testSettingsEnabled)
+		require.Empty(t, globalTrustBannerSuffix(context.Background(), agent.AgentNameClaudeCode))
+	})
+
+	t.Run("off tier gets no line", func(t *testing.T) {
+		setupGloballyEnrolledRepo(t, `{"global":{"enabled":false}}`)
+		require.Empty(t, globalTrustBannerSuffix(context.Background(), agent.AgentNameClaudeCode))
+	})
+}
+
+// TestHandleLifecycleSessionStart_UntrustedGlobalModeLineRidesTheBanner: the
+// trust notice is a LINE inside the one composed SessionStart banner — a
+// second WriteHookResponse would corrupt Claude's stdout JSON — so it must
+// arrive in the same message as the standard banner text.
+func TestHandleLifecycleSessionStart_UntrustedGlobalModeLineRidesTheBanner(t *testing.T) {
+	setupGloballyEnrolledRepo(t, `{"global":{"enabled":true}}`)
+
+	ag := newMockHookResponseAgent()
+	err := handleLifecycleSessionStart(context.Background(), ag, &agent.Event{
+		Type:      agent.SessionStart,
+		SessionID: "test-global-trust-banner",
+		Timestamp: time.Now(),
+	})
+	require.NoError(t, err)
+	require.Contains(t, ag.lastMessage, "run `entire trust`")
+	require.Contains(t, ag.lastMessage, "link this conversation to your next commit",
+		"the trust notice must ride the standard banner, not replace it")
 }
 
 // --- handleLifecycleTurnStart tests ---

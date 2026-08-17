@@ -135,6 +135,11 @@ func TestRunDisableGlobalMode_AnswerIsDurable(t *testing.T) {
 	if us.Global == nil || us.Global.Enabled {
 		t.Fatalf("disable --global must persist a durable false, got %+v", us.Global)
 	}
+	// The tier may have captured checkpoints in repos that never got trusted;
+	// disabling must state that they will not sync.
+	if !strings.Contains(buf.String(), "Locally captured checkpoints in untrusted repos will not sync.") {
+		t.Errorf("disable --global must state the held-data consequence, got: %q", buf.String())
+	}
 
 	var wizardOut bytes.Buffer
 	maybeAskGlobalTracking(t.Context(), &wizardOut, EnableOptions{})

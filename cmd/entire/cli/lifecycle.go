@@ -28,6 +28,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
@@ -221,6 +222,11 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	}
 	countSessionsSpan.End()
 
+	// Untrusted global enrollment: a LINE in this composed banner, never a
+	// second WriteHookResponse (Claude parses one JSON object from stdout);
+	// once-per-session comes free from ClaimSessionStartBanner below.
+	message += globalTrustBannerSuffix(ctx, ag.Name())
+
 	// Codex-only: surface untrusted hooks. Reaching this point means
 	// SessionStart is itself trusted, but a newer entire release may have
 	// added hooks (e.g. PostToolUse) that the user hasn't approved on
@@ -311,6 +317,26 @@ func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
 		return "\n\nEntire CLI found no commits yet — checkpoints will activate after your first commit."
 	}
 	return "\n\nEntire CLI will link this conversation to your next commit."
+}
+
+// globalTrustBannerSuffix returns the untrusted-enrollment banner line: the
+// repo is captured by the global tier but its checkpoints are not syncing.
+// Empty for every consented state (repo-level setup, per-repo trust,
+// trust_all) and for repos the tier does not enroll — the shared
+// settings.RepoUntrustedEnrolled predicate decides. Codex banners are
+// single-line (see sessionStartMessage), so the suffix joins with a space
+// there.
+func globalTrustBannerSuffix(ctx context.Context, agentName types.AgentName) string {
+	if !settings.RepoUntrustedEnrolled(ctx) {
+		return ""
+	}
+	// "checkpoint sync remote", not "origin": sync targets the ELECTED remote
+	// (checkpoint_push_remote → origin → sole → first), not literally origin.
+	const notice = "Entire is capturing this repo locally via global mode. Checkpoints aren't synced yet — run `entire trust` to sync them to your checkpoint sync remote."
+	if agentName == agent.AgentNameCodex {
+		return " " + notice
+	}
+	return "\n  " + notice
 }
 
 // agentHelpBannerSuffix returns the SessionStart banner suffix that points an
