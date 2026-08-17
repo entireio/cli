@@ -551,14 +551,18 @@ type reviewAgentCatalogEntry struct {
 // adapter (claude-code, codex, gemini, pi, ...), marking which have hooks
 // installed in this repo. Derived from the registry + deps.ReviewerFor so it
 // never drifts from the set of agents `entire review` can actually launch.
+//
+// This is a user-facing choice of agent, so it walks agent.ListAvailable: a
+// test-only agent must not be offered here even if an adapter is registered
+// for it.
 func availableReviewAgents(installed []types.AgentName, reviewerFor func(string) reviewtypes.AgentReviewer) []reviewAgentCatalogEntry {
 	installedSet := make(map[string]struct{}, len(installed))
 	for _, n := range installed {
 		installedSet[string(n)] = struct{}{}
 	}
 	var out []reviewAgentCatalogEntry
-	for _, name := range agent.List() {
-		ns := string(name)
+	for _, ra := range agent.ListAvailable() {
+		ns := string(ra.Name)
 		if reviewerFor(ns) == nil {
 			continue
 		}
@@ -738,11 +742,13 @@ func buildConfiguredProfile(ctx context.Context, profileName string, opts review
 	return profile, nil
 }
 
+// reviewAgentNames is the "available: ..." listing in `--agent` rejection
+// errors, so like availableReviewAgents it excludes test-only agents.
 func reviewAgentNames(deps Deps) []string {
 	var names []string
-	for _, name := range agent.List() {
-		if deps.ReviewerFor(string(name)) != nil {
-			names = append(names, string(name))
+	for _, ra := range agent.ListAvailable() {
+		if deps.ReviewerFor(string(ra.Name)) != nil {
+			names = append(names, string(ra.Name))
 		}
 	}
 	return names
