@@ -335,3 +335,114 @@ func TestRunAgentList_EmptyStateWording(t *testing.T) {
 		t.Errorf("--external empty-state must not scope to built-ins, got:\n%s", ext.String())
 	}
 }
+
+// externalAgentRepo prepares a repo with settings, puts a mock external plugin
+// named agentName on $PATH, and restores the agent registry afterwards. The
+// settings deliberately leave external_agents unset: `agent add`/`remove` are
+// themselves the opt-in, so they must work without it.
+func externalAgentRepo(t *testing.T, agentName string) {
+	t.Helper()
+
+	// The mock is a #!/bin/sh script, and $PATH/cwd are process-global.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	t.Cleanup(agent.SnapshotForTesting())
+
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true}`)
+
+	externalDir := t.TempDir()
+	writeExternalAgentBinary(t, externalDir, agentName)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestAgentAdd_InstallsExternalPluginFromPath is the core of #1928 for `add`:
+// a plugin that is only discoverable by scanning $PATH must install through
+// `entire agent add <name>`, which previously failed with "unknown agent"
+// because the command never ran discovery.
+func TestAgentAdd_InstallsExternalPluginFromPath(t *testing.T) {
+	// Cannot use t.Parallel: mutates PATH via t.Setenv, cwd via t.Chdir, and the
+	// process-global agent registry.
+	const agentName = "ext-add-test"
+	externalAgentRepo(t, agentName)
+
+	cmd := newAgentAddCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{agentName})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("entire agent add %s: %v\noutput:\n%s", agentName, err, out.String())
+	}
+
+	// Installing an external agent flips external_agents on, or the hooks it
+	// just wrote would fire for an agent later runs refuse to discover.
+	data, err := os.ReadFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("reading settings after add: %v", err)
+	}
+	if !strings.Contains(string(data), `"external_agents": true`) &&
+		!strings.Contains(string(data), `"external_agents":true`) {
+		t.Errorf("expected add of an external agent to enable external_agents, got settings:\n%s", data)
+	}
+}
+
+// TestAgentRemove_ResolvesExternalPluginFromPath covers the `remove` half of
+// #1928: uninstalling must reach the same $PATH-discovered plugin that `add`
+// installed, rather than reporting it unknown.
+func TestAgentRemove_ResolvesExternalPluginFromPath(t *testing.T) {
+	// Cannot use t.Parallel: see TestAgentAdd_InstallsExternalPluginFromPath.
+	const agentName = "ext-remove-test"
+	externalAgentRepo(t, agentName)
+
+	add := newAgentAddCmd()
+	var addOut bytes.Buffer
+	add.SetOut(&addOut)
+	add.SetErr(&addOut)
+	add.SetArgs([]string{agentName})
+	if err := add.Execute(); err != nil {
+		t.Fatalf("entire agent add %s: %v\noutput:\n%s", agentName, err, addOut.String())
+	}
+
+	remove := newAgentRemoveCmd()
+	var out bytes.Buffer
+	remove.SetOut(&out)
+	remove.SetErr(&out)
+	remove.SetArgs([]string{agentName})
+	if err := remove.Execute(); err != nil {
+		t.Fatalf("entire agent remove %s: %v\noutput:\n%s", agentName, err, out.String())
+	}
+	if strings.Contains(out.String(), "Unknown agent") {
+		t.Errorf("remove must resolve the external plugin, got:\n%s", out.String())
+	}
+}
+
+// TestAgentAdd_UnknownNameReportsSearchedPath pins the miss path: a name that
+// matches neither a built-in nor an `entire-agent-<name>` binary falls through
+// to the agent listing, and the hint reports the $PATH lookup that already
+// happened instead of telling the user to go run it.
+func TestAgentAdd_UnknownNameReportsSearchedPath(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd via t.Chdir.
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true}`)
+
+	cmd := newAgentAddCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"no-such-agent"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("expected an error for an unknown agent, got output:\n%s", out.String())
+	}
+
+	if !strings.Contains(out.String(), `Unknown agent "no-such-agent"`) {
+		t.Errorf("expected the unknown-agent listing, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "was found on your PATH") {
+		t.Errorf("expected the hint to report the $PATH search that already ran, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), agentAddUsage) {
+		t.Errorf("expected the `agent add` usage line, got:\n%s", out.String())
+	}
+}
