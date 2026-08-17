@@ -606,6 +606,33 @@ func TestConfigureBranchHasNoUnpushedCommits(t *testing.T) {
 	})
 }
 
+func TestConfigureNonInteractiveAgentSelectionFallsBackToDefault(t *testing.T) {
+	defaultAgent := agent.Default()
+	if defaultAgent == nil {
+		t.Fatal("test requires the default agent to be registered")
+	}
+	defaultName := string(defaultAgent.Name())
+	options := []huh.Option[string]{huh.NewOption("Default", defaultName)}
+	got, err := configureNonInteractiveAgentSelection(nil, options)
+	if err != nil {
+		t.Fatalf("configureNonInteractiveAgentSelection() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{defaultName}) {
+		t.Fatalf("selection = %v, want default agent %q", got, defaultName)
+	}
+}
+
+func TestConfigureNonInteractiveAgentSelectionPreservesDetectedAgents(t *testing.T) {
+	selected := []string{"codex"}
+	got, err := configureNonInteractiveAgentSelection(selected, nil)
+	if err != nil {
+		t.Fatalf("configureNonInteractiveAgentSelection() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, selected) {
+		t.Fatalf("selection = %v, want existing selection %v", got, selected)
+	}
+}
+
 func TestConfigureNoChangeSaveChoices(t *testing.T) {
 	if got := defaultConfigureSaveChoice(false, false, false); got != configureSaveCancel {
 		t.Fatalf("default no-change form choice = %q, want Cancel", got)

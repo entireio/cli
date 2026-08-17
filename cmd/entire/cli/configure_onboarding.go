@@ -821,6 +821,11 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		if !ok {
 			return coreapi.ResolvedPlacement{}, nil, "", false, errors.New("default upstream is no longer available")
 		}
+		selection, selectionErr := configureNonInteractiveAgentSelection(selectedAgentNames, agentOptions)
+		if selectionErr != nil {
+			return coreapi.ResolvedPlacement{}, nil, "", false, selectionErr
+		}
+		selectedAgentNames = selection
 		selectedAgents, err := configureSelectedAgents(selectedAgentNames)
 		if err != nil {
 			return coreapi.ResolvedPlacement{}, nil, "", false, err
@@ -1025,6 +1030,23 @@ func runConfigureAgentManagement(cmd *cobra.Command, opts EnableOptions) error {
 	}
 	generated := newConfigureChanges(beforeApply, afterApply)
 	return configureSaveAndPush(cmd, repoRoot, owner, repo, beforeApply, generated, branch, protected, saveChoice, forgeRemote, time.Now)
+}
+
+func configureNonInteractiveAgentSelection(selected []string, options []huh.Option[string]) ([]string, error) {
+	if len(selected) != 0 {
+		return selected, nil
+	}
+	defaultAgent := agent.Default()
+	if defaultAgent == nil {
+		return nil, errors.New("no agents selected and no default agent is available")
+	}
+	defaultName := string(defaultAgent.Name())
+	for _, option := range options {
+		if option.Value == defaultName {
+			return []string{defaultName}, nil
+		}
+	}
+	return nil, fmt.Errorf("no agents selected and default agent %q does not support repository hooks", defaultName)
 }
 
 func configureSelectedAgents(names []string) ([]agent.Agent, error) {
