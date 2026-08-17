@@ -98,7 +98,7 @@ func askTrustPrompt(ctx context.Context) (trustChoice, error) {
 		huh.NewGroup(
 			huh.NewSelect[trustChoice]().
 				Title("Entire captured agent sessions in this repo via global mode.").
-				Description("Trust this folder and sync its checkpoints to origin?").
+				Description("Trust this folder and sync its checkpoints to your checkpoint sync remote?").
 				Options(
 					huh.NewOption(yesLabel, trustChoiceYes),
 					huh.NewOption("Not now — keep capturing locally, ask again next push", trustChoiceNotNow),

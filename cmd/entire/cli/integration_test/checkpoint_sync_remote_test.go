@@ -384,6 +384,121 @@ func TestCheckpointSyncRemote_DedicatedCheckpointRemoteExemptFromGate(t *testing
 	}
 }
 
+// heldSyncMessageFragment identifies the pre-push hold explanation on stderr
+// without pinning the full copy (the strategy unit tests own the wording).
+const heldSyncMessageFragment = "checkpoint sync held"
+
+// gitPushWithHooksOutput is GitPushWithHooks returning the combined push
+// output, so callers can assert on the pre-push hook's stderr (git surfaces
+// hook stderr as part of the push output). Fails the test on a non-zero exit.
+func gitPushWithHooksOutput(t *testing.T, env *TestEnv, remote, refSpec string) string {
+	t.Helper()
+
+	env.InstallRealPrePushHook()
+	cmd := execx.NonInteractive(t.Context(), "git", "push", remote, refSpec)
+	cmd.Dir = env.RepoDir
+	cmd.Env = env.cliEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git push (with hooks) %s %s failed: %v\n%s", remote, refSpec, err, output)
+	}
+	return string(output)
+}
+
+// TestGlobalEnrolledRepoHoldsCheckpointSyncUntilTrusted is the end-to-end
+// acceptance for the egress trust gate through the REAL binary and a REAL
+// `git push`: in a repo enrolled only via the user-global tier (no .entire
+// anywhere), an untrusted push must exit 0 and deliver the user's branch while
+// every checkpoint stays home with one stderr explanation — and after
+// `entire trust`, the next push must drain the held backlog. The regression
+// this catches end-to-end: checkpoint data leaving a repo the user never
+// consented to sync, the hold breaking the user's own push, or trust failing
+// to release the backlog.
+func TestGlobalEnrolledRepoHoldsCheckpointSyncUntilTrusted(t *testing.T) {
+	t.Parallel()
+	ForEachBackend(t, func(t *testing.T, backend string) {
+		env, extraEnv := newGloballyTrackedEnv(t, true)
+		env.CheckpointStore = backend
+		bareOrigin := env.SetupEmptyNamedBareRemote("origin")
+
+		// Produce a checkpoint through the global lazy-enable flow: agent
+		// hooks fire, the user's commit condenses the session.
+		const sessionID = "trust-gate-session-1"
+		runClaudeHook(t, env, extraEnv, "user-prompt-submit", map[string]string{
+			"session_id":      sessionID,
+			"transcript_path": "",
+			"prompt":          "Create gate file",
+		})
+		env.WriteFile("gate.txt", "held until trusted\n")
+		builder := NewTranscriptBuilder()
+		builder.AddUserMessage("Create gate file")
+		toolID := builder.AddToolUse("mcp__acp__Write", "gate.txt", "held until trusted\n")
+		builder.AddToolResult(toolID)
+		builder.AddAssistantMessage("Done!")
+		transcriptPath := filepath.Join(env.ClaudeProjectDir, sessionID+".jsonl")
+		if err := builder.WriteToFile(transcriptPath); err != nil {
+			t.Fatalf("write transcript: %v", err)
+		}
+		runClaudeHook(t, env, extraEnv, "stop", map[string]string{
+			"session_id":      sessionID,
+			"transcript_path": transcriptPath,
+		})
+		env.GitCommitWithShadowHooksAsAgent("Add gate file", "gate.txt")
+
+		checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+		if checkpointID == "" {
+			t.Fatal("commit has no Entire-Checkpoint trailer; nothing to hold")
+		}
+		if !env.CheckpointsPresentLocally() {
+			t.Fatal("checkpoints should exist locally after condensation")
+		}
+
+		// Untrusted push: the branch lands, exit 0 (gitPushWithHooksOutput
+		// fails the test otherwise), checkpoints stay home on BOTH backends'
+		// shapes, exactly one held explanation on stderr.
+		output := gitPushWithHooksOutput(t, env, "origin", "HEAD")
+		if got := strings.Count(output, heldSyncMessageFragment); got != 1 {
+			t.Errorf("held push should print exactly one hold explanation, got %d in:\n%s", got, output)
+		}
+		if !strings.Contains(output, "entire trust") {
+			t.Errorf("hold explanation should name the remedy `entire trust`, got:\n%s", output)
+		}
+		if !env.BranchExistsOnRemote(bareOrigin, env.GetCurrentBranch()) {
+			t.Error("the user's branch must land on the remote despite the hold")
+		}
+		if anyRefUnderPrefix(t, bareOrigin, checkpointRefPrefix) {
+			t.Error("no refs/entire/* may reach the remote while the repo is untrusted")
+		}
+		if env.BranchExistsOnRemote(bareOrigin, paths.MetadataBranchName) {
+			t.Error("the v1 branch may not reach the remote while the repo is untrusted")
+		}
+		if env.usingGitRefs() && queuedCheckpointRefCount(t, env) == 0 {
+			t.Error("a held push must leave the push queue undrained")
+		}
+
+		// Consent via the real binary, then a push with new work: the held
+		// backlog drains silently.
+		trustOut := env.RunCLI("trust")
+		if !strings.Contains(trustOut, "Trusted") {
+			t.Fatalf("entire trust did not confirm trust, got:\n%s", trustOut)
+		}
+		env.WriteFile("after-trust.txt", "synced\n")
+		env.GitAdd("after-trust.txt")
+		env.GitCommit("Add after-trust file")
+
+		output = gitPushWithHooksOutput(t, env, "origin", "HEAD")
+		if strings.Contains(output, heldSyncMessageFragment) {
+			t.Errorf("a trusted push is silent about holds, got:\n%s", output)
+		}
+		if !env.CheckpointExistsOnRemote(bareOrigin, checkpointID) {
+			t.Errorf("checkpoint %s held while untrusted should drain to origin on the first trusted push", checkpointID)
+		}
+		if env.usingGitRefs() && queuedCheckpointRefCount(t, env) != 0 {
+			t.Error("the first trusted push should drain the push queue")
+		}
+	})
+}
+
 // initUnregisteredBareRepo creates a bare repo that is deliberately NOT added
 // as a remote of any test repo, for raw-URL push scenarios.
 func initUnregisteredBareRepo(t *testing.T) string {

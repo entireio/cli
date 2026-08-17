@@ -241,6 +241,28 @@ If your AI sessions will touch sensitive data:
 - **Avoid passing sensitive files to your agent.** Content that never enters the agent conversation never appears in transcripts.
 - **Review before pushing.** You can inspect the `entire/checkpoints/v1` branch locally before pushing it to a remote.
 
+## Global tracking and trust
+
+Global mode (`global.enabled` in `~/.config/entire/settings.json`) enrolls every git repository on the machine: agent hooks install automatically and sessions are captured **locally**. Capture and sync are separate decisions — enrollment alone never sends anything anywhere.
+
+Checkpoints never travel on their own. There is no background uploader; they are git refs inside `.git` whose **only** egress is piggybacking on your own `git push` via the pre-push hook, riding along to the elected checkpoint sync remote (`checkpoint_push_remote` setting → `origin` → sole remote → first remote). Sync carries only Entire's metadata refs — never your code or branches — and goes to the same remote your code goes to.
+
+In a globally-enrolled repo, that egress is gated by **per-repo trust**:
+
+- Your own branch push always proceeds, trusted or not — worst case, git behaves as if Entire weren't installed.
+- Until the repo is trusted, checkpoint refs stay home. An interactive push asks once (`y` = trust this repo, `n` = hold and re-ask next push, `A` = trust every repo on this machine via `trust_all`); a non-interactive push asks nothing and holds, with one stderr line and exit 0. You can also trust ahead of time with `entire trust`.
+- The first trusted push drains everything queued while the repo was untrusted, so deciding late loses nothing.
+
+Trust is **strictly per-repo** — no fan-out. A push in one repo decides only whether that repo's refs go to that repo's remote, never another repo's data. A session that touches other repositories creates no checkpoints in them.
+
+In short:
+
+- Global enable installs hooks and captures sessions locally in every repo.
+- Nothing syncs from a repo until you trust that repo (`entire trust`, the push prompt, or `trust_all`).
+- Repos can be excluded from enrollment entirely via `global.exclude_paths` / `global.exclude_origins`.
+
+Trusted pushes are silent; held pushes print exactly one stderr line explaining that checkpoint sync is held and how to enable it.
+
 ## What Gets Redacted
 
 ### Secrets (always on)
