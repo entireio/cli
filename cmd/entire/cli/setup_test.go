@@ -2510,48 +2510,6 @@ func TestManageAgents_NoChanges(t *testing.T) {
 	}
 }
 
-func TestManageAgents_NoChanges_StillPersistsVercelSetting(t *testing.T) {
-	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
-	writeSettings(t, testSettingsEnabled)
-	writeClaudeHooksFixture(t)
-
-	if err := os.WriteFile("vercel.json", []byte(`{
-  "git": {
-    "deploymentEnabled": {
-      "entire/**": false
-    }
-  }
-}`), 0o644); err != nil {
-		t.Fatalf("write vercel.json: %v", err)
-	}
-
-	selectFn := func(_ []string) ([]string, error) {
-		return []string{string(agent.AgentNameClaudeCode)}, nil
-	}
-
-	var buf bytes.Buffer
-	err := runManageAgents(context.Background(), &buf, EnableOptions{}, selectFn)
-	if err != nil {
-		t.Fatalf("runManageAgents() error = %v", err)
-	}
-
-	if strings.Contains(buf.String(), "No changes made.") {
-		t.Fatalf("did not expect no-op output when settings changed, got: %s", buf.String())
-	}
-	if !strings.Contains(buf.String(), ".entire/settings.json") {
-		t.Fatalf("expected settings update output, got: %s", buf.String())
-	}
-
-	s, err := settings.Load(context.Background())
-	if err != nil {
-		t.Fatalf("load settings: %v", err)
-	}
-	if !s.Vercel {
-		t.Fatal("expected vercel setting to be enabled")
-	}
-}
-
 func TestManageAgents_ForceReinstallsSelectedAgentHooks(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
@@ -2655,161 +2613,6 @@ func TestManageAgents_AddAndRemove(t *testing.T) {
 	}
 	if !checkGeminiCLIHooksInstalled() {
 		t.Error("Expected Gemini CLI hooks to be installed after selection")
-	}
-}
-
-func TestMaybePromptVercelDeploymentDisable_MergesExistingConfig(t *testing.T) {
-	setupTestRepo(t)
-
-	requireWriteFile := func(path, content string) {
-		t.Helper()
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatalf("write %s: %v", path, err)
-		}
-	}
-
-	requireWriteFile("vercel.json", `{
-  "cleanUrls": true,
-  "git": {
-    "deploymentEnabled": {
-      "main": true
-    }
-  }
-}`)
-
-	var prompted bool
-	var buf bytes.Buffer
-	changed, err := maybePromptVercelDeploymentDisable(context.Background(), &buf, settings.EntireSettingsFile, func() (bool, error) {
-		prompted = true
-		return true, nil
-	})
-	if err != nil {
-		t.Fatalf("maybePromptVercelDeploymentDisable() error = %v", err)
-	}
-	if !changed {
-		t.Fatal("expected Vercel setting change")
-	}
-	if !prompted {
-		t.Fatal("expected Vercel prompt to run")
-	}
-
-	projectSettings, err := settings.Load(context.Background())
-	if err != nil {
-		t.Fatalf("load settings: %v", err)
-	}
-	if !projectSettings.Vercel {
-		t.Fatal("expected vercel setting to be enabled")
-	}
-}
-
-func TestMaybePromptVercelDeploymentDisable_CreatesConfigWhenVercelDetected(t *testing.T) {
-	setupTestRepo(t)
-
-	if err := os.MkdirAll(".vercel", 0o755); err != nil {
-		t.Fatalf("mkdir .vercel: %v", err)
-	}
-
-	var buf bytes.Buffer
-	changed, err := maybePromptVercelDeploymentDisable(context.Background(), &buf, settings.EntireSettingsFile, func() (bool, error) {
-		return true, nil
-	})
-	if err != nil {
-		t.Fatalf("maybePromptVercelDeploymentDisable() error = %v", err)
-	}
-	if !changed {
-		t.Fatal("expected Vercel setting change")
-	}
-
-	projectSettings, err := settings.Load(context.Background())
-	if err != nil {
-		t.Fatalf("load settings: %v", err)
-	}
-	if !projectSettings.Vercel {
-		t.Fatal("expected vercel setting to be enabled")
-	}
-}
-
-func TestMaybePromptVercelDeploymentDisable_SkipsPromptWhenAlreadyDisabledInVercelJSON(t *testing.T) {
-	setupTestRepo(t)
-
-	if err := os.WriteFile("vercel.json", []byte(`{
-  "git": {
-    "deploymentEnabled": {
-      "entire/**": false
-    }
-  }
-}`), 0o644); err != nil {
-		t.Fatalf("write vercel.json: %v", err)
-	}
-
-	promptCalled := false
-	var buf bytes.Buffer
-	changed, err := maybePromptVercelDeploymentDisable(context.Background(), &buf, settings.EntireSettingsFile, func() (bool, error) {
-		promptCalled = true
-		return true, nil
-	})
-	if err != nil {
-		t.Fatalf("maybePromptVercelDeploymentDisable() error = %v", err)
-	}
-	if !changed {
-		t.Fatal("expected Vercel setting change from existing vercel.json")
-	}
-	if promptCalled {
-		t.Fatal("expected Vercel prompt to be skipped when already configured")
-	}
-	if !strings.Contains(buf.String(), ".entire/settings.json") {
-		t.Fatalf("expected settings update output, got %q", buf.String())
-	}
-
-	projectSettings, err := settings.Load(context.Background())
-	if err != nil {
-		t.Fatalf("load settings: %v", err)
-	}
-	if !projectSettings.Vercel {
-		t.Fatal("expected vercel setting to be enabled from existing vercel.json")
-	}
-}
-
-func TestMaybePromptVercelDeploymentDisable_WritesLocalSettingsWhenRequested(t *testing.T) {
-	setupTestRepo(t)
-
-	if err := os.MkdirAll(filepath.Dir(settings.EntireSettingsLocalFile), 0o755); err != nil {
-		t.Fatalf("mkdir settings dir: %v", err)
-	}
-	if err := os.WriteFile("vercel.json", []byte(`{}`), 0o644); err != nil {
-		t.Fatalf("write vercel.json: %v", err)
-	}
-
-	var buf bytes.Buffer
-	changed, err := maybePromptVercelDeploymentDisable(context.Background(), &buf, settings.EntireSettingsLocalFile, func() (bool, error) {
-		return true, nil
-	})
-	if err != nil {
-		t.Fatalf("maybePromptVercelDeploymentDisable() error = %v", err)
-	}
-	if !changed {
-		t.Fatal("expected Vercel setting change")
-	}
-	if !strings.Contains(buf.String(), settings.EntireSettingsLocalFile) {
-		t.Fatalf("expected local settings update output, got %q", buf.String())
-	}
-
-	localSettingsPath := filepath.Join(".", settings.EntireSettingsLocalFile)
-	localSettings, err := settings.LoadFromFile(localSettingsPath)
-	if err != nil {
-		t.Fatalf("load local settings: %v", err)
-	}
-	if !localSettings.Vercel {
-		t.Fatal("expected vercel setting in local settings")
-	}
-
-	projectSettingsPath := filepath.Join(".", settings.EntireSettingsFile)
-	projectSettings, err := settings.LoadFromFile(projectSettingsPath)
-	if err != nil {
-		t.Fatalf("load project settings: %v", err)
-	}
-	if projectSettings.Vercel {
-		t.Fatal("expected project settings to remain unchanged")
 	}
 }
 
@@ -3530,7 +3333,7 @@ func TestEnableCmd_YesFreshRepo_SkipsPromptsAndEnables(t *testing.T) {
 	testutil.GitCommit(t, ".", "init")
 
 	// Use --yes with --agent to test the realistic CI scenario.
-	// The --yes flag skips telemetry/Vercel prompts while --agent selects a specific agent.
+	// The --yes flag skips telemetry prompts while --agent selects a specific agent.
 	// The pure --yes-selects-all-agents path is covered by TestDetectOrSelectAgent_YesSelectsAll.
 	cmd := newEnableCmd()
 	var stdout, stderr bytes.Buffer
@@ -3610,9 +3413,6 @@ func TestEnableCmd_YesOnConfiguredRepo_ManagesAgents(t *testing.T) {
 
 func TestRunEnableInteractiveSuppressAdditionalSetupAppliesTelemetryDefault(t *testing.T) {
 	setupTestRepo(t)
-	if err := os.Mkdir(".vercel", 0o755); err != nil {
-		t.Fatalf("create Vercel marker: %v", err)
-	}
 	ag, err := agent.Get(types.AgentName("claude-code"))
 	if err != nil {
 		t.Fatalf("agent.Get(claude-code) error = %v", err)
@@ -3633,9 +3433,6 @@ func TestRunEnableInteractiveSuppressAdditionalSetupAppliesTelemetryDefault(t *t
 	}
 	if s.Telemetry == nil || !*s.Telemetry {
 		t.Fatalf("suppressed telemetry prompt did not apply enabled default: %v", s.Telemetry)
-	}
-	if !s.Vercel {
-		t.Fatal("focused onboarding suppressed Vercel deployment protection")
 	}
 }
 
