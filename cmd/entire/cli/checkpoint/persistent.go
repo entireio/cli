@@ -972,7 +972,7 @@ func (s *treeWriter) reaggregateFromEntries(basePath string, sessionCount int, e
 		}
 		totalCount += meta.CheckpointsCount
 		allFiles = mergeFilesTouched(allFiles, meta.FilesTouched)
-		totalTokens = types.AddTokenUsage(totalTokens, meta.TokenUsage)
+		totalTokens = aggregateTokenUsage(totalTokens, meta.TokenUsage)
 		totalModels = mergeModelUsage(totalModels, meta.ModelUsage)
 	}
 
@@ -1019,6 +1019,45 @@ func (s *treeWriter) readSummaryFromBlob(hash plumbing.Hash) (*CheckpointSummary
 	return readJSONFromBlob[CheckpointSummary](s.repo, hash)
 }
 
+// aggregateTokenUsage sums two TokenUsage structs.
+// Returns nil if both inputs are nil.
+//
+// CacheCreation1hTokens is summed with the rest: it is the subset of
+// CacheCreationTokens written with a 1-hour TTL, which pricing.Estimate bills at
+// 2x input instead of 1.25x, so dropping it makes any re-priced aggregate
+// silently undercount.
+func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
+	if a == nil && b == nil {
+		return nil
+	}
+	result := &agent.TokenUsage{}
+	var aCost, bCost *float64
+	if a != nil {
+		result.InputTokens = a.InputTokens
+		result.CacheCreationTokens = a.CacheCreationTokens
+		result.CacheCreation1hTokens = a.CacheCreation1hTokens
+		result.CacheReadTokens = a.CacheReadTokens
+		result.OutputTokens = a.OutputTokens
+		result.APICallCount = a.APICallCount
+		aCost = a.CostUSD
+	}
+	if b != nil {
+		result.InputTokens += b.InputTokens
+		result.CacheCreationTokens += b.CacheCreationTokens
+		result.CacheCreation1hTokens += b.CacheCreation1hTokens
+		result.CacheReadTokens += b.CacheReadTokens
+		result.OutputTokens += b.OutputTokens
+		result.APICallCount += b.APICallCount
+		bCost = b.CostUSD
+	}
+	result.CostUSD = types.AddCostUSD(aCost, bCost)
+	// MergeCostSourceUsages folds a priced side with an unpriced-but-token-bearing
+	// side to mixed, so a summary that combines a costed session with an
+	// uncosted token-bearing one reports partial coverage honestly.
+	result.CostSource = types.MergeCostSourceUsages(a, b)
+	return result
+}
+
 // mergeModelUsage merges two per-model usage lists keyed by model, summing token
 // counts and folding costs with the same AddCostUSD/MergeCostSource rules as
 // aggregateTokenUsage. The result is sorted by model for deterministic output.
@@ -1031,7 +1070,7 @@ func mergeModelUsage(a, b []types.ModelUsage) []types.ModelUsage {
 	fold := func(list []types.ModelUsage) {
 		for i := range list {
 			usage := list[i].TokenUsage
-			byModel[list[i].Model] = types.AddTokenUsage(byModel[list[i].Model], &usage)
+			byModel[list[i].Model] = aggregateTokenUsage(byModel[list[i].Model], &usage)
 		}
 	}
 	fold(a)
