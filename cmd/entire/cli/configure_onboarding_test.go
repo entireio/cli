@@ -19,6 +19,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
@@ -377,6 +379,18 @@ func TestConfigureSaveFieldEnterSubmits(t *testing.T) {
 	_, cmd := field.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("enter did not submit the save field")
+	}
+}
+
+func TestConfigureAgentOptionsUsePlainLabels(t *testing.T) {
+	selected := map[types.AgentName]struct{}{agent.AgentNameClaudeCode: {}}
+	options := configureAgentOptions([]huh.Option[string]{
+		huh.NewOption("Claude Code", string(agent.AgentNameClaudeCode)),
+		huh.NewOption("Codex", string(agent.AgentNameCodex)),
+	}, selected)
+	got := []string{ansi.Strip(options[0].Key), ansi.Strip(options[1].Key)}
+	if want := []string{"Claude Code", "Codex"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("agent labels = %v, want plain labels %v", got, want)
 	}
 }
 

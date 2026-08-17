@@ -47,6 +47,7 @@ const (
 	configureSaveLocal          = "local"
 	configureSaveCancel         = "cancel"
 	configureGitProtocolSSH     = "ssh"
+	configureKeyEnter           = "enter"
 )
 
 // configureAccessReporter is the small part of the authenticated API used by
@@ -690,8 +691,8 @@ func configureRadioKeyBinds(selectField *huh.Select[string]) []key.Binding {
 	bindings := selectField.KeyBinds()
 	for i := range bindings {
 		help := bindings[i].Help()
-		if help.Key == "enter" && help.Desc == "select" {
-			bindings[i].SetHelp("enter", "continue")
+		if help.Key == configureKeyEnter && help.Desc == "select" {
+			bindings[i].SetHelp(configureKeyEnter, "continue")
 		}
 	}
 	return append(bindings, key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "select")))
@@ -702,7 +703,7 @@ func configureRadioSelectKey(key string) bool {
 }
 
 func configureNextKey(key string) bool {
-	return key == "enter" || key == "tab"
+	return key == configureKeyEnter || key == "tab"
 }
 
 // promptConfigureUpstreamAndAgents presents upstream, agents, and the dynamic
@@ -1192,36 +1193,15 @@ func configureQuestionTitle(question string, focused bool) string {
 }
 
 func configureAgentOptions(options []huh.Option[string], selected map[types.AgentName]struct{}) []huh.Option[string] {
-	styled := make([]huh.Option[string], 0, len(options))
+	plain := make([]huh.Option[string], 0, len(options))
 	for _, option := range options {
-		name := types.AgentName(option.Value)
-		dot := lipgloss.NewStyle().Foreground(lipgloss.Color(configureAgentColor(name))).Render("●")
-		item := huh.NewOption(dot+" "+option.Key, option.Value)
-		if _, ok := selected[name]; ok {
+		item := huh.NewOption(option.Key, option.Value)
+		if _, ok := selected[types.AgentName(option.Value)]; ok {
 			item = item.Selected(true)
 		}
-		styled = append(styled, item)
+		plain = append(plain, item)
 	}
-	return styled
-}
-
-func configureAgentColor(name types.AgentName) string {
-	switch name {
-	case agent.AgentNameClaudeCode:
-		return "#e8864a"
-	case agent.AgentNameCodex:
-		return "#34a37f"
-	case agent.AgentNameCopilotCLI:
-		return "#d162c4"
-	case agent.AgentNameGemini:
-		return "#5b93e8"
-	case agent.AgentNameOpenCode:
-		return "#4cc3c9"
-	case agent.AgentNamePi:
-		return "#e6c04a"
-	default:
-		return palette.Muted
-	}
+	return plain
 }
 
 func configureCurrentUpstream(ctx context.Context, repoRoot string) string {
