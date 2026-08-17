@@ -122,7 +122,7 @@ func TestSelectableAvailableRepos(t *testing.T) {
 		{Owner: "octocat", Repo: "alpha", Access: coreapi.AvailableMirrorAccessWrite, Status: coreapi.AvailableMirrorStatusAvailable},
 		// dropped: read-only access can't onboard
 		{Owner: "octocat", Repo: "readonly", Access: coreapi.AvailableMirrorAccessRead, Status: coreapi.AvailableMirrorStatusAvailable},
-		// dropped: already mirrored
+		// kept: mirrored repos can be moved into or out of regions
 		{Owner: "octocat", Repo: "done", Access: coreapi.AvailableMirrorAccessWrite, Status: coreapi.AvailableMirrorStatusMirrored},
 		// dropped: owner-only
 		{Owner: "someone", Repo: "private", Access: coreapi.AvailableMirrorAccessAdmin, Status: coreapi.AvailableMirrorStatusOwnerOnly},
@@ -136,7 +136,7 @@ func TestSelectableAvailableRepos(t *testing.T) {
 	for _, m := range got {
 		keys = append(keys, m.Owner+"/"+m.Repo)
 	}
-	require.Equal(t, []string{"acme/thing", "octocat/alpha", "octocat/zeta"}, keys)
+	require.Equal(t, []string{"acme/thing", "octocat/alpha", "octocat/done", "octocat/zeta"}, keys)
 }
 
 func TestHostFromPublicURL(t *testing.T) {
@@ -187,7 +187,7 @@ func TestClusterChoices(t *testing.T) {
 	opts, defaults := clusterChoices(regions, "eu")
 
 	require.Len(t, opts, 3)
-	require.Equal(t, "EU — Frankfurt", opts[0].Key, "caller's jurisdiction listed first")
+	require.Equal(t, "eu-west (eu)", opts[0].Key, "caller's jurisdiction listed first")
 	require.Equal(t, "eu-west-1.entire.io", opts[0].Value)
 	require.Equal(t, []string{"eu-west-1.entire.io"}, defaults)
 	// The other jurisdictions are still present, in their original relative order.
@@ -195,20 +195,16 @@ func TestClusterChoices(t *testing.T) {
 	for _, o := range opts {
 		keys = append(keys, o.Key)
 	}
-	require.ElementsMatch(t, []string{"US — Virginia", "EU — Frankfurt", "bare.entire.io"}, keys)
+	require.ElementsMatch(t, []string{"us-east (us)", "eu-west (eu)", "bare.entire.io"}, keys)
 
 	// Unknown jurisdiction: all still listed, original order, nothing pre-selected.
 	noOpts, noneDefault := clusterChoices(regions, "")
 	require.Empty(t, noneDefault)
-	require.Equal(t, "US — Virginia", noOpts[0].Key)
+	require.Equal(t, "us-east (us)", noOpts[0].Key)
 }
 
 func TestRegionLabel(t *testing.T) {
 	t.Parallel()
-	require.Equal(t, "AU — Sydney", regionPickerLabel(regionChoice{jurisdiction: "au"}))
-	require.Equal(t, "EU — Frankfurt", regionPickerLabel(regionChoice{jurisdiction: "eu"}))
-	require.Equal(t, "IN — Mumbai", regionPickerLabel(regionChoice{jurisdiction: "in"}))
-	require.Equal(t, "US — Virginia", regionPickerLabel(regionChoice{jurisdiction: "us"}))
 	require.Equal(t, "us-east (us)", regionLabel(regionChoice{slug: "us-east", jurisdiction: "us", host: "h"}))
 	require.Equal(t, "us-east", regionLabel(regionChoice{slug: "us-east", host: "h"}))
 	require.Equal(t, "h", regionLabel(regionChoice{host: "h"}))
@@ -233,6 +229,33 @@ func TestMirrorTargets(t *testing.T) {
 	require.Equal(t, mirrorTarget{owner: "a", repo: "x", region: regions[1]}, targets[1])
 	require.Equal(t, mirrorTarget{owner: "b", repo: "y", region: regions[0]}, targets[2])
 	require.Equal(t, mirrorTarget{owner: "b", repo: "y", region: regions[1]}, targets[3])
+}
+
+func TestMirrorRegionDeltaAddsAndRemovesFromLiveSelection(t *testing.T) {
+	t.Parallel()
+	repo := coreapi.AvailableMirror{Owner: "acme", Repo: "widget"}
+	regions := []regionChoice{{host: "eu.entire.io"}, {host: "us.entire.io"}, {host: "au.entire.io"}}
+	current := map[string]bool{"eu.entire.io": true, "us.entire.io": true}
+	selected := []regionChoice{regions[0], regions[2]}
+
+	add, remove := mirrorRegionDelta(repo, regions, current, selected)
+	require.Equal(t, []mirrorTarget{{owner: "acme", repo: "widget", region: regions[2]}}, add)
+	require.Equal(t, []mirrorTarget{{owner: "acme", repo: "widget", region: regions[1]}}, remove)
+}
+
+func TestRegionsWithPlacementsIncludesLivePlacementMissingFromCatalog(t *testing.T) {
+	t.Parallel()
+	catalog := []regionChoice{{host: "eu.entire.io"}}
+	placements := []coreapi.ResolvedPlacement{{
+		ClusterHost:  "legacy.entire.io",
+		Cell:         coreapi.NewOptString("legacy-cell"),
+		Jurisdiction: coreapi.NewOptString("us"),
+	}}
+	got := regionsWithPlacements(catalog, placements)
+	require.Equal(t, []regionChoice{
+		{host: "eu.entire.io"},
+		{slug: "legacy-cell", jurisdiction: "us", host: "legacy.entire.io"},
+	}, got)
 }
 
 func TestMirrorCreateResultRow(t *testing.T) {

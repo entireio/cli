@@ -118,13 +118,13 @@ func hostFromPublicURL(raw string) (string, error) {
 }
 
 // selectableAvailableRepos narrows the ListAvailableMirrors result to repos the
-// wizard should offer: status "available" (not already mirrored or owner-only)
-// with write or admin access (read-only can't be onboarded). Sorted by
-// owner/repo for a stable picker order.
+// wizard can manage: available or already mirrored, with write/admin access.
+// Including mirrored repos lets the region checklist reflect and update live
+// placements. Results are sorted by owner/repo for stable presentation.
 func selectableAvailableRepos(avail []coreapi.AvailableMirror) []coreapi.AvailableMirror {
 	out := make([]coreapi.AvailableMirror, 0, len(avail))
 	for _, m := range avail {
-		if m.Status != coreapi.AvailableMirrorStatusAvailable {
+		if m.Status != coreapi.AvailableMirrorStatusAvailable && m.Status != coreapi.AvailableMirrorStatusMirrored {
 			continue
 		}
 		if m.Access != coreapi.AvailableMirrorAccessWrite && m.Access != coreapi.AvailableMirrorAccessAdmin {
@@ -173,27 +173,12 @@ func clusterChoices(regions []regionChoice, jurisdiction string) (opts []huh.Opt
 	}
 	opts = make([]huh.Option[string], 0, len(ordered))
 	for _, r := range ordered {
-		opts = append(opts, huh.NewOption(regionPickerLabel(r), r.host))
+		opts = append(opts, huh.NewOption(regionLabel(r), r.host))
 		if jurisdiction != "" && r.isDefault && r.jurisdiction == jurisdiction {
 			defaults = append(defaults, r.host)
 		}
 	}
 	return opts, defaults
-}
-
-func regionPickerLabel(r regionChoice) string {
-	switch strings.ToLower(r.jurisdiction) {
-	case "au":
-		return "AU — Sydney"
-	case "eu":
-		return "EU — Frankfurt"
-	case "in":
-		return "IN — Mumbai"
-	case "us":
-		return "US — Virginia"
-	default:
-		return regionLabel(r)
-	}
 }
 
 // regionLabel is the human label used in results: "slug (jurisdiction)" when
@@ -296,6 +281,41 @@ type mirrorTarget struct {
 	region regionChoice
 }
 
+func regionsWithPlacements(catalog []regionChoice, placements []coreapi.ResolvedPlacement) []regionChoice {
+	regions := append([]regionChoice(nil), catalog...)
+	seen := make(map[string]bool, len(regions))
+	for _, region := range regions {
+		seen[region.host] = true
+	}
+	for _, placement := range placements {
+		if seen[placement.ClusterHost] {
+			continue
+		}
+		regions = append(regions, regionChoice{
+			slug:         placement.Cell.Or(""),
+			jurisdiction: placement.Jurisdiction.Or(""),
+			host:         placement.ClusterHost,
+		})
+	}
+	return regions
+}
+
+func mirrorRegionDelta(repo coreapi.AvailableMirror, regions []regionChoice, currentHosts map[string]bool, selected []regionChoice) (add, remove []mirrorTarget) {
+	selectedHosts := make(map[string]bool, len(selected))
+	for _, region := range selected {
+		selectedHosts[region.host] = true
+		if !currentHosts[region.host] {
+			add = append(add, mirrorTarget{owner: repo.Owner, repo: repo.Repo, region: region})
+		}
+	}
+	for _, region := range regions {
+		if currentHosts[region.host] && !selectedHosts[region.host] {
+			remove = append(remove, mirrorTarget{owner: repo.Owner, repo: repo.Repo, region: region})
+		}
+	}
+	return add, remove
+}
+
 // mirrorTargets expands the selected repos and regions into the full
 // cross-product of (repo, region) pairs.
 func mirrorTargets(repos []coreapi.AvailableMirror, regions []regionChoice) []mirrorTarget {
@@ -329,9 +349,9 @@ func mirrorCreateResultRow(r mirrorResult) []string {
 }
 
 // runMirrorCreateWizard is the zero-argument `entire repo mirror create` flow:
-// verify auth, pick repos, pick regions, then create the cross-product of
-// mirrors in parallel and report the clone URLs. noWait/waitTimeout carry the
-// same meaning as the positional-arg create path.
+// verify auth, pick repos, then reconcile each repository's live placements
+// with its region checklist. Additions are created in parallel; unchecked live
+// placements are removed only after every addition succeeds.
 func runMirrorCreateWizard(cmd *cobra.Command, noWait bool, waitTimeout time.Duration) error {
 	cmd.SilenceUsage = true
 	ctx := cmd.Context()
@@ -372,8 +392,8 @@ func runMirrorCreateWizard(cmd *cobra.Command, noWait bool, waitTimeout time.Dur
 	stopRepos(true)
 	repos := selectableAvailableRepos(avail.Available)
 	if len(repos) == 0 {
-		fmt.Fprintln(errW, "No GitHub repos available to mirror (you need write access to a repo that isn't mirrored yet).")
-		fmt.Fprintln(errW, "Run 'entire repo mirror list' to see what's onboardable.")
+		fmt.Fprintln(errW, "No GitHub repos available to manage (write access is required).")
+		fmt.Fprintln(errW, "Run 'entire repo mirror list' to inspect existing placements.")
 		return nil
 	}
 	selectedRepos, err := pickRepos(ctx, outW, repos)
@@ -392,21 +412,56 @@ func runMirrorCreateWizard(cmd *cobra.Command, noWait bool, waitTimeout time.Dur
 	if len(regions) == 0 {
 		return errors.New("no regions available to mirror into")
 	}
-	selectedRegions, err := pickRegions(ctx, outW, regions, jurisdiction)
-	if err != nil || len(selectedRegions) == 0 {
-		return err
+	var additions, removals []mirrorTarget
+	for _, selectedRepo := range selectedRepos {
+		stopPlacements := startSpinner(errW, "Fetching current placements for "+selectedRepo.Owner+"/"+selectedRepo.Repo)
+		placements, placementErr := resolvePullablePlacements(ctx, client, selectedRepo.Owner, selectedRepo.Repo)
+		stopPlacements(placementErr == nil)
+		if placementErr != nil {
+			return renderCoreError(placementErr)
+		}
+		repoRegions := regionsWithPlacements(regions, placements)
+		currentHosts := make(map[string]bool, len(placements))
+		currentSelection := make([]string, 0, len(placements))
+		for _, placement := range placements {
+			currentHosts[placement.ClusterHost] = true
+			currentSelection = append(currentSelection, placement.ClusterHost)
+		}
+		selectedRegions, pickErr := pickRegions(ctx, outW, repoRegions, jurisdiction, currentSelection, selectedRepo.Owner+"/"+selectedRepo.Repo)
+		if pickErr != nil || selectedRegions == nil {
+			return pickErr
+		}
+		add, remove := mirrorRegionDelta(selectedRepo, repoRegions, currentHosts, selectedRegions)
+		additions = append(additions, add...)
+		removals = append(removals, remove...)
 	}
 
-	// --- create + poll ------------------------------------------------------
-	targets := mirrorTargets(selectedRepos, selectedRegions)
-	results := createMirrors(ctx, errW, targets, noWait, waitTimeout)
-
-	// A cancelled run (Ctrl+C) leaves in-flight mirrors looking like errors;
-	// exit quietly instead of reporting them as "N mirror(s) failed".
-	if ctx.Err() != nil {
-		return NewSilentError(ctx.Err())
+	// Create additions first. If any creation fails, retain every existing
+	// placement rather than removing healthy mirrors and leaving the repository
+	// with less coverage than the user requested.
+	var results []mirrorResult
+	if len(additions) != 0 {
+		results = createMirrors(ctx, errW, additions, noWait, waitTimeout)
+		if ctx.Err() != nil {
+			return NewSilentError(ctx.Err())
+		}
+		if err := reportMirrorResults(outW, errW, results); err != nil {
+			return err
+		}
 	}
-	return reportMirrorResults(outW, errW, results)
+	for _, target := range removals {
+		clusterClient, clientErr := coreapi.NewForCluster(ctx, target.region.host)
+		if clientErr != nil {
+			return clientErr
+		}
+		if err := removeMirror(ctx, outW, clusterClient, target.owner, target.repo, target.region.host); err != nil {
+			return renderCoreError(err)
+		}
+	}
+	if len(additions) == 0 && len(removals) == 0 {
+		fmt.Fprintln(outW, "No mirror placement changes.")
+	}
+	return nil
 }
 
 // ensureMirrorWizardAuth mirrors `entire auth status`: resolve the active
@@ -488,19 +543,23 @@ func pickRepos(ctx context.Context, w io.Writer, repos []coreapi.AvailableMirror
 
 // pickRegions runs the region multi-select, pre-selecting the default cluster
 // for the caller's jurisdiction. A clean cancel returns (nil, nil).
-func pickRegions(ctx context.Context, w io.Writer, regions []regionChoice, jurisdiction string) ([]regionChoice, error) {
+func pickRegions(ctx context.Context, w io.Writer, regions []regionChoice, jurisdiction string, currentHosts []string, repoLabel string) ([]regionChoice, error) {
 	opts, defaults := clusterChoices(regions, jurisdiction)
 	regionByHost := make(map[string]regionChoice, len(regions))
 	for _, r := range regions {
 		regionByHost[r.host] = r
 	}
 
-	// Pre-fill with the default hosts so they start checked.
-	selected := append([]string(nil), defaults...)
+	// Existing live placements win; a repository with no mirrors starts with
+	// the caller's jurisdiction default checked.
+	selected := append([]string(nil), currentHosts...)
+	if len(selected) == 0 {
+		selected = append(selected, defaults...)
+	}
 	control := newConfigureChecklistControl(
 		"Which regions should this repository live in?",
-		"Each repository is mirrored into every selected region.",
-		opts, &selected, true,
+		"Repository: "+repoLabel+". Checked regions are live; uncheck one to remove it.",
+		opts, &selected, len(currentHosts) == 0,
 	)
 	fmt.Fprintln(w)
 	if err := newConfigureForm(huh.NewGroup(control)).RunWithContext(ctx); err != nil {
