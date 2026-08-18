@@ -16,9 +16,9 @@ command that needs external agents runs it itself, in one of three shapes.
 
 | Entry point | Scope | Gate | Used by |
 |---|---|---|---|
-| `external.DiscoverAndRegister` | Full `$PATH` scan | Skipped unless `external_agents` is enabled | Most commands: `status`, `review`, `explain`, `resume`, `attach`, `rewind`, the `hooks` command trees, and post-commit condensation |
-| `external.DiscoverAndRegisterAlways` | Full `$PATH` scan | Bypassed | Interactive setup flows and `entire agent list --external` |
-| `external.DiscoverAndRegisterNamedAlways` | Looks up `entire-agent-<name>` only | Bypassed | `entire agent add` / `entire agent remove` |
+| `external.DiscoverAndRegister` | Full `$PATH` scan | Skipped unless `external_agents` is enabled | Commands that resolve an agent recorded in an existing session: `resume`, `attach`, `explain`, `rewind`, `review`, `trail resume`, the `hooks` command trees, and post-commit condensation |
+| `external.DiscoverAndRegisterAlways` | Full `$PATH` scan | Bypassed | Interactive setup flows, `entire enable --agent <name>`, `entire configure --summarize-provider`, `entire agent list --external`, and summary-provider resolution (both the picker and the configured-provider lookup) |
+| `external.DiscoverAndRegisterNamedAlways` | Looks up `entire-agent-<name>` only | Bypassed | `entire agent add` / `entire agent remove`, and `entire dispatch --agent <name>`'s summary-provider lookup |
 
 Consequences worth knowing:
 

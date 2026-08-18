@@ -145,6 +145,27 @@ func TestSnapshotForTesting_RestoresRegistry(t *testing.T) {
 	}
 }
 
+// TestSnapshotForTesting_RestoreIsRepeatable pins that restore can run more than
+// once. Tests routinely both t.Cleanup the restore and call it inline; if the
+// first call aliased the snapshot into the registry, a Register after it would
+// edit the snapshot and the cleanup would hand that mock back to later tests.
+func TestSnapshotForTesting_RestoreIsRepeatable(t *testing.T) {
+	// Not parallel: mutates the process-global registry.
+	restore := SnapshotForTesting()
+	t.Cleanup(restore)
+
+	const probe types.AgentName = "snapshot-repeat-probe-agent"
+	Register(probe, func() Agent { return &mockAgent{} })
+	restore()
+
+	Register(probe, func() Agent { return &mockAgent{} })
+	restore()
+
+	if slices.Contains(List(), probe) {
+		t.Fatalf("probe agent %q survived the second restore()", probe)
+	}
+}
+
 // sessionDirAgent is a mock with a configurable session dir, for path-prefix tests.
 type sessionDirAgent struct {
 	mockAgent
