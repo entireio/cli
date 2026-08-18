@@ -38,6 +38,7 @@ var (
 const (
 	configureAccessPollInterval = 2 * time.Second
 	configureAccessWaitTimeout  = 5 * time.Minute
+	configureAccessMaxErrors    = 3
 	configureCommitMessage      = "chore: configure entire"
 	configureBranchBase         = "configure-entire"
 	configureSaveDirect         = "direct"
@@ -377,18 +378,34 @@ func ensureConfigureRepoAccess(ctx context.Context, outW, errW io.Writer, report
 
 	waitCtx, cancel := context.WithTimeout(ctx, configureAccessWaitTimeout)
 	defer cancel()
-	ticker := time.NewTicker(configureAccessPollInterval)
+	if err := waitForConfigureRepoAccess(waitCtx, reporter, cleanRemote, configureAccessPollInterval, configureAccessMaxErrors); err != nil {
+		return err
+	}
+	stop(true)
+	stopped = true
+	fmt.Fprintln(outW, "✓ Access granted")
+	return nil
+}
+
+func waitForConfigureRepoAccess(ctx context.Context, reporter configureAccessReporter, cleanRemote string, pollInterval time.Duration, maxErrors int) error {
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
+	consecutiveErrors := 0
 	for {
 		select {
-		case <-waitCtx.Done():
-			return fmt.Errorf("waiting for GitHub app installation: %w", waitCtx.Err())
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for GitHub app installation: %w", ctx.Err())
 		case <-ticker.C:
-			access, err := reporter.ReportEnable(waitCtx, cleanRemote)
-			if err == nil && access.Connected {
-				stop(true)
-				stopped = true
-				fmt.Fprintln(outW, "✓ Access granted")
+			access, err := reporter.ReportEnable(ctx, cleanRemote)
+			if err != nil {
+				consecutiveErrors++
+				if consecutiveErrors >= maxErrors {
+					return fmt.Errorf("check repository access while waiting for installation: %w", err)
+				}
+				continue
+			}
+			consecutiveErrors = 0
+			if access != nil && access.Connected {
 				return nil
 			}
 		}

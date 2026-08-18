@@ -206,6 +206,49 @@ func (configureAccessReporterStub) ReportEnable(context.Context, string) (*api.E
 	return &api.EnableRepoResponse{Connected: false}, nil
 }
 
+type configureAccessReporterFunc func(context.Context, string) (*api.EnableRepoResponse, error)
+
+func (fn configureAccessReporterFunc) ReportEnable(ctx context.Context, remote string) (*api.EnableRepoResponse, error) {
+	return fn(ctx, remote)
+}
+
+func TestWaitForConfigureRepoAccessStopsAfterPersistentErrors(t *testing.T) {
+	wantErr := errors.New("API unavailable")
+	calls := 0
+	reporter := configureAccessReporterFunc(func(context.Context, string) (*api.EnableRepoResponse, error) {
+		calls++
+		return nil, wantErr
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := waitForConfigureRepoAccess(ctx, reporter, "https://github.com/acme/widget.git", time.Millisecond, 3)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error = %v, want persistent API error", err)
+	}
+	if calls != 3 {
+		t.Fatalf("poll calls = %d, want 3", calls)
+	}
+}
+
+func TestWaitForConfigureRepoAccessRecoversFromTransientError(t *testing.T) {
+	calls := 0
+	reporter := configureAccessReporterFunc(func(context.Context, string) (*api.EnableRepoResponse, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("temporary failure")
+		}
+		return &api.EnableRepoResponse{Connected: true}, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := waitForConfigureRepoAccess(ctx, reporter, "https://github.com/acme/widget.git", time.Millisecond, 3); err != nil {
+		t.Fatalf("wait for access: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("poll calls = %d, want 2", calls)
+	}
+}
+
 func TestEnsureConfigureRepoAccessNonAdminPrintsShareableLink(t *testing.T) {
 	opened := false
 	deps := configureFlowDeps{
