@@ -35,6 +35,7 @@ const (
 	testGitShowRef      = "show-ref"
 	testGitPush         = "push"
 	testGitAdd          = "add"
+	testGitRestore      = "restore"
 )
 
 func TestConfigureCmdBareInteractiveRunsOnboarding(t *testing.T) {
@@ -805,7 +806,7 @@ func TestConfigureSaveNewBranchReturnsToOriginalBranch(t *testing.T) {
 		case testGitLSRemote:
 			cmd := exec.CommandContext(context.Background(), "sh", "-c", "exit 2")
 			return "", cmd.Run()
-		case "switch", testGitAdd, gitCmdCommit, testGitPush, "restore":
+		case "switch", testGitAdd, gitCmdCommit, testGitPush, testGitRestore:
 			return "", nil
 		case testGitRevParse:
 			return testConfigureSHA, nil
@@ -817,9 +818,35 @@ func TestConfigureSaveNewBranchReturnsToOriginalBranch(t *testing.T) {
 	if err := configureSaveAndPush(cmd, dir, "acme", "widget", nil, generated, "feature", false, configureSaveNewBranch, mirrorCloneProviderGitHub, time.Now); err != nil {
 		t.Fatalf("configureSaveAndPush() error = %v", err)
 	}
-	wantRestore := []string{"restore", "--source", configureBranchBase, "--worktree", "--", ".entire/settings.json"}
+	wantRestore := []string{testGitRestore, "--source", configureBranchBase, "--worktree", "--", ".entire/settings.json"}
 	if got := calls[len(calls)-1]; !reflect.DeepEqual(got, wantRestore) {
 		t.Fatalf("last git call = %v, want configuration restored on original branch as %v", got, wantRestore)
+	}
+}
+
+func TestRestoreConfigureOriginalBranchReturnsToSourceWhenRestoreFails(t *testing.T) {
+	previous := gitRunner
+	t.Cleanup(func() { gitRunner = previous })
+	restoreErr := errors.New("restore failed")
+	var calls [][]string
+	gitRunner = func(_ context.Context, _ string, args ...string) (string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if args[0] == testGitRestore {
+			return "", restoreErr
+		}
+		return "", nil
+	}
+
+	err := restoreConfigureOriginalBranch(context.Background(), t.TempDir(), "configure-entire", "feature", []string{".entire/settings.json"}, true)
+	if !errors.Is(err, restoreErr) {
+		t.Fatalf("error = %v, want restore failure", err)
+	}
+	wantLast := []string{"switch", "configure-entire"}
+	if got := calls[len(calls)-1]; !reflect.DeepEqual(got, wantLast) {
+		t.Fatalf("last git call = %v, want rollback to source branch %v", got, wantLast)
+	}
+	if !strings.Contains(err.Error(), "preserve the generated configuration") {
+		t.Fatalf("error does not explain recovery state: %v", err)
 	}
 }
 
@@ -841,7 +868,7 @@ func TestConfigureSaveNewBranchPushFailureRestoresConfiguration(t *testing.T) {
 		case testGitLSRemote:
 			exit := exec.CommandContext(context.Background(), "sh", "-c", "exit 2")
 			return "", exit.Run()
-		case "switch", testGitAdd, gitCmdCommit, "restore":
+		case "switch", testGitAdd, gitCmdCommit, testGitRestore:
 			return "", nil
 		case testGitRevParse:
 			return testConfigureSHA, nil
@@ -856,7 +883,7 @@ func TestConfigureSaveNewBranchPushFailureRestoresConfiguration(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "push rejected") {
 		t.Fatalf("configureSaveAndPush() error = %v, want push failure", err)
 	}
-	wantRestore := []string{"restore", "--source", configureBranchBase, "--worktree", "--", generated[0]}
+	wantRestore := []string{testGitRestore, "--source", configureBranchBase, "--worktree", "--", generated[0]}
 	if got := calls[len(calls)-1]; !reflect.DeepEqual(got, wantRestore) {
 		t.Fatalf("last git call after push failure = %v, want %v", got, wantRestore)
 	}

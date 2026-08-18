@@ -1250,7 +1250,14 @@ func restoreConfigureOriginalBranch(ctx context.Context, repoRoot, sourceBranch,
 	}
 	args = append(args, generated...)
 	if _, err := gitRunner(ctx, repoRoot, args...); err != nil {
-		return fmt.Errorf("restore configuration on original branch %q: %w", originalBranch, err)
+		restoreErr := fmt.Errorf("restore configuration on original branch %q: %w", originalBranch, err)
+		// Do not leave the user on the original branch without the generated
+		// configuration. Returning to the review branch preserves the committed
+		// files and gives them a recoverable checkout if worktree restoration fails.
+		if _, rollbackErr := gitRunner(ctx, repoRoot, "switch", sourceBranch); rollbackErr != nil {
+			return errors.Join(restoreErr, fmt.Errorf("return to configuration branch %q after restore failure: %w", sourceBranch, rollbackErr))
+		}
+		return fmt.Errorf("%w; returned to configuration branch %q to preserve the generated configuration", restoreErr, sourceBranch)
 	}
 	return nil
 }
