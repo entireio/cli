@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // No t.Parallel in this file: every test uses t.Chdir and/or t.Setenv.
@@ -215,11 +217,24 @@ func TestRunStatus_GlobalTrustLine(t *testing.T) {
 		return out.String()
 	}
 
-	t.Run("untrusted enrolled repo shows sync held", func(t *testing.T) {
+	t.Run("untrusted enrolled repo shows sync held with count", func(t *testing.T) {
 		setupGloballyEnrolledStatusRepo(t, `{"global":{"enabled":true}}`)
+		// One v1 commit with no remote-tracking ref = one held checkpoint
+		// under the git-branch backend, so the "(N held)" suffix renders.
+		root, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		testutil.AddRemote(t, root, "origin", "https://github.com/acme/widgets.git")
+		testutil.WriteFile(t, root, "f.txt", "init")
+		testutil.GitAdd(t, root, "f.txt")
+		testutil.GitCommit(t, root, "init")
+		testutil.GitUpdateRef(t, root, "refs/heads/entire/checkpoints/v1", "HEAD")
+		t.Setenv(settings.EnvCheckpointsPrimary, checkpoint.BackendTypeGitBranch)
+
 		got := statusOutput(t)
-		if !strings.Contains(got, "sync held — repo not trusted · run `entire trust`") {
-			t.Errorf("missing sync-held line, got: %s", got)
+		if !strings.Contains(got, "sync held — repo not trusted · run `entire trust` (1 held)") {
+			t.Errorf("missing sync-held line with held count, got: %s", got)
 		}
 		if strings.Contains(got, "trusted (") {
 			t.Errorf("untrusted repo must not read as trusted, got: %s", got)
@@ -448,6 +463,19 @@ func TestRunStatusJSON_TrustState(t *testing.T) {
 		setupGloballyEnrolledStatusRepo(t, `{"global":{"enabled":true,"trust_all":true}}`)
 		got := globalTrackingJSONOutput(t)
 		for _, want := range []string{`"trust_state":"trusted"`, `"trust_source":"trust_all"`} {
+			if !strings.Contains(got, want) {
+				t.Errorf("global_tracking missing %s, got: %s", want, got)
+			}
+		}
+	})
+
+	t.Run("per-repo trust names its source", func(t *testing.T) {
+		setupGloballyEnrolledStatusRepo(t, `{"global":{"enabled":true}}`)
+		if _, err := settings.TrustCurrentRepo(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		got := globalTrackingJSONOutput(t)
+		for _, want := range []string{`"trust_state":"trusted"`, `"trust_source":"repo"`} {
 			if !strings.Contains(got, want) {
 				t.Errorf("global_tracking missing %s, got: %s", want, got)
 			}

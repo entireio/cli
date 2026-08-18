@@ -72,37 +72,8 @@ func TestMaybeWarnGlobalTracking_ObservedOffDeletesMarkerAndNotesHeldData(t *tes
 	}
 }
 
-// TestMaybeWarnGlobalTracking_ReEnableAfterObservedOffReWarns pins the
-// observational-generation mechanic: an off→on flip re-warns ONLY because a
-// foreground command observed the off state in between and retired the
-// marker — that intervening invocation is what defines the generation
-// boundary (the settings file itself carries no counter).
-func TestMaybeWarnGlobalTracking_ReEnableAfterObservedOffReWarns(t *testing.T) {
-	cfg := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
-	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
-
-	var first bytes.Buffer
-	maybeWarnGlobalTracking(t.Context(), &first)
-	if !strings.Contains(first.String(), "Warning: global tracking is enabled") {
-		t.Fatalf("generation 1 must warn, got: %q", first.String())
-	}
-
-	// Hand-edit disable, then the intervening foreground observation.
-	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":false}}`)
-	var off bytes.Buffer
-	maybeWarnGlobalTracking(t.Context(), &off)
-	if !strings.Contains(off.String(), "Global tracking is off") {
-		t.Fatalf("intervening command must observe the off state, got: %q", off.String())
-	}
-
-	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
-	var reWarn bytes.Buffer
-	maybeWarnGlobalTracking(t.Context(), &reWarn)
-	if !strings.Contains(reWarn.String(), "Warning: global tracking is enabled") {
-		t.Errorf("generation 2 must re-warn after an observed-off command, got: %q", reWarn.String())
-	}
-}
+// The off→on re-warn is emergent from the two mechanics above (observed-off
+// deletes the marker; enabled-without-marker warns) — no separate test.
 
 // TestMaybeWarnGlobalTracking_TrustAllVariant: with trust_all set the
 // per-repo "sync only after `entire trust`" sentence would lie — the warn

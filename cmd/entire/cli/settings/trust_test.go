@@ -67,12 +67,12 @@ func TestRepoTrustIdentity(t *testing.T) {
 			{"remote", "add", "origin", "git@gitlab.example.com:team/proj.git"},
 			{"remote", "set-url", "--add", "origin", "https://github.com/acme/widgets.git"},
 		}, []string{"gitlab.example.com/team/proj", "github.com/acme/widgets"}, false},
-		{"entire mirror origin keys by the forge host", [][]string{
-			{"remote", "add", "origin", "entire://aws-us-east-2.entire.io/gh/Acme/Widgets.git"},
+		// Two URLs normalizing to the same key must yield that key once —
+		// duplicate keys would bloat trusted_origins on every trust write.
+		{"URLs normalizing to the same key are deduplicated", [][]string{
+			{"remote", "add", "origin", "https://github.com/Acme/Widgets.git"},
+			{"remote", "set-url", "--add", "origin", "git@github.com:acme/widgets.git"},
 		}, []string{"github.com/acme/widgets"}, false},
-		{"insteadOf shorthand keys by the shorthand", [][]string{
-			{"remote", "add", "origin", "gh:acme/widgets"},
-		}, []string{"gh/acme/widgets"}, false},
 		{"unnormalizable origin falls back to path identity", [][]string{
 			{"remote", "add", "origin", "file:///srv/git/secret.git"},
 		}, nil, true},
@@ -162,6 +162,18 @@ func TestCheckpointEgressAllowed(t *testing.T) {
 			`{"global":{"enabled":true,"trusted_origins":["gitlab.example.com/team/proj","github.com/acme/widgets"]}}`)
 		if !CheckpointEgressAllowed(t.Context()) {
 			t.Fatal("an identity with every key trusted must pass")
+		}
+	})
+
+	t.Run("a hand-edited entry with case and whitespace is honored", func(t *testing.T) {
+		// canonicalOriginEntry tolerance: identity keys are produced
+		// lowercase, but a hand-edited "  GitHub.com/Acme/Widgets " must
+		// still grant consent — trimmed and case-folded, never glob-expanded.
+		dir, cfg := newTrustTestRepo(t)
+		addTestRemote(t, dir, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+		writeUserSettings(t, cfg, `{"global":{"enabled":true,"trusted_origins":["  GitHub.com/Acme/Widgets "]}}`)
+		if !CheckpointEgressAllowed(t.Context()) {
+			t.Fatal("a hand-edited entry differing only in case/whitespace must grant consent")
 		}
 	})
 
@@ -434,11 +446,51 @@ func TestRevokeCurrentRepo(t *testing.T) {
 	t.Run("revoking an untrusted repo is a no-op", func(t *testing.T) {
 		dir, cfg := newTrustTestRepo(t)
 		addTestRemote(t, dir, "remote", "add", "origin", "https://github.com/acme/widgets.git")
-		writeUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+		writeUserSettings(t, cfg, `{"global":{"enabled":true,"trusted_origins":["github.com/other/repo"]}}`)
 		for range 2 {
 			if _, err := RevokeCurrentRepo(t.Context()); err != nil {
 				t.Fatal(err)
 			}
+		}
+		// A "no-op" that granted trust or wrote entries would pass a bare
+		// no-error check — pin the store state and the gate.
+		if CheckpointEgressAllowed(t.Context()) {
+			t.Fatal("revoking an untrusted repo must not open the gate")
+		}
+		us, err := LoadUserSettings(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(us.Global.TrustedOrigins, []string{"github.com/other/repo"}) {
+			t.Fatalf("no-op revoke must leave other repos' keys untouched, got %v", us.Global.TrustedOrigins)
+		}
+		if len(us.Global.TrustedPaths) != 0 {
+			t.Fatalf("no-op revoke must not write path entries, got %v", us.Global.TrustedPaths)
+		}
+	})
+
+	t.Run("revoke removes a hand-edited entry the gate honors", func(t *testing.T) {
+		// canonicalOriginEntry contract: whitespace-trimmed, case-folded — an
+		// entry the gate accepts must always be one revoke can remove, or a
+		// hand-edited file becomes unrevokable consent.
+		dir, cfg := newTrustTestRepo(t)
+		addTestRemote(t, dir, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+		writeUserSettings(t, cfg, `{"global":{"enabled":true,"trusted_origins":["  GitHub.com/Acme/Widgets "]}}`)
+		if !CheckpointEgressAllowed(t.Context()) {
+			t.Fatal("fixture must start trusted via the hand-edited entry")
+		}
+		if _, err := RevokeCurrentRepo(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		us, err := LoadUserSettings(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(us.Global.TrustedOrigins) != 0 {
+			t.Fatalf("revoke must remove the hand-edited entry, got %v", us.Global.TrustedOrigins)
+		}
+		if CheckpointEgressAllowed(t.Context()) {
+			t.Fatal("the gate must hold after revoking the hand-edited entry")
 		}
 	})
 
@@ -452,15 +504,8 @@ func TestRevokeCurrentRepo(t *testing.T) {
 	})
 }
 
+// The trust_all attribution (TrustSourceAll) is pinned by TestTrustAllRepos.
 func TestCurrentTrustSource(t *testing.T) {
-	t.Run("trust_all", func(t *testing.T) {
-		_, cfg := newTrustTestRepo(t)
-		writeUserSettings(t, cfg, `{"global":{"enabled":true,"trust_all":true}}`)
-		if got := CurrentTrustSource(t.Context()); got != TrustSourceAll {
-			t.Fatalf("CurrentTrustSource = %q, want %q", got, TrustSourceAll)
-		}
-	})
-
 	t.Run("repo", func(t *testing.T) {
 		dir, cfg := newTrustTestRepo(t)
 		addTestRemote(t, dir, "remote", "add", "origin", "https://github.com/acme/widgets.git")

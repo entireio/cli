@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -368,12 +369,29 @@ func TestCheckGlobalTracking_InfoOnUntrustedEnrolledRepo(t *testing.T) {
 	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
 	settings.ClearGlobalModeCache()
 	t.Cleanup(settings.ClearGlobalModeCache)
+	// One v1 commit with no remote-tracking ref = one held checkpoint under
+	// the git-branch backend, exercising the singular count branch.
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.AddRemote(t, root, "origin", "https://github.com/acme/widgets.git")
+	testutil.WriteFile(t, root, "f.txt", "init")
+	testutil.GitAdd(t, root, "f.txt")
+	testutil.GitCommit(t, root, "init")
+	testutil.GitUpdateRef(t, root, "refs/heads/entire/checkpoints/v1", "HEAD")
+	t.Setenv(settings.EnvCheckpointsPrimary, checkpoint.BackendTypeGitBranch)
 
 	got := runCheckGlobalTracking(t)
 	if !strings.Contains(got, "checkpoint sync held in this repo (informational)") {
 		t.Fatalf("missing informational hold note, got: %q", got)
 	}
-	for _, want := range []string{"intended until you opt in", "run `entire trust` to sync"} {
+	wants := []string{
+		"1 checkpoint is held locally.", // singular branch of the held count
+		"intended until you opt in",
+		"run `entire trust` to sync",
+	}
+	for _, want := range wants {
 		if !strings.Contains(got, want) {
 			t.Errorf("hold note missing %q, got: %q", want, got)
 		}

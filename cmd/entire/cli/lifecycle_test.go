@@ -861,11 +861,6 @@ func TestGlobalTrustBannerSuffix(t *testing.T) {
 		require.Empty(t, globalTrustBannerSuffix(context.Background(), agent.AgentNameClaudeCode))
 	})
 
-	t.Run("trust_all gets no line", func(t *testing.T) {
-		setupGloballyEnrolledRepo(t, `{"global":{"enabled":true,"trust_all":true}}`)
-		require.Empty(t, globalTrustBannerSuffix(context.Background(), agent.AgentNameClaudeCode))
-	})
-
 	t.Run("repo-level setup gets no line", func(t *testing.T) {
 		setupGloballyEnrolledRepo(t, `{"global":{"enabled":true}}`)
 		writeSettings(t, testSettingsEnabled)

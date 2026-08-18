@@ -418,10 +418,11 @@ func TestPrePush_EgressGateHoldsUntrustedGloballyEnrolledRepo_RefsBackend(t *tes
 	}
 }
 
-// Egress trust gate, git-refs backend: consent (per-repo trust or trust_all)
-// must let checkpoint refs ride the push again, silently — a trusted push that
-// still held (or still warned) would strand every globally-enrolled repo's
-// data forever. Not parallel: t.Chdir + t.Setenv.
+// Egress trust gate, git-refs backend: consent must let checkpoint refs ride
+// the push again, silently — a trusted push that still held (or still warned)
+// would strand every globally-enrolled repo's data forever. Which consent
+// source grants (per-repo key vs trust_all) is predicate-level, pinned by the
+// settings gate table. Not parallel: t.Chdir + t.Setenv.
 func TestPrePush_EgressGateTrustedRepoSyncs_RefsBackend(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -429,7 +430,6 @@ func TestPrePush_EgressGateTrustedRepoSyncs_RefsBackend(t *testing.T) {
 		trustRepo    bool
 	}{
 		{"trusted via settings.TrustCurrentRepo", `{"global":{"enabled":true}}`, true},
-		{"trust_all", `{"global":{"enabled":true,"trust_all":true}}`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -465,9 +465,10 @@ func TestPrePush_EgressGateTrustedRepoSyncs_RefsBackend(t *testing.T) {
 
 // Egress trust gate, git-branch backend: the gate sits above the v1 path too,
 // so an untrusted globally-enrolled repo must not publish
-// entire/checkpoints/v1 — while per-repo trust AND trust_all must, silently.
-// Catches the gate being wired into only one backend branch, and either
-// consent source covering only one backend. Not parallel: t.Chdir + t.Setenv.
+// entire/checkpoints/v1 — while a trusted one must, silently. Catches the
+// gate being wired into only one backend branch (PushQueuedCheckpointRefs
+// carries its own gate, so refs-backend tests alone would miss it).
+// Not parallel: t.Chdir + t.Setenv.
 func TestPrePush_EgressGate_BranchBackend(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -477,7 +478,6 @@ func TestPrePush_EgressGate_BranchBackend(t *testing.T) {
 	}{
 		{"untrusted holds v1", `{"global":{"enabled":true}}`, false, false},
 		{"trusted pushes v1", `{"global":{"enabled":true}}`, true, true},
-		{"trust_all pushes v1", `{"global":{"enabled":true,"trust_all":true}}`, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			testutil.IsolateGitConfigEnv(t)

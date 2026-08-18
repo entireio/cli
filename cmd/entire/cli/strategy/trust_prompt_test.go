@@ -3,6 +3,7 @@ package strategy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -90,6 +91,22 @@ func TestResolveTrustDecision_NotNowHoldsAndWritesNothing(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, TrustHeld, d)
 	require.False(t, settings.CheckpointEgressAllowed(ctx), "declining must leave the gate held")
+}
+
+// A failing prompt (terminal torn down mid-form, huh error) must resolve to
+// TrustHeld with the error surfaced to the caller — a mutant returning
+// Granted alongside the error would egress data nobody consented to. prePush
+// logs the returned error and holds, so the gate must stay closed here.
+func TestResolveTrustDecision_AskErrorHoldsAndPropagates(t *testing.T) {
+	newGloballyEnrolledPromptRepo(t, `{"global":{"enabled":true}}`)
+	ctx := context.Background()
+
+	askErr := errors.New("trust prompt: terminal gone")
+	d, err := resolveTrustDecision(ctx, true,
+		func() (trustChoice, error) { return trustChoiceYes, askErr }, io.Discard)
+	require.ErrorIs(t, err, askErr, "the prompt failure must reach the caller for logging")
+	require.Equal(t, TrustHeld, d, "a failed prompt must hold, never grant")
+	require.False(t, settings.CheckpointEgressAllowed(ctx), "a failed prompt must not record consent")
 }
 
 // A trust-write failure (here: the global tier is unconfigured, the same shape
