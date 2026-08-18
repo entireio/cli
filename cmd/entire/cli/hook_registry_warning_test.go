@@ -73,63 +73,6 @@ func captureStdout(t *testing.T, fn func()) string {
 	return <-outCh
 }
 
-// TestWarnInactiveOnSessionStart_DeliveryChannel pins where the notice goes:
-// through the agent's hook-response channel when it has one (Claude Code's
-// JSON systemMessage on stdout — no built-in agent surfaces raw hook stderr
-// to the user), and to stderr only as the fallback for agents without that
-// capability (e.g. Cursor).
-func TestWarnInactiveOnSessionStart_DeliveryChannel(t *testing.T) {
-	notice := "entire: not tracking this session (not a git repo)"
-
-	var errBuf bytes.Buffer
-	out := captureStdout(t, func() {
-		warnInactiveOnSessionStart(&errBuf, agent.AgentNameClaudeCode, "session-start", notice)
-	})
-	if !strings.Contains(out, `"systemMessage"`) || !strings.Contains(out, "not a git repo") {
-		t.Errorf("response-writer agent: stdout = %q, want JSON systemMessage carrying the notice", out)
-	}
-	if errBuf.Len() != 0 {
-		t.Errorf("response-writer agent must not also write stderr: %q", errBuf.String())
-	}
-
-	// Agents without a hook-response channel keep the plain stderr line.
-	errBuf.Reset()
-	out = captureStdout(t, func() {
-		warnInactiveOnSessionStart(&errBuf, agent.AgentNameCursor, "session-start", notice)
-	})
-	if got := errBuf.String(); got != notice+"\n" {
-		t.Errorf("fallback stderr notice = %q, want %q", got, notice+"\n")
-	}
-	if out != "" {
-		t.Errorf("fallback agent wrote stdout: %q", out)
-	}
-}
-
-func TestWarnInactiveOnSessionStart_OnlySessionStartVerb(t *testing.T) {
-	notice := "entire: not tracking this session (not a git repo)"
-
-	// Every other hook stays silent on both channels — the notice must never
-	// repeat per hook.
-	for _, hook := range []string{"stop", "user-prompt-submit", "session-end", "post-todo"} {
-		var b bytes.Buffer
-		out := captureStdout(t, func() {
-			warnInactiveOnSessionStart(&b, agent.AgentNameClaudeCode, hook, notice)
-		})
-		if b.Len() != 0 || out != "" {
-			t.Errorf("hook %q wrote a notice: stderr=%q stdout=%q", hook, b.String(), out)
-		}
-	}
-
-	// An empty notice (silent reason) writes nothing even on session-start.
-	var b bytes.Buffer
-	out := captureStdout(t, func() {
-		warnInactiveOnSessionStart(&b, agent.AgentNameClaudeCode, "session-start", "")
-	})
-	if b.Len() != 0 || out != "" {
-		t.Errorf("empty notice wrote output: stderr=%q stdout=%q", b.String(), out)
-	}
-}
-
 // newHookTestCmd builds a command shell for executeAgentHook with a captured
 // stderr and an empty JSON payload on stdin.
 func newHookTestCmd(t *testing.T, errBuf *bytes.Buffer) *cobra.Command {

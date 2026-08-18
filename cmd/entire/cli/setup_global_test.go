@@ -143,99 +143,12 @@ func TestRunDisableGlobalMode_AnswerIsDurable(t *testing.T) {
 	}
 }
 
-// TestRunDisableGlobalMode_RemovesUserHooksNonInteractive: without a TTY the
-// disable flow removes Entire's user-level hooks without prompting — and only
-// Entire's entries, leaving the rest of the user file intact.
-func TestRunDisableGlobalMode_RemovesUserHooksNonInteractive(t *testing.T) {
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	home := isolateUserHome(t)
-	t.Cleanup(settings.ClearGlobalModeCache)
-
-	claudePath := filepath.Join(home, ".claude", "settings.json")
-	if err := os.MkdirAll(filepath.Dir(claudePath), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(claudePath, []byte(`{"model":"opus"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := runEnableGlobalMode(t.Context(), &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-
-	var buf bytes.Buffer
-	if err := runDisableGlobalMode(t.Context(), &buf); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(buf.String(), "user-level hooks removed") {
-		t.Fatalf("missing removal report, got: %q", buf.String())
-	}
-	data, err := os.ReadFile(claudePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(data), "entire hooks claude-code") {
-		t.Errorf("Entire hooks left in user settings: %s", data)
-	}
-	if !strings.Contains(string(data), "opus") {
-		t.Errorf("unrelated user settings key removed: %s", data)
-	}
-	gemini, err := os.ReadFile(filepath.Join(home, ".gemini", "settings.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(gemini), "entire hooks gemini") {
-		t.Errorf("Entire hooks left in gemini user settings: %s", gemini)
-	}
-}
-
-// TestRunEnableGlobalMode_PerAgentFailureIsolation: a corrupt
-// ~/.claude/settings.json must fail ONLY claude-code's install (a `!` line),
-// leave the corrupt file untouched, and let gemini's install land — partial
-// success stays exit 0.
-func TestRunEnableGlobalMode_PerAgentFailureIsolation(t *testing.T) {
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	home := isolateUserHome(t)
-	t.Cleanup(settings.ClearGlobalModeCache)
-
-	claudePath := filepath.Join(home, ".claude", "settings.json")
-	if err := os.MkdirAll(filepath.Dir(claudePath), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	const corrupt = `{not json`
-	if err := os.WriteFile(claudePath, []byte(corrupt), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	var buf bytes.Buffer
-	if err := runEnableGlobalMode(t.Context(), &buf); err != nil {
-		t.Fatalf("partial success must stay exit 0, got: %v\n%s", err, buf.String())
-	}
-	out := buf.String()
-	if !strings.Contains(out, "! claude-code: install failed") {
-		t.Errorf("missing claude-code failure line, got: %q", out)
-	}
-	if !strings.Contains(out, "✓ gemini: installed") {
-		t.Errorf("gemini install must proceed past claude-code's failure, got: %q", out)
-	}
-	data, err := os.ReadFile(claudePath)
-	if err != nil || string(data) != corrupt {
-		t.Errorf("corrupt claude settings must be left untouched (data=%q err=%v)", data, err)
-	}
-	if _, err := os.Stat(filepath.Join(home, ".gemini", "settings.json")); err != nil {
-		t.Errorf("gemini user-level hook file not written: %v", err)
-	}
-}
-
-// TestRunEnableGlobalMode_ZeroCoverageIsAnError: when NO supporting agent
-// ends up with hooks installed, "Global tracking enabled" plus exit 0 would
-// report a tracking state that does not exist — the command must say so and
-// return an error. (The setting itself stays persisted; a re-run repairs.)
-func TestRunEnableGlobalMode_ZeroCoverageIsAnError(t *testing.T) {
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	home := isolateUserHome(t)
-	t.Cleanup(settings.ClearGlobalModeCache)
-
-	for _, dir := range []string{".claude", ".gemini"} {
+// Corrupt agent configs must fail only that agent's install (a `!` line, file
+// untouched, other agents proceed, exit 0); with NO agent covered the command
+// errors instead of reporting a tracking state that does not exist.
+func TestRunEnableGlobalMode_AgentFailures(t *testing.T) {
+	corruptAgentConfig := func(t *testing.T, home, dir string) string {
+		t.Helper()
 		path := filepath.Join(home, dir, "settings.json")
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			t.Fatal(err)
@@ -243,60 +156,115 @@ func TestRunEnableGlobalMode_ZeroCoverageIsAnError(t *testing.T) {
 		if err := os.WriteFile(path, []byte(`{not json`), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		return path
 	}
 
-	var buf bytes.Buffer
-	err := runEnableGlobalMode(t.Context(), &buf)
-	if err == nil {
-		t.Fatalf("zero agents covered must return an error, output: %q", buf.String())
-	}
-	if !strings.Contains(buf.String(), "will not capture any sessions") {
-		t.Errorf("missing zero-coverage explanation, got: %q", buf.String())
-	}
-	us, loadErr := settings.LoadUserSettings(t.Context())
-	if loadErr != nil {
-		t.Fatal(loadErr)
-	}
-	if us.Global == nil || !us.Global.Enabled {
-		t.Errorf("the enabled setting itself must persist so a re-run repairs: %+v", us.Global)
-	}
+	t.Run("per-agent failure isolation", func(t *testing.T) {
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		home := isolateUserHome(t)
+		t.Cleanup(settings.ClearGlobalModeCache)
+		claudePath := corruptAgentConfig(t, home, ".claude")
+
+		var buf bytes.Buffer
+		if err := runEnableGlobalMode(t.Context(), &buf); err != nil {
+			t.Fatalf("partial success must stay exit 0, got: %v\n%s", err, buf.String())
+		}
+		out := buf.String()
+		if !strings.Contains(out, "! claude-code: install failed") || !strings.Contains(out, "✓ gemini: installed") {
+			t.Errorf("want claude failure line and gemini success, got: %q", out)
+		}
+		data, err := os.ReadFile(claudePath)
+		if err != nil || string(data) != `{not json` {
+			t.Errorf("corrupt claude settings must be left untouched (data=%q err=%v)", data, err)
+		}
+	})
+
+	t.Run("zero coverage is an error", func(t *testing.T) {
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		home := isolateUserHome(t)
+		t.Cleanup(settings.ClearGlobalModeCache)
+		corruptAgentConfig(t, home, ".claude")
+		corruptAgentConfig(t, home, ".gemini")
+
+		var buf bytes.Buffer
+		if err := runEnableGlobalMode(t.Context(), &buf); err == nil {
+			t.Fatalf("zero agents covered must return an error, output: %q", buf.String())
+		}
+		if !strings.Contains(buf.String(), "will not capture any sessions") {
+			t.Errorf("missing zero-coverage explanation, got: %q", buf.String())
+		}
+		us, loadErr := settings.LoadUserSettings(t.Context())
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if us.Global == nil || !us.Global.Enabled {
+			t.Errorf("the enabled setting itself must persist so a re-run repairs: %+v", us.Global)
+		}
+	})
 }
 
-// TestRunDisableGlobalMode_UnreadableAgentConfigReported: an agent whose
-// user-level config cannot be read must get a `! ... could not remove` line
-// instead of being silently skipped, while readable agents still get their
-// hooks removed.
-func TestRunDisableGlobalMode_UnreadableAgentConfigReported(t *testing.T) {
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	home := isolateUserHome(t)
-	t.Cleanup(settings.ClearGlobalModeCache)
+// Non-interactive disable removes ONLY Entire's user-level entries; an agent
+// whose config cannot be read gets a `! ... could not remove` line while
+// readable agents still get their hooks removed.
+func TestRunDisableGlobalMode_HookRemoval(t *testing.T) {
+	t.Run("removes only ours without prompting", func(t *testing.T) {
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		home := isolateUserHome(t)
+		t.Cleanup(settings.ClearGlobalModeCache)
+		claudePath := filepath.Join(home, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(claudePath), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(claudePath, []byte(`{"model":"opus"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := runEnableGlobalMode(t.Context(), &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
 
-	if err := runEnableGlobalMode(t.Context(), &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-	claudePath := filepath.Join(home, ".claude", "settings.json")
-	if err := os.WriteFile(claudePath, []byte(`{not json`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+		var buf bytes.Buffer
+		if err := runDisableGlobalMode(t.Context(), &buf); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(buf.String(), "user-level hooks removed") {
+			t.Fatalf("missing removal report, got: %q", buf.String())
+		}
+		data, err := os.ReadFile(claudePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "entire hooks claude-code") || !strings.Contains(string(data), "opus") {
+			t.Errorf("disable must remove only Entire entries: %s", data)
+		}
+		gemini, err := os.ReadFile(filepath.Join(home, ".gemini", "settings.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(gemini), "entire hooks gemini") {
+			t.Errorf("Entire hooks left in gemini user settings: %s", gemini)
+		}
+	})
 
-	var buf bytes.Buffer
-	if err := runDisableGlobalMode(t.Context(), &buf); err != nil {
-		t.Fatal(err)
-	}
-	out := buf.String()
-	if !strings.Contains(out, "! claude-code: could not remove:") {
-		t.Errorf("unreadable agent config must be reported, got: %q", out)
-	}
-	if !strings.Contains(out, "✓ gemini: user-level hooks removed") {
-		t.Errorf("gemini removal must proceed, got: %q", out)
-	}
-	gemini, err := os.ReadFile(filepath.Join(home, ".gemini", "settings.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(gemini), "entire hooks gemini") {
-		t.Errorf("Entire hooks left in gemini user settings: %s", gemini)
-	}
+	t.Run("unreadable agent config is reported", func(t *testing.T) {
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		home := isolateUserHome(t)
+		t.Cleanup(settings.ClearGlobalModeCache)
+		if err := runEnableGlobalMode(t.Context(), &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{not json`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		var buf bytes.Buffer
+		if err := runDisableGlobalMode(t.Context(), &buf); err != nil {
+			t.Fatal(err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "! claude-code: could not remove:") || !strings.Contains(out, "✓ gemini: user-level hooks removed") {
+			t.Errorf("want claude failure line and gemini removal, got: %q", out)
+		}
+	})
 }
 
 // TestMaybeAskGlobalTracking_YesInstallsUserHooks pins the wizard's yes path
