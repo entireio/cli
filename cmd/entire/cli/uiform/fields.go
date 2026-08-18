@@ -61,6 +61,7 @@ type Radio[T comparable] struct {
 	value         *T
 	committed     T
 	highlighted   T
+	options       []huh.Option[T]
 	refresh       func()
 	layoutChanged func()
 	title         string
@@ -72,10 +73,29 @@ func NewRadio[T comparable](title, description string, options []huh.Option[T], 
 	field.Select = huh.NewSelect[T]().
 		Title(QuestionTitle(title, false)).
 		Description(description).
-		Options(options...).
 		Height(FieldHeight(len(options), description)).
 		Value(value)
+	return field.Options(options...)
+}
+
+// Options replaces the radio choices and applies the shared selected and
+// unselected markers. Callers provide plain labels; Radio owns their styling.
+func (field *Radio[T]) Options(options ...huh.Option[T]) *Radio[T] {
+	field.options = append(field.options[:0], options...)
+	field.renderOptions()
 	return field
+}
+
+func (field *Radio[T]) renderOptions() {
+	options := make([]huh.Option[T], 0, len(field.options))
+	for _, option := range field.options {
+		marker := lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Render("○")
+		if option.Value == field.committed {
+			marker = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Success)).Render("●")
+		}
+		options = append(options, huh.NewOption(marker+" "+option.Key, option.Value))
+	}
+	field.Select.Options(options...)
 }
 
 func (field *Radio[T]) OnRefresh(fn func()) *Radio[T] {
@@ -160,6 +180,7 @@ func (field *Radio[T]) commitHighlighted() {
 	if field.refresh != nil {
 		field.refresh()
 	}
+	field.renderOptions()
 	if field.layoutChanged != nil {
 		field.layoutChanged()
 	}

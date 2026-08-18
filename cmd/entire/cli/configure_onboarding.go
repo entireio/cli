@@ -518,7 +518,7 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		placementByHost[placement.ClusterHost] = placement
 	}
 	upstreamOptions := func() []huh.Option[string] {
-		return configureUpstreamOptions(placements, selectedHost, currentHost)
+		return configureUpstreamOptions(placements, currentHost)
 	}
 
 	external.DiscoverAndRegisterAlways(ctx)
@@ -804,11 +804,10 @@ func configureSelectedAgents(names []string) ([]agent.Agent, error) {
 	return selected, nil
 }
 
-func configureUpstreamOptions(placements []coreapi.ResolvedPlacement, selectedHost, currentHost string) []huh.Option[string] {
+func configureUpstreamOptions(placements []coreapi.ResolvedPlacement, currentHost string) []huh.Option[string] {
 	options := make([]huh.Option[string], 0, len(placements))
 	for _, placement := range placements {
-		selected := placement.ClusterHost == selectedHost
-		label := configureRadioLabel(configurePlacementLabel(placement), selected)
+		label := configurePlacementLabel(placement)
 		if strings.EqualFold(placement.ClusterHost, currentHost) {
 			tag := lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Render("— current")
 			label += " " + tag
@@ -903,14 +902,6 @@ func configureOptionsContain(options []huh.Option[string], value string) bool {
 		}
 	}
 	return false
-}
-
-func configureRadioLabel(label string, selected bool) string {
-	marker := lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Render("○")
-	if selected {
-		marker = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Success)).Render("●")
-	}
-	return marker + " " + label
 }
 
 func configureAgentOptions(options []huh.Option[string], selected map[types.AgentName]struct{}) []huh.Option[string] {

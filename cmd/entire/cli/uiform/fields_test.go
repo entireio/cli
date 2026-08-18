@@ -1,10 +1,12 @@
 package uiform
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestRadioArrowsMoveWithoutCommitting(t *testing.T) {
@@ -15,6 +17,9 @@ func TestRadioArrowsMoveWithoutCommitting(t *testing.T) {
 	}, &selected)
 	field.WithKeyMap(huh.NewDefaultKeyMap())
 	field.Focus()
+	if got := ansi.Strip(field.View()); !containsAll(got, "○ US", "● EU") {
+		t.Fatalf("initial radio markers are incorrect:\n%s", got)
+	}
 	_, cmd := field.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if cmd != nil {
 		t.Fatal("down arrow emitted a field transition")
@@ -26,6 +31,18 @@ func TestRadioArrowsMoveWithoutCommitting(t *testing.T) {
 	if selected != "us" {
 		t.Fatalf("space committed %q, want highlighted us", selected)
 	}
+	if got := ansi.Strip(field.View()); !containsAll(got, "● US", "○ EU") {
+		t.Fatalf("updated radio markers are incorrect:\n%s", got)
+	}
+}
+
+func containsAll(value string, parts ...string) bool {
+	for _, part := range parts {
+		if !strings.Contains(value, part) {
+			return false
+		}
+	}
+	return true
 }
 
 func TestRadioEnterAdvances(t *testing.T) {

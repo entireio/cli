@@ -328,18 +328,18 @@ func TestConfigureAgentOptionsUsePlainLabels(t *testing.T) {
 	}
 }
 
-func TestConfigureUpstreamOptionsUsePrototypeLabels(t *testing.T) {
+func TestConfigureUpstreamOptionsUseRegionLabels(t *testing.T) {
 	placements := []coreapi.ResolvedPlacement{
 		{ClusterHost: "aws-ap-southeast-2.entire.io", Jurisdiction: coreapi.NewOptString("au")},
 		{ClusterHost: "aws-eu-central-1.entire.io", Jurisdiction: coreapi.NewOptString("eu")},
 		{ClusterHost: "aws-us-east-2.entire.io", Jurisdiction: coreapi.NewOptString("us")},
 	}
-	options := configureUpstreamOptions(placements, placements[1].ClusterHost, placements[0].ClusterHost)
+	options := configureUpstreamOptions(placements, placements[0].ClusterHost)
 	got := make([]string, len(options))
 	for i, option := range options {
 		got[i] = ansi.Strip(option.Key)
 	}
-	want := []string{"○ Australia — current", "● European Union", "○ United States"}
+	want := []string{"Australia — current", "European Union", "United States"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("option labels = %v, want %v", got, want)
 	}
