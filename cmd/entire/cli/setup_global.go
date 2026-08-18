@@ -253,6 +253,10 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 	}
 	if enable {
 		fmt.Fprintln(w, "  ✓ Global tracking enabled")
+		// Like enable --global, this confirmation IS the generation's
+		// announcement: ack the detection marker so PersistentPostRun doesn't
+		// stack the warn on top of it in this same `entire enable` run.
+		ackGlobalWarnMarker(ctx)
 		// The wizard's yes is the same commitment as enable --global, so it
 		// triggers the same user-level hook install (user-scope config only).
 		// The wizard is best-effort (enable itself already succeeded), so the

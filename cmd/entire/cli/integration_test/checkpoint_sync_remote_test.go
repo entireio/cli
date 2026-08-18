@@ -496,6 +496,48 @@ func TestGlobalEnrolledRepoHoldsCheckpointSyncUntilTrusted(t *testing.T) {
 		if env.usingGitRefs() && queuedCheckpointRefCount(t, env) != 0 {
 			t.Error("the first trusted push should drain the push queue")
 		}
+
+		// Act three: `entire trust --revoke` must close the gate again — a new
+		// checkpoint made after the revoke stays home (the already-synced state
+		// on the remote is untouched), with exactly one held explanation.
+		revokeOut := env.RunCLI("trust", "--revoke")
+		if !strings.Contains(revokeOut, "Revoked") {
+			t.Fatalf("entire trust --revoke did not confirm, got:\n%s", revokeOut)
+		}
+		syncedState := env.RemoteCheckpointState(bareOrigin)
+
+		const sessionID2 = "trust-gate-session-2"
+		runClaudeHook(t, env, extraEnv, "user-prompt-submit", map[string]string{
+			"session_id":      sessionID2,
+			"transcript_path": "",
+			"prompt":          "Create revoked file",
+		})
+		env.WriteFile("revoked.txt", "held again after revoke\n")
+		builder2 := NewTranscriptBuilder()
+		builder2.AddUserMessage("Create revoked file")
+		toolID2 := builder2.AddToolUse("mcp__acp__Write", "revoked.txt", "held again after revoke\n")
+		builder2.AddToolResult(toolID2)
+		builder2.AddAssistantMessage("Done!")
+		transcriptPath2 := filepath.Join(env.ClaudeProjectDir, sessionID2+".jsonl")
+		if err := builder2.WriteToFile(transcriptPath2); err != nil {
+			t.Fatalf("write transcript: %v", err)
+		}
+		runClaudeHook(t, env, extraEnv, "stop", map[string]string{
+			"session_id":      sessionID2,
+			"transcript_path": transcriptPath2,
+		})
+		env.GitCommitWithShadowHooksAsAgent("Add revoked file", "revoked.txt")
+
+		output = gitPushWithHooksOutput(t, env, "origin", "HEAD")
+		if got := strings.Count(output, heldSyncMessageFragment); got != 1 {
+			t.Errorf("a post-revoke push should print exactly one hold explanation, got %d in:\n%s", got, output)
+		}
+		if got := env.RemoteCheckpointState(bareOrigin); got != syncedState {
+			t.Errorf("no new checkpoint refs/objects may reach the remote after revoke:\nbefore:\n%s\nafter:\n%s", syncedState, got)
+		}
+		if env.usingGitRefs() && queuedCheckpointRefCount(t, env) == 0 {
+			t.Error("a post-revoke push must leave the new checkpoint queued")
+		}
 	})
 }
 

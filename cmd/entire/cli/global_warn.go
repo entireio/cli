@@ -40,6 +40,11 @@ func maybeWarnGlobalTracking(ctx context.Context, errW io.Writer) {
 	}
 	_, statErr := os.Stat(globalWarnMarkerPath())
 	markerPresent := statErr == nil
+	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+		// Unexpected (permissions, I/O): treated as marker-absent, which can
+		// only over-warn, never suppress — but leave a trace for diagnosis.
+		logging.Debug(ctx, "global warn marker unreadable; treating as absent", slog.String("error", statErr.Error()))
+	}
 	switch {
 	case us.GlobalEnabled() && !markerPresent:
 		fmt.Fprintln(errW, globalTrackingWarnText(us))

@@ -93,8 +93,11 @@ type GlobalConfig struct {
 
 	// TrustedOrigins are exact normalized origin keys (host/owner/repo, as
 	// RepoTrustIdentity derives them) — never globs: egress consent is
-	// per-project and must not widen by pattern. A multi-URL origin syncs
-	// only when EVERY configured URL's key is listed.
+	// per-project and must not widen by pattern. Keys derive from the
+	// origin's PUSH URLs as well as its fetch URLs (remote.origin.pushurl
+	// joins the set — git's pushurl-replaces-url rule means egress follows
+	// it), and a multi-URL origin syncs only when EVERY configured URL's key
+	// is listed.
 	TrustedOrigins []string `json:"trusted_origins,omitempty"`
 
 	// TrustedPaths are exact symlink-resolved worktree roots — never globs,

@@ -811,7 +811,10 @@ func TestHandleLifecycleSessionStart_CodexConcurrentSessionsStaySingleLine(t *te
 
 // setupGloballyEnrolledRepo puts the test in a fresh repo (with one commit)
 // enrolled by the global tier: user settings written into an isolated
-// ENTIRE_CONFIG_DIR, no repo-level setup. Not parallel-safe: t.Chdir/t.Setenv.
+// ENTIRE_CONFIG_DIR, no repo-level setup. The cache clears run after the
+// chdir: the invisible-runtime cache carries no CWD key and never
+// self-invalidates on chdir, so clearing must happen after the final chdir.
+// Not parallel-safe: t.Chdir/t.Setenv.
 func setupGloballyEnrolledRepo(t *testing.T, userSettingsJSON string) {
 	t.Helper()
 	tmpDir := t.TempDir()

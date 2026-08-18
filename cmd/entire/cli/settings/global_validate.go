@@ -10,13 +10,14 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// ValidateGlobalConfig checks an enabled global tier's exclude patterns for
-// problems the fail-closed rule turns into silent deactivation: an unusable
-// exclude_paths, exclude_paths_exact, or exclude_origins entry (relative,
-// unsupported ~user form, invalid glob) deactivates the tier in every repo it
-// is checked against. It returns one problem string per offending pattern,
-// naming the pattern index, in the same "exclude_paths[i]: reason" shape the
-// matchers use.
+// ValidateGlobalConfig checks an enabled global tier's exclude and trust
+// entries for problems that otherwise stay silent: an unusable exclude_paths,
+// exclude_paths_exact, or exclude_origins entry (relative, unsupported ~user
+// form, invalid glob) deactivates the tier in every repo it is checked
+// against (fail closed), and an unusable trusted_paths entry can never grant
+// checkpoint-sync trust (the gate skips it). It returns one problem string
+// per offending entry, naming the entry index, in the same
+// "exclude_paths[i]: reason" shape the matchers use.
 //
 // A (nil, nil) result means the tier is unconfigured, disabled, or clean. The
 // error reports an unreadable or malformed settings file — the failure hook
@@ -68,6 +69,16 @@ func ValidateGlobalPatterns(g *GlobalConfig) []string {
 		}
 		if !doublestar.ValidatePattern(strings.ToLower(p)) {
 			problems = append(problems, fmt.Sprintf("exclude_origins[%d]: invalid glob", i))
+		}
+	}
+	for i, p := range g.TrustedPaths {
+		// Same plain-path probe as exclude_paths_exact. The gate skips an
+		// unusable trusted_paths entry (it can never grant trust) rather than
+		// deactivating anything, so doctor is the only surface that can name
+		// a broken entry — without this, a typo'd grant just silently never
+		// takes effect.
+		if _, err := expandTilde(p); err != nil {
+			problems = append(problems, fmt.Sprintf("trusted_paths[%d]: %v", i, err))
 		}
 	}
 	return problems

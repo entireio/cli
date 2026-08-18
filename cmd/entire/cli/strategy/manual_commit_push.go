@@ -28,6 +28,12 @@ var errOPFAbortedByUser = errors.New("OPF prompt aborted by user; push cancelled
 
 var opfPrePushProgressWriter io.Writer = os.Stderr
 
+// resolveTrustDecisionFn is a test seam over the trust prompt (same pattern as
+// stderrWriter): PrePush's granted-at-the-prompt path re-evaluates the gate and
+// syncs in the same call, and only an injected resolver can drive that without
+// a TTY.
+var resolveTrustDecisionFn = resolveTrustDecisionForPrePush
+
 // PrePush is called by the git pre-push hook before pushing to a remote.
 // It pushes each ref in refs.Push alongside the user's push.
 //
@@ -93,7 +99,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// IsSetUpAny-moot anyway (pinned by the settings tests); checking here is
 	// defense in depth.
 	if !settings.CheckpointEgressAllowed(ctx) {
-		decision, decisionErr := resolveTrustDecisionForPrePush(ctx, stderrWriter)
+		decision, decisionErr := resolveTrustDecisionFn(ctx, stderrWriter)
 		if decisionErr != nil {
 			logging.Warn(ctx, "trust pre-push prompt failed; holding checkpoint sync",
 				slog.String("error", decisionErr.Error()),

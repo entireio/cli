@@ -76,6 +76,20 @@ func TestRepoTrustIdentity(t *testing.T) {
 		{"unnormalizable origin falls back to path identity", [][]string{
 			{"remote", "add", "origin", "file:///srv/git/secret.git"},
 		}, nil, true},
+		// git's pushurl-replaces-url rule: a push delivers to the pushurl, so
+		// an identity that ignored it would consent to a destination the data
+		// never reaches while missing the one it does.
+		{"pushurl joins the key set alongside the fetch URL", [][]string{
+			{"remote", "add", "origin", "https://github.com/acme/widgets.git"},
+			{"config", "remote.origin.pushurl", "git@gitlab.example.com:team/proj.git"},
+		}, []string{"github.com/acme/widgets", "gitlab.example.com/team/proj"}, false},
+		// The mixed rule applies to push URLs too: an unkeyable pushurl is the
+		// destination the push actually reaches, so the whole identity flips
+		// to path rather than syncing on the fetch URL's key alone.
+		{"unnormalizable pushurl flips a normalizable origin to path identity", [][]string{
+			{"remote", "add", "origin", "https://github.com/acme/widgets.git"},
+			{"config", "remote.origin.pushurl", "file:///srv/git/secret.git"},
+		}, nil, true},
 		// One unkeyable URL among normalizable ones flips the WHOLE identity
 		// to path — a multi-URL push delivers refs to every URL, so an origin
 		// identity with partial keys would fail open on the URL that cannot
@@ -197,6 +211,63 @@ func TestCheckpointEgressAllowed(t *testing.T) {
 		writeUserSettings(t, cfg, `{"global":{"enabled":true,"trusted_origins":["github.com/acme/widgets"]}}`)
 		if CheckpointEgressAllowed(t.Context()) {
 			t.Fatal("an origin with an unkeyable URL is a path identity; its normalizable key must not grant egress")
+		}
+	})
+
+	t.Run("a trusted fetch-URL subset holds when the pushurl key is missing", func(t *testing.T) {
+		// Egress follows the pushurl (git's pushurl-replaces-url rule), so
+		// consent recorded against the fetch URL alone must not open the gate
+		// toward a different push destination — both keys are required.
+		dir, cfg := newTrustTestRepo(t)
+		addTestRemote(t, dir, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+		addTestRemote(t, dir, "config", "remote.origin.pushurl", "git@gitlab.example.com:team/proj.git")
+		writeUserSettings(t, cfg, `{"global":{"enabled":true,"trusted_origins":["github.com/acme/widgets"]}}`)
+		if CheckpointEgressAllowed(t.Context()) {
+			t.Fatal("the fetch-URL key alone must not consent a differing push destination")
+		}
+		writeUserSettings(t, cfg,
+			`{"global":{"enabled":true,"trusted_origins":["github.com/acme/widgets","gitlab.example.com/team/proj"]}}`)
+		if !CheckpointEgressAllowed(t.Context()) {
+			t.Fatal("with both the fetch-URL and pushurl keys trusted the gate must pass")
+		}
+	})
+
+	t.Run("a poisoned trusted_paths entry is skipped, not fatal to the list", func(t *testing.T) {
+		// One unreadable hand-edited entry can't grant trust either way, but
+		// it must not veto the valid grant after it — aborting the whole list
+		// would hold a repo the user explicitly trusted.
+		dir, cfg := newTrustTestRepo(t)
+		writeUserSettings(t, cfg,
+			`{"global":{"enabled":true,"trusted_paths":["~nobody/broken","`+resolvedRoot(t, dir)+`"]}}`)
+		if !CheckpointEgressAllowed(t.Context()) {
+			t.Fatal("a valid entry after a poisoned one must still grant consent")
+		}
+	})
+
+	t.Run("a hand-edited tilde trusted_paths entry is honored and revocable", func(t *testing.T) {
+		// Mirror of the hand-edited origin tolerance: a ~-prefixed entry for
+		// the repo root must open the gate (expandTilde bridging), and revoke
+		// must be able to remove the entry the gate honors — otherwise a
+		// hand-edited file becomes unrevokable consent.
+		dir, cfg := newTrustTestRepo(t)
+		root := resolvedRoot(t, dir)
+		t.Setenv("HOME", filepath.Dir(root))
+		writeUserSettings(t, cfg, `{"global":{"enabled":true,"trusted_paths":["~/`+filepath.Base(root)+`"]}}`)
+		if !CheckpointEgressAllowed(t.Context()) {
+			t.Fatal("a ~-prefixed entry for the repo root must grant consent")
+		}
+		if _, err := RevokeCurrentRepo(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		us, err := LoadUserSettings(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(us.Global.TrustedPaths) != 0 {
+			t.Fatalf("revoke must remove the tilde entry the gate honors, got %v", us.Global.TrustedPaths)
+		}
+		if CheckpointEgressAllowed(t.Context()) {
+			t.Fatal("the gate must hold after revoking the tilde entry")
 		}
 	})
 

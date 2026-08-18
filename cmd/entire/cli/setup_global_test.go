@@ -332,6 +332,17 @@ func TestMaybeAskGlobalTracking_YesInstallsUserHooks(t *testing.T) {
 	if err != nil || !strings.Contains(string(gemini), "entire hooks gemini session-start") {
 		t.Errorf("gemini user-level hooks not installed by the wizard yes (err=%v): %s", err, gemini)
 	}
+	// The wizard's confirmation IS the generation's announcement, exactly like
+	// enable --global: without the ack, PersistentPostRun's detection warn
+	// stacks on top of it in the same `entire enable` run.
+	if _, err := os.Stat(filepath.Join(cfg, globalWarnMarkerName)); err != nil {
+		t.Fatalf("wizard enable must ack the global warn marker itself: %v", err)
+	}
+	var warn bytes.Buffer
+	maybeWarnGlobalTracking(t.Context(), &warn)
+	if warn.Len() != 0 {
+		t.Errorf("detection warn must not stack on the wizard's own confirmation, got: %q", warn.String())
+	}
 }
 
 func TestMaybeAskGlobalTracking_NonInteractiveHintsWithoutWriting(t *testing.T) {

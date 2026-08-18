@@ -45,7 +45,12 @@ func runTrust(cmd *cobra.Command, revoke bool) error {
 		return nil
 	}
 	if revoke {
+		// Deliberately not guarded by the inactive-tier refusal below:
+		// revoking in an inactive repo is harmless cleanup of a stale grant.
 		return runTrustRevoke(cmd, out)
+	}
+	if err := refuseTrustWhenInactive(cmd); err != nil {
+		return err
 	}
 
 	id, err := settings.TrustCurrentRepo(ctx)
@@ -55,11 +60,19 @@ func runTrust(cmd *cobra.Command, revoke bool) error {
 		}
 		return fmt.Errorf("recording trust: %w", err)
 	}
-	if len(id.OriginKeys) > 0 {
-		fmt.Fprintf(out, "✓ Trusted %s (all clones on this machine)\n", id.OriginKeys[0])
-	} else {
-		fmt.Fprintf(out, "✓ Trusted %s (this folder only)\n", id.Path)
+	// Post-grant honesty (mirrors prePush's re-check after the prompt): if the
+	// gate still holds after a successful write, a ✓ would misreport consent
+	// the sync paths don't see — name the file instead of celebrating.
+	if !settings.CheckpointEgressAllowed(ctx) {
+		fmt.Fprintf(out, "Warning: trust for %s was written to %s, but checkpoint sync is still held for this repo — check that file's trust entries.\n",
+			id.DisplayScope(), settings.UserSettingsPath())
+		return nil
 	}
+	scopeNote := "this folder only"
+	if id.OriginKeyed() {
+		scopeNote = "all clones on this machine"
+	}
+	fmt.Fprintf(out, "✓ Trusted %s (%s)\n", id.DisplayScope(), scopeNote)
 	// Best-effort: a count failure only omits the line — trust is already
 	// recorded, and failing here would misreport that.
 	switch n := heldCheckpointCount(ctx); {
@@ -67,6 +80,36 @@ func runTrust(cmd *cobra.Command, revoke bool) error {
 		fmt.Fprintln(out, "1 held checkpoint will sync on your next push.")
 	case n > 1:
 		fmt.Fprintf(out, "%d held checkpoints will sync on your next push.\n", n)
+	}
+	return nil
+}
+
+// refuseTrustWhenInactive rejects a trust grant in a repo the global tier is
+// not actually capturing: with the tier disabled or the repo excluded there is
+// nothing to sync, and silently pre-consenting a repo the user excluded is
+// exactly the bug consent exists to prevent. The unconfigured tier is not
+// handled here — it falls through to TrustCurrentRepo's sentinel and its
+// enable-pointing guidance.
+func refuseTrustWhenInactive(cmd *cobra.Command) error {
+	ctx := cmd.Context()
+	// Unreadable settings and an unconfigured tier both fall through: the
+	// trust writer owns those messages (strict-decode error / the sentinel's
+	// enable-pointing guidance), so this guard only speaks for a CONFIGURED
+	// tier that is off or excluding this repo.
+	if us, err := settings.LoadUserSettings(ctx); err != nil || !us.GlobalConfigured() {
+		return nil //nolint:nilerr // deliberate fall-through, see above
+	}
+	if active, reason := settings.IsActiveForRepoWithReason(ctx); !active {
+		cmd.SilenceUsage = true
+		errW := cmd.ErrOrStderr()
+		if reason == settings.InactiveReasonGlobalExcluded {
+			fmt.Fprintln(errW, "Not recording trust: this repo is excluded in your settings, so Entire is not capturing it.")
+			fmt.Fprintf(errW, "Remove the exclude from %s first if you want it tracked and synced.\n", settings.UserSettingsPath())
+			return NewSilentError(errors.New("repo is excluded from global tracking"))
+		}
+		fmt.Fprintln(errW, "Not recording trust: global tracking is off, so Entire is not capturing this repo.")
+		fmt.Fprintln(errW, "Run 'entire enable --global' to turn it back on, then re-run 'entire trust'.")
+		return NewSilentError(errors.New("global tracking is off"))
 	}
 	return nil
 }
@@ -92,11 +135,7 @@ func runTrustRevoke(cmd *cobra.Command, out io.Writer) error {
 		}
 		return fmt.Errorf("revoking trust: %w", err)
 	}
-	scope := id.Path
-	if len(id.OriginKeys) > 0 {
-		scope = id.OriginKeys[0]
-	}
-	fmt.Fprintf(out, "✓ Revoked trust for %s — checkpoint sync held again; captured data stays local. Already-pushed checkpoints stay on the remote.\n", scope)
+	fmt.Fprintf(out, "✓ Revoked trust for %s — checkpoint sync held again; captured data stays local. Already-pushed checkpoints stay on the remote.\n", id.DisplayScope())
 	// Masking honesty: a key revoke under active trust_all changes nothing —
 	// implying effect would be a lie about what still egresses.
 	if settings.CurrentTrustSource(ctx) == settings.TrustSourceAll {

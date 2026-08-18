@@ -284,7 +284,7 @@ func TestCheckGlobalTracking_MultipleProblemsAllReported(t *testing.T) {
 	got := runCheckGlobalTracking(t)
 	idxMissing := strings.Index(got, "USER-LEVEL AGENT HOOKS MISSING")
 	idxUnverifiable := strings.Index(got, "USER-LEVEL AGENT HOOKS UNVERIFIABLE")
-	idxPatterns := strings.Index(got, "UNUSABLE EXCLUDE PATTERNS")
+	idxPatterns := strings.Index(got, "UNUSABLE SETTINGS ENTRIES")
 	if idxMissing < 0 || idxUnverifiable < 0 || idxPatterns < 0 {
 		t.Fatalf("all three sections must be reported (missing=%d unverifiable=%d patterns=%d), got: %q",
 			idxMissing, idxUnverifiable, idxPatterns, got)
@@ -319,16 +319,19 @@ func TestCheckGlobalTracking_WarnsOnUnusableExcludePatterns(t *testing.T) {
 	cfg := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
 	isolateUserHome(t)
+	// The trusted_paths entry uses the unsupported ~user form: the gate
+	// skips it (it can never grant trust), so doctor is the only surface
+	// that can tell the user their hand-written grant is dead.
 	writeGlobalUserSettings(t, cfg,
-		`{"global":{"enabled":true,"exclude_paths":["relative/path","~bob/code/**","/srv/["],"exclude_origins":["github.com/acme/["]}}`)
+		`{"global":{"enabled":true,"exclude_paths":["relative/path","~bob/code/**","/srv/["],"exclude_origins":["github.com/acme/["],"trusted_paths":["~bob/code/repo"]}}`)
 
 	got := runCheckGlobalTracking(t)
-	if !strings.Contains(got, "UNUSABLE EXCLUDE PATTERNS") {
+	if !strings.Contains(got, "UNUSABLE SETTINGS ENTRIES") {
 		t.Fatalf("missing pattern warning, got: %q", got)
 	}
 	for _, want := range []string{
 		"exclude_paths[0]", "exclude_paths[1]", "exclude_paths[2]",
-		"exclude_origins[0]", settings.UserSettingsPath(),
+		"exclude_origins[0]", "trusted_paths[0]", settings.UserSettingsPath(),
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("warning missing %q, got: %q", want, got)
@@ -427,7 +430,7 @@ func TestCheckGlobalTracking_ValidationSilentWhenClean(t *testing.T) {
 		`{"global":{"enabled":true,"exclude_paths":["~/scratch/**","/srv/tmp/**"],"exclude_origins":["github.com/acme/*"]}}`)
 
 	got := runCheckGlobalTracking(t)
-	for _, banned := range []string{"USER SETTINGS UNREADABLE", "UNUSABLE EXCLUDE PATTERNS", "origin not checkable"} {
+	for _, banned := range []string{"USER SETTINGS UNREADABLE", "UNUSABLE SETTINGS ENTRIES", "origin not checkable"} {
 		if strings.Contains(got, banned) {
 			t.Errorf("clean config must not trigger %q, got: %q", banned, got)
 		}

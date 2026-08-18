@@ -79,7 +79,8 @@ func applyTrustChoice(ctx context.Context, choice trustChoice, errOut io.Writer)
 	}
 }
 
-// askTrustPrompt shows the y/n/A trust form. It runs inside the user's `git
+// askTrustPrompt shows the three-option trust select (Yes / Not now /
+// Always, arrow keys). It runs inside the user's `git
 // push` pre-push hook, whose stdin carries git ref lines — the uiform/huh form
 // reads the terminal, never stdin (same mechanics as askOPFPrompt). Ctrl-C /
 // abort means "not now": the hold is re-asked next push, and the user's push
@@ -90,8 +91,8 @@ func askTrustPrompt(ctx context.Context) (trustChoice, error) {
 	// identity error here doesn't need handling: TrustCurrentRepo re-derives
 	// it and its failure is warned-and-held by applyTrustChoice.
 	yesLabel := "Yes — trust this repo (this folder only)"
-	if id, err := settings.RepoTrustIdentity(ctx); err == nil && len(id.OriginKeys) > 0 {
-		yesLabel = fmt.Sprintf("Yes — trust this repo (all clones of %s)", id.OriginKeys[0])
+	if id, err := settings.RepoTrustIdentity(ctx); err == nil && id.OriginKeyed() {
+		yesLabel = fmt.Sprintf("Yes — trust this repo (all clones of %s)", id.DisplayScope())
 	}
 	choice := trustChoiceYes
 	form := uiform.New(

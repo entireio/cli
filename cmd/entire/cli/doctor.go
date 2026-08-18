@@ -609,8 +609,9 @@ func checkGlobalTracking(cmd *cobra.Command) {
 	// function; the pure validators take it directly instead of re-reading
 	// the settings file per check.
 	if problems := settings.ValidateGlobalPatterns(us.Global); len(problems) > 0 {
-		fmt.Fprintln(w, "Global tracking: UNUSABLE EXCLUDE PATTERNS")
-		fmt.Fprintln(w, "  Fail closed: each of these deactivates global tracking in every repo it is checked against.")
+		fmt.Fprintln(w, "Global tracking: UNUSABLE SETTINGS ENTRIES")
+		fmt.Fprintln(w, "  Exclude entries fail closed: each deactivates global tracking in every repo it is checked against.")
+		fmt.Fprintln(w, "  trusted_paths entries are skipped: an unusable one never grants checkpoint sync.")
 		for _, p := range problems {
 			fmt.Fprintf(w, "    - %s\n", p)
 		}

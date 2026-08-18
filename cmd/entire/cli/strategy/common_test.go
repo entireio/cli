@@ -1714,8 +1714,9 @@ func TestEnsureEntireGitignore_IncludesRedactorsLocal(t *testing.T) {
 // dir with the given settings JSON and leaves the current repo without
 // repo-level setup, so settings.CheckpointEgressAllowed is decided purely by
 // the global trust store. Returns the config dir. Callers must already have
-// chdir'd into the repo (the cache resets here are keyed off CWD). Not
-// parallel-safe: t.Setenv.
+// chdir'd into the repo: the invisible-runtime cache carries no CWD key and
+// never self-invalidates on chdir, so clearing must happen after the final
+// chdir. Not parallel-safe: t.Setenv.
 func enrollRepoGlobally(t *testing.T, userSettingsJSON string) string {
 	t.Helper()
 	cfgDir := t.TempDir()

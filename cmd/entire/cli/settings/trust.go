@@ -4,26 +4,48 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // TrustIdentity is the egress-consent key for one repository. Exactly one
 // side is set: OriginKeys when the origin remote exists and EVERY configured
 // URL normalizes — one key per URL, and consent requires all of them — or
 // Path (the symlink-resolved worktree root) when there is no origin or ANY
-// URL fails to normalize. A single unnormalizable URL flips the whole
-// identity to path rather than being dropped from the key set: an unkeyable
-// URL is still an egress destination (a multi-URL push delivers refs to every
-// URL), so partial origin keys would fail open. The split is exclusive, never
-// a union: a repo keyed by its origin is not covered by a trusted path, and
-// any identity flip re-asks (new egress destination, new consent).
+// URL fails to normalize. The URL set covers both remote.origin.url and
+// remote.origin.pushurl: git's pushurl-replaces-url rule means egress follows
+// the pushurl when one is set, so consent must key what the data actually
+// reaches — a pushurl's keys join the set and are required like any other. A
+// single unnormalizable URL flips the whole identity to path rather than
+// being dropped from the key set: an unkeyable URL is still an egress
+// destination (a multi-URL push delivers refs to every URL), so partial
+// origin keys would fail open. The split is exclusive, never a union: a repo
+// keyed by its origin is not covered by a trusted path, and any identity flip
+// re-asks (new egress destination, new consent). The zero value (returned
+// alongside a non-nil error) has neither side set and must not be consulted.
 type TrustIdentity struct {
 	OriginKeys []string
 	Path       string
+}
+
+// OriginKeyed reports which side of the identity is set: true for an
+// origin-keyed repo, false for a path-keyed one.
+func (id TrustIdentity) OriginKeyed() bool {
+	return len(id.OriginKeys) > 0
+}
+
+// DisplayScope is the identity's user-facing name: the first origin key for
+// an origin-keyed repo, else the worktree root path.
+func (id TrustIdentity) DisplayScope() string {
+	if id.OriginKeyed() {
+		return id.OriginKeys[0]
+	}
+	return id.Path
 }
 
 // TrustSource names what grants egress consent for a repository in the
@@ -57,12 +79,24 @@ func currentTrustIdentity(ctx context.Context) (TrustIdentity, string, error) {
 	resolvedRoot := filepath.ToSlash(root)
 	if resolved, symErr := filepath.EvalSymlinks(root); symErr == nil {
 		resolvedRoot = filepath.ToSlash(resolved)
+	} else {
+		logging.Debug(ctx, "trust identity: worktree root symlink resolution failed; keying on the unresolved path",
+			slog.String("error", symErr.Error()))
 	}
-	urls, found, err := gitremote.GetRemoteURLsInDirIfSet(ctx, root, "origin")
+	urls, urlsFound, err := gitremote.GetRemoteURLsInDirIfSet(ctx, root, "origin")
 	if err != nil {
 		return TrustIdentity{}, "", fmt.Errorf("reading origin remote: %w", err)
 	}
-	if found {
+	// Push URLs join the set: git's pushurl-replaces-url rule means a push
+	// delivers to remote.origin.pushurl when set, so an identity keyed only on
+	// the fetch URLs would consent to a destination the data never reaches
+	// while ignoring the one it does (see TrustIdentity).
+	pushURLs, pushFound, err := gitremote.GetRemotePushURLsInDirIfSet(ctx, root, "origin")
+	if err != nil {
+		return TrustIdentity{}, "", fmt.Errorf("reading origin pushurl: %w", err)
+	}
+	urls = append(urls, pushURLs...)
+	if urlsFound || pushFound {
 		var keys []string
 		for _, u := range urls {
 			key := normalizeOrigin(u)
@@ -247,11 +281,14 @@ func identityTrusted(ctx context.Context, g *GlobalConfig, id TrustIdentity) boo
 		}
 		return true
 	}
-	// Reuses the exclude_paths_exact matcher for its symlink/case bridging;
-	// exact-match-only with no subtree cascade is precisely the trusted_paths
-	// contract. An unusable entry errors → not trusted (fail closed).
-	ok, err := matchesExcludePathExact(ctx, g.TrustedPaths, id.Path)
-	return err == nil && ok
+	// Per-entry via pathEntryIsRoot (which reuses the exclude_paths_exact
+	// matcher for its symlink/case bridging; exact-match-only with no subtree
+	// cascade is precisely the trusted_paths contract). Deliberately NOT the
+	// whole-list matcher: it aborts on the first unusable entry, so one
+	// poisoned hand-edit would veto every valid grant in the list. An
+	// unreadable entry cannot grant trust either way, so it is skipped and
+	// the rest still count — still fail-closed, entry by entry.
+	return anyPathEntryIsRoot(ctx, g.TrustedPaths, id.Path)
 }
 
 // canonicalOriginEntry is the one definition of hand-edited-entry tolerance

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -76,6 +77,70 @@ func TestTrustCmd_UnconfiguredGlobalTierIsFriendly(t *testing.T) {
 	}
 	if strings.Contains(stderr, "global mode is not configured") {
 		t.Errorf("raw settings error must not leak to the user, got: %q", stderr)
+	}
+}
+
+// TestTrustCmd_RefusesWhenTierDisabled: with the global tier configured but
+// off, nothing is being captured — recording trust anyway would silently
+// pre-consent the repo for whenever the tier comes back. The command must
+// refuse (naming the reason) and write nothing.
+func TestTrustCmd_RefusesWhenTierDisabled(t *testing.T) {
+	setupTestRepo(t)
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":false}}`)
+	t.Cleanup(settings.ClearGlobalModeCache)
+
+	_, stderr, err := runTrustCmd(t)
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Fatalf("want SilentError, got %v", err)
+	}
+	if !strings.Contains(stderr, "global tracking is off") {
+		t.Errorf("refusal must name the disabled tier, got: %q", stderr)
+	}
+	assertNoTrustWritten(t)
+}
+
+// TestTrustCmd_RefusesWhenRepoExcluded: an excluded repo is one the user
+// explicitly carved out of global tracking — `entire trust` must refuse to
+// pre-consent it (the one-predicate rule) and write nothing.
+func TestTrustCmd_RefusesWhenRepoExcluded(t *testing.T) {
+	setupTestRepo(t)
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	writeGlobalUserSettings(t, cfg,
+		`{"global":{"enabled":true,"exclude_paths_exact":["`+filepath.ToSlash(root)+`"]}}`)
+	t.Cleanup(settings.ClearGlobalModeCache)
+
+	_, stderr, err := runTrustCmd(t)
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Fatalf("want SilentError, got %v", err)
+	}
+	if !strings.Contains(stderr, "excluded in your settings") {
+		t.Errorf("refusal must name the exclusion, got: %q", stderr)
+	}
+	assertNoTrustWritten(t)
+}
+
+// assertNoTrustWritten pins the refusal contract shared by the inactive-tier
+// tests: a refused grant must leave the trust store untouched.
+func assertNoTrustWritten(t *testing.T) {
+	t.Helper()
+	us, err := settings.LoadUserSettings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(us.Global.TrustedOrigins)+len(us.Global.TrustedPaths) != 0 || us.Global.TrustAll {
+		t.Errorf("a refused trust must not write consent, got: %+v", us.Global)
 	}
 }
 
