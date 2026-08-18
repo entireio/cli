@@ -51,6 +51,11 @@ func DiscoverAndRegisterAlways(ctx context.Context) {
 	discoverAndRegister(ctx)
 }
 
+// ErrInvalidAgentName reports a name that can never name a $PATH plugin, so
+// callers can tell "this could not identify a plugin" apart from "the plugin
+// exists but failed to load" and report the former as a plain unknown agent.
+var ErrInvalidAgentName = errors.New("invalid external agent name")
+
 // DiscoverAndRegisterNamedAlways discovers and registers only the external
 // agent binary matching name. It bypasses the external_agents setting for
 // explicit, one-invocation selections without executing unrelated plugins.
@@ -92,7 +97,7 @@ func discoverAndRegisterNamed(ctx context.Context, name types.AgentName, timeout
 		return nil
 	}
 	if strings.ContainsAny(string(name), `/\`) {
-		return fmt.Errorf("invalid external agent name %q: contains path separators", name)
+		return fmt.Errorf("%w %q: contains path separators", ErrInvalidAgentName, name)
 	}
 	if agent.IsRegistered(name) {
 		return nil

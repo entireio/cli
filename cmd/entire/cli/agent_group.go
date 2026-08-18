@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
@@ -150,11 +151,21 @@ func runAgentList(ctx context.Context, w io.Writer, includeExternal bool) error 
 // built-ins too. Bypasses the external_agents gate because invoking these
 // commands with a plugin name is itself the explicit opt-in.
 func resolveNamedExternalAgent(cmd *cobra.Command, name string) error {
-	if err := external.DiscoverAndRegisterNamedAlways(cmd.Context(), types.AgentName(name)); err != nil {
-		cmd.SilenceUsage = true
-		return fmt.Errorf("loading external agent %q: %w", name, err)
+	err := external.DiscoverAndRegisterNamedAlways(cmd.Context(), types.AgentName(name))
+	if err == nil {
+		return nil
 	}
-	return nil
+	// A name that cannot address a plugin at all is a miss, not a load failure:
+	// `entire agent add ./claude-code` (a typo, or a shell-completion artifact
+	// like bin/claude-code) must get the same "Unknown agent" listing every
+	// other bad name gets, not a raw validation error. exec.ErrDot is the same
+	// class — it means the lookup refused a relative path, not that a plugin by
+	// that name broke while loading.
+	if errors.Is(err, external.ErrInvalidAgentName) || errors.Is(err, exec.ErrDot) {
+		return nil
+	}
+	cmd.SilenceUsage = true
+	return fmt.Errorf("loading external agent %q: %w", name, err)
 }
 
 func newAgentAddCmd() *cobra.Command {

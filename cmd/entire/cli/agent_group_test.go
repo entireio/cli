@@ -459,3 +459,32 @@ func TestAgentAdd_UnknownNameReportsSearchedPath(t *testing.T) {
 		t.Errorf("expected the `agent add` usage line, got:\n%s", out.String())
 	}
 }
+
+// TestAgentAdd_PathSeparatorNameReportsUnknownAgent pins that a name which can
+// never address a plugin — a mistyped "./claude-code", or a shell-completion
+// artifact like "bin/claude-code" — takes the same miss path as any other bad
+// name instead of surfacing the raw name-validation error.
+func TestAgentAdd_PathSeparatorNameReportsUnknownAgent(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd via t.Chdir.
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true}`)
+
+	cmd := newAgentAddCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"./claude-code"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("expected an error for a path-separator name, got output:\n%s", out.String())
+	}
+
+	if strings.Contains(out.String(), "path separators") {
+		t.Errorf("expected the friendly miss path, not the raw validation error, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), `Unknown agent "./claude-code"`) {
+		t.Errorf("expected the unknown-agent listing, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), agentAddUsage) {
+		t.Errorf("expected the `agent add` usage line, got:\n%s", out.String())
+	}
+}
