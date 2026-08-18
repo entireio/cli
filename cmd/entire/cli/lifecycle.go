@@ -223,8 +223,7 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	countSessionsSpan.End()
 
 	// Untrusted global enrollment: a LINE in this composed banner, never a
-	// second WriteHookResponse (Claude parses one JSON object from stdout);
-	// once-per-session comes free from ClaimSessionStartBanner below.
+	// second WriteHookResponse (Claude parses one JSON object from stdout).
 	message += globalTrustBannerSuffix(ctx, ag.Name())
 
 	// Codex-only: surface untrusted hooks. Reaching this point means
@@ -319,19 +318,14 @@ func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
 	return "\n\nEntire CLI will link this conversation to your next commit."
 }
 
-// globalTrustBannerSuffix returns the untrusted-enrollment banner line: the
-// repo is captured by the global tier but its checkpoints are not syncing.
-// Empty for every consented state (repo-level setup, per-repo trust,
-// trust_all) and for repos the tier does not enroll — the shared
-// settings.RepoUntrustedEnrolled predicate decides. Codex banners are
-// single-line (see sessionStartMessage), so the suffix joins with a space
-// there.
+// globalTrustBannerSuffix returns the untrusted-enrollment banner line, empty
+// for every consented state (settings.RepoUntrustedEnrolled decides). Codex
+// banners are single-line, so the suffix joins with a space there.
 func globalTrustBannerSuffix(ctx context.Context, agentName types.AgentName) string {
 	if !settings.RepoUntrustedEnrolled(ctx) {
 		return ""
 	}
-	// "checkpoint sync remote", not "origin": sync targets the ELECTED remote
-	// (checkpoint_push_remote → origin → sole → first), not literally origin.
+	// "checkpoint sync remote", not "origin": sync targets the elected remote.
 	const notice = "Entire is capturing this repo locally via global mode. Checkpoints aren't synced yet — run `entire trust` to sync them to your checkpoint sync remote."
 	if agentName == agent.AgentNameCodex {
 		return " " + notice

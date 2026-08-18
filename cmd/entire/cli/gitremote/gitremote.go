@@ -163,12 +163,9 @@ func GetRemoteURLsInDirIfSet(ctx context.Context, dir, remoteName string) (urls 
 }
 
 // GetRemotePushURLsInDirIfSet is GetRemoteURLsInDirIfSet for the remote's
-// remote.<name>.pushurl values, with the same stored-config (no insteadOf
-// expansion) and exit-1-means-unset contracts. When any pushurl is set, git's
-// pushurl-replaces-url rule sends pushes there INSTEAD of the fetch URLs, so
-// callers reasoning about where data leaves the machine must consult this in
-// addition to the fetch URLs. found=false means no pushurl is configured (the
-// common case) — pushes then go to the remote's url values.
+// remote.<name>.pushurl values (same stored-config and exit-1-means-unset
+// contracts). When any pushurl is set, git's pushurl-replaces-url rule sends
+// pushes there INSTEAD of the fetch URLs; found=false means none configured.
 func GetRemotePushURLsInDirIfSet(ctx context.Context, dir, remoteName string) (urls []string, found bool, err error) {
 	return getAllRemoteConfig(ctx, dir, remoteName, "pushurl")
 }

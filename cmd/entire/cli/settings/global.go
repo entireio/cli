@@ -79,31 +79,21 @@ type GlobalConfig struct {
 	// reads raw config precisely to preserve this contract).
 	ExcludeOrigins []string `json:"exclude_origins,omitempty"`
 
-	// TrustAll grants checkpoint-egress consent machine-wide: every
-	// globally-enrolled repo, current and future, syncs without a per-repo
-	// entry. It governs egress only — enrollment stays with Enabled and the
-	// exclude lists.
-	//
-	// The trust fields live inside this strict-decoded block deliberately: a
-	// pre-trust binary reading a trust-bearing file fails LoadUserSettings,
-	// so global mode dies fail-closed on that machine rather than enrolling
-	// repos while misreading recorded consent. That is also why trust-schema
-	// changes must ship in the same release train as their consumers.
+	// TrustAll grants checkpoint-egress consent machine-wide; enrollment
+	// stays with Enabled and the exclude lists. The trust fields live inside
+	// this strict-decoded block deliberately: a pre-trust binary reading a
+	// trust-bearing file fails LoadUserSettings and global mode dies
+	// fail-closed rather than misreading recorded consent.
 	TrustAll bool `json:"trust_all,omitempty"`
 
 	// TrustedOrigins are exact normalized origin keys (host/owner/repo, as
-	// RepoTrustIdentity derives them) — never globs: egress consent is
-	// per-project and must not widen by pattern. Keys derive from the
-	// origin's PUSH URLs as well as its fetch URLs (remote.origin.pushurl
-	// joins the set — git's pushurl-replaces-url rule means egress follows
-	// it), and a multi-URL origin syncs only when EVERY configured URL's key
-	// is listed.
+	// RepoTrustIdentity derives them from fetch AND push URLs) — never globs.
+	// A multi-URL origin syncs only when EVERY configured URL's key is listed.
 	TrustedOrigins []string `json:"trusted_origins,omitempty"`
 
 	// TrustedPaths are exact symlink-resolved worktree roots — never globs,
-	// and with no subtree cascade — for repos whose identity falls back to
-	// path (no origin, or ANY of its URLs fails to normalize). Each linked
-	// worktree of such a clone needs its own entry.
+	// no subtree cascade — for repos whose identity falls back to path. Each
+	// linked worktree needs its own entry.
 	TrustedPaths []string `json:"trusted_paths,omitempty"`
 }
 

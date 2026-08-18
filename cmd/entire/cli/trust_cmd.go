@@ -45,8 +45,8 @@ func runTrust(cmd *cobra.Command, revoke bool) error {
 		return nil
 	}
 	if revoke {
-		// Deliberately not guarded by the inactive-tier refusal below:
-		// revoking in an inactive repo is harmless cleanup of a stale grant.
+		// Not guarded by the inactive-tier refusal: revoking in an inactive
+		// repo is harmless cleanup of a stale grant.
 		return runTrustRevoke(cmd, out)
 	}
 	if err := refuseTrustWhenInactive(cmd); err != nil {
@@ -60,9 +60,8 @@ func runTrust(cmd *cobra.Command, revoke bool) error {
 		}
 		return fmt.Errorf("recording trust: %w", err)
 	}
-	// Post-grant honesty (mirrors prePush's re-check after the prompt): if the
-	// gate still holds after a successful write, a ✓ would misreport consent
-	// the sync paths don't see — name the file instead of celebrating.
+	// If the gate still holds after a successful write, a ✓ would misreport
+	// consent the sync paths don't see.
 	if !settings.CheckpointEgressAllowed(ctx) {
 		fmt.Fprintf(out, "Warning: trust for %s was written to %s, but checkpoint sync is still held for this repo — check that file's trust entries.\n",
 			id.DisplayScope(), settings.UserSettingsPath())
@@ -73,8 +72,7 @@ func runTrust(cmd *cobra.Command, revoke bool) error {
 		scopeNote = "all clones on this machine"
 	}
 	fmt.Fprintf(out, "✓ Trusted %s (%s)\n", id.DisplayScope(), scopeNote)
-	// Best-effort: a count failure only omits the line — trust is already
-	// recorded, and failing here would misreport that.
+	// Best-effort: a count failure only omits the line.
 	switch n := heldCheckpointCount(ctx); {
 	case n == 1:
 		fmt.Fprintln(out, "1 held checkpoint will sync on your next push.")
@@ -85,17 +83,12 @@ func runTrust(cmd *cobra.Command, revoke bool) error {
 }
 
 // refuseTrustWhenInactive rejects a trust grant in a repo the global tier is
-// not actually capturing: with the tier disabled or the repo excluded there is
-// nothing to sync, and silently pre-consenting a repo the user excluded is
-// exactly the bug consent exists to prevent. The unconfigured tier is not
-// handled here — it falls through to TrustCurrentRepo's sentinel and its
-// enable-pointing guidance.
+// not actually capturing (disabled tier or excluded repo) — silently
+// pre-consenting an excluded repo is the bug consent exists to prevent.
 func refuseTrustWhenInactive(cmd *cobra.Command) error {
 	ctx := cmd.Context()
-	// Unreadable settings and an unconfigured tier both fall through: the
-	// trust writer owns those messages (strict-decode error / the sentinel's
-	// enable-pointing guidance), so this guard only speaks for a CONFIGURED
-	// tier that is off or excluding this repo.
+	// Unreadable settings and an unconfigured tier fall through: the trust
+	// writer owns those messages.
 	if us, err := settings.LoadUserSettings(ctx); err != nil || !us.GlobalConfigured() {
 		return nil //nolint:nilerr // deliberate fall-through, see above
 	}
@@ -115,10 +108,7 @@ func refuseTrustWhenInactive(cmd *cobra.Command) error {
 }
 
 // unconfiguredTrustTierError is the shared friendly rendering for
-// settings.ErrGlobalModeUnconfigured: both the grant and revoke paths must
-// swap the raw settings error for guidance, and revoke especially must not
-// print a "revoked" confirmation on a machine where nothing was ever
-// trustable.
+// settings.ErrGlobalModeUnconfigured on both the grant and revoke paths.
 func unconfiguredTrustTierError(cmd *cobra.Command, err error) error {
 	cmd.SilenceUsage = true
 	fmt.Fprintln(cmd.ErrOrStderr(), "Global tracking is not set up on this machine, so there is nothing to trust yet.")
@@ -136,8 +126,7 @@ func runTrustRevoke(cmd *cobra.Command, out io.Writer) error {
 		return fmt.Errorf("revoking trust: %w", err)
 	}
 	fmt.Fprintf(out, "✓ Revoked trust for %s — checkpoint sync held again; captured data stays local. Already-pushed checkpoints stay on the remote.\n", id.DisplayScope())
-	// Masking honesty: a key revoke under active trust_all changes nothing —
-	// implying effect would be a lie about what still egresses.
+	// A key revoke under active trust_all changes nothing — say so.
 	if settings.CurrentTrustSource(ctx) == settings.TrustSourceAll {
 		fmt.Fprintln(out, "Note: trust_all is enabled in settings; this repo will still sync until you disable it.")
 	}

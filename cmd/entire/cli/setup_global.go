@@ -51,8 +51,7 @@ func runEnableGlobalMode(ctx context.Context, w io.Writer) error {
 	if kept > 0 {
 		fmt.Fprintf(w, "Keeping %d exclude pattern(s) from your user settings.\n", kept)
 	}
-	// This confirmation IS the generation's announcement: ack the detection
-	// marker so PersistentPostRun doesn't stack the warn on top of it.
+	// This confirmation is the announcement: don't stack the detection warn.
 	ackGlobalWarnMarker(ctx)
 	succeeded, supported := installUserAgentHooks(ctx, w)
 	if supported > 0 && succeeded == 0 {
@@ -183,8 +182,7 @@ func runDisableGlobalMode(ctx context.Context, w io.Writer) error {
 	}
 	fmt.Fprintln(w, "Global tracking disabled.")
 	fmt.Fprintln(w, "Locally captured checkpoints in untrusted repos will not sync.")
-	// The held-data line above replaces the off-detection note: retire the
-	// marker so PersistentPostRun doesn't repeat it, now or next command.
+	// The held-data line above replaces the off-detection note.
 	retireGlobalWarnMarker(ctx)
 	maybeRemoveUserAgentHooks(ctx, w)
 	return nil
@@ -253,9 +251,7 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 	}
 	if enable {
 		fmt.Fprintln(w, "  ✓ Global tracking enabled")
-		// Like enable --global, this confirmation IS the generation's
-		// announcement: ack the detection marker so PersistentPostRun doesn't
-		// stack the warn on top of it in this same `entire enable` run.
+		// This confirmation is the announcement: don't stack the detection warn.
 		ackGlobalWarnMarker(ctx)
 		// The wizard's yes is the same commitment as enable --global, so it
 		// triggers the same user-level hook install (user-scope config only).

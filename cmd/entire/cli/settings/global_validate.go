@@ -72,11 +72,8 @@ func ValidateGlobalPatterns(g *GlobalConfig) []string {
 		}
 	}
 	for i, p := range g.TrustedPaths {
-		// Same plain-path probe as exclude_paths_exact. The gate skips an
-		// unusable trusted_paths entry (it can never grant trust) rather than
-		// deactivating anything, so doctor is the only surface that can name
-		// a broken entry — without this, a typo'd grant just silently never
-		// takes effect.
+		// The gate skips an unusable entry (it can never grant trust), so
+		// doctor is the only surface that can name a dead grant.
 		if _, err := expandTilde(p); err != nil {
 			problems = append(problems, fmt.Sprintf("trusted_paths[%d]: %v", i, err))
 		}

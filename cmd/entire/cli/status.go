@@ -144,12 +144,9 @@ type globalTrackingInfo struct {
 	InactiveReason settings.InactiveReason
 	// TrustState is the per-repo checkpoint egress consent
 	// (trustStateTrusted/Untrusted/NotApplicable), "" outside a repository.
-	// not_applicable covers repo-level setups (already consented), carved-out
-	// repos, and a disabled tier — there is no per-repo trust decision there.
 	TrustState  string
 	TrustSource settings.TrustSource
-	// HeldCheckpoints counts checkpoints held locally; computed only for the
-	// untrusted state (elsewhere the generic unpushed counter applies).
+	// HeldCheckpoints counts checkpoints held locally (untrusted state only).
 	HeldCheckpoints int
 }
 
@@ -193,11 +190,9 @@ func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 	return info
 }
 
-// computeRepoTrustState classifies THIS repo's egress consent for status.
-// Only a globally enrolled repo (active here, no repo-level setup) has a
-// per-repo trust decision; everything else is not_applicable. The held state
-// comes from the shared settings.RepoUntrustedEnrolled predicate, so status
-// can never disagree with the banner and doctor about who is held.
+// computeRepoTrustState classifies this repo's egress consent for status.
+// Only a globally enrolled repo has a per-repo trust decision; everything
+// else is not_applicable.
 func computeRepoTrustState(ctx context.Context, activeHere bool) (string, settings.TrustSource) {
 	if settings.RepoUntrustedEnrolled(ctx) {
 		return trustStateUntrusted, settings.TrustSourceNone
@@ -209,9 +204,8 @@ func computeRepoTrustState(ctx context.Context, activeHere bool) (string, settin
 }
 
 // heldCheckpointCount counts checkpoints held locally against the elected
-// checkpoint sync remote — the untrusted-repo counter shared by status,
-// doctor, and `entire trust`. Best-effort: resolution or count failure reads
-// as 0 (callers omit the count rather than fail).
+// checkpoint sync remote, shared by status, doctor, and `entire trust`.
+// Best-effort: any failure reads as 0.
 func heldCheckpointCount(ctx context.Context) int {
 	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
 	if err != nil || elected.Name == "" {
@@ -247,9 +241,8 @@ func writeGlobalTrackingLine(ctx context.Context, w io.Writer, sty statusStyles)
 }
 
 // writeGlobalTrustLine renders the per-repo egress consent under the tracking
-// line. The trusted line names its SOURCE so a revoke masked by trust_all is
-// auditable from status; not_applicable states stay silent — the tracking
-// line above already tells the whole story there.
+// line: the trusted line names its source (a revoke masked by trust_all is
+// auditable); not_applicable states stay silent.
 func writeGlobalTrustLine(w io.Writer, sty statusStyles, info globalTrackingInfo) {
 	switch info.TrustState {
 	case trustStateUntrusted:
@@ -936,9 +929,7 @@ type globalTrackingJSON struct {
 	// outside one.
 	ActiveHere     *bool  `json:"active_here,omitempty"`
 	InactiveReason string `json:"inactive_reason,omitempty"`
-	// TrustState is the per-repo checkpoint egress consent:
-	// "trusted"|"untrusted"|"not_applicable" (repo-level setups, carved-out
-	// repos, disabled tier). TrustSource names what grants consent:
+	// TrustState is "trusted"|"untrusted"|"not_applicable"; TrustSource is
 	// "trust_all"|"repo"|"none". Both omitted outside a repository.
 	TrustState  string `json:"trust_state,omitempty"`
 	TrustSource string `json:"trust_source,omitempty"`
@@ -980,8 +971,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 				gt.InactiveReason = inactiveReasonJSON(info.InactiveReason)
 			}
 		}
-		// TrustState is set inside a repository even for the disabled tier
-		// (not_applicable) — the string doubles as the in-repo marker.
+		// TrustState doubles as the in-repo marker (set even for a disabled tier).
 		if info.TrustState != "" {
 			gt.TrustState = info.TrustState
 			gt.TrustSource = string(info.TrustSource)

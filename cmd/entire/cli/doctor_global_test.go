@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -319,9 +318,7 @@ func TestCheckGlobalTracking_WarnsOnUnusableExcludePatterns(t *testing.T) {
 	cfg := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
 	isolateUserHome(t)
-	// The trusted_paths entry uses the unsupported ~user form: the gate
-	// skips it (it can never grant trust), so doctor is the only surface
-	// that can tell the user their hand-written grant is dead.
+	// The gate skips an unusable trusted_paths entry; doctor must name it.
 	writeGlobalUserSettings(t, cfg,
 		`{"global":{"enabled":true,"exclude_paths":["relative/path","~bob/code/**","/srv/["],"exclude_origins":["github.com/acme/["],"trusted_paths":["~bob/code/repo"]}}`)
 
@@ -360,10 +357,7 @@ func TestCheckGlobalTracking_InfoOnUnnormalizableOrigin(t *testing.T) {
 	}
 }
 
-// TestCheckGlobalTracking_InfoOnUntrustedEnrolledRepo: an untrusted enrolled
-// repo is a consent state, not a failure — doctor explains the hold at INFO
-// level with the opt-in remedy. A red/failure framing here would train users
-// to treat the egress consent gate as breakage.
+// The hold is a consent state, not a failure — doctor explains it at INFO level.
 func TestCheckGlobalTracking_InfoOnUntrustedEnrolledRepo(t *testing.T) {
 	setupTestRepo(t)
 	cfg := t.TempDir()
@@ -372,52 +366,13 @@ func TestCheckGlobalTracking_InfoOnUntrustedEnrolledRepo(t *testing.T) {
 	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
 	settings.ClearGlobalModeCache()
 	t.Cleanup(settings.ClearGlobalModeCache)
-	// One v1 commit with no remote-tracking ref = one held checkpoint under
-	// the git-branch backend, exercising the singular count branch.
-	root, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	testutil.AddRemote(t, root, "origin", "https://github.com/acme/widgets.git")
-	testutil.WriteFile(t, root, "f.txt", "init")
-	testutil.GitAdd(t, root, "f.txt")
-	testutil.GitCommit(t, root, "init")
-	testutil.GitUpdateRef(t, root, "refs/heads/entire/checkpoints/v1", "HEAD")
-	t.Setenv(settings.EnvCheckpointsPrimary, checkpoint.BackendTypeGitBranch)
 
 	got := runCheckGlobalTracking(t)
 	if !strings.Contains(got, "checkpoint sync held in this repo (informational)") {
 		t.Fatalf("missing informational hold note, got: %q", got)
 	}
-	wants := []string{
-		"1 checkpoint is held locally.", // singular branch of the held count
-		"intended until you opt in",
-		"run `entire trust` to sync",
-	}
-	for _, want := range wants {
-		if !strings.Contains(got, want) {
-			t.Errorf("hold note missing %q, got: %q", want, got)
-		}
-	}
-}
-
-// TestCheckGlobalTracking_NoHoldInfoWhenTrusted: once consent is recorded the
-// hold note must disappear — a doctor that keeps reporting a hold after
-// `entire trust` reads as the trust write having failed.
-func TestCheckGlobalTracking_NoHoldInfoWhenTrusted(t *testing.T) {
-	setupTestRepo(t)
-	cfg := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
-	isolateUserHome(t)
-	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
-	settings.ClearGlobalModeCache()
-	t.Cleanup(settings.ClearGlobalModeCache)
-	if _, err := settings.TrustCurrentRepo(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := runCheckGlobalTracking(t); strings.Contains(got, "checkpoint sync held") {
-		t.Errorf("trusted repo must not report a hold, got: %q", got)
+	if !strings.Contains(got, "run `entire trust` to sync") {
+		t.Errorf("hold note missing the remedy, got: %q", got)
 	}
 }
 

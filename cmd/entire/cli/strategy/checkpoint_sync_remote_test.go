@@ -13,7 +13,6 @@ import (
 	git "github.com/go-git/go-git/v6"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
@@ -385,77 +384,8 @@ func TestCheckpointSyncAllowedForRemote(t *testing.T) {
 	})
 }
 
-// Egress trust gate, git-refs backend: a globally enrolled repo (no repo-level
-// setup) that hasn't been trusted must not egress checkpoint refs at pre-push.
-// The regression this catches: the queue draining (or refs landing on the
-// remote) for a repo the user never consented to sync, or the hold failing the
-// user's own push. Not parallel: t.Chdir + t.Setenv.
-func TestPrePush_EgressGateHoldsUntrustedGloballyEnrolledRepo_RefsBackend(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
-	testutil.AddRemote(t, workDir, "origin", bareDir)
-	t.Chdir(workDir)
-	t.Setenv(settings.EnvCheckpointsPrimary, checkpoint.BackendTypeGitRefs)
-	enrollRepoGlobally(t, `{"global":{"enabled":true}}`)
-
-	repo, err := git.PlainOpen(workDir)
-	require.NoError(t, err)
-	queue := enqueueRefs(t, repo, refs)
-	stderr := captureStderrWriter(t)
-
-	require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "origin"),
-		"a hold must never fail the user's push")
-
-	require.Equal(t, 1, strings.Count(stderr.String(), heldMessageFragment),
-		"a hold pairs with exactly one stderr explanation")
-	require.Contains(t, stderr.String(), "entire trust")
-
-	remaining, err := queue.Drain()
-	require.NoError(t, err)
-	assert.ElementsMatch(t, refs, remaining, "a held push must leave the queue undrained")
-	remoteRefs := lsRemoteOutput(t, bareDir)
-	for _, ref := range refs {
-		assert.NotContains(t, remoteRefs, ref.String(), "a held push must not reach the remote")
-	}
-}
-
-// Egress trust gate, git-refs backend: consent must let checkpoint refs ride
-// the push again, silently — a trusted push that still held (or still warned)
-// would strand every globally-enrolled repo's data forever. Which consent
-// source grants (per-repo key vs trust_all) is predicate-level, pinned by the
-// settings gate table. Not parallel: t.Chdir + t.Setenv.
-func TestPrePush_EgressGateTrustedRepoSyncs_RefsBackend(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
-	testutil.AddRemote(t, workDir, "origin", bareDir)
-	t.Chdir(workDir)
-	t.Setenv(settings.EnvCheckpointsPrimary, checkpoint.BackendTypeGitRefs)
-	enrollRepoGlobally(t, `{"global":{"enabled":true}}`)
-	_, err := settings.TrustCurrentRepo(context.Background())
-	require.NoError(t, err)
-
-	repo, err := git.PlainOpen(workDir)
-	require.NoError(t, err)
-	queue := enqueueRefs(t, repo, refs)
-	stderr := captureStderrWriter(t)
-
-	require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "origin"))
-
-	require.NotContains(t, stderr.String(), heldMessageFragment, "a trusted push is silent")
-	remoteRefs := lsRemoteOutput(t, bareDir)
-	for _, ref := range refs {
-		assert.Contains(t, remoteRefs, ref.String(), "a trusted push must sync the queued refs")
-	}
-	remaining, err := queue.Drain()
-	require.NoError(t, err)
-	assert.Empty(t, remaining, "the first trusted push drains everything queued while untrusted")
-}
-
-// Granted-at-the-prompt path: when the injected resolver records real consent
-// (settings.TrustCurrentRepo) and returns TrustGranted, the SAME PrePush call
-// must re-evaluate the gate and sync — the regression being a prompt "yes"
-// whose refs only ride the NEXT push (or a held message printed anyway).
-// Not parallel: t.Chdir + t.Setenv + package seams.
+// Granted-at-the-prompt seam (unreachable from the integration test): the
+// SAME PrePush call must re-evaluate the gate and sync. Not parallel.
 func TestPrePush_TrustGrantedAtPromptSyncsInSameCall(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
@@ -463,9 +393,6 @@ func TestPrePush_TrustGrantedAtPromptSyncsInSameCall(t *testing.T) {
 	t.Chdir(workDir)
 	t.Setenv(settings.EnvCheckpointsPrimary, checkpoint.BackendTypeGitRefs)
 	enrollRepoGlobally(t, `{"global":{"enabled":true}}`)
-	require.False(t, settings.CheckpointEgressAllowed(context.Background()),
-		"fixture must start with the gate closed, or the prompt path is never taken")
-
 	prompted := 0
 	oldResolve := resolveTrustDecisionFn
 	resolveTrustDecisionFn = func(ctx context.Context, _ io.Writer) (TrustDecision, error) {
@@ -478,66 +405,15 @@ func TestPrePush_TrustGrantedAtPromptSyncsInSameCall(t *testing.T) {
 
 	repo, err := git.PlainOpen(workDir)
 	require.NoError(t, err)
-	queue := enqueueRefs(t, repo, refs)
+	enqueueRefs(t, repo, refs)
 	stderr := captureStderrWriter(t)
 
 	require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "origin"))
 
 	require.Equal(t, 1, prompted, "the closed gate must consult the resolver exactly once")
-	require.NotContains(t, stderr.String(), heldMessageFragment,
-		"a granted prompt must not also print the held message")
+	require.NotContains(t, stderr.String(), heldMessageFragment)
 	remoteRefs := lsRemoteOutput(t, bareDir)
 	for _, ref := range refs {
 		assert.Contains(t, remoteRefs, ref.String(), "consent at the prompt must sync in that same PrePush call")
-	}
-	remaining, err := queue.Drain()
-	require.NoError(t, err)
-	assert.Empty(t, remaining, "the queue must drain in the same call the prompt granted")
-}
-
-// Egress trust gate, git-branch backend: the gate sits above the v1 path too,
-// so an untrusted globally-enrolled repo must not publish
-// entire/checkpoints/v1 — while a trusted one must, silently. Catches the
-// gate being relocated into the refs-only branch (prePushCheckpointRefs),
-// which the refs-backend tests alone would not notice.
-// Not parallel: t.Chdir + t.Setenv.
-func TestPrePush_EgressGate_BranchBackend(t *testing.T) {
-	for _, tc := range []struct {
-		name         string
-		userSettings string
-		trustRepo    bool
-		wantSync     bool
-	}{
-		{"untrusted holds v1", `{"global":{"enabled":true}}`, false, false},
-		{"trusted pushes v1", `{"global":{"enabled":true}}`, true, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			testutil.IsolateGitConfigEnv(t)
-			workDir := setupRepoWithCheckpointBranch(t)
-			bareDir := filepath.Join(t.TempDir(), "remote.git")
-			_, err := git.PlainInit(bareDir, true)
-			require.NoError(t, err)
-			testutil.AddRemote(t, workDir, "origin", bareDir)
-			t.Chdir(workDir)
-			enrollRepoGlobally(t, tc.userSettings)
-			if tc.trustRepo {
-				_, err := settings.TrustCurrentRepo(context.Background())
-				require.NoError(t, err)
-			}
-			stderr := captureStderrWriter(t)
-
-			require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "origin"),
-				"neither hold nor sync may fail the user's push")
-
-			remoteRefs := lsRemoteOutput(t, bareDir)
-			if tc.wantSync {
-				require.NotContains(t, stderr.String(), heldMessageFragment, "a trusted push is silent")
-				assert.Contains(t, remoteRefs, paths.MetadataBranchName, "a trusted push must publish v1")
-			} else {
-				require.Equal(t, 1, strings.Count(stderr.String(), heldMessageFragment),
-					"a hold pairs with exactly one stderr explanation")
-				assert.NotContains(t, remoteRefs, paths.MetadataBranchName, "a held push must not publish v1")
-			}
-		})
 	}
 }

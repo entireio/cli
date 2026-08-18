@@ -13,21 +13,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
-// TrustIdentity is the egress-consent key for one repository. Exactly one
-// side is set: OriginKeys when the origin remote exists and EVERY configured
-// URL normalizes — one key per URL, and consent requires all of them — or
-// Path (the symlink-resolved worktree root) when there is no origin or ANY
-// URL fails to normalize. The URL set covers both remote.origin.url and
-// remote.origin.pushurl: git's pushurl-replaces-url rule means egress follows
-// the pushurl when one is set, so consent must key what the data actually
-// reaches — a pushurl's keys join the set and are required like any other. A
-// single unnormalizable URL flips the whole identity to path rather than
-// being dropped from the key set: an unkeyable URL is still an egress
-// destination (a multi-URL push delivers refs to every URL), so partial
-// origin keys would fail open. The split is exclusive, never a union: a repo
-// keyed by its origin is not covered by a trusted path, and any identity flip
-// re-asks (new egress destination, new consent). The zero value (returned
-// alongside a non-nil error) has neither side set and must not be consulted.
+// TrustIdentity is the egress-consent key for one repository. Exactly one side
+// is set: OriginKeys when every configured origin URL (fetch and push)
+// normalizes — consent requires all of them — or Path (the symlink-resolved
+// worktree root) when there is no origin or ANY URL fails to normalize. The
+// split is exclusive, never a union; an identity flip re-asks. The zero value
+// (returned alongside a non-nil error) must not be consulted.
 type TrustIdentity struct {
 	OriginKeys []string
 	Path       string
@@ -58,19 +49,16 @@ const (
 	TrustSourceNone TrustSource = "none"
 )
 
-// RepoTrustIdentity derives the trust identity of the current worktree. It is
-// the single derivation shared by the egress gate, the trust command, status,
-// and doctor — no caller may re-derive keys another way, or two surfaces
-// could disagree about what consent covers. Errors (worktree unresolvable,
-// origin config unreadable) are returned for callers to fail closed on.
+// RepoTrustIdentity derives the trust identity of the current worktree — the
+// single derivation shared by the egress gate, the trust command, status, and
+// doctor. Errors are returned for callers to fail closed on.
 func RepoTrustIdentity(ctx context.Context) (TrustIdentity, error) {
 	id, _, err := currentTrustIdentity(ctx)
 	return id, err
 }
 
-// currentTrustIdentity is RepoTrustIdentity plus the symlink-resolved
-// worktree root, which the write helpers need even for origin-keyed repos
-// (pruning stale trusted_paths entries for the root).
+// currentTrustIdentity is RepoTrustIdentity plus the symlink-resolved worktree
+// root, which the write helpers need even for origin-keyed repos.
 func currentTrustIdentity(ctx context.Context) (TrustIdentity, string, error) {
 	root, err := worktreeRootFn(ctx)
 	if err != nil {
@@ -87,10 +75,8 @@ func currentTrustIdentity(ctx context.Context) (TrustIdentity, string, error) {
 	if err != nil {
 		return TrustIdentity{}, "", fmt.Errorf("reading origin remote: %w", err)
 	}
-	// Push URLs join the set: git's pushurl-replaces-url rule means a push
-	// delivers to remote.origin.pushurl when set, so an identity keyed only on
-	// the fetch URLs would consent to a destination the data never reaches
-	// while ignoring the one it does (see TrustIdentity).
+	// Push URLs join the set: git's pushurl-replaces-url rule means egress
+	// follows the pushurl when one is set.
 	pushURLs, pushFound, err := gitremote.GetRemotePushURLsInDirIfSet(ctx, root, "origin")
 	if err != nil {
 		return TrustIdentity{}, "", fmt.Errorf("reading origin pushurl: %w", err)
@@ -116,32 +102,24 @@ func currentTrustIdentity(ctx context.Context) (TrustIdentity, string, error) {
 }
 
 // CheckpointEgressAllowed reports whether checkpoint data may leave this
-// machine for the current repository. Repo-level setup (either settings file)
-// is explicit consent and short-circuits true — which is also why any
-// checkpoint_remote configuration is moot for this gate: it can only live in
-// repo-level settings, so the gate has passed before it could matter.
-// Otherwise the globally-enrolled repo must be trusted: trust_all, or its
-// full identity listed — one decision tree, shared with CurrentTrustSource
-// via globalTrustSource so the two can never drift. Every error path returns
-// false — held checkpoints are recoverable, leaked ones are not.
+// machine for the current repository: repo-level setup is explicit consent
+// (which also makes any checkpoint_remote configuration moot — it can only
+// live in repo-level settings); otherwise the globally-enrolled repo must be
+// trusted. Every error path returns false (fail closed).
 func CheckpointEgressAllowed(ctx context.Context) bool {
 	return IsSetUpAny(ctx) || globalTrustSource(ctx) != TrustSourceNone
 }
 
-// CurrentTrustSource names what grants egress consent for the current
-// repository. It describes the global trust store only — repo-level setup is
-// deliberately ignored (CheckpointEgressAllowed is the gate) — so revoke can
-// detect that a key removal is masked by trust_all, and status can name the
-// consent source.
+// CurrentTrustSource names what grants egress consent in the global trust
+// store only — repo-level setup is deliberately ignored — so revoke can detect
+// a removal masked by trust_all and status can name the consent source.
 func CurrentTrustSource(ctx context.Context) TrustSource {
 	return globalTrustSource(ctx)
 }
 
-// RepoUntrustedEnrolled reports the held state: the current repo is enrolled
-// by the global tier (active here, no repo-level setup) and checkpoint egress
-// is not consented. It is the ONE predicate behind every untrusted-enrolled
-// surface (session-start banner line, status trust state, doctor's hold
-// note), so the three cannot drift into disagreeing about who is held.
+// RepoUntrustedEnrolled reports the held state: enrolled by the global tier,
+// no repo-level setup, egress not consented. It is the ONE predicate behind
+// every untrusted-enrolled surface (banner, status, doctor).
 func RepoUntrustedEnrolled(ctx context.Context) bool {
 	return !IsSetUpAny(ctx) && GlobalModeActive(ctx) && globalTrustSource(ctx) == TrustSourceNone
 }
@@ -168,10 +146,9 @@ func globalTrustSource(ctx context.Context) TrustSource {
 }
 
 // TrustCurrentRepo records egress consent for the current repository's
-// identity and returns that identity. Origin-keyed repos get ALL their URL
-// keys written, and any trusted_paths entry for this root is pruned in the
-// same write — a stale path entry would resurrect trust the moment the origin
-// is removed, defeating a later revoke. Idempotent.
+// identity and returns it. Origin-keyed repos get ALL their URL keys written;
+// any trusted_paths entry for this root is pruned in the same write, or it
+// would resurrect trust once the origin is removed. Idempotent.
 func TrustCurrentRepo(ctx context.Context) (TrustIdentity, error) {
 	id, root, err := currentTrustIdentity(ctx)
 	if err != nil {
@@ -203,14 +180,12 @@ func TrustCurrentRepo(ctx context.Context) (TrustIdentity, error) {
 }
 
 // ErrGlobalModeUnconfigured is returned by the trust writers when the global
-// tier was never configured. Exported as a sentinel so `entire trust` can
-// swap it for a friendly message without string-matching.
+// tier was never configured, as a sentinel so `entire trust` can swap it for
+// a friendly message.
 var ErrGlobalModeUnconfigured = errors.New("global mode is not configured; nothing to trust")
 
-// requireConfiguredGlobal is the single guard shared by every trust writer:
-// materializing the global block on a machine whose global tier was never
-// configured would flip GlobalConfigured() and silently suppress the ask-once
-// global-enable question.
+// requireConfiguredGlobal guards every trust writer: materializing the global
+// block would flip GlobalConfigured() and suppress the ask-once question.
 func requireConfiguredGlobal(us *UserSettings) error {
 	if us.Global == nil {
 		return ErrGlobalModeUnconfigured
@@ -218,10 +193,8 @@ func requireConfiguredGlobal(us *UserSettings) error {
 	return nil
 }
 
-// TrustAllRepos records machine-wide egress consent (trust_all): every
-// globally enrolled repo on this machine — current and future — syncs
-// checkpoints. Per-repo keys are left untouched, so disabling trust_all later
-// restores the per-repo consent state.
+// TrustAllRepos records machine-wide egress consent (trust_all). Per-repo keys
+// are left untouched, so disabling trust_all later restores the per-repo state.
 func TrustAllRepos(ctx context.Context) error {
 	return ModifyUserSettings(ctx, func(us *UserSettings) error {
 		if err := requireConfiguredGlobal(us); err != nil {
@@ -233,14 +206,12 @@ func TrustAllRepos(ctx context.Context) error {
 }
 
 // RevokeCurrentRepo withdraws egress consent for the current repository's
-// identity and returns that identity. It removes the identity's origin keys
-// AND any trusted_paths entry for this root regardless of which side the
-// identity is on — leaving the path entry behind would resurrect trust once
-// the origin is removed. Other repos' keys, the exclude lists, and trust_all
-// are never touched. Idempotent for a configured tier (revoking an untrusted
-// repo is a no-op); an unconfigured tier returns ErrGlobalModeUnconfigured —
-// there was never anything to revoke, and a silent success would read as a
-// withdrawal that happened. Not retroactive (pushed data stays pushed).
+// identity and returns it. It removes the identity's origin keys AND any
+// trusted_paths entry for this root regardless of identity side (a leftover
+// path entry would resurrect trust once the origin is removed); other repos'
+// keys, the exclude lists, and trust_all are never touched. Idempotent for a
+// configured tier; an unconfigured tier returns ErrGlobalModeUnconfigured.
+// Not retroactive.
 func RevokeCurrentRepo(ctx context.Context) (TrustIdentity, error) {
 	id, root, err := currentTrustIdentity(ctx)
 	if err != nil {
@@ -281,21 +252,14 @@ func identityTrusted(ctx context.Context, g *GlobalConfig, id TrustIdentity) boo
 		}
 		return true
 	}
-	// Per-entry via pathEntryIsRoot (which reuses the exclude_paths_exact
-	// matcher for its symlink/case bridging; exact-match-only with no subtree
-	// cascade is precisely the trusted_paths contract). Deliberately NOT the
-	// whole-list matcher: it aborts on the first unusable entry, so one
-	// poisoned hand-edit would veto every valid grant in the list. An
-	// unreadable entry cannot grant trust either way, so it is skipped and
-	// the rest still count — still fail-closed, entry by entry.
+	// Per-entry so one unreadable hand-edit can't veto every valid grant; an
+	// unreadable entry cannot grant trust either way (still fail-closed).
 	return anyPathEntryIsRoot(ctx, g.TrustedPaths, id.Path)
 }
 
-// canonicalOriginEntry is the one definition of hand-edited-entry tolerance
-// for trusted_origins: whitespace-trimmed and case-folded (identity keys are
-// produced lowercase) — but never glob-expanded: consent is exact. Both the
-// gate's membership check and revoke's removal filter go through it, so an
-// entry the gate honors is always one revoke can remove.
+// canonicalOriginEntry defines hand-edited-entry tolerance for
+// trusted_origins: trimmed and case-folded, never glob-expanded. Both the
+// gate's membership check and revoke's removal filter go through it.
 func canonicalOriginEntry(e string) string {
 	return strings.ToLower(strings.TrimSpace(e))
 }
@@ -309,10 +273,9 @@ func containsTrustedOrigin(entries []string, key string) bool {
 	return false
 }
 
-// pathEntryIsRoot reports whether one trusted_paths entry refers to root,
-// with the same given/resolved/case bridging as the gate's matcher. An entry
-// it cannot interpret reports false: pruning must not drop what it cannot
-// read, and a failed membership probe merely appends root's canonical entry.
+// pathEntryIsRoot reports whether one trusted_paths entry refers to root, with
+// the same given/resolved/case bridging as the gate's matcher. An entry it
+// cannot interpret reports false.
 func pathEntryIsRoot(ctx context.Context, entry, root string) bool {
 	ok, err := matchesExcludePathExact(ctx, []string{entry}, root)
 	return err == nil && ok

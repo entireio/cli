@@ -1710,14 +1710,9 @@ func TestEnsureEntireGitignore_IncludesRedactorsLocal(t *testing.T) {
 	}
 }
 
-// enrollRepoGlobally points the user-global settings tier at a fresh config
-// dir with the given settings JSON and leaves the current repo without
-// repo-level setup, so settings.CheckpointEgressAllowed is decided purely by
-// the global trust store. Returns the config dir. Callers must already have
-// chdir'd into the repo: the invisible-runtime cache carries no CWD key and
-// never self-invalidates on chdir, so clearing must happen after the final
-// chdir. Not parallel-safe: t.Setenv.
-func enrollRepoGlobally(t *testing.T, userSettingsJSON string) string {
+// enrollRepoGlobally enrolls the current repo via the user-global tier (no
+// repo-level setup). Call after the final chdir. Not parallel-safe: t.Setenv.
+func enrollRepoGlobally(t *testing.T, userSettingsJSON string) {
 	t.Helper()
 	cfgDir := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
@@ -1728,11 +1723,9 @@ func enrollRepoGlobally(t *testing.T, userSettingsJSON string) string {
 		paths.ClearWorktreeRootCache()
 		paths.ClearInvisibleRuntimeCache()
 	})
-	return cfgDir
 }
 
-// captureStderrWriter redirects the strategy package's user-facing warning
-// writer into a buffer for the duration of the test.
+// captureStderrWriter redirects the package's warning writer into a buffer.
 func captureStderrWriter(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
@@ -1742,20 +1735,17 @@ func captureStderrWriter(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// writeEnabledRepoSettings gives a fixture repo explicit repo-level setup,
-// which is consent under the egress trust gate (IsSetUpAny short-circuit).
+// writeEnabledRepoSettings gives a fixture repo explicit repo-level setup
+// (consent under the egress trust gate's IsSetUpAny short-circuit).
 func writeEnabledRepoSettings(t *testing.T, dir string) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(dir, ".entire", "settings.json"),
-		[]byte(`{"enabled": true}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(`{"enabled": true}`), 0o600))
 }
 
 const heldMessageFragment = "checkpoint sync held"
 
-// lsRemoteOutput returns `git ls-remote <bareDir>` for asserting which refs a
-// push did (not) deliver.
+// lsRemoteOutput returns `git ls-remote <bareDir>`.
 func lsRemoteOutput(t *testing.T, bareDir string) string {
 	t.Helper()
 	lsCmd := exec.CommandContext(context.Background(), "git", "ls-remote", bareDir)

@@ -627,9 +627,8 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		fmt.Fprintln(w, "  Global tracking stays off in this repo (fail closed).")
 	}
 
-	// Untrusted enrolled repo: informational, never a failure — holding
-	// checkpoint sync is the intended state until the user opts in. RED here
-	// would train users to treat the consent gate as breakage.
+	// Untrusted enrolled repo: informational, never a failure — the hold is
+	// the intended state until the user opts in.
 	if settings.RepoUntrustedEnrolled(ctx) {
 		fmt.Fprintln(w, "Global tracking: checkpoint sync held in this repo (informational)")
 		switch n := heldCheckpointCount(ctx); {
