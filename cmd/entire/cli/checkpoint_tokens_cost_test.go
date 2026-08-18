@@ -84,11 +84,11 @@ func TestAddCheckpointTokenUsage_NilCostStaysNil(t *testing.T) {
 	}
 }
 
-// buildCheckpointTokensReport must recompute a LOCAL cost estimate from the
-// persisted token breakdown at current rates (rather than echoing the spend-time
-// cost stored on the checkpoint) and label it as a local estimate. Here the
-// per-model breakdown carries 420000 priceable tokens
-// under test-model ($1/MTok) => $0.42.
+// buildCheckpointTokensReport must fall back to a LOCAL cost estimate from the
+// persisted token breakdown at current rates only when the checkpoint carries
+// no persisted cost (a legacy checkpoint written before cost persistence
+// existed) and label it as a local estimate. Here the per-model breakdown
+// carries 420000 priceable tokens under test-model ($1/MTok) => $0.42.
 func TestBuildCheckpointTokensReport_RecomputesLocalCostEstimate(t *testing.T) {
 	t.Parallel()
 	cpID := id.MustCheckpointID("abc123abc123")
@@ -128,6 +128,56 @@ func TestBuildCheckpointTokensReport_RecomputesLocalCostEstimate(t *testing.T) {
 	}
 	if !strings.Contains(out, localCostEstimateNote) {
 		t.Fatalf("expected local-estimate note, got:\n%s", out)
+	}
+}
+
+// Regression (finding: "CLI persists the authoritative spend-time cost, then
+// refuses to display it"): a checkpoint that carries a persisted cost must
+// render THAT value, not a fresh estimate at today's rates — even when the
+// current pricing table would compute something different. Pricing table
+// prices test-model at $1/MTok, which would estimate $0.42 for these tokens;
+// the persisted $1.23 (reported) must win instead.
+func TestBuildCheckpointTokensReport_PrefersPersistedCostOverEstimate(t *testing.T) {
+	t.Parallel()
+	cpID := id.MustCheckpointID("abc123abc125")
+	report := buildCheckpointTokensReport(
+		cpID,
+		&checkpoint.CheckpointSummary{
+			CheckpointID: cpID,
+			Sessions:     []checkpoint.SessionFilePaths{{Metadata: "0/metadata.json"}},
+		},
+		[]*checkpoint.Metadata{
+			{
+				SessionID: "cost-session",
+				Agent:     "Claude Code",
+				Model:     "test-model",
+				TokenUsage: &agent.TokenUsage{
+					InputTokens: 400000, OutputTokens: 20000,
+					CostUSD: costPtr(1.23), CostSource: types.CostSourceReported,
+				},
+				ModelUsage: []types.ModelUsage{
+					{Model: "test-model", TokenUsage: agent.TokenUsage{InputTokens: 400000, OutputTokens: 20000}},
+				},
+			},
+		},
+		0,
+		testDisplayPricingTable(t),
+	)
+	if report.Tokens == nil || report.Tokens.CostUSD == nil || *report.Tokens.CostUSD != 1.23 {
+		t.Fatalf("expected persisted cost 1.23, got %+v", report.Tokens)
+	}
+	if report.Tokens.CostSource != types.CostSourceReported {
+		t.Fatalf("cost source = %q, want reported", report.Tokens.CostSource)
+	}
+
+	var buf bytes.Buffer
+	writeCheckpointTokensText(&buf, report)
+	out := buf.String()
+	if !strings.Contains(out, "Cost:  $1.23 (reported)") {
+		t.Fatalf("expected persisted cost line, got:\n%s", out)
+	}
+	if strings.Contains(out, localCostEstimateNote) {
+		t.Fatalf("did not expect local-estimate note for a reported cost, got:\n%s", out)
 	}
 }
 

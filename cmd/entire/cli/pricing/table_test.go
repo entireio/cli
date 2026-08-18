@@ -314,9 +314,14 @@ func TestEstimate_CacheWrite1hPremium(t *testing.T) {
 		CacheCreationTokens: 1_000_000,
 	}), 1e-9)
 
-	// An explicit cache-write rate is honored for BOTH portions: there is no
-	// separate 1h rate, so the 1h subset does NOT get the 2x premium. $3/MTok
-	// explicit -> 1M * 3 = 3.00 even though the whole write is 1-hour-TTL.
+	// Regression (finding: "remote pricing catalog silently disables the 2x
+	// Anthropic 1h cache-write premium"): an explicit 5-minute rate must NOT
+	// also silently cover the 1-hour portion. The two TTLs are independent
+	// multiples of input, not one derived from the other — a source (e.g. a
+	// remote catalog mirroring upstream list prices) that supplies only the
+	// 5-minute rate still gets the 2x-input 1h premium. $3/MTok explicit 5m
+	// rate, but the whole write is 1-hour-TTL -> 1M * 2.0 (input-based
+	// default) = 2.00, NOT 1M * 3 = 3.00.
 	explicit := ModelRate{
 		ID:                modelOpus48,
 		Provider:          "anthropic",
@@ -324,10 +329,78 @@ func TestEstimate_CacheWrite1hPremium(t *testing.T) {
 		OutputPerMTok:     1,
 		CacheWritePerMTok: floatPtr(3),
 	}
-	assert.InDelta(t, 3.0, Estimate(explicit, types.TokenUsage{
+	assert.InDelta(t, 2.0, Estimate(explicit, types.TokenUsage{
 		CacheCreationTokens:   1_000_000,
 		CacheCreation1hTokens: 1_000_000,
 	}), 1e-9)
+
+	// A source that knows the distinct 1-hour rate can say so explicitly via
+	// CacheWrite1hPerMTok, which wins outright: $4/MTok -> 1M * 4 = 4.00.
+	explicit1h := ModelRate{
+		ID:                  modelOpus48,
+		Provider:            "anthropic",
+		InputPerMTok:        1,
+		OutputPerMTok:       1,
+		CacheWritePerMTok:   floatPtr(3),
+		CacheWrite1hPerMTok: floatPtr(4),
+	}
+	assert.InDelta(t, 4.0, Estimate(explicit1h, types.TokenUsage{
+		CacheCreationTokens:   1_000_000,
+		CacheCreation1hTokens: 1_000_000,
+	}), 1e-9)
+
+	// Non-Anthropic providers are unaffected: a missing cache-write rate falls
+	// back to the full input rate (1.0x) for both TTLs, same as before.
+	other := ModelRate{
+		ID:            "some-other-model",
+		Provider:      "openai",
+		InputPerMTok:  1,
+		OutputPerMTok: 1,
+	}
+	assert.InDelta(t, 1.0, Estimate(other, types.TokenUsage{
+		CacheCreationTokens:   1_000_000,
+		CacheCreation1hTokens: 1_000_000,
+	}), 1e-9)
+}
+
+func TestTableAdd_InheritsCacheWrite1hRate(t *testing.T) {
+	t.Parallel()
+
+	// A remote/override entry that supplies only the 5-minute rate must not
+	// clobber a previously-set 1-hour rate it doesn't know about.
+	tbl := &Table{index: make(map[string]int)}
+	tbl.add(ModelRate{
+		ID:                  modelOpus48,
+		Provider:            "anthropic",
+		InputPerMTok:        1,
+		OutputPerMTok:       1,
+		CacheWrite1hPerMTok: floatPtr(9),
+	})
+	tbl.add(ModelRate{
+		ID:                modelOpus48,
+		Provider:          "anthropic",
+		InputPerMTok:      1,
+		OutputPerMTok:     1,
+		CacheWritePerMTok: floatPtr(3),
+	})
+
+	got, ok := tbl.Lookup(modelOpus48)
+	require.True(t, ok)
+	require.NotNil(t, got.CacheWrite1hPerMTok)
+	assert.InDelta(t, 9.0, *got.CacheWrite1hPerMTok, 1e-9)
+}
+
+func TestValidateRate_RejectsNegativeCacheWrite1hRate(t *testing.T) {
+	t.Parallel()
+
+	err := validateRate(ModelRate{
+		ID:                  modelOpus48,
+		InputPerMTok:        1,
+		OutputPerMTok:       1,
+		CacheWrite1hPerMTok: floatPtr(-1),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cache_write_1h_per_mtok")
 }
 
 func TestLoadTable_OverrideReplacesByID(t *testing.T) {

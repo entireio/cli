@@ -234,7 +234,7 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 	usage := checkpointTokenUsage(summary, metas, metadataWarnings > 0)
 	if tokens := buildSessionTokensUsage(usage); tokens != nil {
 		report.Tokens = tokens
-		applyLocalCostEstimate(tokens, usage, checkpointModelUsage(summary, metas, metadataWarnings > 0), report.Model, table)
+		applyCheckpointCost(tokens, usage, checkpointModelUsage(summary, metas, metadataWarnings > 0), report.Model, table)
 		if tokens.SubagentTotal > 0 {
 			report.Contributors = append(report.Contributors, sessionTokensContributor{
 				Kind:       "subagents",
@@ -377,11 +377,10 @@ func checkpointTokenUsage(summary *checkpoint.CheckpointSummary, metas []*checkp
 }
 
 // checkpointModelUsage returns the per-model token buckets for a checkpoint,
-// mirroring checkpointTokenUsage's source preference so the local cost estimate
+// mirroring checkpointTokenUsage's source preference so a fallback local cost
+// estimate (applyCheckpointCost, when the checkpoint carries no persisted cost)
 // prices the same tokens the report displays: the per-session buckets when
-// metadata read cleanly, else the aggregated root-summary buckets. Only the
-// buckets' token counts are used — the displayed cost is re-estimated downstream
-// at current rates, not read from the buckets' persisted spend-time cost.
+// metadata read cleanly, else the aggregated root-summary buckets.
 func checkpointModelUsage(summary *checkpoint.CheckpointSummary, metas []*checkpoint.Metadata, metadataReadWarning bool) []types.ModelUsage {
 	var sessionBuckets []types.ModelUsage
 	for _, meta := range metas {
@@ -396,6 +395,25 @@ func checkpointModelUsage(summary *checkpoint.CheckpointSummary, metas []*checkp
 		return summary.ModelUsage
 	}
 	return sessionBuckets
+}
+
+// applyCheckpointCost sets tokens' cost from usage's persisted spend-time
+// value when one exists — a committed checkpoint is CostSourceReported at the
+// rates in force when the CLI wrote it, and re-estimating at today's rates
+// would silently drift from that stored value (and from what the platform,
+// which now trusts the CLI-reported cost, shows for the same checkpoint). Only
+// checkpoints written before cost persistence existed carry a nil CostUSD;
+// those fall back to a local estimate from the token breakdown, same as before.
+func applyCheckpointCost(tokens *sessionTokensUsage, usage *agent.TokenUsage, models []types.ModelUsage, fallbackModel string, table *pricing.Table) {
+	if tokens == nil {
+		return
+	}
+	if usage != nil && usage.CostUSD != nil {
+		tokens.CostUSD = usage.CostUSD
+		tokens.CostSource = usage.CostSource
+		return
+	}
+	applyLocalCostEstimate(tokens, usage, models, fallbackModel, table)
 }
 
 func addCheckpointTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {

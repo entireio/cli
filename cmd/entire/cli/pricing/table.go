@@ -31,8 +31,15 @@ type ModelRate struct {
 	OutputPerMTok float64 `json:"output_per_mtok"`
 	// CacheReadPerMTok is the price of cache-read tokens per MTok, if set.
 	CacheReadPerMTok *float64 `json:"cache_read_per_mtok"`
-	// CacheWritePerMTok is the price of cache-write tokens per MTok, if set.
+	// CacheWritePerMTok is the price of 5-minute-TTL cache-write tokens per
+	// MTok, if set.
 	CacheWritePerMTok *float64 `json:"cache_write_per_mtok"`
+	// CacheWrite1hPerMTok is the price of 1-hour-TTL cache-write tokens per
+	// MTok, if set. Anthropic prices the two TTLs as independent multiples of
+	// the input rate (1.25x / 2.0x) rather than one derived from the other, so
+	// a data source that knows the 1h rate should say so explicitly here
+	// instead of relying on CacheWritePerMTok to cover both — see Estimate.
+	CacheWrite1hPerMTok *float64 `json:"cache_write_1h_per_mtok"`
 	// EffectiveDate is the ISO date the price took effect (informational).
 	EffectiveDate string `json:"effective_date"`
 }
@@ -154,6 +161,9 @@ func (t *Table) add(m ModelRate) {
 		if m.CacheWritePerMTok == nil {
 			m.CacheWritePerMTok = prev.CacheWritePerMTok
 		}
+		if m.CacheWrite1hPerMTok == nil {
+			m.CacheWrite1hPerMTok = prev.CacheWrite1hPerMTok
+		}
 		t.models[idx] = m
 		return
 	}
@@ -243,6 +253,16 @@ func stripLongContextSuffix(s string) string {
 // cache-write rate falls back to the full input rate (1.0x) — billing cached
 // tokens as normal input, which never undercharges. In practice the non-Anthropic
 // embedded tables carry explicit cache rates, so this fallback is a safety net.
+//
+// The 1-hour-TTL cache-write rate is resolved separately from the 5-minute one:
+// CacheWrite1hPerMTok wins when set (a data source that knows the two TTLs bill
+// differently should say so explicitly); otherwise an Anthropic entry falls back
+// to AnthropicCacheWrite1hMultiplier (2x input) regardless of whether
+// CacheWritePerMTok is set, because Anthropic prices the two TTLs as independent
+// multiples of input rather than one derived from the other — a 5-minute rate
+// supplied without an accompanying 1-hour one (e.g. a remote catalog mirroring
+// upstream list prices, which does not distinguish the two) must not silently
+// disable the 1-hour premium.
 func Estimate(r ModelRate, u types.TokenUsage) float64 {
 	isAnthropic := strings.EqualFold(strings.TrimSpace(r.Provider), "anthropic")
 
@@ -262,8 +282,11 @@ func Estimate(r ModelRate, u types.TokenUsage) float64 {
 	}
 
 	cw1hRate := cwRate
-	if isAnthropic && r.CacheWritePerMTok == nil {
+	if isAnthropic {
 		cw1hRate = AnthropicCacheWrite1hMultiplier * r.InputPerMTok
+	}
+	if r.CacheWrite1hPerMTok != nil {
+		cw1hRate = *r.CacheWrite1hPerMTok
 	}
 	cw1h := u.CacheCreation1hTokens
 	if cw1h < 0 {
@@ -300,6 +323,9 @@ func validateRate(r ModelRate) error {
 	}
 	if r.CacheWritePerMTok != nil && *r.CacheWritePerMTok < 0 {
 		return fmt.Errorf("model %q: cache_write_per_mtok must not be negative, got %v", r.ID, *r.CacheWritePerMTok)
+	}
+	if r.CacheWrite1hPerMTok != nil && *r.CacheWrite1hPerMTok < 0 {
+		return fmt.Errorf("model %q: cache_write_1h_per_mtok must not be negative, got %v", r.ID, *r.CacheWrite1hPerMTok)
 	}
 	for _, alias := range r.Aliases {
 		if strings.TrimSpace(alias) == "" {

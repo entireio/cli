@@ -183,11 +183,14 @@ func buildTokensProfileReport(ctx context.Context, store checkpoint.PersistentSt
 			continue
 		}
 
-		// Re-estimate at current rates for this checkpoint's profile view
-		// (may differ from the cost persisted at checkpoint time if pricing
-		// changed since). Stamped onto usage so addCheckpointTokenUsage folds
-		// the per-checkpoint estimates into the aggregate total/source.
-		if usage != nil {
+		// Prefer this checkpoint's persisted spend-time cost; only estimate at
+		// current rates when none was persisted (a checkpoint written before
+		// cost persistence existed). Re-estimating an already-costed
+		// checkpoint would drift the profile from both the stored value and
+		// what the platform shows for the same checkpoint the moment a rate
+		// changes. Stamped onto usage so addCheckpointTokenUsage folds the
+		// per-checkpoint cost into the aggregate total/source.
+		if usage != nil && usage.CostUSD == nil {
 			cost, source := agent.EstimateCost(usage, buckets, model, table)
 			usage.CostUSD = cost
 			usage.CostSource = source
@@ -426,7 +429,9 @@ func writeTokensProfileText(w io.Writer, report tokensProfileReport) {
 		fmt.Fprintf(w, "Total cost: %s across %d of %d checkpoints\n",
 			formatCostUSD(report.CostUSD, report.CostSource),
 			report.CheckpointsWithCostData, report.CheckpointsAnalyzed)
-		fmt.Fprintf(w, "  %s\n", localCostEstimateNote)
+		if report.CostSource != types.CostSourceReported {
+			fmt.Fprintf(w, "  %s\n", localCostEstimateNote)
+		}
 	}
 	writeTokensProfileSignals(w, report.Signals)
 	if len(report.Recommendations) > 0 {

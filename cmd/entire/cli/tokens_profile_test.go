@@ -347,6 +347,48 @@ func TestTokensProfileCmd_TotalCostAcrossCheckpoints(t *testing.T) {
 	}
 }
 
+// Regression (finding: "CLI persists the authoritative spend-time cost, then
+// refuses to display it"): a checkpoint that carries a persisted cost must
+// fold that value into the profile total, not a fresh re-estimate at today's
+// rates. The pricing table would estimate $0.42 for these tokens under
+// test-model; the persisted $1.23 (reported) must win instead.
+func TestTokensProfileCmd_PrefersPersistedCostOverEstimate(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	ctx := context.Background()
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+
+	writeProfileTokenCheckpointModel(ctx, t, store, "700ddd000004", "profile-cost-reported", "test-model", &agent.TokenUsage{
+		InputTokens: 400000, OutputTokens: 20000, APICallCount: 1,
+		CostUSD: costPtr(1.23), CostSource: types.CostSourceReported,
+	})
+
+	infos, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	report, err := buildTokensProfileReport(ctx, store, infos, 0, testDisplayPricingTable(t))
+	if err != nil {
+		t.Fatalf("buildTokensProfileReport: %v", err)
+	}
+
+	if report.CostUSD == nil || *report.CostUSD != 1.23 {
+		t.Fatalf("total cost = %v, want 1.23 (persisted)", report.CostUSD)
+	}
+	if report.CostSource != types.CostSourceReported {
+		t.Fatalf("cost source = %q, want reported", report.CostSource)
+	}
+
+	var buf bytes.Buffer
+	writeTokensProfileText(&buf, report)
+	out := buf.String()
+	if !strings.Contains(out, "Total cost: $1.23 (reported) across 1 of 1 checkpoints") {
+		t.Fatalf("expected persisted total cost line, got:\n%s", out)
+	}
+	if strings.Contains(out, localCostEstimateNote) {
+		t.Fatalf("did not expect local-estimate note for a reported cost, got:\n%s", out)
+	}
+}
+
 func TestTokensProfileCmd_JSONCost(t *testing.T) {
 	repo, _ := runExplainAutoTestRepo(t)
 	ctx := context.Background()

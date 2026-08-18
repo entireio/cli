@@ -112,11 +112,22 @@ var RemoteURL = "https://entire.io/pricing/v1/models.json"
 
 const (
 	// remoteRefreshInterval is the minimum cache age before a refresh is
-	// attempted. Every fetch outcome — success, 304, or failure — resets
-	// FetchedAt, so a broken endpoint is retried at most once per interval.
+	// attempted. A response from the source — success, 304, non-200, or a
+	// garbage body — resets FetchedAt to this full interval; a transport-level
+	// failure (see transportRetryBackoff) resets it to a shorter floor instead.
 	remoteRefreshInterval = 24 * time.Hour
 	// remoteMaxBytes caps the response body read (1 MiB), mirroring versioncheck.
 	remoteMaxBytes = 1 << 20
+	// transportRetryBackoff is how soon a transport-level failure (timeout,
+	// dial/connection error, or a connection dropped mid-read) is retried,
+	// instead of waiting out the full remoteRefreshInterval. Such a failure
+	// means we don't know whether the source is even reachable — unlike a
+	// well-formed HTTP response (304, non-200, or a 200 with a garbage body),
+	// which says the source IS reachable and just has nothing new, and so
+	// keeps the full interval. Without this distinction, a single slow
+	// request (e.g. a Worker cold start landing past remoteFetchTimeout)
+	// resets the clock and blocks any retry for a full day.
+	transportRetryBackoff = time.Hour
 )
 
 // remoteFetchTimeout bounds the whole refresh request (dial + read), matching
@@ -127,8 +138,8 @@ var remoteFetchTimeout = 2 * time.Second
 // Refresh outcomes reported by RefreshResult.Outcome.
 const (
 	refreshOutcomeUpdated     = "updated"      // 200 with a usable doc: Doc+ETag replaced.
-	refreshOutcomeNotModified = "not-modified" // 304: prior Doc kept, FetchedAt bumped.
-	refreshOutcomeUnchanged   = "unchanged"    // error/404/garbage: prior Doc kept, FetchedAt bumped.
+	refreshOutcomeNotModified = "not-modified" // 304: prior Doc kept, FetchedAt bumped a full interval.
+	refreshOutcomeUnchanged   = "unchanged"    // non-200/garbage: prior Doc kept, FetchedAt bumped a full interval; transport failure: prior Doc kept, FetchedAt bumped only transportRetryBackoff.
 	refreshOutcomeSkipped     = "skipped"      // throttled: fresh cache, no request made.
 )
 
@@ -210,10 +221,14 @@ func RefreshRemoteCacheForce(ctx context.Context) (RefreshResult, error) {
 //
 // Failure is absorbed, not surfaced: a network error, timeout, non-200 status,
 // oversized/garbage body, or a doc that fails the schema/sanity check all keep
-// the previous Doc+ETag and only bump FetchedAt — so a broken endpoint degrades
-// to "keep serving the last good table" and is retried at most once per 24h. A
-// 304 keeps the Doc and bumps FetchedAt. It returns an error only for a
-// genuinely local failure (cache-dir create, lock, or write).
+// the previous Doc+ETag — so a broken endpoint degrades to "keep serving the
+// last good table". A response from the source (304, non-200, garbage body)
+// bumps FetchedAt a full remoteRefreshInterval, since the source is reachable
+// and simply has nothing usable right now. A transport-level failure (network
+// error, timeout, connection dropped mid-read) instead bumps FetchedAt only
+// transportRetryBackoff, since it says nothing about the source itself — see
+// fetchRemote. It returns an error only for a genuinely local failure
+// (cache-dir create, lock, or write).
 func refreshRemoteCache(ctx context.Context, force bool) (RefreshResult, error) {
 	res := RefreshResult{SourceURL: remoteURL(), Outcome: refreshOutcomeSkipped}
 
@@ -268,9 +283,11 @@ func fillResultFromCache(res *RefreshResult, rc *RemoteCache) {
 }
 
 // fetchRemote performs the conditional HTTP request and folds the outcome into a
-// new RemoteCache derived from prev. Every outcome bumps FetchedAt. It never
-// returns an error — the worst case is "keep prev's Doc+ETag", but only when
-// prev is actually from the source about to be queried.
+// new RemoteCache derived from prev. Every outcome bumps FetchedAt — to "now"
+// for a response from the source, to a short retry floor (via transportFailure)
+// for a transport-level failure. It never returns an error — the worst case is
+// "keep prev's Doc+ETag", but only when prev is actually from the source about
+// to be queried.
 func fetchRemote(ctx context.Context, prev *RemoteCache) (*RemoteCache, string) {
 	url := remoteURL()
 	// prev may be from a DIFFERENT source (ENTIRE_PRICING_URL changed since it
@@ -307,7 +324,9 @@ func fetchRemote(ctx context.Context, prev *RemoteCache) (*RemoteCache, string) 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return out, refreshOutcomeUnchanged
+		// Timeout, dial failure, connection refused/reset — we don't know
+		// whether the source is even reachable, so retry sooner.
+		return transportFailure(out), refreshOutcomeUnchanged
 	}
 	defer resp.Body.Close()
 
@@ -320,7 +339,9 @@ func fetchRemote(ctx context.Context, prev *RemoteCache) (*RemoteCache, string) 
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, remoteMaxBytes))
 	if err != nil {
-		return out, refreshOutcomeUnchanged
+		// Connection dropped mid-read: same "source reachability unknown" case
+		// as the client.Do error above, not a well-formed-but-unusable response.
+		return transportFailure(out), refreshOutcomeUnchanged
 	}
 	var doc fileSchema
 	if err := json.Unmarshal(body, &doc); err != nil {
@@ -332,6 +353,14 @@ func fetchRemote(ctx context.Context, prev *RemoteCache) (*RemoteCache, string) 
 	out.Doc = &doc
 	out.ETag = resp.Header.Get("ETag")
 	return out, refreshOutcomeUpdated
+}
+
+// transportFailure backdates out.FetchedAt to a short retry floor instead of
+// "now", for a transport-level failure — see remoteRefreshInterval and
+// transportRetryBackoff.
+func transportFailure(out *RemoteCache) *RemoteCache {
+	out.FetchedAt = time.Now().Add(-(remoteRefreshInterval - transportRetryBackoff))
+	return out
 }
 
 // remoteDocUsable is the sanity gate a freshly-fetched doc must pass before it

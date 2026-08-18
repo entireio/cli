@@ -110,7 +110,22 @@ func TestRefreshRemoteCache_TimeoutKeepsPrior(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, refreshOutcomeUnchanged, res.Outcome)
 	assert.InDelta(t, priorInputRate, priorInput(t), 1e-9, "prior doc must be kept on timeout")
-	assert.WithinDuration(t, time.Now(), loadRemoteCache().FetchedAt, time.Minute)
+
+	// Regression (finding: "one slow pricing fetch costs a full day of
+	// staleness"): a transport-level failure (this timeout) must NOT reset
+	// FetchedAt to "now" — that would block any retry for a full
+	// remoteRefreshInterval over one slow request. It backdates to the short
+	// transportRetryBackoff floor instead, so the next periodic trigger
+	// retries well within the day.
+	wantFetchedAt := time.Now().Add(-(remoteRefreshInterval - transportRetryBackoff))
+	assert.WithinDuration(t, wantFetchedAt, loadRemoteCache().FetchedAt, time.Minute)
+
+	// The cache becomes eligible for retry (ShouldRefresh) within
+	// transportRetryBackoff, not the full remoteRefreshInterval — this is the
+	// property the finding asks for, not just the raw FetchedAt value.
+	timeUntilStale := remoteRefreshInterval - time.Since(loadRemoteCache().FetchedAt)
+	assert.LessOrEqual(t, timeUntilStale, transportRetryBackoff+time.Minute,
+		"a transport failure must make the cache eligible for retry within transportRetryBackoff, not the full interval")
 }
 
 func TestRefreshRemoteCache_GarbageKeepsPrior(t *testing.T) {

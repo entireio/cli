@@ -254,10 +254,13 @@ func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {
 	if total == 0 && usage.APICallCount == 0 {
 		return nil
 	}
-	// Cost is intentionally NOT copied from the persisted usage here: this is
-	// live/in-progress session state, not yet checkpointed, so there is no
-	// stored cost to read. Callers apply a local cost estimate via
-	// applyLocalCostEstimate instead.
+	// Cost is intentionally NOT copied from usage here — this function is
+	// shared by the live session-state path (no stored cost exists yet) and
+	// the committed-checkpoint path (a stored spend-time cost may exist).
+	// Callers set it afterward: the checkpoint path prefers usage's persisted
+	// cost (applyCheckpointCost), falling back to a local estimate only when
+	// none was persisted; the live-session path always applies a local
+	// estimate (applyLocalCostEstimate), since it genuinely has none yet.
 	return &sessionTokensUsage{
 		Total:         total,
 		Input:         usage.InputTokens,
@@ -280,12 +283,14 @@ func loadDisplayPricingTable(ctx context.Context) *pricing.Table {
 	return table
 }
 
-// applyLocalCostEstimate replaces a rendered usage's cost with a LOCAL, on-the-fly
-// estimate computed from its token breakdown at current rates, so token commands
-// render a consistent figure for both checkpointed and still-live token usage
-// (see costSourceSuffix / localCostEstimateNote for the labeling). The persisted
-// spend-time cost in checkpoint metadata is unaffected — this is display only.
-// A nil result (nothing priceable) leaves the cost unset so no cost line renders.
+// applyLocalCostEstimate sets a rendered usage's cost to a LOCAL, on-the-fly
+// estimate computed from its token breakdown at current rates (see
+// costSourceSuffix / localCostEstimateNote for the labeling). Used directly for
+// live, not-yet-checkpointed session state, which genuinely has no stored cost
+// yet; applyCheckpointCost uses it only as the fallback for a checkpoint that
+// carries no persisted cost. The persisted spend-time cost in checkpoint
+// metadata is never modified — this is display only. A nil result (nothing
+// priceable) leaves the cost unset so no cost line renders.
 func applyLocalCostEstimate(tokens *sessionTokensUsage, usage *agent.TokenUsage, models []types.ModelUsage, fallbackModel string, table *pricing.Table) {
 	if tokens == nil {
 		return
@@ -455,9 +460,12 @@ func formatPercent(percent float64) string {
 }
 
 // localCostEstimateNote explains that a rendered cost is a CLI-side estimate at
-// today's rates, recomputed from the token breakdown rather than read back from
-// the spend-time cost stored on the checkpoint.
-const localCostEstimateNote = "Cost is a local estimate at current rates; the authoritative cost is computed on the Entire platform."
+// today's rates, recomputed from the token breakdown, for usage that carries no
+// persisted spend-time cost yet (live session state, or a checkpoint written
+// before cost persistence existed). It does not print for a checkpoint's
+// persisted (CostSourceReported) cost — writeTokenCostLine gates on that — since
+// the platform now stores the CLI-reported figure rather than computing its own.
+const localCostEstimateNote = "Cost is a local estimate at current rates for usage that has no persisted spend-time cost yet."
 
 // formatCostUSD renders a locally-estimated cost for display. The value is a
 // current-rate estimate the token command recomputed from the token breakdown,
@@ -509,13 +517,21 @@ func costSourceSuffix(source string) string {
 // writeTokenCostLine emits the "Cost:" line inside a token usage block when a
 // cost is known. Shared by the session and checkpoint text writers. A nil usage
 // or nil cost prints nothing (unknown cost is never rendered as $0.00).
+//
+// localCostEstimateNote prints only when the cost is actually a local estimate
+// (CostSourceEstimated/Mixed, or an unlabeled source). A CostSourceReported
+// cost is the checkpoint's persisted spend-time value, already labeled
+// "(reported)" by formatCostUSD — appending a note about local estimation
+// there would be false.
 func writeTokenCostLine(w io.Writer, tokens *sessionTokensUsage) {
 	if tokens == nil {
 		return
 	}
 	if line := formatCostUSD(tokens.CostUSD, tokens.CostSource); line != "" {
 		fmt.Fprintf(w, "Cost:  %s\n", line)
-		fmt.Fprintf(w, "  %s\n", localCostEstimateNote)
+		if tokens.CostSource != types.CostSourceReported {
+			fmt.Fprintf(w, "  %s\n", localCostEstimateNote)
+		}
 	}
 }
 

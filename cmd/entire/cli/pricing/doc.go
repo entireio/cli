@@ -45,9 +45,14 @@
 //     bill at 2x input (AnthropicCacheWrite1hMultiplier). Claude Code transcripts
 //     split the two via cache_creation.ephemeral_1h_input_tokens /
 //     ephemeral_5m_input_tokens; the 1h portion is parsed into
-//     TokenUsage.CacheCreation1hTokens and priced at 2x, so the earlier
-//     1h under-estimate is resolved. A model carrying an explicit cache-write rate
-//     uses that rate for both portions (there is no separate 1h rate).
+//     TokenUsage.CacheCreation1hTokens and priced at 2x. The two TTLs are
+//     resolved independently: an Anthropic entry's explicit 5-minute rate
+//     (CacheWritePerMTok) does NOT also cover the 1-hour portion, because the two
+//     are independent multiples of the input rate rather than one derived from
+//     the other — a rate source that mirrors upstream list prices without
+//     distinguishing the two TTLs (e.g. a remote catalog) must not silently
+//     disable the 1-hour premium. A source that does know a distinct 1-hour rate
+//     sets CacheWrite1hPerMTok, which wins outright.
 //
 //   - Fast mode: turns billed at the fast-mode premium (usage.speed == "fast")
 //     are priced here at standard rates — another known under-estimate — because
