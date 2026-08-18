@@ -1,6 +1,11 @@
 // Package uiform builds huh forms wired to Entire's standard theme and
-// accessibility behavior. Centralises the Theme()+WithAccessible() recipe
-// so picker UI stays consistent across callers.
+// accessibility behavior. It centralizes form construction so picker UI stays
+// consistent across callers.
+//
+// Choose fields by selection semantics:
+//   - Radio is for single-select questions: exactly one option is the value.
+//   - Checklist is for multi-select questions: options are independently toggled.
+//   - ActionSelect is for commands such as Save or Cancel, not data selection.
 package uiform
 
 import (

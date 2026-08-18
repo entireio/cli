@@ -53,8 +53,10 @@ func EqualValues[T comparable](a, b []T) bool {
 	return true
 }
 
-// Radio is a single-choice field whose row cursor is independent from its
-// committed value. Arrows move the cursor, Space selects, and Enter continues.
+// Radio is the standard single-select component. Use it when exactly one of
+// several mutually exclusive options is the value; use Checklist when options
+// can be selected independently. Its row cursor is separate from its committed
+// value: arrows move the cursor, Space selects, and Enter continues.
 type Radio[T comparable] struct {
 	*huh.Select[T]
 
@@ -68,6 +70,8 @@ type Radio[T comparable] struct {
 	sectionGap    bool
 }
 
+// NewRadio creates a single-select field. Options should have plain labels;
+// Radio adds and updates the shared ○/● selection markers.
 func NewRadio[T comparable](title, description string, options []huh.Option[T], value *T) *Radio[T] {
 	field := &Radio[T]{value: value, committed: *value, highlighted: *value, title: title, sectionGap: true}
 	field.Select = huh.NewSelect[T]().
@@ -186,7 +190,9 @@ func (field *Radio[T]) commitHighlighted() {
 	}
 }
 
-// Checklist is a checkbox field with shared focus rendering and change hooks.
+// Checklist is the standard checkbox-based multi-select component. Use it when
+// each option can be toggled independently; use Radio for one mutually exclusive
+// choice. It allows zero or more values unless requireOne is set by NewChecklist.
 type Checklist[T comparable] struct {
 	*huh.MultiSelect[T]
 
@@ -196,6 +202,8 @@ type Checklist[T comparable] struct {
 	title            string
 }
 
+// NewChecklist creates a multi-select checkbox field. When requireOne is true,
+// the user must keep at least one option selected.
 func NewChecklist[T comparable](title, description string, options []huh.Option[T], selected *[]T, requireOne bool) *Checklist[T] {
 	field := &Checklist[T]{value: selected, title: title}
 	multi := huh.NewMultiSelect[T]().
@@ -261,14 +269,15 @@ func (field *Checklist[T]) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
 	return field, cmd
 }
 
-// ActionSelect is a plain action list with the same focus behavior as the
-// radio and checklist primitives.
+// ActionSelect is a menu of commands such as Save or Cancel. It is not a
+// single-select data field; use Radio when the chosen option is configuration.
 type ActionSelect[T comparable] struct {
 	*huh.Select[T]
 
 	title string
 }
 
+// NewActionSelect creates an action menu with no radio or checkbox markers.
 func NewActionSelect[T comparable](title, description string, options []huh.Option[T], value *T) *ActionSelect[T] {
 	field := &ActionSelect[T]{title: title}
 	field.Select = huh.NewSelect[T]().
