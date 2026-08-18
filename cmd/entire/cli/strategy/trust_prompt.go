@@ -22,7 +22,6 @@ const (
 	TrustGranted                      // consent recorded — the caller re-evaluates the gate, never reuses this as a boolean
 )
 
-// trustChoice is one answer at the trust prompt.
 type trustChoice string
 
 const (

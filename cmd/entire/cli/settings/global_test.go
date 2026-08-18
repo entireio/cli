@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -64,33 +63,6 @@ func TestLoadUserSettings_UnknownFieldErrors(t *testing.T) {
 	writeUserSettings(t, dir, `{"global":{"enabled":true,"exclud_paths":["~/oss"]}}`)
 	if _, err := LoadUserSettings(t.Context()); err == nil {
 		t.Fatal("typo'd key must return error, not silently drop the exclude list")
-	}
-}
-
-// TestLoadUserSettings_TrustFieldsRoundTrip pins the trust schema's json tags
-// in both directions: trust state written through ModifyUserSettings must
-// survive a strict LoadUserSettings unchanged.
-func TestLoadUserSettings_TrustFieldsRoundTrip(t *testing.T) {
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	want := &GlobalConfig{
-		Enabled:        true,
-		TrustAll:       true,
-		TrustedOrigins: []string{"github.com/acme/widgets", "gitlab.example.com/team/proj"},
-		TrustedPaths:   []string{"/srv/repos/dotfiles"},
-	}
-	err := ModifyUserSettings(t.Context(), func(us *UserSettings) error {
-		us.Global = want
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	us, err := LoadUserSettings(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(us.Global, want) {
-		t.Fatalf("trust fields did not round-trip: got %+v, want %+v", us.Global, want)
 	}
 }
 

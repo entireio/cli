@@ -173,8 +173,6 @@ func GetRemotePushURLsInDirIfSet(ctx context.Context, dir, remoteName string) (u
 	return getAllRemoteConfig(ctx, dir, remoteName, "pushurl")
 }
 
-// getAllRemoteConfig implements the shared `git config --get-all
-// remote.<name>.<key>` lookup behind the two exported IfSet variants.
 func getAllRemoteConfig(ctx context.Context, dir, remoteName, key string) (urls []string, found bool, err error) {
 	cmd := exec.CommandContext(ctx, "git", "config", "--get-all", "remote."+remoteName+"."+key)
 	if dir != "" {
