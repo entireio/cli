@@ -16,9 +16,17 @@ const testLoginComplete = "complete"
 
 // mockClient implements deviceAuthClient for unit tests.
 type mockClient struct {
-	start     *auth.DeviceAuthStart
 	responses []pollResponse
 	calls     int
+
+	start    *auth.DeviceAuthStart
+	startErr error
+	baseURL  string
+
+	gotTokenIssuer    string
+	tokenIssuerCalls  int
+	tokenIssuerErr    error
+	pollDeviceCodeArg string
 }
 
 type pollResponse struct {
@@ -27,17 +35,30 @@ type pollResponse struct {
 }
 
 func (m *mockClient) StartDeviceAuth(_ context.Context) (*auth.DeviceAuthStart, error) {
-	if m.start != nil {
-		return m.start, nil
+	if m.start == nil && m.startErr == nil {
+		return nil, errors.New("not implemented in mock")
 	}
-	return nil, errors.New("not implemented in mock")
+	return m.start, m.startErr
 }
 
 func (m *mockClient) BaseURL() string {
+	if m.baseURL != "" {
+		return m.baseURL
+	}
 	return "http://test"
 }
 
-func (m *mockClient) PollDeviceAuth(_ context.Context, _ string) (*auth.DeviceAuthPoll, error) {
+func (m *mockClient) UseTokenIssuer(origin string) error {
+	m.tokenIssuerCalls++
+	if m.tokenIssuerErr != nil {
+		return m.tokenIssuerErr
+	}
+	m.gotTokenIssuer = origin
+	return nil
+}
+
+func (m *mockClient) PollDeviceAuth(_ context.Context, deviceCode string) (*auth.DeviceAuthPoll, error) {
+	m.pollDeviceCodeArg = deviceCode
 	if m.calls >= len(m.responses) {
 		return nil, errors.New("unexpected poll call")
 	}
@@ -319,12 +340,27 @@ type fakeBrowserFlow struct {
 	exchAccess    string
 	exchRefresh   string
 	exchErr       error
+	issuer        string
 
-	gotExchangeCode string
-	closed          bool
+	gotExchangeCode  string
+	gotTokenIssuer   string
+	tokenIssuerCalls int
+	tokenIssuerErr   error
+	closed           bool
 }
 
 func (f *fakeBrowserFlow) AuthorizationURL() string { return f.authURL }
+
+func (f *fakeBrowserFlow) Issuer() string { return f.issuer }
+
+func (f *fakeBrowserFlow) UseTokenIssuer(origin string) error {
+	f.tokenIssuerCalls++
+	if f.tokenIssuerErr != nil {
+		return f.tokenIssuerErr
+	}
+	f.gotTokenIssuer = origin
+	return nil
+}
 
 func (f *fakeBrowserFlow) Wait(ctx context.Context) (string, error) {
 	if f.waitUntilDone {

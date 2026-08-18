@@ -274,6 +274,7 @@ mise run dev
 
 # In this repo, point the CLI at the local API. The login flow targets
 # the local server via --server (the default is the production
+# auth.entire.io, which dispatches to a regional login server such as
 # us.auth.entire.io).
 cd ../cli
 export ENTIRE_API_BASE_URL=http://localhost:8787

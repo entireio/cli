@@ -18,7 +18,7 @@ accept a core's JWTs.
 
 | Role | Service (prod / staging) | Hit by | Trusted-core discovery |
 |---|---|---|---|
-| **Core** — IdP **and** control-plane API, co-located | `entire-core` (`us.auth.entire.io`) | `org` / `repo` / `project` / `grant`, `auth *`, `login` | none needed — the host *is* the core |
+| **Core** — IdP **and** control-plane API, co-located | `entire-core`, per region (`us.auth.entire.io`, `eu.auth.entire.io`), fronted by the apex `auth.entire.io` | `org` / `repo` / `project` / `grant`, `auth *`, `login` | none needed — the host *is* the core |
 | **Resource: git cluster** | `entire-server` / `entiredb` | `git-remote-entire` (clone/push) | `/.well-known/entire-cluster.json` → `core_urls` |
 | **Resource: web/data API** | `entire.io` (`partial.to`) | `activity` / `search` / `trail` / `dispatch` | `/.well-known/entire-api.json` → `trusted_issuers` (audience = the host origin) |
 
@@ -26,6 +26,38 @@ accept a core's JWTs.
 CLIs) stores each login as `{Name, CoreURL, Handle, KeychainService}` plus a
 `CurrentContext` pointer. `CoreURL` is the JWT `iss` — the core that minted the
 token. `entire auth use <ctx>` flips `CurrentContext`.
+
+### `entire login`: the apex dispatches, a region issues
+
+`entire login --server` defaults to the apex `https://auth.entire.io`
+(`api.DefaultAuthBaseURL`). The apex is a **dispatcher, not an issuer**: it
+serves `/authorize` and `/device_authorization` and redirects each to the
+caller's regional core, and it serves no token endpoint, no discovery
+document, and no JWKS. Only a region mints tokens, with `iss`/`aud` set to
+its own host — so the CLI has to discover the region mid-login and send the
+token request there:
+
+- **Browser (authorization-code) flow.** The apex 302s the browser to the
+  region, which appends the RFC 9207 `iss` parameter to the loopback
+  redirect. `runBrowserLogin` reads it (`BrowserAuthFlow.Issuer()`) and
+  redeems the code at that host (`UseTokenIssuer`). Posting the exchange to
+  the apex would 404.
+- **Device flow.** The apex 307s `POST /device_authorization` to the region
+  (307 preserves the method and body). `DeviceAuthStart.ResponseOrigin`
+  reports the origin that actually answered, and `runLogin` points the token
+  poll at it.
+
+Both handoffs are gated by `issMatches` in `cmd/entire/cli/login.go`, which
+accepts the dialled origin itself or a **strict subdomain of it over https**
+(`auth.entire.io` → `us.auth.entire.io`; never `auth.entire.io.evil.com`, a
+sibling, a different port, or a plaintext downgrade). The same rule validates
+the `iss` claim on the returned token, so the host that receives the
+authorization code and the issuer recorded in `contexts.json` are held to one
+policy.
+
+Nothing downstream of login changes: `RecordLoginContext` keys the context and
+keychain slot on the token's own `iss`, and refresh + RFC 8693 exchange target
+that persisted `CoreURL`. The apex is only ever the entry point.
 
 ## Resolution per call type
 

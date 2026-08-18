@@ -29,6 +29,10 @@ const (
 	schemeHTTPS = "https"
 )
 
+// loginCompleteMsg is the success line for a login whose token came from the
+// host the user dialled. See loginCompleteLine for the dispatched variant.
+const loginCompleteMsg = "✓ Login complete."
+
 const fallbackDeviceAuthPollInterval = time.Second
 const defaultSlowDownBackoff = 5 * time.Second
 const maxPollInterval = 30 * time.Second
@@ -137,6 +141,10 @@ type deviceAuthClient interface {
 	StartDeviceAuth(ctx context.Context) (*auth.DeviceAuthStart, error)
 	PollDeviceAuth(ctx context.Context, deviceCode string) (*auth.DeviceAuthPoll, error)
 	BaseURL() string
+	// UseTokenIssuer points subsequent token polls at origin instead of
+	// BaseURL, for a login server that dispatched the device authorization
+	// to a regional host. Callers must vet origin first (see adoptIssuer).
+	UseTokenIssuer(origin string) error
 }
 
 // browserAuthFlow abstracts an in-progress loopback authorization-code
@@ -145,6 +153,12 @@ type deviceAuthClient interface {
 type browserAuthFlow interface {
 	AuthorizationURL() string
 	Wait(ctx context.Context) (code string, err error)
+	// Issuer is the RFC 9207 iss parameter from the loopback callback, or
+	// "" when the login server sent none. Unvalidated — see adoptIssuer.
+	Issuer() string
+	// UseTokenIssuer redeems the authorization code at origin instead of
+	// the dialled login server. Callers must vet origin first.
+	UseTokenIssuer(origin string) error
 	Exchange(ctx context.Context, code string) (accessToken, refreshToken string, err error)
 	Close() error
 }
@@ -242,6 +256,20 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 		return fmt.Errorf("start login: %w", err)
 	}
 
+	// The apex login server redirects /device_authorization to a regional
+	// one and serves no token endpoint itself, so the poll has to follow the
+	// device code to whichever host actually answered. Do this before any
+	// output: nothing is shown to the user until we know the poll target.
+	issuer, err := adoptIssuer(start.ResponseOrigin, client.BaseURL())
+	if err != nil {
+		return err
+	}
+	if issuer != "" {
+		if err := client.UseTokenIssuer(issuer); err != nil {
+			return fmt.Errorf("target login server %s: %w", issuer, err)
+		}
+	}
+
 	approvalURL := chooseApprovalURL(start)
 	fmt.Fprintf(outW, "Device code: %s\n", start.UserCode)
 	printLoginURL(outW, deviceLoginURLLabel, approvalURL)
@@ -269,7 +297,7 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 		return fmt.Errorf("complete login: %w", err)
 	}
 
-	return persistLogin(outW, client.BaseURL(), result.accessToken, result.refreshToken)
+	return persistLogin(outW, client.BaseURL(), issuer, result.accessToken, result.refreshToken)
 }
 
 type loginTokens struct {
@@ -373,19 +401,55 @@ func runBrowserLogin(ctx context.Context, outW, errW io.Writer, flow browserAuth
 		return fmt.Errorf("complete login: %w", err)
 	}
 
+	// RFC 9207: a dispatching login server redirected the browser to the
+	// region that issued this code, and named itself on the callback. Only
+	// that region will redeem the code — the apex serves no token endpoint —
+	// so the exchange has to follow it, once the host clears adoptIssuer.
+	issuer, err := adoptIssuer(flow.Issuer(), baseURL)
+	if err != nil {
+		return err
+	}
+	if issuer != "" {
+		if err := flow.UseTokenIssuer(issuer); err != nil {
+			return fmt.Errorf("target login server %s: %w", issuer, err)
+		}
+	}
+
 	token, refreshToken, err := flow.Exchange(ctx, code)
 	if err != nil {
 		return fmt.Errorf("complete login: %w", err)
 	}
 
-	return persistLogin(outW, baseURL, token, refreshToken)
+	return persistLogin(outW, baseURL, issuer, token, refreshToken)
 }
 
 // persistLogin validates the freshly-issued access token and records it in
 // the shared contexts.json credential model. Shared by the device-code and
 // browser flows.
-func persistLogin(outW io.Writer, baseURL, token, refreshToken string) error {
-	if err := validateReceivedToken(token, baseURL, time.Now()); err != nil {
+//
+// dialled is the host the user asked for; adoptedIssuer is the origin a
+// dispatching login server handed the flow off to, or "" when there was no
+// handoff. The token's iss is validated against the handoff target when there
+// was one, and against the dialled host otherwise — the same rule that gated
+// the handoff, now applied to the token it produced.
+//
+// Scoping to the handoff target matters because iss names the *signer*, and a
+// verifier resolves JWKS from it. Only the region that minted the token can
+// claim it, and that is the region that answered the handoff — so a token
+// arriving from us.auth.entire.io while claiming eu.auth.entire.io is
+// misconfiguration, even though both sit under the dialled apex. Validating
+// against the apex alone would wave that through and leave a context whose
+// every later refresh fails against a region that never issued it.
+//
+// A jurisdiction the account is not homed in can legitimately mint (the apex
+// geo-routes the device flow, so an AU-homed account can be served by EU); the
+// home region travels in the home_jurisdiction claim, not in iss.
+func persistLogin(outW io.Writer, dialled, adoptedIssuer, token, refreshToken string) error {
+	expected := dialled
+	if adoptedIssuer != "" {
+		expected = adoptedIssuer
+	}
+	if err := validateReceivedToken(token, expected, time.Now()); err != nil {
 		return fmt.Errorf("reject login token: %w", err)
 	}
 
@@ -396,8 +460,26 @@ func persistLogin(outW io.Writer, baseURL, token, refreshToken string) error {
 		return fmt.Errorf("save login: %w", withHeadlessStoreHint(err))
 	}
 
-	fmt.Fprintln(outW, "✓ Login complete.")
+	fmt.Fprintln(outW, loginCompleteLine(token, dialled))
 	return nil
+}
+
+// loginCompleteLine names the issuer when it differs from the host the user
+// asked for. With a dispatching login server the two legitimately differ,
+// and the issuer — not the dialled host — is what gets persisted as the
+// context's CoreURL and targeted by every later refresh and token exchange,
+// so it's worth one line of confirmation. Falls back to the plain message
+// when the claims don't parse; validateReceivedToken has already accepted
+// the token by this point, so this is display only.
+func loginCompleteLine(token, dialled string) string {
+	claims, err := tokens.ParseClaims(token)
+	if err != nil {
+		return loginCompleteMsg
+	}
+	if iss := api.OriginOnly(claims.Issuer); iss != "" && iss != api.OriginOnly(dialled) {
+		return fmt.Sprintf("✓ Login complete (signed in at %s).", iss)
+	}
+	return loginCompleteMsg
 }
 
 // withHeadlessStoreHint appends file-token-store guidance to a credential
@@ -461,16 +543,96 @@ func validateReceivedToken(rawToken, issuerURL string, now time.Time) error {
 	return nil
 }
 
-// issMatches reports whether claimed equals expected after stripping path/
-// query/fragment via api.OriginOnly, so "https://issuer/" and "https://issuer"
-// match. The caller has already rejected an empty iss claim.
+// issMatches reports whether an issuer identifier is one this CLI accepts
+// for a login dialled at expected. Both sides are stripped to a bare origin
+// via api.OriginOnly first, so "https://issuer/" and "https://issuer" match.
+// The caller has already rejected an empty iss claim.
+//
+// Two shapes are accepted:
+//
+//   - exact origin equality (the single-region case, and any dev/loopback
+//     login server), and
+//   - claimed is a strict subdomain of expected over https — the production
+//     shape, where https://auth.entire.io is a dispatcher that hands the
+//     login off to a regional login server such as
+//     https://us.auth.entire.io, which is what actually mints the token.
+//
+// The subdomain rule is a delegation rule, not a string-prefix one:
+// "auth.entire.io.evil.com" does not end in ".auth.entire.io", and a sibling
+// like "entire.io" is not below it either. https is required so a
+// dispatching host can never widen trust to a plaintext origin, and the port
+// must match so ":443" and ":8443" stay distinct issuers.
 func issMatches(claimed, expected string) error {
 	normClaimed := api.OriginOnly(claimed)
 	normExpected := api.OriginOnly(expected)
-	if normClaimed != normExpected {
-		return fmt.Errorf("iss mismatch: token claims %q, expected %q", normClaimed, normExpected)
+	if normClaimed == normExpected {
+		return nil
 	}
-	return nil
+	if isDelegatedIssuer(normClaimed, normExpected) {
+		return nil
+	}
+	// Only offer the delegation shape when this origin could ever delegate.
+	// A plaintext dev/loopback login server never can, so naming a subdomain
+	// there would send the reader after a host that gets rejected too.
+	if canDelegate(normExpected) {
+		return fmt.Errorf("iss mismatch: token claims %q, expected %q or a subdomain of it", normClaimed, normExpected)
+	}
+	return fmt.Errorf("iss mismatch: token claims %q, expected %q", normClaimed, normExpected)
+}
+
+// canDelegate reports whether expected is an origin isDelegatedIssuer could
+// accept any subdomain of at all — that is, an https origin with a host.
+func canDelegate(expected string) bool {
+	u, err := url.Parse(expected)
+	return err == nil && u.Scheme == schemeHTTPS && u.Hostname() != ""
+}
+
+// isDelegatedIssuer reports whether claimed is an https origin whose host
+// sits strictly below expected's host, on the same port. Both arguments are
+// already api.OriginOnly-normalised (lowercase, default port dropped, no
+// path/query/fragment).
+func isDelegatedIssuer(claimed, expected string) bool {
+	c, cErr := url.Parse(claimed)
+	e, eErr := url.Parse(expected)
+	if cErr != nil || eErr != nil {
+		return false
+	}
+	// https only, on both sides: a dispatcher reached over TLS must not be
+	// able to redirect the token exchange to a plaintext origin, and a
+	// plaintext (dev/loopback) login server gets no delegation at all.
+	if c.Scheme != schemeHTTPS || e.Scheme != schemeHTTPS {
+		return false
+	}
+	if c.Port() != e.Port() {
+		return false
+	}
+	claimedHost, expectedHost := c.Hostname(), e.Hostname()
+	if claimedHost == "" || expectedHost == "" {
+		return false
+	}
+	// The leading dot is what makes this a delegation check: it forces a
+	// label boundary, so neither "xauth.entire.io" nor "auth.entire.io.evil.com"
+	// qualifies under "auth.entire.io".
+	return strings.HasSuffix(claimedHost, "."+expectedHost)
+}
+
+// adoptIssuer decides whether a login started against dialled may be
+// completed at the issuer the login server named, and returns the origin the
+// token request should go to ("" meaning "no change").
+//
+// This is the security-critical half of the dispatching-login-server
+// support: the returned origin receives the authorization code (or the
+// device code) and hands back the user's tokens, so it is gated by exactly
+// the same rule as the iss claim on the token itself.
+func adoptIssuer(claimed, dialled string) (string, error) {
+	normClaimed := api.OriginOnly(strings.TrimSpace(claimed))
+	if normClaimed == "" || normClaimed == api.OriginOnly(dialled) {
+		return "", nil
+	}
+	if err := issMatches(normClaimed, dialled); err != nil {
+		return "", fmt.Errorf("login server %s handed off to an unacceptable issuer: %w", api.OriginOnly(dialled), err)
+	}
+	return normClaimed, nil
 }
 
 func waitForApproval(ctx context.Context, poller deviceAuthClient, deviceCode string, expiresIn int, interval, slowDownBackoff time.Duration) (accessToken, refreshToken string, err error) {

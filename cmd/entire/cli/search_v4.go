@@ -523,7 +523,7 @@ func dedupSemanticResults(merged []search.Result) ([]search.Result, map[string]i
 	dupesByType := make(map[string]int)
 	deduped := merged[:0]
 	for _, r := range merged {
-		id := r.ResultID()
+		id := r.DedupID()
 		if id == "" {
 			deduped = append(deduped, r)
 			continue
