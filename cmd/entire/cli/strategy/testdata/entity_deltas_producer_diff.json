@@ -1,0 +1,137 @@
+{
+  "_comment": "CAPTURED OUTPUT - do not hand-edit. This is the verbatim `entire-graph diff --json` payload from the real producer binary, not a hand-written approximation. A hand-written fixture is how the producer_version mapping bug survived: the fake used a top-level \"version\" key the producer has never emitted. Keys beginning with _ are capture provenance and are ignored by the decoder along with every other unknown key.",
+  "_producer_commit": "entire-graph b6ddbb722296b95fbbb34cd7e010460977b1240f (2026-08-18)",
+  "_capture_recipe": "go build ./cmd/entire-graph in the entire-graph repo, then run `entire-graph diff --base <base> --head <head> --repo . --json` over a scratch repo whose single commit adds a function, deletes a type, edits a body, changes a signature, renames a function, moves a function to another file, moves+renames a second function, and git-mv's a third file whose contents also change.",
+  "_covers": [
+    "added (after_start_line only)",
+    "removed (before_start_line ONLY - no after_start_line)",
+    "body_changed and signature_changed (both fold to \"modified\")",
+    "renamed (old_name/new_name)",
+    "moved (entity-level old_path/new_path)",
+    "moved AND renamed in one change (old_name on a non-\"renamed\" type)",
+    "file-level old_path with an entity that has none (git-renamed file)",
+    "top-level producer_version and schema_version"
+  ],
+  "base": "08d820015345455cff92fd37b48065e71819c66a",
+  "head": "a7c02cdbc0f11091655a24b6769e2d7d4c8e0b61",
+  "files": [
+    {
+      "path": "pkg/reloc/b.go",
+      "status": "M",
+      "language": "Go",
+      "changes": [
+        {
+          "type": "moved",
+          "kind": "function",
+          "name": "Relocated",
+          "old_signature": "func Relocated(items []int) int",
+          "new_signature": "func Relocated(items []int) int",
+          "old_path": "pkg/reloc/a.go",
+          "new_path": "pkg/reloc/b.go",
+          "before_start_line": 3,
+          "after_start_line": 5,
+          "dependents_count": 0,
+          "similarity": 1,
+          "reconciliation": "MOVED"
+        },
+        {
+          "type": "moved",
+          "kind": "function",
+          "name": "ShiftedRenamed",
+          "old_name": "Shifted",
+          "new_name": "ShiftedRenamed",
+          "old_signature": "func Shifted(name string, count int) string",
+          "new_signature": "func ShiftedRenamed(name string, count int) string",
+          "old_path": "pkg/reloc/a.go",
+          "new_path": "pkg/reloc/b.go",
+          "before_start_line": 17,
+          "after_start_line": 17,
+          "dependents_count": 0,
+          "similarity": 1,
+          "reconciliation": "MOVED"
+        }
+      ]
+    },
+    {
+      "path": "pkg/renamed/new.go",
+      "old_path": "pkg/renamed/old.go",
+      "status": "R",
+      "language": "Go",
+      "changes": [
+        {
+          "type": "body_changed",
+          "kind": "function",
+          "name": "Inside",
+          "before_start_line": 3,
+          "after_start_line": 3,
+          "dependents_count": 0
+        }
+      ]
+    },
+    {
+      "path": "pkg/svc/handler.go",
+      "status": "M",
+      "language": "Go",
+      "changes": [
+        {
+          "type": "added",
+          "kind": "function",
+          "name": "NewHandler",
+          "new_signature": "func NewHandler() *Handler",
+          "after_start_line": 5,
+          "dependents_count": 0
+        },
+        {
+          "type": "removed",
+          "kind": "type",
+          "name": "LegacyConfig",
+          "old_signature": "LegacyConfig struct { A int }",
+          "before_start_line": 5,
+          "dependents_count": 0
+        },
+        {
+          "type": "removed",
+          "kind": "field",
+          "name": "LegacyConfig.A",
+          "old_signature": "A int",
+          "before_start_line": 6,
+          "dependents_count": 0
+        },
+        {
+          "type": "body_changed",
+          "kind": "method",
+          "name": "Handler.Serve",
+          "before_start_line": 9,
+          "after_start_line": 9,
+          "dependents_count": 0
+        },
+        {
+          "type": "signature_changed",
+          "kind": "function",
+          "name": "Parse",
+          "old_signature": "func Parse(s string)",
+          "new_signature": "func Parse(s string) error",
+          "before_start_line": 13,
+          "after_start_line": 14,
+          "dependents_count": 0
+        },
+        {
+          "type": "renamed",
+          "kind": "function",
+          "name": "compute",
+          "old_name": "oldCompute",
+          "new_name": "compute",
+          "old_signature": "func oldCompute(a int) int",
+          "new_signature": "func compute(a int) int",
+          "before_start_line": 17,
+          "after_start_line": 19,
+          "dependents_count": 0,
+          "similarity": 1,
+          "reconciliation": "RENAMED"
+        }
+      ]
+    }
+  ],
+  "schema_version": "1.1",
+  "producer_version": "dev"
+}

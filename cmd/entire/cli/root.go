@@ -157,6 +157,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newSendAnalyticsCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
 	cmd.AddCommand(newRefreshTrailEnablementCmd())
+	cmd.AddCommand(newEntityDeltasCmd())
 
 	// Experimental command (developer-only visibility; setup/tune runners).
 	experimental.Register(cmd, newRunnerCmd()) // 'runner' (experimental)

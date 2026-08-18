@@ -428,7 +428,6 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		InvestigateRunID:            state.InvestigateRunID,
 		InvestigateTopic:            state.InvestigateTopic,
 	}
-
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")
 	if err := store.Write(writeCtx, cpkg.Session(writeOpts)); err != nil {
@@ -438,6 +437,11 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}
 	writeCommittedSpan.End()
 	writeV1Duration := time.Since(writeV1Start)
+
+	// Opt-in entity deltas are computed and attached AFTER the checkpoint
+	// exists, by a detached child — see entity_deltas.go. This call forks and
+	// returns; it yields nothing and can fail nothing.
+	scheduleEntityDeltas(ctx, logCtx, repo, o, checkpointID, state.SessionID, attrBase, writeOpts.FilesTouched)
 
 	// Deferred prompt-window reset: a checkpoint was written, so the window base
 	// must be re-anchored — but not now. We defer until the next counted turn (in

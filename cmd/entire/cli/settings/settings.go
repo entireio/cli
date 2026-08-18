@@ -146,6 +146,13 @@ type EntireSettings struct {
 	// should include a vercel.json that disables deployments for Entire branches.
 	Vercel bool `json:"vercel,omitempty"`
 
+	// EntityDeltas opts into recording which code entities (functions, classes,
+	// types) changed between a session's base commit and HEAD alongside each
+	// persistent checkpoint. Off by default; requires the entire-graph plugin
+	// binary on $PATH. The deltas are computed and attached out of band, after
+	// the checkpoint is written — see strategy.scheduleEntityDeltas.
+	EntityDeltas bool `json:"entity_deltas,omitempty"`
+
 	// SummaryTimeoutSeconds is an optional hard deadline (in seconds) for
 	// `entire explain --generate` summary generation. Zero or negative means
 	// "unset" -- falls back to the per-run --summary-timeout-seconds flag
@@ -980,6 +987,9 @@ func mergeScalarFields(settings *EntireSettings, raw map[string]json.RawMessage)
 	if err := mergeRawBool(raw, "vercel", &settings.Vercel); err != nil {
 		return err
 	}
+	if err := mergeRawBool(raw, "entity_deltas", &settings.EntityDeltas); err != nil {
+		return err
+	}
 	if err := mergeRawBoolPtr(raw, "telemetry", &settings.Telemetry); err != nil {
 		return err
 	}
@@ -1384,6 +1394,51 @@ func IsImageExternalizationEnabled(ctx context.Context) bool {
 		return false
 	}
 	return s.Redaction != nil && s.Redaction.ExternalizeImages
+}
+
+// EnvEntityDeltas is the tri-state env override for the entity_deltas setting.
+const EnvEntityDeltas = "ENTIRE_ENTITY_DELTAS"
+
+// IsEntityDeltasEnabled reports whether a condensed session should record the
+// code entities (functions, classes, types) that changed between its base
+// commit and HEAD. Opt-in via the entity_deltas setting. Off by default: it
+// shells out to the entire-graph plugin binary.
+//
+// ENTIRE_ENTITY_DELTAS is a TRI-STATE override, unlike the enable-only
+// ENTIRE_EXTERNALIZE_IMAGES above:
+//
+//	1/true/yes/on   force ON  regardless of settings
+//	0/false/no/off  force OFF regardless of settings (the kill switch: a repo
+//	                whose settings enable the feature can still be opted out
+//	                per-shell, per-CI-job, or per-agent-invocation)
+//	unset, empty,
+//	or unrecognized fall through to the entity_deltas setting
+//
+// There is no other tri-state env override in this package to mirror, so the
+// contract is spelled out here rather than inherited.
+func IsEntityDeltasEnabled(ctx context.Context) bool {
+	if forced, ok := entityDeltasEnvOverride(); ok {
+		return forced
+	}
+	s, err := Load(ctx)
+	if err != nil {
+		return false
+	}
+	return s.EntityDeltas
+}
+
+// entityDeltasEnvOverride decodes EnvEntityDeltas. ok=false means "no opinion"
+// (unset, empty, or a value we don't recognize) — the caller falls through to
+// settings rather than guessing at an intent.
+func entityDeltasEnvOverride() (enabled, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvEntityDeltas))) {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 // IsSummarizeEnabled checks if auto-summarize is enabled in this settings instance.
