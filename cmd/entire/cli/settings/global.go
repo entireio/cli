@@ -429,24 +429,24 @@ func matchesExcludePathExactFold(_ context.Context, entries []string, worktreeRo
 }
 
 // matchesExcludeOrigin reports whether the normalized origin ("host/owner/repo")
-// matches any exclude_origins pattern. An empty origin matches nothing.
-// Patterns are whitespace-trimmed (hand-edited file; a stray space must not
-// silently disable an exclusion) and blank entries are skipped; an invalid
-// glob returns an error so the caller can fail closed.
+// matches any exclude_origins pattern. An empty origin matches nothing, but
+// every non-blank pattern is still validated — GlobalModeActive passes "" to
+// vet the list before the origin lookup, so a malformed entry fails closed
+// identically whether or not the repo has an origin. Patterns are
+// whitespace-trimmed (hand-edited file; a stray space must not silently
+// disable an exclusion) and blank entries are skipped; an invalid glob
+// returns an error so the caller can fail closed.
 func matchesExcludeOrigin(_ context.Context, patterns []string, normalizedOrigin string) (bool, error) {
-	if normalizedOrigin == "" {
-		return false, nil
-	}
 	for i, p := range patterns {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
 		}
-		ok, err := doublestar.Match(strings.ToLower(p), normalizedOrigin)
-		if err != nil {
-			return false, fmt.Errorf("exclude_origins[%d]: invalid glob: %w", i, err)
+		lowered := strings.ToLower(p)
+		if !doublestar.ValidatePattern(lowered) {
+			return false, fmt.Errorf("exclude_origins[%d]: invalid glob: %w", i, doublestar.ErrBadPattern)
 		}
-		if ok {
+		if normalizedOrigin != "" && doublestar.MatchUnvalidated(lowered, normalizedOrigin) {
 			return true, nil
 		}
 	}
@@ -611,6 +611,13 @@ func computeGlobalModeStatus(ctx context.Context) (bool, InactiveReason) {
 		return false, InactiveReasonGlobalExcluded
 	}
 	if len(us.Global.ExcludeOrigins) > 0 {
+		// Vet the pattern list before the origin lookup: a malformed entry
+		// must fail closed the same way whether or not the repo has an origin.
+		if _, err := matchesExcludeOrigin(ctx, us.Global.ExcludeOrigins, ""); err != nil {
+			logging.Debug(ctx, "unusable exclude_origins pattern; treating global mode as inactive (fail closed)",
+				slog.String("error", err.Error()))
+			return false, InactiveReasonGlobalExcluded
+		}
 		origins, found, err := gitremote.GetRemoteURLsInDirIfSet(ctx, root, "origin")
 		if err != nil {
 			logging.Debug(ctx, "origin lookup failed; treating global mode as inactive",
@@ -619,14 +626,15 @@ func computeGlobalModeStatus(ctx context.Context) (bool, InactiveReason) {
 		}
 		// found==false means the repo has NO origin remote: nothing exists
 		// for a pattern to match, so the tier stays active (documented on
-		// ExcludeOrigins). found==true means URLs exist and every one of
-		// them must be checkable.
+		// ExcludeOrigins). found==true means the key exists and every stored
+		// value — including a blank one — must be checkable.
 		if found {
 			for _, origin := range origins {
 				normalized := normalizeOrigin(origin)
 				if normalized == "" {
-					// Present but unparseable (bare path, file://): exclusion
-					// could not be checked against this origin — fail closed.
+					// Present but unparseable (blank, bare path, file://):
+					// exclusion could not be checked against this origin —
+					// fail closed.
 					logging.Debug(ctx, "origin unparseable; treating global mode as inactive (fail closed)")
 					return false, InactiveReasonGlobalExcluded
 				}

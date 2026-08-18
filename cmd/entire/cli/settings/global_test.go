@@ -602,6 +602,17 @@ func TestIsActiveForRepo_FailClosed(t *testing.T) {
 		}
 	})
 
+	t.Run("malformed exclude_origins pattern, repo has no origin", func(t *testing.T) {
+		dir := newGlobalTestRepo(t)
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		writeUserSettings(t, cfg, `{"global":{"enabled":true,"exclude_origins":["["]}}`)
+		t.Chdir(dir)
+		if IsActiveForRepo(t.Context()) {
+			t.Fatal("a malformed exclude_origins pattern must fail closed identically with and without an origin")
+		}
+	})
+
 	t.Run("unparseable present origin", func(t *testing.T) {
 		dir := newGlobalTestRepo(t)
 		addTestRemote(t, dir, "remote", "add", "origin", "/srv/git/secret.git")
