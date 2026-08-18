@@ -10,6 +10,7 @@ type HooksFile struct {
 // HookEvents contains the hook configurations by event type.
 type HookEvents struct {
 	SessionStart     []MatcherGroup `json:"SessionStart,omitempty"`
+	SessionEnd       []MatcherGroup `json:"SessionEnd,omitempty"`
 	UserPromptSubmit []MatcherGroup `json:"UserPromptSubmit,omitempty"`
 	Stop             []MatcherGroup `json:"Stop,omitempty"`
 	PreToolUse       []MatcherGroup `json:"PreToolUse,omitempty"`
@@ -29,15 +30,22 @@ type HookEntry struct {
 	Timeout int    `json:"timeout,omitempty"`
 }
 
-// sessionStartRaw is the JSON structure from SessionStart hooks.
-type sessionStartRaw struct {
+// sessionInfoRaw is the JSON structure shared by the session-scoped hooks,
+// SessionStart and SessionEnd, which differ only in the event they represent.
+//
+// SessionEnd's payload is a strict subset: it carries no model or
+// permission_mode (it fires after teardown, not within a turn), and swaps
+// `source` for a `reason` that is the constant "other" in Codex today, so it
+// cannot distinguish quit from /clear. Unmarshalling is not strict, so the
+// absent fields simply stay zero.
+type sessionInfoRaw struct {
 	SessionID      string  `json:"session_id"`
-	TranscriptPath *string `json:"transcript_path"` // nullable
+	TranscriptPath *string `json:"transcript_path"` // nullable (ephemeral mode)
 	CWD            string  `json:"cwd"`
 	HookEventName  string  `json:"hook_event_name"`
 	Model          string  `json:"model"`
 	PermissionMode string  `json:"permission_mode"`
-	Source         string  `json:"source"` // "startup", "resume", "clear"
+	Source         string  `json:"source"` // SessionStart: "startup", "resume", "clear"
 }
 
 // userPromptSubmitRaw is the JSON structure from UserPromptSubmit hooks.

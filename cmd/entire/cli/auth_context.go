@@ -15,9 +15,9 @@ import (
 // (it authenticates any cluster fronted by its login server) and the
 // control-plane commands (auth status, org/project/repo/grant), which dial the
 // context's core. Switching takes effect on the next operation; resolution
-// recomputes every time. Activity/search/dispatch and legacy trail commands take
-// their host from ENTIRE_API_BASE_URL; ENTIRE_TRAILS_BACKEND=entire-api routes
-// trail commands to the repository's owning cell. All use the active identity.
+// recomputes every time. Activity/search/dispatch take their host from
+// ENTIRE_API_BASE_URL; trail commands route to the repository's owning cell.
+// All use the active identity.
 func newAuthUseCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "use <context>",
@@ -33,9 +33,9 @@ func newAuthUseCmd() *cobra.Command {
 			"ENTIRE_CONTEXT for one shell or one git operation:\n\n" +
 			"  entire --context staging activity\n" +
 			"  ENTIRE_CONTEXT=staging git push\n\n" +
-			"Activity/search/dispatch and legacy trail commands take their host from\n" +
-			"ENTIRE_API_BASE_URL. ENTIRE_TRAILS_BACKEND=entire-api routes trails to the\n" +
-			"repository's owning cell. The selected context supplies the identity.",
+			"Activity/search/dispatch take their host from ENTIRE_API_BASE_URL; trail\n" +
+			"commands route to the repository's owning cell. The selected context\n" +
+			"supplies the identity.",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeContextNames,
 		RunE: func(cmd *cobra.Command, args []string) error {

@@ -265,7 +265,8 @@ type checkpointSyncInfo struct {
 	// dedicated checkpoint_remote mode. Empty when nothing resolved (no
 	// remotes configured, or the fail-closed case).
 	Remote string
-	// Source is config|default|sole|first (resolver values) or "dedicated".
+	// Source is config|observed|default|sole|first (resolver values) or
+	// "dedicated".
 	Source string
 	// Err is the fail-closed misconfiguration message from the resolver.
 	Err string
@@ -351,8 +352,11 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 	default:
 		b.WriteString("\n  Checkpoints sync to: ")
 		b.WriteString(sty.render(sty.cyan, info.Remote))
-		if info.Source == string(strategy.SyncRemoteSourceConfig) {
+		switch info.Source {
+		case string(strategy.SyncRemoteSourceConfig):
 			b.WriteString(sty.render(sty.dim, " (set by checkpoint_push_remote)"))
+		case string(strategy.SyncRemoteSourceObserved):
+			b.WriteString(sty.render(sty.dim, " (follows your branch's push destination)"))
 		}
 	}
 	if info.Unpushed > 0 {
@@ -431,10 +435,13 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("Finalized %d exited session(s) (agent process gone).", n)))
 	}
 
-	// Filter to active sessions only
+	// Filter to active sessions only, per session.State.IsEnded — the same rule
+	// `entire session stop` filters on, so status can't advertise a session that
+	// stop then refuses to list. EndedAt alone is not it: `entire session attach`
+	// sets Phase to ended without stamping EndedAt.
 	var active []*session.State
 	for _, s := range states {
-		if s.EndedAt == nil {
+		if !s.IsEnded() {
 			active = append(active, s)
 		}
 	}
@@ -742,7 +749,7 @@ type statusJSON struct {
 	// org/repo slug in dedicated checkpoint_remote mode. Deliberately not named
 	// checkpoint_remote, which is the existing GitHub-coupled setting.
 	CheckpointSyncRemote       string `json:"checkpoint_sync_remote,omitempty"`
-	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|tracking|default|sole|first|dedicated
+	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|observed|default|sole|first|dedicated
 	CheckpointSyncError        string `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
 	UnpushedCheckpoints        int    `json:"unpushed_checkpoints,omitempty"`
 	Error                      string `json:"error,omitempty"`
@@ -827,7 +834,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 				}
 				byAgent := make(map[string]*agentEntry)
 				for _, st := range states {
-					if st.EndedAt != nil {
+					if st.IsEnded() {
 						continue
 					}
 					agent := string(st.AgentType)
@@ -867,7 +874,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 
 // sessionStatusLabel derives a display status from a session state.
 func sessionStatusLabel(s *session.State) string {
-	if s.EndedAt != nil {
+	if s.IsEnded() {
 		return "ended"
 	}
 	if s.OwnerExited() {

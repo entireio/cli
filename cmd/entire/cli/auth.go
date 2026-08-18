@@ -245,7 +245,18 @@ type authProfile struct {
 	ProviderUserID string
 	// Jurisdiction is the caller's home jurisdiction slug (e.g. "eu"), used to
 	// pick the default mirror cluster for that jurisdiction. May be empty.
+	//
+	// This comes from /me's global.homeJurisdiction (the account's own home),
+	// NOT the top-level jurisdiction field, which is the jurisdiction of
+	// whichever core answered. The two differ whenever a login was dispatched
+	// to a non-home region.
 	Jurisdiction string
+	// ForeignRegion is true when the core that served /me is not the
+	// account's home region — /me signals this with a regionalUnavailable
+	// block. It explains both the region shown on the "Logged in to" line and
+	// the absent display name and email, which that core deliberately
+	// withholds for an account it doesn't host.
+	ForeignRegion bool
 }
 
 // profileFetcher fetches a user's profile via GET /me on coreURL, authenticated
@@ -373,7 +384,21 @@ func defaultFetchProfile(ctx context.Context, coreURL, token string) (*authProfi
 		ProviderUserID: me.Auth.ProviderUserId,
 	}
 	p.Handle, _ = me.Global.Handle.Get()
-	p.Jurisdiction, _ = me.Jurisdiction.Get()
+	// global.homeJurisdiction is the account's own home region. The top-level
+	// me.Jurisdiction field is the serving node's region — reading that one is
+	// what used to make a geo-routed login report the wrong slug.
+	p.Jurisdiction, _ = me.Global.HomeJurisdiction.Get()
+	if ru, ok := me.RegionalUnavailable.Get(); ok {
+		p.ForeignRegion = true
+		// The block also carries a homeCoreUrl and a ready-made message, both
+		// deliberately ignored: that URL points at a console SPA that was
+		// retired (a bare "/" now redirects by role, so it lands on the admin
+		// bundle or the marketing site, never a profile page), and the message
+		// tells the user to open it. Take only the slug, which is sound.
+		if home := strings.TrimSpace(ru.Jurisdiction); home != "" && p.Jurisdiction == "" {
+			p.Jurisdiction = home
+		}
+	}
 	if reg, ok := me.Regional.Get(); ok {
 		p.DisplayName, _ = reg.DisplayName.Get()
 		p.Email, _ = reg.Email.Get()
@@ -411,8 +436,28 @@ func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher
 		return fmt.Errorf("validate token: %w", err)
 	}
 
+	// Last resort for the home jurisdiction: the login token carries it as a
+	// home_jurisdiction claim, and that claim is what jurisdictional calls
+	// route on (see auth.HomeJurisdictionFromLoginJWT). /me's
+	// global.homeJurisdiction is authoritative and normally wins; this covers a
+	// core too old to send it.
+	if profile.Jurisdiction == "" {
+		if juris, jerr := auth.HomeJurisdictionFromLoginJWT(t.token); jerr == nil && juris != "" {
+			profile.Jurisdiction = juris
+		}
+	}
+
 	fmt.Fprintf(w, "Logged in to %s\n", t.coreURL)
 	writeProfileLines(w, profile)
+	// Without this the block reads as a contradiction: "Logged in to
+	// eu.auth.entire.io" sitting directly above "Jurisdiction: au", with the
+	// display name and email silently missing. Name the split rather than
+	// leaving the user to infer it.
+	if profile.ForeignRegion {
+		writeAuthStatusLine(w, "Note:", fmt.Sprintf(
+			"served by %s, outside your home region; profile details live at home",
+			api.OriginOnly(t.coreURL)))
+	}
 
 	// ENTIRE_TOKEN mode: no stored context, keychain slot, or revocable
 	// session — the bearer is the env var itself. Name that and stop, rather

@@ -59,6 +59,58 @@ trusted_hash = "sha256:ccc"
 	require.Equal(t, []string{"post_tool_use"}, gaps)
 }
 
+// TestHookTrustGaps_FlagsUntrustedSessionEnd is the live instance of the case
+// above: SessionEnd shipped after users had already trusted the other four, so
+// every existing repo has an untrusted session_end entry. Codex silently skips
+// untrusted hooks and `codex exec` can never prompt, so without this the new
+// hook would do nothing and nothing would say why.
+func TestHookTrustGaps_FlagsUntrustedSessionEnd(t *testing.T) {
+	hooksJSON := `{
+  "hooks": {
+    "SessionStart": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":30}]}],
+    "SessionEnd": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":3}]}],
+    "UserPromptSubmit": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":30}]}],
+    "Stop": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":30}]}],
+    "PostToolUse": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":30}]}]
+  }
+}`
+	repoRoot, hooksPath := writeTrustFixture(t, hooksJSON)
+
+	// The trust state a user carries over from before SessionEnd existed.
+	configTOML := `[hooks.state."` + hooksPath + `:session_start:0:0"]
+trusted_hash = "sha256:aaa"
+
+[hooks.state."` + hooksPath + `:user_prompt_submit:0:0"]
+trusted_hash = "sha256:bbb"
+
+[hooks.state."` + hooksPath + `:stop:0:0"]
+trusted_hash = "sha256:ccc"
+
+[hooks.state."` + hooksPath + `:post_tool_use:0:0"]
+trusted_hash = "sha256:ddd"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte(configTOML), 0o600))
+
+	require.Equal(t, []string{"session_end"}, HookTrustGaps(repoRoot))
+}
+
+// TestMissingEntireHooks_FlagsAbsentSessionEnd covers the other half of the
+// upgrade path: a repo enabled before SessionEnd existed has no such hook in
+// hooks.json at all, which `entire doctor` must report as drift.
+func TestMissingEntireHooks_FlagsAbsentSessionEnd(t *testing.T) {
+	hooksJSON := `{
+  "hooks": {
+    "SessionStart": [{"matcher": null, "hooks": [{"type":"command","command":"entire hooks codex session-start","timeout":30}]}],
+    "UserPromptSubmit": [{"matcher": null, "hooks": [{"type":"command","command":"entire hooks codex user-prompt-submit","timeout":30}]}],
+    "Stop": [{"matcher": null, "hooks": [{"type":"command","command":"entire hooks codex stop","timeout":30}]}],
+    "PostToolUse": [{"matcher": null, "hooks": [{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}]
+  }
+}`
+	repoRoot, _ := writeTrustFixture(t, hooksJSON)
+
+	require.Equal(t, []string{"session_end"}, MissingEntireHooks(repoRoot))
+}
+
 // TestHookTrustGaps_NoGapsWhenAllTrusted returns nil when every declared
 // event has a state entry, even if extra entries exist for other paths.
 func TestHookTrustGaps_NoGapsWhenAllTrusted(t *testing.T) {
@@ -111,10 +163,10 @@ func TestHookTrustGaps_NilWhenConfigUnreadable(t *testing.T) {
 	require.Nil(t, HookTrustGaps(filepath.Join(tmp, "repo")))
 }
 
-// TestMissingEntireHooks_FlagsStaleFile — user enabled Codex on an
-// older release that didn't include PostToolUse. Their hooks.json has
-// the three legacy events but the CLI now installs four. Detection
-// must surface the gap so doctor can prompt `entire enable`.
+// TestMissingEntireHooks_FlagsStaleFile — user enabled Codex on an older
+// release that predates both PostToolUse and SessionEnd. Their hooks.json has
+// the three oldest events; detection must surface every event added since so
+// doctor can prompt `entire enable`.
 func TestMissingEntireHooks_FlagsStaleFile(t *testing.T) {
 	hooksJSON := `{"hooks":{
 		"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-start","timeout":30}]}],
@@ -122,7 +174,7 @@ func TestMissingEntireHooks_FlagsStaleFile(t *testing.T) {
 		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]}]
 	}}`
 	repoRoot, _ := writeTrustFixture(t, hooksJSON)
-	require.Equal(t, []string{"post_tool_use"}, MissingEntireHooks(repoRoot))
+	require.Equal(t, []string{"session_end", "post_tool_use"}, MissingEntireHooks(repoRoot))
 }
 
 // TestMissingEntireHooks_NilWhenAllPresent returns nil when every
@@ -131,6 +183,7 @@ func TestMissingEntireHooks_FlagsStaleFile(t *testing.T) {
 func TestMissingEntireHooks_NilWhenAllPresent(t *testing.T) {
 	hooksJSON := `{"hooks":{
 		"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-start","timeout":30}]}],
+		"SessionEnd":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-end","timeout":3}]}],
 		"UserPromptSubmit":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex user-prompt-submit","timeout":30}]}],
 		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]},
 		        {"matcher":null,"hooks":[{"type":"command","command":"my-custom-tool","timeout":30}]}],
@@ -154,6 +207,7 @@ func TestMissingEntireHooks_NilWhenFileMissing(t *testing.T) {
 func TestMissingEntireHooks_IgnoresNonEntireCommands(t *testing.T) {
 	hooksJSON := `{"hooks":{
 		"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"my-other-tool","timeout":30}]}],
+		"SessionEnd":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-end","timeout":3}]}],
 		"UserPromptSubmit":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex user-prompt-submit","timeout":30}]}],
 		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]}],
 		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}]

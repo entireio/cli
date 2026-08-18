@@ -254,9 +254,10 @@ func runSelectedImports(ctx context.Context, w io.Writer, repoRoot string, selec
 	for _, e := range selected {
 		progress, stopProgress := newImportProgressReporter(w, e.displayName)
 		res, err := agentimport.Run(ctx, repo, e.imp, agentimport.Options{
-			RepoRoot: repoRoot,
-			Now:      time.Now(),
-			Progress: progress,
+			RepoRoot:    repoRoot,
+			Now:         time.Now(),
+			Progress:    progress,
+			ReadRemotes: strategy.CheckpointReadRemotes(ctx),
 		})
 		stopProgress(err == nil)
 		if err != nil {

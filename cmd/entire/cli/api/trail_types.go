@@ -127,11 +127,13 @@ type TrailCreateResponse struct {
 }
 
 // TrailUpdateRequest uses pointers to distinguish absent fields from clears.
+// There is deliberately no Labels field: the trails API does not accept label
+// writes, so `trail update` exposes no label flags (labels are read-only, see
+// TrailResource.Labels).
 type TrailUpdateRequest struct {
 	Status             *string   `json:"status,omitempty"`
 	Title              *string   `json:"title,omitempty"`
 	Body               *string   `json:"body,omitempty"`
-	Labels             *[]string `json:"labels,omitempty"`
 	Assignees          *[]string `json:"assignees,omitempty"`
 	RequestedReviewers *[]string `json:"requestedReviewers,omitempty"`
 	Type               *string   `json:"type,omitempty"`
@@ -142,15 +144,10 @@ type TrailUpdateResponse struct {
 	Trail TrailResource `json:"trail"`
 }
 
-// Kept for source compatibility with callers that model the former BFF body.
-// entire-api now confirms deletion with a 204 No Content response.
-type TrailDeleteResponse struct {
-	OK bool `json:"ok"`
-}
-
 // TrailApproval is a single approval decision on a trail. Author is exposed as
-// a login string while UnmarshalJSON accepts both the BFF's string and
-// entire-api's {id,login} object.
+// a login string while UnmarshalJSON accepts both shapes entire-api itself
+// uses: the approvals collection sends a bare login string, the trail resource
+// sends an {id,login} object. Both are live — this is not legacy tolerance.
 type TrailApproval struct {
 	ID        string    `json:"id"`
 	Author    string    `json:"author"`

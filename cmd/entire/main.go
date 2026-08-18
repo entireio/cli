@@ -13,8 +13,10 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli"
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/procsignal"
+
 	"github.com/spf13/cobra"
 )
 
@@ -24,6 +26,14 @@ func main() {
 
 	// Create context that cancels on interrupt
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Memoize this process's .git/config remote reads. The checkpoint sync
+	// election re-runs per call by design and each run shells out to git for the
+	// same two answers; one command can elect several times. Answers are
+	// partitioned per git working directory, so a command walking several repos
+	// stays correct. `entire repo mirror use` invalidates after re-pointing a
+	// remote, and `entire mcp` narrows this to one window per request.
+	ctx = strategy.WithGitRemoteCache(ctx)
 
 	// Handle interrupt signals
 	sigChan := make(chan os.Signal, 1)

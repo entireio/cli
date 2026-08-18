@@ -7,8 +7,6 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 
@@ -982,7 +980,13 @@ func (m loginURLActionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (loginURLActionModel) View() tea.View { return tea.NewView("") }
 
-func openBrowser(ctx context.Context, browserURL string) error {
+// openBrowser opens browserURL in the user's default browser. The URL is
+// handed to the platform launcher as a single argument and must never reach a
+// shell — see openBrowserPlatform in browser_open_windows.go for why.
+//
+// The context is unused: launching is fire-and-forget on every platform. The
+// parameter stays to satisfy browserOpenFunc.
+func openBrowser(_ context.Context, browserURL string) error {
 	u, err := url.Parse(browserURL)
 	if err != nil || (u.Scheme != schemeHTTPS && u.Scheme != schemeHTTP) {
 		return fmt.Errorf("refusing to open non-HTTP URL: %s", browserURL)
@@ -994,31 +998,5 @@ func openBrowser(ctx context.Context, browserURL string) error {
 		return errors.New("browser unavailable under test")
 	}
 
-	var command string
-	var args []string
-
-	switch runtime.GOOS {
-	case darwinGOOS:
-		command = "open"
-		args = []string{browserURL}
-	case "linux":
-		command = "xdg-open"
-		args = []string{browserURL}
-	case "windows":
-		command = "cmd"
-		args = []string{"/c", "start", "", browserURL}
-	default:
-		return fmt.Errorf("unsupported platform %s", runtime.GOOS)
-	}
-
-	cmd := exec.CommandContext(ctx, command, args...)
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start browser command %q: %w", command, err)
-	}
-
-	if err := cmd.Process.Release(); err != nil {
-		return fmt.Errorf("release browser process: %w", err)
-	}
-
-	return nil
+	return openBrowserPlatform(browserURL)
 }

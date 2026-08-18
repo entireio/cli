@@ -48,6 +48,13 @@ func WithWorktreeRoot(ctx context.Context, worktreeRoot string) context.Context 
 	return context.WithValue(ctx, worktreeRootContextKey{}, filepath.Clean(worktreeRoot))
 }
 
+// WorktreeRoot returns the explicit worktree root carried by ctx. Consumers
+// that combine settings resolution with repo-local git commands use this to
+// keep both operations scoped to the same repository.
+func WorktreeRoot(ctx context.Context) (string, bool) {
+	return worktreeRootFromContext(ctx)
+}
+
 func worktreeRootFromContext(ctx context.Context) (string, bool) {
 	root, ok := ctx.Value(worktreeRootContextKey{}).(string)
 	return root, ok && root != ""

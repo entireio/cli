@@ -37,41 +37,6 @@ func TestDecodeNormalizedTrailJSONPreservesFreeFormMapKeys(t *testing.T) {
 	}
 }
 
-func TestLegacyTrailRequestBodyPreservesFreeFormMapKeys(t *testing.T) {
-	t.Parallel()
-	body := struct {
-		BranchName string         `json:"branchName"`
-		Metadata   map[string]any `json:"metadata"`
-	}{
-		BranchName: "feature/test",
-		Metadata: map[string]any{
-			"userDefinedKey": 1,
-			"already_snake":  2,
-		},
-	}
-	normalized, err := legacyTrailRequestBody(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, ok := normalized.(map[string]any)
-	if !ok {
-		t.Fatalf("normalized body = %#v", normalized)
-	}
-	if got["branch_name"] != "feature/test" {
-		t.Fatalf("typed key was not converted: %#v", got)
-	}
-	metadata, ok := got["metadata"].(map[string]any)
-	if !ok {
-		t.Fatalf("metadata = %#v", got["metadata"])
-	}
-	if _, ok := metadata["userDefinedKey"]; !ok {
-		t.Fatalf("metadata keys were re-cased: %#v", metadata)
-	}
-	if _, ok := metadata["already_snake"]; !ok {
-		t.Fatalf("metadata keys were re-cased: %#v", metadata)
-	}
-}
-
 func TestNormalizeTrailJSONKeySharesReviewAlias(t *testing.T) {
 	t.Parallel()
 	if got := NormalizeTrailJSONKey("review_session_id"); got != "reviewId" {

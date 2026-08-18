@@ -7,6 +7,7 @@ import (
 	"context"
 	"io"
 	"os/exec"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
@@ -392,6 +393,30 @@ type HookResponseWriter interface {
 
 	// WriteHookResponse outputs a message to the user via the agent's hook response protocol.
 	WriteHookResponse(message string) error
+}
+
+// SessionEndBudgeter is implemented by agents whose host enforces a hard
+// wall-clock budget on the session-end hook, because it runs inside the agent's
+// own shutdown sequence rather than between turns.
+//
+// Codex is the motivating case: it defaults SessionEnd handlers to a 1s timeout
+// and clamps any configured value to 3s (SESSION_END_MAX_TIMEOUT_SEC in
+// codex-rs/hooks/src/events/session_end.rs), keeping teardown inside
+// app-server's five-second shutdown bound. On expiry it terminates the hook's
+// entire process tree.
+//
+// Declaring a budget makes Entire stop itself just short of that ceiling rather
+// than being killed mid-write: the session is marked ENDED first (a single
+// atomic state-file rename), and only the eager condense — which is fail-open
+// and retried by PostCommit — runs against the remaining budget. Agents whose
+// session-end hook has a normal timeout should not implement this.
+type SessionEndBudgeter interface {
+	Agent
+
+	// SessionEndBudget returns the wall-clock budget for the whole session-end
+	// hook invocation, measured from process start. A non-positive value means
+	// no budget applies.
+	SessionEndBudget() time.Duration
 }
 
 // RestoredSessionPathResolver is implemented by agents that need a

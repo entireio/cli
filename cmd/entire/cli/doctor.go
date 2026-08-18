@@ -144,6 +144,15 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	}
 	defer repo.Close()
 
+	// Route logging to .entire/logs/ for the rest of the command. Doctor emits
+	// none itself, but the sweep below and the condense/discard handlers further
+	// down all do, and with no logger installed those land on the user's terminal
+	// via slog.Default(), interleaved with doctor's own report. It belongs here
+	// rather than inside the sweep: the sweep returns early — without touching
+	// logging — whenever no session needs finalizing, which is the common case
+	// for a run that still has time-based stuck sessions to condense.
+	defer ensureCommandLogging(ctx)()
+
 	// Finalize any ACTIVE session whose agent process has exited (no SessionStop
 	// hook fired). A gone process is unambiguous, so these are condensed on the
 	// spot rather than left for the interactive prompt below; the sweep marks
@@ -240,27 +249,7 @@ func classifySession(state *strategy.SessionState, repo *git.Repository, now tim
 	_, refErr := repo.Reference(refName, true)
 	hasShadowBranch := refErr == nil
 
-	switch {
-	case state.Phase.IsActive():
-		var reason string
-		switch {
-		case state.OwnerExited():
-			// Detected immediately (no timeout wait): the owning agent process
-			// is gone. Normally finalized up front in runSessionsFix; this
-			// branch covers a session that couldn't be finalized there.
-			pid := 0
-			if state.Owner != nil {
-				pid = state.Owner.PID
-			}
-			reason = fmt.Sprintf("agent process %d exited (no longer running)", pid)
-		case !state.IsStuckActive():
-			return nil
-		case state.LastInteractionTime != nil:
-			reason = fmt.Sprintf("active, last interaction %s ago", now.Sub(*state.LastInteractionTime).Truncate(time.Minute))
-		default:
-			reason = fmt.Sprintf("active, started %s ago with no recorded interaction", now.Sub(state.StartedAt).Truncate(time.Minute))
-		}
-
+	stuck := func(reason string) *stuckSession {
 		return &stuckSession{
 			State:             state,
 			Reason:            reason,
@@ -269,21 +258,38 @@ func classifySession(state *strategy.SessionState, repo *git.Repository, now tim
 			CheckpointCount:   state.StepCount,
 			FilesTouchedCount: len(state.FilesTouched),
 		}
+	}
+
+	// A dead owner is unambiguous and phase-independent, so it is checked ahead
+	// of the phase switch: an agent that quit without firing a session-end hook
+	// leaves the session IDLE just as often as ACTIVE (see State.OwnerExited).
+	// Detected immediately, with no timeout wait. These are normally finalized
+	// up front in runSessionsFix; this covers sessions that couldn't be.
+	if state.OwnerExited() {
+		pid := 0
+		if state.Owner != nil {
+			pid = state.Owner.PID
+		}
+		return stuck(fmt.Sprintf("agent process %d exited (no longer running)", pid))
+	}
+
+	switch {
+	case state.Phase.IsActive():
+		switch {
+		case !state.IsStuckActive():
+			return nil
+		case state.LastInteractionTime != nil:
+			return stuck(fmt.Sprintf("active, last interaction %s ago", now.Sub(*state.LastInteractionTime).Truncate(time.Minute)))
+		default:
+			return stuck(fmt.Sprintf("active, started %s ago with no recorded interaction", now.Sub(state.StartedAt).Truncate(time.Minute)))
+		}
 
 	case state.Phase == session.PhaseEnded:
 		// Ended sessions are stuck if they have uncondensed data
 		if state.StepCount <= 0 || !hasShadowBranch {
 			return nil
 		}
-
-		return &stuckSession{
-			State:             state,
-			Reason:            "ended with uncondensed checkpoint data",
-			ShadowBranch:      shadowBranch,
-			HasShadowBranch:   hasShadowBranch,
-			CheckpointCount:   state.StepCount,
-			FilesTouchedCount: len(state.FilesTouched),
-		}
+		return stuck("ended with uncondensed checkpoint data")
 
 	default:
 		return nil
@@ -367,6 +373,46 @@ func discardSession(ctx context.Context, ss stuckSession, _ *git.Repository, err
 	return nil
 }
 
+// reportMetadataDivergence prints the metadata-branch verdict for a comparison
+// that is not disconnected: either plain OK, or DIVERGED when both sides advanced
+// since their merge base.
+//
+// Divergence needs saying because it is the one state whose resolution rewrites
+// the local ref: the next fetch from the elected sync remote replays the local
+// commits onto the fetched tip (SafelyAdvanceLocalRef), which loses no
+// checkpoints but does move the ref and re-hash those commits. Nothing else
+// surfaces that — the replay itself only logs.
+//
+// Takes the already-computed comparison rather than re-deriving it: the verdict
+// costs a merge-base subprocess, and the caller has one in hand.
+func reportMetadataDivergence(ctx context.Context, w io.Writer, comparison strategy.MetadataComparison, remoteName string, primary plumbing.ReferenceName) {
+	if comparison.Relation != strategy.MetadataRelationDiverged {
+		fmt.Fprintln(w, "✓ Metadata branches: OK")
+		return
+	}
+
+	fmt.Fprintln(w, "Metadata branches: DIVERGED")
+	fmt.Fprintf(w, "  Local and remote %s have both advanced since they last agreed.\n", primary.Short())
+	// Labels are fixed-width and the remote name trails the hash: padding it
+	// into the label misaligns the pair for every remote name that is not
+	// exactly as long as "origin".
+	fmt.Fprintf(w, "    local:  %s\n", comparison.Local.String()[:12])
+	fmt.Fprintf(w, "    remote: %s  (%s)\n", comparison.Remote.String()[:12], remoteName)
+
+	// Whether the divergence resolves itself depends on the confinement rule:
+	// only the elected sync remote may advance the local ref, so a diverged
+	// legacy-tier ref sits there indefinitely and says nothing about local state.
+	elected, electErr := strategy.ResolveCheckpointSyncRemote(ctx)
+	if electErr == nil && elected.Name == remoteName {
+		fmt.Fprintln(w, "  No action needed: the next fetch from this remote replays your local")
+		fmt.Fprintln(w, "  checkpoints onto its tip. No checkpoints are lost, but the local ref moves")
+		fmt.Fprintln(w, "  and the replayed commits get new hashes.")
+		return
+	}
+	fmt.Fprintf(w, "  %q is the legacy read tier, not the elected checkpoint sync remote, so it\n", remoteName)
+	fmt.Fprintln(w, "  never advances the local ref. Nothing will reconcile this on its own.")
+}
+
 // checkDisconnectedMetadata detects and optionally repairs disconnected
 // local/remote metadata branches (the "empty-orphan bug").
 func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
@@ -379,24 +425,45 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	ctx := cmd.Context()
 	refs := checkpoint.ResolveRefs(ctx)
 	w := cmd.OutOrStdout()
-	if !refs.PrimaryFetchableFromOrigin() {
-		fmt.Fprintf(w, "✓ Metadata branches: OK (primary ref %s is not pushed to origin)\n", refs.Primary)
+	if !refs.PrimaryFetchableFromRemote() {
+		fmt.Fprintf(w, "✓ Metadata branches: OK (primary ref %s is not pushed to a remote)\n", refs.Primary)
 		return nil
 	}
-	remoteRefName := plumbing.NewRemoteReferenceName("origin", refs.Primary.Short())
-	disconnected, err := strategy.IsMetadataDisconnected(ctx, repo, remoteRefName)
+	// Check against the first checkpoint read candidate whose remote-tracking
+	// ref exists — a pure read across both tiers (elected sync remote, then
+	// the legacy origin tier).
+	remoteName, remoteRefName, ok := strategy.FirstReadCandidateTrackingRef(ctx, repo, refs.Primary)
+	if !ok {
+		fmt.Fprintln(w, "✓ Metadata branches: OK (no remote-tracking metadata ref found)")
+		return nil
+	}
+	// One classification for both verdicts: disconnected and diverged are two
+	// answers from the same merge base, and computing them separately meant two
+	// merge-base subprocesses that could disagree.
+	comparison, err := strategy.CompareMetadataWithRemote(ctx, repo, remoteRefName)
 	if err != nil {
 		return fmt.Errorf("could not check metadata branch state: %w", err)
 	}
 
-	if !disconnected {
-		fmt.Fprintln(w, "✓ Metadata branches: OK")
+	if comparison.Relation != strategy.MetadataRelationDisconnected {
+		reportMetadataDivergence(ctx, w, comparison, remoteName, refs.Primary)
 		return nil
 	}
 
 	fmt.Fprintln(w, "Metadata branches: DISCONNECTED")
 	fmt.Fprintf(w, "  Local and remote %s branches share no common ancestor.\n", refs.Primary.Short())
 	fmt.Fprintln(w, "  Some remote checkpoints may not be visible locally.")
+
+	// The repair advances the local ref from the remote tip, so it is
+	// confined to the elected checkpoint sync remote: a stale legacy-tier
+	// origin must never drive a local-ref rewrite. Report-only otherwise.
+	elected, electErr := strategy.ResolveCheckpointSyncRemote(ctx)
+	if electErr != nil || elected.Name != remoteName {
+		fmt.Fprintf(w, "  The disconnected tracking ref belongs to remote %q, which is not the elected checkpoint sync remote.\n", remoteName)
+		fmt.Fprintln(w, "  Automatic repair only reconciles against the elected sync remote; fetch its metadata branch and re-run 'entire doctor'.")
+		return nil
+	}
+
 	fmt.Fprintln(w, "  Fix: cherry-pick local checkpoints onto remote tip (preserves all data).")
 
 	if !force {

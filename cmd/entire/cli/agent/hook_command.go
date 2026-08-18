@@ -309,6 +309,12 @@ func hasManagedHookPrefix(command string) bool {
 // command line, not a batch script, so batch's `%%` doubling does not apply,
 // and caret-escaping `%` would leak the caret. The fixed warning constants are
 // %-free; if that changes, percent expansion needs separate handling.
+//
+// Escaping is only correct here because a third party owns the exec: Entire
+// writes these commands into an agent's config file and the agent runs them
+// through cmd.exe, so there is no shell to avoid. Do NOT reach for this when
+// Entire launches something itself — bypass the shell instead, the way
+// cli.openBrowserPlatform (browser_open_windows.go) does.
 func escapeWindowsCMD(s string) string {
 	replacer := strings.NewReplacer(
 		`^`, `^^`,

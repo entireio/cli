@@ -1031,6 +1031,107 @@ func TestListCommitted_FallsBackToRemote(t *testing.T) {
 	}
 }
 
+// Regression (PR #1951 review): attach's local-presence gates require reads
+// that see ONLY the local primary branch — a checkpoint present solely on a
+// remote-tracking ref must read as absent, or attach would treat it as safe
+// to write and clobber the remote's sessions on push. The read chain's
+// per-checkpoint fall-through defeated that: a stale-but-existing local
+// branch fell through to origin's tracking tree and reported the checkpoint
+// present. PrimaryAsLocalRead pins reads to the local ref with no remote
+// tiers; the default chain keeps the fall-through for ordinary reads.
+func TestRead_PrimaryAsLocalRead_IgnoresRemoteTrackingPresence(t *testing.T) {
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	remoteRepo, err := git.PlainOpen(remoteDir)
+	if err != nil {
+		t.Fatalf("failed to open remote repo: %v", err)
+	}
+	remoteWorktree, err := remoteRepo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get remote worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(remoteDir, "README.md"), []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := remoteWorktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := remoteWorktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	}); err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	remoteStore := NewGitStore(remoteRepo, DefaultV1Refs())
+	remoteOnlyID := id.MustCheckpointID("abcdef123456")
+	if err := remoteStore.Write(context.Background(), Session{
+		CheckpointID: remoteOnlyID,
+		SessionID:    "remote-only-session",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"test": true}`)),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}); err != nil {
+		t.Fatalf("failed to write checkpoint to remote: %v", err)
+	}
+
+	localDir := t.TempDir()
+	localRepo, err := git.PlainClone(localDir, &git.CloneOptions{URL: remoteDir})
+	if err != nil {
+		t.Fatalf("failed to clone repo: %v", err)
+	}
+	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", paths.MetadataBranchName, paths.MetadataBranchName)
+	if err := localRepo.Fetch(&git.FetchOptions{
+		RemoteName: "origin",
+		RefSpecs:   []config.RefSpec{config.RefSpec(refSpec)},
+	}); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		t.Fatalf("failed to fetch metadata branch: %v", err)
+	}
+
+	// A stale LOCAL v1 branch: it exists (so a naive local-branch-exists gate
+	// passes) but holds a different checkpoint, not remoteOnlyID.
+	localStore := NewGitStore(localRepo, DefaultV1Refs())
+	localOnlyID := id.MustCheckpointID("fedcba654321")
+	if err := localStore.Write(context.Background(), Session{
+		CheckpointID: localOnlyID,
+		SessionID:    "local-session",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"local": true}`)),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}); err != nil {
+		t.Fatalf("failed to write local checkpoint: %v", err)
+	}
+
+	// Default chain: the remote-only checkpoint IS readable (fall-through).
+	chainSummary, err := localStore.Read(context.Background(), remoteOnlyID)
+	if err != nil {
+		t.Fatalf("chain Read() error = %v", err)
+	}
+	if chainSummary == nil {
+		t.Fatal("chain read should fall through to the remote-tracking tree")
+	}
+
+	// Local-pinned reads: the same checkpoint must be ABSENT.
+	pinnedStore := NewGitStore(localRepo, DefaultV1Refs().PrimaryAsLocalRead())
+	pinnedSummary, err := pinnedStore.Read(context.Background(), remoteOnlyID)
+	if err != nil && !errors.Is(err, ErrCheckpointNotFound) {
+		t.Fatalf("pinned Read() error = %v", err)
+	}
+	if pinnedSummary != nil {
+		t.Fatal("local-pinned read must not see a checkpoint that exists only on a remote-tracking ref")
+	}
+
+	// And the local checkpoint stays readable through the pin.
+	localSummary, err := pinnedStore.Read(context.Background(), localOnlyID)
+	if err != nil {
+		t.Fatalf("pinned Read(local) error = %v", err)
+	}
+	if localSummary == nil {
+		t.Fatal("local-pinned read must still serve locally present checkpoints")
+	}
+}
+
 // TestGetCheckpointAuthor verifies that GetCheckpointAuthor retrieves the
 // author of the commit that created the checkpoint on the entire/checkpoints/v1 branch.
 func TestGetCheckpointAuthor(t *testing.T) {

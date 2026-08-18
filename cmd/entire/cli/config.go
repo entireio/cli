@@ -7,6 +7,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/pricing"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -89,6 +90,23 @@ func GetLogLevel() string {
 		return ""
 	}
 	return s.LogLevel
+}
+
+// ensureCommandLogging routes logging to .entire/logs/ for a plain command that
+// would otherwise emit logging.* calls with no logger installed, and returns the
+// teardown. Commands reached from a hook already have one, and this leaves it
+// alone; see logging.EnsureInitialized.
+//
+// The level getter is paired with the init here — the same pairing every
+// command-level Init site needs — because without it `log_level` from settings
+// is ignored on this path.
+//
+// Scope the returned cleanup to the whole command, not to the one call that
+// needed a logger: it closes the log file, so anything logged afterwards goes
+// back to the user's terminal via slog.Default().
+func ensureCommandLogging(ctx context.Context) func() {
+	logging.SetLogLevelGetter(GetLogLevel)
+	return logging.EnsureInitialized(ctx)
 }
 
 // GetAgentsWithHooksInstalled returns names of agents that have hooks installed.

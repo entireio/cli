@@ -88,6 +88,7 @@ fails even with --dry-run.`, imp.AgentType()),
 				Now: time.Now(), DryRun: dryRun,
 				LinkCommitSHA: linkCommitSHA,
 				Progress:      progress,
+				ReadRemotes:   strategy.CheckpointReadRemotes(ctx),
 			})
 			stopProgress(err == nil)
 			if err != nil {

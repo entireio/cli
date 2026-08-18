@@ -86,6 +86,7 @@ func declaredCodexEvents(hooksJSONPath string) ([]string, bool) {
 		}
 	}
 	add("session_start", file.Hooks.SessionStart)
+	add("session_end", file.Hooks.SessionEnd)
 	add("user_prompt_submit", file.Hooks.UserPromptSubmit)
 	add("stop", file.Hooks.Stop)
 	add("pre_tool_use", file.Hooks.PreToolUse)
@@ -94,10 +95,11 @@ func declaredCodexEvents(hooksJSONPath string) ([]string, bool) {
 }
 
 // MissingEntireHooks returns the snake_case event labels the CLI's
-// canonical install ships today (SessionStart, UserPromptSubmit, Stop,
-// PostToolUse) that aren't backed by an Entire-managed hook command in
-// <repoRoot>/.codex/hooks.json. Surfaces drift when the user enabled
-// Codex on an older release and the install set has since grown.
+// canonical install ships today (SessionStart, SessionEnd,
+// UserPromptSubmit, Stop, PostToolUse) that aren't backed by an
+// Entire-managed hook command in <repoRoot>/.codex/hooks.json. Surfaces
+// drift when the user enabled Codex on an older release and the install
+// set has since grown — SessionEnd is exactly that case today.
 //
 // Returns nil when hooks.json is missing or unreadable — those cases
 // are "Codex isn't enabled here", which is a different problem.
@@ -118,6 +120,7 @@ func MissingEntireHooks(repoRoot string) []string {
 		}
 	}
 	check("session_start", file.Hooks.SessionStart)
+	check("session_end", file.Hooks.SessionEnd)
 	check("user_prompt_submit", file.Hooks.UserPromptSubmit)
 	check("stop", file.Hooks.Stop)
 	check("post_tool_use", file.Hooks.PostToolUse)

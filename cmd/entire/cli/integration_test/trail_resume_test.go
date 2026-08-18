@@ -208,7 +208,6 @@ func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL str
 
 	env.ExtraEnv = append(env.ExtraEnv,
 		"ENTIRE_API_BASE_URL="+coreURL,
-		"ENTIRE_TRAILS_BACKEND=entire-api",
 		"ENTIRE_CONFIG_DIR="+configDir,
 		"XDG_CACHE_HOME="+xdgCacheHome,
 		"ENTIRE_TOKEN_STORE=file",

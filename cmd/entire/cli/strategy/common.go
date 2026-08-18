@@ -206,7 +206,7 @@ func replayLocalRefFromBase(ctx context.Context, repo *git.Repository, repoPath 
 	if err != nil {
 		return fmt.Errorf("failed to load shallow boundaries for %s: %w", localRefName, err)
 	}
-	return replayLocalCommits(ctx, repo, localRefName, targetHash, localCommits, shallow)
+	return replayLocalCommits(ctx, repo, "diverged", localRefName, localHash, targetHash, localCommits, shallow)
 }
 
 func replayDisconnectedLocalRef(ctx context.Context, repo *git.Repository, repoPath string, localRefName plumbing.ReferenceName, localHash, targetHash plumbing.Hash) error {
@@ -218,10 +218,30 @@ func replayDisconnectedLocalRef(ctx context.Context, repo *git.Repository, repoP
 	if err != nil {
 		return fmt.Errorf("failed to collect disconnected local commits for %s: %w", localRefName, err)
 	}
-	return replayLocalCommits(ctx, repo, localRefName, targetHash, localCommits, shallow)
+	return replayLocalCommits(ctx, repo, "disconnected", localRefName, localHash, targetHash, localCommits, shallow)
 }
 
-func replayLocalCommits(ctx context.Context, repo *git.Repository, localRefName plumbing.ReferenceName, targetHash plumbing.Hash, localCommits []*object.Commit, shallow map[plumbing.Hash]bool) error {
+func replayLocalCommits(ctx context.Context, repo *git.Repository, reason string, localRefName plumbing.ReferenceName, localHash, targetHash plumbing.Hash, localCommits []*object.Commit, shallow map[plumbing.Hash]bool) error {
+	// Logged here rather than in each caller: this is the function that performs
+	// the rewrite, so a future third caller cannot silently skip the trace.
+	//
+	// A replay rewrites the local ref to the fetched remote tip with the local
+	// commits re-applied on top: no checkpoint is lost, but the ref no longer
+	// points where it did and the local commits have new hashes. That is the one
+	// place a fetch reaches past remote-tracking refs into local state, so it must
+	// leave a trace — the whole advance/replay chain was previously silent, which
+	// made an invisible rewrite impossible to reconstruct afterwards from
+	// .entire/logs/. Info rather than Debug: the default log level has to carry it
+	// for a post-hoc investigation to find it.
+	//
+	// Metadata only (ref names, hashes, counts) per the logging privacy rule.
+	logging.Info(ctx, "replaying local commits onto fetched tip; local ref will be rewritten",
+		slog.String("reason", reason),
+		slog.String("ref", localRefName.String()),
+		slog.String("local_tip", localHash.String()),
+		slog.String("target_tip", targetHash.String()),
+		slog.Int("commits_replayed", len(localCommits)))
+
 	if len(localCommits) == 0 {
 		return setRefHash(repo, localRefName, targetHash)
 	}
@@ -294,9 +314,9 @@ func ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
 	defer repo.Close()
 
 	// Warn (once per process) if metadata branches are disconnected
-	WarnIfMetadataDisconnected()
+	WarnIfMetadataDisconnected(ctx)
 
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -458,11 +478,12 @@ func resolveAgentType(ctxAgentType types.AgentType, state *SessionState) types.A
 // EnsurePrimaryRef creates or updates the local primary metadata ref.
 //
 // A configured checkpoint_remote is the authoritative checkpoint store: when one
-// is set the local ref is only ever sourced from it, never from origin's
-// (possibly stale) tracking ref (issue #1374). Without a checkpoint_remote,
-// origin holds the store — when Primary is in Push and the local ref is missing
-// or un-initialized, the local ref is created/updated from origin's
-// remote-tracking ref. Otherwise an empty orphan is created.
+// is set the local ref is only ever sourced from it, never from a (possibly
+// stale) tracking ref (issue #1374). Without a checkpoint_remote, the elected
+// checkpoint sync remote holds the store — when Primary is in Push and the
+// local ref is missing or un-initialized, the local ref is created/updated
+// from the ELECTED remote's tracking ref only; the legacy origin read tier
+// never seeds or advances local refs. Otherwise an empty orphan is created.
 // primaryIsGitRefs reports whether the configured primary checkpoint backend is
 // git-refs. Resolution is fail-soft: any config-load error is treated as the
 // default git-branch backend (returns false), preserving legacy behavior.
@@ -544,12 +565,38 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 		return createOrphanMetadataRef(ctx, repo, refs)
 	}
 
-	// No checkpoint_remote configured — origin holds the checkpoint store. Origin
-	// only tracks Primary when Primary is in Push.
+	// No checkpoint_remote configured — the elected checkpoint sync remote
+	// holds the checkpoint store. Local-ref seeding and healing are confined
+	// to that elected remote: the legacy origin read tier is strictly
+	// read-only, so a stale refs/remotes/origin/... tracking ref must never
+	// seed or update the local primary when the election points elsewhere (a
+	// stale origin driving local-ref writes is the #1374-class hazard). When
+	// the elected remote's tracking ref is unavailable there is nothing to
+	// advance from — never substitute origin. The election result is passed
+	// explicitly (not inferred from the read-candidate chain, whose first
+	// entry can be the fail-open origin). A remote only tracks Primary when
+	// Primary is in Push.
+	//
+	// A FAILED election is the one exception, and only for a MISSING local
+	// primary: checkpoint pushes are already fail-closed while the election
+	// is broken, so an orphan buys no safety — but it guarantees a disjoint
+	// history (non-fast-forward on every sync) the moment the user fixes the
+	// setting. Seeding the missing ref from origin's real history is the
+	// seeding counterpart of the read chain's fail-open; no existing local
+	// ref is advanced, so the #1374 replay hazard does not apply.
+	electedName := ""
+	electionFailed := false
+	if elected, electErr := ResolveCheckpointSyncRemote(ctx); electErr == nil {
+		electedName = elected.Name
+	} else {
+		electionFailed = true
+		logging.Debug(ctx, "primary metadata ref: checkpoint sync remote election failed; skipping remote-tracking seed",
+			slog.String("error", electErr.Error()))
+	}
 	var remoteRef *plumbing.Reference
-	if refs.PrimaryFetchableFromOrigin() {
+	if electedName != "" && refs.PrimaryFetchableFromRemote() {
 		var remoteErr error
-		remoteRef, remoteErr = repo.Reference(plumbing.NewRemoteReferenceName("origin", primaryName), true)
+		remoteRef, remoteErr = repo.Reference(plumbing.NewRemoteReferenceName(electedName, primaryName), true)
 		if remoteErr != nil && !errors.Is(remoteErr, plumbing.ErrReferenceNotFound) {
 			return fmt.Errorf("failed to check remote metadata ref: %w", remoteErr)
 		}
@@ -567,7 +614,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 				if setErr := setRefHash(repo, refs.Primary, remoteRef.Hash()); setErr != nil {
 					return fmt.Errorf("failed to update metadata ref from remote: %w", setErr)
 				}
-				fmt.Fprintf(os.Stderr, "[entire] Updated local ref '%s' from origin\n", primaryName)
+				fmt.Fprintf(os.Stderr, "[entire] Updated local ref '%s' from %s\n", primaryName, electedName)
 			} else {
 				// Local has real data and differs from remote — if disconnected
 				// (no common ancestor), reconciliation happens at pre-push time
@@ -581,16 +628,29 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 		return nil
 	}
 
-	// Local ref doesn't exist — create from origin if available.
+	// Local ref doesn't exist — create from the elected remote if available.
 	if remoteRef != nil {
 		if err := setRefHash(repo, refs.Primary, remoteRef.Hash()); err != nil {
 			return fmt.Errorf("failed to create metadata ref from remote: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from origin\n", primaryName)
+		fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from %s\n", primaryName, electedName)
 		return nil
 	}
 
-	// No local or origin ref — create an empty orphan.
+	// Failed election + missing local primary: seed from origin's real
+	// history rather than a guaranteed-disjoint orphan (rationale above).
+	if electionFailed && refs.PrimaryFetchableFromRemote() {
+		originRef, originErr := repo.Reference(plumbing.NewRemoteReferenceName("origin", primaryName), true)
+		if originErr == nil {
+			if err := setRefHash(repo, refs.Primary, originRef.Hash()); err != nil {
+				return fmt.Errorf("failed to create metadata ref from origin under failed election: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from origin (checkpoint sync remote election failed; fix checkpoint_push_remote to resume syncing)\n", primaryName)
+			return nil
+		}
+	}
+
+	// No local ref and no elected-remote tracking ref — create an empty orphan.
 	if skipEmptyOrphan {
 		return nil
 	}
@@ -1108,17 +1168,37 @@ func ReadAllSessionPromptsFromTree(tree *object.Tree, checkpointPath string, ses
 	return prompts
 }
 
-// GetRemotePrimaryTree returns the tree at origin's remote-tracking ref for
-// the configured Primary. Errors when Primary isn't in Push (no origin shadow).
+// GetRemotePrimaryTree returns the tree at the first checkpoint read
+// candidate's remote-tracking ref for the configured Primary (elected sync
+// remote first, then the legacy origin tier; first existing tracking ref
+// wins). Pure read — it never writes local refs. Errors when Primary isn't in
+// Push (no remote-tracking shadow), when no read candidate is configured, or
+// when no candidate's tracking ref exists (surfacing the first candidate's
+// error).
 func GetRemotePrimaryTree(ctx context.Context, repo *git.Repository) (*object.Tree, error) {
 	refs := checkpoint.ResolveRefs(ctx)
-	if !refs.PrimaryFetchableFromOrigin() {
-		return nil, fmt.Errorf("primary metadata ref %s is not pushed to origin", refs.Primary)
+	if !refs.PrimaryFetchableFromRemote() {
+		return nil, fmt.Errorf("primary metadata ref %s is not pushed to a remote", refs.Primary)
 	}
-	refName := plumbing.NewRemoteReferenceName("origin", refs.Primary.Short())
-	ref, err := repo.Reference(refName, true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get remote metadata reference %s: %w", refName, err)
+	candidates := CheckpointReadRemotes(ctx)
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no git remotes configured to read primary metadata ref %s from", refs.Primary)
+	}
+	var ref *plumbing.Reference
+	var firstErr error
+	for _, remoteName := range candidates {
+		refName := plumbing.NewRemoteReferenceName(remoteName, refs.Primary.Short())
+		candidateRef, err := repo.Reference(refName, true)
+		if err == nil {
+			ref = candidateRef
+			break
+		}
+		if firstErr == nil {
+			firstErr = fmt.Errorf("failed to get remote metadata reference %s: %w", refName, err)
+		}
+	}
+	if ref == nil {
+		return nil, firstErr
 	}
 
 	commit, err := repo.CommitObject(ref.Hash())

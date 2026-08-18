@@ -24,11 +24,7 @@ type Client struct {
 	httpClient *http.Client
 	baseURL    string
 
-	// trailBackend is "legacy" for the BFF or "entire-api" for the cell API.
-	// Empty keeps the generic client's historical behavior and is treated as
-	// legacy by CLI selection code only.
-	trailBackend string
-	trailRoutes  map[string]string
+	trailRoutes map[string]string
 
 	// authSessionsPath is the base path for entire-core's login-session
 	// endpoints (list / revoke / current). Set via WithAuthSessionsPath when the
@@ -155,13 +151,6 @@ func (c *Client) GetStream(ctx context.Context, path string, headers http.Header
 func (c *Client) doJSON(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var reader io.Reader
 	if body != nil {
-		if c.trailBackend == "legacy" {
-			var err error
-			body, err = legacyTrailRequestBody(body)
-			if err != nil {
-				return nil, err
-			}
-		}
 		data, err := json.Marshal(body)
 		if err != nil {
 			return nil, fmt.Errorf("marshal request body: %w", err)
@@ -201,21 +190,10 @@ func (c *Client) Request(ctx context.Context, method, path string, headers http.
 	return c.do(ctx, method, path, body, headers)
 }
 
-// WithTrailBackend marks a client as targeting one of the trail backends.
-func (c *Client) WithTrailBackend(backend string) *Client {
-	c.trailBackend = backend
-	return c
-}
-
-// TrailBackend returns the backend marker set by WithTrailBackend.
-func (c *Client) TrailBackend() string { return c.trailBackend }
-
-// SetTrailRoute registers the entire-api base path for a resolved trail. The
-// legacy BFF already uses trail-ID routes, so registration is a no-op there.
+// SetTrailRoute registers the entire-api base path for a resolved trail, so
+// later requests spelled with the trail's ID are rewritten onto its
+// forge/owner/repo/number route (see rewriteTrailRoute).
 func (c *Client) SetTrailRoute(trailID, path string) {
-	if c.trailBackend != "entire-api" {
-		return
-	}
 	trailID = strings.TrimSpace(trailID)
 	path = strings.TrimRight(strings.TrimSpace(path), "/")
 	if trailID == "" || path == "" {

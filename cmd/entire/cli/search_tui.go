@@ -243,22 +243,21 @@ func (m searchModel) selectedResult() *search.Result {
 	return nil
 }
 
-// computeTypeCounts calculates per-type counts from the loaded results,
-// falling back to API-provided counts when available.
-func (m searchModel) computeTypeCounts() (checkpoints, commits, sessions int) {
+// computeTypeCounts calculates per-tab counts from the loaded results,
+// falling back to API-provided counts when available. Checkpoints have no tab
+// (they fold into sessions server-side), so they are not counted here.
+func (m searchModel) computeTypeCounts() (commits, sessions int) {
 	if m.counts != nil {
-		return m.counts.Checkpoints, m.counts.Commits, m.counts.Sessions
+		return m.counts.Commits, m.counts.Sessions
 	}
 	for _, r := range m.results {
 		switch typeFilter(r.Type) {
-		case typeFilterCheckpoints:
-			checkpoints++
 		case typeFilterCommits:
 			commits++
 		case typeFilterSessions:
 			sessions++
-		case typeFilterAll, typeFilterCode:
-			// not a valid result type; skip
+		case typeFilterAll, typeFilterCode, typeFilterCheckpoints:
+			// not shown as a tab; skip
 		}
 	}
 	return
@@ -270,7 +269,7 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	ti := textinput.New()
 	ti.SetValue(query)
 	ti.Prompt = " › "
-	ti.Placeholder = "search checkpoints... (author:name date:week branch:main repo:owner/name or repo:*)"
+	ti.Placeholder = "search sessions, commits, code... (author:name date:week branch:main repo:owner/name or repo:*)"
 	ti.CharLimit = 200
 	ti.SetWidth(max(ss.width-6, 30))
 	ti.SetVirtualCursor(true)
@@ -301,7 +300,7 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 		styles:         styles,
 		browseVP:       viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
 		darkBg:         termenv.HasDarkBackground(),
-		filterType:     typeFilterCheckpoints,      // default the results table to checkpoints
+		filterType:     typeFilterCommits,          // default to the leftmost tab (Commits), matching the web UI order
 		semanticSearch: newSemanticSearcher(false), // command layer overrides with its session searcher
 	}
 	if codeOpts != nil {
@@ -516,7 +515,7 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	// Type tab keys (1/2/3)
 	switch msg.String() {
 	case "1":
-		m.filterType = typeFilterCheckpoints
+		m.filterType = typeFilterCommits
 		m.cursor = 0
 		m.page = 0
 		m.browseVP.GotoTop()
@@ -530,13 +529,6 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		m = m.refreshBrowseContent()
 		return m, nil
 	case "3":
-		m.filterType = typeFilterCommits
-		m.cursor = 0
-		m.page = 0
-		m.browseVP.GotoTop()
-		m = m.refreshBrowseContent()
-		return m, nil
-	case "4":
 		m.filterType = typeFilterCode
 		m.cursor = 0
 		m.page = 0
@@ -800,7 +792,7 @@ func (m searchModel) viewSearchMode() string {
 
 // viewTypeTabs renders the type filter tabs with counts.
 func (m searchModel) viewTypeTabs() string {
-	cpCount, cmCount, ssCount := m.computeTypeCounts()
+	cmCount, ssCount := m.computeTypeCounts()
 
 	renderTab := func(label string, filter typeFilter, count int, keyHint string) string {
 		text := fmt.Sprintf("[%s] %s %d", keyHint, label, count)
@@ -810,11 +802,15 @@ func (m searchModel) viewTypeTabs() string {
 		return m.styles.render(m.styles.tabInactive, text)
 	}
 
+	// No Checkpoints tab: the search service folds checkpoint hits into their
+	// owning sessions (ENT-1595), so a checkpoint surfaces as its session. This
+	// matches the web, which dropped its Checkpoints tab. Raw checkpoints stay
+	// reachable by ID via `entire checkpoint explain <id>` (folded session rows
+	// route there).
 	tabs := []string{
-		renderTab("Checkpoints", typeFilterCheckpoints, cpCount, "1"),
+		renderTab("Commits", typeFilterCommits, cmCount, "1"),
 		renderTab("Sessions", typeFilterSessions, ssCount, "2"),
-		renderTab("Commits", typeFilterCommits, cmCount, "3"),
-		renderTab("Code", typeFilterCode, len(m.codeResults), "4"),
+		renderTab("Code", typeFilterCode, len(m.codeResults), "3"),
 	}
 
 	return strings.Join(tabs, "  ")
@@ -835,15 +831,16 @@ func (m searchModel) viewBrowseHeader() (string, bool) {
 	b.WriteString("\n\n")
 
 	// Always show type tabs so the user can switch to the Code tab even when
-	// checkpoint search is loading/errored/empty.
-	checkpointBlocked := m.loading || m.searchErr != "" || len(m.results) == 0
+	// the semantic search is loading/errored/empty.
+	resultsBlocked := m.loading || m.searchErr != "" || len(m.results) == 0
 
 	// Type tabs
 	b.WriteString(pad + m.viewTypeTabs())
 	b.WriteString("\n\n")
 
-	// Checkpoint-specific loading/error/empty when on a checkpoint tab.
-	if checkpointBlocked && m.filterType != typeFilterCode {
+	// Loading/error/empty state for the semantic-result tabs (Sessions,
+	// Commits). Code has its own state below and is exempt.
+	if resultsBlocked && m.filterType != typeFilterCode {
 		switch {
 		case m.loading:
 			b.WriteString(pad + m.styles.render(m.styles.dim, "Searching..."))
@@ -1558,7 +1555,7 @@ func (m searchModel) viewHelp() string {
 	if pages > 1 {
 		left += dot + m.styles.helpItem("n/p", "page")
 	}
-	left += dot + m.styles.helpItem("1-4", "type") + dot +
+	left += dot + m.styles.helpItem("1-3", "type") + dot +
 		m.styles.helpItem(keys.Quit.Help().Key, keys.Quit.Help().Desc)
 
 	// The page / results count lives on the status row beneath the list

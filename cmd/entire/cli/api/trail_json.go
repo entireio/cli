@@ -10,11 +10,17 @@ import (
 
 var rawJSONType = reflect.TypeFor[json.RawMessage]()
 
-// normalizeLegacyTrailJSON accepts the former BFF's snake_case trail payloads
-// while the CLI moves to entire-api's camelCase contract. Normalization follows
-// the destination schema so map, interface, RawMessage, and unknown fields keep
-// their user-defined keys unchanged.
-func normalizeLegacyTrailJSON(data []byte, dest any) ([]byte, error) {
+// normalizeTrailJSON maps snake_case trail keys onto their canonical camelCase
+// spellings. Normalization follows the destination schema so map, interface,
+// RawMessage, and unknown fields keep their user-defined keys unchanged.
+//
+// This runs unconditionally on every trail decode and is NOT retired-backend
+// fallback: the alias table it shares with the SSE reader
+// (NormalizeTrailJSONKey, used by trail watch) is load-bearing for entire-api's
+// own snake_case event keys. Whether entire-api's JSON *responses* still need
+// the snake→camel step is unverified, so removing this is a wire-contract
+// question to settle with the API owners, not a dead-code cleanup.
+func normalizeTrailJSON(data []byte, dest any) ([]byte, error) {
 	var value any
 	if err := json.Unmarshal(data, &value); err != nil {
 		return nil, fmt.Errorf("decode trail JSON: %w", err)
@@ -27,7 +33,7 @@ func normalizeLegacyTrailJSON(data []byte, dest any) ([]byte, error) {
 }
 
 func decodeNormalizedTrailJSON(data []byte, dest any) error {
-	normalized, err := normalizeLegacyTrailJSON(data, dest)
+	normalized, err := normalizeTrailJSON(data, dest)
 	if err != nil {
 		return err
 	}
@@ -35,63 +41,6 @@ func decodeNormalizedTrailJSON(data []byte, dest any) error {
 		return fmt.Errorf("decode normalized trail JSON: %w", err)
 	}
 	return nil
-}
-
-func legacyTrailRequestBody(body any) (any, error) {
-	data, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("marshal trail request: %w", err)
-	}
-	var value any
-	if err := json.Unmarshal(data, &value); err != nil {
-		return nil, fmt.Errorf("decode trail request: %w", err)
-	}
-	return snakeCaseTrailJSONValue(value, reflect.TypeOf(body)), nil
-}
-
-func snakeCaseTrailJSONValue(value any, typ reflect.Type) any {
-	typ = indirectTrailJSONType(typ)
-	if typ == nil || typ == rawJSONType {
-		return value
-	}
-	switch v := value.(type) {
-	case map[string]any:
-		if typ.Kind() != reflect.Struct {
-			return value
-		}
-		out := make(map[string]any, len(v))
-		for key, child := range v {
-			fieldType, canonical, ok := trailJSONStructField(typ, key)
-			if !ok {
-				out[key] = child
-				continue
-			}
-			out[lowerCamelToSnake(canonical)] = snakeCaseTrailJSONValue(child, fieldType)
-		}
-		return out
-	case []any:
-		if typ.Kind() != reflect.Slice && typ.Kind() != reflect.Array {
-			return value
-		}
-		for i := range v {
-			v[i] = snakeCaseTrailJSONValue(v[i], typ.Elem())
-		}
-	}
-	return value
-}
-
-func lowerCamelToSnake(value string) string {
-	var out strings.Builder
-	for i, r := range value {
-		if unicode.IsUpper(r) {
-			if i > 0 {
-				out.WriteByte('_')
-			}
-			r = unicode.ToLower(r)
-		}
-		out.WriteRune(r)
-	}
-	return out.String()
 }
 
 func normalizeTrailJSONValue(value any, typ reflect.Type) any {

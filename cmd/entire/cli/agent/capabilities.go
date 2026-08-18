@@ -220,3 +220,13 @@ func AsModelExtractor(ag Agent) (ModelExtractor, bool) {
 func AsSkillEventExtractor(ag Agent) (SkillEventExtractor, bool) {
 	return builtinCapability[SkillEventExtractor](ag)
 }
+
+// AsSessionEndBudgeter returns the agent as SessionEndBudgeter if it implements
+// the interface. Built-in only because no external agent needs it yet — not
+// because external agents could enforce a budget themselves: a plugin supplies
+// only parse-hook, while the work being bounded (endSessionNow, the condense)
+// runs in the entire process. Widen DeclaredCaps with a session_end_budget
+// field when an external agent has a host that clamps its session-end hook.
+func AsSessionEndBudgeter(ag Agent) (SessionEndBudgeter, bool) {
+	return builtinCapability[SessionEndBudgeter](ag)
+}

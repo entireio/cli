@@ -97,16 +97,12 @@ func currentTrailEnablementScope(ctx context.Context) (trailEnablementScope, err
 	if err != nil {
 		return trailEnablementScope{}, fmt.Errorf("resolve auth cache key: %w", err)
 	}
-	apiBase, err := trailBackendScopedAPIBase()
-	if err != nil {
-		return trailEnablementScope{}, err
-	}
 	return trailEnablementScope{
 		Forge:     info.Forge,
 		Owner:     info.Owner,
 		Repo:      info.Repo,
 		RepoKey:   trailEnablementRepoKey(info.Forge, info.Owner, info.Repo),
-		APIBase:   apiBase,
+		APIBase:   api.BaseURL(),
 		AuthKey:   authKey,
 		Supported: info.Forge != "",
 	}, nil
@@ -114,14 +110,6 @@ func currentTrailEnablementScope(ctx context.Context) (trailEnablementScope, err
 
 func trailEnablementRepoKey(forge, owner, repo string) string {
 	return strings.Join([]string{forge, owner, repo}, "/")
-}
-
-func trailBackendScopedAPIBase() (string, error) {
-	backend, err := configuredTrailBackend()
-	if err != nil {
-		return "", err
-	}
-	return string(backend) + ":" + api.BaseURL(), nil
 }
 
 func saveTrailEnablementScopeHint(ctx context.Context, sessionID string, scope trailEnablementScope) error {
@@ -185,16 +173,12 @@ func saveTrailsEnabledForRemote(ctx context.Context, forge, owner, repo string, 
 	if err != nil {
 		return fmt.Errorf("resolve auth cache key: %w", err)
 	}
-	apiBase, err := trailBackendScopedAPIBase()
-	if err != nil {
-		return err
-	}
 	scope := trailEnablementScope{
 		Forge:     forge,
 		Owner:     owner,
 		Repo:      repo,
 		RepoKey:   trailEnablementRepoKey(forge, owner, repo),
-		APIBase:   apiBase,
+		APIBase:   api.BaseURL(),
 		AuthKey:   authKey,
 		Supported: forge != "",
 	}

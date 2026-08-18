@@ -39,6 +39,10 @@ type GitStore struct {
 	// metadataBranchFetchTried latches the one recovery attempt per store; see
 	// tryFetchMetadataBranch.
 	metadataBranchFetchTried bool
+	// readRemotes is the ordered checkpoint read-candidate chain consulted by
+	// committed reads after the local tree; see OpenOptions.ReadRemotes. nil
+	// means the legacy origin-only fallback.
+	readRemotes []string
 }
 
 // ephemeralStore is the git shadow-branch (temporary) checkpoint store. It is
@@ -74,6 +78,16 @@ func NewGitStore(repo *git.Repository, refs PersistentRefs) *GitStore {
 // on demand when reading from metadata trees.
 func (s *GitStore) SetBlobFetcher(f BlobFetchFunc) {
 	s.blobFetcher = f
+}
+
+// SetReadRemotes configures the ordered checkpoint read-candidate remotes
+// (elected sync remote first, then the legacy origin tier) whose tracking
+// refs committed reads consult after the local tree. Selection happens by
+// requested checkpoint, so an existing but incomplete tree does not mask a
+// later candidate. This is a pure read — the chain never seeds or advances
+// local refs. nil keeps the legacy origin-only fallback.
+func (s *GitStore) SetReadRemotes(remotes []string) {
+	s.readRemotes = remotes
 }
 
 // SetMetadataBranchFetcher configures the store to fetch the metadata branch

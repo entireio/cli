@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,8 +14,8 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"     // register agent
-	_ "github.com/entireio/cli/cmd/entire/cli/agent/codex"          // register agent
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode" // register agent
+	codexagent "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"         // register agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid" // register agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"      // register agent
@@ -780,6 +781,113 @@ func TestExtractTranscriptMetadataForAgent_Pi(t *testing.T) {
 	}
 	if got.Model != "gpt-5.6-sol" {
 		t.Errorf("Model = %q, want gpt-5.6-sol", got.Model)
+	}
+}
+
+// TestExtractTranscriptMetadataForAgent_CodexSkipsEnvironmentContext: Codex
+// review sessions (and any session where the agent injects an instruction
+// preamble) record the <environment_context> block as the first user message.
+// Attach must use the first genuine user prompt as the checkpoint title — the
+// same filter the rewind display path applies (strategy.FirstDisplayPrompt).
+func TestExtractTranscriptMetadataForAgent_CodexSkipsEnvironmentContext(t *testing.T) {
+	t.Parallel()
+
+	// Single-line form: JSONL test fixtures can't embed raw newlines in a
+	// string literal without escaping, and the filter only needs the prefix.
+	envContext := "<environment_context><cwd>/Users/soph/Work/repo</cwd><shell>zsh</shell><current_date>2026-08-15</current_date></environment_context>"
+	data := []byte(`{"timestamp":"2026-08-15T10:00:00.000Z","type":"session_meta","payload":{"id":"019d6c43-1537-7343-9691-1f8cee04fe59","timestamp":"2026-08-15T10:00:00.000Z"}}
+{"timestamp":"2026-08-15T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"` + envContext + `"}]}}
+{"timestamp":"2026-08-15T10:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Review this trail for correctness"}]}}
+{"timestamp":"2026-08-15T10:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Reviewing"}]}}
+`)
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := extractTranscriptMetadataForAgent(codexagent.NewCodexAgent(), path, data)
+	if got.FirstPrompt != "Review this trail for correctness" {
+		t.Errorf("FirstPrompt = %q, want the genuine user prompt, not the injected environment context", got.FirstPrompt)
+	}
+	// One genuine prompt, so one step: the injected preamble is not a user turn.
+	if got.TurnCount != 1 {
+		t.Errorf("TurnCount = %d, want 1 (injected preamble is not a user turn)", got.TurnCount)
+	}
+}
+
+// TestExtractTranscriptMetadata_CodexOnlyEnvironmentContext guards the
+// degenerate case: a transcript whose only user content is the injected
+// preamble must still yield a title (the raw preamble) rather than an empty
+// prompt — an attach checkpoint with no prompt at all is worse than a
+// noisy-but-present one.
+func TestExtractTranscriptMetadata_CodexOnlyEnvironmentContext(t *testing.T) {
+	t.Parallel()
+
+	envContext := "<environment_context><cwd>/repo</cwd></environment_context>"
+	data := []byte(`{"timestamp":"2026-08-15T10:00:00.000Z","type":"session_meta","payload":{"id":"019d6c43-1537-7343-9691-1f8cee04fe59","timestamp":"2026-08-15T10:00:00.000Z"}}
+{"timestamp":"2026-08-15T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"` + envContext + `"}]}}
+`)
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := extractTranscriptMetadataForAgent(codexagent.NewCodexAgent(), path, data)
+	if got.FirstPrompt != envContext {
+		t.Errorf("FirstPrompt = %q, want the raw environment context as fallback", got.FirstPrompt)
+	}
+}
+
+// TestExtractTranscriptMetadata_JSONLSkipsInjectedPreamble covers the generic
+// JSONL path (agents without a native prompt extractor): an injected
+// AGENTS.md instruction message must not become the first prompt.
+func TestExtractTranscriptMetadata_JSONLSkipsInjectedPreamble(t *testing.T) {
+	t.Parallel()
+
+	preamble := `# AGENTS.md instructions for /repo
+
+<INSTRUCTIONS>
+follow the repo conventions
+</INSTRUCTIONS>`
+	// JSON-escape the preamble so the fixture is valid JSONL (raw newlines in a
+	// string literal would break every line parse).
+	preambleJSON, err := json.Marshal(preamble)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{"type":"user","message":{"role":"user","content":` + string(preambleJSON) + `},"uuid":"u1"}
+{"type":"user","message":{"role":"user","content":"fix the crash"},"uuid":"u2"}
+`)
+
+	got := extractTranscriptMetadata(data)
+	if got.FirstPrompt != "fix the crash" {
+		t.Errorf("FirstPrompt = %q, want %q", got.FirstPrompt, "fix the crash")
+	}
+	if got.TurnCount != 1 {
+		t.Errorf("TurnCount = %d, want 1 (injected preamble is not a user turn)", got.TurnCount)
+	}
+}
+
+// TestExtractTranscriptMetadata_JSONLOnlyInjectedPreamble is the generic-JSONL
+// twin of TestExtractTranscriptMetadata_CodexOnlyEnvironmentContext: when every
+// user message is injected, the raw preamble must still be recorded as the
+// title. Returning an empty FirstPrompt here would write a checkpoint with no
+// prompt.txt at all, and — because TurnCount would also be non-zero —
+// warnEmptyTranscriptMetadata would stay silent about it.
+func TestExtractTranscriptMetadata_JSONLOnlyInjectedPreamble(t *testing.T) {
+	t.Parallel()
+
+	preamble := "# AGENTS.md instructions for /repo\n\nfollow the repo conventions"
+	preambleJSON, err := json.Marshal(preamble)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{"type":"user","message":{"role":"user","content":` + string(preambleJSON) + `},"uuid":"u1"}
+`)
+
+	got := extractTranscriptMetadata(data)
+	if got.FirstPrompt != preamble {
+		t.Errorf("FirstPrompt = %q, want the raw preamble as fallback", got.FirstPrompt)
 	}
 }
 

@@ -12,6 +12,62 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/search"
 )
 
+// --- dedup ------------------------------------------------------------------
+
+// TestDedupSemanticResults_RepoScopedIDs exercises the deduper itself (not just
+// DedupID in isolation) over every id type that can repeat across repos:
+// server-folded legacy sessions (ENT-1595), raw checkpoints, and commits (the
+// same SHA lives in a fork and its upstream). On main these rows either had an
+// empty ResultID (legacy sessions, never deduped) or a bare repo-scoped/shared
+// id (checkpoints/commits, collapsed across repos). DedupID now repo-qualifies
+// all three, so the same four cases must hold for each.
+func TestDedupSemanticResults_RepoScopedIDs(t *testing.T) {
+	t.Parallel()
+
+	for _, typ := range []string{search.TypeSession, search.TypeCheckpoint, search.TypeCommit} {
+		t.Run(typ, func(t *testing.T) {
+			t.Parallel()
+
+			// Distinct ids in the same repo must all survive.
+			if out, _ := dedupSemanticResults([]search.Result{
+				v4RepoScopedRow(typ, "id-a", "backend", 0.9),
+				v4RepoScopedRow(typ, "id-b", "backend", 0.8),
+			}); len(out) != 2 {
+				t.Errorf("distinct ids collapsed: in=2 out=%d", len(out))
+			}
+
+			// The SAME row from a repo mirrored across cells collapses to one.
+			out, dupes := dedupSemanticResults([]search.Result{
+				v4RepoScopedRow(typ, "id-x", "backend", 0.9),
+				v4RepoScopedRow(typ, "id-x", "backend", 0.8),
+			})
+			if len(out) != 1 {
+				t.Errorf("mirrored row not deduped: in=2 out=%d", len(out))
+			}
+			if dupes[typ] != 1 {
+				t.Errorf("dupe tally = %v, want %s:1", dupes, typ)
+			}
+
+			// Repo casing skew across cells (git remote vs repo index) still dedupes.
+			if out, _ := dedupSemanticResults([]search.Result{
+				v4RepoScopedRow(typ, "id-x", "backend", 0.9),
+				v4RepoScopedRow(typ, "id-x", "Backend", 0.8),
+			}); len(out) != 1 {
+				t.Errorf("casing skew leaked a duplicate: in=2 out=%d", len(out))
+			}
+
+			// The same id in DIFFERENT repos (a fork/upstream, or two legacy repos)
+			// is a distinct result — it must NOT collapse.
+			if out, _ := dedupSemanticResults([]search.Result{
+				v4RepoScopedRow(typ, "id-dup", "backend", 0.9),
+				v4RepoScopedRow(typ, "id-dup", "frontend", 0.8),
+			}); len(out) != 2 {
+				t.Errorf("cross-repo same id collapsed: in=2 out=%d", len(out))
+			}
+		})
+	}
+}
+
 // --- helpers -----------------------------------------------------------------
 
 func fptr(f float64) *float64 { return &f }
@@ -39,6 +95,23 @@ func v4Commit(sha string, tier int, meta search.Meta) search.Result {
 		Meta:   meta,
 		Commit: &search.CommitResult{CommitSHA: sha},
 	}
+}
+
+// v4RepoScopedRow builds a result whose dedup identity is repo-qualified: a
+// server-folded legacy session (ENT-1595, empty sessionId), a raw checkpoint, or
+// a commit — all under org acme, with the given repo. id is the checkpoint id /
+// commit SHA the row carries.
+func v4RepoScopedRow(typ, id, repo string, score float64) search.Result {
+	r := search.Result{Type: typ, Meta: search.Meta{Score: score}}
+	switch typ {
+	case search.TypeSession:
+		r.Session = &search.SessionResult{SessionID: "", MatchedCheckpointID: id, Org: "acme", Repo: repo}
+	case search.TypeCheckpoint:
+		r.Checkpoint = &search.CheckpointResult{ID: id, Org: "acme", Repo: repo}
+	case search.TypeCommit:
+		r.Commit = &search.CommitResult{CommitSHA: id, Org: "acme", Repo: repo}
+	}
+	return r
 }
 
 // v4RepoRow builds a repo-type result via the wire format, since repo rows
