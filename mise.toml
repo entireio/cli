@@ -30,6 +30,14 @@ mise run test:e2e:canary
 description = "Run formatting, linting, and CI tests"
 depends = ["fmt", "lint", "test:ci"]
 
+[tasks."pricing:sync"]
+description = "Report drift between the embedded pricing tables and entire-api's canonical catalog (read-only)"
+run = "go run ./cmd/entire/cli/pricing/pricingsync"
+
+[tasks."pricing:sync:write"]
+description = "Sync the embedded pricing tables (cmd/entire/cli/pricing/models/*.json) from entire-api's canonical catalog; review the diff before committing"
+run = "go run ./cmd/entire/cli/pricing/pricingsync -write"
+
 [tasks."build:windows"]
 description = "Cross-compile for Windows amd64"
 run = "CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o entire.exe ./cmd/entire/"
