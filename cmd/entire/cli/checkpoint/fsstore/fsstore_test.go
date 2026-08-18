@@ -109,6 +109,32 @@ func TestStore_SessionSummaryAndAttribution(t *testing.T) {
 	assert.Equal(t, 10, summary.CombinedAttribution.AgentLines)
 }
 
+// The reference backend must handle every request in the union, including the
+// post-hoc entity-delta backfill.
+func TestStore_SessionEntityDeltas(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := New(t.TempDir())
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	document := []byte(`{"schema_version":"1.0","entities":[]}`)
+
+	require.NoError(t, store.Write(ctx, cp.Session{
+		CheckpointID: cid, SessionID: "sess-1", Strategy: "manual-commit",
+		Transcript: redact.AlreadyRedacted([]byte("t")),
+	}))
+	require.NoError(t, store.Write(ctx, cp.SessionEntityDeltas{
+		CheckpointID: cid, SessionID: "sess-1", Document: document,
+	}))
+
+	// An unknown session or checkpoint is an error the caller drops, not a panic.
+	require.Error(t, store.Write(ctx, cp.SessionEntityDeltas{
+		CheckpointID: cid, SessionID: "nope", Document: document,
+	}))
+	require.Error(t, store.Write(ctx, cp.SessionEntityDeltas{
+		CheckpointID: id.MustCheckpointID("ffffffffffff"), SessionID: "sess-1", Document: document,
+	}))
+}
+
 func TestStore_ListReturnsCheckpoints(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -286,6 +286,58 @@ func (s *treeWriter) applyAttributionBackfill(ctx context.Context, existing *obj
 	return s.buildCheckpointSubtree(ctx, entries, basePath)
 }
 
+// applyEntityDeltasBackfill writes one session's entity-delta document into
+// that session's directory on the checkpoint's current subtree, returning the
+// new subtree hash. Returns ErrCheckpointNotFound when the checkpoint has no
+// root summary, and a plain (non-sentinel, so store routing does not fall
+// through) error when no session in it carries sessionID.
+//
+// Unlike applySummaryBackfill (which targets the latest session), the target is
+// resolved from the session ID: entity deltas are produced per session and a
+// checkpoint can hold several, so writing into "the latest" would attribute one
+// session's deltas to another.
+func (s *treeWriter) applyEntityDeltasBackfill(ctx context.Context, existing *object.Tree, basePath, sessionID string, document []byte) (plumbing.Hash, error) {
+	entries, err := s.flattenExisting(existing, basePath)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+
+	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
+	entry, exists := entries[rootMetadataPath]
+	if !exists {
+		return plumbing.ZeroHash, ErrCheckpointNotFound
+	}
+	summary, err := s.readSummaryFromBlob(entry.Hash)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to read checkpoint summary: %w", err)
+	}
+
+	// findSessionIndex returns len(Sessions) for "not present" — for a backfill
+	// that is a miss, not an append slot: there is no session document to attach
+	// the deltas to.
+	sessionIndex := s.findSessionIndex(ctx, basePath, summary, entries, sessionID)
+	if sessionIndex >= len(summary.Sessions) {
+		return plumbing.ZeroHash, fmt.Errorf("entity deltas: session %q not found in checkpoint", sessionID)
+	}
+
+	deltasPath := checkpointSubtreePath(basePath, strconv.Itoa(sessionIndex), paths.EntityDeltasFileName)
+	// Same regex-only redaction every other checkpoint file gets on the
+	// post-commit path; the pre-push OPF rewrite re-redacts it with the 9th
+	// layer along with the rest of the tree.
+	redacted := RedactBlobBytes(ctx, document, paths.EntityDeltasFileName, false)
+	blobHash, err := CreateBlobFromContent(s.repo, redacted)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to create entity deltas blob: %w", err)
+	}
+	entries[deltasPath] = object.TreeEntry{
+		Name: deltasPath,
+		Mode: filemode.Regular,
+		Hash: blobHash,
+	}
+
+	return s.buildCheckpointSubtree(ctx, entries, basePath)
+}
+
 // applySummaryBackfill rewrites the latest session's summary on the checkpoint's
 // current subtree, returning the new subtree hash and that session's ID (for the
 // commit message). Returns ErrCheckpointNotFound when the checkpoint has no root
@@ -920,6 +972,68 @@ func (s *GitStore) backfillAttribution(ctx context.Context, checkpointID id.Chec
 	}
 
 	return s.setPrimaryRef(newCommitHash)
+}
+
+// backfillEntityDeltas attaches a session's entity-delta document to an
+// existing checkpoint on the v1 branch. Like backfillAttribution it is a
+// post-hoc write: the checkpoint is already committed, so a failure here leaves
+// it exactly as it was.
+//
+// CONCURRENCY. This one runs in a detached child (see strategy.RunEntityDeltasBackfill)
+// that shares no lock with the condense path — condensation serializes on the
+// per-session state lock, the children on their own backfill lock — so the v1
+// tip genuinely can move between the read below and the write. A force-set here
+// would commit onto a stale parent and silently orphan whatever landed in
+// between (another session's checkpoint, an attribution backfill). Hence the
+// compare-and-swap, and hence the rebuild: on a lost race the document is
+// rebuilt on the winner's tip so BOTH survive.
+func (s *GitStore) backfillEntityDeltas(ctx context.Context, req SessionEntityDeltas) error {
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // Propagating context cancellation
+	}
+
+	// Backfills require the branch to exist; a miss must not create it.
+	if err := s.requireSessionsBranch(); err != nil {
+		return err
+	}
+
+	return writeWithRefRaceRetry(ctx, "entity deltas backfill", func() error {
+		return s.tryBackfillEntityDeltas(ctx, req)
+	})
+}
+
+// tryBackfillEntityDeltas is one attempt of backfillEntityDeltas: read the tip,
+// build the document into it, and compare-and-swap. It re-reads the tip on
+// every call, so a retry after a lost race rebuilds on the new parent rather
+// than replaying a commit built on the old one.
+func (s *GitStore) tryBackfillEntityDeltas(ctx context.Context, req SessionEntityDeltas) error {
+	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
+	if err != nil {
+		return err
+	}
+
+	existing, err := s.subtreeObjAt(rootTreeHash, req.CheckpointID.Path())
+	if err != nil {
+		return err
+	}
+	checkpointSubtree, err := s.applyEntityDeltasBackfill(ctx, existing, req.CheckpointID.Path()+"/", req.SessionID, req.Document)
+	if err != nil {
+		return err
+	}
+
+	newTreeHash, err := s.spliceCheckpointSubtree(rootTreeHash, req.CheckpointID, checkpointSubtree)
+	if err != nil {
+		return err
+	}
+
+	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
+	commitMsg := fmt.Sprintf("Record entity deltas for checkpoint %s (session: %s)", req.CheckpointID, req.SessionID)
+	newCommitHash, err := CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
+	if err != nil {
+		return err
+	}
+
+	return s.casPrimaryRef(parentHash, newCommitHash)
 }
 
 // findSessionIndex returns the index of an existing session with the given ID,

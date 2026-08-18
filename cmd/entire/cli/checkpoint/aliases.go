@@ -44,10 +44,12 @@ type (
 	Writer           = apicheckpoint.Writer
 	WriteRequest     = apicheckpoint.WriteRequest
 	// Write request union: session-level (Session, SessionTranscript,
-	// SessionSummary) and checkpoint-level (CheckpointAttribution).
-	Session           = apicheckpoint.Session
-	SessionTranscript = apicheckpoint.SessionTranscript
-	SessionSummary    = apicheckpoint.SessionSummary
+	// SessionSummary, SessionEntityDeltas) and checkpoint-level
+	// (CheckpointAttribution).
+	Session             = apicheckpoint.Session
+	SessionTranscript   = apicheckpoint.SessionTranscript
+	SessionSummary      = apicheckpoint.SessionSummary
+	SessionEntityDeltas = apicheckpoint.SessionEntityDeltas
 	//nolint:revive // CheckpointAttribution stutter is accepted — makes the checkpoint (vs session) tier explicit.
 	CheckpointAttribution = apicheckpoint.CheckpointAttribution
 )

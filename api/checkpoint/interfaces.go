@@ -2,6 +2,7 @@ package checkpoint
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -38,10 +39,10 @@ type PersistentStore interface {
 // unexported isWriteRequest marker. A store dispatches on the concrete type; a
 // mirror/fan-out store forwards the same value to each backend's Write.
 //
-// Three requests are session-level (Session, SessionTranscript, SessionSummary)
-// and one is checkpoint-level (CheckpointAttribution). Adding a write operation
-// is a new request type plus one dispatch case — the Store interface stays
-// unchanged and existing backends keep compiling.
+// Four requests are session-level (Session, SessionTranscript, SessionSummary,
+// SessionEntityDeltas) and one is checkpoint-level (CheckpointAttribution).
+// Adding a write operation is a new request type plus one dispatch case — the
+// Store interface stays unchanged and existing backends keep compiling.
 type WriteRequest interface {
 	isWriteRequest()
 }
@@ -70,9 +71,30 @@ type CheckpointAttribution struct {
 	Attribution  *Attribution
 }
 
+// SessionEntityDeltas records which code entities changed during one session,
+// as a document written into that session's directory inside an EXISTING
+// checkpoint. (session-level)
+//
+// Like CheckpointAttribution it is a post-hoc backfill: the document is
+// produced out of band, after the checkpoint has been written, so nothing on
+// the checkpoint-creation path ever waits on (or can be broken by) it.
+type SessionEntityDeltas struct {
+	CheckpointID id.CheckpointID
+	// SessionID selects which of the checkpoint's session directories receives
+	// the document. A checkpoint can hold several sessions and each has its own
+	// deltas, so the index is resolved from this ID, never assumed.
+	SessionID string
+	// Document is the encoded entity_deltas.json payload. Its schema is owned by
+	// the producer side (strategy.entityDeltasDocument); the store keeps it
+	// opaque and stores it verbatim, subject only to the standard blob
+	// redaction every checkpoint file gets.
+	Document json.RawMessage
+}
+
 func (Session) isWriteRequest()               {}
 func (SessionTranscript) isWriteRequest()     {}
 func (SessionSummary) isWriteRequest()        {}
+func (SessionEntityDeltas) isWriteRequest()   {}
 func (CheckpointAttribution) isWriteRequest() {}
 
 // Writer is the persistent-store write surface: a single Write that accepts any

@@ -68,6 +68,15 @@ func TestWrite_DispatchesEachRequest(t *testing.T) {
 		t.Errorf("SessionSummary not applied: %+v", meta.Summary)
 	}
 
+	// SessionEntityDeltas attaches the named session's entity-delta document.
+	if err := store.Write(ctx, SessionEntityDeltas{
+		CheckpointID: cpID,
+		SessionID:    "session-001",
+		Document:     []byte(`{"schema_version":"1.0"}`),
+	}); err != nil {
+		t.Fatalf("Write(SessionEntityDeltas) error = %v", err)
+	}
+
 	// CheckpointAttribution rewrites the checkpoint root combined attribution.
 	if err := store.Write(ctx, CheckpointAttribution{
 		CheckpointID: cpID,

@@ -120,6 +120,8 @@ func (s *gitRefsStore) Write(ctx context.Context, req WriteRequest) error {
 		return s.backfillTranscript(ctx, UpdateOptions(r))
 	case SessionSummary:
 		return s.backfillSummary(ctx, r.CheckpointID, r.Summary)
+	case SessionEntityDeltas:
+		return s.backfillEntityDeltas(ctx, r)
 	case CheckpointAttribution:
 		return s.backfillAttribution(ctx, r.CheckpointID, r.Attribution)
 	default:
@@ -205,6 +207,30 @@ func (s *gitRefsStore) setRef(ctx context.Context, cid id.CheckpointID, hash plu
 	}
 	if err := s.repo.Storer.SetReference(plumbing.NewHashReference(refName, hash)); err != nil {
 		return fmt.Errorf("set checkpoint ref %s to %s: %w", refName, hash, err)
+	}
+	s.enqueueForPush(ctx, refName)
+	return nil
+}
+
+// casRef is setRef for writers that must not clobber a concurrent advance: the
+// ref moves only if it still holds expectedOld, and a lost race surfaces as
+// storage.ErrReferenceHasChanged (wrapped) for the caller to rebuild on.
+//
+// A zero expectedOld means "the ref did not exist when we read it" and degrades
+// to a plain set; the entity-deltas backfill never gets there (an absent ref is
+// reported as ErrCheckpointNotFound before any commit is built), but the
+// primitive stays honest for future callers.
+func (s *gitRefsStore) casRef(ctx context.Context, cid id.CheckpointID, expectedOld, hash plumbing.Hash) error {
+	refName, err := RefName(cid)
+	if err != nil {
+		return err
+	}
+	var old *plumbing.Reference
+	if !expectedOld.IsZero() {
+		old = plumbing.NewHashReference(refName, expectedOld)
+	}
+	if err := s.repo.Storer.CheckAndSetReference(plumbing.NewHashReference(refName, hash), old); err != nil {
+		return fmt.Errorf("compare-and-set checkpoint ref %s to %s: %w", refName, hash, err)
 	}
 	s.enqueueForPush(ctx, refName)
 	return nil
@@ -328,6 +354,47 @@ func (s *gitRefsStore) backfillSummary(ctx context.Context, checkpointID id.Chec
 		return err
 	}
 	return s.setRef(ctx, checkpointID, commitHash)
+}
+
+// backfillEntityDeltas attaches a session's entity-delta document to an
+// existing checkpoint ref. Post-hoc, like backfillAttribution: the checkpoint
+// is already written, so a failure here leaves the ref untouched.
+//
+// Same race as the git-branch backend's (see GitStore.backfillEntityDeltas):
+// the detached child shares no lock with condensation, and a second session of
+// the same checkpoint condensing while this runs advances the very ref this
+// write targets. Compare-and-swap plus rebuild-on-the-new-tip, so the loser
+// stacks on the winner instead of erasing it.
+func (s *gitRefsStore) backfillEntityDeltas(ctx context.Context, req SessionEntityDeltas) error {
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // Propagating context cancellation
+	}
+
+	return writeWithRefRaceRetry(ctx, "entity deltas backfill", func() error {
+		return s.tryBackfillEntityDeltas(ctx, req)
+	})
+}
+
+// tryBackfillEntityDeltas is one attempt of backfillEntityDeltas: it re-reads
+// the checkpoint's ref every call so a retry rebuilds on the winner's commit.
+func (s *gitRefsStore) tryBackfillEntityDeltas(ctx context.Context, req SessionEntityDeltas) error {
+	parentHash, existing, err := s.refBaseForBackfill(ctx, req.CheckpointID)
+	if err != nil {
+		return err
+	}
+
+	checkpointSubtree, err := s.applyEntityDeltasBackfill(ctx, existing, "", req.SessionID, req.Document)
+	if err != nil {
+		return err
+	}
+
+	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
+	commitMsg := fmt.Sprintf("Record entity deltas for checkpoint %s (session: %s)", req.CheckpointID, req.SessionID)
+	commitHash, err := CreateCommit(ctx, s.repo, checkpointSubtree, parentHash, commitMsg, authorName, authorEmail)
+	if err != nil {
+		return err
+	}
+	return s.casRef(ctx, req.CheckpointID, parentHash, commitHash)
 }
 
 func (s *gitRefsStore) backfillAttribution(ctx context.Context, checkpointID id.CheckpointID, combinedAttribution *Attribution) error {
