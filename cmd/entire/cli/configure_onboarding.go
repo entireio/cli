@@ -329,7 +329,9 @@ func ensureConfigureRepoAccess(ctx context.Context, outW, errW io.Writer, report
 	fmt.Fprintf(errW, "✗ Entire has no access to %s/%s\n\n", owner, repo)
 	installURL := strings.TrimSpace(initial.InstallURL)
 	if installURL == "" {
-		installURL = fmt.Sprintf("%s/install?repo=%s%%2F%s", configureWebBaseURL(), url.PathEscape(owner), url.PathEscape(repo))
+		fmt.Fprintln(errW, "  Entire did not provide a GitHub App installation URL.")
+		fmt.Fprintln(errW, "  Please try again later or contact Entire support.")
+		return NewSilentError(errors.New("GitHub App installation URL unavailable"))
 	}
 
 	admin, adminErr := deps.githubAdmin(ctx, owner, repo)

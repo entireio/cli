@@ -217,7 +217,7 @@ func TestEnsureConfigureRepoAccessNonAdminPrintsShareableLink(t *testing.T) {
 	}
 	var out, errOut bytes.Buffer
 	err := ensureConfigureRepoAccess(context.Background(), &out, &errOut, configureAccessReporterStub{},
-		&api.EnableRepoResponse{InstallURL: "https://entire.io/install?repo=acme%2Fwidget"},
+		&api.EnableRepoResponse{InstallURL: "https://github.com/apps/entire/installations/new"},
 		"https://github.com/acme/widget.git", "acme", "widget", false, deps)
 	if err == nil {
 		t.Fatal("non-admin access branch should stop configure")
@@ -225,10 +225,35 @@ func TestEnsureConfigureRepoAccessNonAdminPrintsShareableLink(t *testing.T) {
 	if opened {
 		t.Fatal("non-admin branch must not open the installation URL")
 	}
-	for _, want := range []string{"Entire has no access to acme/widget", "An admin needs to install", "https://entire.io/install?repo=acme%2Fwidget"} {
+	for _, want := range []string{"Entire has no access to acme/widget", "An admin needs to install", "https://github.com/apps/entire/installations/new"} {
 		if !strings.Contains(errOut.String(), want) {
 			t.Errorf("stderr missing %q:\n%s", want, errOut.String())
 		}
+	}
+}
+
+func TestEnsureConfigureRepoAccessRequiresAPIInstallURL(t *testing.T) {
+	deps := configureFlowDeps{
+		githubAdmin: func(context.Context, string, string) (bool, error) {
+			t.Fatal("admin check must not run without an installation URL")
+			return false, nil
+		},
+		openURL: func(context.Context, string) error {
+			t.Fatal("browser must not open without an installation URL")
+			return nil
+		},
+	}
+	var out, errOut bytes.Buffer
+	err := ensureConfigureRepoAccess(context.Background(), &out, &errOut, configureAccessReporterStub{},
+		&api.EnableRepoResponse{}, "https://github.com/acme/widget.git", "acme", "widget", false, deps)
+	if err == nil {
+		t.Fatal("missing installation URL should stop configure")
+	}
+	if !strings.Contains(errOut.String(), "did not provide a GitHub App installation URL") {
+		t.Fatalf("missing installation URL guidance:\n%s", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "/install?repo=") {
+		t.Fatalf("obsolete installation fallback was shown:\n%s", errOut.String())
 	}
 }
 
@@ -247,7 +272,7 @@ func TestEnsureConfigureRepoAccessUnknownAdminStillAllowsInstall(t *testing.T) {
 	defer cancel()
 	var out, errOut bytes.Buffer
 	err := ensureConfigureRepoAccess(ctx, &out, &errOut, configureAccessReporterStub{},
-		&api.EnableRepoResponse{InstallURL: "https://entire.io/install?repo=acme%2Fwidget"},
+		&api.EnableRepoResponse{InstallURL: "https://github.com/apps/entire/installations/new"},
 		"https://github.com/acme/widget.git", "acme", "widget", false, deps)
 	if err == nil {
 		t.Fatal("expected the installation wait to end with the test deadline")

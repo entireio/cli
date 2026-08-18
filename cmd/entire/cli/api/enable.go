@@ -16,10 +16,8 @@ type EnableRepoRequest struct {
 // EnableRepoResponse is the result of recording an `entire enable`. Connected
 // reports whether the GitHub App can currently reach the repo; when it can't,
 // InstallURL points at the App installation page.
-//
-// The CLI deliberately ignores these fields today: reporting is best-effort and
-// the "install the GitHub App" nudge is surfaced by the web onboarding, not the
-// CLI. They are decoded for the API contract and potential future use.
+// Interactive configure uses these fields to guide GitHub App installation
+// before attempting mirror creation.
 type EnableRepoResponse struct {
 	Connected  bool   `json:"connected"`
 	InstallURL string `json:"install_url,omitempty"`
