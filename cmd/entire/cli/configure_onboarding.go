@@ -202,11 +202,19 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 		return nil
 	}
 
-	// Snapshot immediately before applying our changes. The form may have been
-	// open for an arbitrary amount of time, so the pre-form status is not a safe
-	// commit baseline: editor autosaves or another process may have changed files
-	// while the user was choosing options. Anything already dirty now is excluded
-	// from generated and disables automatic commit/push below.
+	// Configure remotes before taking the worktree baseline. This mutates only Git
+	// metadata, but doing it first ensures any tool reacting to that metadata has
+	// settled before generated configuration changes are measured.
+	forgeRemote, err := configureUseMirror(ctx, outW, errW, repoRoot, owner, repo, chosen)
+	if err != nil {
+		return err
+	}
+
+	// Snapshot immediately before applying our worktree changes. The form may
+	// have been open for an arbitrary amount of time, so the pre-form status is
+	// not a safe commit baseline: editor autosaves or another process may have
+	// changed files while the user was choosing options. Anything already dirty
+	// now is excluded from generated and disables automatic commit/push below.
 	beforeApply, err := configureGitChanges(ctx, repoRoot)
 	if err != nil {
 		return err
@@ -214,11 +222,6 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 	if (saveChoice == configureSaveDirect || saveChoice == configureSaveNewBranch) &&
 		(len(beforeApply) != 0 || !configureBranchHasNoUnpushedCommits(ctx, repoRoot, branch)) {
 		saveChoice = configureSaveLocal
-	}
-
-	forgeRemote, err := configureUseMirror(ctx, outW, errW, repoRoot, owner, repo, chosen)
-	if err != nil {
-		return err
 	}
 
 	if agentsChanged {
