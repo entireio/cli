@@ -177,6 +177,11 @@ func GetRemoteURLsInDirIfSet(ctx context.Context, dir, remoteName string) (urls 
 			// for absent-there too, which would misreport "not a repo" as "no
 			// origin configured". Confirm repo-ness before trusting it.
 			if !isGitRepoDir(ctx, dir) {
+				// A context canceled between the two git runs also fails the
+				// probe; report the cancellation, not a bogus "not a repo".
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, false, fmt.Errorf("looking up remote %q: %w", remoteName, ctxErr)
+				}
 				return nil, false, fmt.Errorf("looking up remote %q: not a git repository", remoteName)
 			}
 			return nil, false, nil
