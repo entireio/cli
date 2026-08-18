@@ -120,6 +120,9 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 
 	reporter, err := deps.accessClient(ctx)
 	if err != nil {
+		if errors.Is(err, auth.ErrNotLoggedIn) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return renderDataAPIAuthError(errW, err)
+		}
 		return fmt.Errorf("connect to Entire: %w", err)
 	}
 	access, err := reporter.ReportEnable(ctx, cleanRemote)
@@ -266,7 +269,7 @@ func configureOnboardingEnableOptions(opts EnableOptions) EnableOptions {
 }
 
 func configureWebBaseURL() string {
-	return strings.TrimRight(api.BaseURL(), "/")
+	return entireWebBaseURL()
 }
 
 func configureRepoIdentity(ctx context.Context) (owner, repo, cleanRemote string, err error) {
