@@ -329,6 +329,10 @@ func splitOwnerRepo(path string) (string, string, error) {
 	if suffix := len(path) - len(".git"); suffix >= 0 && strings.EqualFold(path[suffix:], ".git") {
 		path = path[:suffix]
 	}
+	// Stripping ".git" can expose a new trailing slash (".../repo/.git" — the
+	// on-disk repo dir form); shed it too or the leftover slash fails open in
+	// exclude_origins matching exactly like the plain trailing slash did.
+	path = strings.TrimRight(path, "/")
 	parts := strings.SplitN(path, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", fmt.Errorf("cannot parse owner/repo from path: %s", path)

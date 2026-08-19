@@ -94,8 +94,13 @@ func NewRootCmd() *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			// If we're in a git repo but Entire isn't set up yet, start the setup flow
-			if _, err := paths.WorktreeRoot(ctx); err == nil && !settings.IsSetUpAny(ctx) {
+			// If we're in a git repo Entire isn't active in — no repo-level
+			// setup AND not covered by the global tier — start the setup flow.
+			// A globally-tracked repo must not be funneled into repo-level
+			// setup: completing it writes .entire/settings.json, which
+			// permanently pins the repo out of the global tier (exclude lists
+			// stop applying to it).
+			if _, err := paths.WorktreeRoot(ctx); err == nil && !settings.IsSetUpAny(ctx) && !settings.GlobalModeActive(ctx) {
 				return runSetupFlow(ctx, cmd.OutOrStdout(), EnableOptions{})
 			}
 			return cmd.Help()

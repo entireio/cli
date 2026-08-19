@@ -72,6 +72,11 @@ func TestParseURL(t *testing.T) {
 			wantInfo: &Info{Protocol: ProtocolSSH, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
 		},
 		{
+			name:     "HTTPS with /.git suffix",
+			url:      "https://github.com/org/repo/.git",
+			wantInfo: &Info{Protocol: ProtocolHTTPS, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
 			name:     "entire:// gh prefix preserved as forge",
 			url:      "entire://entirehost/gh/entireio/cli",
 			wantInfo: &Info{Protocol: ProtocolEntire, Host: "entirehost", Forge: "gh", Owner: "entireio", Repo: "cli"},

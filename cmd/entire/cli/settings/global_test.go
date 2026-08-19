@@ -90,6 +90,7 @@ func TestNormalizeOrigin(t *testing.T) {
 		{"https://github.com/acme/widgets/", "github.com/acme/widgets"},
 		{"git@github.com:acme/widgets.GIT", "github.com/acme/widgets"},
 		{"https://github.com/acme/widgets.git/", "github.com/acme/widgets"},
+		{"https://github.com/acme/widgets/.git", "github.com/acme/widgets"},
 		{"not a url at all", ""},
 		{"", ""},
 	}
@@ -407,6 +408,23 @@ func TestIsActiveForRepo(t *testing.T) {
 		t.Chdir(dir)
 		if IsActiveForRepo(t.Context()) {
 			t.Fatal("explicit repo-level disable must veto global mode")
+		}
+	})
+
+	t.Run("local-only repo enable is active", func(t *testing.T) {
+		dir := newRepo(t)
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		if err := os.MkdirAll(filepath.Join(dir, ".entire"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// settings.local.json ONLY, enabled — `enable --local` writes just this
+		// file, and the gate treating it as inactive silently drops all capture.
+		if err := os.WriteFile(filepath.Join(dir, ".entire", "settings.local.json"), []byte(`{"enabled":true}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		if !IsActiveForRepo(t.Context()) {
+			t.Fatal("a local-only enabled setup must activate")
 		}
 	})
 
