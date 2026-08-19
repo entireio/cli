@@ -716,7 +716,12 @@ func ResolvePreTaskToolUseID(ctx context.Context, toolUseID, taskDescription str
 			continue
 		}
 		candidateID := strings.TrimSuffix(strings.TrimPrefix(name, preTaskFilePrefix), ".json")
-		if validation.ValidateToolUseID(candidateID) != nil {
+		// ValidateToolUseID treats "" as valid (it's an optional field on other
+		// call paths), but an empty candidateID here means the filename itself
+		// is malformed (pre-task-.json) — not a usable tool_use_id. Reject it
+		// explicitly rather than letting it become the sole "active" candidate
+		// and have callers resolve to an empty ID as if that were a real match.
+		if candidateID == "" || validation.ValidateToolUseID(candidateID) != nil {
 			// Malformed filename (e.g. pre-task-.json or an invalid ID) — not
 			// a usable candidate, skip it rather than risk returning it below.
 			continue

@@ -158,6 +158,27 @@ func TestResolvePreTaskToolUseID_SingleActiveFileFallback(t *testing.T) {
 	}
 }
 
+// TestResolvePreTaskToolUseID_MalformedEmptyIDFileNotFound proves a malformed
+// pre-task-.json (empty tool_use_id in the filename) is never treated as a
+// usable candidate, even when it is the only file present. ValidateToolUseID
+// itself accepts "" (it's an optional field on other call paths), so the scan
+// must reject an empty candidateID explicitly rather than relying on that
+// validator alone.
+func TestResolvePreTaskToolUseID_MalformedEmptyIDFileNotFound(t *testing.T) {
+	ctx := context.Background()
+	setupTestRepoForPreTask(t)
+
+	malformedPath := filepath.Join(paths.EntireTmpDir, "pre-task-.json")
+	if err := os.WriteFile(malformedPath, []byte(`{"tool_use_id": ""}`), 0o644); err != nil {
+		t.Fatalf("failed to write malformed pre-task file: %v", err)
+	}
+
+	id, found := ResolvePreTaskToolUseID(ctx, "", "")
+	if found {
+		t.Errorf("ResolvePreTaskToolUseID() = (%q, true), want (\"\", false) for a malformed pre-task-.json as the sole file", id)
+	}
+}
+
 func TestResolvePreTaskToolUseID_AmbiguousWithoutDescriptionNotFound(t *testing.T) {
 	ctx := context.Background()
 	setupTestRepoForPreTask(t)
