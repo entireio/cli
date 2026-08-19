@@ -340,7 +340,14 @@ func matchesExcludeOrigin(_ context.Context, patterns []string, normalizedOrigin
 		if !doublestar.ValidatePattern(lowered) {
 			return false, fmt.Errorf("exclude_origins[%d]: invalid glob: %w", i, doublestar.ErrBadPattern)
 		}
-		if normalizedOrigin != "" && doublestar.MatchUnvalidated(lowered, normalizedOrigin) {
+		if normalizedOrigin == "" {
+			continue
+		}
+		ok, err := doublestar.Match(lowered, normalizedOrigin)
+		if err != nil {
+			return false, fmt.Errorf("exclude_origins[%d]: invalid glob: %w", i, err)
+		}
+		if ok {
 			return true, nil
 		}
 	}
