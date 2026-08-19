@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/goose"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/openhands"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -1886,13 +1887,15 @@ func scopeTranscriptForCheckpoint(fullTranscript []byte, startOffset int, agentT
 			return nil
 		}
 		return scoped
+	case agent.AgentTypeOpenHands:
+		return openhands.SliceFromEvent(fullTranscript, startOffset)
 	case agent.AgentTypeGoose:
 		scoped, err := goose.SliceFromMessage(fullTranscript, startOffset)
 		if err != nil {
 			return nil
 		}
 		return scoped
-	case agent.AgentTypeCodex, agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeUnknown:
+	case agent.AgentTypeCodex, agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeQwenCode, agent.AgentTypeUnknown:
 		return transcript.SliceFromLine(fullTranscript, startOffset)
 	}
 	return transcript.SliceFromLine(fullTranscript, startOffset)
@@ -3371,7 +3374,8 @@ func transcriptOffset(transcriptBytes []byte, agentType types.AgentType) int {
 			return 0
 		}
 		return n
-	case agent.AgentTypeClaudeCode, agent.AgentTypeOpenCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeUnknown:
+	case agent.AgentTypeClaudeCode, agent.AgentTypeOpenCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeQwenCode, agent.AgentTypeOpenHands, agent.AgentTypeUnknown:
+		// OpenHands offsets count events, which are one per line once serialized.
 		return countLines(transcriptBytes)
 	}
 	return countLines(transcriptBytes)

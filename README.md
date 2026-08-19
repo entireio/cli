@@ -330,7 +330,7 @@ table.
 
 | Flag                                        | Description                                                                                                       |
 | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `--agent <name>`                            | AI agent to install hooks for: `claude-code`, `codex`, `gemini`, `goose`, `opencode`, `cursor`, `factoryai-droid`, or `copilot-cli` |
+| `--agent <name>`                            | AI agent to install hooks for: `claude-code`, `codex`, `gemini`, `goose`, `opencode`, `openhands`, `qwen-code`, `cursor`, `factoryai-droid`, or `copilot-cli` |
 | `--force`, `-f`                             | Force reinstall hooks (removes existing Entire hooks first)                                                       |
 | `--local`                                   | Write settings to `settings.local.json` instead of `settings.json`                                                |
 | `--project`                                 | Write settings to `settings.json` even if it already exists                                                       |
@@ -458,6 +458,8 @@ Each agent stores its hook configuration in its own directory. When you run `ent
 | Gemini CLI       | `.gemini/settings.json`       | JSON hooks config |
 | Goose            | `.agents/plugins/entire/hooks/hooks.json` | JSON hooks config |
 | OpenCode         | `.opencode/plugins/entire.ts` | TypeScript plugin |
+| OpenHands        | `.openhands/hooks.json`       | JSON hooks config |
+| Qwen Code        | `.qwen/settings.json`         | JSON hooks config |
 | Pi               | `.pi/extensions/entire/index.ts` | TypeScript extension |
 
 You can enable multiple agents at the same time — each agent's hooks are independent. Entire detects which agents are active by checking for installed hooks, not by a setting in `settings.json`.

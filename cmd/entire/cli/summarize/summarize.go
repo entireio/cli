@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/goose"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/openhands"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
@@ -162,11 +163,13 @@ func BuildCondensedTranscriptFromBytes(content redact.RedactedBytes, agentType t
 		return buildCondensedTranscriptFromOpenCode(content)
 	case agent.AgentTypeGoose:
 		return buildCondensedTranscriptFromGoose(content)
+	case agent.AgentTypeOpenHands:
+		return buildCondensedTranscriptFromOpenHands(content)
 	case agent.AgentTypeCodex:
 		return buildCondensedTranscriptFromCodex(content)
 	case agent.AgentTypePi:
 		return buildCondensedTranscriptFromPi(content)
-	case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeUnknown:
+	case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeQwenCode, agent.AgentTypeUnknown:
 		// Claude/cursor format - fall through to shared logic below
 	}
 	// Claude format (JSONL) - handles Claude Code, Unknown, and any future agent types
@@ -364,6 +367,44 @@ func buildCondensedTranscriptFromGoose(redacted redact.RedactedBytes) ([]Entry, 
 		}
 	}
 
+	return entries, nil
+}
+
+// buildCondensedTranscriptFromOpenHands converts a serialized OpenHands event
+// stream into the condensed entry list.
+//
+// Events are discriminated by kind rather than by role: an ActionEvent carries
+// the agent's reasoning in `thought` and its tool call separately, so both
+// become entries.
+func buildCondensedTranscriptFromOpenHands(redacted redact.RedactedBytes) ([]Entry, error) {
+	events := openhands.ParseEvents(redacted.Bytes())
+
+	var entries []Entry
+	for _, ev := range events {
+		switch ev.Kind {
+		case "MessageEvent":
+			text := openhands.TextOf(ev)
+			if text == "" {
+				continue
+			}
+			entryType := EntryTypeAssistant
+			if ev.Source == string(EntryTypeUser) {
+				entryType = EntryTypeUser
+			}
+			entries = append(entries, Entry{Type: entryType, Content: text})
+		case "ActionEvent":
+			if thought := openhands.ThoughtOf(ev); thought != "" {
+				entries = append(entries, Entry{Type: EntryTypeAssistant, Content: thought})
+			}
+			if ev.ToolCall != nil {
+				entries = append(entries, Entry{
+					Type:       EntryTypeTool,
+					ToolName:   ev.ToolCall.Name,
+					ToolDetail: openhands.ToolDetail(ev.ToolCall.Arguments),
+				})
+			}
+		}
+	}
 	return entries, nil
 }
 

@@ -60,6 +60,26 @@ func ResumeCommandSpecFor(name types.AgentName, sessionID string) (ForegroundCom
 			Binary: "goose",
 			Args:   []string{"session", "--resume", "--session-id", sessionID},
 		}, true
+	case AgentNameQwenCode:
+		// Bare `qwen` starts a fresh session, so the no-ID case uses --continue.
+		if sessionID == "" {
+			return ForegroundCommandSpec{Binary: "qwen", Args: []string{"--continue"}}, true
+		}
+		if !isLaunchableResumeSessionID(sessionID) {
+			return ForegroundCommandSpec{}, false
+		}
+		return ForegroundCommandSpec{Binary: "qwen", Args: []string{"--resume", sessionID}}, true
+	case AgentNameOpenHands:
+		if sessionID == "" {
+			return ForegroundCommandSpec{Binary: "openhands"}, true
+		}
+		if !isLaunchableResumeSessionID(sessionID) {
+			return ForegroundCommandSpec{}, false
+		}
+		return ForegroundCommandSpec{
+			Binary: "openhands",
+			Args:   []string{"--resume", dashedConversationID(sessionID)},
+		}, true
 	case AgentNameOpenCode:
 		if sessionID == "" {
 			return ForegroundCommandSpec{Binary: "opencode"}, true
@@ -98,4 +118,28 @@ func NewResumeForegroundCommand(ctx context.Context, name types.AgentName, sessi
 		return nil, true, fmt.Errorf("build %s resume command: %w", spec.Binary, err)
 	}
 	return cmd, true, nil
+}
+
+// dashedConversationID converts OpenHands' undashed hex32 conversation id into
+// the dashed UUID form `openhands --resume` expects.
+//
+// OpenHands names the on-disk conversation directory with the undashed form but
+// prints and accepts the dashed one, so the id Entire stores can be either.
+// Anything that is not 32 hex characters passes through untouched.
+//
+// This duplicates resumeID in agent/openhands rather than calling it: that
+// package imports agent, so importing it back would be a cycle. The two are
+// pinned to agree by TestResumeCommandSpecMatchesFormattedResumeCommand.
+func dashedConversationID(id string) string {
+	if strings.Contains(id, "-") || len(id) != 32 {
+		return id
+	}
+	for _, r := range id {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return id
+		}
+	}
+	return id[0:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:32]
 }
