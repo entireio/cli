@@ -174,6 +174,14 @@ func invisibleRuntimeBase(ctx context.Context, root string) (string, error) {
 	invisibleMu.Lock()
 	defer invisibleMu.Unlock()
 	if invisibleCache.valid && invisibleCache.root == root {
+		// A cached ROUTING error must not mask the caller's own cancellation.
+		// A cached base is still served: the memo read needs no I/O, and
+		// teardown paths may resolve paths under an already-canceled context.
+		if invisibleCache.err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", fmt.Errorf("resolving runtime base: %w", ctxErr)
+			}
+		}
 		return invisibleCache.base, invisibleCache.err
 	}
 	base, err := computeInvisibleRuntimeBase(ctx, root)
