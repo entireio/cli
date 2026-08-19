@@ -128,12 +128,12 @@ type entityDelta struct {
 	Fingerprint  string `json:"fingerprint,omitempty"`
 }
 
-// graphDiffResult mirrors the producer's `diff --json` output. Only the fields
-// the frozen schema needs are decoded; unknown keys are ignored so a newer
-// producer stays compatible. The field names here are the producer's REAL
-// top-level keys (base, files, head, producer_version, schema_version) — see
-// testdata/entity_deltas_producer_diff.json, which is captured from the real
-// binary precisely so this mapping cannot drift again.
+// graphDiffResult decodes the two fields of the producer's `diff --json`
+// output that the frozen schema needs: `producer_version` and `files`. The
+// producer's other top-level keys (base, head, schema_version) are
+// intentionally left undecoded — this type ignores them, not just unknown
+// future keys. See testdata/entity_deltas_producer_diff.json, captured from
+// the real binary, so the two decoded field names cannot drift again.
 type graphDiffResult struct {
 	// ProducerVersion is the producer binary's own version. It is optional:
 	// producers built without a stamped version omit it, and the document then
