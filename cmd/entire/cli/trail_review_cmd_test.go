@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -22,6 +25,7 @@ import (
 const (
 	trailReviewApplyOriginalContent = "hello\nold\n"
 	trailReviewTestCommentID        = "cmt_1"
+	trailReviewTestFilePath         = "src/auth/session.ts"
 	trailReviewTestStartPath        = "/api/v1/trails/trl_1/reviews"
 	trailReviewTestCommentsPath     = "/api/v1/trails/trl_1/reviews/rvw_1/comments"
 )
@@ -92,7 +96,7 @@ func TestResolveTrailReviewTargetRejectsUnsupportedForge(t *testing.T) {
 	}
 }
 
-func TestTrailReviewCommentsPath(t *testing.T) {
+func TestTrailReviewCommentsPathPreservesSharedBFFQueryContract(t *testing.T) {
 	t.Parallel()
 	got := trailReviewCommentsPath("trail id/with slash", trailReviewListOptions{
 		Status:           "open,resolved",
@@ -233,12 +237,12 @@ func TestBuildTrailReviewCommentInput(t *testing.T) {
 		Body:        "Token refresh should allow clock skew.",
 		Severity:    "HIGH",
 		Confidence:  0.94,
-		FilePath:    "src/auth/session.ts",
+		FilePath:    trailReviewTestFilePath,
 		StartLine:   88,
 		EndLine:     91,
 		ClientID:    "agent-run-1:finding-7",
 		Instruction: "Allow a five minute skew.",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("buildTrailReviewCommentInput: %v", err)
 	}
@@ -254,7 +258,7 @@ func TestBuildTrailReviewCommentInput(t *testing.T) {
 	if input.ClientID != "agent-run-1:finding-7" {
 		t.Fatalf("ClientID = %q", input.ClientID)
 	}
-	if input.Location.Granularity != "range" || input.Location.FilePath == nil || *input.Location.FilePath != "src/auth/session.ts" {
+	if input.Location.Granularity != "range" || input.Location.FilePath == nil || *input.Location.FilePath != trailReviewTestFilePath {
 		t.Fatalf("Location = %#v", input.Location)
 	}
 	if input.Location.StartLine == nil || *input.Location.StartLine != 88 || input.Location.EndLine == nil || *input.Location.EndLine != 91 {
@@ -267,12 +271,319 @@ func TestBuildTrailReviewCommentInput(t *testing.T) {
 
 func TestBuildTrailReviewCommentInputGeneratesClientID(t *testing.T) {
 	t.Parallel()
-	input, err := buildTrailReviewCommentInput(trailReviewCommentAddOptions{Body: "finding body"})
+	input, err := buildTrailReviewCommentInput(trailReviewCommentAddOptions{Body: "finding body"}, nil)
 	if err != nil {
 		t.Fatalf("buildTrailReviewCommentInput: %v", err)
 	}
 	if input.ClientID == "" {
 		t.Fatal("expected a generated client_id when --client-id is omitted")
+	}
+}
+
+// TestBuildTrailReviewCommentInputSendsFullPatchAnchor guards the contract the
+// API enforces: a unified_diff is rejected unless it carries expected_file_path,
+// expected_file_hash, expected_start_line, expected_end_line and expected_lines.
+// Sending only change_type and patch is what made --patch fail with a 400.
+func TestBuildTrailReviewCommentInputSendsFullPatchAnchor(t *testing.T) {
+	t.Parallel()
+	anchor := &trailReviewPatchAnchor{
+		FilePath:  trailReviewTestFilePath,
+		FileHash:  "0cfbf08886fca9a91cb753ec8734c84fcbe52c9f",
+		StartLine: 88,
+		EndLine:   91,
+		Lines:     "old line\n",
+	}
+	patch := trailReviewPatch(trailReviewTestFilePath, "old")
+	input, err := buildTrailReviewCommentInput(trailReviewCommentAddOptions{
+		Body:  "Token refresh should allow clock skew.",
+		Patch: patch,
+	}, anchor)
+	if err != nil {
+		t.Fatalf("buildTrailReviewCommentInput: %v", err)
+	}
+	// Compare the whole request: that pins Instruction to nil too, and fails
+	// loudly if the API request struct later grows a field nothing populates.
+	trimmedPatch := strings.TrimSpace(patch)
+	want := api.TrailReviewSuggestedChangeCreateRequest{
+		ChangeType:        "unified_diff",
+		Patch:             &trimmedPatch,
+		ExpectedFilePath:  &anchor.FilePath,
+		ExpectedFileHash:  &anchor.FileHash,
+		ExpectedStartLine: &anchor.StartLine,
+		ExpectedEndLine:   &anchor.EndLine,
+		ExpectedLines:     &anchor.Lines,
+	}
+	if input.SuggestedChange == nil || !reflect.DeepEqual(*input.SuggestedChange, want) {
+		t.Fatalf("SuggestedChange = %#v, want %#v", input.SuggestedChange, want)
+	}
+}
+
+// TestBuildTrailReviewCommentInputLocatesPatchOnlyFinding covers a --patch with
+// no --file: the patch already names the file and the lines it rewrites, so the
+// finding is placed there instead of landing on the trail as a whole.
+func TestBuildTrailReviewCommentInputLocatesPatchOnlyFinding(t *testing.T) {
+	t.Parallel()
+	anchor := &trailReviewPatchAnchor{FilePath: trailReviewTestFilePath, StartLine: 40, EndLine: 98}
+	input, err := buildTrailReviewCommentInput(trailReviewCommentAddOptions{
+		Body:  "finding body",
+		Patch: trailReviewPatch(trailReviewTestFilePath, "old"),
+	}, anchor)
+	if err != nil {
+		t.Fatalf("buildTrailReviewCommentInput: %v", err)
+	}
+	loc := input.Location
+	if loc.Granularity != reviewTrailGranularityRange {
+		t.Fatalf("Granularity = %q, want range", loc.Granularity)
+	}
+	if loc.FilePath == nil || *loc.FilePath != trailReviewTestFilePath {
+		t.Fatalf("FilePath = %#v", loc.FilePath)
+	}
+	if loc.StartLine == nil || *loc.StartLine != 40 || loc.EndLine == nil || *loc.EndLine != 98 {
+		t.Fatalf("lines = %#v/%#v, want 40/98", loc.StartLine, loc.EndLine)
+	}
+}
+
+// TestBuildTrailReviewCommentInputExplicitFileWinsOverAnchor pins the precedence:
+// the anchor only fills a gap, it never overrides what the caller typed.
+func TestBuildTrailReviewCommentInputExplicitFileWinsOverAnchor(t *testing.T) {
+	t.Parallel()
+	// Same file spelled with a leading ./ — must not read as a mismatch. The
+	// caller's line stays put even though the patch spans a different range.
+	anchor := &trailReviewPatchAnchor{FilePath: trailReviewTestFilePath, StartLine: 40, EndLine: 98}
+	input, err := buildTrailReviewCommentInput(trailReviewCommentAddOptions{
+		Body:     "finding body",
+		FilePath: "./" + trailReviewTestFilePath,
+		Line:     45,
+		Patch:    trailReviewPatch(trailReviewTestFilePath, "old"),
+	}, anchor)
+	if err != nil {
+		t.Fatalf("buildTrailReviewCommentInput: %v", err)
+	}
+	if input.Location.Granularity != reviewTrailGranularityLine {
+		t.Fatalf("Granularity = %q, want line", input.Location.Granularity)
+	}
+	if input.Location.StartLine == nil || *input.Location.StartLine != 45 {
+		t.Fatalf("StartLine = %#v, want the explicit 45", input.Location.StartLine)
+	}
+}
+
+// TestBuildTrailReviewCommentInputRejectsFileAnchorMismatch refuses a finding
+// whose location and fix point at different files.
+func TestBuildTrailReviewCommentInputRejectsFileAnchorMismatch(t *testing.T) {
+	t.Parallel()
+	anchor := &trailReviewPatchAnchor{FilePath: "cmd/b.go", StartLine: 1, EndLine: 2}
+	_, err := buildTrailReviewCommentInput(trailReviewCommentAddOptions{
+		Body:     "finding body",
+		FilePath: "cmd/a.go",
+		Patch:    trailReviewPatch("cmd/b.go", "old"),
+	}, anchor)
+	if err == nil {
+		t.Fatal("expected an error when --file and the patch name different files")
+	}
+	if !strings.Contains(err.Error(), "cmd/a.go") || !strings.Contains(err.Error(), "cmd/b.go") {
+		t.Fatalf("error = %v, want it to name both paths", err)
+	}
+}
+
+// TestBuildTrailReviewCommentInputRejectsUnanchoredPatch keeps an unanchored
+// patch off the wire rather than letting the API reject it.
+func TestBuildTrailReviewCommentInputRejectsUnanchoredPatch(t *testing.T) {
+	t.Parallel()
+	_, err := buildTrailReviewCommentInput(trailReviewCommentAddOptions{
+		Body:  "finding body",
+		Patch: trailReviewPatch("file.txt", "old"),
+	}, nil)
+	if err == nil {
+		t.Fatal("expected an error when a patch has no resolved anchor")
+	}
+}
+
+func TestResolveTrailReviewPatchAnchor(t *testing.T) {
+	repo := newTrailReviewApplyRepo(t)
+	writeTrailReviewApplyFile(t, repo, "dir/file.txt")
+
+	anchor, err := resolveTrailReviewPatchAnchor(context.Background(), trailReviewPatch("dir/file.txt", "old"))
+	if err != nil {
+		t.Fatalf("resolveTrailReviewPatchAnchor: %v", err)
+	}
+	if anchor.FilePath != "dir/file.txt" {
+		t.Fatalf("FilePath = %q", anchor.FilePath)
+	}
+	if anchor.StartLine != 1 || anchor.EndLine != 2 {
+		t.Fatalf("range = %d-%d, want 1-2", anchor.StartLine, anchor.EndLine)
+	}
+	// expected_lines is the exact pre-image slice, line endings included.
+	if anchor.Lines != trailReviewApplyOriginalContent {
+		t.Fatalf("Lines = %q, want %q", anchor.Lines, trailReviewApplyOriginalContent)
+	}
+	// The hash must be the blob OID git itself would print for the file.
+	want := trailReviewGitOutput(t, repo, "hash-object", "dir/file.txt")
+	if anchor.FileHash != want {
+		t.Fatalf("FileHash = %q, want %q", anchor.FileHash, want)
+	}
+}
+
+func TestResolveTrailReviewPatchAnchorErrors(t *testing.T) {
+	repo := newTrailReviewApplyRepo(t)
+	writeTrailReviewApplyFile(t, repo, "file.txt")
+
+	tests := []struct {
+		name  string
+		patch string
+		want  string
+	}{
+		{
+			name:  "missing file",
+			patch: trailReviewPatch("absent.txt", "old"),
+			want:  "anchor the suggested change",
+		},
+		{
+			name:  "hunk past end of file",
+			patch: "--- a/file.txt\n+++ b/file.txt\n@@ -40,2 +40,2 @@\n old\n",
+			want:  "the file has 2",
+		},
+		{
+			name:  "multiple files",
+			patch: trailReviewPatch("file.txt", "old") + trailReviewPatch("other.txt", "old"),
+			want:  "multiple files",
+		},
+		{
+			name:  "file creation",
+			patch: "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,1 @@\n+added\n",
+			want:  "must modify an existing file",
+		},
+		{
+			name:  "no hunk header",
+			patch: "--- a/file.txt\n+++ b/file.txt\n",
+			want:  "no '@@' hunk header",
+		},
+		{
+			name:  "escapes the repository",
+			patch: "--- a/../outside.txt\n+++ b/../outside.txt\n@@ -1,1 +1,1 @@\n-a\n+b\n",
+			want:  "escapes the repository",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := resolveTrailReviewPatchAnchor(context.Background(), tc.patch)
+			if err == nil {
+				t.Fatalf("expected an error containing %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseTrailReviewPatchTargetSkipsHunkBodies covers diff *content* that
+// looks like a diff *header*. Deleting a line that itself starts with "-- "
+// (SQL, Lua and Haskell comments, CLI flag docs) serializes as "--- ...", and
+// an added line starting with "++ " serializes as "+++ ...". Neither is a file
+// header, and treating them as one rejected valid single-file patches.
+func TestParseTrailReviewPatchTargetSkipsHunkBodies(t *testing.T) {
+	t.Parallel()
+	patch := "--- a/schema.sql\n+++ b/schema.sql\n" +
+		"@@ -10,4 +10,4 @@\n" +
+		" CREATE TABLE t (\n" +
+		"--- legacy column, drop after migration\n" +
+		"+++ replacement column\n" +
+		" );\n"
+	target, err := parseTrailReviewPatchTarget(patch)
+	if err != nil {
+		t.Fatalf("parseTrailReviewPatchTarget: %v", err)
+	}
+	if target.Path != "schema.sql" {
+		t.Fatalf("Path = %q, want schema.sql", target.Path)
+	}
+	if target.StartLine != 10 || target.EndLine != 13 {
+		t.Fatalf("range = %d-%d, want 10-13", target.StartLine, target.EndLine)
+	}
+}
+
+// TestParseTrailReviewPatchTargetKeepsRealPathPrefix guards a file genuinely
+// living under b/ (or a/): the diff header "--- a/b/pkg.go" must resolve to
+// b/pkg.go, not pkg.go. Stripping both prefixes in sequence read the wrong file.
+func TestParseTrailReviewPatchTargetKeepsRealPathPrefix(t *testing.T) {
+	t.Parallel()
+	for _, dir := range []string{"a", "b"} {
+		t.Run(dir, func(t *testing.T) {
+			t.Parallel()
+			want := dir + "/pkg.go"
+			patch := "--- a/" + want + "\n+++ b/" + want + "\n@@ -1,2 +1,2 @@\n-old\n+new\n"
+			target, err := parseTrailReviewPatchTarget(patch)
+			if err != nil {
+				t.Fatalf("parseTrailReviewPatchTarget: %v", err)
+			}
+			if target.Path != want {
+				t.Fatalf("Path = %q, want %q", target.Path, want)
+			}
+		})
+	}
+}
+
+// TestParseTrailReviewPatchTargetPrependToExistingFile covers "@@ -0,0 +1,N @@",
+// which `diff -u0` emits both for a brand-new file and for an insertion above
+// line 1 of an existing one. Only a /dev/null old path means creation; the
+// prepend anchors on the line it is inserted before.
+func TestParseTrailReviewPatchTargetPrependToExistingFile(t *testing.T) {
+	t.Parallel()
+	patch := "--- a/file.txt\n+++ b/file.txt\n@@ -0,0 +1,1 @@\n+added\n"
+	target, err := parseTrailReviewPatchTarget(patch)
+	if err != nil {
+		t.Fatalf("parseTrailReviewPatchTarget: %v", err)
+	}
+	if target.StartLine != 1 || target.EndLine != 1 {
+		t.Fatalf("range = %d-%d, want 1-1", target.StartLine, target.EndLine)
+	}
+}
+
+// TestParseTrailReviewPatchTargetAllowsDeletion keeps "delete this" a valid
+// suggestion: a /dev/null *new* side still has a real old file to anchor to,
+// unlike a /dev/null old side.
+func TestParseTrailReviewPatchTargetAllowsDeletion(t *testing.T) {
+	t.Parallel()
+	patch := "--- a/file.txt\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-hello\n-old\n"
+	target, err := parseTrailReviewPatchTarget(patch)
+	if err != nil {
+		t.Fatalf("parseTrailReviewPatchTarget: %v", err)
+	}
+	if target.Path != "file.txt" || target.StartLine != 1 || target.EndLine != 2 {
+		t.Fatalf("target = %+v, want file.txt 1-2", target)
+	}
+}
+
+// TestParseTrailReviewPatchTargetRejectsRename gives renames an actionable
+// message: the old path is gone from the worktree, so anchoring would otherwise
+// fail with a confusing "read <old path>" error.
+func TestParseTrailReviewPatchTargetRejectsRename(t *testing.T) {
+	t.Parallel()
+	patch := "diff --git a/old.go b/new.go\nrename from old.go\nrename to new.go\n" +
+		"--- a/old.go\n+++ b/new.go\n@@ -1,2 +1,2 @@\n-old\n+new\n"
+	_, err := parseTrailReviewPatchTarget(patch)
+	if err == nil {
+		t.Fatal("expected a rename patch to be rejected")
+	}
+	if !strings.Contains(err.Error(), "renames") {
+		t.Fatalf("error = %v, want it to mention the rename", err)
+	}
+}
+
+// TestParseTrailReviewPatchTargetSpansHunks checks that a multi-hunk patch
+// anchors to the full span it touches, not just its first hunk.
+func TestParseTrailReviewPatchTargetSpansHunks(t *testing.T) {
+	t.Parallel()
+	// Hunk bodies must match the counts their headers declare, exactly as git
+	// emits them — the parser consumes bodies by those counts.
+	patch := "--- a/file.txt\n+++ b/file.txt\n" +
+		"@@ -20,3 +20,3 @@\n a\n-b\n+c\n g\n" +
+		"@@ -5,2 +5,2 @@\n d\n-e\n+f\n"
+	target, err := parseTrailReviewPatchTarget(patch)
+	if err != nil {
+		t.Fatalf("parseTrailReviewPatchTarget: %v", err)
+	}
+	if target.StartLine != 5 || target.EndLine != 22 {
+		t.Fatalf("range = %d-%d, want 5-22", target.StartLine, target.EndLine)
 	}
 }
 
@@ -488,7 +799,7 @@ func TestPrintTrailReviewDashboard(t *testing.T) {
 	t.Parallel()
 	high := trailReviewSeverityHigh
 	medium := trailReviewSeverityMedium
-	path := "src/auth/session.ts"
+	path := trailReviewTestFilePath
 	line := 88
 	comments := []api.TrailReviewComment{
 		{
@@ -528,7 +839,7 @@ func TestPrintTrailReviewDashboard(t *testing.T) {
 		"Resolved: 1",
 		"FRESHNESS",
 		"High",
-		"src/auth/session.ts:88",
+		trailReviewTestFilePath + ":88",
 		"Missing expiry skew handling",
 		"Actions:",
 	} {
@@ -608,11 +919,51 @@ func TestFetchTrailReviewCommentsAndPatchStatus(t *testing.T) {
 	}
 }
 
+func TestFetchAllTrailReviewCommentsStopsOnRepeatedPage(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.URL.Query().Get("include_dismissed"); got != strconv.FormatBool(true) {
+			t.Errorf("include_dismissed = %q, want true", got)
+		}
+		wantOffset := ""
+		if requests == 2 {
+			wantOffset = strconv.Itoa(defaultTrailReviewLimit)
+		}
+		if got := r.URL.Query().Get("offset"); got != wantOffset {
+			t.Errorf("offset = %q, want %q", got, wantOffset)
+		}
+		encodeTrailReviewTestJSON(t, w, api.TrailReviewCommentsResponse{
+			Comments: []api.TrailReviewComment{{ID: trailReviewTestCommentID}},
+			HasMore:  true,
+		})
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+
+	_, err := fetchAllTrailReviewComments(context.Background(), client, "trl_1", trailReviewSummaryOptions())
+	if err == nil || !strings.Contains(err.Error(), "repeated page") {
+		t.Fatalf("error = %v, want repeated page", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+}
+
 func TestFetchTrailReviewStateFollowsCursor(t *testing.T) {
 	requests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/trails/trl_1/reviews/rvw_1" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if got := r.URL.Query().Get("include_dismissed"); got != strconv.FormatBool(true) {
+			t.Fatalf("include_dismissed = %q, want true", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != strconv.Itoa(defaultTrailReviewLimit) {
+			t.Fatalf("limit = %q, want %d", got, defaultTrailReviewLimit)
+		}
+		if got := r.URL.Query().Get("stale"); got != trailReviewFreshnessAny {
+			t.Fatalf("stale = %q, want %q", got, trailReviewFreshnessAny)
 		}
 		requests++
 		switch r.URL.Query().Get("cursor") {
@@ -763,13 +1114,25 @@ func readTrailReviewApplyFile(t *testing.T, repo, rel string) string {
 	return string(data)
 }
 
-func runTrailReviewApplyGit(t *testing.T, dir string, args ...string) {
+// trailReviewGitOutput runs git in dir and returns its trimmed stdout, failing
+// the test on error. runTrailReviewApplyGit is the same thing where the output
+// is not interesting.
+func trailReviewGitOutput(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	var stderr bytes.Buffer
 	cmd := exec.CommandContext(context.Background(), "git", args...)
 	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, stderr.String())
 	}
+	return strings.TrimSpace(string(out))
+}
+
+func runTrailReviewApplyGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	trailReviewGitOutput(t, dir, args...)
 }
 
 func trailReviewApplyComment(patches ...string) api.TrailReviewComment {

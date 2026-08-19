@@ -490,7 +490,7 @@ func (env *TestEnv) RunResume(branchName string) (string, error) {
 
 	ctx := env.T.Context()
 	// Detach from controlling terminal so huh can't open /dev/tty for prompts.
-	cmd := execx.NonInteractive(ctx, getTestBinary(), "resume", branchName)
+	cmd := execx.NonInteractive(ctx, getTestBinary(), "session", "resume", branchName)
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
@@ -505,7 +505,7 @@ func (env *TestEnv) RunResumeForce(branchName string) (string, error) {
 	env.T.Helper()
 
 	ctx := env.T.Context()
-	cmd := exec.CommandContext(ctx, getTestBinary(), "resume", "--force", branchName)
+	cmd := exec.CommandContext(ctx, getTestBinary(), "session", "resume", "--force", branchName)
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
@@ -520,7 +520,7 @@ func (env *TestEnv) GitMerge(branchName string) {
 	env.T.Helper()
 
 	ctx := env.T.Context()
-	// Use --no-verify to skip hooks - the hooks use local_dev paths that don't work
+	// Use --no-verify to skip hooks - git-triggered hooks are not exercised here
 	// from test temp directories. This is fine since we're testing merge behavior,
 	// not hook execution during merge.
 	cmd := exec.CommandContext(ctx, "git", "merge", branchName, "-m", "Merge branch '"+branchName+"'", "--no-verify")

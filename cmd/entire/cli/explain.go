@@ -52,6 +52,7 @@ const (
 	lessPagerName     = "less"
 	lessRawControlEnv = "LESS=-R"
 	windowsGOOS       = "windows"
+	darwinGOOS        = "darwin"
 )
 
 var generateTranscriptSummary = summarize.GenerateFromTranscript
@@ -234,6 +235,8 @@ func newExplainCmd() *cobra.Command {
 	var searchAllFlag bool
 	var jsonFlag bool
 	var transcriptFlag bool
+	var repoFlag string
+	var insecureHTTPFlag bool
 	var summaryTimeoutSecondsFlag int
 	sessionIndex := -1
 	listLimit := 0 // 0 means "use default (branchCheckpointsLimit)"
@@ -253,6 +256,14 @@ Viewing specific items:
   entire checkpoint explain <id-or-sha>           Auto-detects checkpoint ID or commit SHA
   entire checkpoint explain --checkpoint <id>     Force interpretation as checkpoint ID
   entire checkpoint explain --commit <ref>        Force interpretation as commit ref
+
+Checkpoints in another repo:
+  entire checkpoint explain <id> --repo owner/name
+                 Explain a checkpoint owned by another repository — the
+                 drill-down for a cross-repo 'entire search' hit. Reads it from
+                 that repo's Entire API; nothing is written to this repo.
+                 Needs a full checkpoint ID (positional or --checkpoint) and a
+                 checkpoint that has been pushed.
 
 Filtering the list view:
   --session      Filter checkpoints by session ID (or prefix)
@@ -320,46 +331,52 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 				}
 			}
 
-			// --generate and --raw-transcript need a specific target — either the
-			// positional arg, --checkpoint/-c, or --commit (which forwards to
-			// the checkpoint path via the commit's Entire-Checkpoint trailer).
-			hasCheckpointTarget := checkpointFlag != "" || commitFlag != "" || positional != ""
-			if generateFlag && !hasCheckpointTarget {
-				return errors.New("--generate requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
+			if err := validateExplainFlagCombinations(cmd, explainFlagValues{
+				checkpoint:            checkpointFlag,
+				commit:                commitFlag,
+				repo:                  repoFlag,
+				generate:              generateFlag,
+				force:                 forceFlag,
+				rawTranscript:         rawTranscriptFlag,
+				transcript:            transcriptFlag,
+				json:                  jsonFlag,
+				sessionIndex:          sessionIndex,
+				listLimit:             listLimit,
+				summaryTimeoutSeconds: summaryTimeoutSecondsFlag,
+			}, positional); err != nil {
+				return err
 			}
-			if forceFlag && !generateFlag {
-				return errors.New("--force requires --generate flag")
-			}
-			if rawTranscriptFlag && !hasCheckpointTarget {
-				return errors.New("--raw-transcript requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
-			}
-			if transcriptFlag && !hasCheckpointTarget {
-				return errors.New("--transcript requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
-			}
-			if cmd.Flags().Changed("session-index") {
-				if !transcriptFlag && !rawTranscriptFlag {
-					return errors.New("--session-index only applies with --transcript or --raw-transcript")
+
+			// Cross-repo: read the foreign checkpoint from its repo's cell and
+			// render it with the same formatters as a local one. Routed before
+			// the local pipelines because none of their git-backed resolution
+			// (commit walks, prefix matching, blob prefetch) applies to a repo
+			// that isn't checked out here.
+			if repoFlag != "" {
+				target := positional
+				if target == "" {
+					target = checkpointFlag
 				}
-				if sessionIndex < 0 {
-					return errors.New("--session-index must be non-negative")
+				if !explainRepoTargetsCurrentRepo(cmd.Context(), repoFlag) {
+					// Past flag parsing every failure is a runtime one
+					// (network, auth, missing checkpoint), not a usage
+					// mistake — don't dump usage text on it.
+					cmd.SilenceUsage = true
+					return runCrossRepoExplain(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), crossRepoExplainOptions{
+						repoFlag:      repoFlag,
+						target:        target,
+						json:          jsonFlag,
+						transcript:    transcriptFlag,
+						rawTranscript: rawTranscriptFlag,
+						sessionIndex:  crossRepoExplainSessionIndex(cmd.Flags().Changed("session-index"), sessionIndex),
+						verbose:       !shortFlag,
+						full:          fullFlag,
+						noPager:       noPagerFlag,
+						insecureHTTP:  insecureHTTPFlag,
+					})
 				}
-			}
-			if cmd.Flags().Changed("limit") {
-				if !jsonFlag {
-					return errors.New("--limit only applies with --json")
-				}
-				if listLimit <= 0 {
-					return errors.New("--limit must be positive")
-				}
-			}
-			// --summary-timeout-seconds only makes sense with --generate.
-			if cmd.Flags().Changed("summary-timeout-seconds") {
-				if !generateFlag {
-					return errors.New("--summary-timeout-seconds only applies with --generate")
-				}
-				if summaryTimeoutSecondsFlag < 0 {
-					return errors.New("--summary-timeout-seconds must be non-negative")
-				}
+				// --repo naming the current repo is a no-op: the local path is
+				// faster and can also read checkpoints that aren't pushed yet.
 			}
 
 			// Export modes — emit machine-readable output and skip the prose pipeline.
@@ -401,10 +418,20 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream stored checkpoint transcript bytes to stdout")
 	cmd.Flags().IntVar(&sessionIndex, "session-index", -1, "Session index within a multi-session checkpoint (0-based, defaults to latest)")
 	cmd.Flags().IntVar(&listLimit, "limit", 0, "Cap the list view at N checkpoints (default: 100). Only meaningful with --json.")
+	cmd.Flags().StringVar(&repoFlag, "repo", "", "Explain a checkpoint owned by another repo (owner/name or gh/owner/name), read from that repo's Entire API")
+	cmd.Flags().BoolVar(&insecureHTTPFlag, "insecure-http-auth", false, "Allow plain-HTTP auth for --repo (local dev only)")
 	cmd.Flags().IntVar(&summaryTimeoutSecondsFlag, "summary-timeout-seconds", 0, "Hard deadline in seconds for --generate summary generation; overrides summary_timeout_seconds setting. 0 = use setting; if setting is also unset or 0, no automatic deadline applies.")
 
 	// Verbosity / transcript output modes are mutually exclusive
 	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript", "transcript", "json")
+	// --repo reads another repo over HTTP: --commit resolves against local
+	// history, --session filters the local list view, --search-all walks local
+	// commits, and --generate would write a summary the foreign repo never
+	// sees.
+	cmd.MarkFlagsMutuallyExclusive("repo", "commit")
+	cmd.MarkFlagsMutuallyExclusive("repo", "session")
+	cmd.MarkFlagsMutuallyExclusive("repo", "generate")
+	cmd.MarkFlagsMutuallyExclusive("repo", "search-all")
 	// --generate and --raw-transcript are incompatible (summary would be generated but not shown)
 	cmd.MarkFlagsMutuallyExclusive("generate", "raw-transcript")
 	// --generate is a write op; export modes are reader-only
@@ -412,6 +439,71 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.MarkFlagsMutuallyExclusive("generate", "transcript")
 
 	return cmd
+}
+
+// explainFlagValues carries the explain flag values that participate in
+// combination rules, so validateExplainFlagCombinations can enforce them
+// outside the already-large newExplainCmd closure.
+type explainFlagValues struct {
+	checkpoint, commit, repo                         string
+	generate, force, rawTranscript, transcript, json bool
+	sessionIndex, listLimit, summaryTimeoutSeconds   int
+}
+
+// validateExplainFlagCombinations enforces the rules cobra's
+// MarkFlagsMutuallyExclusive cannot express: which flags need a specific target
+// and which values are in range.
+func validateExplainFlagCombinations(cmd *cobra.Command, v explainFlagValues, positional string) error {
+	// --generate and --raw-transcript need a specific target — either the
+	// positional arg, --checkpoint/-c, or --commit (which forwards to
+	// the checkpoint path via the commit's Entire-Checkpoint trailer).
+	hasCheckpointTarget := v.checkpoint != "" || v.commit != "" || positional != ""
+	if v.generate && !hasCheckpointTarget {
+		return errors.New("--generate requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
+	}
+	if v.force && !v.generate {
+		return errors.New("--force requires --generate flag")
+	}
+	// --repo needs a specific checkpoint: there is no local history to resolve a
+	// commit ref or an ID prefix against.
+	if v.repo != "" && positional == "" && v.checkpoint == "" {
+		return errors.New("--repo requires a checkpoint ID (positional or --checkpoint/-c)")
+	}
+	if cmd.Flags().Changed("insecure-http-auth") && v.repo == "" {
+		return errors.New("--insecure-http-auth only applies with --repo")
+	}
+	if v.rawTranscript && !hasCheckpointTarget {
+		return errors.New("--raw-transcript requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
+	}
+	if v.transcript && !hasCheckpointTarget {
+		return errors.New("--transcript requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
+	}
+	if cmd.Flags().Changed("session-index") {
+		if !v.transcript && !v.rawTranscript {
+			return errors.New("--session-index only applies with --transcript or --raw-transcript")
+		}
+		if v.sessionIndex < 0 {
+			return errors.New("--session-index must be non-negative")
+		}
+	}
+	if cmd.Flags().Changed("limit") {
+		if !v.json {
+			return errors.New("--limit only applies with --json")
+		}
+		if v.listLimit <= 0 {
+			return errors.New("--limit must be positive")
+		}
+	}
+	// --summary-timeout-seconds only makes sense with --generate.
+	if cmd.Flags().Changed("summary-timeout-seconds") {
+		if !v.generate {
+			return errors.New("--summary-timeout-seconds only applies with --generate")
+		}
+		if v.summaryTimeoutSeconds < 0 {
+			return errors.New("--summary-timeout-seconds must be non-negative")
+		}
+	}
+	return nil
 }
 
 // runExplain routes to the appropriate explain function based on flags and the
@@ -647,7 +739,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		// layer, so rawTranscript is always false when generate is true; the
 		// direct-to-w write path inside explainTemporaryCheckpoint is not
 		// reachable here and won't leak partial output on error.
-		tempStores, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{})
+		tempStores, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 		if openErr != nil {
 			return fmt.Errorf("open checkpoint store: %w", openErr)
 		}
@@ -720,7 +812,8 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		// exists remotely but not locally (written/migrated on another
 		// machine), bounded by the write-probe budget.
 		writeStores, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{
-			RefFetcher: remote.BoundedCheckpointRefFetcher(remote.WriteProbeFetchBudget),
+			RefFetcher:  remote.BoundedCheckpointRefFetcher(remote.WriteProbeFetchBudget),
+			ReadRemotes: strategy.CheckpointReadRemotes(ctx),
 		})
 		if openErr != nil {
 			return fmt.Errorf("open checkpoint store: %w", openErr)
@@ -730,7 +823,12 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		}
 		// Reload to get the updated summary.
 		stopLoad = startSpinner(errW, fmt.Sprintf("Reloading checkpoint %s", fullCheckpointID))
-		reopened, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+		reopened, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{
+			BlobFetcher:           FetchBlobsByHash,
+			RefFetcher:            FetchCheckpointRef,
+			MetadataBranchFetcher: FetchMetadataFromCheckpointRemote,
+			ReadRemotes:           strategy.CheckpointReadRemotes(ctx),
+		})
 		if openErr != nil {
 			stopLoad(false)
 			return fmt.Errorf("open checkpoint store: %w", openErr)
@@ -880,7 +978,7 @@ func loadPrimaryMetadataRootTree(ctx context.Context, repo *git.Repository, refs
 	if tree, err := strategy.GetMetadataRefTree(repo, refs.Primary); err == nil {
 		return tree, nil
 	}
-	if !refs.PrimaryFetchableFromOrigin() {
+	if !refs.PrimaryFetchableFromRemote() {
 		return nil, fmt.Errorf("read primary metadata tree %s: ref not found locally", refs.Primary)
 	}
 	tree, err := strategy.GetRemotePrimaryTree(ctx, repo)
@@ -906,7 +1004,16 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 	// `git fetch` fails against partial-clone repos with "did not send all
 	// necessary objects"). Falls back to a full metadata-branch fetch if
 	// fetch-pack also can't reach the blobs.
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		BlobFetcher: FetchBlobsByHash,
+		RefFetcher:  FetchCheckpointRef,
+		// Legacy hex-ID checkpoints live on the v1 branch, which a fresh clone
+		// with a dedicated checkpoint_remote does not have — and cannot get from
+		// origin, which never received it. Without this, explain reports every
+		// such checkpoint as unreadable.
+		MetadataBranchFetcher: FetchMetadataFromCheckpointRemote,
+		ReadRemotes:           strategy.CheckpointReadRemotes(ctx),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -2008,10 +2115,16 @@ func formatCheckpointOutput(ctx context.Context, summary *checkpoint.CheckpointS
 		}
 
 		hint := fmt.Sprintf("Not generated yet. Run `entire checkpoint explain --generate %s` to create an AI summary.", checkpointID)
-		if summary != nil && summary.Imported {
+		switch src, crossRepo := crossRepoReadSource(ctx); {
+		case summary != nil && summary.Imported:
 			// Imported history is read-only; --generate is refused for it, so
 			// don't point users at a command that will error out.
 			hint = "No summary. Imported history is read-only, so summaries cannot be generated."
+		case crossRepo:
+			// Same reasoning across repos: --generate is rejected with --repo,
+			// and a summary is stored by the repo that owns the checkpoint, so
+			// the default hint names a command that cannot succeed here.
+			hint = fmt.Sprintf("No summary stored for this checkpoint. Summaries are generated in the repo that owns it (%s).", src)
 		}
 		md := buildNoSummaryMarkdown(intent, files, hint)
 		sb.WriteString(renderExplainBody(w, md))
@@ -2140,7 +2253,14 @@ func formatCheckpointHeader(
 	writeRow("session", meta.SessionID)
 	writeRow("created", meta.CreatedAt.Format("2006-01-02 15:04:05"))
 	if author.Name != "" {
-		writeRow("author", fmt.Sprintf("%s <%s>", author.Name, author.Email))
+		// Some sources carry a display name without an email (the cell reports
+		// a commit author's name and forge username, never their address), so
+		// don't render an empty "<>".
+		authorVal := author.Name
+		if author.Email != "" {
+			authorVal = fmt.Sprintf("%s <%s>", author.Name, author.Email)
+		}
+		writeRow("author", authorVal)
 	}
 
 	tokenUsage := meta.TokenUsage
@@ -2388,18 +2508,26 @@ func walkFirstParentCommits(ctx context.Context, repo *git.Repository, from plum
 // entries without anything being dropped).
 func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) ([]strategy.RewindPoint, bool, error) {
 	// Warn (once per process) if metadata branches are disconnected
-	strategy.WarnIfMetadataDisconnected()
+	strategy.WarnIfMetadataDisconnected(ctx)
 
 	// This is a user-facing enumeration (`entire checkpoint list` / the branch
-	// `explain` view), so opt into git-refs remote discovery: when a
-	// checkpoint_remote is configured, List enumerates it (names only) to
-	// surface refs-native checkpoints written on another machine, and the
-	// fetchers hydrate each on read. WithRemoteListDiscovery keeps this off the
+	// `explain` view), so opt into git-refs remote discovery: List enumerates
+	// the dedicated checkpoint_remote when configured, else the checkpoint
+	// read candidates with merged listings (names only), to surface
+	// refs-native checkpoints written on another machine; the fetchers
+	// hydrate each on read. WithRemoteListDiscovery keeps this off the
 	// per-turn hook hot path.
+	//
+	// Deliberately no MetadataBranchFetcher: that tier transfers the whole v1
+	// branch, and enumeration must stay proportionate to rendering a list — the
+	// refs side next to it discovers by name only for the same reason. A repo
+	// with no local v1 lists what it has; naming a specific checkpoint
+	// (explain --checkpoint) is what earns the fetch.
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
 		BlobFetcher:     FetchBlobsByHash,
 		RefFetcher:      FetchCheckpointRef,
 		RemoteRefLister: ListCheckpointRefsOnRemote,
+		ReadRemotes:     strategy.CheckpointReadRemotes(ctx),
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("open checkpoint store: %w", err)
@@ -2613,7 +2741,7 @@ func hydrateListedBranchCheckpoints(
 // metadata branch but carry no commit trailer, so the commit-driven branch
 // walk never surfaces them. Best-effort: returns nil on read failure.
 func getImportedRewindPoints(ctx context.Context, repo *git.Repository) []strategy.RewindPoint {
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil
 	}

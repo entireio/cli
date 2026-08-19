@@ -244,6 +244,28 @@ func SessionMetadataDirFromSessionID(sessionID string) string {
 	return EntireMetadataDir + "/" + sessionID
 }
 
+// SubagentsDir returns the directory an agent stores a session's subagent
+// transcripts in: <transcriptDir>/<sessionID>/subagents.
+//
+// This layout lives here, in the leaf paths package, because it is needed on both
+// sides of the import graph — the lifecycle dispatcher and the strategy, review,
+// and agentimport packages all resolve it, and those cannot import each other.
+// Before it was named it existed as five copies of the same filepath.Join, which
+// is how the SubagentEnd path came to disagree with the turn-end path about where
+// subagent transcripts live.
+//
+// sessionID is the *agent's* session ID (the transcript file's own basename), not
+// the date-prefixed Entire session ID.
+func SubagentsDir(transcriptDir, sessionID string) string {
+	return filepath.Join(transcriptDir, sessionID, "subagents")
+}
+
+// AgentTranscriptFileName returns the file name an agent writes a subagent's
+// transcript under: agent-<agentID>.jsonl.
+func AgentTranscriptFileName(agentID string) string {
+	return "agent-" + agentID + ".jsonl"
+}
+
 // ExtractSessionIDFromTranscriptPath attempts to extract a session ID from a transcript path.
 // Claude transcripts are stored at ~/.claude/projects/<project>/sessions/<id>.jsonl
 // If the path doesn't match expected format, returns empty string.

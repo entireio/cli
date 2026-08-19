@@ -30,6 +30,15 @@ type Info = gitremote.Info
 // FetchURLOptions configures FetchURL.
 type FetchURLOptions struct {
 	WorktreeRoot string
+
+	// LeadReadRemote is the checkpoint read candidate the caller wants the
+	// fetch URL derived from (the elected sync remote, or one entry of the
+	// read-candidate chain while iterating it), supplied by cli/strategy
+	// callers — this package cannot resolve the election itself. When set and
+	// NO checkpoint_remote is configured, the base fetch URL is derived from
+	// it instead of unconditionally from origin. The dedicated
+	// checkpoint_remote derivation path ignores it entirely.
+	LeadReadRemote string
 }
 
 // FetchURL returns the effective checkpoint fetch URL for the current repository.
@@ -91,13 +100,34 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 
 	config := s.GetCheckpointRemote()
 	if config == nil {
-		if originURL == "" {
-			// Genuinely no remote to fetch checkpoints from: no origin remote and
-			// no configured checkpoint_remote. Tagged with the sentinel so callers
-			// classify a probe failure as absence rather than a real error.
-			return "", false, fmt.Errorf("no fetch URL found: %w: %w", originErr, errNoCheckpointRemoteConfigured)
+		// No checkpoint_remote configured: the caller-supplied read candidate
+		// (the elected checkpoint sync remote, or the chain entry being
+		// tried) is the checkpoint host; without one, origin is.
+		if lead := opt.LeadReadRemote; lead != "" && lead != originRemote {
+			leadURL, leadErr := getRemoteURL(ctx, lead)
+			if leadErr == nil && leadURL == "" {
+				leadErr = fmt.Errorf("remote %q has an empty URL", lead)
+			}
+			if leadErr == nil {
+				if withToken {
+					if tokenURL, ok := deriveTokenOriginURL(leadURL); ok {
+						leadURL = tokenURL
+					}
+				}
+				return leadURL, true, nil
+			}
+			if originURL != "" {
+				// The lead candidate's URL could not be resolved; fall back to
+				// origin but do not certify it as the checkpoint host.
+				logFallback(ctx, "fetch", originURL, "resolve read candidate remote URL", leadErr,
+					slog.String("read_candidate", lead))
+				return originURL, false, nil
+			}
+			return "", false, fmt.Errorf("no fetch URL found for read candidate %q: %w", lead, leadErr)
 		}
-		// No checkpoint_remote configured: origin IS the checkpoint host.
+		if originURL == "" {
+			return "", false, fmt.Errorf("no fetch URL found: %w", originErr)
+		}
 		return originURL, true, nil
 	}
 
@@ -149,8 +179,11 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 // PushURL returns the effective checkpoint push URL for the current repository.
 // Unlike FetchURL:
 //   - it derives protocol from the requested push remote, not always origin
-//   - it skips checkpoint remote use when the push remote owner differs
-//     from the configured checkpoint remote owner
+//   - it skips checkpoint remote use unless origin and EVERY push URL of the
+//     push remote are owned by the configured checkpoint repo's owner
+//     (see checkpointRemoteIsInherited); FetchURL applies no ownership check
+//     at all, so a repo whose writes were diverted still reads from the
+//     configured checkpoint repo
 //
 // If ENTIRE_CHECKPOINT_TOKEN is set, HTTPS is forced so the token can be used
 // even when the push remote is configured via SSH.
@@ -185,7 +218,11 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 		return fallbackURL, false, nil
 	}
 
-	pushRemoteURL, err := GetRemoteURL(ctx, pushRemoteName)
+	// Every push URL, not just the first: git fans out to all of them on the
+	// git-branch backend, so ownership has to hold for the whole set. The first
+	// still drives transport derivation below, matching the single destination
+	// resolveRefsPushDestination sends checkpoint refs to.
+	pushRemoteURLs, err := GetPushURLs(ctx, pushRemoteName)
 	if err != nil {
 		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
 		if fallbackErr == nil {
@@ -195,6 +232,26 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 			return fallbackURL, false, nil
 		}
 		return "", true, fmt.Errorf("no push URL found: %w", err)
+	}
+	pushRemoteURL := pushRemoteURLs[0]
+
+	// Whether to use the checkpoint remote at all is a question about ownership
+	// ("is this checkpoint_remote mine, or did I inherit it by cloning?"), which
+	// both remotes get a vote on: origin says which project this is, the push
+	// destinations say which repos we are writing to. Any one of them owned by
+	// somebody other than the checkpoint repo's owner means inherited. See
+	// checkpointRemoteIsInherited.
+	if inherited, reason := checkpointRemoteIsInherited(ctx, config, originURL, pushRemoteURLs); inherited {
+		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
+		if fallbackErr != nil {
+			return "", false, fmt.Errorf("no push URL found: %w", fallbackErr)
+		}
+		logging.Warn(ctx, "checkpoint-remote: ignoring checkpoint_remote that appears to belong to another owner; pushing checkpoints to the push remote instead",
+			slog.String("checkpoint_repo", config.Repo),
+			slog.String("reason", reason),
+			slog.String("hint", "if this checkpoint repo is yours, configure checkpoint_remote in .entire/settings.local.json"),
+		)
+		return fallbackURL, false, nil
 	}
 
 	pushInfo, err := ParseURL(pushRemoteURL)
@@ -227,15 +284,6 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 			Owner:    pushInfo.Owner,
 			Repo:     pushInfo.Repo,
 		}
-	}
-
-	checkpointOwner := config.Owner()
-	if pushInfo.Owner != "" && checkpointOwner != "" && !strings.EqualFold(pushInfo.Owner, checkpointOwner) {
-		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
-		if fallbackErr != nil {
-			return "", false, fmt.Errorf("no push URL found: %w", fallbackErr)
-		}
-		return fallbackURL, false, nil
 	}
 
 	if withToken && pushInfo.Protocol == ProtocolEntire {
@@ -289,6 +337,108 @@ func GetRemoteURL(ctx context.Context, remoteName string) (string, error) {
 		return "", fmt.Errorf("get remote URL: %w", err)
 	}
 	return url, nil
+}
+
+// GetPushURLs returns every URL a push to remoteName delivers to, in the order
+// git will use them. See gitremote.GetPushURLs for why this differs from
+// GetRemoteURL.
+func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
+	urls, err := gitremote.GetPushURLs(ctx, remoteName)
+	if err != nil {
+		return nil, fmt.Errorf("get push URLs: %w", err)
+	}
+	return urls, nil
+}
+
+// checkpointRemoteIsInherited reports whether the configured checkpoint_remote
+// looks like it belongs to an upstream project rather than to this developer,
+// along with a short reason for logging.
+//
+// checkpoint_remote is normally committed in .entire/settings.json, so anyone who
+// forks or clones the project inherits it. Honoring it blindly would push a
+// contributor's session data into the upstream project's checkpoint repo — which
+// they typically cannot write to and should not be writing to. This is the check
+// that guards against that (added in e8b589835 as "fork detection").
+//
+// Ownership is decided from local signals only, no network:
+//
+//  1. A checkpoint_remote in .entire/settings.local.json is gitignored and
+//     per-clone, so it cannot have been inherited — it is always ours.
+//  2. Otherwise EVERY remote that identifies this repo must be owned by the
+//     checkpoint repo's owner: origin (which project am I working in) and the
+//     push destination (which repo am I actually writing to). A single
+//     mismatch means inherited.
+//
+// Requiring both is what closes the "cloned the base repo, added my fork"
+// topology. There are two ways to contribute to someone else's project:
+//
+//	fork first, clone the fork  -> origin <fork>/app          -> origin mismatches
+//	clone the base, add a fork  -> origin <upstream>/app       -> origin MATCHES
+//
+// In the second, origin belongs to upstream rather than to us, so an
+// origin-only check reads an inherited setting as ours and aims a
+// contributor's transcripts at the upstream project's checkpoint repo. The push
+// destination is the signal that disagrees: we are writing to <fork>/app.
+//
+// The cost, accepted deliberately: a repo of our own with a differently-owned
+// secondary remote (a backup in another org) no longer routes checkpoints to
+// our checkpoint repo on pushes to THAT remote — the two topologies are
+// indistinguishable from local git config alone, since both are
+// origin=<owner>/app plus a push destination owned by somebody else, and only
+// the network could say which repo is ours. Pushes to the elected sync remote
+// (normally origin) are unaffected, and ENT-1451's pre-push gate independently
+// blocks checkpoint sync on pushes to a non-elected remote, so this costs
+// nothing that the gate was not already stopping. Erring toward "not ours" is
+// the safe direction: it never writes session transcripts to a repository we
+// cannot confirm we own.
+//
+// A remote with several push URLs must have EVERY one of them owned by the
+// checkpoint repo's owner. git fans out to all of them on the git-branch
+// backend, so checking only the first would let a differently-owned mirror in
+// second position read as ours.
+//
+// An identity whose owner cannot be determined (no remote at all, or a
+// non-forge URL such as a bare local path) counts as inherited: for a committed
+// setting we cannot confirm ownership, and falling back preserves the previous
+// behavior for those repos. settings.local.json is the escape hatch when the
+// checkpoint repo is genuinely ours but owned by a different account or org.
+func checkpointRemoteIsInherited(ctx context.Context, config *settings.CheckpointRemoteConfig, originURL string, pushRemoteURLs []string) (bool, string) {
+	checkpointOwner := config.Owner()
+	if checkpointOwner == "" {
+		// No owner to compare (malformed repo field). Matches the predecessor,
+		// which skipped the check rather than blocking on it.
+		return false, ""
+	}
+	if settings.CheckpointRemoteIsLocalOnly(ctx) {
+		return false, ""
+	}
+
+	// Both identities when both exist. A repo with no origin has exactly one
+	// identity — its push remote — and must not lose its configured checkpoint
+	// remote just because nothing is named "origin".
+	identities := make([]struct{ url, source string }, 0, 1+len(pushRemoteURLs))
+	if originURL != "" {
+		identities = append(identities, struct{ url, source string }{originURL, "origin"})
+	}
+	for _, pushRemoteURL := range pushRemoteURLs {
+		if pushRemoteURL != "" && pushRemoteURL != originURL {
+			identities = append(identities, struct{ url, source string }{pushRemoteURL, "push remote"})
+		}
+	}
+	if len(identities) == 0 {
+		return true, "no remote to establish ownership"
+	}
+
+	for _, id := range identities {
+		info, err := ParseURL(id.url)
+		if err != nil || info.Owner == "" {
+			return true, id.source + " URL owner could not be determined"
+		}
+		if !strings.EqualFold(info.Owner, checkpointOwner) {
+			return true, fmt.Sprintf("%s owner %q differs from checkpoint owner %q", id.source, info.Owner, checkpointOwner)
+		}
+	}
+	return false, ""
 }
 
 // GetRemoteURLInDir returns the URL configured for the named git remote in dir.
@@ -482,6 +632,12 @@ func providerHost(provider string) (string, bool) {
 // RedactURL removes credentials and query parameters from a URL for safe logging.
 func RedactURL(rawURL string) string {
 	return gitremote.RedactURL(rawURL)
+}
+
+// RedactURLOrPath is RedactURL for values that may be a remote name or a local
+// path rather than a URL. See gitremote.RedactURLOrPath.
+func RedactURLOrPath(target string) string {
+	return gitremote.RedactURLOrPath(target)
 }
 
 func logFallback(ctx context.Context, operation, fallbackURL, reason string, err error, attrs ...any) {

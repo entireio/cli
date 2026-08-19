@@ -39,7 +39,7 @@ func TestDefaultV1Refs(t *testing.T) {
 	}, DefaultV1Refs())
 }
 
-func TestCommittedRefs_PrimaryFetchableFromOrigin(t *testing.T) {
+func TestCommittedRefs_PrimaryFetchableFromRemote(t *testing.T) {
 	t.Parallel()
 	v1 := v1BranchRef()
 	otherBranch := plumbing.NewBranchReferenceName("entire/checkpoints/other")
@@ -55,12 +55,12 @@ func TestCommittedRefs_PrimaryFetchableFromOrigin(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, tt.refs.PrimaryFetchableFromOrigin())
+			assert.Equal(t, tt.want, tt.refs.PrimaryFetchableFromRemote())
 		})
 	}
 }
 
-func TestCommittedRefs_ReadBootstrappableFromOrigin(t *testing.T) {
+func TestCommittedRefs_ReadBootstrappableFromRemote(t *testing.T) {
 	t.Parallel()
 	v1 := v1BranchRef()
 	otherBranch := plumbing.NewBranchReferenceName("entire/checkpoints/other")
@@ -76,7 +76,7 @@ func TestCommittedRefs_ReadBootstrappableFromOrigin(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, tt.refs.ReadBootstrappableFromOrigin())
+			assert.Equal(t, tt.want, tt.refs.ReadBootstrappableFromRemote())
 		})
 	}
 }

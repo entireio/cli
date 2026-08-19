@@ -183,20 +183,24 @@ func runTrailApprovals(ctx context.Context, w, errW io.Writer, insecureHTTP bool
 			fmt.Fprintf(w, "No approvals on trail #%d\n", found.Number)
 			return nil
 		}
-		for _, a := range out.Approvals {
-			login := ""
-			if a.Author != nil && a.Author.Login != nil {
-				login = *a.Author.Login
-			}
-			sha := a.CommitSHA
-			if len(sha) > 7 {
-				sha = sha[:7]
-			}
-			fmt.Fprintf(w, "%s  %s  %s  %s\n", a.Event, login, sha, a.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
-			if strings.TrimSpace(a.Body) != "" {
-				fmt.Fprintf(w, "    %s\n", a.Body)
-			}
-		}
+		renderTrailApprovals(w, out.Approvals)
 		return nil
 	})
+}
+
+// renderTrailApprovals prints one line per approval decision, plus an indented
+// body when the reviewer left one. Split out so the render path is covered without
+// a live API — the decode bug it exercises could only be seen against a trail that
+// actually had approvals.
+func renderTrailApprovals(w io.Writer, approvals []api.TrailApproval) {
+	for _, a := range approvals {
+		sha := a.CommitSHA
+		if len(sha) > 7 {
+			sha = sha[:7]
+		}
+		fmt.Fprintf(w, "%s  %s  %s  %s\n", a.Event, a.Author, sha, a.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
+		if strings.TrimSpace(a.Body) != "" {
+			fmt.Fprintf(w, "    %s\n", a.Body)
+		}
+	}
 }

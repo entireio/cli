@@ -24,7 +24,7 @@ go build ./...                                      # compile check (no agent CL
 e2e/
 ├── agents/       # Agent abstraction (Agent interface, tmux sessions, concurrency gates)
 ├── bootstrap/    # CI pre-test setup (auth config, warmup)
-├── entire/       # `entire` CLI wrapper (enable, rewind, etc.)
+├── entire/       # `entire` CLI wrapper (enable, explain, etc.)
 ├── exploratory/  # Experimental tests, not run by CI
 ├── tests/        # Blessed test files (run by CI)
 └── testutil/     # Repo setup, assertions, artifact capture

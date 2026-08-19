@@ -1397,3 +1397,27 @@ func TestIsSetUpAndEnabled_LocalSettingsOnly(t *testing.T) {
 		t.Fatal("IsSetUpAndEnabled should be true when only settings.local.json exists and is enabled")
 	}
 }
+
+func TestGetCheckpointPushRemote(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		opts map[string]any
+		want string
+	}{
+		{"unset", map[string]any{}, ""},
+		{"nil options", nil, ""},
+		{"set", map[string]any{"checkpoint_push_remote": "private"}, "private"},
+		{"empty string", map[string]any{"checkpoint_push_remote": ""}, ""},
+		{"wrong type", map[string]any{"checkpoint_push_remote": true}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := &EntireSettings{StrategyOptions: tt.opts}
+			if got := s.GetCheckpointPushRemote(); got != tt.want {
+				t.Errorf("GetCheckpointPushRemote() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

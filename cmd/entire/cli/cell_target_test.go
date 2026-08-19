@@ -3,8 +3,10 @@ package cli
 import (
 	"context"
 	"errors"
-	"sort"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/internal/coreapi"
 )
@@ -13,38 +15,18 @@ const euCellAPIURL = "https://eu.api.entire.io"
 
 const euWestCell = "aws-eu-west-1"
 
-func TestDistinctActiveClusterHosts(t *testing.T) {
-	t.Parallel()
-	mirrors := []coreapi.Mirror{
-		{ClusterHost: "aws-us-east-2.entire.io"},
-		{ClusterHost: "AWS-US-EAST-2.entire.io"}, // dup (case-insensitive) → collapses
-		{ClusterHost: "aws-eu-west-1.entire.io"}, // distinct active
-		// Unique host that is archived → must be excluded (observably absent).
-		{ClusterHost: "aws-ap-south-1.entire.io", IsArchived: coreapi.NewOptBool(true)},
-		// Unique host with a failed clone → excluded (can't serve experts).
-		{ClusterHost: "aws-sa-east-1.entire.io", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusFailed)},
-		// Unique host suspended → excluded.
-		{ClusterHost: "aws-ca-central-1.entire.io", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusSuspended)},
-		{ClusterHost: ""}, // empty → excluded
-	}
-	got := distinctActiveClusterHosts(mirrors)
-	sort.Strings(got)
-	want := []string{"aws-eu-west-1.entire.io", "aws-us-east-2.entire.io"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("distinctActiveClusterHosts = %v, want %v", got, want)
-	}
-}
+// usCellAPIURL and usClusterSlug mirror the real aws-us-east-2 cell that
+// entirehq/entire.io's processing placement lives on in prod, so the
+// multi-homed regression tests below reproduce the actual bug rather than an
+// invented topology.
+const (
+	usCellAPIURL  = "https://aws-us-east-2.api.entire.io"
+	usClusterSlug = "aws-us-east-2"
 
-func TestDistinctActiveClusterHosts_AllInactive(t *testing.T) {
-	t.Parallel()
-	mirrors := []coreapi.Mirror{
-		{ClusterHost: "aws-us-east-2.entire.io", IsArchived: coreapi.NewOptBool(true)},
-		{ClusterHost: "aws-eu-west-1.entire.io", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusFailed)},
-	}
-	if got := distinctActiveClusterHosts(mirrors); len(got) != 0 {
-		t.Fatalf("distinctActiveClusterHosts = %v, want empty", got)
-	}
-}
+	euClusterSlug          = euWestCell
+	apSoutheastClusterSlug = "aws-ap-southeast-1"
+	apSouthClusterSlug     = "aws-ap-south-1"
+)
 
 func TestMatchClusterByHost(t *testing.T) {
 	t.Parallel()
@@ -70,37 +52,63 @@ func TestMatchClusterByHost(t *testing.T) {
 	}
 }
 
-// TestClusterHostJoin exercises the realistic invariant that a mirror's
-// ClusterHost joins to a cluster whose PublicUrl host equals it — the actual
-// key the resolver relies on.
-func TestClusterHostJoin(t *testing.T) {
+// TestMatchClusterBySlug mirrors TestMatchClusterByHost for the slug-keyed
+// join used by the processing-placement path: the catalog's Slug, not its
+// PublicUrl host, is the reliable join key for a RepoPlacement.
+func TestMatchClusterBySlug(t *testing.T) {
 	t.Parallel()
-	mirrors := []coreapi.Mirror{{ClusterHost: "eu.entire.io", Repo: "widget"}}
-	clusters := []coreapi.Cluster{
-		{PublicUrl: "https://us.entire.io", Jurisdiction: "us", ApiUrl: coreapi.NewOptString("https://us.api.entire.io")},
-		{PublicUrl: "https://eu.entire.io", Jurisdiction: "eu", ApiUrl: coreapi.NewOptString(euCellAPIURL)},
+	clusters := clustersWithSlugs()
+
+	cl, ok := matchClusterBySlug(clusters, usClusterSlug)
+	if !ok {
+		t.Fatalf("expected a match for %s", usClusterSlug)
 	}
-	hosts := distinctActiveClusterHosts(mirrors)
-	if len(hosts) != 1 {
-		t.Fatalf("hosts = %v, want 1", hosts)
+	if cl.Jurisdiction != "us" || cl.ApiUrl.Or("") != usCellAPIURL {
+		t.Fatalf("matched wrong cluster: %+v", cl)
 	}
-	cl, ok := matchClusterByHost(clusters, hosts[0])
-	if !ok || cl.Jurisdiction != "eu" || cl.ApiUrl.Or("") != euCellAPIURL {
-		t.Fatalf("join failed: ok=%v cluster=%+v", ok, cl)
+
+	if _, ok := matchClusterBySlug(clusters, "unknown-slug"); ok {
+		t.Fatal("expected no match for unknown slug")
+	}
+	if _, ok := matchClusterBySlug(clusters, ""); ok {
+		t.Fatal("expected no match for empty slug")
 	}
 }
 
-// fakeCellCore is a stub control plane for resolveRepoCellTarget tests.
+// fakeCellCore is a stub control plane for resolveRepoCellTarget /
+// resolveRepoCellPlacement tests.
 type fakeCellCore struct {
 	repo        *coreapi.Repo
 	repoErr     error
-	mirrors     []coreapi.Mirror
-	mirrorsErr  error
 	clusters    []coreapi.Cluster
 	clustersErr error
+	repos       *coreapi.ListReposOutputBody
+	reposErr    error
+	// blockUntilCtxDone makes ListRepos and GetRepo hang until the caller's
+	// deadline fires, standing in for a reachable-but-slow control plane —
+	// both, so the owner/repo and ULID paths can each be tested. Off by
+	// default, so existing tests are unaffected.
+	blockUntilCtxDone bool
+	// lastListReposParams records the params passed to the most recent
+	// ListRepos call, so a test can assert the resolver actually sets Filter
+	// to the requested repo rather than merely returning whatever fixture was
+	// configured regardless of what was asked.
+	lastListReposParams coreapi.ListReposParams
 }
 
-func (f *fakeCellCore) GetRepo(context.Context, coreapi.GetRepoParams) (*coreapi.Repo, error) {
+// waitIfBlocking simulates a core that accepts the connection and then stalls.
+func (f *fakeCellCore) waitIfBlocking(ctx context.Context) error {
+	if !f.blockUntilCtxDone {
+		return nil
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (f *fakeCellCore) GetRepo(ctx context.Context, _ coreapi.GetRepoParams) (*coreapi.Repo, error) {
+	if err := f.waitIfBlocking(ctx); err != nil {
+		return nil, err
+	}
 	return f.repo, f.repoErr
 }
 
@@ -111,11 +119,18 @@ func (f *fakeCellCore) ListClusters(context.Context) (*coreapi.ListClustersOutpu
 	return &coreapi.ListClustersOutputBody{Clusters: f.clusters}, nil
 }
 
-func (f *fakeCellCore) ListMirrors(context.Context, coreapi.ListMirrorsParams) (*coreapi.ListMirrorsOutputBody, error) {
-	if f.mirrorsErr != nil {
-		return nil, f.mirrorsErr
+func (f *fakeCellCore) ListRepos(ctx context.Context, params coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error) {
+	f.lastListReposParams = params
+	if err := f.waitIfBlocking(ctx); err != nil {
+		return nil, err
 	}
-	return &coreapi.ListMirrorsOutputBody{Mirrors: f.mirrors}, nil
+	if f.reposErr != nil {
+		return nil, f.reposErr
+	}
+	if f.repos != nil {
+		return f.repos, nil
+	}
+	return &coreapi.ListReposOutputBody{}, nil
 }
 
 func withFakeCellCore(t *testing.T, f *fakeCellCore) {
@@ -125,10 +140,106 @@ func withFakeCellCore(t *testing.T, f *fakeCellCore) {
 	t.Cleanup(func() { newCellCoreClient = prev })
 }
 
+// euClusters is keyed by PublicUrl host, the join the ULID path uses
+// (cellTargetForClusterHost / matchClusterByHost).
 func euClusters() []coreapi.Cluster {
 	return []coreapi.Cluster{
 		{PublicUrl: "https://us.entire.io", Jurisdiction: "us", ApiUrl: coreapi.NewOptString("https://us.api.entire.io")},
 		{PublicUrl: "https://eu.entire.io", Jurisdiction: "eu", ApiUrl: coreapi.NewOptString(euCellAPIURL)},
+	}
+}
+
+// clustersWithSlugs is keyed by Slug, the join the owner/repo path uses
+// (cellTargetForClusterSlug / matchClusterBySlug) against a RepoPlacement's
+// ClusterSlug.
+func clustersWithSlugs() []coreapi.Cluster {
+	return []coreapi.Cluster{
+		{Slug: usClusterSlug, Jurisdiction: "us", PublicUrl: "https://us.entire.io", ApiUrl: coreapi.NewOptString(usCellAPIURL)},
+		{Slug: euClusterSlug, Jurisdiction: "eu", PublicUrl: "https://eu.entire.io", ApiUrl: coreapi.NewOptString(euCellAPIURL)},
+		{Slug: apSoutheastClusterSlug, Jurisdiction: "ap-southeast", PublicUrl: "https://ap-southeast.entire.io", ApiUrl: coreapi.NewOptString("https://aws-ap-southeast-1.api.entire.io")},
+		{Slug: apSouthClusterSlug, Jurisdiction: "ap-south", PublicUrl: "https://ap-south.entire.io", ApiUrl: coreapi.NewOptString("https://aws-ap-south-1.api.entire.io")},
+	}
+}
+
+// placementFixture is one entry of a RepoIndexEntry.Placements list.
+type placementFixture struct {
+	id     string
+	slug   string
+	status coreapi.RepoPlacementStatus
+}
+
+// repoIndexFixture builds a RepoIndexEntry for fullName from an ordered list
+// of placements, with processingID naming the placement that is
+// primaries.processing. Order in placements is preserved, so a fixture can
+// deliberately put the processing placement somewhere other than index 0 -
+// proving a resolver picks it by id, not by position.
+func repoIndexFixture(fullName, processingID string, placements ...placementFixture) coreapi.RepoIndexEntry {
+	out := make([]coreapi.RepoPlacement, 0, len(placements))
+	for _, p := range placements {
+		status := p.status
+		if status == "" {
+			status = coreapi.RepoPlacementStatusReady
+		}
+		out = append(out, coreapi.RepoPlacement{
+			ID:          p.id,
+			ClusterSlug: p.slug,
+			Cell:        p.slug,
+			Status:      status,
+		})
+	}
+	return coreapi.RepoIndexEntry{
+		FullName:   fullName,
+		ID:         "repo-" + fullName,
+		Primaries:  coreapi.NewOptRepoPrimaries(coreapi.RepoPrimaries{Processing: processingID}),
+		Placements: out,
+	}
+}
+
+// fourRegionFixture reproduces entirehq/entire.io's real prod topology: four
+// active placements, with the US one (deliberately not first in the list)
+// naming primaries.processing. This is the shape that used to make
+// resolveRepoClusterHost see >1 distinct active cluster host and refuse.
+func fourRegionFixture() coreapi.RepoIndexEntry {
+	return repoIndexFixture("entirehq/entire.io", "mirror-us",
+		placementFixture{id: "mirror-eu", slug: euClusterSlug},
+		placementFixture{id: "mirror-ap-southeast", slug: apSoutheastClusterSlug},
+		placementFixture{id: "mirror-ap-south", slug: apSouthClusterSlug},
+		placementFixture{id: "mirror-us", slug: usClusterSlug},
+	)
+}
+
+// fourRegionFixtureProcessingInMiddle is the same real topology as
+// fourRegionFixture but with the processing placement in the middle of the
+// list, so neither a "first" nor a "last" positional heuristic could
+// accidentally satisfy this test — only selection by primaries.processing id
+// can.
+func fourRegionFixtureProcessingInMiddle() coreapi.RepoIndexEntry {
+	return repoIndexFixture("entirehq/entire.io", "mirror-us",
+		placementFixture{id: "mirror-eu", slug: euClusterSlug},
+		placementFixture{id: "mirror-us", slug: usClusterSlug},
+		placementFixture{id: "mirror-ap-southeast", slug: apSoutheastClusterSlug},
+		placementFixture{id: "mirror-ap-south", slug: apSouthClusterSlug},
+	)
+}
+
+func reposOutput(entries ...coreapi.RepoIndexEntry) *coreapi.ListReposOutputBody {
+	return &coreapi.ListReposOutputBody{Repos: entries}
+}
+
+// candidateRepoIndexFixture builds a RepoIndexEntry for a repo that ListRepos'
+// Filter can find (it exists on the forge and the caller can see it) but that
+// has never been onboarded to Entire: a Candidate is set, and there are no
+// placements or primaries to resolve. This is the common "random repo a
+// developer works in" shape, as opposed to the zero-rows "not found at all"
+// shape.
+func candidateRepoIndexFixture(fullName string) coreapi.RepoIndexEntry {
+	return coreapi.RepoIndexEntry{
+		FullName: fullName,
+		ID:       "repo-" + fullName,
+		Candidate: coreapi.NewOptRepoCandidate(coreapi.RepoCandidate{
+			Access:      coreapi.RepoCandidateAccessRead,
+			Onboardable: true,
+		}),
 	}
 }
 
@@ -137,7 +248,10 @@ func TestResolveRepoCellTarget_ULID(t *testing.T) {
 		repo:     &coreapi.Repo{ID: "ULID", ClusterHost: coreapi.NewOptString("eu.entire.io")},
 		clusters: euClusters(),
 	})
-	target := resolveRepoCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	target, err := resolveRepoCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	if err != nil {
+		t.Fatalf("resolveRepoCellTarget: %v", err)
+	}
 	if target == nil {
 		t.Fatal("expected a target for a resolvable ULID")
 	}
@@ -146,50 +260,28 @@ func TestResolveRepoCellTarget_ULID(t *testing.T) {
 	}
 }
 
-func TestResolveRepoCellTarget_ULIDError_FallsBack(t *testing.T) {
+func TestResolveRepoCellTarget_ULIDError_ReturnsError(t *testing.T) {
 	withFakeCellCore(t, &fakeCellCore{repoErr: errors.New("boom"), clusters: euClusters()})
-	if target := resolveRepoCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV"); target != nil {
-		t.Fatalf("expected nil (fallback) on GetRepo error, got %+v", target)
+	target, err := resolveRepoCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	if err == nil {
+		t.Fatalf("expected an error on GetRepo failure, got target=%+v", target)
+	}
+	if target != nil {
+		t.Fatalf("expected a nil target alongside the error, got %+v", target)
 	}
 }
 
-func TestResolveRepoCellTarget_OwnerRepoSingleRegion(t *testing.T) {
-	withFakeCellCore(t, &fakeCellCore{
-		mirrors: []coreapi.Mirror{
-			{Repo: "widget", ClusterHost: "eu.entire.io", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusReady)},
-			// A failed placement in another region must be ignored, not create ambiguity.
-			{Repo: "widget", ClusterHost: "us.entire.io", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusFailed)},
-			// A different repo must be filtered out by listMirrorsForRepo.
-			{Repo: "other", ClusterHost: "us.entire.io"},
-		},
-		clusters: euClusters(),
-	})
-	target := resolveRepoCellTarget(context.Background(), "acme/widget", "")
-	if target == nil || target.Jurisdiction != "eu" || target.BaseURL != euCellAPIURL {
-		t.Fatalf("target = %+v, want eu cell", target)
-	}
-}
-
-func TestResolveRepoCellTarget_MultiRegion_FallsBack(t *testing.T) {
-	withFakeCellCore(t, &fakeCellCore{
-		mirrors: []coreapi.Mirror{
-			{Repo: "widget", ClusterHost: "eu.entire.io"},
-			{Repo: "widget", ClusterHost: "us.entire.io"},
-		},
-		clusters: euClusters(),
-	})
-	if target := resolveRepoCellTarget(context.Background(), "acme/widget", ""); target != nil {
-		t.Fatalf("expected nil (fallback) for ambiguous multi-region repo, got %+v", target)
-	}
-}
-
-func TestResolveRepoCellTarget_NoClusterMatch_FallsBack(t *testing.T) {
+func TestResolveRepoCellTarget_NoClusterMatch_ReturnsError(t *testing.T) {
 	withFakeCellCore(t, &fakeCellCore{
 		repo:     &coreapi.Repo{ClusterHost: coreapi.NewOptString("ap.entire.io")}, // not in catalog
 		clusters: euClusters(),
 	})
-	if target := resolveRepoCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV"); target != nil {
-		t.Fatalf("expected nil (fallback) when no cluster matches, got %+v", target)
+	target, err := resolveRepoCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	if err == nil {
+		t.Fatalf("expected an error when no cluster matches, got target=%+v", target)
+	}
+	if target != nil {
+		t.Fatalf("expected a nil target alongside the error, got %+v", target)
 	}
 }
 
@@ -200,8 +292,402 @@ func TestResolveRepoCellTarget_JurisdictionLowercased(t *testing.T) {
 			{PublicUrl: "https://eu.entire.io", Jurisdiction: "EU", ApiUrl: coreapi.NewOptString(euCellAPIURL)},
 		},
 	})
-	target := resolveRepoCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	target, err := resolveRepoCellTarget(context.Background(), "", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	if err != nil {
+		t.Fatalf("resolveRepoCellTarget: %v", err)
+	}
 	if target == nil || target.Jurisdiction != "eu" {
 		t.Fatalf("target = %+v, want lowercased jurisdiction eu", target)
+	}
+}
+
+func TestResolveRepoCellTarget_OwnerRepo_SingleHomedRepo(t *testing.T) {
+	fake := &fakeCellCore{
+		repos: reposOutput(repoIndexFixture("acme/widget", "mirror-eu",
+			placementFixture{id: "mirror-eu", slug: euClusterSlug},
+		)),
+		clusters: clustersWithSlugs(),
+	}
+	withFakeCellCore(t, fake)
+	target, err := resolveRepoCellTarget(context.Background(), "acme/widget", "")
+	if err != nil {
+		t.Fatalf("resolveRepoCellTarget: %v", err)
+	}
+	if target == nil || target.Jurisdiction != "eu" || target.BaseURL != euCellAPIURL {
+		t.Fatalf("target = %+v, want eu cell", target)
+	}
+	// Proves the resolver actually sets Filter to the requested repo, not
+	// just that the fake happens to return the right fixture regardless of
+	// what was asked.
+	if got := fake.lastListReposParams.Filter.Or(""); got != "acme/widget" {
+		t.Errorf("ListRepos Filter = %q, want %q", got, "acme/widget")
+	}
+}
+
+// This is the regression test for the actual production bug: a repo mirrored
+// in 4 regions (entirehq/entire.io's real topology) used to make
+// resolveRepoClusterHost see >1 distinct cluster host and refuse, falling
+// back to home-jurisdiction routing (wrong-region silent failure for `entire
+// trail`/`entire experts`). It must resolve to the PROCESSING placement's
+// cell (us) regardless of how many other regions the repo is mirrored in.
+func TestResolveRepoCellTarget_OwnerRepo_MultiHomedRepo_ResolvesProcessingCell(t *testing.T) {
+	fixtures := map[string]coreapi.RepoIndexEntry{
+		"processing last":   fourRegionFixture(),
+		"processing middle": fourRegionFixtureProcessingInMiddle(),
+	}
+	for name, fixture := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			withFakeCellCore(t, &fakeCellCore{
+				repos:    reposOutput(fixture),
+				clusters: clustersWithSlugs(),
+			})
+			target, err := resolveRepoCellTarget(context.Background(), "entirehq/entire.io", "")
+			if err != nil {
+				t.Fatalf("resolveRepoCellTarget: %v", err)
+			}
+			if target == nil {
+				t.Fatal("expected a target for a multi-homed repo's processing cell")
+			}
+			if target.Jurisdiction != "us" || target.BaseURL != usCellAPIURL {
+				t.Fatalf("target = %+v, want the us processing cell, not any of the other 3 mirrored regions", target)
+			}
+		})
+	}
+}
+
+func TestResolveRepoCellTarget_OwnerRepo_JurisdictionLowercased(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
+		repos: reposOutput(repoIndexFixture("acme/widget", "mirror-eu",
+			placementFixture{id: "mirror-eu", slug: euClusterSlug},
+		)),
+		clusters: []coreapi.Cluster{
+			{Slug: euClusterSlug, Jurisdiction: "EU", PublicUrl: "https://eu.entire.io", ApiUrl: coreapi.NewOptString(euCellAPIURL)},
+		},
+	})
+	target, err := resolveRepoCellTarget(context.Background(), "acme/widget", "")
+	if err != nil {
+		t.Fatalf("resolveRepoCellTarget: %v", err)
+	}
+	if target == nil || target.Jurisdiction != "eu" {
+		t.Fatalf("target = %+v, want lowercased jurisdiction eu", target)
+	}
+}
+
+// processingResolutionErrorCase names one way processing-placement
+// resolution can fail. Shared between resolveRepoCellTarget's owner/repo path
+// and resolveRepoCellPlacement, since both now go through
+// resolveProcessingPlacement + cellTargetForClusterSlug.
+type processingResolutionErrorCase struct {
+	name        string
+	repos       *coreapi.ListReposOutputBody
+	reposErr    error
+	clusters    []coreapi.Cluster
+	clustersErr error
+	// wantNotOnboarded marks the cases that must surface errRepoNotOnboarded
+	// specifically (not just any error), so callers like the trail
+	// enablement cache can tell "not onboarded" apart from a transient
+	// placement failure.
+	wantNotOnboarded bool
+}
+
+func processingResolutionErrorCases() []processingResolutionErrorCase {
+	activePlacement := placementFixture{id: "mirror-eu", slug: euClusterSlug}
+
+	return []processingResolutionErrorCase{
+		{
+			name:             "repo not found",
+			repos:            reposOutput(), // zero rows
+			clusters:         clustersWithSlugs(),
+			wantNotOnboarded: true,
+		},
+		{
+			// The more common real trigger for "not onboarded": a repo that
+			// exists on the forge and is visible to the caller, but was never
+			// onboarded to Entire. ListRepos' Filter bypasses the default
+			// scope=onboarded restriction, so this comes back as a row with a
+			// Candidate set instead of a zero-row response.
+			name:             "repo discoverable but not onboarded (candidate row)",
+			repos:            reposOutput(candidateRepoIndexFixture("acme/widget")),
+			clusters:         clustersWithSlugs(),
+			wantNotOnboarded: true,
+		},
+		{
+			// Guards the identity check: the control plane's Filter param is
+			// documented as an exact-match lookup, but nothing enforces that
+			// here. If Filter were ever ignored/dropped server-side, an
+			// unchecked Repos[0] would silently resolve an unrelated repo's
+			// cell instead of erroring.
+			name: "repo index returns a different repo than requested",
+			repos: reposOutput(repoIndexFixture("some/other-repo", "mirror-eu",
+				placementFixture{id: "mirror-eu", slug: euClusterSlug},
+			)),
+			clusters: clustersWithSlugs(),
+		},
+		{
+			name: "no processing primary",
+			repos: reposOutput(func() coreapi.RepoIndexEntry {
+				e := repoIndexFixture("acme/widget", "", activePlacement)
+				e.Primaries = coreapi.OptRepoPrimaries{} // unset
+				return e
+			}()),
+			clusters:         clustersWithSlugs(),
+			wantNotOnboarded: true,
+		},
+		{
+			// The defensive branch: primaries names a processing placement that
+			// is absent from the same response's placement list. Should not be
+			// reachable via the control plane, but it is the difference between
+			// a clear error and a zero-value placement resolving to no cell.
+			name: "processing placement id absent from the placement list",
+			repos: reposOutput(repoIndexFixture("acme/widget", "mirror-vanished",
+				placementFixture{id: "mirror-eu", slug: euClusterSlug},
+			)),
+			clusters: clustersWithSlugs(),
+		},
+		{
+			name: "processing placement failed",
+			repos: reposOutput(repoIndexFixture("acme/widget", "mirror-eu",
+				placementFixture{id: "mirror-eu", slug: euClusterSlug, status: coreapi.RepoPlacementStatusFailed},
+			)),
+			clusters: clustersWithSlugs(),
+		},
+		{
+			name: "processing placement suspended",
+			repos: reposOutput(repoIndexFixture("acme/widget", "mirror-eu",
+				placementFixture{id: "mirror-eu", slug: euClusterSlug, status: coreapi.RepoPlacementStatusSuspended},
+			)),
+			clusters: clustersWithSlugs(),
+		},
+		{
+			name:     "list repos errors",
+			reposErr: errors.New("core unavailable"),
+			clusters: clustersWithSlugs(),
+		},
+		{
+			name:        "list clusters errors",
+			repos:       reposOutput(repoIndexFixture("acme/widget", "mirror-eu", activePlacement)),
+			clustersErr: errors.New("core unavailable"),
+		},
+		{
+			name:  "no cluster matches the placement's slug",
+			repos: reposOutput(repoIndexFixture("acme/widget", "mirror-eu", activePlacement)),
+			clusters: []coreapi.Cluster{
+				{Slug: "some-other-slug", Jurisdiction: "us", PublicUrl: "https://us.entire.io", ApiUrl: coreapi.NewOptString("https://us.api.entire.io")},
+			},
+		},
+	}
+}
+
+func TestResolveRepoCellTarget_OwnerRepo_ProcessingResolutionErrors(t *testing.T) {
+	for _, tc := range processingResolutionErrorCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			withFakeCellCore(t, &fakeCellCore{repos: tc.repos, reposErr: tc.reposErr, clusters: tc.clusters, clustersErr: tc.clustersErr})
+			target, err := resolveRepoCellTarget(context.Background(), "acme/widget", "")
+			if err == nil {
+				t.Fatalf("expected an error, got target=%+v", target)
+			}
+			if target != nil {
+				t.Fatalf("expected a nil target alongside the error, got %+v", target)
+			}
+			if got := errors.Is(err, errRepoNotOnboarded); got != tc.wantNotOnboarded {
+				t.Fatalf("errors.Is(err, errRepoNotOnboarded) = %v, want %v (err: %v)", got, tc.wantNotOnboarded, err)
+			}
+		})
+	}
+}
+
+func TestResolveRepoCellPlacement_ProcessingResolutionErrors(t *testing.T) {
+	for _, tc := range processingResolutionErrorCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			withFakeCellCore(t, &fakeCellCore{repos: tc.repos, reposErr: tc.reposErr, clusters: tc.clusters, clustersErr: tc.clustersErr})
+			_, err := resolveRepoCellPlacement(context.Background(), "acme", "widget")
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := errors.Is(err, errRepoNotOnboarded); got != tc.wantNotOnboarded {
+				t.Fatalf("errors.Is(err, errRepoNotOnboarded) = %v, want %v (err: %v)", got, tc.wantNotOnboarded, err)
+			}
+		})
+	}
+}
+
+// Bugbot (PR #1942): cross-repo reads must take the repo_id and the cell from
+// the SAME placement. A mirror id is only resolvable by the cell holding that
+// placement, so pairing one placement's id with a cell picked another way
+// asks a cell about an id it has never seen. With a single placement this is
+// trivially true; TestResolveRepoCellPlacement_MultiHomedRepo_ResolvesProcessingPlacement
+// below is the version of this invariant that actually exercises a choice.
+func TestResolveRepoCellPlacement_PairsIDWithItsOwnCell(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
+		repos: reposOutput(repoIndexFixture("acme/widget", "mirror-eu",
+			placementFixture{id: "mirror-eu", slug: euClusterSlug},
+		)),
+		clusters: clustersWithSlugs(),
+	})
+	got, err := resolveRepoCellPlacement(context.Background(), "acme", "widget")
+	if err != nil {
+		t.Fatalf("resolveRepoCellPlacement: %v", err)
+	}
+	if got.RepoID != "mirror-eu" {
+		t.Errorf("RepoID = %q, want mirror-eu", got.RepoID)
+	}
+	if got.Target == nil || got.Target.Jurisdiction != "eu" || got.Target.BaseURL != euCellAPIURL {
+		t.Fatalf("Target = %+v, want the eu cell that holds mirror-eu", got.Target)
+	}
+}
+
+// A multi-homed repo must resolve to its PROCESSING placement specifically,
+// not merely "some" placement (the pre-fix behavior in resolveRepoCellTarget
+// was to refuse; resolveRepoCellPlacement's pre-fix behavior was to take
+// whichever active mirror came first). The fixture orders the processing
+// placement (mirror-us) last, so a resolver that still picked "first active"
+// would fail this test.
+func TestResolveRepoCellPlacement_MultiHomedRepo_ResolvesProcessingPlacement(t *testing.T) {
+	fixtures := map[string]coreapi.RepoIndexEntry{
+		"processing last":   fourRegionFixture(),
+		"processing middle": fourRegionFixtureProcessingInMiddle(),
+	}
+	for name, fixture := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			withFakeCellCore(t, &fakeCellCore{
+				repos:    reposOutput(fixture),
+				clusters: clustersWithSlugs(),
+			})
+			got, err := resolveRepoCellPlacement(context.Background(), "entirehq", "entire.io")
+			if err != nil {
+				t.Fatalf("resolveRepoCellPlacement: %v", err)
+			}
+			if got.RepoID != "mirror-us" {
+				t.Errorf("RepoID = %q, want mirror-us (the processing placement, regardless of its position in the list)", got.RepoID)
+			}
+			if got.Target == nil || got.Target.Jurisdiction != "us" || got.Target.BaseURL != usCellAPIURL {
+				t.Fatalf("Target = %+v, want the us cell that holds mirror-us", got.Target)
+			}
+		})
+	}
+}
+
+// The not-onboarded error is what a user in a non-onboarded repo sees, and the
+// fail-loud path made it the most common failure — so it must not read like a
+// stack trace. Each resolution layer naming the repo produced
+// "resolve processing placement for acme/widget: acme/widget: repo is not
+// onboarded to Entire"; the name belongs to exactly one layer.
+func TestResolveRepoCellPlacement_NotOnboardedNamesTheRepoOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		repos *coreapi.ListReposOutputBody
+	}{
+		{name: "no row in the repos index", repos: reposOutput()},
+		{name: "candidate row", repos: reposOutput(candidateRepoIndexFixture("acme/widget"))},
+		{
+			name: "row with no processing primary",
+			repos: reposOutput(func() coreapi.RepoIndexEntry {
+				e := repoIndexFixture("acme/widget", "", placementFixture{id: "mirror-eu", slug: euClusterSlug})
+				e.Primaries = coreapi.OptRepoPrimaries{}
+				return e
+			}()),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFakeCellCore(t, &fakeCellCore{repos: tc.repos, clusters: clustersWithSlugs()})
+
+			_, err := resolveRepoCellPlacement(context.Background(), "acme", "widget")
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := strings.Count(err.Error(), "acme/widget"); got != 1 {
+				t.Errorf("error = %q names the repo %d times, want exactly 1", err, got)
+			}
+		})
+	}
+}
+
+// Trail #1003 finding: resolveRepoCellPlacement was the one cell-resolution
+// entry point with no deadline, and the coreapi HTTP client sets only a dial
+// timeout — so a reachable-but-slow control plane stalled `explain --repo`
+// indefinitely, before its spinner had even started. The parent deadline here
+// is shorter than requiredCellResolveTimeout, which is what keeps this test
+// fast; the point is that the wait is bounded and reported as a timeout. The
+// blocking now happens on ListRepos (the processing-placement lookup), not
+// ListMirrors.
+func TestResolveRepoCellPlacement_BoundedByDeadline(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{blockUntilCtxDone: true, clusters: clustersWithSlugs()})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := resolveRepoCellPlacement(ctx, "acme", "widget")
+	if err == nil {
+		t.Fatal("expected a timeout error from a stalled control plane")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("resolveRepoCellPlacement waited %s; the lookup is not bounded", elapsed)
+	}
+	// Reported as a timeout, not as a missing mirror — the whole point is that
+	// the user looks at the control plane rather than at their mirrors.
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %q, want it to name a timeout", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %q, want it to wrap context.DeadlineExceeded", err)
+	}
+}
+
+// The ULID path resolves a placement the caller already named, so it skips the
+// processing-placement lookup entirely — but a stalled control plane must still
+// report a timeout as a timeout, in the same words as the owner/repo path. The
+// two paths reaching different wording for the same failure is what made the
+// shared cellPlacementError worth routing both through.
+func TestResolveRepoCellTarget_ULIDPathReportsTimeoutAsTimeout(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{blockUntilCtxDone: true, clusters: euClusters()})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := resolveRepoCellTarget(ctx, "", "01J000000000000000000000")
+	if err == nil {
+		t.Fatal("expected a timeout error from a stalled control plane")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("resolveRepoCellTarget waited %s; the ULID lookup is not bounded", elapsed)
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %q, want it to name a timeout like the owner/repo path does", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %q, want it to wrap context.DeadlineExceeded", err)
+	}
+}
+
+// A cancelled context is a Ctrl+C, not a slow control plane; calling it a
+// timeout sends the user debugging the wrong thing.
+func TestCellPlacementError_CancellationIsNotReportedAsTimeout(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	fallback := fmt.Errorf("list repos: %w", context.Canceled)
+	err := cellPlacementError(ctx, "acme/widget", fallback)
+
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %q, want a cancellation not to be labelled a timeout", err)
+	}
+	// The Canceled chain has to survive: renderDataAPIAuthError silences on it.
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %q, want it to still wrap context.Canceled", err)
+	}
+}
+
+// The command cannot proceed without this lookup, so its budget is separate
+// from the best-effort one that silently degrades to home-jurisdiction routing.
+func TestRequiredCellResolveTimeoutIsItsOwnBudget(t *testing.T) {
+	t.Parallel()
+
+	if requiredCellResolveTimeout <= cellResolveTimeout {
+		t.Errorf("requiredCellResolveTimeout (%s) should be more patient than the best-effort cellResolveTimeout (%s): a timeout here fails the command instead of degrading",
+			requiredCellResolveTimeout, cellResolveTimeout)
 	}
 }

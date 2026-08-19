@@ -1099,13 +1099,20 @@ func TestEnsurePrimaryRef_SeedsV1FromRemote(t *testing.T) {
 func cloneWithConfig(t *testing.T, bareDir string) (string, func(args ...string)) {
 	t.Helper()
 	cloneDir := filepath.Join(t.TempDir(), "clone")
+	// GitIsolatedEnv on every invocation, matching initBareWithMetadataBranch:
+	// without it these commands inherit the developer's or CI's global git
+	// config, and a global gc.autoDetach=true lets a background `git gc` write
+	// .git/objects after the test returns and race t.TempDir() cleanup. Per-command
+	// env rather than t.Setenv, so callers can still use t.Parallel().
 	cmd := exec.CommandContext(context.Background(), "git", "clone", bareDir, cloneDir)
+	cmd.Env = testutil.GitIsolatedEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("clone failed: %v\n%s", err, out)
 	}
 	run := func(args ...string) {
 		cmd := exec.CommandContext(context.Background(), "git", args...)
 		cmd.Dir = cloneDir
+		cmd.Env = testutil.GitIsolatedEnv()
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v failed: %v\n%s", args, err, out)
 		}

@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 
@@ -639,8 +640,8 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 	}
 	defer repo.Close()
 
-	WarnIfMetadataDisconnected()
-	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{BlobFetcher: s.blobFetcher})
+	WarnIfMetadataDisconnected(ctx)
+	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{BlobFetcher: s.blobFetcher, ReadRemotes: CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -816,25 +817,29 @@ func restoredPromptPreview(sessionAgent agent.Agent, promptContent string, trans
 	if err != nil || len(prompts) == 0 {
 		return ""
 	}
-	return firstRestoredDisplayPrompt(prompts)
-}
-
-func firstRestoredDisplayPrompt(prompts []string) string {
-	for _, prompt := range prompts {
-		cleaned := strings.TrimSpace(prompt)
-		if cleaned == "" || isOnlySeparators(cleaned) || isInjectedInstructionPrompt(cleaned) {
-			continue
-		}
-		return TruncateDescription(cleaned, MaxDescriptionLength)
+	if first := FirstDisplayPrompt(prompts); first != "" {
+		return TruncateDescription(first, MaxDescriptionLength)
 	}
 	return ""
 }
 
-func isInjectedInstructionPrompt(prompt string) bool {
-	trimmed := strings.TrimSpace(prompt)
-	return strings.HasPrefix(trimmed, "# AGENTS.md instructions for ") ||
-		strings.HasPrefix(trimmed, "<environment_context>") ||
-		(strings.Contains(trimmed, "<INSTRUCTIONS>") && strings.Contains(trimmed, "AGENTS.md instructions"))
+// FirstDisplayPrompt returns the first prompt in the list worth showing as a
+// title/preview: the first entry that is non-empty, not separator-only, and not
+// agent-injected (runtime preambles, AGENTS.md dumps — see
+// textutil.IsInjectedPrompt). Returns "" if none qualifies, which callers that
+// must show something should treat as "fall back to the raw first prompt".
+//
+// The returned text is not truncated; callers that render it into a fixed-width
+// display are responsible for that (see restoredPromptPreview).
+func FirstDisplayPrompt(prompts []string) string {
+	for _, prompt := range prompts {
+		cleaned := strings.TrimSpace(prompt)
+		if cleaned == "" || isOnlySeparators(cleaned) || textutil.IsInjectedPrompt(cleaned) {
+			continue
+		}
+		return cleaned
+	}
+	return ""
 }
 
 func extractPromptsFromTranscriptBytes(extractor agent.PromptExtractor, transcript []byte) ([]string, error) {

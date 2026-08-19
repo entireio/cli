@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -428,7 +429,7 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	if len(agentIDs) > 0 {
 		subagentUsage := &agent.TokenUsage{}
 		for agentID := range agentIDs {
-			agentPath := filepath.Join(subagentsDir, fmt.Sprintf("agent-%s.jsonl", agentID))
+			agentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
 			agentUsage, err := CalculateTokenUsageFromFile(agentPath, 0)
 			if err != nil {
 				// Agent transcript may not exist yet or may have been cleaned up
@@ -493,7 +494,7 @@ func (c *ClaudeCodeAgent) ExtractAllModifiedFiles(transcriptData []byte, startLi
 	}
 	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
 	for agentID := range agentIDs {
-		agentPath := filepath.Join(subagentsDir, fmt.Sprintf("agent-%s.jsonl", agentID))
+		agentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
 		agentLines, agentErr := transcript.ParseFromFileAtLine(agentPath, 0)
 		if agentErr != nil {
 			// Subagent transcript may not exist yet or may have been cleaned up

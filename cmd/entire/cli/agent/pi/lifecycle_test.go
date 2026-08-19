@@ -344,3 +344,97 @@ func TestPiAgent_ContextInjector(t *testing.T) {
 		t.Errorf("empty text must render no payload, got %q", string(out))
 	}
 }
+
+// TestParseHookEvent_SessionlessPayloadIsSkipped pins the guard that keeps a
+// sessionless payload from being resolved against the per-repo session-ID cache.
+//
+// A Pi subagent is a nested `pi --no-session` process that auto-discovers the same
+// project-local extension, so it fires these hooks carrying no session identity.
+// Resolving that against the single-slot cache handed the child its parent's ID,
+// and the nested turn then overwrote the parent's prompt and turn window.
+func TestParseHookEvent_SessionlessPayloadIsSkipped(t *testing.T) {
+	// Cannot use t.Parallel — t.Chdir.
+	t.Chdir(t.TempDir())
+
+	ctx := context.Background()
+	a := &PiAgent{}
+
+	// A parent session populates the cache, so a leaked ID would be observable.
+	if _, err := a.ParseHookEvent(ctx, HookNameSessionStart, strings.NewReader(
+		`{"type":"session_start","session_file":"/tmp/2026-05-09T12-00-00-000Z_parent-id.jsonl"}`)); err != nil {
+		t.Fatalf("parent session_start: %v", err)
+	}
+	if got := readCachedSessionID(ctx); got != "parent-id" {
+		t.Fatalf("cache = %q, want parent-id", got)
+	}
+
+	tests := []struct {
+		name          string
+		hook          string
+		stdin         string
+		wantSessionID string // "" means: expect no event at all
+	}{
+		{
+			name:  "nested session_start",
+			hook:  HookNameSessionStart,
+			stdin: `{"type":"session_start","cwd":"/repo"}`,
+		},
+		{
+			name:  "nested before_agent_start",
+			hook:  HookNameBeforeAgentStart,
+			stdin: `{"type":"before_agent_start","cwd":"/repo","prompt":"Task: create docs/red.md"}`,
+		},
+		{
+			name:  "nested agent_end",
+			hook:  HookNameAgentEnd,
+			stdin: `{"type":"agent_end","cwd":"/repo"}`,
+		},
+		{
+			// A session file whose basename carries no ID (trailing separator)
+			// also yields no session ID. Skipping is the safe reading: the
+			// alternative — requiring an empty session_file too — would let this
+			// payload fall through to the cache, which is the leak itself.
+			name:  "session file with unparseable name",
+			hook:  HookNameBeforeAgentStart,
+			stdin: `{"type":"before_agent_start","cwd":"/repo","session_file":"/tmp/x_.jsonl","prompt":"hi"}`,
+		},
+		{
+			// The guard distrusts a missing ID, not the payload: an explicit
+			// session_id is still honoured with no session file present.
+			name:          "explicit session_id without a session file",
+			hook:          HookNameBeforeAgentStart,
+			stdin:         `{"type":"before_agent_start","cwd":"/repo","session_id":"explicit-id","prompt":"hi"}`,
+			wantSessionID: "explicit-id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cacheBefore := readCachedSessionID(ctx)
+
+			ev, err := a.ParseHookEvent(ctx, tt.hook, strings.NewReader(tt.stdin))
+			if err != nil {
+				t.Fatalf("ParseHookEvent(%s): %v", tt.hook, err)
+			}
+
+			if tt.wantSessionID == "" {
+				if ev != nil {
+					t.Fatalf("emitted %s for session %q; want no event so the cached session is left alone",
+						ev.Type, ev.SessionID)
+				}
+				// A skipped invocation must not disturb the cached session either.
+				if got := readCachedSessionID(ctx); got != cacheBefore {
+					t.Errorf("cache = %q after a skipped invocation, want %q", got, cacheBefore)
+				}
+				return
+			}
+
+			if ev == nil {
+				t.Fatalf("emitted no event; want one for session %q", tt.wantSessionID)
+			}
+			if ev.SessionID != tt.wantSessionID {
+				t.Errorf("SessionID = %q, want %q", ev.SessionID, tt.wantSessionID)
+			}
+		})
+	}
+}

@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -36,8 +38,8 @@ func newImportAgentCmd(imp agentimport.Importer) *cobra.Command {
 		Use:   imp.Name(),
 		Short: fmt.Sprintf("Import existing %s transcripts as read-only checkpoints", imp.AgentType()),
 		Long: fmt.Sprintf(`Import pre-existing %s transcripts for this repo (the past month) as
-read-only checkpoints. Imported history is searchable and explainable but is
-not rewindable.
+read-only checkpoints. Imported history is searchable and explainable, but
+read-only: imported sessions cannot be resumed.
 
 Import honors checkpoint policy before scanning transcripts. If the configured
 checkpoint_version or checkpoint_min_version is unsupported by this CLI, import
@@ -86,9 +88,18 @@ fails even with --dry-run.`, imp.AgentType()),
 				Now: time.Now(), DryRun: dryRun,
 				LinkCommitSHA: linkCommitSHA,
 				Progress:      progress,
+				ReadRemotes:   strategy.CheckpointReadRemotes(ctx),
 			})
 			stopProgress(err == nil)
 			if err != nil {
+				// Ctrl-C is not a failure: report the partial import (turns
+				// already written stay written, and a re-run resumes where
+				// this one stopped) instead of a raw "context canceled".
+				if errors.Is(err, context.Canceled) {
+					c.SilenceUsage = true
+					fmt.Fprintf(c.OutOrStdout(), "Import interrupted after %d turn(s). Re-run to finish.\n", res.TurnsImported)
+					return NewSilentError(err)
+				}
 				return fmt.Errorf("import %s: %w", imp.Name(), err)
 			}
 			verb := "Imported"

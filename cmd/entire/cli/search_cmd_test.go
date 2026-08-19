@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -107,47 +108,207 @@ func TestWriteSearchJSON_ZeroLimitFallsBackToDefaultPageSize(t *testing.T) {
 	}
 }
 
-func TestCodeSearchEnabled_EnvGate(t *testing.T) {
-	// Modifies process-global env, no t.Parallel().
-	for _, tc := range []struct {
-		val  string
-		want bool
-	}{
-		{"", false},
-		{"0", false},
-		{"false", false},
-		{"true", false},
-		{"1", true},
+func TestWriteSearchCompactJSON_TrimsResults(t *testing.T) {
+	t.Parallel()
+
+	resp := &search.Response{
+		Results: testResults(),
+		Total:   2,
+		Page:    1,
+	}
+
+	var buf bytes.Buffer
+	if err := writeSearchCompactJSON(&buf, resp, 0, 1); err != nil {
+		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+	}
+
+	output := buf.String()
+	// Identifiers, ranking, and files survive.
+	for _, want := range []string{
+		`"id": "a3b2c4d5e6f7"`,
+		`"type": "checkpoint"`,
+		`"repo": "entirehq/entire.io"`,
+		`"branch": "main"`,
+		`"author": "alicecodes"`,
+		`"date": "2026-03-24T10:30:00Z"`,
+		`"src/middleware/auth.go"`,
+		`"score": 0.042`,
+		`"title": "Implement auth middleware"`,
+		`"snippet": "added auth middleware for JWT validation"`,
+		`"matchType": "semantic"`,
+		`"total_pages": 1`,
 	} {
-		t.Setenv("ENTIRE_CODE_SEARCH", tc.val)
-		if got := codeSearchEnabled(); got != tc.want {
-			t.Errorf("ENTIRE_CODE_SEARCH=%q: codeSearchEnabled() = %v, want %v", tc.val, got, tc.want)
+		if !strings.Contains(output, want) {
+			t.Errorf("compact output missing %s:\n%s", want, output)
 		}
+	}
+	// The full prompt must NOT be embedded (that's the whole point).
+	if strings.Contains(output, "add auth middleware to protect API routes") {
+		t.Errorf("compact output must not contain the full prompt:\n%s", output)
 	}
 }
 
-func TestSearchCmd_CodeFlagGated(t *testing.T) {
-	// --code without ENTIRE_CODE_SEARCH should fail with gate message.
-	t.Setenv("ENTIRE_CODE_SEARCH", "")
+// Repo/pr rows (reachable via --all-repos) have no typed struct; compact hits
+// must still carry identifying info from the raw payload instead of collapsing
+// to just {id, type, score}.
+func TestWriteSearchCompactJSON_RepoAndPRRowsKeepIdentifyingFields(t *testing.T) {
+	t.Parallel()
 
+	wire := `{"results":[
+		{"type":"repo","data":{"id":"01JREPO","name":"backend","org":"acme","fullName":"acme/backend","description":"Backend services","checkpointCount":18},"searchMeta":{"score":0.9}},
+		{"type":"pr","data":{"id":"pr-9","title":"Fix login retry","repo":"backend","userLogin":"alice"},"searchMeta":{"score":0.5}}
+	],"total":2,"page":1}`
+	var resp search.Response
+	if err := json.Unmarshal([]byte(wire), &resp); err != nil {
+		t.Fatalf("unmarshaling wire response: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := writeSearchCompactJSON(&buf, &resp, 0, 1); err != nil {
+		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+	}
+
+	output := buf.String()
+	for _, want := range []string{
+		`"id": "01JREPO"`,
+		`"repo": "acme/backend"`,
+		`"title": "backend"`,
+		`"description": "Backend services"`,
+		`"checkpointCount": 18`,
+		`"id": "pr-9"`,
+		`"title": "Fix login retry"`,
+		`"author": "alice"`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("compact output missing %s:\n%s", want, output)
+		}
+	}
+	// The owner must never be doubled when the payload carries a qualified fullName.
+	if strings.Contains(output, "acme/acme/") {
+		t.Errorf("compact output doubled the repo owner:\n%s", output)
+	}
+}
+
+// A checkpoint with no commit subject titles itself with the prompt, and the
+// backend's snippet for that row is the prompt's first indexed chunk
+// ("Prompt: " + the same text) — emitting both would carry the same 200 runes
+// twice. The duplicate snippet is dropped; a snippet from a later chunk (not
+// a title prefix) survives because it shows where the match landed.
+func TestWriteSearchCompactJSON_DropsSnippetDuplicatingTitle(t *testing.T) {
+	t.Parallel()
+
+	subject := "fix login"
+	longPrompt := strings.TrimSpace(strings.Repeat("word ", 50)) // 249 runes, past the 200-rune cap
+	cases := []struct {
+		name        string
+		checkpoint  *search.CheckpointResult
+		snippet     string
+		wantSnippet bool
+	}{
+		{
+			name:       "prompt-title duplicate dropped",
+			checkpoint: &search.CheckpointResult{ID: "cp1", Prompt: "add rate limiting to the public API", Org: "o", Repo: "r"},
+			snippet:    "Prompt: add rate limiting to the public API",
+		},
+		{
+			name:       "duplicate survives truncation on both sides",
+			checkpoint: &search.CheckpointResult{ID: "cp2", Prompt: longPrompt, Org: "o", Repo: "r"},
+			snippet:    "Prompt: " + longPrompt,
+		},
+		{
+			name:        "later-chunk snippet kept",
+			checkpoint:  &search.CheckpointResult{ID: "cp3", Prompt: "add rate limiting to the public API", Org: "o", Repo: "r"},
+			snippet:     "Prompt: retry the bucket refill when redis is down",
+			wantSnippet: true,
+		},
+		{
+			name:        "snippet extending a commit-subject title kept",
+			checkpoint:  &search.CheckpointResult{ID: "cp4", Prompt: "fix login retries in the auth flow", CommitSubject: &subject, Org: "o", Repo: "r"},
+			snippet:     "Prompt: fix login retries in the auth flow",
+			wantSnippet: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			resp := &search.Response{
+				Results: []search.Result{{
+					Type:       search.TypeCheckpoint,
+					Checkpoint: tc.checkpoint,
+					Meta:       search.Meta{Snippet: tc.snippet, Score: 1},
+				}},
+				Total: 1,
+			}
+			var buf bytes.Buffer
+			if err := writeSearchCompactJSON(&buf, resp, 0, 1); err != nil {
+				t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+			}
+			if got := strings.Contains(buf.String(), `"snippet"`); got != tc.wantSnippet {
+				t.Errorf("snippet present = %v, want %v:\n%s", got, tc.wantSnippet, buf.String())
+			}
+		})
+	}
+}
+
+func TestWriteSearchCompactJSON_TruncatesLongPromptTitle(t *testing.T) {
+	t.Parallel()
+
+	longPrompt := strings.Repeat("word ", 200) // ~1000 chars, no commit message fallback
+	resp := &search.Response{
+		Results: []search.Result{{
+			Type: search.TypeCheckpoint,
+			Checkpoint: &search.CheckpointResult{
+				ID:     "cp1",
+				Prompt: longPrompt,
+				Org:    "o",
+				Repo:   "r",
+			},
+		}},
+		Total: 1,
+	}
+
+	var buf bytes.Buffer
+	if err := writeSearchCompactJSON(&buf, resp, 0, 1); err != nil {
+		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+	}
+
+	output := buf.String()
+	if strings.Contains(output, strings.TrimSpace(longPrompt)) {
+		t.Error("expected long prompt title to be truncated")
+	}
+	if !strings.Contains(output, "…") {
+		t.Errorf("expected truncated title to end with ellipsis:\n%s", output)
+	}
+}
+
+func TestSearchCmd_CompactWithCodeRejected(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+	root.SetArgs([]string{"search", "--code", "--compact", "handleRequest"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected error when --compact used with --code")
+	}
+	if !strings.Contains(err.Error(), "--compact cannot be used with --code") {
+		t.Errorf("error = %q, want containing '--compact cannot be used with --code'", err.Error())
+	}
+}
+
+func TestSearchCmd_CodeFlagUngated(t *testing.T) {
+	// Code search is generally available: --code must never fail with the old
+	// feature-gate message (it may still fail later at auth/network).
 	root := NewRootCmd()
 	root.SetArgs([]string{"search", "--code", "test query"})
 
 	err := root.Execute()
-	if err == nil {
-		t.Fatal("expected error when --code used without ENTIRE_CODE_SEARCH")
-	}
-	if !strings.Contains(err.Error(), "not yet available") {
-		t.Errorf("error = %q, want containing 'not yet available'", err.Error())
-	}
-	if strings.Contains(err.Error(), "ENTIRE_CODE_SEARCH") {
-		t.Errorf("gate error should not mention env var, got: %q", err.Error())
+	if err != nil && strings.Contains(err.Error(), "not yet available") {
+		t.Errorf("--code should not be feature-gated, got: %q", err.Error())
 	}
 }
 
 func TestSearchCmd_CodeFlagRequiresQuery(t *testing.T) {
-	t.Setenv("ENTIRE_CODE_SEARCH", "1")
-
 	root := NewRootCmd()
 	root.SetArgs([]string{"search", "--code"})
 
@@ -761,8 +922,6 @@ func TestResolveRepoFilters_MultipleReposMixed(t *testing.T) {
 
 func TestSearchCmd_CaseSensitiveWithCodeFlagParsesCorrectly(t *testing.T) {
 	// --case-sensitive with --code should be accepted (fails later at auth, not at validation).
-	t.Setenv("ENTIRE_CODE_SEARCH", "1")
-
 	root := NewRootCmd()
 	root.SetArgs([]string{"search", "--code", "--case-sensitive", "HandleRequest"})
 
@@ -775,8 +934,6 @@ func TestSearchCmd_CaseSensitiveWithCodeFlagParsesCorrectly(t *testing.T) {
 
 func TestSearchCmd_LimitFlagAccepted(t *testing.T) {
 	// --limit with --code should parse correctly.
-	t.Setenv("ENTIRE_CODE_SEARCH", "1")
-
 	root := NewRootCmd()
 	root.SetArgs([]string{"search", "--code", "--limit", "50", "handleRequest"})
 
@@ -789,8 +946,6 @@ func TestSearchCmd_LimitFlagAccepted(t *testing.T) {
 
 func TestSearchCmd_InlineRepoStarTreatedAsAllRepos(t *testing.T) {
 	// repo:* inline should be treated as "all repos" (no filter).
-	t.Setenv("ENTIRE_CODE_SEARCH", "1")
-
 	root := NewRootCmd()
 	root.SetArgs([]string{"search", "--code", "auth repo:*"})
 
@@ -803,8 +958,6 @@ func TestSearchCmd_InlineRepoStarTreatedAsAllRepos(t *testing.T) {
 
 func TestSearchCmd_MultipleInlineRepoFilters(t *testing.T) {
 	// Multiple inline repo: filters should all be collected.
-	t.Setenv("ENTIRE_CODE_SEARCH", "1")
-
 	root := NewRootCmd()
 	root.SetArgs([]string{"search", "--code", "auth repo:gh/entirehq/entire.io repo:gh/entirehq/cli"})
 
@@ -911,8 +1064,6 @@ func TestExtractInlineRepoFilters(t *testing.T) {
 
 func TestSearchCmd_CodePreservesNonRepoFiltersInQuery(t *testing.T) {
 	// Ensure author:foo is NOT consumed by code search query parsing.
-	t.Setenv("ENTIRE_CODE_SEARCH", "1")
-
 	root := NewRootCmd()
 	root.SetArgs([]string{"search", "--code", "author:foo TODO"})
 

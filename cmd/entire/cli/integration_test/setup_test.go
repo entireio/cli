@@ -47,6 +47,11 @@ func TestMain(m *testing.M) {
 		"ENTIRE_TEST_AUTH_STORE_FILE": filepath.Join(tmpDir, "entire-auth-tokens.json"),
 		"GIT_TERMINAL_PROMPT":         "0",
 		testutil.EnvGitHermetic:       "1",
+		// Plugin fixtures are file:// repos, which the shipped allowlist
+		// refuses — nothing in production needs a local git remote, and a
+		// security allowlist should not be widened for test convenience.
+		// testing.Testing() is false in the spawned binary, so it is told here.
+		"ENTIRE_TEST_ALLOW_FILE_REMOTES": "1",
 	}
 	for k, v := range isolation {
 		if err := os.Setenv(k, v); err != nil {

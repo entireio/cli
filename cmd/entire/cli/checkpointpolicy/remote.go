@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -25,6 +27,13 @@ var errStopTraversal = errors.New("stop traversal")
 type Target struct {
 	Remote string
 	Dir    string
+
+	// SkipLocalUpdate marks a read-only (legacy-tier) candidate: a policy
+	// baseline found on it may be read, compared, and reported, but never
+	// advances the local policy ref via SetRef. Push targets and the elected
+	// checkpoint sync remote leave this false. The zero value preserves the
+	// historical single-target Sync behavior (pre-push hook path).
+	SkipLocalUpdate bool
 }
 
 type RemoteState struct {
@@ -61,20 +70,45 @@ func CheckRemote(ctx context.Context, target Target) (RemoteState, error) {
 }
 
 func Sync(ctx context.Context, repo *git.Repository, target Target) (State, error) {
+	return SyncFrom(ctx, repo, []Target{target})
+}
+
+// SyncFrom reconciles the local checkpoint policy ref against the first
+// target that has a policy ref. Targets are tried in order; a target lacking
+// the policy ref and a target failing at the transport level both advance to
+// the next target (failures logged at debug); when no target yields a
+// baseline and at least one failed, the FIRST failure is surfaced. A winning
+// target marked SkipLocalUpdate contributes a read-only baseline: it is
+// compared and reported but never advances the local policy ref.
+func SyncFrom(ctx context.Context, repo *git.Repository, targets []Target) (State, error) {
 	local, err := ReadLocal(ctx, repo)
 	if err != nil {
 		return State{}, err
 	}
 
-	baseline, remoteFound, err := remoteBaseline(ctx, repo, target, local)
+	winner, baseline, remoteFound, err := findRemoteBaseline(ctx, repo, targets, local)
 	if err != nil {
 		return State{}, err
 	}
-	if !remoteFound || local.Hash == baseline.Hash {
+	if !remoteFound {
+		return local, nil
+	}
+	if local.Hash == baseline.Hash {
 		return baseline, nil
 	}
 
+	// Legacy-tier baseline (SkipLocalUpdate): read/compare/report only — the
+	// local policy ref advances only from the elected remote (or a dedicated
+	// checkpoint_remote). Because the local ref did not move, the ENFORCED
+	// policy is still the local one, and that is what gets reported:
+	// returning the baseline as Source=remote here would print a policy the
+	// hooks never enforce. The unadopted baseline stays visible via
+	// RemoteHash so divergence can be surfaced.
 	if local.Hash.IsZero() {
+		if winner.SkipLocalUpdate {
+			local.RemoteHash = baseline.RemoteHash
+			return local, nil
+		}
 		if err := SetRef(repo, RefName, baseline.Hash); err != nil {
 			return State{}, err
 		}
@@ -86,6 +120,10 @@ func Sync(ctx context.Context, repo *git.Repository, target Target) (State, erro
 		return State{}, err
 	}
 	if localAncestor {
+		if winner.SkipLocalUpdate {
+			local.RemoteHash = baseline.RemoteHash
+			return local, nil
+		}
 		if err := SetRef(repo, RefName, baseline.Hash); err != nil {
 			return State{}, err
 		}
@@ -107,26 +145,63 @@ func Sync(ctx context.Context, repo *git.Repository, target Target) (State, erro
 	return local, nil
 }
 
+// remoteBaseline resolves the policy baseline from a single target, for the
+// write flow (Update), which always operates against the push target.
 func remoteBaseline(ctx context.Context, repo *git.Repository, target Target, local State) (State, bool, error) {
-	remoteState, err := CheckRemote(ctx, target)
+	_, baseline, found, err := findRemoteBaseline(ctx, repo, []Target{target}, local)
 	if err != nil {
 		return State{}, false, err
 	}
-	if !remoteState.Exists {
+	if !found {
 		return local, false, nil
 	}
-	if local.Hash == remoteState.Hash {
-		local.Source = SourceRemote
-		local.RemoteHash = remoteState.Hash
-		return local, true, nil
-	}
+	return baseline, true, nil
+}
 
-	fetched, err := fetchRemotePolicy(ctx, repo, target)
-	if err != nil {
-		return State{}, false, err
+// findRemoteBaseline iterates targets in order and returns the first target
+// that has a policy ref together with its resolved baseline. A target whose
+// probe or fetch fails advances to the next target; the first such error is
+// surfaced only when no target yields a baseline. found is false (with a nil
+// error) when every target was reachable and none has the policy ref.
+func findRemoteBaseline(ctx context.Context, repo *git.Repository, targets []Target, local State) (Target, State, bool, error) {
+	var firstErr error
+	for _, target := range targets {
+		remoteState, err := CheckRemote(ctx, target)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			logging.Debug(ctx, "checkpoint policy: read candidate probe failed; trying next candidate",
+				slog.String("candidate", remote.RedactURLOrPath(target.Remote)),
+				slog.String("error", err.Error()))
+			continue
+		}
+		if !remoteState.Exists {
+			continue
+		}
+		if local.Hash == remoteState.Hash {
+			baseline := local
+			baseline.Source = SourceRemote
+			baseline.RemoteHash = remoteState.Hash
+			return target, baseline, true, nil
+		}
+		fetched, err := fetchRemotePolicy(ctx, repo, target)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			logging.Debug(ctx, "checkpoint policy: read candidate fetch failed; trying next candidate",
+				slog.String("candidate", remote.RedactURLOrPath(target.Remote)),
+				slog.String("error", err.Error()))
+			continue
+		}
+		fetched.RemoteHash = remoteState.Hash
+		return target, fetched, true, nil
 	}
-	fetched.RemoteHash = remoteState.Hash
-	return fetched, true, nil
+	if firstErr != nil {
+		return Target{}, State{}, false, firstErr
+	}
+	return Target{}, State{}, false, nil
 }
 
 func parseRemotePolicyHash(raw string) (plumbing.Hash, error) {

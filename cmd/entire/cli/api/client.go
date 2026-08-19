@@ -24,6 +24,8 @@ type Client struct {
 	httpClient *http.Client
 	baseURL    string
 
+	trailRoutes map[string]string
+
 	// authSessionsPath is the base path for entire-core's login-session
 	// endpoints (list / revoke / current). Set via WithAuthSessionsPath when the
 	// client targets the auth host; empty otherwise, and the session methods
@@ -188,7 +190,40 @@ func (c *Client) Request(ctx context.Context, method, path string, headers http.
 	return c.do(ctx, method, path, body, headers)
 }
 
+// SetTrailRoute registers the entire-api base path for a resolved trail, so
+// later requests spelled with the trail's ID are rewritten onto its
+// forge/owner/repo/number route (see rewriteTrailRoute).
+func (c *Client) SetTrailRoute(trailID, path string) {
+	trailID = strings.TrimSpace(trailID)
+	path = strings.TrimRight(strings.TrimSpace(path), "/")
+	if trailID == "" || path == "" {
+		return
+	}
+	if c.trailRoutes == nil {
+		c.trailRoutes = make(map[string]string)
+	}
+	c.trailRoutes[url.PathEscape(trailID)] = path
+}
+
+func (c *Client) rewriteTrailRoute(path string) string {
+	const prefix = "/api/v1/trails/"
+	if !strings.HasPrefix(path, prefix) || len(c.trailRoutes) == 0 {
+		return path
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	id, suffix, _ := strings.Cut(rest, "/")
+	base, ok := c.trailRoutes[id]
+	if !ok {
+		return path
+	}
+	if suffix == "" {
+		return base
+	}
+	return base + "/" + suffix
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body io.Reader, headers http.Header) (*http.Response, error) {
+	path = c.rewriteTrailRoute(path)
 	endpoint, err := ResolveURLFromBase(c.baseURL, path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve URL %s: %w", path, err)

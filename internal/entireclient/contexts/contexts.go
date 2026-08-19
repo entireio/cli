@@ -110,7 +110,7 @@ func (f *File) ContextsForIssuer(issuer string) []*Context {
 	want := trimURL(issuer)
 	var out []*Context
 	for _, c := range f.Contexts {
-		if trimURL(c.CoreURL) == want {
+		if c != nil && trimURL(c.CoreURL) == want {
 			out = append(out, c)
 		}
 	}
@@ -130,7 +130,7 @@ func (f *File) Find(name string) *Context {
 		return nil
 	}
 	for _, c := range f.Contexts {
-		if c.Name == name {
+		if c != nil && c.Name == name {
 			return c
 		}
 	}
