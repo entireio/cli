@@ -576,6 +576,17 @@ func TestAutoAdopt_PostCommitFinalizeRetiresSource(t *testing.T) {
 	if !sameAdoptPath(sourceAfter.AdoptedIntoWorktreePath, targetRepo) {
 		t.Fatalf("source AdoptedIntoWorktreePath = %q, want %q", sourceAfter.AdoptedIntoWorktreePath, targetRepo)
 	}
+
+	// The live-session claim must be released too — otherwise it lingers for
+	// AdoptClaimMaxAge (1h) and blocks other adoptions of the same session even
+	// though this adopt is fully done.
+	claim, err := session.LiveSessionClaim(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim != nil {
+		t.Fatalf("post-commit finalize must release the live-session claim, got %+v", claim)
+	}
 }
 
 // saveActiveSourceSession writes a minimal ACTIVE source session directly into a

@@ -316,6 +316,17 @@ func retirePendingSource(ctx context.Context, targetStore *session.StateStore, t
 		)
 		return
 	}
+	// Clear the live-session claim now that the adopt has fully completed.
+	// Without this, UnregisterLiveSession's common-dir check above never fires
+	// (the registry entry's CommonDir is the target's, not the source's), so
+	// the claim would otherwise sit until AdoptClaimMaxAge, blocking other
+	// adoptions of the same session for up to an hour after this one finished.
+	if err := session.ReleaseLiveSessionClaim(adopted.SessionID, targetCommonDir); err != nil {
+		logging.Warn(logCtx, "auto-adopt finalize: failed to release live-session claim",
+			slog.String("session_id", adopted.SessionID),
+			slog.String("error", err.Error()),
+		)
+	}
 	logging.Info(logCtx, "auto-adopt finalize: retired source session after commit",
 		slog.String("session_id", adopted.SessionID),
 		slog.String("source_common_dir", marker.SourceCommonDir),
