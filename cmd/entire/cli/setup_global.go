@@ -558,6 +558,13 @@ func copyFileThenRemove(src, dst string) (copied bool, err error) {
 		_ = tmp.Close()
 		return false, fmt.Errorf("chmod temp: %w", err)
 	}
+	// fsync before close: the source is removed after the rename, so a crash
+	// surfacing the rename with the bytes still in cache would lose the file
+	// outright (same rationale as jsonutil.WriteFileAtomic).
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return false, fmt.Errorf("sync temp: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return false, fmt.Errorf("close temp: %w", err)
 	}
