@@ -12,6 +12,7 @@ import (
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -115,6 +116,10 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	// Agent-specific: Codex hook trust state.
 	checkCodexHookTrust(cmd)
+
+	// Agent-specific: Cursor IDE on Windows opening this WSL repo over UNC
+	// (\\wsl$), which runs no hooks at all.
+	checkCursorUNCMode(cmd)
 
 	// Agent-specific: Claude Code hook config drift.
 	checkHookDrift(cmd)
@@ -672,6 +677,46 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 		}
 		fmt.Fprintln(w, "  Open /hooks inside Codex to approve them.")
 	}
+}
+
+// cursorWindowsUsersRoot is the Windows user-profile root as seen from WSL.
+// A package var (rather than an inline literal) so tests can point it at a
+// populated temp directory and exercise the positive-match path.
+var cursorWindowsUsersRoot = "/mnt/c/Users"
+
+// checkCursorUNCMode warns when Cursor IDE on the Windows host has opened
+// this WSL repo via a \\wsl$ UNC path: Cursor executes no hooks in that mode
+// (verified empirically), so sessions silently never track. Detection is the
+// Windows-side project-dir fingerprint (cursor.DetectUNCProjectDirs). Stays
+// silent outside WSL, when cursor hooks aren't installed in this repo, or
+// when nothing matches. Warn-only: there is no CLI-side fix — the user must
+// reopen the folder in WSL mode.
+func checkCursorUNCMode(cmd *cobra.Command) {
+	distro := os.Getenv("WSL_DISTRO_NAME")
+	if distro == "" {
+		return
+	}
+	ctx := cmd.Context()
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+	ca := &cursor.CursorAgent{}
+	if !ca.AreHooksInstalled(ctx) {
+		return
+	}
+	matches := cursor.DetectUNCProjectDirs(cursorWindowsUsersRoot, distro, repoRoot, time.Now())
+	if len(matches) == 0 {
+		return
+	}
+	w := cmd.OutOrStdout()
+	fmt.Fprintln(w, "Cursor IDE hooks: NOT FIRING (repo opened over \\\\wsl$)")
+	fmt.Fprintln(w, "  Cursor runs no hooks in this mode, so sessions here are never tracked.")
+	fmt.Fprintln(w, "  Fix: in Cursor, run \"Reopen Folder in WSL\" (Ctrl+Shift+P). The window")
+	fmt.Fprintln(w, "  title should end in [WSL: "+distro+"]. From a WSL terminal, `cursor .`")
+	fmt.Fprintln(w, "  also works once the WSL server is installed.")
+	fmt.Fprintln(w, "  Already switched? This warning stops once the leftover Windows-side")
+	fmt.Fprintln(w, "  activity is older than 14 days.")
 }
 
 // canDeleteShadowBranch checks if a shadow branch can be safely deleted.
