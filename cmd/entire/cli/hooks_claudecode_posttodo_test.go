@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -163,5 +165,56 @@ func TestResolveIncrementalCheckpointTask_NoAgentIDFallsBackToMtimeHeuristic(t *
 			entry.Name()[:len(agentTaskLinkFilePrefix)] == agentTaskLinkFilePrefix {
 			t.Errorf("unexpected agent-task link file created without an agent_id: %s", entry.Name())
 		}
+	}
+}
+
+// TestResolveIncrementalCheckpointTask_ConcurrentBootstrapNeverDoubleClaims races many
+// sibling agentIDs' first PostTodo bootstrap against a fixed number of unclaimed
+// pre-task files (each hook invocation is a separate OS process in production, but
+// goroutines exercise the same flock-guarded critical section). Without the
+// agentTaskBootstrapLockPath serialization, two goroutines could both read the same
+// unclaimed pre-task via FindUnclaimedActivePreTaskFile before either wrote its
+// RememberAgentTaskLink, double-claiming one task and leaving another with zero
+// claimants.
+func TestResolveIncrementalCheckpointTask_ConcurrentBootstrapNeverDoubleClaims(t *testing.T) {
+	setupTmpDirRepo(t)
+
+	const numTasks = 6
+	taskIDs := make([]string, numTasks)
+	for i := range taskIDs {
+		taskIDs[i] = fmt.Sprintf("toolu_task_%d", i)
+		writePreTaskFileWithModTime(t, taskIDs[i], time.Now())
+	}
+
+	var wg sync.WaitGroup
+	results := make([]string, numTasks)
+	for i := range numTasks {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			agentID := fmt.Sprintf("agent-%d", i)
+			taskToolUseID, found := resolveIncrementalCheckpointTask(context.Background(), agentID)
+			if found {
+				results[i] = taskToolUseID
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	claimCount := make(map[string]int)
+	for _, taskID := range results {
+		if taskID == "" {
+			t.Error("a sibling failed to resolve any task")
+			continue
+		}
+		claimCount[taskID]++
+	}
+	for taskID, count := range claimCount {
+		if count != 1 {
+			t.Errorf("task %s claimed by %d siblings, want exactly 1 (double-claim indicates the bootstrap race is not serialized)", taskID, count)
+		}
+	}
+	if len(claimCount) != numTasks {
+		t.Errorf("distinct tasks claimed = %d, want %d", len(claimCount), numTasks)
 	}
 }

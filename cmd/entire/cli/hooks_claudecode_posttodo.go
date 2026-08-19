@@ -12,8 +12,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -168,8 +170,26 @@ func handleClaudeCodePostTodoFromReader(ctx context.Context, reader io.Reader) e
 //
 // Bootstrap prefers an unclaimed pre-task (no existing agent-task link) so two siblings
 // whose first PostTodos race each other do not both latch onto the same mtime winner.
+// Each PostTodo hook invocation is a separate OS process, so the unclaimed-lookup and
+// the link-write below are additionally serialized with agentTaskBootstrapLockPath: two
+// siblings' first PostTodos firing at the same instant could otherwise both read the same
+// unclaimed pre-task before either had written its claim, and double-claim it.
 func resolveIncrementalCheckpointTask(ctx context.Context, agentID string) (taskToolUseID string, found bool) {
 	if agentID != "" {
+		if linked, ok := LookupAgentTaskLink(ctx, agentID); ok {
+			return linked, true
+		}
+	}
+
+	if agentID != "" {
+		if release, err := flock.Acquire(agentTaskBootstrapLockPath(ctx)); err != nil {
+			logging.Warn(ctx, "failed to acquire agent-task bootstrap lock; unclaimed lookup may race",
+				slog.String("error", err.Error()))
+		} else {
+			defer release()
+		}
+		// Re-check under the lock: another sibling's bootstrap may have remembered
+		// our link while we were waiting to acquire it.
 		if linked, ok := LookupAgentTaskLink(ctx, agentID); ok {
 			return linked, true
 		}
@@ -197,4 +217,13 @@ func resolveIncrementalCheckpointTask(ctx context.Context, agentID string) (task
 		}
 	}
 	return taskToolUseID, true
+}
+
+// agentTaskBootstrapLockPath returns the path to the advisory lock guarding the
+// unclaimed-pre-task lookup + agent-task link write in resolveIncrementalCheckpointTask.
+// A single fixed path (not per-agent) is intentional: the race being closed is between
+// DIFFERENT agentIDs racing to claim the same unclaimed pre-task, so the critical section
+// must be exclusive across all of them.
+func agentTaskBootstrapLockPath(ctx context.Context) string {
+	return filepath.Join(resolveTmpDir(ctx), "agent-task-bootstrap.lock")
 }
