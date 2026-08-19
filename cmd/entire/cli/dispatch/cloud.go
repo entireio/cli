@@ -14,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
 type CloudConfig struct {
@@ -176,6 +177,7 @@ func (c *CloudClient) doJSON(ctx context.Context, method, path string, reqBody, 
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
+	req.Header.Set("User-Agent", versioninfo.UserAgent())
 
 	resp, err := c.http.Do(req)
 	if err != nil {

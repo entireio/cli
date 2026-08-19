@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
 func newTestCloudClient(t *testing.T, baseURL, token string) *CloudClient {
@@ -312,6 +314,36 @@ func TestCloudClient_CreateDispatch_AcceptsVoiceResponseField(t *testing.T) {
 	}
 	if got.Voice == nil || *got.Voice != "calm and direct" {
 		t.Fatalf("unexpected voice response: %v", got.Voice)
+	}
+}
+
+func TestCloudClient_CreateDispatch_SetsUserAgent(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	var capturedUserAgent string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedUserAgent = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"window":{"normalized_since":"2026-04-09T00:00:00Z","normalized_until":"2026-04-16T00:00:00Z"},"covered_repos":["entireio/cli"],"repos":[],"totals":{"checkpoints":0,"used_checkpoint_count":0,"branches":0,"files_touched":0},"warnings":{"access_denied_count":0,"pending_count":0,"failed_count":0,"unknown_count":0,"uncategorized_count":0},"generated_markdown":"hi"}`)) //nolint:errcheck // test fixture response
+	}))
+	defer srv.Close()
+
+	client := newTestCloudClient(t, srv.URL, "t")
+	_, err := client.CreateDispatch(ctx, CreateDispatchRequest{
+		Repos:    []string{"entireio/cli"},
+		Since:    "2026-04-09T00:00:00Z",
+		Until:    "2026-04-16T00:00:00Z",
+		Generate: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := versioninfo.UserAgent()
+	if capturedUserAgent != want {
+		t.Errorf("User-Agent = %q, want %q", capturedUserAgent, want)
 	}
 }
 
