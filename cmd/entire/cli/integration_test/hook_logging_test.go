@@ -35,7 +35,7 @@ func TestHookLogging_WritesToSessionLogFile(t *testing.T) {
 
 	// Run a hook with ENTIRE_LOG_LEVEL=debug to ensure logs are written
 	// Use post-commit since it takes no arguments
-	cmd := exec.Command(getTestBinary(), "hooks", "git", "post-commit")
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", "git", "post-commit")
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
@@ -55,7 +55,10 @@ func TestHookLogging_WritesToSessionLogFile(t *testing.T) {
 		t.Logf("hook stderr/stdout: %s", output)
 
 		// List what's in the logs dir for debugging
-		entries, _ := os.ReadDir(logsDir)
+		entries, dirErr := os.ReadDir(logsDir)
+		if dirErr != nil {
+			t.Logf("failed to read logs directory: %v", dirErr)
+		}
 		t.Logf("logs directory contents: %v", entries)
 	}
 
@@ -92,7 +95,7 @@ func TestHookLogging_WritesWithoutSession(t *testing.T) {
 	// Don't create a session state file - logging should still write to entire.log
 
 	// Run a hook with ENTIRE_LOG_LEVEL=debug
-	cmd := exec.Command(getTestBinary(), "hooks", "git", "post-commit")
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", "git", "post-commit")
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,

@@ -3,6 +3,7 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,7 +22,7 @@ func TestInstallHooks_PermissionsDeny_FreshInstall(t *testing.T) {
 	t.Chdir(tempDir)
 
 	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -40,13 +41,13 @@ func TestInstallHooks_PermissionsDeny_Idempotent(t *testing.T) {
 
 	agent := &ClaudeCodeAgent{}
 	// First install
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
 
 	// Second install
-	_, err = agent.InstallHooks(context.Background(), false, false)
+	_, err = agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("second InstallHooks() error = %v", err)
 	}
@@ -77,7 +78,7 @@ func TestInstallHooks_PermissionsDeny_PreservesUserRules(t *testing.T) {
 }`)
 
 	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -105,7 +106,7 @@ func TestInstallHooks_PermissionsDeny_PreservesAllowRules(t *testing.T) {
 }`)
 
 	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -136,7 +137,7 @@ func TestInstallHooks_PermissionsDeny_SkipsExistingRule(t *testing.T) {
 }`)
 
 	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -163,7 +164,7 @@ func TestInstallHooks_PermissionsDeny_PreservesUnknownFields(t *testing.T) {
 }`)
 
 	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -276,7 +277,7 @@ func TestUninstallHooks(t *testing.T) {
 	agent := &ClaudeCodeAgent{}
 
 	// First install
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -359,7 +360,7 @@ func TestUninstallHooks_RemovesDenyRule(t *testing.T) {
 	agent := &ClaudeCodeAgent{}
 
 	// First install (which adds the deny rule)
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -420,49 +421,172 @@ func TestUninstallHooks_PreservesUserDenyRules(t *testing.T) {
 	}
 }
 
-func TestInstallHooks_LocalDevFallsBackToPath(t *testing.T) {
+// TestInstallHooks_ReplacesLegacyLocalDevHook pins the migration for hooks left
+// by the removed local-dev mode. Such a hook runs a script inside the working
+// tree, so a plain install (no --force) must replace it, not add the binary hook
+// alongside it — two hooks would both fire and the repo-relative one would keep
+// executing whatever the checked-out branch contains.
+func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
+	ctx := context.Background()
+	ag := &ClaudeCodeAgent{}
 
-	agent := &ClaudeCodeAgent{}
-	if _, err := agent.InstallHooks(context.Background(), true, false); err != nil {
-		t.Fatalf("InstallHooks(localDev=true) error = %v", err)
+	legacyStop := testutil.LegacyClaudeProjectDirCommand("hooks claude-code stop")
+	seedClaudeSettings(t, tempDir, legacyStop)
+
+	// Sanity: the legacy shape must still be recognized as ours, otherwise it
+	// would be treated as a foreign hook and deliberately left alone.
+	if !isEntireHook(legacyStop) {
+		t.Fatalf("legacy local-dev command not recognized as an Entire hook: %s", legacyStop)
+	}
+
+	if _, err := ag.InstallHooks(ctx, false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
 	settings := readClaudeSettings(t, tempDir)
-	if len(settings.Hooks.Stop) == 0 || len(settings.Hooks.Stop[0].Hooks) == 0 {
-		t.Fatal("expected a Stop hook to be installed")
+	var stopCmds []string
+	for _, matcher := range settings.Hooks.Stop {
+		for _, h := range matcher.Hooks {
+			stopCmds = append(stopCmds, h.Command)
+		}
 	}
-	cmd := settings.Hooks.Stop[0].Hooks[0].Command
 
-	want := "${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks claude-code stop"
-	if cmd != want {
-		t.Errorf("local-dev Stop hook should delegate to the script:\ngot:  %s\nwant: %s", cmd, want)
+	wantStop := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	if len(stopCmds) != 1 {
+		t.Fatalf("Stop hooks = %d (%v), want exactly 1 — the legacy hook must be replaced, not joined", len(stopCmds), stopCmds)
 	}
-	if strings.Contains(cmd, "go build") || strings.Contains(cmd, "sh -c") {
-		t.Errorf("build-probe/fallback logic must live in the script, not the hook command: %s", cmd)
+	if stopCmds[0] != wantStop {
+		t.Errorf("Stop hook = %q, want %q", stopCmds[0], wantStop)
 	}
-	if !isEntireHook(cmd) {
-		t.Errorf("local-dev Stop hook should be recognized as an Entire hook, got:\n%s", cmd)
+	for _, cmd := range stopCmds {
+		if strings.Contains(cmd, "scripts/entire-dev") {
+			t.Errorf("a hook still points at a script inside the working tree: %s", cmd)
+		}
 	}
 }
 
-func TestUninstallHooks_RemovesLocalDevHooks(t *testing.T) {
+// TestInstallHooks_ReplacesLegacyLocalDevHookAlongsideCurrent covers the state a
+// machine lands in if it installed hooks after the local-dev generation was
+// removed but before the stale-hook cleanup existed: both a legacy and a current
+// hook present. Nothing needs *adding* there, so an install that only writes
+// when it added something would silently leave the legacy hook in place.
+func TestInstallHooks_ReplacesLegacyLocalDevHookAlongsideCurrent(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	ctx := context.Background()
+	ag := &ClaudeCodeAgent{}
+
+	if _, err := ag.InstallHooks(ctx, false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	// Append a legacy hook next to the freshly installed current one.
+	appendClaudeStopHook(t, tempDir, testutil.LegacyClaudeProjectDirCommand("hooks claude-code stop"))
+
+	if _, err := ag.InstallHooks(ctx, false); err != nil {
+		t.Fatalf("second InstallHooks() error = %v", err)
+	}
+
+	settings := readClaudeSettings(t, tempDir)
+	for _, matcher := range settings.Hooks.Stop {
+		for _, h := range matcher.Hooks {
+			if strings.Contains(h.Command, "scripts/entire-dev") {
+				t.Errorf("legacy local-dev hook survived a non-force install: %s", h.Command)
+			}
+		}
+	}
+}
+
+func TestUninstallHooks_RemovesLegacyLocalDevHooks(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	ctx := context.Background()
+	ag := &ClaudeCodeAgent{}
+
+	seedClaudeSettings(t, tempDir, testutil.LegacyClaudeProjectDirCommand("hooks claude-code stop"))
+	if !ag.AreHooksInstalled(ctx) {
+		t.Fatal("legacy local-dev hooks should be detected as installed")
+	}
+	if err := ag.UninstallHooks(ctx); err != nil {
+		t.Fatalf("UninstallHooks() error = %v", err)
+	}
+	if ag.AreHooksInstalled(ctx) {
+		t.Fatal("legacy local-dev hooks should be removed after uninstall")
+	}
+}
+
+// TestInstallHooks_SessionEndIsUntimed verifies no hook carries an explicit
+// timeout. The explicit SessionEnd timeout existed only for local-dev hooks,
+// which compiled from source and could exceed Claude Code's exit grace.
+func TestInstallHooks_SessionEndIsUntimed(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	agent := &ClaudeCodeAgent{}
-	if _, err := agent.InstallHooks(context.Background(), true, false); err != nil {
-		t.Fatalf("InstallHooks(localDev=true) error = %v", err)
+	ag := &ClaudeCodeAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
 	}
-	if !agent.AreHooksInstalled(context.Background()) {
-		t.Fatal("local-dev hooks should be detected as installed")
+
+	settings := readClaudeSettings(t, tempDir)
+	if len(settings.Hooks.SessionEnd) == 0 || len(settings.Hooks.SessionEnd[0].Hooks) == 0 {
+		t.Fatal("expected a SessionEnd hook to be installed")
 	}
-	if err := agent.UninstallHooks(context.Background()); err != nil {
-		t.Fatalf("UninstallHooks() error = %v", err)
+	if got := settings.Hooks.SessionEnd[0].Hooks[0].Timeout; got != 0 {
+		t.Errorf("SessionEnd timeout = %d, want 0", got)
 	}
-	if agent.AreHooksInstalled(context.Background()) {
-		t.Fatal("local-dev hooks should be removed after uninstall")
+
+	// Stronger than the parsed check: prove the field is omitted entirely
+	// (omitempty), not written as an explicit "timeout": 0.
+	raw, err := os.ReadFile(filepath.Join(tempDir, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("failed to read settings.json: %v", err)
+	}
+	if strings.Contains(string(raw), "timeout") {
+		t.Errorf("settings.json must not contain any timeout field, got:\n%s", raw)
+	}
+}
+
+// seedClaudeSettings writes a .claude/settings.json whose Stop hook is stopCmd.
+func seedClaudeSettings(t *testing.T, dir, stopCmd string) {
+	t.Helper()
+	writeClaudeStopHooks(t, dir, []string{stopCmd})
+}
+
+// appendClaudeStopHook adds cmd to the existing Stop hooks, preserving them.
+func appendClaudeStopHook(t *testing.T, dir, cmd string) {
+	t.Helper()
+	settings := readClaudeSettings(t, dir)
+	var cmds []string
+	for _, matcher := range settings.Hooks.Stop {
+		for _, h := range matcher.Hooks {
+			cmds = append(cmds, h.Command)
+		}
+	}
+	writeClaudeStopHooks(t, dir, append(cmds, cmd))
+}
+
+func writeClaudeStopHooks(t *testing.T, dir string, cmds []string) {
+	t.Helper()
+	entries := make([]ClaudeHookEntry, 0, len(cmds))
+	for _, c := range cmds {
+		entries = append(entries, ClaudeHookEntry{Type: "command", Command: c})
+	}
+	settings := map[string]any{
+		"hooks": map[string]any{
+			"Stop": []ClaudeHookMatcher{{Matcher: "", Hooks: entries}},
+		},
+	}
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudeDir := filepath.Join(dir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), data, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -512,7 +636,7 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 }`)
 
 	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -546,8 +670,8 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 			t.Fatalf("failed to parse PostToolUse hooks: %v", err)
 		}
 		assertHookExists(t, matchers, "Write", "echo user wrote file", "user Write hook")
-		assertHookExists(t, matchers, "Task", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "Entire Task hook")
-		assertHookExists(t, matchers, "TodoWrite", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "Entire TodoWrite hook")
+		assertHookExists(t, matchers, "Agent", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "Entire Agent (subagent) hook")
+		assertHookExists(t, matchers, "TaskCreate|TaskUpdate", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "Entire task-list hook")
 	})
 }
 
@@ -589,7 +713,7 @@ func TestInstallHooks_PreservesUnknownHookTypes(t *testing.T) {
 }`)
 
 	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -703,4 +827,159 @@ func TestUninstallHooks_PreservesUnknownHookTypes(t *testing.T) {
 			t.Errorf("Stop hook should have been removed")
 		}
 	}
+}
+
+// TestInstallHooks_UsesCurrentToolMatchers pins the tool-use matchers to Claude
+// Code's current tool names. The subagent tool is "Agent" (there was never a
+// "Task" tool) and "TodoWrite" was deprecated for TaskCreate/TaskUpdate; a bad
+// matcher is a silent no-op in Claude Code, so this is the only guard against
+// the hooks silently ceasing to fire. See:
+//   - https://code.claude.com/docs/en/tools-reference.md
+//   - https://code.claude.com/docs/en/hooks.md
+func TestInstallHooks_UsesCurrentToolMatchers(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	settings := readClaudeSettings(t, tempDir)
+	assertHookExists(t, settings.Hooks.PreToolUse, "Agent",
+		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task"), "pre-task subagent hook")
+	assertHookExists(t, settings.Hooks.PostToolUse, "Agent",
+		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "post-task subagent hook")
+	assertHookExists(t, settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate",
+		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "post-todo task-list hook")
+}
+
+func TestCheckHookConfig_Absent(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	if got := CheckHookConfig(context.Background()); got != HooksAbsent {
+		t.Errorf("CheckHookConfig() = %v, want HooksAbsent", got)
+	}
+}
+
+func TestCheckHookConfig_Current(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	if got := CheckHookConfig(context.Background()); got != HooksCurrent {
+		t.Errorf("CheckHookConfig() = %v, want HooksCurrent", got)
+	}
+}
+
+func TestCheckHookConfig_Outdated(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	// Config from an older CLI version: Entire installed (Stop present) but the
+	// tool-use hooks sit under the outdated Task/TodoWrite matchers.
+	stop := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	pre := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
+	post := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+	todo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
+    "PreToolUse": [{"matcher": "Task", "hooks": [{"type": "command", "command": %q}]}],
+    "PostToolUse": [
+      {"matcher": "Task", "hooks": [{"type": "command", "command": %q}]},
+      {"matcher": "TodoWrite", "hooks": [{"type": "command", "command": %q}]}
+    ]
+  }
+}`, stop, pre, post, todo))
+
+	if got := CheckHookConfig(context.Background()); got != HooksOutdated {
+		t.Errorf("CheckHookConfig() = %v, want HooksOutdated", got)
+	}
+}
+
+// TestCheckHookConfig_SupersetMatchersAreCurrent verifies that widening a
+// matcher beyond what we install (still covering the required tools) is not
+// flagged as drift — matchers are |-lists of exact tool names, so a superset
+// still fires for the required tools.
+func TestCheckHookConfig_SupersetMatchersAreCurrent(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	stop := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	pre := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
+	post := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+	todo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+	// "Agent|Foo" still covers Agent; "TaskCreate|TaskUpdate|TaskGet" still
+	// covers TaskCreate and TaskUpdate.
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
+    "PreToolUse": [{"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q}]}],
+    "PostToolUse": [
+      {"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q}]},
+      {"matcher": "TaskCreate|TaskUpdate|TaskGet", "hooks": [{"type": "command", "command": %q}]}
+    ]
+  }
+}`, stop, pre, post, todo))
+
+	if got := CheckHookConfig(context.Background()); got != HooksCurrent {
+		t.Errorf("CheckHookConfig() = %v, want HooksCurrent (superset matcher)", got)
+	}
+}
+
+// TestInstallHooks_Force_ReinstallsStaleToolMatchers verifies that `--force`
+// strips Entire hooks left under the outdated "Task"/"TodoWrite" matchers by
+// older CLI versions and reinstalls them under the current matchers. (A normal
+// enable does not rewrite existing hook config; --force is the fix path.)
+func TestInstallHooks_Force_ReinstallsStaleToolMatchers(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	// Settings written by an older CLI version, in the production wrapper form.
+	stalePost := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+	staleTodo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "hooks": {
+    "PostToolUse": [
+      {"matcher": "Task", "hooks": [{"type": "command", "command": %q}]},
+      {"matcher": "TodoWrite", "hooks": [{"type": "command", "command": %q}]}
+    ]
+  }
+}`, stalePost, staleTodo))
+
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), true); err != nil {
+		t.Fatalf("InstallHooks(force) error = %v", err)
+	}
+
+	settings := readClaudeSettings(t, tempDir)
+	// Reinstalled under the current matchers.
+	assertHookExists(t, settings.Hooks.PostToolUse, "Agent",
+		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "post-task hook")
+	assertHookExists(t, settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate",
+		staleTodo, "post-todo hook")
+	// The stale matchers no longer carry an Entire hook.
+	for _, m := range settings.Hooks.PostToolUse {
+		if m.Matcher == "Task" || m.Matcher == "TodoWrite" {
+			for _, h := range m.Hooks {
+				if isEntireHook(h.Command) {
+					t.Errorf("stale matcher %q still carries an Entire hook: %q", m.Matcher, h.Command)
+				}
+			}
+		}
+	}
+}
+
+// TestCommittedDogfoodSettingsIsCurrent guards this repo's own committed agent config against drifting from what
+// InstallHooks writes. A stale committed config is how the pi extension ended up
+// invoking a launcher script that had been deleted.
+func TestCommittedDogfoodSettingsIsCurrent(t *testing.T) {
+	testutil.AssertCommittedDogfoodConfigStable(t, ".claude/settings.json", func(t *testing.T, dir string) (int, error) {
+		t.Helper()
+		t.Chdir(dir)
+		return (&ClaudeCodeAgent{}).InstallHooks(context.Background(), false)
+	})
 }

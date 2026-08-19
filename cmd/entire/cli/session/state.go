@@ -256,8 +256,9 @@ type State struct {
 	// successful condensation). Prevents repeated warnings on every commit.
 	DivergenceNoticeShown bool `json:"divergence_notice_shown,omitempty"`
 
-	// AttachedManually indicates this session was imported via `entire attach` rather
-	// than being captured by hooks during normal agent execution.
+	// AttachedManually indicates this session was imported via
+	// `entire session attach` rather than being captured by hooks during
+	// normal agent execution.
 	AttachedManually bool `json:"attached_manually,omitempty"`
 
 	// ContextInjectionDecided records that the once-per-session model-context
@@ -276,12 +277,38 @@ type State struct {
 	// Set from hook data when the agent provides it.
 	ModelName string `json:"model_name,omitempty"`
 
-	// Token usage tracking (accumulated across all checkpoints in this session)
+	// Token usage tracking (accumulated across all checkpoints in this session).
+	//
+	// DECISION: SubagentTokens is "latest snapshot wins", not summed. Subagent
+	// usage arrives as a cumulative-since-session-start total (each subagent
+	// transcript is re-read from line 0 every call), so accumulateTokenUsage
+	// replaces rather than adds it (see cmd/entire/cli/strategy). Tradeoff: if
+	// the main transcript resets or rotates mid-session (compaction writing a
+	// fresh file, or a resume that truncates), a subsequent snapshot can be
+	// SMALLER than a previous one, so this session-wide total regresses
+	// (undercounts) for the rest of the session. This is accepted: undercounting
+	// after a transcript reset is preferable to the multiplicative overcount the
+	// summing approach produced, and the alternative (a session-wide high-water
+	// mark) would mask genuine subagent-transcript cleanup. Checkpoint deltas do
+	// not share this exposure — CheckpointTokenUsage.SubagentTokens is derived as
+	// (this total - SubagentTokensBaseline) and floored at 0 by clampSubtract, so
+	// a shrunk snapshot yields 0, never a negative or stale delta.
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
 
 	// CheckpointTokenUsage tracks hook-provided token usage since the last condensation.
 	// This is checkpoint-scoped; TokenUsage remains the session-wide total.
 	CheckpointTokenUsage *agent.TokenUsage `json:"checkpoint_token_usage,omitempty"`
+
+	// SubagentTokensBaseline is a snapshot of TokenUsage.SubagentTokens captured
+	// at the last condensation reset. Subagent token usage is always re-read
+	// from the start of each subagent transcript (agent IDs are discovered from
+	// the full main transcript so subagents spawned before the checkpoint
+	// window are still found), so it arrives as a cumulative-since-session-start
+	// total rather than a per-checkpoint delta. This baseline lets
+	// CheckpointTokenUsage.SubagentTokens be rescoped to "since last
+	// condensation" via SubtractTokenUsage instead of re-adding the same
+	// cumulative total on every checkpoint.
+	SubagentTokensBaseline *agent.TokenUsage `json:"subagent_tokens_baseline,omitempty"`
 
 	// SkillEvents records explicit native skill signals observed during this session.
 	// Stored as sidecar metadata so consumers can collapse skill-related transcript events
@@ -429,6 +456,21 @@ func (s *State) ClearLegacyTranscriptOffsets() {
 	s.TranscriptLinesAtStart = 0
 }
 
+// RebaselineSubagentTokens snapshots the current cumulative subagent total
+// (TokenUsage.SubagentTokens) into SubagentTokensBaseline so the next checkpoint
+// window's CheckpointTokenUsage.SubagentTokens is rescoped to "since this
+// re-baseline" rather than re-reporting the full cumulative subagent total.
+//
+// The invariant is: every site that starts a fresh checkpoint window by clearing
+// CheckpointTokenUsage MUST also re-baseline. Callers: the condensation reset
+// helper (resetCheckpointWindow) and cross-repo session adoption, which likewise
+// opens a fresh target-local window. Sharing this here keeps the two in step.
+func (s *State) RebaselineSubagentTokens() {
+	if s.TokenUsage != nil {
+		s.SubagentTokensBaseline = s.TokenUsage.SubagentTokens
+	}
+}
+
 // RealignAttributionBase sets AttributionBaseCommit to newBase and clears any
 // bookkeeping whose meaning depends on attribution being diverged from the
 // shadow-branch base. Call this every time a code path intentionally brings
@@ -468,18 +510,38 @@ func (s *State) OwnerLiveness() proclive.Liveness {
 	return proclive.Check(*s.Owner)
 }
 
-// OwnerExited reports true when this session is ACTIVE but its owning agent
-// process is gone — exited cleanly, crashed, was killed, or the machine
-// rebooted — without a SessionStop hook firing. Unlike IsStuckActive (a
-// time-based heuristic), this is detected immediately, regardless of how
-// recently the session interacted. It returns false when liveness is Unknown
-// (no owner recorded, cross-host state, or an unsupported platform) so behavior
-// degrades to the StuckActiveThreshold timeout.
+// OwnerExited reports true when this session's owning agent process is gone —
+// exited cleanly, crashed, was killed, or the machine rebooted — without a
+// SessionStop hook firing. Unlike IsStuckActive (a time-based heuristic), this
+// is detected immediately, regardless of how recently the session interacted.
+// It returns false when liveness is Unknown (no owner recorded, cross-host
+// state, or an unsupported platform) so behavior degrades to the
+// StuckActiveThreshold timeout.
+//
+// It deliberately covers IDLE as well as ACTIVE. An agent that finishes its
+// last turn and then quits leaves the session IDLE, so gating on ACTIVE alone
+// missed precisely the sessions left behind by agents with no session-end hook
+// (Codex before 0.146) or killed before that hook could run: they lingered as
+// "active" in `entire status` until StaleSessionThreshold deleted the state
+// file outright, discarding pending checkpoint work instead of condensing it.
+// Only already-finalized sessions are excluded — see IsEnded.
 func (s *State) OwnerExited() bool {
-	if !s.Phase.IsActive() {
+	if s.IsEnded() {
 		return false
 	}
 	return s.OwnerLiveness() == proclive.LivenessDead
+}
+
+// IsEnded reports whether this session has been finalized — the canonical
+// "no longer a live session" predicate.
+//
+// Both halves matter and neither implies the other in practice: Phase is what
+// the state machine sets, EndedAt is what the finalizing write stamps, and a
+// state file can carry one without the other (a legacy record, or a partial
+// write). Callers that filter for active sessions must agree on this rule, so
+// it lives here rather than being re-spelled at each site.
+func (s *State) IsEnded() bool {
+	return s.Phase == PhaseEnded || s.EndedAt != nil
 }
 
 func (s *State) IsStale() bool {

@@ -41,6 +41,10 @@ type Context struct {
 	// KeychainService is the OS-keyring slot where the access token is
 	// filed; the refresh token lives at KeychainService+":refresh".
 	KeychainService string `json:"keychain_service"`
+	// JurisdictionAudiences lists the audiences this context has a jurisdiction
+	// (data-plane) access token filed for, trailing-slash-trimmed; each lives at
+	// tokenstore.JurisdictionService(audience), also keyed by Handle.
+	JurisdictionAudiences []string `json:"jurisdiction_audiences,omitempty"`
 }
 
 // File is the on-disk shape of contexts.json.
@@ -106,7 +110,7 @@ func (f *File) ContextsForIssuer(issuer string) []*Context {
 	want := trimURL(issuer)
 	var out []*Context
 	for _, c := range f.Contexts {
-		if trimURL(c.CoreURL) == want {
+		if c != nil && trimURL(c.CoreURL) == want {
 			out = append(out, c)
 		}
 	}
@@ -126,7 +130,7 @@ func (f *File) Find(name string) *Context {
 		return nil
 	}
 	for _, c := range f.Contexts {
-		if c.Name == name {
+		if c != nil && c.Name == name {
 			return c
 		}
 	}

@@ -58,8 +58,8 @@ func TestReviewCheckpointContext_IncludesSummaryAndPromptFallback(t *testing.T) 
 		"summary: add checkpoint context to review prompts; review prompt sees checkpoint summaries; open: cover prompt fallback",
 		promptCheckpointID,
 		"prompt: Implement prompt fallback when summaries are missing",
-		"entire explain <id>",
-		"entire explain <id> --raw-transcript",
+		"entire checkpoint explain <id>",
+		"entire checkpoint explain <id> --raw-transcript",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("review checkpoint context missing %q:\n%s", want, got)
@@ -73,6 +73,46 @@ func TestReviewCheckpointContext_IncludesSummaryAndPromptFallback(t *testing.T) 
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("review checkpoint context contains %q:\n%s", unwanted, got)
 		}
+	}
+}
+
+func TestReviewCheckpointContext_UsesTargetRepoCheckpointRemotes(t *testing.T) {
+	cwdDir := t.TempDir()
+	testutil.InitRepo(t, cwdDir)
+	testutil.AddRemote(t, cwdDir, "origin", "https://github.com/acme/cwd.git")
+
+	repoRoot := newReviewContextRepo(t)
+	testutil.AddRemote(t, repoRoot, "origin", "https://github.com/acme/target.git")
+	testutil.AddRemote(t, repoRoot, "upstream", "https://github.com/acme/upstream.git")
+	testutil.WriteCheckpointPushRemoteSetting(t, repoRoot, "upstream")
+
+	const checkpointID = "c1b2c3d4e5f6"
+	writeReviewContextCheckpoint(t, repoRoot, checkpointID, reviewContextCheckpointOptions{
+		filesTouched: []string{"remote.go"},
+		agentType:    agent.AgentTypeClaudeCode,
+		summary: &checkpoint.Summary{
+			Outcome: "loaded checkpoint context from the target repo",
+		},
+	})
+	commitReviewContextChange(t, repoRoot, "remote.go", "remote\n", "remote change", "Entire-Checkpoint: "+checkpointID)
+
+	localRef := "refs/heads/" + paths.MetadataBranchName
+	cmd := exec.CommandContext(t.Context(), "git", "-C", repoRoot, "rev-parse", localRef)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.GitUpdateRef(t, repoRoot, "refs/remotes/upstream/"+paths.MetadataBranchName, strings.TrimSpace(string(out)))
+	cmd = exec.CommandContext(t.Context(), "git", "-C", repoRoot, "update-ref", "-d", localRef)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("delete local checkpoint ref: %v\n%s", err, out)
+	}
+
+	t.Chdir(cwdDir)
+
+	got := reviewCheckpointContext(context.Background(), repoRoot, "master")
+	if !strings.Contains(got, "loaded checkpoint context from the target repo") {
+		t.Fatalf("review context should use the target repo's checkpoint remotes:\n%s", got)
 	}
 }
 
@@ -423,7 +463,7 @@ func installReviewContextClaudeHooks(t *testing.T) {
 	if !ok {
 		t.Fatalf("agent %q does not support hooks", agent.AgentNameClaudeCode)
 	}
-	if _, err := hs.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := hs.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks(%q): %v", agent.AgentNameClaudeCode, err)
 	}
 }

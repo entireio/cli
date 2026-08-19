@@ -120,6 +120,7 @@ func TestPrePush_PushDisabledSkipsCheckpoints(t *testing.T) {
 		env.CheckpointStore = backend
 
 		bareDir := env.SetupBareRemote()
+		barePublish := env.SetupNamedBareRemote("publish")
 
 		// Configure push_sessions: false
 		env.PatchSettings(map[string]any{
@@ -142,6 +143,17 @@ func TestPrePush_PushDisabledSkipsCheckpoints(t *testing.T) {
 		// Checkpoints should NOT be on remote
 		if env.CheckpointsPresentOnRemote(bareDir) {
 			t.Error("checkpoints should NOT be on remote when push_sessions is false")
+		}
+
+		// A gated push (non-elected remote) must ALSO stay hint-silent: the
+		// pushDisabled return precedes the single-remote gate, and a hint
+		// telling a user who disabled pushing that checkpoints are "waiting"
+		// would be advice that cannot help them.
+		if out := env.RunPrePushOutput("publish"); strings.Contains(out, "checkpoint_push_remote") {
+			t.Errorf("push_sessions=false must suppress the gated-push hint; output:\n%s", out)
+		}
+		if env.CheckpointsPresentOnRemote(barePublish) {
+			t.Error("checkpoints should NOT be on the gated remote when push_sessions is false")
 		}
 	})
 }
@@ -734,30 +746,6 @@ func TestResume_FetchesPrimaryBranchFullyWithFilteredFetches(t *testing.T) {
 // =============================================================================
 // Helpers
 // =============================================================================
-
-// fileExistsOnRemoteBranch checks if a file exists in the metadata branch tree on a bare remote.
-func fileExistsOnRemoteBranch(t *testing.T, bareDir, filePath string) bool {
-	t.Helper()
-
-	cmd := exec.CommandContext(t.Context(), "git", "cat-file", "-t", paths.MetadataBranchName+":"+filePath)
-	cmd.Dir = bareDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	return cmd.Run() == nil
-}
-
-// getRemoteBranchHash returns the commit hash of a branch on a bare remote.
-func getRemoteBranchHash(t *testing.T, bareDir, branchName string) string {
-	t.Helper()
-
-	cmd := exec.CommandContext(t.Context(), "git", "rev-parse", "refs/heads/"+branchName)
-	cmd.Dir = bareDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	output, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("failed to get hash for %s on remote: %v", branchName, err)
-	}
-	return strings.TrimSpace(string(output))
-}
 
 // listCheckpointsInDir reads checkpoint IDs from the metadata branch tree.
 // This intentionally uses a separate implementation (git ls-tree) rather than

@@ -30,7 +30,7 @@ func TestMarkSessionEnded_SetsPhaseEnded(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call markSessionEnded
-	_, err = markSessionEnded(context.Background(), nil, "test-session-end-1", nil)
+	_, err = markSessionEnded(context.Background(), nil, "test-session-end-1", nil, endedNow)
 	require.NoError(t, err)
 
 	// Verify phase is ENDED
@@ -60,7 +60,7 @@ func TestMarkSessionEnded_IdleToEnded(t *testing.T) {
 	err := strategy.SaveSessionState(context.Background(), state)
 	require.NoError(t, err)
 
-	_, err = markSessionEnded(context.Background(), nil, "test-session-end-idle", nil)
+	_, err = markSessionEnded(context.Background(), nil, "test-session-end-idle", nil, endedNow)
 	require.NoError(t, err)
 
 	loaded, err := strategy.LoadSessionState(context.Background(), "test-session-end-idle")
@@ -85,7 +85,7 @@ func TestMarkSessionEnded_AlreadyEndedIsNoop(t *testing.T) {
 	err := strategy.SaveSessionState(context.Background(), state)
 	require.NoError(t, err)
 
-	_, err = markSessionEnded(context.Background(), nil, "test-session-end-noop", nil)
+	_, err = markSessionEnded(context.Background(), nil, "test-session-end-noop", nil, endedNow)
 	require.NoError(t, err)
 
 	loaded, err := strategy.LoadSessionState(context.Background(), "test-session-end-noop")
@@ -110,7 +110,7 @@ func TestMarkSessionEnded_EmptyPhaseBackwardCompat(t *testing.T) {
 	err := strategy.SaveSessionState(context.Background(), state)
 	require.NoError(t, err)
 
-	_, err = markSessionEnded(context.Background(), nil, "test-session-end-compat", nil)
+	_, err = markSessionEnded(context.Background(), nil, "test-session-end-compat", nil, endedNow)
 	require.NoError(t, err)
 
 	loaded, err := strategy.LoadSessionState(context.Background(), "test-session-end-compat")
@@ -125,7 +125,7 @@ func TestMarkSessionEnded_NoState(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 
-	_, err := markSessionEnded(context.Background(), nil, "nonexistent-session", nil)
+	_, err := markSessionEnded(context.Background(), nil, "nonexistent-session", nil, endedNow)
 	assert.NoError(t, err, "should be a no-op when no state exists")
 }
 

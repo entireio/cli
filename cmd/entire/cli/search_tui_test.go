@@ -104,14 +104,18 @@ func testMultiTypeResults() []search.Result {
 
 func testModel() searchModel {
 	ss := statusStyles{colorEnabled: false, width: 100}
-	cfg := search.Config{ServiceURL: "http://test", Owner: "o", Repo: "r", Limit: 20}
+	cfg := search.Config{Owner: "o", Repo: "r", Limit: 20}
 	m := newSearchModel(testResults(), "auth", 2, cfg, ss, nil)
+	// testResults() are checkpoint-typed; select that filter so these tests can
+	// exercise the generic list/detail plumbing. (The Checkpoints tab was
+	// removed from the UI, but the filter value remains for this purpose.)
+	m.filterType = typeFilterCheckpoints
 	return initTestViewport(m)
 }
 
 func testMultiTypeModel() searchModel {
 	ss := statusStyles{colorEnabled: false, width: 120}
-	cfg := search.Config{ServiceURL: "http://test", Owner: "o", Repo: "r", Limit: 20}
+	cfg := search.Config{Owner: "o", Repo: "r", Limit: 20}
 	results := testMultiTypeResults()
 	m := newSearchModel(results, "auth", len(results), cfg, ss, nil)
 	return initTestViewport(m)
@@ -237,6 +241,7 @@ func TestSearchModel_TopBottomNavigation(t *testing.T) {
 			ss := statusStyles{colorEnabled: false, width: 100}
 			cfg := search.Config{}
 			m := initTestViewport(newSearchModel(results, "q", len(results), cfg, ss, nil))
+			m.filterType = typeFilterCheckpoints // checkpoint-typed filler; exercise the generic list plumbing
 			m.page = tt.startPage
 			m.cursor = tt.startCursor
 			m = m.refreshBrowseContent()
@@ -395,6 +400,7 @@ func TestSearchModel_ListScrollHint(t *testing.T) {
 
 	// Short terminal + 25 results (multiple pages) → the page's rows can't all fit.
 	overflow := newSearchModel(mk(25), "auth", 25, search.Config{}, statusStyles{width: 80}, nil)
+	overflow.filterType = typeFilterCheckpoints // checkpoint-typed filler
 	overflow.height, overflow.width = 28, 80
 	overflow = overflow.refreshBrowseContent()
 
@@ -497,9 +503,9 @@ func TestSearchModel_ViewMultiTypes(t *testing.T) {
 		t.Error("view missing session type word")
 	}
 
-	// Type tabs
-	if !strings.Contains(view, "Checkpoints") {
-		t.Error("view missing Checkpoints tab")
+	// Type tabs (no Checkpoints tab: checkpoints fold into sessions server-side).
+	if strings.Contains(view, "Checkpoints") {
+		t.Error("view should not have a Checkpoints tab")
 	}
 	if !strings.Contains(view, "Sessions") {
 		t.Error("view missing Sessions tab")
@@ -513,16 +519,16 @@ func TestSearchModel_TypeFilterKeys(t *testing.T) {
 	t.Parallel()
 	m := testMultiTypeModel()
 
-	// Press 1 → filter to checkpoints
+	// Press 1 → filter to commits (leftmost tab and default, matching the web UI order)
 	m = updateModel(t, m, tea.KeyPressMsg{Code: '1', Text: "1"})
-	if m.filterType != typeFilterCheckpoints {
-		t.Errorf("after 1: filterType = %q, want %q", m.filterType, typeFilterCheckpoints)
+	if m.filterType != typeFilterCommits {
+		t.Errorf("after 1: filterType = %q, want %q", m.filterType, typeFilterCommits)
 	}
-	if len(m.filteredResults()) != 2 {
-		t.Errorf("checkpoint filter: got %d results, want 2", len(m.filteredResults()))
+	if len(m.filteredResults()) != 1 {
+		t.Errorf("commit filter: got %d results, want 1", len(m.filteredResults()))
 	}
 
-	// Press 2 → filter to sessions
+	// Press 2 → filter to sessions (the default; checkpoints fold into sessions)
 	m = updateModel(t, m, tea.KeyPressMsg{Code: '2', Text: "2"})
 	if m.filterType != typeFilterSessions {
 		t.Errorf("after 2: filterType = %q, want %q", m.filterType, typeFilterSessions)
@@ -531,19 +537,16 @@ func TestSearchModel_TypeFilterKeys(t *testing.T) {
 		t.Errorf("session filter: got %d results, want 1", len(m.filteredResults()))
 	}
 
-	// Press 3 → filter to commits
+	// Press 3 → filter to code
 	m = updateModel(t, m, tea.KeyPressMsg{Code: '3', Text: "3"})
-	if m.filterType != typeFilterCommits {
-		t.Errorf("after 3: filterType = %q, want %q", m.filterType, typeFilterCommits)
-	}
-	if len(m.filteredResults()) != 1 {
-		t.Errorf("commit filter: got %d results, want 1", len(m.filteredResults()))
+	if m.filterType != typeFilterCode {
+		t.Errorf("after 3: filterType = %q, want %q", m.filterType, typeFilterCode)
 	}
 
-	// Press 0 → no-op (the All tab was removed); filter stays on commits
-	m = updateModel(t, m, tea.KeyPressMsg{Code: '0', Text: "0"})
-	if m.filterType != typeFilterCommits {
-		t.Errorf("after 0: filterType = %q, want %q (no-op)", m.filterType, typeFilterCommits)
+	// Press 4 → no-op (the Checkpoints tab was removed); filter stays on code
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '4', Text: "4"})
+	if m.filterType != typeFilterCode {
+		t.Errorf("after 4: filterType = %q, want %q (no-op)", m.filterType, typeFilterCode)
 	}
 }
 
@@ -673,6 +676,7 @@ func TestSearchModel_BrowseFooterHelpIncludesPagingForMultiplePages(t *testing.T
 
 	ss := statusStyles{colorEnabled: false, width: 120}
 	m := newSearchModel(results, "q", len(results), search.Config{}, ss, nil)
+	m.filterType = typeFilterCheckpoints // checkpoint-typed filler; drive the multi-page footer
 
 	footer := m.viewHelp()
 	wantParts := []string{
@@ -966,6 +970,7 @@ func TestSearchModel_TotalPages(t *testing.T) {
 		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
 	}
 	many := newSearchModel(results, "q", 26, cfg, ss, nil)
+	many.filterType = typeFilterCheckpoints // checkpoint-typed filler; exercise the generic pagination math
 	if got := many.totalPages(); got != 3 {
 		t.Errorf("totalPages() with total=26 = %d, want 3", got)
 	}
@@ -1026,7 +1031,7 @@ func TestSearchModel_FetchMoreOnNavigate(t *testing.T) {
 
 	// 10 loaded results, total=50 → multiple display pages but only 1 page loaded
 	ss := statusStyles{colorEnabled: false, width: 100}
-	cfg := search.Config{ServiceURL: "http://test", Owner: "o", Repo: "r", Limit: 10}
+	cfg := search.Config{Owner: "o", Repo: "r", Limit: 10}
 	results := make([]search.Result, 10)
 	for i := range results {
 		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
@@ -1057,12 +1062,13 @@ func TestSearchModel_NoFetchWhenResultsLoaded(t *testing.T) {
 
 	// 50 loaded results, total=50 → 2 pages, all loaded
 	ss := statusStyles{colorEnabled: false, width: 100}
-	cfg := search.Config{ServiceURL: "http://test", Owner: "o", Repo: "r", Limit: 25}
+	cfg := search.Config{Owner: "o", Repo: "r", Limit: 25}
 	results := make([]search.Result, 50)
 	for i := range results {
 		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
 	}
 	m := newSearchModel(results, "q", 50, cfg, ss, nil)
+	m.filterType = typeFilterCheckpoints // checkpoint-typed filler; exercise the generic pagination math
 
 	// Navigate to page 2 — should NOT trigger fetch (data already loaded)
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
@@ -1136,12 +1142,13 @@ func TestSearchModel_PageNavigation(t *testing.T) {
 
 	// Create model with 20 results (2 pages at 10/page)
 	ss := statusStyles{colorEnabled: false, width: 100}
-	cfg := search.Config{ServiceURL: "http://test", Owner: "o", Repo: "r"}
+	cfg := search.Config{Owner: "o", Repo: "r"}
 	results := make([]search.Result, 20)
 	for i := range results {
 		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
 	}
 	m := newSearchModel(results, "q", 20, cfg, ss, nil)
+	m.filterType = typeFilterCheckpoints // checkpoint-typed filler; exercise the generic paging math
 
 	if m.page != 0 {
 		t.Fatalf("initial page = %d, want 0", m.page)
@@ -1181,7 +1188,7 @@ func TestSearchModel_NewSearchClearsFilters(t *testing.T) {
 	// Create model with startup filters
 	ss := statusStyles{colorEnabled: false, width: 100}
 	cfg := search.Config{
-		ServiceURL: "http://test", Owner: "o", Repo: "r", Limit: 25,
+		Owner: "o", Repo: "r", Limit: 25,
 		Author: "alice", Date: "week",
 	}
 	m := newSearchModel(testResults(), "auth", 2, cfg, ss, nil)
@@ -1285,6 +1292,7 @@ func TestSearchModel_ViewFetchingMore(t *testing.T) {
 		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
 	}
 	m := initTestViewport(newSearchModel(results, "q", 50, cfg, ss, nil))
+	m.filterType = typeFilterCheckpoints // checkpoint-typed filler
 	m.page = 1
 	m.fetchingMore = true
 	m = m.refreshBrowseContent()
@@ -1299,7 +1307,7 @@ func TestSearchModel_NewSearchPersistsFilters(t *testing.T) {
 	t.Parallel()
 
 	ss := statusStyles{colorEnabled: false, width: 100}
-	cfg := search.Config{ServiceURL: "http://test", Owner: "o", Repo: "r", Limit: 25}
+	cfg := search.Config{Owner: "o", Repo: "r", Limit: 25}
 	m := newSearchModel(testResults(), "old", 2, cfg, ss, nil)
 
 	// Enter search mode and type query with filters
@@ -1328,10 +1336,9 @@ func TestSearchModel_NewSearchPersistsRepoFilters(t *testing.T) {
 
 	ss := statusStyles{colorEnabled: false, width: 100}
 	cfg := search.Config{
-		ServiceURL: "http://test",
-		Owner:      "default-owner",
-		Repo:       "default-repo",
-		Limit:      25,
+		Owner: "default-owner",
+		Repo:  "default-repo",
+		Limit: 25,
 	}
 	m := newSearchModel(testResults(), "old", 2, cfg, ss, nil)
 
@@ -1357,11 +1364,10 @@ func TestSearchModel_NewSearchClearsExplicitRepoFilters(t *testing.T) {
 
 	ss := statusStyles{colorEnabled: false, width: 100}
 	cfg := search.Config{
-		ServiceURL: "http://test",
-		Owner:      "default-owner",
-		Repo:       "default-repo",
-		Limit:      25,
-		Repos:      []string{"entirehq/entire.io"},
+		Owner: "default-owner",
+		Repo:  "default-repo",
+		Limit: 25,
+		Repos: []string{"entirehq/entire.io"},
 	}
 	m := newSearchModel(testResults(), "auth", 2, cfg, ss, nil)
 
@@ -1387,10 +1393,9 @@ func TestSearchModel_NewSearchAllReposFilter(t *testing.T) {
 
 	ss := statusStyles{colorEnabled: false, width: 100}
 	cfg := search.Config{
-		ServiceURL: "http://test",
-		Owner:      "default-owner",
-		Repo:       "default-repo",
-		Limit:      25,
+		Owner: "default-owner",
+		Repo:  "default-repo",
+		Limit: 25,
 	}
 	m := newSearchModel(testResults(), "old", 2, cfg, ss, nil)
 
@@ -1408,15 +1413,14 @@ func TestSearchModel_NewSearchAllReposFilter(t *testing.T) {
 	}
 }
 
-func TestSearchModel_NewSearchRejectsMultipleExplicitRepos(t *testing.T) {
+func TestSearchModel_NewSearchAcceptsMultipleExplicitRepos(t *testing.T) {
 	t.Parallel()
 
 	ss := statusStyles{colorEnabled: false, width: 100}
 	cfg := search.Config{
-		ServiceURL: "http://test",
-		Owner:      "default-owner",
-		Repo:       "default-repo",
-		Limit:      25,
+		Owner: "default-owner",
+		Repo:  "default-repo",
+		Limit: 25,
 	}
 	m := newSearchModel(testResults(), "old", 2, cfg, ss, nil)
 
@@ -1429,13 +1433,20 @@ func TestSearchModel_NewSearchRejectsMultipleExplicitRepos(t *testing.T) {
 		t.Fatalf("Update returned %T, want searchModel", updated)
 	}
 
-	// Multi-repo filters are invalid for checkpoint search and code search is
-	// off (nil codeOpts) — stay in search mode so the user can correct input.
-	if m.mode != modeSearch {
-		t.Errorf("mode = %d, want modeSearch", m.mode)
+	// Multiple explicit repos are now valid: the semantic search fires (the v4
+	// path fans out across the hosting cells), so no error and we leave search
+	// mode to show loading results.
+	if m.searchErr != "" {
+		t.Errorf("searchErr = %q, want empty", m.searchErr)
 	}
-	if m.searchErr != "only one explicit repo filter is currently supported" {
-		t.Errorf("searchErr = %q", m.searchErr)
+	if m.mode != modeBrowse {
+		t.Errorf("mode = %d, want modeBrowse", m.mode)
+	}
+	if !m.loading {
+		t.Error("loading = false, want true (semantic search should fire)")
+	}
+	if got, want := m.searchCfg.Repos, []string{"entirehq/entire.io", "entireio/cli"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("searchCfg.Repos = %v, want %v", got, want)
 	}
 }
 
@@ -1491,10 +1502,7 @@ func TestSearchModel_ComputeTypeCounts(t *testing.T) {
 	t.Parallel()
 
 	m := testMultiTypeModel()
-	cp, cm, ss := m.computeTypeCounts()
-	if cp != 2 {
-		t.Errorf("checkpoints = %d, want 2", cp)
-	}
+	cm, ss := m.computeTypeCounts()
 	if cm != 1 {
 		t.Errorf("commits = %d, want 1", cm)
 	}
@@ -1508,14 +1516,35 @@ func TestSearchModel_ComputeTypeCounts_UsesAPICounts(t *testing.T) {
 
 	m := testMultiTypeModel()
 	m.counts = &search.TypeCounts{Checkpoints: 10, Commits: 5, Sessions: 3}
-	cp, cm, ss := m.computeTypeCounts()
-	if cp != 10 {
-		t.Errorf("checkpoints = %d, want 10", cp)
-	}
+	cm, ss := m.computeTypeCounts()
 	if cm != 5 {
 		t.Errorf("commits = %d, want 5", cm)
 	}
 	if ss != 3 {
 		t.Errorf("sessions = %d, want 3", ss)
+	}
+}
+
+// TestSearchModel_WarningShownInStatusRow pins the TUI counterpart of the
+// one-shot path's stderr warnings: a completeness note arriving with search
+// results (partial cell failure, truncated index) must be visible in the
+// status row, and a fresh warning-free search must clear it.
+func TestSearchModel_WarningShownInStatusRow(t *testing.T) {
+	t.Parallel()
+	m := testModel()
+
+	m = updateModel(t, m, searchResultsMsg{
+		results:  testResults(),
+		total:    2,
+		warnings: []string{"search failed in 1 of 2 regions; results may be incomplete"},
+	})
+	view := m.View().Content
+	if !strings.Contains(view, "1 of 2 regions") {
+		t.Errorf("view should surface the completeness warning, got:\n%s", view)
+	}
+
+	m = updateModel(t, m, searchResultsMsg{results: testResults(), total: 2})
+	if view := m.View().Content; strings.Contains(view, "1 of 2 regions") {
+		t.Error("a warning-free search must clear the previous warning")
 	}
 }

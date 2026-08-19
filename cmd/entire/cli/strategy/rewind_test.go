@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -284,6 +283,58 @@ func TestRestoredPromptPreviewFallsBackInOrder(t *testing.T) {
 	}
 }
 
+func TestFirstDisplayPrompt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		prompts []string
+		want    string
+	}{
+		{
+			name:    "first prompt is genuine",
+			prompts: []string{"fix the login bug", "second prompt"},
+			want:    "fix the login bug",
+		},
+		{
+			name: "skips codex environment context prefix",
+			prompts: []string{
+				"<environment_context>\n  <cwd>/repo</cwd>\n  <shell>zsh</shell>\n</environment_context>",
+				"investigate the flaky test",
+			},
+			want: "investigate the flaky test",
+		},
+		{
+			name: "skips AGENTS.md instruction prefix",
+			prompts: []string{
+				"# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nread the docs\n</INSTRUCTIONS>",
+				"add error handling",
+			},
+			want: "add error handling",
+		},
+		{
+			name:    "skips empty and separator-only entries",
+			prompts: []string{"   ", "---", "apply the fixes"},
+			want:    "apply the fixes",
+		},
+		{
+			name:    "only injected prompts yields empty",
+			prompts: []string{"<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>"},
+			want:    "",
+		},
+		{name: "empty list yields empty", prompts: nil, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := FirstDisplayPrompt(tt.prompts); got != tt.want {
+				t.Errorf("FirstDisplayPrompt(%v) = %q, want %q", tt.prompts, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveAgentForRewind(t *testing.T) {
 	t.Parallel()
 
@@ -346,25 +397,6 @@ func TestResolveAgentForRewind(t *testing.T) {
 			t.Errorf("Name() = %q, want %q", ag.Name(), testName)
 		}
 	})
-}
-
-func TestPromptOverwriteNewerLogs_NonInteractiveRequiresForce(t *testing.T) {
-	var errW bytes.Buffer
-	_, err := PromptOverwriteNewerLogs(&errW, []SessionRestoreInfo{
-		{
-			SessionID:      "test-session",
-			Status:         StatusLocalNewer,
-			LocalTime:      time.Now(),
-			CheckpointTime: time.Now().Add(-time.Minute),
-			Prompt:         "test prompt",
-		},
-	})
-	if err == nil {
-		t.Fatal("expected non-interactive prompt error")
-	}
-	if !strings.Contains(err.Error(), "--force") {
-		t.Fatalf("expected error to mention --force, got %v", err)
-	}
 }
 
 // TestShadowStrategy_Rewind_FromSubdirectory verifies that Rewind() writes files
@@ -624,6 +656,125 @@ func TestShadowStrategy_Rewind_FromRepoRoot(t *testing.T) {
 	}
 	if string(content) != "# Test\n" {
 		t.Errorf("README.md content = %q, want %q", string(content), "# Test\n")
+	}
+}
+
+// TestShadowStrategy_Rewind_PreservesIgnoredFiles guards the restore path
+// against wiping gitignored files. Rewind writes the checkpoint tree over the
+// worktree; if it ever reaches for go-git's Worktree.Reset/Checkout instead,
+// those delete ignored directories even when .gitignore lists them (see the Git
+// Operations section in CLAUDE.md), which would take out `.entire/` — the
+// session state and logs the CLI needs in order to keep working after the
+// restore.
+//
+// Scope: this covers what survives an actual execution, which is the half where
+// the go-git hazard lives. Which *untracked* files get deleted is a separate
+// question driven by SessionState.UntrackedFilesAtStart and covered by the
+// PreviewRewind tests above — with no session state every untracked file reads
+// as created-since-the-checkpoint, so this test deliberately asserts nothing
+// about them.
+func TestShadowStrategy_Rewind_PreservesIgnoredFiles(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	author := &object.Signature{
+		Name:  "Test",
+		Email: "test@example.com",
+		When:  time.Now(),
+	}
+
+	// Commit a .gitignore up front so its rules are in effect during Rewind.
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".entire/\n*.log\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .gitignore: %v", err)
+	}
+	for _, f := range []string{"README.md", ".gitignore"} {
+		if _, err := worktree.Add(f); err != nil {
+			t.Fatalf("failed to add %s: %v", f, err)
+		}
+	}
+	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{Author: author})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	// A checkpoint that adds a tracked file, so Rewind has something to restore.
+	trackedContent := "const app = 'restored';\n"
+	if err := os.WriteFile(filepath.Join(dir, "app.js"), []byte(trackedContent), 0o644); err != nil {
+		t.Fatalf("failed to write app.js: %v", err)
+	}
+	if _, err := worktree.Add("app.js"); err != nil {
+		t.Fatalf("failed to add app.js: %v", err)
+	}
+	checkpointHash, err := worktree.Commit("Checkpoint", &git.CommitOptions{Author: author})
+	if err != nil {
+		t.Fatalf("failed to create checkpoint: %v", err)
+	}
+
+	if err := worktree.Reset(&git.ResetOptions{Commit: initialCommit, Mode: git.HardReset}); err != nil {
+		t.Fatalf("failed to reset to initial: %v", err)
+	}
+
+	// Create the ignored and untracked files only now, after the hard reset.
+	// go-git's own HardReset is one of the calls that deletes ignored
+	// directories, so writing them earlier would test that reset rather than
+	// Rewind.
+	entireDir := filepath.Join(dir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("failed to create .entire dir: %v", err)
+	}
+	ignoredPaths := map[string]string{
+		filepath.Join(entireDir, "settings.json"): `{"enabled": true}`,
+		filepath.Join(dir, "debug.log"):           "log line\n",
+	}
+	for path, content := range ignoredPaths {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to write %s: %v", path, err)
+		}
+	}
+	s := NewManualCommitStrategy()
+	point := RewindPoint{
+		ID:      checkpointHash.String(),
+		Message: "Checkpoint",
+		Date:    time.Now(),
+	}
+	if err := s.Rewind(context.Background(), io.Discard, io.Discard, point); err != nil {
+		t.Fatalf("Rewind() error = %v", err)
+	}
+
+	// The checkpoint's tracked file came back.
+	content, err := os.ReadFile(filepath.Join(dir, "app.js"))
+	if err != nil {
+		t.Fatalf("expected app.js to be restored: %v", err)
+	}
+	if string(content) != trackedContent {
+		t.Errorf("app.js content = %q, want %q", string(content), trackedContent)
+	}
+
+	// Ignored files survived, including the whole .entire/ directory.
+	for path, want := range ignoredPaths {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("ignored file %s should survive Rewind, got error: %v", path, err)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("ignored file %s content = %q, want %q", path, string(got), want)
+		}
 	}
 }
 

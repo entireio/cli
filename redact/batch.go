@@ -28,26 +28,40 @@ type NamedBlob struct {
 // returns a non-nil error. Callers running this for privacy-critical
 // operations (e.g. the pre-push rewrite) must abort rather than
 // proceed with partially-redacted content. The per-blob
-// JSONLContentWithPrivacyFilter falls back to 7-layer on batch
-// failure; this batched variant intentionally does not, because the
-// only caller (cross-blob walker) needs an explicit signal that OPF
-// did not finish.
+// JSONLContentWithPrivacyFilter falls back to the regex-only pipeline
+// (the eight always-on/opt-in layers, no OPF) on batch failure; this
+// batched variant intentionally does not, because the only caller
+// (cross-blob walker) needs an explicit signal that OPF did not
+// finish.
 //
-// When OPF is unconfigured, disabled, has no enabled categories, or
-// the per-process circuit breaker has tripped, returns 7-layer-only
-// output for every blob with no error. This matches the existing
-// non-batched paths and keeps the caller's hot-path code clean.
+// When OPF is unconfigured, disabled, or the per-process circuit
+// breaker has tripped, returns regex-only output for every blob with
+// no error. This matches the existing non-batched paths and keeps the
+// caller's hot-path code clean. Enabled with zero effective categories
+// is different: that returns ErrOPFNoEnabledCategories, because the
+// caller is about to stamp the Entire-OPF-Applied trailer and a silent
+// regex-only success here would make that attestation false. Enabled
+// with a nil runtime errors for the same reason. Both fail-closed
+// checks run BEFORE the breaker check so the guarantee is
+// unconditional — a tripped breaker must not downgrade a
+// misconfiguration back into silent regex-only success.
 func BatchBytesWithPrivacyFilter(ctx context.Context, inputs []NamedBlob) ([][]byte, error) {
 	if len(inputs) == 0 {
 		return nil, nil
 	}
 	cfg := getOPFConfig()
-	if cfg == nil || !cfg.Enabled || cfg.runtime == nil || opfBreakerTripped.Load() {
-		return apply7LayerToBlobs(inputs), nil
+	if cfg == nil || !cfg.Enabled {
+		return applyRegexLayersToBlobs(inputs), nil
 	}
 	cats := enabledCategories(cfg)
 	if len(cats) == 0 {
-		return apply7LayerToBlobs(inputs), nil
+		return nil, ErrOPFNoEnabledCategories
+	}
+	if cfg.runtime == nil {
+		return nil, errOPFNilRuntime
+	}
+	if opfBreakerTripped.Load() {
+		return applyRegexLayersToBlobs(inputs), nil
 	}
 
 	// Pass 1: collect unique prose-shaped leaves across every blob.
@@ -114,7 +128,7 @@ func BatchBytesWithPrivacyFilter(ctx context.Context, inputs []NamedBlob) ([][]b
 //
 // JSON parse failures fall back to whole-content treatment, matching
 // RedactBlobBytes's behavior: a malformed JSON blob still gets the
-// 7-layer pipeline applied, just without leaf-by-leaf precision.
+// regex-only pipeline applied, just without leaf-by-leaf precision.
 func collectLeaves(in NamedBlob, add func(string)) {
 	if isJSONLikeName(in.Name) {
 		if _, err := jsonlContentImpl(string(in.Content), func(v string) string {
@@ -129,7 +143,7 @@ func collectLeaves(in NamedBlob, add func(string)) {
 }
 
 // applyToBlob produces the redacted bytes for a single blob, combining
-// the 7 regex layers with the cached OPF spans for each leaf. The
+// the always-on/opt-in regex layers with the cached OPF spans for each leaf. The
 // per-leaf closure mirrors JSONLContentWithPrivacyFilter's Pass 3.
 func applyToBlob(in NamedBlob, spansByInput map[string][]Span, cfg *OPFConfig) []byte {
 	applier := func(v string) string {
@@ -145,10 +159,10 @@ func applyToBlob(in NamedBlob, spansByInput map[string][]Span, cfg *OPFConfig) [
 	return []byte(applier(string(in.Content)))
 }
 
-// apply7LayerToBlobs is the OPF-disabled fast path: each blob gets
+// applyRegexLayersToBlobs is the OPF-disabled fast path: each blob gets
 // regex-only redaction with no shell-out. Returned slice is index-aligned
 // with inputs.
-func apply7LayerToBlobs(inputs []NamedBlob) [][]byte {
+func applyRegexLayersToBlobs(inputs []NamedBlob) [][]byte {
 	out := make([][]byte, len(inputs))
 	for i, in := range inputs {
 		if isJSONLikeName(in.Name) {

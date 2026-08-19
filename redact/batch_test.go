@@ -202,7 +202,7 @@ func TestBatchBytesWithPrivacyFilter_EmptyInputs(t *testing.T) {
 
 // TestBatchBytesWithPrivacyFilter_FailsClosedOnBatchError is the
 // fail-closed contract: when the OPF runtime errors, callers must see
-// the error rather than silently get 7-layer-only output tagged as if
+// the error rather than silently get regex-only output tagged as if
 // OPF ran. This is the privacy-critical difference vs
 // JSONLContentWithPrivacyFilter (which silently falls back).
 func TestBatchBytesWithPrivacyFilter_FailsClosedOnBatchError(t *testing.T) {
@@ -277,12 +277,12 @@ func TestBatchBytesWithPrivacyFilter_ShortReturnFailsClosed(t *testing.T) {
 	}
 }
 
-// TestBatchBytesWithPrivacyFilter_OPFDisabledReturns7Layer covers the
+// TestBatchBytesWithPrivacyFilter_OPFDisabledReturnsRegexOnly covers the
 // "OPF turned off in settings" path: every blob gets regex-only
 // redaction, no shell-out happens, no error. Without this, a user with
 // OPF disabled would get a hard error from the new API instead of the
-// fast 7-layer path they expect.
-func TestBatchBytesWithPrivacyFilter_OPFDisabledReturns7Layer(t *testing.T) {
+// fast regex-only path they expect.
+func TestBatchBytesWithPrivacyFilter_OPFDisabledReturnsRegexOnly(t *testing.T) {
 	resetOPFConfig()
 	t.Cleanup(resetOPFConfig)
 	// No ConfigurePrivacyFilter call → cfg == nil
@@ -295,16 +295,16 @@ func TestBatchBytesWithPrivacyFilter_OPFDisabledReturns7Layer(t *testing.T) {
 		t.Fatalf("OPF-disabled path should not error: %v", err)
 	}
 	if !strings.Contains(string(got[0]), "REDACTED") {
-		t.Errorf("7-layer fallback should still redact AWS key, got %q", string(got[0]))
+		t.Errorf("regex-only fallback should still redact AWS key, got %q", string(got[0]))
 	}
 }
 
-// TestBatchBytesWithPrivacyFilter_BreakerTrippedReturns7Layer ensures
+// TestBatchBytesWithPrivacyFilter_BreakerTrippedReturnsRegexOnly ensures
 // that once the circuit breaker has tripped (e.g. an earlier batch
 // failed and the strategy aborted), subsequent calls in the same
 // process don't pay another shell-out cost. They short-circuit to
 // regex-only with no error.
-func TestBatchBytesWithPrivacyFilter_BreakerTrippedReturns7Layer(t *testing.T) {
+func TestBatchBytesWithPrivacyFilter_BreakerTrippedReturnsRegexOnly(t *testing.T) {
 	fake := &fakeRuntime{spans: []Span{{Start: 0, End: 5, Label: "private_person"}}}
 	configureFakeOPF(t, fake, map[string]bool{"private_person": true})
 	opfBreakerTripped.Store(true)
@@ -460,24 +460,96 @@ func TestSumProseLeafBytes_CountsAcrossBlobShapes(t *testing.T) {
 	}
 }
 
-// TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesReturns7Layer
-// covers the configuration edge case where OPF is enabled but every
-// category is turned off — the model has nothing to look for, so we
-// skip the shell-out entirely and return regex-only output.
-func TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesReturns7Layer(t *testing.T) {
+// TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesFailsClosed
+// covers the misconfiguration where OPF is enabled but the effective
+// category set is empty (empty map, all-false, or omitted). The model
+// scan cannot run, and the only caller stamps the Entire-OPF-Applied
+// trailer on success — so silently returning regex-only output here
+// produced a false attestation and made later rewrites skip the commit
+// permanently. Fail closed instead.
+func TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesFailsClosed(t *testing.T) {
+	cases := []struct {
+		name       string
+		categories map[string]bool
+	}{
+		{name: "empty_map", categories: map[string]bool{}},
+		{name: "nil_map", categories: nil},
+		{name: "all_false", categories: map[string]bool{"private_person": false}},
+		// Unknown keys are rejected at settings load, but OPFConfig is
+		// constructible directly; enabledCategories must filter them.
+		{name: "only_unknown_keys", categories: map[string]bool{"typo_category": true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeRuntime{}
+			configureFakeOPF(t, fake, tc.categories)
+
+			inputs := []NamedBlob{
+				{Name: "x.jsonl", Content: []byte(`{"text":"Alice met Bob"}`)},
+			}
+			out, err := BatchBytesWithPrivacyFilter(context.Background(), inputs)
+			if !errors.Is(err, ErrOPFNoEnabledCategories) {
+				t.Fatalf("want ErrOPFNoEnabledCategories, got %v", err)
+			}
+			if out != nil {
+				t.Errorf("want nil output on fail-closed error, got %d blobs", len(out))
+			}
+			if fake.batchCalls != 0 {
+				t.Errorf("want 0 OPF calls when no categories enabled, got %d", fake.batchCalls)
+			}
+		})
+	}
+}
+
+// TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesWinsOverBreaker
+// pins the check ordering: a tripped circuit breaker must not
+// downgrade the no-categories misconfiguration back into silent
+// regex-only success — the caller stamps the Entire-OPF-Applied
+// trailer on any nil-error return. Unreachable through the production
+// config lifecycle today (Configure resets the breaker, and tripping
+// it requires an enabled category), but the guarantee must hold by
+// construction, not by that coincidence.
+func TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesWinsOverBreaker(t *testing.T) {
 	fake := &fakeRuntime{}
-	// Empty categories — Configure call still wires the runtime but
-	// enabledCategories returns nothing.
 	configureFakeOPF(t, fake, map[string]bool{})
+	opfBreakerTripped.Store(true)
+	t.Cleanup(func() { opfBreakerTripped.Store(false) })
 
 	inputs := []NamedBlob{
 		{Name: "x.jsonl", Content: []byte(`{"text":"Alice met Bob"}`)},
 	}
-	_, err := BatchBytesWithPrivacyFilter(context.Background(), inputs)
-	if err != nil {
-		t.Fatalf("no-categories path should not error: %v", err)
+	out, err := BatchBytesWithPrivacyFilter(context.Background(), inputs)
+	if !errors.Is(err, ErrOPFNoEnabledCategories) {
+		t.Fatalf("want ErrOPFNoEnabledCategories despite tripped breaker, got %v", err)
 	}
-	if fake.batchCalls != 0 {
-		t.Errorf("want 0 OPF calls when no categories enabled, got %d", fake.batchCalls)
+	if out != nil {
+		t.Errorf("want nil output on fail-closed error, got %d blobs", len(out))
+	}
+}
+
+// TestBatchBytesWithPrivacyFilter_NilRuntimeFailsClosed pins that an
+// enabled config with a nil runtime errors instead of silently
+// returning regex-only output — the caller stamps the
+// Entire-OPF-Applied trailer on any nil-error return. Unreachable
+// through ConfigurePrivacyFilter (it always constructs the shell-out
+// runtime), but the guarantee must hold by construction, not by that
+// property of the config lifecycle.
+func TestBatchBytesWithPrivacyFilter_NilRuntimeFailsClosed(t *testing.T) {
+	resetOPFConfig()
+	t.Cleanup(resetOPFConfig)
+	ConfigurePrivacyFilterWithRuntime(OPFConfig{
+		Enabled:    true,
+		Categories: map[string]bool{"private_person": true},
+	}, nil)
+
+	inputs := []NamedBlob{
+		{Name: "x.jsonl", Content: []byte(`{"text":"Alice met Bob"}`)},
+	}
+	out, err := BatchBytesWithPrivacyFilter(context.Background(), inputs)
+	if !errors.Is(err, errOPFNilRuntime) {
+		t.Fatalf("want errOPFNilRuntime, got %v", err)
+	}
+	if out != nil {
+		t.Errorf("want nil output on fail-closed error, got %d blobs", len(out))
 	}
 }

@@ -442,7 +442,9 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 
 		// Add subagent transcript if available
 		if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
-			if agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath); readErr == nil {
+			agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
+			agentContent, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, agentContent)
+			if readErr == nil && !tooLarge {
 				redacted, jsonlErr := redact.JSONLBytes(agentContent)
 				if jsonlErr != nil {
 					logging.Warn(ctx, "subagent transcript is not valid JSONL, falling back to plain redaction",
@@ -1195,6 +1197,35 @@ func filterGitIgnoredFiles(ctx context.Context, repo *git.Repository, files []st
 	return kept
 }
 
+// isProtectedCheckpointPath reports whether a repo-relative path must be kept
+// out of checkpoint snapshots: the .entire infrastructure dir, or any
+// registered agent's declared protected dir/file (e.g. .claude, or an external
+// plugin's protected_dirs).
+//
+// This mirrors shouldIgnoreSessionTrackingPath in the cli package. The two
+// cannot share an implementation because cli imports checkpoint, so the logic
+// is duplicated deliberately. The first-checkpoint path (collectChangedFiles)
+// must apply the same exclusions as the session-tracking and rewind paths, or
+// protected-dir content is captured into the shadow tree on session start
+// (see the DetectFileChanges / isProtectedPath call sites).
+func isProtectedCheckpointPath(relPath string) bool {
+	cleanPath := filepath.Clean(filepath.FromSlash(relPath))
+	if paths.IsInfrastructurePath(cleanPath) {
+		return true
+	}
+	for _, file := range agent.AllProtectedFiles() {
+		if paths.Equal(cleanPath, file) {
+			return true
+		}
+	}
+	for _, dir := range agent.AllProtectedDirs() {
+		if paths.IsProtectedSubpath(filepath.Clean(filepath.FromSlash(dir)), cleanPath) {
+			return true
+		}
+	}
+	return false
+}
+
 // collectChangedFiles returns all changed files from git status for the first checkpoint.
 //
 // For the first checkpoint, we need to capture:
@@ -1246,16 +1277,16 @@ func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFile
 		filename := entry[3:] // No TrimSpace needed with -z format
 
 		// Handle R/C (rename/copy) first - they have a second entry we must skip
-		// even if the new filename is an infrastructure path
+		// even if the new filename is a protected path
 		if staging == 'R' || staging == 'C' {
 			// Renamed or copied: current entry is new name, next entry is old name
-			if !paths.IsInfrastructurePath(filename) {
+			if !isProtectedCheckpointPath(filename) {
 				changedSeen[filename] = struct{}{}
 			}
 			// The old name follows as the next NUL-separated entry - must always skip it
 			if i+1 < len(entries) && entries[i+1] != "" {
 				oldName := entries[i+1]
-				if staging == 'R' && !paths.IsInfrastructurePath(oldName) {
+				if staging == 'R' && !isProtectedCheckpointPath(oldName) {
 					// For renames, old file is effectively deleted
 					deletedSeen[oldName] = struct{}{}
 				}
@@ -1264,8 +1295,8 @@ func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFile
 			continue
 		}
 
-		// Skip .entire directory for non-R/C entries
-		if paths.IsInfrastructurePath(filename) {
+		// Skip .entire and agent-protected dirs/files for non-R/C entries
+		if isProtectedCheckpointPath(filename) {
 			continue
 		}
 

@@ -5,7 +5,6 @@
 import type { Plugin } from "@opencode-ai/plugin"
 
 export const EntirePlugin: Plugin = async ({ directory }) => {
-  const ENTIRE_CMD = 'go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go'
   // Track seen user messages to fire turn-start only once per message
   const seenUserMessages = new Set<string>()
   // Track current session ID for message events (which don't include sessionID)
@@ -14,14 +13,18 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
   let currentModel: string | null = null
   // In-memory store for message metadata (role, tokens, etc.)
   const messageStore = new Map<string, any>()
+  // One-time model-context injection captured from the turn-start hook's stdout,
+  // applied on the next LLM call via experimental.chat.system.transform.
+  let pendingInjection: string | null = null
 
   /**
    * Build the shell command for a hook invocation.
-   * Uses sh -c so that shell command substitution in ENTIRE_CMD
-   * (e.g., $(git rev-parse --show-toplevel) for local-dev) is interpreted.
+   * Uses sh -c so the command is guarded by a `command -v` probe: when the
+   * entire binary is not on PATH the hook exits 0 rather than failing the
+   * surrounding OpenCode operation.
    */
   function hookCmd(hookName: string): string[] {
-    return ["sh", "-c", `${ENTIRE_CMD} hooks opencode ${hookName}`]
+    return ["sh", "-c", `if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks opencode ${hookName}`]
   }
 
   /**
@@ -44,10 +47,10 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
   }
 
   /**
-   * Synchronous variant for hooks that fire near process exit (turn-end, session-end).
-   * `opencode run` breaks its event loop on the same session.status idle event that
-   * triggers turn-end. The async callHook would be killed before completing.
-   * Bun.spawnSync blocks the event loop, preventing exit until the hook finishes.
+   * Synchronous variant for hooks that must complete before subsequent agent work
+   * or process exit. `turn-start` must finish initializing session state before a
+   * fast mid-turn commit can hit git hooks, and `turn-end` / `session-end` must
+   * finish before `opencode run` tears down its event loop.
    */
   function callHookSync(hookName: string, payload: Record<string, unknown>) {
     try {
@@ -63,7 +66,69 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
     }
   }
 
+  // parseInjectedContext scans a hook's stdout for Entire's injection envelope
+  // ({"inject_context":"..."}) and returns the text to inject, or null.
+  function parseInjectedContext(stdout: string): string | null {
+    if (!stdout) return null
+    for (const line of stdout.split("\n")) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith("{")) continue
+      try {
+        const parsed = JSON.parse(trimmed) as { inject_context?: unknown }
+        if (typeof parsed.inject_context === "string" && parsed.inject_context.length > 0) {
+          return parsed.inject_context
+        }
+      } catch {
+        // not our envelope — ignore
+      }
+    }
+    return null
+  }
+
+  // fireTurnStart fires turn-start synchronously (state must be ready before
+  // mid-turn commits) and stashes any model-context injection emitted on stdout
+  // for experimental.chat.system.transform to apply. Entire emits the injection
+  // at most once per session, so pendingInjection is set on the first turn only.
+  function fireTurnStart(payload: Record<string, unknown>) {
+    try {
+      const json = JSON.stringify(payload)
+      const proc = Bun.spawnSync(hookCmd("turn-start"), {
+        cwd: directory,
+        stdin: new TextEncoder().encode(json + "\n"),
+        stdout: "pipe",
+        stderr: "ignore",
+      })
+      const out = proc.stdout ? proc.stdout.toString() : ""
+      const injected = parseInjectedContext(out)
+      if (injected) pendingInjection = injected
+    } catch {
+      // Silently ignore — plugin failures must not crash OpenCode
+    }
+  }
+
+  function resetSessionTracking(sessionID: string) {
+    if (currentSessionID === sessionID) {
+      return false
+    }
+    seenUserMessages.clear()
+    messageStore.clear()
+    currentModel = null
+    currentSessionID = sessionID
+    // Drop any turn-start injection captured for the prior session so it
+    // can't leak into the new session's system prompt.
+    pendingInjection = null
+    return true
+  }
+
   return {
+    // Apply the one-time Entire context injection captured at turn-start by
+    // appending it to the system prompt for this LLM call.
+    "experimental.chat.system.transform": async (_input: unknown, output: { system: string[] }) => {
+      if (pendingInjection && Array.isArray(output.system)) {
+        output.system.push(pendingInjection)
+        pendingInjection = null
+      }
+    },
     event: async ({ event }) => {
       try {
         switch (event.type) {
@@ -71,26 +136,51 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             const session = (event as any).properties?.info
             if (!session?.id) break
             // Reset per-session tracking state when switching sessions.
-            if (currentSessionID !== session.id) {
-              seenUserMessages.clear()
-              messageStore.clear()
-              currentModel = null
+            if (resetSessionTracking(session.id)) {
+              const json = JSON.stringify({
+                session_id: session.id,
+              })
+              const proc = Bun.spawn(hookCmd("session-start"), {
+                cwd: directory,
+                stdin: new Blob([json + "\n"]),
+                stdout: "ignore",
+                stderr: "ignore",
+              })
+              await proc.exited
             }
-            currentSessionID = session.id
-            await callHook("session-start", {
-              session_id: session.id,
-            })
             break
           }
 
           case "message.updated": {
             const msg = (event as any).properties?.info
             if (!msg) break
+
+            if (msg.sessionID && resetSessionTracking(msg.sessionID)) {
+              callHookSync("session-start", {
+                session_id: msg.sessionID,
+              })
+            }
+
             // Store message metadata (role, time, tokens, etc.)
             messageStore.set(msg.id, msg)
             // Track model from assistant messages
             if (msg.role === "assistant" && msg.modelID) {
               currentModel = msg.modelID
+            }
+
+            // Fallback: some opencode run flows commit before any message.part.updated
+            // event is delivered for the user's prompt. Start the turn from the
+            // user message itself so git hooks see an ACTIVE session in time.
+            if (msg.role === "user" && !seenUserMessages.has(msg.id)) {
+              seenUserMessages.add(msg.id)
+              const sessionID = msg.sessionID ?? currentSessionID
+              if (sessionID) {
+                fireTurnStart({
+                  session_id: sessionID,
+                  prompt: "",
+                  model: currentModel ?? "",
+                })
+              }
             }
             break
           }
@@ -105,7 +195,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
               seenUserMessages.add(msg.id)
               const sessionID = msg.sessionID ?? currentSessionID
               if (sessionID) {
-                await callHook("turn-start", {
+                fireTurnStart({
                   session_id: sessionID,
                   prompt: part.text ?? "",
                   model: currentModel ?? "",
@@ -146,6 +236,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             seenUserMessages.clear()
             messageStore.clear()
             currentSessionID = null
+            pendingInjection = null
             // Use sync variant: session-end may fire during shutdown.
             callHookSync("session-end", {
               session_id: session.id,
@@ -162,6 +253,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             seenUserMessages.clear()
             messageStore.clear()
             currentSessionID = null
+            pendingInjection = null
             // Use sync variant: this is the last event before process exit.
             callHookSync("session-end", {
               session_id: sessionID,

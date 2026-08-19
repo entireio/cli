@@ -65,7 +65,7 @@ func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error 
 
 	// The picker is interactive. Without a usable terminal (CI, piped, agent
 	// subprocess) the form can't render — bail with guidance instead of hanging
-	// or erroring on /dev/tty, matching `entire attach`.
+	// or erroring on /dev/tty, matching `entire session attach`.
 	if !interactive.CanPromptInteractively() {
 		fmt.Fprintln(w, "The resume picker needs an interactive terminal.")
 		fmt.Fprintln(w, "Pass a branch instead, e.g. 'entire session resume <branch>'.")
@@ -107,7 +107,7 @@ func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error 
 			huh.NewSelect[string]().
 				Title("Resume a session").
 				Description("Checks out the branch, restores the session log, and offers to start the agent.\n" +
-					"Lists sessions from this machine — to resume a branch from origin, run: entire resume <branch>").
+					"Lists sessions from this machine — to resume a branch from origin, run: entire session resume <branch>").
 				Options(options...).
 				Value(&selected),
 		),

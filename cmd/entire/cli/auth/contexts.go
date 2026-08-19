@@ -20,6 +20,20 @@ import (
 // so a conservative non-zero value is enough to keep the entry usable.
 const defaultContextTokenTTL = time.Hour
 
+// ErrCredentialStoreWrite marks a failure writing tokens to the configured
+// credential backend (OS keyring or file store), as opposed to claim
+// validation or contexts.json failures. Login UX branches on it via
+// errors.Is to decide whether pointing the user at the file token store
+// would actually help.
+var ErrCredentialStoreWrite = errors.New("credential store write failed")
+
+// credStoreWriteError tags an underlying store error with
+// ErrCredentialStoreWrite without changing its message.
+type credStoreWriteError struct{ inner error }
+
+func (e *credStoreWriteError) Error() string   { return e.inner.Error() }
+func (e *credStoreWriteError) Unwrap() []error { return []error{e.inner, ErrCredentialStoreWrite} }
+
 // RecordLoginContext records a freshly obtained login token in the
 // shared contexts.json credential model: it derives the issuer (core
 // URL), handle, and expiry from the token's own claims, stores the token
@@ -82,7 +96,7 @@ func RecordLoginContext(rawToken, refreshToken string, activate bool) (string, e
 	refreshSlot := tokenstore.RefreshService(keychainService)
 	if refreshToken != "" {
 		if err := tokenstore.Set(refreshSlot, handle, refreshToken); err != nil {
-			return "", fmt.Errorf("store refresh token in keyring: %w", err)
+			return "", fmt.Errorf("store refresh token in credential store: %w", &credStoreWriteError{err})
 		}
 	} else {
 		_ = tokenstore.Delete(refreshSlot, handle) //nolint:errcheck // best-effort cleanup of a stale refresh token
@@ -90,19 +104,26 @@ func RecordLoginContext(rawToken, refreshToken string, activate bool) (string, e
 
 	encoded := tokenstore.EncodeTokenWithExpiration(rawToken, expiresIn)
 	if err := tokenstore.Set(keychainService, handle, encoded); err != nil {
-		return "", fmt.Errorf("store login token in keyring: %w", err)
+		return "", fmt.Errorf("store login token in credential store: %w", &credStoreWriteError{err})
 	}
 
 	var name string
 	cfgDir := userdirs.Config()
 	if modErr := contexts.Modify(cfgDir, func(f *contexts.File) (bool, error) {
 		name = pickContextName(f, coreURL, handle)
-		f.Upsert(&contexts.Context{
+		next := &contexts.Context{
 			Name:            name,
 			CoreURL:         coreURL,
 			Handle:          handle,
 			KeychainService: keychainService,
-		})
+		}
+		// Upsert replaces the whole entry, so carry the audiences over: the
+		// jurisdiction tokens are keyed by audience + handle, not by login
+		// session, so they survive this re-login and must stay findable.
+		if prev := f.Find(name); prev != nil {
+			next.JurisdictionAudiences = prev.JurisdictionAudiences
+		}
+		f.Upsert(next)
 		if activate || f.CurrentContext == "" {
 			f.CurrentContext = name
 		}

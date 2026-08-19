@@ -9,10 +9,10 @@
 //	defer logging.Close()
 //
 //	// Add context values
-//	ctx = logging.WithSession(ctx, sessionID)
-//	ctx = logging.WithToolCall(ctx, toolCallID)
+//	ctx = logging.WithComponent(ctx, "hooks")
+//	ctx = logging.WithAgent(ctx, agentName)
 //
-//	// Log with context - session/tool IDs extracted automatically
+//	// Log with context - component/agent extracted automatically
 //	logging.Info(ctx, "hook invoked",
 //	    slog.String("hook", hookName),
 //	    slog.String("branch", branch),
@@ -139,9 +139,48 @@ func Init(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// EnsureInitialized routes logging to .entire/logs/ unless it is already
+// initialized, and returns a function that tears down only what it set up.
+//
+// It exists for code that emits logging.* calls from a plain command rather
+// than a hook. Without an initialized logger, log() falls back to
+// slog.Default(), which prints internal structured lines straight onto the
+// user's terminal in the middle of command output — see the same hazard called
+// out at the Init call sites in setup.go and investigate/cmd.go.
+//
+// Unlike Init it is a no-op when a logger already exists, so a caller reachable
+// from a hook cannot close the hook's log file out from under it. Like Init, it
+// CREATES .entire/logs/, so call it only once the command is committed to doing
+// work in an Entire-enabled repository.
+//
+// Scope the returned cleanup to everything the command still has to log, not
+// just the call that needed logging in the first place: it closes the file, so
+// anything logged after it runs goes back to the terminal via slog.Default().
+func EnsureInitialized(ctx context.Context) func() {
+	mu.RLock()
+	already := logger != nil
+	mu.RUnlock()
+	if already {
+		return func() {}
+	}
+	// Init only errors on an invalid non-empty session ID; with "" it always
+	// succeeds, falling back to stderr internally if the log file can't be
+	// opened. Close is correct on that path too — it tolerates a nil logFile.
+	_ = Init(ctx, "") //nolint:errcheck // cannot fail for an empty session ID
+	return Close
+}
+
 // Close closes the log file if one is open.
 // Flushes any buffered data before closing.
 // Safe to call multiple times.
+//
+// It also drops the logger itself, so a caller that keeps logging afterwards
+// falls back to slog.Default() rather than writing into a handler bound to the
+// buffer we just closed. That handler holds the *bufio.Writer by value (see
+// createLogger), so leaving it in place would silently swallow every later line:
+// short writes sit in an orphaned buffer nobody flushes, and once it fills the
+// underlying file is already closed. Commands that Close mid-run and keep
+// working should call EnsureInitialized again rather than rely on the fallback.
 func Close() {
 	mu.Lock()
 	defer mu.Unlock()
@@ -154,6 +193,7 @@ func Close() {
 		_ = logFile.Close()
 		logFile = nil
 	}
+	logger = nil
 	currentSessionID = ""
 }
 
@@ -251,8 +291,8 @@ func log(ctx context.Context, level slog.Level, msg string, attrs ...any) {
 		allAttrs = append(allAttrs, slog.String("session_id", globalSessionID))
 	}
 
-	// Extract context values, skipping session_id if already added from Init()
-	contextAttrs := attrsFromContext(ctx, globalSessionID)
+	// Extract context values
+	contextAttrs := attrsFromContext(ctx)
 	for _, a := range contextAttrs {
 		allAttrs = append(allAttrs, a)
 	}
@@ -266,32 +306,13 @@ func log(ctx context.Context, level slog.Level, msg string, attrs ...any) {
 }
 
 // attrsFromContext extracts logging attributes from a context.
-// If globalSessionID is non-empty, skips adding session_id from context to avoid duplicates.
-func attrsFromContext(ctx context.Context, globalSessionID string) []slog.Attr {
+func attrsFromContext(ctx context.Context) []slog.Attr {
 	if ctx == nil {
 		return nil
 	}
 
 	var attrs []slog.Attr
 
-	// Only add session_id from context if not already set globally
-	if globalSessionID == "" {
-		if v := ctx.Value(sessionIDKey); v != nil {
-			if s, ok := v.(string); ok && s != "" {
-				attrs = append(attrs, slog.String("session_id", s))
-			}
-		}
-	}
-	if v := ctx.Value(parentSessionIDKey); v != nil {
-		if s, ok := v.(string); ok && s != "" {
-			attrs = append(attrs, slog.String("parent_session_id", s))
-		}
-	}
-	if v := ctx.Value(toolCallIDKey); v != nil {
-		if s, ok := v.(string); ok && s != "" {
-			attrs = append(attrs, slog.String("tool_call_id", s))
-		}
-	}
 	if v := ctx.Value(componentKey); v != nil {
 		if s, ok := v.(string); ok && s != "" {
 			attrs = append(attrs, slog.String("component", s))

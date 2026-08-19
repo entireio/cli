@@ -213,7 +213,7 @@ func TestRoot_NounGroupShorthandsUseCobraAliases(t *testing.T) {
 	}
 }
 
-func TestCheckpointSearchIsVisibleButTopLevelSearchIsExperimental(t *testing.T) {
+func TestSearchIsVisibleAtTopLevelAndUnderCheckpoint(t *testing.T) {
 	t.Parallel()
 
 	root := NewRootCmd()
@@ -226,15 +226,17 @@ func TestCheckpointSearchIsVisibleButTopLevelSearchIsExperimental(t *testing.T) 
 		t.Fatal("checkpoint search should be visible in checkpoint help")
 	}
 
-	// The top-level `entire search` shortcut is gated as experimental:
-	// visible and grouped in developer builds (the default test build),
-	// hidden in shipped releases.
+	// The top-level `entire search` is the canonical spelling: visible in
+	// every build (not experimental-gated) and grouped with sessions.
 	topLevelSearch, _, err := root.Find([]string{"search"})
 	if err != nil {
 		t.Fatalf("find top-level search: %v", err)
 	}
-	if topLevelSearch.GroupID != experimental.GroupID {
-		t.Fatalf("top-level search GroupID = %q, want %q (experimental)", topLevelSearch.GroupID, experimental.GroupID)
+	if topLevelSearch.Hidden {
+		t.Fatal("top-level search should be visible in every build")
+	}
+	if topLevelSearch.GroupID != groupSessions {
+		t.Fatalf("top-level search GroupID = %q, want %q", topLevelSearch.GroupID, groupSessions)
 	}
 }
 
@@ -259,6 +261,83 @@ func TestCheckpointPolicyCommandIsExperimental(t *testing.T) {
 	topLevelPolicy, remaining, err := root.Find([]string{"policy"})
 	if err == nil && len(remaining) == 0 && topLevelPolicy.Use == "policy" {
 		t.Fatal("top-level policy command should not remain after moving policy under checkpoint")
+	}
+}
+
+func TestRoot_VisibleCommandsAreGrouped(t *testing.T) {
+	t.Parallel()
+
+	// Commands intentionally left out of any group. version, labs, agent-help,
+	// and help render under cobra's "Additional Commands"; completion is
+	// allowlisted for completeness but never renders (hidden via
+	// CompletionOptions.HiddenDefaultCmd in NewRootCmd).
+	ungrouped := map[string]bool{
+		"version":    true,
+		"labs":       true,
+		"agent-help": true,
+		"help":       true,
+		"completion": true,
+	}
+
+	wantGroups := map[string]string{
+		"enable":     groupSetup,
+		"disable":    groupSetup,
+		"configure":  groupSetup,
+		"agent":      groupSetup,
+		"plugin":     groupSetup,
+		"status":     groupSetup,
+		"doctor":     groupSetup,
+		"clean":      groupSetup,
+		"session":    groupSessions,
+		"checkpoint": groupSessions,
+		"search":     groupSessions,
+		"recap":      groupSessions,
+		"activity":   groupSessions,
+		"dispatch":   groupSessions,
+		"login":      groupAccount,
+		"logout":     groupAccount,
+		"auth":       groupAccount,
+		"org":        groupControlPlane,
+		"project":    groupControlPlane,
+		"repo":       groupControlPlane,
+		"grant":      groupControlPlane,
+		"api":        groupControlPlane,
+	}
+
+	root := NewRootCmd()
+
+	registered := make(map[string]bool)
+	for _, g := range root.Groups() {
+		registered[g.ID] = true
+	}
+
+	for _, c := range root.Commands() {
+		if c.Hidden || c.Deprecated != "" {
+			continue
+		}
+		// Experimental commands are grouped by experimental.Register (visible
+		// only in developer/nightly builds) — not part of this table.
+		if c.GroupID == experimental.GroupID {
+			continue
+		}
+		name := c.Name()
+		if ungrouped[name] {
+			if c.GroupID != "" {
+				t.Errorf("%q should stay ungrouped, got GroupID %q", name, c.GroupID)
+			}
+			continue
+		}
+		want, ok := wantGroups[name]
+		if !ok {
+			t.Errorf("visible command %q missing from group table; assign it a group or add it to the ungrouped allowlist", name)
+			continue
+		}
+		if c.GroupID != want {
+			t.Errorf("%q GroupID = %q, want %q", name, c.GroupID, want)
+		}
+		if !registered[want] {
+			t.Errorf("group %q used by %q is not registered on root (cobra panics at Execute)", want, name)
+		}
 	}
 }
 

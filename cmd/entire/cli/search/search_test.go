@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
 const testOwner = "entirehq"
@@ -132,83 +132,7 @@ func TestParseGitHubRemote_EntireMirror(t *testing.T) {
 
 // -- Search() tests --
 
-func TestSearch_URLConstruction(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "ghp_test123",
-		Owner:       "myowner",
-		Repo:        "myrepo",
-		Query:       "find bugs",
-		Limit:       10,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if capturedReq.URL.Path != "/search/v1/search" {
-		t.Errorf("path = %s, want /search/v1/search", capturedReq.URL.Path)
-	}
-	if capturedReq.URL.Query().Get("q") != "find bugs" {
-		t.Errorf("q = %s, want 'find bugs'", capturedReq.URL.Query().Get("q"))
-	}
-	if capturedReq.URL.Query().Get("repo") != "myowner/myrepo" {
-		t.Errorf("repo = %s, want 'myowner/myrepo'", capturedReq.URL.Query().Get("repo"))
-	}
-	// types param should NOT be set — the CLI now requests all types
-	if capturedReq.URL.Query().Has("types") {
-		t.Errorf("types param should not be set, got %q", capturedReq.URL.Query().Get("types"))
-	}
-	if capturedReq.URL.Query().Get("limit") != "10" {
-		t.Errorf("limit = %s, want '10'", capturedReq.URL.Query().Get("limit"))
-	}
-	if capturedReq.Header.Get("Authorization") != "Bearer ghp_test123" {
-		t.Errorf("auth header = %s, want 'Bearer ghp_test123'", capturedReq.Header.Get("Authorization"))
-	}
-	if want := versioninfo.UserAgent(); capturedReq.Header.Get("User-Agent") != want {
-		t.Errorf("user-agent = %s, want %q", capturedReq.Header.Get("User-Agent"), want)
-	}
-}
-
-func TestSearch_ZeroLimitOmitsParam(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if capturedReq.URL.Query().Has("limit") {
-		t.Error("limit param should be omitted when zero")
-	}
-}
-
-func TestSearch_ErrorJSON(t *testing.T) {
+func TestCellV4_ErrorJSON(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -218,13 +142,7 @@ func TestSearch_ErrorJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "bad",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
+	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
 	if err == nil {
 		t.Fatal("expected error for 401")
 	}
@@ -233,7 +151,7 @@ func TestSearch_ErrorJSON(t *testing.T) {
 	}
 }
 
-func TestSearch_ErrorRawBody(t *testing.T) {
+func TestCellV4_ErrorRawBody(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -242,13 +160,7 @@ func TestSearch_ErrorRawBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
+	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
 	if err == nil {
 		t.Fatal("expected error for 502")
 	}
@@ -257,7 +169,7 @@ func TestSearch_ErrorRawBody(t *testing.T) {
 	}
 }
 
-func TestSearch_HTMLResponseNon200(t *testing.T) {
+func TestCellV4_HTMLResponseNon200(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -266,13 +178,7 @@ func TestSearch_HTMLResponseNon200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
+	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
 	if err == nil {
 		t.Fatal("expected error for HTML response")
 	}
@@ -282,7 +188,7 @@ func TestSearch_HTMLResponseNon200(t *testing.T) {
 	}
 }
 
-func TestSearch_HTMLResponseOn200(t *testing.T) {
+func TestCellV4_HTMLResponseOn200(t *testing.T) {
 	t.Parallel()
 
 	htmlBody := "<!DOCTYPE html><html><body>Website</body></html>"
@@ -291,13 +197,7 @@ func TestSearch_HTMLResponseOn200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
+	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
 	if err == nil {
 		t.Fatal("expected error for HTML response on 200")
 	}
@@ -306,7 +206,7 @@ func TestSearch_HTMLResponseOn200(t *testing.T) {
 	}
 }
 
-func TestSearch_ErrorFieldOn200(t *testing.T) {
+func TestCellV4_ErrorFieldOn200(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -315,13 +215,7 @@ func TestSearch_ErrorFieldOn200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
+	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
 	if err == nil {
 		t.Fatal("expected error when server returns 200 with error field")
 	}
@@ -330,7 +224,7 @@ func TestSearch_ErrorFieldOn200(t *testing.T) {
 	}
 }
 
-func TestSearch_SuccessWithResults(t *testing.T) {
+func TestCellV4_SuccessWithResults(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -338,13 +232,7 @@ func TestSearch_SuccessWithResults(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "test",
-	})
+	resp, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "test"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +254,7 @@ func TestSearch_SuccessWithResults(t *testing.T) {
 	}
 }
 
-func TestSearch_SuccessWithMultipleTypes(t *testing.T) {
+func TestCellV4_SuccessWithMultipleTypes(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -374,13 +262,7 @@ func TestSearch_SuccessWithMultipleTypes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "auth",
-	})
+	resp, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "auth"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,6 +409,63 @@ func TestSearch_ResultAccessors(t *testing.T) {
 	}
 }
 
+// TestResultID_SessionFallsBackToCheckpointID pins the ENT-1595 display id:
+// a server-folded legacy session has no sessionId, so ResultID falls back to its
+// checkpointId — giving the row a real id in the TUI and compact JSON instead of
+// a blank one. (Cross-cell dedupe uses DedupID, not ResultID; see below.)
+func TestResultID_SessionFallsBackToCheckpointID(t *testing.T) {
+	t.Parallel()
+	legacy := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", MatchedCheckpointID: "cp-9"}}
+	if got := legacy.ResultID(); got != "cp-9" {
+		t.Errorf("legacy session ResultID = %q, want checkpointId cp-9", got)
+	}
+	// A real session still keys on its sessionId even with a checkpoint anchor.
+	normal := Result{Type: TypeSession, Session: &SessionResult{SessionID: "sess-1", MatchedCheckpointID: "cp-1"}}
+	if got := normal.ResultID(); got != "sess-1" {
+		t.Errorf("real session ResultID = %q, want sess-1", got)
+	}
+}
+
+// TestDedupID_RepoQualifiesCheckpointScopedIDs pins the fix for the repo-scoped
+// checkpoint-id collision: checkpoint ids are unique only within a repo, so both
+// a raw checkpoint row and a folded legacy session's checkpoint fallback are
+// repo-qualified (and lowercased) in the dedupe key. Two repos' rows sharing a
+// checkpoint id must NOT collapse; ResultID stays the raw id for display.
+func TestDedupID_RepoQualifiesCheckpointScopedIDs(t *testing.T) {
+	t.Parallel()
+	// Legacy session: same checkpoint id, different repos → distinct dedupe keys.
+	sa := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", MatchedCheckpointID: "cp-dup", Org: "acme", Repo: "backend"}}
+	sb := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", MatchedCheckpointID: "cp-dup", Org: "acme", Repo: "frontend"}}
+	if sa.DedupID() == sb.DedupID() {
+		t.Errorf("legacy sessions with same checkpointId in different repos collide: %q", sa.DedupID())
+	}
+	if got := sa.ResultID(); got != "cp-dup" {
+		t.Errorf("ResultID = %q, want raw cp-dup for display", got)
+	}
+	// Checkpoint rows get the same treatment (they key on a raw, repo-scoped id).
+	ca := Result{Type: TypeCheckpoint, Checkpoint: &CheckpointResult{ID: "cp-dup", Org: "acme", Repo: "backend"}}
+	cb := Result{Type: TypeCheckpoint, Checkpoint: &CheckpointResult{ID: "cp-dup", Org: "acme", Repo: "frontend"}}
+	if ca.DedupID() == cb.DedupID() {
+		t.Errorf("checkpoints with same id in different repos collide: %q", ca.DedupID())
+	}
+	// Commit rows too: the same SHA lives in a fork and its upstream (two repos).
+	ma := Result{Type: TypeCommit, Commit: &CommitResult{CommitSHA: "sha-dup", Org: "acme", Repo: "backend"}}
+	mb := Result{Type: TypeCommit, Commit: &CommitResult{CommitSHA: "sha-dup", Org: "acme", Repo: "fork"}}
+	if ma.DedupID() == mb.DedupID() {
+		t.Errorf("same commit SHA in a fork and its upstream collide: %q", ma.DedupID())
+	}
+	// Casing skew across cells (git remote vs repo index) must still dedupe.
+	cUpper := Result{Type: TypeCheckpoint, Checkpoint: &CheckpointResult{ID: "cp-dup", Org: "acme", Repo: "Backend"}}
+	if ca.DedupID() != cUpper.DedupID() {
+		t.Errorf("casing skew leaks a duplicate: %q vs %q", ca.DedupID(), cUpper.DedupID())
+	}
+	// A real session's DedupID is just its sessionId (no repo qualification).
+	normal := Result{Type: TypeSession, Session: &SessionResult{SessionID: "sess-1", Org: "acme", Repo: "backend"}}
+	if got := normal.DedupID(); got != "sess-1" {
+		t.Errorf("real session DedupID = %q, want sess-1", got)
+	}
+}
+
 func TestSearch_ResultJSONRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -576,290 +515,32 @@ func TestSearch_ResultJSONRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSearch_FilterParams(t *testing.T) {
+// TestSearch_MetaDecodesRerankScore guards that query-serve's rerankScore is
+// actually parsed off the wire — the cross-cell merge orders tier 0/1 by it, so
+// a dropped field silently reverts the CLI to pre-rerank ordering.
+func TestSearch_MetaDecodesRerankScore(t *testing.T) {
 	t.Parallel()
 
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-		Author:      testAuthor,
-		Date:        testDateWeek,
-	})
-	if err != nil {
+	raw := `{"type":"commit","data":{"commitSha":"abc123","org":"o","repo":"r"},"searchMeta":{"matchType":"both","score":6,"tier":1,"rerankScore":0.42,"bm25Score":6}}`
+	var r Result
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
 		t.Fatal(err)
 	}
-
-	if capturedReq.URL.Query().Get("author") != testAuthor {
-		t.Errorf("author = %s, want %q", capturedReq.URL.Query().Get("author"), testAuthor)
+	if r.Meta.RerankScore == nil {
+		t.Fatal("rerankScore decoded as nil, want 0.42")
 	}
-	if capturedReq.URL.Query().Get("date") != testDateWeek {
-		t.Errorf("date = %s, want 'week'", capturedReq.URL.Query().Get("date"))
+	if *r.Meta.RerankScore != 0.42 {
+		t.Errorf("decoded rerankScore = %f, want 0.42", *r.Meta.RerankScore)
 	}
-}
 
-func TestSearch_ExplicitRepoParam(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "default-owner",
-		Repo:        "default-repo",
-		Query:       "q",
-		Repos:       []string{"owner-one/repo-a"},
-	})
-	if err != nil {
+	// Absent rerankScore must stay nil (a cell whose rerank fell back), not 0,
+	// so rerankOf can distinguish "unscored" from a genuine 0 score.
+	var noRerank Result
+	if err := json.Unmarshal([]byte(`{"type":"commit","data":{"commitSha":"d","org":"o","repo":"r"},"searchMeta":{"score":1,"tier":1}}`), &noRerank); err != nil {
 		t.Fatal(err)
 	}
-
-	if got := capturedReq.URL.Query()["repo"]; len(got) != 1 || got[0] != "owner-one/repo-a" {
-		t.Errorf("repo params = %v, want %v", got, []string{"owner-one/repo-a"})
-	}
-}
-
-func TestSearch_DefaultRepoParam(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "default-owner",
-		Repo:        "default-repo",
-		Query:       "q",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got := capturedReq.URL.Query()["repo"]; len(got) != 1 || got[0] != "default-owner/default-repo" {
-		t.Errorf("repo params = %v, want %v", got, []string{"default-owner/default-repo"})
-	}
-}
-
-func TestSearch_AllReposFilterOmitsRepoParam(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "default-owner",
-		Repo:        "default-repo",
-		Query:       "q",
-		Repos:       []string{AllReposFilter},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got := capturedReq.URL.Query()["repo"]; len(got) != 0 {
-		t.Errorf("repo params = %v, want omitted for all-repos search", got)
-	}
-}
-
-func TestSearch_AllReposFlagOmitsRepoParam(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "default-owner",
-		Repo:        "default-repo",
-		Query:       "q",
-		AllRepos:    true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got := capturedReq.URL.Query()["repo"]; len(got) != 0 {
-		t.Errorf("repo params = %v, want omitted for AllRepos=true", got)
-	}
-}
-
-func TestSearch_ExplicitRepoWinsOverAllRepos(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	// --all-repos alongside an explicit owner/name filter must scope to the
-	// explicit repo (the more specific filter wins), not search all repos.
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "default-owner",
-		Repo:        "default-repo",
-		Query:       "q",
-		AllRepos:    true,
-		Repos:       []string{"owner/explicit"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got := capturedReq.URL.Query()["repo"]; len(got) != 1 || got[0] != "owner/explicit" {
-		t.Errorf("repo params = %v, want [owner/explicit]", got)
-	}
-}
-
-func TestSearch_MultipleExplicitReposRejected(t *testing.T) {
-	t.Parallel()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  "http://example.com",
-		GitHubToken: "tok",
-		Owner:       "default-owner",
-		Repo:        "default-repo",
-		Query:       "q",
-		Repos:       []string{"owner-one/repo-a", "owner-two/repo-b"},
-	})
-	if err == nil {
-		t.Fatal("expected error for multiple explicit repo filters")
-	}
-	if got := err.Error(); got != "only one explicit repo filter is currently supported" {
-		t.Errorf("error = %q", got)
-	}
-}
-
-func TestSearch_PageParam(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 2}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-		Page:        2,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if capturedReq.URL.Query().Get("page") != "2" {
-		t.Errorf("page = %s, want '2'", capturedReq.URL.Query().Get("page"))
-	}
-}
-
-func TestSearch_ZeroPageOmitsParam(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if capturedReq.URL.Query().Has("page") {
-		t.Error("page param should be omitted when zero")
-	}
-}
-
-func TestSearch_EmptyFiltersOmitParams(t *testing.T) {
-	t.Parallel()
-
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		resp := Response{Results: []Result{}, Total: 0, Page: 1}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
-	}))
-	defer srv.Close()
-
-	_, err := Search(context.Background(), Config{
-		ServiceURL:  srv.URL,
-		GitHubToken: "tok",
-		Owner:       "o",
-		Repo:        "r",
-		Query:       "q",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if capturedReq.URL.Query().Has("author") {
-		t.Error("author param should be omitted when empty")
-	}
-	if capturedReq.URL.Query().Has("date") {
-		t.Error("date param should be omitted when empty")
+	if noRerank.Meta.RerankScore != nil {
+		t.Errorf("absent rerankScore = %v, want nil", *noRerank.Meta.RerankScore)
 	}
 }
 
@@ -977,15 +658,23 @@ func TestParseSearchInput_AllReposFilter(t *testing.T) {
 	}
 }
 
-func TestValidateRepoFilters_RejectsMultipleRepos(t *testing.T) {
+func TestValidateRepoFilters_AllowsMultipleRepos(t *testing.T) {
 	t.Parallel()
 
-	err := ValidateRepoFilters([]string{"entirehq/entire.io", "entireio/cli"})
-	if err == nil {
-		t.Fatal("expected validation error")
+	if err := ValidateRepoFilters([]string{"entirehq/entire.io", "entireio/cli"}); err != nil {
+		t.Errorf("expected multiple valid repo filters to be accepted, got: %v", err)
 	}
-	if got := err.Error(); got != "only one explicit repo filter is currently supported" {
-		t.Errorf("error = %q", got)
+}
+
+func TestValidateRepoFilters_RejectsInvalidAmongMultiple(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateRepoFilters([]string{"entireio/cli", "AGENTS.md"})
+	if err == nil {
+		t.Fatal("expected validation error for an invalid repo among valid ones")
+	}
+	if got := err.Error(); !strings.Contains(got, `invalid repo filter "AGENTS.md"`) {
+		t.Errorf("error = %q, want it to name the invalid repo", got)
 	}
 }
 
@@ -996,9 +685,49 @@ func TestValidateRepoFilters_RejectsInvalidRepoValue(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
-	want := "invalid repo filter \"AGENTS.md\": expected owner/name or *; if you meant all repos, quote the asterisk: --repo '*'"
+	want := "invalid repo filter \"AGENTS.md\": expected owner/name, gh/owner/repo, a repo ULID, or *; if you meant all repos, quote the asterisk: --repo '*'"
 	if got := err.Error(); got != want {
 		t.Errorf("error = %q, want %q", got, want)
+	}
+}
+
+// The CLI --repo help advertises gh/owner/repo, et/proj/repo, and raw ULIDs,
+// and the semantic v4 lookup + code-search resolver both handle them. Validation
+// must accept the same set so it never rejects a filter that would resolve
+// downstream (ENT-1047 review finding).
+func TestValidateRepoFilters_AcceptsAdvertisedFormats(t *testing.T) {
+	t.Parallel()
+
+	valid := []string{
+		"entireio/cli",               // bare owner/name slug
+		"gh/entireio/cli",            // GitHub prefixed path
+		"et/proj/repo",               // Entire project prefixed path
+		"git/owner/repo",             // generic git prefixed path
+		"01ARZ3NDEKTSV4RRFFQ69G5FAV", // raw repo ULID (canonical)
+		"*",                          // all-repos wildcard
+	}
+	for _, repo := range valid {
+		if err := ValidateRepoFilters([]string{repo}); err != nil {
+			t.Errorf("ValidateRepoFilters(%q) = %v, want nil", repo, err)
+		}
+	}
+}
+
+func TestValidateRepoFilters_RejectsMalformed(t *testing.T) {
+	t.Parallel()
+
+	invalid := []string{
+		"AGENTS.md",  // bare filename, not a ULID or slug
+		"owner/",     // empty name segment
+		"/repo",      // empty owner segment
+		"a/b/c/d",    // too many path segments
+		"owner name", // contains a space
+		"gh//repo",   // empty middle segment in a prefixed path
+	}
+	for _, repo := range invalid {
+		if err := ValidateRepoFilters([]string{repo}); err == nil {
+			t.Errorf("ValidateRepoFilters(%q) = nil, want validation error", repo)
+		}
 	}
 }
 

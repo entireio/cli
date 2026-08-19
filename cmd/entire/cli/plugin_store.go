@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -123,6 +124,26 @@ func PluginDataDir(name string) (string, error) {
 	return filepath.Join(parent, pluginManagedDataSubdir, name), nil
 }
 
+// hasTerminalControlChars reports whether s holds a character a terminal acts
+// on rather than displays.
+//
+// Index entries are attacker-influenced by this package's own threat model, and
+// they are printed straight to the terminal by search, info, and the browse
+// picker. An escape sequence in a name, description, or repo URL could clear
+// the line, reposition the cursor, or repaint a row — spoofing the "[official]"
+// marker, or the repository name in the very confirmation whose job is to say
+// where the binary comes from. Bidi controls are included because they do the
+// same thing by reordering rather than escaping.
+//
+// Rejected, not stripped: a sanitized value would no longer be the value that
+// gets used, and the gap between the two is its own bug. Bad rows are dropped
+// at index load, which is what the catalog already does with invalid entries.
+func hasTerminalControlChars(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool {
+		return unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r)
+	})
+}
+
 // validatePluginName mirrors the dispatcher's isPluginCandidate rules and
 // returns a descriptive error for invalid names. Used by every entry point
 // that takes a plugin name from outside the dispatcher (data dir resolution,
@@ -130,6 +151,9 @@ func PluginDataDir(name string) (string, error) {
 func validatePluginName(name string) error {
 	if name == "" {
 		return errors.New("plugin name is empty")
+	}
+	if hasTerminalControlChars(name) {
+		return fmt.Errorf("plugin name %q must not contain control characters", name)
 	}
 	if strings.HasPrefix(name, "-") {
 		return fmt.Errorf("plugin name %q must not start with '-'", name)

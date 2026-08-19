@@ -10,9 +10,11 @@ import (
 
 // EnvTokenVar is the environment variable that, when set, bypasses
 // contexts.json and the keyring entirely: its value is used verbatim as the
-// login JWT for repo-scoped token exchange. This is the CI / workload-identity
-// path — a runner injects a short-lived login or sa-session JWT and clones
-// without an interactive `entire login`.
+// bearer for control-plane and git data-plane requests. This is the CI /
+// workload-identity path — a runner injects a short-lived login or sa-session
+// JWT and clones without an interactive `entire login`. The explicit
+// `entire auth token --jurisdiction` command remains a separate path and uses
+// the value as the subject of its requested jurisdiction-token exchange.
 const EnvTokenVar = "ENTIRE_TOKEN"
 
 // ParseEnvToken is the single owner of the ENTIRE_TOKEN validation sequence
@@ -36,20 +38,20 @@ func ParseEnvToken(raw string) (coreURL, token string, err error) {
 
 // CoreURLFromEnvToken derives the home-region core URL from an ENTIRE_TOKEN
 // JWT's audience claim. Login and sa-session JWTs carry aud=<home-region URL>,
-// which is what STS routing keys on — so we read aud, not iss (iss may be a
-// regional core that can't mint the cross-region exchange).
+// so we read aud, not iss (iss may be a different regional core).
 //
-// SECURITY: the returned URL becomes the host the env token is POSTed to as a
-// subject_token during exchange. ParseClaims does NOT verify the signature, so
-// the audience is attacker-controlled if a forged token is injected. This
-// function only enforces the *shape* of a safe endpoint (https, bare origin);
-// the caller MUST additionally verify the URL is a trusted core for the target
-// cluster (see clusterdiscovery.ResolveClusterCores) before exchanging, or a
-// forged aud could redirect the token to an arbitrary host.
+// SECURITY: ParseClaims does NOT verify the signature, so the audience is
+// attacker-controlled if a forged token is injected. This function only
+// enforces the *shape* of a safe core origin (https, bare origin). The git
+// helper uses the result only after checking it against the target cluster's
+// advertised CoreURLs, then sends the env token directly to the data plane.
+// Control-plane clients use the result as their bearer target, while the
+// explicit `entire auth token --jurisdiction` path uses it as the STS host for
+// that command's requested exchange.
 //
 // Structural rules, all required:
 //   - the aud is a well-formed absolute URL,
-//   - scheme is https (no cleartext token exchange),
+//   - scheme is https (no cleartext token transmission),
 //   - it carries a host and no userinfo, path, query, or fragment — entire
 //     cores are bare origins (https://core.example.com), so anything richer is
 //     either a misconfigured token or an attempt to smuggle a path/redirect.

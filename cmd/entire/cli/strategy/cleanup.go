@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -18,13 +17,6 @@ import (
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
-)
-
-const (
-	// sessionGracePeriod is the minimum age a session must have before it can be
-	// considered orphaned. This protects active sessions that haven't created
-	// their first checkpoint yet.
-	sessionGracePeriod = 10 * time.Minute
 )
 
 // CleanupType identifies the type of item to clean up.
@@ -281,99 +273,6 @@ func DeleteShadowBranches(ctx context.Context, branches []string) (deleted []str
 	}
 
 	return deleted, failed, nil
-}
-
-// ListOrphanedSessionStates returns session state files that are orphaned.
-// A session state is orphaned if:
-//   - No checkpoints on the configured committed read ref reference this session ID
-//   - No shadow branch exists for the session's base commit
-//
-// This is strategy-agnostic as session states are shared by all strategies.
-func ListOrphanedSessionStates(ctx context.Context) ([]CleanupItem, error) {
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open git repository: %w", err)
-	}
-	defer repo.Close()
-
-	// Get all session states
-	store, err := session.NewStateStore(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create state store: %w", err)
-	}
-
-	states, err := store.List(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list session states: %w", err)
-	}
-
-	if len(states) == 0 {
-		return []CleanupItem{}, nil
-	}
-
-	// Get all committed checkpoints from the configured read ref to find which sessions have checkpoints
-	cpStores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("open checkpoint store: %w", err)
-	}
-
-	sessionsWithCheckpoints := make(map[string]bool)
-	checkpoints, listErr := cpStores.Persistent.List(ctx)
-	if listErr == nil {
-		for _, cp := range checkpoints {
-			// cp.SessionID is the most-recent session in a multi-session checkpoint;
-			// cp.SessionIDs lists every session that contributed. Track all of them so
-			// archived sessions of condensed checkpoints aren't flagged as orphaned.
-			sessionsWithCheckpoints[cp.SessionID] = true
-			for _, sid := range cp.SessionIDs {
-				sessionsWithCheckpoints[sid] = true
-			}
-		}
-	}
-
-	// Get all shadow branches as a set for quick lookup
-	shadowBranches, _ := ListShadowBranches(ctx) //nolint:errcheck // Best effort
-	shadowBranchSet := make(map[string]bool)
-	for _, branch := range shadowBranches {
-		shadowBranchSet[branch] = true
-	}
-
-	var orphaned []CleanupItem
-	now := time.Now()
-
-	for _, state := range states {
-		// Skip sessions that started recently - they may be actively in use
-		// but haven't created their first checkpoint yet
-		if now.Sub(state.StartedAt) < sessionGracePeriod {
-			continue
-		}
-
-		// Imported sessions are read-only and commit-less by design — no shadow
-		// branch is ever expected. Never offer them for cleanup.
-		if state.Kind.IsImported() {
-			continue
-		}
-
-		// Check if session has checkpoints in committed checkpoint storage
-		hasCheckpoints := sessionsWithCheckpoints[state.SessionID]
-
-		// Check if shadow branch exists for this session's base commit and worktree
-		// Shadow branches are now worktree-specific: entire/<commit[:7]>-<worktreeHash[:6]>
-		expectedBranch := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		hasShadowBranch := shadowBranchSet[expectedBranch]
-
-		// Session is orphaned if it has no checkpoints AND no shadow branch
-		if !hasCheckpoints && !hasShadowBranch {
-			reason := "no checkpoints or shadow branch found"
-			orphaned = append(orphaned, CleanupItem{
-				Type:   CleanupTypeSessionState,
-				ID:     state.SessionID,
-				Reason: reason,
-			})
-		}
-	}
-
-	return orphaned, nil
 }
 
 // DeleteOrphanedSessionStates deletes the specified session state files.

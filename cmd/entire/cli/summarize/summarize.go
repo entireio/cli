@@ -29,9 +29,17 @@ import (
 //   - filesTouched: list of files modified during the session
 //   - agentType: the agent type to determine transcript format
 //   - generator: summary generator to use (if nil, uses default ClaudeGenerator)
+//   - progress: optional callback for streaming progress updates; nil suppresses reporting
 //
 // Returns nil, error if transcript is empty or cannot be parsed.
-func GenerateFromTranscript(ctx context.Context, transcriptBytes redact.RedactedBytes, filesTouched []string, agentType types.AgentType, generator Generator) (*checkpoint.Summary, error) {
+func GenerateFromTranscript(
+	ctx context.Context,
+	transcriptBytes redact.RedactedBytes,
+	filesTouched []string,
+	agentType types.AgentType,
+	generator Generator,
+	progress agent.ProgressFn,
+) (*checkpoint.Summary, error) {
 	if transcriptBytes.Len() == 0 {
 		return nil, errors.New("empty transcript")
 	}
@@ -52,6 +60,19 @@ func GenerateFromTranscript(ctx context.Context, transcriptBytes redact.Redacted
 
 	if generator == nil {
 		generator = &ClaudeGenerator{}
+	}
+
+	// Forward progress to streaming-capable generators without changing the
+	// Generator interface. Production callers (resolveCheckpointSummaryProvider)
+	// always pass *TextGeneratorAdapter; *ClaudeGenerator is the
+	// fallback when GenerateFromTranscript is called with a nil generator
+	// (some tests and legacy paths). Both implementations have a private
+	// progress field — type-assert each shape and set it.
+	switch g := generator.(type) {
+	case *ClaudeGenerator:
+		g.progress = progress
+	case *TextGeneratorAdapter:
+		g.progress = progress
 	}
 
 	summary, err := generator.Generate(ctx, input)
@@ -140,6 +161,8 @@ func BuildCondensedTranscriptFromBytes(content redact.RedactedBytes, agentType t
 		return buildCondensedTranscriptFromOpenCode(content)
 	case agent.AgentTypeCodex:
 		return buildCondensedTranscriptFromCodex(content)
+	case agent.AgentTypePi:
+		return buildCondensedTranscriptFromPi(content)
 	case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeUnknown:
 		// Claude/cursor format - fall through to shared logic below
 	}
@@ -159,6 +182,24 @@ func BuildCondensedTranscriptFromBytes(content redact.RedactedBytes, agentType t
 		return compactEntries, nil
 	}
 	return entries, nil
+}
+
+// buildCondensedTranscriptFromPi accepts both native Pi v3 session JSONL and
+// already-compacted Pi JSONL. Check compact form first because feeding compact
+// lines back through Compact would treat them as generic Claude-style JSONL.
+func buildCondensedTranscriptFromPi(content redact.RedactedBytes) ([]Entry, error) {
+	if entries, err := buildCondensedTranscriptFromCompact(content); err == nil && len(entries) > 0 {
+		return entries, nil
+	}
+
+	compacted, err := compact.Compact(content, compact.MetadataFields{
+		Agent:      "pi",
+		CLIVersion: "summarize",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to compact Pi transcript: %w", err)
+	}
+	return buildCondensedTranscriptFromCompact(redact.AlreadyRedacted(compacted))
 }
 
 func buildCondensedTranscriptFromCompact(redacted redact.RedactedBytes) ([]Entry, error) {

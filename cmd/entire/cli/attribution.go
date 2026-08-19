@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
@@ -151,10 +152,11 @@ func newBlameCmd() *cobra.Command {
 		// Hidden from `entire help` while the feature is still maturing —
 		// advertised under `entire labs`, and `entire blame` / `entire blame
 		// --help` keep working normally.
-		Hidden: true,
-		Short:  "Show which lines came from Entire checkpoints",
-		Long:   "Show git-blame-style line attribution enriched with Entire checkpoint metadata.\n\nLimit to a line or range with <file>:12, <file>:12-20, or the --line flag.",
-		Args:   cobra.ExactArgs(1),
+		Hidden:  true,
+		Short:   "Show which lines came from Entire checkpoints",
+		Long:    "Show git-blame-style line attribution enriched with Entire checkpoint metadata.\n\nLimit to a line or range with <file>:12, <file>:12-20, or the --line flag.",
+		Example: "  entire blame src/auth.go\n  entire blame src/auth.go:10-40 --json",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAttributionBlame(cmd.Context(), cmd.OutOrStdout(), args[0], attributionBlameOptions{
 				LineFlag: lineFlag,
@@ -177,13 +179,16 @@ func newWhyCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use: "why <file>[:line]",
-		// Hidden from `entire help` while the feature is still maturing —
-		// advertised under `entire labs`, and `entire why` / `entire why
-		// --help` keep working normally.
-		Hidden: true,
-		Short:  "Show why a line exists",
-		Long:   "Explain the commit, checkpoint, prompt, and session behind a file or line.\n\nTarget a specific line with <file>:12 or the --line flag.\n\nUse --tui to browse the file interactively (TTY only; non-interactive runs fall back to the plain output).",
-		Args:   cobra.ExactArgs(1),
+		// --help` keep working normally. The agent-help annotation keeps
+		// `entire agent-help why` resolving in stable builds: agents that
+		// learn of `why` (labs, docs, a user's prompt) verify commands
+		// against agent-help, so it must know the command exists.
+		Annotations: map[string]string{agentHelpAnnotation: agentHelpAnnotationEnabled},
+		Hidden:      true,
+		Short:       "Show why a line exists",
+		Long:        "Explain the commit, checkpoint, prompt, and session behind a file or line.\n\nTarget a specific line with <file>:12 or the --line flag.\n\nUse --tui to browse the file interactively (TTY only; non-interactive runs fall back to the plain output).",
+		Example:     "  entire why src/auth.go:42\n  entire why src/auth.go:42 --json",
+		Args:        cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAttributionWhy(cmd.Context(), cmd.OutOrStdout(), args[0], attributionWhyOptions{
 				LineFlag: lineFlag,
@@ -389,7 +394,7 @@ func newAttributionResolver(ctx context.Context, fetchOnMiss bool) (*attribution
 		return nil, fmt.Errorf("not a git repository: %w", err)
 	}
 
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}

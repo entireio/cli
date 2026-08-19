@@ -326,14 +326,15 @@ func newHooksGitPrePushCmd() *cobra.Command {
 			defer g.span.End()
 			g.logInvoked(slog.String("remote", remote))
 
-			hookErr := g.strategy.PrePush(g.ctx, remote)
+			hookErr := g.strategy.PrePushFromGitHook(g.ctx, remote)
 			g.logCompleted(hookErr)
 
 			// Propagate the error so the hook script exits non-zero and
 			// git push aborts the entire batch. PrePush itself only
 			// returns errors for privacy-critical failures (OPF rewrite —
 			// e.g., V1DivergedError, BootstrapTooLargeError,
-			// V1RefMovedError, OPFRuntimeFailedError); transient
+			// V1RefMovedError, OPFRuntimeFailedError,
+			// OPFNoCategoriesError); transient
 			// checkpoint-push failures are logged and swallowed before
 			// reaching this point. See strategy/manual_commit_push.go
 			// for the contract. We wrap with a short "pre-push:" prefix

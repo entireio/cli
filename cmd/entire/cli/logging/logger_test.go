@@ -18,7 +18,6 @@ const (
 	testSessionID = "2025-01-15-test-session"
 	testComponent = "hooks"
 	testAgent     = "claude-code"
-	levelINFO     = "INFO"
 )
 
 // testLogFilePath returns the expected log file path for a test temp directory.
@@ -247,6 +246,93 @@ func TestInit_FallsBackToStderrOnError(t *testing.T) {
 	Close()
 }
 
+// EnsureInitialized must route logs to the file for commands that never call
+// Init — otherwise they land on the user's terminal via slog.Default().
+func TestEnsureInitialized_InitializesWhenUnset(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	initGitRepo(t, tmpDir)
+	resetLogger()
+
+	done := EnsureInitialized(context.Background())
+	Info(context.Background(), "swept a session")
+	done()
+
+	data, err := os.ReadFile(testLogFilePath(tmpDir))
+	if err != nil {
+		t.Fatalf("EnsureInitialized() did not create a log file: %v", err)
+	}
+	if !strings.Contains(string(data), "swept a session") {
+		t.Errorf("log file missing the message; got %q", string(data))
+	}
+}
+
+// A caller reachable from a hook must not close the hook's log file out from
+// under it, so the cleanup returned for an already-initialized logger is inert.
+func TestEnsureInitialized_NoOpWhenAlreadyInitialized(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	initGitRepo(t, tmpDir)
+	resetLogger()
+
+	if err := Init(context.Background(), testSessionID); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	defer Close()
+
+	done := EnsureInitialized(context.Background())
+	done() // must not tear down the logger installed by Init above
+
+	Info(context.Background(), "still logging after ensure cleanup")
+	Close() // flush
+
+	data, err := os.ReadFile(testLogFilePath(tmpDir))
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if !strings.Contains(string(data), "still logging after ensure cleanup") {
+		t.Errorf("EnsureInitialized cleanup closed a logger it did not open; got %q", string(data))
+	}
+	if !strings.Contains(string(data), testSessionID) {
+		t.Errorf("session ID from the original Init was lost; got %q", string(data))
+	}
+}
+
+// Logging after the cleanup must fall back to slog.Default(), not disappear.
+// The handler holds the buffered writer by value, so a logger left in place
+// after Close writes into an orphaned buffer over a closed file: short lines are
+// never flushed and longer ones fail. `entire doctor` hits exactly this — it
+// keeps condensing sessions after the exited-session sweep tears its logging
+// down.
+func TestEnsureInitialized_CleanupRestoresFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	initGitRepo(t, tmpDir)
+	resetLogger()
+
+	done := EnsureInitialized(context.Background())
+	Info(context.Background(), "during the sweep")
+	done()
+
+	var fallback bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&fallback, nil)))
+	defer slog.SetDefault(prev)
+
+	Info(context.Background(), "after the sweep")
+
+	if !strings.Contains(fallback.String(), "after the sweep") {
+		t.Errorf("line logged after cleanup was swallowed; slog.Default() got %q", fallback.String())
+	}
+	data, err := os.ReadFile(testLogFilePath(tmpDir))
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if !strings.Contains(string(data), "during the sweep") {
+		t.Errorf("log file missing the swept line; got %q", string(data))
+	}
+}
+
 func TestClose_SafeToCallMultipleTimes(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -309,10 +395,7 @@ func TestLogging_IncludesContextValues(t *testing.T) {
 	}
 
 	// Create context with values
-	// Note: session_id from context is skipped when Init() has already set a global session ID
 	ctx := context.Background()
-	ctx = WithSession(ctx, "context-session-id") // Will be ignored, global takes precedence
-	ctx = WithToolCall(ctx, "toolu_123")
 	ctx = WithComponent(ctx, testComponent)
 	ctx = WithAgent(ctx, testAgent)
 
@@ -333,62 +416,15 @@ func TestLogging_IncludesContextValues(t *testing.T) {
 		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, content)
 	}
 
-	// session_id comes from Init() when set, not from context (to avoid duplicates)
+	// session_id comes from Init()
 	if logEntry["session_id"] != sessionID {
 		t.Errorf("Expected session_id='%s' (from Init), got %v", sessionID, logEntry["session_id"])
-	}
-	if logEntry["tool_call_id"] != "toolu_123" {
-		t.Errorf("Expected tool_call_id='toolu_123', got %v", logEntry["tool_call_id"])
 	}
 	if logEntry["component"] != testComponent {
 		t.Errorf("Expected component='%s', got %v", testComponent, logEntry["component"])
 	}
 	if logEntry["agent"] != testAgent {
 		t.Errorf("Expected agent='%s', got %v", testAgent, logEntry["agent"])
-	}
-}
-
-func TestLogging_ParentSessionID(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	initGitRepo(t, tmpDir)
-
-	sessionID := "2025-01-15-parent-test"
-	err := Init(context.Background(), sessionID)
-	if err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
-
-	// Create parent context, then child context
-	// Note: WithSession sets parent_session_id when there's already a session in context
-	ctx := context.Background()
-	ctx = WithSession(ctx, "parent-session")
-	ctx = WithSession(ctx, "child-session") // This sets parent_session_id to "parent-session"
-
-	Info(ctx, "nested session test")
-
-	Close()
-
-	// Read log file
-	content, err := os.ReadFile(testLogFilePath(tmpDir))
-	if err != nil {
-		t.Fatalf("Failed to read log file: %v", err)
-	}
-
-	// Parse as JSON
-	var logEntry map[string]interface{}
-	if err := json.Unmarshal(content, &logEntry); err != nil {
-		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, content)
-	}
-
-	// session_id comes from Init(), context session_id is skipped to avoid duplicates
-	if logEntry["session_id"] != sessionID {
-		t.Errorf("Expected session_id='%s' (from Init), got %v", sessionID, logEntry["session_id"])
-	}
-	// parent_session_id from context is still included
-	if logEntry["parent_session_id"] != "parent-session" {
-		t.Errorf("Expected parent_session_id='parent-session', got %v", logEntry["parent_session_id"])
 	}
 }
 
@@ -404,7 +440,7 @@ func TestLogging_AdditionalAttrs(t *testing.T) {
 		t.Fatalf("Init() error = %v", err)
 	}
 
-	ctx := WithSession(context.Background(), "context-session") // Will be ignored, global takes precedence
+	ctx := context.Background()
 
 	// Log with additional attrs
 	Info(ctx, "attrs test",
@@ -440,36 +476,6 @@ func TestLogging_AdditionalAttrs(t *testing.T) {
 	if logEntry["success"] != true {
 		t.Errorf("Expected success=true, got %v", logEntry["success"])
 	}
-}
-
-func TestLogging_ContextSessionID_WhenNoGlobalSet(t *testing.T) {
-	// Reset any global state to ensure no global session ID
-	resetLogger()
-
-	// Create a buffer to capture output since we won't use Init()
-	var buf bytes.Buffer
-	mu.Lock()
-	logger = createLogger(&buf, slog.LevelInfo)
-	mu.Unlock()
-
-	// Set session_id via context (no global set)
-	ctx := WithSession(context.Background(), "context-only-session")
-	ctx = WithComponent(ctx, testComponent)
-
-	Info(ctx, "context session test")
-
-	// Parse the output
-	var logEntry map[string]interface{}
-	if err := json.Unmarshal(buf.Bytes(), &logEntry); err != nil {
-		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, buf.String())
-	}
-
-	// When no global session ID is set, context session_id should be used
-	if logEntry["session_id"] != "context-only-session" {
-		t.Errorf("Expected session_id='context-only-session' from context, got %v", logEntry["session_id"])
-	}
-
-	resetLogger()
 }
 
 func TestLogging_ConcurrentInitAndLog(t *testing.T) {

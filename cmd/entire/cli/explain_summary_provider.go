@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
@@ -19,21 +20,48 @@ import (
 )
 
 var (
-	loadSummarySettings            = LoadEntireSettings
-	loadSummarySettingsFromFile    = settings.LoadFromFile
-	saveLocalSummarySettings       = SaveEntireSettingsLocal
-	getSummaryAgent                = agent.Get
-	listRegisteredAgents           = agent.List
-	isSummaryCLIAvailable          = agent.IsSummaryCLIAvailable
-	discoverSummaryProviders       = external.DiscoverAndRegister
-	discoverSummaryProvidersAlways = external.DiscoverAndRegisterAlways
+	loadSummarySettings             = LoadEntireSettings
+	loadSummarySettingsFromFile     = settings.LoadFromFile
+	saveLocalSummarySettings        = SaveEntireSettingsLocal
+	getSummaryAgent                 = agent.Get
+	listRegisteredAgents            = agent.List
+	isSummaryCLIAvailable           = agent.IsSummaryCLIAvailable
+	discoverSummaryProviders        = external.DiscoverAndRegister
+	discoverSummaryProvidersAlways  = external.DiscoverAndRegisterAlways
+	discoverDispatchSummaryProvider = external.DiscoverAndRegisterNamedAlways
+	canPromptForSummaryProvider     = interactive.CanPromptInteractively
+	promptSummaryProvider           = promptForSummaryProvider
 )
 
 type checkpointSummaryProvider struct {
-	Name        types.AgentName
-	DisplayName string
-	Model       string
-	Generator   summarize.Generator
+	Name          types.AgentName
+	DisplayName   string
+	Model         string
+	TextGenerator agent.TextGenerator
+	Generator     summarize.Generator
+	// Streaming reports whether the underlying text generator supports the
+	// streaming path (the same predicate TextGeneratorAdapter dispatches on),
+	// so the explain layer can attribute timeouts to the streaming diagnostic
+	// even when the provider stalls before its first progress event.
+	Streaming bool
+}
+
+func resolveDispatchSummaryProvider(ctx context.Context, w io.Writer, override string) (*checkpointSummaryProvider, error) {
+	override = strings.TrimSpace(override)
+	if override == "" {
+		return resolveCheckpointSummaryProvider(ctx, w)
+	}
+
+	providerName := types.AgentName(override)
+	if _, err := getSummaryAgent(providerName); err != nil {
+		if err := discoverDispatchSummaryProvider(ctx, providerName); err != nil {
+			return nil, err
+		}
+	}
+	if err := validateSummaryProvider(override); err != nil {
+		return nil, err
+	}
+	return buildCheckpointSummaryProvider(providerName, "")
 }
 
 func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkpointSummaryProvider, error) {
@@ -65,11 +93,11 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 	case 1:
 		return autoSelectSummaryProvider(ctx, w, candidates[0].Name, "non-interactive auto-select: single installed provider")
 	default:
-		if !interactive.CanPromptInteractively() {
+		if !canPromptForSummaryProvider() {
 			return autoSelectSummaryProvider(ctx, w, candidates[0].Name, "non-interactive auto-select: first detected of multiple")
 		}
 
-		selected, err := promptForSummaryProvider(candidates)
+		selected, err := promptSummaryProvider(candidates)
 		if err != nil {
 			return nil, err
 		}
@@ -167,6 +195,10 @@ func promptForSummaryProvider(providers []checkpointSummaryProvider) (types.Agen
 }
 
 func buildCheckpointSummaryProvider(name types.AgentName, model string) (*checkpointSummaryProvider, error) {
+	return buildCheckpointSummaryProviderWithEffectiveModel(name, summarize.ResolveModel(name, model))
+}
+
+func buildCheckpointSummaryProviderWithEffectiveModel(name types.AgentName, effectiveModel string) (*checkpointSummaryProvider, error) {
 	ag, err := getSummaryAgent(name)
 	if err != nil {
 		return nil, fmt.Errorf("loading summary provider %s: %w", name, err)
@@ -177,12 +209,14 @@ func buildCheckpointSummaryProvider(name types.AgentName, model string) (*checkp
 		return nil, fmt.Errorf("agent %s does not support summary generation", name)
 	}
 
-	effectiveModel := summarize.ResolveModel(name, model)
+	_, streaming := agent.AsStreamingTextGenerator(textGenerator)
 
 	return &checkpointSummaryProvider{
-		Name:        name,
-		DisplayName: string(ag.Type()),
-		Model:       effectiveModel,
+		Name:          name,
+		DisplayName:   string(ag.Type()),
+		Model:         effectiveModel,
+		TextGenerator: textGenerator,
+		Streaming:     streaming,
 		Generator: &summarize.TextGeneratorAdapter{
 			TextGenerator: textGenerator,
 			Model:         effectiveModel,
@@ -219,7 +253,7 @@ func validateSummaryProvider(provider string) error {
 		return fmt.Errorf("agent %q does not support summary generation", provider)
 	}
 	if !isSummaryProviderAvailable(name, ag) {
-		return fmt.Errorf("summary provider %q is configured but its CLI binary is not on PATH; install it or choose another provider", provider)
+		return fmt.Errorf("summary provider %q CLI binary is not on PATH; install it or choose another provider", provider)
 	}
 	return nil
 }

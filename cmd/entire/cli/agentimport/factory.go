@@ -10,6 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
@@ -34,13 +35,15 @@ func (factoryImporter) Discover(repoRoot, overridePath string, now time.Time, se
 }
 
 // SplitTurns produces one Turn per user-prompt envelope, bounded by the next.
-// Token usage (including spawned subagents) is delegated to the Factory agent;
-// the model is read once from the session's adjacent settings file. Droid
+// Token usage is delegated to the Factory agent; spawned-subagent usage comes
+// back as a cumulative snapshot and is rescoped to a per-turn delta by
+// splitLineTurns (see rescopeSubagentTokensToDeltas). The model is read once
+// from the session's adjacent settings file. Droid
 // envelopes carry no per-message timestamp (the agent stamps events with
 // time.Now() at hook time), so every turn falls back to the transcript file's
 // modtime — the same fallback the Gemini importer uses.
 func (factoryImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
-	subagentsDir := filepath.Join(filepath.Dir(sf.Path), sf.SessionID, "subagents")
+	subagentsDir := paths.SubagentsDir(filepath.Dir(sf.Path), sf.SessionID)
 	model := factoryaidroid.ExtractModelFromTranscript(sf.Path)
 	var createdAt time.Time
 	if info, statErr := os.Stat(sf.Path); statErr == nil {

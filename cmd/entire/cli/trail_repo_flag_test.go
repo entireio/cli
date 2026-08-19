@@ -2,9 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
 func TestParseTrailRepoArg(t *testing.T) {
@@ -66,6 +69,29 @@ func TestResolveTrailRepoOrRemote_OverrideSkipsGit(t *testing.T) {
 	}
 	if forge != "gh" || owner != "acme" || repo != "app" {
 		t.Fatalf("got (%q,%q,%q), want (gh,acme,app)", forge, owner, repo)
+	}
+}
+
+func TestRunAuthenticatedTrailAPIRoutesByRepo(t *testing.T) {
+	// newTrailAPIClient is a package seam, so this test must not run in parallel.
+	previous := newTrailAPIClient
+	var gotFullName string
+	newTrailAPIClient = func(_ context.Context, _ bool, fullName string) (*api.Client, error) {
+		gotFullName = fullName
+		return api.NewClientWithBaseURL("token", "https://cell.example"), nil
+	}
+	t.Cleanup(func() { newTrailAPIClient = previous })
+
+	called := false
+	err := runAuthenticatedTrailAPI(t.Context(), io.Discard, false, "gh/acme/app", func(_ context.Context, _ *api.Client) error {
+		called = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called || gotFullName != "acme/app" {
+		t.Fatalf("called=%v fullName=%q, want true and acme/app", called, gotFullName)
 	}
 }
 
@@ -136,8 +162,7 @@ func TestTrailSelectorAndBranchAreMutuallyExclusive(t *testing.T) {
 	}
 }
 
-// --repo must not silently fall back to the local checkout's branch: the
-// branch-defaulting commands require an explicit branch or selector alongside it.
+// --repo requires an explicit branch or selector rather than defaulting to the local branch.
 func TestTrailRepoRequiresExplicitTarget(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -149,6 +174,11 @@ func TestTrailRepoRequiresExplicitTarget(t *testing.T) {
 		{name: "update", args: []string{"update", "--repo", "gh/acme/app"}},
 		{name: "delete", args: []string{"delete", "--repo", "gh/acme/app"}},
 		{name: "finding list", args: []string{"finding", "list", "--repo", "gh/acme/app"}},
+		{name: "approve", args: []string{"approve", "--repo", "gh/acme/app"}},
+		{name: "request-changes", args: []string{"request-changes", "--repo", "gh/acme/app", "-m", "why"}},
+		{name: "approvals", args: []string{"approvals", "--repo", "gh/acme/app"}},
+		{name: "comment list", args: []string{"comment", "list", "--repo", "gh/acme/app"}},
+		{name: "comment add", args: []string{"comment", "add", "--repo", "gh/acme/app", "-m", "hi"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

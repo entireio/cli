@@ -50,30 +50,9 @@ func ParseSubagentTypeAndDescription(toolInput json.RawMessage) (agentType, desc
 }
 
 // todoWriteToolInput represents the tool_input structure for the TodoWrite tool.
-// Used to extract the todos array which is then passed to strategy.ExtractInProgressTodo.
+// Used to extract the todos array for the strategy-package todo helpers.
 type todoWriteToolInput struct {
 	Todos json.RawMessage `json:"todos"`
-}
-
-// ExtractTodoContentFromToolInput extracts the content of the in-progress todo item from TodoWrite tool_input.
-// Falls back to the first pending item if no in-progress item is found.
-// Returns empty string if no suitable item is found or JSON is invalid.
-//
-// This function unwraps the outer tool_input object to extract the todos array,
-// then delegates to strategy.ExtractInProgressTodo for the actual parsing logic.
-func ExtractTodoContentFromToolInput(toolInput json.RawMessage) string {
-	if len(toolInput) == 0 {
-		return ""
-	}
-
-	// First extract the todos array from tool_input
-	var input todoWriteToolInput
-	if err := json.Unmarshal(toolInput, &input); err != nil {
-		return ""
-	}
-
-	// Delegate to strategy package for the actual extraction logic
-	return strategy.ExtractInProgressTodo(input.Todos)
 }
 
 // ExtractLastCompletedTodoFromToolInput extracts the content of the last completed todo item.

@@ -48,7 +48,6 @@ mise.local.toml
 /dist/
 /completions/
 
-
 # E2E test artifacts
 e2e/artifacts/
 

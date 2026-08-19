@@ -8,11 +8,19 @@ import "regexp"
 // entropy or the surrounding key name, so it catches low-entropy
 // credential formats the other secret layers don't reliably flag.
 //
-// The betterleaks layer misses these in isolation: its Supabase
-// secret-key rule is a *composite* rule (RequiredRules:
-// supabase-project-url) that only fires when a matching "*.supabase.co"
-// URL is present in the same content, plus an entropy filter. A secret
-// captured on its own therefore passes straight through.
+// The betterleaks layer's coverage of these differs per prefix (verified
+// against the vendored betterleaks v1.5.0 rule source):
+//   - sb_secret_: the supabase-project-api-key rule is a *composite* rule
+//     (RequiredRules: supabase-project-url) that only fires when a matching
+//     "*.supabase.co" URL is present in the same content, on top of an
+//     entropy<=4.0 filter. A secret captured on its own therefore passes
+//     straight through regardless of entropy.
+//   - sbp_: the supabase-management-token rule fires standalone (no
+//     RequiredRules), but only matches an exact 40-character lowercase body
+//     and is further filtered by entropy<=3.5 and a two-digit minimum. A
+//     high-entropy 40-char sbp_ token captured alone IS caught by
+//     betterleaks; what this layer adds for sbp_ is coverage of bodies at
+//     other lengths, lower entropy, or without two digits.
 //
 // Supabase (https://supabase.com/docs/guides/getting-started/api-keys):
 //   - sb_secret_...      secret API key (replaces the legacy service_role
@@ -38,7 +46,8 @@ import "regexp"
 // the {20,} length check is open-ended, sufficiently long snake_case
 // identifiers that merely start with a provider prefix are redacted even
 // though they aren't secrets — e.g. `sb_secret_key_rotation_handler`, or
-// mid-word inside a longer identifier like `libsbp_something_long`. This is
+// mid-word inside a longer identifier like
+// `libsbp_something_long_enough_value`. This is
 // accepted: over-redaction is the safe direction here (see
 // TestString_SupabaseProviderTokenLongIdentifierOverRedaction), and adding
 // anchors or capping the body length to eliminate it would reopen the

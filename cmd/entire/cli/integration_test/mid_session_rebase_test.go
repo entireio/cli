@@ -71,7 +71,7 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 	}
 
 	// Create first file change
-	fileAContent := "package main\n\nfunc A() {}\n"
+	fileAContent := pkgFuncA
 	env.WriteFile("a.go", fileAContent)
 
 	session.CreateTranscript(
@@ -89,10 +89,9 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 	}
 	t.Logf("Checkpoint 1 created on shadow branch: %s", originalShadowBranch)
 
-	// Verify 1 rewind point
-	points := env.GetRewindPoints()
-	if len(points) != 1 {
-		t.Fatalf("Expected 1 rewind point after first checkpoint, got %d", len(points))
+	// Verify checkpoint 1 content landed on the shadow branch
+	if !env.FileExistsInBranch(originalShadowBranch, "a.go") {
+		t.Fatalf("a.go should exist on shadow branch %s after first checkpoint", originalShadowBranch)
 	}
 
 	// ========================================
@@ -103,7 +102,7 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 	// This simulates what happens when Claude runs: git rebase master
 	// Note: We're NOT calling SimulateUserPromptSubmit here because the rebase
 	// happens mid-session as part of Claude's tool execution
-	cmd := exec.Command("git", "rebase", "master")
+	cmd := exec.CommandContext(t.Context(), "git", "rebase", "master")
 	cmd.Dir = env.RepoDir
 	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -126,7 +125,7 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 	// Claude continues working after the rebase - creates more files
 	// Note: We do NOT call SimulateUserPromptSubmit because this is continuing
 	// the same tool execution flow (no new user prompt)
-	fileBContent := "package main\n\nfunc B() {}\n"
+	fileBContent := pkgFuncB
 	env.WriteFile("b.go", fileBContent)
 
 	// Reset transcript builder for new checkpoint
@@ -185,36 +184,17 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 		t.Logf("✓ Session BaseCommit updated to: %s", state.BaseCommit[:7])
 	}
 
-	// Verify we have 2 checkpoints (both should be on the new shadow branch)
-	points = env.GetRewindPoints()
-	if len(points) != 2 {
-		t.Errorf("Expected 2 rewind points, got %d", len(points))
+	// Verify both checkpoints' content is on the new shadow branch
+	if !env.FileExistsInBranch(newShadowBranch, "a.go") {
+		t.Error("a.go (checkpoint 1) should exist on migrated shadow branch")
+	}
+	if !env.FileExistsInBranch(newShadowBranch, "b.go") {
+		t.Error("b.go (checkpoint 2) should exist on migrated shadow branch")
+	}
+	if state.StepCount != 2 {
+		t.Errorf("Expected 2 checkpoints after migration, got %d", state.StepCount)
 	} else {
-		t.Logf("✓ Found %d rewind points after migration", len(points))
-	}
-
-	// ========================================
-	// Phase 6: Verify rewind still works
-	// ========================================
-	t.Log("Phase 6: Verifying rewind still works after migration")
-
-	// Find checkpoint 1 (before rebase) — it is the oldest rewind point.
-	// Points are sorted most recent first, so checkpoint 1 is the last entry.
-	checkpoint1ID := points[len(points)-1].ID
-
-	// Rewind to checkpoint 1
-	if err := env.Rewind(checkpoint1ID); err != nil {
-		t.Fatalf("Rewind to checkpoint 1 failed: %v", err)
-	}
-
-	// Verify b.go is gone (it was created after checkpoint 1)
-	if env.FileExists("b.go") {
-		t.Error("b.go should NOT exist after rewind to checkpoint 1")
-	}
-
-	// Verify a.go exists
-	if !env.FileExists("a.go") {
-		t.Error("a.go should exist after rewind to checkpoint 1")
+		t.Logf("✓ Found %d checkpoints after migration", state.StepCount)
 	}
 
 	t.Log("Mid-session rebase migration test completed successfully!")
@@ -225,7 +205,7 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 func (env *TestEnv) gitCheckout(ref string) {
 	env.T.Helper()
 
-	cmd := exec.Command("git", "checkout", ref)
+	cmd := exec.CommandContext(env.T.Context(), "git", "checkout", ref)
 	cmd.Dir = env.RepoDir
 	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -282,7 +262,7 @@ func TestShadow_CommitThenRebaseMidSession(t *testing.T) {
 	}
 
 	// Create file and checkpoint
-	fileAContent := "package main\n\nfunc A() {}\n"
+	fileAContent := pkgFuncA
 	env.WriteFile("a.go", fileAContent)
 
 	session.CreateTranscript(
@@ -330,7 +310,7 @@ func TestShadow_CommitThenRebaseMidSession(t *testing.T) {
 	// ========================================
 	t.Log("Phase 4: Claude rebases onto master")
 
-	cmd := exec.Command("git", "rebase", "master")
+	cmd := exec.CommandContext(t.Context(), "git", "rebase", "master")
 	cmd.Dir = env.RepoDir
 	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -350,7 +330,7 @@ func TestShadow_CommitThenRebaseMidSession(t *testing.T) {
 	// ========================================
 	t.Log("Phase 5: Creating checkpoint after commit and rebase")
 
-	fileBContent := "package main\n\nfunc B() {}\n"
+	fileBContent := pkgFuncB
 	env.WriteFile("b.go", fileBContent)
 
 	// IMPORTANT: Don't reset the TranscriptBuilder - append to existing transcript
@@ -403,12 +383,11 @@ func TestShadow_CommitThenRebaseMidSession(t *testing.T) {
 		t.Logf("✓ Session BaseCommit updated to: %s", state.BaseCommit[:7])
 	}
 
-	// Should have rewind points (at least the new checkpoint)
-	points := env.GetRewindPoints()
-	if len(points) == 0 {
-		t.Error("Expected at least 1 rewind point")
+	// The new checkpoint's content should be on the new shadow branch
+	if !env.FileExistsInBranch(newShadowBranch, "b.go") {
+		t.Error("b.go should exist on the new shadow branch")
 	} else {
-		t.Logf("✓ Found %d rewind point(s)", len(points))
+		t.Log("✓ b.go found on the new shadow branch")
 	}
 
 	t.Log("Commit-then-rebase mid-session test completed successfully!")

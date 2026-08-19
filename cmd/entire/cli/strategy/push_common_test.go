@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
@@ -117,8 +119,9 @@ func TestDoPushRef_UnreachableTarget_ReturnsNil(t *testing.T) {
 	// 2. Try to fetch+rebase (fails — can't fetch from non-existent path)
 	// 3. Log warning and return nil (graceful degradation)
 	nonExistentPath := filepath.Join(t.TempDir(), "does-not-exist")
-	err := doPushRef(ctx, nonExistentPath, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
-	assert.NoError(t, err, "doPushRef should return nil when target is unreachable (graceful degradation)")
+	delivered, err := doPushRef(ctx, nonExistentPath, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	require.NoError(t, err, "doPushRef should return nil when target is unreachable (graceful degradation)")
+	assert.False(t, delivered, "an unreachable target delivered nothing, which err cannot express")
 }
 
 // TestPushRefIfNeeded_UnreachableTarget_ReturnsNil exercises the full push path
@@ -140,8 +143,9 @@ func TestPushRefIfNeeded_UnreachableTarget_ReturnsNil(t *testing.T) {
 	//    which finds no remote tracking ref -> returns true (has unpushed)
 	// 4. Call doPushRef which fails gracefully
 	nonExistentPath := filepath.Join(t.TempDir(), "does-not-exist")
-	err := pushRefIfNeeded(ctx, nonExistentPath, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
-	assert.NoError(t, err, "pushRefIfNeeded should return nil when target is unreachable")
+	delivered, err := pushRefIfNeeded(ctx, nonExistentPath, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	require.NoError(t, err, "pushRefIfNeeded should return nil when target is unreachable")
+	assert.False(t, delivered, "an unreachable target delivered nothing, which err cannot express")
 }
 
 // TestPushRefIfNeeded_NonBranchRef verifies that pushRefIfNeeded accepts
@@ -173,8 +177,9 @@ func TestPushRefIfNeeded_NonBranchRef(t *testing.T) {
 
 	t.Chdir(tmpDir)
 
-	require.NoError(t, pushRefIfNeeded(ctx, bareDir, customRef),
-		"pushRefIfNeeded should accept a non-branch ref")
+	delivered, err := pushRefIfNeeded(ctx, bareDir, customRef)
+	require.NoError(t, err, "pushRefIfNeeded should accept a non-branch ref")
+	require.True(t, delivered, "the ref reached the bare remote")
 
 	// Verify the ref arrived on the bare remote at the right hash.
 	bareRepo, err := git.PlainOpen(bareDir)
@@ -208,8 +213,9 @@ func TestPushRefIfNeeded_LocalBareRepo_PushesSuccessfully(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// Push using pushRefIfNeeded with the bare repo path as target.
-	err := pushRefIfNeeded(ctx, bareDir, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	delivered, err := pushRefIfNeeded(ctx, bareDir, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	require.NoError(t, err, "pushRefIfNeeded should succeed with a local bare repo target")
+	require.True(t, delivered, "a successful push reports delivery")
 
 	// Verify the ref arrived on the bare repo.
 	verifyCmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+paths.MetadataBranchName)
@@ -1530,10 +1536,11 @@ func TestDoPushRef_AlreadyUpToDate(t *testing.T) {
 	t.Chdir(workDir)
 
 	restore := captureStderr(t)
-	err := doPushRef(context.Background(), bareDir, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	delivered, err := doPushRef(context.Background(), bareDir, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	output := restore()
 
 	require.NoError(t, err)
+	assert.True(t, delivered, "already up-to-date is delivered: the ref is on the target")
 	assert.Contains(t, output, "already up-to-date", "should indicate nothing was pushed")
 	assert.NotContains(t, output, " done", "should not say 'done' when nothing was pushed")
 }
@@ -1556,10 +1563,11 @@ func TestDoPushRef_NewContent_SaysDone(t *testing.T) {
 	t.Chdir(workDir)
 
 	restore := captureStderr(t)
-	err = doPushRef(context.Background(), bareDir, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	delivered, err := doPushRef(context.Background(), bareDir, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	output := restore()
 
 	require.NoError(t, err)
+	assert.True(t, delivered, "a fresh push reports delivery")
 	assert.Contains(t, output, " done", "should say 'done' when new content was pushed")
 	assert.NotContains(t, output, "already up-to-date", "should not say 'already up-to-date' when content was pushed")
 }
@@ -1666,4 +1674,36 @@ func TestPrintProtectedRefBlock(t *testing.T) {
 		assert.Contains(t, out, displayPushTarget("git@github.com:org/repo.git"))
 		assert.NotContains(t, out, "git@github.com:org/repo.git")
 	})
+}
+
+func TestPrintNonInteractiveSSHAuthHint(t *testing.T) {
+	// Reset the once for this test process isolation: reassign the sync.Once.
+	sshAuthHintOnce = sync.Once{}
+
+	var buf bytes.Buffer
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = w
+	printNonInteractiveSSHAuthHint()
+	printNonInteractiveSSHAuthHint() // second call must be a no-op
+	require.NoError(t, w.Close())
+	os.Stderr = old
+	_, copyErr := io.Copy(&buf, r)
+	require.NoError(t, copyErr)
+	out := buf.String()
+	assert.Contains(t, out, "ssh-add")
+	assert.Contains(t, out, "Checkpoint push skipped")
+	assert.Equal(t, 1, strings.Count(out, "Checkpoint push skipped"), "hint must print once")
+}
+
+func TestNonInteractiveSSHAuthFailure(t *testing.T) {
+	t.Parallel()
+	authErr := errors.New("permission denied (publickey)")
+	ctx := remote.WithNonInteractiveSSH(context.Background())
+	assert.True(t, nonInteractiveSSHAuthFailure(ctx, authErr))
+	assert.False(t, nonInteractiveSSHAuthFailure(context.Background(), authErr),
+		"interactive context must not treat auth errors as BatchMode hints")
+	assert.False(t, nonInteractiveSSHAuthFailure(ctx, errors.New("non-fast-forward")))
+	assert.False(t, nonInteractiveSSHAuthFailure(ctx, nil))
 }

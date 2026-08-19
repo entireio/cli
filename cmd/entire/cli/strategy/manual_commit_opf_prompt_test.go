@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	git "github.com/go-git/go-git/v6"
+
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -38,6 +40,7 @@ func TestResolveOPFDecision_Precedence(t *testing.T) {
 		env            string
 		promptDefault  string
 		hasTTY         bool
+		misconfigured  bool
 		prompter       func() (OPFDecision, error)
 		want           OPFDecision
 		wantErr        bool
@@ -65,11 +68,23 @@ func TestResolveOPFDecision_Precedence(t *testing.T) {
 		// Unrecognized env values fall through to next layer
 		{name: "env_bogus_falls_through_to_setting", env: "maybe", promptDefault: settings.OPFPromptAlways, hasTTY: true, prompter: promptNever, want: OPFRun},
 		{name: "env_empty_falls_through_to_setting", env: "", promptDefault: settings.OPFPromptAlways, hasTTY: true, prompter: promptNever, want: OPFRun},
+		// Misconfigured (OPF enabled, zero effective categories): any
+		// resolution that would run OPF fails closed with
+		// OPFNoCategoriesError, and the prompt is never shown — asking
+		// would offer a scan guaranteed to abort, and "Always" would
+		// persist prompt_default before the failure surfaces. Explicit
+		// skips stay honest opt-outs (regex-only push, no trailer).
+		{name: "misconfigured_env_no_still_skips", env: "no", promptDefault: "", hasTTY: true, misconfigured: true, prompter: promptNever, want: OPFSkip},
+		{name: "misconfigured_setting_never_still_skips", env: "", promptDefault: settings.OPFPromptNever, hasTTY: true, misconfigured: true, prompter: promptNever, want: OPFSkip},
+		{name: "misconfigured_env_yes_fails_closed", env: "yes", promptDefault: "", hasTTY: true, misconfigured: true, prompter: promptNever, want: OPFAbort, wantErr: true, wantErrMessage: "no detection category"},
+		{name: "misconfigured_setting_always_fails_closed", env: "", promptDefault: settings.OPFPromptAlways, hasTTY: true, misconfigured: true, prompter: promptNever, want: OPFAbort, wantErr: true, wantErrMessage: "no detection category"},
+		{name: "misconfigured_tty_ask_fails_closed_without_prompting", env: "", promptDefault: settings.OPFPromptAsk, hasTTY: true, misconfigured: true, prompter: promptNever, want: OPFAbort, wantErr: true, wantErrMessage: "no detection category"},
+		{name: "misconfigured_no_tty_fails_closed", env: "", promptDefault: "", hasTTY: false, misconfigured: true, prompter: promptNever, want: OPFAbort, wantErr: true, wantErrMessage: "no detection category"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := resolveOPFDecision(tc.env, tc.promptDefault, tc.hasTTY, tc.prompter)
+			got, err := resolveOPFDecision(tc.env, tc.promptDefault, tc.hasTTY, tc.misconfigured, tc.prompter)
 			if tc.wantErr {
 				require.Error(t, err)
 				if tc.wantErrMessage != "" {
@@ -171,6 +186,13 @@ func TestPrePush_OPFProgressUsesConfiguredWriter(t *testing.T) {
     }
   }
 }`), 0o644))
+	// The checkpoint sync gate requires a configured remote that resolves to
+	// "origin"; use a local bare repo so resolution stays hermetic (no
+	// network) rather than an unreachable URL.
+	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	_, err := git.PlainInit(remoteDir, true)
+	require.NoError(t, err)
+	testutil.AddRemote(t, tmpDir, "origin", remoteDir)
 	t.Chdir(tmpDir)
 	configureFakeOPF(t, &fakeOPFForRewrite{})
 

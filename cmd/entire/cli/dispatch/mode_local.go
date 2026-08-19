@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -12,11 +13,13 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -34,7 +37,30 @@ var (
 	nowUTC = func() time.Time { return time.Now().UTC() }
 )
 
-func runLocal(ctx context.Context, opts Options) (*Dispatch, error) {
+type localPreflight struct {
+	normalizedSince time.Time
+	normalizedUntil time.Time
+	repoRoots       []string
+	sinceInput      string
+	untilInput      string
+	repoPathsInput  []string
+}
+
+func (p *localPreflight) matches(opts Options) bool {
+	return p != nil &&
+		p.sinceInput == opts.Since &&
+		p.untilInput == opts.Until &&
+		slices.Equal(p.repoPathsInput, opts.RepoPaths)
+}
+
+// PrepareLocal validates and resolves the inputs needed before local dispatch
+// generation can begin. The returned options can be passed to Run without
+// repeating time-window parsing or repository-root discovery.
+func PrepareLocal(ctx context.Context, opts Options) (Options, error) {
+	if opts.Mode != ModeLocal {
+		return Options{}, errors.New("local dispatch preflight requires local mode")
+	}
+
 	now := nowUTC()
 	sinceInput := strings.TrimSpace(opts.Since)
 	if sinceInput == "" {
@@ -42,28 +68,49 @@ func runLocal(ctx context.Context, opts Options) (*Dispatch, error) {
 	}
 	since, err := ParseSinceAtNow(sinceInput, now)
 	if err != nil {
-		return nil, err
+		return Options{}, err
 	}
 	until, err := ParseUntilAtNow(opts.Until, now)
 	if err != nil {
-		return nil, err
+		return Options{}, err
 	}
 	normalizedSince, normalizedUntil := NormalizeWindow(since, until)
 	if !normalizedSince.Before(normalizedUntil) {
-		return nil, errors.New("--since must be before --until")
+		return Options{}, errors.New("--since must be before --until")
 	}
 
 	repoRoots, err := resolveRepoRoots(ctx, opts.RepoPaths)
 	if err != nil {
-		return nil, err
+		return Options{}, err
 	}
+
+	opts.localPreflight = &localPreflight{
+		normalizedSince: normalizedSince,
+		normalizedUntil: normalizedUntil,
+		repoRoots:       repoRoots,
+		sinceInput:      opts.Since,
+		untilInput:      opts.Until,
+		repoPathsInput:  slices.Clone(opts.RepoPaths),
+	}
+	return opts, nil
+}
+
+func runLocal(ctx context.Context, opts Options) (*Dispatch, error) {
+	if !opts.localPreflight.matches(opts) {
+		prepared, err := PrepareLocal(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		opts = prepared
+	}
+	preflight := opts.localPreflight
 
 	allCandidates := make([]candidate, 0)
 	var candidatesMu sync.Mutex
 	group, groupCtx := errgroup.WithContext(ctx)
-	for _, repoRoot := range repoRoots {
+	for _, repoRoot := range preflight.repoRoots {
 		group.Go(func() error {
-			candidates, err := enumerateRepoCandidates(groupCtx, repoRoot, opts, normalizedSince, normalizedUntil)
+			candidates, err := enumerateRepoCandidates(groupCtx, repoRoot, opts, preflight.normalizedSince, preflight.normalizedUntil)
 			if err != nil {
 				return err
 			}
@@ -82,14 +129,14 @@ func runLocal(ctx context.Context, opts Options) (*Dispatch, error) {
 		CoveredRepos: coveredRepos(allCandidates),
 		Repos:        groupBulletsByRepo(fallback.Used),
 		Window: Window{
-			NormalizedSince:   normalizedSince,
-			NormalizedUntil:   normalizedUntil,
+			NormalizedSince:   preflight.normalizedSince,
+			NormalizedUntil:   preflight.normalizedUntil,
 			FirstCheckpointAt: firstAt(fallback.Used),
 			LastCheckpointAt:  lastAt(fallback.Used),
 		},
 	}
 
-	text, err := generateLocalDispatch(ctx, dispatch, opts.Voice)
+	text, err := generateLocalDispatch(ctx, dispatch, opts.Voice, opts.TextGenerator, opts.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -161,9 +208,13 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 	for _, branch := range branches {
 		branchSet[branch] = struct{}{}
 	}
-	reachableCheckpointIDs := map[string]struct{}{}
+	reachableCheckpointIDs := map[string]time.Time{}
 	if opts.ImplicitCurrentBranch && !opts.AllBranches {
-		reachableCheckpointIDs, err = reachableCheckpointIDsInRange(ctx, repoRoot, branchLocalRevRange(ctx, repoRoot), since)
+		currentBranch := ""
+		if len(branches) > 0 {
+			currentBranch = branches[0]
+		}
+		reachableCheckpointIDs, err = reachableCheckpointIDsInRange(ctx, repoRoot, branchLocalRevRange(ctx, repoRoot, currentBranch), since, until)
 		if err != nil {
 			return nil, err
 		}
@@ -176,23 +227,24 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 	// repoRoot may be a different repo (--repo/RepoPaths) or the cwd may not be
 	// a repo at all, so scope checkpoint store construction to this repo.
 	repoCtx := settings.WithWorktreeRoot(ctx, repoRoot)
-	stores, err := checkpoint.Open(repoCtx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(repoCtx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(repoCtx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
 	store := stores.Persistent
-	infos, err := store.List(ctx)
+	infos, err := store.List(repoCtx)
 	if err != nil {
 		return nil, fmt.Errorf("list committed checkpoints: %w", err)
 	}
 
 	candidates := make([]candidate, 0, len(infos))
+	seen := make(map[string]struct{}, len(infos))
 	for _, info := range infos {
 		if info.CreatedAt.Before(since) || !info.CreatedAt.Before(until) {
 			continue
 		}
 
-		summary, err := store.Read(ctx, info.CheckpointID)
+		summary, err := store.Read(repoCtx, info.CheckpointID)
 		if err != nil {
 			logging.Warn(ctx, "failed to read committed checkpoint for dispatch", "checkpoint_id", info.CheckpointID.String(), "error", err)
 			continue
@@ -209,17 +261,6 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 			}
 		}
 
-		localSummary := ""
-		if len(summary.Sessions) > 0 {
-			latestIndex := len(summary.Sessions) - 1
-			if metadata, err := store.ReadSessionMetadata(ctx, info.CheckpointID, latestIndex); err == nil && metadata != nil && metadata.Summary != nil {
-				localSummary = strings.TrimSpace(metadata.Summary.Outcome)
-				if localSummary == "" {
-					localSummary = strings.TrimSpace(metadata.Summary.Intent)
-				}
-			}
-		}
-
 		commitSubject := commitSubjectsByCheckpoint[info.CheckpointID.String()]
 		candidates = append(candidates, candidate{
 			CheckpointID:      info.CheckpointID.String(),
@@ -227,14 +268,107 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 			Branch:            summary.Branch,
 			CreatedAt:         info.CreatedAt,
 			CommitSubject:     commitSubject,
-			LocalSummaryTitle: localSummary,
+			LocalSummaryTitle: readLocalSummaryTitle(repoCtx, store, info.CheckpointID, summary),
 		})
+		seen[info.CheckpointID.String()] = struct{}{}
 	}
 
+	// Second pass: checkpoints referenced by branch commit trailers in the
+	// window that store.List did not surface. store.List only enumerates
+	// checkpoints present in the local checkout, but on a checkout that has not
+	// fetched recent checkpoints (the common case — checkpoints are pushed to
+	// the remote from other worktrees) the recent work is missing locally even
+	// though it is reachable from HEAD. The commit subject is always available
+	// from git log, so we can summarize that work from the trailer + subject
+	// without a (slow) per-checkpoint network fetch; when the checkpoint does
+	// happen to be local we still prefer its richer session summary. Windowed
+	// by commit ("landed on branch") time, since a CheckpointSummary carries no
+	// CreatedAt of its own.
+	for idStr, commitTime := range reachableCheckpointIDs {
+		if _, ok := seen[idStr]; ok {
+			continue
+		}
+		if commitTime.Before(since) || !commitTime.Before(until) {
+			continue
+		}
+		commitSubject := commitSubjectsByCheckpoint[idStr]
+
+		// Opportunistic local read for a richer title/branch — no fetcher is
+		// wired, so this never touches the network; a checkpoint absent locally
+		// resolves to nil and we fall back to the commit subject.
+		branch := ""
+		localSummary := ""
+		if cid, cidErr := checkpointid.NewCheckpointID(idStr); cidErr == nil {
+			if summary, readErr := store.Read(repoCtx, cid); readErr == nil && summary != nil {
+				branch = summary.Branch
+				localSummary = readLocalSummaryTitle(repoCtx, store, cid, summary)
+			}
+		}
+
+		if strings.TrimSpace(localSummary) == "" && strings.TrimSpace(commitSubject) == "" {
+			continue
+		}
+		candidates = append(candidates, candidate{
+			CheckpointID:      idStr,
+			RepoFullName:      repoFullName,
+			Branch:            branch,
+			CreatedAt:         commitTime,
+			CommitSubject:     commitSubject,
+			LocalSummaryTitle: localSummary,
+		})
+		seen[idStr] = struct{}{}
+	}
+
+	// The second pass ranges over a map (randomized iteration order), so sort
+	// before returning to keep bullet order — and therefore the LLM-authored
+	// summary — stable across runs. Newest first, with the checkpoint ID as a
+	// deterministic tiebreak for equal timestamps.
+	sortCandidatesByRecency(candidates)
 	return candidates, nil
 }
 
-func reachableCheckpointIDsInRange(ctx context.Context, repoRoot, revRange string, since time.Time) (map[string]struct{}, error) {
+// sortCandidatesByRecency orders candidates most-recent-first by CreatedAt,
+// breaking ties by checkpoint ID so the order is fully deterministic.
+func sortCandidatesByRecency(candidates []candidate) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if !candidates[i].CreatedAt.Equal(candidates[j].CreatedAt) {
+			return candidates[i].CreatedAt.After(candidates[j].CreatedAt)
+		}
+		return candidates[i].CheckpointID < candidates[j].CheckpointID
+	})
+}
+
+// readLocalSummaryTitle returns the latest session's outcome (falling back to
+// its intent) for use as a bullet title, or "" when no session summary is
+// available.
+func readLocalSummaryTitle(ctx context.Context, store checkpoint.PersistentStore, cid checkpointid.CheckpointID, summary *checkpoint.CheckpointSummary) string {
+	if summary == nil || len(summary.Sessions) == 0 {
+		return ""
+	}
+	latestIndex := len(summary.Sessions) - 1
+	metadata, err := store.ReadSessionMetadata(ctx, cid, latestIndex)
+	if err != nil || metadata == nil || metadata.Summary == nil {
+		return ""
+	}
+	if outcome := strings.TrimSpace(metadata.Summary.Outcome); outcome != "" {
+		return outcome
+	}
+	return strings.TrimSpace(metadata.Summary.Intent)
+}
+
+// reachableCheckpointIDsInRange maps each checkpoint ID referenced by a commit
+// trailer in revRange, within the window [since, until), to the most recent
+// referencing commit time *that falls inside the window*. The commit time is
+// the "landed on this branch" timestamp, used both for membership checks and to
+// window checkpoints that are fetched on demand by ID (whose CheckpointSummary
+// carries no CreatedAt of its own).
+//
+// Commits outside the window are ignored entirely, so a checkpoint referenced
+// by both an in-window commit and a later out-of-window commit still records
+// its in-window time (and is therefore not dropped by the caller's window
+// check). git's --since/--until only bound the scan; the explicit in-loop check
+// is authoritative for the half-open [since, until) boundary.
+func reachableCheckpointIDsInRange(ctx context.Context, repoRoot, revRange string, since, until time.Time) (map[string]time.Time, error) {
 	cmd := exec.CommandContext(
 		ctx,
 		"git",
@@ -243,19 +377,35 @@ func reachableCheckpointIDsInRange(ctx context.Context, repoRoot, revRange strin
 		"log",
 		revRange,
 		"--since="+since.UTC().Format(time.RFC3339),
+		"--until="+until.UTC().Format(time.RFC3339),
 		"--grep",
 		"Entire-Checkpoint:",
-		"--format=%B%x00",
+		"--format=%cI%x00%B%x00%x00",
 	)
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("list HEAD checkpoint trailers: %w", err)
 	}
 
-	reachable := make(map[string]struct{})
-	for _, message := range strings.Split(string(output), "\x00") {
-		for _, checkpointID := range trailers.ParseAllCheckpoints(message) {
-			reachable[checkpointID.String()] = struct{}{}
+	reachable := make(map[string]time.Time)
+	for _, record := range strings.Split(string(output), "\x00\x00") {
+		record = strings.TrimLeft(record, "\n")
+		parts := strings.SplitN(record, "\x00", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		commitTime, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(parts[0]))
+		if parseErr != nil {
+			continue
+		}
+		if commitTime.Before(since) || !commitTime.Before(until) {
+			continue
+		}
+		for _, checkpointID := range trailers.ParseAllCheckpoints(parts[1]) {
+			idStr := checkpointID.String()
+			if existing, ok := reachable[idStr]; !ok || commitTime.After(existing) {
+				reachable[idStr] = commitTime
+			}
 		}
 	}
 	return reachable, nil
@@ -265,9 +415,19 @@ func reachableCheckpointIDsInRange(ctx context.Context, repoRoot, revRange strin
 // those unique to the current branch — reachable from HEAD but not from the
 // repository's default branch. Falls back to "HEAD" when no default branch
 // can be resolved (e.g. a fresh repo with no main/master ref).
-func branchLocalRevRange(ctx context.Context, repoRoot string) string {
+//
+// When the current branch IS the default branch there is no parent history to
+// exclude: base..HEAD is empty on an up-to-date default branch, which would
+// drop every checkpoint whose summary.Branch is a (now-merged) feature branch
+// and leave the dispatch effectively empty. In that case we summarize
+// everything reachable from HEAD in the window, matching the server-side
+// dispatch. The base..HEAD exclusion only applies to feature branches.
+func branchLocalRevRange(ctx context.Context, repoRoot, currentBranch string) string {
 	base := defaultBranchRef(ctx, repoRoot)
 	if base == "" {
+		return "HEAD"
+	}
+	if currentBranch != "" && strings.TrimPrefix(base, "origin/") == currentBranch {
 		return "HEAD"
 	}
 	return base + "..HEAD"

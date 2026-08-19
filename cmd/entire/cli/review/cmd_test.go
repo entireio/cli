@@ -41,7 +41,7 @@ func installHooksForCmdTest(t *testing.T, agentName types.AgentName) {
 	if !ok {
 		t.Fatalf("agent %q does not support hooks", agentName)
 	}
-	if _, err := hs.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := hs.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks(%q): %v", agentName, err)
 	}
 }
@@ -67,7 +67,10 @@ func seedReviewConfig(ctx context.Context, cfg map[string]settings.ReviewConfig)
 	prefs.ReviewProfiles = map[string]settings.ReviewProfileConfig{
 		review.DefaultProfileName: profile,
 	}
-	return settings.SaveClonePreferences(ctx, prefs)
+	return settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
+		*p = *prefs
+		return nil
+	})
 }
 
 func defaultTestJudge(cfg map[string]settings.ReviewConfig) string {

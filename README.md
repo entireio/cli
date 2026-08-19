@@ -5,7 +5,7 @@ Entire hooks into your Git workflow to capture AI agent sessions as you work. Se
 With Entire, you can:
 
 - **Understand why code changed** — see the full prompt/response transcript and files touched
-- **Recover instantly** — rewind to a known-good checkpoint when an agent goes sideways and resume seamlessly
+- **Recover instantly** — resume from a known-good checkpoint when an agent goes sideways
 - **Keep Git history clean** — preserve agent context on a separate branch
 - **Onboard faster** — show the path from prompt → change → commit
 - **Maintain traceability** — support audit and compliance requirements when needed
@@ -13,7 +13,7 @@ With Entire, you can:
 ## Why Entire
 
 - **Understand why code changed, not just what** — Transcripts, prompts, files touched, token usage, tool calls, and more are captured alongside every commit.
-- **Rewind and resume from any checkpoint** — Go back to any previous agent session and pick up exactly where you or a coworker left off.
+- **Resume from any checkpoint** — Go back to any previous agent session and pick up exactly where you or a coworker left off.
 - **Full context preserved and searchable** — A versioned record of every AI interaction tied to your git history, with nothing lost.
 - **Zero context switching** — Git-native, two-step setup, works with Claude Code, Codex, Gemini, Pi, and more.
 
@@ -25,8 +25,10 @@ With Entire, you can:
 - [Key Concepts](#key-concepts)
   - [How It Works](#how-it-works)
   - [Strategy](#strategy)
+- [Headless & CI Authentication](#headless--ci-authentication)
 - [Local Device Auth Testing](#local-device-auth-testing)
 - [Commands Reference](#commands-reference)
+- [Plugins](#plugins)
 - [Configuration](#configuration)
 - [Security & Privacy](#security--privacy)
 - [Troubleshooting](#troubleshooting)
@@ -42,34 +44,64 @@ With Entire, you can:
 
 ## Quick Start
 
+### macOS and Linux
+
+Install with Homebrew:
+
 ```bash
-# To use Homebrew, first tap:
 brew tap entireio/tap
 brew trust entireio/tap
+brew install --cask entire            # stable
+# brew install --cask entire@nightly  # or nightly
+```
 
-# Install stable via Homebrew
-brew install --cask entire
+Or with the install script:
 
-# Or install nightly via Homebrew
-brew install --cask entire@nightly
+```bash
+curl -fsSL https://entire.io/install.sh | bash                          # stable
+# curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly  # or nightly
+```
 
-# Or install stable via install.sh
-curl -fsSL https://entire.io/install.sh | bash
+### Windows
 
-# Or install nightly via install.sh
-curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly
+Install with Scoop:
 
-# Or install stable via Scoop (Windows)
+```powershell
 scoop bucket add entire https://github.com/entireio/scoop-bucket.git
-scoop install entire/cli
+scoop install entire/entire
+```
 
-# Or install via Go (development/manual setup)
+#### Migrating an old `cli` Scoop install (package rename)
+
+The Scoop package was renamed from `cli` to `entire`. If your install is still
+registered as the old `cli` package, run the migration below. It installs the
+new package before removing the old one, so the old install is only removed
+once the new one is in place (`scoop reset` re-links the shared `entire.exe`
+and `git-remote-entire.exe` shims). Run it where `entire` is **not** running — a
+live `entire.exe` locks its own shim, so Scoop can't relink or uninstall it
+mid-run:
+
+```powershell
+cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"
+```
+
+If the first step fails with "couldn't find manifest", your bucket clone
+predates the renamed package — run `scoop update` to refresh it, then retry the
+command above. Nothing is removed until the install succeeds, so a failed
+attempt leaves your existing install working.
+
+### Go (development/manual setup)
+
+```bash
 go install github.com/entireio/cli/cmd/entire@latest
 
-# Linux: Add Go binaries to PATH (add to ~/.zshrc or ~/.bashrc if not already configured)
+# Add Go binaries to PATH (add to ~/.zshrc or ~/.bashrc if not already configured)
 export PATH="$HOME/go/bin:$PATH"
+```
 
-# Enable in your project
+### Enable in your project
+
+```bash
 cd your-project && entire enable
 
 # Check status
@@ -92,7 +124,7 @@ How to use each channel:
 - Homebrew nightly: `brew install --cask entire@nightly`
 - `install.sh` stable: `curl -fsSL https://entire.io/install.sh | bash`
 - `install.sh` nightly: `curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly`
-- Scoop: currently supports `stable` only via `scoop install entire/cli`
+- Scoop: currently supports `stable` only via `scoop install entire/entire`
 
 ## Typical Workflow
 
@@ -120,19 +152,7 @@ Just use one of your AI agents as before. Entire runs in the background, trackin
 entire status  # Check current session status anytime
 ```
 
-### 3. Rewind to a Previous Checkpoint (deprecated)
-
-> **Deprecated:** `entire checkpoint rewind` will be removed in a future release.
-
-If you want to undo some changes and go back to an earlier checkpoint:
-
-```
-entire checkpoint rewind
-```
-
-This shows all available checkpoints in the current session. Select one to restore your code to that exact state.
-
-### 4. Resume a Previous Session
+### 3. Resume a Previous Session
 
 To restore the latest checkpointed session metadata for a branch:
 
@@ -142,7 +162,7 @@ entire session resume <branch>
 
 Entire checks out the branch, restores the latest checkpointed session metadata (one or more sessions), and prints command(s) to continue.
 
-### 5. Disable Entire (Optional)
+### 4. Disable Entire (Optional)
 
 ```
 entire disable
@@ -162,7 +182,7 @@ Sessions are stored separately from your code commits on the `entire/checkpoints
 
 ### Checkpoints
 
-A **checkpoint** is a snapshot within a session that you can rewind to—a "save point" in your work.
+A **checkpoint** is a snapshot within a session—a "save point" in your work.
 
 Checkpoints are created when you or the agent make a git commit. **Checkpoint IDs** are 12-character hex strings (e.g., `a3b2c4d5e6f7`).
 
@@ -195,7 +215,6 @@ Entire uses a manual-commit strategy that keeps your git history clean:
 
 - **No commits on your branch** — Entire never creates commits on the active branch
 - **Safe on any branch** — works on main, master, and feature branches alike
-- **Non-destructive rewind** — restore files from any checkpoint without altering commit history
 - **Metadata stored separately** — all session data lives on the `entire/checkpoints/v1` branch
 
 ### Git Worktrees
@@ -205,6 +224,44 @@ Entire works seamlessly with [git worktrees](https://git-scm.com/docs/git-worktr
 ### Concurrent Sessions
 
 Multiple AI sessions can run on the same commit. If you start a second session while another has uncommitted work, Entire warns you and tracks them separately. Both sessions' checkpoints are preserved and can be rewound independently.
+
+## Headless & CI Authentication
+
+By default `entire login` stores tokens in the OS keyring (macOS Keychain,
+Linux Secret Service, Windows Credential Manager). Machines without a usable
+keyring — headless servers, containers, minimal VMs, CI runners — have two
+supported paths:
+
+### Interactive login on a headless machine
+
+Use the file-backed token store. The device-auth flow already works without a
+local browser (the CLI prints an approval URL you can open on any machine);
+only token storage needs the override:
+
+```bash
+ENTIRE_TOKEN_STORE=file entire login
+```
+
+Tokens are written with `0600` permissions to `tokens.json` in your Entire
+config directory (`~/.config/entire` by default). Override the location with
+`ENTIRE_TOKEN_STORE_PATH`. Set `ENTIRE_TOKEN_STORE=file` persistently (e.g. in
+your shell profile) so later commands read from the same store.
+
+### Non-interactive automation (CI, workload identity)
+
+Skip login and storage entirely by injecting a token per invocation:
+
+```bash
+ENTIRE_TOKEN=<login-or-sa-session-JWT> entire ...
+```
+
+`ENTIRE_TOKEN` bypasses stored credentials; the CLI derives the control-plane
+endpoint from the token itself. Nothing is written to disk. This is the right
+path for CI pipelines and service accounts.
+
+> **Seeing `save login` / `failed to unlock correct collection` errors from
+> `entire login`?** That's the OS keyring being unavailable — use one of the
+> two paths above.
 
 ## Local Device Auth Testing
 
@@ -217,6 +274,7 @@ mise run dev
 
 # In this repo, point the CLI at the local API. The login flow targets
 # the local server via --server (the default is the production
+# auth.entire.io, which dispatches to a regional login server such as
 # us.auth.entire.io).
 cd ../cli
 export ENTIRE_API_BASE_URL=http://localhost:8787
@@ -248,9 +306,9 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | `entire enable`  | Enable Entire in your repository                                                                  |
 | `entire checkpoint`        | List, explain, and search checkpoints                                                   |
 | `entire checkpoint explain` | Explain a session, commit, or checkpoint                                               |
-| `entire checkpoint rewind` | Rewind to a previous checkpoint (deprecated, will be removed in a future release)       |
 | `entire login`   | Authenticate the CLI with Entire device auth                                                      |
 | `entire org`     | Manage Entire organizations (create, list, get, delete)                                           |
+| `entire plugin`  | Discover, install, upgrade, and remove plugins (see [Plugins](#plugins))                          |
 | `entire project` | Manage Entire projects (create, list, get, delete)                                                |
 | `entire repo`    | Manage Entire repositories (create, list, get, delete, clone, mirror, visibility)                 |
 | `entire grant`   | Manage access grants and org membership (org, project, repo)                                      |
@@ -328,6 +386,27 @@ entire configure --checkpoint-remote github:myorg/checkpoints-private
 entire agent add claude-code
 entire agent remove claude-code
 ```
+
+## Plugins
+
+Plugins extend the CLI with new verbs: any executable named `entire-<name>` on `$PATH` runs as `entire <name>`, kubectl-style — stdio passes through, exit codes propagate, no SDK or protocol required.
+
+```sh
+entire plugin search                                    # browse the plugin index
+entire plugin install upgrade                           # install by name (index lookup)
+entire plugin install https://github.com/you/entire-x   # install from any git host
+entire plugin install ./dist/entire-x                   # link a local build
+entire upgrade                                          # run an installed plugin
+entire plugin upgrade --all                             # update remote-installed plugins
+entire plugin doctor                                    # check for broken installs and missing dependencies
+entire plugin remove x
+```
+
+Remote installs are forge-agnostic: the newest stable semver tag is resolved over the git protocol (prereleases need an explicit `--pin`), and the platform's release asset is downloaded over HTTPS and verified against the release's `checksums.txt`. A release that publishes no checksums is refused unless you pass `--allow-unverified` — installing means making those bytes executable. `entire plugin doctor` re-checks installed binaries against the digests recorded at install time. Plugins can declare dependencies on other plugins in an `entire-plugin.yml`; missing ones are installed after a single confirmation.
+
+Discovery uses a git-synced catalog, [entireio/plugin-index](https://github.com/entireio/plugin-index) by default. Organizations can point the CLI at an internal catalog with the `ENTIRE_PLUGIN_INDEX_URL` environment variable or `--index`. It is deliberately not settable from a repository's committed settings: an index-listed plugin installs without a prompt, so a checked-out repo must not be able to choose the catalog.
+
+For the full contract — resolution rules, environment filtering, release-asset conventions, and how to author a plugin — see [External Commands](docs/architecture/external-commands.md).
 
 ## Configuration
 
@@ -407,7 +486,8 @@ Entire derives the git URL automatically using the same protocol (SSH or HTTPS) 
 
 - Fetch the checkpoint branch locally if it exists on the remote but not locally (one-time)
 - Push `entire/checkpoints/v1` to the checkpoint repo instead of your default push remote
-- Skip pushing if a fork is detected (push remote owner differs from checkpoint repo owner)
+- Ignore the setting if it looks inherited rather than yours, and push checkpoints to your own push remote instead. `checkpoint_remote` is normally committed in `.entire/settings.json`, so cloning or forking a project inherits it — without this, a contributor's session data would be pushed into the upstream project's checkpoint repo. A setting is treated as yours when it lives in the gitignored `.entire/settings.local.json`, or when your `origin` **and every push URL** of the remote you are pushing to are owned by the same account or org as the checkpoint repo. Requiring the push destination too covers contributors who cloned the upstream repo and added their own fork, where `origin` belongs to the upstream project rather than to them; requiring every push URL covers mirror-style remotes that fan out to several repositories
+- If your checkpoint repo is owned by a different account or org than `origin`, configure it in `.entire/settings.local.json` so it is always honored
 - If the remote is unreachable, warn and continue without blocking your main push
 
 #### `ENTIRE_CHECKPOINT_TOKEN`
@@ -452,8 +532,8 @@ Local settings override project settings field-by-field. When you run `entire st
 
 ### Agent-Specific Steps & Limitations
 
-- When enabling Entire for Codex, the command will also create or update `.codex/config.toml` with `hooks = true` to enable Codex hooks. If you configure Codex manually, make sure this flag is set in your `.codex/config.toml`. Or select Codex from the interactive agent picker when running `entire enable`.
-- Entire supports Cursor IDE and Cursor Agent CLI tool, but `entire rewind` is not available at this time. Other commands (`doctor`, `status` etc.) work the same as all other agents.
+- Codex hooks are enabled by default (codex-cli 0.124.0+), so enabling Entire for Codex only installs `.codex/hooks.json` — no `config.toml` is needed and Entire never creates one. If an older Entire version left a `.codex/config.toml` behind and your repo lives inside `~/.codex/agents`, delete that file to stop Codex's "malformed agent role definition" startup warning.
+- Entire supports Cursor IDE and Cursor Agent CLI tool. Commands (`doctor`, `status` etc.) work the same as all other agents.
 - Entire supports Copilot CLI, but not Copilot in VS Code, in other IDEs, or on github.com.
 - Entire supports Pi coding agent (Preview). Pi uses a TypeScript extension instead of a JSON hook config. Subagent capture is not currently available.
 
@@ -471,7 +551,6 @@ Entire automatically redacts detected secrets (API keys, tokens, credentials) wh
 | ------------------------ | ------------------------------------------------------- |
 | "Not a git repository"   | Navigate to a Git repository first                      |
 | "Entire is disabled"     | Run `entire enable`                                     |
-| "No rewind points found" | Work with your configured agent and commit your changes |
 | "shadow branch conflict" | Run `entire clean --force`                              |
 
 ### SSH Authentication Errors

@@ -15,14 +15,15 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
+	"github.com/entireio/cli/redact"
 )
 
 // OPFDecision is the resolved gate for a single pre-push OPF run.
 type OPFDecision int
 
 const (
-	OPFRun   OPFDecision = iota // run the rewrite, push 8-layer
-	OPFSkip                     // skip the rewrite, push 7-layer
+	OPFRun   OPFDecision = iota // run the rewrite, push OPF-applied (9-layer)
+	OPFSkip                     // skip the rewrite, push regex-only (8-layer)
 	OPFAbort                    // cancel the push entirely (Ctrl-C / non-TTY abort)
 )
 
@@ -32,12 +33,28 @@ const envOPF = "ENTIRE_OPF"
 // first): ENTIRE_OPF env var → settings.PromptDefault → interactive
 // prompt → non-TTY fallback (run).
 //
+// misconfigured is redact.OPFMisconfiguredNoCategories(): OPF enabled
+// with zero effective categories, so the model scan cannot run. Any
+// resolution that would run OPF (env yes, prompt_default always,
+// non-TTY auto-run) fails closed with OPFNoCategoriesError, and the
+// prompt is never shown — asking "Run OPF?" for a scan guaranteed to
+// abort would be noise, and answering "Always" would persist
+// prompt_default before the failure surfaces. Explicit skips (env no,
+// prompt_default never) still resolve to OPFSkip: they push regex-only
+// content without the trailer, which is an honest opt-out.
+//
 // Pure logic — prompter is only called when the user needs to decide.
 // Tests inject a fake.
-func resolveOPFDecision(env, promptDefault string, hasTTY bool, prompter func() (OPFDecision, error)) (OPFDecision, error) {
+func resolveOPFDecision(env, promptDefault string, hasTTY, misconfigured bool, prompter func() (OPFDecision, error)) (OPFDecision, error) {
+	failClosedOr := func(d OPFDecision) (OPFDecision, error) {
+		if misconfigured {
+			return OPFAbort, &OPFNoCategoriesError{}
+		}
+		return d, nil
+	}
 	switch strings.ToLower(strings.TrimSpace(env)) {
 	case "yes":
-		return OPFRun, nil
+		return failClosedOr(OPFRun)
 	case "no":
 		return OPFSkip, nil
 	}
@@ -45,13 +62,16 @@ func resolveOPFDecision(env, promptDefault string, hasTTY bool, prompter func() 
 	case settings.OPFPromptNever:
 		return OPFSkip, nil
 	case settings.OPFPromptAlways:
-		return OPFRun, nil
+		return failClosedOr(OPFRun)
 	}
 	if !hasTTY {
 		// Non-interactive context: run OPF (matches the user's "if
 		// enabled, just run" preference). The caller emits a progress
 		// line at run time so scripted output isn't silent.
-		return OPFRun, nil
+		return failClosedOr(OPFRun)
+	}
+	if misconfigured {
+		return OPFAbort, &OPFNoCategoriesError{}
 	}
 	return prompter()
 }
@@ -71,6 +91,7 @@ func resolveOPFDecisionForPrePush(ctx context.Context, opf *settings.OPFSettings
 		os.Getenv(envOPF),
 		promptDefault,
 		hasTTY,
+		redact.OPFMisconfiguredNoCategories(),
 		func() (OPFDecision, error) { return askOPFPrompt(ctx) },
 	)
 	if err != nil {

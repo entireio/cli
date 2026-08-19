@@ -15,14 +15,19 @@ import (
 func TestResolveTrailBySelector_FindsBySelector(t *testing.T) {
 	// Not t.Parallel(): the subtests share one httptest server closed on
 	// return, so they must run synchronously before the deferred Close.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if err := json.NewEncoder(w).Encode(api.TrailListResponse{
-			Trails: []api.TrailResource{
-				{ID: "trl_a", Number: 1, Branch: "feature/a", Title: "Alpha"},
-				{ID: "trl_b", Number: 575, Branch: "feature/b", Title: "Bravo"},
-			},
-			Total: 2,
-		}); err != nil {
+	alpha := api.TrailResource{ID: "trl_a", Number: 1, Branch: "feature/a", Title: "Alpha"}
+	bravo := api.TrailResource{ID: "trl_b", Number: 575, Branch: "feature/b", Title: "Bravo"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A numeric selector resolves through the direct number route; the other
+		// selectors fall back to scanning the list.
+		var payload any = api.TrailListResponse{Trails: []api.TrailResource{alpha, bravo}, Total: 2}
+		switch r.URL.Path {
+		case trailTestBasePath + "/1":
+			payload = alpha
+		case trailTestBasePath + "/575":
+			payload = bravo
+		}
+		if err := json.NewEncoder(w).Encode(payload); err != nil {
 			t.Errorf("encode response: %v", err)
 		}
 	}))
@@ -118,5 +123,18 @@ func TestTrailCheckoutRejectsArgWithTrailFlag(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cannot combine") {
 		t.Fatalf("error = %q, want it to mention 'cannot combine'", err)
+	}
+}
+
+func TestTrailCheckoutHasWorktreeFlag(t *testing.T) {
+	t.Parallel()
+
+	cmd := newTrailCheckoutCmd()
+	flag := cmd.Flags().Lookup("worktree")
+	if flag == nil {
+		t.Fatal("worktree flag not registered")
+	}
+	if flag.Value.Type() != "bool" {
+		t.Fatalf("worktree flag type = %q, want bool", flag.Value.Type())
 	}
 }

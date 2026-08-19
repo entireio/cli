@@ -5,7 +5,6 @@ package integration
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,36 +56,12 @@ func TestCodexImageExternalization_FullHookFlow(t *testing.T) {
 		t.Fatalf("write rollout: %v", err)
 	}
 
-	runner := NewCodexHookRunner(env.RepoDir, t)
-	hook := func(name string, extra map[string]any) {
-		t.Helper()
-		in := map[string]any{
-			"session_id":      sessionID,
-			"transcript_path": transcriptPath,
-			"cwd":             env.RepoDir,
-			"model":           "gpt-5",
-			"permission_mode": "default",
-		}
-		for k, v := range extra {
-			in[k] = v
-		}
-		b, err := json.Marshal(in)
-		if err != nil {
-			t.Fatalf("marshal %s input: %v", name, err)
-		}
-		if err := runner.runCodexHook(name, b); err != nil {
-			t.Fatalf("codex hook %s: %v", name, err)
-		}
-	}
+	hook := codexHooker(t, env.RepoDir, sessionID, transcriptPath)
 
 	// Turn start (creates the Codex session), then a file-mutating tool use so the
 	// commit has attributable content.
 	hook("user-prompt-submit", map[string]any{"prompt": "add feature.txt and look at this screenshot", "hook_event_name": "UserPromptSubmit"})
-	patch := "*** Begin Patch\n*** Add File: feature.txt\n+hi\n*** End Patch\n"
-	hook("post-tool-use", map[string]any{
-		"hook_event_name": "PostToolUse", "tool_name": "apply_patch",
-		"tool_use_id": "call_1", "tool_input": map[string]string{"command": patch}, "tool_response": "Success.",
-	})
+	applyPatchHook(hook, "call_1", "*** Begin Patch\n*** Add File: feature.txt\n+hi\n*** End Patch\n")
 
 	// Mid-turn commit -> post-commit condensation externalizes; stop -> finalize.
 	env.WriteFile("feature.txt", "hi\n")

@@ -93,8 +93,27 @@ func writeTestFederation(w http.ResponseWriter, peers []string) {
 	w.Write([]byte(b.String())) //nolint:errcheck // test
 }
 
-func transportFor() *crossJurisRoundTripper {
-	return newCrossJurisRoundTripper(http.DefaultTransport)
+// transportFor builds a round-tripper over a connection pool private to
+// this test.
+//
+// Do not hand it http.DefaultTransport. httptest.Server.Close calls
+// http.DefaultTransport.CloseIdleConnections as a courtesy to its users
+// (net/http/httptest/server.go), so with a shared pool any parallel test
+// in this package tearing its server down closes a pooled connection
+// another test is about to reuse. net/http does not retry that one:
+// shouldRetryRequest lists errServerClosedIdle but not errCloseIdleConns,
+// so it reaches the caller as "transport connection broken: http:
+// CloseIdleConnections called". Clone keeps DefaultTransport's timeouts
+// and proxy settings; only the pool is ours.
+func transportFor(t *testing.T) *crossJurisRoundTripper {
+	t.Helper()
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		t.Fatalf("http.DefaultTransport is %T, want *http.Transport", http.DefaultTransport)
+	}
+	tr := base.Clone()
+	t.Cleanup(tr.CloseIdleConnections)
+	return newCrossJurisRoundTripper(tr)
 }
 
 // TestRoundTripper_PassThrough: a 2xx is returned unchanged.
@@ -106,7 +125,7 @@ func TestRoundTripper_PassThrough(t *testing.T) {
 		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck // test
 	})
 
-	client := &http.Client{Transport: transportFor()}
+	client := &http.Client{Transport: transportFor(t)}
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.srv.URL, nil) //nolint:errcheck // test
 	req.Header.Set("Authorization", "Bearer user-jwt")
 
@@ -138,7 +157,7 @@ func TestRoundTripper_421FollowsToHomeCore(t *testing.T) {
 	})
 	wrongCore.peers = []string{homeCore.srv.URL}
 
-	client := &http.Client{Transport: transportFor()}
+	client := &http.Client{Transport: transportFor(t)}
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, wrongCore.srv.URL+"/api/v1/mirrors", strings.NewReader(`{"a":1}`)) //nolint:errcheck // test
 	req.Header.Set("Authorization", "Bearer user-jwt")
 
@@ -191,7 +210,7 @@ func TestRoundTripper_421ThenBareUnauthorizedProactiveExchange(t *testing.T) {
 	})
 	wrongCore.peers = []string{homeCore.URL}
 
-	client := &http.Client{Transport: transportFor()}
+	client := &http.Client{Transport: transportFor(t)}
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, wrongCore.srv.URL+"/api/v1/mirrors/collaborators", strings.NewReader(`{}`)) //nolint:errcheck // test
 	req.Header.Set("Authorization", "Bearer original-eu-login-jwt")
 
@@ -231,7 +250,7 @@ func TestRoundTripper_BareUnauthorizedNoRedirectPassesThrough(t *testing.T) {
 		w.Write([]byte(`{"error":"invalid token"}`)) //nolint:errcheck // test
 	})
 
-	client := &http.Client{Transport: transportFor()}
+	client := &http.Client{Transport: transportFor(t)}
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.srv.URL+"/api/v1/me", nil) //nolint:errcheck // test
 	req.Header.Set("Authorization", "Bearer user-jwt")
 
@@ -273,7 +292,7 @@ func TestRoundTripper_401ExchangeAndRetry(t *testing.T) {
 	}))
 	t.Cleanup(apiServer.Close)
 
-	client := &http.Client{Transport: transportFor()}
+	client := &http.Client{Transport: transportFor(t)}
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, apiServer.URL+"/api/v1/mirrors", strings.NewReader(`{"a":1}`)) //nolint:errcheck // test
 	req.Header.Set("Authorization", "Bearer user-jwt")
 
@@ -310,7 +329,7 @@ func TestRoundTripper_Rejects421OffFederation(t *testing.T) {
 	})
 	// wrongCore.peers stays empty.
 
-	client := &http.Client{Transport: transportFor()}
+	client := &http.Client{Transport: transportFor(t)}
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, wrongCore.srv.URL+"/api/v1/mirrors", nil) //nolint:errcheck // test
 	req.Header.Set("Authorization", "Bearer user-jwt")
 
@@ -345,7 +364,7 @@ func TestRoundTripper_RejectsOffOrigin401ExchangeURL(t *testing.T) {
 		w.Write([]byte(`{"error":"cross_juris_token_required","token_exchange_url":"` + attacker.URL + `","audience":"https://api.test"}`)) //nolint:errcheck // test
 	})
 
-	client := &http.Client{Transport: transportFor()}
+	client := &http.Client{Transport: transportFor(t)}
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, api.srv.URL+"/api/v1/me", nil) //nolint:errcheck // test
 	req.Header.Set("Authorization", "Bearer user-jwt")
 
@@ -381,7 +400,7 @@ func TestRoundTripper_BodyReplayedOnRetry(t *testing.T) {
 	})
 	wrongCore.peers = []string{homeCore.srv.URL}
 
-	client := &http.Client{Transport: transportFor()}
+	client := &http.Client{Transport: transportFor(t)}
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, wrongCore.srv.URL+"/api/v1/mirrors", bytes.NewReader([]byte(payload))) //nolint:errcheck // test
 	req.Header.Set("Authorization", "Bearer user-jwt")
 	resp, err := client.Do(req)
@@ -447,7 +466,7 @@ func TestEffectiveTokenTTL(t *testing.T) {
 // TestStoreTokenDeclinesNonPositiveTTL: a <=0 TTL must not be cached.
 func TestStoreTokenDeclinesNonPositiveTTL(t *testing.T) {
 	t.Parallel()
-	rt := transportFor()
+	rt := transportFor(t)
 	rt.storeToken("https://example.test", "tok", 0)
 	if _, ok := rt.lookupToken("https://example.test"); ok {
 		t.Error("zero TTL must not be cached")
@@ -485,7 +504,7 @@ func TestRoundTripper_TokenCacheReusesExchanged(t *testing.T) {
 	}))
 	t.Cleanup(apiServer.Close)
 
-	client := &http.Client{Transport: transportFor()}
+	client := &http.Client{Transport: transportFor(t)}
 	for i := range 2 {
 		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, apiServer.URL+"/api/v1/me", nil) //nolint:errcheck // test
 		req.Header.Set("Authorization", "Bearer user-jwt")
@@ -526,7 +545,7 @@ func TestRoundTripper_NoInfiniteLoopOn421Chain(t *testing.T) {
 	})
 	first.peers = []string{second.srv.URL}
 
-	client := &http.Client{Transport: transportFor()}
+	client := &http.Client{Transport: transportFor(t)}
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, first.srv.URL+"/api/v1/mirrors", nil) //nolint:errcheck // test
 	req.Header.Set("Authorization", "Bearer user-jwt")
 	resp, err := client.Do(req)
@@ -560,7 +579,7 @@ func TestRoundTripper_ExchangeFailurePropagates401(t *testing.T) {
 	}))
 	t.Cleanup(api.Close)
 
-	client := &http.Client{Transport: transportFor()}
+	client := &http.Client{Transport: transportFor(t)}
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, api.URL+"/api/v1/me", nil) //nolint:errcheck // test
 	req.Header.Set("Authorization", "Bearer user-jwt")
 	resp, err := client.Do(req)
@@ -639,7 +658,7 @@ func TestRoundTripper_ExchangeAfter401Then421UsesOriginalSubjectToken(t *testing
 	}))
 	t.Cleanup(misdirected.Close)
 
-	client := &http.Client{Transport: transportFor()}
+	client := &http.Client{Transport: transportFor(t)}
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, misdirected.URL+"/api/v1/mirrors", strings.NewReader(`{}`)) //nolint:errcheck // test
 	req.Header.Set("Authorization", "Bearer "+originalLoginJWT)
 	resp, err := client.Do(req)
@@ -665,7 +684,7 @@ func TestRoundTripper_ExchangeAfter401Then421UsesOriginalSubjectToken(t *testing
 // TestCacheExpiresAfterTTL: expired entries are evicted on lookup.
 func TestCacheExpiresAfterTTL(t *testing.T) {
 	t.Parallel()
-	rt := transportFor()
+	rt := transportFor(t)
 	rt.storeToken("https://example.test", "tok", cachedTokenTTL)
 	if _, ok := rt.lookupToken("https://example.test"); !ok {
 		t.Fatal("fresh token must be a hit")

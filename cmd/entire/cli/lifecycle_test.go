@@ -2,22 +2,29 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/internal/coreapi"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/require"
@@ -2228,5 +2235,392 @@ func TestPromptWindowStaleHookDoesNotResetEarly(t *testing.T) {
 	}
 	if got := writeCheckpoint(s); got != 3 {
 		t.Fatalf("back-to-back checkpoint B after stale hook = %d, want 3", got)
+	}
+}
+
+// TestHandleLifecycleSessionStart_NoSynchronousNetworkForTrailEnablement
+// guards against SessionStart hooks stalling agent startup: the
+// trails-enablement cache refresh must be handed off to a detached subprocess,
+// never performed inline on the SessionStart hook path. A slow/unreachable API
+// host previously added up to trailEnablementSessionStartRefreshTimeout (1s) of
+// synchronous latency to every session start once the hourly cache went stale.
+//
+// The deterministic guarantee is the spawn seam: SessionStart must invoke the
+// detached-refresh spawn exactly once and return without doing the network work
+// itself. As a production-shaped backstop the API base points at a blackholed
+// https host that accepts the TCP connection but never answers — so a
+// regression that dials inline both contacts that host (dialed > 0) and burns
+// the ~1s session-start budget instead of returning immediately. (Plain http
+// would be rejected by api.RequireSecureURL before any dial, so the host must
+// be https to actually exercise the synchronous-dial path.)
+func TestHandleLifecycleSessionStart_NoSynchronousNetworkForTrailEnablement(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
+
+	// Blackhole https host: accept connections but never complete the TLS
+	// handshake or respond, so an inline dial stalls until a timeout fires
+	// (mirrors the unreachable-host case that motivated the detached refresh)
+	// rather than failing fast.
+	var dialed int32
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			atomic.AddInt32(&dialed, 1)
+			_ = conn // hold open; never respond
+		}
+	}()
+	t.Setenv("ENTIRE_API_BASE_URL", "https://"+ln.Addr().String())
+
+	var spawnCount int32
+	prevSpawn := trailRefreshSpawn
+	trailRefreshSpawn = func(worktreeRoot string) {
+		atomic.AddInt32(&spawnCount, 1)
+		if worktreeRoot == "" {
+			t.Error("expected non-empty worktree root passed to trail refresh spawn")
+		}
+	}
+	t.Cleanup(func() { trailRefreshSpawn = prevSpawn })
+
+	ag := newMockHookResponseAgent()
+	event := &agent.Event{
+		Type:      agent.SessionStart,
+		SessionID: "test-no-sync-trail-dial",
+		Timestamp: time.Now(),
+	}
+
+	start := time.Now()
+	err = handleLifecycleSessionStart(context.Background(), ag, event)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	// Deterministic guarantee: the network-capable refresh is delegated to the
+	// detached spawn exactly once, never run inline.
+	if got := atomic.LoadInt32(&spawnCount); got != 1 {
+		t.Fatalf("expected exactly one detached trail-enablement refresh spawn, got %d", got)
+	}
+	// Backstops: SessionStart neither contacted the API host nor blocked.
+	if got := atomic.LoadInt32(&dialed); got != 0 {
+		t.Fatalf("SessionStart dialed the trails-enablement API synchronously; the refresh must run out of process")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("handleLifecycleSessionStart took %v; trails-enablement refresh must be detached, not synchronous", elapsed)
+	}
+}
+
+// blockingCellCore is a cellCoreClient that hangs every call until its
+// caller's context is done, standing in for a reachable-but-unresponsive
+// control plane.
+type blockingCellCore struct{}
+
+func (blockingCellCore) GetRepo(ctx context.Context, _ coreapi.GetRepoParams) (*coreapi.Repo, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (blockingCellCore) ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (blockingCellCore) ListRepos(ctx context.Context, _ coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestRunTrailEnablementRefresh_BoundedByTimeoutAgainstUnresponsiveHost
+// verifies the deferred refresh work still completes (or at least
+// gives up) within its own bounded timeout when the control plane never
+// responds — the network work that used to block SessionStart must still
+// happen, just out of the hook's critical path, and it must not hang forever.
+//
+// The hang is injected at the cell-target resolver (newCellCoreClient) rather
+// than at a blackholed ENTIRE_API_BASE_URL listener as this test used to:
+// resolveRepoCellTarget (cell_target.go) no longer falls back to a live
+// network dial when it can't resolve the repo's processing placement — a
+// resolution failure is now a fast, direct error — so a blackholed data-API
+// host would never be dialed at all and this test would pass for the wrong
+// reason (an early return, not a bounded wait).
+func TestRunTrailEnablementRefresh_BoundedByTimeoutAgainstUnresponsiveHost(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
+
+	var attempted int32
+	prevCellCore := newCellCoreClient
+	newCellCoreClient = func() (cellCoreClient, error) {
+		atomic.AddInt32(&attempted, 1)
+		return blockingCellCore{}, nil
+	}
+	t.Cleanup(func() { newCellCoreClient = prevCellCore })
+
+	start := time.Now()
+	refreshErr := runTrailEnablementRefresh(context.Background())
+	elapsed := time.Since(start)
+
+	// Best-effort: control-plane failure must not surface as a hard error.
+	require.NoError(t, refreshErr)
+	if elapsed > trailEnablementRefreshTimeout+2*time.Second {
+		t.Fatalf("runTrailEnablementRefresh took %v, expected to give up within roughly %v", elapsed, trailEnablementRefreshTimeout)
+	}
+	// Prove the test actually exercised the blocking resolver rather than
+	// passing via an early return (e.g. scope resolution failing first).
+	if got := atomic.LoadInt32(&attempted); got == 0 {
+		t.Fatalf("expected the cell-target resolver to have been invoked at least once")
+	}
+}
+
+// TestRunTrailEnablementRefresh_NotOnboardedSavesDisabledCache guards a
+// regression: before the fail-loud cell-resolution rewrite, a not-onboarded
+// repo still got a client (the old home-jurisdiction fallback), and the
+// subsequent TrailsEnabled API call's 403/404 was what cached enabled=false.
+// Now trailRefreshAPIClient fails before a client exists for the exact same
+// repos, landing in the generic "authenticated client unavailable" branch,
+// which never writes the cache — cachedTrailsEnablementForScope stays
+// unknown forever and trailRefreshSpawnThrottle can't stop SessionStart from
+// re-forking a refresh child on every invocation. errRepoNotOnboarded is the
+// one error this refresh must recognize as a permanent negative and persist.
+func TestRunTrailEnablementRefresh_NotOnboardedSavesDisabledCache(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
+
+	prevClient := trailRefreshAPIClient
+	trailRefreshAPIClient = func(context.Context, bool, string) (*api.Client, error) {
+		return nil, fmt.Errorf("resolve the Entire cell for entirehq/example: %w", errRepoNotOnboarded)
+	}
+	t.Cleanup(func() { trailRefreshAPIClient = prevClient })
+
+	require.NoError(t, runTrailEnablementRefresh(context.Background()))
+
+	scope, err := currentTrailEnablementScope(context.Background())
+	require.NoError(t, err)
+	if got := cachedTrailsEnablementForScope(context.Background(), scope, time.Now()); got != trailEnablementCacheDisabled {
+		t.Fatalf("cached enablement = %v, want trailEnablementCacheDisabled (saved, not left unknown)", got)
+	}
+}
+
+// TestRunTrailEnablementRefresh_CandidateRowSavesDisabledCache is the
+// candidate-row counterpart to TestRunTrailEnablementRefresh_NotOnboardedSavesDisabledCache
+// above, and exercises the real resolution chain (rather than mocking
+// trailRefreshAPIClient directly) so it also proves resolveProcessingPlacement
+// itself classifies a discoverable-but-unonboarded repo as errRepoNotOnboarded:
+// a repos-index row with Candidate set but no placements/primaries is the more
+// common real trigger for "not onboarded" than the zero-rows case (a random
+// repo a developer works in, vs. one the caller can't see or that doesn't
+// exist).
+func TestRunTrailEnablementRefresh_CandidateRowSavesDisabledCache(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
+
+	withFakeCellCore(t, &fakeCellCore{
+		repos:    reposOutput(candidateRepoIndexFixture("entirehq/example")),
+		clusters: clustersWithSlugs(),
+	})
+
+	require.NoError(t, runTrailEnablementRefresh(context.Background()))
+
+	scope, err := currentTrailEnablementScope(context.Background())
+	require.NoError(t, err)
+	if got := cachedTrailsEnablementForScope(context.Background(), scope, time.Now()); got != trailEnablementCacheDisabled {
+		t.Fatalf("cached enablement = %v, want trailEnablementCacheDisabled (saved, not left unknown)", got)
+	}
+}
+
+// TestNewRefreshTrailEnablementCmd_APIFailureExitsZero guards against the
+// detached __refresh_trail_enablement subprocess exiting non-zero on a
+// transient network/API failure. The refresh is best-effort cache warming
+// with stdout/stderr discarded (see newRefreshTrailEnablementCmd) — there is
+// no one watching the exit code, so a failing TrailsEnabled call must be
+// logged (already covered by TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile-
+// style tests) and swallowed, never propagated as a command error, mirroring
+// __send_analytics.
+func TestNewRefreshTrailEnablementCmd_APIFailureExitsZero(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	prevClient := trailRefreshAPIClient
+	trailRefreshAPIClient = func(context.Context, bool, string) (*api.Client, error) {
+		return api.NewClientWithBaseURL("test-token", srv.URL), nil
+	}
+	t.Cleanup(func() { trailRefreshAPIClient = prevClient })
+
+	cmd := newRefreshTrailEnablementCmd()
+	cmd.SetArgs([]string{})
+	require.NoError(t, cmd.ExecuteContext(context.Background()),
+		"detached refresh command must exit 0 even when the API call fails (best-effort cache warming)")
+}
+
+// TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile guards
+// diagnosability: the detached __refresh_trail_enablement child runs with
+// stdout/stderr discarded, so a failing background refresh must still leave a
+// trail in .entire/logs/entire.log instead of vanishing. The command runs in a
+// repo with no origin remote, so the scope resolves-and-fails locally (no
+// network) and that failure has to be logged to the repo's log file.
+func TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile(t *testing.T) {
+	setupStopTestRepo(t)
+	t.Setenv("ENTIRE_LOG_LEVEL", "debug")
+
+	cmd := newRefreshTrailEnablementCmd()
+	cmd.SetArgs([]string{})
+	require.NoError(t, cmd.ExecuteContext(context.Background()))
+
+	root, err := paths.WorktreeRoot(context.Background())
+	require.NoError(t, err)
+	logData, err := os.ReadFile(filepath.Join(root, ".entire", "logs", "entire.log"))
+	require.NoError(t, err)
+	require.Contains(t, string(logData), "trails enablement refresh skipped: scope unresolved",
+		"background refresh failure must be diagnosable in .entire/logs/entire.log")
+}
+
+// TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree guards the file-init
+// against running outside a resolvable worktree. logging.Init falls back to the
+// current directory when paths.WorktreeRoot fails, so the command must guard on
+// WorktreeRoot (as resume/rewind/reset/explain do) or a child whose worktree was
+// removed/relocated between spawn and exec would MkdirAll a stray .entire/logs/
+// wherever it happens to be running.
+func TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree(t *testing.T) {
+	dir := t.TempDir() // a plain temp dir, not a git worktree
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	t.Setenv("ENTIRE_LOG_LEVEL", "debug")
+
+	cmd := newRefreshTrailEnablementCmd()
+	cmd.SetArgs([]string{})
+	require.NoError(t, cmd.ExecuteContext(context.Background()))
+
+	_, statErr := os.Stat(filepath.Join(dir, ".entire", "logs"))
+	require.True(t, os.IsNotExist(statErr),
+		"must not create a stray .entire/logs outside a resolvable worktree")
+}
+
+// TestTrailRefreshRecentlySpawned_ThrottlesWithinWindow verifies the spawn-side
+// guard: within trailRefreshSpawnThrottle of a recorded spawn,
+// further spawns are suppressed; once the window passes a fresh spawn is allowed
+// and re-recorded. Without this, an unreachable host — which never writes the
+// cache, so the hourly TTL never starts — would fork a refresh child on every
+// SessionStart.
+func TestTrailRefreshRecentlySpawned_ThrottlesWithinWindow(t *testing.T) {
+	commonDir := t.TempDir()
+	now := time.Now()
+
+	require.False(t, trailRefreshRecentlySpawned(commonDir, now),
+		"first call records the spawn and is not throttled")
+	require.True(t, trailRefreshRecentlySpawned(commonDir, now.Add(time.Second)),
+		"a second attempt within the window is throttled")
+	require.False(t, trailRefreshRecentlySpawned(commonDir, now.Add(trailRefreshSpawnThrottle)),
+		"at the window boundary the spawn is allowed and re-recorded")
+	require.True(t, trailRefreshRecentlySpawned(commonDir, now.Add(trailRefreshSpawnThrottle+time.Second)),
+		"an attempt within the window of the re-recorded spawn is throttled")
+}
+
+// TestSpawnDetachedTrailEnablementRefresh_CollapsesBurst verifies the throttle is
+// actually wired into the spawn path: a burst of SessionStart-driven attempts for
+// the same repo forks a single child, not one per hook.
+func TestSpawnDetachedTrailEnablementRefresh_CollapsesBurst(t *testing.T) {
+	setupStopTestRepo(t)
+
+	var spawnCount int32
+	prevSpawn := trailRefreshSpawn
+	trailRefreshSpawn = func(string) { atomic.AddInt32(&spawnCount, 1) }
+	t.Cleanup(func() { trailRefreshSpawn = prevSpawn })
+
+	spawnDetachedTrailEnablementRefresh(context.Background())
+	spawnDetachedTrailEnablementRefresh(context.Background())
+	spawnDetachedTrailEnablementRefresh(context.Background())
+
+	if got := atomic.LoadInt32(&spawnCount); got != 1 {
+		t.Fatalf("expected the burst to collapse to a single detached spawn, got %d", got)
+	}
+}
+
+// resolvingSubagentAgent is a mockLifecycleAgent that also reports a subagent
+// session link, standing in for an agent whose subagents run as their own
+// sessions (Factory AI Droid's Workers).
+type resolvingSubagentAgent struct {
+	mockLifecycleAgent
+
+	link agent.SubagentSessionLink
+	ok   bool
+}
+
+var _ agent.SubagentSessionResolver = (*resolvingSubagentAgent)(nil)
+
+func (r *resolvingSubagentAgent) ResolveSubagentSession(_ string) (agent.SubagentSessionLink, bool) {
+	return r.link, r.ok
+}
+
+// TestResolveSubagentSessionLink_RejectsPathUnsafeIDs pins the choke point every
+// SubagentSessionResolver passes through. The IDs it returns are interpolated
+// into metadata paths by SessionMetadataDirFromSessionID and TaskMetadataDir,
+// neither of which sanitizes, so validation cannot be left to implementations.
+func TestResolveSubagentSessionLink_RejectsPathUnsafeIDs(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]agent.SubagentSessionLink{
+		"parent traverses":   {ParentSessionID: "../../etc", ToolUseID: "toolu_1"},
+		"parent separator":   {ParentSessionID: "a/b", ToolUseID: "toolu_1"},
+		"tool use traverses": {ParentSessionID: "parent-1", ToolUseID: "../../etc"},
+		"tool use separator": {ParentSessionID: "parent-1", ToolUseID: "a/b"},
+		"empty parent":       {ParentSessionID: "", ToolUseID: "toolu_1"},
+		"empty tool use":     {ParentSessionID: "parent-1", ToolUseID: ""},
+	}
+
+	for name, link := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ag := &resolvingSubagentAgent{link: link, ok: true}
+
+			_, ok := resolveSubagentSessionLink(context.Background(), ag, "transcript.jsonl")
+
+			if ok {
+				t.Errorf("link %+v must be rejected, not used to build a metadata path", link)
+			}
+		})
+	}
+}
+
+// TestResolveSubagentSessionLink_AcceptsValidLink guards against the validation
+// above rejecting everything, which would silently restore the original bug.
+func TestResolveSubagentSessionLink_AcceptsValidLink(t *testing.T) {
+	t.Parallel()
+
+	want := agent.SubagentSessionLink{
+		ParentSessionID: "0b34cbcb-108c-4800-b68e-af7093c8cae9",
+		ToolUseID:       "toolu_01SC9sRHSef1vtNFtMrX9w6T",
+		SubagentType:    "worker",
+	}
+	ag := &resolvingSubagentAgent{link: want, ok: true}
+
+	got, ok := resolveSubagentSessionLink(context.Background(), ag, "transcript.jsonl")
+
+	if !ok {
+		t.Fatal("a well-formed link must be accepted")
+	}
+	if got.ParentSessionID != want.ParentSessionID || got.ToolUseID != want.ToolUseID {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+// TestResolveSubagentSessionLink_AgentWithoutCapability confirms the default
+// path: an agent whose subagents block the parent turn (Claude Code) is left on
+// the ordinary session-checkpoint path.
+func TestResolveSubagentSessionLink_AgentWithoutCapability(t *testing.T) {
+	t.Parallel()
+
+	ag := &mockLifecycleAgent{name: "mock", agentType: "mock"}
+
+	if _, ok := resolveSubagentSessionLink(context.Background(), ag, "transcript.jsonl"); ok {
+		t.Error("an agent without the capability must never resolve a subagent link")
 	}
 }

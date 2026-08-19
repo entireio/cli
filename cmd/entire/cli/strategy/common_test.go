@@ -988,6 +988,38 @@ func TestEnsurePrimaryRef(t *testing.T) {
 			t.Errorf("expected empty tree, got %d entries", len(tree.Entries))
 		}
 	})
+
+	t.Run("skips empty orphan when primary is git-refs", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		initTestRepo(t, dir)
+
+		// Select the git-refs backend for this repo. EnsurePrimaryRef rebinds
+		// the config lookup to the repo root, so a repo-local settings file is
+		// what it reads.
+		settingsDir := filepath.Join(dir, ".entire")
+		if err := os.MkdirAll(settingsDir, 0o750); err != nil {
+			t.Fatalf("failed to create .entire dir: %v", err)
+		}
+		cfg := []byte(`{"checkpoints":{"primary":{"type":"git-refs"}}}`)
+		if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"), cfg, 0o600); err != nil {
+			t.Fatalf("failed to write settings: %v", err)
+		}
+
+		repo, err := git.PlainOpen(dir)
+		if err != nil {
+			t.Fatalf("failed to open repo: %v", err)
+		}
+		if err := EnsurePrimaryRef(t.Context(), repo); err != nil {
+			t.Fatalf("EnsurePrimaryRef() failed: %v", err)
+		}
+
+		// Under git-refs, checkpoints live in per-checkpoint refs and nothing
+		// is ever written to v1, so no vestigial empty orphan should be created.
+		_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+		require.ErrorIs(t, err, plumbing.ErrReferenceNotFound,
+			"expected no v1 branch under git-refs primary")
+	})
 }
 
 func TestEnsurePrimaryRef_WritesVercelConfigWhenEnabled(t *testing.T) {
@@ -1067,13 +1099,20 @@ func TestEnsurePrimaryRef_SeedsV1FromRemote(t *testing.T) {
 func cloneWithConfig(t *testing.T, bareDir string) (string, func(args ...string)) {
 	t.Helper()
 	cloneDir := filepath.Join(t.TempDir(), "clone")
+	// GitIsolatedEnv on every invocation, matching initBareWithMetadataBranch:
+	// without it these commands inherit the developer's or CI's global git
+	// config, and a global gc.autoDetach=true lets a background `git gc` write
+	// .git/objects after the test returns and race t.TempDir() cleanup. Per-command
+	// env rather than t.Setenv, so callers can still use t.Parallel().
 	cmd := exec.CommandContext(context.Background(), "git", "clone", bareDir, cloneDir)
+	cmd.Env = testutil.GitIsolatedEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("clone failed: %v\n%s", err, out)
 	}
 	run := func(args ...string) {
 		cmd := exec.CommandContext(context.Background(), "git", args...)
 		cmd.Dir = cloneDir
+		cmd.Env = testutil.GitIsolatedEnv()
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v failed: %v\n%s", args, err, out)
 		}

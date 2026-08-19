@@ -41,6 +41,16 @@ Examples:
 
 			sessionID := strategy.FindMostRecentSession(ctx)
 			if sessionID == "" {
+				// Machine-readable modes must not emit prose on stdout with a
+				// zero exit — downstream parsers treat stdout as JSON (or raw
+				// transcript bytes) and would choke on the hint text. Report
+				// on stderr and exit non-zero so callers can detect the
+				// no-session case. The human default keeps the stdout hint.
+				if jsonFlag || transcriptFlag {
+					cmd.SilenceUsage = true
+					fmt.Fprintln(cmd.ErrOrStderr(), "No active session found in this worktree.")
+					return NewSilentError(errors.New("no active session found in this worktree"))
+				}
 				fmt.Fprintln(cmd.OutOrStdout(), "No active session found in this worktree.")
 				return nil
 			}

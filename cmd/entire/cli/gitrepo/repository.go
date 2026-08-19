@@ -20,6 +20,11 @@ import (
 
 const gitDir = ".git"
 
+// sharedObjectCache is one process-wide object cache. go-git uses the cache
+// passed to the storage as its delta-base cache, so a per-open cache makes
+// every open re-read pack data from scratch.
+var sharedObjectCache = cache.NewObjectLRUDefault()
+
 // OpenCurrent opens the current git worktree with object alternates enabled.
 // The caller owns the returned repository and must close it.
 func OpenCurrent(ctx context.Context) (*git.Repository, error) {
@@ -113,12 +118,33 @@ func openPathWithAlternates(repoRoot string) (*git.Repository, error) {
 	// an OS-rooted filesystem lets go-git follow those paths outside .git.
 	storage := gitfilesystem.NewStorageWithOptions(
 		repositoryFS,
-		cache.NewObjectLRUDefault(),
+		sharedObjectCache,
 		gitfilesystem.Options{
 			AlternatesFS: newAlternatesFilesystem(),
 		},
 	)
-	repo, err := git.Open(storage, osfs.New(repoRoot, osfs.WithBoundOS()))
+
+	// go-git's filesystem storer cannot read the reftable ref backend: it reads
+	// refs from .git/refs, packed-refs and .git/HEAD, none of which are
+	// authoritative in a reftable repository, and its extension check rejects
+	// extensions.refstorage=reftable outright. Route ref operations through the
+	// git CLI for such repositories while keeping object storage on go-git.
+	//
+	// TODO: drop the reftable branch below and the whole reftableStorer
+	// (reftable.go) once go-git ships a native reftable reader/writer. At that
+	// point a plain git.Open(storage, worktreeFS) will handle reftable
+	// repositories directly and this CLI-backed shim is dead weight.
+	worktreeFS := osfs.New(repoRoot, osfs.WithBoundOS())
+	if repoUsesReftable(dotGitPath, commonGitPath) {
+		repo, err := git.Open(newReftableStorer(storage, dotGitPath), worktreeFS)
+		if err != nil {
+			_ = storage.Close()
+			return nil, fmt.Errorf("open reftable repository storage: %w", err)
+		}
+		return repo, nil
+	}
+
+	repo, err := git.Open(storage, worktreeFS)
 	if err != nil {
 		_ = storage.Close()
 		return nil, fmt.Errorf("open repository storage: %w", err)

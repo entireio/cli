@@ -33,7 +33,7 @@ func TestInvestigate_EnvVarAdoptionCondensesMetadataOnNextCommit(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
-	enableInvestigateAgent(t, env, "claude-code")
+	enableInvestigateAgent(t, env, agentClaudeCode)
 
 	const (
 		runID    = "0123456789ab"
@@ -138,13 +138,13 @@ func TestInvestigate_EnvVarAdoptionCondensesMetadataOnNextCommit(t *testing.T) {
 //   - writeRunManifest. (Manifest writing is exercised separately in unit
 //     tests for the manifest package; we don't re-test it here.)
 func TestInvestigate_FakeAgentLoop_TagsSessionViaLifecycleHook(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("fake agent uses a POSIX shell script")
 	}
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
-	enableInvestigateAgent(t, env, "claude-code")
+	enableInvestigateAgent(t, env, agentClaudeCode)
 
 	const (
 		runID    = "abcdef012345"
@@ -189,7 +189,7 @@ printf '%%s\n' '{"session_id":"%s","transcript_path":"","prompt":"%s"}' | "$ENTI
 `, sessionID, userText)
 
 	spawner := &investigateFakeSpawner{
-		name:   "claude-code",
+		name:   agentClaudeCode,
 		script: fakeAgentScript,
 		extraEnv: []string{
 			"ENTIRE_TEST_BINARY=" + getTestBinary(),
@@ -204,7 +204,7 @@ printf '%%s\n' '{"session_id":"%s","transcript_path":"","prompt":"%s"}' | "$ENTI
 	in := investigate.LoopInput{
 		RunID:       runID,
 		Topic:       topic,
-		Agents:      []string{"claude-code"},
+		Agents:      []string{agentClaudeCode},
 		MaxTurns:    1,
 		Quorum:      1,
 		FindingsDoc: findingsDoc,
@@ -212,7 +212,7 @@ printf '%%s\n' '{"session_id":"%s","transcript_path":"","prompt":"%s"}' | "$ENTI
 	}
 	deps := investigate.LoopDeps{
 		SpawnerFor: func(name string) spawn.Spawner {
-			if name == "claude-code" {
+			if name == agentClaudeCode {
 				return spawner
 			}
 			return nil
@@ -276,7 +276,7 @@ printf '%%s\n' '{"session_id":"%s","transcript_path":"","prompt":"%s"}' | "$ENTI
 // and feeds it into LoopInput.Resume; this test pins that wrapper's
 // contract by exercising the loop with a synthetic Resume state.
 func TestInvestigate_Continue_ResumesAtRecordedAgentIdx(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("fake agent uses a POSIX shell script")
 	}
 	t.Parallel()
@@ -297,14 +297,14 @@ func TestInvestigate_Continue_ResumesAtRecordedAgentIdx(t *testing.T) {
 	resume := &investigate.RunState{
 		RunID:           runID,
 		Topic:           "resume-topic",
-		Agents:          []string{"claude-code", "codex"},
+		Agents:          []string{agentClaudeCode, "codex"},
 		MaxTurns:        1,
 		Quorum:          2,
 		CompletedRounds: 0,
 		Turn:            1,
 		NextAgentIdx:    1,
 		Stances: []investigate.TurnStance{
-			{Round: 1, Turn: 1, Agent: "claude-code", Stance: "approve"},
+			{Round: 1, Turn: 1, Agent: agentClaudeCode, Stance: "approve"},
 		},
 		FindingsDoc: findings,
 		StartingSHA: "deadbeef",
@@ -385,17 +385,17 @@ with open(p, "w") as f:
 // confirm bootstrap ran. We then inspect the on-disk findings doc (under
 // .entire/investigations/<slug>.md) for the resolved title + body.
 func TestInvestigate_IssueLink_ResolvesViaFakeGh(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("fake gh + fake claude rely on POSIX shell scripts")
 	}
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
-	enableInvestigateAgent(t, env, "claude-code")
+	enableInvestigateAgent(t, env, agentClaudeCode)
 	env.WriteSettings(map[string]any{
 		"enabled": true,
 		"investigate": map[string]any{
-			"agents":    []string{"claude-code"},
+			"agents":    []string{agentClaudeCode},
 			"max_turns": 1,
 			"quorum":    1,
 		},
@@ -450,7 +450,7 @@ func TestInvestigate_IssueLink_ResolvesViaFakeGh(t *testing.T) {
 		"--issue-link", "https://github.com/foo/bar/issues/1",
 		"--allow-untrusted-seed",
 		"--max-turns", "1",
-		"--agents", "claude-code")
+		"--agents", agentClaudeCode)
 	cmd.Dir = env.RepoDir
 	cmd.Env = envWithOverrides(env.cliEnv(),
 		"PATH="+fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"),
@@ -511,7 +511,10 @@ func TestInvestigate_IssueLink_ResolvesViaFakeGh(t *testing.T) {
 // Mirrors enableReviewAgent.
 func enableInvestigateAgent(t *testing.T, env *TestEnv, name string) {
 	t.Helper()
-	env.RunCLI("enable", "--agent", name, "--telemetry=false")
+	// Pin the git-branch backend, matching enableReviewAgent: this file's
+	// helpers read checkpoint content from the v1 metadata branch, and
+	// first-run enable now defaults new setups to git-refs.
+	env.RunCLI("enable", "--agent", name, "--telemetry=false", "--checkpoint-backend", "branch")
 }
 
 // SimulateUserPromptSubmitWithInvestigateEnvVars fires UserPromptSubmit with

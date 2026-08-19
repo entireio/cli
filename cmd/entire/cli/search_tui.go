@@ -35,16 +35,18 @@ const (
 
 // searchResultsMsg is sent when a search API call completes.
 type searchResultsMsg struct {
-	results []search.Result
-	total   int
-	counts  *search.TypeCounts
-	err     error
+	results  []search.Result
+	total    int
+	counts   *search.TypeCounts
+	warnings []string
+	err      error
 }
 
 // searchMoreResultsMsg is sent when a fetch-more-results call completes.
 type searchMoreResultsMsg struct {
-	results []search.Result
-	err     error
+	results  []search.Result
+	warnings []string
+	err      error
 }
 
 // codeSearchResultsMsg is sent when an async code search call completes.
@@ -144,12 +146,22 @@ type searchModel struct {
 	filterType   typeFilter         // active type tab filter
 	counts       *search.TypeCounts // per-type counts from API
 
+	// semanticSearch performs checkpoint searches (initial, re-search, and
+	// pagination). The command layer injects its session searcher so every
+	// TUI search shares the invocation's discovery cache.
+	semanticSearch semanticSearcher
+
+	// warning is the current search's completeness note (partial cell
+	// failure, truncated repo index), shown in the status row — the TUI
+	// counterpart of the one-shot path's stderr warnings.
+	warning string
+
 	// darkBg is captured once before bubbletea takes over the terminal so the
 	// snippet renderer never re-queries the terminal via OSC during the Update
 	// loop (which would race against bubbletea's stdin reader and stall).
 	darkBg bool
 
-	// Code search state (behind ENTIRE_CODE_SEARCH=1 feature flag).
+	// Code search state.
 	codeResults    []codesearch.Result // results from peregrine
 	codeStats      codesearch.Stats    // aggregate stats
 	codeLoading    bool                // true while async code search runs
@@ -231,22 +243,21 @@ func (m searchModel) selectedResult() *search.Result {
 	return nil
 }
 
-// computeTypeCounts calculates per-type counts from the loaded results,
-// falling back to API-provided counts when available.
-func (m searchModel) computeTypeCounts() (checkpoints, commits, sessions int) {
+// computeTypeCounts calculates per-tab counts from the loaded results,
+// falling back to API-provided counts when available. Checkpoints have no tab
+// (they fold into sessions server-side), so they are not counted here.
+func (m searchModel) computeTypeCounts() (commits, sessions int) {
 	if m.counts != nil {
-		return m.counts.Checkpoints, m.counts.Commits, m.counts.Sessions
+		return m.counts.Commits, m.counts.Sessions
 	}
 	for _, r := range m.results {
 		switch typeFilter(r.Type) {
-		case typeFilterCheckpoints:
-			checkpoints++
 		case typeFilterCommits:
 			commits++
 		case typeFilterSessions:
 			sessions++
-		case typeFilterAll, typeFilterCode:
-			// not a valid result type; skip
+		case typeFilterAll, typeFilterCode, typeFilterCheckpoints:
+			// not shown as a tab; skip
 		}
 	}
 	return
@@ -258,7 +269,7 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	ti := textinput.New()
 	ti.SetValue(query)
 	ti.Prompt = " › "
-	ti.Placeholder = "search checkpoints... (author:name date:week branch:main repo:owner/name or repo:*)"
+	ti.Placeholder = "search sessions, commits, code... (author:name date:week branch:main repo:owner/name or repo:*)"
 	ti.CharLimit = 200
 	ti.SetWidth(max(ss.width-6, 30))
 	ti.SetVirtualCursor(true)
@@ -279,17 +290,18 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	}
 
 	m := searchModel{
-		results:    results,
-		total:      total,
-		width:      ss.width,
-		mode:       modeBrowse,
-		input:      ti,
-		searchCfg:  cfg,
-		apiPage:    apiPage,
-		styles:     styles,
-		browseVP:   viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
-		darkBg:     termenv.HasDarkBackground(),
-		filterType: typeFilterCheckpoints, // default the results table to checkpoints
+		results:        results,
+		total:          total,
+		width:          ss.width,
+		mode:           modeBrowse,
+		input:          ti,
+		searchCfg:      cfg,
+		apiPage:        apiPage,
+		styles:         styles,
+		browseVP:       viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
+		darkBg:         termenv.HasDarkBackground(),
+		filterType:     typeFilterCommits,          // default to the leftmost tab (Commits), matching the web UI order
+		semanticSearch: newSemanticSearcher(false), // command layer overrides with its session searcher
 	}
 	if codeOpts != nil {
 		m.codeSearchOpts = *codeOpts
@@ -319,7 +331,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		m.loading = false
 		m.fetchingMore = false
 		if msg.err != nil {
-			m.searchErr = msg.err.Error()
+			m.searchErr = RenderUserFacingError(msg.err).Error()
 			m = m.refreshBrowseContent()
 			return m, nil
 		}
@@ -327,6 +339,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		m.results = msg.results
 		m.total = msg.total
 		m.counts = msg.counts
+		m.warning = strings.Join(msg.warnings, "; ")
 		m.apiPage = 1
 		m.cursor = 0
 		m.page = 0
@@ -337,16 +350,25 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 	case searchMoreResultsMsg:
 		m.fetchingMore = false
 		if msg.err != nil {
-			m.searchErr = msg.err.Error()
+			m.searchErr = RenderUserFacingError(msg.err).Error()
 			m = m.refreshBrowseContent()
 			return m, nil
+		}
+		if len(msg.warnings) > 0 {
+			m.warning = strings.Join(msg.warnings, "; ")
 		}
 		m.apiPage++
 		if len(msg.results) > 0 {
 			m.results = append(m.results, msg.results...)
 		} else {
-			// API returned no more results — cap total to what we have
+			// API returned no more results — cap total to what we have, and
+			// pull the display page back into range (paging forward advanced
+			// it optimistically before the fetch came back empty).
 			m.total = len(m.results)
+			if last := m.totalPages() - 1; m.page > last {
+				m.page = last
+				m.cursor = 0
+			}
 		}
 		m = m.refreshBrowseContent()
 		return m, nil
@@ -370,7 +392,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		}
 		m.codeLoading = false
 		if msg.err != nil {
-			m.codeSearchErr = msg.err.Error()
+			m.codeSearchErr = RenderUserFacingError(msg.err).Error()
 		} else if msg.resp != nil {
 			m.codeResults = msg.resp.Results
 			m.codeStats = msg.resp.Stats
@@ -410,8 +432,8 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			return m, nil
 		}
 		// Checkpoint search: ParseSearchInput extracts author:/date:/branch:/repo:.
-		// ValidateRepoFilters only applies to checkpoint search (single repo limit);
-		// code search handles multiple repos via fan-out.
+		// ValidateRepoFilters only checks each repo value's shape; both semantic
+		// and code search accept multiple repos and fan out across cells.
 		parsed := search.ParseSearchInput(raw)
 		checkpointRepoErr := search.ValidateRepoFilters(parsed.Repos)
 
@@ -423,37 +445,35 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		// Code search uses extractInlineRepoFilters (not ParseSearchInput)
 		// so author:/date:/branch: tokens are preserved as literal search
 		// text, matching the --code CLI path.
-		if codeSearchEnabled() {
-			codeQuery, inlineRepos := extractInlineRepoFilters(raw)
-			if codeQuery != "" {
-				willFireCodeSearch = true
-				opts := m.codeSearchOpts
-				opts.query = codeQuery
-				// Always reset to the model's default repo scope, then apply
-				// inline overrides. This prevents a stale repo list from a
-				// previous query leaking into the next one.
-				opts.repoFilters = m.codeSearchOpts.repoFilters
-				if len(inlineRepos) > 0 {
-					if hasAllReposFilter(inlineRepos) {
-						opts.repoFilters = nil
-					} else {
-						opts.repoFilters = filterRepoWildcards(inlineRepos)
-					}
+		codeQuery, inlineRepos := extractInlineRepoFilters(raw)
+		if codeQuery != "" {
+			willFireCodeSearch = true
+			opts := m.codeSearchOpts
+			opts.query = codeQuery
+			// Always reset to the model's default repo scope, then apply
+			// inline overrides. This prevents a stale repo list from a
+			// previous query leaking into the next one.
+			opts.repoFilters = m.codeSearchOpts.repoFilters
+			if len(inlineRepos) > 0 {
+				if hasAllReposFilter(inlineRepos) {
+					opts.repoFilters = nil
+				} else {
+					opts.repoFilters = filterRepoWildcards(inlineRepos)
 				}
-				m.codeSearchGen++
-				m.codeLoading = true
-				m.codeResults = nil
-				m.codeSearchErr = ""
-				cmds = append(cmds, performCodeSearch(opts, m.codeSearchGen))
-			} else {
-				// No code query (e.g. repo-only input) — clear stale code
-				// results and bump the generation so any in-flight search
-				// from a prior query is discarded when it completes.
-				m.codeSearchGen++
-				m.codeLoading = false
-				m.codeResults = nil
-				m.codeSearchErr = ""
 			}
+			m.codeSearchGen++
+			m.codeLoading = true
+			m.codeResults = nil
+			m.codeSearchErr = ""
+			cmds = append(cmds, performCodeSearch(opts, m.codeSearchGen))
+		} else {
+			// No code query (e.g. repo-only input) — clear stale code
+			// results and bump the generation so any in-flight search
+			// from a prior query is discarded when it completes.
+			m.codeSearchGen++
+			m.codeLoading = false
+			m.codeResults = nil
+			m.codeSearchErr = ""
 		}
 
 		// Checkpoint search (only if repo filters are valid for the checkpoint API).
@@ -477,7 +497,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			cfg.Branch = parsed.Branch
 			cfg.Repos = parsed.Repos
 			m.searchCfg = cfg
-			cmds = append(cmds, performSearch(cfg))
+			cmds = append(cmds, m.performSearch(cfg))
 		}
 
 		m.mode = modeBrowse
@@ -495,7 +515,7 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	// Type tab keys (1/2/3)
 	switch msg.String() {
 	case "1":
-		m.filterType = typeFilterCheckpoints
+		m.filterType = typeFilterCommits
 		m.cursor = 0
 		m.page = 0
 		m.browseVP.GotoTop()
@@ -509,21 +529,12 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		m = m.refreshBrowseContent()
 		return m, nil
 	case "3":
-		m.filterType = typeFilterCommits
+		m.filterType = typeFilterCode
 		m.cursor = 0
 		m.page = 0
 		m.browseVP.GotoTop()
 		m = m.refreshBrowseContent()
 		return m, nil
-	case "4":
-		if codeSearchEnabled() {
-			m.filterType = typeFilterCode
-			m.cursor = 0
-			m.page = 0
-			m.browseVP.GotoTop()
-			m = m.refreshBrowseContent()
-			return m, nil
-		}
 	}
 
 	var pageLen int
@@ -583,7 +594,7 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			if m.filterType != typeFilterCode && start >= len(m.filteredResults()) && !m.fetchingMore {
 				m.fetchingMore = true
 				m = m.refreshBrowseContent()
-				return m, fetchMoreResults(m.searchCfg, m.apiPage+1)
+				return m, m.fetchMoreResults(m.searchCfg, m.apiPage+1)
 			}
 			m = m.refreshBrowseContent()
 		}
@@ -641,13 +652,14 @@ func (m searchModel) updateDetailMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	return m, cmd
 }
 
-func performSearch(cfg search.Config) tea.Cmd {
+func (m searchModel) performSearch(cfg search.Config) tea.Cmd {
+	searcher := m.semanticSearch
 	return func() tea.Msg {
-		resp, err := search.Search(context.Background(), cfg)
+		resp, err := searcher(context.Background(), cfg)
 		if err != nil {
 			return searchResultsMsg{err: err}
 		}
-		return searchResultsMsg{results: resp.Results, total: resp.Total, counts: resp.Counts}
+		return searchResultsMsg{results: resp.Results, total: resp.Total, counts: resp.Counts, warnings: resp.Warnings}
 	}
 }
 
@@ -658,14 +670,18 @@ func performCodeSearch(opts codeSearchOpts, gen uint64) tea.Cmd {
 	}
 }
 
-func fetchMoreResults(cfg search.Config, page int) tea.Cmd {
+func (m searchModel) fetchMoreResults(cfg search.Config, page int) tea.Cmd {
+	// Pages server-side: the fan-out forwards Page to every cell (each cell's
+	// page N is interleaved by the merge), so results past the first fetch
+	// stay reachable.
+	searcher := m.semanticSearch
 	return func() tea.Msg {
 		cfg.Page = page
-		resp, err := search.Search(context.Background(), cfg)
+		resp, err := searcher(context.Background(), cfg)
 		if err != nil {
 			return searchMoreResultsMsg{err: err}
 		}
-		return searchMoreResultsMsg{results: resp.Results}
+		return searchMoreResultsMsg{results: resp.Results, warnings: resp.Warnings}
 	}
 }
 
@@ -776,7 +792,7 @@ func (m searchModel) viewSearchMode() string {
 
 // viewTypeTabs renders the type filter tabs with counts.
 func (m searchModel) viewTypeTabs() string {
-	cpCount, cmCount, ssCount := m.computeTypeCounts()
+	cmCount, ssCount := m.computeTypeCounts()
 
 	renderTab := func(label string, filter typeFilter, count int, keyHint string) string {
 		text := fmt.Sprintf("[%s] %s %d", keyHint, label, count)
@@ -786,13 +802,15 @@ func (m searchModel) viewTypeTabs() string {
 		return m.styles.render(m.styles.tabInactive, text)
 	}
 
+	// No Checkpoints tab: the search service folds checkpoint hits into their
+	// owning sessions (ENT-1595), so a checkpoint surfaces as its session. This
+	// matches the web, which dropped its Checkpoints tab. Raw checkpoints stay
+	// reachable by ID via `entire checkpoint explain <id>` (folded session rows
+	// route there).
 	tabs := []string{
-		renderTab("Checkpoints", typeFilterCheckpoints, cpCount, "1"),
+		renderTab("Commits", typeFilterCommits, cmCount, "1"),
 		renderTab("Sessions", typeFilterSessions, ssCount, "2"),
-		renderTab("Commits", typeFilterCommits, cmCount, "3"),
-	}
-	if codeSearchEnabled() {
-		tabs = append(tabs, renderTab("Code", typeFilterCode, len(m.codeResults), "4"))
+		renderTab("Code", typeFilterCode, len(m.codeResults), "3"),
 	}
 
 	return strings.Join(tabs, "  ")
@@ -812,30 +830,17 @@ func (m searchModel) viewBrowseHeader() (string, bool) {
 	b.WriteString(pad + m.styles.render(m.styles.sectionTitle, "›") + " " + m.styles.render(m.styles.bold, query))
 	b.WriteString("\n\n")
 
-	// When code search is available, always show type tabs so the user can
-	// switch to the Code tab even when checkpoint search is loading/errored/empty.
-	hasCodeTab := codeSearchEnabled()
-	checkpointBlocked := m.loading || m.searchErr != "" || len(m.results) == 0
-
-	if checkpointBlocked && !hasCodeTab {
-		// No code tab — show the checkpoint-only loading/error/empty state.
-		switch {
-		case m.loading:
-			b.WriteString(pad + m.styles.render(m.styles.dim, "Searching..."))
-		case m.searchErr != "":
-			b.WriteString(pad + m.styles.render(m.styles.red, "Error: "+m.searchErr))
-		default:
-			b.WriteString(pad + m.styles.render(m.styles.dim, "No results found."))
-		}
-		return b.String(), false
-	}
+	// Always show type tabs so the user can switch to the Code tab even when
+	// the semantic search is loading/errored/empty.
+	resultsBlocked := m.loading || m.searchErr != "" || len(m.results) == 0
 
 	// Type tabs
 	b.WriteString(pad + m.viewTypeTabs())
 	b.WriteString("\n\n")
 
-	// Checkpoint-specific loading/error/empty when on a checkpoint tab.
-	if checkpointBlocked && m.filterType != typeFilterCode {
+	// Loading/error/empty state for the semantic-result tabs (Sessions,
+	// Commits). Code has its own state below and is exempt.
+	if resultsBlocked && m.filterType != typeFilterCode {
 		switch {
 		case m.loading:
 			b.WriteString(pad + m.styles.render(m.styles.dim, "Searching..."))
@@ -982,6 +987,9 @@ func (m searchModel) viewListStatusRow() string {
 	right := fmt.Sprintf("%d results", n)
 	if pages := m.totalPages(); pages > 1 {
 		right = fmt.Sprintf("page %d/%d · %d results", m.page+1, pages, n)
+	}
+	if m.warning != "" {
+		right = "⚠ " + m.warning + " · " + right
 	}
 	if lipgloss.Width(right) > contentWidth {
 		right = stringutil.TruncateRunes(right, contentWidth, "…")
@@ -1547,11 +1555,7 @@ func (m searchModel) viewHelp() string {
 	if pages > 1 {
 		left += dot + m.styles.helpItem("n/p", "page")
 	}
-	typeHint := "1-3"
-	if codeSearchEnabled() {
-		typeHint = "1-4"
-	}
-	left += dot + m.styles.helpItem(typeHint, "type") + dot +
+	left += dot + m.styles.helpItem("1-3", "type") + dot +
 		m.styles.helpItem(keys.Quit.Help().Key, keys.Quit.Help().Desc)
 
 	// The page / results count lives on the status row beneath the list
