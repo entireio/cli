@@ -856,10 +856,17 @@ func shouldSkipJSONLField(key string) bool {
 	return false
 }
 
-// shouldSkipJSONLObject returns true if the object has "type":"image" or "type":"image_url".
+// shouldSkipJSONLObject returns true if the object represents an image payload:
+// "type":"image" or "type":"image_url" (Claude/OpenAI chat format), any
+// "type":"..._image" variant such as "input_image"/"output_image" (Codex embeds
+// screenshots this way), or "type":"base64". Image data is high-entropy binary,
+// not a secret — redacting it would corrupt the payload.
 func shouldSkipJSONLObject(obj map[string]any) bool {
 	t, ok := obj["type"].(string)
-	return ok && (strings.HasPrefix(t, "image") || t == "base64")
+	if !ok {
+		return false
+	}
+	return strings.HasPrefix(t, "image") || strings.HasSuffix(t, "_image") || t == "base64"
 }
 
 func shannonEntropy(s string) float64 {
