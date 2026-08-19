@@ -99,7 +99,9 @@ const maxSymlinkHops = 40
 // does not exist yet. filepath.EvalSymlinks alone cannot do this: it errors on
 // a dangling link exactly like on a missing file, and treating that error as
 // "no symlink here" is how an existing dangling settings.json link got
-// replaced by a regular file.
+// replaced by a regular file. A relative filePath stays relative —
+// EvalSymlinks never absolutizes — so it resolves against the CWD exactly as
+// os.WriteFile would.
 func resolveWriteTarget(filePath string) string {
 	path := filePath
 	for range maxSymlinkHops {

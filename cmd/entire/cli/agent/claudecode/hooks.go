@@ -271,7 +271,9 @@ func installHooksToFile(settingsPath string, localDev, force, projectScope bool)
 	// reinstalls), and adds the entry unless a plain repo-scope install found
 	// it already present. After a removal pass (force or user scope) every
 	// Entire entry is gone from the working slices, so the add must not be
-	// gated on the presence check.
+	// gated on the presence check. Sharing one snapshot across calls cannot
+	// overcount: every call checks a distinct (matcher, command) pair — the
+	// two PostToolUse entries included.
 	addAll := force || userScope
 	ensureHook := func(matchers, check []ClaudeHookMatcher, matcherName, cmd string, timeoutSecs int) []ClaudeHookMatcher {
 		var present bool
