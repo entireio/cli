@@ -46,12 +46,13 @@ func handleClaudeCodePostTodoFromReader(ctx context.Context, reader io.Reader) e
 		slog.String("model_session_id", input.SessionID),
 		slog.String("transcript_path", input.TranscriptPath),
 		slog.String("tool_use_id", input.ToolUseID),
+		slog.String("agent_id", input.AgentID),
 	)
 
-	// Check if we're in a subagent context by looking for an active pre-task file
-	taskToolUseID, found := FindActivePreTaskFile(ctx)
+	// Resolve which task this incremental checkpoint belongs to. Not in subagent
+	// context (no task resolved at all) means this is a main agent TodoWrite, skip.
+	taskToolUseID, found := resolveIncrementalCheckpointTask(logCtx, input.AgentID)
 	if !found {
-		// Not in subagent context - this is a main agent TodoWrite, skip
 		return nil
 	}
 
@@ -148,4 +149,39 @@ func handleClaudeCodePostTodoFromReader(ctx context.Context, reader io.Reader) e
 		slog.String("tool_name", input.ToolName),
 		slog.String("task", taskToolUseID[:min(12, len(taskToolUseID))]))
 	return nil
+}
+
+// resolveIncrementalCheckpointTask determines which task's incremental checkpoint an
+// PostToolUse[TodoWrite] hook invocation belongs to. Returns ("", false) if there is no
+// active task at all (main agent context).
+//
+// Claude Code runs sibling (non-nested) parallel Tasks concurrently, each with its own
+// pre-task file. FindActivePreTaskFile's "most recently modified" heuristic breaks down
+// once a sibling's pre-task file becomes the newest after this agent's Task already
+// started: its TodoWrite progress would get misattributed to the wrong task.
+//
+// When agentID identifies the calling subagent instance (top-level agent_id on
+// PostToolUse hook input), a previously remembered agent->task link is preferred over
+// the mtime heuristic. The first time we resolve a task for a given agentID, the link is
+// created so every subsequent TodoWrite from that same subagent instance sticks to its
+// own task regardless of what other siblings do.
+func resolveIncrementalCheckpointTask(ctx context.Context, agentID string) (taskToolUseID string, found bool) {
+	if agentID != "" {
+		if linked, ok := LookupAgentTaskLink(ctx, agentID); ok {
+			return linked, true
+		}
+	}
+
+	taskToolUseID, found = FindActivePreTaskFile(ctx)
+	if !found {
+		return "", false
+	}
+
+	if agentID != "" {
+		if err := RememberAgentTaskLink(ctx, agentID, taskToolUseID); err != nil {
+			logging.Warn(ctx, "failed to remember agent-task link",
+				slog.String("error", err.Error()))
+		}
+	}
+	return taskToolUseID, true
 }

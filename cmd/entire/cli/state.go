@@ -562,12 +562,134 @@ func LoadPreTaskState(ctx context.Context, toolUseID string) (*PreTaskState, err
 	return &state, nil
 }
 
-// CleanupPreTaskState removes the task state file after use
+// CleanupPreTaskState removes the task state file after use, along with any
+// agent-task link files that point at it (best-effort; see forgetAgentTaskLinksForTask).
 func CleanupPreTaskState(ctx context.Context, toolUseID string) error {
 	if err := validation.ValidateToolUseID(toolUseID); err != nil {
 		return fmt.Errorf("invalid tool use ID for pre-task state cleanup: %w", err)
 	}
+	forgetAgentTaskLinksForTask(ctx, toolUseID)
 	return cleanupTmpStateFile(ctx, fmt.Sprintf("pre-task-%s.json", toolUseID))
+}
+
+// AgentTaskLink records which task tool_use_id a Claude Code subagent instance's
+// incremental checkpoints belong to.
+type AgentTaskLink struct {
+	ToolUseID string `json:"tool_use_id"`
+}
+
+// agentTaskLinkFilePrefix is the prefix for agent->task link files.
+const agentTaskLinkFilePrefix = "agent-task-"
+
+func agentTaskLinkFileName(agentID string) string {
+	return fmt.Sprintf("%s%s.json", agentTaskLinkFilePrefix, agentID)
+}
+
+// RememberAgentTaskLink records that agentID's incremental checkpoints belong to
+// taskToolUseID. Sibling (non-nested) parallel Tasks each get their own pre-task file,
+// and FindActivePreTaskFile's "most recently modified" heuristic misattributes a
+// sibling's TodoWrite progress once another sibling's pre-task file becomes newer.
+// Remembering the link lets a given subagent instance stick to its own task regardless
+// of what siblings do afterward.
+func RememberAgentTaskLink(ctx context.Context, agentID, taskToolUseID string) error {
+	if agentID == "" {
+		return errors.New("agent_id is required")
+	}
+	if err := validation.ValidateAgentID(agentID); err != nil {
+		return fmt.Errorf("invalid agent ID for agent-task link: %w", err)
+	}
+	if err := validation.ValidateToolUseID(taskToolUseID); err != nil {
+		return fmt.Errorf("invalid tool use ID for agent-task link: %w", err)
+	}
+
+	tmpDirAbs := resolveTmpDir(ctx)
+	if err := os.MkdirAll(tmpDirAbs, 0o750); err != nil {
+		return fmt.Errorf("failed to create tmp directory: %w", err)
+	}
+
+	link := AgentTaskLink{ToolUseID: taskToolUseID}
+	data, err := jsonutil.MarshalIndentWithNewline(link, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal agent-task link: %w", err)
+	}
+
+	root, err := os.OpenRoot(tmpDirAbs)
+	if err != nil {
+		return fmt.Errorf("failed to open tmp directory root: %w", err)
+	}
+	defer root.Close()
+
+	if err := osroot.WriteFile(root, agentTaskLinkFileName(agentID), data, 0o600); err != nil {
+		return fmt.Errorf("failed to write agent-task link file: %w", err)
+	}
+	return nil
+}
+
+// LookupAgentTaskLink returns the task tool_use_id previously remembered for agentID via
+// RememberAgentTaskLink. Returns ("", false) if agentID is empty, invalid, or has no link.
+func LookupAgentTaskLink(ctx context.Context, agentID string) (taskToolUseID string, found bool) {
+	if agentID == "" {
+		return "", false
+	}
+	if err := validation.ValidateAgentID(agentID); err != nil {
+		return "", false
+	}
+
+	tmpDirAbs := resolveTmpDir(ctx)
+	root, err := os.OpenRoot(tmpDirAbs)
+	if err != nil {
+		return "", false
+	}
+	defer root.Close()
+
+	data, err := osroot.ReadFile(root, agentTaskLinkFileName(agentID))
+	if err != nil {
+		return "", false
+	}
+
+	var link AgentTaskLink
+	if err := json.Unmarshal(data, &link); err != nil || link.ToolUseID == "" {
+		return "", false
+	}
+	return link.ToolUseID, true
+}
+
+// forgetAgentTaskLinksForTask best-effort removes any agent-task-*.json link files
+// whose recorded tool_use_id matches taskToolUseID. Called from CleanupPreTaskState so
+// links don't outlive the task they point at; a missing or unreadable tmp dir, or
+// missing link files, are not errors.
+func forgetAgentTaskLinksForTask(ctx context.Context, taskToolUseID string) {
+	tmpDirAbs := resolveTmpDir(ctx)
+	entries, err := os.ReadDir(tmpDirAbs)
+	if err != nil {
+		return
+	}
+
+	root, err := os.OpenRoot(tmpDirAbs)
+	if err != nil {
+		return
+	}
+	defer root.Close()
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, agentTaskLinkFilePrefix) || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+
+		data, err := osroot.ReadFile(root, name)
+		if err != nil {
+			continue
+		}
+		var link AgentTaskLink
+		if err := json.Unmarshal(data, &link); err != nil || link.ToolUseID != taskToolUseID {
+			continue
+		}
+		_ = osroot.Remove(root, name) //nolint:errcheck // best-effort cleanup
+	}
 }
 
 // preTaskFilePrefix is the prefix for pre-task state files

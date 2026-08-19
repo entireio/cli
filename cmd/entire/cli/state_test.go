@@ -339,6 +339,129 @@ func TestFindActivePreTaskFile(t *testing.T) {
 	}
 }
 
+// setupTmpDirRepo creates a temp git repo (so paths.AbsPath resolves) with .entire/tmp/
+// ready for pre-task/agent-task link state files, and chdirs the test into it.
+func setupTmpDirRepo(t *testing.T) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	if err := os.MkdirAll(".git/objects", 0o755); err != nil {
+		t.Fatalf("Failed to create .git: %v", err)
+	}
+	if err := os.WriteFile(".git/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatalf("Failed to create HEAD: %v", err)
+	}
+	paths.ClearWorktreeRootCache()
+
+	if err := os.MkdirAll(paths.EntireTmpDir, 0o755); err != nil {
+		t.Fatalf("Failed to create tmp dir: %v", err)
+	}
+}
+
+func TestRememberAndLookupAgentTaskLink(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	// No link yet.
+	if _, found := LookupAgentTaskLink(ctx, "agent-A"); found {
+		t.Fatal("LookupAgentTaskLink() found = true before any link was remembered")
+	}
+
+	if err := RememberAgentTaskLink(ctx, "agent-A", "toolu_task_a"); err != nil {
+		t.Fatalf("RememberAgentTaskLink() error = %v", err)
+	}
+
+	got, found := LookupAgentTaskLink(ctx, "agent-A")
+	if !found {
+		t.Fatal("LookupAgentTaskLink() found = false after remembering a link")
+	}
+	if got != "toolu_task_a" {
+		t.Errorf("LookupAgentTaskLink() = %q, want %q", got, "toolu_task_a")
+	}
+
+	// A different, unrelated agent has no link.
+	if _, found := LookupAgentTaskLink(ctx, "agent-B"); found {
+		t.Error("LookupAgentTaskLink() found = true for an agent that was never remembered")
+	}
+}
+
+func TestRememberAgentTaskLink_InvalidIDs(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	if err := RememberAgentTaskLink(ctx, "", "toolu_task_a"); err == nil {
+		t.Error("RememberAgentTaskLink() with empty agent_id should return an error")
+	}
+	if err := RememberAgentTaskLink(ctx, "../evil", "toolu_task_a"); err == nil {
+		t.Error("RememberAgentTaskLink() with path-unsafe agent_id should return an error")
+	}
+	if err := RememberAgentTaskLink(ctx, "agent-A", "../evil"); err == nil {
+		t.Error("RememberAgentTaskLink() with path-unsafe tool_use_id should return an error")
+	}
+}
+
+func TestLookupAgentTaskLink_EmptyOrInvalidAgentID(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	if _, found := LookupAgentTaskLink(ctx, ""); found {
+		t.Error("LookupAgentTaskLink(\"\") found = true, want false")
+	}
+	if _, found := LookupAgentTaskLink(ctx, "../evil"); found {
+		t.Error("LookupAgentTaskLink() with path-unsafe agent_id found = true, want false")
+	}
+}
+
+func TestCleanupPreTaskState_RemovesMatchingAgentTaskLinks(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	if err := CapturePreTaskState(ctx, "toolu_task_a"); err != nil {
+		t.Fatalf("CapturePreTaskState() error = %v", err)
+	}
+	if err := RememberAgentTaskLink(ctx, "agent-A", "toolu_task_a"); err != nil {
+		t.Fatalf("RememberAgentTaskLink() error = %v", err)
+	}
+	if err := RememberAgentTaskLink(ctx, "agent-A2", "toolu_task_a"); err != nil {
+		t.Fatalf("RememberAgentTaskLink() error = %v", err)
+	}
+	// A sibling task's link should survive cleanup of an unrelated task.
+	if err := RememberAgentTaskLink(ctx, "agent-B", "toolu_task_b"); err != nil {
+		t.Fatalf("RememberAgentTaskLink() error = %v", err)
+	}
+
+	if err := CleanupPreTaskState(ctx, "toolu_task_a"); err != nil {
+		t.Fatalf("CleanupPreTaskState() error = %v", err)
+	}
+
+	if _, found := LookupAgentTaskLink(ctx, "agent-A"); found {
+		t.Error("LookupAgentTaskLink(agent-A) found = true after CleanupPreTaskState for its task")
+	}
+	if _, found := LookupAgentTaskLink(ctx, "agent-A2"); found {
+		t.Error("LookupAgentTaskLink(agent-A2) found = true after CleanupPreTaskState for its task")
+	}
+
+	taskB, found := LookupAgentTaskLink(ctx, "agent-B")
+	if !found || taskB != "toolu_task_b" {
+		t.Errorf("LookupAgentTaskLink(agent-B) = (%q, %v), want (toolu_task_b, true) - unrelated link should survive",
+			taskB, found)
+	}
+}
+
+func TestCleanupPreTaskState_NoLinksIsNotAnError(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	if err := CapturePreTaskState(ctx, "toolu_task_a"); err != nil {
+		t.Fatalf("CapturePreTaskState() error = %v", err)
+	}
+
+	if err := CleanupPreTaskState(ctx, "toolu_task_a"); err != nil {
+		t.Fatalf("CleanupPreTaskState() error = %v, want nil (no agent-task links exist)", err)
+	}
+}
+
 // setupTestRepoWithTranscript sets up a temporary git repo with a transcript file
 // and returns the transcriptPath. Used by PrePromptState transcript tests.
 func setupTestRepoWithTranscript(t *testing.T, transcriptContent string, transcriptName string) (transcriptPath string) {
