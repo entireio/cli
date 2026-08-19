@@ -1179,7 +1179,7 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 	// correlate the matching SubagentEnd event later when that event's own
 	// payload carries no ID.
 	taskDescription := event.TaskDescription
-	if taskDescription == "" && event.SubagentType == "" {
+	if taskDescription == "" {
 		_, taskDescription = ParseSubagentTypeAndDescription(event.ToolInput)
 	}
 	if err := CapturePreTaskStateWithMeta(ctx, event.ToolUseID, taskDescription); err != nil {

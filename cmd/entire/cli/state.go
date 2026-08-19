@@ -694,6 +694,12 @@ func ResolvePreTaskToolUseID(ctx context.Context, toolUseID, taskDescription str
 		return "", false
 	}
 
+	root, err := os.OpenRoot(tmpDirAbs)
+	if err != nil {
+		return "", false
+	}
+	defer root.Close()
+
 	var active []preTaskFileCandidate
 	var matching []preTaskFileCandidate
 
@@ -710,15 +716,20 @@ func ResolvePreTaskToolUseID(ctx context.Context, toolUseID, taskDescription str
 			continue
 		}
 		candidateID := strings.TrimSuffix(strings.TrimPrefix(name, preTaskFilePrefix), ".json")
+		if validation.ValidateToolUseID(candidateID) != nil {
+			// Malformed filename (e.g. pre-task-.json or an invalid ID) — not
+			// a usable candidate, skip it rather than risk returning it below.
+			continue
+		}
 		candidate := preTaskFileCandidate{toolUseID: candidateID, modTime: info.ModTime()}
 		active = append(active, candidate)
 
 		if taskDescription == "" {
 			continue
 		}
-		// name comes from enumerating tmpDirAbs itself, not from untrusted
-		// input, so joining it back onto that same directory is safe.
-		data, readErr := os.ReadFile(filepath.Join(tmpDirAbs, name)) //nolint:gosec // filename enumerated from trusted tmp dir listing
+		// Use os.Root for traversal-resistant access, consistent with the
+		// other pre-task state I/O in this file.
+		data, readErr := osroot.ReadFile(root, name)
 		if readErr != nil {
 			continue
 		}
