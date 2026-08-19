@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -71,7 +70,7 @@ func TestExplain_MutualExclusivity(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 	// Try to provide both --session and --commit flags
-	output, err := env.RunCLIWithError("checkpoint", "explain", "--session", "test-session", "--commit", "abc123")
+	output, err := env.RunCLIWithError("checkpoint", "explain", "--session", testSessionID, "--commit", "abc123")
 
 	if err == nil {
 		t.Errorf("expected error when both flags provided, got output: %s", output)
@@ -103,7 +102,7 @@ func TestExplain_CheckpointMutualExclusivity(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 	// Try to provide --checkpoint with --session
-	output, err := env.RunCLIWithError("checkpoint", "explain", "--session", "test-session", "--checkpoint", "abc123")
+	output, err := env.RunCLIWithError("checkpoint", "explain", "--session", testSessionID, "--checkpoint", "abc123")
 
 	if err == nil {
 		t.Errorf("expected error when both flags provided, got output: %s", output)
@@ -230,14 +229,14 @@ func TestExplain_CheckpointFetchesFromRemoteWhenMissingLocally(t *testing.T) {
 		require.NoError(t, err)
 		if env.usingGitRefs() {
 			ref := plumbing.ReferenceName(checkpointRefName(checkpointID))
-			_ = repo.Storer.RemoveReference(ref)
+			require.NoError(t, repo.Storer.RemoveReference(ref))
 			_, err = repo.Storer.Reference(ref)
 			require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "local checkpoint ref should be absent")
 		} else {
 			localRef := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 			remoteRef := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
-			_ = repo.Storer.RemoveReference(localRef)
-			_ = repo.Storer.RemoveReference(remoteRef)
+			require.NoError(t, repo.Storer.RemoveReference(localRef))
+			require.NoError(t, repo.Storer.RemoveReference(remoteRef))
 			_, err = repo.Storer.Reference(localRef)
 			require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "local metadata ref should be absent")
 			_, err = repo.Storer.Reference(remoteRef)
@@ -303,7 +302,9 @@ func TestExplain_CheckpointFetchDoesNotRewindLocalAheadBranch(t *testing.T) {
 	// unlikely to collide with a real checkpoint ID.
 	// The command is expected to fail (no such checkpoint) — we're testing the
 	// side effect on the local ref, not the command's success.
-	_, _ = env.RunCLIWithError("checkpoint", "explain", "--checkpoint", "000000000000")
+	if _, cliErr := env.RunCLIWithError("checkpoint", "explain", "--checkpoint", "000000000000"); cliErr == nil {
+		t.Log("explain for nonexistent checkpoint unexpectedly succeeded; continuing to check ref side effect")
+	}
 
 	// Re-open repo (go-git caches ref state per handle).
 	repo, err = git.PlainOpen(env.RepoDir)
@@ -414,9 +415,8 @@ func writeMinimalEntireSettings(dir, bareURL string) error {
 		return err
 	}
 	settings := map[string]any{
-		"enabled":   true,
-		"local_dev": true,
-		"strategy":  "manual-commit",
+		"enabled":  true,
+		"strategy": "manual-commit",
 		"strategy_options": map[string]any{
 			"filtered_fetches": true,
 			"checkpoint_remote": map[string]any{
@@ -432,20 +432,11 @@ func writeMinimalEntireSettings(dir, bareURL string) error {
 	return os.WriteFile(filepath.Join(entireDir, paths.SettingsFileName), data, 0o644)
 }
 
-// runExplainInDir runs `entire explain --checkpoint <id>` in dir and
-// returns combined output. Fails the test if the command errors. Uses
-// execx.NonInteractive (project rule for spawning the entire binary in
-// tests) so the child has no controlling terminal.
+// runExplainInDir runs `entire checkpoint explain --checkpoint <id>` in dir and
+// returns combined output. Fails the test if the command errors.
 func runExplainInDir(t *testing.T, dir, checkpointID string) string {
 	t.Helper()
-	cmd := execx.NonInteractive(t.Context(), getTestBinary(), "explain", "--checkpoint", checkpointID)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("explain failed: %v\n%s", err, out)
-	}
-	return string(out)
+	return runEntireInDir(t, dir, "checkpoint", "explain", "--checkpoint", checkpointID)
 }
 
 // requireBlobMissing asserts that at least one metadata blob for the

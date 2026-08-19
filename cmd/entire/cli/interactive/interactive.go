@@ -30,7 +30,9 @@ const EnvTestTTY = "ENTIRE_TEST_TTY"
 //     Subprocess tests must spawn via execx.NonInteractive (or set EnvTestTTY).
 //  3. Agent sentinels — vendor-set by agent subprocesses.
 //  4. CI=<non-empty-non-false> — de-facto CI convention.
-//  5. /dev/tty probe.
+//  5. /dev/tty probe, plus its terminal mode: a controlling terminal held in
+//     raw mode belongs to a full-screen TUI (lazygit, gitui, tig, …) that
+//     spawned us, not to a shell we can prompt. See rawmode_unix.go.
 func CanPromptInteractively() bool {
 	if v := os.Getenv(EnvTestTTY); v != "" {
 		return v == "1"
@@ -54,8 +56,11 @@ func CanPromptInteractively() bool {
 	if err != nil {
 		return false
 	}
-	_ = tty.Close()
-	return true
+	defer tty.Close()
+	// Having a controlling terminal isn't enough — a TUI that spawned us holds
+	// that same terminal in raw mode for its own screen and keys. See
+	// rawmode_unix.go.
+	return !ttyInRawMode(tty)
 }
 
 // UnderTest reports whether the process is running in a test context — either

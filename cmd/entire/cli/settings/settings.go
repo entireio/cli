@@ -46,6 +46,13 @@ func WithWorktreeRoot(ctx context.Context, worktreeRoot string) context.Context 
 	return context.WithValue(ctx, worktreeRootContextKey{}, filepath.Clean(worktreeRoot))
 }
 
+// WorktreeRoot returns the explicit worktree root carried by ctx. Consumers
+// that combine settings resolution with repo-local git commands use this to
+// keep both operations scoped to the same repository.
+func WorktreeRoot(ctx context.Context) (string, bool) {
+	return worktreeRootFromContext(ctx)
+}
+
 func worktreeRootFromContext(ctx context.Context) (string, bool) {
 	root, ok := ctx.Value(worktreeRootContextKey{}).(string)
 	return root, ok && root != ""
@@ -65,8 +72,14 @@ type EntireSettings struct {
 	// show a disabled message and hooks exit silently. Defaults to true.
 	Enabled bool `json:"enabled"`
 
-	// LocalDev indicates whether to use "go run" instead of the "entire" binary
-	// This is used for development when the binary is not installed
+	// Deprecated: no longer used, and deliberately not read anywhere — not even
+	// merged from an override (see mergeScalarFields). Kept so the strict loader
+	// (DisallowUnknownFields) still accepts a "local_dev" key in settings files
+	// written before it was removed.
+	//
+	// It let a tracked settings file decide that hooks run repo content; see
+	// agent.LegacyLocalDevHookScript for the full rationale. Do not reintroduce a
+	// setting that influences hook command generation.
 	LocalDev bool `json:"local_dev,omitempty"`
 
 	// LogLevel sets the logging verbosity (debug, info, warn, error).
@@ -956,9 +969,8 @@ func mergeScalarFields(settings *EntireSettings, raw map[string]json.RawMessage)
 	if err := mergeRawBool(raw, "enabled", &settings.Enabled); err != nil {
 		return err
 	}
-	if err := mergeRawBool(raw, "local_dev", &settings.LocalDev); err != nil {
-		return err
-	}
+	// "local_dev" is deliberately absent — a deprecated no-op, see
+	// EntireSettings.LocalDev.
 	if err := mergeRawBool(raw, "absolute_git_hook_path", &settings.AbsoluteGitHookPath); err != nil {
 		return err
 	}
@@ -1407,6 +1419,47 @@ func (c *CheckpointRemoteConfig) Owner() string {
 	return parts[0]
 }
 
+// HasCheckpointRemoteKey reports whether a checkpoint_remote entry exists in
+// strategy options at all — deliberately including malformed entries that
+// GetCheckpointRemote rejects (it returns nil for absent AND malformed, so it
+// cannot distinguish "no intent" from "botched intent"). Presence in any form
+// means the user intends a checkpoint remote.
+func (s *EntireSettings) HasCheckpointRemoteKey() bool {
+	if s.StrategyOptions == nil {
+		return false
+	}
+	_, ok := s.StrategyOptions["checkpoint_remote"]
+	return ok
+}
+
+// CheckpointRemoteIsLocalOnly reports whether a checkpoint_remote entry is
+// present in .entire/settings.local.json.
+//
+// That file is gitignored and per-clone, so a checkpoint_remote living there
+// cannot have arrived by cloning or forking someone else's project — it is this
+// developer's own explicit choice. Callers use this to distinguish "I configured
+// where my checkpoints go" from "I inherited a committed setting that points at
+// the upstream project's checkpoint repo".
+//
+// Best-effort: an unreadable or malformed local file reports false, which is the
+// conservative answer (callers then fall back to weaker ownership signals).
+func CheckpointRemoteIsLocalOnly(ctx context.Context) bool {
+	_, raw, exists, err := LoadLocalRaw(ctx)
+	if err != nil || !exists {
+		return false
+	}
+	optionsRaw, ok := raw["strategy_options"]
+	if !ok {
+		return false
+	}
+	var options map[string]json.RawMessage
+	if err := json.Unmarshal(optionsRaw, &options); err != nil {
+		return false
+	}
+	_, ok = options["checkpoint_remote"]
+	return ok
+}
+
 // GetCheckpointRemote returns the configured checkpoint remote.
 // Expects a structured object: {"provider": "github", "repo": "org/repo"}.
 // Returns nil if not configured, wrong type, or missing required fields.
@@ -1431,6 +1484,22 @@ func (s *EntireSettings) GetCheckpointRemote() *CheckpointRemoteConfig {
 		return nil
 	}
 	return &CheckpointRemoteConfig{Provider: provider, Repo: repo}
+}
+
+// GetCheckpointPushRemote returns the configured checkpoint push remote name.
+// Stored in strategy_options.checkpoint_push_remote as a plain git remote
+// name (e.g. "origin", "private"). This selects WHICH configured remote
+// carries checkpoint data — distinct from checkpoint_remote, which derives a
+// dedicated URL. Returns "" if unset, empty, or not a string.
+func (s *EntireSettings) GetCheckpointPushRemote() string {
+	if s.StrategyOptions == nil {
+		return ""
+	}
+	val, ok := s.StrategyOptions["checkpoint_push_remote"].(string)
+	if !ok {
+		return ""
+	}
+	return val
 }
 
 // IsFilteredFetchesEnabled checks if fetches should use --filter=blob:none.

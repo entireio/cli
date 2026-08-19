@@ -28,8 +28,8 @@ type expertsAPIClient interface {
 }
 
 // newExpertsAPIClient builds the entire-api cell client. fullName (owner/repo)
-// and/or ulid identify the repo so the client can route to the cell that hosts
-// it (see NewAuthenticatedEntireAPICellClient).
+// or ulid identifies the repo so the client can route to the cell that hosts
+// it; one of them is required (see NewAuthenticatedEntireAPICellClient).
 var newExpertsAPIClient = func(ctx context.Context, insecureHTTP bool, fullName, ulid string) (expertsAPIClient, error) {
 	return NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, fullName, ulid)
 }
@@ -182,10 +182,18 @@ func (s expertsStyles) link(style lipgloss.Style, url, text string) string {
 func newExpertsCmd() *cobra.Command {
 	f := &expertsFlags{limit: 8}
 	cmd := &cobra.Command{
-		Use:    "experts [scope-or-query]",
-		Short:  "Rank agent provenance for code scopes",
-		Hidden: true,
-		Args:   cobra.ArbitraryArgs,
+		Use:   "experts [scope-or-query]",
+		Short: "Rank agent provenance for code scopes",
+		Long: `Rank which agents, skills, and tools have provenance over a code scope — who
+and what has touched the given code.
+
+The argument is either a single scope (a file or directory path) or a
+natural-language query. A scope or query is required unless --staged is set,
+which uses the staged file paths as scopes instead. Results come from the
+entire-api cell keyed on the repo, so the repo must be mirrored.`,
+		Example: "  entire experts src/payments --json\n  entire experts \"who owns token refresh\" --json\n  entire experts --staged",
+		Hidden:  true,
+		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runExperts(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), args, f)
 		},
@@ -273,7 +281,7 @@ func runExperts(ctx context.Context, out, errOut io.Writer, args []string, f *ex
 
 	// Identify the repo for cell routing: a ULID goes on the ulid arg, an
 	// owner/repo on the fullName arg. The client uses whichever is set to reach
-	// the cell that hosts the repo (falling back to home-jurisdiction routing).
+	// the cell that hosts the repo's processing placement.
 	cellFullName, cellULID := "", ""
 	if repoIsULID {
 		cellULID = repoOverride

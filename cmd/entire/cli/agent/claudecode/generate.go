@@ -51,6 +51,26 @@ func buildGenerateArgs(model, settingsPath string) []string {
 	return args
 }
 
+// buildStreamingGenerateArgs is buildGenerateArgs for the stream-json path,
+// with the same isolation and auth-injection contract (see buildGenerateArgs).
+// --include-partial-messages enables the per-token stream_event envelopes
+// that PhaseFirstToken and PhaseGenerating are dispatched from, and
+// --verbose is required by the claude CLI for stream-json output.
+func buildStreamingGenerateArgs(model, settingsPath string) []string {
+	args := []string{
+		"--print",
+		"--output-format", "stream-json",
+		"--include-partial-messages",
+		"--verbose",
+		"--model", model,
+		"--setting-sources", "",
+	}
+	if settingsPath != "" {
+		args = append(args, "--settings", settingsPath)
+	}
+	return args
+}
+
 // writeAuthSettingsFile writes a minimal claude settings file containing only
 // the given apiKeyHelper and returns its path plus a cleanup func. The file is
 // created 0600 so the (possibly key-bearing) helper is no more exposed than the
@@ -183,12 +203,21 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 			return "", classifyEnvelopeError(result, env.APIErrorStatus, exitCode)
 		}
 		// No structured signal on stdout — ctx cancellation is next most
-		// informative, since the rest is a guess.
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", context.DeadlineExceeded
-		}
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return "", context.Canceled
+		// informative, since the rest is a guess. Wrap the sentinel in a
+		// *agent.TextGenerationError (like the streaming path and every other
+		// provider) so the explain timeout diagnostic still gets captured
+		// stderr and the stdout byte count when this path is reached via the
+		// old-CLI streaming fallback.
+		if ctxErr := ctx.Err(); ctxErr != nil && (errors.Is(ctxErr, context.DeadlineExceeded) || errors.Is(ctxErr, context.Canceled)) {
+			sentinel := context.Canceled
+			if errors.Is(ctxErr, context.DeadlineExceeded) {
+				sentinel = context.DeadlineExceeded
+			}
+			return "", &agent.TextGenerationError{
+				Err:         sentinel,
+				Stderr:      strings.TrimSpace(stderr.String()),
+				StdoutBytes: stdout.Len(),
+			}
 		}
 		if isExecNotFound(err) {
 			return "", &ClaudeError{Kind: ClaudeErrorCLIMissing, Cause: err}

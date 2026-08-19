@@ -42,6 +42,14 @@ func TestSubagentCommitFlow(t *testing.T) {
 		sm := testutil.ReadSessionMetadata(t, s.Dir, cpID, 0)
 		assert.NotEmpty(t, sm.Agent, "session agent field should be populated")
 		assert.NotEmpty(t, sm.SessionID, "session_id should be set")
+
+		// The subagent's work must be attributed to the checkpoint. Only the
+		// subagent's own transcript records its Write, so this is what fails when
+		// subagent transcript resolution or file attribution breaks — the test
+		// previously passed on file existence alone and could not see that.
+		assert.Contains(t, meta.FilesTouched, "docs/red.md",
+			"the file the subagent created must be attributed to the checkpoint")
+
 		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }

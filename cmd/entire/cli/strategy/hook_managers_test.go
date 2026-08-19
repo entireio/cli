@@ -377,7 +377,7 @@ func TestHookManagerWarning_Empty(t *testing.T) {
 	}
 }
 
-func TestHookManagerWarning_LocalDev(t *testing.T) {
+func TestHookManagerWarning_AbsolutePathPrefix(t *testing.T) {
 	t.Parallel()
 
 	// Non-Husky overwrite managers still emit command-line guidance with the
@@ -386,10 +386,15 @@ func TestHookManagerWarning_LocalDev(t *testing.T) {
 		{Name: "CustomManager", ConfigPath: ".custom/", OverwritesHooks: true},
 	}
 
-	warning := hookManagerWarning(managers, localDevHookCmdPrefix, false)
+	// The prefix is whatever hookCmdPrefix resolved to — bare "entire" or, with
+	// --absolute-git-hook-path, a shell-quoted absolute path. Either way the
+	// warning must quote it verbatim so the command it tells the user to add is
+	// the one Entire actually installs.
+	const prefix = "'/opt/homebrew/bin/entire'"
+	warning := hookManagerWarning(managers, prefix, false)
 
-	if !strings.Contains(warning, localDevHookCmdPrefix+" hooks git") {
-		t.Error("warning should use local dev command prefix")
+	if !strings.Contains(warning, prefix+" hooks git") {
+		t.Errorf("warning should use the resolved command prefix, got %q", warning)
 	}
 }
 
@@ -462,7 +467,7 @@ func TestCheckAndWarnHookManagers_NoManagers(t *testing.T) {
 	initHooksTestRepo(t)
 
 	var buf bytes.Buffer
-	CheckAndWarnHookManagers(context.Background(), &buf, false, false, false)
+	CheckAndWarnHookManagers(context.Background(), &buf, false, false)
 
 	if buf.Len() != 0 {
 		t.Errorf("expected no output, got %q", buf.String())
@@ -488,7 +493,7 @@ func TestCheckAndWarnHookManagers_WithHusky(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	CheckAndWarnHookManagers(context.Background(), &buf, false, false, true)
+	CheckAndWarnHookManagers(context.Background(), &buf, false, true)
 
 	output := buf.String()
 	if !strings.Contains(output, "Note: Husky detected") {
@@ -508,7 +513,7 @@ func TestCheckAndWarnHookManagers_HuskyUnsafeWarns(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	CheckAndWarnHookManagers(context.Background(), &buf, false, false, false)
+	CheckAndWarnHookManagers(context.Background(), &buf, false, false)
 
 	output := buf.String()
 	if !strings.Contains(output, "Warning: Husky detected") {

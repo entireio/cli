@@ -68,16 +68,15 @@ func ResolveControlPlaneTarget() (ControlPlaneTarget, error) {
 // context: a cluster's mirror lives in the federation that fronts that cluster,
 // which may differ from the active login (e.g. a partial.to context acting on a
 // prod entire.io cluster). We discover the cluster's trusted cores from its
-// /.well-known/entire-cluster.json and pick the local context eligible for one
-// of them — active-wins-if-eligible, else the sole eligible context, else an
-// explicit-choice / login hint — exactly as git and data-API resolution do
-// (see ResolveDataAPIToken). The bearer is that context's
-// refreshing login provider (silent JWT re-mint from its stored refresh token).
+// /.well-known/entire-cluster.json and require the ACTIVE context to be issued
+// by one of them — exactly as git and data-API resolution do (see
+// ResolveDataAPIToken). The bearer is that context's refreshing login provider
+// (silent JWT re-mint from its stored refresh token).
 //
-// With no eligible local context the discovery resolver returns its login hint
-// naming the cluster's cores, so the user logs in to the right federation
-// rather than seeing an opaque "unknown cluster_host" 400 from the active
-// context's core.
+// When the active context isn't trusted by the cluster the discovery resolver
+// says so and names the saved logins that are (or, when none is, the cluster's
+// cores), so the user switches with `entire auth use` or logs in to the right
+// federation rather than seeing an opaque "unknown cluster_host" 400.
 func ResolveControlPlaneTargetForCluster(ctx context.Context, clusterHost string) (ControlPlaneTarget, error) {
 	if clusterHost == "" {
 		return ControlPlaneTarget{}, errors.New("cluster-addressed control-plane command requires a target cluster host")
@@ -106,14 +105,23 @@ func targetForContext(c *contexts.Context) (ControlPlaneTarget, error) {
 // ok=false when there is no current context or it carries no CoreURL (an
 // unusable pointer we treat as "no active context" rather than dialing an
 // empty host).
+//
+// A `--context`/$ENTIRE_CONTEXT selection is honoured here too, so the identity
+// the control plane acts as is the same one git and the data API use. An
+// explicit selection naming no saved context is a hard error rather than
+// ok=false: "you asked for a context that doesn't exist" must not degrade into
+// the `entire login` hint.
 func activeContext() (c *contexts.Context, ok bool, err error) {
 	f, err := contexts.Load(userdirs.Config())
 	if err != nil {
 		return nil, false, fmt.Errorf("load contexts: %w", err)
 	}
-	c = f.Find(f.CurrentContext)
-	if c == nil || c.CoreURL == "" {
+	sel, err := f.Active()
+	if err != nil {
+		return nil, false, err //nolint:wrapcheck // UnknownContextError is already a complete operator message
+	}
+	if sel.Context == nil || sel.Context.CoreURL == "" {
 		return nil, false, nil
 	}
-	return c, true, nil
+	return sel.Context, true, nil
 }

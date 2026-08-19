@@ -4,10 +4,56 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
+
+// SlowSpanEnvVar overrides the slow-root-span threshold, in milliseconds.
+// A value of 0 (or a negative one) disables level escalation entirely, so every
+// root span logs at DEBUG as it did before.
+const SlowSpanEnvVar = "ENTIRE_PERF_SLOW_MS"
+
+// DefaultSlowSpanThreshold is how long a root span must take before its timing
+// tree is logged at WARN instead of DEBUG.
+//
+// Root spans carry the only per-step breakdown of a hook, and they used to log
+// exclusively at DEBUG. Real sessions run at INFO, so a hook that took seconds
+// left behind no record of *which* step took them — the one case anybody needs
+// the breakdown for. Escalating slow spans means a real session captures its own
+// diagnosis without the user reproducing anything or turning on DEBUG.
+//
+// 1.5s sits above what a healthy hook costs and below the observed slow cluster,
+// so fast turns stay silent instead of logging a WARN every turn.
+const DefaultSlowSpanThreshold = 1500 * time.Millisecond
+
+// slowSpanThreshold reports the duration above which a root span is considered
+// slow. Invalid values fall back to the default rather than disabling
+// escalation, so a typo does not silently switch the diagnostics off.
+func slowSpanThreshold() time.Duration {
+	raw, ok := os.LookupEnv(SlowSpanEnvVar)
+	if !ok {
+		return DefaultSlowSpanThreshold
+	}
+	ms, err := strconv.Atoi(raw)
+	if err != nil {
+		return DefaultSlowSpanThreshold
+	}
+	if ms <= 0 {
+		// Explicit opt-out: never escalate.
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// isSlowSpan reports whether d is long enough to warrant escalating a root
+// span's log line from DEBUG to WARN.
+func isSlowSpan(d time.Duration) bool {
+	threshold := slowSpanThreshold()
+	return threshold > 0 && d >= threshold
+}
 
 // Span tracks timing for an operation and its substeps.
 // A Span is not safe for concurrent use from multiple goroutines.
@@ -50,8 +96,10 @@ func (s *Span) RecordError(err error) {
 	s.err = err
 }
 
-// End completes the span. For root spans, emits a single DEBUG log line
-// with the full timing tree. For child spans, records the duration only.
+// End completes the span. For root spans, emits a single log line with the full
+// timing tree -- at DEBUG normally, or at WARN with slow=true when the span
+// exceeded slowSpanThreshold so the breakdown survives a default-level session.
+// For child spans, records the duration only.
 // Safe to call multiple times -- subsequent calls are no-ops.
 func (s *Span) End() {
 	if s.ended {
@@ -73,12 +121,23 @@ func (s *Span) End() {
 		attrs = append(attrs, slog.Bool("error", true))
 	}
 
+	// Decide the level before appending the step tree so "slow" sits next to
+	// duration_ms rather than after a long tail of step attrs.
+	slow := isSlowSpan(s.duration)
+	if slow {
+		attrs = append(attrs, slog.Bool("slow", true))
+	}
+
 	attrs = appendChildStepAttrs(attrs, s, "")
 
 	for _, a := range s.attrs {
 		attrs = append(attrs, a)
 	}
 
+	if slow {
+		logging.Warn(logCtx, "perf", attrs...)
+		return
+	}
 	logging.Debug(logCtx, "perf", attrs...)
 }
 

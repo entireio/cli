@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -85,6 +86,9 @@ func (s *PrePromptState) normalizePrePromptState() {
 	s.StepTranscriptStart = 0
 	s.StartMessageIndex = 0
 }
+
+// unknownSessionID is the fallback session ID used when no session ID is provided.
+const unknownSessionID = "unknown"
 
 // CapturePrePromptState captures current untracked files and transcript position before a prompt
 // and saves them to a state file.
@@ -269,12 +273,7 @@ func DetectFileChanges(ctx context.Context, previouslyUntracked []string) (*File
 	}
 	defer repo.Close()
 
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get worktree: %w", err)
-	}
-
-	status, err := worktree.Status()
+	status, err := gitrepo.Status(ctx, repo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get status: %w", err)
 	}
@@ -438,12 +437,7 @@ func getUntrackedFilesForState(ctx context.Context) ([]string, error) {
 	}
 	defer repo.Close()
 
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return nil, err //nolint:wrapcheck // already present in codebase
-	}
-
-	status, err := worktree.Status()
+	status, err := gitrepo.Status(ctx, repo)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // already present in codebase
 	}

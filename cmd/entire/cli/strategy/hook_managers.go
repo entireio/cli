@@ -63,7 +63,7 @@ func detectHookManagers(repoRoot string) []hookManager {
 }
 
 // hookManagerWarning builds a warning string for detected hook managers.
-// cmdPrefix is the CLI command prefix (e.g., "entire" or "./scripts/entire-dev").
+// cmdPrefix is the CLI command prefix (e.g., "entire" or an absolute binary path).
 // huskySafe is true when the current core.hooksPath is a husky `_` dir with the
 // dispatcher present (Entire will install into the parent user-hook directory).
 func hookManagerWarning(managers []hookManager, cmdPrefix string, huskySafe bool) string {
@@ -133,11 +133,10 @@ func extractCommandLine(hookContent string) string {
 
 // CheckAndWarnHookManagers detects external hook managers and writes a warning
 // to w if any are found.
-// localDev controls whether the warning references "go run" or the "entire" binary.
 // absolutePath embeds the full binary path for GUI git clients.
 // huskySafeInstall must match InstallGitHook's second return value so the Husky
 // advisory cannot disagree with where hooks were just installed.
-func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, localDev, absolutePath, huskySafeInstall bool) {
+func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, absolutePath, huskySafeInstall bool) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return
@@ -148,7 +147,7 @@ func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, localDev, absolu
 		return
 	}
 
-	cmdPrefix, err := hookCmdPrefix(localDev, absolutePath)
+	cmdPrefix, err := hookCmdPrefix(absolutePath)
 	if err != nil {
 		// Best-effort: hook manager warnings are advisory, skip on resolution failure
 		return

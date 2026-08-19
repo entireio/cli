@@ -17,8 +17,8 @@ const CheckpointRefPrefix = "refs/entire/checkpoints/"
 
 // RefName returns the per-checkpoint git ref for a checkpoint ID:
 // refs/entire/checkpoints/<shard>/<id>, where <shard> is id.ShardFor() (the
-// first two chars for legacy hex IDs, the last two for ULIDs). The full ID is
-// always the leaf, so the ref round-trips through ParseRef.
+// last two characters of the ID for both legacy hex and ULID formats). The full
+// ID is always the leaf, so the ref round-trips through ParseRef.
 //
 // It errors on an empty or unrecognized checkpoint ID rather than returning a
 // malformed ref (e.g. "refs/entire/checkpoints//"), so callers at trust

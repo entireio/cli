@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -27,6 +26,7 @@ import (
 func newSearchCmd() *cobra.Command { //nolint:maintidx // command wiring is inherently complex
 	var (
 		jsonOutput       bool
+		compactOutput    bool
 		codeFlag         bool
 		caseSensitive    bool
 		limitFlag        int
@@ -34,7 +34,7 @@ func newSearchCmd() *cobra.Command { //nolint:maintidx // command wiring is inhe
 		authorFlag       string
 		dateFlag         string
 		branchFlag       string
-		repoFlag         string
+		repoFlags        []string
 		allReposFlag     bool
 		insecureHTTPAuth bool
 	)
@@ -51,18 +51,34 @@ By default, results are scoped to the current repository. Use --all-repos to
 search across all accessible repos.
 
 Run without arguments to open an interactive search. Results are
-displayed in an interactive table. Use --json for machine-readable output.
+displayed in an interactive table. Use --json for machine-readable output,
+and add --compact for a trimmed per-result shape suited to agents (implies
+--json): id, type, repo, branch, author, date, files touched, score, match
+snippet, and a truncated title instead of the full prompt (repo hits add
+description and checkpoint count). Fetch full detail
+for a single result with 'entire checkpoint explain <id>', or add --full to
+that command to pull the checkpoint's entire session transcript. For a
+checkpoint hit from another GitHub repo, add --repo <owner/name> to
+'entire checkpoint explain' (requires the full checkpoint ID; unrelated to
+this command's --repo filter below).
 
 CLI queries also support inline filters like author:<name>, date:<week|month>,
 branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
-		Args:   cobra.ArbitraryArgs,
-		Hidden: true,
+		Example: "  entire search \"retry backoff\" --json\n  entire search \"retry backoff\" --json --compact\n  entire search \"auth timeout author:alice date:week\"\n  entire search --code \"parseToken\"",
+		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			query := strings.Join(args, " ")
 
 			if caseSensitive && !codeFlag {
 				return errors.New("--case-sensitive can only be used with --code")
+			}
+
+			if compactOutput {
+				if codeFlag {
+					return errors.New("--compact cannot be used with --code")
+				}
+				jsonOutput = true // compact is a JSON shape
 			}
 
 			if codeFlag {
@@ -86,11 +102,8 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				// literal search text so "author:foo" searches for that
 				// string in code rather than being silently consumed.
 				codeQuery, inlineRepos := extractInlineRepoFilters(query)
-				var codeRepos []string
-				if repoFlag != "" {
-					codeRepos = []string{repoFlag}
-				}
-				codeRepos = append(codeRepos, inlineRepos...)
+				codeRepos := search.AppendUnique(nil, repoFlags...)
+				codeRepos = search.AppendUnique(codeRepos, inlineRepos...)
 				// repo:* or --all-repos means "all repos" — no filter.
 				// Otherwise, if no explicit filter was given, scope to the
 				// current repo (matching the checkpoint-search default).
@@ -148,10 +161,10 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			if branchFlag == "" {
 				branchFlag = parsed.Branch
 			}
-			repos := parsed.Repos
-			if repoFlag != "" {
-				repos = []string{repoFlag}
-			}
+			// Merge --repo flag values with inline repo: filters (flags first),
+			// deduped. Repeatable/comma-separated --repo mirrors code-search UX.
+			repos := search.AppendUnique(nil, repoFlags...)
+			repos = search.AppendUnique(repos, parsed.Repos...)
 			if err := search.ValidateRepoFilters(repos); err != nil {
 				return fmt.Errorf("validating repo filter: %w", err)
 			}
@@ -254,6 +267,9 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			// JSON output: explicit flag or piped/redirected stdout
 			if jsonOutput || !isTerminal {
+				if compactOutput {
+					return writeSearchCompactJSON(w, resp, requestedLimit, requestedPage)
+				}
 				return writeSearchJSON(w, resp, requestedLimit, requestedPage)
 			}
 
@@ -298,6 +314,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	}
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
+	cmd.Flags().BoolVar(&compactOutput, "compact", false, "Trimmed JSON output for agents: id, repo, files touched, score, match snippet, and a truncated title instead of the full prompt (implies --json)")
 	cmd.Flags().BoolVar(&codeFlag, "code", false, "Search code content across repositories")
 	cmd.Flags().BoolVar(&caseSensitive, "case-sensitive", false, "Case-sensitive code search (only with --code)")
 	cmd.Flags().IntVar(&limitFlag, "limit", resultsPerPage, "Maximum number of results (per page for checkpoint search, total for --code)")
@@ -305,7 +322,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	cmd.Flags().StringVar(&authorFlag, "author", "", "Filter by author name")
 	cmd.Flags().StringVar(&dateFlag, "date", "", "Filter by time period (week or month)")
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Filter by branch name")
-	cmd.Flags().StringVar(&repoFlag, "repo", "", "Filter by repository (gh/owner/repo, et/proj/repo, owner/repo, ULID, or *)")
+	cmd.Flags().StringSliceVar(&repoFlags, "repo", nil, "Filter by repository (gh/owner/repo, et/proj/repo, owner/repo, ULID, or *); repeatable and comma-separated for multiple repos")
 	cmd.Flags().BoolVar(&allReposFlag, "all-repos", false, "Search all accessible repos instead of just the current one")
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
@@ -339,11 +356,6 @@ func completeRepoFlag(cmd *cobra.Command, _ []string, _ string) ([]string, cobra
 		suggestions = append(suggestions, r.FullName)
 	}
 	return suggestions, cobra.ShellCompDirectiveNoFileComp
-}
-
-// codeSearchEnabled reports whether the code search feature is gated on.
-func codeSearchEnabled() bool {
-	return os.Getenv("ENTIRE_CODE_SEARCH") == "1"
 }
 
 type codeSearchOpts struct {
@@ -403,14 +415,10 @@ func filterRepoWildcards(repos []string) []string {
 	return out
 }
 
-// buildCodeSearchOpts returns a *codeSearchOpts pre-populated with repo filters
-// when ENTIRE_CODE_SEARCH=1 is set, or nil when the feature is off. It honors
-// --repo, --all-repos, and inline repo: filters from the command line; when none
-// are specified, it falls back to the current git origin slug.
+// buildCodeSearchOpts returns a *codeSearchOpts pre-populated with repo filters.
+// It honors --repo, --all-repos, and inline repo: filters from the command line;
+// when none are specified, it falls back to the current git origin slug.
 func buildCodeSearchOpts(ctx context.Context, owner, repoName string, repos []string, allRepos, insecureHTTP bool) *codeSearchOpts {
-	if !codeSearchEnabled() {
-		return nil
-	}
 	var repoFilters []string
 	switch {
 	case allRepos:
@@ -444,10 +452,6 @@ const codeSearchCellTimeout = 30 * time.Second
 // (mirroring the BFF's /api/v1/stream endpoint): list repos from the control
 // plane, group by cell/jurisdiction, search each cell in parallel, merge.
 func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts) error {
-	if !codeSearchEnabled() {
-		return errors.New("code search is not yet available")
-	}
-
 	if opts.query == "" {
 		return errors.New("query required for code search. Usage: entire search --code <query>")
 	}
@@ -485,9 +489,8 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 //  4. Fan out via fanOutCells with per-cell codesearch.Search calls
 //  5. Merge results (sorted by score, capped to limit)
 func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.SearchResponse, error) {
-	// Step 1: Get repos index from the control plane.
-	// coreapi.Client satisfies cellCoreClient (for resolveCellBaseURLs)
-	// and also provides ListRepos (which cellCoreClient doesn't expose).
+	// Step 1: Get repos index from the control plane. *coreapi.Client
+	// satisfies cellCoreClient (passed to resolveCellBaseURLs below as such).
 	coreClient, err := coreapi.New()
 	if err != nil {
 		if errors.Is(err, auth.ErrNotLoggedIn) {
@@ -926,34 +929,38 @@ func isASCII(s string) bool {
 	return true
 }
 
-// writeSearchJSON writes client-side paginated search results as JSON.
-func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error {
+// paginateSearchResults slices results for the requested client-side page,
+// normalizing limit and page, and returns the page slice (never nil) plus the
+// normalized pagination values.
+func paginateSearchResults(results []search.Result, limit, page int) (pageResults []search.Result, total, totalPages, normLimit, normPage int) {
 	if limit <= 0 {
 		limit = resultsPerPage
 	}
-
-	total := len(resp.Results)
-	totalPages := (total + limit - 1) / limit
+	total = len(results)
+	totalPages = (total + limit - 1) / limit
 	if totalPages < 1 {
 		totalPages = 1
 	}
 	if page < 1 {
 		page = 1
 	}
-
-	// Slice results for the requested page.
 	start := (page - 1) * limit
 	end := start + limit
-	var pageResults []search.Result
 	if start < total {
 		if end > total {
 			end = total
 		}
-		pageResults = resp.Results[start:end]
+		pageResults = results[start:end]
 	}
 	if pageResults == nil {
 		pageResults = []search.Result{}
 	}
+	return pageResults, total, totalPages, limit, page
+}
+
+// writeSearchJSON writes client-side paginated search results as JSON.
+func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error {
+	pageResults, total, totalPages, limit, page := paginateSearchResults(resp.Results, limit, page)
 
 	out := struct {
 		Results    []search.Result    `json:"results"`
@@ -973,6 +980,109 @@ func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error 
 	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling results: %w", err)
+	}
+	fmt.Fprint(w, string(data))
+	return nil
+}
+
+// compactTitleMaxLen caps the title snippet length (in runes) in --compact
+// output so a hit never carries a full multi-KB prompt (ENT-1527).
+const compactTitleMaxLen = 200
+
+// compactSearchHit is the trimmed per-result shape emitted by --compact.
+// Field names follow the full JSON wire format's camelCase convention.
+type compactSearchHit struct {
+	ID           string   `json:"id"`
+	Type         string   `json:"type"`
+	Repo         string   `json:"repo,omitempty"`
+	Branch       string   `json:"branch,omitempty"`
+	Author       string   `json:"author,omitempty"`
+	Date         string   `json:"date,omitempty"`
+	Title        string   `json:"title"`
+	FilesTouched []string `json:"filesTouched,omitempty"`
+	// Description and CheckpointCount only appear on repo rows — without them
+	// a repo hit is just {id, repo, title, score}, too thin for the skill's
+	// "summarize from the compact fields alone" instruction.
+	Description     string  `json:"description,omitempty"`
+	CheckpointCount int     `json:"checkpointCount,omitempty"`
+	Score           float64 `json:"score"`
+	// Snippet is the matched text (the title is just the commit subject or
+	// prompt head) — it's what lets an agent pick which hit to explain.
+	Snippet   string `json:"snippet,omitempty"`
+	MatchType string `json:"matchType,omitempty"`
+}
+
+// compactSnippet drops a truncated snippet that duplicates the truncated
+// title. When a checkpoint has no commit subject its title falls back to the
+// prompt, and the backend's snippet for that row is the prompt's first
+// indexed chunk ("Prompt: " + the same text) — the hit would carry the same
+// 200 runes twice (~20% of a typical compact payload). The snippet is a
+// duplicate when, after stripping the indexer's "Prompt: " prefix and either
+// side's truncation ellipsis, it is a prefix of the title; a later-chunk
+// snippet fails that test and is kept, since it shows where the match landed.
+func compactSnippet(title, snippet string) string {
+	s := strings.TrimSuffix(strings.TrimPrefix(snippet, "Prompt: "), "…")
+	t := strings.TrimSuffix(title, "…")
+	if t != "" && strings.HasPrefix(t, s) {
+		return ""
+	}
+	return snippet
+}
+
+// writeSearchCompactJSON writes client-side paginated search results as
+// compact JSON: per hit only identifiers, ranking, files touched, and a
+// truncated title snippet — never the full prompt. Agents fetch full detail
+// for a single hit via `entire checkpoint explain <id>` (add --full for the
+// checkpoint's entire session transcript).
+func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int) error {
+	pageResults, total, totalPages, limit, page := paginateSearchResults(resp.Results, limit, page)
+
+	hits := make([]compactSearchHit, 0, len(pageResults))
+	for i := range pageResults {
+		r := &pageResults[i]
+		repo := r.ResultRepo()
+		if org := r.ResultOrg(); org != "" && repo != "" {
+			repo = org + "/" + repo
+		}
+		title := truncateOneLine(r.ResultTitle(), compactTitleMaxLen)
+		hit := compactSearchHit{
+			ID:              r.ResultID(),
+			Type:            r.Type,
+			Repo:            repo,
+			Branch:          r.ResultBranch(),
+			Author:          r.ResultAuthor(),
+			Date:            r.ResultCreatedAt(),
+			Title:           title,
+			Description:     r.ResultDescription(),
+			CheckpointCount: r.ResultCheckpointCount(),
+			Score:           r.Meta.Score,
+			Snippet:         compactSnippet(title, truncateOneLine(r.Meta.Snippet, compactTitleMaxLen)),
+			MatchType:       r.Meta.MatchType,
+		}
+		if r.Checkpoint != nil {
+			hit.FilesTouched = r.Checkpoint.FilesTouched
+		}
+		hits = append(hits, hit)
+	}
+
+	out := struct {
+		Results    []compactSearchHit `json:"results"`
+		Total      int                `json:"total"`
+		Page       int                `json:"page"`
+		TotalPages int                `json:"total_pages"`
+		Limit      int                `json:"limit"`
+		Counts     *search.TypeCounts `json:"counts,omitempty"`
+	}{
+		Results:    hits,
+		Total:      total,
+		Page:       page,
+		TotalPages: totalPages,
+		Limit:      limit,
+		Counts:     resp.Counts,
+	}
+	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling compact results: %w", err)
 	}
 	fmt.Fprint(w, string(data))
 	return nil

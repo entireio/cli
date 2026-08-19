@@ -25,7 +25,7 @@ func TestEnableDefault_GitRefsRoundTrip(t *testing.T) {
 	gitOutput(t, env.RepoDir, "add", "README.md")
 	gitOutput(t, env.RepoDir, "commit", "-m", "initial commit")
 
-	env.RunCLI("enable", "--agent", "claude-code", "--telemetry=false")
+	env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
 
 	settings := env.ReadFile(".entire/settings.json")
 	if !strings.Contains(settings, `"git-refs"`) {

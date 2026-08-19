@@ -19,6 +19,7 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -177,6 +178,9 @@ case "$1" in
     echo '{"present": true}'
     ;;
   generate-text)
+    if [ -n "$ENTIRE_TEST_EXTERNAL_MODEL_RECORD" ]; then
+      printf '%s\n%s\n' "$2" "$3" > "$ENTIRE_TEST_EXTERNAL_MODEL_RECORD"
+    fi
     echo '{"text":"{\"intent\":\"Intent\",\"outcome\":\"Outcome\",\"learnings\":{\"repo\":[],\"code\":[],\"workflow\":[]},\"friction\":[],\"open_items\":[]}"}'
     ;;
   *)
@@ -319,7 +323,7 @@ func TestRunEnable_ProjectFlag_ClearsLocalDisable(t *testing.T) {
 	writeSettings(t, testSettingsEnabled)
 	// A real local disable override with a local-only field to prove the sync
 	// touches only the enabled key.
-	writeLocalSettings(t, `{"enabled": false, "local_dev": true}`)
+	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
 
 	// Precondition: the local override wins, so the merged view is disabled.
 	enabled, err := IsEnabled(context.Background())
@@ -353,21 +357,21 @@ func TestRunEnable_ProjectFlag_ClearsLocalDisable(t *testing.T) {
 	if !strings.Contains(string(localContent), `"enabled":true`) && !strings.Contains(string(localContent), `"enabled": true`) {
 		t.Errorf("local override should be synced to enabled:true, got: %s", localContent)
 	}
-	if !strings.Contains(string(localContent), "local_dev") {
-		t.Errorf("local-only field local_dev should be retained, got: %s", localContent)
+	if !strings.Contains(string(localContent), "absolute_git_hook_path") {
+		t.Errorf("local-only field absolute_git_hook_path should be retained, got: %s", localContent)
 	}
 }
 
 // TestRunEnable_ProjectScope_ClearsExplicitLocalDisable seeds both files
 // disabled (committed settings.json enabled:false AND settings.local.json
-// enabled:false with local_dev) and asserts that a project-scope enable flips
+// enabled:false with absolute_git_hook_path) and asserts that a project-scope enable flips
 // both and retains the local-only field. This is the mutation-sensitive test
 // for setEnabledFlag's project-branch local sync: skipping the sync leaves the
 // local override at enabled:false, which would win and keep IsEnabled false.
 func TestRunEnable_ProjectScope_ClearsExplicitLocalDisable(t *testing.T) {
 	setupTestDir(t)
 	writeSettings(t, testSettingsDisabled)
-	writeLocalSettings(t, `{"enabled": false, "local_dev": true}`)
+	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
 
 	var buf bytes.Buffer
 	if err := runEnable(context.Background(), &buf, true); err != nil {
@@ -397,8 +401,8 @@ func TestRunEnable_ProjectScope_ClearsExplicitLocalDisable(t *testing.T) {
 	if !strings.Contains(string(localContent), `"enabled":true`) && !strings.Contains(string(localContent), `"enabled": true`) {
 		t.Errorf("local override should be synced to enabled:true, got: %s", localContent)
 	}
-	if !strings.Contains(string(localContent), "local_dev") {
-		t.Errorf("local-only field local_dev should be retained, got: %s", localContent)
+	if !strings.Contains(string(localContent), "absolute_git_hook_path") {
+		t.Errorf("local-only field absolute_git_hook_path should be retained, got: %s", localContent)
 	}
 }
 
@@ -407,7 +411,7 @@ func TestRunEnable_ProjectScope_ClearsExplicitLocalDisable(t *testing.T) {
 func TestRunEnable_DefaultFlag_ClearsLocalDisable(t *testing.T) {
 	setupTestDir(t)
 	writeSettings(t, testSettingsEnabled)
-	writeLocalSettings(t, `{"enabled": false, "local_dev": true}`)
+	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
 
 	// Precondition: local override wins → disabled.
 	enabled, err := IsEnabled(context.Background())
@@ -435,8 +439,8 @@ func TestRunEnable_DefaultFlag_ClearsLocalDisable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read local settings: %v", err)
 	}
-	if !strings.Contains(string(localContent), "local_dev") {
-		t.Errorf("local-only field local_dev should be retained, got: %s", localContent)
+	if !strings.Contains(string(localContent), "absolute_git_hook_path") {
+		t.Errorf("local-only field absolute_git_hook_path should be retained, got: %s", localContent)
 	}
 }
 
@@ -448,7 +452,7 @@ func TestRunEnable_DefaultFlag_ClearsLocalDisable(t *testing.T) {
 func TestSetupAgentHooksNonInteractive_ClearsLocalDisable(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
-	writeLocalSettings(t, `{"enabled": false, "local_dev": true}`)
+	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
 	writeClaudeHooksFixture(t)
 
 	// Precondition: local override wins → disabled.
@@ -487,8 +491,8 @@ func TestSetupAgentHooksNonInteractive_ClearsLocalDisable(t *testing.T) {
 	if !strings.Contains(string(localContent), `"enabled":true`) && !strings.Contains(string(localContent), `"enabled": true`) {
 		t.Errorf("local override should be synced to enabled:true, got: %s", localContent)
 	}
-	if !strings.Contains(string(localContent), "local_dev") {
-		t.Errorf("local-only field local_dev should be retained, got: %s", localContent)
+	if !strings.Contains(string(localContent), "absolute_git_hook_path") {
+		t.Errorf("local-only field absolute_git_hook_path should be retained, got: %s", localContent)
 	}
 }
 
@@ -535,62 +539,8 @@ func TestSetupAgentHooksNonInteractive_DoesNotLeakLocalOverridesIntoProject(t *t
 	}
 }
 
-// TestSetupAgentHooksNonInteractive_UsesMergedViewForHookInstall:
-// setupAgentHooksNonInteractive loads settings.LoadFromFile scoped to a single
-// file for building the settings struct it writes. If local_dev is set only in
-// settings.local.json while this enable resolves (via --project) to
-// settings.json, the local_dev override must still be honored when
-// installing/regenerating the git hook script — otherwise it's silently
-// dropped and the hook reverts to the plain "entire" cmd prefix instead of
-// the local-dev "./scripts/entire-dev" one. Write scoping (no leaking
-// local_dev into the committed project file) must still hold.
-func TestSetupAgentHooksNonInteractive_UsesMergedViewForHookInstall(t *testing.T) {
-	setupTestRepo(t)
-	writeSettings(t, testSettingsEnabled)
-	writeLocalSettings(t, `{"enabled": true, "local_dev": true}`)
-	writeClaudeHooksFixture(t)
-
-	ag, err := agent.Get(types.AgentName("claude-code"))
-	if err != nil {
-		t.Fatalf("agent.Get(claude-code) error = %v", err)
-	}
-
-	var buf bytes.Buffer
-	opts := EnableOptions{UseProjectSettings: true}
-	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, opts); err != nil {
-		t.Fatalf("setupAgentHooksNonInteractive() error = %v", err)
-	}
-
-	// The git hook script must reflect the merged local_dev override, even
-	// though the write resolved to the project file.
-	hooksDir, err := strategy.GetHooksDir(context.Background())
-	if err != nil {
-		t.Fatalf("GetHooksDir() error = %v", err)
-	}
-	hookContent, err := os.ReadFile(filepath.Join(hooksDir, "post-commit"))
-	if err != nil {
-		t.Fatalf("failed to read post-commit hook: %v", err)
-	}
-	if !strings.Contains(string(hookContent), "./scripts/entire-dev") {
-		t.Errorf("expected hook to use local-dev cmd prefix from the merged view, got: %s", hookContent)
-	}
-
-	// The write path must still stay scoped: local_dev must not leak into
-	// the committed project settings.json.
-	projectS, err := settings.LoadFromFile(EntireSettingsFile)
-	if err != nil {
-		t.Fatalf("failed to load project settings: %v", err)
-	}
-	if projectS.LocalDev {
-		t.Error("local-only local_dev override leaked into project settings")
-	}
-	if !projectS.Enabled {
-		t.Error("expected project settings to remain enabled")
-	}
-}
-
-// TestSetupAgentHooksNonInteractive_UsesMergedAbsoluteHookPathForHookInstall is
-// the absolute_git_hook_path counterpart of the local_dev merged-view test:
+// TestSetupAgentHooksNonInteractive_UsesMergedAbsoluteHookPathForHookInstall
+// covers the merged view for hook generation:
 // with absolute_git_hook_path set only in settings.local.json while the enable
 // resolves (via --project) to settings.json, the generated hook must embed the
 // absolute binary path from the merged view — not fall back to the bare
@@ -599,8 +549,7 @@ func TestSetupAgentHooksNonInteractive_UsesMergedViewForHookInstall(t *testing.T
 func TestSetupAgentHooksNonInteractive_UsesMergedAbsoluteHookPathForHookInstall(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
-	// absolute_git_hook_path only in the local override; no local_dev, which
-	// would otherwise take precedence in hookCmdPrefix.
+	// absolute_git_hook_path only in the local override.
 	writeLocalSettings(t, `{"enabled": true, "absolute_git_hook_path": true}`)
 	writeClaudeHooksFixture(t)
 
@@ -956,7 +905,7 @@ func TestRunDisable_CreatesSettingsDirWhenMissing(t *testing.T) {
 func TestRunDisable_BareCommand_WritesLocalWhenBothExist(t *testing.T) {
 	setupTestDir(t)
 	writeSettings(t, `{"enabled": true, "log_level": "warn"}`)
-	writeLocalSettings(t, `{"enabled": true, "local_dev": true}`)
+	writeLocalSettings(t, `{"enabled": true, "absolute_git_hook_path": true}`)
 
 	var stdout bytes.Buffer
 	if err := runDisable(context.Background(), &stdout, false); err != nil {
@@ -983,8 +932,8 @@ func TestRunDisable_BareCommand_WritesLocalWhenBothExist(t *testing.T) {
 	if !strings.Contains(string(projectContent), "log_level") {
 		t.Errorf("project settings should retain its own log_level field, got: %s", projectContent)
 	}
-	if strings.Contains(string(projectContent), "local_dev") {
-		t.Errorf("project settings must not gain local-only override local_dev, got: %s", projectContent)
+	if strings.Contains(string(projectContent), "absolute_git_hook_path") {
+		t.Errorf("project settings must not gain local-only override absolute_git_hook_path, got: %s", projectContent)
 	}
 
 	// The local override carries the disable and keeps its own fields.
@@ -995,8 +944,8 @@ func TestRunDisable_BareCommand_WritesLocalWhenBothExist(t *testing.T) {
 	if !strings.Contains(string(localContent), `"enabled":false`) && !strings.Contains(string(localContent), `"enabled": false`) {
 		t.Errorf("local settings should have enabled:false, got: %s", localContent)
 	}
-	if !strings.Contains(string(localContent), "local_dev") {
-		t.Errorf("local settings should retain its own local_dev field, got: %s", localContent)
+	if !strings.Contains(string(localContent), "absolute_git_hook_path") {
+		t.Errorf("local settings should retain its own absolute_git_hook_path field, got: %s", localContent)
 	}
 }
 
@@ -1006,7 +955,7 @@ func TestRunDisable_BareCommand_WritesLocalWhenBothExist(t *testing.T) {
 func TestRunDisable_ProjectFlag_WritesCommittedFile(t *testing.T) {
 	setupTestDir(t)
 	writeSettings(t, `{"enabled": true, "log_level": "warn"}`)
-	writeLocalSettings(t, `{"enabled": true, "local_dev": true}`)
+	writeLocalSettings(t, `{"enabled": true, "absolute_git_hook_path": true}`)
 
 	var stdout bytes.Buffer
 	if err := runDisable(context.Background(), &stdout, true); err != nil {
@@ -1020,8 +969,8 @@ func TestRunDisable_ProjectFlag_WritesCommittedFile(t *testing.T) {
 	if !strings.Contains(string(projectContent), `"enabled":false`) && !strings.Contains(string(projectContent), `"enabled": false`) {
 		t.Errorf("project settings should have enabled:false, got: %s", projectContent)
 	}
-	if strings.Contains(string(projectContent), "local_dev") {
-		t.Errorf("project settings must not leak local-only override local_dev, got: %s", projectContent)
+	if strings.Contains(string(projectContent), "absolute_git_hook_path") {
+		t.Errorf("project settings must not leak local-only override absolute_git_hook_path, got: %s", projectContent)
 	}
 
 	localContent, err := os.ReadFile(EntireSettingsLocalFile)
@@ -1035,14 +984,14 @@ func TestRunDisable_ProjectFlag_WritesCommittedFile(t *testing.T) {
 
 // TestRunEnable_ProjectFlag_DoesNotLeakLocalOverrides verifies that
 // `entire enable --project` with a local-only override present (e.g.
-// local_dev, set via settings.local.json) does not write that override into
+// absolute_git_hook_path, set via settings.local.json) does not write that override into
 // the shared, committed project settings.json — only the enabled flag should
 // change there (runEnable must not round-trip the merged settings view
 // through the project file).
 func TestRunEnable_ProjectFlag_DoesNotLeakLocalOverrides(t *testing.T) {
 	setupTestDir(t)
 	writeSettings(t, testSettingsDisabled)
-	writeLocalSettings(t, `{"enabled": true, "local_dev": true}`)
+	writeLocalSettings(t, `{"enabled": true, "absolute_git_hook_path": true}`)
 
 	var buf bytes.Buffer
 	if err := runEnable(context.Background(), &buf, true); err != nil {
@@ -1067,8 +1016,8 @@ func TestRunEnable_ProjectFlag_DoesNotLeakLocalOverrides(t *testing.T) {
 	if !strings.Contains(string(projectContent), `"enabled":true`) && !strings.Contains(string(projectContent), `"enabled": true`) {
 		t.Errorf("project settings should have enabled:true, got: %s", projectContent)
 	}
-	if strings.Contains(string(projectContent), "local_dev") {
-		t.Errorf("project settings must not leak local-only override local_dev, got: %s", projectContent)
+	if strings.Contains(string(projectContent), "absolute_git_hook_path") {
+		t.Errorf("project settings must not leak local-only override absolute_git_hook_path, got: %s", projectContent)
 	}
 
 	// The local file's own override must be preserved untouched.
@@ -1076,19 +1025,19 @@ func TestRunEnable_ProjectFlag_DoesNotLeakLocalOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read local settings: %v", err)
 	}
-	if !strings.Contains(string(localContent), "local_dev") {
-		t.Errorf("local settings should still contain local_dev override, got: %s", localContent)
+	if !strings.Contains(string(localContent), "absolute_git_hook_path") {
+		t.Errorf("local settings should still contain absolute_git_hook_path override, got: %s", localContent)
 	}
 }
 
 // TestRunEnable_LocalScope_PreservesLocalOnlyFields verifies that `entire
 // enable` (default, no --project) with an existing local-only override only
 // flips the enabled flag in settings.local.json and leaves the rest of that
-// file's own content (like local_dev) intact.
+// file's own content (like absolute_git_hook_path) intact.
 func TestRunEnable_LocalScope_PreservesLocalOnlyFields(t *testing.T) {
 	setupTestDir(t)
 	writeSettings(t, testSettingsEnabled)
-	writeLocalSettings(t, `{"enabled": false, "local_dev": true}`)
+	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
 
 	var buf bytes.Buffer
 	if err := runEnable(context.Background(), &buf, false); err != nil {
@@ -1110,8 +1059,8 @@ func TestRunEnable_LocalScope_PreservesLocalOnlyFields(t *testing.T) {
 	if !strings.Contains(string(localContent), `"enabled":true`) && !strings.Contains(string(localContent), `"enabled": true`) {
 		t.Errorf("local settings should have enabled:true, got: %s", localContent)
 	}
-	if !strings.Contains(string(localContent), "local_dev") {
-		t.Errorf("local settings should still contain local_dev override, got: %s", localContent)
+	if !strings.Contains(string(localContent), "absolute_git_hook_path") {
+		t.Errorf("local settings should still contain absolute_git_hook_path override, got: %s", localContent)
 	}
 
 	// Project settings must be untouched by the local-scope write.
@@ -1119,8 +1068,8 @@ func TestRunEnable_LocalScope_PreservesLocalOnlyFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read project settings: %v", err)
 	}
-	if strings.Contains(string(projectContent), "local_dev") {
-		t.Errorf("project settings must not gain local-only override local_dev, got: %s", projectContent)
+	if strings.Contains(string(projectContent), "absolute_git_hook_path") {
+		t.Errorf("project settings must not gain local-only override absolute_git_hook_path, got: %s", projectContent)
 	}
 }
 
@@ -1249,7 +1198,7 @@ func TestRunUninstall_Force_RemovesGitHooks(t *testing.T) {
 	writeSettings(t, testSettingsEnabled)
 
 	// Install git hooks
-	if _, _, err := strategy.InstallGitHook(context.Background(), true, false, false); err != nil {
+	if _, _, err := strategy.InstallGitHook(context.Background(), true, false); err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
 
@@ -1640,7 +1589,6 @@ func TestEnableUsesSetupFlow(t *testing.T) {
 		{name: "project only", args: []string{"--project"}, want: false},
 		{name: "local only", args: []string{"--local"}, want: false},
 		{name: "force", args: []string{"--force"}, want: true},
-		{name: "local dev", args: []string{"--local-dev"}, want: true},
 		{name: "absolute hook path", args: []string{"--absolute-git-hook-path"}, want: true},
 		{name: "telemetry changed", args: []string{"--telemetry=false"}, want: true},
 		{name: "checkpoint remote", args: []string{"--checkpoint-remote", "github:org/repo"}, want: true},
@@ -3850,16 +3798,17 @@ func TestCleanRemoteURLForReport(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := cleanRemoteURLForReport(tt.rawURL)
+			info, err := gitremote.ParseURL(tt.rawURL)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("expected error for %q, got %q", tt.rawURL, got)
+					t.Fatalf("expected ParseURL error for %q", tt.rawURL)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("unexpected error for %q: %v", tt.rawURL, err)
+				t.Fatalf("unexpected error parsing %q: %v", tt.rawURL, err)
 			}
+			got := cleanRemoteURLForReport(info)
 			if got != tt.want {
 				t.Errorf("cleanRemoteURLForReport(%q) = %q, want %q", tt.rawURL, got, tt.want)
 			}
@@ -3923,20 +3872,6 @@ func TestRunEnableInteractive_FirstRunDefaultsToGitRefs(t *testing.T) {
 		cfg := enable(t, EnableOptions{Yes: true, Telemetry: true})
 		if cfg != nil {
 			t.Errorf("Checkpoints = %+v, want none written under the env override", cfg)
-		}
-	})
-
-	t.Run("non-interactive first run without --yes takes the recommendation", func(t *testing.T) {
-		// The most common real path: a headless first run without --yes
-		// (go test => CanPromptInteractively false). The storage prompt must
-		// be skipped and the recommendation written — every other first-run
-		// subtest passes Yes: true, so this is the only coverage of the
-		// !opts.Yes non-TTY branch. Telemetry: false dodges the telemetry
-		// prompt, which (pre-existing) has no headless guard.
-		setupTestRepo(t)
-		cfg := enable(t, EnableOptions{Telemetry: false})
-		if cfg == nil || cfg.Primary.Type != checkpoint.BackendTypeGitRefs {
-			t.Errorf("Checkpoints = %+v, want the git-refs recommendation", cfg)
 		}
 	})
 

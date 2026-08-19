@@ -100,8 +100,14 @@ func newLogoutCmd() *cobra.Command {
 // every login when run repeatedly: each call ends the active login and
 // promotes the next, until none remain. Best-effort and informational —
 // logout already succeeded by the time we get here.
+//
+// It reads the STORED current_context (auth.StoredContexts), not the acting
+// identity: after `entire logout --context staging` the override still names
+// staging, which no longer exists, so resolving the acting identity would fail
+// and skip the promotion — leaving `logout --context X` and a plain `logout`
+// with different end states for the very same target.
 func promoteNextLogin(outW, errW io.Writer) {
-	all, current, err := auth.Contexts()
+	all, current, err := auth.StoredContexts()
 	if err != nil || current != "" || len(all) == 0 {
 		return
 	}

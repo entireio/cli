@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -35,7 +37,30 @@ var (
 	nowUTC = func() time.Time { return time.Now().UTC() }
 )
 
-func runLocal(ctx context.Context, opts Options) (*Dispatch, error) {
+type localPreflight struct {
+	normalizedSince time.Time
+	normalizedUntil time.Time
+	repoRoots       []string
+	sinceInput      string
+	untilInput      string
+	repoPathsInput  []string
+}
+
+func (p *localPreflight) matches(opts Options) bool {
+	return p != nil &&
+		p.sinceInput == opts.Since &&
+		p.untilInput == opts.Until &&
+		slices.Equal(p.repoPathsInput, opts.RepoPaths)
+}
+
+// PrepareLocal validates and resolves the inputs needed before local dispatch
+// generation can begin. The returned options can be passed to Run without
+// repeating time-window parsing or repository-root discovery.
+func PrepareLocal(ctx context.Context, opts Options) (Options, error) {
+	if opts.Mode != ModeLocal {
+		return Options{}, errors.New("local dispatch preflight requires local mode")
+	}
+
 	now := nowUTC()
 	sinceInput := strings.TrimSpace(opts.Since)
 	if sinceInput == "" {
@@ -43,28 +68,49 @@ func runLocal(ctx context.Context, opts Options) (*Dispatch, error) {
 	}
 	since, err := ParseSinceAtNow(sinceInput, now)
 	if err != nil {
-		return nil, err
+		return Options{}, err
 	}
 	until, err := ParseUntilAtNow(opts.Until, now)
 	if err != nil {
-		return nil, err
+		return Options{}, err
 	}
 	normalizedSince, normalizedUntil := NormalizeWindow(since, until)
 	if !normalizedSince.Before(normalizedUntil) {
-		return nil, errors.New("--since must be before --until")
+		return Options{}, errors.New("--since must be before --until")
 	}
 
 	repoRoots, err := resolveRepoRoots(ctx, opts.RepoPaths)
 	if err != nil {
-		return nil, err
+		return Options{}, err
 	}
+
+	opts.localPreflight = &localPreflight{
+		normalizedSince: normalizedSince,
+		normalizedUntil: normalizedUntil,
+		repoRoots:       repoRoots,
+		sinceInput:      opts.Since,
+		untilInput:      opts.Until,
+		repoPathsInput:  slices.Clone(opts.RepoPaths),
+	}
+	return opts, nil
+}
+
+func runLocal(ctx context.Context, opts Options) (*Dispatch, error) {
+	if !opts.localPreflight.matches(opts) {
+		prepared, err := PrepareLocal(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		opts = prepared
+	}
+	preflight := opts.localPreflight
 
 	allCandidates := make([]candidate, 0)
 	var candidatesMu sync.Mutex
 	group, groupCtx := errgroup.WithContext(ctx)
-	for _, repoRoot := range repoRoots {
+	for _, repoRoot := range preflight.repoRoots {
 		group.Go(func() error {
-			candidates, err := enumerateRepoCandidates(groupCtx, repoRoot, opts, normalizedSince, normalizedUntil)
+			candidates, err := enumerateRepoCandidates(groupCtx, repoRoot, opts, preflight.normalizedSince, preflight.normalizedUntil)
 			if err != nil {
 				return err
 			}
@@ -83,14 +129,14 @@ func runLocal(ctx context.Context, opts Options) (*Dispatch, error) {
 		CoveredRepos: coveredRepos(allCandidates),
 		Repos:        groupBulletsByRepo(fallback.Used),
 		Window: Window{
-			NormalizedSince:   normalizedSince,
-			NormalizedUntil:   normalizedUntil,
+			NormalizedSince:   preflight.normalizedSince,
+			NormalizedUntil:   preflight.normalizedUntil,
 			FirstCheckpointAt: firstAt(fallback.Used),
 			LastCheckpointAt:  lastAt(fallback.Used),
 		},
 	}
 
-	text, err := generateLocalDispatch(ctx, dispatch, opts.Voice)
+	text, err := generateLocalDispatch(ctx, dispatch, opts.Voice, opts.TextGenerator, opts.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -181,12 +227,12 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 	// repoRoot may be a different repo (--repo/RepoPaths) or the cwd may not be
 	// a repo at all, so scope checkpoint store construction to this repo.
 	repoCtx := settings.WithWorktreeRoot(ctx, repoRoot)
-	stores, err := checkpoint.Open(repoCtx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(repoCtx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(repoCtx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
 	store := stores.Persistent
-	infos, err := store.List(ctx)
+	infos, err := store.List(repoCtx)
 	if err != nil {
 		return nil, fmt.Errorf("list committed checkpoints: %w", err)
 	}
@@ -198,7 +244,7 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 			continue
 		}
 
-		summary, err := store.Read(ctx, info.CheckpointID)
+		summary, err := store.Read(repoCtx, info.CheckpointID)
 		if err != nil {
 			logging.Warn(ctx, "failed to read committed checkpoint for dispatch", "checkpoint_id", info.CheckpointID.String(), "error", err)
 			continue
@@ -222,7 +268,7 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 			Branch:            summary.Branch,
 			CreatedAt:         info.CreatedAt,
 			CommitSubject:     commitSubject,
-			LocalSummaryTitle: readLocalSummaryTitle(ctx, store, info.CheckpointID, summary),
+			LocalSummaryTitle: readLocalSummaryTitle(repoCtx, store, info.CheckpointID, summary),
 		})
 		seen[info.CheckpointID.String()] = struct{}{}
 	}
@@ -253,9 +299,9 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 		branch := ""
 		localSummary := ""
 		if cid, cidErr := checkpointid.NewCheckpointID(idStr); cidErr == nil {
-			if summary, readErr := store.Read(ctx, cid); readErr == nil && summary != nil {
+			if summary, readErr := store.Read(repoCtx, cid); readErr == nil && summary != nil {
 				branch = summary.Branch
-				localSummary = readLocalSummaryTitle(ctx, store, cid, summary)
+				localSummary = readLocalSummaryTitle(repoCtx, store, cid, summary)
 			}
 		}
 

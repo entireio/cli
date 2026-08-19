@@ -40,7 +40,7 @@ func TestSubdirectory_EntireDirCreatedAtRepoRoot(t *testing.T) {
 		t.Fatalf("failed to marshal input: %v", err)
 	}
 
-	cmd := exec.Command(getTestBinary(), "hooks", "claude-code", "user-prompt-submit")
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", agentClaudeCode, "user-prompt-submit")
 	cmd.Dir = subdirPath // Run from subdirectory!
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = append(testutil.GitIsolatedEnv(),
@@ -105,9 +105,12 @@ func TestSubdirectory_SaveStepFromSubdir(t *testing.T) {
 		"session_id":      session.ID,
 		"transcript_path": "",
 	}
-	inputJSON, _ := json.Marshal(input)
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("failed to marshal input: %v", err)
+	}
 
-	cmd := exec.Command(getTestBinary(), "hooks", "claude-code", "user-prompt-submit")
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", agentClaudeCode, "user-prompt-submit")
 	cmd.Dir = subdirPath // Run from subdirectory
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = append(testutil.GitIsolatedEnv(),
@@ -122,9 +125,12 @@ func TestSubdirectory_SaveStepFromSubdir(t *testing.T) {
 		"session_id":      session.ID,
 		"transcript_path": session.TranscriptPath,
 	}
-	stopInputJSON, _ := json.Marshal(stopInput)
+	stopInputJSON, err := json.Marshal(stopInput)
+	if err != nil {
+		t.Fatalf("failed to marshal stop input: %v", err)
+	}
 
-	stopCmd := exec.Command(getTestBinary(), "hooks", "claude-code", "stop")
+	stopCmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", agentClaudeCode, "stop")
 	stopCmd.Dir = subdirPath // Run from subdirectory
 	stopCmd.Stdin = bytes.NewReader(stopInputJSON)
 	stopCmd.Env = append(testutil.GitIsolatedEnv(),
@@ -140,10 +146,13 @@ func TestSubdirectory_SaveStepFromSubdir(t *testing.T) {
 		t.Errorf(".entire directory should NOT exist in subdirectory %s", subdirName)
 	}
 
-	// Verify we can get rewind points (this uses ListSessions/GetRewindPoints)
-	points := env.GetRewindPoints()
-	// Shadow strategy should have at least one rewind point
-	if len(points) == 0 {
-		t.Error("expected at least one rewind point after save")
+	// Verify the checkpoint was saved on the shadow branch, including the
+	// subdirectory file (paths must be repo-root-relative, not cwd-relative)
+	shadowBranch := env.GetShadowBranchName()
+	if !env.BranchExists(shadowBranch) {
+		t.Fatalf("shadow branch %s should exist after save", shadowBranch)
+	}
+	if !env.FileExistsInBranch(shadowBranch, subdirName+"/app.js") {
+		t.Errorf("%s/app.js should be captured on shadow branch %s", subdirName, shadowBranch)
 	}
 }

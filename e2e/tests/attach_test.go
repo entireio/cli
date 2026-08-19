@@ -46,7 +46,7 @@ func TestAttachSessionCreatesCheckpoint(t *testing.T) {
 		assert.Contains(t, resumeOut, sessionID, "resume output should reference the attached session")
 		assert.Contains(t, resumeOut, "To continue", "resume output should show follow-up instructions")
 		_, statErr := os.Stat(transcriptPath)
-		assert.NoError(t, statErr, "resume should restore the transcript into the isolated vogon HOME")
+		require.NoError(t, statErr, "resume should restore the transcript into the isolated vogon HOME")
 
 		s.Git(t, "checkout", mainBranch)
 		explainOut := entire.Explain(t, s.Dir, checkpointID)
