@@ -345,6 +345,14 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 └── 2/                   # Third session...
 ```
 
+**One record per session, none per subagent.** A committed checkpoint has no
+`tasks/` subtree: the per-subagent detail that the shadow branch carries under
+`.entire/metadata/<session>/tasks/<tool-use-id>/` does not survive condensation,
+because condensation builds one `checkpoint.WriteOptions` per session. Durable
+per-subagent storage is still being designed — see issue #2058. (A `tasks/`
+writer did exist here, but nothing ever reached it; it was removed rather than
+left looking like working storage.)
+
 **Compact transcript (`transcript.jsonl`):** generated best-effort from
 `full.jsonl` via `transcript/compact` on every committed write and on
 transcript replacement during finalization. Like `full.jsonl`, it stores the

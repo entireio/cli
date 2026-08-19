@@ -254,21 +254,18 @@ func (s *gitRefsStore) writeSession(ctx context.Context, opts WriteOptions) erro
 	if err := validation.ValidateToolUseID(opts.ToolUseID); err != nil {
 		return fmt.Errorf("invalid checkpoint options: %w", err)
 	}
-	if err := validation.ValidateAgentID(opts.AgentID); err != nil {
-		return fmt.Errorf("invalid checkpoint options: %w", err)
-	}
 
 	parentHash, existing, err := s.refBase(opts.CheckpointID)
 	if err != nil {
 		return err
 	}
 
-	checkpointSubtree, taskMetadataPath, err := s.applySessionWrite(ctx, opts, existing, "")
+	checkpointSubtree, err := s.applySessionWrite(ctx, opts, existing, "")
 	if err != nil {
 		return err
 	}
 
-	commitMsg := s.buildCommitMessage(opts, taskMetadataPath)
+	commitMsg := s.buildCommitMessage(opts)
 	commitHash, err := CreateCommit(ctx, s.repo, checkpointSubtree, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail)
 	if err != nil {
 		return err

@@ -55,9 +55,11 @@ var chunkTranscript = agent.ChunkTranscript
 // writeSession writes a committed checkpoint to the entire/checkpoints/v1 branch.
 // Checkpoints are stored at sharded paths: <id[:2]>/<id[2:]>/
 //
-// For task checkpoints (IsTask=true), additional files are written under tasks/<tool-use-id>/:
-//   - For incremental checkpoints: checkpoints/NNN-<tool-use-id>.json
-//   - For final checkpoints: checkpoint.json and agent-<agent-id>.jsonl
+// Session checkpoints only. Per-subagent detail is not stored here: a committed
+// checkpoint carries one record per session, and the durable subagent record is
+// still being designed (issue #2058). The tasks/<tool-use-id>/ writer that used
+// to live here was unreachable — no producer ever set IsTask — so it was removed
+// rather than left looking like working storage.
 func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
 	// Parity with this store's backfill writers and with the git-refs store: a
 	// canceled ctx means stop doing work, and creating a checkpoint is the most
@@ -76,9 +78,6 @@ func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
 		return fmt.Errorf("invalid checkpoint options: %w", err)
 	}
 	if err := validation.ValidateToolUseID(opts.ToolUseID); err != nil {
-		return fmt.Errorf("invalid checkpoint options: %w", err)
-	}
-	if err := validation.ValidateAgentID(opts.AgentID); err != nil {
 		return fmt.Errorf("invalid checkpoint options: %w", err)
 	}
 
@@ -100,7 +99,7 @@ func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
 	if err != nil {
 		return err
 	}
-	checkpointSubtree, taskMetadataPath, err := s.applySessionWrite(ctx, opts, existing, opts.CheckpointID.Path()+"/")
+	checkpointSubtree, err := s.applySessionWrite(ctx, opts, existing, opts.CheckpointID.Path()+"/")
 	if err != nil {
 		return err
 	}
@@ -114,7 +113,7 @@ func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
 		return err
 	}
 
-	commitMsg := s.buildCommitMessage(opts, taskMetadataPath)
+	commitMsg := s.buildCommitMessage(opts)
 	newCommitHash, err := CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail)
 	if err != nil {
 		return err
@@ -220,32 +219,24 @@ func (s *GitStore) spliceCheckpointSubtree(rootTreeHash plumbing.Hash, checkpoin
 }
 
 // applySessionWrite applies a Session write to a checkpoint's current subtree and
-// returns the new checkpoint subtree hash plus the task metadata path (for the
-// commit trailer). It is backing-independent: the v1-branch store passes the
-// sharded basePath and the per-checkpoint-ref store passes "".
-func (s *treeWriter) applySessionWrite(ctx context.Context, opts WriteOptions, existing *object.Tree, basePath string) (plumbing.Hash, string, error) {
+// returns the new checkpoint subtree hash. It is backing-independent: the
+// v1-branch store passes the sharded basePath and the per-checkpoint-ref store
+// passes "".
+func (s *treeWriter) applySessionWrite(ctx context.Context, opts WriteOptions, existing *object.Tree, basePath string) (plumbing.Hash, error) {
 	entries, err := s.flattenExisting(existing, basePath)
 	if err != nil {
-		return plumbing.ZeroHash, "", err
-	}
-
-	var taskMetadataPath string
-	if opts.IsTask && opts.ToolUseID != "" {
-		taskMetadataPath, err = s.writeTaskCheckpointEntries(ctx, opts, basePath, entries)
-		if err != nil {
-			return plumbing.ZeroHash, "", err
-		}
+		return plumbing.ZeroHash, err
 	}
 
 	if err := s.writeStandardCheckpointEntries(ctx, opts, basePath, entries); err != nil {
-		return plumbing.ZeroHash, "", err
+		return plumbing.ZeroHash, err
 	}
 
 	subtree, err := s.buildCheckpointSubtree(ctx, entries, basePath)
 	if err != nil {
-		return plumbing.ZeroHash, "", err
+		return plumbing.ZeroHash, err
 	}
-	return subtree, taskMetadataPath, nil
+	return subtree, nil
 }
 
 // applyAttributionBackfill rewrites the checkpoint root summary's combined
@@ -479,106 +470,6 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 	}
 
 	return s.buildCheckpointSubtree(ctx, entries, basePath)
-}
-
-// writeTaskCheckpointEntries writes task-specific checkpoint entries and returns the task metadata path.
-func (s *treeWriter) writeTaskCheckpointEntries(ctx context.Context, opts WriteOptions, basePath string, entries map[string]object.TreeEntry) (string, error) {
-	taskDir := checkpointSubtreePath(basePath, "tasks", opts.ToolUseID)
-
-	if opts.IsIncremental {
-		return s.writeIncrementalTaskCheckpoint(opts, taskDir, entries)
-	}
-	return s.writeFinalTaskCheckpoint(ctx, opts, taskDir, entries)
-}
-
-// writeIncrementalTaskCheckpoint writes an incremental checkpoint file during task execution.
-func (s *treeWriter) writeIncrementalTaskCheckpoint(opts WriteOptions, taskDir string, entries map[string]object.TreeEntry) (string, error) {
-	incData, err := redact.JSONLBytes(opts.IncrementalData)
-	if err != nil {
-		return "", fmt.Errorf("failed to redact incremental checkpoint: %w", err)
-	}
-	checkpoint := incrementalCheckpointData{
-		Type:      opts.IncrementalType,
-		ToolUseID: opts.ToolUseID,
-		Timestamp: time.Now().UTC(),
-		Data:      json.RawMessage(incData.Bytes()),
-	}
-	cpData, err := jsonutil.MarshalIndentWithNewline(checkpoint, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal incremental checkpoint: %w", err)
-	}
-	cpBlobHash, err := CreateBlobFromContent(s.repo, cpData)
-	if err != nil {
-		return "", fmt.Errorf("failed to create incremental checkpoint blob: %w", err)
-	}
-
-	cpFilename := fmt.Sprintf("%03d-%s.json", opts.IncrementalSequence, opts.ToolUseID)
-	cpPath := checkpointSubtreePath(taskDir, "checkpoints", cpFilename)
-	entries[cpPath] = object.TreeEntry{
-		Name: cpPath,
-		Mode: filemode.Regular,
-		Hash: cpBlobHash,
-	}
-	return cpPath, nil
-}
-
-// writeFinalTaskCheckpoint writes the final checkpoint.json and subagent transcript.
-func (s *treeWriter) writeFinalTaskCheckpoint(ctx context.Context, opts WriteOptions, taskDir string, entries map[string]object.TreeEntry) (string, error) {
-	checkpoint := taskCheckpointData{
-		SessionID:      opts.SessionID,
-		ToolUseID:      opts.ToolUseID,
-		CheckpointUUID: opts.CheckpointUUID,
-		AgentID:        opts.AgentID,
-	}
-	checkpointData, err := jsonutil.MarshalIndentWithNewline(checkpoint, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal task checkpoint: %w", err)
-	}
-	blobHash, err := CreateBlobFromContent(s.repo, checkpointData)
-	if err != nil {
-		return "", fmt.Errorf("failed to create task checkpoint blob: %w", err)
-	}
-
-	checkpointFile := checkpointSubtreePath(taskDir, "checkpoint.json")
-	entries[checkpointFile] = object.TreeEntry{
-		Name: checkpointFile,
-		Mode: filemode.Regular,
-		Hash: blobHash,
-	}
-
-	// Write subagent transcript if available
-	if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
-		agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
-		prepared, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, agentContent)
-		if readErr == nil && !tooLarge {
-			agentContent = prepared
-			// Try JSONL-aware redaction first; fall back to plain string redaction
-			// if the content is not valid JSONL (avoids silently dropping the transcript).
-			redacted, jsonlErr := redact.JSONLBytes(agentContent)
-			if jsonlErr != nil {
-				logging.Warn(ctx, "subagent transcript is not valid JSONL, falling back to plain redaction",
-					slog.String("path", opts.SubagentTranscriptPath),
-					slog.String("error", jsonlErr.Error()),
-				)
-				agentContent = redact.Bytes(agentContent)
-			} else {
-				agentContent = redacted.Bytes()
-			}
-
-			agentBlobHash, agentBlobErr := CreateBlobFromContent(s.repo, agentContent)
-			if agentBlobErr == nil {
-				agentPath := checkpointSubtreePath(taskDir, "agent-"+opts.AgentID+".jsonl")
-				entries[agentPath] = object.TreeEntry{
-					Name: agentPath,
-					Mode: filemode.Regular,
-					Hash: agentBlobHash,
-				}
-			}
-		}
-	}
-
-	// taskDir is already a clean path (no trailing slash).
-	return taskDir, nil
 }
 
 // writeStandardCheckpointEntries writes session files to numbered subdirectories and
@@ -1320,7 +1211,7 @@ func (s *treeWriter) readMetadataFromBlob(hash plumbing.Hash) (*Metadata, error)
 // buildCommitMessage constructs the commit message with proper trailers.
 // The commit subject is always "Checkpoint: <id>" for consistency.
 // If CommitSubject is provided (e.g., for task checkpoints), it's included in the body.
-func (s *treeWriter) buildCommitMessage(opts WriteOptions, taskMetadataPath string) string {
+func (s *treeWriter) buildCommitMessage(opts WriteOptions) string {
 	var commitMsg strings.Builder
 
 	// Subject line is always the checkpoint ID for consistent formatting
@@ -1338,29 +1229,8 @@ func (s *treeWriter) buildCommitMessage(opts WriteOptions, taskMetadataPath stri
 	if opts.EphemeralBranch != "" {
 		fmt.Fprintf(&commitMsg, "%s: %s\n", trailers.EphemeralBranchTrailerKey, opts.EphemeralBranch)
 	}
-	if taskMetadataPath != "" {
-		fmt.Fprintf(&commitMsg, "%s: %s\n", trailers.MetadataTaskTrailerKey, taskMetadataPath)
-	}
 
 	return commitMsg.String()
-}
-
-// incrementalCheckpointData represents an incremental checkpoint during subagent execution.
-// This mirrors strategy.SubagentCheckpoint but avoids import cycles.
-type incrementalCheckpointData struct {
-	Type      string          `json:"type"`
-	ToolUseID string          `json:"tool_use_id"`
-	Timestamp time.Time       `json:"timestamp"`
-	Data      json.RawMessage `json:"data"`
-}
-
-// taskCheckpointData represents a final task checkpoint.
-// This mirrors strategy.TaskCheckpoint but avoids import cycles.
-type taskCheckpointData struct {
-	SessionID      string `json:"session_id"`
-	ToolUseID      string `json:"tool_use_id"`
-	CheckpointUUID string `json:"checkpoint_uuid"`
-	AgentID        string `json:"agent_id,omitempty"`
 }
 
 // Read reads a committed checkpoint's summary by ID from the entire/checkpoints/v1 branch.

@@ -1108,10 +1108,14 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 		// re-parse the whole main transcript plus every subagent file from line 0 —
 		// measured at ~29x the cost of this call, enough to triple post-commit
 		// condensation for a subagent-heavy session — and would still yield a
-		// cumulative snapshot needing the same rescoping SaveStep already did. It
-		// also finds nothing on this path once the agent has cleaned the transcripts
-		// up. CondenseSession fills the already-rescoped window total in instead;
+		// cumulative snapshot needing the same rescoping SaveStep already did.
+		// CondenseSession fills the already-rescoped window total in instead;
 		// see withSubagentTokensFrom.
+		//
+		// Cost is the whole reason, not availability: agents do not clean their
+		// subagent transcripts up, so the files are still there at condensation
+		// time. Anything that needs their *content* durably can therefore read
+		// them here rather than racing the turn (see issue #2058).
 		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, "")
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}

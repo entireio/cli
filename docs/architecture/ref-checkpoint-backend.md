@@ -14,7 +14,7 @@ The **git-refs** backend instead keeps **one git ref per checkpoint**:
 refs/entire/checkpoints/<shard>/<id>
 ```
 
-Each ref points at a commit whose **tree root is that checkpoint's contents** (`metadata.json`, `0/`, `1/`, `tasks/…`) — the same subtree the git-branch backend splices *under* `<id[:2]>/<id[2:]>/` in the v1 tree. Independent refs mean checkpoints are written, pushed, and fetched independently: no shared tip to contend on, and a reader can fetch exactly the one checkpoint it needs instead of the whole branch.
+Each ref points at a commit whose **tree root is that checkpoint's contents** (`metadata.json`, `0/`, `1/`, one directory per session) — the same subtree the git-branch backend splices *under* `<id[:2]>/<id[2:]>/` in the v1 tree. Independent refs mean checkpoints are written, pushed, and fetched independently: no shared tip to contend on, and a reader can fetch exactly the one checkpoint it needs instead of the whole branch.
 
 Both backends are **git-backed** — they store the committed record in the repo's own object store — and never touch the working branch's history.
 
@@ -22,7 +22,7 @@ Both backends are **git-backed** — they store the committed record in the repo
 
 Checkpoint storage is pluggable. The topology is a single **primary** plus zero or more **mirrors**:
 
-- **Primary** — the source of truth. It serves all reads and writes, and the full checkpoint lifecycle (resume bootstrap, `doctor` reconcile, `explain` tree reads, push, cleanup, pre-push OPF) drives *its* record.
+- **Primary** — the source of truth. It serves all reads and writes, and the full checkpoint lifecycle (resume bootstrap, `doctor` reconcile, `explain` tree reads, push, cleanup) drives *its* record. Pre-push OPF is the one exception: it is git-branch-only, and does not follow the primary (see [Known limitations](#known-limitations-and-deferred-work)).
 - **Mirror** — an independent backend that receives best-effort **write fan-out** only. Reads never come from a mirror.
 
 Backends register in `checkpoint/registry.go`. Each carries a `gitBacked` capability:

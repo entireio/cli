@@ -84,29 +84,27 @@ type WriteOptions struct {
 	// AuthorEmail is the email to use for commits
 	AuthorEmail string
 
-	// MetadataDir is a directory containing additional metadata files to copy
-	// If set, all files in this directory will be copied to the checkpoint path
-	// This is useful for copying task metadata files, subagent transcripts, etc.
+	// MetadataDir is a directory containing additional metadata files to copy.
+	// If set, all files in it are copied into the checkpoint's session subdirectory.
 	MetadataDir string
 
-	// Task checkpoint fields (for task/subagent checkpoints)
-	IsTask    bool   // Whether this is a task checkpoint
-	ToolUseID string // Tool use ID for task checkpoints
+	// IsTask and ToolUseID mark a write as belonging to a subagent task rather
+	// than to the session as a whole. They are the write-side seam for the read
+	// tier below (SessionMetadata.IsTask -> CheckpointSummary.IsTask -> explain,
+	// checkpoint list), and no producer sets them yet: durable per-subagent
+	// storage is still being designed (issue #2058), so today every persistent
+	// checkpoint is a session checkpoint. Do not read this seam as evidence that
+	// subagent detail is stored — the writer that consumed these fields was
+	// unreachable and has been removed.
+	IsTask    bool
+	ToolUseID string
 
-	// Additional task checkpoint fields for subagent checkpoints
-	AgentID                string // Subagent identifier
-	CheckpointUUID         string // UUID for transcript truncation when rewinding
-	TranscriptPath         string // Path to session transcript file (alternative to in-memory Transcript)
-	SubagentTranscriptPath string // Path to subagent's transcript file
+	// TranscriptPath is a path to the session transcript file, used as a
+	// fallback when Transcript carries no bytes.
+	TranscriptPath string
 
-	// Incremental checkpoint fields
-	IsIncremental       bool   // Whether this is an incremental checkpoint
-	IncrementalSequence int    // Checkpoint sequence number
-	IncrementalType     string // Tool type that triggered this checkpoint
-	IncrementalData     []byte // Tool input payload for this checkpoint
-
-	// Commit message fields (used for task checkpoints)
-	CommitSubject string // Subject line for the metadata commit (overrides default)
+	// CommitSubject overrides the default subject line of the metadata commit.
+	CommitSubject string
 
 	// Agent identifies the agent that created this checkpoint (e.g., "Claude Code", "Cursor")
 	Agent types.AgentType
