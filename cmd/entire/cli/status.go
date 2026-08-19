@@ -146,13 +146,22 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		fmt.Fprintln(w, formatSettingsStatus("Project", projectSettings, sty))
 	}
 
-	// Show local settings if it exists
+	// Show local settings if it exists. LoadFromFile is ungated, so this
+	// renders the file's own contents — say so when the loader ignored them,
+	// or the display contradicts the settings actually in effect.
 	if localExists {
 		localSettings, err := settings.LoadFromFile(localSettingsPath)
 		if err != nil {
 			return fmt.Errorf("failed to load local settings: %w", err)
 		}
-		fmt.Fprintln(w, formatSettingsStatus("Local", localSettings, sty))
+		label := "Local"
+		if effectiveSettings.LocalLayerRejection() != "" {
+			label = "Local (ignored)"
+		}
+		fmt.Fprintln(w, formatSettingsStatus(label, localSettings, sty))
+		if reason := effectiveSettings.LocalLayerRejection(); reason != "" {
+			fmt.Fprintf(w, "  %s\n  fix with: git rm --cached %s\n", reason, settings.EntireSettingsLocalFile)
+		}
 	}
 
 	if effectiveSettings.Enabled {
