@@ -18,7 +18,8 @@ var systemTagRegexes = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)<command-message[^>]*>.*?</command-message>`),
 	regexp.MustCompile(`(?s)<command-args[^>]*>.*?</command-args>`),
 	regexp.MustCompile(`(?s)<local-command-stdout[^>]*>.*?</local-command-stdout>`),
-	regexp.MustCompile(`</?user_query>`), // Cursor wraps user text in <user_query> tags; strip tags but keep content
+	regexp.MustCompile(`</?user_query>`),                      // Cursor wraps user text in <user_query> tags; strip tags but keep content
+	regexp.MustCompile(`(?s)<timestamp[^>]*>.*?</timestamp>`), // Cursor wraps transcripts with a <timestamp> tag; drop tag and content
 }
 
 // StripIDEContextTags removes IDE-injected context tags from prompt text.
@@ -30,6 +31,8 @@ var systemTagRegexes = []*regexp.Regexp{
 //   - <local-command-caveat>...</local-command-caveat>
 //   - <system-reminder>...</system-reminder>
 //   - <command-name>...</command-name>
+//   - <timestamp>...</timestamp> - Cursor's transcript wrapper, dropped with
+//     its content rather than unwrapped like <user_query>
 //
 // These shouldn't appear in commit messages or session descriptions.
 func StripIDEContextTags(text string) string {

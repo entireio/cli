@@ -98,6 +98,16 @@ func TestStripIDEContextTags(t *testing.T) {
 			input:    "<user_query>\nhello world\n</user_query>",
 			expected: "hello world",
 		},
+		{
+			name:     "cursor timestamp wrapper before user_query",
+			input:    "<timestamp>Wed Aug 19, 2026, 1:51 PM (UTC-4)</timestamp>\n<user_query>\nhello\n</user_query>",
+			expected: "hello",
+		},
+		{
+			name:     "cursor timestamp tag with attributes",
+			input:    "<timestamp tz=\"UTC-4\">Wed Aug 19, 2026</timestamp>\n\nfix the bug",
+			expected: "fix the bug",
+		},
 	}
 
 	for _, tt := range tests {
