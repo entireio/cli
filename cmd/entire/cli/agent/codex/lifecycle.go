@@ -173,15 +173,18 @@ func (c *CodexAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 	}, nil
 }
 
-// trimmedLastAssistantMessage extracts a trimmed, non-empty TaskDescription
-// from Codex's nullable last_assistant_message, the agent's own summary of
-// what it just did. Returns "" for nil or whitespace-only messages so a
-// missing field never becomes a spurious non-empty description.
+// trimmedLastAssistantMessage extracts a trimmed, non-empty, single-line
+// TaskDescription from Codex's nullable last_assistant_message, the agent's
+// own summary of what it just did. Returns "" for nil or whitespace-only
+// messages so a missing field never becomes a spurious non-empty
+// description. Internal whitespace (including newlines/tabs) is collapsed to
+// single spaces since this value can propagate into commit subjects via
+// strategy.FormatSubagentEndMessage, where multi-line text is unreadable.
 func trimmedLastAssistantMessage(msg *string) string {
 	if msg == nil {
 		return ""
 	}
-	return strings.TrimSpace(*msg)
+	return strings.Join(strings.Fields(*msg), " ")
 }
 
 // parseSessionInfoEvent parses the hooks whose payload is sessionInfoRaw —

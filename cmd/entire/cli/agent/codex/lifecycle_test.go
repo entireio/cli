@@ -198,17 +198,44 @@ func TestParseHookEvent_Stop_BlankLastAssistantMessage(t *testing.T) {
 	ag := &CodexAgent{}
 	input := `{
 		"session_id": "test-uuid",
+		"turn_id": "turn-1",
 		"transcript_path": "/tmp/rollout.jsonl",
 		"cwd": "/tmp/testrepo",
 		"hook_event_name": "Stop",
 		"model": "gpt-4.1",
-		"last_assistant_message": "   "
+		"permission_mode": "auto",
+		"stop_hook_active": false,
+		"last_assistant_message": "   \n\t  "
 	}`
 
 	event, err := ag.ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
 	require.NoError(t, err)
 	require.NotNil(t, event)
 	require.Empty(t, event.TaskDescription)
+}
+
+// TestParseHookEvent_Stop_MultilineLastAssistantMessage covers a message with
+// internal newlines/tabs: TaskDescription must collapse to a single line so it
+// stays safe to use as a commit subject (via strategy.FormatSubagentEndMessage).
+func TestParseHookEvent_Stop_MultilineLastAssistantMessage(t *testing.T) {
+	t.Parallel()
+	ag := &CodexAgent{}
+	input := `{
+		"session_id": "test-uuid",
+		"turn_id": "turn-1",
+		"transcript_path": "/tmp/rollout.jsonl",
+		"cwd": "/tmp/testrepo",
+		"hook_event_name": "Stop",
+		"model": "gpt-4.1",
+		"permission_mode": "auto",
+		"stop_hook_active": false,
+		"last_assistant_message": "  Fixed the bug.\n\nRan  the\ttests.  "
+	}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, "Fixed the bug. Ran the tests.", event.TaskDescription)
 }
 
 func TestParseHookEvent_PreToolUse_ReturnsNil(t *testing.T) {
