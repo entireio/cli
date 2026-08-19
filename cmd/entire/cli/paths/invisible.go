@@ -166,10 +166,10 @@ func ClearInvisibleRuntimeCache() {
 // invisibleRuntimeBase returns the absolute directory runtime data resolves
 // under for the repo rooted at root (the caller's already-resolved worktree
 // root). "" with a nil error means runtime data lives in the worktree
-// (repo-level setup present, or global tier off). A non-nil error (always
-// carrying ErrUnroutableRuntimePath) means the global tier owns the repo but
-// the git-side location could not be resolved — callers must treat that as
-// "skip", never as "use the worktree".
+// (repo-level setup present, or global tier off). A non-nil error — carrying
+// ErrUnroutableRuntimePath, or the context's own cancellation — means the
+// global tier owns the repo but the git-side location could not be resolved;
+// callers must treat that as "skip", never as "use the worktree".
 func invisibleRuntimeBase(ctx context.Context, root string) (string, error) {
 	invisibleMu.Lock()
 	defer invisibleMu.Unlock()
@@ -177,6 +177,11 @@ func invisibleRuntimeBase(ctx context.Context, root string) (string, error) {
 		return invisibleCache.base, invisibleCache.err
 	}
 	base, err := computeInvisibleRuntimeBase(ctx, root)
+	if ctx.Err() != nil {
+		// Never cache a cancellation-tainted result: the next caller arrives
+		// with a live context and must recompute.
+		return base, err
+	}
 	invisibleCache.valid = true
 	invisibleCache.root = root
 	invisibleCache.base = base
@@ -210,6 +215,12 @@ func computeInvisibleRuntimeBase(ctx context.Context, root string) (string, erro
 	}
 	commonDir, err := gitCommonDir(ctx)
 	if err != nil {
+		// A canceled context fails this probe too; propagate the cancellation
+		// instead of disguising it as an unroutable path, which callers treat
+		// as a silent skip.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("resolving git common dir: %w", ctxErr)
+		}
 		return "", fmt.Errorf("%w: resolving git common dir: %w", ErrUnroutableRuntimePath, err)
 	}
 	base, err := InvisibleRuntimeDir(commonDir, root)
