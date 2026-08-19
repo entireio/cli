@@ -443,7 +443,11 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 		// Add subagent transcript if available
 		if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
 			agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
-			agentContent, taskAssets, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, agentContent)
+			var taskAssets []TranscriptAsset
+			var tooLarge bool
+			if readErr == nil {
+				agentContent, taskAssets, tooLarge = prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, agentContent)
+			}
 			if readErr == nil && !tooLarge {
 				redacted, jsonlErr := redact.JSONLBytes(agentContent)
 				if jsonlErr != nil {
