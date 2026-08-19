@@ -258,6 +258,7 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 			WorktreeID:             state.WorktreeID,
 			ToolUseID:              step.ToolUseID,
 			AgentID:                step.AgentID,
+			Agent:                  step.AgentType,
 			ModifiedFiles:          step.ModifiedFiles,
 			NewFiles:               step.NewFiles,
 			DeletedFiles:           step.DeletedFiles,

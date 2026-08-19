@@ -51,6 +51,15 @@ var managedHooks = []managedHook{
 	{event: "UserPromptSubmit", verb: HookNameUserPromptSubmit, timeout: defaultHookTimeoutSec, core: true, wrap: agent.WrapProductionSilentHookCommandForOS},
 	{event: "Stop", verb: HookNameStop, timeout: defaultHookTimeoutSec, core: true, wrap: agent.WrapProductionSilentHookCommandForOS},
 	{event: "PostToolUse", verb: HookNamePostToolUse, timeout: defaultHookTimeoutSec, core: true, wrap: agent.WrapProductionSilentHookCommandForOS},
+	// Codex keys hooks.json by PascalCase event name (its own fixtures do the
+	// same), even though HookEventName serializes snake_case elsewhere in its
+	// protocol — following that would install hooks that never fire.
+	//
+	// Not core, for the same reason as SessionEnd: both postdate the four events
+	// above, so requiring them would un-enable Codex for anyone who enabled it
+	// before this release.
+	{event: "SubagentStart", verb: HookNameSubagentStart, timeout: defaultHookTimeoutSec, wrap: agent.WrapProductionSilentHookCommandForOS},
+	{event: "SubagentStop", verb: HookNameSubagentStop, timeout: defaultHookTimeoutSec, wrap: agent.WrapProductionSilentHookCommandForOS},
 }
 
 // InstallHooks installs Codex hooks in .codex/hooks.json.

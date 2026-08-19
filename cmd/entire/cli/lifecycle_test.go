@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/internal/coreapi"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/require"
@@ -2312,50 +2314,120 @@ func TestHandleLifecycleSessionStart_NoSynchronousNetworkForTrailEnablement(t *t
 	}
 }
 
+// blockingCellCore is a cellCoreClient that hangs every call until its
+// caller's context is done, standing in for a reachable-but-unresponsive
+// control plane.
+type blockingCellCore struct{}
+
+func (blockingCellCore) GetRepo(ctx context.Context, _ coreapi.GetRepoParams) (*coreapi.Repo, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (blockingCellCore) ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (blockingCellCore) ListRepos(ctx context.Context, _ coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 // TestRunTrailEnablementRefresh_BoundedByTimeoutAgainstUnresponsiveHost
 // verifies the deferred refresh work still completes (or at least
-// gives up) within its own bounded timeout when the API host never
+// gives up) within its own bounded timeout when the control plane never
 // responds — the network work that used to block SessionStart must still
 // happen, just out of the hook's critical path, and it must not hang forever.
+//
+// The hang is injected at the cell-target resolver (newCellCoreClient) rather
+// than at a blackholed ENTIRE_API_BASE_URL listener as this test used to:
+// resolveRepoCellTarget (cell_target.go) no longer falls back to a live
+// network dial when it can't resolve the repo's processing placement — a
+// resolution failure is now a fast, direct error — so a blackholed data-API
+// host would never be dialed at all and this test would pass for the wrong
+// reason (an early return, not a bounded wait).
 func TestRunTrailEnablementRefresh_BoundedByTimeoutAgainstUnresponsiveHost(t *testing.T) {
 	setupStopTestRepo(t)
 	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
 
-	var lc net.ListenConfig
-	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer ln.Close()
-	var accepted int32
-	go func() {
-		for {
-			conn, acceptErr := ln.Accept()
-			if acceptErr != nil {
-				return
-			}
-			atomic.AddInt32(&accepted, 1)
-			// Accept the connection but never write anything back (no TLS
-			// handshake, no HTTP response) — simulates a blackholed/firewalled
-			// host, which is what triggered the original 1s stall per call.
-			_ = conn
-		}
-	}()
-	t.Setenv("ENTIRE_API_BASE_URL", "https://"+ln.Addr().String())
+	var attempted int32
+	prevCellCore := newCellCoreClient
+	newCellCoreClient = func() (cellCoreClient, error) {
+		atomic.AddInt32(&attempted, 1)
+		return blockingCellCore{}, nil
+	}
+	t.Cleanup(func() { newCellCoreClient = prevCellCore })
 
 	start := time.Now()
 	refreshErr := runTrailEnablementRefresh(context.Background())
 	elapsed := time.Since(start)
 
-	// Best-effort: network failure must not surface as a hard error.
+	// Best-effort: control-plane failure must not surface as a hard error.
 	require.NoError(t, refreshErr)
 	if elapsed > trailEnablementRefreshTimeout+2*time.Second {
 		t.Fatalf("runTrailEnablementRefresh took %v, expected to give up within roughly %v", elapsed, trailEnablementRefreshTimeout)
 	}
-	// Prove the test actually exercised the network path rather than passing
-	// via an early return (e.g. scope resolution or auth failing before any
-	// dial): the blackholed listener must have accepted at least one
-	// connection attempt.
-	if got := atomic.LoadInt32(&accepted); got == 0 {
-		t.Fatalf("expected at least one dial attempt against the unresponsive host, got %d", got)
+	// Prove the test actually exercised the blocking resolver rather than
+	// passing via an early return (e.g. scope resolution failing first).
+	if got := atomic.LoadInt32(&attempted); got == 0 {
+		t.Fatalf("expected the cell-target resolver to have been invoked at least once")
+	}
+}
+
+// TestRunTrailEnablementRefresh_NotOnboardedSavesDisabledCache guards a
+// regression: before the fail-loud cell-resolution rewrite, a not-onboarded
+// repo still got a client (the old home-jurisdiction fallback), and the
+// subsequent TrailsEnabled API call's 403/404 was what cached enabled=false.
+// Now trailRefreshAPIClient fails before a client exists for the exact same
+// repos, landing in the generic "authenticated client unavailable" branch,
+// which never writes the cache — cachedTrailsEnablementForScope stays
+// unknown forever and trailRefreshSpawnThrottle can't stop SessionStart from
+// re-forking a refresh child on every invocation. errRepoNotOnboarded is the
+// one error this refresh must recognize as a permanent negative and persist.
+func TestRunTrailEnablementRefresh_NotOnboardedSavesDisabledCache(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
+
+	prevClient := trailRefreshAPIClient
+	trailRefreshAPIClient = func(context.Context, bool, string) (*api.Client, error) {
+		return nil, fmt.Errorf("resolve the Entire cell for entirehq/example: %w", errRepoNotOnboarded)
+	}
+	t.Cleanup(func() { trailRefreshAPIClient = prevClient })
+
+	require.NoError(t, runTrailEnablementRefresh(context.Background()))
+
+	scope, err := currentTrailEnablementScope(context.Background())
+	require.NoError(t, err)
+	if got := cachedTrailsEnablementForScope(context.Background(), scope, time.Now()); got != trailEnablementCacheDisabled {
+		t.Fatalf("cached enablement = %v, want trailEnablementCacheDisabled (saved, not left unknown)", got)
+	}
+}
+
+// TestRunTrailEnablementRefresh_CandidateRowSavesDisabledCache is the
+// candidate-row counterpart to TestRunTrailEnablementRefresh_NotOnboardedSavesDisabledCache
+// above, and exercises the real resolution chain (rather than mocking
+// trailRefreshAPIClient directly) so it also proves resolveProcessingPlacement
+// itself classifies a discoverable-but-unonboarded repo as errRepoNotOnboarded:
+// a repos-index row with Candidate set but no placements/primaries is the more
+// common real trigger for "not onboarded" than the zero-rows case (a random
+// repo a developer works in, vs. one the caller can't see or that doesn't
+// exist).
+func TestRunTrailEnablementRefresh_CandidateRowSavesDisabledCache(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
+
+	withFakeCellCore(t, &fakeCellCore{
+		repos:    reposOutput(candidateRepoIndexFixture("entirehq/example")),
+		clusters: clustersWithSlugs(),
+	})
+
+	require.NoError(t, runTrailEnablementRefresh(context.Background()))
+
+	scope, err := currentTrailEnablementScope(context.Background())
+	require.NoError(t, err)
+	if got := cachedTrailsEnablementForScope(context.Background(), scope, time.Now()); got != trailEnablementCacheDisabled {
+		t.Fatalf("cached enablement = %v, want trailEnablementCacheDisabled (saved, not left unknown)", got)
 	}
 }
 

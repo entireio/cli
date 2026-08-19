@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 Thanks to @MuskanPaliwal for tracking down the checkpoint metadata bloat — both the nested-checkout status walk and the `files_touched` dedupe at the write boundary — which had made `entire/checkpoints/v1` unpushable on repos with agent worktrees!
 
+Thanks to @ChetanReddyC for privately reporting that the OpenAI privacy filter, when enabled with no effective categories, stamped `Entire-OPF-Applied: true` on commits it never scanned — fixed in this release by failing closed at push time!
+
 ## [0.10.0] - 2026-08-12
 
 ### Added

@@ -19,6 +19,7 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -3797,16 +3798,17 @@ func TestCleanRemoteURLForReport(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := cleanRemoteURLForReport(tt.rawURL)
+			info, err := gitremote.ParseURL(tt.rawURL)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("expected error for %q, got %q", tt.rawURL, got)
+					t.Fatalf("expected ParseURL error for %q", tt.rawURL)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("unexpected error for %q: %v", tt.rawURL, err)
+				t.Fatalf("unexpected error parsing %q: %v", tt.rawURL, err)
 			}
+			got := cleanRemoteURLForReport(info)
 			if got != tt.want {
 				t.Errorf("cleanRemoteURLForReport(%q) = %q, want %q", tt.rawURL, got, tt.want)
 			}

@@ -549,7 +549,9 @@ func (s *treeWriter) writeFinalTaskCheckpoint(ctx context.Context, opts WriteOpt
 	// Write subagent transcript if available
 	if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
 		agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
-		if readErr == nil {
+		prepared, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, agentContent)
+		if readErr == nil && !tooLarge {
+			agentContent = prepared
 			// Try JSONL-aware redaction first; fall back to plain string redaction
 			// if the content is not valid JSONL (avoids silently dropping the transcript).
 			redacted, jsonlErr := redact.JSONLBytes(agentContent)

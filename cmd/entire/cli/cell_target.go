@@ -2,29 +2,30 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// cellResolveTimeout bounds the best-effort control-plane lookups that
-// pick a repo's cell. Without it, a reachable-but-hung control plane would block
-// the calling command (experts, and any future cell-routed command) instead of
-// degrading to home-jurisdiction routing — the "any failure falls back" contract
-// must hold for slow cores, not just erroring ones.
+// cellResolveTimeout bounds the best-effort control-plane lookups that pick a
+// repo's cell for a multi-repo fan-out (cell_fanout.go's resolveCellBaseURLs).
+// Without it, a reachable-but-hung control plane would block the calling
+// command instead of degrading to jurisdiction routing — the "any failure
+// falls back" contract must hold for slow cores, not just erroring ones.
 const cellResolveTimeout = 5 * time.Second
 
 // requiredCellResolveTimeout bounds the control-plane lookups a repo-scoped
-// cell read cannot proceed without (resolveRepoCellPlacement).
+// cell read cannot proceed without: resolveRepoCellTarget (trails, experts)
+// and resolveRepoCellPlacement (checkpoint/explain --repo).
 //
-// Deliberately not cellResolveTimeout: that budget bounds *best-effort* lookups
-// whose failure silently degrades to home-jurisdiction routing, so it can be
-// aggressive. Here a timeout is a visible command failure, and the budget has
-// to cover two sequential control-plane round trips (the repo's mirrors, then
+// Deliberately not cellResolveTimeout: that budget bounds *best-effort*
+// lookups whose failure silently degrades to jurisdiction routing, so it can
+// be aggressive. Here a timeout is a visible command failure, and the budget
+// has to cover two sequential control-plane round trips (a repo lookup, then
 // the cluster catalog), so it is more patient.
 //
 // Some deadline is required: the coreapi HTTP client sets only a dial timeout,
@@ -38,7 +39,7 @@ const requiredCellResolveTimeout = 15 * time.Second
 type cellCoreClient interface {
 	GetRepo(ctx context.Context, params coreapi.GetRepoParams) (*coreapi.Repo, error)
 	ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error)
-	ListMirrors(ctx context.Context, params coreapi.ListMirrorsParams) (*coreapi.ListMirrorsOutputBody, error)
+	ListRepos(ctx context.Context, params coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error)
 }
 
 // newCellCoreClient builds the control-plane client used for cell resolution.
@@ -46,90 +47,209 @@ type cellCoreClient interface {
 var newCellCoreClient = func() (cellCoreClient, error) { return coreapi.New() }
 
 // resolveRepoCellTarget resolves the entire-api cell that HOSTS the given
-// repo, plus that cell's jurisdiction, so a repo-scoped call (experts today)
+// repo, plus that cell's jurisdiction, so a repo-scoped call (trails, experts)
 // reaches the region that owns the repo — mirroring how the entire.io BFF
-// selects a cell per repo (resolve-cluster-host.ts / repos-stream.ts) rather
+// selects a cell per repo (list-repos-index.ts' processingPlacement()) rather
 // than using the caller's home cell.
 //
-// It is deliberately best-effort: ANY failure (not logged in, control-plane
-// error or timeout, unknown/ambiguous placement, missing apiUrl) returns nil,
-// and the auth-layer client falls back to home-jurisdiction routing. That
-// fallback is exactly the previous behaviour, so this can never regress the
-// common same-region case (where the repo's jurisdiction equals the caller's
-// home). A short deadline keeps a slow control plane from stalling the command.
+// This is NOT best-effort: every failure (control-plane error or timeout,
+// repo not onboarded, no/failed/suspended processing placement, missing
+// apiUrl) returns a descriptive error instead of falling back to the
+// caller's home cell. A silent wrong-region "success" is worse than a command
+// failure for repo-scoped data — that fallback is exactly how a mirrored repo
+// like entirehq/entire.io used to read (or fail to read) the wrong region's
+// trails.
 //
 // Placement source:
-//   - ulid form: coreapi.GetRepo(ulid) -> Repo.ClusterHost;
-//   - owner/repo form: coreapi mirrors filtered to this repo -> ClusterHost.
-//
-// The cluster host is then mapped to a cell apiUrl + jurisdiction via the
-// coreapi cluster catalog (ListClusters), the authoritative source for a
-// jurisdiction's cell URL.
-func resolveRepoCellTarget(ctx context.Context, fullName, ulid string) *auth.CellTarget {
-	ctx, cancel := context.WithTimeout(ctx, cellResolveTimeout)
-	defer cancel()
+//   - ulid form: coreapi.GetRepo(ulid) -> Repo.ClusterHost, mapped by host via
+//     cellTargetForClusterHost. A ULID already names one placement
+//     unambiguously, so there is no processing-placement lookup to do.
+//   - owner/repo form: delegates to resolveRepoCellPlacement (see its doc
+//     comment for why the two functions stay separate) and discards the
+//     placement id.
+func resolveRepoCellTarget(ctx context.Context, fullName, ulid string) (*auth.CellTarget, error) {
+	if strings.TrimSpace(ulid) != "" {
+		ctx, cancel := context.WithTimeout(ctx, requiredCellResolveTimeout)
+		defer cancel()
 
-	c, err := newCellCoreClient()
+		c, err := newCellCoreClient()
+		if err != nil {
+			return nil, fmt.Errorf("control plane unavailable: %w", err)
+		}
+		repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: ulid})
+		if err != nil {
+			return nil, cellPlacementError(ctx, ulid, fmt.Errorf("resolve the Entire cell for %s: %w", ulid, err))
+		}
+		clusterHost := strings.TrimSpace(repo.ClusterHost.Or(""))
+		if clusterHost == "" {
+			return nil, fmt.Errorf("resolve the Entire cell for %s: repo has no cluster host", ulid)
+		}
+		target, err := cellTargetForClusterHost(ctx, c, clusterHost)
+		if err != nil {
+			return nil, cellPlacementError(ctx, ulid, fmt.Errorf("resolve the Entire cell for %s: %w", ulid, err))
+		}
+		return target, nil
+	}
+
+	owner, repo, ok := strings.Cut(strings.TrimSpace(fullName), "/")
+	if !ok || owner == "" || repo == "" {
+		return nil, fmt.Errorf("invalid repo %q: expected owner/repo", fullName)
+	}
+	placement, err := resolveRepoCellPlacement(ctx, owner, repo)
 	if err != nil {
-		logging.Debug(ctx, "cell target: core client unavailable, using home-jurisdiction routing", "error", err.Error())
-		return nil
+		return nil, err
 	}
-
-	clusterHost, ok := resolveRepoClusterHost(ctx, c, fullName, ulid)
-	if !ok || clusterHost == "" {
-		return nil
-	}
-
-	return cellTargetForClusterHost(ctx, c, clusterHost)
+	return placement.Target, nil
 }
 
 // cellTargetForClusterHost maps a known cluster host to a cell apiUrl +
 // jurisdiction via the coreapi cluster catalog, the authoritative source for a
-// jurisdiction's cell URL. Returns nil for every unresolvable case so callers
-// fall back to home-jurisdiction routing.
-func cellTargetForClusterHost(ctx context.Context, c cellCoreClient, clusterHost string) *auth.CellTarget {
+// jurisdiction's cell URL. Used by the ULID path only: a GetRepo response
+// names a cluster host, not a slug.
+func cellTargetForClusterHost(ctx context.Context, c cellCoreClient, clusterHost string) (*auth.CellTarget, error) {
 	clusters, err := c.ListClusters(ctx)
 	if err != nil {
-		logging.Debug(ctx, "cell target: list clusters failed, using home-jurisdiction routing", "error", err.Error())
-		return nil
+		return nil, fmt.Errorf("list clusters: %w", err)
 	}
 	cluster, ok := matchClusterByHost(clusters.Clusters, clusterHost)
 	if !ok {
-		logging.Debug(ctx, "cell target: no cluster matched repo host, using home-jurisdiction routing", "cluster_host", clusterHost)
-		return nil
+		return nil, fmt.Errorf("no cluster matches host %q", clusterHost)
 	}
+	return cellTargetFromCluster(cluster)
+}
+
+// cellTargetForClusterSlug maps a known cluster slug (a RepoPlacement's
+// ClusterSlug) to a cell apiUrl + jurisdiction via the coreapi cluster
+// catalog. The slug, not the host, is the reliable join key for a
+// RepoPlacement — see cell_fanout.go's groupReposByCell for the same rule
+// applied to the repo-set fan-out path.
+func cellTargetForClusterSlug(ctx context.Context, c cellCoreClient, clusterSlug string) (*auth.CellTarget, error) {
+	clusters, err := c.ListClusters(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list clusters: %w", err)
+	}
+	cluster, ok := matchClusterBySlug(clusters.Clusters, clusterSlug)
+	if !ok {
+		return nil, fmt.Errorf("no cluster matches slug %q", clusterSlug)
+	}
+	return cellTargetFromCluster(cluster)
+}
+
+// cellTargetFromCluster extracts the apiUrl + jurisdiction a matched catalog
+// cluster resolves to, shared by the host- and slug-keyed joins above.
+func cellTargetFromCluster(cluster coreapi.Cluster) (*auth.CellTarget, error) {
 	apiURL := strings.TrimRight(strings.TrimSpace(cluster.ApiUrl.Or("")), "/")
 	// DNS is case-insensitive; normalise the catalog jurisdiction so a
 	// non-lowercase value still passes the auth layer's strict label check
 	// instead of hard-failing the target path.
 	jurisdiction := strings.ToLower(strings.TrimSpace(cluster.Jurisdiction))
 	if apiURL == "" || jurisdiction == "" {
-		logging.Debug(ctx, "cell target: matched cluster missing apiUrl/jurisdiction, using home-jurisdiction routing", "cluster_host", clusterHost)
-		return nil
+		return nil, fmt.Errorf("matched cluster %q is missing apiUrl/jurisdiction", cluster.Slug)
 	}
-	return &auth.CellTarget{BaseURL: apiURL, Jurisdiction: jurisdiction}
+	return &auth.CellTarget{BaseURL: apiURL, Jurisdiction: jurisdiction}, nil
 }
 
-// repoCellPlacement is one active mirror placement: the id entire-api keys
+// errRepoNotOnboarded signals that fullName has no processing placement to
+// resolve, in any of its three shapes: no entry at all in the control plane's
+// repos index, a Candidate row (on the forge, never onboarded), or a row whose
+// primaries name no processing placement. Callers that persist a per-repo
+// enabled/disabled decision (trails' background enablement cache) should treat
+// this the same way they'd treat an explicit "not found" from the data API,
+// rather than leaving the decision unresolved forever.
+//
+// The third shape can be transient (a repo mid-onboarding has placements
+// before its primaries are set) and is still grouped with the permanent two
+// deliberately: repo-scoped data is unreachable either way, and the one
+// consumer caches under a TTL, so a completed onboarding self-heals.
+var errRepoNotOnboarded = errors.New("repo is not onboarded to Entire")
+
+// resolveProcessingPlacement resolves fullName's PROCESSING placement — the
+// placement id and cell entire-api and the control plane treat as
+// authoritative for repo-scoped data (trails, experts, checkpoint/explain),
+// mirroring the entire.io BFF's processingPlacement() selection
+// (list-repos-index.ts). A repo can be mirrored in several regions; only this
+// one placement is guaranteed to hold the repo's actual data.
+//
+// Its errors deliberately omit fullName: every caller already wraps them with
+// the repo name, and naming it here too is what produced the doubled
+// "resolve processing placement for X: X: repo is not onboarded" output.
+func resolveProcessingPlacement(ctx context.Context, c cellCoreClient, fullName string) (coreapi.RepoPlacement, error) {
+	out, err := c.ListRepos(ctx, coreapi.ListReposParams{Filter: coreapi.NewOptString(fullName)})
+	if err != nil {
+		return coreapi.RepoPlacement{}, fmt.Errorf("list repos: %w", err)
+	}
+	if len(out.Repos) == 0 {
+		return coreapi.RepoPlacement{}, errRepoNotOnboarded
+	}
+	entry := out.Repos[0]
+	// Filter is documented as an exact-match lookup restricted to fullName, so
+	// beyond this identity check and the zero-length check above, Repos[0] is
+	// the only possible row. The check exists because that promise lives only
+	// in the OpenAPI doc, not in this code: if the control plane ever ignored
+	// or dropped Filter, entry could silently be an unrelated repo — exactly
+	// the wrong-region-success bug class this resolver exists to kill.
+	if !strings.EqualFold(strings.TrimSpace(entry.FullName), strings.TrimSpace(fullName)) {
+		return coreapi.RepoPlacement{}, fmt.Errorf("control plane returned %q for %s", entry.FullName, fullName)
+	}
+	// A Filter lookup bypasses ListRepos' default scope=onboarded restriction
+	// (see the OpenAPI doc on ListReposParams.Filter), so it can return a row
+	// for a repo that exists on the forge and is visible to the caller but was
+	// never onboarded to Entire: a Candidate set, with no placements or
+	// primaries to resolve. This is the common real-world "not onboarded"
+	// shape — a repo a developer just happens to work in — as opposed to the
+	// zero-rows case below (caller can't see it, or it doesn't exist at all).
+	if _, isCandidate := entry.Candidate.Get(); isCandidate {
+		return coreapi.RepoPlacement{}, errRepoNotOnboarded
+	}
+	var processingID string
+	if primaries, ok := entry.Primaries.Get(); ok {
+		processingID = strings.TrimSpace(primaries.Processing)
+	}
+	if processingID == "" {
+		return coreapi.RepoPlacement{}, errRepoNotOnboarded
+	}
+	for _, p := range entry.Placements {
+		if p.ID != processingID {
+			continue
+		}
+		if p.Status == coreapi.RepoPlacementStatusFailed || p.Status == coreapi.RepoPlacementStatusSuspended {
+			return coreapi.RepoPlacement{}, fmt.Errorf("processing placement is %s", p.Status)
+		}
+		return p, nil
+	}
+	// Defensive: primaries.processing should always name a placement present
+	// in the same response.
+	return coreapi.RepoPlacement{}, fmt.Errorf("processing placement %q is not in the repo's placement list", processingID)
+}
+
+// repoCellPlacement is a repo's processing placement: the id entire-api keys
 // repo-scoped routes on, paired with the cell that actually holds it.
 type repoCellPlacement struct {
-	// RepoID is the mirror id, which entire-api uses as its repo_id.
+	// RepoID is the placement id (coreapi.RepoPlacement.ID), which entire-api
+	// uses as its repo_id — verified identical to the id the old
+	// mirrors-based lookup used (coreapi.Mirror.MirrorId) for the same
+	// placement.
 	RepoID string
 	// Target is the cell hosting THIS placement.
 	Target *auth.CellTarget
 }
 
-// resolveRepoCellPlacement resolves a GitHub repo to one active placement's
-// (repo_id, cell) pair for repo-scoped cell reads.
+// resolveRepoCellPlacement resolves a GitHub repo to its processing
+// placement's (repo_id, cell) pair for repo-scoped cell reads.
 //
-// The pair must come from the same placement: each placement has its own mirror
-// id, and only the cell hosting that placement can resolve it. Taking the id
-// from one placement and routing to a cell chosen some other way — the caller's
-// home cell, say — asks a cell about an id it has never seen, which comes back
-// as an indistinguishable 404. That is also why this does not reuse
-// resolveRepoCellTarget's owner/repo path: that one deliberately refuses to pick
-// among multi-region placements and falls back to the home cell, which is
-// exactly the mismatch to avoid here.
+// The pair must come from the same placement: a placement id is only
+// resolvable by the cell hosting that placement, and entire-api's data lives
+// on exactly one placement (the processing one) even when the repo is
+// mirrored elsewhere too. Taking the id from one placement and routing to a
+// cell chosen some other way asks a cell about an id it has never seen, which
+// comes back as an indistinguishable 404.
+//
+// resolveRepoCellTarget's owner/repo path delegates to this function and
+// discards RepoID, rather than the two duplicating the same resolution body:
+// the two functions exist separately only because their callers need
+// different return shapes for the same lookup — this one also needs the
+// placement id (repo_id), which resolveRepoCellTarget has no caller for and
+// so doesn't return — not because the resolution logic itself differs.
 func resolveRepoCellPlacement(ctx context.Context, owner, repo string) (repoCellPlacement, error) {
 	ctx, cancel := context.WithTimeout(ctx, requiredCellResolveTimeout)
 	defer cancel()
@@ -138,79 +258,33 @@ func resolveRepoCellPlacement(ctx context.Context, owner, repo string) (repoCell
 	if err != nil {
 		return repoCellPlacement{}, fmt.Errorf("control plane unavailable: %w", err)
 	}
-	mirrors, err := listMirrorsForRepo(ctx, c, mirrorCloneProviderGitHub, strings.ToLower(owner), strings.ToLower(repo))
+	fullName := owner + "/" + repo
+	placement, err := resolveProcessingPlacement(ctx, c, fullName)
 	if err != nil {
-		return repoCellPlacement{}, cellPlacementError(ctx, owner, repo, fmt.Errorf("list mirrors for %s/%s: %w", owner, repo, err))
+		return repoCellPlacement{}, cellPlacementError(ctx, fullName, fmt.Errorf("resolve processing placement for %s: %w", fullName, err))
 	}
-	for i := range mirrors {
-		if !isActiveMirror(mirrors[i]) {
-			continue
-		}
-		repoID := strings.TrimSpace(mirrors[i].MirrorId)
-		clusterHost := strings.TrimSpace(mirrors[i].ClusterHost)
-		if repoID == "" || clusterHost == "" {
-			continue
-		}
-		target := cellTargetForClusterHost(ctx, c, clusterHost)
-		if target == nil {
-			// The catalog can't place this cluster; try the next placement
-			// rather than falling back to a cell that doesn't know this id.
-			continue
-		}
-		return repoCellPlacement{RepoID: repoID, Target: target}, nil
+	target, err := cellTargetForClusterSlug(ctx, c, placement.ClusterSlug)
+	if err != nil {
+		return repoCellPlacement{}, cellPlacementError(ctx, fullName, fmt.Errorf("resolve cell for %s: %w", fullName, err))
 	}
-	// A deadline that fired mid-loop leaves cellTargetForClusterHost returning
-	// nil for every placement, which would otherwise be reported as "no
-	// reachable mirror" — a wrong diagnosis for a slow control plane.
-	return repoCellPlacement{}, cellPlacementError(ctx, owner, repo,
-		fmt.Errorf("no reachable Entire mirror for %s/%s", owner, repo))
+	return repoCellPlacement{RepoID: placement.ID, Target: target}, nil
 }
 
-// cellPlacementError reports a timeout as a timeout. The underlying lookups
-// degrade quietly (cellTargetForClusterHost logs and returns nil), so without
-// this a fired deadline surfaces as whichever "not found" message the caller
-// reached, and the user goes looking for a missing mirror instead of a slow
-// control plane.
-func cellPlacementError(ctx context.Context, owner, repo string, fallback error) error {
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return fmt.Errorf("resolving the Entire mirror for %s/%s timed out: %w", owner, repo, ctxErr)
+// cellPlacementError reports a timeout as a timeout: without this, a fired
+// deadline surfaces as whichever "not found"/"no processing placement" error
+// the caller's lookup happened to return, and the user goes looking for a
+// missing mirror instead of a slow control plane. subject is the repo the
+// lookup was for, named however the caller addressed it (owner/repo or ULID).
+//
+// Only DeadlineExceeded is relabelled. A cancelled context is a Ctrl+C, not a
+// timeout, and calling it one sends the user hunting a slow control plane that
+// was never the problem; the cancelled in-flight call's own error already
+// carries context.Canceled, which is what renderDataAPIAuthError silences on.
+func cellPlacementError(ctx context.Context, subject string, fallback error) error {
+	if ctxErr := ctx.Err(); errors.Is(ctxErr, context.DeadlineExceeded) {
+		return fmt.Errorf("resolving the Entire cell for %s timed out: %w", subject, ctxErr)
 	}
 	return fallback
-}
-
-// resolveRepoClusterHost finds the public cluster host that owns the repo. It
-// returns ok=false to signal "fall back to home-jurisdiction routing" for every
-// unresolved or ambiguous case, never an error.
-func resolveRepoClusterHost(ctx context.Context, c cellCoreClient, fullName, ulid string) (string, bool) {
-	if strings.TrimSpace(ulid) != "" {
-		repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: ulid})
-		if err != nil {
-			logging.Debug(ctx, "cell target: GetRepo failed, using home-jurisdiction routing", "error", err.Error())
-			return "", false
-		}
-		return strings.TrimSpace(repo.ClusterHost.Or("")), true
-	}
-
-	owner, repo, ok := strings.Cut(strings.TrimSpace(fullName), "/")
-	if !ok || owner == "" || repo == "" {
-		return "", false
-	}
-	mirrors, err := listMirrorsForRepo(ctx, c, mirrorCloneProviderGitHub, strings.ToLower(owner), strings.ToLower(repo))
-	if err != nil {
-		logging.Debug(ctx, "cell target: list mirrors failed, using home-jurisdiction routing", "error", err.Error())
-		return "", false
-	}
-	hosts := distinctActiveClusterHosts(mirrors)
-	if len(hosts) != 1 {
-		// Zero placements (not mirrored / unknown) or multiple regions
-		// (ambiguous which cell holds the repo-scoped data): fall back rather than
-		// guess a region.
-		if len(hosts) > 1 {
-			logging.Debug(ctx, "cell target: repo mirrored in multiple regions, using home-jurisdiction routing", "count", len(hosts))
-		}
-		return "", false
-	}
-	return hosts[0], true
 }
 
 // isActiveMirror reports whether a mirror placement can currently serve the
@@ -225,37 +299,10 @@ func isActiveMirror(m coreapi.Mirror) bool {
 	return st != coreapi.MirrorStatusFailed && st != coreapi.MirrorStatusSuspended
 }
 
-// distinctActiveClusterHosts returns the set of cluster hosts a repo is actively
-// serviced on: excluding archived placements and unhealthy ones (failed /
-// suspended clone status), since those cells can't answer for the repo.
-// A failed/suspended placement must neither manufacture false cross-region
-// ambiguity nor become a sole "active" host. Case-folded to match DNS
-// semantics; order is unimportant (callers only use a single-member set).
-func distinctActiveClusterHosts(mirrors []coreapi.Mirror) []string {
-	seen := make(map[string]string, len(mirrors))
-	for _, m := range mirrors {
-		if !isActiveMirror(m) {
-			continue
-		}
-		host := strings.TrimSpace(m.ClusterHost)
-		if host == "" {
-			continue
-		}
-		key := strings.ToLower(host)
-		if _, ok := seen[key]; !ok {
-			seen[key] = host
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for _, host := range seen {
-		out = append(out, host)
-	}
-	return out
-}
-
 // matchClusterByHost finds the catalog cluster whose public host equals
 // clusterHost (case-insensitive). The cluster's apiUrl + jurisdiction are the
-// authoritative cell coordinates.
+// authoritative cell coordinates. Used by the ULID path (GetRepo returns a
+// host, not a slug).
 func matchClusterByHost(clusters []coreapi.Cluster, clusterHost string) (coreapi.Cluster, bool) {
 	want := strings.ToLower(strings.TrimSpace(clusterHost))
 	if want == "" {
@@ -267,6 +314,24 @@ func matchClusterByHost(clusters []coreapi.Cluster, clusterHost string) (coreapi
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(host), want) {
+			return cl, true
+		}
+	}
+	return coreapi.Cluster{}, false
+}
+
+// matchClusterBySlug finds the catalog cluster whose Slug equals clusterSlug
+// (case-insensitive). Used by the owner/repo path: a RepoPlacement carries a
+// ClusterSlug, not a host, so this is the reliable join for it (the catalog
+// does not expose a cell field, so slug — not cell name — is the only
+// reliable join key; see cell_fanout.go's groupReposByCell for the same rule).
+func matchClusterBySlug(clusters []coreapi.Cluster, clusterSlug string) (coreapi.Cluster, bool) {
+	want := strings.ToLower(strings.TrimSpace(clusterSlug))
+	if want == "" {
+		return coreapi.Cluster{}, false
+	}
+	for _, cl := range clusters {
+		if strings.EqualFold(strings.TrimSpace(cl.Slug), want) {
 			return cl, true
 		}
 	}

@@ -24,10 +24,15 @@ const RedactorsDirName = "redactors"
 // a runaway YAML scalar from blowing up log lines.
 const maxIdentifierLen = 64
 
-// maxPackFileBytes caps the per-file size LoadPacks will parse. The trust
-// boundary is "user owns repo," so this is not a security barrier — it is a
-// runaway-input guard that keeps an accidentally large YAML out of the
-// redaction startup path.
+// maxPackFileBytes caps the per-file size LoadPacks will parse. Rule packs are
+// declarative patterns, never executed, so the trust boundary here is "user
+// owns repo" and this is not a security barrier — it is a runaway-input guard
+// that keeps an accidentally large YAML out of the redaction startup path.
+//
+// That "user owns repo" assumption is scoped to inert content and does NOT
+// generalize to committed .entire/ data that reaches an exec: see
+// settings.enforceOPFCommandTrust and the "Why command is local-only" section
+// of docs/security-and-privacy.md.
 const maxPackFileBytes = 1 << 20 // 1 MiB
 
 // maxPackFiles caps how many pack files LoadPacks will accept under one

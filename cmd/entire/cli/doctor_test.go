@@ -546,7 +546,9 @@ func canonicalCodexHooksJSON() string {
 		"SessionEnd":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-end","timeout":3}]}],
 		"UserPromptSubmit":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex user-prompt-submit","timeout":30}]}],
 		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]}],
-		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}]
+		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}],
+		"SubagentStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-start","timeout":30}]}],
+		"SubagentStop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-stop","timeout":30}]}]
 	}}`
 }
 
@@ -577,6 +579,12 @@ trusted_hash = "sha256:ccc"
 
 [hooks.state."` + hooksPath + `:post_tool_use:0:0"]
 trusted_hash = "sha256:ddd"
+
+[hooks.state."` + hooksPath + `:subagent_start:0:0"]
+trusted_hash = "sha256:eee"
+
+[hooks.state."` + hooksPath + `:subagent_stop:0:0"]
+trusted_hash = "sha256:fff"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(configTOML), 0o600))
 	t.Setenv("CODEX_HOME", codexHome)
@@ -621,8 +629,13 @@ trusted_hash = "sha256:ccc"
 
 	out := stdout.String()
 	require.Contains(t, out, "Codex hook trust: REVIEW NEEDED")
-	require.Contains(t, out, "1 hook(s) declared")
+	// The fixture trusts session_start/user_prompt_submit/stop, so the remaining
+	// three declared events are untrusted. Codex refuses to run untrusted hooks, so
+	// each one named here is a hook that silently would not fire.
+	require.Contains(t, out, "3 hook(s) declared")
 	require.Contains(t, out, "- post_tool_use")
+	require.Contains(t, out, "- subagent_start")
+	require.Contains(t, out, "- subagent_stop")
 	require.Contains(t, out, "Open /hooks inside Codex")
 }
 

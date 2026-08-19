@@ -319,3 +319,97 @@ func TestCodexAgent_ContextInjector(t *testing.T) {
 	require.Contains(t, string(out), `"additionalContext":"use entire trail"`)
 	require.True(t, strings.HasSuffix(string(out), "\n"))
 }
+
+// testCodexAgentID is the subagent thread id used by the subagent hook tests.
+const testCodexAgentID = "child-thread-9"
+
+// TestParseHookEvent_SubagentStart pins the identity mapping, which is the part a
+// future reader is most likely to get backwards: session_id is the identity shared
+// by the root thread and all descendants (the user's session), agent_id the child
+// thread's own. See AGENT.md.
+func TestParseHookEvent_SubagentStart(t *testing.T) {
+	t.Parallel()
+
+	// Field set per subagent-start.command.input.schema.json.
+	stdin := strings.NewReader(`{
+		"hook_event_name": "SubagentStart",
+		"session_id": "root-session-1",
+		"agent_id": "` + testCodexAgentID + `",
+		"agent_type": "reviewer",
+		"transcript_path": "/rollouts/root-session-1.jsonl",
+		"cwd": "/repo",
+		"model": "gpt-5.4",
+		"permission_mode": "default",
+		"turn_id": "turn-3"
+	}`)
+
+	ev, err := (&CodexAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStart, stdin)
+	require.NoError(t, err)
+	require.NotNil(t, ev)
+	require.Equal(t, agent.SubagentStart, ev.Type)
+	require.Equal(t, "root-session-1", ev.SessionID, "the shared root session id, not the child thread")
+	// Codex sends no tool_use_id; agent_id is the only value correlating start with
+	// stop, and Entire keys pre-task state on ToolUseID.
+	require.Equal(t, testCodexAgentID, ev.ToolUseID)
+	require.Equal(t, "reviewer", ev.SubagentType)
+	require.Equal(t, "/rollouts/root-session-1.jsonl", ev.SessionRef, "the parent rollout")
+}
+
+// TestParseHookEvent_SubagentStop covers the two transcripts SubagentStop carries:
+// transcript_path is the parent's rollout, agent_transcript_path the subagent's own.
+func TestParseHookEvent_SubagentStop(t *testing.T) {
+	t.Parallel()
+
+	stdin := strings.NewReader(`{
+		"hook_event_name": "SubagentStop",
+		"session_id": "root-session-1",
+		"agent_id": "` + testCodexAgentID + `",
+		"agent_type": "reviewer",
+		"transcript_path": "/rollouts/root-session-1.jsonl",
+		"agent_transcript_path": "/rollouts/` + testCodexAgentID + `.jsonl",
+		"last_assistant_message": "done",
+		"cwd": "/repo",
+		"model": "gpt-5.4",
+		"permission_mode": "default",
+		"stop_hook_active": false,
+		"turn_id": "turn-3"
+	}`)
+
+	ev, err := (&CodexAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStop, stdin)
+	require.NoError(t, err)
+	require.NotNil(t, ev)
+	require.Equal(t, agent.SubagentEnd, ev.Type)
+	require.Equal(t, "root-session-1", ev.SessionID, "the shared root session id")
+	require.Equal(t, testCodexAgentID, ev.SubagentID)
+	require.Equal(t, testCodexAgentID, ev.ToolUseID, "agent_id doubles as the correlation key")
+	require.Equal(t, "/rollouts/root-session-1.jsonl", ev.SessionRef, "the PARENT rollout")
+	require.Equal(t, "/rollouts/"+testCodexAgentID+".jsonl", ev.SubagentTranscriptPath,
+		"the subagent's own rollout")
+}
+
+// TestParseHookEvent_SubagentStop_NullTranscripts covers the nullable fields: Codex
+// sends null in --ephemeral mode, and a null must not become the string "null".
+func TestParseHookEvent_SubagentStop_NullTranscripts(t *testing.T) {
+	t.Parallel()
+
+	stdin := strings.NewReader(`{
+		"hook_event_name": "SubagentStop",
+		"session_id": "root-session-1",
+		"agent_id": "` + testCodexAgentID + `",
+		"agent_type": "default",
+		"transcript_path": null,
+		"agent_transcript_path": null,
+		"last_assistant_message": null,
+		"cwd": "/repo",
+		"model": "gpt-5.4",
+		"permission_mode": "default",
+		"stop_hook_active": false,
+		"turn_id": "turn-3"
+	}`)
+
+	ev, err := (&CodexAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStop, stdin)
+	require.NoError(t, err)
+	require.NotNil(t, ev)
+	require.Empty(t, ev.SessionRef, "a null transcript_path must not become \"null\"")
+	require.Empty(t, ev.SubagentTranscriptPath, "a null agent_transcript_path must not become \"null\"")
+}
