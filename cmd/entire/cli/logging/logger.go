@@ -84,6 +84,27 @@ func Init(ctx context.Context, sessionID string) error {
 		}
 	}
 
+	// Resolve the level BEFORE taking the write lock. logLevelGetter is
+	// supplied by the cli package and loads settings, and anything it touches
+	// may log — settings.Load already does. mu is a plain (non-reentrant)
+	// RWMutex, so a log call underneath the getter would block on RLock while
+	// Init holds the write lock and hang the process. That was a real hang:
+	// every hook froze in any repo whose committed settings.json set
+	// redaction.openai_privacy_filter.command, because the trust gate warned
+	// from inside the loader.
+	//
+	// Never call out to code you do not control while holding mu.
+	levelStr := os.Getenv(LogLevelEnvVar)
+	if levelStr == "" {
+		mu.RLock()
+		getter := logLevelGetter
+		mu.RUnlock()
+		if getter != nil {
+			levelStr = getter()
+		}
+	}
+	level := parseLogLevel(levelStr)
+
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -96,13 +117,6 @@ func Init(ctx context.Context, sessionID string) error {
 		_ = logFile.Close()
 		logFile = nil
 	}
-
-	// Get log level from environment first, then settings
-	levelStr := os.Getenv(LogLevelEnvVar)
-	if levelStr == "" && logLevelGetter != nil {
-		levelStr = logLevelGetter()
-	}
-	level := parseLogLevel(levelStr)
 
 	// Warn if invalid level was provided
 	if levelStr != "" && !isValidLogLevel(levelStr) {
