@@ -60,9 +60,9 @@ func hasSuffix(path, suffix string) bool {
 }
 
 // setupTestRepoForPreTask initializes a minimal git repo and .entire/tmp
-// directory, returning the repo directory. Shared by ResolvePreTaskToolUseID
-// tests, which need a real worktree root for resolveTmpDir to find .entire/tmp.
-func setupTestRepoForPreTask(t *testing.T) string {
+// directory. Shared by ResolvePreTaskToolUseID tests, which need a real
+// worktree root for resolveTmpDir to find .entire/tmp.
+func setupTestRepoForPreTask(t *testing.T) {
 	t.Helper()
 
 	tmpDir := t.TempDir()
@@ -78,8 +78,6 @@ func setupTestRepoForPreTask(t *testing.T) string {
 	if err := os.MkdirAll(paths.EntireTmpDir, 0o755); err != nil {
 		t.Fatalf("Failed to create tmp dir: %v", err)
 	}
-
-	return tmpDir
 }
 
 func TestResolvePreTaskToolUseID_ExplicitIDWins(t *testing.T) {
