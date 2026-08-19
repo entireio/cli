@@ -2702,3 +2702,83 @@ func TestHandleLifecycleSubagentEnd_ResolvesMissingToolUseIDViaTaskDescription(t
 		t.Errorf("unrelated pre-task file for %q must NOT be removed, stat err = %v", otherToolUseID, err)
 	}
 }
+
+// TestHandleLifecycleSubagentEnd_ConcurrentCleanupBetweenResolveAndLoadSkipsCheckpoint
+// simulates a second, concurrent SubagentEnd (e.g. a sibling subagent racing
+// through the same ambiguous "single active pre-task file" fallback, or a
+// duplicate hook delivery for the same subagent) whose CleanupPreTaskState
+// deletes the just-resolved pre-task file in the window between this
+// handler's own ResolvePreTaskToolUseID call and its LoadPreTaskState call.
+//
+// Without the resolvedAmbiguously guard, this falls through to
+// DetectFileChanges(ctx, nil), which treats every untracked file as new and
+// mints a spurious checkpoint out of files this subagent never touched. The
+// fix must instead skip the checkpoint entirely: there is no reliable
+// baseline once the pre-task state has vanished after an ambiguous resolve.
+func TestHandleLifecycleSubagentEnd_ConcurrentCleanupBetweenResolveAndLoadSkipsCheckpoint(t *testing.T) {
+	// NOT parallel: uses t.Chdir and a package-level test seam.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+
+	ctx := context.Background()
+
+	const toolUseID = "toolu_target"
+	if err := CapturePreTaskStateWithMeta(ctx, toolUseID, ""); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta() error = %v", err)
+	}
+
+	// A file that pre-existed as untracked before this subagent ran. If the
+	// bug reappears, DetectFileChanges(ctx, nil) would wrongly report this as
+	// a new file and the checkpoint would go through.
+	testutil.WriteFile(t, tmpDir, "unrelated-untracked.txt", "pre-existing, not this subagent's work")
+
+	prevHook := afterAmbiguousSubagentEndResolve
+	t.Cleanup(func() { afterAmbiguousSubagentEndResolve = prevHook })
+	var hookCalled bool
+	afterAmbiguousSubagentEndResolve = func(resolvedAmbiguously bool, resolvedID string) {
+		hookCalled = true
+		if !resolvedAmbiguously || resolvedID != toolUseID {
+			t.Errorf("hook saw (resolvedAmbiguously=%v, id=%q), want (true, %q)", resolvedAmbiguously, resolvedID, toolUseID)
+		}
+		// Simulate the concurrent sibling's CleanupPreTaskState winning the race.
+		if err := CleanupPreTaskState(ctx, resolvedID); err != nil {
+			t.Fatalf("simulated concurrent cleanup failed: %v", err)
+		}
+	}
+
+	transcriptPath := filepath.Join(tmpDir, "main.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  "test-session",
+		SessionRef: transcriptPath,
+		ToolUseID:  "", // ambiguous resolve path, like Cursor's real subagentStop payload
+		Timestamp:  time.Now(),
+	}
+
+	if err := DispatchLifecycleEvent(ctx, ag, event); err != nil {
+		t.Fatalf("DispatchLifecycleEvent(SubagentEnd) error = %v", err)
+	}
+	if !hookCalled {
+		t.Fatal("test seam hook was never invoked; resolvedAmbiguously path did not run")
+	}
+
+	// No checkpoint (shadow branch) should have been created for this task: the
+	// handler must have skipped rather than minting a spurious one out of a
+	// pre-existing untracked file it never touched.
+	out, err := exec.Command("git", "branch", "--list", "entire/*").Output()
+	if err != nil {
+		t.Fatalf("git branch --list failed: %v", err)
+	}
+	if branches := strings.TrimSpace(string(out)); branches != "" {
+		t.Errorf("expected no shadow checkpoint branch after a vanished pre-task state, got: %s", branches)
+	}
+}

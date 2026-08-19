@@ -1208,6 +1208,14 @@ func declaredSubagentTranscript(ctx context.Context, event *agent.Event) string 
 	return declared
 }
 
+// afterAmbiguousSubagentEndResolve runs immediately after
+// handleLifecycleSubagentEnd's ambiguous-ID resolution, before LoadPreTaskState.
+// No-op in production; tests override it to deterministically simulate a
+// concurrent SubagentEnd's CleanupPreTaskState landing in that window.
+//
+//nolint:gochecknoglobals // test seam; see doc comment
+var afterAmbiguousSubagentEndResolve = func(resolvedAmbiguously bool, toolUseID string) {}
+
 // handleLifecycleSubagentEnd handles subagent end: detects changes, saves task checkpoint.
 func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
@@ -1221,17 +1229,28 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	// event.ToolUseID/SubagentID arrive empty for real Cursor payloads. Resolve
 	// the real ID via the task description recorded at SubagentStart before any
 	// pre-task-state lookup keys off it — see ResolvePreTaskToolUseID's doc.
+	// resolvedAmbiguously tracks whether event.ToolUseID came from
+	// ResolvePreTaskToolUseID's best-effort fallback rather than an ID the agent
+	// itself reported. A concurrent SubagentEnd for a different subagent can
+	// clean up the very pre-task file this fallback just named between this
+	// resolution and the LoadPreTaskState call below — see the guard there.
+	resolvedAmbiguously := false
 	if event.ToolUseID == "" {
 		// Explicit empty ID: we are inside the no-ToolUseID branch, so the
 		// explicit-ID-wins path of ResolvePreTaskToolUseID is intentionally
 		// unreachable — resolve by TaskDescription (or single-active fallback).
 		if resolvedID, resolved := ResolvePreTaskToolUseID(ctx, "", event.TaskDescription); resolved {
 			event.ToolUseID = resolvedID
+			resolvedAmbiguously = true
 			if event.SubagentID == "" {
 				event.SubagentID = resolvedID
 			}
 		}
 	}
+	// Test seam: lets tests deterministically simulate a concurrent SubagentEnd's
+	// CleanupPreTaskState landing in the window between the ambiguous resolve
+	// above and the LoadPreTaskState below. No-op in production.
+	afterAmbiguousSubagentEndResolve(resolvedAmbiguously, event.ToolUseID)
 
 	// Prefer what the agent declared; see Event.SubagentTranscriptPath.
 	subagentTranscriptPath := declaredSubagentTranscript(logCtx, event)
@@ -1278,6 +1297,20 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	if err != nil {
 		logging.Warn(logCtx, "failed to load pre-task state",
 			slog.String("error", err.Error()))
+	}
+	// A resolvedAmbiguously ID that then fails to load its pre-task state means
+	// a concurrent SubagentEnd (for a sibling subagent, resolved via the same
+	// fallback) already ran CleanupPreTaskState on it between our resolve and
+	// this load — not "this agent never captured pre-task state" (that case has
+	// event.ToolUseID == "" going in, so resolvedAmbiguously is false). Treating
+	// it as the latter would fall through to DetectFileChanges(ctx, nil), which
+	// treats every untracked file as new and mints a spurious checkpoint. Skip
+	// instead: we have no reliable baseline to attribute this subagent's actual
+	// changes to.
+	if resolvedAmbiguously && preState == nil {
+		logging.Warn(logCtx, "pre-task state vanished after ambiguous resolution; a concurrent SubagentEnd likely cleaned it up first, skipping task checkpoint",
+			slog.String("tool_use_id", event.ToolUseID))
+		return nil
 	}
 	var preUntrackedFiles []string
 	if preState != nil {
