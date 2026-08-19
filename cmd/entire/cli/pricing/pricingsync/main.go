@@ -18,6 +18,11 @@
 //	mise run pricing:sync        # read-only: report what would change
 //	mise run pricing:sync:write  # -write: apply it to models/*.json
 //
+// Read-only mode exits non-zero when drift is found (and 0 when the tables
+// already match), so it doubles as a CI freshness gate — see
+// .github/workflows/pricing-sync.yml, which runs it on a schedule and alerts
+// on a non-zero exit rather than writing anything itself.
+//
 // Flags:
 //
 //	-source  catalog URL or local file path (fileSchema-shaped: {schema_version,
@@ -82,13 +87,26 @@ type fileSchema struct {
 	Models        []modelRate `json:"models"`
 }
 
+// errDriftFound is a sentinel returned by run in read-only mode when the
+// embedded tables have drifted from the canonical catalog. main treats it as
+// a distinct case from a genuine failure: the report (already printed to
+// stdout) is the useful output, so it exits non-zero without an additional
+// "pricingsync: <err>" line on stderr. This is what lets a CI job use the
+// exit code as a freshness gate, the same way entire-api's own
+// pricingcheck/mise run pricing:check already does.
+var errDriftFound = errors.New("embedded pricing tables have drifted from the canonical catalog")
+
 func main() {
 	source := flag.String("source", defaultSource, "catalog URL or local file path")
 	dir := flag.String("dir", defaultDir, "directory of embedded model JSONs")
 	write := flag.Bool("write", false, "apply the sync to the JSON files (default: report only)")
 	flag.Parse()
 
-	if err := run(*source, *dir, *write); err != nil {
+	err := run(*source, *dir, *write)
+	if errors.Is(err, errDriftFound) {
+		os.Exit(1)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "pricingsync:", err)
 		os.Exit(1)
 	}
@@ -114,6 +132,7 @@ func run(source, dir string, write bool) error {
 	if !write {
 		if report.hasChanges() {
 			fmt.Println("\n(dry run: pass -write to apply)")
+			return errDriftFound
 		}
 		return nil
 	}

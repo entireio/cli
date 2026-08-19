@@ -12,6 +12,44 @@ import (
 
 func floatPtr(f float64) *float64 { return &f }
 
+// TestRun_ReadOnlyDriftReturnsSentinel is the regression for the CI freshness
+// gate: run() in read-only mode must signal drift via errDriftFound (a
+// distinct sentinel from a genuine failure) so a scheduled workflow can key
+// its exit code on "needs attention" without misreporting drift as an error,
+// and must NOT signal it when there is none — the common case must exit
+// clean.
+func TestRun_ReadOnlyDriftReturnsSentinel(t *testing.T) {
+	dir := t.TempDir()
+	writeSchema(t, filepath.Join(dir, "anthropic.json"), fileSchema{SchemaVersion: 1, Models: []modelRate{
+		{ID: "a", Provider: "anthropic", InputPerMTok: 1, OutputPerMTok: 1},
+	}})
+	// The catalog fixture must live OUTSIDE dir: loadEmbedded reads every
+	// *.json file in dir as an embedded provider file, so a catalog written
+	// alongside them would be picked up as a bogus extra "provider" and
+	// pollute the comparison.
+	catalogPath := filepath.Join(t.TempDir(), "catalog.json")
+
+	// Drifted: catalog disagrees with the embedded table.
+	writeSchema(t, catalogPath, fileSchema{SchemaVersion: 1, Models: []modelRate{
+		{ID: "a", Provider: "anthropic", InputPerMTok: 2, OutputPerMTok: 1},
+	}})
+	err := run(catalogPath, dir, false)
+	require.ErrorIs(t, err, errDriftFound)
+
+	// No drift: catalog matches the embedded table exactly.
+	writeSchema(t, catalogPath, fileSchema{SchemaVersion: 1, Models: []modelRate{
+		{ID: "a", Provider: "anthropic", InputPerMTok: 1, OutputPerMTok: 1},
+	}})
+	require.NoError(t, run(catalogPath, dir, false))
+
+	// -write must never return the drift sentinel — it either applies
+	// cleanly (nil, as here) or fails for a real reason.
+	writeSchema(t, catalogPath, fileSchema{SchemaVersion: 1, Models: []modelRate{
+		{ID: "a", Provider: "anthropic", InputPerMTok: 3, OutputPerMTok: 1},
+	}})
+	require.NoError(t, run(catalogPath, dir, true))
+}
+
 func TestValidateCatalog(t *testing.T) {
 	t.Parallel()
 

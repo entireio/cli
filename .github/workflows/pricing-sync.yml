@@ -1,0 +1,65 @@
+name: Pricing Sync Check
+
+# Weekly freshness gate on the embedded pricing tables
+# (cmd/entire/cli/pricing/models/*.json): entire-api is the canonical source
+# (LiteLLM-drift-checked there via mise run pricing:check/update), and this
+# repo's embedded copy is a release-time export of it — see
+# cmd/entire/cli/pricing/pricingsync/main.go. A release build (release.yml,
+# triggered by a tag push) only ever embeds whatever is already committed on
+# main; there is no live fetch at release/build time, so freshness has to be
+# maintained here on a schedule instead, ahead of whenever the next tag gets
+# cut. Read-only by design: on drift this only alerts. A human runs
+# `mise run pricing:sync:write` locally, reviews the diff (rates, not just
+# ids), and opens a PR — mirroring how entire-api's own pricing:check/update
+# already works (no auto-commit bot there either).
+
+on:
+  schedule:
+    - cron: "0 8 * * 1" # 08:00 UTC every Monday
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          cache: false
+          go-version-file: go.mod
+
+      - name: Check pricing drift
+        id: check
+        run: |
+          set +e
+          mise run pricing:sync > "$RUNNER_TEMP/pricing_sync.log" 2>&1
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+          cat "$RUNNER_TEMP/pricing_sync.log"
+
+      - name: Notify Slack of pricing drift
+        if: steps.check.outputs.exit_code != '0'
+        uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
+        with:
+          webhook: ${{ secrets.E2E_SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": ":warning: *Embedded pricing tables have drifted* from entire-api's canonical catalog.\n\nRun `mise run pricing:sync` locally to see the diff, then `mise run pricing:sync:write` to apply it — review the rate changes before committing.\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run details>"
+                  }
+                }
+              ]
+            }
+
+      - name: Fail the job when drift was found
+        if: steps.check.outputs.exit_code != '0'
+        run: exit 1
