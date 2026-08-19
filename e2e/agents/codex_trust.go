@@ -30,6 +30,8 @@ type codexHookEvents struct {
 	SessionEnd        []codexHookGroup `json:"SessionEnd"`
 	UserPromptSubmit  []codexHookGroup `json:"UserPromptSubmit"`
 	Stop              []codexHookGroup `json:"Stop"`
+	SubagentStart     []codexHookGroup `json:"SubagentStart"`
+	SubagentStop      []codexHookGroup `json:"SubagentStop"`
 }
 
 type codexHookGroup struct {
@@ -66,6 +68,8 @@ var codexHookEventLabels = []struct {
 	{"SessionEnd", "session_end"},
 	{"UserPromptSubmit", "user_prompt_submit"},
 	{"Stop", "stop"},
+	{"SubagentStart", "subagent_start"},
+	{"SubagentStop", "subagent_stop"},
 }
 
 // codexHookTrustState reads .codex/hooks.json from projectDir and returns the
@@ -148,6 +152,10 @@ func codexEventGroups(events *codexHookEvents, displayName string) []codexHookGr
 		return events.UserPromptSubmit
 	case "Stop":
 		return events.Stop
+	case "SubagentStart":
+		return events.SubagentStart
+	case "SubagentStop":
+		return events.SubagentStop
 	}
 	return nil
 }

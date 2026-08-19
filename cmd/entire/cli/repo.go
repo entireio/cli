@@ -107,16 +107,40 @@ func repoCreateOutput(r *coreapi.Repo) (any, error) {
 	return obj, nil
 }
 
+// parseObjectFormat maps the CLI flag value to the wire enum, rejecting
+// anything other than the two accepted values so a typo fails fast
+// client-side rather than as an opaque 422 from the server.
+func parseObjectFormat(s string) (coreapi.CreateRepoInputBodyObjectFormat, error) {
+	switch s {
+	case "sha1":
+		return coreapi.CreateRepoInputBodyObjectFormatSHA1, nil
+	case "sha256":
+		return coreapi.CreateRepoInputBodyObjectFormatSHA256, nil
+	default:
+		return "", fmt.Errorf("invalid object format %q: must be \"sha1\" or \"sha256\"", s)
+	}
+}
+
 func newRepoCreateCmd() *cobra.Command {
 	var (
-		projectID   string
-		clusterHost string
+		projectID    string
+		clusterHost  string
+		objectFormat string
 	)
 	cmd := &cobra.Command{
 		Use:   "create <name>",
 		Short: "Create a repository in a project",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var format coreapi.CreateRepoInputBodyObjectFormat
+			if objectFormat != "" {
+				parsed, err := parseObjectFormat(objectFormat)
+				if err != nil {
+					cmd.SilenceUsage = true
+					return err
+				}
+				format = parsed
+			}
 			return runCoreMutation(cmd, func(ctx context.Context, c *coreapi.Client) (string, any, error) {
 				projID, err := resolveProjectRef(ctx, c, projectID)
 				if err != nil {
@@ -128,6 +152,9 @@ func newRepoCreateCmd() *cobra.Command {
 				}
 				if clusterHost != "" {
 					body.ClusterHost = coreapi.NewOptString(clusterHost)
+				}
+				if format != "" {
+					body.ObjectFormat = coreapi.NewOptCreateRepoInputBodyObjectFormat(format)
 				}
 				created, err := c.CreateRepo(ctx, body)
 				if err != nil {
@@ -147,6 +174,7 @@ func newRepoCreateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&projectID, "project", "", "Owning project (name or ULID) (required)")
 	cmd.Flags().StringVar(&clusterHost, "cluster-host", "", "Public host of the cluster to pin the repo to (defaults to the jurisdiction default)")
+	cmd.Flags().StringVar(&objectFormat, "object-format", "", "Git object format for the repository: sha1 or sha256 (defaults to the server default)")
 	markRequired(cmd, "project")
 	addJSONFlag(cmd)
 	return cmd

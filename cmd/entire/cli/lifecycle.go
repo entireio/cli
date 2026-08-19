@@ -1181,6 +1181,25 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 	return nil
 }
 
+// declaredSubagentTranscript returns the agent-declared subagent transcript path
+// when it names a file that exists, else "".
+//
+// A declared-but-missing path warns rather than falling through silently: it means
+// the agent's contract and its behaviour disagree.
+func declaredSubagentTranscript(ctx context.Context, event *agent.Event) string {
+	declared := strings.TrimSpace(event.SubagentTranscriptPath)
+	if declared == "" {
+		return ""
+	}
+	if !fileExists(declared) {
+		logging.Warn(ctx, "agent declared a subagent transcript that does not exist",
+			slog.String("path", declared),
+			slog.String("agent_id", event.SubagentID))
+		return ""
+	}
+	return declared
+}
+
 // handleLifecycleSubagentEnd handles subagent end: detects changes, saves task checkpoint.
 func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
@@ -1189,8 +1208,11 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		event.SubagentType, event.TaskDescription = ParseSubagentTypeAndDescription(event.ToolInput)
 	}
 
-	// Determine subagent transcript path (empty when the agent stores none).
-	subagentTranscriptPath := ResolveAgentTranscriptPath(filepath.Dir(event.SessionRef), event.SessionID, event.SubagentID)
+	// Prefer what the agent declared; see Event.SubagentTranscriptPath.
+	subagentTranscriptPath := declaredSubagentTranscript(logCtx, event)
+	if subagentTranscriptPath == "" {
+		subagentTranscriptPath = ResolveAgentTranscriptPath(filepath.Dir(event.SessionRef), event.SessionID, event.SubagentID)
+	}
 
 	// Log context
 	subagentEndAttrs := []any{

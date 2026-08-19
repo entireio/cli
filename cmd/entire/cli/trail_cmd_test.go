@@ -39,8 +39,6 @@ const (
 	trailListTestAuthorBob   = "bob"
 	// trailTestBasePath is the trails endpoint for the gh/acme/repo fixture.
 	trailTestBasePath = "/api/v1/trails/gh/acme/repo"
-	// trailBodyField is the PATCH field name carrying a trail's description.
-	trailBodyField = "body"
 )
 
 func TestNewTrailCreateRequestUsesLinkBranchAction(t *testing.T) {
@@ -1260,15 +1258,57 @@ func TestFindTrailStopsAtMaxPagesWithoutTotal(t *testing.T) {
 	}
 }
 
-func TestBuildTrailUpdateRequestCanClearBody(t *testing.T) {
+// TestRunTrailUpdateClearsDescriptionWithEmptyBody covers `--body=`: an empty
+// description is a value to write, not an absence. Two things have to hold for
+// that, and neither is visible from a passing update test — the write must be
+// triggered by the flag having been set rather than by the text being non-empty,
+// and markdown must reach the wire as an empty string (with omitempty it would
+// drop out of the JSON and the server would reject the write as "exactly one of
+// markdown/contentJson is required"). Both failures silently do nothing.
+func TestRunTrailUpdateClearsDescriptionWithEmptyBody(t *testing.T) {
 	t.Parallel()
-	req := buildTrailUpdateRequest(&api.TrailResource{Body: "old"}, trailUpdateInputs{BodyChanged: true, Body: ""})
-	if req.Body == nil {
-		t.Fatal("Body pointer is nil, want empty string pointer")
-	}
-	if *req.Body != "" {
-		t.Fatalf("Body = %q, want empty string", *req.Body)
-	}
+
+	var mu sync.Mutex
+	var put map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath:
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+				Trails: []api.TrailResource{{ID: "trl_1", Number: 7, Branch: "feature/x", Status: string(trail.StatusOpen)}},
+				Total:  1,
+			}); err != nil {
+				t.Errorf("encode list response: %v", err)
+			}
+		case r.Method == http.MethodPut && r.URL.Path == trailTestBasePath+"/7/body":
+			mu.Lock()
+			defer mu.Unlock()
+			if err := json.NewDecoder(r.Body).Decode(&put); err != nil {
+				t.Errorf("decode body request: %v", err)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailBodyDocument{}); err != nil {
+				t.Errorf("encode body response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	err := runTrailUpdateWithClient(t.Context(), &out, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+		Branch:      "feature/x",
+		Body:        "",
+		BodyChanged: true,
+	})
+
+	require.NoError(t, err)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, map[string]any{"markdown": "", "overwrite": true}, put)
+	require.Contains(t, out.String(), "Updated trail for branch feature/x")
 }
 
 func TestValidateTrailUpdateFieldsRejectsEmptyTitle(t *testing.T) {
@@ -1951,44 +1991,19 @@ func TestValidateTrailUpdateFieldsRejectsInvalidTypePriority(t *testing.T) {
 	}
 }
 
-func TestSplitTrailUpdateSeparatesBodyFromMetadata(t *testing.T) {
-	t.Parallel()
-	body := "new body"
-	title := "new title"
-	full := api.TrailUpdateRequest{Body: &body, Title: &title}
-	meta, hasMeta, bodyReq := splitTrailUpdate(full)
-	if !hasMeta || meta.Title == nil || *meta.Title != "new title" {
-		t.Fatalf("meta = %#v, hasMeta = %v, want title-only metadata", meta, hasMeta)
-	}
-	if meta.Body != nil {
-		t.Fatal("metadata request must not carry body")
-	}
-	if bodyReq == nil || bodyReq.Body == nil || *bodyReq.Body != "new body" {
-		t.Fatalf("bodyReq = %#v, want body-only request", bodyReq)
-	}
-
-	_, hasMeta2, bodyReq2 := splitTrailUpdate(api.TrailUpdateRequest{Body: &body})
-	if hasMeta2 {
-		t.Error("body-only update must not produce a metadata request")
-	}
-	if bodyReq2 == nil {
-		t.Error("body-only update must produce a body request")
-	}
-}
-
-// TestSplitTrailUpdateCountsEveryNonBodyFieldAsMetadata pins the structural
-// rule splitTrailUpdate relies on: any field other than Body makes a metadata
-// PATCH. Naming the fields by hand is how a later addition (a branch rename,
-// say) gets dropped silently — hasMeta stays false, no PATCH is sent, and the
-// command still reports success. This test grows with the struct instead.
-func TestSplitTrailUpdateCountsEveryNonBodyFieldAsMetadata(t *testing.T) {
+// TestTrailUpdateRequestCountsEveryFieldAsMetadata pins the structural rule
+// runTrailUpdateWithClient relies on: every field of api.TrailUpdateRequest
+// makes a metadata PATCH. Naming the fields by hand is how a later addition (a
+// branch rename, say) gets dropped silently — hasMeta stays false, no PATCH is
+// sent, and the command still reports success. This test grows with the struct
+// instead. The description is not among them: it has no field here at all, and
+// travels as its own PUT .../body.
+func TestTrailUpdateRequestCountsEveryFieldAsMetadata(t *testing.T) {
 	t.Parallel()
 	typ := reflect.TypeOf(api.TrailUpdateRequest{})
+	require.NotZero(t, typ.NumField(), "api.TrailUpdateRequest has no fields; this test would pass vacuously")
 	for i := range typ.NumField() {
 		field := typ.Field(i)
-		if field.Name == "Body" {
-			continue
-		}
 		t.Run(field.Name, func(t *testing.T) {
 			t.Parallel()
 			// Fail rather than skip: a skipped subtest passes quietly, so a
@@ -2001,25 +2016,45 @@ func TestSplitTrailUpdateCountsEveryNonBodyFieldAsMetadata(t *testing.T) {
 			// field is cleared (e.g. an empty title, an emptied assignee list).
 			reflect.ValueOf(&req).Elem().Field(i).Set(reflect.New(field.Type.Elem()))
 
-			_, hasMeta, _ := splitTrailUpdate(req)
-
-			require.Truef(t, hasMeta, "field %s must count as metadata, otherwise splitTrailUpdate drops it without sending a PATCH", field.Name)
+			require.Truef(t, trailUpdateRequestHasFields(req),
+				"field %s must count as metadata, otherwise the update drops it without sending a PATCH", field.Name)
 		})
 	}
 }
 
-// TestRunTrailUpdateSendsTitleAndBodyAsSeparatePatches drives the whole update
-// path against a server that rejects body+metadata in one PATCH exactly as
-// production does, so `trail update --title X --body Y` stays working end to
-// end and not just in splitTrailUpdate's unit test.
-func TestRunTrailUpdateSendsTitleAndBodyAsSeparatePatches(t *testing.T) {
+// TestRunTrailUpdateSendsTitleAsPatchAndBodyAsPut drives the whole update path
+// against a server shaped like production's: metadata on PATCH .../{number}, the
+// description only on PUT .../{number}/body. The PATCH handler fails the test if
+// a description ever appears on it, which is the invariant that matters and the
+// one production enforces — it rejects that field naming the PUT route to use
+// instead. The rejection's status code is deliberately not modeled: it has been
+// a redacted 5xx and is moving to a 4xx, and the CLI must not care either way.
+func TestRunTrailUpdateSendsTitleAsPatchAndBodyAsPut(t *testing.T) {
 	t.Parallel()
 
-	// patches is written from the handler goroutine and read from the test
+	type trailWrite struct {
+		method string
+		path   string
+		body   map[string]any
+	}
+	// writes is appended from the handler goroutine and read from the test
 	// goroutine, so it is guarded — the counter-based tests in this file use
 	// sync/atomic for the same reason; a slice needs a mutex instead.
 	var mu sync.Mutex
-	var patches []map[string]any
+	var writes []trailWrite
+	// Returns nil on a decode failure, which the caller treats as "stop here";
+	// the t.Errorf has already failed the test.
+	record := func(r *http.Request) map[string]any {
+		var got map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode %s request: %v", r.Method, err)
+			return nil
+		}
+		mu.Lock()
+		writes = append(writes, trailWrite{method: r.Method, path: r.URL.Path, body: got})
+		mu.Unlock()
+		return got
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath:
@@ -2031,33 +2066,26 @@ func TestRunTrailUpdateSendsTitleAndBodyAsSeparatePatches(t *testing.T) {
 				t.Errorf("encode list response: %v", err)
 			}
 		case r.Method == http.MethodPatch && r.URL.Path == trailTestBasePath+"/7":
-			var got map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-				t.Errorf("decode patch request: %v", err)
+			got := record(r)
+			if got == nil {
 				return
 			}
-			mu.Lock()
-			patches = append(patches, got)
-			mu.Unlock()
-			// Mirror the server's own rule ("Body updates cannot be combined
-			// with metadata updates").
-			_, hasBody := got[trailBodyField]
-			hasMeta := false
-			for key := range got {
-				if key != trailBodyField {
-					hasMeta = true
-				}
-			}
-			if hasBody && hasMeta {
-				w.WriteHeader(http.StatusBadRequest)
-				if err := json.NewEncoder(w).Encode(map[string]string{"error": "Body updates cannot be combined with metadata updates"}); err != nil {
-					t.Errorf("encode rejection: %v", err)
-				}
+			if _, hasBody := got["body"]; hasBody {
+				// The metadata route does not serve body writes at all, so a
+				// description reaching it is the bug this test exists to catch.
+				t.Errorf("metadata PATCH carried a description: %v", got)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(api.TrailUpdateResponse{Trail: api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x"}}); err != nil {
 				t.Errorf("encode update response: %v", err)
+			}
+		case r.Method == http.MethodPut && r.URL.Path == trailTestBasePath+"/7/body":
+			record(r)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("ETag", `W/"2026-08-19T00:00:00.000Z"`)
+			if err := json.NewEncoder(w).Encode(api.TrailBodyDocument{TextSnapshot: "new body"}); err != nil {
+				t.Errorf("encode body response: %v", err)
 			}
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -2077,9 +2105,12 @@ func TestRunTrailUpdateSendsTitleAndBodyAsSeparatePatches(t *testing.T) {
 	require.NoError(t, err)
 	mu.Lock()
 	defer mu.Unlock()
-	require.Len(t, patches, 2, "title and body must go out as two PATCHes")
-	require.Equal(t, map[string]any{"title": "new title"}, patches[0])
-	require.Equal(t, map[string]any{trailBodyField: "new body"}, patches[1])
+	require.Equal(t, []trailWrite{
+		{method: http.MethodPatch, path: trailTestBasePath + "/7", body: map[string]any{"title": "new title"}},
+		// overwrite is what makes editing an existing description work: without
+		// it the route 409s on any non-empty body.
+		{method: http.MethodPut, path: trailTestBasePath + "/7/body", body: map[string]any{"markdown": "new body", "overwrite": true}},
+	}, writes, "title must go out as a metadata PATCH and the body as a PUT .../body")
 	require.Contains(t, out.String(), "Updated trail for branch feature/x")
 	require.Empty(t, errOut.String())
 }
@@ -2122,10 +2153,10 @@ func TestRunTrailUpdateReportsNoChangesWhenNothingWasSent(t *testing.T) {
 	require.NotContains(t, out.String(), "Updated trail")
 }
 
-// TestRunTrailUpdateReportsAppliedMetadataWhenBodyPatchFails covers the
-// non-atomic half of the two-PATCH split: the metadata already landed, so the
-// error has to say so rather than reading as "nothing changed".
-func TestRunTrailUpdateReportsAppliedMetadataWhenBodyPatchFails(t *testing.T) {
+// TestRunTrailUpdateReportsAppliedMetadataWhenBodyWriteFails covers the
+// non-atomic half of the two-request update: the metadata PATCH already landed,
+// so the error has to say so rather than reading as "nothing changed".
+func TestRunTrailUpdateReportsAppliedMetadataWhenBodyWriteFails(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2138,19 +2169,12 @@ func TestRunTrailUpdateReportsAppliedMetadataWhenBodyPatchFails(t *testing.T) {
 			}); err != nil {
 				t.Errorf("encode list response: %v", err)
 			}
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/body"):
+			w.WriteHeader(http.StatusServiceUnavailable)
+			if err := json.NewEncoder(w).Encode(map[string]string{"error": "yjs engine is not configured"}); err != nil {
+				t.Errorf("encode rejection: %v", err)
+			}
 		case r.Method == http.MethodPatch:
-			var got map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-				t.Errorf("decode patch request: %v", err)
-				return
-			}
-			if _, hasBody := got[trailBodyField]; hasBody {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				if err := json.NewEncoder(w).Encode(map[string]string{"error": "Editor collaboration not configured"}); err != nil {
-					t.Errorf("encode rejection: %v", err)
-				}
-				return
-			}
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(api.TrailUpdateResponse{Trail: api.TrailResource{ID: "trl_1", Number: 7}}); err != nil {
 				t.Errorf("encode update response: %v", err)

@@ -1007,7 +1007,7 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr, ty
 	}
 	client, err := newTrailAPIClient(ctx, trailInsecureHTTP(cmd), owner+"/"+repoName)
 	if err != nil {
-		return renderDataAPIAuthError(cmd.ErrOrStderr(), err)
+		return renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), err)
 	}
 
 	branchState, err := prepareTrailCreateBranch(w, errW, repo, branch, currentBranch, noBranch)
@@ -1273,7 +1273,7 @@ func newTrailUpdateCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&statusStr, "status", "", "Update status")
 	cmd.Flags().StringVar(&title, "title", "", "Update title")
-	cmd.Flags().StringVar(&body, "body", "", "Update body")
+	cmd.Flags().StringVar(&body, "body", "", "Replace the description (--body= clears it)")
 	cmd.Flags().StringVar(&branch, "branch", "", "Branch to update trail for (defaults to current)")
 	cmd.Flags().StringSliceVar(&assigneeAdd, "add-assignee", nil, "Add assignee(s) by login")
 	cmd.Flags().StringSliceVar(&assigneeRemove, "remove-assignee", nil, "Remove assignee(s) by login")
@@ -1411,14 +1411,13 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 		return err
 	}
 
-	// Build update request with only changed fields.
+	// Build the metadata request with only changed fields. The description is
+	// not part of it — it is written separately, from the `body` local below.
 	updateReq := buildTrailUpdateRequest(found, trailUpdateInputs{
 		Status:          statusStr,
 		StatusChanged:   inputs.StatusChanged,
 		Title:           title,
 		TitleChanged:    inputs.TitleChanged,
-		Body:            body,
-		BodyChanged:     inputs.BodyChanged,
 		AssigneeAdd:     inputs.AssigneeAdd,
 		AssigneeRemove:  inputs.AssigneeRemove,
 		ReviewerAdd:     inputs.ReviewerAdd,
@@ -1436,27 +1435,26 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 	}
 	path := trailNumberPath(forge, owner, repoName, found.Number)
 
-	// The server rejects body + metadata in one PATCH, so send them as
-	// separate requests when both are present. These two calls are not
-	// atomic: if the metadata PATCH lands and the body PATCH then fails, the
-	// metadata change persists. Report that partial state explicitly so the
-	// caller knows the metadata already applied and only the body needs a
-	// retry, rather than assuming nothing changed.
-	meta, hasMeta, bodyReq := splitTrailUpdate(updateReq)
-	if !hasMeta && bodyReq == nil {
+	// Metadata and description live on different routes, so an update touching
+	// both sends two requests. They are not atomic: if the metadata PATCH lands
+	// and the body PUT then fails, the metadata change persists. Report that
+	// partial state explicitly so the caller knows the metadata already applied
+	// and only the body needs a retry, rather than assuming nothing changed.
+	hasMeta := trailUpdateRequestHasFields(updateReq)
+	if !hasMeta && !inputs.BodyChanged {
 		// Nothing changed — most often the interactive form opened and closed
-		// untouched. Say so instead of printing the success line: no PATCH went
+		// untouched. Say so instead of printing the success line: no request went
 		// out, and agents read that line as confirmation the write landed.
 		fmt.Fprintf(w, "No changes to apply to the trail for branch %s\n", branch)
 		return nil
 	}
 	if hasMeta {
-		if err := sendTrailPatch(ctx, client, path, meta); err != nil {
+		if err := sendTrailPatch(ctx, client, path, updateReq); err != nil {
 			return err
 		}
 	}
-	if bodyReq != nil {
-		if err := sendTrailPatch(ctx, client, path, *bodyReq); err != nil {
+	if inputs.BodyChanged {
+		if err := sendTrailBody(ctx, client, trailBodyPath(forge, owner, repoName, found.Number), body); err != nil {
 			if hasMeta {
 				return fmt.Errorf("trail metadata was updated, but the body update failed (the metadata change already applied; retry only the --body change): %w", err)
 			}
@@ -1538,7 +1536,10 @@ func mergeStringSet(current, add, remove []string) []string {
 	return out
 }
 
-// buildTrailUpdateRequest constructs a PATCH request body from the current trail and the requested changes.
+// buildTrailUpdateRequest constructs the metadata PATCH body from the current
+// trail and the requested changes. It deliberately ignores inputs.Body: the
+// description is not part of this request, it is written by sendTrailBody
+// against its own route, and api.TrailUpdateRequest has no field to put it in.
 func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInputs) api.TrailUpdateRequest {
 	var req api.TrailUpdateRequest
 
@@ -1547,9 +1548,6 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 	}
 	if inputs.TitleChanged {
 		req.Title = &inputs.Title
-	}
-	if inputs.BodyChanged {
-		req.Body = &inputs.Body
 	}
 	if inputs.TypeChanged {
 		typ := strings.TrimSpace(inputs.Type)
@@ -1572,36 +1570,18 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 	return req
 }
 
-// splitTrailUpdate separates a full update into a metadata request and an
-// optional body request. The server rejects a body update combined with
-// status/title/branch/base/assignees/reviewers/type/priority ("Body updates
-// cannot be combined with metadata updates"), so the two must be sent as
-// separate PATCH calls — that split is what makes `trail update --title X
-// --body Y` work in one command. hasMeta reports whether the metadata request
-// has any field set.
-func splitTrailUpdate(full api.TrailUpdateRequest) (meta api.TrailUpdateRequest, hasMeta bool, bodyReq *api.TrailUpdateRequest) {
-	if full.Body != nil {
-		b := *full.Body
-		bodyReq = &api.TrailUpdateRequest{Body: &b}
-	}
-	meta = full
-	meta.Body = nil
-	return meta, trailUpdateRequestHasFields(meta), bodyReq
-}
-
 // trailUpdateRequestHasFields reports whether req sets any field at all. It
 // walks the struct reflectively rather than naming each field, so a field added
-// to TrailUpdateRequest later — a branch rename, say — counts as metadata
-// without anyone having to remember to extend this check. Forgetting to would
-// make splitTrailUpdate return hasMeta=false and drop that change silently: the
-// PATCH is never sent, yet the command still reports success.
+// to api.TrailUpdateRequest later — a branch rename, say — counts as a metadata
+// change without anyone having to remember to extend this check. Forgetting to
+// would drop that change silently: the PATCH is never sent, yet the command
+// still reports success.
 //
-// The reflective default is only right for fields the server treats as
-// metadata. A field that has to travel *with* the body instead — a hypothetical
-// body_format or body_version — would be routed into the metadata PATCH here
-// and rejected under the very "Body updates cannot be combined with metadata
-// updates" rule the split exists to satisfy. Adding one means deciding
-// explicitly where it belongs in splitTrailUpdate; it is not handled for free.
+// The reflective default is only right for fields the metadata route actually
+// serves. A field that has to travel with the description instead — a
+// hypothetical body_format or body_version — belongs in api.TrailBodyRequest
+// and on the body PUT; put it here and it goes out on a route that does not
+// know it, which is the same wrong-route mistake the body itself used to make.
 func trailUpdateRequestHasFields(req api.TrailUpdateRequest) bool {
 	v := reflect.ValueOf(req)
 	for i := range v.NumField() {
@@ -1614,7 +1594,8 @@ func trailUpdateRequestHasFields(req api.TrailUpdateRequest) bool {
 	return false
 }
 
-// sendTrailPatch issues a single trail PATCH and validates the response.
+// sendTrailPatch issues a single trail metadata PATCH and validates the
+// response. The description is not sent here — see sendTrailBody.
 func sendTrailPatch(ctx context.Context, client *api.Client, path string, req api.TrailUpdateRequest) error {
 	resp, err := client.Patch(ctx, path, req)
 	if err != nil {
@@ -1627,6 +1608,46 @@ func sendTrailPatch(ctx context.Context, client *api.Client, path string, req ap
 	var updateResp api.TrailUpdateResponse
 	if err := api.DecodeJSON(resp, &updateResp); err != nil {
 		return fmt.Errorf("failed to decode update response: %w", err)
+	}
+	return nil
+}
+
+// sendTrailBody writes a trail's description through the body route, the only
+// one that serves body writes (api.TrailUpdateRequest documents why the metadata
+// PATCH does not). path must already be that route — see trailBodyPath.
+//
+// Overwrite is set because that is what `trail update --body` already means: the
+// caller named the replacement text, and the interactive path shows them the
+// current description before they edit it (resolveTrailUpdateBody). Left false,
+// the route refuses with 409 document_not_empty against any trail whose
+// description is non-empty — i.e. everything except a first write — so the flag
+// is what makes editing an existing description work at all.
+//
+// The cost is that a description changed elsewhere between that read and this
+// write is replaced rather than reported. The route's If-Match is not a fix for
+// that here: its ETag comes only from a body write's own response (including the
+// 409's), so the CLI can obtain one just by being refused and retrying — which
+// clobbers exactly as overwrite does, one round trip later. A true
+// compare-and-set would need the ETag of the document the user actually read,
+// and a trail read carries none (bodyDocument has no ETag, and its updatedAt is
+// formatted to a different precision than the header, so reconstructing one from
+// a read yields a value that never matches). Giving the user that choice is a
+// flag decision, not something to bury here.
+func sendTrailBody(ctx context.Context, client *api.Client, path, body string) error {
+	resp, err := client.Put(ctx, path, api.TrailBodyRequest{Markdown: body, Overwrite: true})
+	if err != nil {
+		return fmt.Errorf("failed to update trail body: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return err
+	}
+	// Nothing reads the document back; decoding it only confirms the success
+	// really was this route's JSON response, and drains the body — the same
+	// check sendTrailPatch makes on the metadata route.
+	var doc api.TrailBodyDocument
+	if err := api.DecodeJSON(resp, &doc); err != nil {
+		return fmt.Errorf("failed to decode trail body response: %w", err)
 	}
 	return nil
 }
@@ -2108,6 +2129,13 @@ func trailsBasePath(forge, owner, repo string) string {
 // integer here and rejects the trail UUID, so callers must pass Number, not ID.
 func trailNumberPath(forge, owner, repo string, number int) string {
 	return trailsBasePath(forge, owner, repo) + "/" + strconv.Itoa(number)
+}
+
+// trailBodyPath returns the route that writes a trail's description
+// (e.g. "/api/v1/trails/gh/acme/repo/575/body"). It is the only route that does;
+// see api.TrailBodyRequest.
+func trailBodyPath(forge, owner, repo string, number int) string {
+	return trailNumberPath(forge, owner, repo, number) + "/body"
 }
 
 // resolveTrailRemote resolves the origin remote and ensures the forge is

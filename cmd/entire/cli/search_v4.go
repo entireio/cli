@@ -294,8 +294,8 @@ func (c *cachedClusterClient) GetRepo(ctx context.Context, params coreapi.GetRep
 	return c.inner.GetRepo(ctx, params) //nolint:wrapcheck // transparent delegation
 }
 
-func (c *cachedClusterClient) ListMirrors(ctx context.Context, params coreapi.ListMirrorsParams) (*coreapi.ListMirrorsOutputBody, error) {
-	return c.inner.ListMirrors(ctx, params) //nolint:wrapcheck // transparent delegation
+func (c *cachedClusterClient) ListRepos(ctx context.Context, params coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error) {
+	return c.inner.ListRepos(ctx, params) //nolint:wrapcheck // transparent delegation
 }
 
 // mergedTier2Max mirrors query-serve's maxTier2 and the BFF's MERGED_TIER2_MAX:

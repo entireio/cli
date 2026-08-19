@@ -54,6 +54,8 @@ const (
 	HookNameStop             = "stop"
 	HookNamePreToolUse       = "pre-tool-use"
 	HookNamePostToolUse      = "post-tool-use"
+	HookNameSubagentStart    = "subagent-start"
+	HookNameSubagentStop     = "subagent-stop"
 )
 
 // HookNames returns the hook verbs Codex supports.
@@ -65,6 +67,8 @@ func (c *CodexAgent) HookNames() []string {
 		HookNameStop,
 		HookNamePreToolUse,
 		HookNamePostToolUse,
+		HookNameSubagentStart,
+		HookNameSubagentStop,
 	}
 }
 
@@ -114,9 +118,57 @@ func (c *CodexAgent) ParseHookEvent(_ context.Context, hookName string, stdin io
 		return nil, nil //nolint:nilnil // nil event = no lifecycle action
 	case HookNamePostToolUse:
 		return c.parsePostToolUse(stdin)
+	case HookNameSubagentStart:
+		return c.parseSubagentStart(stdin)
+	case HookNameSubagentStop:
+		return c.parseSubagentStop(stdin)
 	default:
 		return nil, nil //nolint:nilnil // Unknown hooks have no lifecycle action
 	}
+}
+
+// parseSubagentStart maps Codex's SubagentStart (thread-spawned subagents only;
+// internal/synthetic ones expose no user-configured hooks).
+//
+// session_id is the identity shared by the root thread and all descendants — the
+// user's session — while agent_id is the child thread's own. Codex sends no
+// tool_use_id, so agent_id doubles as ToolUseID, the key Entire correlates
+// start/stop on. See AGENT.md for the full contract.
+func (c *CodexAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) {
+	raw, err := agent.ReadAndParseHookInput[subagentStartRaw](stdin)
+	if err != nil {
+		return nil, err
+	}
+	return &agent.Event{
+		Type:         agent.SubagentStart,
+		SessionID:    raw.SessionID,
+		SessionRef:   derefString(raw.TranscriptPath),
+		ToolUseID:    raw.AgentID,
+		SubagentType: raw.AgentType,
+		Model:        raw.Model,
+		Timestamp:    time.Now(),
+	}, nil
+}
+
+// parseSubagentStop maps Codex's SubagentStop. Note the two transcripts:
+// transcript_path is the parent thread's rollout, agent_transcript_path the
+// subagent's own (see Event.SubagentTranscriptPath).
+func (c *CodexAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
+	raw, err := agent.ReadAndParseHookInput[subagentStopRaw](stdin)
+	if err != nil {
+		return nil, err
+	}
+	return &agent.Event{
+		Type:                   agent.SubagentEnd,
+		SessionID:              raw.SessionID,
+		SessionRef:             derefString(raw.TranscriptPath),
+		ToolUseID:              raw.AgentID,
+		SubagentID:             raw.AgentID,
+		SubagentType:           raw.AgentType,
+		SubagentTranscriptPath: derefString(raw.AgentTranscriptPath),
+		Model:                  raw.Model,
+		Timestamp:              time.Now(),
+	}, nil
 }
 
 // parseSessionInfoEvent parses the hooks whose payload is sessionInfoRaw —

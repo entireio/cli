@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -239,6 +240,128 @@ func TestRepoCreateOutput_OmitsRemoteWhenUnresolvable(t *testing.T) {
 	if _, ok := got["remote"]; ok {
 		t.Errorf("expected no remote field, got %v", got["remote"])
 	}
+}
+
+func TestParseObjectFormat(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in      string
+		want    coreapi.CreateRepoInputBodyObjectFormat
+		wantErr bool
+	}{
+		{in: "sha1", want: coreapi.CreateRepoInputBodyObjectFormatSHA1},
+		{in: "sha256", want: coreapi.CreateRepoInputBodyObjectFormatSHA256},
+		{in: "SHA1", wantErr: true}, // case-sensitive; the wire enum is lowercase
+		{in: "", wantErr: true},
+		{in: "sha512", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseObjectFormat(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseObjectFormat(%q) = %q, want error", tt.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseObjectFormat(%q) error = %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseObjectFormat(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// serveRepoCreate stands up a fake control plane answering POST /repos with a
+// minimal created repo and delivers each raw request body on the returned
+// channel. Points the active-context client seam at the server.
+func serveRepoCreate(t *testing.T) <-chan []byte {
+	t.Helper()
+	bodyCh := make(chan []byte, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/repos" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read create body: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		bodyCh <- raw
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		if err := printJSON(w, &coreapi.Repo{
+			ID:              "01KS6KFJR2XS6PZ188MVYE07AN",
+			Name:            "web",
+			OwningProjectId: testProjectULID,
+		}); err != nil {
+			t.Errorf("encode create response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := activeCoreClient
+	activeCoreClient = func(context.Context) (*coreapi.Client, error) {
+		return coreapi.NewWithBearer(srv.URL, "tok")
+	}
+	t.Cleanup(func() { activeCoreClient = prev })
+	return bodyCh
+}
+
+// execRepoCreate runs `repo create web --project <ulid>` under a parent
+// carrying the control-plane persistent flags, mirroring execRepoList.
+func execRepoCreate(t *testing.T, args ...string) error {
+	t.Helper()
+	parent := &cobra.Command{Use: "repo"}
+	addControlPlaneFlags(parent)
+	parent.AddCommand(newRepoCreateCmd())
+	var out, errOut bytes.Buffer
+	parent.SetOut(&out)
+	parent.SetErr(&errOut)
+	parent.SetArgs(append([]string{"create", "web", "--project", testProjectULID}, args...))
+	return parent.ExecuteContext(t.Context())
+}
+
+// TestRepoCreate_ObjectFormat pins the --object-format wiring: a set flag
+// reaches the wire body, an unset flag leaves the field to the server
+// default, and an invalid value fails fast before any request is sent.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoCreate_ObjectFormat(t *testing.T) {
+	t.Run("--object-format sha256 is sent on the wire", func(t *testing.T) {
+		bodyCh := serveRepoCreate(t)
+		require.NoError(t, execRepoCreate(t, "--object-format", "sha256"))
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(<-bodyCh, &body))
+		require.Equal(t, "sha256", body["objectFormat"])
+	})
+
+	t.Run("unset flag omits the field so the server default applies", func(t *testing.T) {
+		bodyCh := serveRepoCreate(t)
+		require.NoError(t, execRepoCreate(t))
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(<-bodyCh, &body))
+		require.NotContains(t, body, "objectFormat")
+	})
+
+	t.Run("an invalid value fails before any request is sent", func(t *testing.T) {
+		bodyCh := serveRepoCreate(t)
+		err := execRepoCreate(t, "--object-format", "sha512")
+		require.ErrorContains(t, err, "sha512")
+		require.ErrorContains(t, err, "sha1")
+		require.ErrorContains(t, err, "sha256")
+		select {
+		case raw := <-bodyCh:
+			t.Fatalf("no create request expected, got body %s", raw)
+		default:
+		}
+	})
 }
 
 // testProjectULID is a syntactically valid ULID so `repo list <project>` skips

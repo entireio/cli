@@ -96,7 +96,8 @@ trusted_hash = "sha256:ddd"
 
 // TestMissingEntireHooks_FlagsAbsentSessionEnd covers the other half of the
 // upgrade path: a repo enabled before SessionEnd existed has no such hook in
-// hooks.json at all, which `entire doctor` must report as drift.
+// hooks.json at all, which `entire doctor` must report as drift. That install
+// also predates the subagent hooks, so all three are reported.
 func TestMissingEntireHooks_FlagsAbsentSessionEnd(t *testing.T) {
 	hooksJSON := `{
   "hooks": {
@@ -108,7 +109,7 @@ func TestMissingEntireHooks_FlagsAbsentSessionEnd(t *testing.T) {
 }`
 	repoRoot, _ := writeTrustFixture(t, hooksJSON)
 
-	require.Equal(t, []string{"session_end"}, MissingEntireHooks(repoRoot))
+	require.Equal(t, []string{"session_end", "subagent_start", "subagent_stop"}, MissingEntireHooks(repoRoot))
 }
 
 // TestHookTrustGaps_NoGapsWhenAllTrusted returns nil when every declared
@@ -164,9 +165,9 @@ func TestHookTrustGaps_NilWhenConfigUnreadable(t *testing.T) {
 }
 
 // TestMissingEntireHooks_FlagsStaleFile — user enabled Codex on an older
-// release that predates both PostToolUse and SessionEnd. Their hooks.json has
-// the three oldest events; detection must surface every event added since so
-// doctor can prompt `entire enable`.
+// release that predates PostToolUse, SessionEnd and the subagent hooks. Their
+// hooks.json has the three oldest events; detection must surface every event
+// added since so doctor can prompt `entire enable`.
 func TestMissingEntireHooks_FlagsStaleFile(t *testing.T) {
 	hooksJSON := `{"hooks":{
 		"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-start","timeout":30}]}],
@@ -174,7 +175,7 @@ func TestMissingEntireHooks_FlagsStaleFile(t *testing.T) {
 		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]}]
 	}}`
 	repoRoot, _ := writeTrustFixture(t, hooksJSON)
-	require.Equal(t, []string{"session_end", "post_tool_use"}, MissingEntireHooks(repoRoot))
+	require.Equal(t, []string{"session_end", "post_tool_use", "subagent_start", "subagent_stop"}, MissingEntireHooks(repoRoot))
 }
 
 // TestMissingEntireHooks_NilWhenAllPresent returns nil when every
@@ -187,7 +188,9 @@ func TestMissingEntireHooks_NilWhenAllPresent(t *testing.T) {
 		"UserPromptSubmit":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex user-prompt-submit","timeout":30}]}],
 		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]},
 		        {"matcher":null,"hooks":[{"type":"command","command":"my-custom-tool","timeout":30}]}],
-		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}]
+		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}],
+		"SubagentStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-start","timeout":30}]}],
+		"SubagentStop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-stop","timeout":30}]}]
 	}}`
 	repoRoot, _ := writeTrustFixture(t, hooksJSON)
 	require.Empty(t, MissingEntireHooks(repoRoot))
@@ -210,7 +213,9 @@ func TestMissingEntireHooks_IgnoresNonEntireCommands(t *testing.T) {
 		"SessionEnd":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-end","timeout":3}]}],
 		"UserPromptSubmit":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex user-prompt-submit","timeout":30}]}],
 		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]}],
-		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}]
+		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}],
+		"SubagentStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-start","timeout":30}]}],
+		"SubagentStop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-stop","timeout":30}]}]
 	}}`
 	repoRoot, _ := writeTrustFixture(t, hooksJSON)
 	require.Equal(t, []string{"session_start"}, MissingEntireHooks(repoRoot))

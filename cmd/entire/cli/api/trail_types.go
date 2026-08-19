@@ -85,7 +85,10 @@ func (r *TrailResource) UnmarshalJSON(data []byte) error {
 }
 
 // TrailBodyDocument is the trail's description editor document. TextSnapshot
-// is the rendered plain text displayed by the CLI.
+// is the rendered plain text displayed by the CLI. The document is also what a
+// body write returns (see TrailBodyRequest), so both directions decode into this
+// type; the fields the CLI does not use (id, documentKey, schemaVersion,
+// contentJson, updatedAt) are simply left out of it.
 type TrailBodyDocument struct {
 	TextSnapshot string `json:"textSnapshot"`
 }
@@ -130,10 +133,17 @@ type TrailCreateResponse struct {
 // There is deliberately no Labels field: the trails API does not accept label
 // writes, so `trail update` exposes no label flags (labels are read-only, see
 // TrailResource.Labels).
+//
+// There is deliberately no Body field either. The trails API does not serve
+// body writes on this route — it rejects a body field outright and names the
+// dedicated route to use instead — so the description has its own route and its
+// own request shape; see TrailBodyRequest. Do not reintroduce the field to save
+// a request: the rejection has been served as a redacted 5xx, which reads to
+// the caller as a flaky server rather than as the wrong route, and that is what
+// made this bug survive as long as it did.
 type TrailUpdateRequest struct {
 	Status             *string   `json:"status,omitempty"`
 	Title              *string   `json:"title,omitempty"`
-	Body               *string   `json:"body,omitempty"`
 	Assignees          *[]string `json:"assignees,omitempty"`
 	RequestedReviewers *[]string `json:"requestedReviewers,omitempty"`
 	Type               *string   `json:"type,omitempty"`
@@ -142,6 +152,26 @@ type TrailUpdateRequest struct {
 
 type TrailUpdateResponse struct {
 	Trail TrailResource `json:"trail"`
+}
+
+// TrailBodyRequest is the body for PUT
+// /api/v1/trails/:host/:owner/:repo/:number/body, the only route that writes a
+// trail's description (see TrailUpdateRequest for why it is not PATCH). The
+// route answers with the resulting document, which decodes into
+// TrailBodyDocument.
+//
+// Markdown carries no omitempty: an empty string is how a description is
+// cleared, and the server distinguishes present-and-empty from absent — with
+// omitempty the field would vanish from the JSON and the request would be
+// rejected as "exactly one of markdown/contentJson is required".
+//
+// The route also accepts contentJson (ProseMirror JSON, written as-is) in place
+// of markdown, and an If-Match header for optimistic concurrency. Neither is
+// modeled here: the CLI writes Markdown, and it has no ETag to send — that
+// value only comes back from a prior write through this same route.
+type TrailBodyRequest struct {
+	Markdown  string `json:"markdown"`
+	Overwrite bool   `json:"overwrite,omitempty"`
 }
 
 // TrailApproval is a single approval decision on a trail. Author is exposed as

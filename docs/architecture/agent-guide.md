@@ -55,6 +55,15 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | `ContextInjector` | `InjectionEvent`, `RenderContextInjection` | Agent can inject text into the **model's** context window (distinct from `HookResponseWriter`, which targets the *user*). The agent declares which lifecycle event it injects at and renders a native stdout payload. The dispatcher (`emitContextInjection`) emits it once per normal session via `session.State.ContextInjectionDecided`, skipping review/investigate sessions, and only when fresh clone-local preferences say trails are enabled for the current repo/API/auth target. The API check happens before the prompt path (`entire enable`, successful `entire trail ...` commands, and stale/missing cache refresh on SessionStart all refresh `ClonePreferences.TrailsEnabled` using `api.Client.TrailsEnabled`); TurnStart performs no auth/network work and leaves unknown/stale caches undecided so a later refresh can still inject. Claude Code / Codex / Gemini inject at `TurnStart` using `hookSpecificOutput.additionalContext` (UserPromptSubmit / BeforeAgent); Pi and OpenCode emit a `{"inject_context":...}` envelope that their embedded extension applies (Pi via a `before_agent_start` message, OpenCode via `experimental.chat.system.transform`). |
 | `FileWatcher` | `GetWatchPaths`, `OnFileChange` | Agent doesn't support hooks; uses file-based detection instead |
 
+### Declaring a subagent transcript
+
+Not an interface — a field. On `SubagentEnd`, set `Event.SubagentTranscriptPath` when
+the agent's hook payload names the subagent's own transcript (Codex and Cursor both
+send `agent_transcript_path`). Leave it empty and the framework probes the layout
+Claude Code and Factory AI Droid share, which finds nothing for any other agent and
+fails silently — the task checkpoint simply stores no subagent transcript. See the
+field's doc comment in `cmd/entire/cli/agent/event.go`.
+
 ## Step-by-Step Implementation Guide
 
 ### Step 1: Create Package
