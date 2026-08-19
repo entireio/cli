@@ -24,6 +24,7 @@ func truncatePromptForStorage(prompt string) string {
 // SessionState is an alias for session.State.
 // Previously this was a separate struct with manual conversion functions.
 type SessionState = session.State
+type CrossRepoContextState = session.CrossRepoContextState
 
 // PromptAttribution is an alias for session.PromptAttribution.
 type PromptAttribution = session.PromptAttribution

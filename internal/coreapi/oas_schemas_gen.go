@@ -943,6 +943,169 @@ func (s *CompleteOnboardingOutputBodyAdditional) init() CompleteOnboardingOutput
 	return m
 }
 
+// Ref: #/components/schemas/ContextSharingConsent
+type ContextSharingConsent struct {
+	// A URL to the JSON Schema for this object.
+	Schema                 OptURI      `json:"$schema"`
+	AllowCrossJurisdiction bool        `json:"allowCrossJurisdiction"`
+	Enabled                bool        `json:"enabled"`
+	IncludeLocalLive       bool        `json:"includeLocalLive"`
+	UpdatedAt              OptDateTime `json:"updatedAt"`
+	AdditionalProps        ContextSharingConsentAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ContextSharingConsent) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetAllowCrossJurisdiction returns the value of AllowCrossJurisdiction.
+func (s *ContextSharingConsent) GetAllowCrossJurisdiction() bool {
+	return s.AllowCrossJurisdiction
+}
+
+// GetEnabled returns the value of Enabled.
+func (s *ContextSharingConsent) GetEnabled() bool {
+	return s.Enabled
+}
+
+// GetIncludeLocalLive returns the value of IncludeLocalLive.
+func (s *ContextSharingConsent) GetIncludeLocalLive() bool {
+	return s.IncludeLocalLive
+}
+
+// GetUpdatedAt returns the value of UpdatedAt.
+func (s *ContextSharingConsent) GetUpdatedAt() OptDateTime {
+	return s.UpdatedAt
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ContextSharingConsent) GetAdditionalProps() ContextSharingConsentAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ContextSharingConsent) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetAllowCrossJurisdiction sets the value of AllowCrossJurisdiction.
+func (s *ContextSharingConsent) SetAllowCrossJurisdiction(val bool) {
+	s.AllowCrossJurisdiction = val
+}
+
+// SetEnabled sets the value of Enabled.
+func (s *ContextSharingConsent) SetEnabled(val bool) {
+	s.Enabled = val
+}
+
+// SetIncludeLocalLive sets the value of IncludeLocalLive.
+func (s *ContextSharingConsent) SetIncludeLocalLive(val bool) {
+	s.IncludeLocalLive = val
+}
+
+// SetUpdatedAt sets the value of UpdatedAt.
+func (s *ContextSharingConsent) SetUpdatedAt(val OptDateTime) {
+	s.UpdatedAt = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ContextSharingConsent) SetAdditionalProps(val ContextSharingConsentAdditional) {
+	s.AdditionalProps = val
+}
+
+type ContextSharingConsentAdditional map[string]jx.Raw
+
+func (s *ContextSharingConsentAdditional) init() ContextSharingConsentAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ContextSharingSource
+type ContextSharingSource struct {
+	Cell            string `json:"cell"`
+	ClusterSlug     string `json:"clusterSlug"`
+	FullName        string `json:"fullName"`
+	Jurisdiction    string `json:"jurisdiction"`
+	RepoId          string `json:"repoId"`
+	AdditionalProps ContextSharingSourceAdditional
+}
+
+// GetCell returns the value of Cell.
+func (s *ContextSharingSource) GetCell() string {
+	return s.Cell
+}
+
+// GetClusterSlug returns the value of ClusterSlug.
+func (s *ContextSharingSource) GetClusterSlug() string {
+	return s.ClusterSlug
+}
+
+// GetFullName returns the value of FullName.
+func (s *ContextSharingSource) GetFullName() string {
+	return s.FullName
+}
+
+// GetJurisdiction returns the value of Jurisdiction.
+func (s *ContextSharingSource) GetJurisdiction() string {
+	return s.Jurisdiction
+}
+
+// GetRepoId returns the value of RepoId.
+func (s *ContextSharingSource) GetRepoId() string {
+	return s.RepoId
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ContextSharingSource) GetAdditionalProps() ContextSharingSourceAdditional {
+	return s.AdditionalProps
+}
+
+// SetCell sets the value of Cell.
+func (s *ContextSharingSource) SetCell(val string) {
+	s.Cell = val
+}
+
+// SetClusterSlug sets the value of ClusterSlug.
+func (s *ContextSharingSource) SetClusterSlug(val string) {
+	s.ClusterSlug = val
+}
+
+// SetFullName sets the value of FullName.
+func (s *ContextSharingSource) SetFullName(val string) {
+	s.FullName = val
+}
+
+// SetJurisdiction sets the value of Jurisdiction.
+func (s *ContextSharingSource) SetJurisdiction(val string) {
+	s.Jurisdiction = val
+}
+
+// SetRepoId sets the value of RepoId.
+func (s *ContextSharingSource) SetRepoId(val string) {
+	s.RepoId = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ContextSharingSource) SetAdditionalProps(val ContextSharingSourceAdditional) {
+	s.AdditionalProps = val
+}
+
+type ContextSharingSourceAdditional map[string]jx.Raw
+
+func (s *ContextSharingSourceAdditional) init() ContextSharingSourceAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/CreateBindingInputBody
 type CreateBindingInputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -7446,6 +7609,66 @@ func (s *OrgAdditional) init() OrgAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/OrgContextSharingPolicy
+type OrgContextSharingPolicy struct {
+	// A URL to the JSON Schema for this object.
+	Schema                 OptURI      `json:"$schema"`
+	AllowCrossJurisdiction bool        `json:"allowCrossJurisdiction"`
+	UpdatedAt              OptDateTime `json:"updatedAt"`
+	AdditionalProps        OrgContextSharingPolicyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *OrgContextSharingPolicy) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetAllowCrossJurisdiction returns the value of AllowCrossJurisdiction.
+func (s *OrgContextSharingPolicy) GetAllowCrossJurisdiction() bool {
+	return s.AllowCrossJurisdiction
+}
+
+// GetUpdatedAt returns the value of UpdatedAt.
+func (s *OrgContextSharingPolicy) GetUpdatedAt() OptDateTime {
+	return s.UpdatedAt
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *OrgContextSharingPolicy) GetAdditionalProps() OrgContextSharingPolicyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *OrgContextSharingPolicy) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetAllowCrossJurisdiction sets the value of AllowCrossJurisdiction.
+func (s *OrgContextSharingPolicy) SetAllowCrossJurisdiction(val bool) {
+	s.AllowCrossJurisdiction = val
+}
+
+// SetUpdatedAt sets the value of UpdatedAt.
+func (s *OrgContextSharingPolicy) SetUpdatedAt(val OptDateTime) {
+	s.UpdatedAt = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *OrgContextSharingPolicy) SetAdditionalProps(val OrgContextSharingPolicyAdditional) {
+	s.AdditionalProps = val
+}
+
+type OrgContextSharingPolicyAdditional map[string]jx.Raw
+
+func (s *OrgContextSharingPolicyAdditional) init() OrgContextSharingPolicyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/PatchRepoCIWebhookInputBody
 type PatchRepoCIWebhookInputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -7752,6 +7975,126 @@ func (s *ProjectOwnerType) UnmarshalText(data []byte) error {
 	default:
 		return errors.Errorf("invalid value: %q", data)
 	}
+}
+
+// Ref: #/components/schemas/PutContextSharingConsentInputBody
+type PutContextSharingConsentInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema                 OptURI `json:"$schema"`
+	AllowCrossJurisdiction bool   `json:"allowCrossJurisdiction"`
+	Enabled                bool   `json:"enabled"`
+	IncludeLocalLive       bool   `json:"includeLocalLive"`
+	AdditionalProps        PutContextSharingConsentInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *PutContextSharingConsentInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetAllowCrossJurisdiction returns the value of AllowCrossJurisdiction.
+func (s *PutContextSharingConsentInputBody) GetAllowCrossJurisdiction() bool {
+	return s.AllowCrossJurisdiction
+}
+
+// GetEnabled returns the value of Enabled.
+func (s *PutContextSharingConsentInputBody) GetEnabled() bool {
+	return s.Enabled
+}
+
+// GetIncludeLocalLive returns the value of IncludeLocalLive.
+func (s *PutContextSharingConsentInputBody) GetIncludeLocalLive() bool {
+	return s.IncludeLocalLive
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *PutContextSharingConsentInputBody) GetAdditionalProps() PutContextSharingConsentInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *PutContextSharingConsentInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetAllowCrossJurisdiction sets the value of AllowCrossJurisdiction.
+func (s *PutContextSharingConsentInputBody) SetAllowCrossJurisdiction(val bool) {
+	s.AllowCrossJurisdiction = val
+}
+
+// SetEnabled sets the value of Enabled.
+func (s *PutContextSharingConsentInputBody) SetEnabled(val bool) {
+	s.Enabled = val
+}
+
+// SetIncludeLocalLive sets the value of IncludeLocalLive.
+func (s *PutContextSharingConsentInputBody) SetIncludeLocalLive(val bool) {
+	s.IncludeLocalLive = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *PutContextSharingConsentInputBody) SetAdditionalProps(val PutContextSharingConsentInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type PutContextSharingConsentInputBodyAdditional map[string]jx.Raw
+
+func (s *PutContextSharingConsentInputBodyAdditional) init() PutContextSharingConsentInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/PutOrgContextSharingPolicyInputBody
+type PutOrgContextSharingPolicyInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema                 OptURI `json:"$schema"`
+	AllowCrossJurisdiction bool   `json:"allowCrossJurisdiction"`
+	AdditionalProps        PutOrgContextSharingPolicyInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *PutOrgContextSharingPolicyInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetAllowCrossJurisdiction returns the value of AllowCrossJurisdiction.
+func (s *PutOrgContextSharingPolicyInputBody) GetAllowCrossJurisdiction() bool {
+	return s.AllowCrossJurisdiction
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *PutOrgContextSharingPolicyInputBody) GetAdditionalProps() PutOrgContextSharingPolicyInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *PutOrgContextSharingPolicyInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetAllowCrossJurisdiction sets the value of AllowCrossJurisdiction.
+func (s *PutOrgContextSharingPolicyInputBody) SetAllowCrossJurisdiction(val bool) {
+	s.AllowCrossJurisdiction = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *PutOrgContextSharingPolicyInputBody) SetAdditionalProps(val PutOrgContextSharingPolicyInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type PutOrgContextSharingPolicyInputBodyAdditional map[string]jx.Raw
+
+func (s *PutOrgContextSharingPolicyInputBodyAdditional) init() PutOrgContextSharingPolicyInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // RemoveOrgMemberNoContent is response for RemoveOrgMember operation.
@@ -8474,6 +8817,137 @@ func (s *RepoPrimaries) SetAdditionalProps(val RepoPrimariesAdditional) {
 type RepoPrimariesAdditional map[string]jx.Raw
 
 func (s *RepoPrimariesAdditional) init() RepoPrimariesAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ResolveContextSharingScopeInputBody
+type ResolveContextSharingScopeInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI `json:"$schema"`
+	TargetRepoId    string `json:"targetRepoId"`
+	AdditionalProps ResolveContextSharingScopeInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ResolveContextSharingScopeInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetTargetRepoId returns the value of TargetRepoId.
+func (s *ResolveContextSharingScopeInputBody) GetTargetRepoId() string {
+	return s.TargetRepoId
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ResolveContextSharingScopeInputBody) GetAdditionalProps() ResolveContextSharingScopeInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ResolveContextSharingScopeInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetTargetRepoId sets the value of TargetRepoId.
+func (s *ResolveContextSharingScopeInputBody) SetTargetRepoId(val string) {
+	s.TargetRepoId = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ResolveContextSharingScopeInputBody) SetAdditionalProps(val ResolveContextSharingScopeInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ResolveContextSharingScopeInputBodyAdditional map[string]jx.Raw
+
+func (s *ResolveContextSharingScopeInputBodyAdditional) init() ResolveContextSharingScopeInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ResolveContextSharingScopeOutputBody
+type ResolveContextSharingScopeOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema                 OptURI                 `json:"$schema"`
+	AllowCrossJurisdiction bool                   `json:"allowCrossJurisdiction"`
+	Enabled                bool                   `json:"enabled"`
+	IncludeLocalLive       bool                   `json:"includeLocalLive"`
+	Sources                []ContextSharingSource `json:"sources"`
+	AdditionalProps        ResolveContextSharingScopeOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ResolveContextSharingScopeOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetAllowCrossJurisdiction returns the value of AllowCrossJurisdiction.
+func (s *ResolveContextSharingScopeOutputBody) GetAllowCrossJurisdiction() bool {
+	return s.AllowCrossJurisdiction
+}
+
+// GetEnabled returns the value of Enabled.
+func (s *ResolveContextSharingScopeOutputBody) GetEnabled() bool {
+	return s.Enabled
+}
+
+// GetIncludeLocalLive returns the value of IncludeLocalLive.
+func (s *ResolveContextSharingScopeOutputBody) GetIncludeLocalLive() bool {
+	return s.IncludeLocalLive
+}
+
+// GetSources returns the value of Sources.
+func (s *ResolveContextSharingScopeOutputBody) GetSources() []ContextSharingSource {
+	return s.Sources
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ResolveContextSharingScopeOutputBody) GetAdditionalProps() ResolveContextSharingScopeOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ResolveContextSharingScopeOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetAllowCrossJurisdiction sets the value of AllowCrossJurisdiction.
+func (s *ResolveContextSharingScopeOutputBody) SetAllowCrossJurisdiction(val bool) {
+	s.AllowCrossJurisdiction = val
+}
+
+// SetEnabled sets the value of Enabled.
+func (s *ResolveContextSharingScopeOutputBody) SetEnabled(val bool) {
+	s.Enabled = val
+}
+
+// SetIncludeLocalLive sets the value of IncludeLocalLive.
+func (s *ResolveContextSharingScopeOutputBody) SetIncludeLocalLive(val bool) {
+	s.IncludeLocalLive = val
+}
+
+// SetSources sets the value of Sources.
+func (s *ResolveContextSharingScopeOutputBody) SetSources(val []ContextSharingSource) {
+	s.Sources = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ResolveContextSharingScopeOutputBody) SetAdditionalProps(val ResolveContextSharingScopeOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ResolveContextSharingScopeOutputBodyAdditional map[string]jx.Raw
+
+func (s *ResolveContextSharingScopeOutputBodyAdditional) init() ResolveContextSharingScopeOutputBodyAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}

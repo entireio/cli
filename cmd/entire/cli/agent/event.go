@@ -50,6 +50,11 @@ const (
 	// commit mid-turn (before TurnEnd fires) have no per-tool file accounting,
 	// and the carry-forward path falls back to whole-transcript extraction.
 	ToolUse
+
+	// ContextRequest asks the lifecycle dispatcher to produce model-facing
+	// context without re-running turn initialization. Copilot CLI uses this for
+	// userPromptTransformed, which fires after userPromptSubmitted.
+	ContextRequest
 )
 
 // String returns a human-readable name for the event type.
@@ -73,6 +78,8 @@ func (e EventType) String() string {
 		return "ModelUpdate"
 	case ToolUse:
 		return "ToolUse"
+	case ContextRequest:
+		return "ContextRequest"
 	default:
 		return "Unknown"
 	}
@@ -96,6 +103,11 @@ type Event struct {
 
 	// Prompt is the user's prompt text (populated on TurnStart events).
 	Prompt string
+
+	// TransformedPrompt is the complete model-facing prompt supplied by a
+	// mutation-style hook. Renderers that replace rather than append hook output
+	// must preserve this text when adding context.
+	TransformedPrompt string
 
 	// Model is the LLM model identifier (e.g., "claude-sonnet-4-20250514").
 	// Populated on SessionStart (Claude Code), ModelUpdate (Gemini CLI BeforeModel),

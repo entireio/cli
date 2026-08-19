@@ -52,6 +52,19 @@ func TestParseHookEvent_TurnStart(t *testing.T) {
 	}
 }
 
+func TestFactoryAIDroidAgent_ContextInjector(t *testing.T) {
+	t.Parallel()
+
+	ag := &FactoryAIDroidAgent{}
+	require.Equal(t, agent.TurnStart, ag.InjectionEvent())
+
+	out, err := ag.RenderContextInjection(agent.ContextInjection{Text: "cross-repo evidence"})
+	require.NoError(t, err)
+	require.JSONEq(t, `{
+		"additionalContext": "cross-repo evidence"
+	}`, string(out))
+}
+
 func TestParseHookEvent_TurnStart_IncludesModel(t *testing.T) {
 	t.Parallel()
 

@@ -22,14 +22,15 @@ const hooksDir = ".github/hooks"
 
 // hookConfigKey maps our kebab-case hook names to camelCase JSON keys.
 var hookConfigKey = map[string]string{
-	HookNameUserPromptSubmitted: "userPromptSubmitted",
-	HookNameSessionStart:        "sessionStart",
-	HookNameAgentStop:           "agentStop",
-	HookNameSessionEnd:          "sessionEnd",
-	HookNameSubagentStop:        "subagentStop",
-	HookNamePreToolUse:          "preToolUse",
-	HookNamePostToolUse:         "postToolUse",
-	HookNameErrorOccurred:       "errorOccurred",
+	HookNameUserPromptSubmitted:   "userPromptSubmitted",
+	HookNameUserPromptTransformed: "userPromptTransformed",
+	HookNameSessionStart:          "sessionStart",
+	HookNameAgentStop:             "agentStop",
+	HookNameSessionEnd:            "sessionEnd",
+	HookNameSubagentStop:          "subagentStop",
+	HookNamePreToolUse:            "preToolUse",
+	HookNamePostToolUse:           "postToolUse",
+	HookNameErrorOccurred:         "errorOccurred",
 }
 
 // InstallHooks installs Copilot CLI hooks in .github/hooks/entire.json.
@@ -255,6 +256,7 @@ func (c *CopilotCLIAgent) AreHooksInstalled(ctx context.Context) bool {
 	}
 
 	return hasEntireHook(hooksFile.Hooks.UserPromptSubmitted) ||
+		hasEntireHook(hooksFile.Hooks.UserPromptTransformed) ||
 		hasEntireHook(hooksFile.Hooks.SessionStart) ||
 		hasEntireHook(hooksFile.Hooks.AgentStop) ||
 		hasEntireHook(hooksFile.Hooks.SessionEnd) ||
@@ -265,8 +267,9 @@ func (c *CopilotCLIAgent) AreHooksInstalled(ctx context.Context) bool {
 }
 
 // GetSupportedHooks returns the normalized lifecycle events this agent supports.
-// Note: HookNames() returns 8 hooks but GetSupportedHooks() returns only 6.
-// The two not listed here are:
+// Note: HookNames() also includes native hooks that have no HookType equivalent.
+// Those not listed here are:
+//   - userPromptTransformed: injection-only ContextRequest
 //   - subagentStop: handled by ParseHookEvent (returns SubagentEnd), but there is no
 //     HookType constant for subagent events (they use EventType instead).
 //   - errorOccurred: pass-through hook with no lifecycle action (ParseHookEvent returns nil).

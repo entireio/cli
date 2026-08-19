@@ -135,6 +135,12 @@ type Invoker interface {
 	//
 	// DELETE /service-accounts/{accountId}
 	DeleteServiceAccount(ctx context.Context, params DeleteServiceAccountParams) error
+	// GetContextSharingConsent invokes getContextSharingConsent operation.
+	//
+	// Get cross-repository context consent.
+	//
+	// GET /me/context-sharing
+	GetContextSharingConsent(ctx context.Context) (*ContextSharingConsent, error)
 	// GetDeletionPreview invokes getDeletionPreview operation.
 	//
 	// Preview what deleting the calling account will erase, unlink, and block on.
@@ -165,6 +171,12 @@ type Invoker interface {
 	//
 	// GET /orgs/{orgId}
 	GetOrg(ctx context.Context, params GetOrgParams) (*Org, error)
+	// GetOrgContextSharingPolicy invokes getOrgContextSharingPolicy operation.
+	//
+	// Get organization context-sharing policy.
+	//
+	// GET /orgs/{orgId}/context-sharing
+	GetOrgContextSharingPolicy(ctx context.Context, params GetOrgContextSharingPolicyParams) (*OrgContextSharingPolicy, error)
 	// GetPermissions invokes getPermissions operation.
 	//
 	// List the caller's permissions on a single resource.
@@ -351,12 +363,30 @@ type Invoker interface {
 	//
 	// PATCH /repos/{repoId}/ci-webhooks/{id}
 	PatchRepoCIWebhook(ctx context.Context, request *PatchRepoCIWebhookInputBody, params PatchRepoCIWebhookParams) (*CIWebhookView, error)
+	// PutContextSharingConsent invokes putContextSharingConsent operation.
+	//
+	// Update cross-repository context consent.
+	//
+	// PUT /me/context-sharing
+	PutContextSharingConsent(ctx context.Context, request *PutContextSharingConsentInputBody) (*ContextSharingConsent, error)
+	// PutOrgContextSharingPolicy invokes putOrgContextSharingPolicy operation.
+	//
+	// Update organization context-sharing policy.
+	//
+	// PUT /orgs/{orgId}/context-sharing
+	PutOrgContextSharingPolicy(ctx context.Context, request *PutOrgContextSharingPolicyInputBody, params PutOrgContextSharingPolicyParams) (*OrgContextSharingPolicy, error)
 	// RemoveOrgMember invokes removeOrgMember operation.
 	//
 	// Remove a member from an organization.
 	//
 	// DELETE /orgs/{orgId}/members/{provider}/{providerUserId}
 	RemoveOrgMember(ctx context.Context, params RemoveOrgMemberParams) error
+	// ResolveContextSharingScope invokes resolveContextSharingScope operation.
+	//
+	// Resolve authorized context source placements.
+	//
+	// POST /me/context-sharing/scope
+	ResolveContextSharingScope(ctx context.Context, request *ResolveContextSharingScopeInputBody) (*ResolveContextSharingScopeOutputBody, error)
 	// ResolveHandle invokes resolveHandle operation.
 	//
 	// Resolve account by external provider handle.
@@ -2315,6 +2345,88 @@ func (c *Client) sendDeleteServiceAccount(ctx context.Context, params DeleteServ
 	return result, nil
 }
 
+// GetContextSharingConsent invokes getContextSharingConsent operation.
+//
+// Get cross-repository context consent.
+//
+// GET /me/context-sharing
+func (c *Client) GetContextSharingConsent(ctx context.Context) (*ContextSharingConsent, error) {
+	res, err := c.sendGetContextSharingConsent(ctx)
+	return res, err
+}
+
+func (c *Client) sendGetContextSharingConsent(ctx context.Context) (res *ContextSharingConsent, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/me/context-sharing"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, GetContextSharingConsentOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, GetContextSharingConsentOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeGetContextSharingConsentResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // GetDeletionPreview invokes getDeletionPreview operation.
 //
 // Preview what deleting the calling account will erase, unlink, and block on.
@@ -2754,6 +2866,107 @@ func (c *Client) sendGetOrg(ctx context.Context, params GetOrgParams) (res *Org,
 	defer body.Close()
 
 	result, err := decodeGetOrgResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// GetOrgContextSharingPolicy invokes getOrgContextSharingPolicy operation.
+//
+// Get organization context-sharing policy.
+//
+// GET /orgs/{orgId}/context-sharing
+func (c *Client) GetOrgContextSharingPolicy(ctx context.Context, params GetOrgContextSharingPolicyParams) (*OrgContextSharingPolicy, error) {
+	res, err := c.sendGetOrgContextSharingPolicy(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendGetOrgContextSharingPolicy(ctx context.Context, params GetOrgContextSharingPolicyParams) (res *OrgContextSharingPolicy, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/orgs/"
+	{
+		// Encode "orgId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "orgId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.OrgId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/context-sharing"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, GetOrgContextSharingPolicyOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, GetOrgContextSharingPolicyOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeGetOrgContextSharingPolicyResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -6470,6 +6683,195 @@ func (c *Client) sendPatchRepoCIWebhook(ctx context.Context, request *PatchRepoC
 	return result, nil
 }
 
+// PutContextSharingConsent invokes putContextSharingConsent operation.
+//
+// Update cross-repository context consent.
+//
+// PUT /me/context-sharing
+func (c *Client) PutContextSharingConsent(ctx context.Context, request *PutContextSharingConsentInputBody) (*ContextSharingConsent, error) {
+	res, err := c.sendPutContextSharingConsent(ctx, request)
+	return res, err
+}
+
+func (c *Client) sendPutContextSharingConsent(ctx context.Context, request *PutContextSharingConsentInputBody) (res *ContextSharingConsent, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/me/context-sharing"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "PUT", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodePutContextSharingConsentRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, PutContextSharingConsentOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, PutContextSharingConsentOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodePutContextSharingConsentResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// PutOrgContextSharingPolicy invokes putOrgContextSharingPolicy operation.
+//
+// Update organization context-sharing policy.
+//
+// PUT /orgs/{orgId}/context-sharing
+func (c *Client) PutOrgContextSharingPolicy(ctx context.Context, request *PutOrgContextSharingPolicyInputBody, params PutOrgContextSharingPolicyParams) (*OrgContextSharingPolicy, error) {
+	res, err := c.sendPutOrgContextSharingPolicy(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendPutOrgContextSharingPolicy(ctx context.Context, request *PutOrgContextSharingPolicyInputBody, params PutOrgContextSharingPolicyParams) (res *OrgContextSharingPolicy, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/orgs/"
+	{
+		// Encode "orgId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "orgId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.OrgId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/context-sharing"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "PUT", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodePutOrgContextSharingPolicyRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, PutOrgContextSharingPolicyOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, PutOrgContextSharingPolicyOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodePutOrgContextSharingPolicyResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // RemoveOrgMember invokes removeOrgMember operation.
 //
 // Remove a member from an organization.
@@ -6601,6 +7003,91 @@ func (c *Client) sendRemoveOrgMember(ctx context.Context, params RemoveOrgMember
 	defer body.Close()
 
 	result, err := decodeRemoveOrgMemberResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ResolveContextSharingScope invokes resolveContextSharingScope operation.
+//
+// Resolve authorized context source placements.
+//
+// POST /me/context-sharing/scope
+func (c *Client) ResolveContextSharingScope(ctx context.Context, request *ResolveContextSharingScopeInputBody) (*ResolveContextSharingScopeOutputBody, error) {
+	res, err := c.sendResolveContextSharingScope(ctx, request)
+	return res, err
+}
+
+func (c *Client) sendResolveContextSharingScope(ctx context.Context, request *ResolveContextSharingScopeInputBody) (res *ResolveContextSharingScopeOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/me/context-sharing/scope"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeResolveContextSharingScopeRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ResolveContextSharingScopeOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ResolveContextSharingScopeOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeResolveContextSharingScopeResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

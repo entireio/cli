@@ -146,6 +146,15 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	// rather than assumed, so a future mutating child cannot inherit the claim.
 	"tokens profile": {agentHelpAudienceReadOnly, false},
 
+	// Context is mixed: querying and inspection are read-only, while consent
+	// changes remain explicitly user-owned.
+	"context":         {agentHelpAudienceTaskDriven, false},
+	"context query":   {agentHelpAudienceReadOnly, false},
+	"context inspect": {agentHelpAudienceReadOnly, false},
+	"context status":  {agentHelpAudienceReadOnly, false},
+	"context enable":  {agentHelpAudienceUserOwned, false},
+	"context disable": {agentHelpAudienceUserOwned, false},
+
 	// api is deliberately UNLISTED. It is an escape hatch: the right tool when
 	// you are developing against Entire's own APIs, or when no first-class
 	// command covers what you need — not during ordinary work in a repo that has

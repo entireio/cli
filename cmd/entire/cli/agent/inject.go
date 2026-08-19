@@ -11,6 +11,10 @@ import (
 // nothing to inject.
 type ContextInjection struct {
 	Text string
+
+	// BaseText is the hook's existing model-facing content. It is used only by
+	// replacement-style transports, which must include it in their response.
+	BaseText string
 }
 
 // ContextInjector is implemented by agents that can place additional context

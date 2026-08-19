@@ -22,8 +22,8 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
-	if count != 8 {
-		t.Errorf("InstallHooks() count = %d, want 8", count)
+	if count != 9 {
+		t.Errorf("InstallHooks() count = %d, want 9", count)
 	}
 
 	hooksFile := readHooksFile(t, tempDir)
@@ -31,6 +31,9 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	// Verify all hooks are present
 	if len(hooksFile.Hooks.UserPromptSubmitted) != 1 {
 		t.Errorf("UserPromptSubmitted hooks = %d, want 1", len(hooksFile.Hooks.UserPromptSubmitted))
+	}
+	if len(hooksFile.Hooks.UserPromptTransformed) != 1 {
+		t.Errorf("UserPromptTransformed hooks = %d, want 1", len(hooksFile.Hooks.UserPromptTransformed))
 	}
 	if len(hooksFile.Hooks.SessionStart) != 1 {
 		t.Errorf("SessionStart hooks = %d, want 1", len(hooksFile.Hooks.SessionStart))
@@ -61,6 +64,7 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 
 	// Verify commands use bash field and type is "command"
 	assertEntryBash(t, hooksFile.Hooks.UserPromptSubmitted, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli user-prompt-submitted"))
+	assertEntryBash(t, hooksFile.Hooks.UserPromptTransformed, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli user-prompt-transformed"))
 	assertEntryBash(t, hooksFile.Hooks.SessionStart, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli session-start"))
 	assertEntryBash(t, hooksFile.Hooks.AgentStop, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli agent-stop"))
 	assertEntryBash(t, hooksFile.Hooks.SessionEnd, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli session-end"))
@@ -87,8 +91,8 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
-	if count1 != 8 {
-		t.Errorf("first InstallHooks() count = %d, want 8", count1)
+	if count1 != 9 {
+		t.Errorf("first InstallHooks() count = %d, want 9", count1)
 	}
 
 	// Second install
@@ -189,8 +193,8 @@ func TestInstallHooks_ForceReinstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("force InstallHooks() error = %v", err)
 	}
-	if count != 8 {
-		t.Errorf("force InstallHooks() count = %d, want 8", count)
+	if count != 9 {
+		t.Errorf("force InstallHooks() count = %d, want 9", count)
 	}
 
 	// Verify no duplicates
@@ -274,8 +278,8 @@ func TestInstallHooks_PreservesUnknownFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
-	if count != 8 {
-		t.Errorf("InstallHooks() count = %d, want 8", count)
+	if count != 9 {
+		t.Errorf("InstallHooks() count = %d, want 9", count)
 	}
 
 	// Read the raw JSON to verify unknown fields are preserved

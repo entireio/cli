@@ -24,10 +24,12 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 	// path (relative to the group root) -> honors --json.
 	want := map[string]bool{
 		// org
-		"org create": true,
-		"org list":   true,
-		"org get":    true,
-		"org delete": false,
+		"org create":              true,
+		"org list":                true,
+		"org get":                 true,
+		"org delete":              false,
+		"org context-sharing get": true,
+		"org context-sharing set": true,
 		// project
 		"project create": true,
 		"project list":   true,

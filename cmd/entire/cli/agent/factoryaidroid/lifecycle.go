@@ -22,8 +22,27 @@ var (
 	_ agent.SubagentAwareExtractor  = (*FactoryAIDroidAgent)(nil)
 	_ agent.SubagentSessionResolver = (*FactoryAIDroidAgent)(nil)
 	_ agent.HookResponseWriter      = (*FactoryAIDroidAgent)(nil)
+	_ agent.ContextInjector         = (*FactoryAIDroidAgent)(nil)
 	_ agent.PromptExtractor         = (*FactoryAIDroidAgent)(nil)
 )
+
+// InjectionEvent reports that Factory Droid accepts additional model context
+// in the UserPromptSubmit hook response.
+func (f *FactoryAIDroidAgent) InjectionEvent() agent.EventType { return agent.TurnStart }
+
+// RenderContextInjection renders Droid's native UserPromptSubmit response.
+func (f *FactoryAIDroidAgent) RenderContextInjection(inj agent.ContextInjection) ([]byte, error) {
+	if strings.TrimSpace(inj.Text) == "" {
+		return nil, nil
+	}
+	out, err := json.Marshal(struct {
+		AdditionalContext string `json:"additionalContext"`
+	}{AdditionalContext: inj.Text})
+	if err != nil {
+		return nil, fmt.Errorf("render Factory Droid context injection: %w", err)
+	}
+	return append(out, '\n'), nil
+}
 
 // WriteHookResponse outputs the hook response as plain text to stdout.
 // Factory AI Droid does not parse the JSON systemMessage protocol,

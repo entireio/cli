@@ -112,6 +112,34 @@ func TestSanitizeTranscriptForStorage_NilReturnFailsSafe(t *testing.T) {
 	}
 }
 
+func TestSanitizeTranscriptForStorage_StripsEntireContextBlocks(t *testing.T) {
+	t.Parallel()
+
+	in := []byte("before <entire-context>untrusted evidence</entire-context> after\n" +
+		`{"message":"keep \u003centire-context\u003esecret\u003c/entire-context\u003e tail"}`)
+	got := SanitizeTranscriptForStorage(&mockBaseAgent{}, in)
+
+	if bytes.Contains(got, []byte("untrusted evidence")) || bytes.Contains(got, []byte("secret")) {
+		t.Fatalf("stored transcript retained injected context: %q", got)
+	}
+	if !bytes.Contains(got, []byte("before  after")) || !bytes.Contains(got, []byte("keep ")) || !bytes.Contains(got, []byte(" tail")) {
+		t.Fatalf("stored transcript lost surrounding content: %q", got)
+	}
+}
+
+func TestSanitizeTranscriptForStorage_PreservesUnmatchedContextOpener(t *testing.T) {
+	t.Parallel()
+
+	in := []byte("{\"type\":\"user\",\"message\":\"literal <entire-context> text\"}\n" +
+		"{\"type\":\"assistant\",\"message\":\"later record must survive\"}\n")
+
+	got := SanitizeTranscriptForStorage(&mockBaseAgent{}, in)
+
+	if !bytes.Equal(got, in) {
+		t.Fatalf("unmatched marker changed stored transcript:\n got=%q\nwant=%q", got, in)
+	}
+}
+
 func TestAsTranscriptSanitizer(t *testing.T) {
 	t.Parallel()
 

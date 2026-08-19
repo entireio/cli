@@ -14,14 +14,15 @@ type CopilotHooksFile struct {
 //
 
 type CopilotHooks struct {
-	UserPromptSubmitted []CopilotHookEntry `json:"userPromptSubmitted,omitempty"`
-	SessionStart        []CopilotHookEntry `json:"sessionStart,omitempty"`
-	AgentStop           []CopilotHookEntry `json:"agentStop,omitempty"`
-	SessionEnd          []CopilotHookEntry `json:"sessionEnd,omitempty"`
-	SubagentStop        []CopilotHookEntry `json:"subagentStop,omitempty"`
-	PreToolUse          []CopilotHookEntry `json:"preToolUse,omitempty"`
-	PostToolUse         []CopilotHookEntry `json:"postToolUse,omitempty"`
-	ErrorOccurred       []CopilotHookEntry `json:"errorOccurred,omitempty"`
+	UserPromptSubmitted   []CopilotHookEntry `json:"userPromptSubmitted,omitempty"`
+	UserPromptTransformed []CopilotHookEntry `json:"userPromptTransformed,omitempty"`
+	SessionStart          []CopilotHookEntry `json:"sessionStart,omitempty"`
+	AgentStop             []CopilotHookEntry `json:"agentStop,omitempty"`
+	SessionEnd            []CopilotHookEntry `json:"sessionEnd,omitempty"`
+	SubagentStop          []CopilotHookEntry `json:"subagentStop,omitempty"`
+	PreToolUse            []CopilotHookEntry `json:"preToolUse,omitempty"`
+	PostToolUse           []CopilotHookEntry `json:"postToolUse,omitempty"`
+	ErrorOccurred         []CopilotHookEntry `json:"errorOccurred,omitempty"`
 }
 
 // CopilotHookEntry represents a single hook command.

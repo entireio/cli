@@ -288,6 +288,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 			logging.Warn(logCtx, "failed to normalize Gemini transcript, storing raw", "error", normErr)
 		}
 	}
+	storedTranscript = agent.SanitizeTranscriptForStorage(ag, storedTranscript)
 
 	meta := extractTranscriptMetadataForAgent(ag, transcriptPath, transcriptData)
 	warnEmptyTranscriptMetadata(errW, ag.Name(), meta, opts)

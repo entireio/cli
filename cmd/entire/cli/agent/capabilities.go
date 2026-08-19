@@ -1,5 +1,7 @@
 package agent
 
+import "bytes"
+
 // CapabilityDeclarer is implemented by agents that declare their capabilities
 // at registration time (e.g., external plugin agents). The As* helper functions
 // below use this interface to gate capability access: an agent must both implement
@@ -106,26 +108,43 @@ func AsTranscriptSanitizer(ag Agent) (TranscriptSanitizer, bool) {
 	return builtinCapability[TranscriptSanitizer](ag)
 }
 
-// SanitizeTranscriptForStorage applies the agent's storage sanitizer when it has one
-// and returns data unchanged otherwise. Every path that stores a transcript copy
-// should call this BEFORE redaction — see TranscriptSanitizer for why. A no-op for
-// agents without the capability and idempotent for those with it, so it is safe to
-// call on any transcript from any path.
+// SanitizeTranscriptForStorage applies the agent's storage sanitizer when it has
+// one, then removes Entire-injected context from the copy. Every path that stores
+// a transcript copy should call this BEFORE redaction — see TranscriptSanitizer
+// for why. The agent's native transcript is never modified.
 func SanitizeTranscriptForStorage(ag Agent, data []byte) []byte {
 	if len(data) == 0 {
 		return data
 	}
+	sanitized := data
 	s, ok := AsTranscriptSanitizer(ag)
-	if !ok {
-		return data
+	if ok {
+		candidate := s.SanitizeTranscriptForStorage(data)
+		if candidate != nil {
+			sanitized = candidate
+		}
 	}
-	sanitized := s.SanitizeTranscriptForStorage(data)
-	if sanitized == nil {
-		// Defensive: the interface forbids this, but a nil return would silently
-		// drop the whole session. Prefer the unsanitized transcript over none.
-		return data
+	return stripDelimitedBlocks(sanitized, []byte("<entire-context>"), []byte("</entire-context>"),
+		[]byte(`\u003centire-context\u003e`), []byte(`\u003c/entire-context\u003e`))
+}
+
+func stripDelimitedBlocks(data, start, end, escapedStart, escapedEnd []byte) []byte {
+	strip := func(input, open, closeMarker []byte) []byte {
+		out := append([]byte(nil), input...)
+		for {
+			startIndex := bytes.Index(out, open)
+			if startIndex < 0 {
+				return out
+			}
+			endOffset := bytes.Index(out[startIndex+len(open):], closeMarker)
+			if endOffset < 0 {
+				return out
+			}
+			endIndex := startIndex + len(open) + endOffset + len(closeMarker)
+			out = append(out[:startIndex], out[endIndex:]...)
+		}
 	}
-	return sanitized
+	return strip(strip(data, start, end), escapedStart, escapedEnd)
 }
 
 // AsTokenCalculator returns the agent as TokenCalculator if it both
