@@ -51,3 +51,8 @@ type SessionChange struct {
 // contract can reference it without importing the full agent package. The
 // alias keeps existing agent.TokenUsage references working.
 type TokenUsage = types.TokenUsage
+
+// ModelUsage pairs a model identifier with its token usage. Like TokenUsage it
+// lives in the leaf agent/types package; the alias lets agent-package callers
+// reference agent.ModelUsage.
+type ModelUsage = types.ModelUsage

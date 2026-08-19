@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/pricing"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/spf13/cobra"
 )
@@ -27,13 +29,15 @@ type sessionTokensReport struct {
 }
 
 type sessionTokensUsage struct {
-	Total         int `json:"total"`
-	Input         int `json:"input"`
-	CacheRead     int `json:"cache_read"`
-	CacheWrite    int `json:"cache_write"`
-	Output        int `json:"output"`
-	APICalls      int `json:"api_calls"`
-	SubagentTotal int `json:"subagent_total,omitempty"`
+	Total         int      `json:"total"`
+	Input         int      `json:"input"`
+	CacheRead     int      `json:"cache_read"`
+	CacheWrite    int      `json:"cache_write"`
+	Output        int      `json:"output"`
+	APICalls      int      `json:"api_calls"`
+	SubagentTotal int      `json:"subagent_total,omitempty"`
+	CostUSD       *float64 `json:"cost_usd,omitempty"`
+	CostSource    string   `json:"cost_source,omitempty"`
 }
 
 type sessionTokensContext struct {
@@ -142,7 +146,7 @@ func runSessionTokens(ctx context.Context, cmd *cobra.Command, sessionID string,
 		return NewSilentError(fmt.Errorf("session not found: %s", sessionID))
 	}
 
-	report := buildSessionTokensReport(state, sessionPhaseLabel(state))
+	report := buildSessionTokensReport(state, sessionPhaseLabel(state), loadDisplayPricingTable(ctx))
 	if jsonOutput {
 		return printJSON(cmd.OutOrStdout(), report)
 	}
@@ -168,7 +172,7 @@ func tokenCommandError(err error) error {
 	return err
 }
 
-func buildSessionTokensReport(state *strategy.SessionState, status string) sessionTokensReport {
+func buildSessionTokensReport(state *strategy.SessionState, status string, table *pricing.Table) sessionTokensReport {
 	agentLabel := string(state.AgentType)
 	if agentLabel == "" {
 		agentLabel = unknownPlaceholder
@@ -184,6 +188,16 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 
 	if tokens := buildSessionTokensUsage(state.TokenUsage); tokens != nil {
 		report.Tokens = tokens
+		// Estimate cost from the SESSION-WIDE flat usage (state.TokenUsage) — the
+		// same scope as the displayed token total. state.ModelUsage is deliberately
+		// NOT passed: it is CHECKPOINT-scoped (reset at every condensation, see
+		// session.State.ModelUsage), so pricing it while the displayed total is the
+		// whole session would silently understate cost after any condensation.
+		// Session state carries no session-cumulative per-model breakdown, so the
+		// flat total (EstimateCost flattens the subagent subtree into it, matching
+		// totalTokens) is the only scope-consistent basis; it is priced under the
+		// session's current model as an explicit local estimate.
+		applyLocalCostEstimate(tokens, state.TokenUsage, nil, state.ModelName, table)
 		if tokens.SubagentTotal > 0 {
 			report.Contributors = append(report.Contributors, sessionTokensContributor{
 				Kind:       "subagents",
@@ -240,6 +254,13 @@ func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {
 	if total == 0 && usage.APICallCount == 0 {
 		return nil
 	}
+	// Cost is intentionally NOT copied from usage here — this function is
+	// shared by the live session-state path (no stored cost exists yet) and
+	// the committed-checkpoint path (a stored spend-time cost may exist).
+	// Callers set it afterward: the checkpoint path prefers usage's persisted
+	// cost (applyCheckpointCost), falling back to a local estimate only when
+	// none was persisted; the live-session path always applies a local
+	// estimate (applyLocalCostEstimate), since it genuinely has none yet.
 	return &sessionTokensUsage{
 		Total:         total,
 		Input:         usage.InputTokens,
@@ -249,6 +270,34 @@ func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {
 		APICalls:      usage.APICallCount,
 		SubagentTotal: totalTokens(usage.SubagentTokens),
 	}
+}
+
+// loadDisplayPricingTable returns the pricing table the token commands use to
+// compute a LOCAL cost estimate for display, or nil when estimation is disabled
+// (so no cost is shown). Never fails: on load error the table is nil.
+func loadDisplayPricingTable(ctx context.Context) *pricing.Table {
+	table, disableEstimation := LoadPricingTable(ctx)
+	if disableEstimation {
+		return nil
+	}
+	return table
+}
+
+// applyLocalCostEstimate sets a rendered usage's cost to a LOCAL, on-the-fly
+// estimate computed from its token breakdown at current rates (see
+// costSourceSuffix / localCostEstimateNote for the labeling). Used directly for
+// live, not-yet-checkpointed session state, which genuinely has no stored cost
+// yet; applyCheckpointCost uses it only as the fallback for a checkpoint that
+// carries no persisted cost. The persisted spend-time cost in checkpoint
+// metadata is never modified — this is display only. A nil result (nothing
+// priceable) leaves the cost unset so no cost line renders.
+func applyLocalCostEstimate(tokens *sessionTokensUsage, usage *agent.TokenUsage, models []types.ModelUsage, fallbackModel string, table *pricing.Table) {
+	if tokens == nil {
+		return
+	}
+	cost, source := agent.EstimateCost(usage, models, fallbackModel, table)
+	tokens.CostUSD = cost
+	tokens.CostSource = source
 }
 
 func topLevelSessionTokenTotal(tokens *sessionTokensUsage) int {
@@ -410,6 +459,82 @@ func formatPercent(percent float64) string {
 	return formatted + "%"
 }
 
+// localCostEstimateNote explains that a rendered cost is a CLI-side estimate at
+// today's rates, recomputed from the token breakdown, for usage that carries no
+// persisted spend-time cost yet (live session state, or a checkpoint written
+// before cost persistence existed). It does not print for a checkpoint's
+// persisted (CostSourceReported) cost — writeTokenCostLine gates on that — since
+// the platform now stores the CLI-reported figure rather than computing its own.
+const localCostEstimateNote = "Cost is a local estimate at current rates for usage that has no persisted spend-time cost yet."
+
+// formatCostUSD renders a locally-estimated cost for display. The value is a
+// current-rate estimate the token command recomputed from the token breakdown,
+// not the spend-time cost stored on the checkpoint.
+//
+//   - v == nil        -> "" (unknown/unpriceable cost: caller omits the line, never $0.00)
+//   - 0 < v < $0.005  -> "<$0.01" (sub-cent, would round to $0.00)
+//   - otherwise       -> "$X.XX" (2dp)
+//
+// A non-empty source appends a provenance suffix: " (estimated locally)", or
+// " (estimated locally, partial)" when only some tokens were priceable. An
+// empty/unknown source adds no suffix.
+func formatCostUSD(v *float64, source string) string {
+	if v == nil {
+		return ""
+	}
+	out := formatCostAmount(*v)
+	if suffix := costSourceSuffix(source); suffix != "" {
+		out += " " + suffix
+	}
+	return out
+}
+
+// formatCostAmount formats a bare dollar amount ("$X.XX"), collapsing a positive
+// sub-cent value to "<$0.01" so it never displays as "$0.00".
+func formatCostAmount(v float64) string {
+	if v > 0 && v < 0.005 {
+		return "<$0.01"
+	}
+	return fmt.Sprintf("$%.2f", v)
+}
+
+// costSourceSuffix maps a CostSource provenance to its parenthetical display
+// suffix. Displayed cost is always recomputed locally, so the estimated/mixed
+// cases say so explicitly; an empty/unknown source yields "".
+func costSourceSuffix(source string) string {
+	switch source {
+	case types.CostSourceReported:
+		return "(reported)"
+	case types.CostSourceEstimated:
+		return "(estimated locally)"
+	case types.CostSourceMixed:
+		return "(estimated locally, partial)"
+	default:
+		return ""
+	}
+}
+
+// writeTokenCostLine emits the "Cost:" line inside a token usage block when a
+// cost is known. Shared by the session and checkpoint text writers. A nil usage
+// or nil cost prints nothing (unknown cost is never rendered as $0.00).
+//
+// localCostEstimateNote prints only when the cost is actually a local estimate
+// (CostSourceEstimated/Mixed, or an unlabeled source). A CostSourceReported
+// cost is the checkpoint's persisted spend-time value, already labeled
+// "(reported)" by formatCostUSD — appending a note about local estimation
+// there would be false.
+func writeTokenCostLine(w io.Writer, tokens *sessionTokensUsage) {
+	if tokens == nil {
+		return
+	}
+	if line := formatCostUSD(tokens.CostUSD, tokens.CostSource); line != "" {
+		fmt.Fprintf(w, "Cost:  %s\n", line)
+		if tokens.CostSource != types.CostSourceReported {
+			fmt.Fprintf(w, "  %s\n", localCostEstimateNote)
+		}
+	}
+}
+
 func skillEventLabels(events []agent.SkillEvent) []string {
 	seen := make(map[string]struct{}, len(events))
 	labels := make([]string, 0, len(events))
@@ -444,6 +569,7 @@ func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 	fmt.Fprintf(w, "Status:  %s\n", report.Status)
 
 	writeTokenUsageSection(w, report.Tokens)
+	writeTokenCostLine(w, report.Tokens)
 	if len(report.Recommendations) > 0 {
 		writeTokenRecommendations(w, report.Recommendations)
 	}
@@ -475,15 +601,21 @@ func agentBriefUsageLine(tokens *sessionTokensUsage) string {
 	if tokens == nil {
 		return "Token usage: unavailable."
 	}
+	var line string
 	if tokens.CacheRead > 0 {
-		return fmt.Sprintf(
+		line = fmt.Sprintf(
 			"Token usage: %s total; %s cache/context replay; %s.",
 			formatTokenCount(tokens.Total),
 			formatPercent(tokenPercent(tokens.CacheRead, topLevelSessionTokenTotal(tokens))),
 			formatAPICalls(tokens.APICalls),
 		)
+	} else {
+		line = fmt.Sprintf("Token usage: %s total; %s.", formatTokenCount(tokens.Total), formatAPICalls(tokens.APICalls))
 	}
-	return fmt.Sprintf("Token usage: %s total; %s.", formatTokenCount(tokens.Total), formatAPICalls(tokens.APICalls))
+	if cost := formatCostUSD(tokens.CostUSD, tokens.CostSource); cost != "" {
+		line += " Cost: " + cost + "."
+	}
+	return line
 }
 
 func formatAPICalls(count int) string {

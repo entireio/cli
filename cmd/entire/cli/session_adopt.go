@@ -480,6 +480,7 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	adopted.LastCheckpointID = id.EmptyCheckpointID
 	adopted.LastCheckpointCommitHash = ""
 	adopted.CheckpointTokenUsage = nil
+	adopted.ModelUsage = nil
 	// Re-baseline the subagent cumulative for the fresh target-local window. The
 	// cloned TokenUsage carries the SOURCE session's full cumulative subagent
 	// total; without re-baselining here, the first post-adopt checkpoint would

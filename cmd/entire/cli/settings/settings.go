@@ -18,10 +18,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/pricing"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/redact"
 )
@@ -167,6 +169,10 @@ type EntireSettings struct {
 	// settings loader (DisallowUnknownFields) accepts a "checkpoints" key.
 	Checkpoints *CheckpointsConfig `json:"checkpoints,omitempty"`
 
+	// Pricing configures token-cost estimation: per-model rate overrides layered
+	// on top of the embedded defaults, plus a switch to disable estimation.
+	Pricing *PricingSettings `json:"pricing,omitempty"`
+
 	// Deprecated: no longer used. Exists to tolerate old settings files
 	// that still contain "strategy": "auto-commit" or similar.
 	Strategy string `json:"strategy,omitempty"`
@@ -281,6 +287,167 @@ type RedactionSettings struct {
 	// into the checkpoint's assets/ store (off by default). Restore re-injects
 	// them regardless of this flag.
 	ExternalizeImages bool `json:"externalize_images,omitempty"`
+}
+
+// PricingSettings configures token-cost estimation. Models are per-model rate
+// overrides layered on top of the embedded pricing defaults (an override whose
+// id matches a built-in entry replaces it; otherwise it is appended).
+// DisableEstimation, when true, turns off derived cost estimates entirely —
+// agent-reported costs still flow through, but unpriced usage keeps a nil cost
+// rather than an estimate.
+type PricingSettings struct {
+	Models            []pricing.ModelRate `json:"models,omitempty"`
+	DisableEstimation *bool               `json:"disable_estimation,omitempty"`
+	// CodexServiceTier opts a Codex session into a non-default pricing tier.
+	// "priority" prices Codex turns at the priority-tier premium via the
+	// model's "-priority" variant; empty (the default) prices at standard rates.
+	CodexServiceTier string `json:"codex_service_tier,omitempty"`
+	// Remote, when true, merges a locally cached remote pricing table (refreshed
+	// in the background, never fetched inline) on top of the embedded defaults
+	// and beneath any pricing.models overrides. Opt-in via a pointer so the
+	// default (nil/false) keeps estimation on embedded defaults + local
+	// overrides only, with no network activity.
+	Remote *bool `json:"remote,omitempty"`
+}
+
+// PricingOverrides returns the configured per-model rate overrides, or nil when
+// none are set.
+func (s *EntireSettings) PricingOverrides() []pricing.ModelRate {
+	if s == nil || s.Pricing == nil {
+		return nil
+	}
+	return s.Pricing.Models
+}
+
+// IsEstimationDisabled reports whether cost estimation is turned off. Defaults
+// to false (estimation enabled) when unset.
+func (s *EntireSettings) IsEstimationDisabled() bool {
+	if s == nil || s.Pricing == nil || s.Pricing.DisableEstimation == nil {
+		return false
+	}
+	return *s.Pricing.DisableEstimation
+}
+
+// CodexServiceTier returns the configured Codex pricing service tier (e.g.
+// "priority"), or "" when unset. It is nil-safe. Codex priority-tier turns bill
+// at a premium that is priced via a "-priority" model variant; the default
+// empty tier prices at standard rates.
+func (s *EntireSettings) CodexServiceTier() string {
+	if s == nil || s.Pricing == nil {
+		return ""
+	}
+	return s.Pricing.CodexServiceTier
+}
+
+// codexAgentType mirrors agent.AgentTypeCodex. The settings package cannot
+// import the agent package (the agent plugin tree transitively imports settings),
+// so the Codex display-name value is duplicated here. It must stay in sync with
+// agent.AgentTypeCodex — the value is stored in metadata/trailers and is stable.
+const codexAgentType types.AgentType = "Codex"
+
+// PricingModelForAgent maps a turn's model to the id it should be priced under,
+// applying this session's opt-in service tier. A Codex session whose
+// pricing.codex_service_tier is "priority" bills at a premium the pricing table
+// carries as a "-priority" model variant; every other agent or tier prices under
+// the model unchanged. An empty model, or a model already ending in "-priority",
+// is returned as-is so the id never double-suffixes.
+//
+// The returned id is a pricing-lookup concern only: callers keep the STORED model
+// name (state.ModelName / checkpoint metadata) raw and apply this solely at the
+// point of pricing so both turn-end and condensation price the same tier.
+func (s *EntireSettings) PricingModelForAgent(agentType types.AgentType, model string) string {
+	if model == "" {
+		return model
+	}
+	if agentType == codexAgentType && strings.EqualFold(s.CodexServiceTier(), "priority") && !strings.HasSuffix(model, "-priority") {
+		return model + "-priority"
+	}
+	return model
+}
+
+// PricingModelForAgent loads settings and applies the service-tier suffix via the
+// EntireSettings method of the same name. Non-Codex agents short-circuit before
+// any settings load, preserving the "only Codex reads settings" property on the
+// pricing path. A settings-load failure returns the model unchanged, matching the
+// estimation defaults so a load error can never silently switch pricing tiers.
+func PricingModelForAgent(ctx context.Context, agentType types.AgentType, model string) string {
+	if model == "" || agentType != codexAgentType {
+		return model
+	}
+	s, err := Load(ctx)
+	if err != nil {
+		return model
+	}
+	return s.PricingModelForAgent(agentType, model)
+}
+
+// IsRemoteEnabled reports whether remote pricing merging is enabled. It is
+// nil-safe and defaults to false (embedded defaults + local overrides only, no
+// network activity) when the setting is unset.
+func (s *EntireSettings) IsRemoteEnabled() bool {
+	if s == nil || s.Pricing == nil || s.Pricing.Remote == nil {
+		return false
+	}
+	return *s.Pricing.Remote
+}
+
+// IsRemoteEnabled loads settings and reports whether remote pricing merging is
+// enabled. A settings-load failure returns false, matching the opt-in default so
+// a load error can never switch the background network refresh on.
+func IsRemoteEnabled(ctx context.Context) bool {
+	s, err := Load(ctx)
+	if err != nil {
+		return false
+	}
+	return s.IsRemoteEnabled()
+}
+
+// LoadPricingTable builds the model pricing table from settings — the embedded
+// defaults with any configured pricing.models overrides layered on top — and
+// reports whether cost estimation is disabled. It never fails the caller: a
+// settings-load or table-build error is logged and yields a nil table, which
+// callers treat as "cost unavailable" (they must never fail a hook path over
+// missing pricing).
+func LoadPricingTable(ctx context.Context) (*pricing.Table, bool) {
+	s, err := Load(ctx)
+	if err != nil {
+		logging.Debug(ctx, "pricing: settings load failed; cost estimation unavailable",
+			slog.String("error", err.Error()))
+		return nil, false
+	}
+	disable := s.IsEstimationDisabled()
+
+	// Remote entries (opt-in) sit beneath the user's pricing.models: append the
+	// cached remote table first, then the user overrides, so LoadTable's
+	// last-writer-wins keeps a user override authoritative over the same id from
+	// the remote table, which in turn overrides the embedded default.
+	//
+	// Validate the user overrides per-entry and drop only the invalid ones
+	// (mirroring LoadRemoteEntries): a single malformed pricing.models entry must
+	// not make LoadTable hard-error and disable cost estimation for the whole
+	// table.
+	overrides := pricing.ValidOverrides(ctx, s.PricingOverrides())
+	if s.IsRemoteEnabled() {
+		remote := pricing.LoadRemoteEntries(ctx)
+		fetchedAt := pricing.RemoteFetchedAt()
+		var staleness time.Duration
+		if !fetchedAt.IsZero() {
+			staleness = time.Since(fetchedAt)
+		}
+		logging.Debug(ctx, "pricing: merging remote pricing entries",
+			slog.Int("remote_entries", len(remote)),
+			slog.Time("fetched_at", fetchedAt),
+			slog.Duration("staleness", staleness))
+		overrides = append(remote, overrides...)
+	}
+
+	table, err := pricing.LoadTable(overrides)
+	if err != nil {
+		logging.Warn(ctx, "pricing: table load failed; cost estimation unavailable",
+			slog.String("error", err.Error()))
+		return nil, disable
+	}
+	return table, disable
 }
 
 // PIISettings configures PII detection categories.
@@ -1000,6 +1167,55 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		return err
 	}
 
+	// Merge pricing sub-fields if present (field-level, not wholesale replace).
+	if pricingRaw, ok := raw["pricing"]; ok {
+		if settings.Pricing == nil {
+			settings.Pricing = &PricingSettings{}
+		}
+		if err := mergePricing(settings.Pricing, pricingRaw); err != nil {
+			return fmt.Errorf("parsing pricing field: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// mergePricing merges pricing overrides into existing PricingSettings. Only
+// fields present in the override JSON are applied; models are replaced wholesale
+// so a local override file fully controls the override set.
+func mergePricing(dst *PricingSettings, data json.RawMessage) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parsing pricing: %w", err)
+	}
+	if modelsRaw, ok := raw["models"]; ok {
+		var models []pricing.ModelRate
+		if err := unmarshalField("pricing.models", modelsRaw, &models); err != nil {
+			return err
+		}
+		dst.Models = models
+	}
+	if disableRaw, ok := raw["disable_estimation"]; ok {
+		var b bool
+		if err := unmarshalField("pricing.disable_estimation", disableRaw, &b); err != nil {
+			return err
+		}
+		dst.DisableEstimation = &b
+	}
+	if tierRaw, ok := raw["codex_service_tier"]; ok {
+		var tier string
+		if err := unmarshalField("pricing.codex_service_tier", tierRaw, &tier); err != nil {
+			return err
+		}
+		dst.CodexServiceTier = tier
+	}
+	if remoteRaw, ok := raw["remote"]; ok {
+		var b bool
+		if err := unmarshalField("pricing.remote", remoteRaw, &b); err != nil {
+			return err
+		}
+		dst.Remote = &b
+	}
 	return nil
 }
 

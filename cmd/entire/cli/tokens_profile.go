@@ -7,8 +7,10 @@ import (
 	"io"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/pricing"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/spf13/cobra"
 )
@@ -19,9 +21,12 @@ type tokensProfileReport struct {
 	CheckpointsAvailable     int                           `json:"checkpoints_available"`
 	CheckpointsAnalyzed      int                           `json:"checkpoints_analyzed"`
 	CheckpointsWithTokenData int                           `json:"checkpoints_with_token_data"`
+	CheckpointsWithCostData  int                           `json:"checkpoints_with_cost_data,omitempty"`
 	MissingTokenData         int                           `json:"missing_token_data"`
 	MetadataReadWarnings     int                           `json:"metadata_read_warnings,omitempty"`
 	Tokens                   *sessionTokensUsage           `json:"tokens,omitempty"`
+	CostUSD                  *float64                      `json:"cost_usd,omitempty"`
+	CostSource               string                        `json:"cost_source,omitempty"`
 	Signals                  []tokensProfileSignal         `json:"signals,omitempty"`
 	Recommendations          []sessionTokensRecommendation `json:"recommendations,omitempty"`
 	Limitations              []string                      `json:"limitations,omitempty"`
@@ -57,17 +62,20 @@ func newTokensGroupCmd() *cobra.Command {
 		Long: `Analyze token usage across sessions and checkpoints.
 
 Commands:
-  profile  Aggregate token usage across committed checkpoints
+  profile          Aggregate token usage across committed checkpoints
+  pricing-refresh  Force-refresh the cached remote pricing table
 
 Examples:
   entire tokens profile
-  entire tokens profile --json`,
+  entire tokens profile --json
+  entire tokens pricing-refresh`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
 	}
 
 	cmd.AddCommand(newTokensProfileCmd())
+	cmd.AddCommand(newTokensPricingRefreshCmd())
 	return cmd
 }
 
@@ -123,7 +131,7 @@ func runTokensProfile(ctx context.Context, cmd *cobra.Command, jsonOutput bool, 
 		return fmt.Errorf("failed to list checkpoints: %w", err)
 	}
 
-	report, err := buildTokensProfileReport(ctx, store, infos, limit)
+	report, err := buildTokensProfileReport(ctx, store, infos, limit, loadDisplayPricingTable(ctx))
 	if err != nil {
 		return err
 	}
@@ -135,7 +143,7 @@ func runTokensProfile(ctx context.Context, cmd *cobra.Command, jsonOutput bool, 
 	return nil
 }
 
-func buildTokensProfileReport(ctx context.Context, store checkpoint.PersistentStore, infos []checkpoint.CheckpointInfo, limit int) (tokensProfileReport, error) {
+func buildTokensProfileReport(ctx context.Context, store checkpoint.PersistentStore, infos []checkpoint.CheckpointInfo, limit int, table *pricing.Table) (tokensProfileReport, error) {
 	checkpointsAvailable := len(infos)
 	infos = limitTokensProfileCheckpoints(infos, limit)
 	report := tokensProfileReport{
@@ -162,7 +170,7 @@ func buildTokensProfileReport(ctx context.Context, store checkpoint.PersistentSt
 			continue
 		}
 
-		usage, metadataReadWarning, err := tokensProfileCheckpointUsage(ctx, store, info.CheckpointID, summary)
+		usage, buckets, model, metadataReadWarning, err := tokensProfileCheckpointUsage(ctx, store, info.CheckpointID, summary)
 		if err != nil {
 			return tokensProfileReport{}, err
 		}
@@ -176,12 +184,36 @@ func buildTokensProfileReport(ctx context.Context, store checkpoint.PersistentSt
 			continue
 		}
 
+		// Prefer this checkpoint's persisted spend-time cost; only estimate at
+		// current rates when none was persisted (a checkpoint written before
+		// cost persistence existed). Re-estimating an already-costed
+		// checkpoint would drift the profile from both the stored value and
+		// what the platform shows for the same checkpoint the moment a rate
+		// changes. Stamped onto usage so addCheckpointTokenUsage folds the
+		// per-checkpoint cost into the aggregate total/source.
+		if usage != nil && usage.CostUSD == nil {
+			cost, source := agent.EstimateCost(usage, buckets, model, table)
+			usage.CostUSD = cost
+			usage.CostSource = source
+		}
+
 		report.CheckpointsWithTokenData++
+		if usage != nil && usage.CostUSD != nil {
+			report.CheckpointsWithCostData++
+		}
 		aggregate = addCheckpointTokenUsage(aggregate, usage)
 		addTokensProfileTokenSignals(signals, info.CheckpointID, tokens, report.CheckpointsAnalyzed)
 	}
 
 	report.Tokens = buildSessionTokensUsage(aggregate)
+	if report.Tokens != nil && aggregate != nil {
+		// buildSessionTokensUsage no longer carries cost; surface the folded
+		// local estimate from the aggregate directly.
+		report.Tokens.CostUSD = aggregate.CostUSD
+		report.Tokens.CostSource = aggregate.CostSource
+		report.CostUSD = aggregate.CostUSD
+		report.CostSource = aggregate.CostSource
+	}
 	report.Signals = orderedTokensProfileSignals(signals)
 	report.Recommendations = tokensProfileRecommendations(report)
 	report.Limitations = tokensProfileLimitations(report)
@@ -195,9 +227,9 @@ func limitTokensProfileCheckpoints(infos []checkpoint.CheckpointInfo, limit int)
 	return infos[:limit]
 }
 
-func tokensProfileCheckpointUsage(ctx context.Context, store checkpoint.PersistentStore, checkpointID id.CheckpointID, summary *checkpoint.CheckpointSummary) (*agent.TokenUsage, bool, error) {
+func tokensProfileCheckpointUsage(ctx context.Context, store checkpoint.PersistentStore, checkpointID id.CheckpointID, summary *checkpoint.CheckpointSummary) (*agent.TokenUsage, []types.ModelUsage, string, bool, error) {
 	if summary == nil {
-		return nil, false, nil
+		return nil, nil, "", false, nil
 	}
 
 	metas := make([]*checkpoint.Metadata, 0, len(summary.Sessions))
@@ -206,14 +238,28 @@ func tokensProfileCheckpointUsage(ctx context.Context, store checkpoint.Persiste
 		meta, err := store.ReadSessionMetadata(ctx, checkpointID, i)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, false, ctxErr //nolint:wrapcheck // Propagating context cancellation.
+				return nil, nil, "", false, ctxErr //nolint:wrapcheck // Propagating context cancellation.
 			}
 			metadataReadWarning = true
 			continue
 		}
 		metas = append(metas, meta)
 	}
-	return checkpointTokenUsage(summary, metas, metadataReadWarning), metadataReadWarning, nil
+	usage := checkpointTokenUsage(summary, metas, metadataReadWarning)
+	buckets := checkpointModelUsage(summary, metas, metadataReadWarning)
+	return usage, buckets, firstCheckpointModelName(metas), metadataReadWarning, nil
+}
+
+// firstCheckpointModelName returns the first non-empty model id across the
+// checkpoint's session metadata, used as the fallback pricing model when a
+// checkpoint carries no per-model buckets. Empty when no model is recorded.
+func firstCheckpointModelName(metas []*checkpoint.Metadata) string {
+	for _, meta := range metas {
+		if meta != nil && meta.Model != "" {
+			return meta.Model
+		}
+	}
+	return ""
 }
 
 func addTokensProfileTokenSignals(signals map[string]*tokensProfileSignal, checkpointID id.CheckpointID, tokens *sessionTokensUsage, denominator int) {
@@ -380,6 +426,14 @@ func writeTokensProfileText(w io.Writer, report tokensProfileReport) {
 	}
 
 	writeTokenUsageSectionWithTitle(w, "Checkpoint-observed token usage", report.Tokens)
+	if report.CostUSD != nil {
+		fmt.Fprintf(w, "Total cost: %s across %d of %d checkpoints\n",
+			formatCostUSD(report.CostUSD, report.CostSource),
+			report.CheckpointsWithCostData, report.CheckpointsAnalyzed)
+		if report.CostSource != types.CostSourceReported {
+			fmt.Fprintf(w, "  %s\n", localCostEstimateNote)
+		}
+	}
 	writeTokensProfileSignals(w, report.Signals)
 	if len(report.Recommendations) > 0 {
 		writeTokenRecommendations(w, report.Recommendations)

@@ -777,6 +777,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, // Deprecated: kept for backward compat
 		CompactTranscriptStart:      compactTranscriptStart,
 		TokenUsage:                  opts.TokenUsage,
+		ModelUsage:                  opts.ModelUsage,
 		SkillEventsVersion:          skillEventsVersion(opts.SkillEvents),
 		SkillEvents:                 opts.SkillEvents,
 		SessionMetrics:              opts.SessionMetrics,
@@ -813,7 +814,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 // writeCheckpointSummary writes the root-level CheckpointSummary with aggregated statistics.
 // sessions is the complete sessions array (already built by the caller).
 func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, entries map[string]object.TreeEntry, sessions []SessionFilePaths) error {
-	checkpointsCount, filesTouched, tokenUsage, err := s.reaggregateFromEntries(basePath, len(sessions), entries)
+	checkpointsCount, filesTouched, tokenUsage, modelUsage, err := s.reaggregateFromEntries(basePath, len(sessions), entries)
 	if err != nil {
 		return fmt.Errorf("failed to aggregate session stats: %w", err)
 	}
@@ -861,6 +862,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 		FilesTouched:        filesTouched,
 		Sessions:            sessions,
 		TokenUsage:          tokenUsage,
+		ModelUsage:          modelUsage,
 		CombinedAttribution: combinedAttribution,
 		HasReview:           hasReview,
 		HasInvestigation:    hasInvestigation,
@@ -953,28 +955,30 @@ func (s *treeWriter) findSessionIndex(ctx context.Context, basePath string, exis
 }
 
 // reaggregateFromEntries reads all session metadata from the entries map and
-// reaggregates CheckpointsCount, FilesTouched, and TokenUsage.
-func (s *treeWriter) reaggregateFromEntries(basePath string, sessionCount int, entries map[string]object.TreeEntry) (int, []string, *agent.TokenUsage, error) {
+// reaggregates CheckpointsCount, FilesTouched, TokenUsage, and per-model ModelUsage.
+func (s *treeWriter) reaggregateFromEntries(basePath string, sessionCount int, entries map[string]object.TreeEntry) (int, []string, *agent.TokenUsage, []types.ModelUsage, error) {
 	var totalCount int
 	var allFiles []string
 	var totalTokens *agent.TokenUsage
+	var totalModels []types.ModelUsage
 
 	for i := range sessionCount {
 		path := checkpointSubtreePath(basePath, strconv.Itoa(i), paths.MetadataFileName)
 		entry, exists := entries[path]
 		if !exists {
-			return 0, nil, nil, fmt.Errorf("session %d metadata not found at %s", i, path)
+			return 0, nil, nil, nil, fmt.Errorf("session %d metadata not found at %s", i, path)
 		}
 		meta, err := s.readMetadataFromBlob(entry.Hash)
 		if err != nil {
-			return 0, nil, nil, fmt.Errorf("failed to read session %d metadata: %w", i, err)
+			return 0, nil, nil, nil, fmt.Errorf("failed to read session %d metadata: %w", i, err)
 		}
 		totalCount += meta.CheckpointsCount
 		allFiles = mergeFilesTouched(allFiles, meta.FilesTouched)
-		totalTokens = types.AddTokenUsage(totalTokens, meta.TokenUsage)
+		totalTokens = aggregateTokenUsage(totalTokens, meta.TokenUsage)
+		totalModels = mergeModelUsage(totalModels, meta.ModelUsage)
 	}
 
-	return totalCount, allFiles, totalTokens, nil
+	return totalCount, allFiles, totalTokens, totalModels, nil
 }
 
 func checkpointCreatedAt(opts WriteOptions) time.Time {
@@ -1015,6 +1019,68 @@ func readJSONFromBlob[T any](repo *git.Repository, hash plumbing.Hash) (*T, erro
 // readSummaryFromBlob reads CheckpointSummary from a blob hash.
 func (s *treeWriter) readSummaryFromBlob(hash plumbing.Hash) (*CheckpointSummary, error) {
 	return readJSONFromBlob[CheckpointSummary](s.repo, hash)
+}
+
+// aggregateTokenUsage sums two TokenUsage structs.
+// Returns nil if both inputs are nil.
+//
+// CacheCreation1hTokens is summed with the rest: it is the subset of
+// CacheCreationTokens written with a 1-hour TTL, which pricing.Estimate bills at
+// 2x input instead of 1.25x, so dropping it makes any re-priced aggregate
+// silently undercount.
+func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
+	// Tokens (including the subagent chain) come from the shared summer; this
+	// wrapper exists only to layer cost on top, which AddTokenUsage does not
+	// carry. Summing the fields here instead would silently drop SubagentTokens
+	// and every committed checkpoint would report "subagent_tokens": null.
+	result := types.AddTokenUsage(a, b)
+	if result == nil {
+		return nil
+	}
+	var aCost, bCost *float64
+	if a != nil {
+		aCost = a.CostUSD
+	}
+	if b != nil {
+		bCost = b.CostUSD
+	}
+	result.CostUSD = types.AddCostUSD(aCost, bCost)
+	// MergeCostSourceUsages folds a priced side with an unpriced-but-token-bearing
+	// side to mixed, so a summary that combines a costed session with an
+	// uncosted token-bearing one reports partial coverage honestly.
+	result.CostSource = types.MergeCostSourceUsages(a, b)
+	return result
+}
+
+// mergeModelUsage merges two per-model usage lists keyed by model, summing token
+// counts and folding costs with the same AddCostUSD/MergeCostSource rules as
+// aggregateTokenUsage. The result is sorted by model for deterministic output.
+// Returns nil when both inputs are empty so the omitempty JSON tag drops the field.
+func mergeModelUsage(a, b []types.ModelUsage) []types.ModelUsage {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	byModel := make(map[string]*agent.TokenUsage, len(a)+len(b))
+	fold := func(list []types.ModelUsage) {
+		for i := range list {
+			usage := list[i].TokenUsage
+			byModel[list[i].Model] = aggregateTokenUsage(byModel[list[i].Model], &usage)
+		}
+	}
+	fold(a)
+	fold(b)
+
+	models := make([]string, 0, len(byModel))
+	for model := range byModel {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+
+	out := make([]types.ModelUsage, 0, len(models))
+	for _, model := range models {
+		out = append(out, types.ModelUsage{Model: model, TokenUsage: *byModel[model]})
+	}
+	return out
 }
 
 // SanitizeTranscriptForAgentType strips non-portable agent state from a transcript

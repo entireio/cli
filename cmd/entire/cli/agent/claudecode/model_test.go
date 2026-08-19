@@ -2,6 +2,9 @@ package claudecode
 
 import "testing"
 
+// modelOpus48 is the clean (non-tier-suffixed) model id these fixtures extract.
+const modelOpus48 = "claude-opus-4-8"
+
 func TestExtractModel_MostRecentAssistantMessageWins(t *testing.T) {
 	t.Parallel()
 	// message.model is the clean, hook-consistent identifier; the most recent
@@ -31,8 +34,8 @@ func TestExtractModel_SkipsSyntheticPlaceholder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExtractModel returned error: %v", err)
 	}
-	if model != "claude-opus-4-8" {
-		t.Errorf("expected last genuine model %q, got %q", "claude-opus-4-8", model)
+	if model != modelOpus48 {
+		t.Errorf("expected last genuine model %q, got %q", modelOpus48, model)
 	}
 }
 
@@ -106,7 +109,7 @@ func TestExtractModel_IgnoresMalformedLines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExtractModel returned error: %v", err)
 	}
-	if model != "claude-opus-4-8" {
-		t.Errorf("expected %q despite malformed line, got %q", "claude-opus-4-8", model)
+	if model != modelOpus48 {
+		t.Errorf("expected %q despite malformed line, got %q", modelOpus48, model)
 	}
 }

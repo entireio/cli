@@ -310,6 +310,9 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		// Contract: a zero CreatedAt means "use the current time".
 		createdAt = time.Now()
 	}
+	// TokenUsage is carried through as-is, cost included: every checkpoint
+	// backend persists the cost computed when the tokens were spent (see
+	// cp.Metadata.TokenUsage).
 	return cp.Metadata{
 		CheckpointID:                opts.CheckpointID,
 		SessionID:                   opts.SessionID,

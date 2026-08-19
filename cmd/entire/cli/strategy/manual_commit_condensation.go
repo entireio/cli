@@ -311,15 +311,19 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		sessionData.TokenUsage = withSubagentTokensFrom(sessionData.TokenUsage, state.CheckpointTokenUsage)
 	}
 
+	// Mirror the TokenUsage backfill for per-model usage: when the freshly-extracted
+	// transcript yields no per-model buckets (e.g. Cursor, whose usage arrives only
+	// via stop-hook payloads accumulated in state), fall back to the checkpoint-scoped
+	// per-model map so the checkpoint metadata still carries a per-model breakdown.
+	if !hasModelUsageData(sessionData.ModelUsage) && len(state.ModelUsage) > 0 {
+		sessionData.ModelUsage = sortedModelUsage(state.ModelUsage)
+	}
+
 	// Backfill the model from the transcript for agents that don't report it via
 	// hooks (e.g., Pi records message.model but its hook events carry no model
 	// field). Only fills when the model is otherwise unknown — hook-reported
 	// models take precedence.
-	if state.ModelName == "" {
-		if model := sessionStateBackfillModel(ctx, ag, sessionData.Transcript); model != "" {
-			state.ModelName = model
-		}
-	}
+	backfillModelAndReprice(ctx, ag, sessionData, state)
 
 	// Skip gate: if there is no transcript AND no files touched, there is nothing
 	// meaningful to condense. Return early to avoid writing metadata-only stubs.
@@ -415,6 +419,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
 		TokenUsage:                  sessionData.TokenUsage,
+		ModelUsage:                  sessionData.ModelUsage,
 		SkillEvents:                 skillEvents,
 		SessionMetrics:              buildSessionMetrics(state),
 		Attribution:                 attribution,
@@ -589,7 +594,7 @@ func (s *ManualCommitStrategy) extractOrCreateSessionData(ctx context.Context, r
 	case hasShadowBranch:
 		// Shadow branch exists (from SaveStep commits) — extract transcript and
 		// metadata from the branch tree, preferring the live transcript if fresher.
-		data, err := s.extractSessionData(ctx, repo, shadowHash, state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart, state.Phase.IsActive())
+		data, err := s.extractSessionData(ctx, repo, shadowHash, state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart, state.ModelName, state.Phase.IsActive())
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract session data: %w", err)
 		}
@@ -769,17 +774,156 @@ func hasTokenUsageData(usage *agent.TokenUsage) bool {
 	return hasTokenUsageData(usage.SubagentTokens)
 }
 
+// hasModelUsageData reports whether any per-model bucket carries real token data.
+// It mirrors hasTokenUsageData so the ModelUsage backfill triggers on exactly the
+// same "no usable data" condition (an empty slice, or buckets with only zero
+// counts, both fall back to the accumulated state map).
+func hasModelUsageData(buckets []agent.ModelUsage) bool {
+	for i := range buckets {
+		bucket := buckets[i].TokenUsage
+		if hasTokenUsageData(&bucket) {
+			return true
+		}
+	}
+	return false
+}
+
+// sessionDataUnpricedFromTranscript reports whether transcript-extracted usage
+// came out unpriced in a way that a just-recovered model can fix: the flat usage
+// carries data but no cost, or a bucket keyed under the empty model still holds
+// token data (the signature of a pricing pass that ran before the model was
+// known). It first requires the flat usage to carry data so the reprice never
+// fires in the state.ModelUsage mirror-fallback case — where the transcript
+// produced no usage and re-pricing would clobber the mirrored per-model buckets.
+func sessionDataUnpricedFromTranscript(d *ExtractedSessionData) bool {
+	if !hasTokenUsageData(d.TokenUsage) {
+		return false
+	}
+	if d.TokenUsage.CostUSD == nil {
+		return true
+	}
+	for i := range d.ModelUsage {
+		if d.ModelUsage[i].Model == "" {
+			bucket := d.ModelUsage[i].TokenUsage
+			if hasTokenUsageData(&bucket) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// tokenUsageWithCost computes token usage from a transcript slice and attributes
+// cost using the configured pricing table. It mirrors agent.CalculateTokenUsage's
+// nil-on-error contract (errors are debug-logged, never fatal to condensation)
+// and returns the per-model buckets alongside the flat usage. fallbackModel
+// prices agents that don't attribute usage per model; an empty value leaves such
+// usage unpriced (agents that implement ModelUsageCalculator, e.g. pi and gemini,
+// are priced from their own per-model buckets regardless). Condensation never
+// passes a subagents dir (see the TODOs at the call sites), so none is taken.
+//
+// agentType selects the pricing service tier: a Codex session opted into the
+// "priority" tier (pricing.codex_service_tier) prices the fallback bucket under
+// the model's "-priority" variant, matching the turn-end hook so a committed
+// checkpoint carries the same tier the turn was priced at. The suffix is a
+// pricing-lookup concern only — the stored model name stays raw.
+//
+// The accounted-subagent baseline is nil because it can only matter when a
+// subagents dir is supplied: with none, no SubagentAwareExtractor produces a
+// SubagentTokens subtree, so there is no cumulative snapshot to rescope and the
+// remainder bucket is already a pure main-agent shortfall. If this ever starts
+// passing a subagents dir, it must pass a baseline too (see the scoping contract
+// on agent.CalculateUsageWithCost).
+func tokenUsageWithCost(ctx context.Context, ag agent.Agent, transcript []byte, fromOffset int, fallbackModel string, agentType types.AgentType) (*agent.TokenUsage, []agent.ModelUsage) {
+	table, disableEstimation := settings.LoadPricingTable(ctx)
+	pricingModel := settings.PricingModelForAgent(ctx, agentType, fallbackModel)
+	usage, buckets, err := agent.CalculateUsageWithCost(ag, transcript, fromOffset, "", nil /* accountedSubagentTokens */, table, pricingModel, disableEstimation)
+	if err != nil {
+		logging.Debug(ctx, "failed usage-with-cost extraction",
+			slog.String("error", err.Error()))
+		return nil, nil
+	}
+	return usage, buckets
+}
+
+// backfillModelAndReprice recovers the model from the transcript for agents
+// that don't report it via hooks (e.g., Pi records message.model but its hook
+// events carry no model field) and re-prices the extracted usage with it. Only
+// fills when the model is otherwise unknown — hook-reported models take
+// precedence.
+//
+// The pricing pass in extractOrCreateSessionData ran while the model was still
+// unknown, so it used an empty fallbackModel and left the usage unpriced under
+// an empty-model bucket. Re-pricing the SAME extracted slice with the recovered
+// model is equivalent to the original pass (both extraction paths price from
+// state.CheckpointTranscriptStart with no subagents dir). The swap requires the
+// re-extraction to carry real tokens — a zero slice (e.g. a Pi fork abandoning
+// the branch that consumed the tokens) must not clobber usage restored from
+// checkpoint state. When the state total aliases the pre-reprice usage (Pi's
+// backfill returns the checkpoint usage as-is), it is repointed to the priced
+// copy so the session-state diagnostic matches the persisted checkpoint.
+//
+// Copilot CLI is a second, independent case: sessionStateBackfillTokenUsage (run
+// earlier, before this function) prices the full-session transcript with
+// whatever model was known at that point, so when the model was still unknown
+// state.TokenUsage ends up as its OWN unpriced usage — a distinct object from
+// sessionData.TokenUsage's checkpoint-scoped slice, so the alias check above
+// never fires for it. Reprice that full-session total too, guarded the same way
+// (recovered model, real token data required) so a zero-data recovery window can
+// never clobber a good value.
+func backfillModelAndReprice(ctx context.Context, ag agent.Agent, sessionData *ExtractedSessionData, state *SessionState) {
+	if state.ModelName != "" {
+		return
+	}
+	model := sessionStateBackfillModel(ctx, ag, sessionData.Transcript)
+	if model == "" {
+		return
+	}
+	state.ModelName = model
+
+	if state.AgentType == agent.AgentTypeCopilotCLI && state.TokenUsage != sessionData.TokenUsage &&
+		hasTokenUsageData(state.TokenUsage) && state.TokenUsage.CostUSD == nil {
+		fullUsage, _ := tokenUsageWithCost(ctx, ag, sessionData.Transcript, 0, state.ModelName, state.AgentType)
+		if hasTokenUsageData(fullUsage) {
+			// The reprice recomputes with subagentsDir="" and so drops the
+			// cumulative subagent total; carry it across, same as the backfill
+			// path does (finding 019f5ebf-a57e).
+			state.TokenUsage = withSubagentTokensFrom(fullUsage, state.TokenUsage)
+		}
+	}
+
+	if !sessionDataUnpricedFromTranscript(sessionData) {
+		return
+	}
+	usage, buckets := tokenUsageWithCost(ctx, ag, sessionData.Transcript, state.CheckpointTranscriptStart, state.ModelName, state.AgentType)
+	if !hasTokenUsageData(usage) {
+		return
+	}
+	// The reprice runs after CondenseSession has already refilled the subagent
+	// total that the subagentsDir="" recompute drops, and it replaces the whole
+	// value — so carry that total across or the committed checkpoint reports
+	// "subagent_tokens": null again.
+	priced := withSubagentTokensFrom(usage, sessionData.TokenUsage)
+	if state.TokenUsage == sessionData.TokenUsage {
+		state.TokenUsage = priced
+	}
+	sessionData.TokenUsage = priced
+	sessionData.ModelUsage = buckets
+}
+
 // withSubagentTokensFrom fills usage's SubagentTokens from src when usage has none
 // of its own, returning a copy. It exists because the transcript recompute runs
 // with subagentsDir="" and so always yields a nil SubagentTokens (see
 // extractSessionData), which would otherwise replace a total already computed.
 //
-// The caller picks the source, and the two callers deliberately pick differently:
+// The caller picks the source, and the callers deliberately pick differently:
 // condensation passes state.CheckpointTokenUsage (this window's total, already
 // rescoped by SaveStep, so committed checkpoints stay summable rather than each
 // re-reporting the session total), while applyBackfilledSessionTokenUsage passes
 // state.TokenUsage (the session-wide cumulative, which is what
 // resetCheckpointWindow must later snapshot as the next baseline).
+// backfillModelAndReprice passes whichever value it is about to replace, so a
+// reprice preserves the total the earlier fill established.
 //
 // Copies rather than mutates: applyBackfilledSessionTokenUsage can adopt the
 // checkpoint usage as state.TokenUsage (Copilot CLI), so mutating in place would
@@ -809,7 +953,7 @@ func withSubagentTokensFrom(usage, src *agent.TokenUsage) *agent.TokenUsage {
 // which copies so the cumulative is never mixed into checkpointUsage (the
 // checkpoint-scoped value written to metadata).
 func applyBackfilledSessionTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte, checkpointUsage *agent.TokenUsage) {
-	backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, transcript, checkpointUsage)
+	backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, transcript, state.ModelName, checkpointUsage)
 	if backfillUsage == nil {
 		return
 	}
@@ -818,9 +962,11 @@ func applyBackfilledSessionTokenUsage(ctx context.Context, ag agent.Agent, state
 
 // sessionStateBackfillTokenUsage returns the best session-level token usage to
 // persist in session state after condensation.
-func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentType types.AgentType, transcript []byte, checkpointUsage *agent.TokenUsage) *agent.TokenUsage {
+func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentType types.AgentType, transcript []byte, sessionModel string, checkpointUsage *agent.TokenUsage) *agent.TokenUsage {
 	if agentType == agent.AgentTypeCopilotCLI && len(transcript) > 0 {
-		fullSessionUsage := agent.CalculateTokenUsage(ctx, ag, transcript, 0, "")
+		// Session-wide backfill (state.TokenUsage); per-model buckets are
+		// checkpoint-scoped and not persisted here, so discard them.
+		fullSessionUsage, _ := tokenUsageWithCost(ctx, ag, transcript, 0, sessionModel, agentType)
 		if hasTokenUsageData(fullSessionUsage) {
 			return fullSessionUsage
 		}
@@ -1036,7 +1182,7 @@ func committedFilesExcludingMetadata(committedFiles map[string]struct{}) []strin
 // This handles the case where SaveStep was skipped (no code changes) but the transcript
 // continued growing — the shadow branch copy would be stale.
 // checkpointTranscriptStart is the line offset (Claude) or message index (Gemini) where the current checkpoint began.
-func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType types.AgentType, liveTranscriptPath string, checkpointTranscriptStart int, isActive bool) (*ExtractedSessionData, error) {
+func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType types.AgentType, liveTranscriptPath string, checkpointTranscriptStart int, sessionModel string, isActive bool) (*ExtractedSessionData, error) {
 	ag, _ := agent.GetByAgentType(agentType) //nolint:errcheck // ag may be nil for unknown agent types; callers use type assertions so nil is safe
 	commit, err := repo.CommitObject(shadowRef)
 	if err != nil {
@@ -1112,7 +1258,7 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 		// also finds nothing on this path once the agent has cleaned the transcripts
 		// up. CondenseSession fills the already-rescoped window total in instead;
 		// see withSubagentTokensFrom.
-		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, "")
+		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, checkpointTranscriptStart, sessionModel, agentType)
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
@@ -1158,7 +1304,7 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 		// for the cleanup reason: this is the live mid-turn path, where the subagent
 		// transcripts are still on disk. It is the one place the gap noted on
 		// withSubagentTokensFrom could be closed by reading them.
-		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, "")
+		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, state.ModelName, state.AgentType)
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 

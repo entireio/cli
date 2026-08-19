@@ -9,8 +9,10 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/pricing"
 	"github.com/spf13/cobra"
 )
 
@@ -42,7 +44,9 @@ type checkpointTokensComparison struct {
 	CacheWrite           *checkpointTokensMetricDelta `json:"cache_write,omitempty"`
 	Output               *checkpointTokensMetricDelta `json:"output,omitempty"`
 	APICalls             *checkpointTokensMetricDelta `json:"api_calls,omitempty"`
+	Cost                 *checkpointTokensCostDelta   `json:"cost,omitempty"`
 	CacheReadCaveat      string                       `json:"cache_read_caveat,omitempty"`
+	CostCaveat           string                       `json:"cost_caveat,omitempty"`
 	Qualification        string                       `json:"qualification"`
 	Limitations          []string                     `json:"limitations,omitempty"`
 }
@@ -54,6 +58,20 @@ type checkpointTokensMetricDelta struct {
 	ChangePercent *float64 `json:"change_percent,omitempty"`
 	Direction     string   `json:"direction"`
 }
+
+// checkpointTokensCostDelta mirrors checkpointTokensMetricDelta for USD cost. It
+// is only populated when both compared checkpoints carry a non-nil cost.
+type checkpointTokensCostDelta struct {
+	Baseline      float64  `json:"baseline"`
+	Current       float64  `json:"current"`
+	Change        float64  `json:"change"`
+	ChangePercent *float64 `json:"change_percent,omitempty"`
+	Direction     string   `json:"direction"`
+}
+
+// costNotComparableCaveat explains why a compared cost delta was omitted: cost
+// is present on one side but not the other, so no honest delta can be shown.
+const costNotComparableCaveat = "cost not comparable: missing on one side"
 
 const (
 	checkpointComparisonStatusUnavailable       = "unavailable"
@@ -156,7 +174,7 @@ func loadCheckpointTokensReport(ctx context.Context, cmd *cobra.Command, checkpo
 		return checkpointTokensReport{}, lookup, err
 	}
 
-	return buildCheckpointTokensReport(cpID, summary, metas, metadataWarnings), lookup, nil
+	return buildCheckpointTokensReport(cpID, summary, metas, metadataWarnings, loadDisplayPricingTable(ctx)), lookup, nil
 }
 
 func readCheckpointTokenSessionMetadata(ctx context.Context, store reviewContextSessionMetadataReader, cpID id.CheckpointID, sessionCount int) ([]*checkpoint.Metadata, int, error) {
@@ -182,7 +200,7 @@ func readCheckpointTokenSessionMetadata(ctx context.Context, store reviewContext
 	return metas, warnings, nil
 }
 
-func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.CheckpointSummary, metas []*checkpoint.Metadata, metadataWarnings int) checkpointTokensReport {
+func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.CheckpointSummary, metas []*checkpoint.Metadata, metadataWarnings int, table *pricing.Table) checkpointTokensReport {
 	report := checkpointTokensReport{
 		CheckpointID: cpID.String(),
 		Source:       "committed_checkpoint",
@@ -216,6 +234,7 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 	usage := checkpointTokenUsage(summary, metas, metadataWarnings > 0)
 	if tokens := buildSessionTokensUsage(usage); tokens != nil {
 		report.Tokens = tokens
+		applyCheckpointCost(tokens, usage, checkpointModelUsage(summary, metas, metadataWarnings > 0), report.Model, table)
 		if tokens.SubagentTotal > 0 {
 			report.Contributors = append(report.Contributors, sessionTokensContributor{
 				Kind:       "subagents",
@@ -357,26 +376,78 @@ func checkpointTokenUsage(summary *checkpoint.CheckpointSummary, metas []*checkp
 	return sessionUsage
 }
 
+// checkpointModelUsage returns the per-model token buckets for a checkpoint,
+// mirroring checkpointTokenUsage's source preference so a fallback local cost
+// estimate (applyCheckpointCost, when the checkpoint carries no persisted cost)
+// prices the same tokens the report displays: the per-session buckets when
+// metadata read cleanly, else the aggregated root-summary buckets.
+func checkpointModelUsage(summary *checkpoint.CheckpointSummary, metas []*checkpoint.Metadata, metadataReadWarning bool) []types.ModelUsage {
+	var sessionBuckets []types.ModelUsage
+	for _, meta := range metas {
+		if meta != nil {
+			sessionBuckets = append(sessionBuckets, meta.ModelUsage...)
+		}
+	}
+	if !metadataReadWarning && len(sessionBuckets) > 0 {
+		return sessionBuckets
+	}
+	if summary != nil && len(summary.ModelUsage) > 0 {
+		return summary.ModelUsage
+	}
+	return sessionBuckets
+}
+
+// applyCheckpointCost sets tokens' cost from usage's persisted spend-time
+// value when one exists — a committed checkpoint is CostSourceReported at the
+// rates in force when the CLI wrote it, and re-estimating at today's rates
+// would silently drift from that stored value (and from what the platform,
+// which now trusts the CLI-reported cost, shows for the same checkpoint). Only
+// checkpoints written before cost persistence existed carry a nil CostUSD;
+// those fall back to a local estimate from the token breakdown, same as before.
+func applyCheckpointCost(tokens *sessionTokensUsage, usage *agent.TokenUsage, models []types.ModelUsage, fallbackModel string, table *pricing.Table) {
+	if tokens == nil {
+		return
+	}
+	if usage != nil && usage.CostUSD != nil {
+		tokens.CostUSD = usage.CostUSD
+		tokens.CostSource = usage.CostSource
+		return
+	}
+	applyLocalCostEstimate(tokens, usage, models, fallbackModel, table)
+}
+
 func addCheckpointTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 	if a == nil && b == nil {
 		return nil
 	}
 	result := &agent.TokenUsage{}
+	var aCost, bCost *float64
 	if a != nil {
 		result.InputTokens = a.InputTokens
 		result.CacheCreationTokens = a.CacheCreationTokens
+		// CacheCreation1hTokens is the subset of CacheCreationTokens written with a
+		// 1-hour TTL, which EstimateCost bills at 2x input instead of 1.25x. Summing
+		// it here keeps the displayed estimate from silently undercounting.
+		result.CacheCreation1hTokens = a.CacheCreation1hTokens
 		result.CacheReadTokens = a.CacheReadTokens
 		result.OutputTokens = a.OutputTokens
 		result.APICallCount = a.APICallCount
+		aCost = a.CostUSD
 	}
 	if b != nil {
 		result.InputTokens = saturatingIntAdd(result.InputTokens, b.InputTokens)
 		result.CacheCreationTokens = saturatingIntAdd(result.CacheCreationTokens, b.CacheCreationTokens)
+		result.CacheCreation1hTokens = saturatingIntAdd(result.CacheCreation1hTokens, b.CacheCreation1hTokens)
 		result.CacheReadTokens = saturatingIntAdd(result.CacheReadTokens, b.CacheReadTokens)
 		result.OutputTokens = saturatingIntAdd(result.OutputTokens, b.OutputTokens)
 		result.APICallCount = saturatingIntAdd(result.APICallCount, b.APICallCount)
+		bCost = b.CostUSD
 	}
 	result.SubagentTokens = addCheckpointTokenUsage(tokenUsageSubagents(a), tokenUsageSubagents(b))
+	result.CostUSD = types.AddCostUSD(aCost, bCost)
+	// MergeCostSourceUsages folds a priced side with an unpriced-but-token-bearing
+	// side to mixed, mirroring the per-bucket coverage rule.
+	result.CostSource = types.MergeCostSourceUsages(a, b)
 	return result
 }
 
@@ -425,6 +496,7 @@ func buildCheckpointTokensComparison(target, baseline checkpointTokensReport) *c
 	comparison.Output = buildCheckpointMetricDelta(baseline.Tokens.Output, target.Tokens.Output)
 	comparison.APICalls = buildCheckpointMetricDelta(baseline.Tokens.APICalls, target.Tokens.APICalls)
 	comparison.CacheReadCaveat = checkpointComparisonCacheReadCaveat(comparison.CacheRead)
+	comparison.Cost, comparison.CostCaveat = buildCheckpointCostComparison(baseline.Tokens.CostUSD, target.Tokens.CostUSD)
 	comparison.Status = checkpointComparisonStatus(comparison.Total)
 	comparison.Qualification = checkpointComparisonQualification(comparison.Status)
 	if classes := checkpointCostProxyPressureIncreased(comparison); len(classes) > 0 {
@@ -473,6 +545,52 @@ func buildCheckpointMetricDelta(baseline, current int) *checkpointTokensMetricDe
 		delta.ChangePercent = &percent
 	}
 	return delta
+}
+
+// buildCheckpointCostComparison returns the cost delta and an accompanying
+// caveat. A delta is produced only when BOTH sides carry a non-nil cost;
+// otherwise it returns (nil, caveat) when exactly one side has cost (so the
+// asymmetry is explained) and (nil, "") when neither side has cost (cost simply
+// is not tracked for these checkpoints, so nothing is said).
+func buildCheckpointCostComparison(baseline, current *float64) (*checkpointTokensCostDelta, string) {
+	switch {
+	case baseline != nil && current != nil:
+		return buildCheckpointCostDelta(*baseline, *current), ""
+	case baseline != nil || current != nil:
+		return nil, costNotComparableCaveat
+	default:
+		return nil, ""
+	}
+}
+
+func buildCheckpointCostDelta(baseline, current float64) *checkpointTokensCostDelta {
+	change := current - baseline
+	delta := &checkpointTokensCostDelta{
+		Baseline:  baseline,
+		Current:   current,
+		Change:    change,
+		Direction: checkpointDeltaDirectionFloat(change),
+	}
+	if baseline != 0 {
+		percent := (change / baseline) * 100
+		delta.ChangePercent = &percent
+	}
+	return delta
+}
+
+// checkpointDeltaDirectionFloat classifies a USD cost change using the same
+// down/up/unchanged semantics as checkpointDeltaDirection, but at cent
+// granularity so sub-cent float noise reads as "unchanged".
+func checkpointDeltaDirectionFloat(change float64) string {
+	cents := change * 100
+	switch {
+	case cents <= -0.5:
+		return checkpointDeltaDirectionDown
+	case cents >= 0.5:
+		return checkpointDeltaDirectionUp
+	default:
+		return checkpointDeltaDirectionUnchanged
+	}
 }
 
 func saturatingIntSub(a, b int) int {
@@ -575,6 +693,7 @@ func writeCheckpointTokensText(w io.Writer, report checkpointTokensReport) {
 	}
 
 	writeTokenUsageSection(w, report.Tokens)
+	writeTokenCostLine(w, report.Tokens)
 	writeCheckpointTokenComparison(w, report.Comparison)
 	if len(report.Recommendations) > 0 {
 		writeTokenRecommendations(w, report.Recommendations)
@@ -633,6 +752,9 @@ func writeCheckpointTokenComparison(w io.Writer, comparison *checkpointTokensCom
 	if comparison.CacheReadCaveat != "" {
 		fmt.Fprintf(w, "Caveat: %s\n", comparison.CacheReadCaveat)
 	}
+	if comparison.CostCaveat != "" {
+		fmt.Fprintf(w, "Caveat: %s\n", comparison.CostCaveat)
+	}
 	if comparison.Status != checkpointComparisonStatusUnavailable {
 		fmt.Fprintf(w, "Total tokens: %s\n", formatCheckpointMetricDelta(comparison.Total, formatTokenCount))
 		fmt.Fprintf(w, "Input: %s\n", formatCheckpointMetricDelta(comparison.Input, formatTokenCount))
@@ -640,6 +762,9 @@ func writeCheckpointTokenComparison(w io.Writer, comparison *checkpointTokensCom
 		fmt.Fprintf(w, "Cache write: %s\n", formatCheckpointMetricDelta(comparison.CacheWrite, formatTokenCount))
 		fmt.Fprintf(w, "Output: %s\n", formatCheckpointMetricDelta(comparison.Output, formatTokenCount))
 		fmt.Fprintf(w, "API calls: %s\n", formatCheckpointMetricDelta(comparison.APICalls, formatPlainCount))
+		if comparison.Cost != nil {
+			fmt.Fprintf(w, "Cost: %s\n", formatCheckpointCostDelta(comparison.Cost))
+		}
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Qualification")
@@ -652,6 +777,21 @@ func formatCheckpointMetricDelta(delta *checkpointTokensMetricDelta, formatValue
 	}
 	from := formatValue(delta.Baseline)
 	to := formatValue(delta.Current)
+	if delta.Direction == checkpointDeltaDirectionUnchanged {
+		return fmt.Sprintf("unchanged (%s -> %s)", from, to)
+	}
+	if delta.ChangePercent == nil {
+		return fmt.Sprintf("%s (%s -> %s)", delta.Direction, from, to)
+	}
+	return fmt.Sprintf("%s %s (%s -> %s)", delta.Direction, formatPercent(absFloat(*delta.ChangePercent)), from, to)
+}
+
+func formatCheckpointCostDelta(delta *checkpointTokensCostDelta) string {
+	if delta == nil {
+		return checkpointComparisonStatusUnavailable
+	}
+	from := formatCostAmount(delta.Baseline)
+	to := formatCostAmount(delta.Current)
 	if delta.Direction == checkpointDeltaDirectionUnchanged {
 		return fmt.Sprintf("unchanged (%s -> %s)", from, to)
 	}

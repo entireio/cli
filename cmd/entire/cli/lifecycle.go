@@ -845,8 +845,21 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Single load serves both prompt retrieval and backfill.
 	_, commitMsgSpan := perf.Start(ctx, "generate_commit_message")
 	lastPrompt := ""
+	// accountedSubagentTokens is the cumulative-since-session-start subagent
+	// snapshot this session has ALREADY attributed cost to. It scopes this turn's
+	// subagent remainder to just the new subagent tokens — see the scoping
+	// contract on agent.CalculateUsageWithCost. state.TokenUsage.SubagentTokens is
+	// the right source because accumulateTokenUsage replaces (never adds) it, so
+	// it always holds the latest snapshot folded into the running totals; reading
+	// it here, before SaveStep folds this turn in, yields the previous turn's
+	// snapshot. Nil (no state, or no subagents yet) correctly means "nothing
+	// attributed yet".
+	var accountedSubagentTokens *agent.TokenUsage
 	if sessionState, stateErr := strategy.LoadSessionState(ctx, sessionID); stateErr == nil && sessionState != nil {
 		lastPrompt = sessionState.LastPrompt
+		if sessionState.TokenUsage != nil {
+			accountedSubagentTokens = sessionState.TokenUsage.SubagentTokens
+		}
 	}
 	// Backfill LastPrompt so `entire status` shows the prompt even when no
 	// files were modified (before the early return below).
@@ -967,14 +980,41 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		transcriptLinesAtStart = preState.TranscriptOffset
 	}
 
-	// Resolve token usage. Hook-provided counts (e.g., Cursor's stop hook,
-	// which is the only authoritative source for Cursor sessions because the
-	// JSONL transcript has no usage fields) take precedence; otherwise fall
-	// back to transcript-based computation, preferring SubagentAwareExtractor
-	// to include subagent tokens.
-	tokenUsage := event.TokenUsage
-	if tokenUsage == nil {
-		tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
+	// Resolve token usage and attribute cost. Hook-provided counts (e.g.,
+	// Cursor's stop hook, which is the only authoritative source for Cursor
+	// sessions because the JSONL transcript has no usage fields) take precedence
+	// and are priced directly as a single bucket under the session model;
+	// otherwise usage is computed from the transcript (preferring
+	// SubagentAwareExtractor to include subagent tokens) and priced per model.
+	// The per-model buckets are threaded through StepContext.ModelUsage so the
+	// strategy can accumulate them into checkpoint-scoped per-model metadata.
+	table, disableEstimation := LoadPricingTable(ctx)
+	// Opt-in daily remote pricing refresh: when enabled and the cache is stale,
+	// spawn a detached worker to refresh it. Never fetches inline on this
+	// turn-end hook path; ShouldRefresh gates on the 24h backoff so the common
+	// case is a cheap cache stat.
+	maybeSpawnPricingRefresh(ctx)
+	// Codex "priority" service tier bills at a premium; when opted in, price the
+	// turn under the model's "-priority" variant. Only Codex reads settings here,
+	// so every other agent's turn-end skips the extra load.
+	pricingModel := event.Model
+	if agentType == agent.AgentTypeCodex && event.Model != "" {
+		if s, sErr := LoadEntireSettings(ctx); sErr == nil {
+			pricingModel = s.PricingModelForAgent(agentType, event.Model)
+		}
+	}
+	var tokenUsage *agent.TokenUsage
+	var buckets []agent.ModelUsage
+	if event.TokenUsage != nil {
+		tokenUsage, buckets = agent.PriceUsage(event.TokenUsage, pricingModel, table, disableEstimation)
+	} else {
+		var costErr error
+		tokenUsage, buckets, costErr = agent.CalculateUsageWithCost(ag, transcriptData, transcriptLinesAtStart, subagentsDir, accountedSubagentTokens, table, pricingModel, disableEstimation)
+		if costErr != nil {
+			logging.Debug(logCtx, "failed usage-with-cost extraction",
+				slog.String("error", costErr.Error()))
+			tokenUsage, buckets = nil, nil
+		}
 	}
 
 	// Build fully-populated step context and delegate to strategy
@@ -993,6 +1033,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		StepTranscriptIdentifier: transcriptIdentifierAtStart,
 		StepTranscriptStart:      transcriptLinesAtStart,
 		TokenUsage:               tokenUsage,
+		ModelUsage:               buckets,
 	}
 
 	if err := strat.SaveStep(ctx, stepCtx); err != nil {

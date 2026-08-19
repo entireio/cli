@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -176,6 +177,7 @@ func CalculateTokenUsage(transcript []TranscriptLine) *agent.TokenUsage {
 	for _, u := range usageByMessageID {
 		usage.InputTokens += u.InputTokens
 		usage.CacheCreationTokens += u.CacheCreationInputTokens
+		usage.CacheCreation1hTokens += u.CacheCreation.Ephemeral1hInputTokens
 		usage.CacheReadTokens += u.CacheReadInputTokens
 		usage.OutputTokens += u.OutputTokens
 	}
@@ -196,6 +198,103 @@ func CalculateTokenUsageFromFile(path string, startLine int) (*agent.TokenUsage,
 	}
 
 	return CalculateTokenUsage(lines), nil
+}
+
+// modelUsageRow pairs a deduplicated assistant message's usage with the model
+// that produced it, so per-model attribution keys off the SAME kept row as the
+// flat token loop (dedup by message.id, keeping the highest-output row).
+type modelUsageRow struct {
+	model string
+	usage messageUsage
+}
+
+// modelKeyWithSpeed returns the pricing/attribution key for a turn's model,
+// appending a "-fast" suffix when the turn was billed at the fast-mode premium
+// (speed == "fast", case-insensitive). It leaves the model unchanged for
+// standard/empty speed, an empty model id, or an id that already ends in
+// "-fast", so buckets never double-suffix.
+func modelKeyWithSpeed(model, speed string) string {
+	if !strings.EqualFold(speed, "fast") || model == "" || strings.HasSuffix(model, "-fast") {
+		return model
+	}
+	return model + "-fast"
+}
+
+// CalculateModelUsage attributes per-message token usage to the model that
+// produced it (message.model), over the MAIN transcript only. The
+// ModelUsageCalculator signature carries no subagentsDir, so unlike
+// CalculateTotalTokenUsage this covers only the main-agent transcript; the
+// dispatcher's remainder bucket attributes any subagent shortfall under the
+// session model. It reuses the flat token loop's dedup semantics — one row per
+// message.id, keeping the highest output_tokens (final streaming state) — and
+// buckets each kept row by that row's model. Buckets are returned sorted by
+// model for deterministic output and sum to the flat CalculateTokenUsage total
+// over the same main-transcript slice. Cost fields are left nil; the framework
+// prices each bucket.
+func (c *ClaudeCodeAgent) CalculateModelUsage(transcriptData []byte, fromOffset int) ([]agent.ModelUsage, error) {
+	if len(transcriptData) == 0 {
+		return nil, nil
+	}
+
+	sliced := transcript.SliceFromLine(transcriptData, fromOffset)
+	parsed, err := transcript.ParseFromBytes(sliced)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse transcript: %w", err)
+	}
+
+	// Deduplicate by message.id, keeping the highest-output row; the model rides
+	// the kept row so attribution matches the flat token loop exactly.
+	rowByID := make(map[string]modelUsageRow)
+	for _, line := range parsed {
+		if line.Type != envelopeTypeAssistant {
+			continue
+		}
+		var msg messageWithUsage
+		if err := json.Unmarshal(line.Message, &msg); err != nil {
+			continue
+		}
+		if msg.ID == "" {
+			continue
+		}
+		existing, exists := rowByID[msg.ID]
+		if !exists || msg.Usage.OutputTokens > existing.usage.OutputTokens {
+			rowByID[msg.ID] = modelUsageRow{model: msg.Model, usage: msg.Usage}
+		}
+	}
+
+	// Aggregate the deduplicated rows into per-model buckets. A fast-mode turn
+	// (usage.speed == "fast" on the kept row) buckets under the model's "-fast"
+	// variant so the dispatcher prices it at the fast premium; the speed rides
+	// the SAME dedup-kept row as the model, keeping attribution consistent with
+	// the flat token loop.
+	byModel := make(map[string]*agent.TokenUsage)
+	for _, row := range rowByID {
+		key := modelKeyWithSpeed(row.model, row.usage.Speed)
+		u := byModel[key]
+		if u == nil {
+			u = &agent.TokenUsage{}
+			byModel[key] = u
+		}
+		u.InputTokens += row.usage.InputTokens
+		u.CacheCreationTokens += row.usage.CacheCreationInputTokens
+		u.CacheCreation1hTokens += row.usage.CacheCreation.Ephemeral1hInputTokens
+		u.CacheReadTokens += row.usage.CacheReadInputTokens
+		u.OutputTokens += row.usage.OutputTokens
+		u.APICallCount++
+	}
+
+	// Emit in a deterministic order (map iteration is randomized).
+	models := make([]string, 0, len(byModel))
+	for m := range byModel {
+		models = append(models, m)
+	}
+	sort.Strings(models)
+
+	buckets := make([]agent.ModelUsage, 0, len(models))
+	for _, m := range models {
+		buckets = append(buckets, agent.ModelUsage{Model: m, TokenUsage: *byModel[m]})
+	}
+	return buckets, nil
 }
 
 // ExtractSpawnedAgentIDs extracts agent IDs from Task tool results in a transcript.
@@ -437,6 +536,10 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 			}
 			subagentUsage.InputTokens += agentUsage.InputTokens
 			subagentUsage.CacheCreationTokens += agentUsage.CacheCreationTokens
+			// CacheCreation1hTokens is the subset of CacheCreationTokens written with
+			// a 1-hour TTL, billed at 2x input instead of 1.25x. Omitting it made
+			// every subagent's cache writes look 5-minute, undercounting cost.
+			subagentUsage.CacheCreation1hTokens += agentUsage.CacheCreation1hTokens
 			subagentUsage.CacheReadTokens += agentUsage.CacheReadTokens
 			subagentUsage.OutputTokens += agentUsage.OutputTokens
 			subagentUsage.APICallCount += agentUsage.APICallCount

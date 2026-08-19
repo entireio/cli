@@ -127,6 +127,9 @@ type WriteOptions struct {
 	// TokenUsage contains the token usage for this checkpoint
 	TokenUsage *types.TokenUsage
 
+	// ModelUsage is the per-model breakdown of TokenUsage for this checkpoint.
+	ModelUsage []types.ModelUsage
+
 	// SkillEvents records explicit native skill signals observed in this session.
 	SkillEvents []types.SkillEvent
 
@@ -390,8 +393,20 @@ type Metadata struct {
 	// (legacy delta file) is distinguishable from 0 (full file, first checkpoint).
 	CompactTranscriptStart *int `json:"compact_transcript_start,omitempty"`
 
-	// Token usage for this checkpoint
+	// Token usage for this checkpoint, including the cost_usd/cost_source
+	// computed when the tokens were spent. Cost is persisted deliberately: the
+	// CLI is the only place that knows which pricing was in force at spend time,
+	// so pricing once here is both simpler and more historically accurate than
+	// having a backend re-derive cost later from raw counts (which needs a full
+	// historical pricing table and breaks for forked/renamed repos with no
+	// lineage). Writers persist Metadata as-is — nothing strips cost.
 	TokenUsage *types.TokenUsage `json:"token_usage,omitempty"`
+
+	// ModelUsage is the per-model breakdown of TokenUsage for this checkpoint. Each
+	// entry pairs a model identifier with its token usage. Backends ingest this as
+	// the canonical per-model shape ("model" + nested "token_usage"). Omitted when
+	// no per-model data is available.
+	ModelUsage []types.ModelUsage `json:"model_usage,omitempty"`
 
 	// SkillEvents records explicit native skill signals observed in this session.
 	// Consumers use these anchors to collapse skill-related raw transcript events.
@@ -506,6 +521,7 @@ type CheckpointSummary struct {
 	FilesTouched        []string           `json:"files_touched"`
 	Sessions            []SessionFilePaths `json:"sessions"`
 	TokenUsage          *types.TokenUsage  `json:"token_usage,omitempty"`
+	ModelUsage          []types.ModelUsage `json:"model_usage,omitempty"`
 	CombinedAttribution *Attribution       `json:"combined_attribution,omitempty"`
 
 	// HasReview is the umbrella "any review happened" flag: true when at least

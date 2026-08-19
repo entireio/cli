@@ -2253,6 +2253,7 @@ func TestCheckpointTokensReport_UsesRootSummaryWhenSessionMetadataIncomplete(t *
 			},
 		},
 		1,
+		nil,
 	)
 
 	if report.Tokens == nil {
@@ -2336,6 +2337,7 @@ func TestCheckpointTokensReport_UsesRootSummaryWhenNoSessionMetadataReadable(t *
 		},
 		nil,
 		2,
+		nil,
 	)
 
 	if report.Tokens == nil {

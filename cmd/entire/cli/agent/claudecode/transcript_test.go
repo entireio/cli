@@ -340,6 +340,238 @@ func TestCalculateTokenUsage_StreamingDeduplication(t *testing.T) {
 	}
 }
 
+func TestCalculateTokenUsage_CacheCreation1hSplit(t *testing.T) {
+	t.Parallel()
+
+	// Each assistant row carries the per-TTL split under message.usage.cache_creation.
+	// The 1h portion must land in CacheCreation1hTokens in BOTH the flat total and
+	// the per-model bucket; CacheCreationTokens stays the full cache_creation total.
+	data := buildJSONL(
+		`{"type":"assistant","uuid":"a1","message":{"id":"msg_001","model":"claude-opus-4-8","usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_creation":{"ephemeral_1h_input_tokens":40,"ephemeral_5m_input_tokens":60},"cache_read_input_tokens":0,"output_tokens":5}}}`,
+		`{"type":"assistant","uuid":"a2","message":{"id":"msg_002","model":"claude-opus-4-8","usage":{"input_tokens":5,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":50,"ephemeral_5m_input_tokens":150},"cache_read_input_tokens":0,"output_tokens":7}}}`,
+	)
+
+	c := &ClaudeCodeAgent{}
+
+	// Flat path.
+	flat, err := c.CalculateTokenUsage(data, 0)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsage error: %v", err)
+	}
+	if flat.CacheCreationTokens != 300 {
+		t.Errorf("flat CacheCreationTokens = %d, want 300", flat.CacheCreationTokens)
+	}
+	if flat.CacheCreation1hTokens != 90 { // 40 + 50
+		t.Errorf("flat CacheCreation1hTokens = %d, want 90", flat.CacheCreation1hTokens)
+	}
+
+	// Per-model path (single model here -> one bucket).
+	buckets, err := c.CalculateModelUsage(data, 0)
+	if err != nil {
+		t.Fatalf("CalculateModelUsage error: %v", err)
+	}
+	if len(buckets) != 1 {
+		t.Fatalf("buckets = %d, want 1", len(buckets))
+	}
+	if buckets[0].TokenUsage.CacheCreation1hTokens != 90 {
+		t.Errorf("bucket CacheCreation1hTokens = %d, want 90", buckets[0].TokenUsage.CacheCreation1hTokens)
+	}
+}
+
+func TestCalculateModelUsage_TwoModelsWithStreamingDedup(t *testing.T) {
+	t.Parallel()
+
+	// Two models interleaved. msg_001 (opus) streams three rows with increasing
+	// output_tokens; the model stays constant on the id. msg_002 (opus) and
+	// msg_003 (fable) are single rows. Dedup keeps the max-output row per id, and
+	// the model rides that kept row.
+	data := buildJSONL(
+		`{"type":"user","uuid":"u1","message":{"content":"go"}}`,
+		`{"type":"assistant","uuid":"a1a","message":{"id":"msg_001","model":"claude-opus-4-8","usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_read_input_tokens":50,"output_tokens":1}}}`,
+		`{"type":"assistant","uuid":"a1b","message":{"id":"msg_001","model":"claude-opus-4-8","usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_read_input_tokens":50,"output_tokens":5}}}`,
+		`{"type":"assistant","uuid":"a1c","message":{"id":"msg_001","model":"claude-opus-4-8","usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_read_input_tokens":50,"output_tokens":20}}}`,
+		`{"type":"assistant","uuid":"a2","message":{"id":"msg_002","model":"claude-opus-4-8","usage":{"input_tokens":7,"cache_creation_input_tokens":30,"cache_read_input_tokens":0,"output_tokens":40}}}`,
+		`{"type":"assistant","uuid":"a3","message":{"id":"msg_003","model":"claude-fable-5","usage":{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":9,"output_tokens":12}}}`,
+	)
+
+	c := &ClaudeCodeAgent{}
+	buckets, err := c.CalculateModelUsage(data, 0)
+	if err != nil {
+		t.Fatalf("CalculateModelUsage error: %v", err)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("buckets = %d, want 2", len(buckets))
+	}
+
+	// Deterministic order: sorted by model string. "claude-fable-5" < "claude-opus-4-8".
+	if buckets[0].Model != "claude-fable-5" || buckets[1].Model != "claude-opus-4-8" {
+		t.Fatalf("bucket order = [%q, %q], want [claude-fable-5, claude-opus-4-8]",
+			buckets[0].Model, buckets[1].Model)
+	}
+
+	// opus: msg_001 (deduped to output=20) + msg_002.
+	opus := buckets[1].TokenUsage
+	if opus.InputTokens != 17 { // 10 + 7 (msg_001 counted once)
+		t.Errorf("opus input = %d, want 17", opus.InputTokens)
+	}
+	if opus.CacheCreationTokens != 130 { // 100 + 30
+		t.Errorf("opus cache_creation = %d, want 130", opus.CacheCreationTokens)
+	}
+	if opus.CacheReadTokens != 50 { // 50 + 0
+		t.Errorf("opus cache_read = %d, want 50", opus.CacheReadTokens)
+	}
+	if opus.OutputTokens != 60 { // 20 (max of msg_001) + 40
+		t.Errorf("opus output = %d, want 60", opus.OutputTokens)
+	}
+	if opus.APICallCount != 2 { // msg_001 + msg_002
+		t.Errorf("opus api_call_count = %d, want 2", opus.APICallCount)
+	}
+
+	// fable: msg_003 only.
+	fable := buckets[0].TokenUsage
+	if fable.InputTokens != 3 || fable.CacheReadTokens != 9 || fable.OutputTokens != 12 || fable.APICallCount != 1 {
+		t.Errorf("fable bucket = %+v, want in=3 cacheRead=9 out=12 calls=1", fable)
+	}
+
+	// Buckets must sum to the flat CalculateTokenUsage total (main transcript only).
+	flat, err := c.CalculateTokenUsage(data, 0)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsage error: %v", err)
+	}
+	var sumIn, sumCC, sumCR, sumOut, sumCalls int
+	for _, b := range buckets {
+		sumIn += b.TokenUsage.InputTokens
+		sumCC += b.TokenUsage.CacheCreationTokens
+		sumCR += b.TokenUsage.CacheReadTokens
+		sumOut += b.TokenUsage.OutputTokens
+		sumCalls += b.TokenUsage.APICallCount
+	}
+	if sumIn != flat.InputTokens || sumCC != flat.CacheCreationTokens ||
+		sumCR != flat.CacheReadTokens || sumOut != flat.OutputTokens || sumCalls != flat.APICallCount {
+		t.Errorf("bucket sums (in=%d cc=%d cr=%d out=%d calls=%d) != flat (in=%d cc=%d cr=%d out=%d calls=%d)",
+			sumIn, sumCC, sumCR, sumOut, sumCalls,
+			flat.InputTokens, flat.CacheCreationTokens, flat.CacheReadTokens, flat.OutputTokens, flat.APICallCount)
+	}
+}
+
+func TestCalculateModelUsage_Offset(t *testing.T) {
+	t.Parallel()
+
+	// From an offset past the first assistant turn, only later turns contribute.
+	data := buildJSONL(
+		`{"type":"user","uuid":"u1","message":{"content":"go"}}`,
+		`{"type":"assistant","uuid":"a1","message":{"id":"msg_001","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":20}}}`,
+		`{"type":"user","uuid":"u2","message":{"content":"more"}}`,
+		`{"type":"assistant","uuid":"a2","message":{"id":"msg_002","model":"claude-fable-5","usage":{"input_tokens":15,"output_tokens":25}}}`,
+	)
+
+	c := &ClaudeCodeAgent{}
+	buckets, err := c.CalculateModelUsage(data, 2)
+	if err != nil {
+		t.Fatalf("CalculateModelUsage error: %v", err)
+	}
+	if len(buckets) != 1 || buckets[0].Model != "claude-fable-5" {
+		t.Fatalf("buckets = %+v, want single claude-fable-5", buckets)
+	}
+	if buckets[0].TokenUsage.InputTokens != 15 || buckets[0].TokenUsage.OutputTokens != 25 {
+		t.Errorf("bucket = %+v, want in=15 out=25", buckets[0].TokenUsage)
+	}
+}
+
+func TestCalculateModelUsage_FastModeBucketsSeparately(t *testing.T) {
+	t.Parallel()
+
+	// Fixture: a standard turn and a fast turn on claude-opus-4-8 (the fast turn
+	// is a streaming duplicate pair — same message.id, increasing output, speed
+	// on both rows), plus a fast turn on a second model. Fast turns must bucket
+	// under the model's "-fast" variant; the standard turn stays on the base id.
+	data, err := os.ReadFile("testdata/stream_session_fast.jsonl")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	c := &ClaudeCodeAgent{}
+	buckets, err := c.CalculateModelUsage(data, 0)
+	if err != nil {
+		t.Fatalf("CalculateModelUsage error: %v", err)
+	}
+
+	// Deterministic order sorted by model string:
+	// "claude-opus-4-8" < "claude-opus-4-8-fast" < "claude-sonnet-5-fast".
+	if len(buckets) != 3 {
+		t.Fatalf("buckets = %d, want 3", len(buckets))
+	}
+	if buckets[0].Model != "claude-opus-4-8" ||
+		buckets[1].Model != "claude-opus-4-8-fast" ||
+		buckets[2].Model != "claude-sonnet-5-fast" {
+		t.Fatalf("bucket models = [%q, %q, %q], want [claude-opus-4-8, claude-opus-4-8-fast, claude-sonnet-5-fast]",
+			buckets[0].Model, buckets[1].Model, buckets[2].Model)
+	}
+
+	// Standard bucket: the single non-fast opus turn.
+	std := buckets[0].TokenUsage
+	if std.InputTokens != 10 || std.CacheCreationTokens != 100 || std.CacheReadTokens != 50 ||
+		std.OutputTokens != 100 || std.APICallCount != 1 {
+		t.Errorf("standard bucket = %+v, want in=10 cc=100 cr=50 out=100 calls=1", std)
+	}
+
+	// Fast bucket: streaming dedup kept the max-output row (200), and the speed
+	// rode that same kept row so it landed here, not on the base id.
+	fast := buckets[1].TokenUsage
+	if fast.InputTokens != 20 || fast.CacheCreationTokens != 200 || fast.CacheReadTokens != 80 ||
+		fast.OutputTokens != 200 || fast.APICallCount != 1 {
+		t.Errorf("fast bucket = %+v, want in=20 cc=200 cr=80 out=200 calls=1", fast)
+	}
+
+	// Second-model fast bucket.
+	sonnetFast := buckets[2].TokenUsage
+	if sonnetFast.InputTokens != 5 || sonnetFast.CacheReadTokens != 9 ||
+		sonnetFast.OutputTokens != 40 || sonnetFast.APICallCount != 1 {
+		t.Errorf("sonnet fast bucket = %+v, want in=5 cr=9 out=40 calls=1", sonnetFast)
+	}
+
+	// Buckets must still sum to the flat total: speed splits attribution but
+	// never changes token counts.
+	flat, err := c.CalculateTokenUsage(data, 0)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsage error: %v", err)
+	}
+	var sumIn, sumCC, sumCR, sumOut, sumCalls int
+	for _, b := range buckets {
+		sumIn += b.TokenUsage.InputTokens
+		sumCC += b.TokenUsage.CacheCreationTokens
+		sumCR += b.TokenUsage.CacheReadTokens
+		sumOut += b.TokenUsage.OutputTokens
+		sumCalls += b.TokenUsage.APICallCount
+	}
+	if sumIn != flat.InputTokens || sumCC != flat.CacheCreationTokens ||
+		sumCR != flat.CacheReadTokens || sumOut != flat.OutputTokens || sumCalls != flat.APICallCount {
+		t.Errorf("bucket sums (in=%d cc=%d cr=%d out=%d calls=%d) != flat (in=%d cc=%d cr=%d out=%d calls=%d)",
+			sumIn, sumCC, sumCR, sumOut, sumCalls,
+			flat.InputTokens, flat.CacheCreationTokens, flat.CacheReadTokens, flat.OutputTokens, flat.APICallCount)
+	}
+}
+
+func TestModelKeyWithSpeed(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		model, speed, want string
+	}{
+		{"claude-opus-4-8", "fast", "claude-opus-4-8-fast"},
+		{"claude-opus-4-8", "FAST", "claude-opus-4-8-fast"},
+		{"claude-opus-4-8", "standard", "claude-opus-4-8"},
+		{"claude-opus-4-8", "", "claude-opus-4-8"},
+		{"", "fast", ""},
+		{"claude-opus-4-8-fast", "fast", "claude-opus-4-8-fast"},
+	}
+	for _, tc := range cases {
+		if got := modelKeyWithSpeed(tc.model, tc.speed); got != tc.want {
+			t.Errorf("modelKeyWithSpeed(%q, %q) = %q, want %q", tc.model, tc.speed, got, tc.want)
+		}
+	}
+}
+
 func TestCalculateTokenUsage_IgnoresUserMessages(t *testing.T) {
 	t.Parallel()
 

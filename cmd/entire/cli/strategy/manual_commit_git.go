@@ -151,6 +151,9 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 					state.TokenUsage.SubagentTokens, state.SubagentTokensBaseline)
 			}
 		}
+		if len(step.ModelUsage) > 0 {
+			state.ModelUsage = accumulateModelUsage(state.ModelUsage, step.ModelUsage)
+		}
 
 		if !branchExisted {
 			logging.Info(logging.WithComponent(ctx, "checkpoint"), "created shadow branch and committed changes",
@@ -355,46 +358,108 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 		return existing
 	}
 	if existing == nil {
-		// Return a copy to avoid sharing the pointer
+		// Return a copy to avoid sharing the pointer. SubagentTokens must be
+		// deep-copied too: aliasing incoming's subtree lets a later in-place
+		// accumulation mutate incoming (and cross-contaminate any other aggregate
+		// that folded the same step), inflating subagent token counts.
 		return &agent.TokenUsage{
 			InputTokens:         incoming.InputTokens,
 			CacheCreationTokens: incoming.CacheCreationTokens,
-			CacheReadTokens:     incoming.CacheReadTokens,
-			OutputTokens:        incoming.OutputTokens,
-			APICallCount:        incoming.APICallCount,
-			SubagentTokens:      incoming.SubagentTokens,
+			// CacheCreation1hTokens is the subset of CacheCreationTokens written with
+			// a 1-hour TTL, billed at 2x input instead of 1.25x. It must be carried
+			// and summed like the other counts, or every accumulated total reports
+			// all-5-minute cache writes and re-prices low.
+			CacheCreation1hTokens: incoming.CacheCreation1hTokens,
+			CacheReadTokens:       incoming.CacheReadTokens,
+			OutputTokens:          incoming.OutputTokens,
+			APICallCount:          incoming.APICallCount,
+			SubagentTokens:        accumulateTokenUsage(nil, incoming.SubagentTokens),
+			// AddCostUSD(nil, ...) returns a fresh pointer, never aliasing incoming.CostUSD.
+			CostUSD:    types.AddCostUSD(nil, incoming.CostUSD),
+			CostSource: types.MergeCostSource("", incoming.CostSource, nil, incoming.CostUSD),
 		}
 	}
 
-	// Accumulate values
+	// Accumulate values. Merge the cost source BEFORE summing CostUSD and the
+	// token fields, so the merge still sees the pre-sum existing usage (its
+	// possibly-nil cost and its token counts). MergeCostSourceUsages folds a
+	// priced side with an unpriced-but-token-bearing side to mixed.
+	existing.CostSource = types.MergeCostSourceUsages(existing, incoming)
+	existing.CostUSD = types.AddCostUSD(existing.CostUSD, incoming.CostUSD)
 	existing.InputTokens += incoming.InputTokens
 	existing.CacheCreationTokens += incoming.CacheCreationTokens
+	existing.CacheCreation1hTokens += incoming.CacheCreation1hTokens
 	existing.CacheReadTokens += incoming.CacheReadTokens
 	existing.OutputTokens += incoming.OutputTokens
 	existing.APICallCount += incoming.APICallCount
 
 	// Replace (not add) subagent tokens: incoming.SubagentTokens is already
 	// the cumulative total as of this step, so the latest snapshot supersedes
-	// whatever was recorded before rather than stacking on top of it.
+	// whatever was recorded before rather than stacking on top of it. Deep-copy
+	// the snapshot (not alias it) so the two aggregates that fold the same step —
+	// state.TokenUsage and state.CheckpointTokenUsage — never share, and thus can
+	// never cross-contaminate, the step's SubagentTokens object.
 	if incoming.SubagentTokens != nil {
-		existing.SubagentTokens = incoming.SubagentTokens
+		existing.SubagentTokens = accumulateTokenUsage(nil, incoming.SubagentTokens)
 	}
 
 	return existing
 }
 
+// accumulateModelUsage merges per-model token buckets into an existing
+// checkpoint-scoped map keyed by model. Each bucket is folded into its model's
+// entry with accumulateTokenUsage (token sums plus AddCostUSD/MergeCostSource
+// cost folding). Returns existing unchanged when incoming is empty; lazily
+// allocates the map on first use. The map is the per-model mirror of
+// CheckpointTokenUsage and is reset together with it at every condensation.
+func accumulateModelUsage(existing map[string]*agent.TokenUsage, incoming []agent.ModelUsage) map[string]*agent.TokenUsage {
+	if len(incoming) == 0 {
+		return existing
+	}
+	if existing == nil {
+		existing = make(map[string]*agent.TokenUsage, len(incoming))
+	}
+	for i := range incoming {
+		bucket := incoming[i].TokenUsage
+		existing[incoming[i].Model] = accumulateTokenUsage(existing[incoming[i].Model], &bucket)
+	}
+	return existing
+}
+
+// sortedModelUsage flattens a per-model usage map into a slice sorted by model,
+// for deterministic serialization into checkpoint metadata. Returns nil for an
+// empty map so the omitempty JSON tag drops the field entirely.
+func sortedModelUsage(m map[string]*agent.TokenUsage) []agent.ModelUsage {
+	if len(m) == 0 {
+		return nil
+	}
+	models := make([]string, 0, len(m))
+	for model := range m {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	out := make([]agent.ModelUsage, 0, len(models))
+	for _, model := range models {
+		out = append(out, agent.ModelUsage{Model: model, TokenUsage: *m[model]})
+	}
+	return out
+}
+
 // resetCheckpointWindow resets the per-checkpoint accumulation window after a
 // condensation reset. It zeroes the step count, clears the checkpoint-scoped
-// token usage, and snapshots the cumulative subagent total into
-// SubagentTokensBaseline so the next window's CheckpointTokenUsage.SubagentTokens
-// can be rescoped to "since this condensation" rather than re-reporting the full
-// cumulative subagent total (see accumulateTokenUsage and the SaveStep rescoping
-// in this file, plus SessionState.SubagentTokensBaseline). Shared by all three
-// condensation reset sites (CondenseSessionByID, CondenseAndMarkFullyCondensed,
-// condenseAndUpdateState) so the baseline capture cannot drift between them.
+// token usage and its per-model mirror (ModelUsage), and snapshots the
+// cumulative subagent total into SubagentTokensBaseline so the next window's
+// CheckpointTokenUsage.SubagentTokens can be rescoped to "since this
+// condensation" rather than re-reporting the full cumulative subagent total
+// (see accumulateTokenUsage and the SaveStep rescoping in this file, plus
+// SessionState.SubagentTokensBaseline). ModelUsage is the per-model mirror of
+// CheckpointTokenUsage and is reset with it. Shared by all three condensation
+// reset sites (CondenseSessionByID, CondenseAndMarkFullyCondensed,
+// condenseAndUpdateState) so the reset cannot drift between them.
 func resetCheckpointWindow(state *SessionState) {
 	state.StepCount = 0
 	state.CheckpointTokenUsage = nil
+	state.ModelUsage = nil
 	state.RebaselineSubagentTokens()
 }
 

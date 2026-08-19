@@ -402,6 +402,13 @@ func CalculateTotalTokenUsageFromBytes(data []byte, startLine int, subagentsDir 
 			}
 			subagentUsage.InputTokens += agentUsage.InputTokens
 			subagentUsage.CacheCreationTokens += agentUsage.CacheCreationTokens
+			// Carried for parity with Claude Code's subagent aggregation: this is
+			// the subset of CacheCreationTokens written with a 1-hour TTL, billed at
+			// 2x input instead of 1.25x. Droid's own usage parser does not populate
+			// it yet (its transcript exposes no 1h field), so today this is a no-op —
+			// it exists so adding that parsing later cannot silently drop the
+			// premium on the subagent side.
+			subagentUsage.CacheCreation1hTokens += agentUsage.CacheCreation1hTokens
 			subagentUsage.CacheReadTokens += agentUsage.CacheReadTokens
 			subagentUsage.OutputTokens += agentUsage.OutputTokens
 			subagentUsage.APICallCount += agentUsage.APICallCount
