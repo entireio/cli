@@ -856,17 +856,27 @@ func shouldSkipJSONLField(key string) bool {
 	return false
 }
 
+// codexImageTypes are the exact "type" values Codex uses for embedded
+// screenshots. Matched by explicit equality (not a "_image" suffix) so an
+// unrelated object shape that happens to end in "_image" (e.g. a
+// "docker_image"/"container_image" record carrying a real secret in another
+// field) is not skipped.
+var codexImageTypes = map[string]bool{
+	"input_image":  true,
+	"output_image": true,
+}
+
 // shouldSkipJSONLObject returns true if the object represents an image payload:
-// "type":"image" or "type":"image_url" (Claude/OpenAI chat format), any
-// "type":"..._image" variant such as "input_image"/"output_image" (Codex embeds
-// screenshots this way), or "type":"base64". Image data is high-entropy binary,
-// not a secret — redacting it would corrupt the payload.
+// "type":"image" or "type":"image_url" (Claude/OpenAI chat format), one of
+// codexImageTypes (Codex embeds screenshots this way), or "type":"base64".
+// Image data is high-entropy binary, not a secret — redacting it would
+// corrupt the payload.
 func shouldSkipJSONLObject(obj map[string]any) bool {
 	t, ok := obj["type"].(string)
 	if !ok {
 		return false
 	}
-	return strings.HasPrefix(t, "image") || strings.HasSuffix(t, "_image") || t == "base64"
+	return strings.HasPrefix(t, "image") || codexImageTypes[t] || t == "base64"
 }
 
 func shannonEntropy(s string) float64 {

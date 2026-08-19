@@ -1251,6 +1251,16 @@ func TestShouldSkipJSONLObject(t *testing.T) {
 			obj:  map[string]any{"type": "output_image"},
 			want: true,
 		},
+		{
+			name: "docker_image type is NOT skipped (only exact Codex image types match)",
+			obj:  map[string]any{"type": "docker_image", "url": "https://token@registry"},
+			want: false,
+		},
+		{
+			name: "container_image type is NOT skipped",
+			obj:  map[string]any{"type": "container_image"},
+			want: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
