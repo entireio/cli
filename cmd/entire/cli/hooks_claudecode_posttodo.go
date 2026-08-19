@@ -182,12 +182,17 @@ func resolveIncrementalCheckpointTask(ctx context.Context, agentID string) (task
 	}
 
 	if agentID != "" {
-		if release, err := flock.Acquire(agentTaskBootstrapLockPath(ctx)); err != nil {
-			logging.Warn(ctx, "failed to acquire agent-task bootstrap lock; unclaimed lookup may race",
+		release, err := flock.Acquire(agentTaskBootstrapLockPath(ctx))
+		if err != nil {
+			// The lock is required, not best-effort: proceeding without it would
+			// recreate the exact double-claim race this function exists to close.
+			// Bailing loses at most one incremental checkpoint for this call; a
+			// later TodoWrite from the same agentID retries the whole bootstrap.
+			logging.Warn(ctx, "failed to acquire agent-task bootstrap lock; skipping bootstrap for this call",
 				slog.String("error", err.Error()))
-		} else {
-			defer release()
+			return "", false
 		}
+		defer release()
 		// Re-check under the lock: another sibling's bootstrap may have remembered
 		// our link while we were waiting to acquire it.
 		if linked, ok := LookupAgentTaskLink(ctx, agentID); ok {

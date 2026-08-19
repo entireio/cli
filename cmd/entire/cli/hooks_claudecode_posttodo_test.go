@@ -168,6 +168,34 @@ func TestResolveIncrementalCheckpointTask_NoAgentIDFallsBackToMtimeHeuristic(t *
 	}
 }
 
+// TestResolveIncrementalCheckpointTask_LockAcquireFailureBailsRatherThanRaces proves
+// the lock is required, not best-effort: if flock.Acquire fails, the function must
+// return early rather than falling through to the unprotected
+// FindUnclaimedActivePreTaskFile + RememberAgentTaskLink sequence, which would
+// recreate the exact double-claim race the lock exists to close.
+func TestResolveIncrementalCheckpointTask_LockAcquireFailureBailsRatherThanRaces(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	writePreTaskFileWithModTime(t, testTaskToolUseA, time.Now())
+
+	// Force flock.Acquire to fail deterministically: os.OpenFile(O_CREATE|O_RDWR)
+	// on a path that is already a directory returns EISDIR.
+	lockPath := agentTaskBootstrapLockPath(ctx)
+	if err := os.MkdirAll(lockPath, 0o755); err != nil {
+		t.Fatalf("failed to create directory at lock path: %v", err)
+	}
+
+	taskToolUseID, found := resolveIncrementalCheckpointTask(ctx, "agent-A")
+	if found {
+		t.Errorf("resolveIncrementalCheckpointTask() = (%q, true), want (\"\", false) when the bootstrap lock cannot be acquired", taskToolUseID)
+	}
+
+	if _, linkFound := LookupAgentTaskLink(ctx, "agent-A"); linkFound {
+		t.Error("no agent-task link should be written when the bootstrap lock could not be acquired")
+	}
+}
+
 // TestResolveIncrementalCheckpointTask_ConcurrentBootstrapNeverDoubleClaims races many
 // sibling agentIDs' first PostTodo bootstrap against a fixed number of unclaimed
 // pre-task files (each hook invocation is a separate OS process in production, but
