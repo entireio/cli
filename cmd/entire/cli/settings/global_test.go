@@ -151,6 +151,25 @@ func TestMatchesExcludePath(t *testing.T) {
 	}
 }
 
+// TestMatchesExcludePath_WindowsDriveAbsolute pins that drive-letter
+// absolutes pass the relative-pattern guard: filepath.IsAbs, not the "/"
+// prefix (which they can never carry), is what qualifies them.
+func TestMatchesExcludePath_WindowsDriveAbsolute(t *testing.T) {
+	t.Parallel()
+	// Gate on the capability itself: drive-letter paths are absolute only on
+	// Windows, which is exactly the property under test.
+	if !filepath.IsAbs(`C:/code`) {
+		t.Skip("drive-letter absolutes exist only on Windows")
+	}
+	matched, err := matchesExcludePath(t.Context(), []string{`C:/code/**`}, `C:\code\repo`)
+	if err != nil {
+		t.Fatalf("drive-letter absolute pattern must not be rejected as relative: %v", err)
+	}
+	if !matched {
+		t.Error(`C:/code/** must exclude C:\code\repo`)
+	}
+}
+
 // TestMatchesExcludePath_SymlinkedPrefix pins the logical/physical bridging:
 // a pattern written against a symlinked directory (the logical ~/code) must
 // exclude a worktree root reported in physical form, and vice versa — git
