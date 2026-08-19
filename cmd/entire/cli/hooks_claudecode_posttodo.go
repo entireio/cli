@@ -165,6 +165,9 @@ func handleClaudeCodePostTodoFromReader(ctx context.Context, reader io.Reader) e
 // the mtime heuristic. The first time we resolve a task for a given agentID, the link is
 // created so every subsequent TodoWrite from that same subagent instance sticks to its
 // own task regardless of what other siblings do.
+//
+// Bootstrap prefers an unclaimed pre-task (no existing agent-task link) so two siblings
+// whose first PostTodos race each other do not both latch onto the same mtime winner.
 func resolveIncrementalCheckpointTask(ctx context.Context, agentID string) (taskToolUseID string, found bool) {
 	if agentID != "" {
 		if linked, ok := LookupAgentTaskLink(ctx, agentID); ok {
@@ -172,7 +175,17 @@ func resolveIncrementalCheckpointTask(ctx context.Context, agentID string) (task
 		}
 	}
 
-	taskToolUseID, found = FindActivePreTaskFile(ctx)
+	if agentID != "" {
+		taskToolUseID, found = FindUnclaimedActivePreTaskFile(ctx)
+	}
+	if !found {
+		taskToolUseID, found = FindActivePreTaskFile(ctx)
+		if found && agentID != "" {
+			logging.Warn(ctx, "bootstrapping agent-task link from mtime heuristic; no unclaimed pre-task left",
+				slog.String("agent_id", agentID),
+				slog.String("task", taskToolUseID[:min(12, len(taskToolUseID))]))
+		}
+	}
 	if !found {
 		return "", false
 	}

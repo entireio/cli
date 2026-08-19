@@ -108,6 +108,37 @@ func TestResolveIncrementalCheckpointTask_ParallelSiblingsPreferRememberedLink(t
 	}
 }
 
+// Parallel sibling bootstrap: when agent-A has already claimed the newer pre-task,
+// agent-B's first PostTodo must latch onto the remaining unclaimed task rather than
+// the same mtime winner.
+func TestResolveIncrementalCheckpointTask_BootstrapPrefersUnclaimed(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	older := time.Now().Add(-1 * time.Minute)
+	newer := time.Now()
+	writePreTaskFileWithModTime(t, testTaskToolUseA, older)
+	writePreTaskFileWithModTime(t, testTaskToolUseB, newer)
+
+	if err := RememberAgentTaskLink(ctx, "agent-A", testTaskToolUseB); err != nil {
+		t.Fatalf("RememberAgentTaskLink() error = %v", err)
+	}
+
+	// mtime heuristic alone would still pick task-B (already claimed).
+	if taskToolUseID, found := FindActivePreTaskFile(ctx); !found || taskToolUseID != testTaskToolUseB {
+		t.Fatalf("sanity check failed: FindActivePreTaskFile() = (%q, %v), want (toolu_task_b, true)", taskToolUseID, found)
+	}
+
+	taskToolUseID, found := resolveIncrementalCheckpointTask(ctx, "agent-B")
+	if !found {
+		t.Fatal("resolveIncrementalCheckpointTask(agent-B) found = false, want true")
+	}
+	if taskToolUseID != testTaskToolUseA {
+		t.Errorf("resolveIncrementalCheckpointTask(agent-B) = %q, want %q (unclaimed older task)",
+			taskToolUseID, testTaskToolUseA)
+	}
+}
+
 // No agent_id at all (older Claude Code, or an agent that doesn't send it) preserves the
 // pre-existing FindActivePreTaskFile behavior and never remembers a link.
 func TestResolveIncrementalCheckpointTask_NoAgentIDFallsBackToMtimeHeuristic(t *testing.T) {

@@ -707,6 +707,54 @@ const preTaskFilePrefix = "pre-task-"
 // modified one.
 // Works correctly from any subdirectory within the repository.
 func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found bool) {
+	return findActivePreTaskFile(ctx, nil)
+}
+
+// FindUnclaimedActivePreTaskFile is like FindActivePreTaskFile but skips pre-task
+// files that another subagent instance has already claimed via an agent-task link.
+// Used when bootstrapping a new agent→task link so parallel siblings each latch onto
+// a distinct Task instead of both inheriting the same mtime winner.
+func FindUnclaimedActivePreTaskFile(ctx context.Context) (taskToolUseID string, found bool) {
+	return findActivePreTaskFile(ctx, claimedTaskToolUseIDs(ctx))
+}
+
+// claimedTaskToolUseIDs returns the set of task tool_use_ids currently pointed at by
+// agent-task-*.json link files. Best-effort; a missing tmp dir yields an empty set.
+func claimedTaskToolUseIDs(ctx context.Context) map[string]struct{} {
+	claimed := make(map[string]struct{})
+	tmpDirAbs := resolveTmpDir(ctx)
+	entries, err := os.ReadDir(tmpDirAbs)
+	if err != nil {
+		return claimed
+	}
+	root, err := os.OpenRoot(tmpDirAbs)
+	if err != nil {
+		return claimed
+	}
+	defer root.Close()
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, agentTaskLinkFilePrefix) || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		data, err := osroot.ReadFile(root, name)
+		if err != nil {
+			continue
+		}
+		var link AgentTaskLink
+		if err := json.Unmarshal(data, &link); err != nil || link.ToolUseID == "" {
+			continue
+		}
+		claimed[link.ToolUseID] = struct{}{}
+	}
+	return claimed
+}
+
+func findActivePreTaskFile(ctx context.Context, skip map[string]struct{}) (taskToolUseID string, found bool) {
 	tmpDirAbs := resolveTmpDir(ctx)
 	entries, err := os.ReadDir(tmpDirAbs)
 	if err != nil {
@@ -723,6 +771,13 @@ func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found boo
 		name := entry.Name()
 		if !strings.HasPrefix(name, preTaskFilePrefix) || !strings.HasSuffix(name, ".json") {
 			continue
+		}
+
+		candidateID := strings.TrimSuffix(strings.TrimPrefix(name, preTaskFilePrefix), ".json")
+		if skip != nil {
+			if _, taken := skip[candidateID]; taken {
+				continue
+			}
 		}
 
 		// Check modification time for nested subagent handling
