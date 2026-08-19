@@ -9,11 +9,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestIssue411_EndedToIdle_PrepareCommitMsgAddsTrailer is the natural
-// reproduction for https://github.com/entireio/cli/issues/411:
-// session-end (ENDED) → session-start (ENDED→IDLE) → new turn → git commit.
-// prepare-commit-msg must still attach Entire-Checkpoint.
-func TestIssue411_EndedToIdle_PrepareCommitMsgAddsTrailer(t *testing.T) {
+// TestEndedToIdle_PrepareCommitMsgAddsTrailer is the natural reproduction of a
+// session-end (ENDED) → session-start (ENDED→IDLE) → new turn → git commit
+// sequence. prepare-commit-msg must still attach Entire-Checkpoint after the
+// session restarts from ENDED into IDLE.
+func TestEndedToIdle_PrepareCommitMsgAddsTrailer(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -58,5 +58,5 @@ func TestIssue411_EndedToIdle_PrepareCommitMsgAddsTrailer(t *testing.T) {
 	env.GitCommitWithShadowHooks("Add second after ended→idle restart", "second.go")
 	cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	require.NotEmpty(t, cpID,
-		"prepare-commit-msg must add Entire-Checkpoint after ended→idle session restart (#411)")
+		"prepare-commit-msg must add Entire-Checkpoint after ended→idle session restart")
 }
