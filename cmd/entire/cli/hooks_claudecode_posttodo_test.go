@@ -10,6 +10,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
+const (
+	testTaskToolUseA = "toolu_task_a"
+	testTaskToolUseB = "toolu_task_b"
+)
+
 // writePreTaskFileWithModTime creates a pre-task-<toolUseID>.json file under .entire/tmp/
 // and backdates/forwards its mtime, so tests can control which pre-task file
 // FindActivePreTaskFile treats as "most recently modified" without needing real sleeps.
@@ -42,22 +47,22 @@ func TestResolveIncrementalCheckpointTask_Bootstrap(t *testing.T) {
 	ctx := context.Background()
 
 	now := time.Now()
-	writePreTaskFileWithModTime(t, "toolu_task_a", now)
+	writePreTaskFileWithModTime(t, testTaskToolUseA, now)
 
 	taskToolUseID, found := resolveIncrementalCheckpointTask(ctx, "agent-A")
 	if !found {
 		t.Fatal("resolveIncrementalCheckpointTask() found = false, want true")
 	}
-	if taskToolUseID != "toolu_task_a" {
-		t.Errorf("resolveIncrementalCheckpointTask() = %q, want %q", taskToolUseID, "toolu_task_a")
+	if taskToolUseID != testTaskToolUseA {
+		t.Errorf("resolveIncrementalCheckpointTask() = %q, want %q", taskToolUseID, testTaskToolUseA)
 	}
 
 	linked, linkFound := LookupAgentTaskLink(ctx, "agent-A")
 	if !linkFound {
 		t.Fatal("expected resolveIncrementalCheckpointTask() to remember an agent-task link on bootstrap")
 	}
-	if linked != "toolu_task_a" {
-		t.Errorf("remembered link = %q, want %q", linked, "toolu_task_a")
+	if linked != testTaskToolUseA {
+		t.Errorf("remembered link = %q, want %q", linked, testTaskToolUseA)
 	}
 }
 
@@ -71,16 +76,16 @@ func TestResolveIncrementalCheckpointTask_ParallelSiblingsPreferRememberedLink(t
 
 	older := time.Now().Add(-1 * time.Minute)
 	newer := time.Now()
-	writePreTaskFileWithModTime(t, "toolu_task_a", older)
-	writePreTaskFileWithModTime(t, "toolu_task_b", newer)
+	writePreTaskFileWithModTime(t, testTaskToolUseA, older)
+	writePreTaskFileWithModTime(t, testTaskToolUseB, newer)
 
 	// Sanity check: without a remembered link, the mtime heuristic alone would pick
 	// task-B (the bug this fix addresses).
-	if taskToolUseID, found := FindActivePreTaskFile(ctx); !found || taskToolUseID != "toolu_task_b" {
+	if taskToolUseID, found := FindActivePreTaskFile(ctx); !found || taskToolUseID != testTaskToolUseB {
 		t.Fatalf("sanity check failed: FindActivePreTaskFile() = (%q, %v), want (toolu_task_b, true)", taskToolUseID, found)
 	}
 
-	if err := RememberAgentTaskLink(ctx, "agent-A", "toolu_task_a"); err != nil {
+	if err := RememberAgentTaskLink(ctx, "agent-A", testTaskToolUseA); err != nil {
 		t.Fatalf("RememberAgentTaskLink() error = %v", err)
 	}
 
@@ -88,17 +93,17 @@ func TestResolveIncrementalCheckpointTask_ParallelSiblingsPreferRememberedLink(t
 	if !found {
 		t.Fatal("resolveIncrementalCheckpointTask() found = false, want true")
 	}
-	if taskToolUseID != "toolu_task_a" {
+	if taskToolUseID != testTaskToolUseA {
 		t.Errorf("resolveIncrementalCheckpointTask() = %q, want %q (remembered link, not the mtime heuristic)",
-			taskToolUseID, "toolu_task_a")
+			taskToolUseID, testTaskToolUseA)
 	}
 
 	// The sibling agent, with its own remembered link, must resolve to its own task.
-	if err := RememberAgentTaskLink(ctx, "agent-B", "toolu_task_b"); err != nil {
+	if err := RememberAgentTaskLink(ctx, "agent-B", testTaskToolUseB); err != nil {
 		t.Fatalf("RememberAgentTaskLink() error = %v", err)
 	}
 	siblingTask, siblingFound := resolveIncrementalCheckpointTask(ctx, "agent-B")
-	if !siblingFound || siblingTask != "toolu_task_b" {
+	if !siblingFound || siblingTask != testTaskToolUseB {
 		t.Errorf("resolveIncrementalCheckpointTask(agent-B) = (%q, %v), want (toolu_task_b, true)", siblingTask, siblingFound)
 	}
 }
@@ -110,10 +115,10 @@ func TestResolveIncrementalCheckpointTask_NoAgentIDFallsBackToMtimeHeuristic(t *
 	ctx := context.Background()
 
 	now := time.Now()
-	writePreTaskFileWithModTime(t, "toolu_task_a", now)
+	writePreTaskFileWithModTime(t, testTaskToolUseA, now)
 
 	taskToolUseID, found := resolveIncrementalCheckpointTask(ctx, "")
-	if !found || taskToolUseID != "toolu_task_a" {
+	if !found || taskToolUseID != testTaskToolUseA {
 		t.Errorf("resolveIncrementalCheckpointTask(\"\") = (%q, %v), want (toolu_task_a, true)", taskToolUseID, found)
 	}
 
