@@ -443,7 +443,7 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 		// Add subagent transcript if available
 		if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
 			agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
-			agentContent, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, agentContent)
+			agentContent, taskAssets, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, agentContent)
 			if readErr == nil && !tooLarge {
 				redacted, jsonlErr := redact.JSONLBytes(agentContent)
 				if jsonlErr != nil {
@@ -461,6 +461,22 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 						Path:  agentPath,
 						Entry: &object.TreeEntry{Mode: filemode.Regular, Hash: blobHash},
 					})
+				}
+
+				// Write externalized image assets under the task's own assets/
+				// subtree, same layout as the persistent-store session path
+				// (writeAssets), so reinject-on-read finds them at
+				// tasks/<id>/assets/<name>.
+				if len(taskAssets) > 0 {
+					assetChanges, assetErr := s.buildTaskAssetChanges(taskAssets, taskMetadataDir)
+					if assetErr != nil {
+						logging.Warn(ctx, "failed to write subagent transcript image assets",
+							slog.String("path", opts.SubagentTranscriptPath),
+							slog.String("error", assetErr.Error()),
+						)
+					} else {
+						changes = append(changes, assetChanges...)
+					}
 				}
 			}
 		}
@@ -485,6 +501,52 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 	}
 
 	return ApplyTreeChanges(ctx, s.repo, baseTreeHash, changes)
+}
+
+// buildTaskAssetChanges stores each externalized subagent-transcript image
+// asset as a raw binary blob under the task metadata dir's assets/ folder, plus
+// an assets/manifest.json index — mirroring treeWriter.writeAssets on the
+// persistent-store session path, adapted to the TreeChange-list style this
+// shadow-branch writer uses.
+func (s *ephemeralStore) buildTaskAssetChanges(assets []TranscriptAsset, taskMetadataDir string) ([]TreeChange, error) {
+	if len(assets) == 0 {
+		return nil, nil
+	}
+	assetsDir := taskMetadataDir + "/" + paths.AssetsDirName
+	manifest := struct {
+		Version int                  `json:"version"`
+		Assets  []assetManifestEntry `json:"assets"`
+	}{Version: 1}
+
+	changes := make([]TreeChange, 0, len(assets)+1)
+	for _, a := range assets {
+		blobHash, err := CreateBlobFromContent(s.repo, a.Data)
+		if err != nil {
+			return nil, fmt.Errorf("create asset blob: %w", err)
+		}
+		changes = append(changes, TreeChange{
+			Path:  assetsDir + "/" + a.Name,
+			Entry: &object.TreeEntry{Mode: filemode.Regular, Hash: blobHash},
+		})
+		sum := sha256.Sum256(a.Data)
+		manifest.Assets = append(manifest.Assets, assetManifestEntry{
+			Name: a.Name, MediaType: a.MediaType, Size: len(a.Data), SHA256: hex.EncodeToString(sum[:]),
+		})
+	}
+
+	manifestJSON, err := jsonutil.MarshalIndentWithNewline(manifest, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal assets manifest: %w", err)
+	}
+	manifestHash, err := CreateBlobFromContent(s.repo, manifestJSON)
+	if err != nil {
+		return nil, fmt.Errorf("create assets manifest blob: %w", err)
+	}
+	changes = append(changes, TreeChange{
+		Path:  assetsDir + "/manifest.json",
+		Entry: &object.TreeEntry{Mode: filemode.Regular, Hash: manifestHash},
+	})
+	return changes, nil
 }
 
 // ListCheckpoints lists all checkpoint commits on a shadow branch.

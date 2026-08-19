@@ -549,7 +549,7 @@ func (s *treeWriter) writeFinalTaskCheckpoint(ctx context.Context, opts WriteOpt
 	// Write subagent transcript if available
 	if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
 		agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
-		prepared, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, agentContent)
+		prepared, taskAssets, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, agentContent)
 		if readErr == nil && !tooLarge {
 			agentContent = prepared
 			// Try JSONL-aware redaction first; fall back to plain string redaction
@@ -572,6 +572,18 @@ func (s *treeWriter) writeFinalTaskCheckpoint(ctx context.Context, opts WriteOpt
 					Name: agentPath,
 					Mode: filemode.Regular,
 					Hash: agentBlobHash,
+				}
+			}
+
+			// Write externalized image assets into the task's own assets/ subtree,
+			// same layout as the session path (writeAssets), so the reinject-on-read
+			// path can find them at tasks/<id>/assets/<name>.
+			if len(taskAssets) > 0 {
+				if _, assetErr := s.writeAssets(taskAssets, taskDir, entries); assetErr != nil {
+					logging.Warn(ctx, "failed to write subagent transcript image assets",
+						slog.String("path", opts.SubagentTranscriptPath),
+						slog.String("error", assetErr.Error()),
+					)
 				}
 			}
 		}
