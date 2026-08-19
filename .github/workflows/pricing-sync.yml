@@ -18,6 +18,9 @@ on:
     - cron: "0 8 * * 1" # 08:00 UTC every Monday
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
