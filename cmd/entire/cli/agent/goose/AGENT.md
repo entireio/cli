@@ -114,25 +114,39 @@ Content block types `[verified]`: `text`, `toolRequest`, `toolResponse`,
 
 ## Tool naming — read this before writing a matcher
 
-`[verified]` Goose namespaces tools as `<extension>__<tool>` at runtime
-(`developer__shell` appears in the binary). The names are **built at runtime**,
-so they cannot be enumerated statically from the binary.
+`[verified]` The complete tool list goose v1.46.0 advertises, captured by running
+a real session against a local endpoint that logged the request:
 
-`[documented]` The Agentic Tools Almanac records a live-verified discrepancy
-here: the vendor's own hook documentation shows `"tool_name": "developer__shell"`,
-but the value actually delivered to a hook is the bare `"shell"` — so a matcher
-of `developer__shell` *"silently never matches and the hook never fires."*
+```
+analyze                delegate                 edit
+apps__create_app       extensionmanager__list_resources
+apps__delete_app       extensionmanager__manage_extensions
+apps__iterate_app      extensionmanager__read_resource
+apps__list_apps        extensionmanager__search_available_extensions
+load                   load_skill               read_image
+shell                  todo__todo_write         tree            write
+```
 
-Consequence for this integration: **never match a Goose tool name for equality.**
-`transcript.go` matches on suffix after the `__` separator, so both the bare and
-namespaced spellings resolve to the same tool. The fixture-derived names in the
-export above (`Bash`) are Claude's, inherited through the import path, which is a
-third spelling we must tolerate.
+**Only `edit` and `write` touch files.** Two traps this list exposes:
+
+- **There is no `create` tool.** Matching a bare `create` would catch
+  `apps__create_app`, which creates an *application*, not a file.
+- **There is no `developer__text_editor`.** The vendor docs and the Agentic Tools
+  Almanac both describe one; goose does not advertise it. The editor is the bare
+  name `edit`.
+
+Note that names are a mix of bare (`edit`, `write`, `shell`) and namespaced
+(`apps__*`), so `transcript.go` matches on the suffix after `__` rather than for
+equality. Transcripts imported from Claude via `goose session import` carry a
+third spelling (`Edit`), which the case-insensitive suffix match also covers.
 
 ## Hooks
 
-`[verified]` All eleven event names are present as literals in the v1.46.0
-binary:
+`[verified]` **Hooks fire.** A real goose session with all four registered ran
+every one of them, confirmed by a marker command appended to a file:
+`SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd`, in that order.
+
+All eleven event names are also present as literals in the v1.46.0 binary:
 
 ```
 SessionStart  SessionEnd  UserPromptSubmit  Stop

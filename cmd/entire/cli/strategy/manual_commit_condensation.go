@@ -655,7 +655,7 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 				slog.String("error", sliceErr.Error()))
 		}
 		scopedTranscript = scoped
-	case agent.AgentTypeCodex, agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeUnknown:
+	case agent.AgentTypeCodex, agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeQwenCode, agent.AgentTypeUnknown:
 		scopedTranscript = transcript.SliceFromLine(transcriptBytes, state.CheckpointTranscriptStart)
 	}
 

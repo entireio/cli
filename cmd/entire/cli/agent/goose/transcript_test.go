@@ -38,7 +38,7 @@ const sampleExport = `{
     {"id": "m1", "role": "assistant", "content": [
       {"type": "text", "text": "working on it"},
       {"type": "toolRequest", "id": "t1", "toolCall": {"status": "success",
-        "value": {"name": "developer__text_editor", "arguments": {"path": "a.txt"}}}}
+        "value": {"name": "edit", "arguments": {"path": "a.txt"}}}}
     ]},
     {"id": "m2", "role": "user", "content": [{"type": "toolResponse", "text": "ignored"}]},
     {"id": "m3", "role": "user", "content": [{"type": "text", "text": "second prompt"}]},
@@ -46,7 +46,7 @@ const sampleExport = `{
       {"type": "toolRequest", "id": "t2", "toolCall": {"status": "success",
         "value": {"name": "shell", "arguments": {"command": "ls"}}}},
       {"type": "toolRequest", "id": "t3", "toolCall": {"status": "success",
-        "value": {"name": "text_editor", "arguments": {"path": "b.txt"}}}}
+        "value": {"name": "write", "arguments": {"path": "b.txt"}}}}
     ]}
   ]
 }`
@@ -184,15 +184,21 @@ func TestExtractModifiedFiles_IgnoresShellTool(t *testing.T) {
 func TestIsFileTool_ToleratesNamespacing(t *testing.T) {
 	t.Parallel()
 
+	// Names come from the tool list goose v1.46.0 advertises; see the comment on
+	// fileToolSuffixes for the full capture.
 	cases := map[string]bool{
-		"developer__text_editor": true,
-		"text_editor":            true,
-		"TEXT_EDITOR":            true,
-		"Edit":                   true, // via `goose session import` of a Claude transcript
-		"Write":                  true,
-		"developer__shell":       false,
-		"shell":                  false,
-		"":                       false,
+		"edit":             true,
+		"write":            true,
+		"Edit":             true, // Claude spelling, via `goose session import`
+		"ext__edit":        true, // namespaced, should an extension provide one
+		"shell":            false,
+		"developer__shell": false,
+		"tree":             false,
+		"read_image":       false,
+		// apps__create_app creates an application, not a file. Matching a bare
+		// "create" would have caught it.
+		"apps__create_app": false,
+		"":                 false,
 	}
 	for name, want := range cases {
 		if got := isFileTool(name); got != want {

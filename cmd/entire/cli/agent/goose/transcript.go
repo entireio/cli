@@ -338,21 +338,26 @@ func extractFilesFromMessages(messages []ExportMessage) []string {
 	return files
 }
 
-// fileToolSuffixes are the tool names that touch files, matched by suffix.
+// fileToolSuffixes are the tool names that write files, matched by suffix.
 //
-// Goose namespaces tools as "<extension>__<tool>" at runtime, but the Agentic
-// Tools Almanac records a live-verified case where the value delivered to a hook
-// was the bare name instead — a matcher written against the namespaced spelling
-// "silently never matches". Transcripts imported from Claude/Codex/Pi add a
-// third spelling. Matching the suffix accepts all three.
+// These come from the tool list goose v1.46.0 actually advertises to the model,
+// captured by running a real session against a local endpoint that logged the
+// request. The full list is: analyze, apps__create_app, apps__delete_app,
+// apps__iterate_app, apps__list_apps, delegate, edit, extensionmanager__*,
+// load, load_skill, read_image, shell, todo__todo_write, tree, write.
+//
+// Only edit and write touch files. Two traps that list exposes:
+//   - "create" is NOT a goose tool. Matching it would catch apps__create_app,
+//     which creates an application, not a file.
+//   - The vendor docs and the Agentic Tools Almanac both describe a
+//     developer__text_editor tool. No such tool is advertised; the editor is
+//     the bare name "edit".
+//
+// Matching is on the suffix after "__" so a namespaced spelling (should an
+// extension provide its own editor) still resolves.
 var fileToolSuffixes = []string{
-	"text_editor", // Goose's developer extension
-	"str_replace_editor",
-	"write_file",
-	"edit_file",
-	"edit",   // Claude-style, via `goose session import`
-	"write",  //
-	"create", //
+	"edit",
+	"write",
 }
 
 // isFileTool reports whether a tool name denotes a file-touching tool.

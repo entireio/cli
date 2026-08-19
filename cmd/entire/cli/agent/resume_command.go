@@ -60,6 +60,15 @@ func ResumeCommandSpecFor(name types.AgentName, sessionID string) (ForegroundCom
 			Binary: "goose",
 			Args:   []string{"session", "--resume", "--session-id", sessionID},
 		}, true
+	case AgentNameQwenCode:
+		// Bare `qwen` starts a fresh session, so the no-ID case uses --continue.
+		if sessionID == "" {
+			return ForegroundCommandSpec{Binary: "qwen", Args: []string{"--continue"}}, true
+		}
+		if !isLaunchableResumeSessionID(sessionID) {
+			return ForegroundCommandSpec{}, false
+		}
+		return ForegroundCommandSpec{Binary: "qwen", Args: []string{"--resume", sessionID}}, true
 	case AgentNameOpenCode:
 		if sessionID == "" {
 			return ForegroundCommandSpec{Binary: "opencode"}, true

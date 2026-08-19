@@ -166,7 +166,7 @@ func BuildCondensedTranscriptFromBytes(content redact.RedactedBytes, agentType t
 		return buildCondensedTranscriptFromCodex(content)
 	case agent.AgentTypePi:
 		return buildCondensedTranscriptFromPi(content)
-	case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeUnknown:
+	case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeQwenCode, agent.AgentTypeUnknown:
 		// Claude/cursor format - fall through to shared logic below
 	}
 	// Claude format (JSONL) - handles Claude Code, Unknown, and any future agent types
