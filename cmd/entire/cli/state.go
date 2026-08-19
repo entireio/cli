@@ -598,6 +598,12 @@ func RememberAgentTaskLink(ctx context.Context, agentID, taskToolUseID string) e
 	if err := validation.ValidateAgentID(agentID); err != nil {
 		return fmt.Errorf("invalid agent ID for agent-task link: %w", err)
 	}
+	if taskToolUseID == "" {
+		// ValidateToolUseID allows empty (it's an optional field elsewhere),
+		// but a link file with an empty tool_use_id is unusable: LookupAgentTaskLink
+		// rejects empty ToolUseID, so it would be written and silently never read.
+		return errors.New("task tool_use_id is required")
+	}
 	if err := validation.ValidateToolUseID(taskToolUseID); err != nil {
 		return fmt.Errorf("invalid tool use ID for agent-task link: %w", err)
 	}

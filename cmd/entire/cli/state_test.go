@@ -344,14 +344,8 @@ func TestFindActivePreTaskFile(t *testing.T) {
 func setupTmpDirRepo(t *testing.T) {
 	t.Helper()
 	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
 	t.Chdir(tmpDir)
-
-	if err := os.MkdirAll(".git/objects", 0o755); err != nil {
-		t.Fatalf("Failed to create .git: %v", err)
-	}
-	if err := os.WriteFile(".git/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
-		t.Fatalf("Failed to create HEAD: %v", err)
-	}
 	paths.ClearWorktreeRootCache()
 
 	if err := os.MkdirAll(paths.EntireTmpDir, 0o755); err != nil {
