@@ -253,6 +253,19 @@ func TestStreamOnce_TooManyRequestsIsRecoverable(t *testing.T) {
 	}
 }
 
+func TestPrintReviewStreamEventReadsEntireAPICamelCasePayload(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	printReviewStreamEvent(&out, reviewStreamEvent{
+		EventType: "code_version.created",
+		TargetID:  "cv_1",
+		Payload:   map[string]any{"headSha": "abc123"},
+	})
+	if got := out.String(); !strings.Contains(got, "head abc123") {
+		t.Fatalf("output = %q, want camelCase headSha", got)
+	}
+}
+
 func TestStreamOnce_SendsLastEventIDHeader(t *testing.T) {
 	frames := []string{
 		"event: reconnect\ndata: {\"reason\":\"max_duration\"}\n\n",

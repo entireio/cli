@@ -86,7 +86,7 @@ func TestEnableDisable(t *testing.T) {
 	}
 
 	// Re-enable (using --agent for non-interactive mode)
-	stdout = env.RunCLI("enable", "--agent", "claude-code", "--telemetry=false")
+	stdout = env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
 	if !strings.Contains(stdout, "Ready.") {
 		t.Errorf("Expected enable output to contain 'Ready.', got: %s", stdout)
 	}
@@ -98,7 +98,7 @@ func TestEnableDisable(t *testing.T) {
 	}
 }
 
-func TestRewindBlockedWhenDisabled(t *testing.T) {
+func TestCheckpointListPendingBlockedWhenDisabled(t *testing.T) {
 	t.Parallel()
 	env := NewRepoWithCommit(t)
 	// Disable Entire
@@ -159,7 +159,7 @@ func TestEnableWhenDisabled(t *testing.T) {
 	env.SetEnabled(false)
 
 	// Enable command should work (using --agent for non-interactive mode)
-	stdout := env.RunCLI("enable", "--agent", "claude-code", "--telemetry=false")
+	stdout := env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
 	if !strings.Contains(stdout, "Ready.") {
 		t.Errorf("Expected enable output to contain 'Ready.', got: %s", stdout)
 	}
@@ -243,7 +243,7 @@ func TestHooksRunAfterLocalOnlyEnable(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(entireDir, "tmp"), 0o755); err != nil {
 		t.Fatalf("mkdir .entire/tmp: %v", err)
 	}
-	localSettings := `{"enabled":true,"local_dev":true,"strategy_options":{"filtered_fetches":true}}`
+	localSettings := `{"enabled":true,"strategy_options":{"filtered_fetches":true}}`
 	if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(localSettings), 0o644); err != nil {
 		t.Fatalf("write settings.local.json: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestEnableReenablesProjectScopeAfterProjectDisable(t *testing.T) {
 
 	// First-time setup via the real binary; a plain enable writes the project
 	// .entire/settings.json.
-	env.RunCLI("enable", "--agent", "claude-code", "--telemetry=false")
+	env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
 	assertProjectSettingsEnabled(t, env, true)
 
 	// Disable at the project scope → settings.json enabled=false.

@@ -21,8 +21,10 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/gitops"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -1063,7 +1065,13 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	repoDir string,
 ) error {
 	logCtx := logging.WithComponent(ctx, "attribution")
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	// RefFetcher: the attribution backfill's absence probe fetches a ref that
+	// exists remotely but not locally. Bounded budget + the store's failure
+	// memo keep a dead network from stalling the post-commit hook.
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		RefFetcher:  remote.HookCheckpointRefFetcher(),
+		ReadRemotes: CheckpointReadRemotes(ctx),
+	})
 	if err != nil {
 		return fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -1409,7 +1417,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	state.RealignAttributionBase(newHead)
 	resetCheckpointWindow(state)
 	state.CheckpointTranscriptStart = result.TotalTranscriptLines
-	state.CheckpointTranscriptSize = int64(len(result.Transcript))
+	state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 
 	// Clear attribution tracking — condensation already used these values
 	state.PromptAttributions = nil
@@ -1479,7 +1487,12 @@ func (s *ManualCommitStrategy) postCommitUpdateBaseCommitOnly(ctx context.Contex
 		return // Silent failure — hooks must be resilient
 	}
 
-	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
+	// Exact matches only: this path rewrites BaseCommit, which must track the
+	// HEAD of the session's own worktree. A trailer-less commit here says
+	// nothing about HEAD movement in a sibling worktree, and rewriting a
+	// fallback-matched session's base would orphan its shadow branch
+	// (shadow branches are keyed by BaseCommit + WorktreeID).
+	sessions, err := s.findExactSessionsForWorktree(ctx, worktreePath)
 	if err != nil || len(sessions) == 0 {
 		return
 	}
@@ -1933,7 +1946,7 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 	// For Claude Code, use ExtractAllModifiedFiles which parses the main transcript
 	// AND subagent transcripts in a single pass, avoiding redundant parsing.
 	if state.AgentType == agent.AgentTypeClaudeCode {
-		subagentsDir := filepath.Join(filepath.Dir(state.TranscriptPath), state.SessionID, "subagents")
+		subagentsDir := paths.SubagentsDir(filepath.Dir(state.TranscriptPath), state.SessionID)
 		transcriptData, readErr := os.ReadFile(state.TranscriptPath)
 		if readErr != nil {
 			logging.Debug(logCtx, "extractModifiedFilesFromLiveTranscript: failed to read transcript",
@@ -2325,6 +2338,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		}
 		captureSessionBranch(repo, state)
 		captureSessionOwner(state)
+		reconcileWorktreePathForResumedTurn(ctx, state)
 
 		// ORDERING: attribution runs BEFORE migrate to use the pre-migration
 		// BaseCommit as the base tree (preserving correct agent-line counts
@@ -2487,8 +2501,10 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 		return result
 	}
 
-	// Get worktree status to find ALL changed files
-	status, err := worktree.Status()
+	// Get worktree status to find ALL changed files. This is a second full
+	// worktree walk in the turn-start hook — the pre-prompt capture in
+	// cli/state.go does its own. They are not shared.
+	status, err := gitrepo.Status(ctx, repo)
 	if err != nil {
 		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree status",
 			slog.String("error", err.Error()))
@@ -2832,6 +2848,12 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	ag, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; ExtractSkillEvents handles nil
 	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(agent.ExtractSkillEvents(ctx, ag, fullTranscript, 0), state.TurnID))
 
+	// Sanitize before externalizing and redacting, matching CondenseSession's
+	// sanitize -> externalize -> redact order. Skill events above are extracted from
+	// the pre-sanitization bytes because they are session telemetry rather than
+	// stored transcript content.
+	fullTranscript = agent.SanitizeTranscriptForStorage(ag, fullTranscript)
+
 	// Redact secrets before writing. Checkpoint store methods require
 	// pre-redacted in-memory transcript content from callers. The live
 	// transcript on disk is still treated as raw/untrusted input, so redact it
@@ -2897,7 +2919,14 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// Post-commit emits regex-only blobs; the writer joins + redacts
 	// via checkpoint.redactedJoinedPrompts. OPF runs later, once per
 	// push, in the pre-push rewrite path.
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	// RefFetcher: the transcript finalize targets existing checkpoints whose
+	// refs may live only on the remote (resumed/adopted multi-machine
+	// sessions). Bounded budget + the store's failure memo keep a dead
+	// network from stalling the stop hook N times.
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		RefFetcher:  remote.HookCheckpointRefFetcher(),
+		ReadRemotes: CheckpointReadRemotes(ctx),
+	})
 	if err != nil {
 		logging.Warn(logCtx, "finalize: failed to open checkpoint store",
 			slog.String("error", err.Error()),
@@ -3006,7 +3035,7 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 ) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	start := time.Now()
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: CheckpointReadRemotes(ctx)})
 	if err != nil {
 		logging.Warn(logCtx, "post-commit: carry-forward failed to open checkpoint store",
 			slog.String("session_id", state.SessionID),

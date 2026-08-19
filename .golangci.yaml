@@ -1,4 +1,10 @@
 version: "2"
+# Without these, every `//go:build integration` and `//go:build e2e` file is
+# invisible to golangci-lint.
+run:
+  build-tags:
+    - integration
+    - e2e
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
@@ -107,6 +113,9 @@ linters:
         - pattern: '^.*\.Checkout$'
           msg: "go-git Checkout deletes .gitignored dirs - use CheckoutBranch() from git_operations.go"
           pkg: 'github\.com/go-git/go-git'
+        - pattern: '^.*Worktree\.Status$'
+          msg: "go-git Worktree.Status() walks the whole worktree - use gitrepo.Status(ctx, repo)"
+          pkg: 'github\.com/go-git/go-git'
         - pattern: '^.*\.(Print|Println|Printf)$'
           msg: "cobra's Print* writes to OutOrStderr (stderr in production); use fmt.Fprint*(cmd.OutOrStdout(), ...)"
           pkg: 'github\.com/spf13/cobra'
@@ -144,6 +153,11 @@ linters:
           - revive
           - usetesting
           - wrapcheck
+      # Test harness that happens not to end in _test.go, so the rules above
+      # miss it. Same exemption `^e2e/` already gets for its support files.
+      - path: ^cmd/entire/cli/integration_test/
+        linters:
+          - gosec
       - path: ^test/workloads/
         linters:
           - wrapcheck

@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
@@ -20,13 +21,6 @@ const entireHookMarker = "Entire CLI hooks"
 const backupSuffix = ".pre-entire"
 const chainComment = "# Chain: run pre-existing hook"
 const missingEntireGitHookWarning = "[entire] Entire CLI is enabled but not installed or not on PATH. Skipping Entire Git hook; continuing. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
-
-// localDevHookCmdPrefix is the command prefix used for git hooks in local
-// development mode. It points at scripts/entire-dev, which compiles the CLI on
-// demand and falls back to the entire binary on PATH when the tree does not
-// build. The path is relative to the repository root, which is git's working
-// directory when it runs hooks.
-const localDevHookCmdPrefix = "./scripts/entire-dev"
 
 // gitHookNames are the git hooks managed by Entire CLI
 var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite", "pre-push"}
@@ -139,38 +133,148 @@ func getHooksDirInPath(ctx context.Context, dir string) (string, error) {
 	return filepath.Clean(hooksDir), nil
 }
 
-// IsGitHookInstalled checks if all generic Entire CLI hooks are installed.
-func IsGitHookInstalled(ctx context.Context) bool {
+// GitHookState describes .git/hooks relative to what InstallGitHook writes today.
+//
+// Deliberately the same vocabulary as agent.HookConfigState: there are two hook
+// surfaces (git hooks and per-agent configs) and one set of words for "ours and
+// current" vs "ours but stale" vs "not ours". A single bool cannot serve both
+// questions callers ask — EnsureSetup needs "are these current", while uninstall
+// needs "is there anything of ours to remove", and a stale hook answers those
+// differently.
+type GitHookState int
+
+const (
+	// GitHooksAbsent means there is no complete set of Entire git hooks: one is
+	// missing, or a foreign hook sits at one of our paths. A partial set reads
+	// Absent, which is what the predicate has always reported.
+	GitHooksAbsent GitHookState = iota
+	// GitHooksCurrent means every managed hook is ours and in the shape this
+	// version writes.
+	GitHooksCurrent
+	// GitHooksOutdated means the hooks are ours but at least one is a shape we no
+	// longer write. Today that means running Entire from the working tree, which
+	// is broken as well as stale — the path it names is gone.
+	GitHooksOutdated
+)
+
+// CheckGitHookState reports the state of the active hooks directory.
+func CheckGitHookState(ctx context.Context) GitHookState {
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
-		return false
+		return GitHooksAbsent
 	}
-	return isGitHookInstalledInHooksDir(hooksDir)
+	return gitHookStateInHooksDir(hooksDir)
 }
 
-// IsGitHookInstalledInDir checks if all Entire CLI hooks are installed in the given repo directory.
-// This is useful for tests that need to check hooks without changing the working directory.
-func IsGitHookInstalledInDir(ctx context.Context, repoDir string) bool {
+// CheckGitHookStateInDir reports the state for a specific repo directory, for
+// callers that must not depend on the working directory.
+func CheckGitHookStateInDir(ctx context.Context, repoDir string) GitHookState {
 	hooksDir, err := getHooksDirInPath(ctx, repoDir)
 	if err != nil {
-		return false
+		return GitHooksAbsent
 	}
-	return isGitHookInstalledInHooksDir(hooksDir)
+	return gitHookStateInHooksDir(hooksDir)
 }
 
-// isGitHookInstalledInHooksDir checks if all hooks are installed in the given hooks directory.
-func isGitHookInstalledInHooksDir(hooksDir string) bool {
+// IsGitHookInstalled reports whether a CURRENT set of Entire git hooks is
+// installed. Callers that need to tell "none" from "ours but stale" — uninstall,
+// doctor — must use CheckGitHookState instead, or they will treat a stale hook as
+// if it were not there.
+func IsGitHookInstalled(ctx context.Context) bool {
+	return CheckGitHookState(ctx) == GitHooksCurrent
+}
+
+// IsGitHookInstalledInDir checks if a current set of Entire CLI hooks is installed
+// in the given repo directory. Useful for tests that must not change cwd.
+func IsGitHookInstalledInDir(ctx context.Context, repoDir string) bool {
+	return CheckGitHookStateInDir(ctx, repoDir) == GitHooksCurrent
+}
+
+// AnyGitHookInstalled reports whether Entire git hooks are present at all,
+// current or not. This is what uninstall needs: a stale hook is still ours, and
+// still ours to remove.
+func AnyGitHookInstalled(ctx context.Context) bool {
+	return CheckGitHookState(ctx) != GitHooksAbsent
+}
+
+// ReinstallGitHooks rewrites the managed git hooks using this repo's hook
+// settings — the same pair EnsureSetup runs, exported so callers outside this
+// package cannot open-code it and silently drop absolute_git_hook_path.
+func ReinstallGitHooks(ctx context.Context) (int, error) {
+	return InstallGitHook(ctx, true, hookSettingsFromConfig(ctx))
+}
+
+// legacyGitHookLaunchers are the markers of a git hook that runs Entire from the
+// working tree instead of the installed binary — the two shapes local-dev mode
+// wrote over time. Retained for DETECTION ONLY: a hook naming either must be
+// treated as needing reinstallation.
+//
+// Such a hook is actively broken, not merely outdated. It carries
+// entireHookMarker, so a marker-only check reports it as installed and nothing
+// ever replaces it. `scripts/entire-dev` no longer exists, and `go run` on a
+// single file cannot build a package split across several — so both fail, and a
+// repo-relative prefix gets no availability guard to swallow it. pre-push
+// deliberately propagates exit codes, so the older of these forms was one
+// missing `|| true` away from rejecting every `git push`.
+//
+// Matching these two rather than "anything unexpected" is deliberate: neither
+// can appear in a hook this version generates (which emits only bare `entire` or
+// a quoted absolute path), and they are the same forms the agents match in their
+// entireHookPrefixes.
+var legacyGitHookLaunchers = []string{"scripts/entire-dev", "go run "}
+
+// bareEntireHookCmd is the default hook command prefix: the entire binary
+// resolved through PATH at hook runtime.
+const bareEntireHookCmd = "entire"
+
+// gitHookStateInHooksDir classifies the hooks in the given directory. A hook that
+// is present but still invokes a removed local-dev launcher reads Outdated, not
+// Current, which is what makes EnsureSetup reinstall it rather than leaving a
+// broken hook in place forever.
+func gitHookStateInHooksDir(hooksDir string) GitHookState {
+	outdated := false
 	for _, hook := range gitHookNames {
 		hookPath := filepath.Join(hooksDir, hook)
 		data, err := os.ReadFile(hookPath) //nolint:gosec // Path is constructed from constants
 		if err != nil {
-			return false
+			return GitHooksAbsent
 		}
-		if !strings.Contains(string(data), entireHookMarker) {
-			return false
+		content := string(data)
+		if !strings.Contains(content, entireHookMarker) {
+			return GitHooksAbsent
+		}
+		if entireHookLineRunsFromWorkingTree(content) {
+			outdated = true
 		}
 	}
-	return true
+	if outdated {
+		return GitHooksOutdated
+	}
+	return GitHooksCurrent
+}
+
+// entireHookLineRunsFromWorkingTree reports whether the hook's OWN Entire
+// invocation names a legacy launcher.
+//
+// Scoped to the invocation line, not the whole file. A user may hand-edit a hook
+// Entire installed to append their own steps, and one of those steps containing
+// `go run ` must not make the file read as ours-but-stale: InstallGitHook only
+// backs up a hook that does NOT carry entireHookMarker, so a hand-edited hook is
+// rewritten with no backup and a false positive here would silently discard their
+// additions. Every generated invocation contains `hooks git `, so keying on that
+// line separates Entire's command from anything around it.
+func entireHookLineRunsFromWorkingTree(content string) bool {
+	for line := range strings.SplitSeq(content, "\n") {
+		if !strings.Contains(line, "hooks git ") {
+			continue
+		}
+		for _, launcher := range legacyGitHookLaunchers {
+			if strings.Contains(line, launcher) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // buildHookSpecs returns the hook specifications for all managed hooks.
@@ -243,31 +347,39 @@ func buildHookSpecs(cmdPrefix string) []hookSpec {
 	}
 }
 
+// gitHookCommand wraps an invocation in an existence test, so a hook whose
+// binary is missing exits cleanly instead of failing the surrounding git
+// operation. Every prefix is guarded — there is no unguarded form.
 func gitHookCommand(cmdPrefix, args string, warnMissing bool) string {
 	invocation := fmt.Sprintf("%s hooks git %s", cmdPrefix, args)
-	availableTest, ok := gitHookCommandAvailableTest(cmdPrefix)
-	if !ok {
-		return invocation
-	}
-
 	missingAction := ":"
 	if warnMissing {
 		missingAction = fmt.Sprintf("printf '%%s\\n' %s >&2 || :", shellQuote(missingEntireGitHookWarning))
 	}
-	return fmt.Sprintf("if %s; then %s; else %s; fi", availableTest, invocation, missingAction)
+	return fmt.Sprintf("if %s; then %s; else %s; fi", gitHookCommandAvailableTest(cmdPrefix), invocation, missingAction)
 }
 
-func gitHookCommandAvailableTest(cmdPrefix string) (string, bool) {
-	if cmdPrefix == "entire" {
-		return "command -v entire >/dev/null 2>&1", true
+// gitHookCommandAvailableTest returns the shell test that decides whether the
+// hook's command can run.
+//
+// It always returns a test. It used to return ok=false for prefixes it could not
+// classify, and gitHookCommand then emitted the invocation unguarded — a path
+// that existed only for the removed local-dev launcher (a repo-relative path).
+// The prefixes hookCmdPrefix can now produce are bare "entire" or a shell-quoted
+// absolute path from os.Executable(), but an odd absolute form (a Windows UNC or
+// extended-length path on a network share) would previously have fallen through
+// and silently lost the guard, which is the one case where losing it hurts most.
+// Defaulting to an executability test keeps the contract unconditional.
+func gitHookCommandAvailableTest(cmdPrefix string) string {
+	if cmdPrefix == bareEntireHookCmd {
+		return "command -v entire >/dev/null 2>&1"
 	}
 	if isWindowsAbsoluteHookCommand(cmdPrefix) {
-		return fmt.Sprintf("[ -f %s ]", cmdPrefix), true
+		// Git for Windows' sh has no reliable -x for native paths; -f is what
+		// distinguishes "binary is there" from "it was uninstalled".
+		return fmt.Sprintf("[ -f %s ]", cmdPrefix)
 	}
-	if strings.HasPrefix(cmdPrefix, "/") || strings.HasPrefix(cmdPrefix, "'/") {
-		return fmt.Sprintf("[ -x %s ]", cmdPrefix), true
-	}
-	return "", false
+	return fmt.Sprintf("[ -x %s ]", cmdPrefix)
 }
 
 func isWindowsAbsoluteHookCommand(cmdPrefix string) bool {
@@ -285,20 +397,36 @@ func isWindowsAbsoluteHookCommand(cmdPrefix string) bool {
 // InstallGitHook installs generic git hooks that delegate to `entire hook` commands.
 // These hooks work with any strategy - the strategy is determined at runtime.
 // If silent is true, no output is printed (except backup notifications, which always print).
-// localDev controls whether hooks use "go run" (true) or the "entire" binary (false).
 // absolutePath embeds the full binary path in hooks for GUI git clients.
 // Returns the number of hooks that were installed (0 if all already up to date).
-func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (int, error) {
+//
+// Hooks always invoke the "entire" binary. Git hooks written by older versions
+// in local-dev mode ran a repo-relative launcher script instead; they still
+// carry entireHookMarker, so the content comparison below rewrites them to the
+// binary form on the next install rather than leaving them pointed at repo
+// content.
+func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error) {
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
 		return 0, err
+	}
+
+	info, statErr := os.Stat(hooksDir)
+	notDir := statErr == nil && !info.IsDir()
+	// ENOTDIR: a path component of hooksDir is itself a non-directory
+	// (e.g. core.hooksPath=/dev/null/hooks) — same misconfiguration.
+	if notDir || errors.Is(statErr, syscall.ENOTDIR) {
+		return 0, fmt.Errorf("git resolves the hooks directory to %s, which is not a directory — core.hooksPath is likely set to disable git hooks\n"+
+			"Entire requires git hooks to capture sessions. See where it is set with:\n"+
+			"  git config --show-origin --get-all core.hooksPath\n"+
+			"then unset it (git config --global --unset core.hooksPath) or override for this repo (git config core.hooksPath .git/hooks) and re-run 'entire enable'", hooksDir)
 	}
 
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil { //nolint:gosec // Git hooks require executable permissions
 		return 0, fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
-	cmdPrefix, err := hookCmdPrefix(localDev, absolutePath)
+	cmdPrefix, err := hookCmdPrefix(absolutePath)
 	if err != nil {
 		return 0, err
 	}
@@ -449,14 +577,15 @@ fi
 }
 
 // hookCmdPrefix returns the command prefix for hook scripts and warning messages.
-// Returns the scripts/entire-dev launcher when local_dev is enabled.
 // When absolutePath is true, resolves the full binary path via os.Executable()
 // and returns an error if resolution fails. This is needed for GUI git clients
 // (Xcode, Tower, etc.) that don't source shell profiles.
-func hookCmdPrefix(localDev, absolutePath bool) (string, error) {
-	if localDev {
-		return localDevHookCmdPrefix, nil
-	}
+//
+// The prefix always names a binary outside the repository — either bare
+// "entire" resolved through PATH or an absolute path inlined at install time.
+// Never derive it from repository content: a repo-relative prefix lets whatever
+// the working tree contains run on every git operation.
+func hookCmdPrefix(absolutePath bool) (string, error) {
 	if absolutePath {
 		exe, err := os.Executable()
 		if err != nil {
@@ -468,7 +597,7 @@ func hookCmdPrefix(localDev, absolutePath bool) (string, error) {
 		}
 		return shellQuote(resolved), nil
 	}
-	return "entire", nil
+	return bareEntireHookCmd, nil
 }
 
 // resolveHookExePath resolves exe through symlinks for embedding as an absolute
@@ -500,11 +629,11 @@ func shellQuote(s string) string {
 }
 
 // hookSettingsFromConfig loads hook-related settings from .entire/settings.json.
-// Returns (localDev, absoluteHookPath). On error, both default to false.
-func hookSettingsFromConfig(ctx context.Context) (localDev, absoluteHookPath bool) {
+// Returns absoluteHookPath. On error, it defaults to false.
+func hookSettingsFromConfig(ctx context.Context) (absoluteHookPath bool) {
 	s, err := settings.Load(ctx)
 	if err != nil {
-		return false, false
+		return false
 	}
-	return s.LocalDev, s.AbsoluteGitHookPath
+	return s.AbsoluteGitHookPath
 }

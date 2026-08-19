@@ -7,6 +7,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
@@ -82,6 +83,23 @@ func GetLogLevel() string {
 	return s.LogLevel
 }
 
+// ensureCommandLogging routes logging to .entire/logs/ for a plain command that
+// would otherwise emit logging.* calls with no logger installed, and returns the
+// teardown. Commands reached from a hook already have one, and this leaves it
+// alone; see logging.EnsureInitialized.
+//
+// The level getter is paired with the init here — the same pairing every
+// command-level Init site needs — because without it `log_level` from settings
+// is ignored on this path.
+//
+// Scope the returned cleanup to the whole command, not to the one call that
+// needed a logger: it closes the log file, so anything logged afterwards goes
+// back to the user's terminal via slog.Default().
+func ensureCommandLogging(ctx context.Context) func() {
+	logging.SetLogLevelGetter(GetLogLevel)
+	return logging.EnsureInitialized(ctx)
+}
+
 // GetAgentsWithHooksInstalled returns names of agents that have hooks installed.
 func GetAgentsWithHooksInstalled(ctx context.Context) []types.AgentName {
 	var installed []types.AgentName
@@ -100,6 +118,38 @@ func GetAgentsWithHooksInstalled(ctx context.Context) []types.AgentName {
 // InstalledAgentDisplayNames returns user-facing display names for agents with hooks installed.
 func InstalledAgentDisplayNames(ctx context.Context) []string {
 	return agentDisplayNames(GetAgentsWithHooksInstalled(ctx))
+}
+
+// OutdatedHookAgents returns installed agents whose Entire hook config has
+// drifted from what the CLI would write today, for `entire status` and
+// `entire doctor` to surface. Agents that don't implement agent.HookFreshness
+// are skipped: absence of a drift check reads as "nothing to report", never as
+// a warning.
+//
+// Scoped to agents AreHooksInstalled reports as installed here. Note what that
+// means for generated-file agents (Pi, OpenCode): the committed file *is* the
+// installation, so a repo that ships one gets drift warnings even where nobody
+// ran `entire agent add`. That is the intent — such a repo is relying on the
+// committed file to work — but it does mean this is not scoped to people who
+// opted in on this machine.
+func OutdatedHookAgents(ctx context.Context) []types.AgentName {
+	var outdated []types.AgentName
+	for _, name := range GetAgentsWithHooksInstalled(ctx) {
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		if hf, ok := agent.AsHookFreshness(ag); ok && hf.CheckHookConfig(ctx) == agent.HooksOutdated {
+			outdated = append(outdated, name)
+		}
+	}
+	return outdated
+}
+
+// OutdatedHookAgentDisplayNames returns user-facing display names for agents
+// whose hook config is out of date.
+func OutdatedHookAgentDisplayNames(ctx context.Context) []string {
+	return agentDisplayNames(OutdatedHookAgents(ctx))
 }
 
 // agentDisplayNames maps agent names to their user-facing display names,

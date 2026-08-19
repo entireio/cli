@@ -250,12 +250,16 @@ func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer
 		return matches, lookup
 	}
 
-	// git-refs primary: there is no single metadata branch to fetch — each
-	// checkpoint is its own ref. When the prefix is a full checkpoint ID (the
+	// git-refs primary: refs-native checkpoints have no single metadata branch to
+	// fetch — each is its own ref. When the prefix is a full checkpoint ID (the
 	// Entire-Checkpoint commit trailer always is), fetch that one ref directly,
-	// then re-list. A shorter prefix cannot be fetched per-ref, and under a
-	// refs primary there is no v1 metadata branch to fetch either, so a
-	// short-prefix miss stays local-only.
+	// then re-list. A shorter prefix cannot be fetched per-ref, so a short-prefix
+	// miss stays local-only for refs-native checkpoints.
+	//
+	// Legacy hex-ID checkpoints on the v1 branch are already covered before we
+	// get here, at any prefix length: matchCheckpointPrefix reads lookup.committed,
+	// which the store's List populates, and the git-branch read store recovers a
+	// missing v1 branch from the checkpoint remote itself (MetadataBranchFetchFunc).
 	if cpCfg, _ := settings.LoadCheckpointsConfig(ctx); checkpoint.PrimaryIsRefs(cpCfg) { //nolint:errcheck // fail-soft: bad config surfaces via Open elsewhere
 		if cid, err := id.NewCheckpointID(prefix); err != nil {
 			logging.Debug(ctx, "explain: prefix is not a full checkpoint ID; refs-primary store cannot fetch by prefix, treating as no match",

@@ -15,7 +15,10 @@ import (
 )
 
 // Ensure ClaudeCodeAgent implements HookSupport
-var _ agent.HookSupport = (*ClaudeCodeAgent)(nil)
+var (
+	_ agent.HookSupport   = (*ClaudeCodeAgent)(nil)
+	_ agent.HookFreshness = (*ClaudeCodeAgent)(nil)
+)
 
 // Claude Code hook names - these become subcommands under `entire hooks claude-code`
 const (
@@ -53,32 +56,10 @@ const ClaudeSettingsFileName = "settings.json"
 // metadataDenyRule blocks Claude from reading Entire session metadata
 const metadataDenyRule = "Read(./.entire/metadata/**)"
 
-// localDevHookCmdPrefix is the command prefix used for hooks in local-dev mode.
-// It points at scripts/entire-dev, which compiles the CLI on demand and falls
-// back to the entire binary on PATH when the tree does not build (e.g. mid
-// merge-conflict-fix). ${CLAUDE_PROJECT_DIR} is set by Claude Code to the
-// repository root when it runs hooks.
-const localDevHookCmdPrefix = "${CLAUDE_PROJECT_DIR}/scripts/entire-dev "
-
-// entireHookPrefixes are command prefixes that identify Entire hooks. The
-// "go run" prefix is retained so hooks installed by older versions are still
-// recognized for removal/upgrade.
-var entireHookPrefixes = []string{
-	"entire ",
-	localDevHookCmdPrefix,
-	"go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go ",
-}
-
-// localDevHookCommand builds a local-dev hook command for the given hook name,
-// delegating to scripts/entire-dev for the build-probe-and-fallback logic.
-func localDevHookCommand(hookName string) string {
-	return fmt.Sprintf("%shooks claude-code %s", localDevHookCmdPrefix, hookName)
-}
-
 // InstallHooks installs Claude Code hooks in .claude/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
-func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
+func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	// Use repo root instead of CWD to find .claude directory
 	// This ensures hooks are installed correctly when run from a subdirectory
 	repoRoot, err := paths.WorktreeRoot(ctx)
@@ -147,26 +128,34 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 	}
 
 	// Define hook commands
-	var sessionStartCmd, sessionEndCmd, stopCmd, userPromptSubmitCmd, preTaskCmd, postTaskCmd, postTodoCmd string
-	if localDev {
-		sessionStartCmd = localDevHookCommand(HookNameSessionStart)
-		sessionEndCmd = localDevHookCommand(HookNameSessionEnd)
-		stopCmd = localDevHookCommand(HookNameStop)
-		userPromptSubmitCmd = localDevHookCommand(HookNameUserPromptSubmit)
-		preTaskCmd = localDevHookCommand(HookNamePreTask)
-		postTaskCmd = localDevHookCommand(HookNamePostTask)
-		postTodoCmd = localDevHookCommand(HookNamePostTodo)
-	} else {
-		sessionStartCmd = agent.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agent.WarningFormatMultiLine)
-		sessionEndCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code session-end")
-		stopCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code stop")
-		userPromptSubmitCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit")
-		preTaskCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
-		postTaskCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
-		postTodoCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
-	}
+	sessionStartCmd := agent.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agent.WarningFormatMultiLine)
+	sessionEndCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code session-end")
+	stopCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	userPromptSubmitCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit")
+	preTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
+	postTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+	postTodoCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
 
 	count := 0
+
+	// Drop Entire hooks left by older versions before adding the current ones,
+	// so a stale command (e.g. the removed local-dev launcher, which ran a
+	// script inside the working tree) does not survive alongside them.
+	// Unconditional: a plain `entire enable` must migrate too, not just --force.
+	staleDropped := false
+	drop := func(matchers []ClaudeHookMatcher, want ...string) []ClaudeHookMatcher {
+		out, dropped := dropStaleEntireHooks(matchers, want...)
+		if dropped {
+			staleDropped = true
+		}
+		return out
+	}
+	sessionStart = drop(sessionStart, sessionStartCmd)
+	sessionEnd = drop(sessionEnd, sessionEndCmd)
+	stop = drop(stop, stopCmd)
+	userPromptSubmit = drop(userPromptSubmit, userPromptSubmitCmd)
+	preToolUse = drop(preToolUse, preTaskCmd)
+	postToolUse = drop(postToolUse, postTaskCmd, postTodoCmd)
 
 	// Add hooks if they don't exist
 	if !hookCommandExists(sessionStart, sessionStartCmd) {
@@ -216,7 +205,10 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 		permissionsChanged = true
 	}
 
-	if count == 0 && !permissionsChanged {
+	// staleDropped forces a write even when nothing was added: a file holding
+	// both a stale and a current hook adds nothing, and returning early here
+	// would leave the stale hook on disk.
+	if count == 0 && !permissionsChanged && !staleDropped {
 		return 0, nil // All hooks and permissions already installed
 	}
 
@@ -433,19 +425,31 @@ func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) bool {
 }
 
 // HookConfigState describes how Entire's Claude Code hooks compare to what
-// InstallHooks would write today.
-type HookConfigState int
+// InstallHooks would write today. Aliased to the shared agent-package type so
+// `entire status` and `entire doctor` can treat every agent's drift check
+// uniformly; the names stay exported here for existing call sites.
+//
+// For Claude Code, HooksOutdated means Entire hooks are installed but the
+// current tool-use matchers no longer carry them (e.g. an older CLI wrote them
+// under the now non-firing "Task"/"TodoWrite" matchers).
+type HookConfigState = agent.HookConfigState
 
 const (
 	// HooksAbsent means Entire hooks are not installed in this repo.
-	HooksAbsent HookConfigState = iota
+	HooksAbsent = agent.HooksAbsent
 	// HooksCurrent means the installed hooks match the current config.
-	HooksCurrent
-	// HooksOutdated means Entire hooks are installed but the current tool-use
-	// matchers no longer carry them (e.g. an older CLI wrote them under the now
-	// non-firing "Task"/"TodoWrite" matchers). Fix: `entire enable --force`.
-	HooksOutdated
+	HooksCurrent = agent.HooksCurrent
+	// HooksOutdated means the installed hooks are stale.
+	// Fix: `entire enable --force`.
+	HooksOutdated = agent.HooksOutdated
 )
+
+// CheckHookConfig satisfies agent.HookFreshness by delegating to the
+// package-level check, which predates the interface and is still called
+// directly by tests.
+func (c *ClaudeCodeAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
+	return CheckHookConfig(ctx)
+}
 
 // CheckHookConfig reports whether Entire's Claude Code hooks are absent,
 // current, or outdated. It is a read-only diagnostic used by `entire status`
@@ -545,6 +549,11 @@ func hookCommandExistsWithMatcher(matchers []ClaudeHookMatcher, matcherName, com
 	return false
 }
 
+// addHookToMatcher appends command to the matcher named matcherName, creating it
+// if absent. No timeout is set: Timeout exists on ClaudeHookEntry to round-trip
+// settings files that carry one, but Entire's own hooks all keep Claude Code's
+// default. (The removed local-dev mode was the only thing that needed a longer
+// SessionEnd budget, because it compiled the CLI from source.)
 func addHookToMatcher(matchers []ClaudeHookMatcher, matcherName, command string) []ClaudeHookMatcher {
 	entry := ClaudeHookEntry{
 		Type:    "command",
@@ -581,26 +590,42 @@ func addHookToMatcher(matchers []ClaudeHookMatcher, matcherName, command string)
 
 // isEntireHook checks if a command is an Entire hook (old or new format)
 func isEntireHook(command string) bool {
-	return agent.IsManagedHookCommand(command, entireHookPrefixes)
+	return agent.IsManagedHookCommand(command)
 }
 
-// removeEntireHooks removes all Entire hooks from a list of matchers (for simple hooks like Stop)
-func removeEntireHooks(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
+// dropStaleEntireHooks removes Entire-owned hooks whose command is not one of
+// want, per matcher, pruning matchers left with no hooks. want is a set because
+// one hook list can hold several Entire commands (PostToolUse carries both
+// post-task and post-todo). See agent.DropStaleManagedHooks for why this runs on
+// every install and why the dropped flag matters.
+func dropStaleEntireHooks(matchers []ClaudeHookMatcher, want ...string) ([]ClaudeHookMatcher, bool) {
 	result := make([]ClaudeHookMatcher, 0, len(matchers))
+	dropped := false
 	for _, matcher := range matchers {
-		filteredHooks := make([]ClaudeHookEntry, 0, len(matcher.Hooks))
-		for _, hook := range matcher.Hooks {
-			if !isEntireHook(hook.Command) {
-				filteredHooks = append(filteredHooks, hook)
-			}
+		kept, d := agent.DropStaleManagedHooks(matcher.Hooks, hookEntryCommand, want)
+		if d {
+			dropped = true
 		}
-		// Only keep the matcher if it has hooks remaining
-		if len(filteredHooks) > 0 {
-			matcher.Hooks = filteredHooks
+		if len(kept) > 0 {
+			matcher.Hooks = kept
 			result = append(result, matcher)
 		}
 	}
-	return result
+	if !dropped {
+		return matchers, false
+	}
+	return result, true
+}
+
+// hookEntryCommand reads the command off a hook entry for the shared helpers.
+func hookEntryCommand(e ClaudeHookEntry) string { return e.Command }
+
+// removeEntireHooks removes all Entire hooks from a list of matchers (for simple
+// hooks like Stop). It is dropStaleEntireHooks with an empty want set: nothing is
+// wanted, so every managed hook is stale.
+func removeEntireHooks(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
+	out, _ := dropStaleEntireHooks(matchers)
+	return out
 }
 
 // removeEntireHooksFromMatchers removes Entire hooks from tool-use matchers (PreToolUse, PostToolUse)

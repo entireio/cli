@@ -124,7 +124,8 @@ Fires when Claude finishes responding. Does **not** fire on user interrupt (Ctrl
     - Extracts token counts from assistant messages: input tokens, cache creation/read tokens, output tokens.
     - Deduplicates by message ID (streaming creates multiple rows per message; uses highest output_tokens).
     - Finds spawned subagents by scanning for `agentId:` in Task tool results.
-    - Calculates subagent token usage from their transcript files (`agent-<id>.jsonl`).
+    - Calculates subagent token usage from their transcript files under
+      `paths.SubagentsDir`.
     - Aggregates into a `TokenUsage` struct with nested `SubagentTokens`.
 
 6.  **Invoke Strategy**:
@@ -172,10 +173,13 @@ Fires after a subagent finishes its work. Creates the final checkpoint for the s
 
 1.  **Parse Input**: Extracts `tool_use_id`, `agent_id` (from `tool_response.agentId`), `session_id`, `transcript_path`, and `tool_input`.
 
-2.  **Locate Subagent Transcript**:
-
-    - Constructs path: `<transcript_dir>/agent-<agent_id>.jsonl`.
-    - If the subagent transcript exists, uses it for file extraction; otherwise falls back to main transcript.
+2.  **Locate Subagent Transcript** — `ResolveAgentTranscriptPath`, which prefers
+    `paths.SubagentsDir` (`<transcript_dir>/<session_id>/subagents/agent-<agent_id>.jsonl`,
+    where Claude Code writes it today, alongside an unused-by-Entire
+    `agent-<agent_id>.meta.json` sidecar) and falls back to the legacy sibling
+    `<transcript_dir>/agent-<agent_id>.jsonl`. See that function for why the order
+    matters. If it resolves, it is used for file extraction; otherwise extraction
+    falls back to the main transcript, where a subagent's Write/Edit calls do not appear.
 
 3.  **Extract Modified Files**: Parses the transcript (subagent or main) to find Write/Edit tool invocations.
 

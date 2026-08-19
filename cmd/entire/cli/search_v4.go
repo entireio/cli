@@ -294,8 +294,8 @@ func (c *cachedClusterClient) GetRepo(ctx context.Context, params coreapi.GetRep
 	return c.inner.GetRepo(ctx, params) //nolint:wrapcheck // transparent delegation
 }
 
-func (c *cachedClusterClient) ListMirrors(ctx context.Context, params coreapi.ListMirrorsParams) (*coreapi.ListMirrorsOutputBody, error) {
-	return c.inner.ListMirrors(ctx, params) //nolint:wrapcheck // transparent delegation
+func (c *cachedClusterClient) ListRepos(ctx context.Context, params coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error) {
+	return c.inner.ListRepos(ctx, params) //nolint:wrapcheck // transparent delegation
 }
 
 // mergedTier2Max mirrors query-serve's maxTier2 and the BFF's MERGED_TIER2_MAX:
@@ -314,6 +314,16 @@ func tierOf(r search.Result) int {
 func bm25Of(r search.Result) float64 {
 	if r.Meta.BM25Score != nil {
 		return *r.Meta.BM25Score
+	}
+	return 0
+}
+
+// rerankOf returns query-serve's cross-encoder relevance score, or 0 when the
+// row was not reranked (its cell fell back). Rows without a score sort after
+// reranked ones, matching the BFF's rerankOf.
+func rerankOf(r search.Result) float64 {
+	if r.Meta.RerankScore != nil {
+		return *r.Meta.RerankScore
 	}
 	return 0
 }
@@ -341,11 +351,18 @@ type semanticCellPage struct {
 // cluster catalog doesn't expose the placement's jurisdiction at all (a cell
 // mid-onboarding). Neither is worth warning the user about on every search.
 func classifySemanticCells(ctx context.Context, results []cellCallResult[*search.Response]) (pages []semanticCellPage, failed []string, lastErr error) {
-	var skipped []string
+	var skipped, unmatched []string
+	var unmatchedErr error
 	for _, r := range results {
 		switch {
 		case errors.Is(r.err, search.ErrCellUnavailable), errors.Is(r.err, auth.ErrNoCellForJurisdiction):
 			skipped = append(skipped, r.group.label())
+		case errors.Is(r.err, search.ErrRepoFilterUnmatched):
+			// The cell answered; the repo filter just matched nothing there.
+			// Quiet like a skip when another cell has results, but if NO cell
+			// matches it must surface as a repo problem, never a region one.
+			unmatched = append(unmatched, r.group.label())
+			unmatchedErr = r.err
 		case r.err != nil:
 			lastErr = r.err
 			failed = append(failed, r.group.label())
@@ -365,22 +382,52 @@ func classifySemanticCells(ctx context.Context, results []cellCallResult[*search
 	if len(skipped) > 0 {
 		logging.Debug(ctx, "semantic search: cells without query-serve skipped", "skipped_cells", skipped)
 	}
-	if len(pages) == 0 && lastErr == nil && len(skipped) > 0 {
-		lastErr = errNoRegionAvailable
+	if len(unmatched) > 0 {
+		// unmatchedErr carries the server's own message (CellV4 wraps it into
+		// the sentinel) — keep it visible here for diagnosis.
+		logging.Debug(ctx, "semantic search: cells where the repo filter matched nothing", "unmatched_cells", unmatched, "error", unmatchedErr.Error())
+	}
+	if len(pages) == 0 && lastErr == nil {
+		switch {
+		case len(unmatched) > 0:
+			// Takes priority over the region message: a cell answering proves
+			// its region serves semantic search.
+			lastErr = errNoRepoAvailable
+		case len(skipped) > 0:
+			lastErr = errNoRegionAvailable
+		}
 	}
 	return pages, failed, lastErr
 }
 
+// errNoRepoAvailable is returned when at least one cell answered but none
+// matched the repo filter. A typo'd name or missing access cannot reach this
+// point — resolveScope already validated the slug against the control-plane
+// repo index — so the message names only the causes that survive: query-serve
+// hasn't indexed the repo, or its owner org isn't enabled for semantic search.
+var errNoRepoAvailable = errors.New("semantic search cannot search this repo yet — it may not be indexed, or semantic search may not be enabled for its owner")
+
 // errNoRegionAvailable is returned when every queried cell lacks query-serve.
 var errNoRegionAvailable = errors.New("semantic search is not yet available in the region(s) hosting this search")
 
-// rankSemanticResults buckets every page's rows and applies the ordering
-// query-serve uses within a cell (and the BFF uses across cells): repos first,
-// then tier-0 by BM25 desc, tier-1 by rerank score desc, promoted tier-2 by
-// ANN asc. Tier-2 rows arriving alongside tier 0/1 from the same cell were
-// deliberately promoted by query-serve; a cell whose page is entirely tier 2
-// had nothing better — its ANN fallback, shown (uncapped here) only when tiers
-// 0/1 are empty everywhere.
+// tier0Row pairs a tier-0 result with its rank within the cell that returned
+// it — the selection order the mixed-capability fallback preserves (see
+// sortTier0Rows).
+type tier0Row struct {
+	r        search.Result
+	cellRank int
+}
+
+// rankSemanticResults buckets every page's rows and applies the SAME ordering
+// the BFF's cross-cell merge uses (searcher.go / routes/search.ts): repos
+// first, then tier 0 and tier 1 EACH by rerank score desc (ENT-1425/ENT-1431),
+// then promoted tier-2 by ANN asc. Ordering by rerank score — not BM25 or the
+// per-namespace retrieval Score — is what keeps the CLI in parity with the web:
+// query-serve documents that Score "is not the field results are ordered by …
+// sorting by it undoes reranking." Tier-2 rows arriving alongside tier 0/1 from
+// the same cell were deliberately promoted by query-serve; a cell whose page is
+// entirely tier 2 had nothing better — its ANN fallback, shown (uncapped here)
+// only when tiers 0/1 are empty everywhere.
 func rankSemanticResults(pages []semanticCellPage) (merged []search.Result, globalUpper bool) {
 	for _, p := range pages {
 		if p.hasUpper {
@@ -389,14 +436,17 @@ func rankSemanticResults(pages []semanticCellPage) (merged []search.Result, glob
 		}
 	}
 
-	var repos, tier0, tier1, promotedTier2, fallbackTier2 []search.Result
+	var repos, tier1, promotedTier2, fallbackTier2 []search.Result
+	var tier0 []tier0Row
 	for _, p := range pages {
+		cellRank := 0
 		for _, r := range p.body.Results {
 			switch {
 			case r.Type == search.TypeRepo:
 				repos = append(repos, r)
 			case tierOf(r) == 0:
-				tier0 = append(tier0, r)
+				tier0 = append(tier0, tier0Row{r: r, cellRank: cellRank})
+				cellRank++
 			case tierOf(r) == 1:
 				tier1 = append(tier1, r)
 			case p.hasUpper:
@@ -409,10 +459,19 @@ func rankSemanticResults(pages []semanticCellPage) (merged []search.Result, glob
 	sort.SliceStable(repos, func(i, j int) bool { return repos[i].Meta.Score > repos[j].Meta.Score })
 	merged = append(merged, repos...)
 	if globalUpper {
-		sort.SliceStable(tier0, func(i, j int) bool { return bm25Of(tier0[i]) > bm25Of(tier0[j]) })
-		sort.SliceStable(tier1, func(i, j int) bool { return tier1[i].Meta.Score > tier1[j].Meta.Score })
+		sortTier0Rows(tier0)
+		// Tier 1: rerank score decides, retrieval Score breaks ties. Rows whose
+		// cell fell back (no rerank score) sort last, matching the BFF.
+		sort.SliceStable(tier1, func(i, j int) bool {
+			if ri, rj := rerankOf(tier1[i]), rerankOf(tier1[j]); ri != rj {
+				return ri > rj
+			}
+			return tier1[i].Meta.Score > tier1[j].Meta.Score
+		})
 		sort.SliceStable(promotedTier2, func(i, j int) bool { return annOrScoreOf(promotedTier2[i]) < annOrScoreOf(promotedTier2[j]) })
-		merged = append(merged, tier0...)
+		for _, t := range tier0 {
+			merged = append(merged, t.r)
+		}
 		merged = append(merged, tier1...)
 		merged = append(merged, promotedTier2...)
 	} else {
@@ -420,6 +479,39 @@ func rankSemanticResults(pages []semanticCellPage) (merged []search.Result, glob
 		merged = append(merged, fallbackTier2...)
 	}
 	return merged, globalUpper
+}
+
+// sortTier0Rows orders the tier-0 band the way the BFF's sortTier0 does
+// (ENT-1431). When EVERY row was judged by the cross-encoder, rerank score
+// decides and BM25 breaks ties. When any row is missing a rerank score — its
+// cell predates tier-0 reranking — a global rerank sort would demote all of
+// that cell's full-phrase hits regardless of relevance, so instead the rows are
+// interleaved positionally (each cell's #1, then each cell's #2, …), preserving
+// every cell's own selection order, with BM25 breaking ties between same-rank
+// rows. Converges to rerank-first once every cell is current.
+func sortTier0Rows(tier0 []tier0Row) {
+	allScored := true
+	for _, t := range tier0 {
+		if t.r.Meta.RerankScore == nil {
+			allScored = false
+			break
+		}
+	}
+	if allScored {
+		sort.SliceStable(tier0, func(i, j int) bool {
+			if ri, rj := rerankOf(tier0[i].r), rerankOf(tier0[j].r); ri != rj {
+				return ri > rj
+			}
+			return bm25Of(tier0[i].r) > bm25Of(tier0[j].r)
+		})
+		return
+	}
+	sort.SliceStable(tier0, func(i, j int) bool {
+		if tier0[i].cellRank != tier0[j].cellRank {
+			return tier0[i].cellRank < tier0[j].cellRank
+		}
+		return bm25Of(tier0[i].r) > bm25Of(tier0[j].r)
+	})
 }
 
 // dedupSemanticResults removes cross-cell duplicates by type+id (a repo
@@ -431,7 +523,7 @@ func dedupSemanticResults(merged []search.Result) ([]search.Result, map[string]i
 	dupesByType := make(map[string]int)
 	deduped := merged[:0]
 	for _, r := range merged {
-		id := r.ResultID()
+		id := r.DedupID()
 		if id == "" {
 			deduped = append(deduped, r)
 			continue

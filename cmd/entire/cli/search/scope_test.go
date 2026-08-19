@@ -67,3 +67,86 @@ func TestResultID_RawDataFallback(t *testing.T) {
 		t.Errorf("checkpoint ResultID() = %q, want \"ck1\"", got)
 	}
 }
+
+// TestResultAccessors_RawDataFallback verifies repo/pr rows expose identifying
+// fields from the raw payload, so trimmed views (e.g. --compact) don't collapse
+// them to just {id, type, score}.
+func TestResultAccessors_RawDataFallback(t *testing.T) {
+	t.Parallel()
+
+	const repoName = "backend"
+
+	var repoRow Result
+	if err := json.Unmarshal([]byte(`{"type":"repo","data":{"id":"01JREPO","name":"backend","org":"acme","createdAt":"2026-01-02T00:00:00Z"},"searchMeta":{"score":1}}`), &repoRow); err != nil {
+		t.Fatal(err)
+	}
+	if got := repoRow.ResultTitle(); got != repoName {
+		t.Errorf("repo ResultTitle() = %q, want \"backend\"", got)
+	}
+	if got := repoRow.ResultRepo(); got != repoName {
+		t.Errorf("repo ResultRepo() = %q, want \"backend\"", got)
+	}
+	if got := repoRow.ResultOrg(); got != "acme" {
+		t.Errorf("repo ResultOrg() = %q, want \"acme\"", got)
+	}
+	if got := repoRow.ResultCreatedAt(); got != "2026-01-02T00:00:00Z" {
+		t.Errorf("repo ResultCreatedAt() = %q", got)
+	}
+
+	// A row carrying only an owner-qualified fullName splits into org + bare
+	// repo, so org+"/"+repo joins never double the owner (acme/acme/backend).
+	var qualifiedRow Result
+	if err := json.Unmarshal([]byte(`{"type":"repo","data":{"id":"01JQUAL","fullName":"acme/backend"},"searchMeta":{"score":1}}`), &qualifiedRow); err != nil {
+		t.Fatal(err)
+	}
+	if got := qualifiedRow.ResultOrg(); got != "acme" {
+		t.Errorf("fullName-only ResultOrg() = %q, want \"acme\"", got)
+	}
+	if got := qualifiedRow.ResultRepo(); got != repoName {
+		t.Errorf("fullName-only ResultRepo() = %q, want bare \"backend\"", got)
+	}
+
+	var prRow Result
+	if err := json.Unmarshal([]byte(`{"type":"pr","data":{"id":"pr-9","title":"Fix login retry","repo":"backend","userLogin":"alice","headBranch":"fix/login"},"searchMeta":{"score":1}}`), &prRow); err != nil {
+		t.Fatal(err)
+	}
+	if got := prRow.ResultTitle(); got != "Fix login retry" {
+		t.Errorf("pr ResultTitle() = %q, want \"Fix login retry\"", got)
+	}
+	if got := prRow.ResultRepo(); got != repoName {
+		t.Errorf("pr ResultRepo() = %q, want \"backend\"", got)
+	}
+	if got := prRow.ResultAuthor(); got != testAuthor {
+		t.Errorf("pr ResultAuthor() = %q, want \"alice\"", got)
+	}
+	if got := prRow.ResultBranch(); got != "fix/login" {
+		t.Errorf("pr ResultBranch() = %q, want \"fix/login\"", got)
+	}
+	// Fields absent from the payload stay empty.
+	if got := prRow.ResultCreatedAt() + prRow.ResultOrg(); got != "" {
+		t.Errorf("pr accessors for absent fields = %q, want all empty", got)
+	}
+}
+
+// TestResultAccessors_TypedRowsNeverReadRawPayload pins the gate: for typed
+// rows (checkpoint/commit/session) an empty typed field stays empty even when
+// the raw payload carries a same-named key — the raw fallback is reserved for
+// types without a typed struct, so backend field additions can't silently
+// change what the TUI or compact output renders.
+func TestResultAccessors_TypedRowsNeverReadRawPayload(t *testing.T) {
+	t.Parallel()
+
+	var sessionRow Result
+	if err := json.Unmarshal([]byte(`{"type":"session","data":{"sessionId":"s1","displayName":"","author":"alice@example.com","title":"stray","branch":null},"searchMeta":{"score":1}}`), &sessionRow); err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionRow.ResultAuthor(); got != "" {
+		t.Errorf("session ResultAuthor() = %q, want \"\" (raw author must be suppressed)", got)
+	}
+	if got := sessionRow.ResultTitle(); got != "" {
+		t.Errorf("session ResultTitle() = %q, want \"\" (raw title must be suppressed)", got)
+	}
+	if got := sessionRow.ResultBranch(); got != "" {
+		t.Errorf("session ResultBranch() = %q, want \"\"", got)
+	}
+}

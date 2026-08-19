@@ -83,7 +83,10 @@ func TestSessionIDConflict_OrphanedBranchIsReset(t *testing.T) {
 	}
 
 	// Verify shadow branch now has session2's checkpoint
-	state2, _ := env.GetSessionState(session2.ID)
+	state2, err := env.GetSessionState(session2.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState (session2) failed: %v", err)
+	}
 	if state2 == nil || state2.StepCount == 0 {
 		t.Error("Session 2 should have checkpoints after orphaned branch was reset")
 	} else {
@@ -202,7 +205,10 @@ func TestSessionIDConflict_ManuallyCreatedOrphanedBranch(t *testing.T) {
 	}
 
 	// Verify session has checkpoints
-	state, _ := env.GetSessionState(session.ID)
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
 	if state == nil || state.StepCount == 0 {
 		t.Error("Session should have checkpoints after orphaned branch was reset")
 	} else {

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -94,25 +96,58 @@ func newTrailCommentListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return withNumberedTrail(cmd, func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
-				resp, err := client.Get(ctx, trailThreadsPath(forge, owner, repo, found.Number))
+				items, err := fetchAllTrailThreads(ctx, client, trailThreadsPath(forge, owner, repo, found.Number))
 				if err != nil {
-					return fmt.Errorf("failed to list threads: %w", err)
-				}
-				defer resp.Body.Close()
-				if err := checkTrailResponse(resp); err != nil {
 					return err
 				}
-				var out api.TrailThreadsResponse
-				if err := api.DecodeJSON(resp, &out); err != nil {
-					return fmt.Errorf("failed to decode threads response: %w", err)
-				}
-				return printTrailThreads(cmd.OutOrStdout(), out.Items, found.Number, jsonOut, all)
+				return printTrailThreads(cmd.OutOrStdout(), items, found.Number, jsonOut, all)
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
 	cmd.Flags().BoolVar(&all, "all", false, "Include code-review threads (managed via 'trail finding')")
 	return cmd
+}
+
+func fetchAllTrailThreads(ctx context.Context, client *api.Client, path string) ([]api.TrailThreadSummary, error) {
+	const pageSize = 100
+	var items []api.TrailThreadSummary
+	pageToken := ""
+	seen := map[string]bool{}
+	for {
+		q := url.Values{"pageSize": {strconv.Itoa(pageSize)}}
+		if pageToken != "" {
+			q.Set("pageToken", pageToken)
+		}
+		resp, err := client.Get(ctx, path+"?"+q.Encode())
+		if err != nil {
+			return nil, fmt.Errorf("failed to list threads: %w", err)
+		}
+		var page api.TrailThreadsResponse
+		decodeErr := func() error {
+			defer resp.Body.Close()
+			if err := checkTrailResponse(resp); err != nil {
+				return err
+			}
+			if err := api.DecodeJSON(resp, &page); err != nil {
+				return fmt.Errorf("failed to decode threads response: %w", err)
+			}
+			return nil
+		}()
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		items = append(items, page.Items...)
+		if page.NextPageToken == nil || strings.TrimSpace(*page.NextPageToken) == "" {
+			break
+		}
+		pageToken = strings.TrimSpace(*page.NextPageToken)
+		if seen[pageToken] {
+			return nil, fmt.Errorf("thread list pagination repeated page token %q", pageToken)
+		}
+		seen[pageToken] = true
+	}
+	return items, nil
 }
 
 func printTrailThreads(w io.Writer, items []api.TrailThreadSummary, number int, jsonOut, all bool) error {
@@ -195,9 +230,11 @@ func printTrailThreadDetail(w io.Writer, out api.TrailThreadDetailResponse, json
 	}
 	fmt.Fprintf(w, "Thread %s [%s]: %s\n\n", t.ID, marker, t.Title)
 	for _, m := range out.Messages {
-		fmt.Fprintf(w, "%s  %s\n%s\n", m.Author, m.CreatedAt.Format(time.RFC3339), m.Body)
+		// The message ID is the argument `comment edit`/`delete` take, so it
+		// must be visible here (the only plain-text read that shows messages).
+		fmt.Fprintf(w, "%s  %s  %s\n%s\n", m.ID, m.Author, m.CreatedAt.Format(time.RFC3339), m.Body)
 		for _, r := range m.Replies {
-			fmt.Fprintf(w, "  ↳ %s  %s\n  %s\n", r.Author, r.CreatedAt.Format(time.RFC3339), r.Body)
+			fmt.Fprintf(w, "  ↳ %s  %s  %s\n  %s\n", r.ID, r.Author, r.CreatedAt.Format(time.RFC3339), r.Body)
 		}
 		fmt.Fprintln(w)
 	}
@@ -284,6 +321,7 @@ func newTrailCommentEditCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "edit <thread-id> <message-id>",
 		Short: "Edit a message in a discussion thread",
+		Long:  "Edit a message in a discussion thread.\n\nFind <thread-id> with 'entire trail comment list' and <message-id> with 'entire trail comment show <thread-id>'.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			threadID, messageID := args[0], args[1]
@@ -318,6 +356,7 @@ func newTrailCommentDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "delete <thread-id> <message-id>",
 		Short: "Delete a message from a discussion thread",
+		Long:  "Delete a message from a discussion thread.\n\nFind <thread-id> with 'entire trail comment list' and <message-id> with 'entire trail comment show <thread-id>'.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			threadID, messageID := args[0], args[1]

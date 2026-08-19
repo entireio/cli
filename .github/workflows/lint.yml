@@ -23,7 +23,7 @@ jobs:
           # edit; release.yml uses the same pattern.
           go-version-file: go.mod
 
-      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
 
       - name: Run linters
         run: mise run lint

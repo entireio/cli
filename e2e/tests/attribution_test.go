@@ -34,9 +34,9 @@ func TestLineAttributionReasonable(t *testing.T) {
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		sm := testutil.ReadSessionMetadata(t, s.Dir, cpID, 0)
 
-		assert.Greater(t, sm.Attribution.AgentLines, 0,
+		assert.Positive(t, sm.Attribution.AgentLines,
 			"agent lines should be > 0")
-		assert.Greater(t, sm.Attribution.TotalCommitted, 0,
+		assert.Positive(t, sm.Attribution.TotalCommitted,
 			"total committed should be > 0")
 		assert.Greater(t, sm.Attribution.AgentPercentage, 50.0,
 			"agent created 100%% of content, percentage should be > 50%%")
@@ -66,9 +66,9 @@ func TestInteractiveAttributionOnAgentCommit(t *testing.T) {
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		sm := testutil.ReadSessionMetadata(t, s.Dir, cpID, 0)
 
-		assert.Greater(t, sm.Attribution.AgentLines, 0,
+		assert.Positive(t, sm.Attribution.AgentLines,
 			"agent lines should be > 0 on first agent commit")
-		assert.Greater(t, sm.Attribution.TotalCommitted, 0,
+		assert.Positive(t, sm.Attribution.TotalCommitted,
 			"total committed should be > 0 on first agent commit")
 		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
@@ -104,9 +104,9 @@ func TestInteractiveAttributionMultiCommitSameSession(t *testing.T) {
 		testutil.WaitForCheckpointExists(t, s.Dir, cpID2, 30*time.Second)
 		sm := testutil.WaitForSessionMetadata(t, s.Dir, cpID2, 0, 10*time.Second)
 
-		assert.Greater(t, sm.Attribution.AgentLines, 0,
+		assert.Positive(t, sm.Attribution.AgentLines,
 			"agent lines should be > 0 on second commit")
-		assert.Greater(t, sm.Attribution.TotalCommitted, 0,
+		assert.Positive(t, sm.Attribution.TotalCommitted,
 			"total committed should be > 0 on second commit")
 		assert.Greater(t, sm.Attribution.AgentPercentage, 50.0,
 			"agent wrote all content, percentage should be > 50%%")

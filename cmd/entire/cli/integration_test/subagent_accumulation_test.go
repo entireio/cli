@@ -40,7 +40,7 @@ func TestSubagentAccumulation_Issue591(t *testing.T) {
 	const numSubagents = 4
 	subagents := make([]subagentInfo, 0, numSubagents)
 
-	for i := 0; i < numSubagents; i++ {
+	for i := range numSubagents {
 		sub := env.NewSession()
 		file := fmt.Sprintf("subagent_work_%d.go", i)
 		content := fmt.Sprintf("package main\n\nfunc SubagentWork%d() {}\n", i)

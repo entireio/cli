@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -461,9 +462,35 @@ func lsRemote(ctx context.Context, dir, remote string, patterns ...string) ([]by
 	disableTerminalPrompt(cmd)
 	out, err := cmd.Output()
 	if err != nil {
-		return out, fmt.Errorf("git ls-remote: %w", err)
+		return out, fmt.Errorf("git ls-remote: %w", formatGitCommandError(ctx, err, remote))
 	}
 	return out, nil
+}
+
+// formatGitCommandError enriches an exec error from git Output() so callers see
+// useful detail: context deadline expiry by name, and git's stderr (auth denied,
+// repository not found, DNS) which ExitError otherwise hides behind "exit status N".
+// When remote is a URL it may carry credentials that git echoes into stderr;
+// those are redacted before the error is returned (same pattern as FetchBlobs).
+func formatGitCommandError(ctx context.Context, err error, remote string) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("deadline exceeded: %w", err)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+			if remote != "" {
+				stderr = strings.ReplaceAll(stderr, remote, RedactURLOrPath(remote))
+			}
+			// Collapse whitespace so multi-line git stderr stays one log/attr value.
+			stderr = strings.Join(strings.Fields(stderr), " ")
+			return fmt.Errorf("%w (%s)", err, stderr)
+		}
+	}
+	return err
 }
 
 // IsURL returns true if the target looks like a URL rather than a git remote name.

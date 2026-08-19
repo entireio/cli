@@ -153,7 +153,11 @@ func runTurn(dir, sessionID, transcriptPath, prompt string) {
 	appendTranscript(transcriptPath, "user", prompt)
 
 	actions := parsePrompt(prompt)
-	executeActions(dir, actions)
+	if delegatesToSubagent(prompt) {
+		runSubagentTask(dir, sessionID, transcriptPath, prompt, actions)
+	} else {
+		appendToolUse(transcriptPath, executeActions(dir, actions))
+	}
 
 	appendTranscript(transcriptPath, "assistant", fmt.Sprintf("Done. Executed %d actions.", len(actions)))
 	fmt.Fprintf(os.Stdout, "Done. Executed %d actions.\n", len(actions))
@@ -163,6 +167,86 @@ func runTurn(dir, sessionID, transcriptPath, prompt string) {
 		"transcript_path": transcriptPath,
 		"model":           "vogon-llm-42",
 	})
+}
+
+// subagentPromptRe matches the delegation phrasing the e2e prompts use ("use a
+// subagent: …", "using a subagent", "delegate to a subagent"). Vogon has no real
+// subagents; it simulates one so the pre-task/post-task hooks, the task
+// checkpoint, and the shadow-branch lifecycle around them are exercised on every
+// canary run. Before this, the canary fired no subagent hooks at all, so a whole
+// class of regression was invisible to it (see TestSubagentCommitFlow).
+var subagentPromptRe = regexp.MustCompile(`(?i)\b(use|using|via|with|delegate to)\s+(a\s+)?sub-?agent`)
+
+func delegatesToSubagent(prompt string) bool {
+	return subagentPromptRe.MatchString(prompt)
+}
+
+// runSubagentTask performs the actions as a simulated subagent: pre-task, then the
+// work recorded in a *separate* subagent transcript, then post-task.
+//
+// The subagent transcript deliberately lives at the layout the framework resolves
+// (paths.SubagentsDir: <transcriptDir>/<sessionID>/subagents/agent-<id>.jsonl), and
+// the writes are recorded ONLY there — never in the main transcript. That asymmetry
+// is the real thing being modelled: a subagent's edits are invisible in the main
+// transcript, which is what made a wrong subagent-transcript path silently fall
+// back to scanning the main one.
+// subagentSeq numbers delegations within this process so each task gets its own
+// tool-use and agent ID.
+//
+// Deriving them from the prompt or action count instead would collide: a vogon
+// process handles every prompt of a session (see the multi-prompt loop in main),
+// and two delegated prompts that happen to produce the same action count — the
+// common case, one file each — would share an agent ID. The framework keys
+// pre-task state on the tool-use ID (pre-task-<id>.json) and the subagent
+// transcript on the agent ID, so a collision silently overwrites the first task's
+// state and transcript, corrupting attribution. A counter keeps vogon
+// deterministic, which a UUID would not.
+var subagentSeq int
+
+func nextSubagentIDs() (toolUseID, agentID string) {
+	subagentSeq++
+	return fmt.Sprintf("toolu_vogon%03d", subagentSeq), fmt.Sprintf("avogon%03d", subagentSeq)
+}
+
+func runSubagentTask(dir, sessionID, transcriptPath, prompt string, actions []action) {
+	toolUseID, agentID := nextSubagentIDs()
+
+	fireHook(dir, "pre-task", map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+		"tool_use_id":     toolUseID,
+		"subagent_type":   "vogon-worker",
+		"description":     "vogon delegated task",
+	})
+
+	subagentTranscript := setupSubagentTranscript(transcriptPath, sessionID, agentID)
+	appendTranscript(subagentTranscript, "user", prompt)
+	touched := executeActions(dir, actions)
+	appendToolUse(subagentTranscript, touched)
+	appendTranscript(subagentTranscript, "assistant", "Subagent done.")
+
+	fireHook(dir, "post-task", map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+		"tool_use_id":     toolUseID,
+		"agent_id":        agentID,
+		"subagent_type":   "vogon-worker",
+		"description":     "vogon delegated task",
+	})
+}
+
+// setupSubagentTranscript creates the subagent transcript where the framework
+// looks for it — keep in step with paths.SubagentsDir.
+func setupSubagentTranscript(mainTranscriptPath, sessionID, agentID string) string {
+	dir := filepath.Join(filepath.Dir(mainTranscriptPath), sessionID, "subagents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		fatal("mkdir subagents dir: %v", err)
+	}
+	path := filepath.Join(dir, "agent-"+agentID+".jsonl")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		fatal("create subagent transcript: %v", err)
+	}
+	return path
 }
 
 // --- Prompt Parsing ---
@@ -467,24 +551,28 @@ func extractTopic(prompt string) string {
 	return "the topic"
 }
 
-func executeActions(dir string, actions []action) {
-	var pendingFiles []string
+func executeActions(dir string, actions []action) []string {
+	var touched, pendingFiles []string
 	for _, a := range actions {
 		switch a.kind {
 		case "create":
 			createFile(dir, a.path, a.content)
 			pendingFiles = append(pendingFiles, a.path)
+			touched = append(touched, a.path)
 		case "modify":
 			modifyFile(dir, a.path, a.content)
 			pendingFiles = append(pendingFiles, a.path)
+			touched = append(touched, a.path)
 		case "delete":
 			deleteFile(dir, a.path)
 			pendingFiles = append(pendingFiles, a.path)
+			touched = append(touched, a.path)
 		case "commit":
 			gitCommit(dir, pendingFiles)
 			pendingFiles = nil
 		}
 	}
+	return touched
 }
 
 func createFile(dir, path, content string) {
@@ -580,14 +668,36 @@ type transcriptEntry struct {
 	Type      string `json:"type"`
 	Timestamp string `json:"timestamp"`
 	Message   string `json:"message"`
+	// Files records the paths a tool-use entry touched. The vogon Agent's
+	// TranscriptAnalyzer reads these back, which is what lets the canary cover
+	// transcript-derived file extraction — the path a real agent takes and the
+	// one where a subagent's writes are only ever visible in its own transcript.
+	Files []string `json:"files,omitempty"`
 }
 
 func appendTranscript(path, role, content string) {
-	entry := transcriptEntry{
+	appendTranscriptEntry(path, transcriptEntry{
 		Type:      role,
 		Timestamp: time.Now().Format(time.RFC3339),
 		Message:   content,
+	})
+}
+
+// appendToolUse records the files a (sub)agent wrote, mirroring how a real agent's
+// transcript carries Write/Edit tool calls.
+func appendToolUse(path string, files []string) {
+	if len(files) == 0 {
+		return
 	}
+	appendTranscriptEntry(path, transcriptEntry{
+		Type:      "tool_use",
+		Timestamp: time.Now().Format(time.RFC3339),
+		Message:   "wrote " + strings.Join(files, ", "),
+		Files:     files,
+	})
+}
+
+func appendTranscriptEntry(path string, entry transcriptEntry) {
 	data, _ := json.Marshal(entry) //nolint:errchkjson // transcriptEntry has no unsafe types
 	data = append(data, '\n')
 

@@ -93,7 +93,7 @@ func rowsHaveValue(rows []explainRow, want string) bool {
 
 func TestFormatCheckpointSummaryError_Auth(t *testing.T) {
 	t.Parallel()
-	label, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorAuth, Message: "Invalid API key"}, 0)
+	label, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorAuth, Message: "Invalid API key"}, newSummaryAttempt("claude-code", 0))
 	if !strings.Contains(strings.ToLower(label), "authentication failed") {
 		t.Errorf("missing 'authentication failed' in label %q", label)
 	}
@@ -107,7 +107,7 @@ func TestFormatCheckpointSummaryError_Auth(t *testing.T) {
 
 func TestFormatCheckpointSummaryError_RateLimit(t *testing.T) {
 	t.Parallel()
-	label, _, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorRateLimit, Message: "429"}, 0)
+	label, _, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorRateLimit, Message: "429"}, newSummaryAttempt("claude-code", 0))
 	if !strings.Contains(label, "rate limit") {
 		t.Errorf("missing rate-limit phrasing in label: %q", label)
 	}
@@ -118,7 +118,7 @@ func TestFormatCheckpointSummaryError_RateLimit(t *testing.T) {
 
 func TestFormatCheckpointSummaryError_Config(t *testing.T) {
 	t.Parallel()
-	_, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorConfig, Message: "model not found"}, 0)
+	_, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorConfig, Message: "model not found"}, newSummaryAttempt("claude-code", 0))
 	if !rowsHaveValue(rows, "model not found") {
 		t.Errorf("envelope message not surfaced in rows: %+v", rows)
 	}
@@ -129,7 +129,7 @@ func TestFormatCheckpointSummaryError_Config(t *testing.T) {
 
 func TestFormatCheckpointSummaryError_CLIMissing(t *testing.T) {
 	t.Parallel()
-	label, _, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorCLIMissing}, 0)
+	label, _, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorCLIMissing}, newSummaryAttempt("claude-code", 0))
 	if !strings.Contains(label, "not installed") {
 		t.Errorf("missing cli-missing phrasing in label: %q", label)
 	}
@@ -152,7 +152,7 @@ func TestFormatCheckpointSummaryError_TypedBranchesHandleEmptyMessage(t *testing
 	for _, kind := range kinds {
 		t.Run(string(kind), func(t *testing.T) {
 			t.Parallel()
-			label, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: kind}, 0)
+			label, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: kind}, newSummaryAttempt("claude-code", 0))
 			if err == nil {
 				t.Fatal("expected structured error")
 			}
@@ -172,8 +172,9 @@ func TestFormatCheckpointSummaryError_TypedBranchesHandleEmptyMessage(t *testing
 
 func TestFormatCheckpointSummaryError_DeadlineExceeded(t *testing.T) {
 	t.Parallel()
-	label, rows, err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.DeadlineExceeded), 5*time.Minute)
-	if !strings.Contains(label, "timed out") {
+	attempt := newSummaryAttempt("codex", 5*time.Minute)
+	label, rows, err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.DeadlineExceeded), attempt)
+	if !strings.Contains(strings.ToLower(label), "timed out") {
 		t.Errorf("expected 'timed out' in label, got %q", label)
 	}
 	if !strings.Contains(label, "5m") {
@@ -206,7 +207,7 @@ func TestFormatCheckpointSummaryError_DeadlineExceeded(t *testing.T) {
 
 func TestFormatCheckpointSummaryError_Canceled(t *testing.T) {
 	t.Parallel()
-	label, _, err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.Canceled), 0)
+	label, _, err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.Canceled), newSummaryAttempt("claude-code", 0))
 	if !strings.Contains(label, "canceled") {
 		t.Errorf("missing canceled in label: %q", label)
 	}
@@ -217,7 +218,7 @@ func TestFormatCheckpointSummaryError_Canceled(t *testing.T) {
 
 func TestFormatCheckpointSummaryError_Passthrough(t *testing.T) {
 	t.Parallel()
-	_, rows, err := formatCheckpointSummaryError(errors.New("something else"), 0)
+	_, rows, err := formatCheckpointSummaryError(errors.New("something else"), newSummaryAttempt("claude-code", 0))
 	if err == nil {
 		t.Fatal("expected structured error")
 	}
@@ -252,7 +253,7 @@ func TestFormatCheckpointSummaryError_Unknown(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			label, rows, err := formatCheckpointSummaryError(tc.err, 0)
+			label, rows, err := formatCheckpointSummaryError(tc.err, newSummaryAttempt("claude-code", 0))
 			if err == nil {
 				t.Fatal("expected structured error")
 			}
@@ -916,15 +917,12 @@ func TestExplainCmd_CommitFlagWithGenerateValidates(t *testing.T) {
 	}
 }
 
-func TestGenerateCheckpointAISummary_AddsDefaultTimeoutWithoutParentDeadline(t *testing.T) {
-	tmpTimeout := checkpointSummaryTimeout
+// Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
+func TestGenerateCheckpointAISummary_ExplicitTimeoutApplied(t *testing.T) {
 	tmpGenerator := generateTranscriptSummary
-	t.Cleanup(func() {
-		checkpointSummaryTimeout = tmpTimeout
-		generateTranscriptSummary = tmpGenerator
-	})
+	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })
 
-	checkpointSummaryTimeout = 50 * time.Millisecond
+	const explicitTimeout = 50 * time.Millisecond
 
 	var gotDeadline time.Time
 	generateTranscriptSummary = func(
@@ -933,17 +931,18 @@ func TestGenerateCheckpointAISummary_AddsDefaultTimeoutWithoutParentDeadline(t *
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		deadline, ok := ctx.Deadline()
 		if !ok {
-			return nil, errors.New("expected deadline on summary context")
+			return nil, errors.New("expected deadline on summary context when timeout > 0")
 		}
 		gotDeadline = deadline
 		return &checkpoint.Summary{Intent: "intent", Outcome: "outcome"}, nil
 	}
 
 	start := time.Now()
-	summary, _, err := generateCheckpointAISummary(context.Background(), []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, checkpointSummaryTimeout)
+	summary, err := generateCheckpointAISummary(context.Background(), []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, explicitTimeout, nil, newSummaryAttempt("claude-code", explicitTimeout))
 	if err != nil {
 		t.Fatalf("generateCheckpointAISummary() error = %v", err)
 	}
@@ -954,7 +953,7 @@ func TestGenerateCheckpointAISummary_AddsDefaultTimeoutWithoutParentDeadline(t *
 		t.Fatal("expected deadline to be set")
 	}
 	if remaining := gotDeadline.Sub(start); remaining < 30*time.Millisecond || remaining > 200*time.Millisecond {
-		t.Fatalf("deadline offset = %s, want around %s", remaining, checkpointSummaryTimeout)
+		t.Fatalf("deadline offset = %s, want around %s", remaining, explicitTimeout)
 	}
 }
 
@@ -1007,55 +1006,35 @@ esac
 	}
 }
 
-func TestGenerateCheckpointAISummary_UsesParentDeadlineAndWrapsSentinel(t *testing.T) {
-	tmpTimeout := checkpointSummaryTimeout
+// TestGenerateCheckpointAISummary_NoTimeoutInheritsParent verifies that when
+// timeout == 0 the provider call inherits the parent context unchanged, so a
+// tight parent deadline fires and the error wraps DeadlineExceeded.
+//
+// Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
+func TestGenerateCheckpointAISummary_NoTimeoutInheritsParent(t *testing.T) {
 	tmpGenerator := generateTranscriptSummary
-	t.Cleanup(func() {
-		checkpointSummaryTimeout = tmpTimeout
-		generateTranscriptSummary = tmpGenerator
-	})
+	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })
 
-	checkpointSummaryTimeout = 30 * time.Second
-
-	parentCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	parentDeadline, _ := parentCtx.Deadline()
-
-	var gotDeadline time.Time
+	// Use a mock that blocks until ctx is done, so the parent deadline fires.
 	generateTranscriptSummary = func(
 		ctx context.Context,
 		_ redact.RedactedBytes,
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
-		gotDeadline, _ = ctx.Deadline()
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
 
-	_, appliedDeadline, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, checkpointSummaryTimeout)
-	if err == nil {
-		t.Fatal("expected timeout error")
-	}
+	parentCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, 0, nil, newSummaryAttempt("claude-code", 0))
+	// Parent deadline (50ms) should fire, not our absence of a deadline.
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected DeadlineExceeded, got %v", err)
-	}
-	if gotDeadline.IsZero() {
-		t.Fatal("expected deadline to be captured")
-	}
-	// The applied deadline must reflect the shorter parent-ctx deadline,
-	// not the package-default checkpointSummaryTimeout. Otherwise
-	// formatCheckpointSummaryError would report the wrong timeout to users.
-	if appliedDeadline >= checkpointSummaryTimeout {
-		t.Fatalf("appliedDeadline = %s; want shorter than %s (parent had tighter deadline)",
-			appliedDeadline, checkpointSummaryTimeout)
-	}
-	if delta := gotDeadline.Sub(parentDeadline); delta < -5*time.Millisecond || delta > 5*time.Millisecond {
-		t.Fatalf("deadline delta = %s, want near 0", delta)
-	}
-	if strings.Contains(err.Error(), "30s") {
-		t.Fatalf("timeout error should not report default timeout when parent deadline fired: %v", err)
+		t.Fatalf("expected DeadlineExceeded from parent, got %v", err)
 	}
 }
 
@@ -1065,15 +1044,11 @@ func TestGenerateCheckpointAISummary_UsesParentDeadlineAndWrapsSentinel(t *testi
 // timeoutCtx.Err() and unconditionally wrapped with %w context.DeadlineExceeded,
 // which discarded the typed error and routed the user to the wrong
 // "safety deadline" guidance instead of the auth/rate-limit message.
+//
+// Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
 func TestGenerateCheckpointAISummary_PreservesClaudeErrorWhenCtxIsDone(t *testing.T) {
-	tmpTimeout := checkpointSummaryTimeout
 	tmpGenerator := generateTranscriptSummary
-	t.Cleanup(func() {
-		checkpointSummaryTimeout = tmpTimeout
-		generateTranscriptSummary = tmpGenerator
-	})
-
-	checkpointSummaryTimeout = 30 * time.Second
+	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })
 
 	// Cancel the parent before we even call — ctx.Err() will be non-nil.
 	parentCtx, cancel := context.WithCancel(context.Background())
@@ -1086,11 +1061,12 @@ func TestGenerateCheckpointAISummary_PreservesClaudeErrorWhenCtxIsDone(t *testin
 		[]string,
 		types.AgentType,
 		summarize.Generator,
+		agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		return nil, claudeErr
 	}
 
-	_, _, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, checkpointSummaryTimeout)
+	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, 0, nil, newSummaryAttempt("claude-code", 0))
 	var ce *claudecode.ClaudeError
 	if !errors.As(err, &ce) {
 		t.Fatalf("errors.As did not recover *ClaudeError; got %v", err)
@@ -1182,7 +1158,7 @@ func stubSummaryProviderForTest(t *testing.T) {
 		return &stubTextAgent{name: name, kind: agent.AgentTypeClaudeCode}, nil
 	}
 	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
-	generateTranscriptSummary = func(context.Context, redact.RedactedBytes, []string, types.AgentType, summarize.Generator) (*checkpoint.Summary, error) {
+	generateTranscriptSummary = func(context.Context, redact.RedactedBytes, []string, types.AgentType, summarize.Generator, agent.ProgressFn) (*checkpoint.Summary, error) {
 		return &checkpoint.Summary{Intent: "i", Outcome: "o"}, nil
 	}
 }
@@ -1242,15 +1218,16 @@ func TestRunExplainGenerateBlocksWhenPolicyWriteUnsupported(t *testing.T) {
 	require.Equal(t, fixture.v1Hash, v1After.Hash(), "summary write must not advance metadata")
 }
 
-func TestGenerateCheckpointAISummary_ClampsLongParentDeadlineToDefaultTimeout(t *testing.T) {
-	tmpTimeout := checkpointSummaryTimeout
+// TestGenerateCheckpointAISummary_ExplicitTimeoutNarrowsLongParent verifies
+// that an explicit timeout (e.g. from --summary-timeout-seconds) takes effect
+// even when the parent context has a much longer deadline.
+//
+// Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
+func TestGenerateCheckpointAISummary_ExplicitTimeoutNarrowsLongParent(t *testing.T) {
 	tmpGenerator := generateTranscriptSummary
-	t.Cleanup(func() {
-		checkpointSummaryTimeout = tmpTimeout
-		generateTranscriptSummary = tmpGenerator
-	})
+	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })
 
-	checkpointSummaryTimeout = 50 * time.Millisecond
+	const explicitTimeout = 50 * time.Millisecond
 
 	parentCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -1262,17 +1239,18 @@ func TestGenerateCheckpointAISummary_ClampsLongParentDeadlineToDefaultTimeout(t 
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		deadline, ok := ctx.Deadline()
 		if !ok {
-			return nil, errors.New("expected deadline on summary context")
+			return nil, errors.New("expected deadline on summary context when timeout > 0")
 		}
 		gotDeadline = deadline
 		return &checkpoint.Summary{Intent: "intent", Outcome: "outcome"}, nil
 	}
 
 	start := time.Now()
-	summary, _, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, checkpointSummaryTimeout)
+	summary, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, explicitTimeout, nil, newSummaryAttempt("claude-code", explicitTimeout))
 	if err != nil {
 		t.Fatalf("generateCheckpointAISummary() error = %v", err)
 	}
@@ -1283,17 +1261,14 @@ func TestGenerateCheckpointAISummary_ClampsLongParentDeadlineToDefaultTimeout(t 
 		t.Fatal("expected deadline to be set")
 	}
 	if remaining := gotDeadline.Sub(start); remaining < 30*time.Millisecond || remaining > 200*time.Millisecond {
-		t.Fatalf("deadline offset = %s, want around %s", remaining, checkpointSummaryTimeout)
+		t.Fatalf("deadline offset = %s, want around %s", remaining, explicitTimeout)
 	}
 }
 
+// Cannot use t.Parallel() — mutates package-level generateTranscriptSummary.
 func TestGenerateCheckpointAISummary_UsesCancellationSentinel(t *testing.T) {
-	tmpTimeout := checkpointSummaryTimeout
 	tmpGenerator := generateTranscriptSummary
-	t.Cleanup(func() {
-		checkpointSummaryTimeout = tmpTimeout
-		generateTranscriptSummary = tmpGenerator
-	})
+	t.Cleanup(func() { generateTranscriptSummary = tmpGenerator })
 
 	parentCtx, cancel := context.WithCancel(context.Background())
 
@@ -1303,13 +1278,14 @@ func TestGenerateCheckpointAISummary_UsesCancellationSentinel(t *testing.T) {
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		cancel()
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
 
-	_, _, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, checkpointSummaryTimeout)
+	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, 0, nil, newSummaryAttempt("claude-code", 0))
 	if err == nil {
 		t.Fatal("expected cancellation error")
 	}
@@ -1373,8 +1349,8 @@ func TestResolveSummaryTimeout_DefaultWhenBothUnset(t *testing.T) {
 
 	got := resolveSummaryTimeout(context.Background(), 0)
 
-	if got != checkpointSummaryTimeout {
-		t.Fatalf("resolveSummaryTimeout(flag=0, setting=0) = %s, want %s (package default)", got, checkpointSummaryTimeout)
+	if got != 0 {
+		t.Fatalf("resolveSummaryTimeout(flag=0, setting=0) = %s, want 0 (no deadline)", got)
 	}
 }
 
@@ -1386,18 +1362,27 @@ func TestResolveSummaryTimeout_NegativeSettingTreatedAsUnset(t *testing.T) {
 
 	got := resolveSummaryTimeout(context.Background(), 0)
 
-	if got != checkpointSummaryTimeout {
-		t.Fatalf("resolveSummaryTimeout(flag=0, setting=-1) = %s, want %s (package default)", got, checkpointSummaryTimeout)
+	if got != 0 {
+		t.Fatalf("resolveSummaryTimeout(flag=0, setting=-1) = %s, want 0 (no deadline)", got)
 	}
 }
 
-// Locks in 5 minutes as the package default so a casual edit doesn't silently
-// regress to the prior 30s — issue #1198 raised the default specifically
-// because 30s was too tight for large transcripts.
-func TestDefaultCheckpointSummaryTimeout_IsFiveMinutes(t *testing.T) {
-	t.Parallel()
-	if defaultCheckpointSummaryTimeout != 5*time.Minute {
-		t.Fatalf("defaultCheckpointSummaryTimeout = %s, want 5m (see issue #1198)", defaultCheckpointSummaryTimeout)
+// TestResolveSummaryTimeout_DefaultZero locks in that with no flag and no
+// settings file, --generate has no automatic deadline. The opt-in surface
+// (--summary-timeout-seconds flag and summary_timeout_seconds setting) is
+// the only way to introduce a cap. See
+// docs/superpowers/specs/2026-05-13-explain-summary-streaming-design.md.
+//
+// Cannot use t.Parallel() — t.Chdir mutates process-global state.
+func TestResolveSummaryTimeout_DefaultZero(t *testing.T) {
+	// settings.Load reads .entire/settings.json from CWD; redirect to a
+	// temp dir that has none.
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	got := resolveSummaryTimeout(context.Background(), 0)
+	if got != 0 {
+		t.Errorf("resolveSummaryTimeout(ctx, 0) = %v, want 0 (no deadline)", got)
 	}
 }
 
@@ -1735,6 +1720,7 @@ func TestRunExplainCheckpoint_GenerateV1OnlyReloadsFromV1(t *testing.T) {
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		sawV1Transcript = strings.Contains(string(transcript.Bytes()), "v1-only generate prompt")
 		return &checkpoint.Summary{Intent: "generated intent", Outcome: "generated outcome"}, nil
@@ -1804,6 +1790,7 @@ func TestRunExplainCheckpoint_GenerateV1ModeUsesSelectedStore(t *testing.T) {
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		sawV1Transcript = strings.Contains(string(transcript.Bytes()), "v1-mode generate prompt")
 		return &checkpoint.Summary{Intent: "generated v1 intent", Outcome: "generated v1 outcome"}, nil
@@ -1880,6 +1867,7 @@ func TestRunExplainCheckpoint_GenerateWritesV1Store(t *testing.T) {
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		return &checkpoint.Summary{Intent: "selected v1 intent", Outcome: "selected v1 outcome"}, nil
 	}
@@ -1908,6 +1896,98 @@ func TestRunExplainCheckpoint_GenerateWritesV1Store(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, v1Metadata.Summary)
 	require.Equal(t, "selected v1 intent", v1Metadata.Summary.Intent)
+}
+
+// TestRunExplainAuto_GeneratePersistsHexOnBranchUnderRefsPrimary is the
+// end-to-end regression test for the motivating field bug: under a git-refs
+// primary, `entire checkpoint explain --generate <hex-id>` for a pre-migration
+// checkpoint that lives only on the v1 branch generated the AI summary and
+// then discarded it (the summary backfill went refs-only), reporting
+// `no checkpoint or commit found`. The whole CLI path must work: auto target
+// resolution → routed read → summary generation → kind-routed backfill →
+// summary persisted on the v1 branch.
+func TestRunExplainAuto_GeneratePersistsHexOnBranchUnderRefsPrimary(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "test.txt"), []byte("test"), 0o644))
+	_, err = wt.Add("test.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// git-refs is the configured primary — the field configuration in which
+	// the backfill was discarded.
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tmpDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "summary_generation": {"provider": "claude-code"}, "checkpoints": {"primary": {"type": "git-refs"}}}`),
+		0o644,
+	))
+
+	originalGet := getSummaryAgent
+	originalCLI := isSummaryCLIAvailable
+	originalDiscover := discoverSummaryProviders
+	originalGenerate := generateTranscriptSummary
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		isSummaryCLIAvailable = originalCLI
+		discoverSummaryProviders = originalDiscover
+		generateTranscriptSummary = originalGenerate
+	})
+
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		return &stubTextAgent{name: name, kind: agent.AgentTypeClaudeCode}, nil
+	}
+	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
+	discoverSummaryProviders = func(context.Context) {}
+	generateTranscriptSummary = func(
+		_ context.Context,
+		_ redact.RedactedBytes,
+		_ []string,
+		_ types.AgentType,
+		_ summarize.Generator,
+		_ agent.ProgressFn,
+	) (*checkpoint.Summary, error) {
+		return &checkpoint.Summary{Intent: "backfilled intent", Outcome: "backfilled outcome"}, nil
+	}
+
+	// The checkpoint exists ONLY on the pre-migration v1 branch.
+	branchStore := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	cpID := id.MustCheckpointID("aabbccddeeff")
+	ctx := context.Background()
+
+	transcript := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"generate test"}]}}` + "\n" +
+		`{"type":"assistant","message":{"content":"done"}}` + "\n")
+
+	require.NoError(t, branchStore.Write(ctx, checkpoint.Session{
+		CheckpointID: cpID,
+		SessionID:    "session-hex-on-branch",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted(transcript),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}))
+
+	var buf, errBuf bytes.Buffer
+	err = runExplainAuto(ctx, &buf, &errBuf, cpID.String(), true, false, false, false, true, false, false, 0)
+	require.NoError(t, err, "generate for a hex checkpoint on the branch must succeed under a refs primary")
+	require.NotContains(t, errBuf.String(), "no checkpoint or commit found",
+		"the resolved checkpoint must not be misreported as missing")
+
+	// The summary must be readable back from the v1 branch copy.
+	meta, err := branchStore.ReadSessionMetadata(ctx, cpID, 0)
+	require.NoError(t, err)
+	require.NotNil(t, meta.Summary, "the generated summary must persist on the v1 branch")
+	require.Equal(t, "backfilled intent", meta.Summary.Intent)
 }
 
 func TestRunExplainCheckpoint_GenerateReloadsAfterV1Write(t *testing.T) {
@@ -1957,6 +2037,7 @@ func TestRunExplainCheckpoint_GenerateReloadsAfterV1Write(t *testing.T) {
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		return &checkpoint.Summary{Intent: "generated v1 intent", Outcome: "generated v1 outcome"}, nil
 	}
@@ -2391,6 +2472,20 @@ func TestRunExplainAuto_TemporaryVerboseCompactsScopedExternalNativeTranscript(t
 	require.Contains(t, output, "Transcript (checkpoint scope)")
 	require.Contains(t, output, "[User] temporary scoped prompt")
 	require.Contains(t, output, "[Assistant] temporary scoped reply")
+	require.NotContains(t, output, "(failed to parse transcript)")
+}
+
+func TestFormatTranscriptBytes_PiNativeJSONL(t *testing.T) {
+	t.Parallel()
+
+	piJSONL := []byte(`{"type":"session","version":3,"id":"pi-session","cwd":"/tmp/repo"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"2026-07-25T10:00:00Z","message":{"role":"user","content":[{"type":"text","text":"Review this trail"}]}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-07-25T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"The trail needs two fixes."}],"model":"gpt-5.6-sol"}}
+`)
+
+	output := formatTranscriptBytes(piJSONL, "", agent.AgentTypePi)
+	require.Contains(t, output, "[User] Review this trail")
+	require.Contains(t, output, "[Assistant] The trail needs two fixes.")
 	require.NotContains(t, output, "(failed to parse transcript)")
 }
 
@@ -4271,6 +4366,45 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 			t.Errorf("expected 'session ... nonexistent-session' in output, got:\n%s", output)
 		}
 	})
+
+	t.Run("filter matches archived SessionIDs contributor", func(t *testing.T) {
+		// Multi-session checkpoint: latest SessionID is beta, but alpha is still
+		// in SessionIDs. The shared matcher must keep it when filtering for alpha.
+		multi := []strategy.RewindPoint{
+			{
+				ID:           "abc123def456",
+				Message:      "multi-session checkpoint",
+				Date:         now,
+				CheckpointID: "chk444444444",
+				SessionID:    "2026-01-22-session-beta",
+				SessionIDs:   []string{"2026-01-22-session-alpha", "2026-01-22-session-beta"},
+			},
+		}
+		output := formatBranchCheckpoints(io.Discard, "main", multi, "2026-01-22-session-alpha")
+		if !strings.Contains(output, "checkpoints  1") {
+			t.Errorf("expected archived contributor to match session filter, got:\n%s", output)
+		}
+	})
+
+	t.Run("unhydrated remote stub does not match session filter", func(t *testing.T) {
+		// Documents the pre-hydrate failure mode trail 871 caught: a names-only
+		// List stub has empty SessionID, so --session would drop it. Production
+		// collectCheckpoint hydrates before formatting; this asserts the filter
+		// itself does not invent a match for an empty SessionID.
+		stub := []strategy.RewindPoint{
+			{
+				ID:           "abc123def456",
+				Message:      "remote-discovered stub",
+				Date:         now,
+				CheckpointID: "01KVBJCWYA4YW6J5M9GP655HZN",
+				SessionID:    "",
+			},
+		}
+		output := formatBranchCheckpoints(io.Discard, "main", stub, "2026-01-22-session-alpha")
+		if !strings.Contains(output, "checkpoints  0") {
+			t.Errorf("empty SessionID stub must not match a session filter, got:\n%s", output)
+		}
+	})
 }
 
 func TestRunExplain_SessionFlagFiltersListView(t *testing.T) {
@@ -5925,5 +6059,213 @@ func TestRunExplainBranchWithFilter_DetachedHead(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "HEAD") && !strings.Contains(output, "detached") {
 		t.Errorf("expected output to indicate detached HEAD state, got: %s", output)
+	}
+}
+func TestSummaryProgressWriter_NonTTY(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	attempt := newSummaryAttempt("claude-code", 0)
+	pw := newSummaryProgressWriter(&buf, attempt)
+
+	// Throttling rule: emit on first PhaseGenerating, then on 500ms OR 25% jump.
+	// The two events here are back-to-back (~0ms) but the second is a 100% jump,
+	// so both should emit.
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseConnecting})
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseFirstToken, TTFTms: 935, CachedInputTokens: 35892})
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: 100})
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: 200})
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseDone, OutputTokens: 200, DurationMs: 3100})
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("expected 5 lines, got %d: %q", len(lines), buf.String())
+	}
+	wantSubstr := []string{
+		"Sending request to provider",
+		"Provider responded",
+		"Writing summary",
+		"Writing summary",
+		"Summary generated",
+	}
+	for i, ws := range wantSubstr {
+		if !strings.Contains(lines[i], ws) {
+			t.Errorf("line %d = %q, want substring %q", i, lines[i], ws)
+		}
+	}
+	if strings.Contains(buf.String(), "\r") {
+		t.Error("non-TTY output should not contain carriage returns")
+	}
+}
+
+func TestSummaryProgressWriter_NonTTYGenerateThrottle(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	attempt := newSummaryAttempt("claude-code", 0)
+	pw := newSummaryProgressWriter(&buf, attempt)
+
+	// First Generating event always emits (no prior state).
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: 100})
+	// Tiny jump (10%) within 500ms → suppressed.
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: 110})
+	// 30% jump from baseline of 100 → emits (>=25% rule).
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: 130})
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Errorf("expected 2 emitted Generating lines, got %d: %q", len(lines), buf.String())
+	}
+}
+
+func TestSummaryProgressWriter_Accessible(t *testing.T) {
+	// Cannot use t.Parallel() — t.Setenv mutates process-global state.
+	// (Strictly, t.Setenv IS compatible with t.Parallel() in Go 1.17+ when
+	// Setenv is called BEFORE Parallel, but the project convention is to
+	// avoid pairing them to keep the rules simple.)
+	t.Setenv("ACCESSIBLE", "1")
+	var buf bytes.Buffer
+	attempt := newSummaryAttempt("claude-code", 0)
+	pw := newSummaryProgressWriter(&buf, attempt)
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseConnecting})
+
+	out := buf.String()
+	if strings.Contains(out, "→") {
+		t.Errorf("accessible mode should not contain unicode arrow: %q", out)
+	}
+	if !strings.Contains(out, "->") {
+		t.Errorf("accessible mode should contain ASCII arrow: %q", out)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("accessible mode should not contain ANSI escapes: %q", out)
+	}
+}
+
+func TestSummaryProgressWriter_PopulatesAttempt(t *testing.T) {
+	t.Parallel()
+
+	attempt := newSummaryAttempt("claude-code", 30*time.Second)
+	pw := newSummaryProgressWriter(&bytes.Buffer{}, attempt)
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseConnecting})
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseFirstToken})
+
+	if !attempt.streaming {
+		t.Error("expected attempt.streaming=true after any progress event")
+	}
+	if !attempt.phasesReached[agent.PhaseConnecting] {
+		t.Error("expected PhaseConnecting recorded in attempt")
+	}
+	if !attempt.phasesReached[agent.PhaseFirstToken] {
+		t.Error("expected PhaseFirstToken recorded in attempt")
+	}
+	if attempt.phasesReached[agent.PhaseDone] {
+		t.Error("did not expect PhaseDone yet")
+	}
+}
+
+func TestTimeoutDiagnostic_StreamingStuckBeforeConnecting(t *testing.T) {
+	t.Parallel()
+	attempt := newSummaryAttempt("claude-code", 5*time.Second)
+	attempt.streaming = true // streaming was attempted but no events fired
+
+	label, rows := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "never sent its request") {
+		t.Errorf("label = %q, want 'never sent its request'", label)
+	}
+	if !rowsHaveValue(rows, "claude") {
+		t.Errorf("rows should suggest running 'claude' directly: %v", rows)
+	}
+}
+
+func TestTimeoutDiagnostic_StreamingStuckBeforeFirstToken(t *testing.T) {
+	t.Parallel()
+	attempt := newSummaryAttempt("claude-code", 5*time.Second)
+	attempt.streaming = true
+	attempt.phasesReached[agent.PhaseConnecting] = true
+
+	label, _ := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "received no response") {
+		t.Errorf("label = %q, want 'received no response'", label)
+	}
+}
+
+func TestTimeoutDiagnostic_StreamingStuckMidGeneration(t *testing.T) {
+	t.Parallel()
+	attempt := newSummaryAttempt("claude-code", 5*time.Second)
+	attempt.streaming = true
+	attempt.phasesReached[agent.PhaseConnecting] = true
+	attempt.phasesReached[agent.PhaseFirstToken] = true
+	attempt.phasesReached[agent.PhaseGenerating] = true
+
+	label, _ := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "did not finish") {
+		t.Errorf("label = %q, want 'did not finish'", label)
+	}
+}
+
+func TestTimeoutDiagnostic_StreamingFirstTokenWithoutConnecting(t *testing.T) {
+	t.Parallel()
+	// Older CLIs can reach FirstToken without ever emitting the
+	// version-dependent "requesting" status event. The diagnostic must key
+	// off the furthest phase reached — reporting "never sent its request"
+	// here would contradict the progress lines the user just watched.
+	attempt := newSummaryAttempt("claude-code", 5*time.Second)
+	attempt.streaming = true
+	attempt.phasesReached[agent.PhaseFirstToken] = true
+
+	label, _ := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "did not finish") {
+		t.Errorf("label = %q, want 'did not finish' (furthest phase reached wins)", label)
+	}
+}
+
+func TestTimeoutDiagnostic_StreamingDoneButDeadlineFired(t *testing.T) {
+	t.Parallel()
+	// All phases including Done were reached, yet the deadline still fired
+	// (e.g. while the result was being read). Must not fall through to the
+	// non-streaming branch and claim the provider produced no output.
+	attempt := newSummaryAttempt("claude-code", 5*time.Second)
+	attempt.streaming = true
+	attempt.phasesReached[agent.PhaseConnecting] = true
+	attempt.phasesReached[agent.PhaseFirstToken] = true
+	attempt.phasesReached[agent.PhaseGenerating] = true
+	attempt.phasesReached[agent.PhaseDone] = true
+
+	label, _ := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "was not delivered in time") {
+		t.Errorf("label = %q, want 'was not delivered in time'", label)
+	}
+	if strings.Contains(label, "produced no output") {
+		t.Errorf("label = %q must not claim the provider produced no output", label)
+	}
+}
+
+func TestTimeoutDiagnostic_NonStreamingNoOutput(t *testing.T) {
+	t.Parallel()
+	attempt := newSummaryAttempt("codex", 5*time.Second)
+	attempt.stderrCaptured = "failed to look up host: nodename nor servname provided"
+	attempt.stdoutByteCount = 0
+
+	label, rows := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "produced no output") {
+		t.Errorf("label = %q, want 'produced no output'", label)
+	}
+	if !rowsHaveValue(rows, "failed to look up host") {
+		t.Errorf("rows should surface stderr, got: %v", rows)
+	}
+}
+
+func TestTimeoutDiagnostic_NonStreamingWithOutput(t *testing.T) {
+	t.Parallel()
+	attempt := newSummaryAttempt("codex", 5*time.Second)
+	attempt.stderrCaptured = "model is processing your request"
+	attempt.stdoutByteCount = 1024
+
+	label, rows := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "was generating output when killed") {
+		t.Errorf("label = %q, want 'was generating output when killed'", label)
+	}
+	if !rowsHaveValue(rows, "model is processing") {
+		t.Errorf("rows should surface stderr, got: %v", rows)
 	}
 }

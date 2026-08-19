@@ -171,3 +171,21 @@ func TestCheckpointRemoteConfig_Owner(t *testing.T) {
 		})
 	}
 }
+
+func TestHasCheckpointRemoteKey(t *testing.T) {
+	t.Parallel()
+
+	assert.False(t, (&EntireSettings{}).HasCheckpointRemoteKey(), "nil strategy options")
+	assert.False(t, (&EntireSettings{StrategyOptions: map[string]any{}}).HasCheckpointRemoteKey(), "empty strategy options")
+	assert.True(t, (&EntireSettings{StrategyOptions: map[string]any{
+		"checkpoint_remote": map[string]any{"provider": "github", "repo": "org/repo"},
+	}}).HasCheckpointRemoteKey(), "well-formed entry")
+	// The reason this method exists: a malformed entry still counts as
+	// present even though GetCheckpointRemote rejects it.
+	assert.True(t, (&EntireSettings{StrategyOptions: map[string]any{
+		"checkpoint_remote": map[string]any{"provider": "github"},
+	}}).HasCheckpointRemoteKey(), "malformed entry still counts as present")
+	assert.True(t, (&EntireSettings{StrategyOptions: map[string]any{
+		"checkpoint_remote": nil,
+	}}).HasCheckpointRemoteKey(), "null entry still counts as present")
+}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1030,6 +1031,107 @@ func TestListCommitted_FallsBackToRemote(t *testing.T) {
 	}
 }
 
+// Regression (PR #1951 review): attach's local-presence gates require reads
+// that see ONLY the local primary branch — a checkpoint present solely on a
+// remote-tracking ref must read as absent, or attach would treat it as safe
+// to write and clobber the remote's sessions on push. The read chain's
+// per-checkpoint fall-through defeated that: a stale-but-existing local
+// branch fell through to origin's tracking tree and reported the checkpoint
+// present. PrimaryAsLocalRead pins reads to the local ref with no remote
+// tiers; the default chain keeps the fall-through for ordinary reads.
+func TestRead_PrimaryAsLocalRead_IgnoresRemoteTrackingPresence(t *testing.T) {
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	remoteRepo, err := git.PlainOpen(remoteDir)
+	if err != nil {
+		t.Fatalf("failed to open remote repo: %v", err)
+	}
+	remoteWorktree, err := remoteRepo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get remote worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(remoteDir, "README.md"), []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := remoteWorktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := remoteWorktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	}); err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	remoteStore := NewGitStore(remoteRepo, DefaultV1Refs())
+	remoteOnlyID := id.MustCheckpointID("abcdef123456")
+	if err := remoteStore.Write(context.Background(), Session{
+		CheckpointID: remoteOnlyID,
+		SessionID:    "remote-only-session",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"test": true}`)),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}); err != nil {
+		t.Fatalf("failed to write checkpoint to remote: %v", err)
+	}
+
+	localDir := t.TempDir()
+	localRepo, err := git.PlainClone(localDir, &git.CloneOptions{URL: remoteDir})
+	if err != nil {
+		t.Fatalf("failed to clone repo: %v", err)
+	}
+	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", paths.MetadataBranchName, paths.MetadataBranchName)
+	if err := localRepo.Fetch(&git.FetchOptions{
+		RemoteName: "origin",
+		RefSpecs:   []config.RefSpec{config.RefSpec(refSpec)},
+	}); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		t.Fatalf("failed to fetch metadata branch: %v", err)
+	}
+
+	// A stale LOCAL v1 branch: it exists (so a naive local-branch-exists gate
+	// passes) but holds a different checkpoint, not remoteOnlyID.
+	localStore := NewGitStore(localRepo, DefaultV1Refs())
+	localOnlyID := id.MustCheckpointID("fedcba654321")
+	if err := localStore.Write(context.Background(), Session{
+		CheckpointID: localOnlyID,
+		SessionID:    "local-session",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"local": true}`)),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}); err != nil {
+		t.Fatalf("failed to write local checkpoint: %v", err)
+	}
+
+	// Default chain: the remote-only checkpoint IS readable (fall-through).
+	chainSummary, err := localStore.Read(context.Background(), remoteOnlyID)
+	if err != nil {
+		t.Fatalf("chain Read() error = %v", err)
+	}
+	if chainSummary == nil {
+		t.Fatal("chain read should fall through to the remote-tracking tree")
+	}
+
+	// Local-pinned reads: the same checkpoint must be ABSENT.
+	pinnedStore := NewGitStore(localRepo, DefaultV1Refs().PrimaryAsLocalRead())
+	pinnedSummary, err := pinnedStore.Read(context.Background(), remoteOnlyID)
+	if err != nil && !errors.Is(err, ErrCheckpointNotFound) {
+		t.Fatalf("pinned Read() error = %v", err)
+	}
+	if pinnedSummary != nil {
+		t.Fatal("local-pinned read must not see a checkpoint that exists only on a remote-tracking ref")
+	}
+
+	// And the local checkpoint stays readable through the pin.
+	localSummary, err := pinnedStore.Read(context.Background(), localOnlyID)
+	if err != nil {
+		t.Fatalf("pinned Read(local) error = %v", err)
+	}
+	if localSummary == nil {
+		t.Fatal("local-pinned read must still serve locally present checkpoints")
+	}
+}
+
 // TestGetCheckpointAuthor verifies that GetCheckpointAuthor retrieves the
 // author of the commit that created the checkpoint on the entire/checkpoints/v1 branch.
 func TestGetCheckpointAuthor(t *testing.T) {
@@ -1196,6 +1298,137 @@ func TestWriteCommitted_MultipleSessionsSameCheckpoint(t *testing.T) {
 	if content1.Metadata.SessionID != "session-two" {
 		t.Errorf("session 1 SessionID = %q, want %q", content1.Metadata.SessionID, "session-two")
 	}
+}
+
+// sessionMetadataStore is the slice of the store surface the dedup tests
+// need. Both persistent backends satisfy it; testing each one directly (not
+// just the shared treeWriter) guards against a backend later shadowing or
+// de-embedding the shared write path.
+type sessionMetadataStore interface {
+	Write(ctx context.Context, req WriteRequest) error
+	ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*Metadata, error)
+}
+
+// TestWriteCommitted_DeduplicatesFilesTouched verifies the write boundary
+// enforces uniqueness on files_touched instead of trusting the caller. Every
+// known producer dedupes before writing, yet duplicated paths have reached the
+// permanent record in the wild until a session's metadata.json exceeded
+// GitHub's 100 MB blob limit and the checkpoints branch became unpushable —
+// so the invariant is enforced where the record is written, and verified
+// against each live backend rather than only the shared implementation.
+func TestWriteCommitted_DeduplicatesFilesTouched(t *testing.T) {
+	tests := []struct {
+		name     string
+		newStore func(repo *git.Repository) sessionMetadataStore
+	}{
+		{
+			name:     "git-branch store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return NewGitStore(repo, DefaultV1Refs()) },
+		},
+		{
+			name:     "git-refs store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return newGitRefsStore(repo) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, _ := setupBranchTestRepo(t)
+			store := tt.newStore(repo)
+			checkpointID := id.MustCheckpointID("c1c2c3c4c5c6")
+
+			err := store.Write(context.Background(), Session{
+				CheckpointID:     checkpointID,
+				SessionID:        "session-dup",
+				Strategy:         "manual-commit",
+				Transcript:       redact.AlreadyRedacted([]byte(`{"message": "dup session"}`)),
+				FilesTouched:     []string{"b.go", "a.go", "b.go", "a.go", "a.go"},
+				CheckpointsCount: 1,
+				AuthorName:       "Test Author",
+				AuthorEmail:      "test@example.com",
+			})
+			if err != nil {
+				t.Fatalf("Write() error = %v", err)
+			}
+
+			metadata, err := store.ReadSessionMetadata(context.Background(), checkpointID, 0)
+			if err != nil {
+				t.Fatalf("ReadSessionMetadata() error = %v", err)
+			}
+			want := []string{"a.go", "b.go"}
+			if !slices.Equal(metadata.FilesTouched, want) {
+				t.Errorf("FilesTouched = %v, want %v", metadata.FilesTouched, want)
+			}
+		})
+	}
+}
+
+// TestWriteCommitted_FilesTouchedPreservesEmptyVsNil pins the wire format of
+// files_touched, which is marshaled without omitempty: a non-nil empty input
+// must stay [] and a nil input must stay null. Normalizing at the write
+// boundary must not silently rewrite one into the other — readers outside Go
+// distinguish them. Asserted on the raw JSON because unmarshaling into
+// []string erases exactly the difference under test.
+func TestWriteCommitted_FilesTouchedPreservesEmptyVsNil(t *testing.T) {
+	tests := []struct {
+		name         string
+		filesTouched []string
+		want         string
+	}{
+		{name: "empty stays []", filesTouched: []string{}, want: `"files_touched": []`},
+		{name: "nil stays null", filesTouched: nil, want: `"files_touched": null`},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, _ := setupBranchTestRepo(t)
+			store := NewGitStore(repo, DefaultV1Refs())
+			checkpointID := id.MustCheckpointID(fmt.Sprintf("d%dd2d3d4d5d6", i))
+
+			err := store.Write(context.Background(), Session{
+				CheckpointID: checkpointID,
+				SessionID:    "session-empty",
+				Strategy:     "manual-commit",
+				Transcript:   redact.AlreadyRedacted([]byte(`{"message": "m"}`)),
+				FilesTouched: tt.filesTouched,
+				AuthorName:   "Test Author",
+				AuthorEmail:  "test@example.com",
+			})
+			if err != nil {
+				t.Fatalf("Write() error = %v", err)
+			}
+
+			raw := readRawSessionMetadata(t, repo, checkpointID)
+			if !strings.Contains(raw, tt.want) {
+				t.Errorf("session metadata JSON does not contain %q:\n%s", tt.want, raw)
+			}
+		})
+	}
+}
+
+// readRawSessionMetadata returns session 0's metadata.json contents verbatim
+// from the metadata branch, for tests asserting on the wire format itself.
+func readRawSessionMetadata(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID) string {
+	t.Helper()
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("metadata branch reference: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("metadata branch commit: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("metadata branch tree: %v", err)
+	}
+	file, err := tree.File(checkpointID.Path() + "/0/" + paths.MetadataFileName)
+	if err != nil {
+		t.Fatalf("session metadata not found: %v", err)
+	}
+	content, err := file.Contents()
+	if err != nil {
+		t.Fatalf("session metadata contents: %v", err)
+	}
+	return content
 }
 
 // TestWriteCommitted_Aggregation verifies that CheckpointSummary correctly
@@ -1461,10 +1694,17 @@ func TestWriteCommitted_CodexSanitizesPortableTranscript(t *testing.T) {
 
 	got := string(content.Transcript)
 	require.NotContains(t, got, `"encrypted_content":"REDACTED"`)
-	require.NotContains(t, got, `"type":"compaction"`)
-	require.NotContains(t, got, `"type":"compaction_summary"`)
 	require.Contains(t, got, `"summary":[{"text":"brief"}]`)
 	require.Contains(t, got, `"summary":[{"text":"nested"}]`)
+
+	// The top-level compaction item keeps its line (payload stripped) so the stored
+	// transcript stays line-aligned with the agent's rollout. Items nested inside a
+	// compacted line's replacement_history are still removed outright — they are
+	// array elements, so removing them cannot shift line numbers.
+	require.Contains(t, got, `"type":"compaction"`)
+	require.NotContains(t, got, `"type":"compaction_summary"`)
+	require.Len(t, strings.Split(strings.TrimRight(got, "\n"), "\n"), 3,
+		"stored transcript must keep one line per rollout line")
 }
 
 // TestReadSessionContent_InvalidIndex verifies that ReadSessionContent returns
@@ -5051,4 +5291,51 @@ func TestCommittedMetadata_InvestigateFieldsRoundTrip(t *testing.T) {
 	if meta.InvestigateTopic != "topic-x" {
 		t.Errorf("InvestigateTopic: got %q", meta.InvestigateTopic)
 	}
+}
+
+// TestWriteCommitted_CodexSanitizesTranscriptFromPath covers writeTranscript's
+// TranscriptPath fallback — the one way raw bytes reach the store, and previously
+// the only transcript path with no test at all.
+//
+// It asserts the stored result: sanitized, line-aligned, conversation intact. It
+// deliberately does NOT claim to pin the sanitize-before-redact ORDER on this path,
+// because the two orders are indistinguishable by output — redaction is JSON-aware,
+// so redact-then-sanitize still ends with the encrypted_content key deleted. Getting
+// the order right there is a wasted-work fix (redaction scanning ciphertext that
+// sanitization discards), not a content fix, and it is not observable from here.
+func TestWriteCommitted_CodexSanitizesTranscriptFromPath(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	checkpointID := id.MustCheckpointID("c0de5a1712ed")
+
+	rollout := `{"timestamp":"2026-03-25T11:31:11.754Z","type":"response_item","payload":{"type":"reasoning","summary":[{"text":"brief"}],"encrypted_content":"Y2lwaGVydGV4dA=="}}
+{"timestamp":"2026-03-25T11:31:11.755Z","type":"response_item","payload":{"type":"compaction","encrypted_content":"Y2lwaGVydGV4dA=="}}
+{"timestamp":"2026-03-25T11:31:11.756Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}
+`
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(rollout), 0o600))
+
+	// No in-memory Transcript: force the TranscriptPath fallback.
+	err := store.Write(context.Background(), Session{
+		CheckpointID:     checkpointID,
+		SessionID:        "codex-session",
+		Strategy:         "manual-commit",
+		Agent:            agent.AgentTypeCodex,
+		TranscriptPath:   path,
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	require.NoError(t, err)
+
+	content, err := store.ReadLatestSessionContent(context.Background(), checkpointID)
+	require.NoError(t, err)
+
+	got := string(content.Transcript)
+	require.NotContains(t, got, "Y2lwaGVydGV4dA==", "ciphertext survived into storage")
+	require.NotContains(t, got, "encrypted_content")
+	require.Contains(t, got, `"type":"compaction"`, "compaction line must survive, payload stripped")
+	require.Contains(t, got, "hello", "conversation content was lost")
+	require.Len(t, strings.Split(strings.TrimRight(got, "\n"), "\n"), 3,
+		"stored transcript must stay line-aligned with the rollout")
 }
