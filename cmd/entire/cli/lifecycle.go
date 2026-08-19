@@ -1222,7 +1222,10 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	// the real ID via the task description recorded at SubagentStart before any
 	// pre-task-state lookup keys off it — see ResolvePreTaskToolUseID's doc.
 	if event.ToolUseID == "" {
-		if resolvedID, resolved := ResolvePreTaskToolUseID(ctx, event.ToolUseID, event.TaskDescription); resolved {
+		// Explicit empty ID: we are inside the no-ToolUseID branch, so the
+		// explicit-ID-wins path of ResolvePreTaskToolUseID is intentionally
+		// unreachable — resolve by TaskDescription (or single-active fallback).
+		if resolvedID, resolved := ResolvePreTaskToolUseID(ctx, "", event.TaskDescription); resolved {
 			event.ToolUseID = resolvedID
 			if event.SubagentID == "" {
 				event.SubagentID = resolvedID
