@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/goose"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -642,6 +643,14 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 		scoped, sliceErr := opencode.SliceFromMessage(transcriptBytes, state.CheckpointTranscriptStart)
 		if sliceErr != nil {
 			logging.Warn(summarizeCtx, "failed to scope OpenCode transcript for summary",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", sliceErr.Error()))
+		}
+		scopedTranscript = scoped
+	case agent.AgentTypeGoose:
+		scoped, sliceErr := goose.SliceFromMessage(transcriptBytes, state.CheckpointTranscriptStart)
+		if sliceErr != nil {
+			logging.Warn(summarizeCtx, "failed to scope Goose transcript for summary",
 				slog.String("session_id", state.SessionID),
 				slog.String("error", sliceErr.Error()))
 		}

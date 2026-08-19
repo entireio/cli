@@ -48,6 +48,18 @@ func ResumeCommandSpecFor(name types.AgentName, sessionID string) (ForegroundCom
 			return ForegroundCommandSpec{}, false
 		}
 		return ForegroundCommandSpec{Binary: "gemini", Args: []string{"--resume", sessionID}}, true
+	case AgentNameGoose:
+		// --session-id requires --resume, so the flags are always paired.
+		if sessionID == "" {
+			return ForegroundCommandSpec{Binary: "goose", Args: []string{"session", "--resume"}}, true
+		}
+		if !isLaunchableResumeSessionID(sessionID) {
+			return ForegroundCommandSpec{}, false
+		}
+		return ForegroundCommandSpec{
+			Binary: "goose",
+			Args:   []string{"session", "--resume", "--session-id", sessionID},
+		}, true
 	case AgentNameOpenCode:
 		if sessionID == "" {
 			return ForegroundCommandSpec{Binary: "opencode"}, true

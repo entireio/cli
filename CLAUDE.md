@@ -13,7 +13,7 @@ This repo contains the CLI for Entire.
 - `entire/`: Main CLI entry point. Also home to kubectl-style external-command resolution (`entire <name>` → `entire-<name>` on PATH) — see [External Commands](docs/architecture/external-commands.md).
 - `entire/cli`: CLI utilities and helpers (Cobra commands, helpers, group roots)
 - `entire/cli/commands`: actual command implementations
-- `entire/cli/agent`: agent implementations (Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi) - see [Agent Integration Checklist](docs/architecture/agent-integration-checklist.md) and [Agent Implementation Guide](docs/architecture/agent-guide.md)
+- `entire/cli/agent`: agent implementations (Claude Code, Gemini CLI, Goose, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi) - see [Agent Integration Checklist](docs/architecture/agent-integration-checklist.md) and [Agent Implementation Guide](docs/architecture/agent-guide.md)
 - `entire/cli/strategy`: strategy implementation (manual-commit) - see section below
 - `entire/cli/checkpoint`: checkpoint storage abstractions (ephemeral and persistent)
 - `entire/cli/session`: session state management

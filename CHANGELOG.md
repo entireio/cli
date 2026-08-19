@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Goose support (preview): `entire enable --agent goose` installs an Open Plugins hook file at `.agents/plugins/entire/hooks/hooks.json`, mapping Goose's `SessionStart` / `UserPromptSubmit` / `Stop` / `SessionEnd` events onto Entire's lifecycle. Goose keeps conversations in SQLite rather than in per-session files, so the integration follows the OpenCode pattern: read through `goose session export --format json`, restore through `goose session import`, and never touch the database directly
+
 ## [0.10.2] - 2026-08-19
 
 ### Added

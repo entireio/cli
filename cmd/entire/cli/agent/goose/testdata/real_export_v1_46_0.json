@@ -1,0 +1,290 @@
+{
+  "id": "20260819_1",
+  "working_dir": "/Users/private/entire/test-repos/test-repo",
+  "name": "I need to revert a change to my last commit message",
+  "user_set_name": false,
+  "session_type": "user",
+  "created_at": "2026-08-19T21:08:38Z",
+  "updated_at": "2026-08-19T21:08:38Z",
+  "extension_data": {},
+  "usage": {
+    "input_tokens": 124611,
+    "output_tokens": 394,
+    "total_tokens": 125005,
+    "cache_read_input_tokens": 112820,
+    "cache_write_input_tokens": 11777
+  },
+  "accumulated_usage": {
+    "input_tokens": 124611,
+    "output_tokens": 394,
+    "total_tokens": 125005,
+    "cache_read_input_tokens": 112820,
+    "cache_write_input_tokens": 11777
+  },
+  "accumulated_cost": null,
+  "schedule_id": null,
+  "recipe": null,
+  "user_recipe_values": null,
+  "conversation": [
+    {
+      "id": "msg_20260819_1_0f59a0ce-3f50-414c-8eb1-d5e845198a1e",
+      "role": "user",
+      "created": 1773792194,
+      "content": [
+        {
+          "type": "text",
+          "text": "I need to revert a change to my last commit message"
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
+    },
+    {
+      "id": "msg_20260819_1_feae9c75-35f7-4083-a3cb-2787c3a3d638",
+      "role": "assistant",
+      "created": 1773792199,
+      "content": [
+        {
+          "type": "text",
+          "text": "What would you like the new commit message to be? The last commit on this branch is:\n\n```\n42e6c78 test\n```\n\nTo change it, I can run `git commit --amend -m \"new message\"`. What message would you like?"
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
+    },
+    {
+      "id": "msg_20260819_1_0fc1b296-6798-4059-9734-db45bf03a440",
+      "role": "user",
+      "created": 1773792310,
+      "content": [
+        {
+          "type": "text",
+          "text": "No I want to revert the extra amendment to the commit message where the new entire-checkpoint text was added"
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
+    },
+    {
+      "id": "msg_20260819_1_68798667-fe26-4f09-9ffd-2bf11da6b3dc",
+      "role": "assistant",
+      "created": 1773792313,
+      "content": [
+        {
+          "type": "text",
+          "text": "\n\nLet me check the current full commit message first."
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
+    },
+    {
+      "id": "msg_20260819_1_54a99def-d40c-442c-af6f-12aa3f45e145",
+      "role": "assistant",
+      "created": 1773792314,
+      "content": [
+        {
+          "type": "toolRequest",
+          "id": "toolu_01NFoPKsjrNsBZ4PJ4r8uSF2",
+          "toolCall": {
+            "status": "success",
+            "value": {
+              "name": "Bash",
+              "arguments": {
+                "command": "git log -1 --format=\"%B\"",
+                "description": "Show full last commit message"
+              }
+            }
+          }
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
+    },
+    {
+      "id": "msg_20260819_1_b9fa15ad-1358-4fe0-a3ac-b7007f0fb510",
+      "role": "user",
+      "created": 1773792314,
+      "content": [
+        {
+          "type": "toolResponse",
+          "id": "toolu_01NFoPKsjrNsBZ4PJ4r8uSF2",
+          "toolResult": {
+            "status": "success",
+            "value": {
+              "resultType": "complete",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "test\n\nEntire-Checkpoint: ecf782729563\nEntire-Checkpoint: c81467b72ca0"
+                }
+              ],
+              "isError": false
+            }
+          }
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
+    },
+    {
+      "id": "msg_20260819_1_f3dc8d30-80e2-477c-b297-0aba89d1f517",
+      "role": "assistant",
+      "created": 1773792318,
+      "content": [
+        {
+          "type": "text",
+          "text": "I see — the commit message has `Entire-Checkpoint` lines appended. What should the message be after reverting? Just `test` with no checkpoint lines?"
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
+    },
+    {
+      "id": "msg_20260819_1_9871b876-3c36-4bff-94c2-5f8ca8e57e33",
+      "role": "user",
+      "created": 1773792327,
+      "content": [
+        {
+          "type": "text",
+          "text": "it shouldn't have this one: Entire-Checkpoint: c81467b72ca0"
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
+    },
+    {
+      "id": "msg_20260819_1_3d4e0d39-848b-45c4-8986-0f9642e7e583",
+      "role": "assistant",
+      "created": 1773792330,
+      "content": [
+        {
+          "type": "toolRequest",
+          "id": "toolu_017oWPxD8roc925BiDyeQi8t",
+          "toolCall": {
+            "status": "success",
+            "value": {
+              "name": "Bash",
+              "arguments": {
+                "command": "git commit --amend -m \"$(cat <<'EOF'\ntest\n\nEntire-Checkpoint: ecf782729563\nEOF\n)\"",
+                "description": "Amend commit message to remove the extra checkpoint line"
+              }
+            }
+          }
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
+    },
+    {
+      "id": "msg_20260819_1_389f0d54-0512-4327-b32d-520a5ede99ff",
+      "role": "user",
+      "created": 1773792341,
+      "content": [
+        {
+          "type": "toolResponse",
+          "id": "toolu_017oWPxD8roc925BiDyeQi8t",
+          "toolResult": {
+            "status": "success",
+            "value": {
+              "resultType": "complete",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "[test-gemini 70a873a] test\n Date: Tue Mar 17 15:39:58 2026 -0700\n 1 file changed, 2 insertions(+)"
+                }
+              ],
+              "isError": false
+            }
+          }
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
+    },
+    {
+      "id": "msg_20260819_1_c835487b-599d-46ee-a42a-762b73ea5d69",
+      "role": "assistant",
+      "created": 1773792343,
+      "content": [
+        {
+          "type": "text",
+          "text": "Done. The extra `Entire-Checkpoint: c81467b72ca0` line has been removed."
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
+    },
+    {
+      "id": "msg_20260819_1_52948de7-0db7-4449-be79-029f5ca4105a",
+      "role": "user",
+      "created": 1773792360,
+      "content": [
+        {
+          "type": "text",
+          "text": "when error happens the footer should still show"
+        },
+        {
+          "type": "image",
+          "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+          "mimeType": "image/png"
+        },
+        {
+          "type": "image",
+          "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+          "mimeType": "image/png"
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
+    },
+    {
+      "id": "msg_20260819_1_317ef7a4-3009-4d3c-899a-d74df5164faf",
+      "role": "assistant",
+      "created": 1773792365,
+      "content": [
+        {
+          "type": "text",
+          "text": "I see the screenshots. Let me fix the footer."
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
+    }
+  ],
+  "message_count": 13,
+  "last_message_at": "2026-03-18T00:06:05Z",
+  "provider_name": null,
+  "model_config": null,
+  "goose_mode": "auto",
+  "archived_at": null,
+  "project_id": null,
+  "parent_session_id": null,
+  "last_message_snippet": null
+}

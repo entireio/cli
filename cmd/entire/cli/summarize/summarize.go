@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/goose"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -159,6 +160,8 @@ func BuildCondensedTranscriptFromBytes(content redact.RedactedBytes, agentType t
 		return buildCondensedTranscriptFromDroid(content)
 	case agent.AgentTypeOpenCode:
 		return buildCondensedTranscriptFromOpenCode(content)
+	case agent.AgentTypeGoose:
+		return buildCondensedTranscriptFromGoose(content)
 	case agent.AgentTypeCodex:
 		return buildCondensedTranscriptFromCodex(content)
 	case agent.AgentTypePi:
@@ -308,6 +311,55 @@ func buildCondensedTranscriptFromOpenCode(redacted redact.RedactedBytes) ([]Entr
 						ToolDetail: extractOpenCodeToolDetail(part.State.Input),
 					})
 				}
+			}
+		}
+	}
+
+	return entries, nil
+}
+
+// buildCondensedTranscriptFromGoose converts a Goose session export into the
+// condensed entry list.
+//
+// Goose attributes tool output to the user role, so a user message can hold both
+// a real prompt (text blocks) and tool results (toolResponse blocks). Only text
+// blocks become user entries; otherwise every tool result would read as a
+// prompt.
+func buildCondensedTranscriptFromGoose(redacted redact.RedactedBytes) ([]Entry, error) {
+	session, err := goose.ParseExportSession(redacted.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse Goose transcript: %w", err)
+	}
+	if session == nil {
+		return nil, nil
+	}
+
+	var entries []Entry
+	for _, msg := range session.Conversation {
+		switch msg.Role {
+		case string(EntryTypeUser):
+			if text := goose.ExtractText(msg.Content); text != "" {
+				entries = append(entries, Entry{
+					Type:    EntryTypeUser,
+					Content: text,
+				})
+			}
+		case string(EntryTypeAssistant):
+			if text := goose.ExtractText(msg.Content); text != "" {
+				entries = append(entries, Entry{
+					Type:    EntryTypeAssistant,
+					Content: text,
+				})
+			}
+			for _, block := range msg.Content {
+				if block.Type != "toolRequest" || block.ToolCall == nil || block.ToolCall.Value == nil {
+					continue
+				}
+				entries = append(entries, Entry{
+					Type:       EntryTypeTool,
+					ToolName:   block.ToolCall.Value.Name,
+					ToolDetail: goose.ToolDetail(block.ToolCall.Value.Arguments),
+				})
 			}
 		}
 	}
