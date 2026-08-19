@@ -1173,8 +1173,16 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 		slog.String("transcript", event.SessionRef),
 	)
 
-	// Capture pre-task state
-	if err := CapturePreTaskState(ctx, event.ToolUseID); err != nil {
+	// Capture pre-task state, including the task description if the agent
+	// provided one (Cursor's "task", Claude Code's Task tool_input.description
+	// via ParseSubagentTypeAndDescription). ResolvePreTaskToolUseID uses it to
+	// correlate the matching SubagentEnd event later when that event's own
+	// payload carries no ID.
+	taskDescription := event.TaskDescription
+	if taskDescription == "" && event.SubagentType == "" {
+		_, taskDescription = ParseSubagentTypeAndDescription(event.ToolInput)
+	}
+	if err := CapturePreTaskStateWithMeta(ctx, event.ToolUseID, taskDescription); err != nil {
 		return fmt.Errorf("failed to capture pre-task state: %w", err)
 	}
 
@@ -1206,6 +1214,20 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	if event.SubagentType == "" && event.TaskDescription == "" {
 		// Extract subagent type and description from tool input
 		event.SubagentType, event.TaskDescription = ParseSubagentTypeAndDescription(event.ToolInput)
+	}
+
+	// Cursor's subagentStop payload carries no subagent_id (confirmed against
+	// Cursor's hooks documentation — only subagentStart has one), so
+	// event.ToolUseID/SubagentID arrive empty for real Cursor payloads. Resolve
+	// the real ID via the task description recorded at SubagentStart before any
+	// pre-task-state lookup keys off it — see ResolvePreTaskToolUseID's doc.
+	if event.ToolUseID == "" {
+		if resolvedID, resolved := ResolvePreTaskToolUseID(ctx, event.ToolUseID, event.TaskDescription); resolved {
+			event.ToolUseID = resolvedID
+			if event.SubagentID == "" {
+				event.SubagentID = resolvedID
+			}
+		}
 	}
 
 	// Prefer what the agent declared; see Event.SubagentTranscriptPath.

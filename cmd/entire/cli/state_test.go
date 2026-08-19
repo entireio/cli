@@ -59,6 +59,171 @@ func hasSuffix(path, suffix string) bool {
 	return len(path) >= len(suffix) && path[len(path)-len(suffix):] == suffix
 }
 
+// setupTestRepoForPreTask initializes a minimal git repo and .entire/tmp
+// directory, returning the repo directory. Shared by ResolvePreTaskToolUseID
+// tests, which need a real worktree root for resolveTmpDir to find .entire/tmp.
+func setupTestRepoForPreTask(t *testing.T) string {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	if err := os.MkdirAll(".git/objects", 0o755); err != nil {
+		t.Fatalf("Failed to create .git: %v", err)
+	}
+	if err := os.WriteFile(".git/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatalf("Failed to create HEAD: %v", err)
+	}
+	paths.ClearWorktreeRootCache()
+	if err := os.MkdirAll(paths.EntireTmpDir, 0o755); err != nil {
+		t.Fatalf("Failed to create tmp dir: %v", err)
+	}
+
+	return tmpDir
+}
+
+func TestResolvePreTaskToolUseID_ExplicitIDWins(t *testing.T) {
+	setupTestRepoForPreTask(t)
+	ctx := context.Background()
+
+	// No pre-task files exist at all — an explicit, non-empty ID must still be
+	// trusted and returned as-is (the pre-existing, already-correct path).
+	id, found := ResolvePreTaskToolUseID(ctx, "toolu_explicit", "some description")
+	if !found {
+		t.Fatal("ResolvePreTaskToolUseID() found = false, want true")
+	}
+	if id != "toolu_explicit" {
+		t.Errorf("ResolvePreTaskToolUseID() id = %q, want %q", id, "toolu_explicit")
+	}
+}
+
+func TestResolvePreTaskToolUseID_MatchesByTaskDescription(t *testing.T) {
+	setupTestRepoForPreTask(t)
+	ctx := context.Background()
+
+	if err := CapturePreTaskStateWithMeta(ctx, "toolu_target", "write release notes"); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta() error = %v", err)
+	}
+
+	id, found := ResolvePreTaskToolUseID(ctx, "", "write release notes")
+	if !found {
+		t.Fatal("ResolvePreTaskToolUseID() found = false, want true")
+	}
+	if id != "toolu_target" {
+		t.Errorf("ResolvePreTaskToolUseID() id = %q, want %q", id, "toolu_target")
+	}
+}
+
+// TestResolvePreTaskToolUseID_ParallelTasksDifferentDescriptions guards the
+// case that motivated this function: two subagents running in parallel, each
+// with its own pre-task file. An empty tool_use_id (Cursor's real subagentStop
+// payload) must resolve to the one whose task description actually matches,
+// never the other subagent's file.
+func TestResolvePreTaskToolUseID_ParallelTasksDifferentDescriptions(t *testing.T) {
+	ctx := context.Background()
+	setupTestRepoForPreTask(t)
+
+	if err := CapturePreTaskStateWithMeta(ctx, "toolu_alpha", "task alpha"); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta(alpha) error = %v", err)
+	}
+	if err := CapturePreTaskStateWithMeta(ctx, "toolu_beta", "task beta"); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta(beta) error = %v", err)
+	}
+
+	idAlpha, foundAlpha := ResolvePreTaskToolUseID(ctx, "", "task alpha")
+	if !foundAlpha || idAlpha != "toolu_alpha" {
+		t.Errorf("ResolvePreTaskToolUseID(task alpha) = (%q, %v), want (toolu_alpha, true)", idAlpha, foundAlpha)
+	}
+
+	idBeta, foundBeta := ResolvePreTaskToolUseID(ctx, "", "task beta")
+	if !foundBeta || idBeta != "toolu_beta" {
+		t.Errorf("ResolvePreTaskToolUseID(task beta) = (%q, %v), want (toolu_beta, true)", idBeta, foundBeta)
+	}
+}
+
+func TestResolvePreTaskToolUseID_SingleActiveFileFallback(t *testing.T) {
+	ctx := context.Background()
+	setupTestRepoForPreTask(t)
+
+	if err := CapturePreTaskState(ctx, "toolu_only"); err != nil {
+		t.Fatalf("CapturePreTaskState() error = %v", err)
+	}
+
+	// No ID and no description: exactly one active pre-task file exists, so
+	// it's unambiguous.
+	id, found := ResolvePreTaskToolUseID(ctx, "", "")
+	if !found {
+		t.Fatal("ResolvePreTaskToolUseID() found = false, want true")
+	}
+	if id != "toolu_only" {
+		t.Errorf("ResolvePreTaskToolUseID() id = %q, want %q", id, "toolu_only")
+	}
+}
+
+func TestResolvePreTaskToolUseID_AmbiguousWithoutDescriptionNotFound(t *testing.T) {
+	ctx := context.Background()
+	setupTestRepoForPreTask(t)
+
+	if err := CapturePreTaskState(ctx, "toolu_one"); err != nil {
+		t.Fatalf("CapturePreTaskState(one) error = %v", err)
+	}
+	if err := CapturePreTaskState(ctx, "toolu_two"); err != nil {
+		t.Fatalf("CapturePreTaskState(two) error = %v", err)
+	}
+
+	// No ID, no description, and more than one active file: genuinely
+	// ambiguous, must not guess.
+	_, found := ResolvePreTaskToolUseID(ctx, "", "")
+	if found {
+		t.Error("ResolvePreTaskToolUseID() found = true, want false (ambiguous with 2 active files)")
+	}
+}
+
+func TestResolvePreTaskToolUseID_DescriptionNoMatchNotFound(t *testing.T) {
+	ctx := context.Background()
+	setupTestRepoForPreTask(t)
+
+	if err := CapturePreTaskStateWithMeta(ctx, "toolu_target", "write release notes"); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta() error = %v", err)
+	}
+
+	// A non-empty description that matches nothing is a stronger negative
+	// signal than no description at all, so this must not fall back to the
+	// single-active-file case even though exactly one file exists.
+	_, found := ResolvePreTaskToolUseID(ctx, "", "totally different task")
+	if found {
+		t.Error("ResolvePreTaskToolUseID() found = true, want false (description matches nothing)")
+	}
+}
+
+func TestResolvePreTaskToolUseID_NoFilesNotFound(t *testing.T) {
+	ctx := context.Background()
+	setupTestRepoForPreTask(t)
+
+	_, found := ResolvePreTaskToolUseID(ctx, "", "")
+	if found {
+		t.Error("ResolvePreTaskToolUseID() found = true, want false (no pre-task files exist)")
+	}
+}
+
+func TestCapturePreTaskStateWithMeta_StoresTaskDescription(t *testing.T) {
+	ctx := context.Background()
+	setupTestRepoForPreTask(t)
+
+	if err := CapturePreTaskStateWithMeta(ctx, "toolu_meta", "do the thing"); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta() error = %v", err)
+	}
+
+	state, err := LoadPreTaskState(ctx, "toolu_meta")
+	if err != nil {
+		t.Fatalf("LoadPreTaskState() error = %v", err)
+	}
+	require.NotNil(t, state, "LoadPreTaskState() returned nil")
+	if state.TaskDescription != "do the thing" {
+		t.Errorf("TaskDescription = %q, want %q", state.TaskDescription, "do the thing")
+	}
+}
+
 func TestPrePromptState_BackwardCompat_LastTranscriptLineCount(t *testing.T) {
 	// Verify that state files written by older CLI versions with deprecated fields
 	// are correctly migrated to TranscriptOffset on load.

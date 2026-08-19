@@ -2624,3 +2624,81 @@ func TestResolveSubagentSessionLink_AgentWithoutCapability(t *testing.T) {
 		t.Error("an agent without the capability must never resolve a subagent link")
 	}
 }
+
+// TestHandleLifecycleSubagentEnd_ResolvesMissingToolUseIDViaTaskDescription
+// reproduces Cursor's real subagentStop payload, which carries no subagent_id
+// (confirmed against Cursor's hooks documentation — only subagentStart has
+// one). Without ResolvePreTaskToolUseID, event.ToolUseID stays "", so
+// LoadPreTaskState/SaveTaskStep/CleanupPreTaskState all key off an empty
+// string: the real pre-task-<id>.json file is orphaned, and a second parallel
+// subagent's file would collide on the same empty key.
+//
+// This drives the full path through DispatchLifecycleEvent, not just the
+// resolver in isolation, so it also pins that the resolved ID actually reaches
+// event.ToolUseID/SubagentID before the pre-task-state lookup.
+func TestHandleLifecycleSubagentEnd_ResolvesMissingToolUseIDViaTaskDescription(t *testing.T) {
+	// NOT parallel: uses t.Chdir, like TestDispatchLifecycleEvent_RoutesToCorrectHandler.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+
+	ctx := context.Background()
+
+	// Two subagents were started in parallel, each capturing its own pre-task
+	// file at SubagentStart (which, unlike Cursor's subagentStop, does carry an
+	// ID) with a distinct task description.
+	const otherToolUseID = "toolu_other"
+	if err := CapturePreTaskStateWithMeta(ctx, otherToolUseID, "unrelated task"); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta(other) error = %v", err)
+	}
+	const wantToolUseID = "toolu_target"
+	const wantDescription = "write release notes"
+	if err := CapturePreTaskStateWithMeta(ctx, wantToolUseID, wantDescription); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta(target) error = %v", err)
+	}
+
+	// The target subagent's file change, detected via git status since the
+	// mock agent has no transcript analyzer.
+	testutil.WriteFile(t, tmpDir, "docs/release.md", "release notes")
+
+	transcriptPath := filepath.Join(tmpDir, "main.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:            agent.SubagentEnd,
+		SessionID:       "test-session",
+		SessionRef:      transcriptPath,
+		ToolUseID:       "", // Cursor's real subagentStop payload: no subagent_id
+		TaskDescription: wantDescription,
+		Timestamp:       time.Now(),
+	}
+
+	if err := DispatchLifecycleEvent(ctx, ag, event); err != nil {
+		t.Fatalf("DispatchLifecycleEvent(SubagentEnd) error = %v", err)
+	}
+
+	if event.ToolUseID != wantToolUseID {
+		t.Errorf("event.ToolUseID = %q, want %q (resolved via task description)", event.ToolUseID, wantToolUseID)
+	}
+	if event.SubagentID != wantToolUseID {
+		t.Errorf("event.SubagentID = %q, want %q (backfilled from resolved tool_use_id)", event.SubagentID, wantToolUseID)
+	}
+
+	// The resolved subagent's own pre-task file must be cleaned up by
+	// CleanupPreTaskState, keyed by the resolved (not empty) ID.
+	if _, err := os.Stat(preTaskStateFile(ctx, wantToolUseID)); !os.IsNotExist(err) {
+		t.Errorf("pre-task file for resolved tool_use_id %q should be cleaned up, stat err = %v", wantToolUseID, err)
+	}
+	// The unrelated parallel subagent's pre-task file must survive untouched —
+	// this is the "orphans real pre-task files" / "parallel Stops collide on
+	// empty key" failure mode the fix prevents.
+	if _, err := os.Stat(preTaskStateFile(ctx, otherToolUseID)); err != nil {
+		t.Errorf("unrelated pre-task file for %q must NOT be removed, stat err = %v", otherToolUseID, err)
+	}
+}

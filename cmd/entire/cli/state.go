@@ -459,6 +459,12 @@ type PreTaskState struct {
 	ToolUseID      string   `json:"tool_use_id"`
 	Timestamp      string   `json:"timestamp"`
 	UntrackedFiles []string `json:"untracked_files"`
+
+	// TaskDescription is the subagent task description captured at SubagentStart
+	// (e.g. Cursor's "task" field, Claude Code's Task tool "description"). It lets
+	// ResolvePreTaskToolUseID correlate a SubagentEnd event back to this file when
+	// the ending hook's own payload carries no ID — see that function's doc for why.
+	TaskDescription string `json:"task_description,omitempty"`
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
@@ -476,7 +482,19 @@ func (s *PreTaskState) PreUntrackedFiles() []string {
 // CapturePreTaskState captures current untracked files before a Task execution
 // and saves them to a state file.
 // Works correctly from any subdirectory within the repository.
+//
+// This is a thin wrapper around CapturePreTaskStateWithMeta for callers that
+// don't have a task description to record.
 func CapturePreTaskState(ctx context.Context, toolUseID string) error {
+	return CapturePreTaskStateWithMeta(ctx, toolUseID, "")
+}
+
+// CapturePreTaskStateWithMeta captures current untracked files before a Task
+// execution and saves them, along with the subagent's task description, to a
+// state file. The description is later used by ResolvePreTaskToolUseID to
+// correlate a SubagentEnd event that arrives with no ID — see its doc comment.
+// Works correctly from any subdirectory within the repository.
+func CapturePreTaskStateWithMeta(ctx context.Context, toolUseID, taskDescription string) error {
 	if toolUseID == "" {
 		return errors.New("tool_use_id is required")
 	}
@@ -501,9 +519,10 @@ func CapturePreTaskState(ctx context.Context, toolUseID string) error {
 
 	// Create state file using os.Root for traversal-resistant write
 	state := PreTaskState{
-		ToolUseID:      toolUseID,
-		Timestamp:      time.Now().UTC().Format(time.RFC3339),
-		UntrackedFiles: untrackedFiles,
+		ToolUseID:       toolUseID,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		UntrackedFiles:  untrackedFiles,
+		TaskDescription: taskDescription,
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
@@ -616,6 +635,114 @@ func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found boo
 	toolUseID := strings.TrimPrefix(latestFile, preTaskFilePrefix)
 	toolUseID = strings.TrimSuffix(toolUseID, ".json")
 	return toolUseID, true
+}
+
+// preTaskFileCandidate pairs a discovered pre-task file's tool_use_id with its
+// modification time, for picking the most recent among several matches.
+type preTaskFileCandidate struct {
+	toolUseID string
+	modTime   time.Time
+}
+
+// mostRecent returns the candidate with the latest modification time.
+// Panics if candidates is empty — callers must check length first.
+func mostRecent(candidates []preTaskFileCandidate) string {
+	latest := candidates[0]
+	for _, c := range candidates[1:] {
+		if c.modTime.After(latest.modTime) {
+			latest = c
+		}
+	}
+	return latest.toolUseID
+}
+
+// ResolvePreTaskToolUseID resolves the tool_use_id that should key a
+// SubagentEnd event's LoadPreTaskState/SaveTaskStep/CleanupPreTaskState calls,
+// for agents whose "subagent ended" hook payload does not carry the ID that
+// named the matching pre-task file.
+//
+// This exists because Cursor's subagentStop payload has no subagent_id field
+// (only subagentStart does — confirmed against Cursor's hooks documentation).
+// Without this, LoadPreTaskState looks up "pre-task-.json" (empty ID), misses
+// the real pre-task-<id>.json file CapturePreTaskState wrote at
+// SubagentStart, and SaveTaskStep/CleanupPreTaskState key off the same empty
+// string — orphaning the real file and colliding across parallel subagents
+// that all resolve to the same empty key.
+//
+// Resolution order:
+//  1. toolUseID, if non-empty: trust the caller's own ID (the existing,
+//     already-correct path for agents like Claude Code that do report one).
+//  2. Else, taskDescription, if non-empty: scan pre-task-*.json files in
+//     .entire/tmp for ones whose stored TaskDescription matches exactly.
+//     Multiple matches (parallel subagents launched with the same task
+//     string) resolve to the most recently modified file. No match with a
+//     non-empty taskDescription is reported as not-found rather than falling
+//     back to case 3 — a task description that doesn't match anything is a
+//     stronger negative signal than having no description at all.
+//  3. Else (no ID, no description): if exactly one active pre-task file
+//     exists, it's unambiguous — use it.
+//
+// Returns ("", false) when none of the above yields a candidate.
+func ResolvePreTaskToolUseID(ctx context.Context, toolUseID, taskDescription string) (id string, found bool) {
+	if toolUseID != "" {
+		return toolUseID, true
+	}
+
+	tmpDirAbs := resolveTmpDir(ctx)
+	entries, err := os.ReadDir(tmpDirAbs)
+	if err != nil {
+		return "", false
+	}
+
+	var active []preTaskFileCandidate
+	var matching []preTaskFileCandidate
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, preTaskFilePrefix) || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		candidateID := strings.TrimSuffix(strings.TrimPrefix(name, preTaskFilePrefix), ".json")
+		candidate := preTaskFileCandidate{toolUseID: candidateID, modTime: info.ModTime()}
+		active = append(active, candidate)
+
+		if taskDescription == "" {
+			continue
+		}
+		// name comes from enumerating tmpDirAbs itself, not from untrusted
+		// input, so joining it back onto that same directory is safe.
+		data, readErr := os.ReadFile(filepath.Join(tmpDirAbs, name)) //nolint:gosec // filename enumerated from trusted tmp dir listing
+		if readErr != nil {
+			continue
+		}
+		var state PreTaskState
+		if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
+			continue
+		}
+		if state.TaskDescription == taskDescription {
+			matching = append(matching, candidate)
+		}
+	}
+
+	if taskDescription != "" {
+		if len(matching) == 0 {
+			return "", false
+		}
+		return mostRecent(matching), true
+	}
+
+	if len(active) == 1 {
+		return active[0].toolUseID, true
+	}
+
+	return "", false
 }
 
 // GetNextCheckpointSequence returns the next sequence number for incremental checkpoints.
