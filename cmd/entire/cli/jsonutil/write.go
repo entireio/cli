@@ -109,6 +109,7 @@ const maxSymlinkHops = 40
 func resolveWriteTarget(filePath string) string {
 	path := filePath
 	for range maxSymlinkHops {
+		prev := path
 		if resolved, err := filepath.EvalSymlinks(path); err == nil {
 			return resolved
 		}
@@ -130,6 +131,11 @@ func resolveWriteTarget(filePath string) string {
 		}
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(path), target)
+		}
+		if target == prev {
+			// A self-referential link (a -> a): the kernel answers ELOOP at
+			// once, so stop here instead of re-walking it to the hop cap.
+			return path
 		}
 		path = target
 	}
