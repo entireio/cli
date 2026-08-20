@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -291,54 +292,86 @@ func TestGetHooksDirInPath_CoreHooksPath(t *testing.T) {
 }
 
 // Global mode runs first-ever installs from hook processes that can fire
-// concurrently; without the install lock, one racer renames the other's
-// half-installed wrapper over the user's backup — destroying the user's hook
-// and leaving a wrapper that chains to itself.
-func TestInstallGitHook_ConcurrentFirstInstall_PreservesUserHook(t *testing.T) {
-	tmpDir := t.TempDir()
-	initCmd := exec.CommandContext(t.Context(), "git", "init")
-	initCmd.Dir = tmpDir
-	if err := initCmd.Run(); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-	t.Chdir(tmpDir)
-	paths.ClearWorktreeRootCache()
-	t.Cleanup(paths.ClearWorktreeRootCache)
-
-	const userHook = "#!/bin/sh\necho user-commit-msg\n"
-	hookPath := filepath.Join(tmpDir, ".git", "hooks", "commit-msg")
-	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(hookPath, []byte(userHook), 0o755); err != nil {
-		t.Fatal(err)
+// concurrently. Without the install lock, two losing interleavings exist and
+// BOTH must fail this test: a racer can rename a half-installed wrapper over
+// the user's backup (destroying the user's script), or read after the winner
+// wrote its wrapper, skip the backup, and write UNCHAINED content — leaving
+// the backup intact but orphaning the user's hook so it never runs again.
+//
+// Shape is mutation-tuned, not arbitrary: 4 installers (measured peak
+// interleave rate — more racers hit the marker short-circuit and make the
+// race RARER), every managed hook seeded (independent chances per round), and
+// many rounds because one round is a coin flip at any installer count.
+func TestInstallGitHook_ConcurrentFirstInstall_PreservesUserHooks(t *testing.T) {
+	const (
+		rounds     = 60
+		installers = 4
+	)
+	userScript := func(name string) string {
+		return "#!/bin/sh\necho user-" + name + "\n"
 	}
 
-	var wg sync.WaitGroup
-	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if _, err := InstallGitHook(t.Context(), true, false); err != nil {
-				t.Errorf("InstallGitHook: %v", err)
+	for round := range rounds {
+		t.Run(fmt.Sprintf("round-%d", round), func(t *testing.T) {
+			tmpDir := t.TempDir()
+			initCmd := exec.CommandContext(t.Context(), "git", "init")
+			initCmd.Dir = tmpDir
+			if err := initCmd.Run(); err != nil {
+				t.Fatalf("git init: %v", err)
 			}
-		}()
-	}
-	wg.Wait()
+			t.Chdir(tmpDir)
+			paths.ClearWorktreeRootCache()
+			ClearHooksDirCache()
+			t.Cleanup(func() {
+				paths.ClearWorktreeRootCache()
+				ClearHooksDirCache()
+			})
 
-	backup, err := os.ReadFile(hookPath + backupSuffix)
-	if err != nil {
-		t.Fatalf("user hook backup missing: %v", err)
-	}
-	if string(backup) != userHook {
-		t.Fatalf("user hook destroyed: backup contains %q", backup)
-	}
-	installed, err := os.ReadFile(hookPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(installed), entireHookMarker) {
-		t.Fatalf("installed hook is not Entire's: %q", installed)
+			hooksDir := filepath.Join(tmpDir, ".git", "hooks")
+			if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range ManagedGitHookNames() {
+				if err := os.WriteFile(filepath.Join(hooksDir, name), []byte(userScript(name)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var wg sync.WaitGroup
+			for range installers {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if _, err := InstallGitHook(t.Context(), true, false); err != nil {
+						t.Errorf("InstallGitHook: %v", err)
+					}
+				}()
+			}
+			wg.Wait()
+
+			for _, name := range ManagedGitHookNames() {
+				hookPath := filepath.Join(hooksDir, name)
+				backup, err := os.ReadFile(hookPath + backupSuffix)
+				if err != nil {
+					t.Fatalf("%s: user hook backup missing: %v", name, err)
+				}
+				if string(backup) != userScript(name) {
+					t.Fatalf("%s: user hook destroyed, backup holds: %q", name, backup)
+				}
+				installed, err := os.ReadFile(hookPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(installed), entireHookMarker) {
+					t.Fatalf("%s: installed hook is not Entire's: %q", name, installed)
+				}
+				// Without the chain the backup is orphaned: the user's hook
+				// survives on disk but git never runs it again.
+				if !strings.Contains(string(installed), name+backupSuffix) {
+					t.Fatalf("%s: installed hook does not chain to its backup: %q", name, installed)
+				}
+			}
+		})
 	}
 }
 
