@@ -59,12 +59,13 @@ type remoteTopology struct {
 	// failure this note exists to prevent.
 	syncRemote string
 	syncSource strategy.CheckpointSyncRemoteSource
-	// syncErr is the election failure, kept rather than swallowed because it
-	// is the only reason syncRemote can be empty where the note is written:
-	// that branch runs with at least two remotes configured, and a successful
-	// election over two or more remotes always yields a name. So an empty name
-	// there means checkpoint sync is fail-closed off, which is the one thing
-	// the note must not stay silent about.
+	// syncErr is the election failure, kept rather than swallowed because a
+	// fail-closed election is the one case where checkpoints are going
+	// nowhere at all, which the note must not stay silent about. It is not
+	// the only way syncRemote ends up empty: the resolver also returns an
+	// unnamed remote with no error when its own `git config` read fails
+	// transiently (cachedRemotesInConfigOrder answers nil rather than caching
+	// the failure), so the note carries a tier-agnostic fallback too.
 	syncErr error
 }
 
@@ -215,9 +216,16 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 // that remote and carries the checkpoints with it, so "checkpoints go to
 // origin, full stop" is exactly what must not be said here.
 //
-// The exception to the orientation-not-warning rule is a failed election: with
-// two or more remotes that only happens fail-closed, so checkpoints are going
-// nowhere at all and the note has to say so.
+// The "no session history" line is the inverse promise, and belongs only to
+// the tiers where the election is settled: with checkpoint_push_remote set or
+// a capture already in force, captureEligible refuses every displacement, so
+// no push can move the destination and every push to another remote really
+// does leave the transcripts behind. On the open tiers the same sentence would
+// be false for the electing push itself.
+//
+// The exception to the orientation-not-warning rule is a failed election: that
+// is fail-closed, so checkpoints are going nowhere at all and the note has to
+// say so.
 func (t remoteTopology) describeSyncRemote(w io.Writer) {
 	if t.syncRemote == "" {
 		if t.syncErr != nil {
@@ -225,28 +233,42 @@ func (t remoteTopology) describeSyncRemote(w io.Writer) {
 			// the pre-push gate is skipping checkpoint sync entirely until the
 			// setting is fixed.
 			fmt.Fprintf(w, "    Checkpoints are NOT syncing: %v\n", t.syncErr)
+			return
 		}
+		// The election could not be read at all. Saying nothing here would
+		// leave a multi-remote repo with a bare remote count and no hint that
+		// the destination is one remote rather than all of them, so fall back
+		// to the part that holds on every tier.
+		fmt.Fprintln(w, "    Checkpoints sync to a single elected remote; `entire status` shows which.")
 		return
 	}
 	switch t.syncSource {
 	case strategy.SyncRemoteSourceConfig:
-		// The decision is already made; repeating the setting key would read
-		// as a warning that something still needs doing.
+		// The decision is already made; repeating the setting key as advice
+		// would read as a warning that something still needs doing.
 		fmt.Fprintf(w, "    Checkpoints sync to one remote — %q (set by checkpoint_push_remote).\n", t.syncRemote)
+		fmt.Fprintln(w, "    A push to any other remote carries your code but no session history.")
 	case strategy.SyncRemoteSourceObserved:
 		// Same fact `entire status` reports as "follows your branch's push
 		// destination", shortened to hold one line at this indent.
 		fmt.Fprintf(w, "    Checkpoints sync to one remote — %q, your branch's push destination.\n", t.syncRemote)
+		fmt.Fprintln(w, "    A push to any other remote carries your code but no session history.")
 		fmt.Fprintln(w, "    Set strategy_options.checkpoint_push_remote to pin a different one.")
 	case strategy.SyncRemoteSourceDefault, strategy.SyncRemoteSourceSole, strategy.SyncRemoteSourceFirst:
-		// Sole is listed for exhaustiveness only and cannot occur here: the
-		// caller writes this note solely when two or more remotes are
-		// unpinned, and the resolver reaches the sole tier only with exactly
-		// one remote configured. If that gate ever loosens, sole needs its own
-		// wording — "your first push takes it over" is meaningless when there
-		// is nothing to take it from.
-		fmt.Fprintf(w, "    Checkpoints sync to one remote — right now %q, and your first push to\n", t.syncRemote)
-		fmt.Fprintln(w, "    your branch's own remote takes it over. `entire status` shows where.")
+		// One wording for all three because the user-visible fact is the same:
+		// nothing has chosen the destination yet, so a push can still move it.
+		// Sole is all but unreachable from this caller, which writes the note
+		// only when two or more remotes are unpinned while the resolver
+		// reaches sole with exactly one remote configured — the two count
+		// remotes with different git commands, so the arm stays shared rather
+		// than assert an impossibility.
+		//
+		// "a different remote" rather than "your branch's own remote": capture
+		// requires the push target to both agree with the branch's declared
+		// push destination and differ from today's election, so on the common
+		// setup where they already agree, no push moves anything.
+		fmt.Fprintf(w, "    Checkpoints sync to one remote — right now %q. A push to a different\n", t.syncRemote)
+		fmt.Fprintln(w, "    remote of your own can move it; `entire status` shows where they go.")
 		fmt.Fprintln(w, "    Set strategy_options.checkpoint_push_remote to pin one yourself.")
 	}
 }
