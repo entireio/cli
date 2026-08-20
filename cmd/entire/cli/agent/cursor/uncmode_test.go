@@ -66,10 +66,17 @@ func TestDetectUNCProjectDirs(t *testing.T) {
 	mkEmptyTranscripts(t, usersRoot, "empty-evidence", "wsl-Ubuntu-root-probe-repo")
 	// Matching name, but the only evidence is 30 days old: stale, must NOT match.
 	mkProjectDir(t, usersRoot, "stale", "wsl-Ubuntu-root-probe-repo", true, now, 30*24*time.Hour)
+	// Evidence timestamped 1h in the future (negative age): within the WSL/DrvFs
+	// clock-skew tolerance, must MATCH — a live session's newest entry can look
+	// "in the future" right after the Windows host wakes from sleep.
+	mkProjectDir(t, usersRoot, "clock-skew", "wsl-Ubuntu-root-probe-repo", true, now, -time.Hour)
+	// Evidence timestamped 30 days in the future: far beyond any plausible clock
+	// skew, must NOT match — a bogus/corrupt mtime shouldn't count as evidence.
+	mkProjectDir(t, usersRoot, "bogus-future", "wsl-Ubuntu-root-probe-repo", true, now, -30*24*time.Hour)
 
 	got := DetectUNCProjectDirs(usersRoot, "Ubuntu", "/root/probe-repo", now)
-	if len(got) != 3 {
-		t.Fatalf("matches = %v, want the three fresh-evidence wsl-spelling dirs", got)
+	if len(got) != 4 {
+		t.Fatalf("matches = %v, want the three fresh-evidence wsl-spelling dirs plus the clock-skew one", got)
 	}
 	for _, m := range got {
 		base := filepath.Base(m)

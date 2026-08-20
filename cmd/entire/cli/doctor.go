@@ -716,7 +716,7 @@ func checkCursorUNCMode(cmd *cobra.Command) {
 	fmt.Fprintln(w, "  title should end in [WSL: "+distro+"]. From a WSL terminal, `cursor .`")
 	fmt.Fprintln(w, "  also works once the WSL server is installed.")
 	fmt.Fprintln(w, "  Already switched? This warning stops once the leftover Windows-side")
-	fmt.Fprintln(w, "  activity is older than 14 days.")
+	fmt.Fprintf(w, "  activity is older than %d days.\n", int(cursor.UNCEvidenceWindow.Hours()/24))
 }
 
 // canDeleteShadowBranch checks if a shadow branch can be safely deleted.

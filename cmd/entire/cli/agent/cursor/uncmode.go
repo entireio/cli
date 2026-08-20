@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-// uncEvidenceWindow bounds how old a project dir's most recent agent
+// UNCEvidenceWindow bounds how old a project dir's most recent agent
 // activity may be and still count as evidence of a live UNC-mode session.
 // Without a recency bound, a fingerprint left over from before the user
 // switched to WSL-remote mode would warn forever.
-const uncEvidenceWindow = 14 * 24 * time.Hour
+const UNCEvidenceWindow = 14 * 24 * time.Hour
 
 // DetectUNCProjectDirs finds Windows-side Cursor project directories showing
 // that Cursor IDE opened this WSL repo via a \\wsl$-style UNC path — a mode in
@@ -23,7 +23,7 @@ const uncEvidenceWindow = 14 * 24 * time.Hour
 // one of the two observed UNC spellings ("wsl-<distro>-<sanitized>" for
 // \\wsl$, "wsl-localhost-<distro>-<sanitized>" for \\wsl.localhost) and its
 // agent-transcripts subdirectory has at least one entry modified within
-// uncEvidenceWindow of now — browsing alone never created that directory in
+// UNCEvidenceWindow of now — browsing alone never created that directory in
 // testing; an agent session always did, and a stale one shouldn't warn
 // forever. Returns nil when nothing matches or the environment doesn't apply.
 //
@@ -74,7 +74,7 @@ func UNCProjectDirNames(distro, repoRoot string) []string {
 }
 
 // hasRecentEvidence reports whether transcriptsDir exists and contains at
-// least one entry modified within uncEvidenceWindow of now.
+// least one entry modified within UNCEvidenceWindow of now.
 func hasRecentEvidence(transcriptsDir string, now time.Time) bool {
 	entries, err := os.ReadDir(transcriptsDir)
 	if err != nil {
@@ -85,7 +85,10 @@ func hasRecentEvidence(transcriptsDir string, now time.Time) bool {
 		if err != nil {
 			continue
 		}
-		if age := now.Sub(info.ModTime()); age >= 0 && age <= uncEvidenceWindow {
+		// Tolerate bounded skew between the Windows filesystem clock and the WSL
+		// clock (WSL2 lags the host after sleep); far-future bogus mtimes still
+		// never count.
+		if age := now.Sub(info.ModTime()); age >= -24*time.Hour && age <= UNCEvidenceWindow {
 			return true
 		}
 	}
