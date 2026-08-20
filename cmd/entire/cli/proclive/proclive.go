@@ -81,8 +81,8 @@ const maxAncestorDepth = 12
 
 // transientNames are process names that are never the long-lived session owner:
 // our own hook binary, the shells agents commonly use to exec hooks, and the Go
-// toolchain (local-dev runs hooks via `go run`, whose short-lived `go` parent
-// would otherwise be recorded as the owner and exit immediately). The walk skips
+// toolchain (a `go run`-launched hook has a short-lived `go` parent that would
+// otherwise be recorded as the owner and exit immediately). The walk skips
 // past these to reach the real agent process. Note that interpreter runtimes
 // (node, bun, python) are deliberately absent — for several agents the runtime
 // IS the long-lived agent, so treating it as transient would skip the real owner.

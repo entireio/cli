@@ -19,36 +19,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRewindListBridge_ForwardsToPendingJSON verifies the deprecated
-// `rewind --list` bridge still works for external scripts: the JSON payload
-// matches `checkpoint list --pending --json`, and stderr carries the
-// migration hint. Cobra prints the command-level Deprecated notice to stdout
-// before RunE (Printf); consumers already tolerate that — the bridge itself
-// must not add further stdout noise (hint goes to stderr only).
-func TestRewindListBridge_ForwardsToPendingJSON(t *testing.T) {
-	setupCheckpointListRepo(t)
-
-	canonical := runListCmd(t, "--pending", "--json")
-
-	cmd := newRewindCmd()
-	var stdout, stderr bytes.Buffer
-	cmd.SetArgs([]string{"--list"})
-	cmd.SetOut(&stdout)
-	cmd.SetErr(&stderr)
-	require.NoError(t, cmd.Execute(), "rewind --list failed; stderr: %s", stderr.String())
-
-	out := stdout.String()
-	jsonStart := strings.IndexAny(out, "[{")
-	require.GreaterOrEqual(t, jsonStart, 0, "stdout must contain a JSON payload; got: %q", out)
-	require.Equal(t, canonical, out[jsonStart:],
-		"rewind --list JSON payload must match checkpoint list --pending --json")
-	require.Contains(t, stderr.String(),
-		"note: 'rewind --list' is deprecated; use 'entire checkpoint list --pending --json'",
-		"stderr must carry the migration hint")
-	require.NotContains(t, out[jsonStart:], "deprecated",
-		"bridge must not inject deprecation text into the JSON payload")
-}
-
 // TestPendingRewindPointJSON_MatchesRewindListContract pins the machine-readable
 // shape emitted by `checkpoint list --pending --json`. It must stay byte-for-byte
 // compatible with the JSON `rewind --list` historically produced, so consumers that

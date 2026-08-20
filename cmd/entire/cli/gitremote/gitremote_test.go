@@ -62,6 +62,21 @@ func TestParseURL(t *testing.T) {
 			wantInfo: &Info{Protocol: ProtocolHTTPS, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
 		},
 		{
+			name:     "HTTPS with trailing slash",
+			url:      "https://github.com/org/repo/",
+			wantInfo: &Info{Protocol: ProtocolHTTPS, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
+			name:     "SSH SCP with uppercase .GIT",
+			url:      "git@github.com:org/repo.GIT",
+			wantInfo: &Info{Protocol: ProtocolSSH, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
+			name:     "HTTPS with /.git suffix",
+			url:      "https://github.com/org/repo/.git",
+			wantInfo: &Info{Protocol: ProtocolHTTPS, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
 			name:     "entire:// gh prefix preserved as forge",
 			url:      "entire://entirehost/gh/entireio/cli",
 			wantInfo: &Info{Protocol: ProtocolEntire, Host: "entirehost", Forge: "gh", Owner: "entireio", Repo: "cli"},
@@ -308,6 +323,23 @@ func TestGetRemoteURLsInDirIfSet(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, found)
 		assert.Empty(t, urls)
+	})
+
+	t.Run("blank URL value is found=true with the empty value", func(t *testing.T) {
+		t.Parallel()
+		dir := newRepo(t)
+		runGit(t, dir, "config", "remote.origin.url", "")
+
+		urls, found, err := GetRemoteURLsInDirIfSet(t.Context(), dir, "origin")
+		require.NoError(t, err)
+		assert.True(t, found, "the key exists; the caller must see an uncheckable value, not no-origin")
+		assert.Equal(t, []string{""}, urls)
+	})
+
+	t.Run("non-repo directory is an error, not found=false", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := GetRemoteURLsInDirIfSet(t.Context(), t.TempDir(), "origin")
+		assert.Error(t, err, "exit 1 outside a repo is scope fallback, not key-unset")
 	})
 
 	t.Run("lookup failure is an error, not found=false", func(t *testing.T) {

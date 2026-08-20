@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -311,8 +312,7 @@ func TestUnauthorized(t *testing.T) {
 
 func TestFailover(t *testing.T) {
 	t.Parallel()
-	down := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	down.Close()
+	down := deadServerURL(t)
 
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -320,7 +320,7 @@ func TestFailover(t *testing.T) {
 	}))
 	defer up.Close()
 
-	p := proxyWithClient([]string{down.URL, up.URL}, "/et/alice/repo", "", "", &http.Client{})
+	p := proxyWithClient([]string{down, up.URL}, "/et/alice/repo", "", "", &http.Client{})
 
 	resp, err := p.InfoRefs(context.Background(), "git-upload-pack")
 	if err != nil {
@@ -362,14 +362,13 @@ func TestFailover5xx(t *testing.T) {
 
 func TestOnNodeFailedCalledOnConnectionError(t *testing.T) {
 	t.Parallel()
-	down := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	down.Close()
+	down := deadServerURL(t)
 
 	var failed []string
 	p := New(Config{
 		Nodes: replicas.NodeConfig{
-			InitialNodes: []string{down.URL},
-			ClusterHost:  mustHost(t, down.URL),
+			InitialNodes: []string{down},
+			ClusterHost:  mustHost(t, down),
 		},
 		Path:         "/et/alice/repo",
 		OnNodeFailed: func(node string) { failed = append(failed, node) },
@@ -379,8 +378,8 @@ func TestOnNodeFailedCalledOnConnectionError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error with single unreachable node")
 	}
-	if len(failed) != 1 || failed[0] != down.URL {
-		t.Errorf("onNodeFailed = %v, want [%s]", failed, down.URL)
+	if len(failed) != 1 || failed[0] != down {
+		t.Errorf("onNodeFailed = %v, want [%s]", failed, down)
 	}
 }
 
@@ -864,17 +863,42 @@ func TestProxyConsumesServerHeaderFormat(t *testing.T) {
 	}
 }
 
-// closedServerURL returns the URL of an httptest.Server that has been
-// closed — a guaranteed-dead 127.0.0.1:port a request will fail to dial.
-func closedServerURL() string {
-	s := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	url := s.URL
-	s.Close()
-	return url
+// deadServerURL returns the URL of a 127.0.0.1:port that accepts connections
+// and immediately closes them, so every request against it fails.
+//
+// Do not build this by starting an httptest.Server and closing it: closing
+// hands the port back to the OS, and tests in this file run with t.Parallel(),
+// so another test's httptest.NewServer can be given the same port while the
+// first test still treats it as dead. That failed
+// TestColdPathRedirectAllReplicasFail and TestServiceRPC together — one saw
+// its "dead" node answer 200, the other saw the foreign request land in its
+// handler. Here the listener stays bound for the test's lifetime, so nothing
+// else can take the port.
+func deadServerURL(t *testing.T) string {
+	t.Helper()
+	var lc net.ListenConfig
+	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		// If Accept ever fails for a reason other than our own Close, drop the
+		// listener with it. A bound port with nobody accepting completes the
+		// handshake from the kernel backlog, so requests would hang instead of
+		// failing — and these callers pass no timeout.
+		defer func() { _ = l.Close() }()
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	return "http://" + l.Addr().String()
 }
 
 func TestColdPathFailoverWhenRedirectTargetUnreachable(t *testing.T) {
-	dead := closedServerURL()
+	dead := deadServerURL(t)
 
 	var aliveURL string
 	alive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -960,8 +984,8 @@ func TestColdPathDoesNotFollowRedirectAuto(t *testing.T) {
 
 func TestColdPathRedirectAllReplicasFail(t *testing.T) {
 	t.Parallel()
-	dead1 := closedServerURL()
-	dead2 := closedServerURL()
+	dead1 := deadServerURL(t)
+	dead2 := deadServerURL(t)
 
 	entry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Entire-Replicas", buildReplicasHeader(dead1, dead2))
@@ -1003,8 +1027,8 @@ func TestColdPathRedirectMissingHeaderFollows(t *testing.T) {
 func TestColdPathRedirectFailureDoesNotPoisonCache(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
-	dead1 := closedServerURL()
-	dead2 := closedServerURL()
+	dead1 := deadServerURL(t)
+	dead2 := deadServerURL(t)
 
 	entry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Entire-Replicas", buildReplicasHeader(dead1, dead2))
@@ -1034,8 +1058,8 @@ func TestColdPathRedirectFailureDoesNotPoisonCache(t *testing.T) {
 func TestColdPathRedirectStaleHeaderFallsBackToLocation(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
-	dead1 := closedServerURL()
-	dead2 := closedServerURL()
+	dead1 := deadServerURL(t)
+	dead2 := deadServerURL(t)
 
 	var aliveURL string
 	alive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1273,9 +1297,9 @@ func TestNoRedirectClientPrefersDiscoveryTransport(t *testing.T) {
 
 func TestInfoRefsWarmAndColdBothFailSurfacesBoth(t *testing.T) {
 	t.Parallel()
-	deadReplica1 := closedServerURL()
-	deadReplica2 := closedServerURL()
-	deadEntry := closedServerURL()
+	deadReplica1 := deadServerURL(t)
+	deadReplica2 := deadServerURL(t)
+	deadEntry := deadServerURL(t)
 
 	p := proxyWithClient([]string{deadReplica1, deadReplica2}, "/et/alice/repo", deadEntry, "127.0.0.1", &http.Client{})
 
@@ -1409,7 +1433,7 @@ func TestColdPathDropsOutOfClusterReplicasFromHeader(t *testing.T) {
 
 func TestColdPathRefusesOutOfClusterLocationSalvage(t *testing.T) {
 	t.Parallel()
-	deadReplica := closedServerURL() // in-cluster (127.0.0.1) but unreachable
+	deadReplica := deadServerURL(t) // in-cluster (127.0.0.1) but never answers
 
 	entry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The only replica is dead, forcing the salvage path; Location points

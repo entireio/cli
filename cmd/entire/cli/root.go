@@ -6,6 +6,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -49,6 +50,34 @@ func inGroup(c *cobra.Command, groupID string) *cobra.Command {
 	return c
 }
 
+// Run every ancestor's persistent hook, root first, not only the closest one
+// cobra picks by default. Without this, the `checkpoint`, `session`, and `agent`
+// pre-runs shadow the root's and it never builds a logger — silently, since the
+// only symptom is missing log lines.
+//
+// Set in init() rather than NewRootCmd: it is a cobra package global, so writing
+// it per construction races with cobra reading it during Execute (parallel tests
+// do both at once).
+//
+//nolint:gochecknoinits // Set a cobra package global once, before any goroutine can read it (see above).
+func init() {
+	cobra.EnableTraverseRunHooks = true
+}
+
+// isShellCompletion reports whether this is one of cobra's hidden completion
+// requests. The shell runs them on every TAB press, so they skip building a
+// logger: MkdirAll + OpenFile + the settings read that resolves the level (which
+// shells out to git) is real latency, and it left a 0-byte entire.log behind.
+func isShellCompletion(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		switch c.Name() {
+		case cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
+			return true
+		}
+	}
+	return false
+}
+
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "entire",
@@ -62,7 +91,26 @@ func NewRootCmd() *cobra.Command {
 		CompletionOptions: cobra.CompletionOptions{
 			HiddenDefaultCmd: true,
 		},
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+			if isShellCompletion(cmd) {
+				return
+			}
+			// IsActiveForRepo, not IsSetUpAny: a globally tracked repo has no
+			// repo-level settings but must still get a logger — newLogger
+			// routes its .entire/logs under the git common dir, so this
+			// creates nothing in the worktree.
+			if !settings.IsActiveForRepo(cmd.Context()) {
+				return
+			}
+			ensureLogger(cmd)
+		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
+			// Deferred so it runs after the telemetry and version-check calls
+			// below, which log, and so the hidden-command early return still
+			// flushes. main.go closes again for the paths cobra skips this hook
+			// on; Close is idempotent and nil-safe.
+			defer func() { _ = logging.LoggerFromContext(cmd.Context()).Close() }()
+
 			// Skip for hidden commands (walk parent chain — Cobra doesn't propagate Hidden)
 			for c := cmd; c != nil; c = c.Parent() {
 				if c.Hidden {
@@ -94,13 +142,30 @@ func NewRootCmd() *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			// If we're in a git repo but Entire isn't set up yet, start the setup flow
+			// If we're in a git repo Entire isn't active in — no repo-level
+			// setup AND the global tier affirmatively not enabled — start the
+			// setup flow. A globally-tracked repo must not be funneled into
+			// repo-level setup: completing it writes .entire/settings.json,
+			// which permanently pins the repo out of the global tier (exclude
+			// lists stop applying to it). The enabled BIT gates here, not
+			// GlobalModeActive: the gate's fail-closed answer reads "tier off"
+			// for an unusable config too, and at THIS call site that answer
+			// would run the wizard and pin the repo — the opposite of failing
+			// safe. An unreadable file is surfaced instead of acted on.
 			if _, err := paths.WorktreeRoot(ctx); err == nil && !settings.IsSetUpAny(ctx) {
-				return runSetupFlow(ctx, cmd.OutOrStdout(), EnableOptions{})
+				us, loadErr := settings.LoadUserSettings(ctx)
+				switch {
+				case loadErr != nil:
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: the user-global settings file cannot be read (%v).\nGlobal tracking is off machine-wide until it is fixed; run 'entire enable' to set this repo up explicitly.\n", loadErr)
+				case us.Global == nil || !us.Global.Enabled:
+					return runSetupFlow(ctx, cmd.OutOrStdout(), EnableOptions{})
+				}
 			}
 			return cmd.Help()
 		},
 	}
+
+	addContextFlag(cmd)
 
 	// Help groups; AddGroup order is display order in `entire --help`.
 	cmd.AddGroup(
@@ -143,21 +208,10 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(inGroup(newRecapCmd(), groupSessions))
 	cmd.AddCommand(inGroup(newAPICmd(), groupControlPlane)) // authenticated passthrough to core/cell APIs
 	cmd.AddCommand(newAgentHelpCmd(cmd))                    // visible: agents on transports without context injection discover it via `entire help`
-
-	// Hidden top-level shortcuts. Functional but print a deprecation hint.
-	cmd.AddCommand(hideAsAlias(newResumeCmd(), "entire session resume"))
-	cmd.AddCommand(hideAsAlias(newAttachCmd(), "entire session attach"))
-	cmd.AddCommand(hideAsAlias(newExplainCmd(), "entire checkpoint explain"))
-	cmd.AddCommand(hideAsAlias(newTraceCmd(), "entire doctor trace"))
-	experimental.Register(cmd, newSearchCmd()) // 'entire search' = 'checkpoint search' (experimental)
+	cmd.AddCommand(inGroup(newSearchCmd(), groupSessions))  // 'search' — canonical top-level spelling; 'checkpoint search' stays a working alias
 
 	// Experimental labs commands (listed via `entire labs`; not deprecation shortcuts).
 	experimental.Register(cmd, newExpertsCmd()) // 'experts' (experimental); agent/workflow provenance
-
-	// Deprecated top-level commands (functional; the constructors mark them
-	// Deprecated, which also excludes them from help and completion).
-	cmd.AddCommand(newResetCmd())
-	cmd.AddCommand(newRewindCmd())
 
 	// Hidden infrastructure.
 	cmd.AddCommand(newMCPCmd(cmd)) // MCP stdio server for MCP-host agents

@@ -696,7 +696,7 @@ func TestRunUninstall_ClearsGlobalSetupMarker(t *testing.T) {
 	// Repo-level setup, with the marker still latched from an earlier
 	// globally tracked phase (the pre-fix state every takeover now clears).
 	testutil.WriteFile(t, dir, ".entire/settings.json", `{"enabled": true}`)
-	if _, err := strategy.InstallGitHook(t.Context(), true, false, false); err != nil {
+	if _, err := strategy.InstallGitHook(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {

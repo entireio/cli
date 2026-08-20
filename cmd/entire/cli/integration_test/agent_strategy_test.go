@@ -14,7 +14,7 @@ import (
 )
 
 // TestAgentStrategyComposition verifies that agent and strategy work together correctly.
-// This tests the full flow: agent parses session → strategy saves checkpoint → rewind works.
+// This tests the full flow: agent parses session → strategy saves checkpoint on the shadow branch.
 func TestAgentStrategyComposition(t *testing.T) {
 	t.Parallel()
 
@@ -59,122 +59,14 @@ func TestAgentStrategyComposition(t *testing.T) {
 		t.Fatalf("SimulateStop error = %v", err)
 	}
 
-	// Verify checkpoint was created
-	points := env.GetRewindPoints()
-	if len(points) == 0 {
-		t.Fatal("expected at least 1 rewind point after Stop hook")
+	// Verify checkpoint was created (manual-commit stores checkpoint data on the shadow branch)
+	shadowBranch := env.GetShadowBranchName()
+	if !env.BranchExists(shadowBranch) {
+		t.Fatalf("shadow branch %s should exist after Stop hook", shadowBranch)
 	}
-}
-
-// TestAgentSessionIDTransformation verifies session ID transformation across agent/strategy boundary.
-func TestAgentSessionIDTransformation(t *testing.T) {
-	t.Parallel()
-
-	env := NewFeatureBranchEnv(t)
-	// Create session and simulate full flow
-	session := env.NewSession()
-	env.WriteFile("test.go", "package main")
-	transcriptPath := session.CreateTranscript("Test", []FileChange{
-		{Path: "test.go", Content: "package main"},
-	})
-
-	// Simulate hooks
-	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
-		t.Fatalf("SimulateUserPromptSubmit error = %v", err)
+	if !env.FileExistsInBranch(shadowBranch, "feature.go") {
+		t.Errorf("feature.go should be captured on shadow branch %s", shadowBranch)
 	}
-	if err := env.SimulateStop(session.ID, transcriptPath); err != nil {
-		t.Fatalf("SimulateStop error = %v", err)
-	}
-
-	// Get rewind points and verify we can rewind
-	points := env.GetRewindPoints()
-	if len(points) == 0 {
-		t.Skip("no rewind points created")
-	}
-
-	// Rewind should work
-	if err := env.Rewind(points[0].ID); err != nil {
-		t.Errorf("Rewind() error = %v", err)
-	}
-}
-
-// TestAgentTranscriptRestoration verifies transcript is restored correctly on rewind.
-func TestAgentTranscriptRestoration(t *testing.T) {
-	t.Parallel()
-
-	env := NewFeatureBranchEnv(t)
-	ag, err := agent.Get(agentClaudeCode)
-	if err != nil {
-		t.Fatalf("Get(claude-code) error = %v", err)
-	}
-
-	// Create first session
-	session1 := env.NewSession()
-	env.WriteFile("file1.go", "package main\n// file1 v1")
-	transcript1 := session1.CreateTranscript("Create file1", []FileChange{
-		{Path: "file1.go", Content: "package main\n// file1 v1"},
-	})
-
-	if err := env.SimulateUserPromptSubmit(session1.ID); err != nil {
-		t.Fatalf("SimulateUserPromptSubmit error = %v", err)
-	}
-	if err := env.SimulateStop(session1.ID, transcript1); err != nil {
-		t.Fatalf("SimulateStop error = %v", err)
-	}
-
-	// Get checkpoint after first prompt
-	points1 := env.GetRewindPoints()
-	if len(points1) == 0 {
-		t.Fatal("no rewind point after first prompt")
-	}
-	checkpoint1ID := points1[0].ID
-
-	// Continue the SAME session with second prompt (manual-commit strategy requires same session on same base commit)
-	// Reset transcript builder for the new checkpoint
-	session1.TranscriptBuilder = NewTranscriptBuilder()
-	env.WriteFile("file1.go", "package main\n// file1 v2")
-	env.WriteFile("file2.go", "package main\n// file2")
-	transcript2 := session1.CreateTranscript("Modify file1, create file2", []FileChange{
-		{Path: "file1.go", Content: "package main\n// file1 v2"},
-		{Path: "file2.go", Content: "package main\n// file2"},
-	})
-
-	if err := env.SimulateUserPromptSubmit(session1.ID); err != nil {
-		t.Fatalf("SimulateUserPromptSubmit error = %v", err)
-	}
-	if err := env.SimulateStop(session1.ID, transcript2); err != nil {
-		t.Fatalf("SimulateStop error = %v", err)
-	}
-
-	// Verify we have 2 checkpoints
-	points2 := env.GetRewindPoints()
-	if len(points2) < 2 {
-		t.Fatalf("expected at least 2 rewind points, got %d", len(points2))
-	}
-
-	// Rewind to first checkpoint
-	if err := env.Rewind(checkpoint1ID); err != nil {
-		t.Fatalf("Rewind() error = %v", err)
-	}
-
-	// Verify file content is restored
-	content := env.ReadFile("file1.go")
-	if content != "package main\n// file1 v1" {
-		t.Errorf("file1.go content after rewind = %q, want v1 content", content)
-	}
-
-	// file2.go should not exist after rewind to checkpoint 1
-	if env.FileExists("file2.go") {
-		t.Error("file2.go should not exist after rewind to checkpoint 1")
-	}
-
-	// Verify agent can read the restored transcript
-	// The transcript path should be restored to the session directory
-	sessionDir, err := ag.GetSessionDir(env.RepoDir)
-	if err != nil {
-		t.Fatalf("GetSessionDir() error = %v", err)
-	}
-	t.Logf("Session directory: %s", sessionDir)
 }
 
 // TestAgentGetSessionDir verifies session directory resolution.
@@ -295,52 +187,12 @@ func TestFactoryAIDroidAgentStrategyComposition(t *testing.T) {
 		t.Fatalf("SimulateFactoryDroidStop error = %v", err)
 	}
 
-	// Verify checkpoint was created
-	points := env.GetRewindPoints()
-	if len(points) == 0 {
-		t.Fatal("expected at least 1 rewind point after Stop hook")
+	// Verify checkpoint was created (manual-commit stores checkpoint data on the shadow branch)
+	shadowBranch := env.GetShadowBranchName()
+	if !env.BranchExists(shadowBranch) {
+		t.Fatalf("shadow branch %s should exist after Stop hook", shadowBranch)
 	}
-}
-
-// TestFactoryAIDroidSessionIDTransformation verifies session ID transformation and rewind
-// across the agent/strategy boundary for Factory AI Droid.
-func TestFactoryAIDroidSessionIDTransformation(t *testing.T) {
-	t.Parallel()
-
-	env := NewTestEnv(t)
-	env.InitRepo()
-	env.InitEntire()
-
-	env.WriteFile(".gitignore", ".entire/\n")
-	env.WriteFile("README.md", "# Test")
-	env.GitAdd(".gitignore")
-	env.GitAdd("README.md")
-	env.GitCommit("Initial commit")
-	env.GitCheckoutNewBranch("feature/droid-rewind")
-
-	// Create session
-	session := env.NewFactoryDroidSession()
-	env.WriteFile("test.go", "package main")
-	session.CreateDroidTranscript("Test", []FileChange{
-		{Path: "test.go", Content: "package main"},
-	})
-
-	// Simulate hooks
-	if err := env.SimulateFactoryDroidUserPromptSubmit(session.ID); err != nil {
-		t.Fatalf("UserPromptSubmit error = %v", err)
-	}
-	if err := env.SimulateFactoryDroidStop(session.ID, session.TranscriptPath); err != nil {
-		t.Fatalf("Stop error = %v", err)
-	}
-
-	// Get rewind points and verify we can rewind
-	points := env.GetRewindPoints()
-	if len(points) == 0 {
-		t.Skip("no rewind points created")
-	}
-
-	// Rewind should work
-	if err := env.Rewind(points[0].ID); err != nil {
-		t.Errorf("Rewind() error = %v", err)
+	if !env.FileExistsInBranch(shadowBranch, "feature.go") {
+		t.Errorf("feature.go should be captured on shadow branch %s", shadowBranch)
 	}
 }

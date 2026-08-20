@@ -313,15 +313,6 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 				return nil
 			}
 
-			// Only initialize logging when inside a git worktree to avoid
-			// creating .entire/logs/ in arbitrary directories.
-			if _, err := paths.WorktreeRoot(cmd.Context()); err == nil {
-				logging.SetLogLevelGetter(GetLogLevel)
-				if err := logging.Init(cmd.Context(), ""); err == nil {
-					defer logging.Close()
-				}
-			}
-
 			// Positional arg is mutually exclusive with --checkpoint, --commit, --session
 			var positional string
 			if len(args) > 0 {
@@ -739,7 +730,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		// layer, so rawTranscript is always false when generate is true; the
 		// direct-to-w write path inside explainTemporaryCheckpoint is not
 		// reachable here and won't leak partial output on error.
-		tempStores, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{})
+		tempStores, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 		if openErr != nil {
 			return fmt.Errorf("open checkpoint store: %w", openErr)
 		}
@@ -812,7 +803,8 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		// exists remotely but not locally (written/migrated on another
 		// machine), bounded by the write-probe budget.
 		writeStores, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{
-			RefFetcher: remote.BoundedCheckpointRefFetcher(remote.WriteProbeFetchBudget),
+			RefFetcher:  remote.BoundedCheckpointRefFetcher(remote.WriteProbeFetchBudget),
+			ReadRemotes: strategy.CheckpointReadRemotes(ctx),
 		})
 		if openErr != nil {
 			return fmt.Errorf("open checkpoint store: %w", openErr)
@@ -822,7 +814,12 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		}
 		// Reload to get the updated summary.
 		stopLoad = startSpinner(errW, fmt.Sprintf("Reloading checkpoint %s", fullCheckpointID))
-		reopened, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+		reopened, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{
+			BlobFetcher:           FetchBlobsByHash,
+			RefFetcher:            FetchCheckpointRef,
+			MetadataBranchFetcher: FetchMetadataFromCheckpointRemote,
+			ReadRemotes:           strategy.CheckpointReadRemotes(ctx),
+		})
 		if openErr != nil {
 			stopLoad(false)
 			return fmt.Errorf("open checkpoint store: %w", openErr)
@@ -972,7 +969,7 @@ func loadPrimaryMetadataRootTree(ctx context.Context, repo *git.Repository, refs
 	if tree, err := strategy.GetMetadataRefTree(repo, refs.Primary); err == nil {
 		return tree, nil
 	}
-	if !refs.PrimaryFetchableFromOrigin() {
+	if !refs.PrimaryFetchableFromRemote() {
 		return nil, fmt.Errorf("read primary metadata tree %s: ref not found locally", refs.Primary)
 	}
 	tree, err := strategy.GetRemotePrimaryTree(ctx, repo)
@@ -998,7 +995,16 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 	// `git fetch` fails against partial-clone repos with "did not send all
 	// necessary objects"). Falls back to a full metadata-branch fetch if
 	// fetch-pack also can't reach the blobs.
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		BlobFetcher: FetchBlobsByHash,
+		RefFetcher:  FetchCheckpointRef,
+		// Legacy hex-ID checkpoints live on the v1 branch, which a fresh clone
+		// with a dedicated checkpoint_remote does not have — and cannot get from
+		// origin, which never received it. Without this, explain reports every
+		// such checkpoint as unreadable.
+		MetadataBranchFetcher: FetchMetadataFromCheckpointRemote,
+		ReadRemotes:           strategy.CheckpointReadRemotes(ctx),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -2493,18 +2499,26 @@ func walkFirstParentCommits(ctx context.Context, repo *git.Repository, from plum
 // entries without anything being dropped).
 func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) ([]strategy.RewindPoint, bool, error) {
 	// Warn (once per process) if metadata branches are disconnected
-	strategy.WarnIfMetadataDisconnected()
+	strategy.WarnIfMetadataDisconnected(ctx)
 
 	// This is a user-facing enumeration (`entire checkpoint list` / the branch
-	// `explain` view), so opt into git-refs remote discovery: when a
-	// checkpoint_remote is configured, List enumerates it (names only) to
-	// surface refs-native checkpoints written on another machine, and the
-	// fetchers hydrate each on read. WithRemoteListDiscovery keeps this off the
+	// `explain` view), so opt into git-refs remote discovery: List enumerates
+	// the dedicated checkpoint_remote when configured, else the checkpoint
+	// read candidates with merged listings (names only), to surface
+	// refs-native checkpoints written on another machine; the fetchers
+	// hydrate each on read. WithRemoteListDiscovery keeps this off the
 	// per-turn hook hot path.
+	//
+	// Deliberately no MetadataBranchFetcher: that tier transfers the whole v1
+	// branch, and enumeration must stay proportionate to rendering a list — the
+	// refs side next to it discovers by name only for the same reason. A repo
+	// with no local v1 lists what it has; naming a specific checkpoint
+	// (explain --checkpoint) is what earns the fetch.
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
 		BlobFetcher:     FetchBlobsByHash,
 		RefFetcher:      FetchCheckpointRef,
 		RemoteRefLister: ListCheckpointRefsOnRemote,
+		ReadRemotes:     strategy.CheckpointReadRemotes(ctx),
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("open checkpoint store: %w", err)
@@ -2718,7 +2732,7 @@ func hydrateListedBranchCheckpoints(
 // metadata branch but carry no commit trailer, so the commit-driven branch
 // walk never surfaces them. Best-effort: returns nil on read failure.
 func getImportedRewindPoints(ctx context.Context, repo *git.Repository) []strategy.RewindPoint {
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil
 	}

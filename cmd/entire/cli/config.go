@@ -3,12 +3,18 @@ package cli
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+
+	"github.com/spf13/cobra"
 
 	// Import agents to register them
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
@@ -71,15 +77,68 @@ func GetStrategy(_ context.Context) *strategy.ManualCommitStrategy {
 	return s
 }
 
-// GetLogLevel returns the configured log level from settings.
-// Returns empty string if not configured (caller should use default).
-// Note: ENTIRE_LOG_LEVEL env var takes precedence; check it first.
-func GetLogLevel() string {
-	s, err := settings.Load(context.TODO()) //nolint:contextcheck // Called as a callback via SetLogLevelGetter, no ctx available
-	if err != nil {
-		return ""
+// resolveLogLevel resolves the level for a new logger: the environment first,
+// then repo settings. An unreadable settings file leaves the default. An
+// unrecognized name warns on stderr rather than logging, because there is no
+// logger yet to warn through.
+func resolveLogLevel(ctx context.Context) slog.Level {
+	name := os.Getenv(logging.LogLevelEnvVar)
+	if name == "" {
+		if s, err := settings.Load(ctx); err == nil {
+			name = s.LogLevel
+		}
 	}
-	return s.LogLevel
+	level, ok := logging.ParseLevel(name)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: invalid log level %q, defaulting to INFO\n", name)
+	}
+	return level
+}
+
+// newLogger opens .entire/logs/entire.log for the current worktree.
+//
+// It CREATES the log directory, so every caller must already have decided that
+// writing into this repo is allowed: the root PersistentPreRun gates on
+// IsActiveForRepo, and enable calls this only after every check that can still
+// reject the invocation, so a rejected enable leaves an untouched repo
+// untouched. For a globally tracked repo the directory resolves under the git
+// common dir, so "creates" never means a worktree file.
+// ensureLogger attaches a logger to cmd's context unless one is already there,
+// and is the only place that installs one. Two loggers on the same file means
+// two 8KB buffers, and whichever lands in the context second orphans the first —
+// nothing flushes it. Best-effort: a command must not die because a log file
+// could not be opened.
+func ensureLogger(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	if logging.LoggerFromContext(ctx) != nil {
+		return
+	}
+	l, err := newLogger(ctx)
+	if err != nil {
+		return
+	}
+	cmd.SetContext(logging.WithLogger(ctx, l))
+}
+
+func newLogger(ctx context.Context) (*logging.Logger, error) {
+	// AbsPath, not a bare worktree join: in a globally tracked repo it
+	// reroutes .entire/logs under the git common dir, so logging never
+	// creates a worktree .entire directory. Any failure — not a repo, or the
+	// tier owns this repo but its git-side location is unresolvable
+	// (paths.ErrUnroutableRuntimePath) — means no logger at all, never a
+	// fallback that writes into the worktree.
+	dir, err := paths.AbsPath(ctx, logging.LogsDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve log directory: %w", err)
+	}
+	l, err := logging.New(logging.Config{
+		Dir:   dir,
+		Level: resolveLogLevel(ctx),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open log sink: %w", err)
+	}
+	return l, nil
 }
 
 // GetAgentsWithHooksInstalled returns names of agents that have hooks installed.

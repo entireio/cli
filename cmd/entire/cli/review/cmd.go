@@ -73,6 +73,19 @@ type Deps struct {
 	// line to out. nil when trail delivery is unavailable (e.g. tests), in which
 	// case the run falls back to local output with a notice.
 	PostReviewToTrail func(ctx context.Context, out io.Writer, profileName, verdict string) error
+
+	// PrepareTarget resolves a branch, trail ID, or trail URL and checks its
+	// branch out in a worktree. It returns the worktree in which review should
+	// be re-run. Injected because trail API access lives in the parent package.
+	PrepareTarget func(ctx context.Context, out, errOut io.Writer, selector string) (TargetWorktree, error)
+
+	// RemoveTarget removes a worktree created specifically for this review.
+	// Reused worktrees are never passed to it.
+	RemoveTarget func(ctx context.Context, worktreeRoot string) error
+
+	// RunInWorktree re-runs the current CLI invocation in worktreeRoot after the
+	// target flags have been removed. nil uses the production subprocess runner.
+	RunInWorktree func(ctx context.Context, worktreeRoot string, args, env []string, stdin io.Reader, stdout, stderr io.Writer) error
 }
 
 // NewCommand returns the `entire review` cobra command wired with the
@@ -98,6 +111,8 @@ func NewCommand(deps Deps) *cobra.Command {
 	var setTask string
 	var setModels []string
 	var setSlots []string
+	var target string
+	var cleanupWorktree bool
 
 	cmd := &cobra.Command{
 		Use: "review",
@@ -105,9 +120,9 @@ func NewCommand(deps Deps) *cobra.Command {
 		// users who know about it can still run `entire review` / `entire
 		// review --help` and the command works normally.
 		Hidden: true,
-		Short:  "Run a multi-agent review against the current branch",
-		Long: `Run a multi-agent review against the current branch: several reviewer
-agents review the change in parallel, then a single judge consolidates their
+		Short:  "Run a multi-agent review against a branch",
+		Long: `Run a multi-agent review against the current branch or a --target branch:
+several reviewer agents review the change in parallel, then a single judge consolidates their
 reports into the final verdict in a closing round. Reviews are saved as named
 profiles in Entire settings and clone-local preferences. On first run, guided
 setup writes a profile and asks before starting agents.
@@ -145,6 +160,11 @@ Flags:
                  PRs where the base is the parent feature branch, not main.
                  Default: first existing of origin/HEAD, origin/main,
                  origin/master, main, master.
+  --target REF   check out a branch identified by branch name, trail ID, or
+                 Entire trail URL in a worktree and run the review there.
+  --cleanup-worktree
+                 remove a newly-created target worktree after a successful
+                 review. Interactive runs ask when this flag is omitted.
 
 To tag an already-finished session as a review, use
 'entire session attach --review <id>'.`,
@@ -159,6 +179,14 @@ To tag an already-finished session as a review, use
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			if target != "" {
+				modeSelected := configure || edit || findings || listProfiles || listAgents || listModels
+				return runTargetReview(ctx, cmd, target, reviewTargetChildArgs(cmd, args), cleanupWorktree, modeSelected, deps)
+			}
+			if cleanupWorktree {
+				return errors.New("--cleanup-worktree requires --target")
+			}
+
 			// Discover external agents so review configs that target them
 			// resolve correctly — without this, GetAgentsWithHooksInstalled
 			// and agent.Get can't see them.
@@ -251,6 +279,8 @@ To tag an already-finished session as a review, use
 	cmd.Flags().StringVar(&profileOverride, "profile", "", "review profile to run (default: review_default_profile or general)")
 	cmd.Flags().StringVar(&perRunPrompt, "prompt", "", "one-off instructions appended to this review run")
 	cmd.Flags().StringVar(&baseOverride, "base", "", "git ref to scope the review against (default: origin/HEAD → origin/main → origin/master → main → master)")
+	cmd.Flags().StringVar(&target, "target", "", "branch, trail ID, or Entire trail URL to check out in a worktree and review")
+	cmd.Flags().BoolVar(&cleanupWorktree, "cleanup-worktree", false, "remove a newly-created target worktree after a successful review (interactive runs ask when omitted)")
 	cmd.Flags().DurationVar(&reviewTimeout, "timeout", 0, "optional hard cap per reviewer (default: none — reviewers run until they finish, like a skill invoked directly in a session). When set, it also bounds the consolidating judge; unset, the judge keeps its own 20m default")
 	// The listing modes and the action modes each select a distinct command
 	// behavior; combining them silently runs one and drops the rest, so reject
@@ -1566,6 +1596,7 @@ func writePostReviewManifest(
 		warnManifestNotWritten(out, "could not load session state: "+err.Error())
 		return
 	}
+	manifest.WorktreePath = reviewManifestWorktreePath(worktreeRoot)
 	if len(manifest.Sources) == 0 {
 		reason, sentinel := explainEmptyManifest(worktreeRoot, headSHA, summary, states)
 		if sentinel {
@@ -1590,6 +1621,13 @@ func writePostReviewManifest(
 		return
 	}
 	writeReviewCompletionFooter(out, manifest)
+}
+
+func reviewManifestWorktreePath(actualWorktree string) string {
+	if ownerWorktree := strings.TrimSpace(os.Getenv(envReviewFindingsWorktree)); ownerWorktree != "" {
+		return ownerWorktree
+	}
+	return actualWorktree
 }
 
 // warnManifestNotWritten prints a user-visible note explaining that the

@@ -10,6 +10,7 @@ entire review --list            # list profiles
 entire review <profile>         # run a profile
 entire review --profile <name>  # same as positional form
 entire review --agent <name>    # run one reviewer from the profile
+entire review --target <ref>    # review a branch/trail in a managed worktree
 entire review --findings        # view local findings
 ```
 
@@ -19,7 +20,25 @@ Useful run flags:
 entire review --prompt "focus on auth"
 entire review --timeout 15m
 entire review --agent claude-code --model opus
+entire review general --target feature/my-change
+entire review general --target feature/my-change --cleanup-worktree
+entire review general --target https://entire.io/gh/acme/app/trails/42/my-change
 ```
+
+`--target` accepts a branch name, trail ID/number, or Entire trail URL. It
+resolves the trail when needed, fetches a remote-only branch, and creates or
+reuses a worktree under `.entire/worktrees`. The review command is then re-run
+inside that worktree, leaving the caller's current checkout unchanged. If the
+branch is already checked out in another worktree, that worktree is reused.
+After a successful interactive review, a newly-created worktree prompts for
+removal. Non-interactive reviews keep it unless `--cleanup-worktree` is passed.
+A reused worktree is never removed by the review command, and failed reviews
+retain newly-created worktrees for inspection. Cancelling the optional cleanup
+prompt also keeps the worktree without changing the successful review exit.
+Findings are attributed to the caller's worktree, so the completion handle
+remains available through `entire review --findings` even after target cleanup.
+Positive integer targets always mean trail numbers rather than numeric branch
+names; this avoids a local branch silently shadowing a trail selector.
 
 ## Profiles
 
@@ -69,13 +88,14 @@ The profile-level `task` is the shared work item. Each `agents` map entry is a w
 
 ## Flow
 
-1. `entire review` selects a profile. If no profiles exist, it runs guided setup in an interactive terminal or writes an opinionated clone-local default profile in non-interactive mode.
-2. It composes worker prompts via `review.ComposeReviewPrompt` and computes scope (mainline base ref via `review.ComputeScopeStats`, overridable with `--base`).
-3. Adapter-backed review workers (claude-code, codex, gemini-cli, pi) are spawned with `ENTIRE_REVIEW_{SESSION,AGENT,SKILLS,PROMPT,STARTING_SHA}` env vars. Their lifecycle hooks use those values to tag sessions as `Kind = "agent_review"`.
-4. Each spawned process has its own env, so multiple worktrees and multi-agent runs do not need a shared marker file.
-5. In multi-worker profiles, the configured judge receives all worker reports and produces one final verdict. The judge prompt asks it to reject unsupported claims, resolve contradictions, merge duplicates, and prioritize evidence-backed findings.
-6. On the next `git commit`, the PostCommit hook condenses worker review sessions into the checkpoint on `entire/checkpoints/v1`, with `Kind`, `ReviewSkills`, and `ReviewPrompt` recorded in `CommittedMetadata`.
-7. `CheckpointSummary.HasReview` is set for O(1) lookup. `entire status` and the re-run guard read this flag from checkpoint metadata.
+1. With `--target`, `entire review` resolves the branch directly or through its trail, prepares a worktree, and re-runs the command there without `--target`.
+2. It selects a profile. If no profiles exist, it runs guided setup in an interactive terminal or writes an opinionated clone-local default profile in non-interactive mode.
+3. It composes worker prompts via `review.ComposeReviewPrompt` and computes scope (mainline base ref via `review.ComputeScopeStats`, overridable with `--base`).
+4. Adapter-backed review workers (claude-code, codex, gemini-cli, pi) are spawned with `ENTIRE_REVIEW_{SESSION,AGENT,SKILLS,PROMPT,STARTING_SHA}` env vars. Their lifecycle hooks use those values to tag sessions as `Kind = "agent_review"`.
+5. Each spawned process has its own env, so multiple worktrees and multi-agent runs do not need a shared marker file.
+6. In multi-worker profiles, the configured judge receives all worker reports and produces one final verdict. The judge prompt asks it to reject unsupported claims, resolve contradictions, merge duplicates, and prioritize evidence-backed findings.
+7. On the next `git commit`, the PostCommit hook condenses worker review sessions into the checkpoint on `entire/checkpoints/v1`, with `Kind`, `ReviewSkills`, and `ReviewPrompt` recorded in `CommittedMetadata`.
+8. `CheckpointSummary.HasReview` is set for O(1) lookup. `entire status` and the re-run guard read this flag from checkpoint metadata.
 
 ## Checkpoint Metadata
 
@@ -134,6 +154,6 @@ The redesign eliminated several constructs from the prior implementation. None s
 - `cmd/entire/cli/agent/{claudecode,codex,geminicli,pi}/reviewer.go` — per-agent `AgentReviewer` implementations
 - `cmd/entire/cli/agent/claudecode/discovery.go` — skill discovery + plugin-cache dedupe
 - `cmd/entire/cli/lifecycle.go` — `adoptReviewEnv` reads `ENTIRE_REVIEW_*` from process env
-- `cmd/entire/cli/review_bridge.go` — bridge code in `cli` package for cycle-bound functions and trail posting
+- `cmd/entire/cli/review_bridge.go` / `review_target.go` — bridge code for cycle-bound functions, trail posting, and target worktree preparation
 - `cmd/entire/cli/checkpoint/checkpoint.go` — review metadata on checkpoints
 - `cmd/entire/cli/settings/settings.go` — review profile settings

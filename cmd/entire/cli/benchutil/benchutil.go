@@ -482,8 +482,7 @@ func initEntireSettings(b *testing.B, dir, strategy string) {
 	}
 
 	settings := map[string]any{
-		"strategy":  strategy,
-		"local_dev": true,
+		"strategy": strategy,
 	}
 	data, err := jsonutil.MarshalIndentWithNewline(settings, "", "  ")
 	if err != nil {

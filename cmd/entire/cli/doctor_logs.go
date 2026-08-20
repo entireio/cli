@@ -27,12 +27,18 @@ func newDoctorLogsCmd() *cobra.Command {
 By default, prints the last 100 lines. Use --tail N to change.
 Use --follow to stream new lines as they are written (Ctrl+C to exit).`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			repoRoot, err := paths.WorktreeRoot(cmd.Context())
+			// AbsPath (not a bare WorktreeRoot join): globally tracked
+			// repos route .entire/logs under the git common dir.
+			logFile, err := paths.AbsPath(cmd.Context(), filepath.Join(logging.LogsDir, "entire.log"))
 			if err != nil {
 				cmd.SilenceUsage = true
+				// A routing failure happens inside a valid git repo —
+				// "not a git repository" would misdiagnose it.
+				if paths.IsUnroutableRuntimePath(err) {
+					return fmt.Errorf("logs unavailable: %w", err)
+				}
 				return errors.New("not a git repository")
 			}
-			logFile := filepath.Join(repoRoot, logging.LogsDir, "entire.log")
 			if _, err := os.Lstat(logFile); errors.Is(err, os.ErrNotExist) {
 				fmt.Fprintf(cmd.OutOrStdout(), "No log file at %s yet.\n", logFile)
 				return nil

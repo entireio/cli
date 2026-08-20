@@ -24,10 +24,15 @@ const RedactorsDirName = "redactors"
 // a runaway YAML scalar from blowing up log lines.
 const maxIdentifierLen = 64
 
-// maxPackFileBytes caps the per-file size LoadPacks will parse. The trust
-// boundary is "user owns repo," so this is not a security barrier — it is a
-// runaway-input guard that keeps an accidentally large YAML out of the
-// redaction startup path.
+// maxPackFileBytes caps the per-file size LoadPacks will parse. Rule packs are
+// declarative patterns, never executed, so the trust boundary here is "user
+// owns repo" and this is not a security barrier — it is a runaway-input guard
+// that keeps an accidentally large YAML out of the redaction startup path.
+//
+// That "user owns repo" assumption is scoped to inert content and does NOT
+// generalize to committed .entire/ data that reaches an exec: see
+// settings.enforceOPFCommandTrust and the "Why command is local-only" section
+// of docs/security-and-privacy.md.
 const maxPackFileBytes = 1 << 20 // 1 MiB
 
 // maxPackFiles caps how many pack files LoadPacks will accept under one
@@ -175,13 +180,15 @@ func validateIdentifier(field, value, sourcePath string) error {
 // personal/uncommitted rules is picked up automatically). Files with the
 // extensions .yaml, .yml, and .json are considered packs; other files are
 // ignored. A missing directory is treated as "no packs configured" and
-// returns no error. Per-file parse errors are slog.Warn'd and the file is
-// skipped — never fatal — so one bad file does not silence the rest.
+// returns no error. Per-file parse errors are warned to logger (nil means
+// slog.Default()) and the file is skipped — never fatal — so one bad file
+// does not silence the rest.
 //
 // Soft caps: files larger than maxPackFileBytes are skipped with a warning,
 // and discovery stops after maxPackFiles parsed packs. The trust boundary is
 // "user owns repo," so these are runaway-input guards, not security limits.
-func LoadPacks(dir string) ([]*Pack, error) {
+func LoadPacks(dir string, logger *slog.Logger) ([]*Pack, error) {
+	logger = loggerOrDefault(logger)
 	var packs []*Pack
 	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -191,7 +198,7 @@ func LoadPacks(dir string) ([]*Pack, error) {
 				}
 				return fmt.Errorf("read redactors dir %s: %w", dir, err)
 			}
-			slog.Warn("skipping unreadable redactor pack path",
+			logger.Warn("skipping unreadable redactor pack path",
 				componentAttr,
 				slog.String("path", path),
 				slog.String("error", err.Error()))
@@ -201,7 +208,7 @@ func LoadPacks(dir string) ([]*Pack, error) {
 			return fmt.Errorf("redactors path %s is not a directory", dir)
 		}
 		if d.Type()&fs.ModeSymlink != 0 {
-			slog.Warn("skipping symlinked redactor pack path",
+			logger.Warn("skipping symlinked redactor pack path",
 				componentAttr,
 				slog.String("path", path))
 			return nil
@@ -216,7 +223,7 @@ func LoadPacks(dir string) ([]*Pack, error) {
 		}
 
 		if len(packs) >= maxPackFiles {
-			slog.Warn("skipping redactor pack: file cap reached",
+			logger.Warn("skipping redactor pack: file cap reached",
 				componentAttr,
 				slog.String("path", path),
 				slog.Int("max_files", maxPackFiles))
@@ -225,14 +232,14 @@ func LoadPacks(dir string) ([]*Pack, error) {
 
 		info, statErr := d.Info()
 		if statErr != nil {
-			slog.Warn("skipping redactor pack: stat failed",
+			logger.Warn("skipping redactor pack: stat failed",
 				componentAttr,
 				slog.String("path", path),
 				slog.String("error", statErr.Error()))
 			return nil
 		}
 		if info.Size() > maxPackFileBytes {
-			slog.Warn("skipping redactor pack: file exceeds size cap",
+			logger.Warn("skipping redactor pack: file exceeds size cap",
 				componentAttr,
 				slog.String("path", path),
 				slog.Int64("size_bytes", info.Size()),
@@ -242,7 +249,7 @@ func LoadPacks(dir string) ([]*Pack, error) {
 
 		data, err := os.ReadFile(path) //nolint:gosec // path comes from WalkDir under a configured dir
 		if err != nil {
-			slog.Warn("skipping unreadable redactor pack",
+			logger.Warn("skipping unreadable redactor pack",
 				componentAttr,
 				slog.String("path", path),
 				slog.String("error", err.Error()))
@@ -250,7 +257,7 @@ func LoadPacks(dir string) ([]*Pack, error) {
 		}
 		pack, err := ParsePack(data, path)
 		if err != nil {
-			slog.Warn("skipping invalid redactor pack",
+			logger.Warn("skipping invalid redactor pack",
 				componentAttr,
 				slog.String("path", path),
 				slog.String("error", err.Error()))

@@ -81,11 +81,11 @@ func MaybeEnsureGlobalSetup(ctx context.Context) {
 			logging.Debug(logCtx, "global lazy setup: hooks dir inside worktree; skipping git hook install",
 				slog.String("hooks_dir", hooksDir))
 		default:
-			localDev, absoluteHookPath := hookSettingsFromConfig(ctx)
+			absoluteHookPath := hookSettingsFromConfig(ctx)
 			// installGitHooks with a discarded notice writer: lazy setup runs
 			// inside agent hooks, where a "[entire] Backed up existing..."
 			// stderr line would leak into the agent's output.
-			if _, err := installGitHooks(ctx, true, localDev, absoluteHookPath, io.Discard); err != nil {
+			if _, err := installGitHooks(ctx, true, absoluteHookPath, io.Discard); err != nil {
 				logging.Debug(logCtx, "global lazy setup: git hook install failed",
 					slog.String("error", err.Error()))
 				return

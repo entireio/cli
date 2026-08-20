@@ -146,14 +146,55 @@ func Discover(ctx context.Context, clusterHost string, c *http.Client, debugf De
 }
 
 // renderLoginHint formats a fatal-ready "no auth context for <subject>"
-// message telling the operator to run `entire login`. subject is a noun
-// phrase like "cluster nyc.entire.io" or "API host partial.to" so the same
-// hint serves both the git-cluster and data-API resolvers.
+// message telling the operator how to get one. subject is a noun phrase like
+// "cluster nyc.entire.io" or "API host partial.to" so the same hint serves both
+// the git-cluster and data-API resolvers.
 //
-// We'll display coreURLs (2nd param) to the user as a hint at a later stage.
-func renderLoginHint(subject string, _ []string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "no auth context for %s.\n", subject)
-	fmt.Fprint(&b, "Log in with `entire login`, then re-run your command.")
-	return b.String()
+// The advertised login servers are named because for anything outside the
+// default federation they are the only actionable part: bare `entire login`
+// re-authenticates against api.DefaultAuthBaseURL, which for a resource that
+// doesn't trust that server reproduces the very failure being reported. Callers
+// reach this with no active login, or with one no saved login can replace, and
+// in both cases the remedy is a login against one of these servers.
+//
+// The instruction half is shared with the "active login rejected and nothing
+// saved fits" error, which supplies its own first line — see
+// renderLoginInstruction.
+func renderLoginHint(subject string, coreURLs []string) string {
+	return fmt.Sprintf("no auth context for %s.\n%s", subject, renderLoginInstruction(coreURLs))
+}
+
+// renderLoginInstruction is the actionable tail of a login hint: the servers the
+// resource trusts, and the command to obtain a login from one of them. Split out
+// so callers that have already explained the situation in their own words can
+// append the remedy without repeating "no auth context for <subject>".
+//
+// coreURLs is normalised and de-duplicated so a resource advertising the same
+// core twice (or with an inconsistent trailing slash) doesn't repeat itself, and
+// the order is the resource's own — its preferred core first.
+func renderLoginInstruction(coreURLs []string) string {
+	servers := trustedLoginServers(coreURLs)
+	if len(servers) == 0 {
+		return "Log in with `entire login`, then re-run your command."
+	}
+	return fmt.Sprintf("It trusts these login servers: %s\nLog in with `entire login --server <url>`, then re-run your command.",
+		strings.Join(servers, ", "))
+}
+
+// trustedLoginServers normalises a resource's advertised cores for display
+// through normalizeCoreURL — the same folding the eligibility check uses, so a
+// server echoed back as trusted is one that would actually be accepted — then
+// drops blanks and duplicates while preserving the advertised order.
+func trustedLoginServers(coreURLs []string) []string {
+	seen := make(map[string]bool, len(coreURLs))
+	out := make([]string, 0, len(coreURLs))
+	for _, coreURL := range coreURLs {
+		normalized := normalizeCoreURL(coreURL)
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		out = append(out, normalized)
+	}
+	return out
 }

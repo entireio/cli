@@ -11,17 +11,17 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 // Compile-time interface assertions.
 var (
-	_ agent.TranscriptAnalyzer     = (*FactoryAIDroidAgent)(nil)
-	_ agent.TokenCalculator        = (*FactoryAIDroidAgent)(nil)
-	_ agent.SubagentAwareExtractor = (*FactoryAIDroidAgent)(nil)
-	_ agent.HookResponseWriter     = (*FactoryAIDroidAgent)(nil)
-	_ agent.PromptExtractor        = (*FactoryAIDroidAgent)(nil)
+	_ agent.TranscriptAnalyzer      = (*FactoryAIDroidAgent)(nil)
+	_ agent.TokenCalculator         = (*FactoryAIDroidAgent)(nil)
+	_ agent.SubagentAwareExtractor  = (*FactoryAIDroidAgent)(nil)
+	_ agent.SubagentSessionResolver = (*FactoryAIDroidAgent)(nil)
+	_ agent.HookResponseWriter      = (*FactoryAIDroidAgent)(nil)
+	_ agent.PromptExtractor         = (*FactoryAIDroidAgent)(nil)
 )
 
 // WriteHookResponse outputs the hook response as plain text to stdout.
@@ -59,7 +59,7 @@ func (f *FactoryAIDroidAgent) ParseHookEvent(ctx context.Context, hookName strin
 	case HookNameUserPromptSubmit:
 		return f.parseTurnStart(stdin)
 	case HookNameStop:
-		return f.parseTurnEnd(stdin)
+		return f.parseTurnEnd(ctx, stdin)
 	case HookNameSessionEnd:
 		return f.parseSessionInfoEvent(stdin, agent.SessionEnd)
 	case HookNamePreToolUse:
@@ -109,9 +109,11 @@ func (f *FactoryAIDroidAgent) ExtractPrompts(sessionRef string, fromOffset int) 
 		if lines[i].Type != transcript.TypeUser {
 			continue
 		}
+		// ExtractUserContent already strips IDE tags; stripping again is not a
+		// no-op now that the <timestamp> strip is position-anchored.
 		content := transcript.ExtractUserContent(lines[i].Message)
 		if content != "" {
-			prompts = append(prompts, textutil.StripIDEContextTags(content))
+			prompts = append(prompts, content)
 		}
 	}
 	return prompts, nil
@@ -196,7 +198,7 @@ func (f *FactoryAIDroidAgent) parseTurnStart(stdin io.Reader) (*agent.Event, err
 	}, nil
 }
 
-func (f *FactoryAIDroidAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
+func (f *FactoryAIDroidAgent) parseTurnEnd(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[stopRaw](stdin)
 	if err != nil {
 		return nil, err
@@ -205,7 +207,7 @@ func (f *FactoryAIDroidAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error
 	model := raw.Model
 	// If model not provided in hook payload, extract from transcript
 	if model == "" && raw.TranscriptPath != "" {
-		model = ExtractModelFromTranscript(raw.TranscriptPath)
+		model = ExtractModelFromTranscript(ctx, raw.TranscriptPath)
 	}
 
 	return &agent.Event{

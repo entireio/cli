@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,9 +12,11 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -306,6 +309,34 @@ func TestClassifySession_WorktreeIDInShadowBranch(t *testing.T) {
 	assert.Equal(t, expectedBranch, result.ShadowBranch)
 }
 
+// Distinct parentless commits have no common ancestor.
+// writeRootlessMetadataCommit builds a metadata commit with an empty tree.
+// parents is variadic so a test can build connected history (shared base, two
+// children) without a second copy of the go-git plumbing dance; passing none
+// yields the rootless commit the disconnection tests want.
+func writeRootlessMetadataCommit(t *testing.T, repo *git.Repository, message string, parents ...plumbing.Hash) plumbing.Hash {
+	t.Helper()
+	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
+	treeObj := repo.Storer.NewEncodedObject()
+	require.NoError(t, emptyTree.Encode(treeObj))
+	treeHash, err := repo.Storer.SetEncodedObject(treeObj)
+	require.NoError(t, err)
+
+	commitObj := &object.Commit{
+		Author:    object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
+		Committer: object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
+		Message:   message,
+		TreeHash:  treeHash,
+
+		ParentHashes: parents,
+	}
+	enc := repo.Storer.NewEncodedObject()
+	require.NoError(t, commitObj.Encode(enc))
+	hash, err := repo.Storer.SetEncodedObject(enc)
+	require.NoError(t, err)
+	return hash
+}
+
 // TestRunSessionsFix_MetadataCheckFailure_PropagatesError verifies that when
 // checkDisconnectedMetadata fails, runSessionsFix returns a SilentError so the
 // custom stderr message is not printed twice by main.go.
@@ -318,26 +349,14 @@ func TestRunSessionsFix_MetadataCheckFailure_PropagatesError(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create a real local metadata branch
-	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
-	treeObj := repo.Storer.NewEncodedObject()
-	require.NoError(t, emptyTree.Encode(treeObj))
-	treeHash, err := repo.Storer.SetEncodedObject(treeObj)
-	require.NoError(t, err)
-
-	commitObj := &object.Commit{
-		Author:    object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
-		Committer: object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
-		Message:   "metadata",
-		TreeHash:  treeHash,
-	}
-	enc := repo.Storer.NewEncodedObject()
-	require.NoError(t, commitObj.Encode(enc))
-	localHash, err := repo.Storer.SetEncodedObject(enc)
-	require.NoError(t, err)
-
+	localHash := writeRootlessMetadataCommit(t, repo, "metadata")
 	localRef := plumbing.NewHashReference(
 		plumbing.NewBranchReferenceName(paths.MetadataBranchName), localHash)
 	require.NoError(t, repo.Storer.SetReference(localRef))
+
+	// Configure an origin remote so origin is a checkpoint read candidate —
+	// the metadata check only consults tracking refs of configured candidates.
+	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
 
 	// Create a remote-tracking ref that points to a nonexistent object.
 	// This makes IsMetadataDisconnected call git merge-base with a bad hash,
@@ -363,6 +382,54 @@ func TestRunSessionsFix_MetadataCheckFailure_PropagatesError(t *testing.T) {
 	require.ErrorAs(t, err, &silentErr)
 	assert.Contains(t, err.Error(), "metadata check failed")
 	assert.Contains(t, stderr.String(), "Error: metadata check failed")
+}
+
+// Even forced doctor repairs must not advance local state from a legacy tier.
+func TestCheckDisconnectedMetadata_NonElectedRemote_ReportOnly(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir and IsolateGitConfigEnv (t.Setenv)
+	// modify process-global state.
+	testutil.IsolateGitConfigEnv(t)
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// Local metadata branch and origin's tracking ref share no common
+	// ancestor — a genuine disconnection on the NON-elected remote.
+	localHash := writeRootlessMetadataCommit(t, repo, "local metadata")
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName(paths.MetadataBranchName), localHash)))
+
+	remoteHash := writeRootlessMetadataCommit(t, repo, "stale origin metadata")
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), remoteHash)))
+
+	// The election picks upstream; origin is only the read-only legacy tier.
+	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, dir, "upstream", "https://example.com/upstream.git")
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "upstream")
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	require.NoError(t, checkDisconnectedMetadata(cmd, true))
+
+	output := stdout.String()
+	assert.Contains(t, output, "Metadata branches: DISCONNECTED",
+		"the disconnection must still be reported")
+	assert.Contains(t, output, "not the elected checkpoint sync remote",
+		"the gate must explain why the repair is withheld")
+	assert.NotContains(t, output, "Fixed: metadata branches reconciled",
+		"the repair must not run against a non-elected remote")
+
+	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	assert.Equal(t, localHash, localRef.Hash(),
+		"local v1 must be untouched — origin's stale tracking ref never drives a local-ref rewrite")
 }
 
 func TestRunSessionsFix_ForceDiscardOutput_Indented(t *testing.T) {
@@ -400,6 +467,57 @@ func TestRunSessionsFix_ForceDiscardOutput_Indented(t *testing.T) {
 	}
 }
 
+// Doctor's logging setup must cover the whole command, not just the
+// exited-session sweep. With no exited session to finalize — the common case,
+// and the one this fixture builds — the sweep returns before it touches logging,
+// so the condense and discard handlers that run afterwards would emit structured
+// slog lines to slog.Default(), i.e. onto the user's terminal interleaved with
+// doctor's own report.
+//
+// Cannot use t.Parallel(): t.Chdir and the process-global slog default.
+func TestRunSessionsFix_HandlerLogsStayOffTheTerminal(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	createShadowBranchRef(t, repo, testBaseCommit, "")
+
+	// Already ended, so never a candidate for the exited-owner sweep, but stuck
+	// with uncondensed data — which sends --force down the condensing path, and
+	// CondenseSessionByID logs.
+	require.NoError(t, strategy.SaveSessionState(context.Background(), &strategy.SessionState{
+		SessionID:  "2026-02-02-doctor-logging",
+		BaseCommit: testBaseCommit,
+		Phase:      session.PhaseEnded,
+		StepCount:  3,
+		StartedAt:  time.Now().Add(-2 * time.Hour),
+	}))
+
+	// Anything reaching slog.Default() is on the user's terminal in production.
+	var fallback bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&fallback, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	// The root pre-run installs the logger for every command; this stands in for
+	// it, since runSessionsFix is called directly rather than through the tree.
+	l, logErr := newLogger(context.Background())
+	require.NoError(t, logErr)
+	t.Cleanup(func() { _ = l.Close() })
+
+	cmd, _ := newTestCmd(t)
+	cmd.SetContext(logging.WithLogger(cmd.Context(), l))
+	require.NoError(t, runSessionsFix(cmd, true))
+	require.NoError(t, l.Close()) // flush before reading the file
+
+	assert.Empty(t, fallback.String(),
+		"handler logs went to slog.Default() (the user's terminal) instead of .entire/logs/")
+
+	logged, err := os.ReadFile(filepath.Join(dir, ".entire", "logs", "entire.log"))
+	require.NoError(t, err, "doctor did not initialize file logging")
+	assert.NotEmpty(t, logged, "nothing was logged, so this test proves nothing about where logs go")
+}
+
 // TestCheckCodexHookTrust_SilentWhenCodexNotInstalled — `entire doctor`
 // shouldn't print anything Codex-related when this repo doesn't have
 // .codex/hooks.json. Other agents (Claude, Cursor) keep their existing
@@ -431,9 +549,12 @@ func resolvedHooksPath(t *testing.T, dir string) string {
 func canonicalCodexHooksJSON() string {
 	return `{"hooks":{
 		"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-start","timeout":30}]}],
+		"SessionEnd":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-end","timeout":3}]}],
 		"UserPromptSubmit":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex user-prompt-submit","timeout":30}]}],
 		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]}],
-		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}]
+		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}],
+		"SubagentStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-start","timeout":30}]}],
+		"SubagentStop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-stop","timeout":30}]}]
 	}}`
 }
 
@@ -453,6 +574,9 @@ func TestCheckCodexHookTrust_OKWhenAllTrusted(t *testing.T) {
 	configTOML := `[hooks.state."` + hooksPath + `:session_start:0:0"]
 trusted_hash = "sha256:aaa"
 
+[hooks.state."` + hooksPath + `:session_end:0:0"]
+trusted_hash = "sha256:eee"
+
 [hooks.state."` + hooksPath + `:user_prompt_submit:0:0"]
 trusted_hash = "sha256:bbb"
 
@@ -461,6 +585,12 @@ trusted_hash = "sha256:ccc"
 
 [hooks.state."` + hooksPath + `:post_tool_use:0:0"]
 trusted_hash = "sha256:ddd"
+
+[hooks.state."` + hooksPath + `:subagent_start:0:0"]
+trusted_hash = "sha256:eee"
+
+[hooks.state."` + hooksPath + `:subagent_stop:0:0"]
+trusted_hash = "sha256:fff"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(configTOML), 0o600))
 	t.Setenv("CODEX_HOME", codexHome)
@@ -484,9 +614,12 @@ func TestCheckCodexHookTrust_ListsMissingEvents(t *testing.T) {
 	hooksPath := resolvedHooksPath(t, dir)
 	codexHome := filepath.Join(t.TempDir(), "codex-home")
 	require.NoError(t, os.MkdirAll(codexHome, 0o750))
-	// Trust three of four — PostToolUse is the gap.
+	// Trust all but one — PostToolUse is the gap.
 	configTOML := `[hooks.state."` + hooksPath + `:session_start:0:0"]
 trusted_hash = "sha256:aaa"
+
+[hooks.state."` + hooksPath + `:session_end:0:0"]
+trusted_hash = "sha256:eee"
 
 [hooks.state."` + hooksPath + `:user_prompt_submit:0:0"]
 trusted_hash = "sha256:bbb"
@@ -502,8 +635,13 @@ trusted_hash = "sha256:ccc"
 
 	out := stdout.String()
 	require.Contains(t, out, "Codex hook trust: REVIEW NEEDED")
-	require.Contains(t, out, "1 hook(s) declared")
+	// The fixture trusts session_start/user_prompt_submit/stop, so the remaining
+	// three declared events are untrusted. Codex refuses to run untrusted hooks, so
+	// each one named here is a hook that silently would not fire.
+	require.Contains(t, out, "3 hook(s) declared")
 	require.Contains(t, out, "- post_tool_use")
+	require.Contains(t, out, "- subagent_start")
+	require.Contains(t, out, "- subagent_stop")
 	require.Contains(t, out, "Open /hooks inside Codex")
 }
 
@@ -525,7 +663,7 @@ func TestCheckHookDrift_ClaudeCodeOKWhenCurrent(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 
-	if _, err := (&claudecode.ClaudeCodeAgent{}).InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := (&claudecode.ClaudeCodeAgent{}).InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
@@ -573,6 +711,8 @@ func TestCheckCodexHookTrust_FlagsStaleHooksFile(t *testing.T) {
 
 	codexDir := filepath.Join(dir, ".codex")
 	require.NoError(t, os.MkdirAll(codexDir, 0o750))
+	// The install set of an older release: no PostToolUse, and no SessionEnd
+	// either — both post-date it.
 	staleHooksJSON := `{"hooks":{
 		"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-start","timeout":30}]}],
 		"UserPromptSubmit":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex user-prompt-submit","timeout":30}]}],
@@ -602,8 +742,11 @@ trusted_hash = "sha256:ccc"
 
 	out := stdout.String()
 	require.Contains(t, out, "Codex hooks: OUT OF DATE")
+	require.Contains(t, out, "- session_end")
 	require.Contains(t, out, "- post_tool_use")
 	require.Contains(t, out, "entire enable")
+	// Trust stays quiet: every event the stale file actually declares is trusted,
+	// so only the out-of-date finding should fire.
 	require.NotContains(t, out, "Codex hook trust: REVIEW NEEDED")
 }
 
@@ -619,4 +762,105 @@ func TestConfirmDoctorFix_CancelledContext(t *testing.T) {
 	proceed, err := confirmDoctorFix(ctx, &out, "Apply fix?")
 	require.NoError(t, err)
 	assert.False(t, proceed)
+}
+
+// setupDivergedMetadata points local v1 and origin's tracking ref at two
+// different children of one base commit, and returns both tips.
+func setupDivergedMetadata(t *testing.T, repo *git.Repository) (local, remote plumbing.Hash) {
+	t.Helper()
+	base := writeRootlessMetadataCommit(t, repo, "shared base")
+	local = writeRootlessMetadataCommit(t, repo, "local checkpoint", base)
+	remote = writeRootlessMetadataCommit(t, repo, "remote checkpoint", base)
+
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName(paths.MetadataBranchName), local)))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), remote)))
+	return local, remote
+}
+
+func runCheckDisconnectedMetadata(t *testing.T) string {
+	t.Helper()
+	cmd, stdout := newTestCmd(t)
+	require.NoError(t, checkDisconnectedMetadata(cmd, true))
+	return stdout.String()
+}
+
+// TestCheckDisconnectedMetadata_Diverged_ReportedAsSelfHealing covers the state
+// that previously printed a bare "OK": local and remote both advanced, so the
+// next fetch rewrites the local ref by replaying local commits. Nothing else
+// surfaces that, since the replay itself only logs.
+func TestCheckDisconnectedMetadata_Diverged_ReportedAsSelfHealing(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir and IsolateGitConfigEnv modify globals.
+	testutil.IsolateGitConfigEnv(t)
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	local, remote := setupDivergedMetadata(t, repo)
+
+	// origin is the elected remote here, so the replay really will happen.
+	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
+
+	output := runCheckDisconnectedMetadata(t)
+
+	assert.Contains(t, output, "Metadata branches: DIVERGED")
+	assert.NotContains(t, output, "DISCONNECTED", "shared ancestry is not a disconnection")
+	assert.Contains(t, output, local.String()[:12], "the local tip must be shown")
+	assert.Contains(t, output, remote.String()[:12], "the remote tip must be shown")
+	assert.Contains(t, output, "No action needed", "divergence against the elected remote self-heals")
+	assert.Contains(t, output, "new hashes", "the user must learn the replayed commits are re-hashed")
+
+	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	assert.Equal(t, local, localRef.Hash(), "reporting must not move any ref")
+}
+
+// TestCheckDisconnectedMetadata_Diverged_LegacyTierWontReconcile is the other
+// half: the confinement rule means a diverged legacy-tier ref never advances the
+// local ref, so promising self-healing there would be a lie.
+func TestCheckDisconnectedMetadata_Diverged_LegacyTierWontReconcile(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	setupDivergedMetadata(t, repo)
+
+	// Election picks upstream; origin carries the diverged tracking ref.
+	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, dir, "upstream", "https://example.com/upstream.git")
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "upstream")
+
+	output := runCheckDisconnectedMetadata(t)
+
+	assert.Contains(t, output, "Metadata branches: DIVERGED")
+	assert.Contains(t, output, "legacy read tier")
+	assert.Contains(t, output, "Nothing will reconcile this on its own.")
+	assert.NotContains(t, output, "No action needed",
+		"a legacy-tier divergence does not self-heal; saying so would be wrong")
+}
+
+// TestCheckDisconnectedMetadata_Aligned_StaysQuiet pins that the common case is
+// unchanged — the divergence check must not add noise to a healthy repo.
+func TestCheckDisconnectedMetadata_Aligned_StaysQuiet(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	tip := writeRootlessMetadataCommit(t, repo, "agreed metadata")
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName(paths.MetadataBranchName), tip)))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), tip)))
+	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
+
+	output := runCheckDisconnectedMetadata(t)
+
+	assert.Contains(t, output, "✓ Metadata branches: OK")
+	assert.NotContains(t, output, "DIVERGED")
 }
