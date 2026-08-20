@@ -14,15 +14,23 @@ set -euo pipefail
 # publish as a prerelease, and goreleaser stamps experimental.Visible=true for
 # any prerelease, so dogfooders keep seeing experimental commands.
 #
-# Exit codes: 0 with the tag on stdout, 2 if HEAD already has one (nothing to
-# do), 1 on error.
+# Exit codes: 0 with the tag on stdout, 2 if the commit already has one (nothing
+# to do), 1 on error.
+#
+# The commit to tag is an argument rather than HEAD so the caller can run this
+# from a checkout of main while tagging an earlier commit on main — see
+# dev-release.yml, which must not consume the workflow_run ref as a checkout ref.
 #
 # Deliberately parallel to create-nightly-tag.sh rather than shared with it: that
 # script feeds the externally-consumed nightly channel, and this change is not the
 # place to refactor a published release path. Keep the two in step.
-# Usage: scripts/create-dev-tag.sh
+# Usage: scripts/create-dev-tag.sh [commit]   (default: HEAD)
 
-SHORT_COMMIT=$(git rev-parse --short HEAD)
+TARGET=${1:-HEAD}
+if ! SHORT_COMMIT=$(git rev-parse --short --verify "${TARGET}^{commit}" 2>/dev/null); then
+  echo "::error::Not a commit in this repository: ${TARGET}" >&2
+  exit 1
+fi
 
 # Skip if a dev tag already exists for this commit. Makes the workflow safe to
 # re-run, and to fire twice for one commit (a re-run of Tests, a manual dispatch).

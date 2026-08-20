@@ -58,21 +58,26 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The commit Tests actually ran against, not main's tip: main may have
-          # moved on, and tagging an untested commit is the one thing this gate
-          # exists to prevent. Falls back to the ref for a manual dispatch.
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
-          # create-dev-tag.sh needs the full tag history for `git describe`.
+          # Hardcoded, and deliberately NOT the triggering commit. This is a
+          # workflow_run job, so it runs with secrets; checking out a ref taken
+          # from the event payload would run event-controlled code in a
+          # privileged context. The `if:` above happens to restrict that ref to
+          # commits already on main, but a gate is the fragile way to establish
+          # trust — relax one conjunct later (drop `event == 'push'`, add a
+          # second triggering workflow that runs on pull_request) and the
+          # checkout silently becomes arbitrary code execution. Not consuming
+          # the ref at all cannot regress that way.
+          #
+          # The commit to *tag* is still the triggering one; that is passed to
+          # the tag step below rather than checked out. Tagging and running are
+          # separate needs and only the second one requires a trusted tree.
+          ref: main
+          # Full history: `git describe` needs the tags, and the tag step needs
+          # the triggering commit to be present as an ancestor of main.
           fetch-depth: 0
-          # This is a workflow_run job: it holds secrets while running a script
-          # out of the checked-out tree, so it must not leave a repo-write
-          # credential in .git/config where that script could reach it. The
-          # push below passes the app token explicitly instead. No token is
-          # needed for the fetch itself — the repo is public.
-          # CodeQL flags the checkout of the triggering commit here; that part
-          # is inherent to tagging the commit Tests actually ran against, and is
-          # bounded by the head_branch/event gate above, which admits only
-          # commits already pushed to main.
+          # Leaves no repo-write credential in .git/config for the script this
+          # job runs out of the tree. The push below passes the app token
+          # explicitly; the fetch needs no token, as the repo is public.
           persist-credentials: false
 
       - name: Record the dev releases present before this run
@@ -90,8 +95,21 @@ jobs:
         id: tag
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # The commit Tests actually ran against, not main's tip: main may have
+          # moved on while Tests ran, and publishing a commit whose own Tests are
+          # still in flight is the one thing this workflow's gate exists to
+          # prevent. Used only as a tag target, never as a checkout ref.
+          TARGET_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
-          TAG=$(scripts/create-dev-tag.sh) && EXIT_CODE=0 || EXIT_CODE=$?
+          # The tree is main's; the target must be reachable from it. This fails
+          # loudly if main was force-pushed out from under the triggering commit,
+          # rather than tagging something no longer on the branch.
+          if ! git merge-base --is-ancestor "$TARGET_SHA" HEAD; then
+            echo "::error::$TARGET_SHA is not an ancestor of main; refusing to tag it."
+            exit 1
+          fi
+
+          TAG=$(scripts/create-dev-tag.sh "$TARGET_SHA") && EXIT_CODE=0 || EXIT_CODE=$?
           if [ "$EXIT_CODE" -eq 2 ]; then
             echo "Skipping — this commit already has a dev tag."
             exit 0
@@ -99,7 +117,7 @@ jobs:
             echo "::error::Failed to generate dev tag"
             exit 1
           fi
-          git tag "$TAG"
+          git tag "$TAG" "$TARGET_SHA"
           # Explicit credential rather than `push origin`: the checkout persists
           # none. Runner logs mask the app token (create-github-app-token
           # registers it as a secret).
