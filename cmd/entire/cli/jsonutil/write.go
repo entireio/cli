@@ -91,7 +91,14 @@ func WriteFileAtomicFollowingSymlinks(filePath string, data []byte, perm fs.File
 	if info, err := os.Stat(target); err == nil && info.Mode().IsRegular() {
 		perm = info.Mode().Perm()
 	}
-	return WriteFileAtomic(target, data, perm)
+	err := WriteFileAtomic(target, data, perm)
+	if err != nil && target != filePath {
+		// Name both paths: the failure is about the resolved target (whose
+		// directory may be unwritable, or owned by someone else), but the
+		// caller and the user only know the link they asked to write.
+		return fmt.Errorf("%s resolves through a symlink to %s: %w", filePath, target, err)
+	}
+	return err
 }
 
 // maxSymlinkHops bounds the manual final-component symlink walk in
