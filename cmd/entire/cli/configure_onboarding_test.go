@@ -29,6 +29,8 @@ import (
 
 const (
 	testConfigureUSHost = "us.entire.io"
+	testConfigureOwner  = "acme"
+	testConfigureRepo   = "widget"
 	testGitRevParse     = "rev-parse"
 	testConfigureSHA    = "abc123"
 	testGitLSRemote     = "ls-remote"
@@ -37,6 +39,67 @@ const (
 	testGitAdd          = "add"
 	testGitRestore      = "restore"
 )
+
+func addConfigureTestRemote(t *testing.T, name, remoteURL string) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", name, remoteURL)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add remote %q: %v\n%s", name, err, output)
+	}
+}
+
+func TestConfigureRepoIdentityUsesCustomGitHubRemoteWithoutOrigin(t *testing.T) {
+	setupTestRepo(t)
+	addConfigureTestRemote(t, "custom", "https://github.com/acme/widget.git")
+
+	owner, repo, clean, err := configureRepoIdentity(t.Context())
+	if err != nil {
+		t.Fatalf("configureRepoIdentity() error = %v", err)
+	}
+	if owner != testConfigureOwner || repo != testConfigureRepo || clean != "https://github.com/acme/widget.git" {
+		t.Fatalf("identity = %q/%q %q", owner, repo, clean)
+	}
+}
+
+func TestConfigureRepoIdentityRejectsUnsupportedRemoteWithoutOrigin(t *testing.T) {
+	setupTestRepo(t)
+	addConfigureTestRemote(t, "custom", "https://my.custom.repo/acme/widget.git")
+
+	_, _, _, err := configureRepoIdentity(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "requires a GitHub remote") {
+		t.Fatalf("configureRepoIdentity() error = %v, want GitHub remote guidance", err)
+	}
+}
+
+func TestConfigureRepoIdentityRejectsAmbiguousGitHubRemotesWithoutOrigin(t *testing.T) {
+	setupTestRepo(t)
+	addConfigureTestRemote(t, "fork", "https://github.com/me/widget.git")
+	addConfigureTestRemote(t, "upstream", "git@github.com:acme/widget.git")
+
+	_, _, _, err := configureRepoIdentity(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "multiple GitHub repositories") {
+		t.Fatalf("configureRepoIdentity() error = %v, want ambiguity error", err)
+	}
+	for _, repository := range []string{"acme/widget", "me/widget"} {
+		if !strings.Contains(err.Error(), repository) {
+			t.Errorf("ambiguity error missing %q: %v", repository, err)
+		}
+	}
+}
+
+func TestConfigureRepoIdentityAllowsMultipleRemotesForSameGitHubRepo(t *testing.T) {
+	setupTestRepo(t)
+	addConfigureTestRemote(t, "fetch", "https://github.com/acme/widget.git")
+	addConfigureTestRemote(t, "push", "git@github.com:acme/widget.git")
+
+	owner, repo, _, err := configureRepoIdentity(t.Context())
+	if err != nil {
+		t.Fatalf("configureRepoIdentity() error = %v", err)
+	}
+	if owner != testConfigureOwner || repo != testConfigureRepo {
+		t.Fatalf("identity = %q/%q, want acme/widget", owner, repo)
+	}
+}
 
 func TestConfigureCmdBareInteractiveRunsOnboarding(t *testing.T) {
 	setupTestRepo(t)
@@ -262,7 +325,7 @@ func TestEnsureConfigureRepoAccessNonAdminPrintsShareableLink(t *testing.T) {
 	var out, errOut bytes.Buffer
 	err := ensureConfigureRepoAccess(context.Background(), &out, &errOut, configureAccessReporterStub{},
 		&api.EnableRepoResponse{InstallURL: "https://github.com/apps/entire/installations/new"},
-		"https://github.com/acme/widget.git", "acme", "widget", false, deps)
+		"https://github.com/acme/widget.git", testConfigureOwner, testConfigureRepo, false, deps)
 	if err == nil {
 		t.Fatal("non-admin access branch should stop configure")
 	}
@@ -289,7 +352,7 @@ func TestEnsureConfigureRepoAccessRequiresAPIInstallURL(t *testing.T) {
 	}
 	var out, errOut bytes.Buffer
 	err := ensureConfigureRepoAccess(context.Background(), &out, &errOut, configureAccessReporterStub{},
-		&api.EnableRepoResponse{}, "https://github.com/acme/widget.git", "acme", "widget", false, deps)
+		&api.EnableRepoResponse{}, "https://github.com/acme/widget.git", testConfigureOwner, testConfigureRepo, false, deps)
 	if err == nil {
 		t.Fatal("missing installation URL should stop configure")
 	}
@@ -317,7 +380,7 @@ func TestEnsureConfigureRepoAccessUnknownAdminStillAllowsInstall(t *testing.T) {
 	var out, errOut bytes.Buffer
 	err := ensureConfigureRepoAccess(ctx, &out, &errOut, configureAccessReporterStub{},
 		&api.EnableRepoResponse{InstallURL: "https://github.com/apps/entire/installations/new"},
-		"https://github.com/acme/widget.git", "acme", "widget", false, deps)
+		"https://github.com/acme/widget.git", testConfigureOwner, testConfigureRepo, false, deps)
 	if err == nil {
 		t.Fatal("expected the installation wait to end with the test deadline")
 	}
@@ -640,7 +703,7 @@ func TestConfigureBranchProtectedChecksRulesetsAndClassicProtection(t *testing.T
 				}
 				return []byte(`{"required_pull_request_reviews":{}}`), nil
 			}
-			got, err := configureBranchProtected(context.Background(), "acme", "widget", "main")
+			got, err := configureBranchProtected(context.Background(), testConfigureOwner, testConfigureRepo, "main")
 			if err != nil {
 				t.Fatalf("configureBranchProtected() error = %v", err)
 			}
@@ -744,7 +807,7 @@ func TestConfigureSaveAndPushUsesForgeRemote(t *testing.T) {
 		}
 	}
 	generated := []string{".entire/settings.json"}
-	if err := configureSaveAndPush(cmd, dir, "acme", "widget", nil, generated, "feature", false, configureSaveDirect, mirrorCloneProviderGitHub, time.Now); err != nil {
+	if err := configureSaveAndPush(cmd, dir, testConfigureOwner, testConfigureRepo, nil, generated, "feature", false, configureSaveDirect, mirrorCloneProviderGitHub, time.Now); err != nil {
 		t.Fatalf("configureSaveAndPush() error = %v", err)
 	}
 	want := []string{testGitPush, "-u", mirrorCloneProviderGitHub, "feature"}
@@ -815,7 +878,7 @@ func TestConfigureSaveNewBranchReturnsToOriginalBranch(t *testing.T) {
 		}
 	}
 	generated := []string{".entire/settings.json"}
-	if err := configureSaveAndPush(cmd, dir, "acme", "widget", nil, generated, "feature", false, configureSaveNewBranch, mirrorCloneProviderGitHub, time.Now); err != nil {
+	if err := configureSaveAndPush(cmd, dir, testConfigureOwner, testConfigureRepo, nil, generated, "feature", false, configureSaveNewBranch, mirrorCloneProviderGitHub, time.Now); err != nil {
 		t.Fatalf("configureSaveAndPush() error = %v", err)
 	}
 	wantRestore := []string{testGitRestore, "--source", configureBranchBase, "--worktree", "--", ".entire/settings.json"}
@@ -879,7 +942,7 @@ func TestConfigureSaveNewBranchPushFailureRestoresConfiguration(t *testing.T) {
 		}
 	}
 	generated := []string{".entire/settings.json"}
-	err := configureSaveAndPush(cmd, t.TempDir(), "acme", "widget", nil, generated, "feature", false, configureSaveNewBranch, mirrorCloneProviderGitHub, time.Now)
+	err := configureSaveAndPush(cmd, t.TempDir(), testConfigureOwner, testConfigureRepo, nil, generated, "feature", false, configureSaveNewBranch, mirrorCloneProviderGitHub, time.Now)
 	if err == nil || !strings.Contains(err.Error(), "push rejected") {
 		t.Fatalf("configureSaveAndPush() error = %v, want push failure", err)
 	}
@@ -931,7 +994,7 @@ func TestConfigureSaveNewBranchKeepsConfigurationOnOriginalBranch(t *testing.T) 
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	generated := []string{".entire/settings.json"}
-	if err := configureSaveAndPush(cmd, repoDir, "acme", "widget", nil, generated, originalBranch, false, configureSaveNewBranch, mirrorCloneProviderGitHub, time.Now); err != nil {
+	if err := configureSaveAndPush(cmd, repoDir, testConfigureOwner, testConfigureRepo, nil, generated, originalBranch, false, configureSaveNewBranch, mirrorCloneProviderGitHub, time.Now); err != nil {
 		t.Fatalf("configureSaveAndPush() error = %v", err)
 	}
 	if got := runGit(repoDir, "branch", "--show-current"); got != originalBranch {
@@ -962,7 +1025,7 @@ func TestConfigureUseMirrorPreservesOriginUnderAvailableForgeRemote(t *testing.T
 
 	var out, errOut bytes.Buffer
 	chosen := coreapi.ResolvedPlacement{ClusterHost: testConfigureUSHost}
-	forgeRemote, err := configureUseMirror(ctx, &out, &errOut, ".", "acme", "widget", chosen)
+	forgeRemote, err := configureUseMirror(ctx, &out, &errOut, ".", testConfigureOwner, testConfigureRepo, chosen)
 	if err != nil {
 		t.Fatalf("configureUseMirror() error = %v", err)
 	}
@@ -991,7 +1054,7 @@ func TestConfigureUseMirrorRetargetsCurrentBranchFromMirrorToForge(t *testing.T)
 	if err != nil || branch == "" {
 		t.Fatalf("current branch = %q, error = %v", branch, err)
 	}
-	mirrorURL := mirrorCloneURL(testConfigureUSHost, "acme", "widget")
+	mirrorURL := mirrorCloneURL(testConfigureUSHost, testConfigureOwner, testConfigureRepo)
 	if _, err := gitRunner(ctx, ".", "remote", testGitAdd, defaultMirrorRemote, mirrorURL); err != nil {
 		t.Fatalf("add mirror origin: %v", err)
 	}
@@ -1006,7 +1069,7 @@ func TestConfigureUseMirrorRetargetsCurrentBranchFromMirrorToForge(t *testing.T)
 	}
 
 	chosen := coreapi.ResolvedPlacement{ClusterHost: testConfigureUSHost}
-	if _, err := configureUseMirror(ctx, io.Discard, io.Discard, ".", "acme", "widget", chosen); err != nil {
+	if _, err := configureUseMirror(ctx, io.Discard, io.Discard, ".", testConfigureOwner, testConfigureRepo, chosen); err != nil {
 		t.Fatalf("configureUseMirror() error = %v", err)
 	}
 	trackingRemote, err := gitRunner(ctx, ".", "config", "--get", "branch."+branch+".remote")
@@ -1021,7 +1084,7 @@ func TestConfigureUseMirrorRetargetsCurrentBranchFromMirrorToForge(t *testing.T)
 func TestConfigureUseMirrorCreatesForgeRemoteWithGHProtocolPreference(t *testing.T) {
 	setupTestRepo(t)
 	ctx := context.Background()
-	mirrorURL := mirrorCloneURL(testConfigureUSHost, "acme", "widget")
+	mirrorURL := mirrorCloneURL(testConfigureUSHost, testConfigureOwner, testConfigureRepo)
 	if _, err := gitRunner(ctx, ".", "remote", testGitAdd, defaultMirrorRemote, mirrorURL); err != nil {
 		t.Fatalf("add mirror origin: %v", err)
 	}
@@ -1032,7 +1095,7 @@ func TestConfigureUseMirrorCreatesForgeRemoteWithGHProtocolPreference(t *testing
 
 	var out, errOut bytes.Buffer
 	chosen := coreapi.ResolvedPlacement{ClusterHost: testConfigureUSHost}
-	forgeRemote, err := configureUseMirror(ctx, &out, &errOut, ".", "acme", "widget", chosen)
+	forgeRemote, err := configureUseMirror(ctx, &out, &errOut, ".", testConfigureOwner, testConfigureRepo, chosen)
 	if err != nil {
 		t.Fatalf("configureUseMirror() error = %v", err)
 	}

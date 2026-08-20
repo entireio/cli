@@ -277,16 +277,76 @@ func configureWebBaseURL() string {
 }
 
 func configureRepoIdentity(ctx context.Context) (owner, repo, cleanRemote string, err error) {
-	raw, err := gitremote.GetRemoteURL(ctx, defaultMirrorRemote)
+	remotes, err := listGitRemotes(ctx, "")
 	if err != nil {
-		return "", "", "", fmt.Errorf("read origin remote: %w", err)
+		return "", "", "", err
 	}
+	if remotes[defaultMirrorRemote] {
+		raw, readErr := gitremote.GetRemoteURL(ctx, defaultMirrorRemote)
+		if readErr != nil {
+			return "", "", "", fmt.Errorf("read origin remote: %w", readErr)
+		}
+		return configureRepoIdentityFromURL(raw, "origin")
+	}
+
+	// A GitHub clone normally has origin, but remote names are local and users
+	// can rename it or clone with -o. When origin is absent, accept a uniquely
+	// identifiable GitHub repository under any remote name.
+	names := make([]string, 0, len(remotes))
+	for name := range remotes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	type candidate struct {
+		owner string
+		repo  string
+		clean string
+	}
+	byRepository := make(map[string]candidate)
+	for _, name := range names {
+		raw, readErr := gitremote.GetRemoteURL(ctx, name)
+		if readErr != nil {
+			return "", "", "", fmt.Errorf("read remote %q: %w", name, readErr)
+		}
+		info, parseErr := gitremote.ParseURL(raw)
+		if parseErr != nil || info.Forge != mirrorUseForge {
+			continue
+		}
+		clean, cleanErr := cleanRemoteURLForReport(raw)
+		if cleanErr != nil {
+			return "", "", "", fmt.Errorf("clean remote %q: %w", name, cleanErr)
+		}
+		candidateOwner := strings.ToLower(info.Owner)
+		candidateRepo := strings.ToLower(info.Repo)
+		key := candidateOwner + "/" + candidateRepo
+		if _, exists := byRepository[key]; !exists {
+			byRepository[key] = candidate{owner: candidateOwner, repo: candidateRepo, clean: clean}
+		}
+	}
+	if len(byRepository) == 0 {
+		return "", "", "", errors.New("interactive configure currently requires a GitHub remote")
+	}
+	if len(byRepository) > 1 {
+		repositories := make([]string, 0, len(byRepository))
+		for repository := range byRepository {
+			repositories = append(repositories, repository)
+		}
+		sort.Strings(repositories)
+		return "", "", "", fmt.Errorf("multiple GitHub repositories found in remotes (%s); configure cannot choose", strings.Join(repositories, ", "))
+	}
+	for _, found := range byRepository {
+		return found.owner, found.repo, found.clean, nil
+	}
+	return "", "", "", errors.New("GitHub remote resolution produced no repository")
+}
+
+func configureRepoIdentityFromURL(raw, remoteName string) (owner, repo, cleanRemote string, err error) {
 	info, err := gitremote.ParseURL(raw)
 	if err != nil {
-		return "", "", "", fmt.Errorf("parse origin remote: %w", err)
+		return "", "", "", fmt.Errorf("parse %s remote: %w", remoteName, err)
 	}
 	if info.Forge != mirrorUseForge {
-		return "", "", "", errors.New("interactive configure currently requires a GitHub origin remote")
+		return "", "", "", fmt.Errorf("interactive configure currently requires a GitHub remote; %q is not GitHub", remoteName)
 	}
 	clean, err := cleanRemoteURLForReport(raw)
 	if err != nil {
