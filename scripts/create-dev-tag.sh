@@ -33,7 +33,9 @@ fi
 
 # Base the version on the latest stable tag, so a dev build sorts above the
 # current release and below the next one.
-LATEST_STABLE=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' 2>/dev/null)
+# `|| true`: under `set -e` a failing git describe would abort before the
+# explicit check below, so the error message would never be reached.
+LATEST_STABLE=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' 2>/dev/null || true)
 if [ -z "$LATEST_STABLE" ]; then
   echo "::error::No stable version tag found" >&2
   exit 1

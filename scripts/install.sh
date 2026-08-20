@@ -122,7 +122,10 @@ get_latest_dev_version() {
     # name, and cannot match a nightly tag.
     local url="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100"
     local version
-    version=$(fetch_github_json "$url" | grep '"tag_name"' | grep -- '-dev\.' | head -n 1 | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/')
+    # `|| true`: install.sh runs with `set -euo pipefail`, so a grep that matches
+    # nothing would abort here instead of reaching the empty-version check below,
+    # replacing a clear message with a bare non-zero exit.
+    version=$(fetch_github_json "$url" | grep '"tag_name"' | grep -- '-dev\.' | head -n 1 | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/' || true)
 
     if [[ -z "$version" ]]; then
         error "Failed to fetch the latest dev version from GitHub. Please check your internet connection."
@@ -134,7 +137,10 @@ get_latest_dev_version() {
 get_latest_nightly_version() {
     local url="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=20"
     local version
-    version=$(fetch_github_json "$url" | grep '"tag_name"' | grep 'nightly' | head -n 1 | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/')
+    # Same as the dev lookup: keep the pipeline non-fatal so the check below
+    # reports the failure. (Pre-existing; fixed alongside because the two
+    # channels share the shape.)
+    version=$(fetch_github_json "$url" | grep '"tag_name"' | grep 'nightly' | head -n 1 | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/' || true)
 
     if [[ -z "$version" ]]; then
         error "Failed to fetch latest nightly version from GitHub. Please check your internet connection."

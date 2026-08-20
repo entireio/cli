@@ -19,8 +19,12 @@ on:
     types: [completed]
   workflow_dispatch:
 
+# Read-only: every write this workflow makes (the tag push, the release
+# deletes) goes through the app token below, not the job token. Combined with
+# persist-credentials:false on the checkout, no repo-write credential is
+# reachable from the checked-out tree.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: dev-release
@@ -60,7 +64,16 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
           # create-dev-tag.sh needs the full tag history for `git describe`.
           fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
+          # This is a workflow_run job: it holds secrets while running a script
+          # out of the checked-out tree, so it must not leave a repo-write
+          # credential in .git/config where that script could reach it. The
+          # push below passes the app token explicitly instead. No token is
+          # needed for the fetch itself — the repo is public.
+          # CodeQL flags the checkout of the triggering commit here; that part
+          # is inherent to tagging the commit Tests actually ran against, and is
+          # bounded by the head_branch/event gate above, which admits only
+          # commits already pushed to main.
+          persist-credentials: false
 
       - name: Record the dev releases present before this run
         id: existing
@@ -75,6 +88,8 @@ jobs:
 
       - name: Create dev tag
         id: tag
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           TAG=$(scripts/create-dev-tag.sh) && EXIT_CODE=0 || EXIT_CODE=$?
           if [ "$EXIT_CODE" -eq 2 ]; then
@@ -85,7 +100,11 @@ jobs:
             exit 1
           fi
           git tag "$TAG"
-          git push origin "$TAG"
+          # Explicit credential rather than `push origin`: the checkout persists
+          # none. Runner logs mask the app token (create-github-app-token
+          # registers it as a secret).
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "refs/tags/${TAG}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Wait for the release to be published

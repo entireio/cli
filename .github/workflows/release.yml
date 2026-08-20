@@ -78,7 +78,12 @@ jobs:
             *-dev.*) CHANNEL_LABEL="Dev Build"; TAG_GLOB='v*-dev.*' ;;
             *)       CHANNEL_LABEL="Nightly Build"; TAG_GLOB='v*-nightly.*' ;;
           esac
-          LAST_IN_CHANNEL=$(git tag -l "$TAG_GLOB" --sort=-creatordate | grep -v "^${RELEASE_TAG}$" | head -1)
+          # `|| true`: with the runner's default `bash -eo pipefail`, grep exits 1
+          # when it filters everything out, killing the step before the fallback
+          # below. That is the normal case for the dev channel, whose superseded
+          # tags are deleted — so the tag being released is usually the only one
+          # matching the glob.
+          LAST_IN_CHANNEL=$(git tag -l "$TAG_GLOB" --sort=-creatordate | grep -v "^${RELEASE_TAG}$" | head -1 || true)
           if [ -n "$LAST_IN_CHANNEL" ]; then
             BASE_TAG="$LAST_IN_CHANNEL"
           else
