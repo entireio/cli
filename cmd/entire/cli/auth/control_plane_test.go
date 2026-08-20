@@ -97,7 +97,7 @@ func TestResolveControlPlaneTargetForCluster_DialsClusterCoreNotActive(t *testin
 	}
 
 	// Stub cluster discovery so the test doesn't hit the network: the cluster
-	// resolves to the prod context (what /.well-known + selectContext would
+	// resolves to the prod context (what /.well-known + requireActiveContext would
 	// yield), NOT the active partial context.
 	prev := resolveContextForCluster
 	resolveContextForCluster = func(_ context.Context, _, _, host string, _ *http.Client, _ clusterdiscovery.DebugFunc) (*contexts.Context, error) {

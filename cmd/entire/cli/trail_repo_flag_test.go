@@ -2,9 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
 func TestParseTrailRepoArg(t *testing.T) {
@@ -66,6 +69,29 @@ func TestResolveTrailRepoOrRemote_OverrideSkipsGit(t *testing.T) {
 	}
 	if forge != "gh" || owner != "acme" || repo != "app" {
 		t.Fatalf("got (%q,%q,%q), want (gh,acme,app)", forge, owner, repo)
+	}
+}
+
+func TestRunAuthenticatedTrailAPIRoutesByRepo(t *testing.T) {
+	// newTrailAPIClient is a package seam, so this test must not run in parallel.
+	previous := newTrailAPIClient
+	var gotFullName string
+	newTrailAPIClient = func(_ context.Context, _ bool, fullName string) (*api.Client, error) {
+		gotFullName = fullName
+		return api.NewClientWithBaseURL("token", "https://cell.example"), nil
+	}
+	t.Cleanup(func() { newTrailAPIClient = previous })
+
+	called := false
+	err := runAuthenticatedTrailAPI(t.Context(), io.Discard, false, "gh/acme/app", func(_ context.Context, _ *api.Client) error {
+		called = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called || gotFullName != "acme/app" {
+		t.Fatalf("called=%v fullName=%q, want true and acme/app", called, gotFullName)
 	}
 }
 

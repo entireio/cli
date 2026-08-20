@@ -43,7 +43,7 @@ func (g *GeminiCLIAgent) InstallUserHooks(ctx context.Context) (agent.UserHookIn
 	if err != nil {
 		return agent.UserHookInstallResult{}, err
 	}
-	count, repaired, err := installHooksToFile(ctx, settingsPath, false, false, true)
+	count, repaired, err := installHooksToFile(ctx, settingsPath, false, true)
 	return agent.UserHookInstallResult{Installed: count, Repaired: repaired}, err
 }
 

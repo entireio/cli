@@ -2,6 +2,7 @@ package checkpoint
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -29,10 +30,14 @@ func TestWriteStandardCheckpointEntries_RefusesUnexpectedSessionZeroOverwrite(t 
 	}
 	store := NewGitStore(repo, DefaultV1Refs())
 
-	if err := logging.Init(context.Background(), ""); err != nil {
-		t.Fatalf("logging.Init() error = %v", err)
+	// The write path warns through the context's logger; give it a real one so
+	// the tripwire's diagnostics land in the log file instead of the terminal.
+	l, err := logging.New(logging.Config{Dir: filepath.Join(tmpDir, logging.LogsDir)})
+	if err != nil {
+		t.Fatalf("logging.New() error = %v", err)
 	}
-	defer logging.Close()
+	defer func() { _ = l.Close() }()
+	ctx := logging.WithLogger(context.Background(), l)
 
 	checkpointID, err := id.Generate()
 	if err != nil {
@@ -72,7 +77,7 @@ func TestWriteStandardCheckpointEntries_RefusesUnexpectedSessionZeroOverwrite(t 
 		Prompts:      []string{"hi"},
 	}
 
-	err = store.writeStandardCheckpointEntries(context.Background(), opts, basePath, entries)
+	err = store.writeStandardCheckpointEntries(ctx, opts, basePath, entries)
 	if err == nil {
 		t.Fatal("expected writeStandardCheckpointEntries to refuse, got nil error")
 	}

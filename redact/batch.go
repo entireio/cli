@@ -34,20 +34,33 @@ type NamedBlob struct {
 // (cross-blob walker) needs an explicit signal that OPF did not
 // finish.
 //
-// When OPF is unconfigured, disabled, has no enabled categories, or
-// the per-process circuit breaker has tripped, returns regex-only
-// output for every blob with no error. This matches the existing
-// non-batched paths and keeps the caller's hot-path code clean.
+// When OPF is unconfigured, disabled, or the per-process circuit
+// breaker has tripped, returns regex-only output for every blob with
+// no error. This matches the existing non-batched paths and keeps the
+// caller's hot-path code clean. Enabled with zero effective categories
+// is different: that returns ErrOPFNoEnabledCategories, because the
+// caller is about to stamp the Entire-OPF-Applied trailer and a silent
+// regex-only success here would make that attestation false. Enabled
+// with a nil runtime errors for the same reason. Both fail-closed
+// checks run BEFORE the breaker check so the guarantee is
+// unconditional — a tripped breaker must not downgrade a
+// misconfiguration back into silent regex-only success.
 func BatchBytesWithPrivacyFilter(ctx context.Context, inputs []NamedBlob) ([][]byte, error) {
 	if len(inputs) == 0 {
 		return nil, nil
 	}
 	cfg := getOPFConfig()
-	if cfg == nil || !cfg.Enabled || cfg.runtime == nil || opfBreakerTripped.Load() {
+	if cfg == nil || !cfg.Enabled {
 		return applyRegexLayersToBlobs(inputs), nil
 	}
 	cats := enabledCategories(cfg)
 	if len(cats) == 0 {
+		return nil, ErrOPFNoEnabledCategories
+	}
+	if cfg.runtime == nil {
+		return nil, errOPFNilRuntime
+	}
+	if opfBreakerTripped.Load() {
 		return applyRegexLayersToBlobs(inputs), nil
 	}
 

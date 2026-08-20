@@ -251,8 +251,12 @@ func expandTilde(pattern string) (string, error) {
 		return "", errors.New("unsupported ~user form")
 	}
 	slashed := filepath.ToSlash(filepath.Clean(pattern))
-	if !strings.HasPrefix(slashed, "/") && !filepath.IsAbs(pattern) {
-		return "", errors.New("relative pattern cannot match an absolute worktree root")
+	// filepath.IsAbs alone, on purpose: on Unix it IS the leading-slash test,
+	// and on Windows a slash-rooted pattern (the MSYS spelling /c/code/**) is
+	// NOT absolute and can never match a drive-rooted worktree root — a
+	// leading-slash allowance would accept it and silently fail open.
+	if !filepath.IsAbs(pattern) {
+		return "", errors.New("pattern must be an absolute path (a drive-rooted path on Windows)")
 	}
 	return slashed, nil
 }

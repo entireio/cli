@@ -84,7 +84,7 @@ func countOf(cmds []string, want string) int {
 }
 
 func agentWrappedStopCmd() string {
-	return buildClaudeHookCommands(false).stop
+	return buildClaudeHookCommands().stop
 }
 
 func entireCommandSet(t *testing.T, path string) map[string]bool {
@@ -295,7 +295,7 @@ func TestInstallUserHooks_CommandsMatchRepoProductionForms(t *testing.T) {
 	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
 		t.Fatalf("InstallUserHooks() error = %v", err)
 	}
-	if _, err := agent.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := agent.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 

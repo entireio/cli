@@ -60,10 +60,14 @@ that path is printed to stdout. Use --out to choose a specific path.`,
 			}
 
 			// AbsPath (not a bare repoRoot join): globally tracked repos
-			// route .entire/logs under the git common dir.
+			// route .entire/logs under the git common dir. An unroutable
+			// path must not abort the bundle — this command exists to
+			// debug exactly such broken setups — so fall back to the
+			// worktree location, which addDirToZip tolerates when absent.
 			logsDir, err := paths.AbsPath(ctx, logging.LogsDir)
 			if err != nil {
-				return fmt.Errorf("resolve logs directory: %w", err)
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not resolve routed logs directory (%v); bundling worktree logs only.\n", err)
+				logsDir = filepath.Join(repoRoot, logging.LogsDir)
 			}
 
 			if err := writeDoctorBundle(ctx, repoRoot, logsDir, outPath, rawFlag); err != nil {

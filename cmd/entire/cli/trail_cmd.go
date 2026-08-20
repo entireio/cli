@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -32,10 +34,10 @@ const (
 	defaultTrailListStatus = string(trail.StatusOpen)
 	// trailListStatusAny disables the status filter; user-facing value for --status.
 	trailListStatusAny = "any"
-	// trailListServerMaxLimit is the most trails the server returns per
-	// request (the list endpoint clamps limit to 200).
-	trailListServerMaxLimit = 200
-	trailFindMaxPages       = 10
+	// trailListServerMaxLimit is entire-api's maximum pageSize.
+	trailListServerMaxLimit = 100
+	// trailFindMaxPages bounds a branch/ID lookup at a 2,000-trail search budget.
+	trailFindMaxPages = 20
 )
 
 func trailContextBlurb() string {
@@ -147,8 +149,27 @@ type trailListOptions struct {
 	Repo string
 }
 
+// trailShowOptions are the inputs to runTrailShow. Keeping them on a struct
+// avoids a long positional argument list, matching trailListOptions.
+type trailShowOptions struct {
+	// Selector picks the trail by number, id, or branch. Empty means "the trail
+	// for Branch", and an empty Branch in turn means the current branch.
+	Selector string
+	// Branch shows the trail for this branch instead of the current branch.
+	Branch string
+	// Repo is an optional --repo override (forge/owner/repo or a clone URL);
+	// empty means derive the repo from the origin remote.
+	Repo         string
+	JSON         bool
+	InsecureHTTP bool
+}
+
 func newTrailShowCmd() *cobra.Command {
-	var branch string
+	var opts trailShowOptions
+	// branchFlag is bound only so cobra has somewhere to write --branch; RunE
+	// reads it back through trailBranchFlag (which trims) along with every other
+	// field, so a value reaches opts exactly one way.
+	var branchFlag string
 	cmd := &cobra.Command{
 		Use:   "show [<trail>]",
 		Short: "Show a trail",
@@ -168,58 +189,95 @@ Otherwise, <trail> may be a trail number, id, or branch in the target repo.`,
 			if err := ensureTrailRepoHasTarget(cmd, selector != "" || trailBranchFlag(cmd) != "", "pass a trail selector or --branch"); err != nil {
 				return err
 			}
-			return runTrailShow(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), selector, trailRepoFlag(cmd), trailBranchFlag(cmd))
+			opts.Selector = selector
+			opts.Branch = trailBranchFlag(cmd)
+			opts.Repo = trailRepoFlag(cmd)
+			opts.InsecureHTTP = trailInsecureHTTP(cmd)
+			return runTrailShow(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), opts)
 		},
 	}
-	cmd.Flags().StringVar(&branch, "branch", "", "Show the trail for this branch instead of the current branch; cannot be combined with a trail selector")
+	cmd.Flags().StringVar(&branchFlag, "branch", "", "Show the trail for this branch instead of the current branch; cannot be combined with a trail selector")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output the trail as JSON (same object shape as one entry of 'trail list --json')")
 	return cmd
 }
 
 // runTrailShow shows one trail, defaulting to the current branch's trail.
-func runTrailShow(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector, repoOverride, branchOverride string) error {
-	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, repoOverride, func(ctx context.Context, client *api.Client) error {
-		forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, repoOverride)
+func runTrailShow(ctx context.Context, w, errW io.Writer, opts trailShowOptions) error {
+	return runAuthenticatedTrailAPI(ctx, errW, opts.InsecureHTTP, opts.Repo, func(ctx context.Context, client *api.Client) error {
+		forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, opts.Repo)
 		if err != nil {
 			return err
 		}
-
-		found, err := resolveTrailBySelector(ctx, client, forge, owner, repo, selector, branchOverride)
-		if err != nil {
-			return err
-		}
-
-		// Enrich the list result with the detail endpoint, which carries the
-		// rendered description (trail.body_document.text_snapshot) the list
-		// omits, and surface a browser URL. The detail fetch is best-effort:
-		// the core metadata already came from the list, so a detail failure
-		// falls back to the list body with a warning rather than failing.
-		m := found.ToMetadata()
-		webURL := trailDisplayURL(*found, forge, owner, repo)
-		// Seed the description from the list body so a failed (or skipped)
-		// detail fetch still shows something; a successful detail fetch
-		// supersedes it with the richer body_document text below.
-		bodyText := found.Body
-		descriptionLoaded := strings.TrimSpace(found.Body) != ""
-		if found.Number > 0 {
-			if bt, derr := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number); derr == nil {
-				// A successful fetch means we authoritatively consulted the
-				// description, but it only supersedes the seeded list body when
-				// it actually carries text: an older/partial server that omits
-				// body_document returns "" here and must not blank out a list
-				// body that is present.
-				descriptionLoaded = true
-				if strings.TrimSpace(bt) != "" {
-					bodyText = bt
-				}
-			} else {
-				// Best-effort: warn but still render metadata + URL (and the
-				// list body) rather than failing the whole command.
-				fmt.Fprintf(errW, "Warning: could not load trail description: %v\n", derr)
-			}
-		}
-		printTrailDetails(w, m, webURL, trailDescriptionForDisplay(bodyText, descriptionLoaded))
-		return nil
+		return runTrailShowWithClient(ctx, w, errW, client, forge, owner, repo, opts)
 	})
+}
+
+// runTrailShowWithClient renders one trail once the repo and API client are
+// resolved. Warnings go to errW, so --json keeps stdout parseable even when the
+// best-effort description fetch fails.
+func runTrailShowWithClient(ctx context.Context, w, errW io.Writer, client *api.Client, forge, owner, repo string, opts trailShowOptions) error {
+	found, err := resolveTrailBySelector(ctx, client, forge, owner, repo, opts.Selector, opts.Branch)
+	if err != nil {
+		return err
+	}
+
+	// Enrich the list result with the detail endpoint, which carries the
+	// rendered description (trail.body_document.text_snapshot) the list
+	// omits, and surface a browser URL. The detail fetch is best-effort:
+	// the core metadata already came from the list, so a detail failure
+	// falls back to the list body with a warning rather than failing.
+	m := found.ToMetadata()
+	m.URL = trailDisplayURL(*found, forge, owner, repo)
+	// Seed the description from the list body so a failed (or skipped)
+	// detail fetch still shows something; a successful detail fetch
+	// supersedes it with the richer body_document text below.
+	bodyText := found.Body
+	descriptionLoaded := strings.TrimSpace(found.Body) != ""
+	switch {
+	case found.BodyDocument != nil:
+		// A numeric selector already resolved through the detail route, so the
+		// description is in hand — re-requesting the same URL would double the
+		// round trips for every `trail show <number>`. Same precedence as the
+		// fetch below: authoritative, but only supersedes a non-empty snapshot.
+		descriptionLoaded = true
+		if snapshot := strings.TrimSpace(found.BodyDocument.TextSnapshot); snapshot != "" {
+			bodyText = snapshot
+		}
+	case found.Number > 0:
+		if bt, _, derr := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number); derr == nil {
+			// A successful fetch means we authoritatively consulted the
+			// description, but it only supersedes the seeded list body when
+			// it actually carries text: an older/partial server that omits
+			// body_document returns "" here and must not blank out a list
+			// body that is present.
+			descriptionLoaded = true
+			if strings.TrimSpace(bt) != "" {
+				bodyText = bt
+			}
+		} else {
+			// Best-effort: warn but still render metadata + URL (and the
+			// list body) rather than failing the whole command.
+			fmt.Fprintf(errW, "Warning: could not load trail description: %v\n", derr)
+		}
+	}
+	// The list body is the weaker source; carry the resolved description on the
+	// metadata so JSON callers read the same text the human view renders.
+	m.Body = bodyText
+
+	if opts.JSON {
+		// Emit the raw body — never the "no description" placeholder, which is
+		// display text, not data. A single object mirrors one entry of
+		// `trail list --json` so both can feed the same parser.
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(m); err != nil {
+			return fmt.Errorf("failed to encode JSON: %w", err)
+		}
+		return nil
+	}
+
+	printTrailDetails(w, m, m.URL, trailDescriptionForDisplay(bodyText, descriptionLoaded))
+	return nil
 }
 
 // resolveTrailBySelector resolves a trail by an optional selector (trail
@@ -371,29 +429,37 @@ func trailWebURL(base, forge, owner, repo string, number int) string {
 }
 
 // fetchTrailDescription fetches a trail's rendered description text
-// (`trail.body_document.text_snapshot`), which the list endpoint omits, by
-// integer number. It returns only the description — the list result already
-// supplies the metadata — and decodes only the fields it needs, so it is
-// unaffected by the shape of sibling fields like `checkpoints`/`thread`.
-func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, error) {
+// (`trail.body_document.text_snapshot`) and its etag, which the list endpoint
+// omits, by integer number. It returns only the description and etag — the
+// list result already supplies the metadata — and decodes only the fields it
+// needs, so it is unaffected by the shape of sibling fields like
+// `checkpoints`/`thread`.
+func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, string, error) {
 	resp, err := client.Get(ctx, trailNumberPath(forge, owner, repo, number))
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch trail detail: %w", err)
+		return "", "", fmt.Errorf("failed to fetch trail detail: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
-		return "", err
+		return "", "", err
 	}
-	var detail struct {
-		Trail api.TrailResource `json:"trail"`
+	detail, err := decodeTrailResource(resp)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to decode trail detail: %w", err)
 	}
-	if err := api.DecodeJSON(resp, &detail); err != nil {
-		return "", fmt.Errorf("failed to decode trail detail: %w", err)
+	if detail.BodyDocument == nil {
+		return "", "", nil
 	}
-	if detail.Trail.BodyDocument == nil {
-		return "", nil
+	return strings.TrimSpace(detail.BodyDocument.TextSnapshot), detail.BodyDocument.ETag, nil
+}
+
+// decodeTrailResource decodes entire-api's direct detail resource.
+func decodeTrailResource(resp *http.Response) (api.TrailResource, error) {
+	var resource api.TrailResource
+	if err := api.DecodeJSON(resp, &resource); err != nil {
+		return api.TrailResource{}, fmt.Errorf("decode trail resource: %w", err)
 	}
-	return strings.TrimSpace(detail.Trail.BodyDocument.TextSnapshot), nil
+	return resource, nil
 }
 
 func newTrailListCmd() *cobra.Command {
@@ -453,36 +519,22 @@ func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Cli
 		return err
 	}
 
-	// Filtering, sorting (updated_at desc), and truncation all happen
-	// server-side; the response carries the total match count so a capped
-	// page never reads as the total number of matches.
-	resp, err := client.Get(ctx, trailsBasePath(forge, owner, repo)+trailListQuery(statusFilters, authorFilter, opts.Limit))
+	// entire-api uses opaque cursor pagination and a 100-row page cap. Walk as
+	// many pages as needed for --limit. Author login is filtered client-side:
+	// the new backend's author query is account-ID based, while the CLI's public
+	// flag has always accepted GitHub logins.
+	resources, totalMatched, err := listTrailResources(ctx, client, forge, owner, repo, statusFilters, authorFilter, opts.Limit)
 	if err != nil {
-		return fmt.Errorf("failed to list trails: %w", err)
-	}
-	defer resp.Body.Close()
-	if err := checkTrailResponse(resp); err != nil {
 		return err
 	}
 
-	var listResp api.TrailListResponse
-	if err := api.DecodeJSON(resp, &listResp); err != nil {
-		return fmt.Errorf("failed to decode trail list: %w", err)
-	}
-
-	// Convert to metadata for display, attaching the browser URL (server-provided
-	// when present, locally constructed as a fallback for older servers).
-	trails := make([]*trail.Metadata, 0, len(listResp.Trails))
-	for i := range listResp.Trails {
-		m := listResp.Trails[i].ToMetadata()
-		m.URL = trailDisplayURL(listResp.Trails[i], forge, owner, repo)
+	// Convert to metadata for display, attaching the browser URL (entire-api does
+	// not compose the web-app URL on this lower-level surface).
+	trails := make([]*trail.Metadata, 0, len(resources))
+	for i := range resources {
+		m := resources[i].ToMetadata()
+		m.URL = trailDisplayURL(resources[i], forge, owner, repo)
 		trails = append(trails, m)
-	}
-
-	totalMatched := listResp.Total
-	if totalMatched < len(trails) {
-		// Older servers don't report a total; fall back to the page size.
-		totalMatched = len(trails)
 	}
 
 	if opts.JSON {
@@ -506,22 +558,90 @@ func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Cli
 		TotalMatched:    totalMatched,
 	})
 
-	if opts.Limit > trailListServerMaxLimit && totalMatched > len(trails) {
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "Note: --limit %d exceeds the server maximum of %d trails per request.\n", opts.Limit, trailListServerMaxLimit)
-	}
-
 	return nil
 }
 
-// trailListQuery builds the server-side filter query for the trail list
-// endpoint. Empty statusFilters (--status any) omits the status param so the
-// server returns all statuses; the limit is capped at the server maximum.
-func trailListQuery(statusFilters []trail.Status, author string, limit int) string {
-	return trailListQueryWithOffset(statusFilters, author, limit, 0)
+func listTrailResources(ctx context.Context, client *api.Client, forge, owner, repo string, statuses []trail.Status, author string, limit int) ([]api.TrailResource, int, error) {
+	if limit <= 0 {
+		return nil, 0, errors.New("limit must be greater than 0")
+	}
+	items := make([]api.TrailResource, 0, min(limit, trailListServerMaxLimit))
+	pageToken := ""
+	seenTokens := map[string]bool{}
+	totalMatched := 0
+	for {
+		pageSize := trailListServerMaxLimit
+		if author == "" && limit-len(items) < pageSize {
+			pageSize = limit - len(items)
+		}
+		resp, err := client.Get(ctx, trailsBasePath(forge, owner, repo)+trailListPageQuery(statuses, pageSize, pageToken))
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to list trails: %w", err)
+		}
+		var page api.TrailListResponse
+		decodeErr := func() error {
+			defer resp.Body.Close()
+			if err := checkTrailResponse(resp); err != nil {
+				return err
+			}
+			if err := api.DecodeJSON(resp, &page); err != nil {
+				return fmt.Errorf("failed to decode trail list: %w", err)
+			}
+			return nil
+		}()
+		if decodeErr != nil {
+			return nil, 0, decodeErr
+		}
+
+		for _, resource := range page.Trails {
+			if author != "" {
+				login := ""
+				if resource.Author != nil && resource.Author.Login != nil {
+					login = *resource.Author.Login
+				}
+				if !strings.EqualFold(login, author) {
+					continue
+				}
+			}
+			totalMatched++
+			if len(items) < limit {
+				items = append(items, resource)
+			}
+			if author != "" && len(items) >= limit {
+				break
+			}
+		}
+		// entire-api's author filter accepts account IDs while the CLI accepts
+		// logins, so this path filters locally. Stop as soon as --limit is
+		// satisfied rather than walking the repository's complete trail history.
+		if author != "" && len(items) >= limit {
+			break
+		}
+		if author == "" {
+			totalMatched = page.Total
+			if totalMatched < len(items) {
+				totalMatched = len(items)
+			}
+			if len(items) >= limit {
+				break
+			}
+		}
+		if page.NextPageToken == nil || strings.TrimSpace(*page.NextPageToken) == "" {
+			break
+		}
+		pageToken = strings.TrimSpace(*page.NextPageToken)
+		if seenTokens[pageToken] {
+			return nil, 0, fmt.Errorf("trail list pagination repeated page token %q", pageToken)
+		}
+		seenTokens[pageToken] = true
+	}
+	return items, totalMatched, nil
 }
 
-func trailListQueryWithOffset(statusFilters []trail.Status, author string, limit, offset int) string {
+// trailListPageQuery builds entire-api's cursor-paginated list query. Empty
+// statuses (--status any) omit the filter. Author is intentionally absent: the
+// CLI accepts a login while this API's author filter accepts account ULIDs.
+func trailListPageQuery(statusFilters []trail.Status, pageSize int, pageToken string) string {
 	q := url.Values{}
 	if len(statusFilters) > 0 {
 		parts := make([]string, len(statusFilters))
@@ -530,15 +650,12 @@ func trailListQueryWithOffset(statusFilters []trail.Status, author string, limit
 		}
 		q.Set("status", strings.Join(parts, ","))
 	}
-	if author != "" {
-		q.Set("author", author)
+	if pageSize <= 0 || pageSize > trailListServerMaxLimit {
+		pageSize = trailListServerMaxLimit
 	}
-	if limit > trailListServerMaxLimit {
-		limit = trailListServerMaxLimit
-	}
-	q.Set("limit", strconv.Itoa(limit))
-	if offset > 0 {
-		q.Set("offset", strconv.Itoa(offset))
+	q.Set("pageSize", strconv.Itoa(pageSize))
+	if strings.TrimSpace(pageToken) != "" {
+		q.Set("pageToken", strings.TrimSpace(pageToken))
 	}
 	return "?" + q.Encode()
 }
@@ -613,9 +730,9 @@ type trailListDisplayOptions struct {
 	RequestedAuthor string
 	CurrentUser     string
 	StatusFilters   []trail.Status
-	// TotalMatched is the number of trails matching the filters server-side,
-	// before --limit truncation. Counts render as "shown/total" when they
-	// differ so a capped page doesn't read as the total number of matches.
+	// TotalMatched is the best available match count. It is exact when the
+	// backend returns a filtered total; login-filtered entire-api lists stop at
+	// --limit and therefore report only the displayed count.
 	TotalMatched int
 }
 
@@ -886,13 +1003,13 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr, ty
 		return err
 	}
 
-	client, err := NewAuthenticatedAPIClient(ctx, trailInsecureHTTP(cmd))
-	if err != nil {
-		return renderDataAPIAuthError(cmd.ErrOrStderr(), err)
-	}
 	forge, owner, repoName, err := resolveTrailRemote(ctx)
 	if err != nil {
 		return err
+	}
+	client, err := newTrailAPIClient(ctx, trailInsecureHTTP(cmd), owner+"/"+repoName)
+	if err != nil {
+		return renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), owner+"/"+repoName, err)
 	}
 
 	branchState, err := prepareTrailCreateBranch(w, errW, repo, branch, currentBranch, noBranch)
@@ -1100,32 +1217,40 @@ func newTrailCreateRequest(title, body, branch, base, statusStr, typeStr, priori
 }
 
 // resolveTrailUpdateBody returns the body text to seed the interactive update
-// form with. The list resource omits the description (it lives in
-// body_document, served only by the detail endpoint), so update must fetch the
-// detail body — otherwise the form prefills from the empty list body and a
-// user edit against that blank baseline can overwrite a description they never
-// saw. Best-effort: on a failed detail fetch it returns the list body plus the
-// error so the caller can warn (mirroring runTrailShow); an empty detail body
-// (older/partial server) falls back to the list body with no error.
-func resolveTrailUpdateBody(ctx context.Context, client *api.Client, forge, owner, repo string, found *api.TrailResource) (string, error) {
-	body := found.Body
+// form with, plus the etag of the description as read (empty when unavailable,
+// e.g. an older server or a fallback to the list body — see sendTrailBody for
+// how a missing etag is handled). The list resource omits the description (it
+// lives in body_document, served only by the detail endpoint), so update must
+// fetch the detail body — otherwise the form prefills from the empty list body
+// and a user edit against that blank baseline can overwrite a description they
+// never saw. Best-effort: on a failed detail fetch it returns the list body
+// (and no etag) plus the error so the caller can warn (mirroring
+// runTrailShow); an empty detail body (older/partial server) falls back to the
+// list body with no error.
+func resolveTrailUpdateBody(ctx context.Context, client *api.Client, forge, owner, repo string, found *api.TrailResource) (body, etag string, err error) {
+	body = found.Body
 	if found.Number > 0 {
-		bt, err := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number)
-		if err != nil {
-			return body, err
+		bt, et, ferr := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number)
+		if ferr != nil {
+			return body, "", ferr
 		}
 		// fetchTrailDescription already trims; a non-empty result supersedes
 		// the list body, an empty one (older/partial server) leaves it intact.
+		// The etag is kept either way — it describes the document read, not
+		// the text, so it's valid even when the description is legitimately
+		// empty (avoids a redundant refetch below).
+		etag = et
 		if bt != "" {
 			body = bt
 		}
 	}
-	return body, nil
+	return body, etag, nil
 }
 
 func newTrailUpdateCmd() *cobra.Command {
 	var statusStr, title, body, branch, typeStr, priorityStr string
-	var labelAdd, labelRemove, assigneeAdd, assigneeRemove, reviewerAdd, reviewerRemove []string
+	var assigneeAdd, assigneeRemove, reviewerAdd, reviewerRemove []string
+	var overwrite bool
 
 	cmd := &cobra.Command{
 		Use:   "update",
@@ -1142,10 +1267,9 @@ func newTrailUpdateCmd() *cobra.Command {
 				TitleChanged:    cmd.Flags().Changed("title"),
 				Body:            body,
 				BodyChanged:     cmd.Flags().Changed("body"),
+				Overwrite:       overwrite,
 				Branch:          branch,
 				Repo:            trailRepoFlag(cmd),
-				LabelAdd:        labelAdd,
-				LabelRemove:     labelRemove,
 				AssigneeAdd:     assigneeAdd,
 				AssigneeRemove:  assigneeRemove,
 				ReviewerAdd:     reviewerAdd,
@@ -1160,10 +1284,9 @@ func newTrailUpdateCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&statusStr, "status", "", "Update status")
 	cmd.Flags().StringVar(&title, "title", "", "Update title")
-	cmd.Flags().StringVar(&body, "body", "", "Update body")
+	cmd.Flags().StringVar(&body, "body", "", "Replace the description (--body= clears it)")
+	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "Replace the description unconditionally, even if it changed since being read (only applies when --body is also given)")
 	cmd.Flags().StringVar(&branch, "branch", "", "Branch to update trail for (defaults to current)")
-	cmd.Flags().StringSliceVar(&labelAdd, "add-label", nil, "Add label(s)")
-	cmd.Flags().StringSliceVar(&labelRemove, "remove-label", nil, "Remove label(s)")
 	cmd.Flags().StringSliceVar(&assigneeAdd, "add-assignee", nil, "Add assignee(s) by login")
 	cmd.Flags().StringSliceVar(&assigneeRemove, "remove-assignee", nil, "Remove assignee(s) by login")
 	cmd.Flags().StringSliceVar(&reviewerAdd, "add-reviewer", nil, "Request reviewer(s) by login")
@@ -1181,10 +1304,9 @@ type trailUpdateInputs struct {
 	TitleChanged    bool
 	Body            string
 	BodyChanged     bool
+	Overwrite       bool
 	Branch          string
 	Repo            string
-	LabelAdd        []string
-	LabelRemove     []string
 	AssigneeAdd     []string
 	AssigneeRemove  []string
 	ReviewerAdd     []string
@@ -1201,152 +1323,182 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 		if err != nil {
 			return err
 		}
-
-		// Determine branch.
-		branch := inputs.Branch
-		if branch == "" {
-			branch, err = GetCurrentBranch(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to determine current branch: %w", err)
-			}
-		}
-
-		// Find the trail by branch.
-		found, err := findTrailByBranch(ctx, client, forge, owner, repoName, branch)
-		if err != nil {
-			return err
-		}
-		if found == nil {
-			return fmt.Errorf("no trail found for branch %q", branch)
-		}
-
-		// Interactive mode when no update flags are provided.
-		statusStr := inputs.Status
-		title := inputs.Title
-		body := inputs.Body
-		noFlags := !inputs.StatusChanged && !inputs.TitleChanged && !inputs.BodyChanged &&
-			inputs.LabelAdd == nil && inputs.LabelRemove == nil &&
-			inputs.AssigneeAdd == nil && inputs.AssigneeRemove == nil &&
-			inputs.ReviewerAdd == nil && inputs.ReviewerRemove == nil &&
-			!inputs.TypeChanged && !inputs.PriorityChanged
-		if noFlags {
-			metadata := found.ToMetadata()
-			// Build status options with current value as default.
-			var statusOptions []huh.Option[string]
-			for _, s := range trail.ValidStatuses() {
-				if (s == trail.StatusMerged || s == trail.StatusClosed) && s != metadata.Status {
-					continue
-				}
-				label := string(s)
-				if s == metadata.Status {
-					label += " (current)"
-				}
-				statusOptions = append(statusOptions, huh.NewOption(label, string(s)))
-			}
-			statusStr = string(metadata.Status)
-			title = metadata.Title
-			// The list resource omits the description; fetch the detail body so
-			// the form prefills with the current text and change detection below
-			// compares against the real server value. Warn on a fetch failure so
-			// a blank baseline doesn't silently overwrite an unseen description.
-			seedBody, bodyErr := resolveTrailUpdateBody(ctx, client, forge, owner, repoName, found)
-			if bodyErr != nil {
-				fmt.Fprintf(errW, "Warning: could not load current trail body: %v\n", bodyErr)
-			}
-			body = seedBody
-			origStatus, origTitle, origBody := statusStr, title, body
-
-			form := NewAccessibleForm(
-				huh.NewGroup(
-					huh.NewSelect[string]().
-						Title("Status").
-						Options(statusOptions...).
-						Value(&statusStr),
-					huh.NewInput().
-						Title("Title").
-						Value(&title),
-					huh.NewText().
-						Title("Body").
-						Value(&body),
-				),
-			)
-			if formErr := form.Run(); formErr != nil {
-				return handleFormCancellation(w, "Trail update", formErr)
-			}
-			// Only mark a field changed when the user actually edited it, so an
-			// untouched body/title/status isn't needlessly PATCHed (a no-op body
-			// PATCH would otherwise rewrite the description on every update).
-			inputs.StatusChanged = statusStr != origStatus
-			inputs.TitleChanged = title != origTitle
-			inputs.BodyChanged = body != origBody
-		}
-
-		statusStr = strings.TrimSpace(statusStr)
-		title = strings.TrimSpace(title)
-		if err := validateTrailUpdateFields(trailUpdateInputs{
-			Status:          statusStr,
-			StatusChanged:   inputs.StatusChanged,
-			Title:           title,
-			TitleChanged:    inputs.TitleChanged,
-			Type:            inputs.Type,
-			TypeChanged:     inputs.TypeChanged,
-			Priority:        inputs.Priority,
-			PriorityChanged: inputs.PriorityChanged,
-		}); err != nil {
-			return err
-		}
-
-		// Build update request with only changed fields.
-		updateReq := buildTrailUpdateRequest(found, trailUpdateInputs{
-			Status:          statusStr,
-			StatusChanged:   inputs.StatusChanged,
-			Title:           title,
-			TitleChanged:    inputs.TitleChanged,
-			Body:            body,
-			BodyChanged:     inputs.BodyChanged,
-			LabelAdd:        inputs.LabelAdd,
-			LabelRemove:     inputs.LabelRemove,
-			AssigneeAdd:     inputs.AssigneeAdd,
-			AssigneeRemove:  inputs.AssigneeRemove,
-			ReviewerAdd:     inputs.ReviewerAdd,
-			ReviewerRemove:  inputs.ReviewerRemove,
-			Type:            inputs.Type,
-			TypeChanged:     inputs.TypeChanged,
-			Priority:        inputs.Priority,
-			PriorityChanged: inputs.PriorityChanged,
-		})
-
-		// The single-trail endpoint is keyed by trail number, not id; the server
-		// rejects an id here with "Invalid trail number format".
-		if found.Number <= 0 {
-			return fmt.Errorf("trail for branch %q has no number yet; cannot update", branch)
-		}
-		path := trailNumberPath(forge, owner, repoName, found.Number)
-
-		// The server rejects body + metadata in one PATCH, so send them as
-		// separate requests when both are present. These two calls are not
-		// atomic: if the metadata PATCH lands and the body PATCH then fails, the
-		// metadata change persists. Report that partial state explicitly so the
-		// caller knows the metadata already applied and only the body needs a
-		// retry, rather than assuming nothing changed.
-		meta, hasMeta, bodyReq := splitTrailUpdate(updateReq)
-		if hasMeta {
-			if err := sendTrailPatch(ctx, client, path, meta); err != nil {
-				return err
-			}
-		}
-		if bodyReq != nil {
-			if err := sendTrailPatch(ctx, client, path, *bodyReq); err != nil {
-				if hasMeta {
-					return fmt.Errorf("trail metadata was updated, but the body update failed (the metadata change already applied; retry only the --body change): %w", err)
-				}
-				return err
-			}
-		}
-
-		fmt.Fprintf(w, "Updated trail for branch %s\n", branch)
-		return nil
+		return runTrailUpdateWithClient(ctx, w, errW, client, forge, owner, repoName, inputs)
 	})
+}
+
+// runTrailUpdateWithClient applies a trail update once the repo and API client
+// are resolved.
+func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *api.Client, forge, owner, repoName string, inputs trailUpdateInputs) error {
+	// Determine branch.
+	branch := inputs.Branch
+	if branch == "" {
+		current, err := GetCurrentBranch(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to determine current branch: %w", err)
+		}
+		branch = current
+	}
+
+	// Find the trail by branch.
+	found, err := findTrailByBranch(ctx, client, forge, owner, repoName, branch)
+	if err != nil {
+		return err
+	}
+	if found == nil {
+		return fmt.Errorf("no trail found for branch %q", branch)
+	}
+
+	// Interactive mode when no update flags are provided.
+	statusStr := inputs.Status
+	title := inputs.Title
+	body := inputs.Body
+	var bodyETag string
+	noFlags := !inputs.StatusChanged && !inputs.TitleChanged && !inputs.BodyChanged &&
+		inputs.AssigneeAdd == nil && inputs.AssigneeRemove == nil &&
+		inputs.ReviewerAdd == nil && inputs.ReviewerRemove == nil &&
+		!inputs.TypeChanged && !inputs.PriorityChanged
+	if noFlags {
+		metadata := found.ToMetadata()
+		// Build status options with current value as default.
+		var statusOptions []huh.Option[string]
+		for _, s := range trail.ValidStatuses() {
+			if (s == trail.StatusMerged || s == trail.StatusClosed) && s != metadata.Status {
+				continue
+			}
+			label := string(s)
+			if s == metadata.Status {
+				label += " (current)"
+			}
+			statusOptions = append(statusOptions, huh.NewOption(label, string(s)))
+		}
+		statusStr = string(metadata.Status)
+		title = metadata.Title
+		// The list resource omits the description; fetch the detail body so
+		// the form prefills with the current text and change detection below
+		// compares against the real server value. Warn on a fetch failure so
+		// a blank baseline doesn't silently overwrite an unseen description.
+		seedBody, seedETag, bodyErr := resolveTrailUpdateBody(ctx, client, forge, owner, repoName, found)
+		if bodyErr != nil {
+			fmt.Fprintf(errW, "Warning: could not load current trail body: %v\n", bodyErr)
+		}
+		body = seedBody
+		bodyETag = seedETag
+		origStatus, origTitle, origBody := statusStr, title, body
+
+		form := NewAccessibleForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("Status").
+					Options(statusOptions...).
+					Value(&statusStr),
+				huh.NewInput().
+					Title("Title").
+					Value(&title),
+				huh.NewText().
+					Title("Body").
+					Value(&body),
+			),
+		)
+		if formErr := form.Run(); formErr != nil {
+			return handleFormCancellation(w, "Trail update", formErr)
+		}
+		// Only mark a field changed when the user actually edited it, so an
+		// untouched body/title/status isn't needlessly PATCHed (a no-op body
+		// PATCH would otherwise rewrite the description on every update).
+		inputs.StatusChanged = statusStr != origStatus
+		inputs.TitleChanged = title != origTitle
+		inputs.BodyChanged = body != origBody
+	}
+
+	statusStr = strings.TrimSpace(statusStr)
+	title = strings.TrimSpace(title)
+	if err := validateTrailUpdateFields(trailUpdateInputs{
+		Status:          statusStr,
+		StatusChanged:   inputs.StatusChanged,
+		Title:           title,
+		TitleChanged:    inputs.TitleChanged,
+		Type:            inputs.Type,
+		TypeChanged:     inputs.TypeChanged,
+		Priority:        inputs.Priority,
+		PriorityChanged: inputs.PriorityChanged,
+	}); err != nil {
+		return err
+	}
+
+	// Build the metadata request with only changed fields. The description is
+	// not part of it — it is written separately, from the `body` local below.
+	updateReq := buildTrailUpdateRequest(found, trailUpdateInputs{
+		Status:          statusStr,
+		StatusChanged:   inputs.StatusChanged,
+		Title:           title,
+		TitleChanged:    inputs.TitleChanged,
+		AssigneeAdd:     inputs.AssigneeAdd,
+		AssigneeRemove:  inputs.AssigneeRemove,
+		ReviewerAdd:     inputs.ReviewerAdd,
+		ReviewerRemove:  inputs.ReviewerRemove,
+		Type:            inputs.Type,
+		TypeChanged:     inputs.TypeChanged,
+		Priority:        inputs.Priority,
+		PriorityChanged: inputs.PriorityChanged,
+	})
+
+	// The single-trail endpoint is keyed by trail number, not id; the server
+	// rejects an id here with "Invalid trail number format".
+	if found.Number <= 0 {
+		return fmt.Errorf("trail for branch %q has no number yet; cannot update", branch)
+	}
+	path := trailNumberPath(forge, owner, repoName, found.Number)
+
+	// Metadata and description live on different routes, so an update touching
+	// both sends two requests. They are not atomic: if the metadata PATCH lands
+	// and the body PUT then fails, the metadata change persists. Report that
+	// partial state explicitly so the caller knows the metadata already applied
+	// and only the body needs a retry, rather than assuming nothing changed.
+	hasMeta := trailUpdateRequestHasFields(updateReq)
+	if !hasMeta && !inputs.BodyChanged {
+		// Nothing changed — most often the interactive form opened and closed
+		// untouched. Say so instead of printing the success line: no request went
+		// out, and agents read that line as confirmation the write landed.
+		fmt.Fprintf(w, "No changes to apply to the trail for branch %s\n", branch)
+		return nil
+	}
+	if hasMeta {
+		if err := sendTrailPatch(ctx, client, path, updateReq); err != nil {
+			return err
+		}
+	}
+	if !noFlags && inputs.BodyChanged && bodyETag == "" && !inputs.Overwrite {
+		// Non-interactive --body path only (noFlags is the interactive
+		// branch, which already read the body and its etag above to seed the
+		// editor — gating on that branch rather than on bodyETag=="" matters:
+		// an interactive session can legitimately end with no etag too (e.g.
+		// the seed read failed and the user was already warned), and redoing
+		// the read here would silently pair an etag for content the user
+		// never saw with their edit). A --body caller supplied the
+		// replacement text directly and skipped that read, so do it here,
+		// best-effort, purely for the etag. A failure just leaves bodyETag
+		// empty and falls through to sendTrailBody's graceful Overwrite
+		// fallback rather than failing the whole command — but say so, since
+		// this is the unattended path most likely to run without anyone
+		// watching for a silently downgraded conflict check.
+		if _, etag, ferr := fetchTrailDescription(ctx, client, forge, owner, repoName, found.Number); ferr != nil {
+			fmt.Fprintf(errW, "Warning: could not verify trail body is unchanged (%v); writing without conflict detection\n", ferr)
+		} else {
+			bodyETag = etag
+		}
+	}
+	if inputs.BodyChanged {
+		if err := sendTrailBody(ctx, client, trailBodyPath(forge, owner, repoName, found.Number), body, bodyETag, inputs.Overwrite); err != nil {
+			if hasMeta {
+				return fmt.Errorf("trail metadata was updated, but the body update failed (the metadata change already applied; retry only the --body change): %w", err)
+			}
+			return err
+		}
+	}
+
+	fmt.Fprintf(w, "Updated trail for branch %s\n", branch)
+	return nil
 }
 
 func validateTrailUpdateFields(inputs trailUpdateInputs) error {
@@ -1419,7 +1571,10 @@ func mergeStringSet(current, add, remove []string) []string {
 	return out
 }
 
-// buildTrailUpdateRequest constructs a PATCH request body from the current trail and the requested changes.
+// buildTrailUpdateRequest constructs the metadata PATCH body from the current
+// trail and the requested changes. It deliberately ignores inputs.Body: the
+// description is not part of this request, it is written by sendTrailBody
+// against its own route, and api.TrailUpdateRequest has no field to put it in.
 func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInputs) api.TrailUpdateRequest {
 	var req api.TrailUpdateRequest
 
@@ -1428,9 +1583,6 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 	}
 	if inputs.TitleChanged {
 		req.Title = &inputs.Title
-	}
-	if inputs.BodyChanged {
-		req.Body = &inputs.Body
 	}
 	if inputs.TypeChanged {
 		typ := strings.TrimSpace(inputs.Type)
@@ -1441,10 +1593,6 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 		req.Priority = &priority
 	}
 	// Replace-set fields: compute the full new list from the current trail.
-	if len(inputs.LabelAdd) > 0 || len(inputs.LabelRemove) > 0 {
-		labels := mergeStringSet(current.Labels, inputs.LabelAdd, inputs.LabelRemove)
-		req.Labels = &labels
-	}
 	if len(inputs.AssigneeAdd) > 0 || len(inputs.AssigneeRemove) > 0 {
 		assignees := mergeStringSet(current.Assignees, inputs.AssigneeAdd, inputs.AssigneeRemove)
 		req.Assignees = &assignees
@@ -1457,27 +1605,32 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 	return req
 }
 
-// splitTrailUpdate separates a full update into a metadata request and an
-// optional body request. The server rejects a body update combined with
-// status/title/assignees/reviewers/type/priority (trails.ts:4384), so the two
-// must be sent as separate PATCH calls. Labels are exempt server-side, but for
-// simplicity they travel in the metadata request too; the only cost is one
-// extra PATCH in the rare body+labels-only update, which is harmless. hasMeta
-// reports whether the metadata request has any field set.
-func splitTrailUpdate(full api.TrailUpdateRequest) (meta api.TrailUpdateRequest, hasMeta bool, bodyReq *api.TrailUpdateRequest) {
-	if full.Body != nil {
-		b := *full.Body
-		bodyReq = &api.TrailUpdateRequest{Body: &b}
+// trailUpdateRequestHasFields reports whether req sets any field at all. It
+// walks the struct reflectively rather than naming each field, so a field added
+// to api.TrailUpdateRequest later — a branch rename, say — counts as a metadata
+// change without anyone having to remember to extend this check. Forgetting to
+// would drop that change silently: the PATCH is never sent, yet the command
+// still reports success.
+//
+// The reflective default is only right for fields the metadata route actually
+// serves. A field that has to travel with the description instead — a
+// hypothetical body_format or body_version — belongs in api.TrailBodyRequest
+// and on the body PUT; put it here and it goes out on a route that does not
+// know it, which is the same wrong-route mistake the body itself used to make.
+func trailUpdateRequestHasFields(req api.TrailUpdateRequest) bool {
+	v := reflect.ValueOf(req)
+	for i := range v.NumField() {
+		// Every field is a pointer today (nil means "not provided"), but IsZero
+		// also covers a plain string or slice field added later.
+		if !v.Field(i).IsZero() {
+			return true
+		}
 	}
-	meta = full
-	meta.Body = nil
-	hasMeta = meta.Status != nil || meta.Title != nil || meta.Labels != nil ||
-		meta.Assignees != nil || meta.RequestedReviewers != nil ||
-		meta.Type != nil || meta.Priority != nil
-	return meta, hasMeta, bodyReq
+	return false
 }
 
-// sendTrailPatch issues a single trail PATCH and validates the response.
+// sendTrailPatch issues a single trail metadata PATCH and validates the
+// response. The description is not sent here — see sendTrailBody.
 func sendTrailPatch(ctx context.Context, client *api.Client, path string, req api.TrailUpdateRequest) error {
 	resp, err := client.Patch(ctx, path, req)
 	if err != nil {
@@ -1490,6 +1643,63 @@ func sendTrailPatch(ctx context.Context, client *api.Client, path string, req ap
 	var updateResp api.TrailUpdateResponse
 	if err := api.DecodeJSON(resp, &updateResp); err != nil {
 		return fmt.Errorf("failed to decode update response: %w", err)
+	}
+	return nil
+}
+
+// sendTrailBody writes a trail's description through the body route, the only
+// one that serves body writes (api.TrailUpdateRequest documents why the metadata
+// PATCH does not). path must already be that route — see trailBodyPath.
+//
+// Three dispatch modes, in order:
+//
+//   - overwrite: sends Overwrite: true and no If-Match. This is the explicit
+//     --overwrite flag — the caller wants the replacement to win regardless of
+//     what's there.
+//   - ifMatch non-empty (and !overwrite): sends If-Match instead of Overwrite,
+//     so the write is rejected with 412 if the description changed since
+//     ifMatch was read (resolveTrailUpdateBody / the non-interactive etag
+//     fetch in runTrailUpdateWithClient).
+//   - neither: falls back to Overwrite: true. This is deliberate graceful
+//     degradation, not a shortcut to remove — it's what runs against a server
+//     that predates the etag field, a trail with no body document yet, or
+//     after a failed best-effort etag read. Refusing to write in that case
+//     would make `trail update --body` unusable against anything older or
+//     partial than the newest server.
+func sendTrailBody(ctx context.Context, client *api.Client, path, body, ifMatch string, overwrite bool) error {
+	req := api.TrailBodyRequest{Markdown: body}
+	var headers http.Header
+	if ifMatch != "" && !overwrite {
+		headers = http.Header{"If-Match": []string{ifMatch}}
+	} else {
+		req.Overwrite = true
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal trail body request: %w", err)
+	}
+	resp, err := client.Request(ctx, http.MethodPut, path, headers, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("failed to update trail body: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		switch {
+		case api.IsHTTPErrorStatus(err, http.StatusPreconditionFailed):
+			return fmt.Errorf("%w — trail body changed since it was read; run 'entire trail show' to see the current text and merge it in, then re-run — or pass --overwrite to discard it", err)
+		case api.IsHTTPErrorStatus(err, http.StatusConflict):
+			return fmt.Errorf("%w — trail body is not empty; pass --overwrite to replace it", err)
+		default:
+			return err
+		}
+	}
+	// Nothing reads the document back; decoding it only confirms the success
+	// really was this route's JSON response, and drains the body — the same
+	// check sendTrailPatch makes on the metadata route.
+	var doc api.TrailBodyDocument
+	if err := api.DecodeJSON(resp, &doc); err != nil {
+		return fmt.Errorf("failed to decode trail body response: %w", err)
 	}
 	return nil
 }
@@ -1711,27 +1921,15 @@ func runTrailDelete(cmd *cobra.Command, number int, branch string, force bool) e
 	})
 }
 
-// deleteTrailByNumber deletes the trail with the given integer number and
-// verifies the server's {ok:true} signal. CheckResponse accepts any 2xx and the
-// body is otherwise unread, so a destructive delete must confirm ok before
-// reporting success (decoding also drains the body for connection reuse).
+// deleteTrailByNumber deletes a trail; entire-api answers 204 No Content, so any
+// 2xx is a successful delete and the body is not read.
 func deleteTrailByNumber(ctx context.Context, client *api.Client, forge, owner, repo string, number int) error {
 	resp, err := client.Delete(ctx, trailNumberPath(forge, owner, repo, number))
 	if err != nil {
 		return fmt.Errorf("failed to delete trail: %w", err)
 	}
 	defer resp.Body.Close()
-	if err := checkTrailResponse(resp); err != nil {
-		return err
-	}
-	var delResp api.TrailDeleteResponse
-	if err := api.DecodeJSON(resp, &delResp); err != nil {
-		return fmt.Errorf("failed to decode delete response: %w", err)
-	}
-	if !delResp.OK {
-		return fmt.Errorf("trail API did not confirm deletion of trail #%d", number)
-	}
-	return nil
+	return checkTrailResponse(resp)
 }
 
 // confirmTrailDeletion decides whether a trail delete should proceed. With
@@ -1902,20 +2100,40 @@ func findTrailByBranch(ctx context.Context, client *api.Client, forge, owner, re
 	})
 }
 
-// findTrailByNumber looks up a trail by numeric identifier via the list API.
+// findTrailByNumber looks up a trail by numeric identifier through entire-api's
+// direct number route, so it never has to scan the list pages.
 func findTrailByNumber(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (*api.TrailResource, error) {
-	return findTrail(ctx, client, forge, owner, repo, func(t api.TrailResource) bool {
-		return t.Number == number
-	})
+	resp, err := client.Get(ctx, trailNumberPath(forge, owner, repo, number))
+	if err != nil {
+		return nil, fmt.Errorf("get trail %d: %w", number, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil //nolint:nilnil // nil, nil means "not found" to selector callers
+	}
+	if err := checkTrailResponse(resp); err != nil {
+		return nil, err
+	}
+
+	found, err := decodeTrailResource(resp)
+	if err != nil {
+		return nil, fmt.Errorf("decode trail %d: %w", number, err)
+	}
+	if found.ID == "" && found.Number == 0 {
+		// A 2xx carrying nothing recognizable is "not found", not a trail whose
+		// every field is zero: selector callers would otherwise act on a phantom.
+		return nil, nil //nolint:nilnil // nil, nil means "not found" to selector callers
+	}
+	return &found, nil
 }
 
 func findTrail(ctx context.Context, client *api.Client, forge, owner, repo string, match func(api.TrailResource) bool) (*api.TrailResource, error) {
-	// The list endpoint paginates; walk bounded pages so branch/number/id lookups do
-	// not silently miss older trails beyond the first server-max page.
-	offset := 0
-	previousPageSignature := ""
+	// Walk bounded opaque-cursor pages so selector lookups do not silently miss
+	// trails beyond the first entire-api page.
+	pageToken := ""
+	seenTokens := map[string]bool{}
 	for range trailFindMaxPages {
-		resp, err := client.Get(ctx, trailsBasePath(forge, owner, repo)+trailListQueryWithOffset(nil, "", trailListServerMaxLimit, offset))
+		resp, err := client.Get(ctx, trailsBasePath(forge, owner, repo)+trailListPageQuery(nil, trailListServerMaxLimit, pageToken))
 		if err != nil {
 			return nil, fmt.Errorf("list trails: %w", err)
 		}
@@ -1940,39 +2158,22 @@ func findTrail(ctx context.Context, client *api.Client, forge, owner, repo strin
 				return &listResp.Trails[i], nil
 			}
 		}
-
-		pageLen := len(listResp.Trails)
-		if pageLen == 0 || pageLen < trailListServerMaxLimit {
+		if listResp.NextPageToken == nil || strings.TrimSpace(*listResp.NextPageToken) == "" {
 			break
 		}
-		if listResp.Total == 0 {
-			pageSignature := trailListPageSignature(listResp.Trails)
-			if pageSignature != "" && pageSignature == previousPageSignature {
-				break
-			}
-			previousPageSignature = pageSignature
-		}
-		offset += pageLen
-		if listResp.Total > 0 && offset >= listResp.Total {
+		pageToken = strings.TrimSpace(*listResp.NextPageToken)
+		if seenTokens[pageToken] {
 			break
 		}
+		seenTokens[pageToken] = true
 	}
 	return nil, nil //nolint:nilnil // nil, nil means "not found" — callers check both
-}
-
-func trailListPageSignature(trails []api.TrailResource) string {
-	if len(trails) == 0 {
-		return ""
-	}
-	first := trails[0]
-	last := trails[len(trails)-1]
-	return fmt.Sprintf("%s/%d/%s:%s/%d/%s", first.ID, first.Number, first.Branch, last.ID, last.Number, last.Branch)
 }
 
 // trailsBasePath returns the API path prefix for trails endpoints
 // (e.g., "/api/v1/trails/gh/org/repo").
 func trailsBasePath(forge, owner, repo string) string {
-	return fmt.Sprintf("/api/v1/trails/%s/%s/%s", forge, owner, repo)
+	return fmt.Sprintf("/api/v1/trails/%s/%s/%s", url.PathEscape(forge), url.PathEscape(owner), url.PathEscape(repo))
 }
 
 // trailNumberPath returns the single-trail API path keyed by integer trail
@@ -1980,6 +2181,13 @@ func trailsBasePath(forge, owner, repo string) string {
 // integer here and rejects the trail UUID, so callers must pass Number, not ID.
 func trailNumberPath(forge, owner, repo string, number int) string {
 	return trailsBasePath(forge, owner, repo) + "/" + strconv.Itoa(number)
+}
+
+// trailBodyPath returns the route that writes a trail's description
+// (e.g. "/api/v1/trails/gh/acme/repo/575/body"). It is the only route that does;
+// see api.TrailBodyRequest.
+func trailBodyPath(forge, owner, repo string, number int) string {
+	return trailNumberPath(forge, owner, repo, number) + "/body"
 }
 
 // resolveTrailRemote resolves the origin remote and ensures the forge is

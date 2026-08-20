@@ -208,14 +208,16 @@ type cellSubject struct {
 // ENTIRE_TOKEN when set (exclusive, fail-closed), otherwise the ACTIVE stored
 // login context.
 //
-// It deliberately uses the active context — the same login `entire auth token`
-// (no flag) prints a bearer for — rather than resolveStoredCellSubject's
-// data-host discovery. `--jurisdiction` mints a token for the caller's SELECTED
-// environment, so with (say) a partial.to context active it must mint a
-// partial.to token even though the data host defaults to entire.io. Discovery
-// keys off api.BaseURL() and would pick whichever context that host trusts,
-// silently ignoring the selection. NewEntireAPICellClient is a different case —
-// it dials the data plane — so it keeps calling resolveStoredCellSubject.
+// It deliberately skips resolveStoredCellSubject's data-host discovery.
+// `--jurisdiction` mints a token for the caller's SELECTED environment, so with
+// (say) a partial.to context active it must mint a partial.to token even though
+// the data host defaults to entire.io. Discovery keys off api.BaseURL(), so it
+// would fail outright — clusterdiscovery.requireActiveContext validates the
+// active context against *that* host's trusted issuers and errors when they
+// don't match, which for this command is the wrong question to ask: the target
+// jurisdiction comes from the flag, not from the default data host.
+// NewEntireAPICellClient is a different case — it dials the data plane — so it
+// keeps calling resolveStoredCellSubject.
 func resolveCellSubject(ctx context.Context, insecureHTTP bool) (cellSubject, error) {
 	if raw, ok := os.LookupEnv(EnvTokenVar); ok {
 		return resolveEnvTokenCellSubject(raw, insecureHTTP)

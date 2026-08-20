@@ -29,10 +29,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// agentHookLogCleanup stores the cleanup function for agent hook logging.
-// Set by PersistentPreRunE, called by PersistentPostRunE.
-var agentHookLogCleanup func()
-
 // currentHookAgentName stores the agent name for the currently executing hook.
 // Set by newAgentHookVerbCmdWithLogging before calling the handler.
 // This allows handlers to know which agent invoked the hook without guessing.
@@ -61,15 +57,18 @@ func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cob
 		Use:    string(agentName),
 		Short:  handler.Description() + " hook handlers",
 		Hidden: true,
-		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			agentHookLogCleanup = initHookLogging(cmd.Context())
-			return nil
-		},
-		PersistentPostRunE: func(_ *cobra.Command, _ []string) error {
-			if agentHookLogCleanup != nil {
-				agentHookLogCleanup()
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+			// withHookSession scans session state and loads redactors, so it must
+			// not run in a repo Entire is not active in. Same fail-closed gate
+			// the git-hook tree applies before its own call — IsActiveForRepo,
+			// so globally-tracked repos get session stamping and redaction too.
+			if !settings.IsActiveForRepo(cmd.Context()) {
+				return
 			}
-			return nil
+			// Cobra invokes this PersistentPreRun with the leaf command, so
+			// SetContext hands the session-stamped context straight to the
+			// hook verb's RunE via cmd.Context().
+			cmd.SetContext(withHookSession(cmd.Context()))
 		},
 	}
 
@@ -96,12 +95,14 @@ func getHookType(hookName string) string {
 }
 
 // executeAgentHook runs the core hook execution logic for a given agent and hook name.
-// It handles git repo checks, enabled checks, logging, event parsing, and lifecycle dispatch.
+// It handles git repo checks, enabled checks, the hook logging context, event
+// parsing, and lifecycle dispatch.
 // Used by both the registered subcommand path and the RunE fallback for external agents.
-// When initLogging is true, it initializes and cleans up hook logging (used by the RunE fallback
-// since it doesn't go through PersistentPreRunE). Built-in agent subcommands pass false since
-// their parent command's PersistentPreRunE already handles logging.
-func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, initLogging bool) error {
+// When stampSession is true, it attaches the hook session context itself (used by
+// the RunE fallback since it doesn't go through PersistentPreRun). Built-in agent
+// subcommands pass false since their parent command's PersistentPreRun already
+// did it.
+func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, stampSession bool) error {
 	// Skip if not in a git repository - hooks shouldn't prevent the agent
 	// from working. On SessionStart only, and only when the user opted in to
 	// global tracking (tier configured AND enabled), leave a one-line notice:
@@ -127,7 +128,7 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	// or unreadable settings file made every hook invocation pay the full
 	// dispatch cost instead of exiting fast (#524).
 	// settings.IsActiveForRepo(WithReason) is the same fail-closed gate the
-	// git hooks use (see PersistentPreRunE in hooks_git_cmd.go). It extends
+	// git hooks use (see PersistentPreRun in hooks_git_cmd.go). It extends
 	// IsSetUpAndEnabled with the user-global tier: repos with no repo-level
 	// setup proceed when global mode is on and the repo is not excluded.
 	if active, reason := settings.IsActiveForRepoWithReason(cmd.Context()); !active {
@@ -135,9 +136,8 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		return nil
 	}
 
-	if initLogging {
-		cleanup := initHookLogging(cmd.Context())
-		defer cleanup()
+	if stampSession {
+		cmd.SetContext(withHookSession(cmd.Context()))
 	}
 
 	// Lazy invisible setup for globally tracked repos (no repo-level setup,
@@ -145,11 +145,10 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	// (skipped when core.hooksPath resolves inside the worktree — see
 	// MaybeEnsureGlobalSetup) and seeds the checkpoint metadata ref; nothing
 	// it does creates a worktree file. Cheap no-op once the clone-prefs
-	// marker is set or when repo-level setup exists. Runs after logging is
-	// initialized — on the built-in agent route the parent command's
-	// PersistentPreRunE did that, on the RunE fallback the block above did —
-	// so its Debug-level failure ladder is recorded. The git-hook route
-	// triggers the same setup (hooks_git_cmd.go).
+	// marker is set or when repo-level setup exists. The root pre-run has
+	// already installed the logger by here, so its Debug-level failure ladder
+	// is recorded. The git-hook route triggers the same setup
+	// (hooks_git_cmd.go).
 	strategy.MaybeEnsureGlobalSetup(cmd.Context())
 
 	// Initialize logging context with agent name

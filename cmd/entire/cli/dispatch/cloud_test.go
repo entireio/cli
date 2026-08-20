@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
 func newTestCloudClient(t *testing.T, baseURL, token string) *CloudClient {
@@ -77,6 +79,34 @@ func TestCloudClient_CreateDispatch_Happy(t *testing.T) {
 	}
 	if got.GeneratedMarkdown != "hi" {
 		t.Fatalf("bad generated markdown: %q", got.GeneratedMarkdown)
+	}
+}
+
+func TestCloudClient_CreateDispatch_SetsVersionedUserAgent(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	var gotUserAgent string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUserAgent = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"window":{"normalized_since":"2026-04-09T00:00:00Z","normalized_until":"2026-04-16T00:00:00Z"},"covered_repos":["entireio/cli"],"repos":[],"generated_markdown":"hi"}`)) //nolint:errcheck // test fixture response
+	}))
+	defer srv.Close()
+
+	client := newTestCloudClient(t, srv.URL, "t")
+	_, err := client.CreateDispatch(ctx, CreateDispatchRequest{
+		Repos:    []string{testRepoFullName},
+		Since:    "2026-04-09T00:00:00Z",
+		Until:    "2026-04-16T00:00:00Z",
+		Generate: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := versioninfo.UserAgent(); gotUserAgent != want {
+		t.Fatalf("expected User-Agent %q, got %q", want, gotUserAgent)
 	}
 }
 

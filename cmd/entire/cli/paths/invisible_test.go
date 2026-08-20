@@ -1,6 +1,8 @@
 package paths_test
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -148,6 +150,14 @@ func TestAbsPath_InvisibleRouting_ProbeFailure(t *testing.T) {
 		if !paths.IsUnroutableRuntimePath(err) {
 			t.Errorf("AbsPath(%q) error %v does not carry ErrUnroutableRuntimePath", rel, err)
 		}
+	}
+
+	// The loop above cached the routing error; a caller arriving with a
+	// canceled context must see its cancellation, not the stale cached error.
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := paths.AbsPath(canceled, ".entire/logs"); !errors.Is(err, context.Canceled) {
+		t.Errorf("AbsPath with canceled ctx on a cached routing error = %v, want context.Canceled", err)
 	}
 
 	// Non-runtime paths are unaffected by the probe failure.

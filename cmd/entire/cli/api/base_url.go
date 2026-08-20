@@ -17,7 +17,15 @@ const (
 
 	// DefaultAuthBaseURL is the production Entire login server — the
 	// default for `entire login --server`.
-	DefaultAuthBaseURL = "https://us.auth.entire.io"
+	//
+	// This apex host is a dispatcher, not a token issuer: it redirects
+	// /authorize and /device_authorization to the caller's regional login
+	// server (e.g. https://us.auth.entire.io) and serves no token endpoint,
+	// no discovery document, and no JWKS. Tokens are always minted by a
+	// region, with iss and aud set to that region's host — which is what
+	// gets persisted as a context's CoreURL and is the target of every
+	// later refresh and RFC 8693 exchange.
+	DefaultAuthBaseURL = "https://auth.entire.io"
 
 	// BaseURLEnvVar overrides the Entire API origin for local development.
 	BaseURLEnvVar = "ENTIRE_API_BASE_URL"

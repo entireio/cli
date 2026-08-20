@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/huh/v2"
 
@@ -363,8 +364,9 @@ func TestMaybeMigrateGlobalRuntimeData_MovesRoutedFiles(t *testing.T) {
 
 	// Routed runtime data as the invisible tier lays it out (namespaced per
 	// worktree; the main worktree's key hashes the empty worktree ID), plus
-	// one file that already exists in the worktree target (must be skipped,
-	// not clobbered).
+	// two files that already exist in the worktree target: a DIVERGENT one
+	// (kept, source counted failed so it stays findable) and an identical
+	// duplicate (source dropped, counted already-present).
 	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
 	source := filepath.Join(dir, filepath.FromSlash(sourceRel))
 	testutil.WriteFile(t, dir, sourceRel+"/metadata/sess-1/prompt.txt", "routed prompt")
@@ -372,6 +374,8 @@ func TestMaybeMigrateGlobalRuntimeData_MovesRoutedFiles(t *testing.T) {
 	testutil.WriteFile(t, dir, sourceRel+"/tmp/scratch.txt", "routed tmp")
 	testutil.WriteFile(t, dir, sourceRel+"/metadata/sess-1/conflict.txt", "routed version")
 	testutil.WriteFile(t, dir, ".entire/metadata/sess-1/conflict.txt", "worktree version")
+	testutil.WriteFile(t, dir, sourceRel+"/metadata/sess-1/dup.txt", "same bytes")
+	testutil.WriteFile(t, dir, ".entire/metadata/sess-1/dup.txt", "same bytes")
 
 	var buf bytes.Buffer
 	maybeMigrateGlobalRuntimeData(t.Context(), &buf)
@@ -390,19 +394,25 @@ func TestMaybeMigrateGlobalRuntimeData_MovesRoutedFiles(t *testing.T) {
 	if err != nil || string(data) != "worktree version" {
 		t.Errorf("conflicting target must be kept (data=%q err=%v)", data, err)
 	}
-	// Moved files leave the source; the skipped conflict file stays behind.
+	// Moved files leave the source; the divergent conflict file stays behind.
 	if _, err := os.Stat(filepath.Join(source, "metadata", "sess-1", "prompt.txt")); !os.IsNotExist(err) {
 		t.Errorf("moved file still present in source (err=%v)", err)
 	}
 	if _, err := os.Stat(filepath.Join(source, "metadata", "sess-1", "conflict.txt")); err != nil {
-		t.Errorf("skipped file must stay in source: %v", err)
+		t.Errorf("divergent file must stay in source: %v", err)
+	}
+	// The identical duplicate is dropped from the source, not stranded.
+	if _, err := os.Stat(filepath.Join(source, "metadata", "sess-1", "dup.txt")); !os.IsNotExist(err) {
+		t.Errorf("identical duplicate still present in source (err=%v)", err)
 	}
 	// Emptied source subtrees are removed.
 	if _, err := os.Stat(filepath.Join(source, "logs")); !os.IsNotExist(err) {
 		t.Errorf("emptied source logs dir not removed (err=%v)", err)
 	}
-	if !strings.Contains(buf.String(), "Moved 3") {
-		t.Errorf("expected one-line summary with moved count, got: %q", buf.String())
+	for _, want := range []string{"Moved 3", "1 already present", "1 could not be moved (left in "} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("summary missing %q, got: %q", want, buf.String())
+		}
 	}
 }
 
@@ -466,6 +476,62 @@ func TestMaybeMigrateGlobalRuntimeData_MigratesOnlyCurrentWorktreeNamespace(t *t
 	}
 	if !strings.Contains(buf.String(), "Moved 1") {
 		t.Errorf("expected a one-file summary, got: %q", buf.String())
+	}
+}
+
+// TestMaybeMigrateGlobalRuntimeData_DefersWhileSessionActive pins the
+// active-writer guard: an ACTIVE session in THIS worktree defers the whole
+// migration (a hook may be mid-write under the routed dir), while idle
+// sessions here and active sessions of other worktrees do not.
+func TestMaybeMigrateGlobalRuntimeData_DefersWhileSessionActive(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	paths.ClearWorktreeRootCache()
+	paths.ClearInvisibleRuntimeCache()
+	session.ClearGitCommonDirCache()
+	t.Cleanup(func() {
+		paths.ClearWorktreeRootCache()
+		paths.ClearInvisibleRuntimeCache()
+		session.ClearGitCommonDirCache()
+	})
+
+	store, err := session.NewStateStore(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveState := func(id string, phase session.Phase, worktree string) {
+		t.Helper()
+		if err := store.Save(t.Context(), &session.State{
+			SessionID: id, Phase: phase, WorktreePath: worktree, StartedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	saveState("sess-idle-here", session.PhaseIdle, dir)
+	saveState("sess-active-elsewhere", session.PhaseActive, filepath.Join(dir, "elsewhere"))
+
+	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
+	testutil.WriteFile(t, dir, sourceRel+"/logs/first.log", "routed")
+	var buf bytes.Buffer
+	maybeMigrateGlobalRuntimeData(t.Context(), &buf)
+	if !strings.Contains(buf.String(), "Moved 1") {
+		t.Fatalf("idle/foreign sessions must not defer migration, got: %q", buf.String())
+	}
+
+	saveState("sess-active-here", session.PhaseActive, dir)
+	testutil.WriteFile(t, dir, sourceRel+"/logs/second.log", "routed")
+	buf.Reset()
+	maybeMigrateGlobalRuntimeData(t.Context(), &buf)
+	if !strings.Contains(buf.String(), "deferred") {
+		t.Fatalf("expected a deferral line, got: %q", buf.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(sourceRel), "logs", "second.log")); err != nil {
+		t.Errorf("deferred migration must leave the routed file in place: %v", err)
 	}
 }
 
@@ -832,7 +898,7 @@ func TestRunUninstall_ClearsGlobalSetupMarker(t *testing.T) {
 	// Repo-level setup, with the marker still latched from an earlier
 	// globally tracked phase (the pre-fix state every takeover now clears).
 	testutil.WriteFile(t, dir, ".entire/settings.json", `{"enabled": true}`)
-	if _, err := strategy.InstallGitHook(t.Context(), true, false, false); err != nil {
+	if _, err := strategy.InstallGitHook(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
