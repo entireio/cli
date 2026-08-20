@@ -168,6 +168,11 @@ func TestMatchesExcludePath_WindowsDriveAbsolute(t *testing.T) {
 	if !matched {
 		t.Error(`C:/code/** must exclude C:\code\repo`)
 	}
+	// The MSYS spelling (/c/code/**) is NOT absolute on Windows and can never
+	// match a drive-rooted root — it must fail closed, not silently no-op.
+	if _, err := matchesExcludePath(t.Context(), []string{`/c/code/**`}, `C:\code\repo`); err == nil {
+		t.Error("slash-rooted pattern must fail closed on Windows (it can never match)")
+	}
 }
 
 // TestMatchesExcludePath_SymlinkedPrefix pins the logical/physical bridging:

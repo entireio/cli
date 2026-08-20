@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -313,6 +314,58 @@ func TestGetHooksDirInPath_CoreHooksPath(t *testing.T) {
 	}
 	if filepath.Clean(absoluteResult) != filepath.Clean(absHooksPath) {
 		t.Errorf("absolute core.hooksPath expected %s, got %s", absHooksPath, absoluteResult)
+	}
+}
+
+// Global mode runs first-ever installs from hook processes that can fire
+// concurrently; without the install lock, one racer renames the other's
+// half-installed wrapper over the user's backup — destroying the user's hook
+// and leaving a wrapper that chains to itself.
+func TestInstallGitHook_ConcurrentFirstInstall_PreservesUserHook(t *testing.T) {
+	tmpDir := t.TempDir()
+	initCmd := exec.CommandContext(t.Context(), "git", "init")
+	initCmd.Dir = tmpDir
+	if err := initCmd.Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	const userHook = "#!/bin/sh\necho user-commit-msg\n"
+	hookPath := filepath.Join(tmpDir, ".git", "hooks", "commit-msg")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte(userHook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := InstallGitHook(t.Context(), true, false, false); err != nil {
+				t.Errorf("InstallGitHook: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	backup, err := os.ReadFile(hookPath + backupSuffix)
+	if err != nil {
+		t.Fatalf("user hook backup missing: %v", err)
+	}
+	if string(backup) != userHook {
+		t.Fatalf("user hook destroyed: backup contains %q", backup)
+	}
+	installed, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(installed), entireHookMarker) {
+		t.Fatalf("installed hook is not Entire's: %q", installed)
 	}
 }
 

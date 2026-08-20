@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -310,6 +311,19 @@ func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (i
 		return 0, fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
+	// Serialize installs across processes: with global mode, first-ever
+	// installation runs from hook processes that can fire concurrently, and
+	// the unsynchronized read→rename→write below can otherwise rename a
+	// half-installed wrapper over the user's hook backup — destroying the
+	// user's hook and leaving a wrapper that chains to itself. The lock lives
+	// in the git common dir, never the hooks dir, which can be
+	// worktree-resident (core.hooksPath).
+	unlock, err := lockHookInstall(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+
 	cmdPrefix, err := hookCmdPrefix(localDev, absolutePath)
 	if err != nil {
 		return 0, err
@@ -375,6 +389,20 @@ func writeHookFile(path, content string) (bool, error) {
 	return true, nil
 }
 
+// lockHookInstall takes the cross-process lock serializing every hook
+// install/remove for this clone (shared across worktrees via the common dir).
+func lockHookInstall(ctx context.Context) (func(), error) {
+	commonDir, err := GetGitCommonDir(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve git common dir for hook-install lock: %w", err)
+	}
+	release, err := flock.Acquire(filepath.Join(commonDir, "entire-hook-install.lock"))
+	if err != nil {
+		return nil, fmt.Errorf("lock hook installation: %w", err)
+	}
+	return release, nil
+}
+
 // RemoveGitHook removes all Entire CLI git hooks from the repository.
 // If a .pre-entire backup exists, it is restored.
 // Returns the number of hooks removed.
@@ -383,6 +411,14 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+
+	// Same lock as InstallGitHook: a disable racing a lazy hook-process
+	// install performs the same rename dance over the same paths.
+	unlock, err := lockHookInstall(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 
 	removed := 0
 	var removeErrors []string

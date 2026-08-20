@@ -95,13 +95,23 @@ func NewRootCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			// If we're in a git repo Entire isn't active in — no repo-level
-			// setup AND not covered by the global tier — start the setup flow.
-			// A globally-tracked repo must not be funneled into repo-level
-			// setup: completing it writes .entire/settings.json, which
-			// permanently pins the repo out of the global tier (exclude lists
-			// stop applying to it).
-			if _, err := paths.WorktreeRoot(ctx); err == nil && !settings.IsSetUpAny(ctx) && !settings.GlobalModeActive(ctx) {
-				return runSetupFlow(ctx, cmd.OutOrStdout(), EnableOptions{})
+			// setup AND the global tier affirmatively not enabled — start the
+			// setup flow. A globally-tracked repo must not be funneled into
+			// repo-level setup: completing it writes .entire/settings.json,
+			// which permanently pins the repo out of the global tier (exclude
+			// lists stop applying to it). The enabled BIT gates here, not
+			// GlobalModeActive: the gate's fail-closed answer reads "tier off"
+			// for an unusable config too, and at THIS call site that answer
+			// would run the wizard and pin the repo — the opposite of failing
+			// safe. An unreadable file is surfaced instead of acted on.
+			if _, err := paths.WorktreeRoot(ctx); err == nil && !settings.IsSetUpAny(ctx) {
+				us, loadErr := settings.LoadUserSettings(ctx)
+				switch {
+				case loadErr != nil:
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: the user-global settings file cannot be read (%v).\nGlobal tracking is off machine-wide until it is fixed; run 'entire enable' to set this repo up explicitly.\n", loadErr)
+				case us.Global == nil || !us.Global.Enabled:
+					return runSetupFlow(ctx, cmd.OutOrStdout(), EnableOptions{})
+				}
 			}
 			return cmd.Help()
 		},
