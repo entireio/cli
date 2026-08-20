@@ -213,7 +213,7 @@ func TestRoot_NounGroupShorthandsUseCobraAliases(t *testing.T) {
 	}
 }
 
-func TestCheckpointSearchIsVisibleButTopLevelSearchIsExperimental(t *testing.T) {
+func TestSearchIsVisibleAtTopLevelAndUnderCheckpoint(t *testing.T) {
 	t.Parallel()
 
 	root := NewRootCmd()
@@ -226,15 +226,17 @@ func TestCheckpointSearchIsVisibleButTopLevelSearchIsExperimental(t *testing.T) 
 		t.Fatal("checkpoint search should be visible in checkpoint help")
 	}
 
-	// The top-level `entire search` shortcut is gated as experimental:
-	// visible and grouped in developer builds (the default test build),
-	// hidden in shipped releases.
+	// The top-level `entire search` is the canonical spelling: visible in
+	// every build (not experimental-gated) and grouped with sessions.
 	topLevelSearch, _, err := root.Find([]string{"search"})
 	if err != nil {
 		t.Fatalf("find top-level search: %v", err)
 	}
-	if topLevelSearch.GroupID != experimental.GroupID {
-		t.Fatalf("top-level search GroupID = %q, want %q (experimental)", topLevelSearch.GroupID, experimental.GroupID)
+	if topLevelSearch.Hidden {
+		t.Fatal("top-level search should be visible in every build")
+	}
+	if topLevelSearch.GroupID != groupSessions {
+		t.Fatalf("top-level search GroupID = %q, want %q", topLevelSearch.GroupID, groupSessions)
 	}
 }
 
@@ -288,6 +290,7 @@ func TestRoot_VisibleCommandsAreGrouped(t *testing.T) {
 		"clean":      groupSetup,
 		"session":    groupSessions,
 		"checkpoint": groupSessions,
+		"search":     groupSessions,
 		"recap":      groupSessions,
 		"activity":   groupSessions,
 		"dispatch":   groupSessions,

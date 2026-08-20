@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
 func TestBuildApprovalRequestRequiresMessageForRequestChanges(t *testing.T) {
@@ -48,5 +52,49 @@ func TestTrailApprovalCmdsHaveExpectedFlags(t *testing.T) {
 	}
 	if newTrailApprovalsCmd().Flags().Lookup("json") == nil {
 		t.Error("approvals missing --json")
+	}
+}
+
+// TestRenderTrailApprovalsShowsAuthorLogin covers the render path that the
+// author-shape mismatch broke. The approvals endpoint sends `"author":"nodo"`, so
+// the login must reach the output; when this was decoded as a *trail.Author the
+// whole response failed before rendering and the command printed only an error.
+func TestRenderTrailApprovalsShowsAuthorLogin(t *testing.T) {
+	t.Parallel()
+
+	created, err := time.Parse(time.RFC3339, "2026-08-11T09:35:11Z")
+	if err != nil {
+		t.Fatalf("parse time: %v", err)
+	}
+	approvals := []api.TrailApproval{
+		{
+			ID:        "59ef5b87",
+			Author:    "nodo",
+			Event:     "approved",
+			CommitSHA: "e9a9dcbf1fbc55580e7212096824a01e1691853d",
+			CreatedAt: created,
+		},
+		{
+			ID:        "9f65e574",
+			Author:    "reviewer2",
+			Event:     "changes_requested",
+			Body:      "needs a test",
+			CommitSHA: "d55dfa6",
+			CreatedAt: created,
+		},
+	}
+
+	var buf bytes.Buffer
+	renderTrailApprovals(&buf, approvals)
+	out := buf.String()
+
+	for _, want := range []string{"approved", "nodo", "e9a9dcb", "changes_requested", "reviewer2", "needs a test"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	// The 40-char SHA is abbreviated, so the full hash must not appear.
+	if strings.Contains(out, "e9a9dcbf1fbc55580e7212096824a01e1691853d") {
+		t.Errorf("commit SHA should be abbreviated:\n%s", out)
 	}
 }

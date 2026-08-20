@@ -1069,7 +1069,8 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	// exists remotely but not locally. Bounded budget + the store's failure
 	// memo keep a dead network from stalling the post-commit hook.
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
-		RefFetcher: remote.HookCheckpointRefFetcher(),
+		RefFetcher:  remote.HookCheckpointRefFetcher(),
+		ReadRemotes: CheckpointReadRemotes(ctx),
 	})
 	if err != nil {
 		return fmt.Errorf("open checkpoint store: %w", err)
@@ -2337,6 +2338,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		}
 		captureSessionBranch(repo, state)
 		captureSessionOwner(state)
+		reconcileWorktreePathForResumedTurn(ctx, state)
 
 		// ORDERING: attribution runs BEFORE migrate to use the pre-migration
 		// BaseCommit as the base tree (preserving correct agent-line counts
@@ -2499,10 +2501,12 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 		return result
 	}
 
-	// Get worktree status to find ALL changed files. Shared with the turn-start
-	// pre-prompt capture via the context status cache, so the expensive go-git
-	// worktree walk runs once per hook rather than once per caller.
-	status, err := gitrepo.Status(ctx, repo)
+	// Get worktree status to find ALL changed files. This is a second full
+	// worktree walk in the turn-start hook — the pre-prompt capture in
+	// cli/state.go does its own. They are not shared, but they share the
+	// budget wrapper's process-local breach latch: if the pre-prompt walk
+	// breached, this call fails fast instead of re-entering the walk.
+	status, err := gitrepo.StatusWithBudget(ctx, repo)
 	if err != nil {
 		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree status",
 			slog.String("error", err.Error()))
@@ -2922,7 +2926,8 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// sessions). Bounded budget + the store's failure memo keep a dead
 	// network from stalling the stop hook N times.
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
-		RefFetcher: remote.HookCheckpointRefFetcher(),
+		RefFetcher:  remote.HookCheckpointRefFetcher(),
+		ReadRemotes: CheckpointReadRemotes(ctx),
 	})
 	if err != nil {
 		logging.Warn(logCtx, "finalize: failed to open checkpoint store",
@@ -3032,7 +3037,7 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 ) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	start := time.Now()
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: CheckpointReadRemotes(ctx)})
 	if err != nil {
 		logging.Warn(logCtx, "post-commit: carry-forward failed to open checkpoint store",
 			slog.String("session_id", state.SessionID),

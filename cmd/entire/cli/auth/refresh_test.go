@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -204,6 +205,60 @@ func TestNewRefreshingLoginProvider_ExpiredNoRefresh(t *testing.T) {
 	}
 }
 
+// A context pointing at a core that is no longer listening (the stale
+// local-dev-context case) must say which context chose that host and how to get
+// out of it — not just "connection refused" from a port the user has to
+// recognize on their own.
+func TestNewRefreshingLoginProvider_UnreachableCore(t *testing.T) {
+	// A core nobody is listening on: start a server, take its URL, stop it.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	coreURL := srv.URL
+	srv.Close()
+
+	provider := seedExpiredLogin(t, "local", coreURL, nil)
+	_, err := provider(t.Context())
+	if err == nil {
+		t.Fatal("unreachable core: want an error")
+	}
+	got := err.Error()
+	// Phrase, context name and host pinned together, so the host can't satisfy
+	// the assertion by appearing in some unrelated segment.
+	if want := fmt.Sprintf("cannot reach the login server for %q (%s)", "local", coreURL); !strings.Contains(got, want) {
+		t.Errorf("error %q missing %q", got, want)
+	}
+	if !strings.Contains(got, "entire login") || !strings.Contains(got, "entire auth use <context>") {
+		t.Errorf("error %q missing the re-login and switch-login hints", got)
+	}
+	// The transport cause survives for callers matching on it, and the message
+	// doesn't repeat the /oauth/token URL it already names as the login server.
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Errorf("error %v no longer unwraps to ECONNREFUSED", err)
+	}
+	if strings.Contains(got, "/oauth/token") {
+		t.Errorf("error %q repeats the token endpoint URL", got)
+	}
+}
+
+// A token endpoint that answers is a credential problem, not a reachability
+// one: it must keep its own wording rather than being reworded as unreachable.
+func TestNewRefreshingLoginProvider_RejectedRefreshIsNotUnreachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprint(w, `{"error":"invalid_grant","error_description":"refresh token revoked"}`)
+	}))
+	defer srv.Close()
+
+	provider := seedExpiredLogin(t, "alice@core", srv.URL, srv.Client().Transport)
+	_, err := provider(t.Context())
+	if err == nil {
+		t.Fatal("rejected refresh token: want an error")
+	}
+	if strings.Contains(err.Error(), "cannot reach the login server") {
+		t.Errorf("rejected refresh reworded as unreachable: %v", err)
+	}
+}
+
 // The full path: an expired access token is silently re-minted from the
 // stored refresh token, and the rotated refresh token is persisted.
 func TestNewRefreshingLoginProvider_RefreshesAndRotates(t *testing.T) {
@@ -324,6 +379,32 @@ func TestContextTokenStore_SaveTokens_RefreshFirstOrdering(t *testing.T) {
 			t.Fatalf("refresh slot = %q, want entr_new persisted before the access write", r)
 		}
 	})
+}
+
+// seedExpiredLogin points the token store at a throwaway file holding an
+// already-expired login JWT for coreURL plus an "entr_old" refresh token, and
+// returns a login provider for a context named name — i.e. a login that must
+// re-mint on first use, which is what puts the refresh grant on the wire.
+// allowInsecureHTTP is always on: every caller's core is a loopback test server.
+func seedExpiredLogin(t *testing.T, name, coreURL string, transport http.RoundTripper) func(context.Context) (string, error) {
+	t.Helper()
+	t.Cleanup(tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json")))
+
+	svc := tokenstore.CoreKeyringService(coreURL)
+	expired := makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"alice","exp":%d}`, coreURL, time.Now().Add(-time.Hour).Unix()))
+	if err := tokenstore.Set(svc, "alice", expired+tokenstore.TokenExpirationSeparator+"0"); err != nil {
+		t.Fatalf("seed access token: %v", err)
+	}
+	if err := tokenstore.Set(tokenstore.RefreshService(svc), "alice", "entr_old"); err != nil {
+		t.Fatalf("seed refresh token: %v", err)
+	}
+
+	c := &contexts.Context{Name: name, CoreURL: coreURL, Handle: "alice", KeychainService: svc}
+	provider, err := NewRefreshingLoginProvider(c, transport, true)
+	if err != nil {
+		t.Fatalf("NewRefreshingLoginProvider: %v", err)
+	}
+	return provider
 }
 
 func failRoundTripper(t *testing.T) http.RoundTripper {

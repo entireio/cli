@@ -395,9 +395,16 @@ func TestMultiPushURL_DestinationNoteSurfaces(t *testing.T) {
 			want:  []string{"Checkpoint destination", "pushes to 2 URLs", "first URL only", "checkpoint_remote"},
 		},
 		{
-			name:  "several remotes",
-			setup: func(env *TestEnv) { env.SetupNamedBareRemote("backup") },
-			want:  []string{"2 remotes", "always looks at origin"},
+			// The note used to say checkpoints "follow whichever remote you push
+			// to" — the opposite of the single-remote election, where a push to a
+			// non-elected remote carries no session history — and that reading
+			// them back "always looks at origin", which stopped being true when
+			// the read-candidate chain landed. Assert the false phrasings are
+			// gone, not merely that the correct text is present.
+			name:   "several remotes",
+			setup:  func(env *TestEnv) { env.SetupNamedBareRemote("backup") },
+			want:   []string{"2 remotes", "single elected remote", "entire status"},
+			absent: []string{"follow whichever remote", "always looks at origin"},
 		},
 	}
 

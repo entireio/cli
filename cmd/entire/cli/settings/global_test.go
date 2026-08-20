@@ -86,6 +86,13 @@ func TestNormalizeOrigin(t *testing.T) {
 		// insteadOf shorthands normalize to the shorthand form — the
 		// ExcludeOrigins contract is "patterns match what git config stores".
 		{"gh:acme/widgets", "gh/acme/widgets"},
+		// Trailing slashes and any-case ".git" name the same clone target and
+		// must not leak into the normalized form (they'd fail open: non-empty,
+		// matching no pattern).
+		{"https://github.com/acme/widgets/", "github.com/acme/widgets"},
+		{"git@github.com:acme/widgets.GIT", "github.com/acme/widgets"},
+		{"https://github.com/acme/widgets.git/", "github.com/acme/widgets"},
+		{"https://github.com/acme/widgets/.git", "github.com/acme/widgets"},
 		{"not a url at all", ""},
 		{"", ""},
 	}
@@ -143,6 +150,30 @@ func TestMatchesExcludePath(t *testing.T) {
 				t.Errorf("matchesExcludePath(%v, %q) = %v, want %v", c.patterns, c.root, got, c.want)
 			}
 		})
+	}
+}
+
+// TestMatchesExcludePath_WindowsDriveAbsolute pins that drive-letter
+// absolutes pass the relative-pattern guard: filepath.IsAbs, not the "/"
+// prefix (which they can never carry), is what qualifies them.
+func TestMatchesExcludePath_WindowsDriveAbsolute(t *testing.T) {
+	t.Parallel()
+	// Gate on the capability itself: drive-letter paths are absolute only on
+	// Windows, which is exactly the property under test.
+	if !filepath.IsAbs(`C:/code`) {
+		t.Skip("drive-letter absolutes exist only on Windows")
+	}
+	matched, err := matchesExcludePath(t.Context(), []string{`C:/code/**`}, `C:\code\repo`)
+	if err != nil {
+		t.Fatalf("drive-letter absolute pattern must not be rejected as relative: %v", err)
+	}
+	if !matched {
+		t.Error(`C:/code/** must exclude C:\code\repo`)
+	}
+	// The MSYS spelling (/c/code/**) is NOT absolute on Windows and can never
+	// match a drive-rooted root — it must fail closed, not silently no-op.
+	if _, err := matchesExcludePath(t.Context(), []string{`/c/code/**`}, `C:\code\repo`); err == nil {
+		t.Error("slash-rooted pattern must fail closed on Windows (it can never match)")
 	}
 }
 
@@ -290,6 +321,7 @@ func TestMatchesExcludeOrigin(t *testing.T) {
 		{"trailing whitespace trimmed", []string{"github.com/acme/* "}, "github.com/acme/widgets", true, false},
 		{"whitespace-only pattern skipped", []string{"   "}, "github.com/acme/widgets", false, false},
 		{"invalid glob fails closed", []string{"["}, "github.com/acme/widgets", false, true},
+		{"invalid glob fails closed even with no origin", []string{"["}, "", false, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -402,6 +434,23 @@ func TestIsActiveForRepo(t *testing.T) {
 		t.Chdir(dir)
 		if IsActiveForRepo(t.Context()) {
 			t.Fatal("explicit repo-level disable must veto global mode")
+		}
+	})
+
+	t.Run("local-only repo enable is active", func(t *testing.T) {
+		dir := newRepo(t)
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		if err := os.MkdirAll(filepath.Join(dir, ".entire"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// settings.local.json ONLY, enabled — `enable --local` writes just this
+		// file, and the gate treating it as inactive silently drops all capture.
+		if err := os.WriteFile(filepath.Join(dir, ".entire", "settings.local.json"), []byte(`{"enabled":true}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		if !IsActiveForRepo(t.Context()) {
+			t.Fatal("a local-only enabled setup must activate")
 		}
 	})
 
@@ -598,6 +647,30 @@ func TestIsActiveForRepo_FailClosed(t *testing.T) {
 		t.Chdir(dir)
 		if IsActiveForRepo(t.Context()) {
 			t.Fatal("an unusable exclude pattern must deactivate global mode (fail closed)")
+		}
+	})
+
+	t.Run("malformed exclude_origins pattern, repo has no origin", func(t *testing.T) {
+		dir := newGlobalTestRepo(t)
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		writeUserSettings(t, cfg, `{"global":{"enabled":true,"exclude_origins":["["]}}`)
+		t.Chdir(dir)
+		if IsActiveForRepo(t.Context()) {
+			t.Fatal("a malformed exclude_origins pattern must fail closed identically with and without an origin")
+		}
+	})
+
+	t.Run("blank origin value", func(t *testing.T) {
+		dir := newGlobalTestRepo(t)
+		// `url =` with no value: the key exists but exclusion cannot be checked.
+		addTestRemote(t, dir, "config", "remote.origin.url", "")
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		writeUserSettings(t, cfg, `{"global":{"enabled":true,"exclude_origins":["github.com/acme/*"]}}`)
+		t.Chdir(dir)
+		if IsActiveForRepo(t.Context()) {
+			t.Fatal("a blank origin URL must read as present-but-uncheckable, not as no-origin")
 		}
 	})
 

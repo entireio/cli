@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -226,12 +227,12 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 	// repoRoot may be a different repo (--repo/RepoPaths) or the cwd may not be
 	// a repo at all, so scope checkpoint store construction to this repo.
 	repoCtx := settings.WithWorktreeRoot(ctx, repoRoot)
-	stores, err := checkpoint.Open(repoCtx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(repoCtx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(repoCtx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
 	store := stores.Persistent
-	infos, err := store.List(ctx)
+	infos, err := store.List(repoCtx)
 	if err != nil {
 		return nil, fmt.Errorf("list committed checkpoints: %w", err)
 	}
@@ -243,7 +244,7 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 			continue
 		}
 
-		summary, err := store.Read(ctx, info.CheckpointID)
+		summary, err := store.Read(repoCtx, info.CheckpointID)
 		if err != nil {
 			logging.Warn(ctx, "failed to read committed checkpoint for dispatch", "checkpoint_id", info.CheckpointID.String(), "error", err)
 			continue
@@ -267,7 +268,7 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 			Branch:            summary.Branch,
 			CreatedAt:         info.CreatedAt,
 			CommitSubject:     commitSubject,
-			LocalSummaryTitle: readLocalSummaryTitle(ctx, store, info.CheckpointID, summary),
+			LocalSummaryTitle: readLocalSummaryTitle(repoCtx, store, info.CheckpointID, summary),
 		})
 		seen[info.CheckpointID.String()] = struct{}{}
 	}
@@ -298,9 +299,9 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 		branch := ""
 		localSummary := ""
 		if cid, cidErr := checkpointid.NewCheckpointID(idStr); cidErr == nil {
-			if summary, readErr := store.Read(ctx, cid); readErr == nil && summary != nil {
+			if summary, readErr := store.Read(repoCtx, cid); readErr == nil && summary != nil {
 				branch = summary.Branch
-				localSummary = readLocalSummaryTitle(ctx, store, cid, summary)
+				localSummary = readLocalSummaryTitle(repoCtx, store, cid, summary)
 			}
 		}
 

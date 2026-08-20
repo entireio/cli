@@ -71,7 +71,7 @@ Prerequisites:
 pip install opf
 ```
 
-Verify `opf --help` works; the CLI defaults to resolving the binary via `$PATH`. Override with the `command` setting if you need a specific path.
+Verify `opf --help` works; the CLI defaults to resolving the binary via `$PATH`. If you need a specific path, set `command` in `.entire/settings.local.json` — it is deliberately not honored from the committed `.entire/settings.json`. See [Why `command` is local-only](#why-command-is-local-only).
 
 Enable in `.entire/settings.json`:
 
@@ -103,6 +103,8 @@ Available categories (set to `true` to enable, `false` or omit to skip):
 
 Unknown category names are rejected at settings load time so typos surface immediately instead of silently disabling a category.
 
+The filter needs at least one enabled category to run. This is enforced at push time, not settings load: with `enabled: true` and no effective category (`categories` omitted, empty, or all-false) the model scan cannot run, so the push aborts with a configuration error rather than tagging commits as OPF-applied without a scan. Enable a category, set `enabled: false`, or pass `ENTIRE_OPF=no` on a push to skip the filter for that push only.
+
 Full settings reference:
 
 ```json
@@ -120,16 +122,64 @@ Full settings reference:
         "account_number": false,
         "secret": false
       },
-      "command": "opf",
       "timeout_seconds": 30
     }
   }
 }
 ```
 
-- `command` — path or PATH-resolvable name of the `opf` binary. Defaults to `opf`.
+- `command` — path or PATH-resolvable name of the `opf` binary. Defaults to `opf`. **Only read from `.entire/settings.local.json`**, and only when that file is untracked; see [Why `command` is local-only](#why-command-is-local-only).
 - `timeout_seconds` — per-invocation timeout. Defaults to `30`.
 - `prompt_default` — `"ask"` (default), `"never"`, or `"always"`. Controls whether the pre-push hook surfaces an interactive prompt before running OPF. `ENTIRE_OPF=yes` or `ENTIRE_OPF=no` on a single `git push` invocation overrides this for that push only.
+
+### Why `command` is local-only
+
+`command` becomes `argv[0]` of a process Entire executes during `git push`, so
+whoever controls that string controls what runs on the developer's machine.
+`.entire/settings.json` is version-controlled, which would let an ordinary pull
+request pair a `command` with a payload committed alongside it — and a JSON
+settings diff does not read as executable to a reviewer. The pre-push prompt is
+no defense either: it never names the command, `prompt_default: "always"` skips
+it, and non-TTY pushes (CI, agent-driven) auto-run.
+
+Entire therefore honors `command` only when it is genuinely developer-owned:
+
+- it must come from `.entire/settings.local.json`, not `.entire/settings.json`
+- that file must be **untracked** — absent from both the git index and `HEAD`
+
+The second check matters because the filename alone proves nothing:
+`.gitignore` does not apply to a path that is already tracked, so
+`git add -f .entire/settings.local.json` commits it and a fresh clone
+materializes it with the committed content.
+
+This is enforced for the whole file, not just this setting: a tracked
+`.entire/settings.local.json` is ignored in its entirety, because it is not
+local to your clone — it arrives with the repository and would override project
+settings for everyone. Entire warns on stderr and tells you to run
+`git rm --cached .entire/settings.local.json`. The load still succeeds using
+project settings, so a committed file cannot brick the repository.
+
+The two checks also differ in depth. The layer check looks at the git index; the
+`command` check also looks at `HEAD`. A pull request that commits the file puts
+it in the index of every clone that checks the branch out, so the index is what
+catches a delivered attack — and checkout cannot produce a file that is absent
+from the index, so "committed, then `git rm --cached`" is a state you created
+locally, not one that arrived with the repository. Reading `HEAD` is the
+expensive half, so it is reserved for the setting that gets executed.
+
+The two checks fail in opposite directions on purpose. If the repository cannot
+be read at all, the local layer is still applied — losing every local
+preference over an unreadable repo is worse than the risk. The executed
+`command` is dropped in that case, because being wrong there means running
+someone else's binary. With no repository at all, nothing can have arrived by
+cloning, so the file is treated as yours.
+
+When a `command` fails these checks it is ignored with a warning in
+`.entire/logs/entire.log` and OPF falls back to resolving `opf` on `$PATH`. If
+that binary is missing, the pre-push rewrite fails closed rather than pushing
+content you believed OPF had scanned. Everything else in the OPF block
+(`enabled`, `categories`, `timeout_seconds`, `prompt_default`) is ordinary
+configuration and still works from the shared project file.
 
 The interactive prompt offers three options and reacts to **Ctrl-C** for cancellation:
 

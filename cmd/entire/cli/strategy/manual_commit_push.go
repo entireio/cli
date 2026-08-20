@@ -81,8 +81,24 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// remote selected by this push. The gate must stay BELOW
 	// resolvePushSettings: hasCheckpointURL is only known after resolution,
 	// so hoisting the gate above it would break the exemption.
-	if !ps.hasCheckpointURL() && !checkpointSyncAllowedForRemote(ctx, ps.remote) {
-		return nil
+	//
+	// Capture is two-phase, straddling this whole function. The proposal runs
+	// before the gate so that the push which elects a remote by evidence (push
+	// target agrees with the branch's declared push destination) is also the
+	// first push to carry checkpoints there; the election is persisted only at
+	// the delivery points below, once those checkpoints actually arrived.
+	// Everything in between can still stop delivery, and the election is
+	// permanent, so intent is not enough to move it. The hint below then speaks
+	// only for what capture left gated — see hintGatedCheckpointSync.
+	var pendingCapture string
+	if !ps.hasCheckpointURL() {
+		if pendingCaptureCheckpointSyncRemote(ctx, ps.remote) {
+			pendingCapture = ps.remote
+		}
+		if !checkpointSyncAllowedForRemote(ctx, ps.remote, pendingCapture) {
+			hintGatedCheckpointSync(ctx, ps.remote)
+			return nil
+		}
 	}
 
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
@@ -91,8 +107,8 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// branch — the empty-remote guard below is unnecessary for this backend.
 	// (A configured git-branch mirror's v1 ref is not pushed here yet — mirror
 	// push for downgrade safety is a later step.)
-	if cpCfg, _ := settings.LoadCheckpointsConfig(ctx); checkpoint.PrimaryIsRefs(cpCfg) { //nolint:errcheck // fail-soft: a bad checkpoints block already surfaces via Open; default to no refs push
-		return s.prePushCheckpointRefs(ctx, ps)
+	if ps.primaryIsRefs {
+		return s.prePushCheckpointRefs(ctx, ps, pendingCapture)
 	}
 
 	// git-branch primary: entire/checkpoints/v1 is a real refs/heads branch, so
@@ -174,14 +190,36 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// Thread the span's context into the push so the network push and any
 	// fetch+rebase recovery nest beneath it as child steps in the perf trace.
 	pushCtx, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoint_refs")
+	// Capture needs checkpoint data CONFIRMED on this remote, so count what
+	// landed rather than trusting the absence of an error: every ref that was due
+	// has to deliver, and at least one has to actually do so. Delivery must come
+	// from pushRefIfNeeded's delivered return and NOT from err, which is
+	// fail-soft and nil even when the remote refused the ref.
+	deliveredCount, anyFailed := 0, false
 	for _, ref := range refs.Push {
-		if err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref); err != nil {
+		delivered, err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref)
+		if err != nil {
 			pushCheckpointsSpan.RecordError(err)
 			pushCheckpointsSpan.End()
 			return err
 		}
+		if delivered {
+			deliveredCount++
+		} else {
+			anyFailed = true
+		}
 	}
 	pushCheckpointsSpan.End()
+
+	// Delivered: the election may now follow the push that carried it. A push that
+	// carried nothing — an empty ref set, or a v1 ref that does not exist locally
+	// yet — leaves the election alone. It is safe either way (nothing is stranded
+	// when there was nothing to strand), but capturing would announce a move that
+	// moved no data, which is the class of claim this whole path exists to stop
+	// making. The next push that carries a checkpoint captures instead.
+	if pendingCapture != "" && deliveredCount > 0 && !anyFailed {
+		commitCapturedSyncRemote(ctx, pendingCapture)
+	}
 
 	cleanupPushedShadowBranches(ctx)
 	return nil
@@ -241,7 +279,24 @@ func isConfiguredRemote(ctx context.Context, name string) bool {
 	if name == "" {
 		return false
 	}
-	return exec.CommandContext(ctx, "git", "remote", "get-url", name).Run() == nil
+	return cachedIsConfiguredRemote(ctx, name, func() (bool, error) {
+		cmd := exec.CommandContext(ctx, "git", "remote", "get-url", name)
+		if worktreeRoot, ok := settings.WorktreeRoot(ctx); ok {
+			cmd.Dir = worktreeRoot
+		}
+		err := cmd.Run()
+		if err == nil {
+			return true, nil
+		}
+		// git ran and said no: a real answer worth caching. git failing to run at
+		// all says nothing about the remote, and memoizing that false would
+		// fail-close checkpoint_push_remote for the rest of the process.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return false, nil
+		}
+		return false, fmt.Errorf("probe remote %q: %w", name, err)
+	})
 }
 
 // remoteHasTrackingRefs reports whether any refs/remotes/<remote>/* ref exists
@@ -271,7 +326,7 @@ func remoteHasTrackingRefs(ctx context.Context, remote string) bool {
 // checkpoint *format* compatibility (diverged from the remote, or an unsupported
 // local format), which is independent of the storage backend, so a blocked
 // policy skips the ref push (leaving refs queued) rather than pushing.
-func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pushSettings) error {
+func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pushSettings, pendingCapture string) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		logging.Warn(ctx, "git-refs pre-push: open repo failed; skipping checkpoint push",
@@ -288,7 +343,13 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		return nil
 	}
 
-	if _, err := flushCheckpointRefsQueue(ctx, repo, ps); err != nil {
+	if flushed, err := flushCheckpointRefsQueue(ctx, repo, ps); err == nil {
+		// Delivered, and only if something actually was: an empty queue pushed
+		// nothing, so it must not move the election or announce that it had.
+		if pendingCapture != "" && flushed > 0 {
+			commitCapturedSyncRemote(ctx, pendingCapture)
+		}
+	} else {
 		// Fail-soft: a checkpoint-ref push failure must never block the user's
 		// git push. The refs stay queued for the next pre-push.
 		logging.Warn(ctx, "git-refs pre-push: checkpoint ref push failed; refs left queued",

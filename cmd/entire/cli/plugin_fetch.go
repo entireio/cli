@@ -56,9 +56,9 @@ func requireSecureAssetURL(rawURL string) error {
 		return fmt.Errorf("parse download URL %q: %w", redactURL(rawURL), err)
 	}
 	switch strings.ToLower(u.Scheme) {
-	case "https":
+	case schemeHTTPS:
 		return nil
-	case "http":
+	case schemeHTTP:
 		if isLoopbackHost(u.Hostname()) {
 			return nil
 		}
@@ -121,7 +121,7 @@ func releaseAssetBaseURL(repoURL, tag string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse repo URL: %w", err)
 	}
-	if u.Scheme != "https" && u.Scheme != "http" {
+	if u.Scheme != schemeHTTPS && u.Scheme != schemeHTTP {
 		return "", fmt.Errorf("release downloads need an http(s) repo URL, got %q (declare download_url in %s for non-HTTP remotes)", redactURL(repoURL), pluginMetadataFileName)
 	}
 	base := strings.TrimSuffix(u.String(), "/")

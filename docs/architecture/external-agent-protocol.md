@@ -210,13 +210,17 @@ Parses a raw agent hook payload into a structured event.
 
 **Output (stdout):** JSON — the parsed [Event object](#event-object), or `null` if the payload is not relevant.
 
-#### `install-hooks [--local-dev] [--force]`
+#### `install-hooks [--force]`
 
 Installs agent hooks for Entire integration.
 
 **Arguments:**
-- `--local-dev` — Use local development binary path (optional)
 - `--force` — Overwrite existing hooks (optional)
+
+`--local-dev` was removed: it asked the agent to point hooks at a build inside
+the working tree, which meant installed hooks ran whatever the checked-out
+branch contained. The CLI never sends it. Agents that still accept the flag
+should treat it as a no-op; hook commands must name the `entire` binary.
 
 **Output (stdout):** JSON
 

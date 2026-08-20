@@ -11,7 +11,7 @@
           {
             "name": "entire-after-agent",
             "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks gemini after-agent"
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks gemini after-agent'"
           }
         ]
       }
@@ -22,7 +22,7 @@
           {
             "name": "entire-after-model",
             "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks gemini after-model"
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks gemini after-model'"
           }
         ]
       }
@@ -34,7 +34,7 @@
           {
             "name": "entire-after-tool",
             "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks gemini after-tool"
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks gemini after-tool'"
           }
         ]
       }
@@ -45,7 +45,7 @@
           {
             "name": "entire-before-agent",
             "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks gemini before-agent"
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks gemini before-agent'"
           }
         ]
       }
@@ -56,7 +56,7 @@
           {
             "name": "entire-before-model",
             "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks gemini before-model"
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks gemini before-model'"
           }
         ]
       }
@@ -68,7 +68,7 @@
           {
             "name": "entire-before-tool",
             "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks gemini before-tool"
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks gemini before-tool'"
           }
         ]
       }
@@ -79,7 +79,7 @@
           {
             "name": "entire-before-tool-selection",
             "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks gemini before-tool-selection"
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks gemini before-tool-selection'"
           }
         ]
       }
@@ -90,7 +90,7 @@
           {
             "name": "entire-notification",
             "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks gemini notification"
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks gemini notification'"
           }
         ]
       }
@@ -101,7 +101,7 @@
           {
             "name": "entire-pre-compress",
             "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks gemini pre-compress"
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks gemini pre-compress'"
           }
         ]
       }
@@ -113,7 +113,7 @@
           {
             "name": "entire-session-end-exit",
             "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks gemini session-end"
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks gemini session-end'"
           }
         ]
       },
@@ -123,7 +123,7 @@
           {
             "name": "entire-session-end-logout",
             "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks gemini session-end"
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks gemini session-end'"
           }
         ]
       }
@@ -134,7 +134,7 @@
           {
             "name": "entire-session-start",
             "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks gemini session-start"
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then printf \"%s\\n\" \"{\\\"systemMessage\\\":\\\"Entire CLI is enabled but not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\\\"}\"; exit 0; fi; exec entire hooks gemini session-start'"
           }
         ]
       }

@@ -49,7 +49,7 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 	var result MigrateResult
 
 	branch := NewGitStore(repo, DefaultV1Refs())
-	tree, err := branch.getSessionsBranchTree()
+	tree, err := branch.getSessionsBranchTree(ctx)
 	if err != nil {
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			// No v1 branch locally or on origin → nothing to migrate.

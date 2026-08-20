@@ -198,25 +198,28 @@ func TestLoadEntireSettings_LocalOverridesEnabled(t *testing.T) {
 	}
 }
 
-func TestLoadEntireSettings_LocalOverridesLocalDev(t *testing.T) {
+// TestLoadEntireSettings_LocalDevIsTolerated pins the deprecation shape for the
+// removed local_dev setting. It must still *parse* — the settings loaders use
+// DisallowUnknownFields, so dropping the struct field outright would make every
+// existing settings file containing local_dev a hard error — while no longer
+// being merged from an override, since nothing may reintroduce a path by which a
+// settings file influences which command hooks run.
+func TestLoadEntireSettings_LocalDevIsTolerated(t *testing.T) {
 	setupLocalOverrideTestDir(t)
 
-	baseSettings := testSettingsEnabled
-	if err := os.WriteFile(EntireSettingsFile, []byte(baseSettings), 0o644); err != nil {
+	if err := os.WriteFile(EntireSettingsFile, []byte(`{"enabled": true, "local_dev": true}`), 0o644); err != nil {
 		t.Fatalf("Failed to write settings file: %v", err)
 	}
-
-	localSettings := `{"local_dev": true}`
-	if err := os.WriteFile(EntireSettingsLocalFile, []byte(localSettings), 0o644); err != nil {
+	if err := os.WriteFile(EntireSettingsLocalFile, []byte(`{"local_dev": true}`), 0o644); err != nil {
 		t.Fatalf("Failed to write local settings file: %v", err)
 	}
 
 	settings, err := LoadEntireSettings(context.Background())
 	if err != nil {
-		t.Fatalf("LoadEntireSettings(context.Background()) error = %v", err)
+		t.Fatalf("local_dev must remain parseable, got error: %v", err)
 	}
-	if !settings.LocalDev {
-		t.Error("LocalDev should be true from local override")
+	if !settings.Enabled {
+		t.Error("expected the rest of the settings to load normally")
 	}
 }
 
