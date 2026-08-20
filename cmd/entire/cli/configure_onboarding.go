@@ -838,7 +838,8 @@ func runConfigureAgentManagement(cmd *cobra.Command, opts EnableOptions) error {
 		return err
 	}
 	if (saveChoice == configureSaveDirect || saveChoice == configureSaveNewBranch) &&
-		(len(beforeApply) != 0 || !configureBranchMatchesRemoteHead(ctx, repoRoot, forgeRemote, "refs/heads/"+branch)) {
+		(branch == "" || forgeRemote == "" || len(beforeApply) != 0 ||
+			!configureBranchMatchesRemoteHead(ctx, repoRoot, forgeRemote, "refs/heads/"+branch)) {
 		saveChoice = configureSaveLocal
 	}
 	if err := applyAgentChanges(ctx, outW, selectedNames, installedNames, opts); err != nil {
