@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
@@ -52,68 +50,43 @@ func NewAuthenticatedAPIClient(ctx context.Context, insecureHTTP bool) (*api.Cli
 }
 
 // NewAuthenticatedEntireAPICellClient creates an API client for repo-scoped
-// entire-api routes (e.g. experts). It exchanges the login JWT for a
+// entire-api routes (e.g. trails, experts). It exchanges the login JWT for a
 // jurisdictional identity token and dials the entire-api cell directly, because
 // the BFF does not proxy these routes for bearer callers (COR-666).
 //
-// fullName (owner/repo) and/or ulid identify the repo whose cell to reach. When
-// either is supplied, the repo's OWNING cell + jurisdiction are resolved from
-// the control plane (mirroring the BFF's per-repo cell selection) so the call
-// lands in the region that hosts the repo. Resolution is best-effort: any
-// failure yields a nil target and NewEntireAPICellClient falls back to
-// home-jurisdiction routing, so the common same-region case never regresses.
+// fullName (owner/repo) or ulid identifies the repo whose cell to reach; ulid
+// wins when both are set, and both being empty is an error, not a fallback to
+// the caller's home cell. The repo's PROCESSING cell + jurisdiction are
+// resolved from the control plane
+// (mirroring the BFF's per-repo cell selection) so the call lands in the
+// region that actually holds the repo's data. This is NOT best-effort: a
+// resolution failure fails the command instead of falling back to the
+// caller's home cell, because for repo-scoped data a silent wrong-region
+// "success" is worse than an error — that fallback is exactly what used to
+// make `entire trail`/`entire experts` read the wrong region for a
+// multi-homed repo like entirehq/entire.io.
 func NewAuthenticatedEntireAPICellClient(ctx context.Context, insecureHTTP bool, fullName, ulid string) (*api.Client, error) {
-	target := resolveRepoCellTarget(ctx, fullName, ulid)
+	target, err := resolveRepoCellTarget(ctx, fullName, ulid)
+	if err != nil {
+		return nil, err
+	}
 	// NewEntireAPICellClient already returns user-facing, context-rich errors
 	// (login hint, discovery-unavailable, region guidance); re-wrapping here
 	// would bury them, so surface them verbatim.
 	return auth.NewEntireAPICellClient(ctx, insecureHTTP, target) //nolint:wrapcheck // pass through contextual auth errors
 }
 
-type trailBackend string
-
-const (
-	trailBackendEnvVar    = "ENTIRE_TRAILS_BACKEND"
-	trailBackendLegacy    = trailBackend("legacy")
-	trailBackendEntireAPI = trailBackend("entire-api")
-)
-
-func configuredTrailBackend() (trailBackend, error) {
-	switch value := strings.ToLower(strings.TrimSpace(os.Getenv(trailBackendEnvVar))); value {
-	case "", string(trailBackendLegacy), "bff":
-		return trailBackendLegacy, nil
-	case string(trailBackendEntireAPI), "native":
-		return trailBackendEntireAPI, nil
-	default:
-		return "", fmt.Errorf("invalid %s value %q: expected legacy or entire-api", trailBackendEnvVar, value)
-	}
-}
-
-func isEntireAPITrailClient(client *api.Client) bool {
-	return client != nil && client.TrailBackend() == string(trailBackendEntireAPI)
-}
-
-// newTrailAPIClient selects the legacy BFF by default. Setting
-// ENTIRE_TRAILS_BACKEND=entire-api opts into direct, owning-cell routing.
+// newTrailAPIClient dials the entire-api cell that owns the repository. It is a
+// package seam so tests can substitute a client pointed at a stub server.
 var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
-	backend, err := configuredTrailBackend()
-	if err != nil {
-		return nil, err
-	}
-	if backend == trailBackendLegacy {
-		client, err := NewAuthenticatedAPIClient(ctx, insecureHTTP)
-		if err != nil {
-			return nil, err
-		}
-		return client.WithTrailBackend(string(backend)), nil
-	}
-
 	client, err := NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, fullName, "")
 	if errors.Is(err, clusterdiscovery.ErrNoAuthContext) {
+		// Preserve cluster discovery's detailed host/context hint while restoring
+		// the sentinel trail commands use for the standard login UX.
 		return nil, fmt.Errorf("%w: %w", auth.ErrNotLoggedIn, err)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return client.WithTrailBackend(string(backend)), nil
+	return client, nil
 }

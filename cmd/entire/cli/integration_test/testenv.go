@@ -1977,18 +1977,28 @@ func (env *TestEnv) GitPushWithHooks(remote, refSpec string) {
 // env.cliEnv().
 func (env *TestEnv) RunPrePush(remote string) {
 	env.T.Helper()
-	if err := env.RunPrePushWithError(remote); err != nil {
-		env.T.Fatalf("PrePush failed: %v", err)
-	}
+	_ = env.RunPrePushOutput(remote)
 }
 
 // RunPrePushWithError runs the pre-push hook and returns any error instead of failing.
 func (env *TestEnv) RunPrePushWithError(remote string) error {
 	env.T.Helper()
-	return env.runPrePush(remote, env.defaultPrePushStdin())
+	_, err := env.runPrePush(remote, env.defaultPrePushStdin())
+	return err
 }
 
-func (env *TestEnv) runPrePush(remote, stdin string) error {
+// RunPrePushOutput runs the pre-push hook like RunPrePush and returns its
+// combined output, for tests asserting on user-facing hook messages.
+func (env *TestEnv) RunPrePushOutput(remote string) string {
+	env.T.Helper()
+	output, err := env.runPrePush(remote, env.defaultPrePushStdin())
+	if err != nil {
+		env.T.Fatalf("PrePush failed: %v", err)
+	}
+	return output
+}
+
+func (env *TestEnv) runPrePush(remote, stdin string) (string, error) {
 	cmd := exec.CommandContext(env.T.Context(), getTestBinary(), "hooks", "git", "pre-push", remote)
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
@@ -1999,9 +2009,9 @@ func (env *TestEnv) runPrePush(remote, stdin string) error {
 	output, err := cmd.CombinedOutput()
 	env.T.Logf("pre-push output: %s", output)
 	if err != nil {
-		return fmt.Errorf("pre-push hook failed: %w", err)
+		return string(output), fmt.Errorf("pre-push hook failed: %w", err)
 	}
-	return nil
+	return string(output), nil
 }
 
 // defaultPrePushStdin builds the stdin line git feeds a pre-push hook for the

@@ -79,15 +79,6 @@ most recent commit with a checkpoint.  You'll be prompted to confirm resuming in
 }
 
 func runResume(ctx context.Context, cmd *cobra.Command, branchName string, force bool) error {
-	// Only initialize logging when inside a git worktree to avoid
-	// creating .entire/logs/ in arbitrary directories.
-	if _, err := paths.WorktreeRoot(ctx); err == nil {
-		logging.SetLogLevelGetter(GetLogLevel)
-		if err := logging.Init(ctx, ""); err == nil {
-			defer logging.Close()
-		}
-	}
-
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
@@ -171,13 +162,6 @@ func switchToBranchForResume(ctx context.Context, w, errW io.Writer, branchName 
 // branch. The interactive picker uses this so that selecting one of several
 // sessions on the same branch resumes exactly that session.
 func resumeSessionOnBranch(ctx context.Context, cmd *cobra.Command, branchName string, checkpointID id.CheckpointID, force bool) error {
-	if _, err := paths.WorktreeRoot(ctx); err == nil {
-		logging.SetLogLevelGetter(GetLogLevel)
-		if err := logging.Init(ctx, ""); err == nil {
-			defer logging.Close()
-		}
-	}
-
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
@@ -212,13 +196,13 @@ func restoreByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID 
 	}
 	defer repo.Close()
 
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
 	store := stores.Persistent
 	refs := stores.Refs()
-	if refs.ReadBootstrappableFromOrigin() {
+	if refs.ReadBootstrappableFromRemote() {
 		promoteRemoteTrackingPrimary(ctx, repo, refs)
 	}
 
@@ -297,14 +281,14 @@ func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName
 	checkpointID := result.checkpointIDs[0]
 	var metadata *strategy.CheckpointInfo
 
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
 	store := stores.Persistent
 
 	refs := stores.Refs()
-	if refs.ReadBootstrappableFromOrigin() {
+	if refs.ReadBootstrappableFromRemote() {
 		promoteRemoteTrackingPrimary(ctx, repo, refs)
 	}
 
@@ -425,7 +409,7 @@ func readCheckpointInfoFromRef(
 	refs checkpoint.PersistentRefs,
 	checkpointID id.CheckpointID,
 ) (*strategy.CheckpointInfo, error) {
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{Refs: &refs, BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{Refs: &refs, BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -437,7 +421,12 @@ func readCheckpointInfoFromRef(
 // are invisible to the repo opened before the fetch). To avoid this, each
 // attempt opens a fresh repo after the fetch succeeds.
 //
-// Fallback order: treeless fetch → local → checkpoint_remote → full origin fetch → remote tree.
+// Fallback order: checkpoint_remote (if configured) → read-candidates
+// tree-only fetch → local → read-candidates full fetch → read-candidates
+// remote-tracking tree. The final remote-tracking tier is load-bearing for
+// legacy data on the read-only origin tier: candidate fetches deliberately
+// never advance the local primary from a non-elected remote, so origin-only
+// metadata is served through its tracking ref here.
 func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error) {
 	logCtx := logging.WithComponent(ctx, "resume.getMetadataTree")
 
@@ -460,8 +449,8 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 	}
 
 	// When checkpoint_remote is configured, try it first — that's where
-	// checkpoint data lives. Avoids a wasted fetch from origin (which may
-	// not have the metadata branch at all).
+	// checkpoint data lives. Avoids a wasted fetch from the read candidates
+	// (which may not have the metadata branch at all).
 	if fetchErr := FetchMetadataFromCheckpointRemote(ctx); fetchErr == nil {
 		freshRepo, freshErr := openRepository(ctx)
 		if freshErr == nil {
@@ -525,7 +514,7 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 		_ = localRepo.Close()
 	}
 
-	// Fallback: full fetch from origin
+	// Fallback: full fetch from the read candidates
 	if fetchErr := FetchMetadataBranch(ctx); fetchErr == nil {
 		freshRepo, repoErr := openRepository(ctx)
 		if repoErr == nil {
@@ -548,7 +537,11 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 		)
 	}
 
-	// Try remote tree directly (origin's tracking ref for Primary)
+	// Try the remote-tracking tree directly (the read candidates' tracking
+	// refs for Primary, first hit wins — pure read, both tiers legal). This
+	// tier must not be dropped: it is the only way origin-only legacy
+	// metadata is served, since candidate fetches never advance the local
+	// primary from the read-only origin tier.
 	remoteRepo, repoErr := openRepository(ctx)
 	if repoErr != nil {
 		return nil, nil, fmt.Errorf("failed to open repository: %w", repoErr)
@@ -748,8 +741,8 @@ func promptResumeFromOlderCheckpoint() (bool, error) {
 	return confirmed, nil
 }
 
-// checkRemoteMetadata checks if checkpoint metadata exists on the remote and
-// fetches it if available. Skips when reads don't target a ref origin tracks.
+// checkRemoteMetadata checks if checkpoint metadata exists on a remote and
+// fetches it if available. Skips when reads don't target a remote-tracked ref.
 func checkRemoteMetadata(
 	ctx context.Context,
 	w, errW io.Writer,
@@ -758,7 +751,7 @@ func checkRemoteMetadata(
 ) ([]strategy.RestoredSession, error) {
 	logCtx := logging.WithComponent(ctx, "resume.checkRemoteMetadata")
 
-	if !refs.ReadBootstrappableFromOrigin() {
+	if !refs.ReadBootstrappableFromRemote() {
 		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but metadata is not available in %s.\n", checkpointID, refs.Read)
 		fmt.Fprintf(errW, "This ref is local-only. Try: entire checkpoint explain %s\n", checkpointID)
 		return nil, nil
@@ -810,7 +803,9 @@ func checkRemoteMetadata(
 		}
 	}
 
-	// Fall back to origin's remote-tracking branch
+	// Fall back to the local/tracking-ref state: promotion is confined to the
+	// elected remote's tracking ref, while the store read underneath consults
+	// the full read-candidate chain.
 	promoteRemoteTrackingPrimary(ctx, repo, refs)
 	metadata, metadataErr := readCheckpointInfoFromRef(ctx, repo, refs, checkpointID)
 	if metadataErr == nil {
@@ -824,14 +819,14 @@ func checkRemoteMetadata(
 	if fetchErr := FetchMetadataBranch(ctx); fetchErr == nil {
 		freshRepo, freshErr := openRepository(ctx)
 		if freshErr != nil {
-			logging.Debug(logCtx, "origin metadata fetch succeeded but repository reopen failed",
+			logging.Debug(logCtx, "metadata branch fetch succeeded but repository reopen failed",
 				slog.String("error", freshErr.Error()),
 			)
 		} else {
 			defer freshRepo.Close()
 			metadata, err := readCheckpointInfoFromRef(ctx, freshRepo, refs, checkpointID)
 			if err != nil {
-				logging.Debug(logCtx, "origin metadata fetch succeeded but checkpoint metadata read failed",
+				logging.Debug(logCtx, "metadata branch fetch succeeded but checkpoint metadata read failed",
 					slog.String("checkpoint_id", checkpointID.String()),
 					slog.String("error", err.Error()),
 				)
@@ -840,7 +835,7 @@ func checkRemoteMetadata(
 			}
 		}
 	} else {
-		logging.Debug(logCtx, "origin metadata fetch failed",
+		logging.Debug(logCtx, "metadata branch fetch failed",
 			slog.String("error", fetchErr.Error()),
 		)
 	}
@@ -853,24 +848,42 @@ func checkRemoteMetadata(
 		}
 		fmt.Fprintf(errW, "Ensure you have access to the checkpoint remote configured in .entire/settings.json.\n")
 	} else {
-		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but the entire/checkpoints/v1 branch is not available locally or on the remote.\n", checkpointID)
-		fmt.Fprintf(errW, "This can happen if the metadata branch was not pushed. Try:\n")
-		fmt.Fprintf(errW, "  git fetch origin entire/checkpoints/v1:entire/checkpoints/v1\n")
+		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but the %s branch is not available locally or on the remote.\n", checkpointID, paths.MetadataBranchName)
+		fmt.Fprintf(errW, "This can happen if the metadata branch was not pushed.\n")
+		// The pasteable hint names the first read candidate — the elected
+		// sync remote, or the fail-open origin when the election errored
+		// (then origin is also the only place left to fetch from). A
+		// remoteless repo has nothing to fetch from, so no hint is printed.
+		if candidates := strategy.CheckpointReadRemotes(ctx); len(candidates) > 0 {
+			fmt.Fprintf(errW, "Try:\n  git fetch %s %s:%s\n", candidates[0], paths.MetadataBranchName, paths.MetadataBranchName)
+		}
 	}
 	return nil, nil
 }
 
-// promoteRemoteTrackingPrimary advances the local primary ref to match origin's
-// remote-tracking ref. Without this, callers reading checkpoint metadata via
-// the local ref miss checkpoints already fetched into refs/remotes/origin/...:
-// the committed-checkpoint store only falls back to origin/... when the local
-// ref is *missing*, not when it's behind. No-op when Primary isn't in Push
-// (no remote-tracking ref exists).
+// promoteRemoteTrackingPrimary advances the local primary ref to match the
+// ELECTED checkpoint sync remote's remote-tracking ref. Without this, callers
+// reading checkpoint metadata via the local ref miss checkpoints already
+// fetched into refs/remotes/<elected>/...: the committed-checkpoint store only
+// falls back to tracking refs when the local ref is *missing*, not when it's
+// behind.
+//
+// Confined to the elected remote — resolved explicitly, never the read chain's
+// first entry (which can be the fail-open origin): the promotion feeds
+// SafelyAdvanceLocalRef, which on divergence replays local commits onto the
+// given tip, so a stale legacy-tier origin driving it is the #1374-class
+// hazard. Legacy origin data stays readable through the candidate-aware
+// tracking-ref readers without promotion. No-op when the election fails,
+// elects nothing, or Primary isn't in Push (no remote-tracking ref exists).
 func promoteRemoteTrackingPrimary(ctx context.Context, repo *git.Repository, refs checkpoint.PersistentRefs) {
-	if !refs.PrimaryFetchableFromOrigin() {
+	if !refs.PrimaryFetchableFromRemote() {
 		return
 	}
-	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", refs.Primary.Short()), true)
+	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
+	if err != nil || elected.Name == "" {
+		return
+	}
+	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName(elected.Name, refs.Primary.Short()), true)
 	if err != nil {
 		return
 	}
@@ -994,7 +1007,7 @@ func restoreSingleSession(ctx context.Context, w io.Writer, ag agent.Agent, sess
 		return strategy.RestoredSession{}, false, fmt.Errorf("failed to open repository: %w", repoErr)
 	}
 	defer repo.Close()
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return strategy.RestoredSession{}, false, fmt.Errorf("open checkpoint store: %w", err)
 	}

@@ -9,43 +9,10 @@ import (
 )
 
 // TrailListResponse is the response from entire-api's trail list endpoint.
-// Trails is retained as the CLI-facing page field; UnmarshalJSON fills it from
-// the backend's standard {items,nextPageToken,totalCount} envelope.
 type TrailListResponse struct {
 	Trails        []TrailResource `json:"items"`
 	Total         int             `json:"totalCount"`
 	NextPageToken *string         `json:"nextPageToken"`
-
-	// Legacy metadata fields remain source-compatible for integration fixtures;
-	// entire-api's standard list envelope no longer emits them.
-	Limit         int       `json:"-"`
-	Offset        int       `json:"-"`
-	RepoFullName  string    `json:"-"`
-	DefaultBranch string    `json:"-"`
-	UpdatedAt     time.Time `json:"-"`
-}
-
-func (r *TrailListResponse) UnmarshalJSON(data []byte) error {
-	var wire struct {
-		Items         []TrailResource `json:"items"`
-		Trails        []TrailResource `json:"trails"`
-		TotalCount    int             `json:"totalCount"`
-		Total         int             `json:"total"`
-		NextPageToken *string         `json:"nextPageToken"`
-	}
-	if err := decodeNormalizedTrailJSON(data, &wire); err != nil {
-		return fmt.Errorf("decode trail list: %w", err)
-	}
-	r.Trails = wire.Items
-	if r.Trails == nil {
-		r.Trails = wire.Trails
-	}
-	r.Total = wire.TotalCount
-	if r.Total == 0 {
-		r.Total = wire.Total
-	}
-	r.NextPageToken = wire.NextPageToken
-	return nil
 }
 
 // TrailResource represents a trail returned by entire-api. The backend uses
@@ -79,15 +46,16 @@ type TrailResource struct {
 	BodyDocument       *TrailBodyDocument `json:"bodyDocument,omitempty"`
 }
 
-func (r *TrailResource) UnmarshalJSON(data []byte) error {
-	type plain TrailResource
-	return decodeNormalizedTrailJSON(data, (*plain)(r))
-}
-
 // TrailBodyDocument is the trail's description editor document. TextSnapshot
-// is the rendered plain text displayed by the CLI.
+// is the rendered plain text displayed by the CLI. The document is also what a
+// body write returns (see TrailBodyRequest), so both directions decode into this
+// type; the fields the CLI does not use (id, documentKey, schemaVersion,
+// contentJson, updatedAt) are simply left out of it. ETag is populated on a
+// read as well as on a write response, and is what makes If-Match viable on
+// the next write (see sendTrailBody).
 type TrailBodyDocument struct {
 	TextSnapshot string `json:"textSnapshot"`
+	ETag         string `json:"etag,omitempty"`
 }
 
 // ToMetadata converts a TrailResource to display metadata.
@@ -127,11 +95,20 @@ type TrailCreateResponse struct {
 }
 
 // TrailUpdateRequest uses pointers to distinguish absent fields from clears.
+// There is deliberately no Labels field: the trails API does not accept label
+// writes, so `trail update` exposes no label flags (labels are read-only, see
+// TrailResource.Labels).
+//
+// There is deliberately no Body field either. The trails API does not serve
+// body writes on this route — it rejects a body field outright and names the
+// dedicated route to use instead — so the description has its own route and its
+// own request shape; see TrailBodyRequest. Do not reintroduce the field to save
+// a request: the rejection has been served as a redacted 5xx, which reads to
+// the caller as a flaky server rather than as the wrong route, and that is what
+// made this bug survive as long as it did.
 type TrailUpdateRequest struct {
 	Status             *string   `json:"status,omitempty"`
 	Title              *string   `json:"title,omitempty"`
-	Body               *string   `json:"body,omitempty"`
-	Labels             *[]string `json:"labels,omitempty"`
 	Assignees          *[]string `json:"assignees,omitempty"`
 	RequestedReviewers *[]string `json:"requestedReviewers,omitempty"`
 	Type               *string   `json:"type,omitempty"`
@@ -142,15 +119,31 @@ type TrailUpdateResponse struct {
 	Trail TrailResource `json:"trail"`
 }
 
-// Kept for source compatibility with callers that model the former BFF body.
-// entire-api now confirms deletion with a 204 No Content response.
-type TrailDeleteResponse struct {
-	OK bool `json:"ok"`
+// TrailBodyRequest is the body for PUT
+// /api/v1/trails/:host/:owner/:repo/:number/body, the only route that writes a
+// trail's description (see TrailUpdateRequest for why it is not PATCH). The
+// route answers with the resulting document, which decodes into
+// TrailBodyDocument.
+//
+// Markdown carries no omitempty: an empty string is how a description is
+// cleared, and the server distinguishes present-and-empty from absent — with
+// omitempty the field would vanish from the JSON and the request would be
+// rejected as "exactly one of markdown/contentJson is required".
+//
+// The route also accepts contentJson (ProseMirror JSON, written as-is) in place
+// of markdown; the CLI only ever writes Markdown, so contentJson is not
+// modeled here. The route also accepts an If-Match header for optimistic
+// concurrency, populated from a prior read of TrailBodyDocument.ETag — see
+// sendTrailBody for the dispatch between If-Match and Overwrite.
+type TrailBodyRequest struct {
+	Markdown  string `json:"markdown"`
+	Overwrite bool   `json:"overwrite,omitempty"`
 }
 
 // TrailApproval is a single approval decision on a trail. Author is exposed as
-// a login string while UnmarshalJSON accepts both the BFF's string and
-// entire-api's {id,login} object.
+// a login string while UnmarshalJSON accepts both shapes entire-api itself
+// uses: the approvals collection sends a bare login string, the trail resource
+// sends an {id,login} object. Both are live — this is not legacy tolerance.
 type TrailApproval struct {
 	ID        string    `json:"id"`
 	Author    string    `json:"author"`
@@ -169,7 +162,7 @@ func (a *TrailApproval) UnmarshalJSON(data []byte) error {
 		CommitSHA string          `json:"commitSha"`
 		CreatedAt time.Time       `json:"createdAt"`
 	}
-	if err := decodeNormalizedTrailJSON(data, &wire); err != nil {
+	if err := json.Unmarshal(data, &wire); err != nil {
 		return fmt.Errorf("decode trail approval: %w", err)
 	}
 	a.ID, a.Event, a.CommitSHA, a.CreatedAt = wire.ID, wire.Event, wire.CommitSHA, wire.CreatedAt

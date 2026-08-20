@@ -201,6 +201,13 @@ type State struct {
 	// Used for stale session detection in "entire doctor".
 	LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`
 
+	// CaptureDegradedAt records when the session's most recent turn degraded
+	// capture because a worktree status scan breached its budget (new-file
+	// detection skipped, or the checkpoint itself skipped). Set at turn end,
+	// cleared by the next turn whose scans stay within budget. Surfaced as a
+	// warning by `entire status`.
+	CaptureDegradedAt *time.Time `json:"capture_degraded_at,omitempty"`
+
 	// StepCount is the number of checkpoints/steps created in this session.
 	// JSON tag kept as "checkpoint_count" for backward compatibility with existing state files.
 	StepCount int `json:"checkpoint_count"`
@@ -510,18 +517,38 @@ func (s *State) OwnerLiveness() proclive.Liveness {
 	return proclive.Check(*s.Owner)
 }
 
-// OwnerExited reports true when this session is ACTIVE but its owning agent
-// process is gone — exited cleanly, crashed, was killed, or the machine
-// rebooted — without a SessionStop hook firing. Unlike IsStuckActive (a
-// time-based heuristic), this is detected immediately, regardless of how
-// recently the session interacted. It returns false when liveness is Unknown
-// (no owner recorded, cross-host state, or an unsupported platform) so behavior
-// degrades to the StuckActiveThreshold timeout.
+// OwnerExited reports true when this session's owning agent process is gone —
+// exited cleanly, crashed, was killed, or the machine rebooted — without a
+// SessionStop hook firing. Unlike IsStuckActive (a time-based heuristic), this
+// is detected immediately, regardless of how recently the session interacted.
+// It returns false when liveness is Unknown (no owner recorded, cross-host
+// state, or an unsupported platform) so behavior degrades to the
+// StuckActiveThreshold timeout.
+//
+// It deliberately covers IDLE as well as ACTIVE. An agent that finishes its
+// last turn and then quits leaves the session IDLE, so gating on ACTIVE alone
+// missed precisely the sessions left behind by agents with no session-end hook
+// (Codex before 0.146) or killed before that hook could run: they lingered as
+// "active" in `entire status` until StaleSessionThreshold deleted the state
+// file outright, discarding pending checkpoint work instead of condensing it.
+// Only already-finalized sessions are excluded — see IsEnded.
 func (s *State) OwnerExited() bool {
-	if !s.Phase.IsActive() {
+	if s.IsEnded() {
 		return false
 	}
 	return s.OwnerLiveness() == proclive.LivenessDead
+}
+
+// IsEnded reports whether this session has been finalized — the canonical
+// "no longer a live session" predicate.
+//
+// Both halves matter and neither implies the other in practice: Phase is what
+// the state machine sets, EndedAt is what the finalizing write stamps, and a
+// state file can carry one without the other (a legacy record, or a partial
+// write). Callers that filter for active sessions must agree on this rule, so
+// it lives here rather than being re-spelled at each site.
+func (s *State) IsEnded() bool {
+	return s.Phase == PhaseEnded || s.EndedAt != nil
 }
 
 func (s *State) IsStale() bool {

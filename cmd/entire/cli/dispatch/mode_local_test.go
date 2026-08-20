@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
@@ -318,6 +319,65 @@ func TestLocalMode_ExplicitRepoUsesTargetRepoCheckpointSettings(t *testing.T) {
 	}
 	if got.Repos[0].Sections[0].Bullets[0].Text != testLocalFallbackText {
 		t.Fatalf("unexpected bullet: %+v", got.Repos[0].Sections[0].Bullets[0])
+	}
+}
+
+func TestLocalMode_ExplicitRepoUsesTargetRepoCheckpointRemotes(t *testing.T) {
+	cwdDir := t.TempDir()
+	targetDir := t.TempDir()
+
+	testutil.InitRepo(t, cwdDir)
+	addOriginRemote(t, cwdDir)
+
+	testutil.InitRepo(t, targetDir)
+	testutil.WriteFile(t, targetDir, "a.txt", "x")
+	testutil.GitAdd(t, targetDir, "a.txt")
+	testutil.GitCommit(t, targetDir, "initial")
+	addOriginRemote(t, targetDir)
+	testutil.AddRemote(t, targetDir, "upstream", "https://example.com/upstream.git")
+	testutil.WriteCheckpointPushRemoteSetting(t, targetDir, "upstream")
+
+	createdAt := time.Now().UTC()
+	seedCommittedCheckpoint(t, targetDir, seededCheckpoint{
+		id:           testCheckpointID,
+		branch:       "main",
+		createdAt:    createdAt,
+		filesTouched: []string{"a.txt"},
+		outcome:      testLocalFallbackText,
+	})
+
+	localRef := "refs/heads/" + paths.MetadataBranchName
+	cmd := exec.CommandContext(t.Context(), "git", "-C", targetDir, "rev-parse", localRef)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.GitUpdateRef(t, targetDir, "refs/remotes/upstream/"+paths.MetadataBranchName, strings.TrimSpace(string(out)))
+	cmd = exec.CommandContext(t.Context(), "git", "-C", targetDir, "update-ref", "-d", localRef)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("delete local checkpoint ref: %v\n%s", err, out)
+	}
+
+	oldNow := nowUTC
+	nowUTC = func() time.Time { return createdAt.Add(2 * time.Hour) }
+	t.Cleanup(func() {
+		nowUTC = oldNow
+	})
+
+	t.Chdir(cwdDir)
+
+	got, err := Run(context.Background(), Options{
+		Mode:          ModeLocal,
+		RepoPaths:     []string{targetDir},
+		Since:         "7d",
+		Branches:      []string{"main"},
+		TextGenerator: stubGeneratedLocalDispatch(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Repos) != 1 || got.Repos[0].Sections[0].Bullets[0].Text != testLocalFallbackText {
+		t.Fatalf("expected checkpoint from target repo's upstream tracking ref, got %+v", got.Repos)
 	}
 }
 

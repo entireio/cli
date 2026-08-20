@@ -116,7 +116,7 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 		if index.Truncated {
 			// Debug, not Warn: the user-facing channel is the Warnings entry;
 			// slog's default handler would print a Warn straight to stderr on
-			// commands that never ran logging.Init.
+			// commands whose context carries no logger.
 			logging.Debug(ctx, "semantic search: repo index truncated; cross-repo results may be incomplete")
 			warnings = append(warnings, "repo index truncated; cross-repo results may be incomplete")
 		}
@@ -294,8 +294,8 @@ func (c *cachedClusterClient) GetRepo(ctx context.Context, params coreapi.GetRep
 	return c.inner.GetRepo(ctx, params) //nolint:wrapcheck // transparent delegation
 }
 
-func (c *cachedClusterClient) ListMirrors(ctx context.Context, params coreapi.ListMirrorsParams) (*coreapi.ListMirrorsOutputBody, error) {
-	return c.inner.ListMirrors(ctx, params) //nolint:wrapcheck // transparent delegation
+func (c *cachedClusterClient) ListRepos(ctx context.Context, params coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error) {
+	return c.inner.ListRepos(ctx, params) //nolint:wrapcheck // transparent delegation
 }
 
 // mergedTier2Max mirrors query-serve's maxTier2 and the BFF's MERGED_TIER2_MAX:
@@ -603,7 +603,7 @@ func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []ce
 	if len(failed) > 0 {
 		// Debug, not Warn: the warning below already reaches the user via
 		// Response.Warnings, and slog's default handler would print a Warn
-		// straight to stderr on commands that never ran logging.Init.
+		// straight to stderr on commands whose context carries no logger.
 		logging.Debug(ctx, "semantic search: partial failure; results may be incomplete",
 			"succeeded", len(pages), "total", len(results), "failed_cells", failed)
 		warnings = append(warnings, fmt.Sprintf("search failed in %d of %d regions; results may be incomplete", len(failed), len(pages)+len(failed)))

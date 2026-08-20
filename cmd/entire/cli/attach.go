@@ -62,9 +62,13 @@ func (opts attachOptions) committedRefs(ctx context.Context) cpkg.PersistentRefs
 }
 
 // openAttachStore opens the committed store for the resolved topology. refs is
-// passed explicitly so attach preserves PrimaryAsRead() pinning.
+// passed explicitly so attach preserves its pinning: PrimaryAsLocalRead for
+// the local-presence gates (a checkpoint present only on a remote-tracking
+// ref must read as absent, or attach clobbers the remote on push), plain
+// refs with the read chain for ordinary reads (an existing checkpoint's
+// summary may live on the elected sync remote rather than origin).
 func openAttachStore(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs) (cpkg.PersistentStore, error) {
-	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{Refs: &refs})
+	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{Refs: &refs, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -202,16 +206,12 @@ func attachPrompts(meta transcriptMetadata) []string {
 }
 
 func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentName types.AgentName, opts attachOptions) error {
-	// Initialize structured logger so logging.Warn/Info write to .entire/logs/ not stderr.
-	if err := logging.Init(ctx, sessionID); err != nil {
-		// Init failed — logging will use stderr fallback, non-fatal.
-		_ = err
-	}
-	// Flush the 8KB buffered log writer on exit. Without this, any
-	// Warn/Info calls during attach (including the overwrite tripwire)
-	// get silently dropped when the process exits, matching the pattern
-	// already used by resume/clean/reset/rewind/explain.
-	defer logging.Close()
+	// The logger arrives in ctx from the root PersistentPreRun, and the root
+	// PersistentPostRun flushes it (main.go does for the error path cobra skips
+	// that hook on) — so attach neither builds nor closes one, the way
+	// resume/clean/reset/explain do not either. Only the session is attach's to
+	// add, so its lines are filterable.
+	ctx = logging.WithSessionID(ctx, sessionID)
 
 	logCtx := logging.WithComponent(ctx, "attach")
 
@@ -459,7 +459,7 @@ func attachSummaryLine(meta transcriptMetadata, tokenUsage *agent.TokenUsage) st
 // at Primary. Reads target Primary directly, not refs.Read, because this guard
 // must reflect what the next write would target.
 func checkpointHasSessionMetadata(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID, sessionID string) (bool, error) {
-	store, err := openAttachStore(ctx, repo, refs.PrimaryAsRead())
+	store, err := openAttachStore(ctx, repo, refs.PrimaryAsLocalRead())
 	if err != nil {
 		return false, err
 	}
@@ -588,7 +588,7 @@ func checkpointPresentLocally(ctx context.Context, repo *git.Repository, refs cp
 			return false, nil //nolint:nilerr // Missing local branch is the "absent" signal, not an error.
 		}
 	}
-	store, err := openAttachStore(ctx, repo, refs.PrimaryAsRead())
+	store, err := openAttachStore(ctx, repo, refs.PrimaryAsLocalRead())
 	if err != nil {
 		return false, err
 	}
@@ -632,11 +632,13 @@ func suggestCheckpointRefFetchCommand(ctx context.Context, checkpointID id.Check
 	return suggestFetchCommand(ctx, refName.String()+":"+refName.String())
 }
 
-// suggestFetchCommand builds a "git fetch <target> <refspec>" hint. It resolves
-// the target the same way attach's own fetch does (resolveCheckpointFetchTarget:
-// the checkpoint-remote/token URL if any, else origin) so the pasteable command
-// points at the remote the fetch actually used — not a bare "origin" that fails
-// in a token-only environment with an SSH origin.
+// suggestFetchCommand builds a "git fetch <target> <refspec>" hint via
+// resolveCheckpointFetchTarget (the checkpoint-remote/token URL if any, else
+// origin) so the command works in a token-only environment with an SSH origin.
+// Known residual: attach's own fetch iterates the read-candidate chain, so
+// with elected≠origin and no dedicated store this hint can name origin while
+// the data lives on the elected remote — cosmetic only, candidate for a
+// follow-up.
 func suggestFetchCommand(ctx context.Context, refspec string) string {
 	return fmt.Sprintf("git fetch %s %s", resolveCheckpointFetchTarget(ctx), refspec)
 }

@@ -12,11 +12,6 @@ type TrailReviewStateResponse struct {
 	EventCursor string                 `json:"eventCursor"`
 }
 
-func (r *TrailReviewStateResponse) UnmarshalJSON(data []byte) error {
-	type plain TrailReviewStateResponse
-	return decodeNormalizedTrailJSON(data, (*plain)(r))
-}
-
 // TrailReview represents a review session.
 type TrailReview struct {
 	ID            string    `json:"id"`
@@ -56,11 +51,6 @@ type TrailReviewCommentsResponse struct {
 	EventCursor string               `json:"eventCursor,omitempty"`
 }
 
-func (r *TrailReviewCommentsResponse) UnmarshalJSON(data []byte) error {
-	type plain TrailReviewCommentsResponse
-	return decodeNormalizedTrailJSON(data, (*plain)(r))
-}
-
 // TrailReviewComment is a single agent-native review finding.
 type TrailReviewComment struct {
 	ID                        string                       `json:"id"`
@@ -89,11 +79,6 @@ type TrailReviewComment struct {
 	OutgoingLinks             []TrailReviewOutgoingLink    `json:"outgoingLinks,omitempty"`
 }
 
-func (r *TrailReviewComment) UnmarshalJSON(data []byte) error {
-	type plain TrailReviewComment
-	return decodeNormalizedTrailJSON(data, (*plain)(r))
-}
-
 // TrailReviewStartRequest starts a review session for a trail via
 // POST /api/v1/trails/{trail_id}/reviews. All fields are optional; the server
 // resolves the code version (base/head) when they are omitted.
@@ -116,11 +101,6 @@ type TrailReviewStartResponse struct {
 	DiffURL        string            `json:"diffUrl"`
 	FilesURL       string            `json:"filesUrl"`
 	Limits         TrailReviewLimits `json:"limits"`
-}
-
-func (r *TrailReviewStartResponse) UnmarshalJSON(data []byte) error {
-	type plain TrailReviewStartResponse
-	return decodeNormalizedTrailJSON(data, (*plain)(r))
 }
 
 // TrailReviewLimits carries the server-enforced batch limits for a review.
@@ -152,11 +132,6 @@ type TrailReviewCommentInput struct {
 // TrailReviewCommentBatchResponse is returned by the batch comment endpoint.
 type TrailReviewCommentBatchResponse struct {
 	Results []TrailReviewCommentBatchResult `json:"results"`
-}
-
-func (r *TrailReviewCommentBatchResponse) UnmarshalJSON(data []byte) error {
-	type plain TrailReviewCommentBatchResponse
-	return decodeNormalizedTrailJSON(data, (*plain)(r))
 }
 
 // TrailReviewCommentBatchResult reports the per-finding outcome of a batch.

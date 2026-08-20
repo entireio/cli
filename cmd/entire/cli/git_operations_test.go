@@ -572,9 +572,8 @@ func setupRepoWithBlobOnMetadataBranch(t *testing.T) (string, plumbing.Hash) {
 }
 
 // Not parallel: uses t.Chdir()
-// Tests basic FetchBlobsByHash mechanics: when the resolved fetch target has
-// the blob, the function brings it into the local object store.
-// Target selection is tested separately in TestResolveCheckpointFetchTarget_*.
+// Tests blob hydration from the normal target and from the legacy tier after a
+// slow elected target exhausts only its own budget.
 func TestFetchBlobsByHash_FetchesMissingBlob(t *testing.T) {
 	ctx := context.Background()
 
@@ -603,6 +602,34 @@ func TestFetchBlobsByHash_FetchesMissingBlob(t *testing.T) {
 	freshRepo, err := git.PlainOpen(localDir)
 	require.NoError(t, err)
 	require.NoError(t, freshRepo.Storer.HasEncodedObject(blobHash), "blob should exist locally after fetch")
+
+	upstreamDir := t.TempDir()
+	testutil.InitRepo(t, upstreamDir)
+	originDir := t.TempDir()
+	testutil.InitRepo(t, originDir)
+
+	fallbackDir := t.TempDir()
+	testutil.InitRepo(t, fallbackDir)
+	testutil.WriteFile(t, fallbackDir, "f.txt", "init")
+	testutil.GitAdd(t, fallbackDir, "f.txt")
+	testutil.GitCommit(t, fallbackDir, "init")
+	gitRun(t, fallbackDir, "remote", "add", "upstream", upstreamDir)
+	gitRun(t, fallbackDir, "remote", "add", "origin", originDir)
+	testutil.WriteCheckpointPushRemoteSetting(t, fallbackDir, "upstream")
+	t.Chdir(fallbackDir)
+	require.Equal(t, []string{upstreamDir, originDir}, checkpointBlobFetchTargets(ctx))
+
+	var attempted []string
+	fetch := func(candidateCtx context.Context, target string, _ []string) error {
+		attempted = append(attempted, target)
+		if target == upstreamDir {
+			<-candidateCtx.Done()
+			return candidateCtx.Err()
+		}
+		return candidateCtx.Err()
+	}
+	require.NoError(t, fetchBlobsByHash(ctx, []plumbing.Hash{blobHash}, 10*time.Millisecond, time.Second, fetch))
+	require.Equal(t, []string{upstreamDir, originDir}, attempted)
 }
 
 // Not parallel: uses t.Chdir()
@@ -911,4 +938,65 @@ func TestListCheckpointRefsOnRemote_HonorsCanceledContext(t *testing.T) {
 
 	_, err := ListCheckpointRefsOnRemote(ctx)
 	require.Error(t, err, "canceled context must reach ls-remote (regression: deleting WithTimeout would still pass a constant-only test)")
+}
+
+// TestFetchBlobsByHash_ChainBudgetBoundsTheWholeOperation pins the ceiling that
+// per-target budgets alone do not give. Before the read-candidate chain this
+// function was wrapped in one 2-minute budget covering its fallbacks; per-target
+// budgets replaced it, so worst-case latency scaled with the target count and the
+// fallback metadata chain ran on the caller's uncapped context on top of that.
+//
+// Every target here stalls until its context expires, so without the ceiling the
+// elapsed time would be at least perTarget × len(targets).
+func TestFetchBlobsByHash_ChainBudgetBoundsTheWholeOperation(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir modifies process-global state.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "x")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, dir, "fork", "https://example.com/fork.git")
+	// Elect a non-origin remote so the read chain is genuinely two tiers
+	// (elected, then the legacy origin tier). With origin elected the chain
+	// collapses to one candidate and the loop's worst case is a single window —
+	// nothing for a ceiling to bind against.
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "fork")
+	t.Chdir(dir)
+
+	// Production-shaped ratio, scaled down: the ceiling sits BELOW the loop's own
+	// worst case (targets x perTarget), which is the whole point — sized at or
+	// above it the ceiling cannot bind and buys nothing. That was the original
+	// defect here, and the first version of this test hid it by inverting the
+	// relationship (perTarget far larger than the ceiling), which proves only that
+	// some ceiling can bind, not that this one does.
+	const perTarget = 400 * time.Millisecond
+	const chainBudget = 500 * time.Millisecond // < 2 targets x perTarget
+
+	var attempts int
+	stall := func(ctx context.Context, _ string, _ []string) error {
+		attempts++
+		<-ctx.Done() // hang until this attempt's budget expires
+		return ctx.Err()
+	}
+
+	start := time.Now()
+	err := fetchBlobsByHash(t.Context(), []plumbing.Hash{plumbing.NewHash(
+		"1111111111111111111111111111111111111111")}, perTarget, chainBudget, stall)
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "every target stalled, so hydration cannot succeed")
+	assert.GreaterOrEqual(t, attempts, 1, "at least one target must be attempted")
+
+	// The ceiling, not targets x perTarget, decides how long the user waits. The
+	// bound has to be below the loop's own worst case or it proves nothing;
+	// slack on top absorbs a loaded CI box.
+	targetCount := len(checkpointBlobFetchTargets(t.Context()))
+	require.GreaterOrEqual(t, targetCount, 2,
+		"setup: the ceiling can only be shown to bind against a multi-candidate chain")
+	loopWorstCase := time.Duration(targetCount) * perTarget
+	assert.Less(t, elapsed, chainBudget+300*time.Millisecond,
+		"the chain ceiling must bound the whole operation including fallbacks (elapsed %s)", elapsed)
+	assert.Less(t, elapsed, loopWorstCase,
+		"a ceiling at or above the loop's worst case (%s) cannot bind — that was the original defect", loopWorstCase)
 }

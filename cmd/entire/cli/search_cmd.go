@@ -489,9 +489,8 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 //  4. Fan out via fanOutCells with per-cell codesearch.Search calls
 //  5. Merge results (sorted by score, capped to limit)
 func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.SearchResponse, error) {
-	// Step 1: Get repos index from the control plane.
-	// coreapi.Client satisfies cellCoreClient (for resolveCellBaseURLs)
-	// and also provides ListRepos (which cellCoreClient doesn't expose).
+	// Step 1: Get repos index from the control plane. *coreapi.Client
+	// satisfies cellCoreClient (passed to resolveCellBaseURLs below as such).
 	coreClient, err := coreapi.New()
 	if err != nil {
 		if errors.Is(err, auth.ErrNotLoggedIn) {

@@ -278,17 +278,17 @@ func runStop(ctx context.Context, cmd *cobra.Command, sessionID string, all, for
 	return runStopMultiSelect(ctx, cmd, activeSessions, force)
 }
 
-// filterActiveSessions returns sessions that have not been explicitly ended.
-// A session is considered ended if Phase == PhaseEnded OR EndedAt is set.
-// This matches the logic in status.go's writeActiveSessions for consistency:
-// any session visible in `entire status` should also be visible in `sessions stop`.
+// filterActiveSessions returns sessions that have not been explicitly ended,
+// per session.State.IsEnded. `entire status` filters on the same predicate
+// (writeActiveSessions, runStatusJSON), so any session it lists as active is
+// also one `sessions stop` will offer.
 func filterActiveSessions(states []*strategy.SessionState) []*strategy.SessionState {
 	var active []*strategy.SessionState
 	for _, s := range states {
 		if s == nil {
 			continue
 		}
-		if s.Phase != session.PhaseEnded && s.EndedAt == nil {
+		if !s.IsEnded() {
 			active = append(active, s)
 		}
 	}
@@ -736,7 +736,7 @@ func runStopSession(ctx context.Context, cmd *cobra.Command, sessionID string, f
 		return NewSilentError(fmt.Errorf("session not found: %s", sessionID))
 	}
 
-	if state.Phase == session.PhaseEnded || state.EndedAt != nil {
+	if state.IsEnded() {
 		fmt.Fprintf(cmd.OutOrStdout(), "Session %s is already stopped.\n", sessionID)
 		return nil
 	}
@@ -886,7 +886,7 @@ func stopSessionAndPrint(ctx context.Context, cmd *cobra.Command, state *strateg
 	lastCheckpointID := state.LastCheckpointID
 	stepCount := state.StepCount
 
-	if _, err := markSessionEnded(ctx, nil, sessionID, nil); err != nil {
+	if _, err := markSessionEnded(ctx, nil, sessionID, nil, endedNow); err != nil {
 		return fmt.Errorf("failed to stop session %s: %w", sessionID, err)
 	}
 

@@ -913,9 +913,10 @@ func TestString_BoundedCredentialValueOverRedactionGuards(t *testing.T) {
 			want:  "PWD=/workspace/project",
 		},
 		{
-			name:  "standalone password assignment is preserved",
+			// betterleaks >= 1.8.0 detects generic password assignments.
+			name:  "standalone password assignment is redacted by betterleaks",
 			input: "password=not-a-secret-setting",
-			want:  "password=not-a-secret-setting",
+			want:  "password=REDACTED",
 		},
 		{
 			name:  "password reset query parameter is preserved",
@@ -923,9 +924,10 @@ func TestString_BoundedCredentialValueOverRedactionGuards(t *testing.T) {
 			want:  "https://example.com/?password_reset=true",
 		},
 		{
-			name:  "generic https password query is preserved",
+			// The greedy match consumes the trailing query param too.
+			name:  "generic https password query is redacted by betterleaks",
 			input: "https://example.com/callback?user=svc&password=not-a-db-credential&debug=true",
-			want:  "https://example.com/callback?user=svc&password=not-a-db-credential&debug=true",
+			want:  "https://example.com/callback?user=svc&password=REDACTED",
 		},
 		{
 			name:  "db password hash field is preserved",
@@ -966,6 +968,41 @@ func TestString_BoundedCredentialValueOverRedactionGuards(t *testing.T) {
 			name:  "secret_here placeholder is preserved",
 			input: "DB_PASSWORD=secret_here",
 			want:  "DB_PASSWORD=secret_here",
+		},
+		{
+			// Exact placeholder match suppresses the betterleaks finding.
+			name:  "bare placeholder password assignment is preserved",
+			input: "password=changeme",
+			want:  "password=changeme",
+		},
+		{
+			// Semicolon DSNs terminate the unquoted capture, so the finding
+			// is exactly the placeholder.
+			name:  "dsn placeholder password is preserved",
+			input: "Server=db.internal;Database=prod;User Id=app;Password=changeme;TrustCert=true",
+			want:  "Server=db.internal;Database=prod;User Id=app;Password=changeme;TrustCert=true",
+		},
+		{
+			// Greedy findings are redacted whole, never split at a
+			// placeholder head — the tail can hold a real secret.
+			name:  "placeholder head with real secret in greedy tail is redacted",
+			input: "password=changeme&db_pass=hunter2hunter2",
+			want:  "password=REDACTED",
+		},
+		{
+			name:  "quoted secret with placeholder first token is redacted",
+			input: `password="changeme;realSecret42"`,
+			want:  `password="REDACTED"`,
+		},
+		{
+			name:  "placeholder with trailing query params over-redacts",
+			input: "password=changeme&sslmode=require",
+			want:  "password=REDACTED",
+		},
+		{
+			name:  "real value with trailing query params is still redacted",
+			input: "password=hunter2secret&sslmode=require",
+			want:  "password=REDACTED",
 		},
 		{
 			name:  "placeholder literal is preserved",

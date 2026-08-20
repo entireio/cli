@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -14,6 +15,52 @@ import (
 
 // HooksFileName is the hooks config file used by Codex.
 const HooksFileName = "hooks.json"
+
+// defaultHookTimeoutSec is the timeout Entire configures for Codex hooks that
+// run between turns, where Codex allows up to its standard 600s.
+const defaultHookTimeoutSec = 30
+
+// managedHook describes one hooks.json event Entire owns. Keeping the event
+// key, verb, timeout and production wrapper together means adding or removing
+// an event is a single table edit rather than parallel edits in InstallHooks,
+// UninstallHooks and AreHooksInstalled.
+type managedHook struct {
+	event   string // hooks.json key
+	verb    string // `entire hooks codex <verb>`
+	timeout int
+	wrap    func(cmd string, windows bool) string
+
+	// core marks the events whose absence means Codex was never enabled in this
+	// repo, as opposed to enabled against an older release that installed fewer
+	// events. Only these gate AreHooksInstalled — see the comment there.
+	core bool
+}
+
+// managedHooks is the full set of Codex events Entire installs.
+var managedHooks = []managedHook{
+	{event: "SessionStart", verb: HookNameSessionStart, timeout: defaultHookTimeoutSec, core: true, wrap: func(cmd string, windows bool) string {
+		return agent.WrapProductionJSONWarningHookCommandForOS(cmd, agent.WarningFormatSingleLine, windows)
+	}},
+	// SessionEnd is the one event Codex clamps: it caps handlers at
+	// SESSION_END_MAX_TIMEOUT_SEC and warns at every startup when a config asks
+	// for more, so it is installed at exactly the ceiling. See SessionEndTimeoutSec.
+	//
+	// Not core: it postdates the four events below, so requiring it would
+	// un-enable Codex for everyone who enabled it before this release.
+	{event: "SessionEnd", verb: HookNameSessionEnd, timeout: SessionEndTimeoutSec, wrap: agent.WrapProductionSilentHookCommandForOS},
+	{event: "UserPromptSubmit", verb: HookNameUserPromptSubmit, timeout: defaultHookTimeoutSec, core: true, wrap: agent.WrapProductionSilentHookCommandForOS},
+	{event: "Stop", verb: HookNameStop, timeout: defaultHookTimeoutSec, core: true, wrap: agent.WrapProductionSilentHookCommandForOS},
+	{event: "PostToolUse", verb: HookNamePostToolUse, timeout: defaultHookTimeoutSec, core: true, wrap: agent.WrapProductionSilentHookCommandForOS},
+	// Codex keys hooks.json by PascalCase event name (its own fixtures do the
+	// same), even though HookEventName serializes snake_case elsewhere in its
+	// protocol — following that would install hooks that never fire.
+	//
+	// Not core, for the same reason as SessionEnd: both postdate the four events
+	// above, so requiring them would un-enable Codex for anyone who enabled it
+	// before this release.
+	{event: "SubagentStart", verb: HookNameSubagentStart, timeout: defaultHookTimeoutSec, wrap: agent.WrapProductionSilentHookCommandForOS},
+	{event: "SubagentStop", verb: HookNameSubagentStop, timeout: defaultHookTimeoutSec, wrap: agent.WrapProductionSilentHookCommandForOS},
+}
 
 // InstallHooks installs Codex hooks in .codex/hooks.json.
 func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
@@ -46,64 +93,34 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 		rawHooks = make(map[string]json.RawMessage)
 	}
 
-	// Parse event types we manage
-	var sessionStart, userPromptSubmit, stop, postToolUse []MatcherGroup
-	if err := parseHookType(rawHooks, "SessionStart", &sessionStart); err != nil {
-		return 0, err
-	}
-	if err := parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit); err != nil {
-		return 0, err
-	}
-	if err := parseHookType(rawHooks, "Stop", &stop); err != nil {
-		return 0, err
-	}
-	if err := parseHookType(rawHooks, "PostToolUse", &postToolUse); err != nil {
-		return 0, err
-	}
-
-	if force {
-		sessionStart = removeEntireHooks(sessionStart)
-		userPromptSubmit = removeEntireHooks(userPromptSubmit)
-		stop = removeEntireHooks(stop)
-		postToolUse = removeEntireHooks(postToolUse)
-	}
-
-	// Build hook commands
 	const cmdPrefix = "entire hooks codex "
 	useWindowsProductionHooks := agent.UseWindowsProductionHooks(ctx)
-	sessionStartCmd := agent.WrapProductionJSONWarningHookCommandForOS(cmdPrefix+"session-start", agent.WarningFormatSingleLine, useWindowsProductionHooks)
-	userPromptSubmitCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+"user-prompt-submit", useWindowsProductionHooks)
-	stopCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+"stop", useWindowsProductionHooks)
-	postToolUseCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+"post-tool-use", useWindowsProductionHooks)
 
 	count := 0
-
-	if updated, changed := syncHookCommand(sessionStart, sessionStartCmd); changed {
-		sessionStart = updated
-		count++
-	}
-	if updated, changed := syncHookCommand(userPromptSubmit, userPromptSubmitCmd); changed {
-		userPromptSubmit = updated
-		count++
-	}
-	if updated, changed := syncHookCommand(stop, stopCmd); changed {
-		stop = updated
-		count++
-	}
-	if updated, changed := syncHookCommand(postToolUse, postToolUseCmd); changed {
-		postToolUse = updated
-		count++
+	updated := make([][]MatcherGroup, len(managedHooks))
+	for i, h := range managedHooks {
+		var groups []MatcherGroup
+		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
+			return 0, err
+		}
+		if force {
+			groups = removeEntireHooks(groups)
+		}
+		hookCmd := h.wrap(cmdPrefix+h.verb, useWindowsProductionHooks)
+		if synced, changed := syncHookCommand(groups, hookCmd, h.timeout); changed {
+			groups = synced
+			count++
+		}
+		updated[i] = groups
 	}
 
 	if count == 0 {
 		return 0, nil
 	}
 
-	// Marshal modified types back
-	marshalHookType(rawHooks, "SessionStart", sessionStart)
-	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
-	marshalHookType(rawHooks, "Stop", stop)
-	marshalHookType(rawHooks, "PostToolUse", postToolUse)
+	for i, h := range managedHooks {
+		marshalHookType(rawHooks, h.event, updated[i])
+	}
 
 	// Preserve existing top-level keys (e.g., $schema) by reusing the parsed file
 	topLevel := make(map[string]json.RawMessage)
@@ -167,29 +184,13 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 		return nil
 	}
 
-	var sessionStart, userPromptSubmit, stop, postToolUse []MatcherGroup
-	if err := parseHookType(rawHooks, "SessionStart", &sessionStart); err != nil {
-		return err
+	for _, h := range managedHooks {
+		var groups []MatcherGroup
+		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
+			return err
+		}
+		marshalHookType(rawHooks, h.event, removeEntireHooks(groups))
 	}
-	if err := parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit); err != nil {
-		return err
-	}
-	if err := parseHookType(rawHooks, "Stop", &stop); err != nil {
-		return err
-	}
-	if err := parseHookType(rawHooks, "PostToolUse", &postToolUse); err != nil {
-		return err
-	}
-
-	sessionStart = removeEntireHooks(sessionStart)
-	userPromptSubmit = removeEntireHooks(userPromptSubmit)
-	stop = removeEntireHooks(stop)
-	postToolUse = removeEntireHooks(postToolUse)
-
-	marshalHookType(rawHooks, "SessionStart", sessionStart)
-	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
-	marshalHookType(rawHooks, "Stop", stop)
-	marshalHookType(rawHooks, "PostToolUse", postToolUse)
 
 	if len(rawHooks) > 0 {
 		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
@@ -211,7 +212,15 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 	return nil
 }
 
-// AreHooksInstalled checks if Entire hooks are installed in Codex hooks.json.
+// AreHooksInstalled reports whether Codex is wired up to Entire in this repo.
+//
+// It requires only the core events, not everything InstallHooks writes today.
+// The two questions are different: this one decides whether Codex is listed as
+// an installed agent (`entire status`, the review and investigate pickers), and
+// answering it with the full set would drop Codex out of all of them the moment
+// a release adds an event — every existing install predates the addition. Drift
+// against today's set is MissingEntireHooks' job, which `entire doctor` reports
+// with the fix (`entire enable`).
 func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -224,15 +233,30 @@ func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
 		return false
 	}
 
-	var hooksFile HooksFile
-	if err := json.Unmarshal(data, &hooksFile); err != nil {
+	var topLevel map[string]json.RawMessage
+	if err := json.Unmarshal(data, &topLevel); err != nil {
 		return false
 	}
+	var rawHooks map[string]json.RawMessage
+	if hooksRaw, ok := topLevel["hooks"]; ok {
+		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
+			return false
+		}
+	}
 
-	return hasEntireHook(hooksFile.Hooks.SessionStart) &&
-		hasEntireHook(hooksFile.Hooks.UserPromptSubmit) &&
-		hasEntireHook(hooksFile.Hooks.Stop) &&
-		hasEntireHook(hooksFile.Hooks.PostToolUse)
+	for _, h := range managedHooks {
+		if !h.core {
+			continue
+		}
+		var groups []MatcherGroup
+		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
+			return false
+		}
+		if !hasEntireHook(groups) {
+			return false
+		}
+	}
+	return true
 }
 
 // --- Helpers ---
@@ -258,10 +282,15 @@ func marshalHookType(rawHooks map[string]json.RawMessage, hookType string, group
 	rawHooks[hookType] = data
 }
 
-func hookCommandExists(groups []MatcherGroup, command string) bool {
+// hookCommandExists reports whether the exact command is already configured
+// with the timeout we want. The timeout is part of the match so an upgrade
+// rewrites a hook installed by an older Entire with a different budget —
+// notably SessionEnd, where a leftover 30s makes Codex print a clamping warning
+// at every startup.
+func hookCommandExists(groups []MatcherGroup, command string, timeoutSec int) bool {
 	for _, group := range groups {
 		for _, hook := range group.Hooks {
-			if hook.Command == command {
+			if hook.Command == command && hook.Timeout == timeoutSec {
 				return true
 			}
 		}
@@ -270,29 +299,43 @@ func hookCommandExists(groups []MatcherGroup, command string) bool {
 }
 
 // syncHookCommand ensures groups contains exactly the given Entire hook command
-// and no other Entire-owned entry, reporting whether the config changed.
+// at the given timeout, and no other Entire-owned entry, reporting whether the
+// config changed.
 //
 // Stale entries are dropped even when command is already present. Checking
 // presence first (as this did before) left a hook written by an older version
 // sitting next to the current one, so both fired — for the removed local-dev mode
 // that meant a script inside the working tree kept running on every agent turn.
-func syncHookCommand(groups []MatcherGroup, command string) ([]MatcherGroup, bool) {
-	groups, dropped := dropStaleEntireHooks(groups, command)
-	if hookCommandExists(groups, command) {
+func syncHookCommand(groups []MatcherGroup, command string, timeoutSec int) ([]MatcherGroup, bool) {
+	groups, dropped := dropStaleEntireHooks(groups, command, timeoutSec)
+	if hookCommandExists(groups, command, timeoutSec) {
 		return groups, dropped
 	}
-	return addHook(groups, command), true
+	return addHook(groups, command, timeoutSec), true
 }
 
-// dropStaleEntireHooks removes Entire-owned hooks whose command is not one of
-// want, per matcher group, pruning groups left with no hooks. See
+// dropStaleEntireHooks removes Entire-owned hooks that are not command at
+// timeoutSec, per matcher group, pruning groups left with no hooks. See
 // agent.DropStaleManagedHooks for why this runs on every install.
-func dropStaleEntireHooks(groups []MatcherGroup, want ...string) ([]MatcherGroup, bool) {
+//
+// The timeout is part of what counts as stale here, which the shared helper
+// cannot express: it matches on the command alone, and Codex budgets per event.
+// A SessionEnd hook left at the old 30s keeps its command but makes Codex print
+// a clamping warning at every startup — see SessionEndTimeoutSec.
+func dropStaleEntireHooks(groups []MatcherGroup, command string, timeoutSec int) ([]MatcherGroup, bool) {
+	staleTimeout := func(e HookEntry) bool { return e.Command == command && e.Timeout != timeoutSec }
+
 	result := make([]MatcherGroup, 0, len(groups))
 	dropped := false
 	for _, group := range groups {
-		kept, d := agent.DropStaleManagedHooks(group.Hooks, hookEntryCommand, want)
+		kept, d := agent.DropStaleManagedHooks(group.Hooks, hookEntryCommand, []string{command})
 		if d {
+			dropped = true
+		}
+		// Clone before deleting: with nothing dropped above, kept still aliases
+		// the caller's slice.
+		if slices.ContainsFunc(kept, staleTimeout) {
+			kept = slices.DeleteFunc(slices.Clone(kept), staleTimeout)
 			dropped = true
 		}
 		if len(kept) > 0 {
@@ -309,11 +352,11 @@ func dropStaleEntireHooks(groups []MatcherGroup, want ...string) ([]MatcherGroup
 // hookEntryCommand reads the command off a hook entry for the shared helpers.
 func hookEntryCommand(e HookEntry) string { return e.Command }
 
-func addHook(groups []MatcherGroup, command string) []MatcherGroup {
+func addHook(groups []MatcherGroup, command string, timeoutSec int) []MatcherGroup {
 	entry := HookEntry{
 		Type:    "command",
 		Command: command,
-		Timeout: 30,
+		Timeout: timeoutSec,
 	}
 
 	// Add to an existing group with null matcher, or create a new one

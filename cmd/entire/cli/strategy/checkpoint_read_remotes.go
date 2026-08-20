@@ -23,10 +23,12 @@ import (
 // absent" classification must gather their own positive evidence (successful
 // remote listing, readable settings); an empty chain alone is not proof.
 //
-// Deliberately un-memoized: every call re-runs the election (~2 git
-// subprocesses plus a settings.Load). Callers on hot paths (per-turn hooks,
-// checkpoint.Open sites) accept that cost for always-fresh results; revisit
-// with memoization only if profiling shows it matters.
+// The election itself is deliberately un-memoized: every call re-runs it, so a
+// settings change or a captured election written mid-invocation is observed
+// immediately. What IS memoized, per invocation, are the two .git/config reads
+// underneath it — which remotes exist, and does remote X exist (see
+// git_remote_cache.go). That split is load-bearing: caching the election result
+// would make #1991's capture invisible to the gate that runs right after it.
 func CheckpointReadRemotes(ctx context.Context) []string {
 	return CheckpointReadRemotesWithElection(ctx).Candidates
 }

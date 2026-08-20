@@ -18,6 +18,7 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode" // register claude-code so its .claude protected dir is discoverable
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -197,6 +198,34 @@ func TestCollectChangedFiles_ExcludesProtectedDirs(t *testing.T) {
 		"infrastructure dir must not be captured into the checkpoint")
 	require.Contains(t, result.Changed, "src/keep.txt",
 		"ordinary untracked files must still be captured")
+}
+
+// TestCollectChangedFiles_BudgetExceededReturnsSentinel pins the second half
+// of the zombie-hook regression: the first-checkpoint `git status` subprocess
+// had no deadline, so on a pathological worktree the hook process could
+// outlive the agent's ~60s hook timeout stuck in a child git rather than a
+// goroutine. When the budget expires, the child is killed and the error must
+// wrap gitrepo.ErrStatusBudgetExceeded so the lifecycle handlers' warn-and-skip
+// degrade path recognizes it (rather than failing the hook on a generic error).
+func TestCollectChangedFiles_BudgetExceededReturnsSentinel(t *testing.T) {
+	// Not parallel: overrides the package-level budget seam.
+	origBudget := gitStatusBudget
+	// An already-expired deadline deterministically forces the breach path
+	// without needing a slow git or a multi-million-file fixture.
+	gitStatusBudget = time.Nanosecond
+	t.Cleanup(func() { gitStatusBudget = origBudget })
+
+	tempDir := t.TempDir()
+	testutil.InitRepo(t, tempDir)
+	testutil.WriteFile(t, tempDir, "base.txt", "base")
+	testutil.GitAdd(t, tempDir, "base.txt")
+	testutil.GitCommit(t, tempDir, "init")
+
+	repo, err := git.PlainOpen(tempDir)
+	require.NoError(t, err)
+
+	_, err = collectChangedFiles(context.Background(), repo)
+	require.ErrorIs(t, err, gitrepo.ErrStatusBudgetExceeded)
 }
 
 // TestWriteCommitted_AgentField verifies that the Agent field is written
@@ -1028,6 +1057,107 @@ func TestListCommitted_FallsBackToRemote(t *testing.T) {
 	}
 	if len(checkpoints) > 0 && checkpoints[0].CheckpointID.String() != cpID.String() {
 		t.Errorf("List() checkpoint ID = %q, want %q", checkpoints[0].CheckpointID, cpID)
+	}
+}
+
+// Regression (PR #1951 review): attach's local-presence gates require reads
+// that see ONLY the local primary branch — a checkpoint present solely on a
+// remote-tracking ref must read as absent, or attach would treat it as safe
+// to write and clobber the remote's sessions on push. The read chain's
+// per-checkpoint fall-through defeated that: a stale-but-existing local
+// branch fell through to origin's tracking tree and reported the checkpoint
+// present. PrimaryAsLocalRead pins reads to the local ref with no remote
+// tiers; the default chain keeps the fall-through for ordinary reads.
+func TestRead_PrimaryAsLocalRead_IgnoresRemoteTrackingPresence(t *testing.T) {
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	remoteRepo, err := git.PlainOpen(remoteDir)
+	if err != nil {
+		t.Fatalf("failed to open remote repo: %v", err)
+	}
+	remoteWorktree, err := remoteRepo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get remote worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(remoteDir, "README.md"), []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := remoteWorktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := remoteWorktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	}); err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	remoteStore := NewGitStore(remoteRepo, DefaultV1Refs())
+	remoteOnlyID := id.MustCheckpointID("abcdef123456")
+	if err := remoteStore.Write(context.Background(), Session{
+		CheckpointID: remoteOnlyID,
+		SessionID:    "remote-only-session",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"test": true}`)),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}); err != nil {
+		t.Fatalf("failed to write checkpoint to remote: %v", err)
+	}
+
+	localDir := t.TempDir()
+	localRepo, err := git.PlainClone(localDir, &git.CloneOptions{URL: remoteDir})
+	if err != nil {
+		t.Fatalf("failed to clone repo: %v", err)
+	}
+	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", paths.MetadataBranchName, paths.MetadataBranchName)
+	if err := localRepo.Fetch(&git.FetchOptions{
+		RemoteName: "origin",
+		RefSpecs:   []config.RefSpec{config.RefSpec(refSpec)},
+	}); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		t.Fatalf("failed to fetch metadata branch: %v", err)
+	}
+
+	// A stale LOCAL v1 branch: it exists (so a naive local-branch-exists gate
+	// passes) but holds a different checkpoint, not remoteOnlyID.
+	localStore := NewGitStore(localRepo, DefaultV1Refs())
+	localOnlyID := id.MustCheckpointID("fedcba654321")
+	if err := localStore.Write(context.Background(), Session{
+		CheckpointID: localOnlyID,
+		SessionID:    "local-session",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"local": true}`)),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}); err != nil {
+		t.Fatalf("failed to write local checkpoint: %v", err)
+	}
+
+	// Default chain: the remote-only checkpoint IS readable (fall-through).
+	chainSummary, err := localStore.Read(context.Background(), remoteOnlyID)
+	if err != nil {
+		t.Fatalf("chain Read() error = %v", err)
+	}
+	if chainSummary == nil {
+		t.Fatal("chain read should fall through to the remote-tracking tree")
+	}
+
+	// Local-pinned reads: the same checkpoint must be ABSENT.
+	pinnedStore := NewGitStore(localRepo, DefaultV1Refs().PrimaryAsLocalRead())
+	pinnedSummary, err := pinnedStore.Read(context.Background(), remoteOnlyID)
+	if err != nil && !errors.Is(err, ErrCheckpointNotFound) {
+		t.Fatalf("pinned Read() error = %v", err)
+	}
+	if pinnedSummary != nil {
+		t.Fatal("local-pinned read must not see a checkpoint that exists only on a remote-tracking ref")
+	}
+
+	// And the local checkpoint stays readable through the pin.
+	localSummary, err := pinnedStore.Read(context.Background(), localOnlyID)
+	if err != nil {
+		t.Fatalf("pinned Read(local) error = %v", err)
+	}
+	if localSummary == nil {
+		t.Fatal("local-pinned read must still serve locally present checkpoints")
 	}
 }
 

@@ -463,13 +463,13 @@ func resolveTrailCheckpointSessions(ctx context.Context, branch string) ([]trail
 		return nil, 0, nil
 	}
 
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, 0, fmt.Errorf("open checkpoint store: %w", err)
 	}
 	store := stores.Persistent
 	refs := stores.Refs()
-	if refs.ReadBootstrappableFromOrigin() {
+	if refs.ReadBootstrappableFromRemote() {
 		promoteRemoteTrackingPrimary(ctx, repo, refs)
 	}
 
