@@ -178,7 +178,7 @@ with hooks (verified empirically, Cursor 3.16.29 on Windows Server 2022 + WSL2):
 
 Multi-root workspaces (macOS-verified): every root's hooks.json fires for the
 same conversation with per-root CWDs, and the stop `transcript_path` keys to
-the FIRST workspace root. Known quirks, tracked separately.
+the FIRST workspace root. Known quirks; follow-ups recorded in PR #2078.
 
 ## Transcript
 

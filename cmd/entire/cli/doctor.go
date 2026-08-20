@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -680,17 +681,18 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 }
 
 // cursorWindowsUsersRoot is the Windows user-profile root as seen from WSL.
-// A package var (rather than an inline literal) so tests can point it at a
-// populated temp directory and exercise the positive-match path.
+// Package var so tests can override it. Assumes Windows is on C: with the
+// default WSL automount; other drive-letter mappings of \\wsl$ are missed.
 var cursorWindowsUsersRoot = "/mnt/c/Users"
 
 // checkCursorUNCMode warns when Cursor IDE on the Windows host has opened
 // this WSL repo via a \\wsl$ UNC path: Cursor executes no hooks in that mode
-// (verified empirically), so sessions silently never track. Detection is the
-// Windows-side project-dir fingerprint (cursor.DetectUNCProjectDirs). Stays
-// silent outside WSL, when cursor hooks aren't installed in this repo, or
-// when nothing matches. Warn-only: there is no CLI-side fix — the user must
-// reopen the folder in WSL mode.
+// (see cursor/AGENT.md § Windows + WSL for the verified behavior), so
+// sessions silently never track. Detection is the Windows-side project-dir
+// fingerprint (cursor.DetectUNCProjectDirs). Stays silent outside WSL, when
+// cursor hooks aren't installed in this repo, or when nothing matches.
+// Warn-only: there is no CLI-side fix — the user must reopen the folder in
+// WSL mode.
 func checkCursorUNCMode(cmd *cobra.Command) {
 	distro := os.Getenv("WSL_DISTRO_NAME")
 	if distro == "" {
@@ -709,9 +711,10 @@ func checkCursorUNCMode(cmd *cobra.Command) {
 	if len(matches) == 0 {
 		return
 	}
+	logging.Debug(ctx, "doctor: cursor UNC-mode fingerprint matched", "count", len(matches))
 	w := cmd.OutOrStdout()
-	fmt.Fprintln(w, "Cursor IDE hooks: NOT FIRING (repo opened over \\\\wsl$)")
-	fmt.Fprintln(w, "  Cursor runs no hooks in this mode, so sessions here are never tracked.")
+	fmt.Fprintln(w, "Cursor IDE hooks: NOT FIRING (recent sessions ran over \\\\wsl$)")
+	fmt.Fprintln(w, "  Sessions opened this way are never tracked.")
 	fmt.Fprintln(w, "  Fix: in Cursor, run \"Reopen Folder in WSL\" (Ctrl+Shift+P). The window")
 	fmt.Fprintln(w, "  title should end in [WSL: "+distro+"]. From a WSL terminal, `cursor .`")
 	fmt.Fprintln(w, "  also works once the WSL server is installed.")

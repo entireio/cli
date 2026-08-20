@@ -702,7 +702,9 @@ func TestCheckCursorUNCMode_WarnsOnFreshUNCFingerprint(t *testing.T) {
 
 	cmd, stdout := newTestCmd(t)
 	checkCursorUNCMode(cmd)
-	require.Contains(t, stdout.String(), "Cursor IDE hooks: NOT FIRING")
+	out := stdout.String()
+	require.Contains(t, out, "Cursor IDE hooks: NOT FIRING")
+	require.Contains(t, out, "Reopen Folder in WSL")
 }
 
 // installCursorHooksFixture writes a minimal .cursor/hooks.json declaring one
