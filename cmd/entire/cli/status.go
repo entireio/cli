@@ -164,6 +164,10 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		}
 	}
 
+	if reason := effectiveSettings.AbsoluteGitHookPathRejection(); reason != "" {
+		fmt.Fprintf(w, "absolute_git_hook_path ignored: %s\n", reason)
+	}
+
 	if effectiveSettings.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}

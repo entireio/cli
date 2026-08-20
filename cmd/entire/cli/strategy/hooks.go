@@ -159,9 +159,17 @@ const (
 
 // CheckGitHookState reports the state of the active hooks directory.
 func CheckGitHookState(ctx context.Context) GitHookState {
+	state, _ := CheckGitHookStateWithReason(ctx)
+	return state
+}
+
+// CheckGitHookStateWithReason also reports why the hooks read as outdated, for
+// callers that show the user what to do about it. The reason is "" for any state
+// other than GitHooksOutdated.
+func CheckGitHookStateWithReason(ctx context.Context) (GitHookState, string) {
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
-		return GitHooksAbsent
+		return GitHooksAbsent, ""
 	}
 	return gitHookStateInHooksDir(hooksDir)
 }
@@ -173,7 +181,8 @@ func CheckGitHookStateInDir(ctx context.Context, repoDir string) GitHookState {
 	if err != nil {
 		return GitHooksAbsent
 	}
-	return gitHookStateInHooksDir(hooksDir)
+	state, _ := gitHookStateInHooksDir(hooksDir)
+	return state
 }
 
 // IsGitHookInstalled reports whether a CURRENT set of Entire git hooks is
@@ -231,27 +240,46 @@ const bareEntireHookCmd = "entire"
 // is present but still invokes a removed local-dev launcher reads Outdated, not
 // Current, which is what makes EnsureSetup reinstall it rather than leaving a
 // broken hook in place forever.
-func gitHookStateInHooksDir(hooksDir string) GitHookState {
-	outdated := false
+func gitHookStateInHooksDir(hooksDir string) (GitHookState, string) {
+	reason := ""
 	for _, hook := range gitHookNames {
 		hookPath := filepath.Join(hooksDir, hook)
 		data, err := os.ReadFile(hookPath) //nolint:gosec // Path is constructed from constants
 		if err != nil {
-			return GitHooksAbsent
+			return GitHooksAbsent, ""
 		}
 		content := string(data)
 		if !strings.Contains(content, entireHookMarker) {
-			return GitHooksAbsent
+			return GitHooksAbsent, ""
+		}
+		// Both causes below mean "ours, but not what we would write now". They
+		// need different advice, though — one hook runs deleted repo content, the
+		// other points at a binary that moved — so the first cause found is
+		// carried out rather than collapsing into a single message.
+		if reason != "" {
+			continue
 		}
 		if entireHookLineRunsFromWorkingTree(content) {
-			outdated = true
+			reason = gitHookWorkingTreeReason
+		} else if pinned := entireHookPinnedPath(content); pinned != "" {
+			if _, statErr := os.Stat(pinned); statErr != nil {
+				reason = fmt.Sprintf(gitHookDeadPinReasonFmt, pinned)
+			}
 		}
 	}
-	if outdated {
-		return GitHooksOutdated
+	if reason != "" {
+		return GitHooksOutdated, reason
 	}
-	return GitHooksCurrent
+	return GitHooksCurrent, ""
 }
+
+// Reasons a hook set reads as GitHooksOutdated, for the caller to report.
+const (
+	gitHookWorkingTreeReason = "A hook still runs Entire from the working tree instead of the installed\n" +
+		"binary. This can reject `git push`, because the path it names is gone."
+	gitHookDeadPinReasonFmt = "A hook is pinned to a binary path that no longer exists, so hooks are\n" +
+		"silently skipped and no checkpoints are captured:\n  %s"
+)
 
 // entireHookLineRunsFromWorkingTree reports whether the hook's OWN Entire
 // invocation names a legacy launcher.
@@ -275,6 +303,50 @@ func entireHookLineRunsFromWorkingTree(content string) bool {
 		}
 	}
 	return false
+}
+
+// entireHookPinnedPath returns the absolute binary path a hook is pinned to, or
+// "" when it resolves `entire` through PATH.
+//
+// absolute_git_hook_path exists for GUI git clients that never source a shell
+// profile, and it trades PATH resolution for a path fixed at install time. That
+// path can stop resolving — an upgrade into a new version directory, a binary
+// built in a temp dir, a `go install` that relocates it — and the failure is
+// quiet: the guard simply takes its else branch, so git keeps working while
+// nothing is captured. Only commit-msg carries the missing-binary warning, and it
+// reads like a generic "not installed" notice.
+//
+// Treating a dead pin as outdated is what makes that self-healing: reinstalling
+// re-pins to the binary now running, which is exactly the repair.
+func entireHookPinnedPath(content string) string {
+	for line := range strings.SplitSeq(content, "\n") {
+		if !strings.Contains(line, "hooks git ") {
+			continue
+		}
+		// gitHookCommandAvailableTest emits `[ -x <path> ]`, or `[ -f <path> ]`
+		// for a Windows path where Git-for-Windows' sh has no reliable -x.
+		for _, marker := range []string{"[ -x ", "[ -f "} {
+			start := strings.Index(line, marker)
+			if start < 0 {
+				continue
+			}
+			rest := line[start+len(marker):]
+			end := strings.Index(rest, " ]")
+			if end < 0 {
+				continue
+			}
+			return shellUnquote(rest[:end])
+		}
+	}
+	return ""
+}
+
+// shellUnquote reverses shellQuote.
+func shellUnquote(s string) string {
+	if len(s) < 2 || s[0] != '\'' || s[len(s)-1] != '\'' {
+		return s
+	}
+	return strings.ReplaceAll(s[1:len(s)-1], `'\''`, "'")
 }
 
 // buildHookSpecs returns the hook specifications for all managed hooks.

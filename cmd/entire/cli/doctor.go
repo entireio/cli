@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"charm.land/huh/v2"
@@ -534,7 +535,18 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
-	switch strategy.CheckGitHookState(ctx) {
+	// Reported whatever the hook state is: a setting present in the repository
+	// but deliberately not applied is confusing precisely when everything else
+	// looks fine.
+	if s, err := settings.Load(ctx); err == nil {
+		if reason := s.AbsoluteGitHookPathRejection(); reason != "" {
+			fmt.Fprintln(w, "Git hooks: absolute_git_hook_path ignored")
+			fmt.Fprintf(w, "  %s\n", reason)
+		}
+	}
+
+	state, outdatedReason := strategy.CheckGitHookStateWithReason(ctx)
+	switch state {
 	case strategy.GitHooksCurrent:
 		fmt.Fprintln(w, "✓ Git hooks: OK")
 		return nil
@@ -560,10 +572,12 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 	case strategy.GitHooksOutdated:
 		// Actionable whatever the settings say: a hook carrying Entire's marker
 		// means this repo opted in at some point, and a stale one is actively
-		// broken rather than merely missing.
+		// broken rather than merely missing. The reason comes from the check
+		// because the causes need different advice.
 		fmt.Fprintln(w, "Git hooks: OUT OF DATE")
-		fmt.Fprintln(w, "  A hook still runs Entire from the working tree instead of the installed")
-		fmt.Fprintln(w, "  binary. This can reject `git push`, because the path it names is gone.")
+		for line := range strings.SplitSeq(outdatedReason, "\n") {
+			fmt.Fprintf(w, "  %s\n", line)
+		}
 	}
 	fmt.Fprintln(w, "  Fix: reinstall the managed git hooks (any non-Entire hook is backed up).")
 

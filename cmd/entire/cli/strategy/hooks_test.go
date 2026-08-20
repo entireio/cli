@@ -738,7 +738,7 @@ func TestCheckGitHookState(t *testing.T) {
 
 	t.Run("no hooks at all is Absent", func(t *testing.T) {
 		t.Parallel()
-		if got := gitHookStateInHooksDir(t.TempDir()); got != GitHooksAbsent {
+		if got, _ := gitHookStateInHooksDir(t.TempDir()); got != GitHooksAbsent {
 			t.Errorf("empty hooks dir = %v, want GitHooksAbsent", got)
 		}
 	})
@@ -751,7 +751,7 @@ func TestCheckGitHookState(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "pre-push"), []byte("#!/bin/sh\necho lefthook\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if got := gitHookStateInHooksDir(dir); got != GitHooksAbsent {
+		if got, _ := gitHookStateInHooksDir(dir); got != GitHooksAbsent {
 			t.Errorf("foreign hook = %v, want GitHooksAbsent", got)
 		}
 	})
@@ -763,7 +763,7 @@ func TestCheckGitHookState(t *testing.T) {
 		if err := os.Remove(filepath.Join(dir, "post-commit")); err != nil {
 			t.Fatal(err)
 		}
-		if got := gitHookStateInHooksDir(dir); got != GitHooksAbsent {
+		if got, _ := gitHookStateInHooksDir(dir); got != GitHooksAbsent {
 			t.Errorf("incomplete set = %v, want GitHooksAbsent", got)
 		}
 	})
@@ -776,7 +776,7 @@ func TestCheckGitHookState(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		writeCurrentManagedHooks(t, dir)
-		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
+		if got, _ := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
 			t.Errorf("current-shape hooks = %v, want GitHooksCurrent", got)
 		}
 	})
@@ -793,7 +793,7 @@ func TestCheckGitHookState(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "pre-push"), []byte(legacyContent), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
+			if got, _ := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
 				t.Errorf("legacy hook %q = %v, want GitHooksOutdated", legacy, got)
 			}
 		}
@@ -824,7 +824,7 @@ func TestCheckGitHookState_UserAdditionsAreNotDrift(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
+		if got, _ := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
 			t.Errorf("a hook whose own Entire line is current must read Current despite the user line %q, got %v", userLine, got)
 		}
 	}
@@ -845,7 +845,7 @@ func TestCheckGitHookState_LegacyEntireLineIsStillDrift(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
+	if got, _ := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
 		t.Errorf("a legacy launcher on Entire's own invocation line must read Outdated, got %v", got)
 	}
 }
@@ -869,7 +869,7 @@ func TestIsGitHookInstalled_LegacyLocalDevCountsAsNotInstalled(t *testing.T) {
 	if _, err := InstallGitHook(context.Background(), true, false); err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
-	if got := gitHookStateInHooksDir(hooksDir); got != GitHooksCurrent {
+	if got, _ := gitHookStateInHooksDir(hooksDir); got != GitHooksCurrent {
 		t.Fatalf("a freshly installed hook set should read as current, got %v", got)
 	}
 
@@ -887,7 +887,7 @@ func TestIsGitHookInstalled_LegacyLocalDevCountsAsNotInstalled(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(legacy), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if got := gitHookStateInHooksDir(hooksDir); got != GitHooksOutdated {
+		if got, _ := gitHookStateInHooksDir(hooksDir); got != GitHooksOutdated {
 			t.Errorf("a hook running Entire from the working tree must read as outdated, got %v: %s", got, legacyCmd)
 		}
 	}
@@ -1990,6 +1990,151 @@ func TestResolveHookExePath(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "failed to resolve symlinks") {
 			t.Errorf("error should mention symlink resolution, got: %v", err)
+		}
+	})
+}
+
+// TestCheckGitHookState_DeadPinnedPathIsDrift pins that a hook whose embedded
+// absolute path no longer resolves reads as outdated rather than healthy.
+//
+// absolute_git_hook_path fixes the binary path at install time, so an upgrade or
+// a relocated binary leaves the guard failing its else branch: git keeps working
+// and nothing is captured. Reporting Current there is what made it silent —
+// `entire doctor` said "✓ Git hooks: OK" while no checkpoint was written.
+func TestCheckGitHookState_DeadPinnedPathIsDrift(t *testing.T) {
+	t.Parallel()
+
+	live := filepath.Join(t.TempDir(), "entire")
+	if err := os.WriteFile(live, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		path string
+		want GitHookState
+	}{
+		{"a pin that still resolves is current", live, GitHooksCurrent},
+		{"a pin that no longer resolves is outdated", filepath.Join(t.TempDir(), "moved-away", "entire"), GitHooksOutdated},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			for _, hook := range gitHookNames {
+				// The exact shape gitHookCommand emits for an absolute prefix.
+				quoted := shellQuote(tc.path)
+				content := "#!/bin/sh\n# " + entireHookMarker + "\n" +
+					"if [ -x " + quoted + " ]; then " + quoted + " hooks git " + hook + "; else :; fi\n"
+				if err := os.WriteFile(filepath.Join(dir, hook), []byte(content), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got, _ := gitHookStateInHooksDir(dir); got != tc.want {
+				t.Errorf("state = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEntireHookPinnedPath covers extraction, including the quoting cases that
+// make naive parsing wrong.
+func TestEntireHookPinnedPath(t *testing.T) {
+	t.Parallel()
+
+	hookLine := func(prefix string) string {
+		return "#!/bin/sh\n# " + entireHookMarker + "\nif [ -x " + prefix + " ]; then " + prefix + " hooks git pre-push; else :; fi\n"
+	}
+
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			// A PATH-resolved hook is not pinned and must not be probed.
+			name:    "bare entire is not pinned",
+			content: "#!/bin/sh\n# " + entireHookMarker + "\nif command -v entire >/dev/null 2>&1; then entire hooks git pre-push; else :; fi\n",
+			want:    "",
+		},
+		{"absolute unix path", hookLine(shellQuote("/opt/homebrew/bin/entire")), "/opt/homebrew/bin/entire"},
+		{"path containing spaces", hookLine(shellQuote("/Users/A B/bin/entire")), "/Users/A B/bin/entire"},
+		{
+			// shellQuote renders ' as '\'' — the case a naive split on quotes gets wrong.
+			name:    "path containing an apostrophe",
+			content: hookLine(shellQuote("/Users/John O'Brien/bin/entire")),
+			want:    "/Users/John O'Brien/bin/entire",
+		},
+		{"windows path uses -f", hookLine(shellQuote(`C:\Program Files\Entire\entire.exe`)), `C:\Program Files\Entire\entire.exe`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			content := tc.content
+			if tc.name == "windows path uses -f" {
+				content = strings.Replace(content, "[ -x ", "[ -f ", 1)
+			}
+			if got := entireHookPinnedPath(content); got != tc.want {
+				t.Errorf("entireHookPinnedPath() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGitHookStateReason_DistinguishesCauses pins that the two ways a hook set
+// can be outdated report differently. Collapsing them told a user with a moved
+// binary that their hook "runs Entire from the working tree", which is false and
+// points at the wrong fix.
+func TestGitHookStateReason_DistinguishesCauses(t *testing.T) {
+	t.Parallel()
+
+	write := func(t *testing.T, dir, body string) {
+		t.Helper()
+		for _, hook := range gitHookNames {
+			content := "#!/bin/sh\n# " + entireHookMarker + "\n" + strings.ReplaceAll(body, "%HOOK%", hook) + "\n"
+			if err := os.WriteFile(filepath.Join(dir, hook), []byte(content), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	t.Run("working-tree hook mentions git push", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		write(t, dir, "./scripts/entire-dev hooks git %HOOK%")
+		state, reason := gitHookStateInHooksDir(dir)
+		if state != GitHooksOutdated {
+			t.Fatalf("state = %v, want GitHooksOutdated", state)
+		}
+		if !strings.Contains(reason, "working tree") || !strings.Contains(reason, "git push") {
+			t.Errorf("reason should describe the working-tree cause, got:\n%s", reason)
+		}
+	})
+
+	t.Run("dead pin names the missing path", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		missing := filepath.Join(dir, "gone", "entire")
+		quoted := shellQuote(missing)
+		write(t, dir, "if [ -x "+quoted+" ]; then "+quoted+" hooks git %HOOK%; else :; fi")
+		state, reason := gitHookStateInHooksDir(dir)
+		if state != GitHooksOutdated {
+			t.Fatalf("state = %v, want GitHooksOutdated", state)
+		}
+		if !strings.Contains(reason, missing) {
+			t.Errorf("reason should name the missing path, got:\n%s", reason)
+		}
+		if strings.Contains(reason, "working tree") {
+			t.Errorf("a moved binary must not be reported as a working-tree hook, got:\n%s", reason)
+		}
+	})
+
+	t.Run("a healthy set has no reason", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeCurrentManagedHooks(t, dir)
+		if state, reason := gitHookStateInHooksDir(dir); state != GitHooksCurrent || reason != "" {
+			t.Errorf("state = %v, reason = %q; want GitHooksCurrent with no reason", state, reason)
 		}
 	})
 }

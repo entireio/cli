@@ -97,7 +97,16 @@ type EntireSettings struct {
 	// AbsoluteGitHookPath embeds the full binary path in git hooks instead of
 	// bare "entire". This is needed for GUI git clients (Xcode, Tower, etc.)
 	// that don't source shell profiles and can't find "entire" on PATH.
+	//
+	// Honored ONLY from .entire/settings.local.json — it describes one machine's
+	// installation, not the repository. See enforceAbsoluteGitHookPathScope.
 	AbsoluteGitHookPath bool `json:"absolute_git_hook_path,omitempty"`
+
+	// absoluteGitHookPathRejection records an absolute_git_hook_path dropped
+	// because it came from the committed project file, for the consumer to
+	// report. Unexported so it never serializes back to disk as if the user had
+	// unset it. See enforceAbsoluteGitHookPathScope.
+	absoluteGitHookPathRejection string
 
 	// Telemetry controls anonymous usage analytics.
 	// nil = not asked yet (show prompt), true = opted in, false = opted out
@@ -326,6 +335,17 @@ type OPFSettings struct {
 	// "always" runs without asking. ENTIRE_OPF=yes|no on the push
 	// invocation overrides this setting per-push.
 	PromptDefault string `json:"prompt_default,omitempty"`
+}
+
+// AbsoluteGitHookPathRejection reports why Load dropped absolute_git_hook_path,
+// or "" when it did not. Callers that report on hook configuration should
+// surface this — it is the only signal that a setting present in the repository
+// is deliberately not being applied.
+func (s *EntireSettings) AbsoluteGitHookPathRejection() string {
+	if s == nil {
+		return ""
+	}
+	return s.absoluteGitHookPathRejection
 }
 
 // CommandRejection reports a Command that Load dropped as untrusted: the
@@ -574,6 +594,11 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 		return nil, fmt.Errorf("reading settings file: %w", err)
 	}
 
+	// Only the project file has been read at this point, so a value here came
+	// from the committed file. Drop it before the local layer gets a chance to
+	// set it legitimately.
+	enforceAbsoluteGitHookPathScope(settings)
+
 	if preferencesFileAbs != "" {
 		preferences, err := loadClonePreferencesFromFile(preferencesFileAbs)
 		if err != nil {
@@ -604,6 +629,14 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	// openai_privacy_filter.command is executed, so it is honored only from a
 	// local file positively verified as this developer's own.
 	enforceOPFCommandTrust(ctx, settings, localSettingsFileAbs, localData)
+
+	// A rejection only matters if it changed the outcome. When the local file
+	// enables absolute_git_hook_path anyway, the project value was redundant
+	// rather than overridden, and reporting "ignored" next to a hook that IS
+	// pinned reads as a contradiction.
+	if settings.AbsoluteGitHookPath {
+		settings.absoluteGitHookPathRejection = ""
+	}
 
 	// Re-validate after merge. Individual files are validated by loadFromFile,
 	// but mergeJSON patches fields independently and can produce combinations

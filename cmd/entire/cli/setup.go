@@ -307,7 +307,14 @@ func updateGlobalSettings(ctx context.Context, cmd *cobra.Command, w io.Writer, 
 		s.Telemetry = &v
 	}
 	if cmd.Flags().Changed(flagAbsoluteGitHookPath) {
+		// Deliberately not written into s: this key belongs in the local file
+		// regardless of the target scope. Kept in memory so the reinstall below
+		// uses the value the user just asked for.
+		if err := setAbsoluteGitHookPathLocal(ctx, opts.AbsoluteGitHookPath); err != nil {
+			return fmt.Errorf("failed to save absolute_git_hook_path: %w", err)
+		}
 		s.AbsoluteGitHookPath = opts.AbsoluteGitHookPath
+		fmt.Fprintf(w, "  absolute_git_hook_path written to %s (it describes this machine)\n", settings.EntireSettingsLocalFile)
 	}
 
 	if err := saveSettingsToTarget(ctx, s, targetFile); err != nil {
@@ -1291,6 +1298,10 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	// Update the specific fields
 	settings.Enabled = true
 	if opts.AbsoluteGitHookPath {
+		// Local file, not the target scope — see setAbsoluteGitHookPathLocal.
+		if err := setAbsoluteGitHookPathLocal(ctx, true); err != nil {
+			return fmt.Errorf("failed to save absolute_git_hook_path: %w", err)
+		}
 		settings.AbsoluteGitHookPath = true
 	}
 
@@ -1540,6 +1551,33 @@ func setEnabledFlag(ctx context.Context, enabled, useProjectSettings bool) error
 
 // setEnabledRaw loads a settings file via load, sets its "enabled" key, and
 // writes it back via save, preserving every other key already in that file.
+// setAbsoluteGitHookPathLocal writes absolute_git_hook_path into
+// .entire/settings.local.json, whatever scope the surrounding command is writing.
+//
+// The setting is honored only from the local file (see
+// the settings loader drops it from the project scope): it names one machine's binary path.
+// The default write target is the project file whenever one exists, so putting it
+// wherever the command happened to be writing would land it in a committed file,
+// where the loader ignores it — the hook would be pinned once by this run and
+// silently revert to bare "entire" on the next EnsureSetup.
+//
+// Edits only that one key, so it cannot disturb anything else in the local file.
+func setAbsoluteGitHookPathLocal(ctx context.Context, value bool) error {
+	path, raw, _, err := settings.LoadLocalRaw(ctx)
+	if err != nil {
+		return fmt.Errorf("read local settings: %w", err)
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("marshal absolute_git_hook_path: %w", err)
+	}
+	raw["absolute_git_hook_path"] = encoded
+	if err := settings.SaveLocalRaw(path, raw); err != nil {
+		return fmt.Errorf("write local settings: %w", err)
+	}
+	return nil
+}
+
 func setEnabledRaw(
 	ctx context.Context,
 	load func(context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error),
@@ -1942,6 +1980,10 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	}
 	targetSettings.Enabled = true
 	if opts.AbsoluteGitHookPath {
+		// Local file, not the target scope — see setAbsoluteGitHookPathLocal.
+		if err := setAbsoluteGitHookPathLocal(ctx, true); err != nil {
+			return fmt.Errorf("failed to save absolute_git_hook_path: %w", err)
+		}
 		targetSettings.AbsoluteGitHookPath = true
 	}
 
