@@ -99,13 +99,13 @@ type EntireSettings struct {
 	// that don't source shell profiles and can't find "entire" on PATH.
 	//
 	// Honored ONLY from .entire/settings.local.json — it describes one machine's
-	// installation, not the repository. See enforceAbsoluteGitHookPathScope.
+	// installation, not the repository. See recordAbsoluteGitHookPathScopeRejection.
 	AbsoluteGitHookPath bool `json:"absolute_git_hook_path,omitempty"`
 
 	// absoluteGitHookPathRejection records an absolute_git_hook_path dropped
 	// because it came from the committed project file, for the consumer to
 	// report. Unexported so it never serializes back to disk as if the user had
-	// unset it. See enforceAbsoluteGitHookPathScope.
+	// unset it. See recordAbsoluteGitHookPathScopeRejection.
 	absoluteGitHookPathRejection string
 
 	// Telemetry controls anonymous usage analytics.
@@ -595,9 +595,10 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	}
 
 	// Only the project file has been read at this point, so a value here came
-	// from the committed file. Drop it before the local layer gets a chance to
-	// set it legitimately.
-	enforceAbsoluteGitHookPathScope(settings)
+	// from the committed file. Dropped now; whether that changed the outcome is
+	// decided after the local layer has had its say.
+	projectRequestedHookPathPin := settings.AbsoluteGitHookPath
+	settings.AbsoluteGitHookPath = false
 
 	if preferencesFileAbs != "" {
 		preferences, err := loadClonePreferencesFromFile(preferencesFileAbs)
@@ -630,13 +631,7 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	// local file positively verified as this developer's own.
 	enforceOPFCommandTrust(ctx, settings, localSettingsFileAbs, localData)
 
-	// A rejection only matters if it changed the outcome. When the local file
-	// enables absolute_git_hook_path anyway, the project value was redundant
-	// rather than overridden, and reporting "ignored" next to a hook that IS
-	// pinned reads as a contradiction.
-	if settings.AbsoluteGitHookPath {
-		settings.absoluteGitHookPathRejection = ""
-	}
+	recordAbsoluteGitHookPathScopeRejection(settings, projectRequestedHookPathPin)
 
 	// Re-validate after merge. Individual files are validated by loadFromFile,
 	// but mergeJSON patches fields independently and can produce combinations
@@ -652,6 +647,12 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 // LoadFromFile loads settings from a specific file path without merging local overrides.
 // Returns default settings if the file doesn't exist.
 // Use this when you need to display individual settings files separately.
+//
+// Reads the file verbatim: none of the scope gating Load applies is run here, so
+// a field that is only honored from a particular scope (absolute_git_hook_path,
+// redaction.openai_privacy_filter.command) comes back ungated. Treat the result
+// as "what this file says", never as "what is in effect" — deciding behavior from
+// it reintroduces exactly the imposition those gates prevent.
 func LoadFromFile(filePath string) (*EntireSettings, error) {
 	return loadFromFile(filePath)
 }
@@ -1667,7 +1668,24 @@ func saveToFile(ctx context.Context, settings *EntireSettings, filePath string) 
 		return fmt.Errorf("creating settings directory: %w", err)
 	}
 
-	data, err := jsonutil.MarshalIndentWithNewline(settings, "", "  ")
+	toWrite := settings
+	if filePath == EntireSettingsFile {
+		// Machine-local fields must never reach the committed file, and the
+		// writer is the only place that can guarantee it. Callers assemble the
+		// struct from a merged or partially-merged view and there are several of
+		// them, so each one relying on remembering this is how the value leaks:
+		// absolute_git_hook_path did exactly that from three separate call sites
+		// even though the loader was already gating it on read.
+		//
+		// Copied rather than mutated: the caller keeps using its struct after
+		// this returns (to decide whether to reinstall hooks), and zeroing it
+		// under them would silently change that decision.
+		stripped := *settings
+		stripped.AbsoluteGitHookPath = false
+		toWrite = &stripped
+	}
+
+	data, err := jsonutil.MarshalIndentWithNewline(toWrite, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling settings: %w", err)
 	}

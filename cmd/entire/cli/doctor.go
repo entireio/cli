@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"charm.land/huh/v2"
@@ -535,19 +534,23 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
-	// Reported whatever the hook state is: a setting present in the repository
-	// but deliberately not applied is confusing precisely when everything else
-	// looks fine.
-	if s, err := settings.Load(ctx); err == nil {
-		if reason := s.AbsoluteGitHookPathRejection(); reason != "" {
-			fmt.Fprintln(w, "Git hooks: absolute_git_hook_path ignored")
-			fmt.Fprintf(w, "  %s\n", reason)
+	reportAbsoluteGitHookPathRejection := func() {
+		// A setting present in the repository but deliberately not applied is
+		// confusing precisely when everything else looks fine, so this is
+		// reported alongside a healthy result too — but not in a repository that
+		// never opted into Entire, where the whole check stays silent.
+		if s, err := settings.Load(ctx); err == nil {
+			if reason := s.AbsoluteGitHookPathRejection(); reason != "" {
+				fmt.Fprintln(w, "Git hooks: absolute_git_hook_path ignored")
+				fmt.Fprintf(w, "  %s\n", reason)
+			}
 		}
 	}
 
-	state, outdatedReason := strategy.CheckGitHookStateWithReason(ctx)
+	state, outdatedReason := strategy.CheckGitHookState(ctx)
 	switch state {
 	case strategy.GitHooksCurrent:
+		reportAbsoluteGitHookPathRejection()
 		fmt.Fprintln(w, "✓ Git hooks: OK")
 		return nil
 
@@ -566,6 +569,7 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 		if !settings.IsSetUpAny(ctx) {
 			return nil
 		}
+		reportAbsoluteGitHookPathRejection()
 		fmt.Fprintln(w, "Git hooks: NOT INSTALLED")
 		fmt.Fprintln(w, "  Commits in this repository are not captured as checkpoints.")
 
@@ -574,10 +578,9 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 		// means this repo opted in at some point, and a stale one is actively
 		// broken rather than merely missing. The reason comes from the check
 		// because the causes need different advice.
+		reportAbsoluteGitHookPathRejection()
 		fmt.Fprintln(w, "Git hooks: OUT OF DATE")
-		for line := range strings.SplitSeq(outdatedReason, "\n") {
-			fmt.Fprintf(w, "  %s\n", line)
-		}
+		fmt.Fprintf(w, "  %s\n", outdatedReason)
 	}
 	fmt.Fprintln(w, "  Fix: reinstall the managed git hooks (any non-Entire hook is backed up).")
 

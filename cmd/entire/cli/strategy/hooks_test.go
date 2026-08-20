@@ -1994,90 +1994,107 @@ func TestResolveHookExePath(t *testing.T) {
 	})
 }
 
-// TestCheckGitHookState_DeadPinnedPathIsDrift pins that a hook whose embedded
-// absolute path no longer resolves reads as outdated rather than healthy.
+// writeGeneratedHooks writes every managed hook exactly as InstallGitHook would
+// for the given command prefix, by going through the generator itself.
 //
-// absolute_git_hook_path fixes the binary path at install time, so an upgrade or
-// a relocated binary leaves the guard failing its else branch: git keeps working
-// and nothing is captured. Reporting Current there is what made it silent —
-// `entire doctor` said "✓ Git hooks: OK" while no checkpoint was written.
-func TestCheckGitHookState_DeadPinnedPathIsDrift(t *testing.T) {
-	t.Parallel()
-
-	live := filepath.Join(t.TempDir(), "entire")
-	if err := os.WriteFile(live, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
+// Fixtures are generated rather than hand-copied on purpose: entireHookPinnedPath
+// parses the shell guard that gitHookCommandAvailableTest emits, so a hand-written
+// fixture lets the two drift silently — change `[ -x ` to `test -x` and a parser
+// that now returns nothing still passes every assertion.
+func writeGeneratedHooks(t *testing.T, dir, cmdPrefix string) {
+	t.Helper()
+	for _, spec := range buildHookSpecs(cmdPrefix) {
+		if err := os.WriteFile(filepath.Join(dir, spec.name), []byte(spec.content), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
+}
+
+// TestEntireHookPinnedPath covers extraction from generated hooks, including the
+// quoting cases that make naive parsing wrong.
+func TestEntireHookPinnedPath(t *testing.T) {
+	t.Parallel()
 
 	cases := []struct {
 		name string
 		path string
-		want GitHookState
+		want string
 	}{
-		{"a pin that still resolves is current", live, GitHooksCurrent},
-		{"a pin that no longer resolves is outdated", filepath.Join(t.TempDir(), "moved-away", "entire"), GitHooksOutdated},
+		{"absolute unix path", "/opt/homebrew/bin/entire", "/opt/homebrew/bin/entire"},
+		{"path containing spaces", "/Users/A B/bin/entire", "/Users/A B/bin/entire"},
+		// shellQuote renders ' as '\'' — the case a naive split on quotes gets wrong.
+		{"path containing an apostrophe", "/Users/John O'Brien/bin/entire", "/Users/John O'Brien/bin/entire"},
+		// A path containing the guard's own delimiter. Scanning forward for the
+		// first " ]" truncated this, which read as a dead pin forever.
+		{"path containing the closing-bracket delimiter", "/Users/a ]b/bin/entire", "/Users/a ]b/bin/entire"},
+		// Windows paths take the -f branch of gitHookCommandAvailableTest.
+		{"windows path", `C:\Program Files\Entire\entire.exe`, `C:\Program Files\Entire\entire.exe`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			for _, hook := range gitHookNames {
-				// The exact shape gitHookCommand emits for an absolute prefix.
-				quoted := shellQuote(tc.path)
-				content := "#!/bin/sh\n# " + entireHookMarker + "\n" +
-					"if [ -x " + quoted + " ]; then " + quoted + " hooks git " + hook + "; else :; fi\n"
-				if err := os.WriteFile(filepath.Join(dir, hook), []byte(content), 0o755); err != nil {
-					t.Fatal(err)
-				}
+			writeGeneratedHooks(t, dir, shellQuote(tc.path))
+			data, err := os.ReadFile(filepath.Join(dir, "pre-push"))
+			if err != nil {
+				t.Fatal(err)
 			}
-			if got, _ := gitHookStateInHooksDir(dir); got != tc.want {
-				t.Errorf("state = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-// TestEntireHookPinnedPath covers extraction, including the quoting cases that
-// make naive parsing wrong.
-func TestEntireHookPinnedPath(t *testing.T) {
-	t.Parallel()
-
-	hookLine := func(prefix string) string {
-		return "#!/bin/sh\n# " + entireHookMarker + "\nif [ -x " + prefix + " ]; then " + prefix + " hooks git pre-push; else :; fi\n"
-	}
-
-	cases := []struct {
-		name    string
-		content string
-		want    string
-	}{
-		{
-			// A PATH-resolved hook is not pinned and must not be probed.
-			name:    "bare entire is not pinned",
-			content: "#!/bin/sh\n# " + entireHookMarker + "\nif command -v entire >/dev/null 2>&1; then entire hooks git pre-push; else :; fi\n",
-			want:    "",
-		},
-		{"absolute unix path", hookLine(shellQuote("/opt/homebrew/bin/entire")), "/opt/homebrew/bin/entire"},
-		{"path containing spaces", hookLine(shellQuote("/Users/A B/bin/entire")), "/Users/A B/bin/entire"},
-		{
-			// shellQuote renders ' as '\'' — the case a naive split on quotes gets wrong.
-			name:    "path containing an apostrophe",
-			content: hookLine(shellQuote("/Users/John O'Brien/bin/entire")),
-			want:    "/Users/John O'Brien/bin/entire",
-		},
-		{"windows path uses -f", hookLine(shellQuote(`C:\Program Files\Entire\entire.exe`)), `C:\Program Files\Entire\entire.exe`},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			content := tc.content
-			if tc.name == "windows path uses -f" {
-				content = strings.Replace(content, "[ -x ", "[ -f ", 1)
-			}
-			if got := entireHookPinnedPath(content); got != tc.want {
+			if got := entireHookPinnedPath(string(data)); got != tc.want {
 				t.Errorf("entireHookPinnedPath() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+
+	t.Run("a PATH-resolved hook is not pinned", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeGeneratedHooks(t, dir, bareEntireHookCmd)
+		data, err := os.ReadFile(filepath.Join(dir, "pre-push"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := entireHookPinnedPath(string(data)); got != "" {
+			t.Errorf("a bare-entire hook must not look pinned, got %q", got)
+		}
+	})
+}
+
+// TestInstallGitHook_PinnedHookRoundTrips is the coupling that keeps the parser
+// honest against the generator.
+//
+// Every other test in this file installs with absolutePath=false, so nothing else
+// installs a pinned hook and reads it back. Without this, changing the guard
+// gitHookCommandAvailableTest emits would silently stop dead-pin detection from
+// working while the whole suite stayed green.
+func TestInstallGitHook_PinnedHookRoundTrips(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	if _, err := InstallGitHook(context.Background(), true, true); err != nil {
+		t.Fatalf("InstallGitHook(absolutePath=true) error = %v", err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
+	}
+	want, err := resolveHookExePath(exe, filepath.EvalSymlinks, runtime.GOOS)
+	if err != nil {
+		t.Fatalf("resolveHookExePath() error = %v", err)
+	}
+
+	for _, hook := range gitHookNames {
+		data, readErr := os.ReadFile(filepath.Join(hooksDir, hook))
+		if readErr != nil {
+			t.Fatalf("hook %s should exist: %v", hook, readErr)
+		}
+		if got := entireHookPinnedPath(string(data)); got != want {
+			t.Errorf("hook %s: parsed pin = %q, want %q\nhook body:\n%s", hook, got, want, data)
+		}
+	}
+
+	// The binary running the test exists, so a freshly pinned set is healthy.
+	if got, _ := gitHookStateInHooksDir(hooksDir); got != GitHooksCurrent {
+		t.Errorf("a live pinned install should read Current, got %v", got)
 	}
 }
 
