@@ -378,10 +378,15 @@ entire configure --telemetry=false
 
 # Reinstall the Entire git hook with an absolute binary path, for GUI git
 # clients (Xcode, Tower) that never source a shell profile and so cannot find
-# `entire` on PATH. It names this machine's binary, so it is written to and
-# honored only from .entire/settings.local.json — committing it to
-# .entire/settings.json would pin every cloner's hooks to a path chosen on
-# whichever machine ran the command, and Entire ignores it there.
+# `entire` on PATH. It names this machine's binary, so it is written to
+# .entire/settings.local.json.
+#
+# If you have absolute_git_hook_path in a committed .entire/settings.json (which
+# is where earlier versions of this flag put it), it still works today, but a
+# future release will honor it only from the local file — committing it pins
+# every cloner's hooks to a path chosen on whichever machine ran the command.
+# `entire doctor` will copy it across for you; your own hooks keep working
+# unchanged.
 entire configure --absolute-git-hook-path
 
 # Update strategy options on an existing repo

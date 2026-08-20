@@ -23,55 +23,58 @@ func newHookPathRepo(t *testing.T) (projectPath, localPath string) {
 	return filepath.Join(root, EntireSettingsFile), filepath.Join(root, EntireSettingsLocalFile)
 }
 
-// TestAbsoluteGitHookPath_ScopeGate pins where the setting is honored.
+// TestAbsoluteGitHookPath_ProjectScopeIsDeprecatedNotDropped pins the staged
+// rollout.
 //
-// It rewrites every generated git hook to name one machine's binary path, so a
-// committed value would impose that on everyone who clones — pinning their hooks
-// to whichever binary they happened to run, which is more brittle than resolving
-// through PATH.
-func TestAbsoluteGitHookPath_ScopeGate(t *testing.T) {
+// The setting rewrites every generated git hook to name one machine's binary
+// path, so a committed value imposes that on everyone who clones. It is still
+// honored from there for now: the only way to enable the feature used to write it
+// exclusively to the project file, so dropping it immediately would unpin the
+// hooks of everyone who ever used it — silently, in the GUI git client that
+// cannot find `entire` on PATH. So the committed value keeps working AND reports
+// a deprecation, and the deprecation goes quiet once the local file sets the key.
+func TestAbsoluteGitHookPath_ProjectScopeIsDeprecatedNotDropped(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name          string
-		project       string
-		local         string
-		want          bool
-		wantRejection bool
+		name           string
+		project        string
+		local          string
+		want           bool
+		wantDeprecated bool
 	}{
 		{
-			name:          "committed project file is ignored",
-			project:       `{"enabled": true, "absolute_git_hook_path": true}`,
-			want:          false,
-			wantRejection: true,
+			// Still honored — nobody's hooks change — but warned about.
+			name:           "committed project file is honored and deprecated",
+			project:        `{"enabled": true, "absolute_git_hook_path": true}`,
+			want:           true,
+			wantDeprecated: true,
 		},
 		{
-			name:    "local override is honored",
+			name:    "local override is honored with no warning",
 			project: `{"enabled": true}`,
 			local:   `{"absolute_git_hook_path": true}`,
 			want:    true,
 		},
 		{
-			// The local file is the authority, so it can also turn it back off.
-			name:          "local override wins over the project file",
-			project:       `{"enabled": true, "absolute_git_hook_path": true}`,
-			local:         `{"absolute_git_hook_path": false}`,
-			want:          false,
-			wantRejection: true,
+			// The local file is the authority, so it can turn it back off. No
+			// warning: the user has already stated their choice locally.
+			name:    "local false wins over a committed true",
+			project: `{"enabled": true, "absolute_git_hook_path": true}`,
+			local:   `{"absolute_git_hook_path": false}`,
+			want:    false,
 		},
 		{
-			// The project value was redundant, not overridden: reporting it as
-			// ignored beside a hook that is in fact pinned reads as a
-			// contradiction.
-			name:          "no rejection reported when the local file enables it anyway",
-			project:       `{"enabled": true, "absolute_git_hook_path": true}`,
-			local:         `{"absolute_git_hook_path": true}`,
-			want:          true,
-			wantRejection: false,
+			// Post-migration state: the committed value is redundant, so warning
+			// about it would be noise the user cannot act on further.
+			name:    "no warning once the local file sets the key",
+			project: `{"enabled": true, "absolute_git_hook_path": true}`,
+			local:   `{"absolute_git_hook_path": true}`,
+			want:    true,
 		},
 		{
-			// A project value of false is a no-op, so there is nothing to report.
-			name:    "an explicit false in the project file is not a rejection",
+			// A committed false pins nothing, so there is nothing to warn about.
+			name:    "an explicit false in the project file is not deprecated",
 			project: `{"enabled": true, "absolute_git_hook_path": false}`,
 			want:    false,
 		},
@@ -95,15 +98,16 @@ func TestAbsoluteGitHookPath_ScopeGate(t *testing.T) {
 			require.NoError(t, err)
 
 			require.Equal(t, tc.want, s.AbsoluteGitHookPath, "effective absolute_git_hook_path")
-			require.Equal(t, tc.wantRejection, s.AbsoluteGitHookPathRejection() != "",
-				"rejection recorded (reason %q)", s.AbsoluteGitHookPathRejection())
+			require.Equal(t, tc.wantDeprecated, s.AbsoluteGitHookPathDeprecation() != "",
+				"deprecation recorded (notice %q)", s.AbsoluteGitHookPathDeprecation())
 		})
 	}
 }
 
-// TestAbsoluteGitHookPath_RejectionDoesNotSerialize guards against writing the
-// dropped value back to disk as though the user had unset it.
-func TestAbsoluteGitHookPath_RejectionDoesNotSerialize(t *testing.T) {
+// TestAbsoluteGitHookPath_DeprecationDoesNotSerialize guards against the notice
+// leaking into a written settings file, and against the loader rewriting a file
+// it only read.
+func TestAbsoluteGitHookPath_DeprecationDoesNotSerialize(t *testing.T) {
 	t.Parallel()
 
 	const body = `{"enabled": true, "absolute_git_hook_path": true}`
@@ -112,7 +116,7 @@ func TestAbsoluteGitHookPath_RejectionDoesNotSerialize(t *testing.T) {
 
 	s, err := loadMergedSettings(t.Context(), projectPath, "", localPath)
 	require.NoError(t, err)
-	require.NotEmpty(t, s.AbsoluteGitHookPathRejection(), "expected a rejection to be recorded")
+	require.NotEmpty(t, s.AbsoluteGitHookPathDeprecation(), "expected a deprecation to be recorded")
 
 	after, err := os.ReadFile(projectPath)
 	require.NoError(t, err)

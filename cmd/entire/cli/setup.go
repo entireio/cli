@@ -307,15 +307,13 @@ func updateGlobalSettings(ctx context.Context, cmd *cobra.Command, w io.Writer, 
 		s.Telemetry = &v
 	}
 	if cmd.Flags().Changed(flagAbsoluteGitHookPath) {
-		// Persisted to the local file explicitly, because that is the only scope
-		// the loader honors it from. Also set on s so the reinstall below uses
-		// the value the user just asked for — saveSettingsToTarget cannot carry
-		// it into a committed file, because the writer strips machine-local
-		// fields from a project-scope save.
+		// Written straight to the local file and deliberately NOT onto s: s is
+		// saved to the target scope below, which defaults to the committed
+		// project file, and this key describes one machine. The reinstall further
+		// down reads the merged view, so it still sees what was just written.
 		if err := setAbsoluteGitHookPathLocal(ctx, opts.AbsoluteGitHookPath); err != nil {
 			return fmt.Errorf("failed to save absolute_git_hook_path: %w", err)
 		}
-		s.AbsoluteGitHookPath = opts.AbsoluteGitHookPath
 		fmt.Fprintf(w, "  absolute_git_hook_path written to %s (it describes this machine)\n", settings.EntireSettingsLocalFile)
 	}
 
@@ -810,7 +808,7 @@ Examples:
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
 	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears (falls back to 5m default).")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
-	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles); written to and honored only from .entire/settings.local.json, as it describes this machine")
+	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles); written to .entire/settings.local.json, as it describes this machine")
 
 	return cmd
 }
@@ -977,7 +975,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
 	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; recommended) or branch (shared entire/checkpoints/v1 branch)")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
-	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles); written to and honored only from .entire/settings.local.json, as it describes this machine")
+	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles); written to .entire/settings.local.json, as it describes this machine")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
 	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
 	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit, and push; then enable all agents and accept telemetry). Does not import existing agent history — see --"+flagImportHistory)
@@ -1313,12 +1311,11 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	// Update the specific fields
 	settings.Enabled = true
 	if opts.AbsoluteGitHookPath {
-		// Persisted to the local file; kept on the struct only so the hook
-		// install below pins. The writer strips it from a project-scope save.
+		// Local file only, never onto the struct saved to the target scope —
+		// see the same block in updateGlobalSettings.
 		if err := setAbsoluteGitHookPathLocal(ctx, true); err != nil {
 			return fmt.Errorf("failed to save absolute_git_hook_path: %w", err)
 		}
-		settings.AbsoluteGitHookPath = true
 	}
 
 	// Auto-enable external_agents if any selected agent is external.
@@ -2002,12 +1999,11 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	}
 	targetSettings.Enabled = true
 	if opts.AbsoluteGitHookPath {
-		// Persisted to the local file; kept on the struct only so the hook
-		// install below pins. The writer strips it from a project-scope save.
+		// Local file only, never onto the struct saved to the target scope —
+		// see the same block in updateGlobalSettings.
 		if err := setAbsoluteGitHookPathLocal(ctx, true); err != nil {
 			return fmt.Errorf("failed to save absolute_git_hook_path: %w", err)
 		}
-		targetSettings.AbsoluteGitHookPath = true
 	}
 
 	// Auto-enable external_agents setting if the agent is external.

@@ -99,14 +99,14 @@ type EntireSettings struct {
 	// that don't source shell profiles and can't find "entire" on PATH.
 	//
 	// Honored ONLY from .entire/settings.local.json — it describes one machine's
-	// installation, not the repository. See recordAbsoluteGitHookPathScopeRejection.
+	// installation, not the repository. See recordAbsoluteGitHookPathDeprecation.
 	AbsoluteGitHookPath bool `json:"absolute_git_hook_path,omitempty"`
 
-	// absoluteGitHookPathRejection records an absolute_git_hook_path dropped
-	// because it came from the committed project file, for the consumer to
-	// report. Unexported so it never serializes back to disk as if the user had
-	// unset it. See recordAbsoluteGitHookPathScopeRejection.
-	absoluteGitHookPathRejection string
+	// absoluteGitHookPathDeprecation records that absolute_git_hook_path is being
+	// honored from the committed project file, which a future release will stop
+	// doing. Unexported so it never serializes to disk.
+	// See recordAbsoluteGitHookPathDeprecation.
+	absoluteGitHookPathDeprecation string
 
 	// Telemetry controls anonymous usage analytics.
 	// nil = not asked yet (show prompt), true = opted in, false = opted out
@@ -337,15 +337,15 @@ type OPFSettings struct {
 	PromptDefault string `json:"prompt_default,omitempty"`
 }
 
-// AbsoluteGitHookPathRejection reports why Load dropped absolute_git_hook_path,
-// or "" when it did not. Callers that report on hook configuration should
-// surface this — it is the only signal that a setting present in the repository
-// is deliberately not being applied.
-func (s *EntireSettings) AbsoluteGitHookPathRejection() string {
+// AbsoluteGitHookPathDeprecation reports that absolute_git_hook_path is being
+// honored from the committed project file, or "" when it is not. Callers that
+// report on hook configuration should surface this: it is the only warning before
+// a future release stops honoring that scope.
+func (s *EntireSettings) AbsoluteGitHookPathDeprecation() string {
 	if s == nil {
 		return ""
 	}
-	return s.absoluteGitHookPathRejection
+	return s.absoluteGitHookPathDeprecation
 }
 
 // CommandRejection reports a Command that Load dropped as untrusted: the
@@ -594,12 +594,6 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 		return nil, fmt.Errorf("reading settings file: %w", err)
 	}
 
-	// Only the project file has been read at this point, so a value here came
-	// from the committed file. Dropped now; whether that changed the outcome is
-	// decided after the local layer has had its say.
-	projectRequestedHookPathPin := settings.AbsoluteGitHookPath
-	settings.AbsoluteGitHookPath = false
-
 	if preferencesFileAbs != "" {
 		preferences, err := loadClonePreferencesFromFile(preferencesFileAbs)
 		if err != nil {
@@ -631,7 +625,9 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	// local file positively verified as this developer's own.
 	enforceOPFCommandTrust(ctx, settings, localSettingsFileAbs, localData)
 
-	recordAbsoluteGitHookPathScopeRejection(settings, projectRequestedHookPathPin)
+	// Still honored from the project file for now; this only warns. See
+	// recordAbsoluteGitHookPathDeprecation for why the switch is staged.
+	recordAbsoluteGitHookPathDeprecation(settings, localData)
 
 	// Re-validate after merge. Individual files are validated by loadFromFile,
 	// but mergeJSON patches fields independently and can produce combinations
@@ -1668,24 +1664,14 @@ func saveToFile(ctx context.Context, settings *EntireSettings, filePath string) 
 		return fmt.Errorf("creating settings directory: %w", err)
 	}
 
-	toWrite := settings
-	if filePath == EntireSettingsFile {
-		// Machine-local fields must never reach the committed file, and the
-		// writer is the only place that can guarantee it. Callers assemble the
-		// struct from a merged or partially-merged view and there are several of
-		// them, so each one relying on remembering this is how the value leaks:
-		// absolute_git_hook_path did exactly that from three separate call sites
-		// even though the loader was already gating it on read.
-		//
-		// Copied rather than mutated: the caller keeps using its struct after
-		// this returns (to decide whether to reinstall hooks), and zeroing it
-		// under them would silently change that decision.
-		stripped := *settings
-		stripped.AbsoluteGitHookPath = false
-		toWrite = &stripped
-	}
-
-	data, err := jsonutil.MarshalIndentWithNewline(toWrite, "", "  ")
+	// Deliberately no stripping of machine-local fields here. It is tempting —
+	// the writer is the one place that could guarantee absolute_git_hook_path
+	// never reaches the committed file — but while that value is still honored
+	// from the project scope, stripping it would delete a working setting out of
+	// a tracked file as a side effect of an unrelated `entire configure`. The
+	// callers keep it out instead (see setAbsoluteGitHookPathLocal). Revisit when
+	// the project scope stops being honored and the key is inert.
+	data, err := jsonutil.MarshalIndentWithNewline(settings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling settings: %w", err)
 	}

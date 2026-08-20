@@ -534,23 +534,49 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
-	reportAbsoluteGitHookPathRejection := func() {
-		// A setting present in the repository but deliberately not applied is
-		// confusing precisely when everything else looks fine, so this is
-		// reported alongside a healthy result too — but not in a repository that
-		// never opted into Entire, where the whole check stays silent.
-		if s, err := settings.Load(ctx); err == nil {
-			if reason := s.AbsoluteGitHookPathRejection(); reason != "" {
-				fmt.Fprintln(w, "Git hooks: absolute_git_hook_path ignored")
-				fmt.Fprintf(w, "  %s\n", reason)
+	migrateAbsoluteGitHookPath := func() {
+		// Reported alongside a healthy result too: the hooks are fine today and
+		// will stop being fine on upgrade, which is exactly when a warning is
+		// worth reading. Not reported in a repository that never opted into
+		// Entire, where the whole check stays silent.
+		s, err := settings.Load(ctx)
+		if err != nil || s.AbsoluteGitHookPathDeprecation() == "" {
+			return
+		}
+		fmt.Fprintln(w, "absolute_git_hook_path: COMMITTED")
+		fmt.Fprintf(w, "  %s\n", s.AbsoluteGitHookPathDeprecation())
+		fmt.Fprintf(w, "  Fix: copy it to %s. Your hooks keep working exactly as they do now.\n",
+			settings.EntireSettingsLocalFile)
+
+		if !force {
+			// Same degradation as the hook repair below: an agent or CI run must
+			// not block on a prompt, and must not edit settings unasked.
+			if !interactive.CanPromptInteractively() {
+				fmt.Fprintln(w, "  Run `entire doctor --force` to apply it.")
+				return
+			}
+			proceed, promptErr := confirmDoctorFix(ctx, w, "Copy absolute_git_hook_path to local settings?")
+			if promptErr != nil || !proceed {
+				return
 			}
 		}
+
+		// Copy, not move: the committed key is left alone. Editing a tracked file
+		// would put an unexpected change in the user's next commit, and once the
+		// local file sets the key the committed one is redundant — it stops being
+		// honored on upgrade without anything else happening.
+		if err := setAbsoluteGitHookPathLocal(ctx, true); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  could not write %s: %v\n", settings.EntireSettingsLocalFile, err)
+			return
+		}
+		fmt.Fprintf(w, "  ✓ Copied to %s (the committed value is now redundant and can be removed at your leisure)\n",
+			settings.EntireSettingsLocalFile)
 	}
 
 	state, outdatedReason := strategy.CheckGitHookState(ctx)
 	switch state {
 	case strategy.GitHooksCurrent:
-		reportAbsoluteGitHookPathRejection()
+		migrateAbsoluteGitHookPath()
 		fmt.Fprintln(w, "✓ Git hooks: OK")
 		return nil
 
@@ -569,7 +595,7 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 		if !settings.IsSetUpAny(ctx) {
 			return nil
 		}
-		reportAbsoluteGitHookPathRejection()
+		migrateAbsoluteGitHookPath()
 		fmt.Fprintln(w, "Git hooks: NOT INSTALLED")
 		fmt.Fprintln(w, "  Commits in this repository are not captured as checkpoints.")
 
@@ -578,7 +604,7 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 		// means this repo opted in at some point, and a stale one is actively
 		// broken rather than merely missing. The reason comes from the check
 		// because the causes need different advice.
-		reportAbsoluteGitHookPathRejection()
+		migrateAbsoluteGitHookPath()
 		fmt.Fprintln(w, "Git hooks: OUT OF DATE")
 		fmt.Fprintf(w, "  %s\n", outdatedReason)
 	}

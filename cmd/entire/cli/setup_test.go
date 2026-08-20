@@ -3941,18 +3941,20 @@ func TestConfigureCmd_AbsoluteGitHookPathFlag_KeepsProjectFileClean(t *testing.T
 	}
 }
 
-// TestConfigureCmd_ForceDoesNotHonorCommittedAbsoluteHookPath pins the scope rule
-// at the install side.
+// TestConfigureCmd_ForceHonorsLocalAbsoluteHookPath pins that the hook-install
+// decision comes from the merged view.
 //
-// updateGlobalSettings loads the target file with settings.LoadFromFile, which
-// applies no scope gating, so feeding that value to InstallGitHook let a committed
-// absolute_git_hook_path pin a cloner's hooks via `entire configure --force` —
-// reaching the same imposition the loader gate blocks, just actively instead of
-// passively.
-func TestConfigureCmd_ForceDoesNotHonorCommittedAbsoluteHookPath(t *testing.T) {
+// updateGlobalSettings loads its target scope with settings.LoadFromFile, which
+// reads one file verbatim. Deciding from that missed a value set only in the local
+// file — the only scope that will be honored once the project scope is retired —
+// so `entire configure --force` would silently unpin a correctly configured repo.
+// It also read the project scope ungated, which is the route by which a committed
+// value will keep imposing itself after the loader stops honoring it.
+func TestConfigureCmd_ForceHonorsLocalAbsoluteHookPath(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir
 	setupTestRepo(t)
-	writeSettings(t, `{"enabled": true, "absolute_git_hook_path": true}`)
+	writeSettings(t, testSettingsEnabled)
+	writeLocalSettings(t, `{"absolute_git_hook_path": true}`)
 
 	cmd := newSetupCmd()
 	var stdout bytes.Buffer
@@ -3971,7 +3973,7 @@ func TestConfigureCmd_ForceDoesNotHonorCommittedAbsoluteHookPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read post-commit hook: %v", err)
 	}
-	if !strings.Contains(string(hook), "command -v entire") {
-		t.Errorf("a committed absolute_git_hook_path must not pin the hook, got:\n%s", hook)
+	if strings.Contains(string(hook), "command -v entire") {
+		t.Errorf("a local absolute_git_hook_path must pin the hook, got:\n%s", hook)
 	}
 }
