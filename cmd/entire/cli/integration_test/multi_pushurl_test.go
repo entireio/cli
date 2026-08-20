@@ -395,7 +395,7 @@ func TestMultiPushURL_DestinationNoteSurfaces(t *testing.T) {
 			want:  []string{"Checkpoint destination", "pushes to 2 URLs", "first URL only", "checkpoint_remote"},
 		},
 		{
-			// Two phrasings this note has already been wrong with, asserted
+			// Three phrasings this note has already been wrong with, asserted
 			// absent rather than merely asserting the current text: that
 			// checkpoints "follow whichever remote you push to" (they follow the
 			// election), that reading them back "always looks at origin" (a read
