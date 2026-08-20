@@ -333,11 +333,22 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 		failed += f
 	}
 	warnLog.flush(ctx)
-	removeEmptyDirTree(source)
-	// The parent (<git-common-dir>/entire/worktree) is shared with sibling
-	// worktrees' namespaces; os.Remove only succeeds once the last namespace
-	// is gone, which is exactly the desired cleanup.
-	_ = os.Remove(filepath.Dir(source))
+	// Re-check before the only remaining destructive step. A session that went
+	// active DURING the moves is the residual window this cannot close (hook
+	// writes take no lock, so nothing here can exclude them), but directory
+	// removal is the one step that can turn a live hook's write into ENOENT:
+	// it MkdirAll'd its session dir, and removing the still-empty dir under it
+	// fails that turn's capture. Leaving the tree costs only a later sweep —
+	// the next enable re-triggers migration on a non-empty routed dir.
+	if n := activeSessionCountInWorktree(ctx, root); n > 0 {
+		logging.Warn(ctx, "skipping routed-directory cleanup: session(s) became active during migration", "count", n)
+	} else {
+		removeEmptyDirTree(source)
+		// The parent (<git-common-dir>/entire/worktree) is shared with sibling
+		// worktrees' namespaces; os.Remove only succeeds once the last namespace
+		// is gone, which is exactly the desired cleanup.
+		_ = os.Remove(filepath.Dir(source))
+	}
 
 	if moved+skipped+failed == 0 {
 		return
