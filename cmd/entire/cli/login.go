@@ -64,21 +64,49 @@ type loginURLActionReadFunc func(ctx context.Context) (loginURLAction, error)
 // clipboardCopyTimeout bounds a single clipboard write. See copyLoginURL.
 const clipboardCopyTimeout = 3 * time.Second
 
+// loginURLActions reports which of the URL prompt's actions this process can
+// actually honour, so the prompt never advertises a keystroke that can only
+// produce a warning. keys covers terminal input (see loginURLKeysAvailable);
+// browser and clipboard cover the two side effects a key would trigger — a
+// headless machine typically has neither, and an SSH session usually has no
+// display for a browser and no X clipboard helper.
+type loginURLActions struct {
+	keys      bool
+	browser   bool
+	clipboard bool
+}
+
+// usable reports whether reading keys can lead anywhere. When it can't, the
+// prompt is suppressed *and* the terminal is left alone: taking a TTY into raw
+// mode to collect keystrokes whose only possible outcome is "this machine
+// can't do that" costs the user their native Ctrl-C for nothing.
+func (a loginURLActions) usable() bool {
+	return a.keys && (a.browser || a.clipboard)
+}
+
 // loginURLInteractor owns the side effects behind the interactive URL prompt.
 // Production uses the controlling TTY, system clipboard, and default browser;
-// tests provide deterministic functions instead. keysAvailable answers whether
-// readAction can actually deliver keys, so the prompt only advertises actions
-// this process can honour.
+// tests provide deterministic functions instead. availableActions answers what
+// this process can honour, so the prompt only advertises those actions.
 type loginURLInteractor struct {
-	keysAvailable func() bool
-	readAction    loginURLActionReadFunc
-	copyURL       clipboardWriteFunc
-	openURL       browserOpenFunc
+	availableActions func() loginURLActions
+	readAction       loginURLActionReadFunc
+	copyURL          clipboardWriteFunc
+	openURL          browserOpenFunc
 }
 
 func defaultLoginURLInteractor(errW io.Writer) loginURLInteractor {
 	return loginURLInteractor{
-		keysAvailable: loginURLKeysAvailable,
+		availableActions: func() loginURLActions {
+			return loginURLActions{
+				keys:    loginURLKeysAvailable(),
+				browser: browserOpenerAvailable(),
+				// atotto/clipboard resolves its helper (pbcopy, xclip, xsel,
+				// wl-copy, …) at init and reports the absence here, which is
+				// the headless/SSH case.
+				clipboard: !clipboard.Unsupported,
+			}
+		},
 		readAction: func(ctx context.Context) (loginURLAction, error) {
 			return readLoginURLAction(ctx, errW)
 		},
@@ -290,6 +318,10 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 	} else {
 		fmt.Fprint(outW, "Waiting for approval… ")
 		result, err = wait(ctx)
+		// Close the status line unconditionally. Whatever comes next — the
+		// completion message, or an error printed by main — must start on its
+		// own line instead of being glued to "Waiting for approval… ".
+		fmt.Fprintln(outW)
 	}
 	if err != nil {
 		return fmt.Errorf("complete login: %w", err)
@@ -481,13 +513,18 @@ func loginCompleteLine(token, dialled string) string {
 }
 
 // withHeadlessStoreHint appends file-token-store guidance to a credential
-// store write failure. The default backend is the OS keyring, which locked
-// or keyring-less machines (CI, containers, minimal server VMs) can't use —
-// the raw store error gives those users no way forward (#1036). The hint is
-// skipped when ENTIRE_TOKEN_STORE=file is already set (suggesting it again
-// would be nonsense) and for failures the file store wouldn't help with.
+// store write failure. The default backend now falls back to the file store
+// on its own when the keyring is unusable, so this is left for the cases
+// where a write genuinely failed and the file store is still worth naming:
+// ENTIRE_TOKEN_STORE=keyring (fallback deliberately disabled), or a keyring
+// error the store did not classify as unusable. The hint is skipped when the
+// file store is already selected or has already been tried and failed
+// (suggesting it again would be nonsense), and for failures it wouldn't help
+// with (#1036).
 func withHeadlessStoreHint(err error) error {
-	if !errors.Is(err, auth.ErrCredentialStoreWrite) || tokenstore.FileBackendSelected() {
+	if !errors.Is(err, auth.ErrCredentialStoreWrite) ||
+		tokenstore.FileBackendSelected() ||
+		errors.Is(err, tokenstore.ErrFileFallbackFailed) {
 		return err
 	}
 
@@ -699,7 +736,37 @@ func waitForApproval(ctx context.Context, poller deviceAuthClient, deviceCode st
 	}
 }
 
-const loginURLPrompt = "[Enter] Open browser  [c] Copy URL"
+const (
+	loginURLOpenHint = "[Enter] Open browser"
+	loginURLCopyHint = "[c] Copy URL"
+	// loginURLPrompt is the fully-equipped prompt; loginURLPromptLine drops
+	// the hints this machine cannot honour.
+	loginURLPrompt = loginURLOpenHint + "  " + loginURLCopyHint
+)
+
+// noBrowserOpenerNotice answers an Enter this machine cannot act on. The hint
+// was already withheld (see loginURLPromptLine), so this only fires when the
+// user pressed Enter anyway — as a plain "get on with it" gesture.
+const noBrowserOpenerNotice = "No browser to open on this machine; open the login URL above instead."
+
+// loginURLPromptLine renders the hints for the actions available here,
+// returning "" when there is nothing to advertise — either the terminal
+// cannot deliver keys or neither side effect is possible on this machine.
+// Sign-in always completes through the URL printed above it, so an empty
+// prompt costs nothing but a line of output.
+func loginURLPromptLine(actions loginURLActions) string {
+	if !actions.keys {
+		return ""
+	}
+	hints := make([]string, 0, 2)
+	if actions.browser {
+		hints = append(hints, loginURLOpenHint)
+	}
+	if actions.clipboard {
+		hints = append(hints, loginURLCopyHint)
+	}
+	return strings.Join(hints, "  ")
+}
 
 const (
 	browserLoginURLLabel = "Login URL:"
@@ -777,12 +844,16 @@ func waitForLoginURLResult[T any](
 		}
 	}
 
+	// Resolved once: the prompt below and the Enter handler must agree on
+	// what this machine can do.
+	actions := interactor.availableActions()
+
 	statusLineOpen := false
 	renderInitialPrompt := func() {
-		// Only advertise the keys when the terminal can actually deliver them.
-		// Authentication still completes through the always-visible URL.
-		if interactor.keysAvailable() {
-			fmt.Fprintln(outW, loginURLPrompt)
+		// Only advertise actions this process can honour. Authentication
+		// still completes through the always-visible URL.
+		if prompt := loginURLPromptLine(actions); prompt != "" {
+			fmt.Fprintln(outW, prompt)
 		}
 		fmt.Fprint(outW, waitingMessage)
 		statusLineOpen = true
@@ -794,7 +865,9 @@ func waitForLoginURLResult[T any](
 		}
 	}
 	renderInitialPrompt()
-	startActionRead()
+	if actions.usable() {
+		startActionRead()
+	}
 
 	for {
 		select {
@@ -838,6 +911,11 @@ func waitForLoginURLResult[T any](
 				}
 				startActionRead()
 			case loginURLOpen:
+				if !actions.browser {
+					fmt.Fprintln(errW, noBrowserOpenerNotice)
+					startActionRead()
+					continue
+				}
 				if err := interactor.openURL(flowCtx, loginURL); err != nil {
 					fmt.Fprintf(errW, "Warning: failed to open default browser: %v\n", err)
 					startActionRead()
