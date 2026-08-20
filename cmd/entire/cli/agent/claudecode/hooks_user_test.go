@@ -5,16 +5,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
 
 // No t.Parallel in this file: every test redirects the user home via t.Setenv.
 
-// setUserHome points os.UserHomeDir at a temp dir (HOME on Unix, USERPROFILE
-// on Windows) so user-level installs never touch the developer's real
-// ~/.claude/settings.json.
+// setUserHome points os.UserHomeDir at a temp dir so user-level installs never
+// touch the developer's real ~/.claude/settings.json.
 func setUserHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -75,6 +73,31 @@ func collectHookCommands(t *testing.T, path string) []string {
 	return cmds
 }
 
+func countOf(cmds []string, want string) int {
+	n := 0
+	for _, c := range cmds {
+		if c == want {
+			n++
+		}
+	}
+	return n
+}
+
+func agentWrappedStopCmd() string {
+	return buildClaudeHookCommands().stop
+}
+
+func entireCommandSet(t *testing.T, path string) map[string]bool {
+	t.Helper()
+	set := make(map[string]bool)
+	for _, c := range collectHookCommands(t, path) {
+		if isEntireHook(c) {
+			set[c] = true
+		}
+	}
+	return set
+}
+
 const existingUserSettings = `{
   "model": "opus",
   "env": {"FOO": "bar"},
@@ -85,174 +108,164 @@ const existingUserSettings = `{
   }
 }`
 
-// TestInstallUserHooks_NonObjectPermissionsRoundTripsVerbatim pins that a
-// user-scope install never parses the permissions section: a value that is
-// not an object (which a project-scope install would reject) must neither
-// fail the install nor be rewritten — it round-trips byte-for-byte.
-func TestInstallUserHooks_NonObjectPermissionsRoundTripsVerbatim(t *testing.T) {
+// TestUserHooks_Lifecycle is the anchor walk: install into a populated user
+// file (merge semantics, permissions untouched, production command forms),
+// re-install (byte-identical no-op), duplicate-entry repair, then uninstall
+// (only Entire's entries removed).
+func TestUserHooks_Lifecycle(t *testing.T) {
 	home := setUserHome(t)
-	writeUserClaudeSettings(t, home, `{
-  "permissions": "deny-all",
-  "hooks": {}
-}`)
-
 	agent := &ClaudeCodeAgent{}
-	res, err := agent.InstallUserHooks(context.Background())
-	if err != nil {
-		t.Fatalf("InstallUserHooks() error = %v", err)
+	// A missing file is not an uninstall error.
+	if err := agent.UninstallUserHooks(context.Background()); err != nil {
+		t.Fatalf("UninstallUserHooks() on missing file = %v", err)
 	}
-	if res.Installed == 0 {
-		t.Fatal("InstallUserHooks() installed nothing on a file without Entire hooks")
-	}
-
-	raw := readRawSettings(t, userSettingsTestPath(t, home))
-	if got := string(raw["permissions"]); got != `"deny-all"` {
-		t.Errorf("permissions not preserved verbatim: got %s, want %q", got, `"deny-all"`)
-	}
-}
-
-func TestInstallUserHooks_MergesWithoutClobberingUnrelatedKeys(t *testing.T) {
-	home := setUserHome(t)
 	writeUserClaudeSettings(t, home, existingUserSettings)
+	path := userSettingsTestPath(t, home)
 
-	agent := &ClaudeCodeAgent{}
+	// Install: merge, never clobber, never touch permissions, production forms.
 	res, err := agent.InstallUserHooks(context.Background())
 	if err != nil {
 		t.Fatalf("InstallUserHooks() error = %v", err)
 	}
-	if res.Installed == 0 {
-		t.Fatal("InstallUserHooks() installed nothing on a file without Entire hooks")
+	if res.Installed == 0 || res.Repaired {
+		t.Fatalf("fresh install must report installs and no repair, got %+v", res)
 	}
-
-	raw := readRawSettings(t, userSettingsTestPath(t, home))
+	raw := readRawSettings(t, path)
 	if got := string(raw["model"]); got != `"opus"` {
 		t.Errorf("model clobbered: %s", got)
 	}
 	if got := string(raw["env"]); !strings.Contains(got, `"FOO"`) {
 		t.Errorf("env clobbered: %s", got)
 	}
-	// User-level installs must never touch user permissions (the deny rule is
-	// repo-scope only).
-	if got := string(raw["permissions"]); got != `{"deny":["Read(secret.txt)"]}` && !strings.Contains(got, "secret.txt") {
-		t.Errorf("permissions clobbered: %s", got)
+	if got := string(raw["permissions"]); !strings.Contains(got, "secret.txt") || strings.Contains(got, ".entire/metadata") {
+		t.Errorf("user permissions altered: %s", got)
 	}
-	if strings.Contains(string(raw["permissions"]), ".entire/metadata") {
-		t.Errorf("repo-scoped deny rule leaked into user permissions: %s", raw["permissions"])
-	}
-
-	cmds := collectHookCommands(t, userSettingsTestPath(t, home))
-	var foundCustomStop, foundNotify, foundEntireStop bool
+	cmds := collectHookCommands(t, path)
+	var foundEntireStop bool
 	for _, c := range cmds {
-		switch {
-		case c == "my-own-stop":
-			foundCustomStop = true
-		case c == "custom-notify":
-			foundNotify = true
-		case isEntireHook(c) && strings.Contains(c, "entire hooks claude-code stop"):
+		if isEntireHook(c) && strings.Contains(c, "entire hooks claude-code stop") {
 			foundEntireStop = true
 		}
-		// The plain production form only — never a repo-local dev path.
 		if strings.Contains(c, "CLAUDE_PROJECT_DIR") || strings.Contains(c, "entire-dev") {
 			t.Errorf("user-level hook uses a repo-local command form: %s", c)
 		}
 	}
-	if !foundCustomStop || !foundNotify {
-		t.Errorf("user's own hooks were removed (customStop=%v notify=%v)", foundCustomStop, foundNotify)
-	}
 	if !foundEntireStop {
 		t.Errorf("Entire stop hook missing from user settings, commands: %v", cmds)
+	}
+	if countOf(cmds, "my-own-stop") != 1 || countOf(cmds, "custom-notify") != 1 {
+		t.Errorf("user's own hooks were removed: %v", cmds)
 	}
 	if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || !ok {
 		t.Errorf("AreUserHooksInstalled() = (%v, %v) after install, want (true, nil)", ok, err)
 	}
-}
 
-func TestInstallUserHooks_Idempotent(t *testing.T) {
-	home := setUserHome(t)
-
-	agent := &ClaudeCodeAgent{}
-	first, err := agent.InstallUserHooks(context.Background())
-	if err != nil {
-		t.Fatalf("first InstallUserHooks() error = %v", err)
-	}
-	if first.Installed == 0 {
-		t.Fatal("first install must report installed hooks")
-	}
-	if first.Repaired {
-		t.Error("a fresh install must not report a repair")
-	}
-	before, err := os.ReadFile(userSettingsTestPath(t, home))
+	// Re-install: byte-identical no-op.
+	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	second, err := agent.InstallUserHooks(context.Background())
 	if err != nil {
 		t.Fatalf("second InstallUserHooks() error = %v", err)
 	}
-	if second.Installed != 0 || second.Repaired {
-		t.Errorf("second install must be a no-op, got %+v", second)
-	}
-	after, err := os.ReadFile(userSettingsTestPath(t, home))
+	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(before) != string(after) {
-		t.Error("re-install rewrote the user settings file")
+	if second.Installed != 0 || second.Repaired || string(before) != string(after) {
+		t.Errorf("second install must be a byte-identical no-op, got %+v", second)
 	}
-}
 
-func TestUninstallUserHooks_RemovesOnlyOurs(t *testing.T) {
-	home := setUserHome(t)
-	writeUserClaudeSettings(t, home, existingUserSettings)
-
-	agent := &ClaudeCodeAgent{}
-	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
+	// Duplicate an entry: the rewrite is Repaired, never "already installed".
+	raw = readRawSettings(t, path)
+	var hooks map[string][]ClaudeHookMatcher
+	if err := json.Unmarshal(raw["hooks"], &hooks); err != nil {
+		t.Fatalf("parse hooks: %v", err)
+	}
+	// Duplicate Entire's wrapped Stop entry specifically — the file also
+	// carries the user's own Stop matcher, which must never be deduped.
+	duplicated := false
+	for i, m := range hooks["Stop"] {
+		for _, h := range m.Hooks {
+			if h.Command == agentWrappedStopCmd() {
+				hooks["Stop"][i].Hooks = append(hooks["Stop"][i].Hooks, h)
+				duplicated = true
+			}
+		}
+		if duplicated {
+			break
+		}
+	}
+	if !duplicated {
+		t.Fatal("install left no wrapped Stop entry to duplicate")
+	}
+	hooksJSON, err := json.Marshal(hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw["hooks"] = hooksJSON
+	data, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err = agent.InstallUserHooks(context.Background())
+	if err != nil {
 		t.Fatalf("InstallUserHooks() error = %v", err)
 	}
+	if res.Installed != 0 || !res.Repaired {
+		t.Errorf("deduplication must report Installed=0, Repaired=true, got %+v", res)
+	}
+	if got := countOf(collectHookCommands(t, path), agentWrappedStopCmd()); got != 1 {
+		t.Errorf("Stop entry count after repair = %d, want 1", got)
+	}
+
+	// Uninstall: only Entire's entries go.
 	if err := agent.UninstallUserHooks(context.Background()); err != nil {
 		t.Fatalf("UninstallUserHooks() error = %v", err)
 	}
-
 	if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || ok {
 		t.Errorf("AreUserHooksInstalled() = (%v, %v) after uninstall, want (false, nil)", ok, err)
 	}
-	raw := readRawSettings(t, userSettingsTestPath(t, home))
+	raw = readRawSettings(t, path)
 	if got := string(raw["model"]); got != `"opus"` {
 		t.Errorf("model clobbered by uninstall: %s", got)
 	}
 	if !strings.Contains(string(raw["permissions"]), "secret.txt") {
 		t.Errorf("user permissions clobbered by uninstall: %s", raw["permissions"])
 	}
-	cmds := collectHookCommands(t, userSettingsTestPath(t, home))
-	var foundCustomStop, foundNotify bool
+	cmds = collectHookCommands(t, path)
 	for _, c := range cmds {
 		if isEntireHook(c) {
 			t.Errorf("Entire hook left behind: %s", c)
 		}
-		if c == "my-own-stop" {
-			foundCustomStop = true
-		}
-		if c == "custom-notify" {
-			foundNotify = true
-		}
 	}
-	if !foundCustomStop || !foundNotify {
-		t.Errorf("uninstall removed the user's own hooks (customStop=%v notify=%v)", foundCustomStop, foundNotify)
+	if countOf(cmds, "my-own-stop") != 1 || countOf(cmds, "custom-notify") != 1 {
+		t.Errorf("uninstall removed the user's own hooks: %v", cmds)
 	}
 }
 
-func TestUninstallUserHooks_MissingFileIsNoError(t *testing.T) {
-	setUserHome(t)
+// A user-scope install never parses the permissions section: a non-object
+// value must neither fail the install nor be rewritten.
+func TestInstallUserHooks_NonObjectPermissionsRoundTripsVerbatim(t *testing.T) {
+	home := setUserHome(t)
+	writeUserClaudeSettings(t, home, `{"permissions": "deny-all", "hooks": {}}`)
+
 	agent := &ClaudeCodeAgent{}
-	if err := agent.UninstallUserHooks(context.Background()); err != nil {
-		t.Fatalf("UninstallUserHooks() on missing file = %v", err)
+	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
+		t.Fatalf("InstallUserHooks() error = %v", err)
+	}
+	raw := readRawSettings(t, userSettingsTestPath(t, home))
+	if got := string(raw["permissions"]); got != `"deny-all"` {
+		t.Errorf("permissions not preserved verbatim: got %s", got)
 	}
 }
 
-// TestInstallUserHooks_NeverWritesRepoFiles pins the core global-enable
-// invariant: the user-level install writes only user-scope config, even when
-// invoked from inside a directory that could take a repo-level install.
+// The user-level install writes only user-scope config, even when invoked from
+// a directory that could take a repo-level install.
 func TestInstallUserHooks_NeverWritesRepoFiles(t *testing.T) {
 	home := setUserHome(t)
 	work := t.TempDir()
@@ -270,11 +283,9 @@ func TestInstallUserHooks_NeverWritesRepoFiles(t *testing.T) {
 	}
 }
 
-// TestInstallUserHooks_CommandsMatchRepoProductionForms pins the dedup
-// contract: Claude Code deduplicates identical hook commands across settings
-// scopes, so a repo with both a repo-level production install and the
-// user-level install fires each hook exactly once. That only holds while the
-// two installs write byte-identical command strings.
+// Claude Code dedups identical hook commands across settings scopes, so
+// no-double-fire holds only while user- and repo-level installs write
+// byte-identical command strings.
 func TestInstallUserHooks_CommandsMatchRepoProductionForms(t *testing.T) {
 	home := setUserHome(t)
 	repoDir := t.TempDir()
@@ -284,7 +295,7 @@ func TestInstallUserHooks_CommandsMatchRepoProductionForms(t *testing.T) {
 	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
 		t.Fatalf("InstallUserHooks() error = %v", err)
 	}
-	if _, err := agent.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := agent.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
@@ -295,7 +306,7 @@ func TestInstallUserHooks_CommandsMatchRepoProductionForms(t *testing.T) {
 	}
 	for c := range userCmds {
 		if !repoCmds[c] {
-			t.Errorf("user-level command not byte-identical to a repo-level production command: %s", c)
+			t.Errorf("user-level command not byte-identical to a repo-level command: %s", c)
 		}
 	}
 	for c := range repoCmds {
@@ -305,10 +316,9 @@ func TestInstallUserHooks_CommandsMatchRepoProductionForms(t *testing.T) {
 	}
 }
 
-// TestUserAuthoredEntireCLIHookSurvivesInstallAndUninstall pins verb-scoped
-// hook recognition: a USER-AUTHORED hook that merely invokes the entire
-// binary (`entire status ...`) must never be claimed as ours — an earlier
-// prefix (`entire `) matched it, so UninstallUserHooks deleted it.
+// Verb-scoped recognition: a user-authored hook that merely invokes the entire
+// binary must never be claimed as ours (a bare `entire ` prefix once was, and
+// UninstallUserHooks deleted it).
 func TestUserAuthoredEntireCLIHookSurvivesInstallAndUninstall(t *testing.T) {
 	home := setUserHome(t)
 	const userCmd = "entire status --json > /tmp/entire-status.json"
@@ -323,17 +333,15 @@ func TestUserAuthoredEntireCLIHookSurvivesInstallAndUninstall(t *testing.T) {
 	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
 		t.Fatalf("InstallUserHooks() error = %v", err)
 	}
-	cmds := collectHookCommands(t, userSettingsTestPath(t, home))
-	if got := countOf(cmds, userCmd); got != 2 {
-		t.Fatalf("user-authored entire-CLI hook count after install = %d, want 2 (commands: %v)", got, cmds)
+	if got := countOf(collectHookCommands(t, userSettingsTestPath(t, home)), userCmd); got != 2 {
+		t.Fatalf("user-authored entire-CLI hook count after install = %d, want 2", got)
 	}
-
 	if err := agent.UninstallUserHooks(context.Background()); err != nil {
 		t.Fatalf("UninstallUserHooks() error = %v", err)
 	}
-	cmds = collectHookCommands(t, userSettingsTestPath(t, home))
+	cmds := collectHookCommands(t, userSettingsTestPath(t, home))
 	if got := countOf(cmds, userCmd); got != 2 {
-		t.Errorf("user-authored entire-CLI hook count after uninstall = %d, want 2 (commands: %v)", got, cmds)
+		t.Errorf("user-authored entire-CLI hook count after uninstall = %d, want 2", got)
 	}
 	for _, c := range cmds {
 		if isEntireHook(c) {
@@ -342,123 +350,37 @@ func TestUserAuthoredEntireCLIHookSurvivesInstallAndUninstall(t *testing.T) {
 	}
 }
 
-func countOf(cmds []string, want string) int {
-	n := 0
-	for _, c := range cmds {
-		if c == want {
-			n++
-		}
-	}
-	return n
-}
-
-// TestInstallUserHooks_RepairsAlternateFormEntireHook pins the user-level
-// self-heal: a pre-existing Entire hook in a different command form (bare
-// `entire hooks claude-code stop`) must be replaced, not joined — the
-// exact-string dedup check otherwise appended a second wrapped entry and both
-// fired on every Stop machine-wide.
-func TestInstallUserHooks_RepairsAlternateFormEntireHook(t *testing.T) {
-	home := setUserHome(t)
-	writeUserClaudeSettings(t, home, `{
+// Incomplete or alternate-form installs must read as not-installed and be
+// repaired in place: a bare-form Entire hook is replaced (not joined — both
+// once fired on every Stop machine-wide), and a Stop-only file is completed.
+func TestInstallUserHooks_RepairsIncompleteInstalls(t *testing.T) {
+	t.Run("alternate command form is replaced", func(t *testing.T) {
+		home := setUserHome(t)
+		writeUserClaudeSettings(t, home, `{
   "hooks": {
     "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "entire hooks claude-code stop"}]}]
   }
 }`)
-
-	agent := &ClaudeCodeAgent{}
-	res, err := agent.InstallUserHooks(context.Background())
-	if err != nil {
-		t.Fatalf("InstallUserHooks() error = %v", err)
-	}
-	if !res.Repaired {
-		t.Error("replacing an alternate-form entry must be reported as a repair")
-	}
-
-	raw := readRawSettings(t, userSettingsTestPath(t, home))
-	var hooks map[string][]ClaudeHookMatcher
-	if err := json.Unmarshal(raw["hooks"], &hooks); err != nil {
-		t.Fatalf("parse hooks: %v", err)
-	}
-	for hookType, matchers := range hooks {
-		entireEntries := 0
-		for _, m := range matchers {
-			for _, h := range m.Hooks {
-				if isEntireHook(h.Command) {
-					entireEntries++
-				}
-			}
+		agent := &ClaudeCodeAgent{}
+		res, err := agent.InstallUserHooks(context.Background())
+		if err != nil {
+			t.Fatalf("InstallUserHooks() error = %v", err)
 		}
-		want := 1
-		if hookType == "PostToolUse" {
-			want = 2 // post-task (Agent) + post-todo (TaskCreate|TaskUpdate)
+		if !res.Repaired {
+			t.Error("replacing an alternate-form entry must be reported as a repair")
 		}
-		if entireEntries != want {
-			t.Errorf("hook type %s has %d Entire entries after install, want exactly %d", hookType, entireEntries, want)
+		cmds := collectHookCommands(t, userSettingsTestPath(t, home))
+		if countOf(cmds, "entire hooks claude-code stop") != 0 {
+			t.Error("bare-form Entire hook still present after repair")
 		}
-	}
-	if got := countOf(collectHookCommands(t, userSettingsTestPath(t, home)), "entire hooks claude-code stop"); got != 0 {
-		t.Errorf("bare-form Entire hook still present after repair (count %d)", got)
-	}
+		if got := countOf(cmds, agentWrappedStopCmd()); got != 1 {
+			t.Errorf("wrapped Stop entry count after repair = %d, want 1", got)
+		}
+	})
 }
 
-// TestInstallUserHooks_DuplicateEntryReportsRepairedNotAlreadyInstalled pins
-// the honesty of the install result: a file whose entries are all current but
-// duplicated is rewritten (duplicates stripped) with nothing new added —
-// Installed 0 — and that rewrite must surface as Repaired, not read as
-// "already installed" for a file the install just changed.
-func TestInstallUserHooks_DuplicateEntryReportsRepairedNotAlreadyInstalled(t *testing.T) {
-	home := setUserHome(t)
-	agent := &ClaudeCodeAgent{}
-	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
-		t.Fatalf("seed install: %v", err)
-	}
-
-	// Duplicate the Stop entry in place.
-	path := userSettingsTestPath(t, home)
-	raw := readRawSettings(t, path)
-	var hooks map[string][]ClaudeHookMatcher
-	if err := json.Unmarshal(raw["hooks"], &hooks); err != nil {
-		t.Fatalf("parse hooks: %v", err)
-	}
-	stop := hooks["Stop"]
-	if len(stop) == 0 || len(stop[0].Hooks) == 0 {
-		t.Fatal("seed install left no Stop entry")
-	}
-	stop[0].Hooks = append(stop[0].Hooks, stop[0].Hooks[0])
-	hooks["Stop"] = stop
-	hooksJSON, err := json.Marshal(hooks)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw["hooks"] = hooksJSON
-	data, err := json.Marshal(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	res, err := agent.InstallUserHooks(context.Background())
-	if err != nil {
-		t.Fatalf("InstallUserHooks() error = %v", err)
-	}
-	if res.Installed != 0 {
-		t.Errorf("deduplicating a complete install must add nothing, got Installed=%d", res.Installed)
-	}
-	if !res.Repaired {
-		t.Error("stripping a duplicate entry must be reported as a repair")
-	}
-	if got := countOf(collectHookCommands(t, path), agentWrappedStopCmd()); got != 1 {
-		t.Errorf("Stop entry count after repair = %d, want 1", got)
-	}
-}
-
-// TestInstallUserHooks_UnparseableHookSectionErrorsCleanly pins item "never
-// clobber unparseable hook sections": a managed hook section in an unexpected
-// shape must abort install AND uninstall with an error naming the section,
-// leaving the file byte-identical — the old parse path silently treated it as
-// empty, clobbering it on install and deleting it on disable --global.
+// A managed hook section in an unexpected shape aborts install AND uninstall
+// with an error naming the section, leaving the file byte-identical.
 func TestInstallUserHooks_UnparseableHookSectionErrorsCleanly(t *testing.T) {
 	home := setUserHome(t)
 	original := `{
@@ -476,151 +398,11 @@ func TestInstallUserHooks_UnparseableHookSectionErrorsCleanly(t *testing.T) {
 	if !strings.Contains(err.Error(), "Stop") || !strings.Contains(err.Error(), userSettingsTestPath(t, home)) {
 		t.Errorf("install error must name the section and file, got: %v", err)
 	}
-
 	if err := agent.UninstallUserHooks(context.Background()); err == nil {
 		t.Fatal("UninstallUserHooks() must error on an unparseable hook section")
 	}
-
 	data, readErr := os.ReadFile(userSettingsTestPath(t, home))
 	if readErr != nil || string(data) != original {
 		t.Errorf("refused write must leave the file byte-identical (err=%v):\n%s", readErr, data)
 	}
-}
-
-// TestInstallUserHooks_WritesThroughSymlink pins the dotfile-manager case: a
-// symlinked ~/.claude/settings.json must be rewritten through to its target —
-// a naive temp+rename write replaces the link with a regular file, silently
-// detaching the managed target.
-func TestInstallUserHooks_WritesThroughSymlink(t *testing.T) {
-	home := setUserHome(t)
-	target := filepath.Join(home, "dotfiles", "claude-settings.json")
-	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(target, []byte(`{"model":"opus"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	link := userSettingsTestPath(t, home)
-	if err := os.MkdirAll(filepath.Dir(link), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-
-	agent := &ClaudeCodeAgent{}
-	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
-		t.Fatalf("InstallUserHooks() error = %v", err)
-	}
-
-	fi, err := os.Lstat(link)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode()&os.ModeSymlink == 0 {
-		t.Fatal("install replaced the settings.json symlink with a regular file")
-	}
-	data, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "entire hooks claude-code stop") || !strings.Contains(string(data), `"opus"`) {
-		t.Errorf("symlink target not rewritten in place: %s", data)
-	}
-}
-
-// TestAreUserHooksInstalled_PartialInstallReadsAsNotInstalled pins the
-// alignment of the user-level predicate with the repo-level completeness spec
-// (CheckHookConfig): a Stop-only file must read as not-installed so doctor
-// flags it and the idempotent installer repairs it, instead of "installed"
-// masking hooks that never fire.
-func TestAreUserHooksInstalled_PartialInstallReadsAsNotInstalled(t *testing.T) {
-	home := setUserHome(t)
-	agent := &ClaudeCodeAgent{}
-	stopOnly := `{
-  "hooks": {
-    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": ` + mustJSON(t, agentWrappedStopCmd()) + `}]}]
-  }
-}`
-	writeUserClaudeSettings(t, home, stopOnly)
-
-	if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || ok {
-		t.Fatalf("Stop-only file: AreUserHooksInstalled() = (%v, %v), want (false, nil)", ok, err)
-	}
-	res, err := agent.InstallUserHooks(context.Background())
-	if err != nil {
-		t.Fatalf("InstallUserHooks() error = %v", err)
-	}
-	if res.Installed == 0 {
-		t.Fatal("InstallUserHooks() must repair a partial install, reported nothing to do")
-	}
-	if !res.Repaired {
-		t.Error("repairing a partial install must be reported as a repair, not a fresh install")
-	}
-	if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || !ok {
-		t.Fatalf("after repair: AreUserHooksInstalled() = (%v, %v), want (true, nil)", ok, err)
-	}
-}
-
-// TestAreUserHooksInstalled_ReadErrorSurfaces pins honest error
-// classification: an unreadable config is "cannot tell", not "not installed"
-// — and the installer must refuse rather than replace the file (verified
-// failure mode: EACCES read → config silently replaced, doctor reported OK).
-func TestAreUserHooksInstalled_ReadErrorSurfaces(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("chmod-based unreadability is not enforceable on Windows")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses file permissions")
-	}
-	home := setUserHome(t)
-	writeUserClaudeSettings(t, home, `{"model":"opus"}`)
-	path := userSettingsTestPath(t, home)
-	if err := os.Chmod(path, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chmod(path, 0o600); err != nil {
-			t.Logf("restore permissions: %v", err)
-		}
-	})
-
-	agent := &ClaudeCodeAgent{}
-	if ok, err := agent.AreUserHooksInstalled(context.Background()); err == nil || ok {
-		t.Fatalf("unreadable file: AreUserHooksInstalled() = (%v, %v), want (false, error)", ok, err)
-	}
-	if _, err := agent.InstallUserHooks(context.Background()); err == nil {
-		t.Fatal("InstallUserHooks() must refuse to replace an unreadable settings file")
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil || string(data) != `{"model":"opus"}` {
-		t.Fatalf("unreadable file must be left untouched (data=%q err=%v)", data, err)
-	}
-}
-
-func mustJSON(t *testing.T, s string) string {
-	t.Helper()
-	b, err := json.Marshal(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b)
-}
-
-func agentWrappedStopCmd() string {
-	return buildClaudeHookCommands(false).stop
-}
-
-func entireCommandSet(t *testing.T, path string) map[string]bool {
-	t.Helper()
-	set := make(map[string]bool)
-	for _, c := range collectHookCommands(t, path) {
-		if isEntireHook(c) {
-			set[c] = true
-		}
-	}
-	return set
 }

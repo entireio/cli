@@ -3,12 +3,13 @@ package cursor
 import (
 	"context"
 	"encoding/json"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
 func TestInstallHooks_FreshInstall(t *testing.T) {
@@ -16,7 +17,7 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	t.Chdir(tempDir)
 
 	ag := &CursorAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -76,7 +77,7 @@ func TestInstallHooks_WindowsProbeSuccessKeepsShWrappers(t *testing.T) {
 	t.Chdir(tempDir)
 
 	ag := &CursorAgent{}
-	if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
@@ -97,7 +98,7 @@ func TestInstallHooks_WindowsProbeFailureUsesCmdWrappers(t *testing.T) {
 	t.Chdir(tempDir)
 
 	ag := &CursorAgent{}
-	if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
@@ -123,13 +124,13 @@ func TestInstallHooks_WindowsProbeFlipMigratesCleanly(t *testing.T) {
 	ag := &CursorAgent{}
 
 	// First install with a working sh → sh-based wrappers.
-	if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
 
 	// sh stops working; reinstall WITHOUT force.
 	shWorks = false
-	if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("second InstallHooks() error = %v", err)
 	}
 
@@ -160,7 +161,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	ag := &CursorAgent{}
 
 	// First install
-	count1, err := ag.InstallHooks(context.Background(), false, false)
+	count1, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
@@ -169,7 +170,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	}
 
 	// Second install
-	count2, err := ag.InstallHooks(context.Background(), false, false)
+	count2, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("second InstallHooks() error = %v", err)
 	}
@@ -200,7 +201,7 @@ func TestAreHooksInstalled_AfterInstall(t *testing.T) {
 
 	ag := &CursorAgent{}
 
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -217,7 +218,7 @@ func TestUninstallHooks(t *testing.T) {
 	ag := &CursorAgent{}
 
 	// Install
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -256,13 +257,13 @@ func TestInstallHooks_ForceReinstall(t *testing.T) {
 	ag := &CursorAgent{}
 
 	// Install normally
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
 
 	// Force reinstall
-	count, err := ag.InstallHooks(context.Background(), false, true)
+	count, err := ag.InstallHooks(context.Background(), true)
 	if err != nil {
 		t.Fatalf("force InstallHooks() error = %v", err)
 	}
@@ -295,7 +296,7 @@ func TestInstallHooks_PreservesExistingHooks(t *testing.T) {
 	})
 
 	ag := &CursorAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -317,18 +318,21 @@ func TestInstallHooks_PreservesExistingHooks(t *testing.T) {
 	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, agent.WrapProductionSilentHookCommand("entire hooks cursor subagent-stop"))
 }
 
-func TestInstallHooks_LocalDev(t *testing.T) {
+func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
-
+	ctx := context.Background()
 	ag := &CursorAgent{}
-	_, err := ag.InstallHooks(context.Background(), true, false)
-	if err != nil {
-		t.Fatalf("InstallHooks(localDev=true) error = %v", err)
-	}
 
-	hooksFile := readHooksFile(t, tempDir)
-	assertEntryCommand(t, hooksFile.Hooks.Stop, `"$(git rev-parse --show-toplevel)"/scripts/entire-dev hooks cursor stop`)
+	testutil.AssertLegacyHookReplaced(t,
+		filepath.Join(tempDir, ".cursor", HooksFileName),
+		agent.WrapProductionSilentHookCommandForOS("entire hooks cursor stop", agent.UseWindowsProductionHooks(ctx)),
+		testutil.LegacyLocalDevCommand("hooks cursor stop"),
+		func() {
+			if _, err := ag.InstallHooks(ctx, false); err != nil {
+				t.Fatalf("InstallHooks() error = %v", err)
+			}
+		})
 }
 
 func TestInstallHooks_PreservesUnknownFields(t *testing.T) {
@@ -354,7 +358,7 @@ func TestInstallHooks_PreservesUnknownFields(t *testing.T) {
 	}
 
 	ag := &CursorAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -409,7 +413,7 @@ func TestUninstallHooks_PreservesUnknownFields(t *testing.T) {
 
 	// Install hooks first
 	ag := &CursorAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,52 +536,53 @@ func assertEntryWithMatcher(t *testing.T, entries []CursorHookEntry, matcher, co
 	t.Errorf("hook with matcher=%q command=%q not found", matcher, command)
 }
 
-// TestUserAuthoredEntireCLIHookSurvives_Cursor pins verb-scoped hook
-// recognition at repo scope: a USER-AUTHORED hook whose command merely
-// invokes the entire binary must survive a force install's remove-then-add
-// cycle and uninstall — under the old bare "entire " prefix both destroyed it.
-func TestUserAuthoredEntireCLIHookSurvives_Cursor(t *testing.T) {
+// TestInstallHooks_DropsLegacyHookAlongsideCurrent is the regression test for
+// syncEntireHook returning early when the current command was already present,
+// which left a legacy local-dev hook beside it so both fired.
+func TestInstallHooks_DropsLegacyHookAlongsideCurrent(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
-
-	const userCmd = "entire status --json > /tmp/entire-status.json"
-	cursorDir := filepath.Join(tempDir, ".cursor")
-	if err := os.MkdirAll(cursorDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	existing := `{"version":1,"hooks":{"stop":[{"command":"` + userCmd + `"}]}}`
-	if err := os.WriteFile(filepath.Join(cursorDir, HooksFileName), []byte(existing), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
+	ctx := context.Background()
 	ag := &CursorAgent{}
-	if _, err := ag.InstallHooks(context.Background(), false, true); err != nil {
-		t.Fatalf("InstallHooks() error = %v", err)
-	}
-	hooksFile := readHooksFile(t, tempDir)
-	if !cursorEntriesContainCommand(hooksFile.Hooks.Stop, userCmd) {
-		t.Fatalf("force install removed the user-authored entire-CLI hook: %+v", hooksFile.Hooks.Stop)
-	}
 
-	if err := ag.UninstallHooks(context.Background()); err != nil {
-		t.Fatalf("UninstallHooks() error = %v", err)
-	}
-	hooksFile = readHooksFile(t, tempDir)
-	if !cursorEntriesContainCommand(hooksFile.Hooks.Stop, userCmd) {
-		t.Errorf("uninstall removed the user-authored entire-CLI hook: %+v", hooksFile.Hooks.Stop)
-	}
-	for _, e := range hooksFile.Hooks.Stop {
-		if strings.Contains(e.Command, "entire hooks cursor") {
-			t.Errorf("Entire hook left behind: %s", e.Command)
-		}
-	}
+	configPath := filepath.Join(tempDir, ".cursor", HooksFileName)
+	current := agent.WrapProductionSilentHookCommandForOS("entire hooks cursor stop", agent.UseWindowsProductionHooks(ctx))
+	legacy := testutil.LegacyLocalDevCommand("hooks cursor stop")
+
+	testutil.AssertStaleHookDroppedAlongsideCurrent(t, configPath, current, legacy,
+		func() {
+			// Install, then append the legacy hook next to the current one.
+			if _, err := ag.InstallHooks(ctx, false); err != nil {
+				t.Fatalf("seed InstallHooks() error = %v", err)
+			}
+			hooksFile := readHooksFile(t, tempDir)
+			hooksFile.Hooks.Stop = append(hooksFile.Hooks.Stop, CursorHookEntry{Command: legacy})
+			// Write with the same marshaller InstallHooks uses: the production
+			// hook command contains `>`, which encoding/json would escape to
+			// \u003e, so a seed written with json.MarshalIndent would not match
+			// what the CLI reads back.
+			data, err := jsonutil.MarshalIndentWithNewline(hooksFile, "", "  ")
+			if err != nil {
+				t.Fatalf("marshal seed: %v", err)
+			}
+			if err := os.WriteFile(configPath, data, 0o600); err != nil {
+				t.Fatalf("write seed: %v", err)
+			}
+		},
+		func() {
+			if _, err := ag.InstallHooks(ctx, false); err != nil {
+				t.Fatalf("InstallHooks() error = %v", err)
+			}
+		})
 }
 
-func cursorEntriesContainCommand(entries []CursorHookEntry, cmd string) bool {
-	for _, e := range entries {
-		if e.Command == cmd {
-			return true
-		}
-	}
-	return false
+// TestCommittedDogfoodHooksIsCurrent guards this repo's own committed agent config against drifting from what
+// InstallHooks writes. A stale committed config is how the pi extension ended up
+// invoking a launcher script that had been deleted.
+func TestCommittedDogfoodHooksIsCurrent(t *testing.T) {
+	testutil.AssertCommittedDogfoodConfigStable(t, ".cursor/hooks.json", func(t *testing.T, dir string) (int, error) {
+		t.Helper()
+		t.Chdir(dir)
+		return (&CursorAgent{}).InstallHooks(context.Background(), false)
+	})
 }

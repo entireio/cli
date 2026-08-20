@@ -26,8 +26,11 @@ import (
 // not support directory fsync; we make this step best-effort so the call
 // does not fail on platforms where the operation is a no-op.
 //
-// perm is applied to the temp file via Chmod before rename so the final file
-// lands with the requested permission regardless of the temp file's default.
+// perm is applied to the OPEN temp file (fd-based chmod) before close, so the
+// final file lands with the requested permission with no path-based window —
+// the same pattern as copyFileThenRemove's migration writer. The temp's name
+// is random and never published until the rename, so its transient state is
+// unreachable by path anyway.
 func WriteFileAtomic(filePath string, data []byte, perm fs.FileMode) error {
 	dir := filepath.Dir(filePath)
 	base := filepath.Base(filePath)
@@ -46,15 +49,16 @@ func WriteFileAtomic(filePath string, data []byte, perm fs.FileMode) error {
 		_ = tmp.Close()
 		return fmt.Errorf("write temp for %s: %w", filePath, err)
 	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temp for %s: %w", filePath, err)
+	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("sync temp for %s: %w", filePath, err)
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp for %s: %w", filePath, err)
-	}
-	if err := os.Chmod(tmpName, perm); err != nil {
-		return fmt.Errorf("chmod temp for %s: %w", filePath, err)
 	}
 	if err := os.Rename(tmpName, filePath); err != nil {
 		return fmt.Errorf("rename temp to %s: %w", filePath, err)
@@ -99,7 +103,9 @@ const maxSymlinkHops = 40
 // does not exist yet. filepath.EvalSymlinks alone cannot do this: it errors on
 // a dangling link exactly like on a missing file, and treating that error as
 // "no symlink here" is how an existing dangling settings.json link got
-// replaced by a regular file.
+// replaced by a regular file. A relative filePath stays relative —
+// EvalSymlinks never absolutizes — so it resolves against the CWD exactly as
+// os.WriteFile would.
 func resolveWriteTarget(filePath string) string {
 	path := filePath
 	for range maxSymlinkHops {

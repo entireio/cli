@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/huh/v2"
 
@@ -142,99 +143,12 @@ func TestRunDisableGlobalMode_AnswerIsDurable(t *testing.T) {
 	}
 }
 
-// TestRunDisableGlobalMode_RemovesUserHooksNonInteractive: without a TTY the
-// disable flow removes Entire's user-level hooks without prompting — and only
-// Entire's entries, leaving the rest of the user file intact.
-func TestRunDisableGlobalMode_RemovesUserHooksNonInteractive(t *testing.T) {
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	home := isolateUserHome(t)
-	t.Cleanup(settings.ClearGlobalModeCache)
-
-	claudePath := filepath.Join(home, ".claude", "settings.json")
-	if err := os.MkdirAll(filepath.Dir(claudePath), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(claudePath, []byte(`{"model":"opus"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := runEnableGlobalMode(t.Context(), &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-
-	var buf bytes.Buffer
-	if err := runDisableGlobalMode(t.Context(), &buf); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(buf.String(), "user-level hooks removed") {
-		t.Fatalf("missing removal report, got: %q", buf.String())
-	}
-	data, err := os.ReadFile(claudePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(data), "entire hooks claude-code") {
-		t.Errorf("Entire hooks left in user settings: %s", data)
-	}
-	if !strings.Contains(string(data), "opus") {
-		t.Errorf("unrelated user settings key removed: %s", data)
-	}
-	gemini, err := os.ReadFile(filepath.Join(home, ".gemini", "settings.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(gemini), "entire hooks gemini") {
-		t.Errorf("Entire hooks left in gemini user settings: %s", gemini)
-	}
-}
-
-// TestRunEnableGlobalMode_PerAgentFailureIsolation: a corrupt
-// ~/.claude/settings.json must fail ONLY claude-code's install (a `!` line),
-// leave the corrupt file untouched, and let gemini's install land — partial
-// success stays exit 0.
-func TestRunEnableGlobalMode_PerAgentFailureIsolation(t *testing.T) {
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	home := isolateUserHome(t)
-	t.Cleanup(settings.ClearGlobalModeCache)
-
-	claudePath := filepath.Join(home, ".claude", "settings.json")
-	if err := os.MkdirAll(filepath.Dir(claudePath), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	const corrupt = `{not json`
-	if err := os.WriteFile(claudePath, []byte(corrupt), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	var buf bytes.Buffer
-	if err := runEnableGlobalMode(t.Context(), &buf); err != nil {
-		t.Fatalf("partial success must stay exit 0, got: %v\n%s", err, buf.String())
-	}
-	out := buf.String()
-	if !strings.Contains(out, "! claude-code: install failed") {
-		t.Errorf("missing claude-code failure line, got: %q", out)
-	}
-	if !strings.Contains(out, "✓ gemini: installed") {
-		t.Errorf("gemini install must proceed past claude-code's failure, got: %q", out)
-	}
-	data, err := os.ReadFile(claudePath)
-	if err != nil || string(data) != corrupt {
-		t.Errorf("corrupt claude settings must be left untouched (data=%q err=%v)", data, err)
-	}
-	if _, err := os.Stat(filepath.Join(home, ".gemini", "settings.json")); err != nil {
-		t.Errorf("gemini user-level hook file not written: %v", err)
-	}
-}
-
-// TestRunEnableGlobalMode_ZeroCoverageIsAnError: when NO supporting agent
-// ends up with hooks installed, "Global tracking enabled" plus exit 0 would
-// report a tracking state that does not exist — the command must say so and
-// return an error. (The setting itself stays persisted; a re-run repairs.)
-func TestRunEnableGlobalMode_ZeroCoverageIsAnError(t *testing.T) {
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	home := isolateUserHome(t)
-	t.Cleanup(settings.ClearGlobalModeCache)
-
-	for _, dir := range []string{".claude", ".gemini"} {
+// Corrupt agent configs must fail only that agent's install (a `!` line, file
+// untouched, other agents proceed, exit 0); with NO agent covered the command
+// errors instead of reporting a tracking state that does not exist.
+func TestRunEnableGlobalMode_AgentFailures(t *testing.T) {
+	corruptAgentConfig := func(t *testing.T, home, dir string) string {
+		t.Helper()
 		path := filepath.Join(home, dir, "settings.json")
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			t.Fatal(err)
@@ -242,60 +156,115 @@ func TestRunEnableGlobalMode_ZeroCoverageIsAnError(t *testing.T) {
 		if err := os.WriteFile(path, []byte(`{not json`), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		return path
 	}
 
-	var buf bytes.Buffer
-	err := runEnableGlobalMode(t.Context(), &buf)
-	if err == nil {
-		t.Fatalf("zero agents covered must return an error, output: %q", buf.String())
-	}
-	if !strings.Contains(buf.String(), "will not capture any sessions") {
-		t.Errorf("missing zero-coverage explanation, got: %q", buf.String())
-	}
-	us, loadErr := settings.LoadUserSettings(t.Context())
-	if loadErr != nil {
-		t.Fatal(loadErr)
-	}
-	if us.Global == nil || !us.Global.Enabled {
-		t.Errorf("the enabled setting itself must persist so a re-run repairs: %+v", us.Global)
-	}
+	t.Run("per-agent failure isolation", func(t *testing.T) {
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		home := isolateUserHome(t)
+		t.Cleanup(settings.ClearGlobalModeCache)
+		claudePath := corruptAgentConfig(t, home, ".claude")
+
+		var buf bytes.Buffer
+		if err := runEnableGlobalMode(t.Context(), &buf); err != nil {
+			t.Fatalf("partial success must stay exit 0, got: %v\n%s", err, buf.String())
+		}
+		out := buf.String()
+		if !strings.Contains(out, "! claude-code: install failed") || !strings.Contains(out, "✓ gemini: installed") {
+			t.Errorf("want claude failure line and gemini success, got: %q", out)
+		}
+		data, err := os.ReadFile(claudePath)
+		if err != nil || string(data) != `{not json` {
+			t.Errorf("corrupt claude settings must be left untouched (data=%q err=%v)", data, err)
+		}
+	})
+
+	t.Run("zero coverage is an error", func(t *testing.T) {
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		home := isolateUserHome(t)
+		t.Cleanup(settings.ClearGlobalModeCache)
+		corruptAgentConfig(t, home, ".claude")
+		corruptAgentConfig(t, home, ".gemini")
+
+		var buf bytes.Buffer
+		if err := runEnableGlobalMode(t.Context(), &buf); err == nil {
+			t.Fatalf("zero agents covered must return an error, output: %q", buf.String())
+		}
+		if !strings.Contains(buf.String(), "will not capture any sessions") {
+			t.Errorf("missing zero-coverage explanation, got: %q", buf.String())
+		}
+		us, loadErr := settings.LoadUserSettings(t.Context())
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if us.Global == nil || !us.Global.Enabled {
+			t.Errorf("the enabled setting itself must persist so a re-run repairs: %+v", us.Global)
+		}
+	})
 }
 
-// TestRunDisableGlobalMode_UnreadableAgentConfigReported: an agent whose
-// user-level config cannot be read must get a `! ... could not remove` line
-// instead of being silently skipped, while readable agents still get their
-// hooks removed.
-func TestRunDisableGlobalMode_UnreadableAgentConfigReported(t *testing.T) {
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	home := isolateUserHome(t)
-	t.Cleanup(settings.ClearGlobalModeCache)
+// Non-interactive disable removes ONLY Entire's user-level entries; an agent
+// whose config cannot be read gets a `! ... could not remove` line while
+// readable agents still get their hooks removed.
+func TestRunDisableGlobalMode_HookRemoval(t *testing.T) {
+	t.Run("removes only ours without prompting", func(t *testing.T) {
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		home := isolateUserHome(t)
+		t.Cleanup(settings.ClearGlobalModeCache)
+		claudePath := filepath.Join(home, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(claudePath), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(claudePath, []byte(`{"model":"opus"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := runEnableGlobalMode(t.Context(), &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
 
-	if err := runEnableGlobalMode(t.Context(), &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-	claudePath := filepath.Join(home, ".claude", "settings.json")
-	if err := os.WriteFile(claudePath, []byte(`{not json`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+		var buf bytes.Buffer
+		if err := runDisableGlobalMode(t.Context(), &buf); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(buf.String(), "user-level hooks removed") {
+			t.Fatalf("missing removal report, got: %q", buf.String())
+		}
+		data, err := os.ReadFile(claudePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "entire hooks claude-code") || !strings.Contains(string(data), "opus") {
+			t.Errorf("disable must remove only Entire entries: %s", data)
+		}
+		gemini, err := os.ReadFile(filepath.Join(home, ".gemini", "settings.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(gemini), "entire hooks gemini") {
+			t.Errorf("Entire hooks left in gemini user settings: %s", gemini)
+		}
+	})
 
-	var buf bytes.Buffer
-	if err := runDisableGlobalMode(t.Context(), &buf); err != nil {
-		t.Fatal(err)
-	}
-	out := buf.String()
-	if !strings.Contains(out, "! claude-code: could not remove:") {
-		t.Errorf("unreadable agent config must be reported, got: %q", out)
-	}
-	if !strings.Contains(out, "✓ gemini: user-level hooks removed") {
-		t.Errorf("gemini removal must proceed, got: %q", out)
-	}
-	gemini, err := os.ReadFile(filepath.Join(home, ".gemini", "settings.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(gemini), "entire hooks gemini") {
-		t.Errorf("Entire hooks left in gemini user settings: %s", gemini)
-	}
+	t.Run("unreadable agent config is reported", func(t *testing.T) {
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		home := isolateUserHome(t)
+		t.Cleanup(settings.ClearGlobalModeCache)
+		if err := runEnableGlobalMode(t.Context(), &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{not json`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		var buf bytes.Buffer
+		if err := runDisableGlobalMode(t.Context(), &buf); err != nil {
+			t.Fatal(err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "! claude-code: could not remove:") || !strings.Contains(out, "✓ gemini: user-level hooks removed") {
+			t.Errorf("want claude failure line and gemini removal, got: %q", out)
+		}
+	})
 }
 
 // TestMaybeAskGlobalTracking_YesInstallsUserHooks pins the wizard's yes path
@@ -398,8 +367,9 @@ func TestMaybeMigrateGlobalRuntimeData_MovesRoutedFiles(t *testing.T) {
 
 	// Routed runtime data as the invisible tier lays it out (namespaced per
 	// worktree; the main worktree's key hashes the empty worktree ID), plus
-	// one file that already exists in the worktree target (must be skipped,
-	// not clobbered).
+	// two files that already exist in the worktree target: a DIVERGENT one
+	// (kept, source counted failed so it stays findable) and an identical
+	// duplicate (source dropped, counted already-present).
 	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
 	source := filepath.Join(dir, filepath.FromSlash(sourceRel))
 	testutil.WriteFile(t, dir, sourceRel+"/metadata/sess-1/prompt.txt", "routed prompt")
@@ -407,6 +377,8 @@ func TestMaybeMigrateGlobalRuntimeData_MovesRoutedFiles(t *testing.T) {
 	testutil.WriteFile(t, dir, sourceRel+"/tmp/scratch.txt", "routed tmp")
 	testutil.WriteFile(t, dir, sourceRel+"/metadata/sess-1/conflict.txt", "routed version")
 	testutil.WriteFile(t, dir, ".entire/metadata/sess-1/conflict.txt", "worktree version")
+	testutil.WriteFile(t, dir, sourceRel+"/metadata/sess-1/dup.txt", "same bytes")
+	testutil.WriteFile(t, dir, ".entire/metadata/sess-1/dup.txt", "same bytes")
 
 	var buf bytes.Buffer
 	maybeMigrateGlobalRuntimeData(t.Context(), &buf)
@@ -425,19 +397,25 @@ func TestMaybeMigrateGlobalRuntimeData_MovesRoutedFiles(t *testing.T) {
 	if err != nil || string(data) != "worktree version" {
 		t.Errorf("conflicting target must be kept (data=%q err=%v)", data, err)
 	}
-	// Moved files leave the source; the skipped conflict file stays behind.
+	// Moved files leave the source; the divergent conflict file stays behind.
 	if _, err := os.Stat(filepath.Join(source, "metadata", "sess-1", "prompt.txt")); !os.IsNotExist(err) {
 		t.Errorf("moved file still present in source (err=%v)", err)
 	}
 	if _, err := os.Stat(filepath.Join(source, "metadata", "sess-1", "conflict.txt")); err != nil {
-		t.Errorf("skipped file must stay in source: %v", err)
+		t.Errorf("divergent file must stay in source: %v", err)
+	}
+	// The identical duplicate is dropped from the source, not stranded.
+	if _, err := os.Stat(filepath.Join(source, "metadata", "sess-1", "dup.txt")); !os.IsNotExist(err) {
+		t.Errorf("identical duplicate still present in source (err=%v)", err)
 	}
 	// Emptied source subtrees are removed.
 	if _, err := os.Stat(filepath.Join(source, "logs")); !os.IsNotExist(err) {
 		t.Errorf("emptied source logs dir not removed (err=%v)", err)
 	}
-	if !strings.Contains(buf.String(), "Moved 3") {
-		t.Errorf("expected one-line summary with moved count, got: %q", buf.String())
+	for _, want := range []string{"Moved 3", "1 already present", "1 could not be moved (left in "} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("summary missing %q, got: %q", want, buf.String())
+		}
 	}
 }
 
@@ -501,6 +479,62 @@ func TestMaybeMigrateGlobalRuntimeData_MigratesOnlyCurrentWorktreeNamespace(t *t
 	}
 	if !strings.Contains(buf.String(), "Moved 1") {
 		t.Errorf("expected a one-file summary, got: %q", buf.String())
+	}
+}
+
+// TestMaybeMigrateGlobalRuntimeData_DefersWhileSessionActive pins the
+// active-writer guard: an ACTIVE session in THIS worktree defers the whole
+// migration (a hook may be mid-write under the routed dir), while idle
+// sessions here and active sessions of other worktrees do not.
+func TestMaybeMigrateGlobalRuntimeData_DefersWhileSessionActive(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	paths.ClearWorktreeRootCache()
+	paths.ClearInvisibleRuntimeCache()
+	session.ClearGitCommonDirCache()
+	t.Cleanup(func() {
+		paths.ClearWorktreeRootCache()
+		paths.ClearInvisibleRuntimeCache()
+		session.ClearGitCommonDirCache()
+	})
+
+	store, err := session.NewStateStore(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveState := func(id string, phase session.Phase, worktree string) {
+		t.Helper()
+		if err := store.Save(t.Context(), &session.State{
+			SessionID: id, Phase: phase, WorktreePath: worktree, StartedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	saveState("sess-idle-here", session.PhaseIdle, dir)
+	saveState("sess-active-elsewhere", session.PhaseActive, filepath.Join(dir, "elsewhere"))
+
+	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
+	testutil.WriteFile(t, dir, sourceRel+"/logs/first.log", "routed")
+	var buf bytes.Buffer
+	maybeMigrateGlobalRuntimeData(t.Context(), &buf)
+	if !strings.Contains(buf.String(), "Moved 1") {
+		t.Fatalf("idle/foreign sessions must not defer migration, got: %q", buf.String())
+	}
+
+	saveState("sess-active-here", session.PhaseActive, dir)
+	testutil.WriteFile(t, dir, sourceRel+"/logs/second.log", "routed")
+	buf.Reset()
+	maybeMigrateGlobalRuntimeData(t.Context(), &buf)
+	if !strings.Contains(buf.String(), "deferred") {
+		t.Fatalf("expected a deferral line, got: %q", buf.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(sourceRel), "logs", "second.log")); err != nil {
+		t.Errorf("deferred migration must leave the routed file in place: %v", err)
 	}
 }
 
@@ -867,7 +901,7 @@ func TestRunUninstall_ClearsGlobalSetupMarker(t *testing.T) {
 	// Repo-level setup, with the marker still latched from an earlier
 	// globally tracked phase (the pre-fix state every takeover now clears).
 	testutil.WriteFile(t, dir, ".entire/settings.json", `{"enabled": true}`)
-	if _, err := strategy.InstallGitHook(t.Context(), true, false, false); err != nil {
+	if _, err := strategy.InstallGitHook(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {

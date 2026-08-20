@@ -318,7 +318,7 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		Branch:                      opts.Branch,
 		CheckpointsCount:            opts.CheckpointsCount,
 		SaveStepCount:               opts.SaveStepCount,
-		FilesTouched:                opts.FilesTouched,
+		FilesTouched:                checkpoint.NormalizeFilesTouched(opts.FilesTouched),
 		Agent:                       opts.Agent,
 		Model:                       opts.Model,
 		TurnID:                      opts.TurnID,

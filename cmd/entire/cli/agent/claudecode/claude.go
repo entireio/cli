@@ -234,8 +234,13 @@ func (c *ClaudeCodeAgent) TruncateAtUUID(session *agent.AgentSession, uuid strin
 }
 
 // FindCheckpointUUID finds the UUID of the message containing the tool_result
-// for the given tool use ID. Used for task checkpoint rewind.
+// for the given tool use ID.
 // Returns the UUID and true if found, empty string and false otherwise.
+//
+// No production caller remains: this served task checkpoint rewind, which went
+// away with the rewind commands. Only a test exercises it now, so it should be
+// removed along with the rest of the strategy-level rewind machinery rather
+// than kept as exported-but-unreachable API.
 func (c *ClaudeCodeAgent) FindCheckpointUUID(session *agent.AgentSession, toolUseID string) (string, bool) {
 	if session == nil || len(session.NativeData) == 0 {
 		return "", false

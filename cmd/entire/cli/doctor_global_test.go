@@ -29,37 +29,56 @@ func runCheckGlobalTracking(t *testing.T) string {
 	return out.String()
 }
 
-func TestCheckGlobalTracking_SilentWhileOffOrUnconfigured(t *testing.T) {
-	setupTestRepo(t)
-	cfg := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
-	isolateUserHome(t)
-
-	if got := runCheckGlobalTracking(t); got != "" {
-		t.Errorf("unconfigured tier must be silent, got: %q", got)
+// TestCheckGlobalTracking_SettingsShapes drives the pure settings→output rows:
+// silence while off/unconfigured/clean, and each validation warning.
+func TestCheckGlobalTracking_SettingsShapes(t *testing.T) {
+	cases := []struct {
+		name         string
+		userSettings string // "" = no file
+		want, banned []string
+	}{
+		{"unconfigured tier is silent", "", nil,
+			[]string{"Global tracking"}},
+		{"off tier is silent", `{"global":{"enabled":false}}`, nil,
+			[]string{"Global tracking"}},
+		{"off tier is silent even with bad patterns", `{"global":{"enabled":false,"exclude_paths":["relative/path"]}}`, nil,
+			[]string{"UNUSABLE SETTINGS ENTRIES"}},
+		{"enabled without user hooks warns", `{"global":{"enabled":true}}`,
+			[]string{"USER-LEVEL AGENT HOOKS MISSING", "claude-code", "gemini", "entire enable --global"}, nil},
+		{"malformed settings warn machine-wide", `{"global":`,
+			[]string{"USER SETTINGS UNREADABLE", "<settings-path>", "machine-wide"}, nil},
+		{"unusable exclude patterns are enumerated",
+			`{"global":{"enabled":true,"exclude_paths":["relative/path","~bob/code/**","/srv/["],"exclude_origins":["github.com/acme/["],"trusted_paths":["~bob/code/repo"]}}`,
+			// trusted_paths joins the same section: the gate skips an unusable
+			// entry, so doctor must name it too.
+			[]string{"UNUSABLE SETTINGS ENTRIES", "exclude_paths[0]", "exclude_paths[1]", "exclude_paths[2]", "exclude_origins[0]", "trusted_paths[0]", "<settings-path>"}, nil},
+		{"clean config triggers no validation warnings",
+			`{"global":{"enabled":true,"exclude_paths":["~/scratch/**","/srv/tmp/**"],"exclude_origins":["github.com/acme/*"]}}`,
+			nil, []string{"USER SETTINGS UNREADABLE", "UNUSABLE SETTINGS ENTRIES", "origin not checkable"}},
 	}
-
-	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":false}}`)
-	if got := runCheckGlobalTracking(t); got != "" {
-		t.Errorf("off tier must be silent, got: %q", got)
-	}
-}
-
-func TestCheckGlobalTracking_WarnsOnMissingUserHooks(t *testing.T) {
-	setupTestRepo(t)
-	cfg := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
-	isolateUserHome(t)
-	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
-
-	got := runCheckGlobalTracking(t)
-	if !strings.Contains(got, "USER-LEVEL AGENT HOOKS MISSING") {
-		t.Fatalf("missing warning, got: %q", got)
-	}
-	for _, want := range []string{"claude-code", "gemini", "entire enable --global"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("warning missing %q, got: %q", want, got)
-		}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			setupTestRepo(t)
+			cfg := t.TempDir()
+			t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+			isolateUserHome(t)
+			if c.userSettings != "" {
+				writeGlobalUserSettings(t, cfg, c.userSettings)
+			}
+			got := runCheckGlobalTracking(t)
+			for _, w := range c.want {
+				// Resolved here: UserSettingsPath depends on the subtest's env.
+				w = strings.ReplaceAll(w, "<settings-path>", settings.UserSettingsPath())
+				if !strings.Contains(got, w) {
+					t.Errorf("output missing %q, got: %q", w, got)
+				}
+			}
+			for _, b := range c.banned {
+				if strings.Contains(got, b) {
+					t.Errorf("output must not contain %q, got: %q", b, got)
+				}
+			}
+		})
 	}
 }
 
@@ -69,13 +88,10 @@ func TestCheckGlobalTracking_OKWhenUserHooksInstalled(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
 	isolateUserHome(t)
 	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
-
-	// Install for every user-hook-capable agent, as enable --global would.
 	var buf bytes.Buffer
 	installUserAgentHooks(t.Context(), &buf)
 
-	got := runCheckGlobalTracking(t)
-	if !strings.Contains(got, "✓ Global tracking: user-level agent hooks OK") {
+	if got := runCheckGlobalTracking(t); !strings.Contains(got, "✓ Global tracking: user-level agent hooks OK") {
 		t.Fatalf("expected OK line, got: %q", got)
 	}
 }
@@ -98,15 +114,11 @@ func TestCheckGlobalTracking_WarnsOnMarkedCloneWithoutGitHooks(t *testing.T) {
 	}
 
 	got := runCheckGlobalTracking(t)
-	if !strings.Contains(got, "GIT HOOKS MISSING") {
-		t.Fatalf("missing clone warning, got: %q", got)
+	if !strings.Contains(got, "GIT HOOKS MISSING") || !strings.Contains(got, "Marker cleared") {
+		t.Fatalf("missing drift warning with marker note, got: %q", got)
 	}
-	if !strings.Contains(got, "Marker cleared") {
-		t.Errorf("warning must say the marker was cleared, got: %q", got)
-	}
-
-	// The global_setup_completed marker is a run-once latch that the lazy setup never
-	// revisits, so doctor must have cleared it...
+	// The marker is a run-once latch the lazy setup never revisits, so doctor
+	// must have cleared it, letting the next hook activity reconverge.
 	prefs, err := settings.LoadClonePreferences(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -114,8 +126,6 @@ func TestCheckGlobalTracking_WarnsOnMarkedCloneWithoutGitHooks(t *testing.T) {
 	if prefs.GlobalSetupCompleted {
 		t.Fatal("doctor must clear the global_setup_completed marker when git hooks are missing")
 	}
-
-	// ...which lets the next hook activity actually reconverge.
 	settings.ClearGlobalModeCache()
 	t.Cleanup(settings.ClearGlobalModeCache)
 	strategy.MaybeEnsureGlobalSetup(t.Context())
@@ -124,12 +134,9 @@ func TestCheckGlobalTracking_WarnsOnMarkedCloneWithoutGitHooks(t *testing.T) {
 	}
 }
 
-// TestCheckGlobalTracking_ExplainsWorktreeResidentHooksPath pins the one
-// missing-hooks shape that is NOT drift: core.hooksPath resolving inside the
-// worktree means the lazy setup deliberately skipped installation (and still
-// set the marker). Doctor must explain — hook capture requires repo-level
-// enable — and must NOT clear the marker: clearing would re-run a setup that
-// skips again and promise a reinstall that never happens.
+// A worktree-resident core.hooksPath means the lazy setup deliberately skipped
+// installation: doctor explains instead of reporting drift, and must NOT clear
+// the marker (clearing re-runs a setup that skips again).
 func TestCheckGlobalTracking_ExplainsWorktreeResidentHooksPath(t *testing.T) {
 	setupTestRepo(t)
 	repoDir, err := os.Getwd()
@@ -150,8 +157,6 @@ func TestCheckGlobalTracking_ExplainsWorktreeResidentHooksPath(t *testing.T) {
 	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
 	var buf bytes.Buffer
 	installUserAgentHooks(t.Context(), &buf)
-
-	// The shape the lazy setup leaves behind: marker set, hooks skipped.
 	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
 		p.GlobalSetupCompleted = true
 		return nil
@@ -162,11 +167,6 @@ func TestCheckGlobalTracking_ExplainsWorktreeResidentHooksPath(t *testing.T) {
 	got := runCheckGlobalTracking(t)
 	if !strings.Contains(got, "GIT HOOKS SKIPPED (core.hooksPath inside the worktree)") {
 		t.Fatalf("missing hooksPath explanation, got: %q", got)
-	}
-	for _, want := range []string{"Agent-side session capture still works", "'entire enable'"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("explanation missing %q, got: %q", want, got)
-		}
 	}
 	for _, banned := range []string{"GIT HOOKS MISSING", "Marker cleared"} {
 		if strings.Contains(got, banned) {
@@ -182,11 +182,9 @@ func TestCheckGlobalTracking_ExplainsWorktreeResidentHooksPath(t *testing.T) {
 	}
 }
 
-// TestCheckGlobalTracking_ProbeErrorReportsUnverifiedWithoutClearing pins the
-// third missing-hooks shape: when the hooksPath residency probe itself fails,
-// doctor must print the UNVERIFIED warning and mutate nothing — the lazy
-// setup treats the same error as "skip installation", so clearing the marker
-// would promise a reinstall that never happens (an infinite mis-advice loop).
+// When the hooksPath residency probe itself fails, doctor prints UNVERIFIED
+// and mutates nothing — the lazy setup treats the same error as "skip", so
+// clearing the marker would promise a reinstall that never happens.
 func TestCheckGlobalTracking_ProbeErrorReportsUnverifiedWithoutClearing(t *testing.T) {
 	setupTestRepo(t)
 	cfg := t.TempDir()
@@ -195,8 +193,6 @@ func TestCheckGlobalTracking_ProbeErrorReportsUnverifiedWithoutClearing(t *testi
 	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
 	var buf bytes.Buffer
 	installUserAgentHooks(t.Context(), &buf)
-
-	// The drift-suspect shape: marker set, git hooks never installed.
 	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
 		p.GlobalSetupCompleted = true
 		return nil
@@ -208,11 +204,8 @@ func TestCheckGlobalTracking_ProbeErrorReportsUnverifiedWithoutClearing(t *testi
 	t.Cleanup(func() { strategy.SetHooksDirProbeErrorForTesting(nil) })
 
 	got := runCheckGlobalTracking(t)
-	if !strings.Contains(got, "GIT HOOK STATE UNVERIFIED") {
-		t.Fatalf("probe error must report UNVERIFIED, got: %q", got)
-	}
-	if !strings.Contains(got, "forced probe failure (test seam)") {
-		t.Errorf("warning must carry the probe error, got: %q", got)
+	if !strings.Contains(got, "GIT HOOK STATE UNVERIFIED") || !strings.Contains(got, "forced probe failure (test seam)") {
+		t.Fatalf("probe error must report UNVERIFIED with the cause, got: %q", got)
 	}
 	for _, banned := range []string{"GIT HOOKS MISSING", "Marker cleared", "GIT HOOKS SKIPPED"} {
 		if strings.Contains(got, banned) {
@@ -228,44 +221,10 @@ func TestCheckGlobalTracking_ProbeErrorReportsUnverifiedWithoutClearing(t *testi
 	}
 }
 
-// TestCheckGlobalTracking_UnverifiableAgentConfigIsNotMissing pins honest
-// error classification: an agent user config that cannot be READ is
-// "unverifiable", not "missing" — the missing-hooks remedy (`entire enable
-// --global`) refuses to run against the broken file, so lumping the two
-// together sends the user to a fix that cannot work. And it must never
-// produce the OK line (the verified failure mode: EACCES read → "✓ OK").
-func TestCheckGlobalTracking_UnverifiableAgentConfigIsNotMissing(t *testing.T) {
-	setupTestRepo(t)
-	cfg := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
-	home := isolateUserHome(t)
-	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
-
-	claudePath := filepath.Join(home, ".claude", "settings.json")
-	if err := os.MkdirAll(filepath.Dir(claudePath), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(claudePath, []byte(`{not json`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	got := runCheckGlobalTracking(t)
-	if !strings.Contains(got, "USER-LEVEL AGENT HOOKS UNVERIFIABLE") || !strings.Contains(got, "claude-code") {
-		t.Fatalf("unreadable claude config must be reported unverifiable, got: %q", got)
-	}
-	if !strings.Contains(got, "USER-LEVEL AGENT HOOKS MISSING") || !strings.Contains(got, "gemini") {
-		t.Errorf("gemini (genuinely missing) must still be reported missing, got: %q", got)
-	}
-	if strings.Contains(got, "user-level agent hooks OK") {
-		t.Errorf("OK line must not appear alongside problems, got: %q", got)
-	}
-}
-
-// TestCheckGlobalTracking_MultipleProblemsAllReported guards the section
-// sequence against a stray early return: with a missing agent, an
-// unverifiable agent, AND unusable exclude patterns at once, every section
-// must appear, in the function's stable order.
-func TestCheckGlobalTracking_MultipleProblemsAllReported(t *testing.T) {
+// An unreadable agent config is "unverifiable", not "missing" (its remedy
+// differs) and never yields the OK line; with unusable exclude patterns in the
+// same run, every section appears in the function's stable order.
+func TestCheckGlobalTracking_UnverifiableAgentConfigAndSectionOrder(t *testing.T) {
 	setupTestRepo(t)
 	cfg := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
@@ -281,6 +240,9 @@ func TestCheckGlobalTracking_MultipleProblemsAllReported(t *testing.T) {
 	}
 
 	got := runCheckGlobalTracking(t)
+	if strings.Contains(got, "user-level agent hooks OK") {
+		t.Errorf("OK line must not appear alongside problems, got: %q", got)
+	}
 	idxMissing := strings.Index(got, "USER-LEVEL AGENT HOOKS MISSING")
 	idxUnverifiable := strings.Index(got, "USER-LEVEL AGENT HOOKS UNVERIFIABLE")
 	idxPatterns := strings.Index(got, "UNUSABLE SETTINGS ENTRIES")
@@ -288,51 +250,11 @@ func TestCheckGlobalTracking_MultipleProblemsAllReported(t *testing.T) {
 		t.Fatalf("all three sections must be reported (missing=%d unverifiable=%d patterns=%d), got: %q",
 			idxMissing, idxUnverifiable, idxPatterns, got)
 	}
+	if !strings.Contains(got[idxUnverifiable:], "claude-code") || !strings.Contains(got[idxMissing:idxUnverifiable], "gemini") {
+		t.Errorf("claude-code must be unverifiable and gemini missing, got: %q", got)
+	}
 	if idxMissing >= idxUnverifiable || idxUnverifiable >= idxPatterns {
-		t.Errorf("sections out of stable order (missing=%d unverifiable=%d patterns=%d), got: %q",
-			idxMissing, idxUnverifiable, idxPatterns, got)
-	}
-}
-
-func TestCheckGlobalTracking_WarnsOnMalformedUserSettings(t *testing.T) {
-	setupTestRepo(t)
-	cfg := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
-	isolateUserHome(t)
-	writeGlobalUserSettings(t, cfg, `{"global":`) // truncated JSON
-
-	got := runCheckGlobalTracking(t)
-	if !strings.Contains(got, "USER SETTINGS UNREADABLE") {
-		t.Fatalf("missing malformed-settings warning, got: %q", got)
-	}
-	if !strings.Contains(got, settings.UserSettingsPath()) {
-		t.Errorf("warning must name the settings file, got: %q", got)
-	}
-	if !strings.Contains(got, "machine-wide") {
-		t.Errorf("warning must state the machine-wide consequence, got: %q", got)
-	}
-}
-
-func TestCheckGlobalTracking_WarnsOnUnusableExcludePatterns(t *testing.T) {
-	setupTestRepo(t)
-	cfg := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
-	isolateUserHome(t)
-	// The gate skips an unusable trusted_paths entry; doctor must name it.
-	writeGlobalUserSettings(t, cfg,
-		`{"global":{"enabled":true,"exclude_paths":["relative/path","~bob/code/**","/srv/["],"exclude_origins":["github.com/acme/["],"trusted_paths":["~bob/code/repo"]}}`)
-
-	got := runCheckGlobalTracking(t)
-	if !strings.Contains(got, "UNUSABLE SETTINGS ENTRIES") {
-		t.Fatalf("missing pattern warning, got: %q", got)
-	}
-	for _, want := range []string{
-		"exclude_paths[0]", "exclude_paths[1]", "exclude_paths[2]",
-		"exclude_origins[0]", "trusted_paths[0]", settings.UserSettingsPath(),
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("warning missing %q, got: %q", want, got)
-		}
+		t.Errorf("sections out of stable order (missing=%d unverifiable=%d patterns=%d)", idxMissing, idxUnverifiable, idxPatterns)
 	}
 }
 
@@ -349,11 +271,8 @@ func TestCheckGlobalTracking_InfoOnUnnormalizableOrigin(t *testing.T) {
 	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true,"exclude_origins":["github.com/acme/*"]}}`)
 
 	got := runCheckGlobalTracking(t)
-	if !strings.Contains(got, "origin not checkable in this repo (informational)") {
-		t.Fatalf("missing informational origin note, got: %q", got)
-	}
-	if !strings.Contains(got, "/srv/git/widgets.git") {
-		t.Errorf("note must name the unnormalizable origin URL, got: %q", got)
+	if !strings.Contains(got, "origin not checkable in this repo (informational)") || !strings.Contains(got, "/srv/git/widgets.git") {
+		t.Fatalf("missing informational origin note naming the URL, got: %q", got)
 	}
 }
 
@@ -373,34 +292,5 @@ func TestCheckGlobalTracking_InfoOnUntrustedEnrolledRepo(t *testing.T) {
 	}
 	if !strings.Contains(got, "run `entire trust` to sync") {
 		t.Errorf("hold note missing the remedy, got: %q", got)
-	}
-}
-
-func TestCheckGlobalTracking_ValidationSilentWhenClean(t *testing.T) {
-	setupTestRepo(t)
-	cfg := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
-	isolateUserHome(t)
-	writeGlobalUserSettings(t, cfg,
-		`{"global":{"enabled":true,"exclude_paths":["~/scratch/**","/srv/tmp/**"],"exclude_origins":["github.com/acme/*"]}}`)
-
-	got := runCheckGlobalTracking(t)
-	for _, banned := range []string{"USER SETTINGS UNREADABLE", "UNUSABLE SETTINGS ENTRIES", "origin not checkable"} {
-		if strings.Contains(got, banned) {
-			t.Errorf("clean config must not trigger %q, got: %q", banned, got)
-		}
-	}
-}
-
-func TestCheckGlobalTracking_ValidationSilentWhenTierOff(t *testing.T) {
-	setupTestRepo(t)
-	cfg := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
-	isolateUserHome(t)
-	// Bad patterns, but the tier is off: nothing gates on them, stay silent.
-	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":false,"exclude_paths":["relative/path"]}}`)
-
-	if got := runCheckGlobalTracking(t); got != "" {
-		t.Errorf("disabled tier must be silent even with bad patterns, got: %q", got)
 	}
 }

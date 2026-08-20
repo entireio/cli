@@ -139,8 +139,13 @@ func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
 // remote in dir, distinguishing "remote not configured" from a failed lookup:
 // exit code 1 from `git config --get-all` is reported as found=false with a
 // nil error — for well-formed remote names that means the key is unset (git
-// also exits 1 for invalid key names). Any other failure (dir missing, git
-// unavailable, context canceled) returns an error. `git remote get-url`
+// also exits 1 for invalid key names). Because that fallback also fires when
+// dir is not a repository at all (the lookup then reads global/system scope),
+// exit 1 is trusted only after verifying dir is inside a repo; a non-repo dir
+// returns an error. found=true means the key EXISTS: stored values are
+// returned verbatim (whitespace-trimmed), including blank ones, so a caller
+// can fail closed on an uncheckable `url =` entry. Any other failure (dir
+// missing, git unavailable, context canceled) returns an error. `git remote get-url`
 // could make the same distinction — its failures are distinguishable too
 // (exit 2 for "no such remote" vs 128 for not-a-repo) — but
 // it is deliberately not used, for two reasons: (i) it expands
@@ -179,16 +184,44 @@ func getAllRemoteConfig(ctx context.Context, dir, remoteName, key string) (urls 
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			// Exit 1 means "key unset" only inside a repository: outside one,
+			// git config silently falls back to global/system scope and exits 1
+			// for absent-there too, which would misreport "not a repo" as "no
+			// origin configured". Confirm repo-ness before trusting it.
+			inRepo := isGitRepoDir(ctx, dir)
+			// Checked after the probe regardless of its outcome: cancellation
+			// can fail the probe (report it, not a bogus "not a repo") or land
+			// after the probe already succeeded (don't swallow it into a clean
+			// "no origin configured").
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, false, fmt.Errorf("looking up remote %q: %w", remoteName, ctxErr)
+			}
+			if !inRepo {
+				return nil, false, fmt.Errorf("looking up remote %q: not a git repository", remoteName)
+			}
 			return nil, false, nil
 		}
 		return nil, false, fmt.Errorf("looking up remote %q: %w", remoteName, err)
 	}
-	for line := range strings.SplitSeq(strings.TrimSpace(string(output)), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			urls = append(urls, line)
-		}
+	// Exit 0 means the key exists: found is true even when every value is
+	// blank. Values are kept verbatim (whitespace-trimmed) INCLUDING empty
+	// ones — `url =` with no value exits 0 with a blank line, and dropping it
+	// would report a configured remote as absent instead of handing the
+	// caller an uncheckable value to fail closed on.
+	for line := range strings.SplitSeq(strings.TrimSuffix(string(output), "\n"), "\n") {
+		urls = append(urls, strings.TrimSpace(line))
 	}
-	return urls, len(urls) > 0, nil
+	return urls, true, nil
+}
+
+// isGitRepoDir reports whether dir (the process CWD when empty) is inside a
+// git repository.
+func isGitRepoDir(ctx context.Context, dir string) bool {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	return cmd.Run() == nil
 }
 
 // ParseURL parses a git remote URL (SSH SCP-style or HTTPS) into its components.
@@ -207,8 +240,7 @@ func ParseURL(rawURL string) (*Info, error) {
 			host = hostPart
 		}
 
-		pathPart := strings.TrimSuffix(parts[1], ".git")
-		owner, repo, err := splitOwnerRepo(pathPart)
+		owner, repo, err := splitOwnerRepo(parts[1])
 		if err != nil {
 			return nil, err
 		}
@@ -300,7 +332,19 @@ func ResolveRemoteRepo(ctx context.Context, remoteName string) (forge, owner, re
 }
 
 func splitOwnerRepo(path string) (string, string, error) {
-	path = strings.TrimSuffix(path, ".git")
+	// Git accepts `.../repo/`, `.../repo.GIT`, and `.../repo.git/` as the same
+	// clone target, so trailing slashes and any-case ".git" are shed here —
+	// otherwise a stored origin like "https://github.com/acme/widgets/" yields
+	// repo "widgets/", which leaks into API paths and makes exclude_origins
+	// matching fail open (it matches neither "…/widgets" nor "…/*").
+	path = strings.TrimRight(path, "/")
+	if suffix := len(path) - len(".git"); suffix >= 0 && strings.EqualFold(path[suffix:], ".git") {
+		path = path[:suffix]
+	}
+	// Stripping ".git" can expose a new trailing slash (".../repo/.git" — the
+	// on-disk repo dir form); shed it too or the leftover slash fails open in
+	// exclude_origins matching exactly like the plain trailing slash did.
+	path = strings.TrimRight(path, "/")
 	parts := strings.SplitN(path, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", fmt.Errorf("cannot parse owner/repo from path: %s", path)

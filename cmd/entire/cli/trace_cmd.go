@@ -36,6 +36,12 @@ Examples:
 			logFile, err := paths.AbsPath(cmd.Context(), filepath.Join(logging.LogsDir, "entire.log"))
 			if err != nil {
 				cmd.SilenceUsage = true
+				// A routing failure happens inside a valid git repo —
+				// "not a git repository" would misdiagnose it.
+				if paths.IsUnroutableRuntimePath(err) {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Logs unavailable: %v.\n", err)
+					return NewSilentError(err)
+				}
 				fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Please run from within a git repository.")
 				return NewSilentError(fmt.Errorf("not a git repository: %w", err))
 			}

@@ -43,7 +43,7 @@ func (c *ClaudeCodeAgent) InstallUserHooks(_ context.Context) (agent.UserHookIns
 	if err != nil {
 		return agent.UserHookInstallResult{}, err
 	}
-	count, repaired, err := installHooksToFile(settingsPath, false, false, false)
+	count, repaired, err := installHooksToFile(settingsPath, false, false)
 	return agent.UserHookInstallResult{Installed: count, Repaired: repaired}, err
 }
 

@@ -429,6 +429,18 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 		}
 	}
 
+	// An active session in this worktree means a hook process may be writing
+	// under source right now: a rename can strand its in-flight file and the
+	// EXDEV copy fallback can snapshot a half-written one. Defer the whole
+	// migration — the non-empty routed dir re-triggers it on the next enable,
+	// which is the documented recovery point — and say so, since silence here
+	// would read as "nothing to migrate".
+	if n := activeSessionCountInWorktree(ctx, root); n > 0 {
+		logging.Warn(ctx, "global runtime data migration deferred: active agent session(s) in this worktree", "count", n)
+		fmt.Fprintf(w, "  Runtime data migration deferred: %d agent session(s) active in this worktree — re-run 'entire enable' once they finish.\n", n)
+		return
+	}
+
 	var moved, skipped, failed int
 	warnLog := &migrationWarnLog{}
 	for _, sub := range paths.InvisibleRuntimeSubdirs() {
@@ -470,6 +482,26 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 	fmt.Fprintln(w, line)
 }
 
+// activeSessionCountInWorktree reports how many sessions are in an active
+// phase in the given worktree (WorktreePath compared exactly, the same idiom
+// as strategy's worktree scoping). Best-effort: a listing failure reports
+// zero after a Warn, so the migration proceeds exactly as it would have
+// before the guard existed.
+func activeSessionCountInWorktree(ctx context.Context, root string) int {
+	states, err := strategy.ListSessionStates(ctx)
+	if err != nil {
+		logging.Warn(ctx, "could not check for active sessions before runtime data migration", "error", err)
+		return 0
+	}
+	n := 0
+	for _, s := range states {
+		if s.Phase.IsActive() && s.WorktreePath == root {
+			n++
+		}
+	}
+	return n
+}
+
 // migrateRenameFile is the rename used by moveDirContents; a seam so tests
 // can force the cross-device (EXDEV) fallback deterministically.
 var migrateRenameFile = os.Rename
@@ -505,8 +537,10 @@ func (l *migrationWarnLog) flush(ctx context.Context) {
 }
 
 // moveDirContents moves every file under src into the same relative location
-// under dst, creating directories as needed. Files already present in dst are
-// skipped (left in src). Returns moved/skipped/failed counts; a missing src is
+// under dst, creating directories as needed. A file already present in dst is
+// skipped only when its content is identical to the source (which is then
+// removed as a duplicate); a divergent or uncomparable destination counts the
+// source as failed, left in src. Returns moved/skipped/failed counts; a missing src is
 // (0, 0, 0), while any other ReadDir failure counts as one failure — an
 // unreadable source is not "nothing to move", and the summary must not claim
 // unqualified success over it. The summary line keeps the counts; individual
@@ -531,7 +565,28 @@ func moveDirContents(ctx context.Context, warnLog *migrationWarnLog, src, dst st
 			continue
 		}
 		if _, statErr := os.Lstat(dstPath); statErr == nil {
-			skipped++
+			// A file already at dst: only identical content lets the source
+			// copy be dropped. A blind skip would silently strand a DIVERGENT
+			// source under .git forever — dst may have been written by a
+			// post-flip session between two migration attempts — so divergent
+			// or uncomparable pairs count as failed, putting them in the
+			// summary's "left in <source>" bucket where they stay findable.
+			same, cmpErr := filesIdentical(srcPath, dstPath)
+			switch {
+			case cmpErr != nil:
+				warnLog.warn(ctx, "global runtime data migration: destination exists but could not be compared with source", "path", srcPath, "error", cmpErr)
+				failed++
+			case !same:
+				warnLog.warn(ctx, "global runtime data migration: destination already exists with different content; source left in place", "path", srcPath)
+				failed++
+			default:
+				if rmErr := os.Remove(srcPath); rmErr != nil {
+					warnLog.warn(ctx, "global runtime data migration: identical duplicate source could not be removed", "path", srcPath, "error", rmErr)
+					failed++
+				} else {
+					skipped++
+				}
+			}
 			continue
 		}
 		//nolint:gosec // G301: runtime-data dirs match the .entire directory permissions
@@ -563,6 +618,31 @@ func moveDirContents(ctx context.Context, warnLog *migrationWarnLog, src, dst st
 		moved++
 	}
 	return moved, skipped, failed
+}
+
+// filesIdentical reports whether two files have identical contents, comparing
+// sizes first so distinct files rarely cost a read.
+func filesIdentical(pathA, pathB string) (bool, error) {
+	infoA, err := os.Stat(pathA)
+	if err != nil {
+		return false, fmt.Errorf("stat %s: %w", pathA, err)
+	}
+	infoB, err := os.Stat(pathB)
+	if err != nil {
+		return false, fmt.Errorf("stat %s: %w", pathB, err)
+	}
+	if !infoA.Mode().IsRegular() || !infoB.Mode().IsRegular() || infoA.Size() != infoB.Size() {
+		return false, nil
+	}
+	sumA, err := fileSHA256(pathA)
+	if err != nil {
+		return false, err
+	}
+	sumB, err := fileSHA256(pathB)
+	if err != nil {
+		return false, err
+	}
+	return sumA == sumB, nil
 }
 
 // copyFileThenRemove copies src to dst (temp file in dst's directory, then
@@ -601,6 +681,13 @@ func copyFileThenRemove(src, dst string) (copied bool, err error) {
 	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
 		_ = tmp.Close()
 		return false, fmt.Errorf("chmod temp: %w", err)
+	}
+	// fsync before close: the source is removed after the rename, so a crash
+	// surfacing the rename with the bytes still in cache would lose the file
+	// outright (same rationale as jsonutil.WriteFileAtomic).
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return false, fmt.Errorf("sync temp: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		return false, fmt.Errorf("close temp: %w", err)

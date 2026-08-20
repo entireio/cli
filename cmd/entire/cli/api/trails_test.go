@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,7 +15,7 @@ func TestClient_TrailsEnabledEscapesPathComponents(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotURI = r.RequestURI
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"trails":[]}`)) //nolint:errcheck // test handler
+		w.Write([]byte(`{"items":[],"nextPageToken":null,"totalCount":0}`)) //nolint:errcheck // test handler
 	}))
 	defer server.Close()
 
@@ -28,9 +29,57 @@ func TestClient_TrailsEnabledEscapesPathComponents(t *testing.T) {
 	if !ok {
 		t.Fatal("enabled = false, want true")
 	}
-	want := "/api/v1/trails/g%2Fh/acme%3Forg/repo%23frag?limit=1"
+	want := "/api/v1/trails/g%2Fh/acme%3Forg/repo%23frag?pageSize=1"
 	if gotURI != want {
 		t.Errorf("request URI = %q, want %q", gotURI, want)
+	}
+}
+
+func TestClient_RewritesResolvedTrailReviewRoute(t *testing.T) {
+	t.Parallel()
+	var got string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := NewClientWithBaseURL("tok", server.URL)
+	c.SetTrailRoute("trl/one", "/api/v1/trails/gh/acme/repo/42")
+	resp, err := c.Get(context.Background(), "/api/v1/trails/trl%2Fone/reviews/comments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if want := "/api/v1/trails/gh/acme/repo/42/reviews/comments"; got != want {
+		t.Fatalf("path = %q, want %q", got, want)
+	}
+}
+
+func TestClient_TrailRequestsUseCamelCase(t *testing.T) {
+	t.Parallel()
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewClientWithBaseURL("tok", server.URL)
+	resp, err := client.Post(context.Background(), "/api/v1/trails/gh/acme/repo", TrailCreateRequest{
+		Title: "test", BranchName: "feature/test", BranchAction: "link",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got["branchName"] != "feature/test" || got["branchAction"] != "link" {
+		t.Fatalf("body = %#v", got)
+	}
+	if _, ok := got["branch_name"]; ok {
+		t.Fatalf("body contains snake_case: %#v", got)
 	}
 }
 
@@ -44,8 +93,8 @@ func TestClient_TrailsEnabled(t *testing.T) {
 		wantOK     bool
 		wantErrNil bool
 	}{
-		{"enabled (200)", http.StatusOK, `{"trails":[],"total":0}`, true, true},
-		{"enabled empty (200)", http.StatusOK, `{"trails":[]}`, true, true},
+		{"enabled (200)", http.StatusOK, `{"items":[],"nextPageToken":null,"totalCount":0}`, true, true},
+		{"enabled empty (200)", http.StatusOK, `{"items":[],"nextPageToken":null,"totalCount":0}`, true, true},
 		{"not enabled (404)", http.StatusNotFound, `{"error":"not found"}`, false, true},
 		{"forbidden (403)", http.StatusForbidden, `{"error":"forbidden"}`, false, true},
 		{"gone (410)", http.StatusGone, `{"error":"gone"}`, false, true},
@@ -80,8 +129,8 @@ func TestClient_TrailsEnabled(t *testing.T) {
 			if gotPath != "/api/v1/trails/gh/acme/repo" {
 				t.Errorf("path = %q, want /api/v1/trails/gh/acme/repo", gotPath)
 			}
-			if gotQuery != "limit=1" {
-				t.Errorf("query = %q, want limit=1", gotQuery)
+			if gotQuery != "pageSize=1" {
+				t.Errorf("query = %q, want pageSize=1", gotQuery)
 			}
 		})
 	}

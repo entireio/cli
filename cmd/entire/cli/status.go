@@ -311,13 +311,22 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		fmt.Fprintln(w, formatSettingsStatus("Project", projectSettings, sty))
 	}
 
-	// Show local settings if it exists
+	// Show local settings if it exists. LoadFromFile is ungated, so this
+	// renders the file's own contents — say so when the loader ignored them,
+	// or the display contradicts the settings actually in effect.
 	if localExists {
 		localSettings, err := settings.LoadFromFile(localSettingsPath)
 		if err != nil {
 			return fmt.Errorf("failed to load local settings: %w", err)
 		}
-		fmt.Fprintln(w, formatSettingsStatus("Local", localSettings, sty))
+		label := "Local"
+		if effectiveSettings.LocalLayerRejection() != "" {
+			label = "Local (ignored)"
+		}
+		fmt.Fprintln(w, formatSettingsStatus(label, localSettings, sty))
+		if reason := effectiveSettings.LocalLayerRejection(); reason != "" {
+			fmt.Fprintf(w, "  %s\n  fix with: git rm --cached %s\n", reason, settings.EntireSettingsLocalFile)
+		}
 	}
 
 	if effectiveSettings.Enabled {
@@ -430,7 +439,8 @@ type checkpointSyncInfo struct {
 	// dedicated checkpoint_remote mode. Empty when nothing resolved (no
 	// remotes configured, or the fail-closed case).
 	Remote string
-	// Source is config|default|sole|first (resolver values) or "dedicated".
+	// Source is config|observed|default|sole|first (resolver values) or
+	// "dedicated".
 	Source string
 	// Err is the fail-closed misconfiguration message from the resolver.
 	Err string
@@ -516,8 +526,11 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 	default:
 		b.WriteString("\n  Checkpoints sync to: ")
 		b.WriteString(sty.render(sty.cyan, info.Remote))
-		if info.Source == string(strategy.SyncRemoteSourceConfig) {
+		switch info.Source {
+		case string(strategy.SyncRemoteSourceConfig):
 			b.WriteString(sty.render(sty.dim, " (set by checkpoint_push_remote)"))
+		case string(strategy.SyncRemoteSourceObserved):
+			b.WriteString(sty.render(sty.dim, " (follows your branch's push destination)"))
 		}
 	}
 	if info.Unpushed > 0 {
@@ -596,10 +609,13 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("Finalized %d exited session(s) (agent process gone).", n)))
 	}
 
-	// Filter to active sessions only
+	// Filter to active sessions only, per session.State.IsEnded — the same rule
+	// `entire session stop` filters on, so status can't advertise a session that
+	// stop then refuses to list. EndedAt alone is not it: `entire session attach`
+	// sets Phase to ended without stamping EndedAt.
 	var active []*session.State
 	for _, s := range states {
-		if s.EndedAt == nil {
+		if !s.IsEnded() {
 			active = append(active, s)
 		}
 	}
@@ -719,6 +735,11 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 				fmt.Fprintln(w, sty.render(sty.dim, statsLine))
 			}
 			if warning := divergenceWarnings[st.SessionID]; warning != "" {
+				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
+			}
+			if st.CaptureDegradedAt != nil {
+				warning := fmt.Sprintf("capture degraded %s: status scan over budget; new-file detection skipped (see 'entire doctor logs')",
+					timeAgo(*st.CaptureDegradedAt))
 				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
 			}
 			fmt.Fprintln(w)
@@ -907,7 +928,7 @@ type statusJSON struct {
 	// org/repo slug in dedicated checkpoint_remote mode. Deliberately not named
 	// checkpoint_remote, which is the existing GitHub-coupled setting.
 	CheckpointSyncRemote       string `json:"checkpoint_sync_remote,omitempty"`
-	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|tracking|default|sole|first|dedicated
+	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|observed|default|sole|first|dedicated
 	CheckpointSyncError        string `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
 	UnpushedCheckpoints        int    `json:"unpushed_checkpoints,omitempty"`
 	// GlobalTracking reports the machine-wide tracking tier. Omitted while
@@ -956,6 +977,9 @@ type sessionBriefJSON struct {
 	Agent  string `json:"agent"`
 	Model  string `json:"model,omitempty"`
 	Status string `json:"status"`
+	// CaptureDegraded reports that a session for this agent last turned with a
+	// status scan over budget, so new-file detection was skipped.
+	CaptureDegraded bool `json:"capture_degraded,omitempty"`
 }
 
 func runStatusJSON(ctx context.Context, w io.Writer) error {
@@ -1050,7 +1074,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 				}
 				byAgent := make(map[string]*agentEntry)
 				for _, st := range states {
-					if st.EndedAt != nil {
+					if st.IsEnded() {
 						continue
 					}
 					agent := string(st.AgentType)
@@ -1064,12 +1088,16 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 							existing.brief.Status = sessionStatusLabel(st)
 							existing.isActive = true
 						}
+						// Degradation is sticky across the dedupe: any degraded
+						// session for this agent must not be hidden by a healthy one.
+						existing.brief.CaptureDegraded = existing.brief.CaptureDegraded || st.CaptureDegradedAt != nil
 					} else {
 						byAgent[agent] = &agentEntry{
 							brief: sessionBriefJSON{
-								Agent:  agent,
-								Model:  st.ModelName,
-								Status: sessionStatusLabel(st),
+								Agent:           agent,
+								Model:           st.ModelName,
+								Status:          sessionStatusLabel(st),
+								CaptureDegraded: st.CaptureDegradedAt != nil,
 							},
 							isActive: active,
 						}
@@ -1090,7 +1118,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 
 // sessionStatusLabel derives a display status from a session state.
 func sessionStatusLabel(s *session.State) string {
-	if s.EndedAt != nil {
+	if s.IsEnded() {
 		return "ended"
 	}
 	if s.OwnerExited() {

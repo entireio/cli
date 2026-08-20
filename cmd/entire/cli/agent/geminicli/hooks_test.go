@@ -4,12 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 	"os"
 	"path/filepath"
 	"testing"
-
-	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 )
 
 const testMatcherStartup = "startup"
@@ -20,7 +19,7 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	t.Chdir(tempDir)
 
 	agent := &GeminiCLIAgent{}
-	count, err := agent.InstallHooks(context.Background(), false, false)
+	count, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -75,7 +74,7 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 		t.Errorf("Notification hooks = %d, want 1", len(settings.Hooks.Notification))
 	}
 
-	// Verify hook commands (localDev=false, so use entire binary)
+	// Verify hook commands invoke the entire binary
 	verifyHookCommand(t, settings.Hooks.SessionStart, "", agentpkg.WrapProductionJSONWarningHookCommand("entire hooks gemini session-start", agentpkg.WarningFormatSingleLine))
 	verifyHookCommand(t, settings.Hooks.SessionEnd, "exit", agentpkg.WrapProductionSilentHookCommand("entire hooks gemini session-end"))
 	verifyHookCommand(t, settings.Hooks.SessionEnd, "logout", agentpkg.WrapProductionSilentHookCommand("entire hooks gemini session-end"))
@@ -90,31 +89,21 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	verifyHookCommand(t, settings.Hooks.Notification, "", agentpkg.WrapProductionSilentHookCommand("entire hooks gemini notification"))
 }
 
-func TestInstallHooks_LocalDev(t *testing.T) {
+func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
+	ctx := context.Background()
+	ag := &GeminiCLIAgent{}
 
-	agent := &GeminiCLIAgent{}
-	_, err := agent.InstallHooks(context.Background(), true, false)
-	if err != nil {
-		t.Fatalf("InstallHooks() error = %v", err)
-	}
-
-	settings := readGeminiSettings(t, tempDir)
-
-	// Verify local dev commands delegate to the entire-dev launcher, resolving
-	// the repo root at runtime via git.
-	prefix := `"$(git rev-parse --show-toplevel)"/scripts/entire-dev hooks gemini `
-	verifyHookCommand(t, settings.Hooks.SessionStart, "", prefix+"session-start")
-	verifyHookCommand(t, settings.Hooks.SessionEnd, "exit", prefix+"session-end")
-	verifyHookCommand(t, settings.Hooks.SessionEnd, "logout", prefix+"session-end")
-	verifyHookCommand(t, settings.Hooks.BeforeAgent, "", prefix+"before-agent")
-	verifyHookCommand(t, settings.Hooks.AfterAgent, "", prefix+"after-agent")
-	verifyHookCommand(t, settings.Hooks.BeforeModel, "", prefix+"before-model")
-	verifyHookCommand(t, settings.Hooks.AfterModel, "", prefix+"after-model")
-	verifyHookCommand(t, settings.Hooks.BeforeToolSelection, "", prefix+"before-tool-selection")
-	verifyHookCommand(t, settings.Hooks.PreCompress, "", prefix+"pre-compress")
-	verifyHookCommand(t, settings.Hooks.Notification, "", prefix+"notification")
+	testutil.AssertLegacyHookReplaced(t,
+		filepath.Join(tempDir, ".gemini", "settings.json"),
+		agentpkg.WrapProductionSilentHookCommand("entire hooks gemini after-agent"),
+		testutil.LegacyLocalDevCommand("hooks gemini after-agent"),
+		func() {
+			if _, err := ag.InstallHooks(ctx, false); err != nil {
+				t.Fatalf("InstallHooks() error = %v", err)
+			}
+		})
 }
 
 func TestInstallHooks_Idempotent(t *testing.T) {
@@ -124,7 +113,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	agent := &GeminiCLIAgent{}
 
 	// First install
-	count1, err := agent.InstallHooks(context.Background(), false, false)
+	count1, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
@@ -133,7 +122,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	}
 
 	// Second install should add 0 hooks
-	count2, err := agent.InstallHooks(context.Background(), false, false)
+	count2, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("second InstallHooks() error = %v", err)
 	}
@@ -158,13 +147,13 @@ func TestInstallHooks_Force(t *testing.T) {
 	agent := &GeminiCLIAgent{}
 
 	// First install
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
 
 	// Force reinstall should replace hooks
-	count, err := agent.InstallHooks(context.Background(), false, true)
+	count, err := agent.InstallHooks(context.Background(), true)
 	if err != nil {
 		t.Fatalf("force InstallHooks() error = %v", err)
 	}
@@ -190,7 +179,7 @@ func TestInstallHooks_PreservesUserHooks(t *testing.T) {
 }`)
 
 	agent := &GeminiCLIAgent{}
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -241,7 +230,7 @@ func TestInstallHooks_PreservesUnknownHookTypes(t *testing.T) {
 }`)
 
 	agent := &GeminiCLIAgent{}
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -346,7 +335,7 @@ func TestInstallHooks_PreservesUnknownFields(t *testing.T) {
 }`)
 
 	agent := &GeminiCLIAgent{}
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -378,7 +367,7 @@ func TestUninstallHooks(t *testing.T) {
 	agent := &GeminiCLIAgent{}
 
 	// First install
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -463,7 +452,7 @@ func TestAreHooksInstalled(t *testing.T) {
 	}
 
 	// Install hooks
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -521,7 +510,7 @@ func TestInstallHooks_RemovesLegacyEnabledField(t *testing.T) {
 }`)
 
 	agent := &GeminiCLIAgent{}
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -566,7 +555,7 @@ func TestInstallHooks_RemovesLegacyEnabledField_WhenAlreadyInstalled(t *testing.
 }`, agentpkg.WrapProductionJSONWarningHookCommand("entire hooks gemini session-start", agentpkg.WarningFormatSingleLine)))
 
 	agent := &GeminiCLIAgent{}
-	n, err := agent.InstallHooks(context.Background(), false, false)
+	n, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -607,7 +596,7 @@ func TestInstallHooks_StripsOnlyLegacyEnabledField(t *testing.T) {
 }`)
 
 	agent := &GeminiCLIAgent{}
-	_, err := agent.InstallHooks(context.Background(), false, false)
+	_, err := agent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -656,7 +645,7 @@ func TestInstallHooks_ForceWithLegacyFields(t *testing.T) {
 }`)
 
 	agent := &GeminiCLIAgent{}
-	count, err := agent.InstallHooks(context.Background(), false, true)
+	count, err := agent.InstallHooks(context.Background(), true)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -743,4 +732,15 @@ func verifyHookCommand(t *testing.T, matchers []GeminiHookMatcher, expectedMatch
 		}
 	}
 	t.Errorf("hook with matcher=%q command=%q not found", expectedMatcher, expectedCommand)
+}
+
+// TestCommittedDogfoodSettingsIsCurrent guards this repo's own committed agent config against drifting from what
+// InstallHooks writes. A stale committed config is how the pi extension ended up
+// invoking a launcher script that had been deleted.
+func TestCommittedDogfoodSettingsIsCurrent(t *testing.T) {
+	testutil.AssertCommittedDogfoodConfigStable(t, ".gemini/settings.json", func(t *testing.T, dir string) (int, error) {
+		t.Helper()
+		t.Chdir(dir)
+		return (&GeminiCLIAgent{}).InstallHooks(context.Background(), false)
+	})
 }

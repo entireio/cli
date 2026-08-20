@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -176,12 +175,12 @@ func newTrailFindingAddCmd(targetOpts *trailReviewTargetOptions) *cobra.Command 
 	cmd.Flags().StringVarP(&opts.Body, "body", "m", "", "Finding body")
 	cmd.Flags().StringVar(&opts.Severity, "severity", "", "Finding severity: high,medium,low")
 	cmd.Flags().Float64Var(&opts.Confidence, "confidence", -1, "Finding confidence from 0.0 to 1.0")
-	cmd.Flags().StringVar(&opts.FilePath, "file", "", "File path for the finding location")
+	cmd.Flags().StringVar(&opts.FilePath, "file", "", "File path for the finding location; defaults to the file a --patch modifies")
 	cmd.Flags().IntVar(&opts.Line, "line", 0, "Line number for the finding location")
 	cmd.Flags().IntVar(&opts.StartLine, "start-line", 0, "Start line for the finding location")
 	cmd.Flags().IntVar(&opts.EndLine, "end-line", 0, "End line for the finding location")
 	cmd.Flags().StringVar(&opts.ClientID, "client-id", "", "Client-provided idempotency key for this finding")
-	cmd.Flags().StringVar(&opts.Patch, "patch", "", "Unified-diff suggested change to attach")
+	cmd.Flags().StringVar(&opts.Patch, "patch", "", "Unified-diff suggested change to attach; must modify a single existing file in this worktree")
 	cmd.Flags().StringVar(&opts.PatchFile, "patch-file", "", "Read unified-diff suggested change from file; use '-' for stdin")
 	cmd.Flags().StringVar(&opts.Instruction, "instruction", "", "Manual suggested-change instruction to attach")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output as JSON")
@@ -348,7 +347,14 @@ func runTrailReviewCommentAdd(cmd *cobra.Command, selector string, opts trailRev
 	if err != nil {
 		return err
 	}
-	input, err := buildTrailReviewCommentInput(opts)
+	// An --instruction-only finding needs no anchor; a patch always does.
+	var anchor *trailReviewPatchAnchor
+	if patch := strings.TrimSpace(opts.Patch); patch != "" {
+		if anchor, err = resolveTrailReviewPatchAnchor(cmd.Context(), patch); err != nil {
+			return err
+		}
+	}
+	input, err := buildTrailReviewCommentInput(opts, anchor)
 	if err != nil {
 		return err
 	}
@@ -524,6 +530,14 @@ func resolveTrailReviewTarget(ctx context.Context, client *api.Client, selector,
 	if found.ID == "" {
 		return trailReviewTarget{}, errors.New("trail has no id yet")
 	}
+	if found.Number <= 0 {
+		return trailReviewTarget{}, errors.New("trail has no number yet")
+	}
+	// Review helpers carry the stable trail ID internally, but entire-api's
+	// public routes are repo/number addressed. Register that translation once
+	// when the target is resolved so findings, snapshots, and SSE all hit the
+	// owning cell's native route.
+	client.SetTrailRoute(found.ID, trailNumberPath(host, owner, repo, found.Number))
 	return trailReviewTarget{Host: host, Owner: owner, Repo: repo, Trail: *found}, nil
 }
 
@@ -624,6 +638,7 @@ func fetchAllTrailReviewComments(ctx context.Context, client *api.Client, trailI
 		opts.Limit = defaultTrailReviewLimit
 	}
 	var all []api.TrailReviewComment
+	seenPages := make(map[string]bool)
 	for {
 		comments, hasMore, err := fetchTrailReviewComments(ctx, client, trailID, opts)
 		if err != nil {
@@ -633,9 +648,24 @@ func fetchAllTrailReviewComments(ctx context.Context, client *api.Client, trailI
 		if !hasMore {
 			break
 		}
+		signature := trailReviewCommentPageSignature(comments)
+		if signature == "" {
+			return nil, errors.New("finding pagination returned hasMore with an empty page")
+		}
+		if seenPages[signature] {
+			return nil, fmt.Errorf("finding pagination repeated page at offset %d", opts.Offset)
+		}
+		seenPages[signature] = true
 		opts.Offset += opts.Limit
 	}
 	return all, nil
+}
+
+func trailReviewCommentPageSignature(comments []api.TrailReviewComment) string {
+	if len(comments) == 0 {
+		return ""
+	}
+	return comments[0].ID + ":" + comments[len(comments)-1].ID
 }
 
 func trailReviewSummaryOptions() trailReviewListOptions {
@@ -648,6 +678,8 @@ func trailReviewSummaryOptions() trailReviewListOptions {
 }
 
 func trailReviewCommentsPath(trailID string, opts trailReviewListOptions) string {
+	// entire-api's review reads use include_dismissed plus limit/offset and
+	// return hasMore/nextOffset; they are not pageSize/pageToken.
 	q := url.Values{}
 	if opts.Status != "" && opts.Status != trailReviewStatusAny {
 		q.Set("status", opts.Status)
@@ -735,7 +767,7 @@ func trailReviewCommentPatchHasFields(req api.TrailReviewCommentPatchRequest) bo
 	return req.Body != nil || req.Severity != nil || req.Confidence != nil || req.Status != "" || req.StatusReason != nil
 }
 
-func buildTrailReviewCommentInput(opts trailReviewCommentAddOptions) (api.TrailReviewCommentInput, error) {
+func buildTrailReviewCommentInput(opts trailReviewCommentAddOptions, anchor *trailReviewPatchAnchor) (api.TrailReviewCommentInput, error) {
 	body := strings.TrimSpace(opts.Body)
 	if body == "" {
 		return api.TrailReviewCommentInput{}, errors.New("finding body is required (pass --body)")
@@ -752,7 +784,7 @@ func buildTrailReviewCommentInput(opts trailReviewCommentAddOptions) (api.TrailR
 	if err != nil {
 		return api.TrailReviewCommentInput{}, err
 	}
-	loc, err := buildTrailReviewCommentLocation(opts)
+	loc, err := buildTrailReviewCommentLocation(opts, anchor)
 	if err != nil {
 		return api.TrailReviewCommentInput{}, err
 	}
@@ -773,10 +805,20 @@ func buildTrailReviewCommentInput(opts trailReviewCommentAddOptions) (api.TrailR
 		input.Confidence = &confidence
 	}
 	if patch := strings.TrimSpace(opts.Patch); patch != "" {
+		// The API rejects a unified_diff that carries no pre-image anchor, so a
+		// patch without one must not reach the wire.
+		if anchor == nil {
+			return api.TrailReviewCommentInput{}, errors.New("suggested-change patch has no resolved file anchor")
+		}
 		input.SuggestedChange = &api.TrailReviewSuggestedChangeCreateRequest{
-			ChangeType:  "unified_diff",
-			Patch:       stringPtr(patch),
-			Instruction: optionalStringPtr(strings.TrimSpace(opts.Instruction)),
+			ChangeType:        "unified_diff",
+			Patch:             stringPtr(patch),
+			Instruction:       optionalStringPtr(strings.TrimSpace(opts.Instruction)),
+			ExpectedFilePath:  stringPtr(anchor.FilePath),
+			ExpectedFileHash:  stringPtr(anchor.FileHash),
+			ExpectedStartLine: &anchor.StartLine,
+			ExpectedEndLine:   &anchor.EndLine,
+			ExpectedLines:     stringPtr(anchor.Lines),
 		}
 	} else if instruction := strings.TrimSpace(opts.Instruction); instruction != "" {
 		input.SuggestedChange = &api.TrailReviewSuggestedChangeCreateRequest{
@@ -803,7 +845,11 @@ func buildTrailReviewCommentConfidence(confidence float64) (float64, bool, error
 	return confidence, true, nil
 }
 
-func buildTrailReviewCommentLocation(opts trailReviewCommentAddOptions) (api.TrailReviewLocationCreateRequest, error) {
+// buildTrailReviewCommentLocation resolves where the finding sits. A patch
+// already names the file it rewrites and the lines it expects, so when the
+// caller gave no --file the anchor supplies both rather than the finding landing
+// on the trail as a whole; explicit flags always win over it.
+func buildTrailReviewCommentLocation(opts trailReviewCommentAddOptions, anchor *trailReviewPatchAnchor) (api.TrailReviewLocationCreateRequest, error) {
 	filePath := strings.TrimSpace(opts.FilePath)
 	line := opts.Line
 	if line < 0 || opts.StartLine < 0 || opts.EndLine < 0 {
@@ -827,7 +873,18 @@ func buildTrailReviewCommentLocation(opts trailReviewCommentAddOptions) (api.Tra
 
 	loc := api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityWholeChange}
 	if filePath == "" {
+		if anchor != nil {
+			return trailReviewLocationFromAnchor(anchor), nil
+		}
 		return loc, nil
+	}
+	// The API pins a suggested change to one file, so a --file naming a
+	// different one than the patch rewrites has no sensible reading: the finding
+	// would point at one place and its fix at another.
+	if anchor != nil && normalizeFindingPath(filePath) != normalizeFindingPath(anchor.FilePath) {
+		return api.TrailReviewLocationCreateRequest{}, fmt.Errorf(
+			"--file names %s but the patch modifies %s; a suggested change must target the file the finding is on",
+			filePath, anchor.FilePath)
 	}
 	loc.Granularity = reviewTrailGranularityFile
 	loc.FilePath = stringPtr(filePath)
@@ -842,6 +899,33 @@ func buildTrailReviewCommentLocation(opts trailReviewCommentAddOptions) (api.Tra
 		}
 	}
 	return loc, nil
+}
+
+// trailReviewLocationFromAnchor places the finding on the span the patch
+// rewrites: the whole hunk range, so a multi-hunk fix is not misreported as
+// sitting on its first line alone.
+func trailReviewLocationFromAnchor(anchor *trailReviewPatchAnchor) api.TrailReviewLocationCreateRequest {
+	// Copy rather than alias the anchor's fields; they are also handed to the
+	// suggested-change request.
+	startLine := anchor.StartLine
+	loc := api.TrailReviewLocationCreateRequest{
+		Granularity: reviewTrailGranularityLine,
+		FilePath:    stringPtr(anchor.FilePath),
+		StartLine:   &startLine,
+	}
+	if anchor.EndLine > anchor.StartLine {
+		endLine := anchor.EndLine
+		loc.Granularity = reviewTrailGranularityRange
+		loc.EndLine = &endLine
+	}
+	return loc
+}
+
+// normalizeFindingPath puts a caller-supplied path into the slash-separated,
+// cleaned form patch targets already use, so `./cmd/foo.go` and `cmd/foo.go`
+// compare equal.
+func normalizeFindingPath(p string) string {
+	return path.Clean(filepath.ToSlash(strings.TrimSpace(p)))
 }
 
 // createTrailReviewFinding posts a single finding through the current API flow:
@@ -1145,6 +1229,8 @@ func fetchTrailReviewState(ctx context.Context, client *api.Client, trailID, rev
 }
 
 func trailReviewStatePath(trailID, reviewID, cursor string) string {
+	// The entire-api snapshot route uses include_dismissed/limit/cursor rather
+	// than pageSize/pageToken.
 	q := url.Values{}
 	q.Set("include_dismissed", "true")
 	q.Set("stale", trailReviewFreshnessAny)
@@ -1215,21 +1301,19 @@ func combinedSafeUnifiedDiffPatch(comment api.TrailReviewComment, w io.Writer) (
 	return combined.String(), supported, nil
 }
 
+// validateUnifiedDiffPatchPaths checks every path a patch's headers name. It
+// walks headers only: diff content is not a path, and a deleted line such as
+// "-- ../legacy" serializes as "--- ../legacy", which read as a header would
+// reject a perfectly safe patch.
 func validateUnifiedDiffPatchPaths(patchText string) error {
-	scanner := bufio.NewScanner(strings.NewReader(patchText))
-	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for scanner.Scan() {
-		line := scanner.Text()
+	return forEachPatchHeaderLine(patchText, func(line string) error {
 		for _, p := range patchHeaderPaths(line) {
 			if err := validatePatchPath(p); err != nil {
 				return err
 			}
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan patch: %w", err)
-	}
-	return nil
+		return nil
+	})
 }
 
 func patchHeaderPaths(line string) []string {
@@ -1261,17 +1345,25 @@ func patchHeaderPath(raw string) string {
 	return raw
 }
 
-func validatePatchPath(raw string) error {
+// cleanPatchPath normalizes a diff header path to the repo-relative,
+// slash-separated form the working tree uses: quoted paths are unquoted, the a/
+// or b/ prefix git prepends is dropped, and separators are normalized.
+func cleanPatchPath(raw string) string {
 	p := strings.TrimSpace(raw)
-	if p == "" || p == "/dev/null" {
-		return nil
-	}
 	if unquoted, err := strconv.Unquote(p); err == nil {
 		p = unquoted
 	}
 	p = strings.TrimPrefix(p, "a/")
 	p = strings.TrimPrefix(p, "b/")
-	p = strings.ReplaceAll(p, "\\", "/")
+	return strings.ReplaceAll(p, "\\", "/")
+}
+
+func validatePatchPath(raw string) error {
+	p := strings.TrimSpace(raw)
+	if p == "" || p == patchDevNull {
+		return nil
+	}
+	p = cleanPatchPath(p)
 	if strings.HasPrefix(p, "/") {
 		return fmt.Errorf("absolute path %q is not allowed", raw)
 	}

@@ -98,11 +98,16 @@ type testOPFRuntime interface {
 // process-global OPF.
 func configureFakeOPF(t *testing.T, rt testOPFRuntime) {
 	t.Helper()
+	configureFakeOPFWithCategories(t, rt, map[string]bool{"private_person": true})
+}
+
+func configureFakeOPFWithCategories(t *testing.T, rt testOPFRuntime, cats map[string]bool) {
+	t.Helper()
 	redact.ResetOPFConfigForTest()
 	t.Cleanup(redact.ResetOPFConfigForTest)
 	redact.ConfigurePrivacyFilterWithRuntime(redact.OPFConfig{
 		Enabled:    true,
-		Categories: map[string]bool{"private_person": true},
+		Categories: cats,
 		Command:    "/tmp/test-opf",
 	}, rt)
 }
@@ -236,6 +241,46 @@ func TestRewriteUnpushedV1WithOPF_HappyPath_RewritesAndTagsApplied(t *testing.T)
 	}))
 }
 
+// Regression: OPF enabled with an empty effective category set used
+// to succeed silently — the model scan
+// never ran, yet the rewrite stamped Entire-OPF-Applied: true, so later
+// rewrites skipped the commit permanently even after the user fixed the
+// config. The rewrite must abort instead, and a corrected config must
+// then scan the same commits normally.
+func TestRewriteUnpushedV1WithOPF_NoEnabledCategoriesAbortsThenRepairs(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPFWithCategories(t, fake, map[string]bool{})
+	repo, originalTip := setupV1Repo(t)
+
+	_, err := RewriteUnpushedV1WithOPF(context.Background(), repo, "origin")
+	var noCatErr *OPFNoCategoriesError
+	require.ErrorAs(t, err, &noCatErr)
+	require.Equal(t, 0, fake.batchCallCount(), "OPF must not be invoked with zero categories")
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	require.Equal(t, originalTip, ref.Hash(), "aborted rewrite must not move the v1 ref")
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	require.False(t, trailers.HasOPFApplied(commit.Message),
+		"no commit may carry Entire-OPF-Applied when the scan never ran")
+
+	// Fix the config: because the abort left no trailer behind, the same
+	// commits are still eligible and the next push scans them normally.
+	redact.ConfigurePrivacyFilterWithRuntime(redact.OPFConfig{
+		Enabled:    true,
+		Categories: map[string]bool{"private_person": true},
+		Command:    "/tmp/test-opf",
+	}, fake)
+	newTip, err := RewriteUnpushedV1WithOPF(context.Background(), repo, "origin")
+	require.NoError(t, err)
+	require.NotEqual(t, originalTip, newTip)
+	require.Equal(t, 1, fake.batchCallCount())
+	repaired, err := repo.CommitObject(newTip)
+	require.NoError(t, err)
+	require.True(t, trailers.HasOPFApplied(repaired.Message))
+}
+
 func TestPrePushFromGitHook_DeferralStillRunsOPF(t *testing.T) {
 	fake := &fakeOPFForRewrite{}
 	configureFakeOPF(t, fake)
@@ -263,6 +308,71 @@ func TestPrePushFromGitHook_DeferralStillRunsOPF(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, trailers.HasOPFApplied(commit.Message))
 	require.Equal(t, 1, fake.batchCallCount())
+}
+
+// Regression: the no-categories abort must reach the git hook boundary.
+// PrePush deliberately swallows transient checkpoint-push failures, so
+// without this pin a refactor could downgrade the rewrite's fail-closed
+// errors to logged warnings and ship unscanned content off-machine.
+func TestPrePushFromGitHook_NoEnabledCategoriesAbortsPush(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPFWithCategories(t, fake, map[string]bool{})
+
+	dir, repo, originalTip := setupV1RepoInDir(t)
+	writeEnabledRepoSettings(t, dir)
+	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	_, err := git.PlainInit(remoteDir, true)
+	require.NoError(t, err)
+	_, err = repo.CreateRemote(&gitconfig.RemoteConfig{Name: "origin", URLs: []string{remoteDir}})
+	require.NoError(t, err)
+
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	err = NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin")
+	var noCatErr *OPFNoCategoriesError
+	require.ErrorAs(t, err, &noCatErr)
+	require.Equal(t, 0, fake.batchCallCount())
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	require.Equal(t, originalTip, ref.Hash(), "aborted push must not move the v1 ref")
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	require.False(t, trailers.HasOPFApplied(commit.Message))
+}
+
+// Regression: ENTIRE_OPF=no must stay a working opt-out under the
+// no-categories misconfiguration — an explicit skip pushes regex-only
+// content without the trailer, so failing closed there would remove
+// the one-command unblock the abort message advertises.
+func TestPrePushFromGitHook_EnvSkipBypassesNoCategoriesAbort(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPFWithCategories(t, fake, map[string]bool{})
+
+	dir, repo, originalTip := setupV1RepoInDir(t)
+	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	_, err := git.PlainInit(remoteDir, true)
+	require.NoError(t, err)
+	_, err = repo.CreateRemote(&gitconfig.RemoteConfig{Name: "origin", URLs: []string{remoteDir}})
+	require.NoError(t, err)
+
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	t.Setenv("ENTIRE_OPF", "no")
+
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	require.Equal(t, 0, fake.batchCallCount())
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	require.Equal(t, originalTip, ref.Hash(), "skipped OPF must leave the v1 ref as-is")
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	require.False(t, trailers.HasOPFApplied(commit.Message),
+		"opted-out push must not carry the OPF-applied trailer")
 }
 
 func TestRewriteUnpushedV1WithOPF_MultiCommitTipCarriesPriorRedactedShards(t *testing.T) {

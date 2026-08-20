@@ -63,7 +63,7 @@ detect_os() {
         mingw*|msys*|cygwin*)
             error "install.sh does not support Windows, you can install the Entire CLI using scoop:
 
-    scoop install entire/cli
+    scoop install entire/entire
 
   Or download the Windows zip from:
     https://github.com/entireio/cli/releases/latest"

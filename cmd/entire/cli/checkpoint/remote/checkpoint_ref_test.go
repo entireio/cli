@@ -46,12 +46,29 @@ func checkpointRefFixture(t *testing.T, withRef bool) (workDir string, ref plumb
 // distinction, git fetch of a missing refspec failed like a network error,
 // which made wiring a fetcher into write paths unsafe.
 func TestFetchCheckpointRef_RemoteMissingRefIsAbsence(t *testing.T) {
-	_, ref := checkpointRefFixture(t, false)
+	t.Run("origin is the checkpoint host", func(t *testing.T) {
+		_, ref := checkpointRefFixture(t, false)
 
-	err := FetchCheckpointRef(context.Background(), ref)
-	require.Error(t, err)
-	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound,
-		"a ref the remote does not have must classify as absence")
+		err := FetchCheckpointRef(context.Background(), ref)
+		require.Error(t, err)
+		require.ErrorIs(t, err, plumbing.ErrReferenceNotFound,
+			"a ref the checkpoint host does not have must classify as absence")
+	})
+
+	t.Run("origin is not the elected checkpoint host", func(t *testing.T) {
+		workDir, ref := checkpointRefFixture(t, false)
+		bareUpstream := t.TempDir()
+		out, err := exec.CommandContext(t.Context(), "git", "init", "--bare", bareUpstream).CombinedOutput()
+		require.NoError(t, err, "git init --bare: %s", out)
+		out, err = exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "add", "upstream", bareUpstream).CombinedOutput()
+		require.NoError(t, err, "git remote add upstream: %s", out)
+		testutil.WriteCheckpointPushRemoteSetting(t, workDir, "upstream")
+
+		err = HookCheckpointRefFetcher()(context.Background(), ref)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
+			"a miss on non-elected origin must not certify global absence")
+	})
 }
 
 // TestFetchCheckpointRef_PresentRefFetches: the ref exists on the remote but
