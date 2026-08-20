@@ -437,6 +437,25 @@ The CLI captures anonymous usage analytics by default. Sent to PostHog with `Dis
 
 Not captured: flag values, prompt text, transcripts, file paths, repository identifiers, GitHub usernames, source code.
 
+Two additional events measure search result relevance for agent-driven search
+(the search → explain funnel):
+
+- `cli_search_performed` — one per `entire search` JSON invocation: a
+  client-minted `search_id` (a ULID, also present in the JSON envelope), a
+  `query_hash` (truncated SHA-256 of the normalized query — raw query text is
+  never sent), the output mode, and result counts/pagination.
+- `cli_checkpoint_explained` — one per successful `entire checkpoint explain`
+  id resolution: the opaque checkpoint id and which resolution path handled it.
+  When the invocation carried the `--search-id` token that compact search
+  hints embed (`search-id[:rank]`, both opaque values minted by the CLI
+  itself), the event also carries that `search_id` and `rank`, linking the
+  explain to its search deterministically. The token is strictly validated
+  (26-char ULID) so free-form flag text never reaches telemetry.
+
+No correlation state is stored locally; the funnel is assembled in the
+analytics layer from the events above. Both events honor the same opt-outs as
+all other telemetry.
+
 Opt out via any one of:
 
 - `--telemetry=false` on a command that accepts it.

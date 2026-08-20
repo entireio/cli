@@ -1388,6 +1388,43 @@ func TestSearchModel_NewSearchClearsExplicitRepoFilters(t *testing.T) {
 	}
 }
 
+// TestSearchModel_ReSearchClearsSearchIDKeepsClientSurface confirms an
+// in-TUI re-search (Enter in search mode) never resends the previous
+// search's X-Entire-Search-Id: the seeded searchCfg (as search_cmd.go hands
+// it to the TUI) carries the initial request's minted SearchID, and that
+// must not leak onto subsequent re-search requests as a stale/mislabeled id.
+// ClientSurface, by contrast, truthfully describes the client on every
+// request and must survive the re-search.
+func TestSearchModel_ReSearchClearsSearchIDKeepsClientSurface(t *testing.T) {
+	t.Parallel()
+
+	ss := statusStyles{colorEnabled: false, width: 100}
+	cfg := search.Config{
+		Owner:         "o",
+		Repo:          "r",
+		Limit:         25,
+		SearchID:      "01JXK9RSTQ4B7NW2VYFCH6M3DZ",
+		ClientSurface: "cli-tui",
+	}
+	m := newSearchModel(testResults(), "old", 2, cfg, ss, nil)
+
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
+	m.input.SetValue(newQuery)
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m, ok := updated.(searchModel)
+	if !ok {
+		t.Fatalf("Update returned %T, want searchModel", updated)
+	}
+
+	if m.searchCfg.SearchID != "" {
+		t.Errorf("searchCfg.SearchID = %q, want empty (re-search must not resend the prior search's id)", m.searchCfg.SearchID)
+	}
+	if m.searchCfg.ClientSurface != "cli-tui" {
+		t.Errorf("searchCfg.ClientSurface = %q, want %q (surface header should still be sent)", m.searchCfg.ClientSurface, "cli-tui")
+	}
+}
+
 func TestSearchModel_NewSearchAllReposFilter(t *testing.T) {
 	t.Parallel()
 

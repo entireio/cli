@@ -496,6 +496,14 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			cfg.Date = parsed.Date
 			cfg.Branch = parsed.Branch
 			cfg.Repos = parsed.Repos
+			// m.searchCfg still carries the SearchID minted for the TUI's
+			// initial (pre-request) search; that id belongs to that first
+			// request only. Clear it so an in-TUI re-search never resends the
+			// previous search's id (mislabeled correlation is worse than
+			// none) — v1 deliberately doesn't mint a fresh id per re-search.
+			// ClientSurface is kept: it truthfully describes the client on
+			// every request, not just the first one.
+			cfg.SearchID = ""
 			m.searchCfg = cfg
 			cmds = append(cmds, m.performSearch(cfg))
 		}

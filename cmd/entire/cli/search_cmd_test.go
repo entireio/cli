@@ -22,6 +22,13 @@ const (
 	testClusterSlugUS = "us-prod"
 )
 
+// test constants used across search JSON writer tests. testCurrentRepo matches
+// the org/repo of the checkpoint hits in testResults() (search_tui_test.go).
+const (
+	testSearchID    = "01JTEST000000000000000000"
+	testCurrentRepo = "entirehq/entire.io"
+)
+
 // TestSearchCmd_AccessibleModeRequiresQuery verifies that accessible mode
 // is treated like --json: a query is required when ACCESSIBLE=1.
 // Note: this test modifies process-global state (env var), so it must NOT
@@ -95,7 +102,8 @@ func TestWriteSearchJSON_ZeroLimitFallsBackToDefaultPageSize(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := writeSearchJSON(&buf, resp, 0, 1); err != nil {
+	_, normLimit, normPage, err := writeSearchJSON(&buf, resp, 0, 1, testSearchID)
+	if err != nil {
 		t.Fatalf("writeSearchJSON returned error: %v", err)
 	}
 
@@ -105,6 +113,34 @@ func TestWriteSearchJSON_ZeroLimitFallsBackToDefaultPageSize(t *testing.T) {
 	}
 	if !strings.Contains(output, `"total_pages": 1`) {
 		t.Fatalf("output missing total_pages:\n%s", output)
+	}
+	// The normalized values are what the emitted telemetry event reports
+	// (ENT-1528) — --limit 0 must show up as the real page size, not 0.
+	if normLimit != 10 {
+		t.Errorf("normLimit = %d, want 10", normLimit)
+	}
+	if normPage != 1 {
+		t.Errorf("normPage = %d, want 1", normPage)
+	}
+}
+
+// --limit 0 --page 0 (both unset/invalid) must normalize to the default page
+// size and page 1 — this is what the cli_search_performed event reports for
+// limit/page, not the raw flag values (ENT-1528).
+func TestWriteSearchJSON_ZeroLimitAndPageNormalizeForTelemetry(t *testing.T) {
+	t.Parallel()
+
+	resp := &search.Response{Results: testResults(), Total: 2}
+	var buf bytes.Buffer
+	_, normLimit, normPage, err := writeSearchJSON(&buf, resp, 0, 0, testSearchID)
+	if err != nil {
+		t.Fatalf("writeSearchJSON returned error: %v", err)
+	}
+	if normLimit != 10 {
+		t.Errorf("normLimit = %d, want 10", normLimit)
+	}
+	if normPage != 1 {
+		t.Errorf("normPage = %d, want 1", normPage)
 	}
 }
 
@@ -118,7 +154,7 @@ func TestWriteSearchCompactJSON_TrimsResults(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := writeSearchCompactJSON(&buf, resp, 0, 1); err != nil {
+	if _, _, _, err := writeSearchCompactJSON(&buf, resp, 0, 1, testSearchID, testCurrentRepo); err != nil {
 		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
 	}
 
@@ -148,6 +184,104 @@ func TestWriteSearchCompactJSON_TrimsResults(t *testing.T) {
 	}
 }
 
+// The envelope carries the client-minted search_id (ENT-1528) so a response
+// can be tied to its cli_search_performed telemetry event.
+func TestWriteSearchJSON_IncludesSearchIDAndReturnsServedCount(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	served, _, _, err := writeSearchJSON(&buf, &search.Response{Results: testResults()}, 10, 1, testSearchID)
+	if err != nil {
+		t.Fatalf("writeSearchJSON returned error: %v", err)
+	}
+	if !strings.Contains(buf.String(), `"search_id": "`+testSearchID+`"`) {
+		t.Errorf("full JSON envelope missing search_id:\n%s", buf.String())
+	}
+	if served != 2 {
+		t.Errorf("served = %d, want 2", served)
+	}
+}
+
+// Compact hits carry a ready-made explain command — the second step of the
+// search funnel (ENT-1528). Same-repo checkpoint hits get the plain form.
+func TestWriteSearchCompactJSON_SearchIDAndSameRepoExplainHint(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	served, _, _, err := writeSearchCompactJSON(&buf, &search.Response{Results: testResults()}, 10, 1, testSearchID, testCurrentRepo)
+	if err != nil {
+		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+	}
+	output := buf.String()
+	if !strings.Contains(output, `"search_id": "`+testSearchID+`"`) {
+		t.Errorf("compact envelope missing search_id:\n%s", output)
+	}
+	// The hint embeds the search_id:rank token so the explain event links to
+	// this search deterministically.
+	if !strings.Contains(output, `"explain": "entire checkpoint explain a3b2c4d5e6f7 --search-id `+testSearchID+`:1"`) {
+		t.Errorf("compact hit missing same-repo explain hint with search token:\n%s", output)
+	}
+	if !strings.Contains(output, `--search-id `+testSearchID+`:2"`) {
+		t.Errorf("second hit must carry rank 2:\n%s", output)
+	}
+	if strings.Contains(output, "--repo") {
+		t.Errorf("same-repo hint must not carry --repo:\n%s", output)
+	}
+	if served != 2 {
+		t.Errorf("served = %d, want 2", served)
+	}
+}
+
+// Checkpoint hits from another repo get --repo so the hint works cross-repo
+// (ENT-1523 / PR #1942).
+func TestWriteSearchCompactJSON_CrossRepoExplainHint(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	if _, _, _, err := writeSearchCompactJSON(&buf, &search.Response{Results: testResults()}, 10, 1, testSearchID, "other/elsewhere"); err != nil {
+		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+	}
+	if !strings.Contains(buf.String(), `"explain": "entire checkpoint explain a3b2c4d5e6f7 --repo entirehq/entire.io --search-id `+testSearchID+`:1"`) {
+		t.Errorf("cross-repo checkpoint hint must carry --repo and the search token:\n%s", buf.String())
+	}
+}
+
+// Hint ranks are absolute across pages, matching what a ranking dashboard
+// needs (page 2 of limit 1 starts at rank 2).
+func TestWriteSearchCompactJSON_HintRankIsAbsolute(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	if _, _, _, err := writeSearchCompactJSON(&buf, &search.Response{Results: testResults()}, 1, 2, testSearchID, testCurrentRepo); err != nil {
+		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+	}
+	if !strings.Contains(buf.String(), `--search-id `+testSearchID+`:2"`) {
+		t.Errorf("page-2 hit must carry absolute rank 2:\n%s", buf.String())
+	}
+}
+
+// Repo and pr rows cannot be resolved by explain, so they carry no hint.
+func TestWriteSearchCompactJSON_NoExplainHintForRepoAndPRRows(t *testing.T) {
+	t.Parallel()
+
+	wire := `{"results":[
+		{"type":"repo","data":{"id":"01JREPO","name":"backend","org":"acme","fullName":"acme/backend"},"searchMeta":{"score":0.9}},
+		{"type":"pr","data":{"id":"pr-9","title":"Fix login retry","repo":"backend","userLogin":"alice"},"searchMeta":{"score":0.5}}
+	],"total":2,"page":1}`
+	var resp search.Response
+	if err := json.Unmarshal([]byte(wire), &resp); err != nil {
+		t.Fatalf("unmarshaling wire response: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, _, _, err := writeSearchCompactJSON(&buf, &resp, 0, 1, testSearchID, testCurrentRepo); err != nil {
+		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+	}
+	if strings.Contains(buf.String(), `"explain"`) {
+		t.Errorf("repo/pr rows must not carry an explain hint:\n%s", buf.String())
+	}
+}
+
 // Repo/pr rows (reachable via --all-repos) have no typed struct; compact hits
 // must still carry identifying info from the raw payload instead of collapsing
 // to just {id, type, score}.
@@ -164,7 +298,7 @@ func TestWriteSearchCompactJSON_RepoAndPRRowsKeepIdentifyingFields(t *testing.T)
 	}
 
 	var buf bytes.Buffer
-	if err := writeSearchCompactJSON(&buf, &resp, 0, 1); err != nil {
+	if _, _, _, err := writeSearchCompactJSON(&buf, &resp, 0, 1, testSearchID, testCurrentRepo); err != nil {
 		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
 	}
 
@@ -240,7 +374,7 @@ func TestWriteSearchCompactJSON_DropsSnippetDuplicatingTitle(t *testing.T) {
 				Total: 1,
 			}
 			var buf bytes.Buffer
-			if err := writeSearchCompactJSON(&buf, resp, 0, 1); err != nil {
+			if _, _, _, err := writeSearchCompactJSON(&buf, resp, 0, 1, testSearchID, testCurrentRepo); err != nil {
 				t.Fatalf("writeSearchCompactJSON returned error: %v", err)
 			}
 			if got := strings.Contains(buf.String(), `"snippet"`); got != tc.wantSnippet {
@@ -268,7 +402,7 @@ func TestWriteSearchCompactJSON_TruncatesLongPromptTitle(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := writeSearchCompactJSON(&buf, resp, 0, 1); err != nil {
+	if _, _, _, err := writeSearchCompactJSON(&buf, resp, 0, 1, testSearchID, testCurrentRepo); err != nil {
 		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
 	}
 
@@ -278,6 +412,96 @@ func TestWriteSearchCompactJSON_TruncatesLongPromptTitle(t *testing.T) {
 	}
 	if !strings.Contains(output, "…") {
 		t.Errorf("expected truncated title to end with ellipsis:\n%s", output)
+	}
+}
+
+// buildSearchPerformedEvent assembles the cli_search_performed telemetry
+// event (ENT-1528) from the request config, server response, and the
+// writer's normalized pagination. A response with no results must report
+// zero_results/fetched_count/total as zero, never fall back to some other
+// non-zero placeholder.
+func TestBuildSearchPerformedEvent_ZeroResults(t *testing.T) {
+	t.Parallel()
+
+	cfg := search.Config{SearchID: testSearchID, Query: "auth timeout"}
+	resp := &search.Response{Results: nil, Total: 0}
+
+	event := buildSearchPerformedEvent(cfg, "json", "ok", resp, 0, 10, 1)
+	if !event.ZeroResults {
+		t.Error("ZeroResults = false, want true")
+	}
+	if event.FetchedCount != 0 {
+		t.Errorf("FetchedCount = %d, want 0", event.FetchedCount)
+	}
+	if event.Total != 0 {
+		t.Errorf("Total = %d, want 0", event.Total)
+	}
+}
+
+// The event's Total must be the server's honest count (resp.Total), never
+// derived from the served/paginated result count — a filtered or short page
+// must not masquerade as "few matches" (ENT-1528 honest-counts requirement).
+func TestBuildSearchPerformedEvent_TotalIsServerHonestNotServedCount(t *testing.T) {
+	t.Parallel()
+
+	cfg := search.Config{SearchID: testSearchID, Query: "auth timeout"}
+	resp := &search.Response{Results: testResults(), Total: 137} // 2 results served, 137 true matches
+
+	event := buildSearchPerformedEvent(cfg, "json", "ok", resp, 2, 10, 1)
+	if event.Total != 137 {
+		t.Errorf("Total = %d, want 137 (resp.Total, not served count 2)", event.Total)
+	}
+	if event.FetchedCount != 2 {
+		t.Errorf("FetchedCount = %d, want 2", event.FetchedCount)
+	}
+	if event.ZeroResults {
+		t.Error("ZeroResults = true, want false (total is 137)")
+	}
+}
+
+// Filter booleans, query length, and scope (all_repos) come from the request
+// config regardless of outcome; AllRepos is ScopeSlugs' second return so an
+// explicit --repo filter beats --all-repos.
+func TestBuildSearchPerformedEvent_FiltersAndScopeFromConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := search.Config{
+		SearchID: testSearchID,
+		Query:    "auth timeout",
+		Author:   "alice",
+		Date:     "week",
+		Branch:   "main",
+		Repos:    []string{"acme/backend"},
+		AllRepos: true, // explicit repo filter wins over --all-repos
+	}
+	event := buildSearchPerformedEvent(cfg, "compact", "ok", &search.Response{Total: 1}, 1, 10, 1)
+	if event.QueryLength != len([]rune("auth timeout")) {
+		t.Errorf("QueryLength = %d, want %d", event.QueryLength, len([]rune("auth timeout")))
+	}
+	if !event.FilterAuthor || !event.FilterDate || !event.FilterBranch || !event.FilterRepo {
+		t.Errorf("filter booleans = %+v, want all true", event)
+	}
+	if event.AllRepos {
+		t.Error("AllRepos = true, want false: explicit --repo filter must win over --all-repos")
+	}
+}
+
+// The error path (search failed before any response existed) reports zero
+// counts and the "error_request" outcome, still tagged with the query/filter
+// metadata from the config.
+func TestBuildSearchPerformedEvent_ErrorPathZeroCounts(t *testing.T) {
+	t.Parallel()
+
+	cfg := search.Config{SearchID: testSearchID, Query: "auth timeout", Author: "alice"}
+	event := buildSearchPerformedEvent(cfg, "json", "error_request", nil, 0, 0, 0)
+	if event.Outcome != "error_request" {
+		t.Errorf("Outcome = %q, want error_request", event.Outcome)
+	}
+	if event.Total != 0 || event.FetchedCount != 0 || event.Page != 0 || event.Limit != 0 {
+		t.Errorf("expected zero counts on error path, got %+v", event)
+	}
+	if !event.FilterAuthor {
+		t.Error("FilterAuthor = false, want true (filters still reported on error)")
 	}
 }
 

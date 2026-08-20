@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -19,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/spf13/cobra"
 )
@@ -257,8 +259,38 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			searchCfg.Limit = search.DefaultLimit
 			searchCfg.Page = 0 // let API default to page 1
 
+			// Mint the search_id before the request (not after the response
+			// comes back) so it travels as a request header and the search
+			// service can log the same id server-side. ClientSurface
+			// identifies which CLI output mode issued the request; check
+			// compactOutput first since it implies jsonOutput.
+			searchID := newSearchID()
+			searchCfg.SearchID = searchID
+			switch {
+			case compactOutput:
+				searchCfg.ClientSurface = "cli-compact"
+			case jsonOutput || !isTerminal:
+				searchCfg.ClientSurface = "cli-json"
+			default:
+				searchCfg.ClientSurface = "cli-tui"
+			}
+
+			// Mode is fixed by compactOutput before the request goes out, so
+			// the error path below (no response yet) can still tag its event
+			// correctly.
+			mode := "json"
+			if compactOutput {
+				mode = "compact"
+			}
+
 			resp, err := searcher(ctx, searchCfg)
 			if err != nil {
+				// Only JSON-mode invocations emit telemetry (mirrors the
+				// success-path guard below): the interactive TUI handles its
+				// own re-search failures and shouldn't double-emit.
+				if jsonOutput || !isTerminal {
+					emitSearchPerformed(ctx, buildSearchPerformedEvent(searchCfg, mode, "error_request", nil, 0, 0, 0))
+				}
 				return fmt.Errorf("search failed: %w", err)
 			}
 			for _, warning := range resp.Warnings {
@@ -267,10 +299,18 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			// JSON output: explicit flag or piped/redirected stdout
 			if jsonOutput || !isTerminal {
+				var served, normLimit, normPage int
+				var writeErr error
 				if compactOutput {
-					return writeSearchCompactJSON(w, resp, requestedLimit, requestedPage)
+					served, normLimit, normPage, writeErr = writeSearchCompactJSON(w, resp, requestedLimit, requestedPage, searchID, owner+"/"+repoName)
+				} else {
+					served, normLimit, normPage, writeErr = writeSearchJSON(w, resp, requestedLimit, requestedPage, searchID)
 				}
-				return writeSearchJSON(w, resp, requestedLimit, requestedPage)
+				if writeErr != nil {
+					return writeErr
+				}
+				emitSearchPerformed(ctx, buildSearchPerformedEvent(searchCfg, mode, "ok", resp, served, normLimit, normPage))
+				return nil
 			}
 
 			styles := newStatusStyles(w)
@@ -929,6 +969,44 @@ func isASCII(s string) bool {
 	return true
 }
 
+// buildSearchPerformedEvent assembles a cli_search_performed telemetry event
+// (ENT-1528) from the request config, the (optional) server response, and
+// the writer-normalized pagination. Shared by RunE's two emit sites — the
+// success path passes the real resp/served/normLimit/normPage, the error
+// path (search failed before any response existed) passes resp == nil and
+// zero counts. Total is always resp.Total, the server's honest match count —
+// never derived from served/len(results), so a short or filtered page never
+// masquerades as "few matches". AllRepos is ScopeSlugs' second return: an
+// explicit --repo filter beats --all-repos.
+func buildSearchPerformedEvent(cfg search.Config, mode, outcome string, resp *search.Response, served, normLimit, normPage int) telemetry.SearchPerformedEvent {
+	_, allRepos := cfg.ScopeSlugs()
+	event := telemetry.SearchPerformedEvent{
+		SearchID:     cfg.SearchID,
+		Mode:         mode,
+		Outcome:      outcome,
+		QueryLength:  utf8.RuneCountInString(cfg.Query),
+		Page:         normPage,
+		Limit:        normLimit,
+		AllRepos:     allRepos,
+		FilterAuthor: cfg.Author != "",
+		FilterDate:   cfg.Date != "",
+		FilterBranch: cfg.Branch != "",
+		FilterRepo:   len(cfg.Repos) > 0,
+	}
+	if resp == nil {
+		return event
+	}
+	event.FetchedCount = served
+	event.Total = resp.Total
+	event.ZeroResults = resp.Total == 0
+	event.Reranked = resp.Reranked != nil && *resp.Reranked
+	if resp.Timing != nil && resp.Timing.TotalMs != nil {
+		event.TotalMS = int(*resp.Timing.TotalMs)
+	}
+	event.Degraded = len(resp.Warnings) > 0
+	return event
+}
+
 // paginateSearchResults slices results for the requested client-side page,
 // normalizing limit and page, and returns the page slice (never nil) plus the
 // normalized pagination values.
@@ -958,8 +1036,14 @@ func paginateSearchResults(results []search.Result, limit, page int) (pageResult
 	return pageResults, total, totalPages, limit, page
 }
 
-// writeSearchJSON writes client-side paginated search results as JSON.
-func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error {
+// writeSearchJSON writes client-side paginated search results as JSON and
+// returns the number of results served plus the normalized limit/page
+// (paginateSearchResults already computes both; the caller needs them for
+// the cli_search_performed telemetry event, ENT-1528). searchID ties the
+// response to that event; it is minted client-side because the server
+// response carries no request id and the CLI merges several cell responses
+// into one page.
+func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int, searchID string) (served, normLimit, normPage int, err error) {
 	pageResults, total, totalPages, limit, page := paginateSearchResults(resp.Results, limit, page)
 
 	out := struct {
@@ -968,6 +1052,7 @@ func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error 
 		Page       int                `json:"page"`
 		TotalPages int                `json:"total_pages"`
 		Limit      int                `json:"limit"`
+		SearchID   string             `json:"search_id,omitempty"`
 		Counts     *search.TypeCounts `json:"counts,omitempty"`
 	}{
 		Results:    pageResults,
@@ -975,14 +1060,15 @@ func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error 
 		Page:       page,
 		TotalPages: totalPages,
 		Limit:      limit,
+		SearchID:   searchID,
 		Counts:     resp.Counts,
 	}
-	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling results: %w", err)
+	data, marshalErr := jsonutil.MarshalIndentWithNewline(out, "", "  ")
+	if marshalErr != nil {
+		return 0, limit, page, fmt.Errorf("marshaling results: %w", marshalErr)
 	}
 	fmt.Fprint(w, string(data))
-	return nil
+	return len(pageResults), limit, page, nil
 }
 
 // compactTitleMaxLen caps the title snippet length (in runes) in --compact
@@ -1010,6 +1096,44 @@ type compactSearchHit struct {
 	// prompt head) — it's what lets an agent pick which hit to explain.
 	Snippet   string `json:"snippet,omitempty"`
 	MatchType string `json:"matchType,omitempty"`
+	// Explain is the ready-made command to fetch this hit's full detail — the
+	// second step of the search funnel (ENT-1528). Empty for hit types explain
+	// cannot resolve (repo, pr, session).
+	Explain string `json:"explain,omitempty"`
+}
+
+// explainHint returns the ready-made fetch command for a hit, or "" for hit
+// types `explain` cannot resolve. Checkpoint hits from another repo get
+// --repo (cross-repo explain, ENT-1523); commit hits resolve via the local
+// Entire-Checkpoint trailer only, so they get a hint only in the current
+// repo. The trailing --search-id <searchID>:<rank> token is what makes the
+// search→explain link deterministic: agents copy the hint verbatim, explain
+// passes the token through to the cli_checkpoint_explained event, and the
+// funnel joins on search_id instead of time proximity (ENT-1528).
+func explainHint(r *search.Result, hitRepo, currentRepo, searchID string, rank int) string {
+	resultID := r.ResultID()
+	if resultID == "" {
+		return ""
+	}
+	var cmd string
+	switch r.Type {
+	case search.TypeCheckpoint:
+		cmd = "entire checkpoint explain " + resultID
+		if hitRepo != "" && !strings.EqualFold(hitRepo, currentRepo) {
+			cmd += " --repo " + hitRepo
+		}
+	case search.TypeCommit:
+		if hitRepo != "" && !strings.EqualFold(hitRepo, currentRepo) {
+			return ""
+		}
+		cmd = "entire checkpoint explain " + resultID
+	default:
+		return ""
+	}
+	if searchID != "" {
+		cmd += " --search-id " + searchID + ":" + strconv.Itoa(rank)
+	}
+	return cmd
 }
 
 // compactSnippet drops a truncated snippet that duplicates the truncated
@@ -1032,9 +1156,11 @@ func compactSnippet(title, snippet string) string {
 // writeSearchCompactJSON writes client-side paginated search results as
 // compact JSON: per hit only identifiers, ranking, files touched, and a
 // truncated title snippet — never the full prompt. Agents fetch full detail
-// for a single hit via `entire checkpoint explain <id>` (add --full for the
-// checkpoint's entire session transcript).
-func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int) error {
+// for a single hit via the per-hit explain hint (add --full for the
+// checkpoint's entire session transcript). Returns the number of results
+// served plus the normalized limit/page (see writeSearchJSON). currentRepo
+// ("org/name") decides which hints need --repo.
+func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int, searchID, currentRepo string) (served, normLimit, normPage int, err error) {
 	pageResults, total, totalPages, limit, page := paginateSearchResults(resp.Results, limit, page)
 
 	hits := make([]compactSearchHit, 0, len(pageResults))
@@ -1058,6 +1184,7 @@ func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int)
 			Score:           r.Meta.Score,
 			Snippet:         compactSnippet(title, truncateOneLine(r.Meta.Snippet, compactTitleMaxLen)),
 			MatchType:       r.Meta.MatchType,
+			Explain:         explainHint(r, repo, currentRepo, searchID, (page-1)*limit+i+1),
 		}
 		if r.Checkpoint != nil {
 			hit.FilesTouched = r.Checkpoint.FilesTouched
@@ -1071,6 +1198,7 @@ func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int)
 		Page       int                `json:"page"`
 		TotalPages int                `json:"total_pages"`
 		Limit      int                `json:"limit"`
+		SearchID   string             `json:"search_id,omitempty"`
 		Counts     *search.TypeCounts `json:"counts,omitempty"`
 	}{
 		Results:    hits,
@@ -1078,12 +1206,13 @@ func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int)
 		Page:       page,
 		TotalPages: totalPages,
 		Limit:      limit,
+		SearchID:   searchID,
 		Counts:     resp.Counts,
 	}
-	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling compact results: %w", err)
+	data, marshalErr := jsonutil.MarshalIndentWithNewline(out, "", "  ")
+	if marshalErr != nil {
+		return 0, limit, page, fmt.Errorf("marshaling compact results: %w", marshalErr)
 	}
 	fmt.Fprint(w, string(data))
-	return nil
+	return len(hits), limit, page, nil
 }

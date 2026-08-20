@@ -15,6 +15,7 @@ import (
 	ulid "github.com/oklog/ulid/v2"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
 const apiTimeout = 30 * time.Second
@@ -515,6 +516,13 @@ type Config struct {
 	Date     string // Filter by time period: "week" or "month"
 	Branch   string // Filter by branch name
 	Page     int    // 1-based page number (0 means omit, API defaults to 1)
+
+	// SearchID and ClientSurface are correlation metadata only: they travel
+	// as request headers (X-Entire-Search-Id, X-Entire-Client), never as part
+	// of the query, so the search service can log the same search_id the CLI
+	// uses client-side. Both are optional; an empty value omits its header.
+	SearchID      string // Minted by the caller before the request (see newSearchID)
+	ClientSurface string // e.g. "cli-compact", "cli-json", "cli-tui"
 }
 
 // ScopeSlugs resolves the repo scope of a search: the explicit repo filters
@@ -729,7 +737,17 @@ func CellV4(ctx context.Context, client *api.Client, cfg Config, repoIDs []strin
 	}
 	addCommonSearchParams(q, cfg)
 
-	resp, err := client.Get(ctx, v4ServicePath+"?"+q.Encode())
+	// Correlation metadata rides as headers, never as query params, so it
+	// can't leak into logs that capture the request line/query string.
+	headers := http.Header{}
+	if cfg.SearchID != "" {
+		headers.Set("X-Entire-Search-Id", cfg.SearchID)
+	}
+	if cfg.ClientSurface != "" {
+		headers.Set("X-Entire-Client", cfg.ClientSurface+"/"+versioninfo.Version)
+	}
+
+	resp, err := client.GetWithHeaders(ctx, v4ServicePath+"?"+q.Encode(), headers)
 	if err != nil {
 		return nil, fmt.Errorf("calling search service: %w", err)
 	}

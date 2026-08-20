@@ -31,6 +31,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
+	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	transcriptcompact "github.com/entireio/cli/cmd/entire/cli/transcript/compact"
@@ -238,6 +239,7 @@ func newExplainCmd() *cobra.Command {
 	var repoFlag string
 	var insecureHTTPFlag bool
 	var summaryTimeoutSecondsFlag int
+	var searchIDFlag string
 	sessionIndex := -1
 	listLimit := 0 // 0 means "use default (branchCheckpointsLimit)"
 
@@ -308,6 +310,11 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Attach the --search-id attribution (from a compact search hint)
+			// to the context so every explain path's telemetry emit can read
+			// it without threading a parameter through the call chains.
+			cmd.SetContext(withExplainSearchHit(cmd.Context(), searchIDFlag))
+
 			// Check if Entire is disabled
 			if checkDisabledGuard(cmd.Context(), cmd.OutOrStdout()) {
 				return nil
@@ -421,6 +428,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.Flags().StringVar(&repoFlag, "repo", "", "Explain a checkpoint owned by another repo (owner/name or gh/owner/name), read from that repo's Entire API")
 	cmd.Flags().BoolVar(&insecureHTTPFlag, "insecure-http-auth", false, "Allow plain-HTTP auth for --repo (local dev only)")
 	cmd.Flags().IntVar(&summaryTimeoutSecondsFlag, "summary-timeout-seconds", 0, "Hard deadline in seconds for --generate summary generation; overrides summary_timeout_seconds setting. 0 = use setting; if setting is also unset or 0, no automatic deadline applies.")
+	cmd.Flags().StringVar(&searchIDFlag, "search-id", "", "Search attribution token from a search result's explain hint (search-id[:rank]); used only for relevance telemetry")
 
 	// Verbosity / transcript output modes are mutually exclusive
 	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript", "transcript", "json")
@@ -757,6 +765,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		return &explainTargetNotFoundError{target: checkpointIDPrefix}
 	case 1:
 		fullCheckpointID = matches[0]
+		emitCheckpointExplained(ctx, string(fullCheckpointID), telemetry.ExplainSourceProse)
 	default:
 		// Ambiguous prefix: render styled failure block, return SilentError so
 		// main.go does not double-print. Matches the temporary-side and

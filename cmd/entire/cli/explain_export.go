@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
@@ -365,6 +366,10 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 		return err
 	}
 	defer lookup.Close()
+	// Emitted here rather than inside resolveExplainCheckpointID: the resolver
+	// is shared with `entire checkpoint tokens`, which must not pollute the
+	// search→explain funnel (ENT-1528).
+	emitCheckpointExplained(ctx, string(cpID), telemetry.ExplainSourceExport)
 
 	store := lookup.store
 	summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
@@ -471,6 +476,10 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 		return err
 	}
 	defer lookup.Close()
+	// Emitted here rather than inside resolveExplainCheckpointID: the resolver
+	// is shared with `entire checkpoint tokens`, which must not pollute the
+	// search→explain funnel (ENT-1528).
+	emitCheckpointExplained(ctx, string(cpID), telemetry.ExplainSourceExport)
 
 	store := lookup.store
 	summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
