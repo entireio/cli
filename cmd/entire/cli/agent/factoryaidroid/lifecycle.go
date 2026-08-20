@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
@@ -110,9 +109,11 @@ func (f *FactoryAIDroidAgent) ExtractPrompts(sessionRef string, fromOffset int) 
 		if lines[i].Type != transcript.TypeUser {
 			continue
 		}
+		// ExtractUserContent already strips IDE tags; stripping again is not a
+		// no-op now that the <timestamp> strip is position-anchored.
 		content := transcript.ExtractUserContent(lines[i].Message)
 		if content != "" {
-			prompts = append(prompts, textutil.StripIDEContextTags(content))
+			prompts = append(prompts, content)
 		}
 	}
 	return prompts, nil
