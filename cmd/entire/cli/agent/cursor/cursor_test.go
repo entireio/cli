@@ -669,6 +669,9 @@ func TestSanitizePathForCursor(t *testing.T) {
 		{"simple", "simple"},
 		{"/path/with spaces/dir", "path-with-spaces-dir"},
 		{"/path.with.dots/dir", "path-with-dots-dir"},
+		// Adjacent non-alphanumerics (e.g. a worktree path with a leading dot)
+		// collapse to a single "-", matching what Cursor writes on disk.
+		{"/home/me/cli/.worktrees/feat", "home-me-cli-worktrees-feat"},
 	}
 
 	for _, tt := range tests {

@@ -86,6 +86,16 @@ func TestDetectUNCProjectDirs(t *testing.T) {
 	if got := DetectUNCProjectDirs(filepath.Join(usersRoot, "missing"), "Ubuntu", "/root/probe-repo", now); got != nil {
 		t.Errorf("missing users root must detect nothing, got %v", got)
 	}
+
+	// Adjacent non-alphanumerics in the repo path (a leading-dot directory)
+	// collapse to a single "-" the same way Cursor's own sanitizer does,
+	// rather than producing a double dash that would never match a real
+	// on-disk fingerprint.
+	dottedRoot := t.TempDir()
+	mkProjectDir(t, dottedRoot, "peyton", "wsl-Ubuntu-root-work-probe", true, now, time.Hour)
+	if got := DetectUNCProjectDirs(dottedRoot, "Ubuntu", "/root/.work/probe", now); len(got) != 1 || filepath.Base(got[0]) != "wsl-Ubuntu-root-work-probe" {
+		t.Errorf("dotted repo path: matches = %v, want the one wsl-Ubuntu-root-work-probe dir", got)
+	}
 }
 
 // TestDetectUNCProjectDirs_VersionedDistro pins that the distro name is
