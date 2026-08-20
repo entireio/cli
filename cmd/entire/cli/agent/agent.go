@@ -7,6 +7,7 @@ import (
 	"context"
 	"io"
 	"os/exec"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
@@ -108,10 +109,14 @@ type HookSupport interface {
 	ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*Event, error)
 
 	// InstallHooks installs agent-specific hooks.
-	// If localDev is true, hooks point to local development build.
 	// If force is true, removes existing Entire hooks before installing.
 	// Returns the number of hooks installed.
-	InstallHooks(ctx context.Context, localDev bool, force bool) (int, error)
+	//
+	// Installed hook commands must always name the "entire" binary, never a
+	// path derived from repository content. Implementations recognize the
+	// legacy local-dev command shapes (see LegacyLocalDevHookScript) only so
+	// they can replace them.
+	InstallHooks(ctx context.Context, force bool) (int, error)
 
 	// UninstallHooks removes installed hooks
 	UninstallHooks(ctx context.Context) error
@@ -375,6 +380,30 @@ type HookResponseWriter interface {
 	WriteHookResponse(message string) error
 }
 
+// SessionEndBudgeter is implemented by agents whose host enforces a hard
+// wall-clock budget on the session-end hook, because it runs inside the agent's
+// own shutdown sequence rather than between turns.
+//
+// Codex is the motivating case: it defaults SessionEnd handlers to a 1s timeout
+// and clamps any configured value to 3s (SESSION_END_MAX_TIMEOUT_SEC in
+// codex-rs/hooks/src/events/session_end.rs), keeping teardown inside
+// app-server's five-second shutdown bound. On expiry it terminates the hook's
+// entire process tree.
+//
+// Declaring a budget makes Entire stop itself just short of that ceiling rather
+// than being killed mid-write: the session is marked ENDED first (a single
+// atomic state-file rename), and only the eager condense — which is fail-open
+// and retried by PostCommit — runs against the remaining budget. Agents whose
+// session-end hook has a normal timeout should not implement this.
+type SessionEndBudgeter interface {
+	Agent
+
+	// SessionEndBudget returns the wall-clock budget for the whole session-end
+	// hook invocation, measured from process start. A non-positive value means
+	// no budget applies.
+	SessionEndBudget() time.Duration
+}
+
 // RestoredSessionPathResolver is implemented by agents that need a
 // transcript-specific path when Entire reconstructs a session from checkpoint
 // metadata. This is used for restored sessions only; live sessions still use
@@ -449,6 +478,51 @@ type SessionBaseDirProvider interface {
 	// GetSessionBaseDir returns the base directory containing per-project
 	// session subdirectories (e.g., ~/.claude/projects, ~/.gemini/tmp).
 	GetSessionBaseDir() (string, error)
+}
+
+// SubagentSessionLink identifies the parent task invocation that spawned a
+// subagent session. It is resolved from the subagent's own transcript, so it
+// stays valid regardless of when the parent's tool hooks fire.
+type SubagentSessionLink struct {
+	// ParentSessionID is the session that invoked the task tool.
+	ParentSessionID string
+
+	// ToolUseID is the parent's tool-use ID for this invocation. It keys the
+	// task checkpoint's metadata directory, so it must be stable across hooks.
+	ToolUseID string
+
+	// ParentTranscriptPath locates the parent session's transcript, which the
+	// task checkpoint stores alongside the subagent's own. Empty when the agent
+	// cannot resolve it; the checkpoint is then written without it.
+	ParentTranscriptPath string
+
+	// SubagentType is the kind of subagent (e.g. "worker"); may be empty.
+	SubagentType string
+
+	// TaskDescription is a short human-readable task label; may be empty.
+	TaskDescription string
+}
+
+// SubagentSessionResolver is implemented by agents that run subagents as
+// full sessions of their own — with their own SessionStart/UserPromptSubmit/Stop
+// hooks — rather than as a blocking tool call inside the parent's turn.
+//
+// For such agents the parent's post-tool hook cannot delimit the subagent's
+// work: it fires when the task is *dispatched*, not when it completes, so the
+// worktree is still untouched at that point. Turn-end consults this instead, to
+// recognize a subagent session and attribute its work to the parent as a task
+// checkpoint rather than minting an unrelated top-level session checkpoint.
+//
+// Agents whose subagents block the parent turn (Claude Code's Task tool) must
+// NOT implement this — their SubagentEnd path already bounds the work correctly.
+type SubagentSessionResolver interface {
+	Agent
+
+	// ResolveSubagentSession reports whether the session behind sessionRef was
+	// spawned by a parent task invocation, and if so identifies the parent.
+	// Returns false for ordinary top-level sessions and whenever the link
+	// cannot be read — callers treat a failure as "not a subagent session".
+	ResolveSubagentSession(sessionRef string) (SubagentSessionLink, bool)
 }
 
 // SubagentAwareExtractor provides methods for extracting files and tokens including subagents.

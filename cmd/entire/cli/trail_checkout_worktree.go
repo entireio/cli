@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,12 @@ const (
 
 func defaultTrailWorktreePath(repoRoot, branch string, trailNumber int) string {
 	name := fmt.Sprintf("trail-%d-%s", trailNumber, sanitizeTrailWorktreeName(branch))
+	return filepath.Join(repoRoot, filepath.FromSlash(trailWorktreesRelDir), name)
+}
+
+func defaultReviewWorktreePath(repoRoot, branch string) string {
+	digest := sha256.Sum256([]byte(branch))
+	name := fmt.Sprintf("review-%s-%x", sanitizeTrailWorktreeName(branch), digest[:4])
 	return filepath.Join(repoRoot, filepath.FromSlash(trailWorktreesRelDir), name)
 }
 
@@ -302,70 +309,86 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 	if trailNumber <= 0 {
 		return fmt.Errorf("trail for branch %q has no number yet; cannot check out into a worktree", branch)
 	}
-	if err := ValidateBranchName(ctx, branch); err != nil {
-		return err
-	}
+	_, err := checkoutManagedBranchWorktree(ctx, w, errW, branch, force, false, func(root string) string {
+		return defaultTrailWorktreePath(root, branch, trailNumber)
+	})
+	return err
+}
 
+// checkoutReviewWorktree returns a worktree containing branch. Unlike trail
+// checkout, review can use a branch with no trail and can run in an existing
+// worktree outside Entire's managed directory.
+func checkoutReviewWorktree(ctx context.Context, w, errW io.Writer, branch string) (string, error) {
+	return checkoutManagedBranchWorktree(ctx, w, errW, branch, false, true, func(root string) string {
+		return defaultReviewWorktreePath(root, branch)
+	})
+}
+
+func checkoutManagedBranchWorktree(
+	ctx context.Context,
+	w, errW io.Writer,
+	branch string,
+	force, reuseExternal bool,
+	worktreePathForRoot func(string) string,
+) (string, error) {
+	if err := ValidateBranchName(ctx, branch); err != nil {
+		return "", err
+	}
 	root, err := trailWorktreeBaseRoot(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to find main worktree root: %w", err)
+		return "", fmt.Errorf("failed to find main worktree root: %w", err)
 	}
 
 	match, found, err := findWorktreeForBranch(ctx, branch, root)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if found {
-		// Lstat: a symlink planted at the registered path must not pass as a
-		// healthy worktree directory.
 		switch info, statErr := os.Lstat(match.path); {
 		case statErr == nil && !info.IsDir():
-			return fmt.Errorf("branch %q is registered to %s, which is not a directory", branch, match.path)
+			return "", fmt.Errorf("branch %q is registered to %s, which is not a directory", branch, match.path)
 		case statErr == nil:
-			if !match.managed {
-				return fmt.Errorf("branch %q is already checked out at %s", branch, match.path)
+			if !match.managed && !reuseExternal {
+				return "", fmt.Errorf("branch %q is already checked out at %s", branch, match.path)
 			}
 			if err := validateTrailWorktreeReuse(ctx, match.path, branch); err != nil {
-				return staleTrailWorktreeError(branch, match.path)
+				return "", staleTrailWorktreeError(branch, match.path)
 			}
 			printTrailWorktreeLocation(w, errW, "Worktree already exists at "+match.path, match.path)
-			return nil
+			return match.path, nil
 		case errors.Is(statErr, fs.ErrNotExist):
-			return staleTrailWorktreeError(branch, match.path)
+			return "", staleTrailWorktreeError(branch, match.path)
 		default:
-			return fmt.Errorf("failed to check worktree at %s: %w", match.path, statErr)
+			return "", fmt.Errorf("failed to check worktree at %s: %w", match.path, statErr)
 		}
 	}
 
 	proceed, err := ensureTrailWorktreeBranchAvailable(ctx, errW, branch, force)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !proceed {
 		fmt.Fprintf(errW, "Checkout of branch %s cancelled.\n", branch)
-		return nil
+		return "", nil
 	}
-
 	if err := ensureTrailWorktreeIgnoreRule(ctx, errW, root); err != nil {
-		return err
+		return "", err
 	}
 
-	worktreePath := defaultTrailWorktreePath(root, branch, trailNumber)
+	worktreePath := worktreePathForRoot(root)
 	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o750); err != nil {
-		return fmt.Errorf("failed to create worktree parent: %w", err)
+		return "", fmt.Errorf("failed to create worktree parent: %w", err)
 	}
 	add := exec.CommandContext(ctx, "git", "worktree", "add", worktreePath, branch)
 	add.Dir = root
 	if output, err := add.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to create worktree: %s: %w", strings.TrimSpace(string(output)), err)
+		return "", fmt.Errorf("failed to create worktree: %s: %w", strings.TrimSpace(string(output)), err)
 	}
-
 	if err := copyWorktreeIncludeFiles(ctx, errW, root, worktreePath); err != nil {
 		fmt.Fprintf(errW, "warning: could not copy %s files: %v\n", worktreeIncludeFile, err)
 	}
-
 	printTrailWorktreeLocation(w, errW, "Worktree ready at "+worktreePath, worktreePath)
-	return nil
+	return worktreePath, nil
 }
 
 // printTrailWorktreeLocation reports where the worktree lives. On a terminal

@@ -27,6 +27,14 @@ func strPtr(v string) *string { return &v }
 // "Not logged in" hint; that was wrong because real STS / network
 // failures got mis-labeled. This PR surfaces real errors but has to
 // keep the cancellation case silent.
+//
+// The passed-in context is actually cancelled (not merely a mock returning
+// context.Canceled) to mirror main.go, which cancels the real ctx on
+// Ctrl+C before any command code runs: renderDataAPIAuthError silences a
+// wrapped context.Canceled/DeadlineExceeded only when the caller's own ctx
+// has actually fired (ctx.Err() != nil), precisely to distinguish this case
+// from an internal resolver timeout that fires on its own derived context
+// while the caller's ctx is still live.
 func TestRunActivity_SilencesContextCanceled(t *testing.T) {
 	// No t.Parallel: SetResolveContextForAPIForTest mutates package-level
 	// auth state.
@@ -39,8 +47,11 @@ func TestRunActivity_SilencesContextCanceled(t *testing.T) {
 			return nil, context.Canceled
 		}))
 
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
 	var out, errOut bytes.Buffer
-	err := runActivity(t.Context(), &out, &errOut, false)
+	err := runActivity(ctx, &out, &errOut, false)
 	if err == nil {
 		t.Fatal("expected error when STS exchange is cancelled")
 	}

@@ -1413,22 +1413,12 @@ func runCheckpointRemoteGit(ctx context.Context, t *testing.T, dir string, args 
 
 func checkpointRemoteCurrentBranch(ctx context.Context, t *testing.T, dir string) string {
 	t.Helper()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	out, err := cmd.Output()
-	require.NoError(t, err)
-	return strings.TrimSpace(string(out))
+	return checkpointRemoteGitOutput(ctx, t, dir, "rev-parse", "--abbrev-ref", "HEAD")
 }
 
 func checkpointRemoteRevParse(ctx context.Context, t *testing.T, dir, rev string) string {
 	t.Helper()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", rev)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	out, err := cmd.Output()
-	require.NoError(t, err)
-	return strings.TrimSpace(string(out))
+	return checkpointRemoteGitOutput(ctx, t, dir, "rev-parse", rev)
 }
 
 func commitCheckpointRemoteMetadata(ctx context.Context, t *testing.T, dir, checkpointID, label string) {
@@ -1452,4 +1442,251 @@ func checkpointRemoteMetadataFiles(ctx context.Context, t *testing.T, dir string
 	out, err := cmd.Output()
 	require.NoError(t, err)
 	return string(out)
+}
+
+// checkpointRemoteWithV1 builds a checkpoint remote holding entire/checkpoints/v1
+// with one real checkpoint, and returns its directory. Used by the git-refs
+// bootstrap-skip tests, where the remote must be genuinely fetchable so a
+// passing assertion proves the fetch was skipped rather than that it failed.
+func checkpointRemoteWithV1(ctx context.Context, t *testing.T) string {
+	t.Helper()
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	defaultBranch := checkpointRemoteCurrentBranch(ctx, t, remoteDir)
+
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, remoteDir, "aaaaaaaaaaaa", "device-a")
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", defaultBranch)
+	return remoteDir
+}
+
+// gitRefsPrimaryLocalRepo builds a local repo configured with a github
+// checkpoint_remote and the git-refs primary backend, with the derived
+// checkpoint URL redirected at remoteDir so any fetch would succeed.
+func checkpointRemoteLocalRepo(ctx context.Context, t *testing.T, remoteDir, settingsJSON string) string {
+	t.Helper()
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	runCheckpointRemoteGit(ctx, t, localDir, "remote", "add", "origin", "git@github.com:org/main-repo.git")
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(settingsJSON), 0o644))
+
+	// A hermetic redirect that WOULD serve the branch: a test asserting the
+	// branch is absent therefore proves the fetch never ran, not that it ran
+	// and failed.
+	redirectGitURL(t, localDir, "git@github.com:org/checkpoints.git", "file://"+remoteDir)
+	return localDir
+}
+
+// gitRefsPrimaryLocalRepo is checkpointRemoteLocalRepo with the git-refs primary
+// selected in settings.
+func gitRefsPrimaryLocalRepo(ctx context.Context, t *testing.T, remoteDir string) string {
+	t.Helper()
+	return checkpointRemoteLocalRepo(ctx, t, remoteDir,
+		`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}, "checkpoints": {"primary": {"type": "git-refs"}}}`)
+}
+
+// TestEnsurePrimaryRef_SkipsCheckpointRemoteBootstrapUnderGitRefsPrimary pins that
+// `entire enable` does not eagerly clone the v1 metadata branch when the git-refs
+// backend is primary. That backend never writes v1, so there is no local orphan
+// that could diverge from the remote — the only thing the bootstrap exists to
+// prevent — while v1 carries the full legacy transcript history, making the fetch
+// arbitrarily expensive on a real checkpoint remote.
+//
+// Note this is an explicit enable flow (WithCheckpointRemoteBootstrap), unlike
+// TestEnsurePrimaryRef_SkipsCheckpointRemoteBootstrapOutsideEnableFlow: the
+// backend, not the calling context, is what suppresses the fetch here.
+func TestEnsurePrimaryRef_SkipsCheckpointRemoteBootstrapUnderGitRefsPrimary(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := checkpointRemoteWithV1(ctx, t)
+	localDir := gitRefsPrimaryLocalRepo(ctx, t, remoteDir)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	require.NoError(t, EnsurePrimaryRef(WithCheckpointRemoteBootstrap(ctx), repo))
+
+	// A bootstrap fetch would have created the local v1 ref at the remote's tip.
+	// Under git-refs no v1 ref should exist at all: not fetched, and not seeded
+	// as an empty orphan either.
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"EnsurePrimaryRef must not fetch or seed v1 under the git-refs primary backend")
+}
+
+// TestResolvePushSettings_SkipsMetadataFetchUnderGitRefsPrimary pins that the
+// pre-push path does not fetch the v1 metadata branch under the git-refs primary
+// backend. fetchMetadataBranchIfMissing is written as a one-time cost that stops
+// once the branch exists locally, but git-refs pushes per-checkpoint refs and
+// never creates v1 locally — so without this gate the "one-time" fetch would run
+// on every single `git push`.
+func TestResolvePushSettings_SkipsMetadataFetchUnderGitRefsPrimary(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := checkpointRemoteWithV1(ctx, t)
+	localDir := gitRefsPrimaryLocalRepo(ctx, t, remoteDir)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	ps := resolvePushSettings(ctx, "origin")
+
+	// The checkpoint URL still resolves — only the eager fetch is suppressed.
+	assert.True(t, ps.hasCheckpointURL(), "checkpoint_remote should still resolve under git-refs")
+	assert.Equal(t, "git@github.com:org/checkpoints.git", ps.pushTarget())
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"resolvePushSettings must not fetch v1 under the git-refs primary backend")
+}
+
+// checkpointRemoteGitOutput runs a git command in dir and returns trimmed stdout.
+func checkpointRemoteGitOutput(ctx context.Context, t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	return strings.TrimSpace(string(out))
+}
+
+// TestEnsurePrimaryRef_BootstrapLandsReadableBranch pins that after the
+// enable-time bootstrap, the branch it landed is actually readable — not just
+// present as a ref.
+//
+// A blob-filtered bootstrap looks safe (the bootstrap itself only needs the ref
+// to stop a later orphan diverging) and is not. The bootstrap is only ever
+// reached under the git-branch primary, where the branch it lands IS the repo's
+// checkpoint store: GitStore.List reads each checkpoint's metadata.json through
+// a plain tree with no blob fetcher, and the read path's recovery tier is keyed
+// on the ref being missing — so once the filtered fetch lands the ref, nothing
+// ever backfills the blobs and `checkpoint list` shows bare IDs forever.
+//
+// Asserting on the blob rather than on fetch flags is deliberate: it pins the
+// property that matters (the store is readable) rather than the mechanism.
+func TestEnsurePrimaryRef_BootstrapLandsReadableBranch(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := checkpointRemoteWithV1(ctx, t)
+	// --filter is only honored over the smart protocol with allowFilter set
+	// server-side; the redirect below already makes this a file:// URL.
+	runCheckpointRemoteGit(ctx, t, remoteDir, "config", "uploadpack.allowFilter", "true")
+
+	remoteTip := checkpointRemoteRevParse(ctx, t, remoteDir, paths.MetadataBranchName)
+	metadataBlob := checkpointRemoteRevParse(ctx, t, remoteDir,
+		"refs/heads/"+paths.MetadataBranchName+":aa/aaaaaaaaaa/"+paths.MetadataFileName)
+
+	// git-branch primary (no checkpoints block) so the bootstrap actually runs.
+	localDir := checkpointRemoteLocalRepo(ctx, t, remoteDir,
+		`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}, "filtered_fetches": true}}`)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	require.NoError(t, EnsurePrimaryRef(WithCheckpointRemoteBootstrap(ctx), repo))
+
+	// The bootstrap still did its job: the local ref tracks the remote tip, so
+	// no divergent orphan can be created on top of it.
+	assert.Equal(t, remoteTip, checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName),
+		"bootstrap must still land the local ref at the checkpoint remote's tip")
+
+	// ...and the checkpoint's metadata blob came with it. rev-list --missing=print
+	// reports absent objects with a "?" prefix without triggering the lazy fetch
+	// that `git cat-file` would, so this distinguishes "present" from "promised".
+	missing := checkpointRemoteGitOutput(ctx, t, localDir,
+		"rev-list", "--objects", "--missing=print", "refs/heads/"+paths.MetadataBranchName)
+	assert.NotContains(t, missing, "?"+metadataBlob,
+		"bootstrap must land a readable branch: without metadata.json, checkpoint list shows a bare ID with no prompt, date, or counts")
+}
+
+// TestFetchBranchIfMissing_ReportsUnreachableRemote pins that a checkpoint remote
+// we could not talk to is reported to the caller rather than swallowed. It used
+// to return nil on every fetch failure, which made an unreachable, timing-out, or
+// auth-refusing remote indistinguishable from one that was never contacted — so
+// resolvePushSettings' warning could never fire and the failure left no trace.
+//
+// Contrast TestFetchBranchIfMissing_NoOpWhenBranchNotOnRemote: a reachable remote
+// that simply lacks the branch is still a quiet no-op.
+func TestFetchBranchIfMissing_ReportsUnreachableRemote(t *testing.T) {
+	ctx := context.Background()
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+
+	t.Chdir(localDir)
+
+	// A path that is not a git repository at all: git fails to connect rather
+	// than reporting the ref as absent.
+	err := fetchMetadataBranchIfMissing(ctx, filepath.Join(t.TempDir(), "nonexistent"))
+	require.Error(t, err, "an unreachable checkpoint remote must surface to the caller")
+
+	// The branch must still not exist locally — reporting the failure does not
+	// change the fail-soft outcome, only its visibility.
+	assert.False(t, testutil.BranchExists(t, localDir, paths.MetadataBranchName))
+}
+
+// TestEnsurePrimaryRef_SkipsEmptyOrphanHealUnderGitRefsPrimary pins the third
+// checkpoint-remote fetch path against the same rule as the other two.
+//
+// healPrimaryFromCheckpointRemote runs whenever a local v1 ref already exists and
+// carries no data — the shape a repo enabled before the git-refs switch is left
+// in. It was the one fetch path not gated on the backend, so `entire enable` on
+// such a repo still pulled the whole transcript archive, on the raised foreground
+// budget, for a branch git-refs never writes.
+//
+// Reads are unaffected: a data-free branch is treated as a miss by the read path,
+// which recovers it on demand (checkpoint.TestGetSessionsBranchTree_RecoversFromDataFreeOrphan).
+func TestEnsurePrimaryRef_SkipsEmptyOrphanHealUnderGitRefsPrimary(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := checkpointRemoteWithV1(ctx, t)
+	localDir := gitRefsPrimaryLocalRepo(ctx, t, remoteDir)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	// Stand up the data-free orphan the heal exists to replace.
+	workBranch := checkpointRemoteCurrentBranch(ctx, t, localDir)
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, localDir, "rm", "-rf", ".")
+	runCheckpointRemoteGit(ctx, t, localDir, "commit", "--allow-empty", "-m", "init orphan")
+	orphanTip := checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", workBranch)
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	require.NoError(t, EnsurePrimaryRef(WithCheckpointRemoteBootstrap(ctx), repo))
+
+	// The redirect would have served the branch, so an unchanged tip proves the
+	// heal fetch was skipped rather than attempted and failed.
+	assert.Equal(t, orphanTip, checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName),
+		"enable must not heal the v1 orphan from the checkpoint remote under git-refs primary")
 }

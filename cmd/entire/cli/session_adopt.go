@@ -592,7 +592,9 @@ func canonicalAdoptPath(path string) string {
 }
 
 func currentFilesTouched(ctx context.Context) ([]string, error) {
-	changes, err := DetectFileChanges(ctx, nil)
+	// Unbounded walk: adopt is a user-attended command, so a slow-but-healthy
+	// repo should finish rather than fail at the hook-path status budget.
+	changes, err := detectFileChangesUnbounded(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("detect current file changes: %w", err)
 	}

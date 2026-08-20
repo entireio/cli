@@ -28,8 +28,8 @@ type expertsAPIClient interface {
 }
 
 // newExpertsAPIClient builds the entire-api cell client. fullName (owner/repo)
-// and/or ulid identify the repo so the client can route to the cell that hosts
-// it (see NewAuthenticatedEntireAPICellClient).
+// or ulid identifies the repo so the client can route to the cell that hosts
+// it; one of them is required (see NewAuthenticatedEntireAPICellClient).
 var newExpertsAPIClient = func(ctx context.Context, insecureHTTP bool, fullName, ulid string) (expertsAPIClient, error) {
 	return NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, fullName, ulid)
 }
@@ -281,7 +281,7 @@ func runExperts(ctx context.Context, out, errOut io.Writer, args []string, f *ex
 
 	// Identify the repo for cell routing: a ULID goes on the ulid arg, an
 	// owner/repo on the fullName arg. The client uses whichever is set to reach
-	// the cell that hosts the repo (falling back to home-jurisdiction routing).
+	// the cell that hosts the repo's processing placement.
 	cellFullName, cellULID := "", ""
 	if repoIsULID {
 		cellULID = repoOverride
@@ -290,6 +290,14 @@ func runExperts(ctx context.Context, out, errOut io.Writer, args []string, f *ex
 	}
 	client, err := newExpertsAPIClient(ctx, f.insecureHTTP, cellFullName, cellULID)
 	if err != nil {
+		// Not-onboarded is the most common way cell resolution fails, and its
+		// raw chain is internal resolution steps; render it like the trail
+		// commands do instead of burying it under another wrap. cellFullName is
+		// "" for the ULID form, where renderRepoNotOnboarded falls back to
+		// naming no repo.
+		if rendered := renderRepoNotOnboarded(errOut, cellFullName, err); rendered != nil {
+			return rendered
+		}
 		return fmt.Errorf("create experts API client: %w", err)
 	}
 

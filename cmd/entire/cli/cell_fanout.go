@@ -122,10 +122,11 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
 
 // resolveCellBaseURLs fills each group's baseURL from the cluster catalog,
 // joining on ClusterSlug ↔ Cluster.Slug. Best-effort: on a catalog error or
-// timeout (bounded by cellResolveTimeout, like resolveRepoCellTarget — a hung
-// core must not stall the command) or a missing/incomplete cluster row, the
-// group keeps baseURL "" and falls back to jurisdiction routing — a degraded
-// catalog must not sink the fan-out.
+// timeout (bounded by cellResolveTimeout — a hung core must not stall the
+// command) or a missing/incomplete cluster row, the group keeps baseURL ""
+// and falls back to jurisdiction routing — a degraded catalog must not sink
+// the fan-out. Unlike resolveRepoCellTarget, which fails loudly on the same
+// class of error for a single repo-scoped read.
 func resolveCellBaseURLs(ctx context.Context, c cellCoreClient, cells []cellGroup) {
 	ctx, cancel := context.WithTimeout(ctx, cellResolveTimeout)
 	defer cancel()

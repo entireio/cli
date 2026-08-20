@@ -256,11 +256,14 @@ func (e *Agent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Re
 	return event.toEvent()
 }
 
-func (e *Agent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
+// InstallHooks invokes the external agent's install-hooks subcommand.
+//
+// The protocol's optional --local-dev flag is never sent: it asked the agent to
+// point hooks at a build inside the working tree, which is exactly the shape
+// that let repository content run from installed hooks. External agents may
+// still accept the flag, but nothing here requests it.
+func (e *Agent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	args := []string{"install-hooks"}
-	if localDev {
-		args = append(args, "--local-dev")
-	}
 	if force {
 		args = append(args, "--force")
 	}

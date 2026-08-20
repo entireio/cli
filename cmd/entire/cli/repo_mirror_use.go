@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -168,6 +169,10 @@ func applyMirrorRemotePlan(ctx context.Context, dir string, plan mirrorRemotePla
 	if plan.noop {
 		return nil
 	}
+	// Deferred, not tail-positioned: the preserve step below is itself a remote
+	// mutation, so a failure in the second write would otherwise leave the first
+	// one uninvalidated and the invocation's memoized remote reads stale.
+	defer strategy.InvalidateGitRemoteCache(ctx)
 	if plan.preserveAs != "" {
 		if _, err := gitRunner(ctx, dir, "remote", "add", plan.preserveAs, plan.replacedURL); err != nil {
 			return fmt.Errorf("preserve current %s URL as %q: %w", plan.remote, plan.preserveAs, err)

@@ -38,8 +38,8 @@ func newImportAgentCmd(imp agentimport.Importer) *cobra.Command {
 		Use:   imp.Name(),
 		Short: fmt.Sprintf("Import existing %s transcripts as read-only checkpoints", imp.AgentType()),
 		Long: fmt.Sprintf(`Import pre-existing %s transcripts for this repo (the past month) as
-read-only checkpoints. Imported history is searchable and explainable but is
-not rewindable.
+read-only checkpoints. Imported history is searchable and explainable, but
+read-only: imported sessions cannot be resumed.
 
 Import honors checkpoint policy before scanning transcripts. If the configured
 checkpoint_version or checkpoint_min_version is unsupported by this CLI, import
@@ -59,14 +59,6 @@ fails even with --dry-run.`, imp.AgentType()),
 			}
 			defer repo.Close()
 
-			// Best-effort file logging (like explain/resume): without Init,
-			// logging.Debug below is a no-op. WorktreeRoot already succeeded,
-			// so this cannot create .entire/logs/ outside a repo.
-			logging.SetLogLevelGetter(GetLogLevel)
-			if err := logging.Init(ctx, ""); err == nil {
-				defer logging.Close()
-			}
-
 			if err := ensureCheckpointPolicyAllowsCheckpointData(ctx, repo); err != nil {
 				return err
 			}
@@ -75,7 +67,7 @@ fails even with --dry-run.`, imp.AgentType()),
 			// redactor packs) before any checkpoint write. Imported transcripts
 			// are redacted with redact.JSONLBytes, which honors this config; without
 			// it only always-on secret scanning would run on imported history.
-			strategy.EnsureRedactionConfigured()
+			strategy.EnsureRedactionConfigured(ctx)
 
 			// Logged so support can tell why an import has no anchor (empty
 			// sha: nothing resolved) or a stale one (origin tip not fetched).
@@ -88,6 +80,7 @@ fails even with --dry-run.`, imp.AgentType()),
 				Now: time.Now(), DryRun: dryRun,
 				LinkCommitSHA: linkCommitSHA,
 				Progress:      progress,
+				ReadRemotes:   strategy.CheckpointReadRemotes(ctx),
 			})
 			stopProgress(err == nil)
 			if err != nil {

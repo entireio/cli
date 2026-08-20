@@ -98,10 +98,16 @@ func TestManualCommit_Attribution(t *testing.T) {
 		t.Fatalf("SimulateStop (checkpoint 2) failed: %v", err)
 	}
 
-	// Verify 2 rewind points
-	points := env.GetRewindPoints()
-	if len(points) != 2 {
-		t.Fatalf("Expected 2 rewind points, got %d", len(points))
+	// Verify 2 checkpoints were saved for this session
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("failed to get session state: %v", err)
+	}
+	if state == nil {
+		t.Fatal("session state should exist after checkpoints")
+	}
+	if state.StepCount != 2 {
+		t.Fatalf("Expected 2 checkpoints, got StepCount = %d", state.StepCount)
 	}
 
 	// ========================================

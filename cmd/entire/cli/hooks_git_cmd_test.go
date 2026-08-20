@@ -2,209 +2,137 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+
 	"github.com/go-git/go-git/v6"
+	"github.com/spf13/cobra"
 )
 
-func TestInitHookLogging(t *testing.T) {
-	// Create a temporary directory to simulate a git repo
-	tmpDir := t.TempDir()
-
-	// Change to temp dir (automatically restored after test)
-	t.Chdir(tmpDir)
-
-	// Initialize git repo (required for session state store to find .git common dir)
-	gitInit := exec.CommandContext(context.Background(), "git", "init")
-	gitInit.Dir = tmpDir
-	if err := gitInit.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	t.Run("returns cleanup func when no session state exists", func(t *testing.T) {
-		// Create settings.json to indicate Entire is set up
-		entireDir := filepath.Join(tmpDir, paths.EntireDir)
-		if err := os.MkdirAll(entireDir, 0o755); err != nil {
-			t.Fatalf("failed to create .entire directory: %v", err)
-		}
-		settingsFile := filepath.Join(entireDir, "settings.json")
-		if err := os.WriteFile(settingsFile, []byte(`{"enabled":true}`), 0o644); err != nil {
-			t.Fatalf("failed to create settings file: %v", err)
-		}
-
-		cleanup := initHookLogging(context.Background())
-		if cleanup == nil {
-			t.Fatal("expected cleanup function, got nil")
-		}
-		cleanup() // Should not panic
-	})
-
-	t.Run("initializes logging when session state exists", func(t *testing.T) {
-		// Create .entire directory
-		entireDir := filepath.Join(tmpDir, paths.EntireDir)
-		if err := os.MkdirAll(entireDir, 0o755); err != nil {
-			t.Fatalf("failed to create .entire directory: %v", err)
-		}
-
-		// Create settings.json to indicate Entire is set up in this repo
-		settingsFile := filepath.Join(entireDir, "settings.json")
-		if err := os.WriteFile(settingsFile, []byte(`{"enabled":true,"strategy":"manual-commit"}`), 0o644); err != nil {
-			t.Fatalf("failed to create settings file: %v", err)
-		}
-
-		// Create session state file in .git/entire-sessions/
-		sessionID := "test-session-12345"
-		stateDir := filepath.Join(tmpDir, ".git", session.SessionStateDirName)
-		if err := os.MkdirAll(stateDir, 0o755); err != nil {
-			t.Fatalf("failed to create session state directory: %v", err)
-		}
-
-		now := time.Now()
-		state := session.State{
-			SessionID:           sessionID,
-			StartedAt:           now,
-			LastInteractionTime: &now,
-			Phase:               session.PhaseActive,
-		}
-		data, err := json.Marshal(state)
-		if err != nil {
-			t.Fatalf("failed to marshal state: %v", err)
-		}
-		stateFile := filepath.Join(stateDir, sessionID+".json")
-		if err := os.WriteFile(stateFile, data, 0o600); err != nil {
-			t.Fatalf("failed to write session state file: %v", err)
-		}
-		defer os.Remove(stateFile)
-
-		// Create logs directory (logging.Init will try to create the log file)
-		logsDir := filepath.Join(entireDir, "logs")
-		if err := os.MkdirAll(logsDir, 0o755); err != nil {
-			t.Fatalf("failed to create logs directory: %v", err)
-		}
-
-		cleanup := initHookLogging(context.Background())
-		if cleanup == nil {
-			t.Fatal("expected cleanup function, got nil")
-		}
-		defer cleanup()
-
-		// Verify log file was created
-		logFile := filepath.Join(logsDir, "entire.log")
-		if _, err := os.Stat(logFile); os.IsNotExist(err) {
-			t.Errorf("expected log file to be created at %s", logFile)
-		}
-	})
-}
-
-// TestInitHookLogging_SkipsWhenNotSetUp tests that initHookLogging(context.Background()) does not
-// create .entire/logs/ in repos where Entire has not been set up.
-// This is a separate test because it needs its own t.Chdir() to a different directory.
-func TestInitHookLogging_SkipsWhenNotSetUp(t *testing.T) {
-	// Create a temp directory without .entire/settings.json
+// TestWithHookSession_StampsMostRecentSession pins the one thing the hook path
+// adds over the root prerun: lines logged under the returned context carry the
+// session, which root cannot know without scanning session state on every
+// command.
+func TestWithHookSession_StampsMostRecentSession(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
 
-	// Initialize git repo
-	gitInit := exec.CommandContext(context.Background(), "git", "init")
-	gitInit.Dir = tmpDir
-	if err := gitInit.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	// Do NOT create .entire/settings.json - simulating a repo where Entire is not set up
-
-	cleanup := initHookLogging(context.Background())
-	if cleanup == nil {
-		t.Fatal("expected cleanup function, got nil")
-	}
-	cleanup() // Should not panic
-
-	// Verify .entire/logs was NOT created
-	logsDir := filepath.Join(tmpDir, ".entire", "logs")
-	if _, err := os.Stat(logsDir); !os.IsNotExist(err) {
-		t.Errorf("expected .entire/logs to NOT be created when Entire is not set up, but it exists")
-	}
-}
-
-// TestInitHookLogging_SkipsWhenDisabled tests that initHookLogging(context.Background()) does not
-// create .entire/logs/ when Entire is set up but disabled.
-func TestInitHookLogging_SkipsWhenDisabled(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize git repo
-	gitInit := exec.CommandContext(context.Background(), "git", "init")
-	gitInit.Dir = tmpDir
-	if err := gitInit.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	// Create .entire/settings.json with enabled: false
+	enableEntire(t, tmpDir)
 	entireDir := filepath.Join(tmpDir, paths.EntireDir)
-	if err := os.MkdirAll(entireDir, 0o755); err != nil {
-		t.Fatalf("failed to create .entire directory: %v", err)
+
+	sessionID := "test-session-12345"
+	writeTestSessionState(t, tmpDir, sessionID)
+
+	// Stand in for the root prerun, which is now the only thing that opens the
+	// log sink.
+	l, err := logging.New(logging.Config{Dir: filepath.Join(entireDir, "logs")})
+	if err != nil {
+		t.Fatalf("logging.New() error = %v", err)
 	}
-	settingsFile := filepath.Join(entireDir, "settings.json")
-	if err := os.WriteFile(settingsFile, []byte(`{"enabled":false,"strategy":"manual-commit"}`), 0o644); err != nil {
-		t.Fatalf("failed to create settings file: %v", err)
+	t.Cleanup(func() { _ = l.Close() })
+
+	ctx := withHookSession(logging.WithLogger(context.Background(), l))
+	logging.Warn(ctx, "hook session stamped")
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
 	}
 
-	cleanup := initHookLogging(context.Background())
-	if cleanup == nil {
-		t.Fatal("expected cleanup function, got nil")
+	content, err := os.ReadFile(filepath.Join(entireDir, "logs", "entire.log"))
+	if err != nil {
+		t.Fatalf("failed to read log file: %v", err)
 	}
-	cleanup() // Should not panic
-
-	// Verify .entire/logs was NOT created
-	logsDir := filepath.Join(tmpDir, ".entire", "logs")
-	if _, err := os.Stat(logsDir); !os.IsNotExist(err) {
-		t.Errorf("expected .entire/logs to NOT be created when Entire is disabled, but it exists")
+	if !strings.Contains(string(content), `"session_id":"`+sessionID+`"`) {
+		t.Errorf("log line missing session_id=%s: %s", sessionID, content)
 	}
 }
 
-// TestInitHookLogging_InitsUnderGlobalMode tests that initHookLogging
-// initializes logging in a repo with NO repo-level setup when the user-global
-// tier is enabled — the defense-in-depth check must use the same
-// settings.IsActiveForRepo predicate as the hook entry gates.
-func TestInitHookLogging_InitsUnderGlobalMode(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize git repo
-	gitInit := exec.CommandContext(context.Background(), "git", "init")
-	gitInit.Dir = tmpDir
-	if err := gitInit.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
+// TestHookPreRuns_GateSkipsRepo covers the gate each hook pre-run applies before
+// calling withHookSession, which scans session state and loads redactors: a repo
+// Entire never set up, and one where it is disabled, must come back with the
+// context untouched. The gate lives at the call sites — withHookSession itself
+// does not repeat it, because that costs an uncached settings.Load on the
+// per-commit and per-turn paths.
+func TestHookPreRuns_GateSkipsRepo(t *testing.T) {
+	tests := []struct {
+		name     string
+		settings string
+	}{
+		{"never set up", ""},
+		{"set up but disabled", `{"enabled":false,"strategy":"manual-commit"}`},
 	}
 
-	// Do NOT create .entire/settings.json — no repo-level setup. Instead,
-	// enable the user-global tier in an isolated config dir.
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Chdir(tmpDir)
+			testutil.InitRepo(t, tmpDir)
+
+			if tt.settings != "" {
+				entireDir := filepath.Join(tmpDir, paths.EntireDir)
+				if err := os.MkdirAll(entireDir, 0o750); err != nil {
+					t.Fatalf("failed to create .entire directory: %v", err)
+				}
+				settingsFile := filepath.Join(entireDir, "settings.json")
+				if err := os.WriteFile(settingsFile, []byte(tt.settings), 0o600); err != nil {
+					t.Fatalf("failed to create settings file: %v", err)
+				}
+			}
+
+			// Drive the real pre-runs. A gated pre-run returns before
+			// SetContext, so the command's context is still the one we handed it.
+			for name, hookCmd := range map[string]*cobra.Command{
+				"git hooks":   newHooksGitCmd(),
+				"agent hooks": agentHooksCmd(t, testAgentName),
+			} {
+				base := context.Background()
+				hookCmd.SetContext(base)
+				hookCmd.PersistentPreRun(hookCmd, nil)
+				if hookCmd.Context() != base {
+					t.Errorf("%s pre-run derived a context in a repo it must skip", name)
+				}
+			}
+		})
+	}
+}
+
+// TestHookPreRuns_ProceedUnderGlobalMode is the positive mirror of
+// TestHookPreRuns_GateSkipsRepo: with NO repo-level setup but the user-global
+// tier enabled, both pre-run gates must PASS (settings.IsActiveForRepo, not
+// IsSetUpAndEnabled) so globally-tracked repos get session stamping and
+// redaction configuration.
+func TestHookPreRuns_ProceedUnderGlobalMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+
+	// No .entire/settings.json — the tier alone must activate the gates.
 	cfgDir := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
-	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{"global":{"enabled":true}}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{"global":{"enabled":true}}`), 0o600); err != nil {
 		t.Fatalf("failed to write user-global settings file: %v", err)
 	}
 
-	cleanup := initHookLogging(context.Background())
-	if cleanup == nil {
-		t.Fatal("expected cleanup function, got nil")
-	}
-	cleanup() // Should not panic
-
-	// Verify .entire/logs WAS created — logging initialized under global mode
-	logsDir := filepath.Join(tmpDir, ".entire", "logs")
-	if _, err := os.Stat(logsDir); err != nil {
-		t.Errorf("expected .entire/logs to be created under global mode, but stat failed: %v", err)
+	for name, hookCmd := range map[string]*cobra.Command{
+		"git hooks":   newHooksGitCmd(),
+		"agent hooks": agentHooksCmd(t, testAgentName),
+	} {
+		base := context.Background()
+		hookCmd.SetContext(base)
+		hookCmd.PersistentPreRun(hookCmd, nil)
+		if hookCmd.Context() == base {
+			t.Errorf("%s pre-run skipped a globally-tracked repo", name)
+		}
 	}
 }
 
@@ -401,11 +329,11 @@ func TestGitHookPolicySkipsWhenRepoCannotOpen(t *testing.T) {
 	}
 }
 
-// TestHooksGitCmd_PersistentPreRunE_GlobalMode pins the git-hook entry gate
+// TestHooksGitCmd_PersistentPreRun_GlobalMode pins the git-hook entry gate
 // on the user-global tier — the third of the three gates that switched to
 // settings.IsActiveForRepo. A repo with no repo-level setup keeps hooks
 // enabled when global mode is on; a globally excluded repo disables them.
-func TestHooksGitCmd_PersistentPreRunE_GlobalMode(t *testing.T) {
+func TestHooksGitCmd_PersistentPreRun_GlobalMode(t *testing.T) {
 	setupRepo := func(t *testing.T) (repoDir, cfgDir string) {
 		t.Helper()
 		repoDir = t.TempDir()
@@ -423,9 +351,7 @@ func TestHooksGitCmd_PersistentPreRunE_GlobalMode(t *testing.T) {
 		t.Helper()
 		cmd := newHooksGitCmd()
 		cmd.SetContext(context.Background())
-		if err := cmd.PersistentPreRunE(cmd, []string{"post-commit"}); err != nil {
-			t.Fatalf("PersistentPreRunE: %v", err)
-		}
+		cmd.PersistentPreRun(cmd, []string{"post-commit"})
 	}
 
 	t.Run("global on keeps hooks enabled", func(t *testing.T) {
@@ -455,4 +381,18 @@ func TestHooksGitCmd_PersistentPreRunE_GlobalMode(t *testing.T) {
 			t.Fatal("a globally excluded repo must disable git hooks")
 		}
 	})
+}
+
+// agentHooksCmd returns the hooks subcommand for one agent, whose pre-run is the
+// call site that used to rely on withHookSession's own gate.
+func agentHooksCmd(t *testing.T, agentName string) *cobra.Command {
+	t.Helper()
+
+	for _, sub := range newHooksCmd().Commands() {
+		if sub.Use == agentName {
+			return sub
+		}
+	}
+	t.Fatalf("no hooks subcommand for %q", agentName)
+	return nil
 }

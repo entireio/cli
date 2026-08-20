@@ -643,7 +643,13 @@ func renderCoreError(err error) error {
 	if msg := coreapi.APIError(err); msg != "" {
 		return errors.New(msg)
 	}
-	return err
+	// A local/transport failure falls through with its own text, cleaned of the
+	// generated security scaffolding. Redundant for the commands that return
+	// this error to main.go (which cleans it again — harmless, since the strip
+	// leaves the original chain intact to unwrap), and load-bearing for the
+	// mirror-create wizard, which prints renderCoreError's result itself and
+	// returns a SilentError, so main.go never renders it.
+	return RenderUserFacingError(err)
 }
 
 // printJSON writes v as indented JSON to w — the --json view for list/get

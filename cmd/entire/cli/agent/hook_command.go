@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,13 +18,15 @@ import (
 // Entire integration is one generated file in the repo (Pi's extension,
 // OpenCode's plugin), for use by HookFreshness implementations.
 //
-// The file counts as ours only if it contains marker, and as current only if
-// it matches one of renders — the outputs InstallHooks could have written.
-// Pass both the production and local-dev renders: they differ only in the
-// substituted entire command, and CheckHookConfig cannot know which mode
-// installed the file. Matching on content rather than a stamped version keeps
-// this honest for free — any edit to the embedded template makes installed
-// copies read as outdated without anyone remembering to bump anything.
+// The file counts as ours only if it contains marker, and as current only if it
+// matches render — what InstallHooks writes today. Pass exactly that one render:
+// anything else still carrying the marker (a template edit, or a file left by an
+// older version) must read as outdated so the next install replaces it. Passing a
+// legacy render here would mark it current and strand it on disk forever, which
+// is what TestCheckHookConfig_LegacyLocalDevIsDrift pins against. Matching on
+// content rather than a stamped version keeps this honest for free — any edit to
+// the embedded template makes installed copies read as outdated without anyone
+// remembering to bump anything.
 //
 // Line endings are normalized before comparing. These files are generated with
 // LF but are typically committed, so on Windows a checkout under the default
@@ -34,7 +37,7 @@ import (
 // A file that exists but lacks marker reads as HooksAbsent, not HooksOutdated:
 // InstallHooks refuses to overwrite a foreign file at our path, so there is no
 // Entire config there for us to call stale.
-func GeneratedHookFileState(path, marker string, renders ...string) HookConfigState {
+func GeneratedHookFileState(path, marker, render string) HookConfigState {
 	data, err := os.ReadFile(path) //nolint:gosec // path constructed from validated repo root
 	if err != nil {
 		return HooksAbsent
@@ -43,11 +46,8 @@ func GeneratedHookFileState(path, marker string, renders ...string) HookConfigSt
 	if !strings.Contains(content, marker) {
 		return HooksAbsent
 	}
-	normalized := normalizeLineEndings(content)
-	for _, render := range renders {
-		if normalized == normalizeLineEndings(render) {
-			return HooksCurrent
-		}
+	if normalizeLineEndings(content) == normalizeLineEndings(render) {
+		return HooksCurrent
 	}
 	return HooksOutdated
 }
@@ -80,13 +80,45 @@ func MissingEntireWarning(format WarningFormat) string {
 	}
 }
 
-// LocalDevHookScript is the local-development hook launcher, with the repo root
-// resolved at hook runtime via git. It points at scripts/entire-dev, which
-// compiles the CLI on demand and falls back to the entire binary on PATH when
-// the tree does not build (e.g. mid merge-conflict-fix). Agents that locate the
-// repo root with `git rev-parse` build their local-dev command prefix from
-// this; claude-code uses ${CLAUDE_PROJECT_DIR} and defines its own prefix.
-const LocalDevHookScript = `"$(git rev-parse --show-toplevel)"/scripts/entire-dev`
+// currentHookCommandPrefix is what every hook command Entire generates begins
+// with today: the entire binary resolved through PATH, then the `hooks`
+// subcommand.
+//
+// Scoped to `hooks ` rather than just `entire `, because this predicate decides
+// what gets DELETED. Every command Entire writes is `entire hooks <target>
+// <verb>`, so anything else invoking the binary — a user's own hook running
+// `entire search …` or `entire status --json` — is theirs, not ours to remove.
+// That distinction did not matter while removal only happened under --force; it
+// matters now that stale hooks are dropped on every install.
+const currentHookCommandPrefix = "entire hooks "
+
+// legacyHookCommandPrefixes are the command shapes Entire wrote in the past and
+// must still recognize as its own, so hooks installed by older versions are
+// replaced rather than left in place beside a current one.
+//
+// These are DETECTION-ONLY, and unexported so that is enforced rather than
+// documented: production code outside this file cannot name them, so it cannot
+// splice one into a generated hook command. Every one of them runs Entire from
+// the working tree — pointing a hook at a path inside the checkout meant that
+// whatever the branch contained ran on every agent turn, and because local-dev
+// mode was honored from the committed .entire/settings.json, any repository could
+// opt its cloners into that. Tests that need to *build* one of these (to seed a
+// config an older version would have written) go through
+// agent/testutil, which is test-only by construction.
+//
+// Both path styles appear because agents resolved the repo root differently:
+// Claude Code has ${CLAUDE_PROJECT_DIR}, everyone else shelled out to git.
+// The whole set is matched for every agent — a hook naming any of them is ours
+// regardless of which agent's config it turned up in.
+// Each ends with `hooks ` for the same reason as currentHookCommandPrefix: a
+// launcher invoking the CLI for something other than a generated hook is not
+// ours to delete.
+var legacyHookCommandPrefixes = []string{
+	`"$(git rev-parse --show-toplevel)"/scripts/entire-dev hooks `,
+	"${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks ",
+	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks `,
+	"go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks ",
+}
 
 // WrapProductionSilentHookCommand exits successfully without output when the
 // Entire CLI is missing from PATH.
@@ -185,10 +217,52 @@ const productionHookWrapperPrefix = `sh -c 'if ! command -v entire >/dev/null 2>
 const windowsProductionHookWrapperPrefix = `where.exe entire >nul 2>nul & if errorlevel 1 `
 const nestedWindowsProductionHookWrapperPrefix = `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 `
 
-// IsManagedHookCommand reports whether command is either a direct Entire hook
-// command or one of Entire's production wrapper forms that exec that command.
-func IsManagedHookCommand(command string, prefixes []string) bool {
-	if hasManagedHookPrefix(command, prefixes) {
+// DropStaleManagedHooks removes Entire-owned entries whose command is not one of
+// want, leaving foreign entries and the wanted commands untouched. commandOf
+// reads the command string off an entry, which is the only per-agent knowledge
+// this needs — agents whose config stores it under a different field (e.g.
+// Copilot CLI's `bash`) just return that field. want is a set because one hook
+// list can legitimately carry several Entire commands.
+//
+// It reports whether anything was dropped, because the caller must persist the
+// config even when no hook was *added*: a config can hold both a stale and a
+// current hook at once, and skipping the write would leave the stale one on disk.
+//
+// Every agent must run this on every install, not only under --force. Without it
+// a hook written by an older version survives alongside the freshly added one and
+// keeps firing — which for the removed local-dev mode means a script inside the
+// working tree still executes on every agent turn. This lives here rather than in
+// each agent because it was independently re-derived six times and two of those
+// copies got it wrong, and because `dupl` cannot see duplication across packages.
+func DropStaleManagedHooks[E any](entries []E, commandOf func(E) string, want []string) ([]E, bool) {
+	dropped := false
+	kept := make([]E, 0, len(entries))
+	for _, entry := range entries {
+		cmd := commandOf(entry)
+		if IsManagedHookCommand(cmd) && !slices.Contains(want, cmd) {
+			dropped = true
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	if !dropped {
+		// Nothing to change: hand back the original slice so the common
+		// idempotent install does not reallocate every hook list.
+		return entries, false
+	}
+	return kept, true
+}
+
+// IsManagedHookCommand reports whether command is one Entire wrote: the current
+// form or any shape an older version wrote, either bare or inside one of Entire's
+// production wrapper forms.
+//
+// The recognized set is owned here rather than passed in. Each agent previously
+// declared its own copy, which meant six near-identical literals that a new agent
+// could silently omit — and omitting the legacy entries is precisely what leaves
+// an old hook installed forever.
+func IsManagedHookCommand(command string) bool {
+	if hasManagedHookPrefix(command) {
 		return true
 	}
 	if strings.HasPrefix(command, productionHookWrapperPrefix) {
@@ -197,7 +271,7 @@ func IsManagedHookCommand(command string, prefixes []string) bool {
 			return false
 		}
 
-		return hasManagedHookPrefix(wrappedCommand, prefixes)
+		return hasManagedHookPrefix(wrappedCommand)
 	}
 	if strings.HasPrefix(command, windowsProductionHookWrapperPrefix) ||
 		strings.HasPrefix(command, nestedWindowsProductionHookWrapperPrefix) {
@@ -211,13 +285,16 @@ func IsManagedHookCommand(command string, prefixes []string) bool {
 		wrappedCommand := command[idx+len(elseMarker):]
 		wrappedCommand = strings.TrimSuffix(wrappedCommand, `"`)
 		wrappedCommand = strings.TrimSuffix(wrappedCommand, `)`)
-		return hasManagedHookPrefix(wrappedCommand, prefixes)
+		return hasManagedHookPrefix(wrappedCommand)
 	}
 	return false
 }
 
-func hasManagedHookPrefix(command string, prefixes []string) bool {
-	for _, prefix := range prefixes {
+func hasManagedHookPrefix(command string) bool {
+	if strings.HasPrefix(command, currentHookCommandPrefix) {
+		return true
+	}
+	for _, prefix := range legacyHookCommandPrefixes {
 		if strings.HasPrefix(command, prefix) {
 			return true
 		}
@@ -232,6 +309,12 @@ func hasManagedHookPrefix(command string, prefixes []string) bool {
 // command line, not a batch script, so batch's `%%` doubling does not apply,
 // and caret-escaping `%` would leak the caret. The fixed warning constants are
 // %-free; if that changes, percent expansion needs separate handling.
+//
+// Escaping is only correct here because a third party owns the exec: Entire
+// writes these commands into an agent's config file and the agent runs them
+// through cmd.exe, so there is no shell to avoid. Do NOT reach for this when
+// Entire launches something itself — bypass the shell instead, the way
+// cli.openBrowserPlatform (browser_open_windows.go) does.
 func escapeWindowsCMD(s string) string {
 	replacer := strings.NewReplacer(
 		`^`, `^^`,
@@ -279,8 +362,8 @@ var (
 // timeout is deliberately generous so a momentarily slow sh isn't misread as
 // absent; if it ever is, the next install simply re-migrates — the outcome is
 // self-correcting, never wedged.
-func UseWindowsProductionHooks(ctx context.Context, localDev bool) bool {
-	if localDev || hookCommandOS != hookWrapperOSWindows {
+func UseWindowsProductionHooks(ctx context.Context) bool {
+	if hookCommandOS != hookWrapperOSWindows {
 		return false
 	}
 	return !shHookWrapperWorks(ctx, shHookWrapperProbeCommand)
