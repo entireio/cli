@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 // Checkpoint destinations are unambiguous in the ordinary single-remote,
@@ -51,6 +52,13 @@ type remoteTopology struct {
 	// primaryIsRefs reports whether the git-refs backend is active, which
 	// decides what a fanning-out remote means for checkpoints.
 	primaryIsRefs bool
+	// syncRemote is the elected checkpoint sync remote — the one remote whose
+	// pushes carry checkpoints — and syncSource says which tier elected it.
+	// Both are empty when the election found nothing or failed, and the note
+	// then says nothing about where checkpoints go: naming a destination the
+	// push side would not use is the failure this note exists to prevent.
+	syncRemote string
+	syncSource strategy.CheckpointSyncRemoteSource
 }
 
 // inspectRemoteTopology reads the repo's remotes and checkpoint configuration.
@@ -91,6 +99,16 @@ func inspectRemoteTopology(ctx context.Context) remoteTopology {
 
 	if cpCfg, err := settings.LoadCheckpointsConfig(ctx); err == nil {
 		t.primaryIsRefs = checkpoint.PrimaryIsRefs(cpCfg)
+	}
+
+	// Ask the resolver rather than reading checkpoint_push_remote out of
+	// settings, for the same reason `pinned` does: the destination shown must
+	// be the one pushes actually use, never a re-derivation that can disagree.
+	if elected, err := strategy.ResolveCheckpointSyncRemote(ctx); err == nil {
+		t.syncRemote, t.syncSource = elected.Name, elected.Source
+	} else {
+		logging.Debug(ctx, "remote topology: could not resolve the checkpoint sync remote",
+			slog.String("error", err.Error()))
 	}
 
 	return t
@@ -168,14 +186,44 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 
 	if names := t.unpinnedNames(); len(names) > 1 {
 		fmt.Fprintf(w, "  This repo has %d remotes (%s).\n", len(names), strings.Join(names, ", "))
-		fmt.Fprintln(w, "    Checkpoints sync to a single elected remote — not to whichever one you")
-		fmt.Fprintln(w, "    push to. A push to any other remote carries your code but no session")
-		fmt.Fprintln(w, "    history. Run `entire status` to see the elected destination and how many")
-		fmt.Fprintln(w, "    checkpoints are waiting for it.")
+		t.describeSyncRemote(w)
 	}
 
 	fmt.Fprintln(w, "  To pin one repository for checkpoints, set checkpoint_remote in")
 	fmt.Fprintln(w, "  .entire/settings.json (or .entire/settings.local.json to keep it to this clone).")
+}
+
+// describeSyncRemote names the one remote that carries checkpoints. It stays
+// to three lines at most on purpose: capture already routes the fork topology
+// correctly and announces itself when it does, a gated push says so at the
+// time (strategy.hintGatedCheckpointSync), and `entire status` reports the
+// destination on demand — so this is orientation at setup, not a warning about
+// something the user must go and fix.
+//
+// Naming today's remote alone would be a promise the next push can break,
+// hence the second clause on the tiers where the election is still open: a
+// push whose target agrees with the branch's declared push destination elects
+// that remote and carries the checkpoints with it, so "checkpoints go to
+// origin, full stop" is exactly what must not be said here.
+func (t remoteTopology) describeSyncRemote(w io.Writer) {
+	if t.syncRemote == "" {
+		return
+	}
+	switch t.syncSource {
+	case strategy.SyncRemoteSourceConfig:
+		// The decision is already made; repeating the setting key would read
+		// as a warning that something still needs doing.
+		fmt.Fprintf(w, "    Checkpoints sync to one remote — %q (set by checkpoint_push_remote).\n", t.syncRemote)
+	case strategy.SyncRemoteSourceObserved:
+		// Same fact `entire status` reports as "follows your branch's push
+		// destination", shortened to hold one line at this indent.
+		fmt.Fprintf(w, "    Checkpoints sync to one remote — %q, your branch's push destination.\n", t.syncRemote)
+		fmt.Fprintln(w, "    Set strategy_options.checkpoint_push_remote to pin a different one.")
+	default:
+		fmt.Fprintf(w, "    Checkpoints sync to one remote — right now %q, and your first push to\n", t.syncRemote)
+		fmt.Fprintln(w, "    your branch's own remote takes it over. `entire status` shows where.")
+		fmt.Fprintln(w, "    Set strategy_options.checkpoint_push_remote to pin one yourself.")
+	}
 }
 
 // unpinnedNames lists the remotes whose checkpoint destination is not already
