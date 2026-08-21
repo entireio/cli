@@ -741,7 +741,7 @@ func TestCheckGitHookState(t *testing.T) {
 
 	t.Run("no hooks at all is Absent", func(t *testing.T) {
 		t.Parallel()
-		if got := gitHookStateInHooksDir(t.TempDir()); got != GitHooksAbsent {
+		if got := gitHookStateInHooksDir(context.Background(), t.TempDir()); got != GitHooksAbsent {
 			t.Errorf("empty hooks dir = %v, want GitHooksAbsent", got)
 		}
 	})
@@ -754,7 +754,7 @@ func TestCheckGitHookState(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "pre-push"), []byte("#!/bin/sh\necho lefthook\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if got := gitHookStateInHooksDir(dir); got != GitHooksAbsent {
+		if got := gitHookStateInHooksDir(context.Background(), dir); got != GitHooksAbsent {
 			t.Errorf("foreign hook = %v, want GitHooksAbsent", got)
 		}
 	})
@@ -766,7 +766,7 @@ func TestCheckGitHookState(t *testing.T) {
 		if err := os.Remove(filepath.Join(dir, "post-commit")); err != nil {
 			t.Fatal(err)
 		}
-		if got := gitHookStateInHooksDir(dir); got != GitHooksAbsent {
+		if got := gitHookStateInHooksDir(context.Background(), dir); got != GitHooksAbsent {
 			t.Errorf("incomplete set = %v, want GitHooksAbsent", got)
 		}
 	})
@@ -779,7 +779,7 @@ func TestCheckGitHookState(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		writeCurrentManagedHooks(t, dir)
-		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
+		if got := gitHookStateInHooksDir(context.Background(), dir); got != GitHooksCurrent {
 			t.Errorf("current-shape hooks = %v, want GitHooksCurrent", got)
 		}
 	})
@@ -796,7 +796,7 @@ func TestCheckGitHookState(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "pre-push"), []byte(legacyContent), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
+			if got := gitHookStateInHooksDir(context.Background(), dir); got != GitHooksOutdated {
 				t.Errorf("legacy hook %q = %v, want GitHooksOutdated", legacy, got)
 			}
 		}
@@ -827,7 +827,7 @@ func TestCheckGitHookState_UserAdditionsAreNotDrift(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
+		if got := gitHookStateInHooksDir(context.Background(), dir); got != GitHooksCurrent {
 			t.Errorf("a hook whose own Entire line is current must read Current despite the user line %q, got %v", userLine, got)
 		}
 	}
@@ -848,7 +848,7 @@ func TestCheckGitHookState_LegacyEntireLineIsStillDrift(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
+	if got := gitHookStateInHooksDir(context.Background(), dir); got != GitHooksOutdated {
 		t.Errorf("a legacy launcher on Entire's own invocation line must read Outdated, got %v", got)
 	}
 }
@@ -872,7 +872,7 @@ func TestIsGitHookInstalled_LegacyLocalDevCountsAsNotInstalled(t *testing.T) {
 	if _, _, err := InstallGitHook(context.Background(), true, false); err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
-	if got := gitHookStateInHooksDir(hooksDir); got != GitHooksCurrent {
+	if got := gitHookStateInHooksDir(context.Background(), hooksDir); got != GitHooksCurrent {
 		t.Fatalf("a freshly installed hook set should read as current, got %v", got)
 	}
 
@@ -890,7 +890,7 @@ func TestIsGitHookInstalled_LegacyLocalDevCountsAsNotInstalled(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(legacy), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if got := gitHookStateInHooksDir(hooksDir); got != GitHooksOutdated {
+		if got := gitHookStateInHooksDir(context.Background(), hooksDir); got != GitHooksOutdated {
 			t.Errorf("a hook running Entire from the working tree must read as outdated, got %v: %s", got, legacyCmd)
 		}
 	}
@@ -1222,7 +1222,7 @@ func TestInstallGitHook_MigratesLegacyEntireHooksFromHuskyOwnedDir(t *testing.T)
 		}
 	}
 	// Dispatcher present so hookInstallDir redirects to parent.
-	if err := os.WriteFile(filepath.Join(huskyOwnedDir, "h"), []byte("#!/usr/bin/env sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(huskyOwnedDir, "h"), []byte("#!/usr/bin/env sh\necho husky-dispatcher\n"), 0o755); err != nil {
 		t.Fatalf("write husky dispatcher: %v", err)
 	}
 
@@ -1265,7 +1265,7 @@ func TestInstallGitHook_MigratesLegacyEntireHooksWithoutBackupWritesStub(t *test
 	if err := os.MkdirAll(huskyOwnedDir, 0o755); err != nil {
 		t.Fatalf("mkdir .husky/_: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(huskyOwnedDir, "h"), []byte("#!/usr/bin/env sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(huskyOwnedDir, "h"), []byte("#!/usr/bin/env sh\necho husky-dispatcher\n"), 0o755); err != nil {
 		t.Fatalf("write husky dispatcher: %v", err)
 	}
 	// Legacy Entire wrappers with no .pre-entire backup.
@@ -1376,7 +1376,7 @@ func TestHuskyUserHooksDir(t *testing.T) {
 		t.Errorf("hookInstallDir without dispatcher = %q, want %q", got, huskyOwned)
 	}
 
-	if err := os.WriteFile(filepath.Join(huskyOwned, "h"), []byte("#!/usr/bin/env sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(huskyOwned, "h"), []byte("#!/usr/bin/env sh\necho husky-dispatcher\n"), 0o755); err != nil {
 		t.Fatalf("write dispatcher: %v", err)
 	}
 	wantParent := filepath.Join(tmp, ".husky")
@@ -1385,6 +1385,17 @@ func TestHuskyUserHooksDir(t *testing.T) {
 	}
 	if got := hookInstallDir(huskyOwned); got != wantParent {
 		t.Errorf("hookInstallDir with dispatcher = %q, want %q", got, wantParent)
+	}
+
+	// Shebang-only / empty dispatcher must not redirect.
+	if err := os.WriteFile(filepath.Join(huskyOwned, "h"), []byte("#!/usr/bin/env sh\n"), 0o755); err != nil {
+		t.Fatalf("write shebang-only dispatcher: %v", err)
+	}
+	if got := huskyUserHooksDir(huskyOwned); got != "" {
+		t.Errorf("huskyUserHooksDir shebang-only = %q, want \"\"", got)
+	}
+	if err := os.WriteFile(filepath.Join(huskyOwned, "h"), []byte("#!/usr/bin/env sh\necho husky-dispatcher\n"), 0o755); err != nil {
+		t.Fatalf("restore dispatcher: %v", err)
 	}
 
 	// Non-husky shapes never redirect (no `_`+`h` dispatcher layout).
@@ -1405,7 +1416,7 @@ func TestHuskyUserHooksDir(t *testing.T) {
 	if err := os.MkdirAll(customOwned, 0o755); err != nil {
 		t.Fatalf("mkdir custom husky: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(customOwned, "h"), []byte("#!/usr/bin/env sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(customOwned, "h"), []byte("#!/usr/bin/env sh\necho husky-dispatcher\n"), 0o755); err != nil {
 		t.Fatalf("write custom dispatcher: %v", err)
 	}
 	wantCustomParent := filepath.Join(tmp, "frontend", ".husky")
@@ -2783,5 +2794,135 @@ func TestStripDelimitedBlock_IgnoresEndMarkerEmbeddedMidLine(t *testing.T) {
 	got := stripDelimitedBlock(content, entireManagedBegin, entireManagedEnd)
 	if got != "before\nafter\n" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestHasActiveHuskyStubDispatch_RequiresExactLine(t *testing.T) {
+	t.Parallel()
+	if !hasActiveHuskyStubDispatch(huskyForwardingStub) {
+		t.Fatal("canonical stub must pass")
+	}
+	for _, bad := range []string{
+		`echo ` + huskyStubDispatchMarker + "\n",
+		`false && ` + huskyStubDispatchMarker + "\n",
+		"# " + huskyStubDispatchMarker + "\n",
+	} {
+		if hasActiveHuskyStubDispatch(bad) {
+			t.Errorf("should reject non-exact dispatch:\n%s", bad)
+		}
+	}
+}
+
+func TestEntireHookUsesForeignAbsoluteLauncher(t *testing.T) {
+	t.Parallel()
+	content := `#!/bin/sh
+# Entire CLI hooks
+if [ -x "/other/clone/entire" ]; then /other/clone/entire hooks git prepare-commit-msg "$1" "$2" 2>/dev/null || true; else :; fi
+`
+	if !entireHookUsesForeignAbsoluteLauncher(content, bareEntireHookCmd) {
+		t.Fatal("foreign absolute should be outdated vs bare entire")
+	}
+	if !entireHookUsesForeignAbsoluteLauncher(content, `"/local/entire"`) && !entireHookUsesForeignAbsoluteLauncher(content, "/local/entire") {
+		t.Fatal("foreign absolute should be outdated vs different expected absolute")
+	}
+	local := `#!/bin/sh
+# Entire CLI hooks
+if [ -x "/local/entire" ]; then /local/entire hooks git prepare-commit-msg "$1" "$2" 2>/dev/null || true; else :; fi
+`
+	if entireHookUsesForeignAbsoluteLauncher(local, "/local/entire") {
+		t.Fatal("matching absolute should not be foreign")
+	}
+}
+
+func TestInjectPostRewriteManagedBlock_ReplaysStdin(t *testing.T) {
+	t.Parallel()
+	entire := `#!/bin/sh
+# Entire CLI hooks
+if command -v entire >/dev/null 2>&1; then entire hooks git post-rewrite "$1" 2>/dev/null || true; else :; fi
+`
+	user := "#!/bin/sh\ncat > /tmp/should-see-mapping\n"
+	got := injectEntireManagedBlock("post-rewrite", user, entire)
+	if !strings.Contains(got, `_entire_stdin=`) {
+		t.Fatalf("missing stdin capture:\n%s", got)
+	}
+	if !strings.Contains(got, `hooks git post-rewrite "$1" < "$_entire_stdin"`) {
+		t.Fatalf("Entire must read replayed stdin:\n%s", got)
+	}
+	if !strings.Contains(got, `) < "$_entire_stdin"`) {
+		t.Fatalf("user body must receive replayed stdin:\n%s", got)
+	}
+}
+
+func TestInstallGitHook_RejectsSymlinkedHook(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+	hookPath := filepath.Join(hooksDir, "prepare-commit-msg")
+	target := filepath.Join(hooksDir, "target-config")
+	if err := os.WriteFile(target, []byte("secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, hookPath); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := InstallGitHook(context.Background(), true, false)
+	if err == nil {
+		t.Fatal("expected symlink rejection")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("error should mention symlink, got: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "secret\n" {
+		t.Fatalf("symlink target corrupted: %q", got)
+	}
+}
+
+func TestRewriteHuskyOwnedHooks_RotatesStaleBackupBeforeHeal(t *testing.T) {
+	tmpDir, _ := initHooksTestRepo(t)
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "git", "config", "core.hooksPath", ".husky/_")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	owned := filepath.Join(tmpDir, ".husky", "_")
+	seedHuskyOwnedDir(t, owned)
+
+	hookPath := filepath.Join(owned, "prepare-commit-msg")
+	backupPath := hookPath + backupSuffix
+	oldBackup := "#!/bin/sh\necho old-stub-backup\n"
+	current := "#!/bin/sh\necho newer-unknown-stub\n"
+	if err := os.WriteFile(backupPath, []byte(oldBackup), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte(current), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := rewriteHuskyOwnedHooks(owned, true); err != nil {
+		t.Fatalf("rewriteHuskyOwnedHooks: %v", err)
+	}
+	gotBackup, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotBackup) != current {
+		t.Fatalf("backup = %q, want current %q", gotBackup, current)
+	}
+	gotStale, err := os.ReadFile(backupPath + ".stale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotStale) != oldBackup {
+		t.Fatalf("stale = %q, want %q", gotStale, oldBackup)
+	}
+	gotHook, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasActiveHuskyStubDispatch(string(gotHook)) {
+		t.Fatalf("healed stub should forward, got:\n%s", gotHook)
 	}
 }

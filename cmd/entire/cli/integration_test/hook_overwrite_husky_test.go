@@ -134,10 +134,11 @@ func commitViaGit(t *testing.T, env *TestEnv, message string) {
 	require.NoError(t, err, "git commit %q failed: %s", message, out)
 }
 
-// TestHusky_PreExistingUserHook_BackedUpAndChained covers tracked `.husky/`
-// territory: a pre-existing mode-0644 user hook is renamed to `.pre-entire`,
-// Entire's wrapper is installed, and the backup still runs (via sh -e) on commit.
-// RemoveGitHook restores the original script.
+// TestHusky_PreExistingUserHook_InjectedAndPreserved covers tracked `.husky/`
+// territory: a pre-existing mode-0644 user hook keeps its original script in
+// the same file with an Entire managed block injected ahead of it. No
+// `.pre-entire` companion is created. RemoveGitHook strips only the managed
+// block and restores the original bytes.
 func TestHusky_PreExistingUserHook_BackedUpAndChained(t *testing.T) {
 	t.Parallel()
 
@@ -160,29 +161,30 @@ func TestHusky_PreExistingUserHook_BackedUpAndChained(t *testing.T) {
 		sess.ID, "Touch preexisting husky hook", sess.TranscriptPath)
 	require.NoError(t, err)
 
-	backupPath := userHook + ".pre-entire"
-	backupData, err := os.ReadFile(backupPath)
-	require.NoError(t, err, "preexisting user hook should be backed up to .pre-entire")
-	require.Equal(t, custom, string(backupData))
+	_, err = os.Stat(userHook + ".pre-entire")
+	require.ErrorIs(t, err, os.ErrNotExist, "managed-block inject must not create .pre-entire companion")
 
 	installed, err := os.ReadFile(userHook)
 	require.NoError(t, err)
 	require.Contains(t, string(installed), "Entire CLI hooks")
-	require.Contains(t, string(installed), "sh -e")
+	require.Contains(t, string(installed), "# BEGIN Entire CLI managed block")
+	require.Contains(t, string(installed), "# END Entire CLI managed block")
+	require.Contains(t, string(installed), `touch "`+sentinel+`"`)
+	require.NotContains(t, string(installed), "sh -e")
 
 	env.WriteFile("chain.go", "package main\n")
 	sess.CreateTranscript("Touch preexisting husky hook", []FileChange{
 		{Path: "chain.go", Content: "package main\n"},
 	})
 	env.GitAdd("chain.go")
-	commitViaGit(t, env, "Exercise chained husky user hook")
+	commitViaGit(t, env, "Exercise injected husky user hook")
 
 	cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	require.NotEmpty(t, cpID, "Entire prepare-commit-msg should still add trailer")
 	_, err = os.Stat(sentinel)
-	require.NoError(t, err, "mode-0644 preexisting user hook must run via chain")
+	require.NoError(t, err, "preexisting user hook body must still run after inject")
 
-	// Byte-for-byte restore on RemoveGitHook is covered by
-	// TestInstallGitHook_ChainsPreExistingHuskyUserHook (strategy package;
-	// GetHooksDir is CWD-based and cannot be used from parallel TestEnv).
+	// Byte-for-byte managed-block strip on RemoveGitHook is covered by
+	// TestRemoveGitHook_StripsManagedBlock (strategy package; GetHooksDir is
+	// CWD-based and cannot be used from parallel TestEnv).
 }
