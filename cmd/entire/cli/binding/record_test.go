@@ -51,8 +51,8 @@ func TestRecordBinding_CreatesRecordOnFirstWrite(t *testing.T) {
 	if rec == nil {
 		t.Fatal("expected record")
 	}
-	if rec.Version != 2 {
-		t.Errorf("version = %d, want 2", rec.Version)
+	if rec.Version != 3 {
+		t.Errorf("version = %d, want 3", rec.Version)
 	}
 	if rec.SessionID != "sess-1" {
 		t.Errorf("session id = %q", rec.SessionID)
@@ -142,6 +142,46 @@ func TestRecordBinding_SameRepoBumpsCounters(t *testing.T) {
 	}
 	if !br.LastEvidenceAt.After(firstAt) {
 		t.Errorf("last evidence at did not advance: first=%v last=%v", firstAt, br.LastEvidenceAt)
+	}
+}
+
+func TestMarkRepoAdopted_PersistsMarkerWithoutChangingEvidence(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+
+	if err := RecordBinding(ctx, "sess-1", testMeta(), testEvidence("b", true)); err != nil {
+		t.Fatal(err)
+	}
+	before, err := LoadRecord(ctx, "sess-1")
+	if err != nil || before == nil {
+		t.Fatalf("load before marker: rec=%v err=%v", before, err)
+	}
+
+	if err := MarkRepoAdopted(ctx, "sess-1", testRepoIdentity("b").CommonDir); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := LoadRecord(ctx, "sess-1")
+	if err != nil || rec == nil {
+		t.Fatalf("load after marker: rec=%v err=%v", rec, err)
+	}
+	br := rec.BoundRepos[0]
+	if br.AdoptedAt == nil || br.AdoptedAt.IsZero() {
+		t.Fatal("adopted marker must be persisted")
+	}
+	if br.EvidenceCount != before.BoundRepos[0].EvidenceCount || !br.FirstEvidenceAt.Equal(before.BoundRepos[0].FirstEvidenceAt) || !br.LastEvidenceAt.Equal(before.BoundRepos[0].LastEvidenceAt) {
+		t.Errorf("marking adoption changed evidence: before=%+v after=%+v", before.BoundRepos[0], br)
+	}
+
+	markedAt := *br.AdoptedAt
+	if err := MarkRepoAdopted(ctx, "sess-1", testRepoIdentity("b").CommonDir); err != nil {
+		t.Fatal(err)
+	}
+	rec, err = LoadRecord(ctx, "sess-1")
+	if err != nil || rec == nil {
+		t.Fatalf("reload idempotent marker: rec=%v err=%v", rec, err)
+	}
+	if !rec.BoundRepos[0].AdoptedAt.Equal(markedAt) {
+		t.Errorf("idempotent marker changed: %v -> %v", markedAt, rec.BoundRepos[0].AdoptedAt)
 	}
 }
 
@@ -322,7 +362,7 @@ func TestRecordBinding_RefusesNewerRecordVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "sess-1.json")
-	newer := []byte(`{"version":3,"session_id":"sess-1","future_field":"must survive"}`)
+	newer := []byte(`{"version":4,"session_id":"sess-1","future_field":"must survive"}`)
 	if err := os.WriteFile(path, newer, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -393,8 +433,8 @@ func TestRecordEvidenceAndAdvanceCursor_NoEvidenceCreatesCursorOnlyRecord(t *tes
 	if rec == nil {
 		t.Fatal("expected record to be created ('scanned, nothing found yet')")
 	}
-	if rec.Version != 2 {
-		t.Errorf("version = %d, want 2", rec.Version)
+	if rec.Version != 3 {
+		t.Errorf("version = %d, want 3", rec.Version)
 	}
 	if rec.LastScannedTranscriptCursor != 42 {
 		t.Errorf("cursor = %d, want 42", rec.LastScannedTranscriptCursor)

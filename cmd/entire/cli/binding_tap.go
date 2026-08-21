@@ -92,6 +92,12 @@ func recordForeignEvidence(ctx context.Context, sessionID string, meta binding.S
 			slog.String("session_id", sessionID),
 			slog.String("repo", ev.Repo.WorktreeRoot),
 			slog.Bool("enabled", ev.Enabled))
+		if err := ensureSessionReplicated(ctx, sessionID, meta, currentWorktreeRoot, ev); err != nil {
+			logging.Debug(logCtx, "failed to replicate session into bound repo",
+				slog.String("session_id", sessionID),
+				slog.String("repo", ev.Repo.WorktreeRoot),
+				slog.String("error", err.Error()))
+		}
 	}
 }
 

@@ -6,8 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/binding"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
@@ -75,6 +79,126 @@ func TestRecordForeignEvidence_EnabledForeignRepoRecorded(t *testing.T) {
 	}
 	if rec.AgentType != testAgentName || rec.LaunchRoot != rootA {
 		t.Errorf("session meta not stored: %+v", rec)
+	}
+}
+
+func TestRecordForeignEvidence_ReplicatesStateWithoutRetiringSource(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+	rootA := newBindingRepo(t)
+	rootB := newBindingRepo(t)
+	for _, root := range []string{rootA, rootB} {
+		testutil.WriteFile(t, root, "tracked.txt", "base\n")
+		testutil.GitAdd(t, root, "tracked.txt")
+		testutil.GitCommit(t, root, "initial")
+	}
+	enableEntireAt(t, rootB)
+	testutil.WriteFile(t, rootB, "agent.go", "package agent\n")
+	t.Chdir(rootA)
+
+	started := time.Now().Add(-time.Hour)
+	lastInteraction := started.Add(30 * time.Minute)
+	source := &session.State{
+		SessionID:                 "sess-1",
+		BaseCommit:                testutil.GetHeadHash(t, rootA),
+		AttributionBaseCommit:     testutil.GetHeadHash(t, rootA),
+		WorktreePath:              rootA,
+		StartedAt:                 started,
+		LastInteractionTime:       &lastInteraction,
+		Phase:                     session.PhaseActive,
+		StepCount:                 4,
+		CheckpointTranscriptStart: 99,
+		LastCheckpointID:          id.CheckpointID("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+		AgentType:                 types.AgentType("Claude Code"),
+		TranscriptPath:            "/tmp/shared.jsonl",
+		FilesTouched:              []string{"source-only.go"},
+	}
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(rootA, ".git", session.SessionStateDirName))
+	if err := sourceStore.Save(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+
+	recordForeignEvidence(ctx, "sess-1", bindingTestMeta(rootA), rootA,
+		[]string{filepath.Join(rootB, "agent.go")})
+
+	targetStore := session.NewStateStoreWithDir(filepath.Join(rootB, ".git", session.SessionStateDirName))
+	target, err := targetStore.Load(ctx, "sess-1")
+	if err != nil || target == nil {
+		t.Fatalf("load replicated target: state=%+v err=%v", target, err)
+	}
+	if target.SessionID != source.SessionID || target.TranscriptPath != source.TranscriptPath || !target.StartedAt.Equal(source.StartedAt) {
+		t.Errorf("shared session identity was not preserved: %+v", target)
+	}
+	if target.WorktreePath != rootB || target.BaseCommit != testutil.GetHeadHash(t, rootB) || target.AttributionBaseCommit != target.BaseCommit {
+		t.Errorf("target-local repository identity is wrong: %+v", target)
+	}
+	if target.StepCount != 0 || target.CheckpointTranscriptStart != 0 || target.LastCheckpointID != id.EmptyCheckpointID {
+		t.Errorf("target-local checkpoint bookkeeping was not reset: %+v", target)
+	}
+	if len(target.FilesTouched) != 1 || target.FilesTouched[0] != "agent.go" {
+		t.Errorf("target files touched = %v, want [agent.go]", target.FilesTouched)
+	}
+	if target.Phase != session.PhaseActive || target.AdoptedIntoWorktreePath != "" {
+		t.Errorf("replicated state must be active and additive, got phase=%s tombstone=%q", target.Phase, target.AdoptedIntoWorktreePath)
+	}
+
+	stillSource, err := sourceStore.Load(ctx, "sess-1")
+	if err != nil || stillSource == nil {
+		t.Fatalf("source must remain live: state=%+v err=%v", stillSource, err)
+	}
+	if stillSource.AdoptedIntoWorktreePath != "" || stillSource.StepCount != source.StepCount {
+		t.Errorf("source was retired or rewritten: %+v", stillSource)
+	}
+	rec, err := binding.LoadRecord(ctx, "sess-1")
+	if err != nil || rec == nil || rec.BoundRepos[0].AdoptedAt == nil {
+		t.Fatalf("durable adopted marker missing: rec=%+v err=%v", rec, err)
+	}
+
+	// The marker is only a fast-path hint. Cleanup or stale-state collection can
+	// remove the target file while the machine record remains; later evidence
+	// must reconstruct the missing replica instead of trusting the old marker.
+	targetStatePath := filepath.Join(rootB, ".git", session.SessionStateDirName, "sess-1.json")
+	if err := os.Remove(targetStatePath); err != nil {
+		t.Fatal(err)
+	}
+	recordForeignEvidence(ctx, "sess-1", bindingTestMeta(rootA), rootA,
+		[]string{filepath.Join(rootB, "agent.go")})
+	recreated, err := targetStore.Load(ctx, "sess-1")
+	if err != nil || recreated == nil {
+		t.Fatalf("marker must not suppress missing-state repair: state=%+v err=%v", recreated, err)
+	}
+}
+
+func TestRecordForeignEvidence_NoRepoSourceSynthesizesState(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+	targetRoot := newBindingRepo(t)
+	testutil.WriteFile(t, targetRoot, "tracked.txt", "base\n")
+	testutil.GitAdd(t, targetRoot, "tracked.txt")
+	testutil.GitCommit(t, targetRoot, "initial")
+	enableEntireAt(t, targetRoot)
+	testutil.WriteFile(t, targetRoot, "from-parent.go", "package parent\n")
+
+	meta := binding.SessionMeta{
+		AgentType:      "Claude Code",
+		TranscriptPath: "/tmp/parent-launch.jsonl",
+	}
+	recordForeignEvidence(ctx, "sess-parent", meta, "",
+		[]string{filepath.Join(targetRoot, "from-parent.go")})
+
+	store := session.NewStateStoreWithDir(filepath.Join(targetRoot, ".git", session.SessionStateDirName))
+	state, err := store.Load(ctx, "sess-parent")
+	if err != nil || state == nil {
+		t.Fatalf("load synthesized state: state=%+v err=%v", state, err)
+	}
+	if state.SessionID != "sess-parent" || state.AgentType != types.AgentType("Claude Code") || state.TranscriptPath != meta.TranscriptPath {
+		t.Errorf("machine session identity not copied: %+v", state)
+	}
+	if state.Phase != session.PhaseActive || state.BaseCommit != testutil.GetHeadHash(t, targetRoot) {
+		t.Errorf("synthesized state is not active at target HEAD: %+v", state)
+	}
+	if state.StartedAt.IsZero() || state.TurnID == "" {
+		t.Errorf("synthesized state lacks lifecycle identity: %+v", state)
 	}
 }
 
