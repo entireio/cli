@@ -111,9 +111,21 @@ type Event struct {
 	// SubagentID identifies the subagent instance (for SubagentEnd events).
 	SubagentID string
 
+	// Final is true only for events that represent true completion of a
+	// subagent (Claude Code's SubagentStop), never for the launch-time
+	// PostToolUse SubagentEnd, which fires at the background launch stub
+	// seconds after launch. Downstream lifecycle branching keys off this flag,
+	// not any payload sentinel. Final is the disambiguator for agents with a
+	// two-signal model (a launch-time stub plus a separate completion hook,
+	// like Claude Code's background tasks); agents whose single subagent-end
+	// event already fires at true completion must leave it false so the
+	// existing pipeline handles them unchanged.
+	Final bool
+
 	// SubagentTranscriptPath is the agent-declared path to the subagent's own
 	// transcript (SubagentEnd). Set it whenever the hook payload names the file;
-	// Codex and Cursor both send agent_transcript_path.
+	// Codex and Cursor both send agent_transcript_path, as does Claude Code's
+	// SubagentStop.
 	//
 	// When empty the framework probes the layout Claude Code and Factory AI Droid
 	// share (cli.ResolveAgentTranscriptPath). For any other agent that probe finds

@@ -232,18 +232,19 @@ func resolveProcessingPlacement(ctx context.Context, c cellCoreClient, fullName 
 	if processingID == "" {
 		return coreapi.RepoPlacement{}, errRepoNotOnboarded
 	}
-	for _, p := range entry.Placements {
-		if p.ID != processingID {
-			continue
-		}
-		if p.Status == coreapi.RepoPlacementStatusFailed || p.Status == coreapi.RepoPlacementStatusSuspended {
-			return coreapi.RepoPlacement{}, fmt.Errorf("processing placement is %s", p.Status)
-		}
-		return p, nil
+	// Shares the fan-out's matcher (cell_fanout.go) so the two resolvers can
+	// never disagree on whether an ID names a placement — only on what they
+	// do with the answer, which is the deliberate part (see below).
+	p, ok := placementByID(entry.Placements, processingID)
+	if !ok {
+		// Defensive: primaries.processing should always name a placement
+		// present in the same response.
+		return coreapi.RepoPlacement{}, fmt.Errorf("processing placement %q is not in the repo's placement list", processingID)
 	}
-	// Defensive: primaries.processing should always name a placement present
-	// in the same response.
-	return coreapi.RepoPlacement{}, fmt.Errorf("processing placement %q is not in the repo's placement list", processingID)
+	if p.Status == coreapi.RepoPlacementStatusFailed || p.Status == coreapi.RepoPlacementStatusSuspended {
+		return coreapi.RepoPlacement{}, fmt.Errorf("processing placement is %s", p.Status)
+	}
+	return p, nil
 }
 
 // repoCellPlacement is a repo's processing placement: the id entire-api keys
@@ -291,7 +292,11 @@ func resolveRepoCellPlacement(ctx context.Context, owner, repo string) (repoCell
 	if err != nil {
 		return repoCellPlacement{}, cellPlacementError(ctx, fullName, fmt.Errorf("resolve cell for %s: %w", fullName, err))
 	}
-	return repoCellPlacement{RepoID: placement.ID, Target: target}, nil
+	// Trimmed for the same reason the match is: RepoID becomes a path segment
+	// in entire-api URLs, so tolerating a padded id in the lookup without
+	// normalizing it here would trade a loud "not in the placement list" for
+	// a malformed request.
+	return repoCellPlacement{RepoID: strings.TrimSpace(placement.ID), Target: target}, nil
 }
 
 // cellPlacementError reports a timeout as a timeout: without this, a fired

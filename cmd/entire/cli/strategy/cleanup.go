@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -26,6 +28,10 @@ const (
 	CleanupTypeShadowBranch CleanupType = "shadow-branch"
 	CleanupTypeSessionState CleanupType = "session-state"
 	CleanupTypeCheckpoint   CleanupType = "checkpoint"
+	// CleanupTypeRedactCache is the redaction prefix cache in the git common dir.
+	// Purely derived data -- it is rebuilt on the next checkpoint -- so it is
+	// removed wholesale rather than per entry.
+	CleanupTypeRedactCache CleanupType = "redact-cache"
 )
 
 // CleanupItem represents an item that can be cleaned up.
@@ -37,12 +43,14 @@ type CleanupItem struct {
 
 // CleanupResult contains the results of a cleanup operation.
 type CleanupResult struct {
+	RedactCaches      []string // Deleted redaction prefix cache directories
 	ShadowBranches    []string // Deleted shadow branches
 	SessionStates     []string // Deleted session state files
 	Checkpoints       []string // Deleted checkpoint metadata
 	FailedBranches    []string // Shadow branches that failed to delete
 	FailedStates      []string // Session states that failed to delete
 	FailedCheckpoints []string // Checkpoints that failed to delete
+	FailedRedactCache []string // Redaction caches that failed to delete
 }
 
 // shadowBranchPattern matches shadow branch names in both old and new formats:
@@ -431,7 +439,29 @@ func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
 		})
 	}
 
+	// The redaction prefix cache accumulates one small entry per session and is
+	// never superseded, so without this it would survive every `entire clean`.
+	if dir, err := redactCacheDir(ctx); err == nil && dir != "" {
+		if _, statErr := os.Stat(dir); statErr == nil {
+			cleanupItems = append(cleanupItems, CleanupItem{
+				Type:   CleanupTypeRedactCache,
+				ID:     checkpoint.RedactCacheDirName,
+				Reason: "clean all",
+			})
+		}
+	}
+
 	return cleanupItems, nil
+}
+
+// redactCacheDir resolves the redaction prefix cache directory, or "" when the
+// git common dir cannot be resolved.
+func redactCacheDir(ctx context.Context) (string, error) {
+	commonDir, err := session.GetGitCommonDir(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve git common dir: %w", err)
+	}
+	return filepath.Join(commonDir, checkpoint.RedactCacheDirName), nil
 }
 
 // DeleteAllCleanupItems deletes all specified cleanup items.
@@ -447,15 +477,32 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 	}
 
 	// Group items by type
-	var branches, states, checkpoints []string
+	var branches, states, checkpoints, redactCaches []string
 	for _, item := range items {
 		switch item.Type {
 		case CleanupTypeShadowBranch:
 			branches = append(branches, item.ID)
 		case CleanupTypeSessionState:
 			states = append(states, item.ID)
+		case CleanupTypeRedactCache:
+			redactCaches = append(redactCaches, item.ID)
 		case CleanupTypeCheckpoint:
 			checkpoints = append(checkpoints, item.ID)
+		}
+	}
+
+	// Remove the redaction prefix cache. Derived data, so a failure is recorded
+	// but never blocks the rest of the cleanup.
+	if len(redactCaches) > 0 {
+		if err := deleteRedactCache(ctx); err != nil {
+			result.FailedRedactCache = redactCaches
+			logging.Warn(logCtx, "failed to delete redaction cache",
+				slog.String("type", string(CleanupTypeRedactCache)),
+				slog.String("error", err.Error()))
+		} else {
+			result.RedactCaches = redactCaches
+			logging.Info(logCtx, "deleted redaction cache",
+				slog.String("type", string(CleanupTypeRedactCache)))
 		}
 	}
 
@@ -555,4 +602,18 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 	}
 
 	return result, nil
+}
+
+// deleteRedactCache removes the redaction prefix cache directory. Every entry is
+// derived data rebuilt on the next checkpoint, so removing the whole directory is
+// always safe; a missing directory is not an error.
+func deleteRedactCache(ctx context.Context) error {
+	dir, err := redactCacheDir(ctx)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove redaction cache %s: %w", dir, err)
+	}
+	return nil
 }

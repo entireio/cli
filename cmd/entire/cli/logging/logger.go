@@ -60,9 +60,12 @@ type Logger struct {
 // logger that wrote to the terminal would splash operational lines over the
 // user's output.
 //
-// A directory that cannot be created or opened is reported by Close, not here —
-// by then lines have already been dropped, which is the same outcome as any
-// other write failure and must never surface as an error in the caller.
+// A directory that cannot be created or opened is not reported here — by then
+// lines have already been dropped, which is the same outcome as any other write
+// failure and must never surface as an error in the caller. Two things can still
+// surface it: Close returns it, and EnsureOpen asks for it up front, which is
+// how `entire doctor` reports a log sink that is silently swallowing every
+// diagnostic.
 func New(cfg Config) (*Logger, error) {
 	if cfg.Dir == "" {
 		return nil, errors.New("logging: Config.Dir is required")
@@ -92,6 +95,37 @@ func (l *Logger) open() error {
 	l.file = f
 	l.buf = bufio.NewWriterSize(f, writeBufferSize)
 	return nil
+}
+
+// EnsureOpen opens the log file now instead of on the first line written, and
+// reports a directory it cannot use.
+//
+// It exists so the failure has one caller that looks: the deferred open drops
+// the line and returns nil, so an unwritable .entire/logs makes every
+// diagnostic vanish with no exit code, no message, and an empty log to grep —
+// indistinguishable from "Entire never ran". `entire doctor` calls this to name
+// it. Idempotent, and nil-safe so a caller need not know whether the entry
+// point installed a logger.
+//
+// It creates the directory and file, which is what the next logged line would
+// have done anyway. That does cost the empty-file-free property New buys for
+// commands that log nothing, so call it from commands that are diagnosing, not
+// from hot paths.
+func (l *Logger) EnsureOpen() error {
+	if l == nil {
+		return nil
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// A second open() would reassign buf and file, leaking the handle this
+	// logger already holds. A previous failure needs no guard of its own here:
+	// open() memoizes openErr and returns it without retrying the syscalls.
+	if l.closed || l.buf != nil {
+		return l.openErr
+	}
+	return l.open()
 }
 
 // Slog returns the underlying *slog.Logger, for packages that take one by

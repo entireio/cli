@@ -545,6 +545,28 @@ func TestResolveRepoCellPlacement_PairsIDWithItsOwnCell(t *testing.T) {
 	}
 }
 
+// Both placement resolvers share one ID matcher (placementByID), so a
+// whitespace-padded placement id resolves the same way here as in the search
+// fan-out. Before they shared it, this resolver compared a trimmed
+// primaries.processing against an untrimmed p.ID and reported the repo as
+// having no processing placement at all. RepoID must come back trimmed: it
+// becomes a path segment in entire-api URLs.
+func TestResolveRepoCellPlacement_ToleratesPaddedPlacementID(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
+		repos: reposOutput(repoIndexFixture("acme/widget", "mirror-eu",
+			placementFixture{id: " mirror-eu ", slug: euClusterSlug},
+		)),
+		clusters: clustersWithSlugs(),
+	})
+	got, err := resolveRepoCellPlacement(context.Background(), "acme", "widget")
+	if err != nil {
+		t.Fatalf("resolveRepoCellPlacement: %v", err)
+	}
+	if got.RepoID != "mirror-eu" {
+		t.Errorf("RepoID = %q, want the trimmed mirror-eu", got.RepoID)
+	}
+}
+
 // A multi-homed repo must resolve to its PROCESSING placement specifically,
 // not merely "some" placement (the pre-fix behavior in resolveRepoCellTarget
 // was to refuse; resolveRepoCellPlacement's pre-fix behavior was to take

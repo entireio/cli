@@ -17,7 +17,7 @@ import (
 
 // TestSeam_GitRefsPrimaryWithGitBranchMirror drives the branch->refs rollout
 // topology through checkpoint.Open: a git-refs primary with a git-branch mirror.
-// It writes all four WriteRequest variants and asserts reads resolve from the
+// It writes all five WriteRequest variants and asserts reads resolve from the
 // git-refs primary while the git-branch mirror (the v1 branch) independently
 // received every write.
 //
@@ -41,12 +41,18 @@ func TestSeam_GitRefsPrimaryWithGitBranchMirror(t *testing.T) {
 
 	ctx := context.Background()
 	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	reservedCID := id.MustCheckpointID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
 	const sessionID = "sess-1"
 
 	require.NoError(t, stores.Persistent.Write(ctx, Session{
 		CheckpointID: cid, SessionID: sessionID, Strategy: "manual-commit",
 		Transcript: redact.AlreadyRedacted([]byte("initial transcript")),
 		Prompts:    []string{"do the thing"}, FilesTouched: []string{"a.go"},
+		AuthorName: "Test", AuthorEmail: "test@example.com",
+	}))
+	require.NoError(t, stores.Persistent.Write(ctx, ReservedSession{
+		CheckpointID: reservedCID, SessionID: "reserved-session", Strategy: "manual-commit",
+		Transcript: redact.AlreadyRedacted([]byte("reserved transcript")),
 		AuthorName: "Test", AuthorEmail: "test@example.com",
 	}))
 	require.NoError(t, stores.Persistent.Write(ctx, SessionTranscript{
@@ -63,7 +69,7 @@ func TestSeam_GitRefsPrimaryWithGitBranchMirror(t *testing.T) {
 
 	// Reads resolve from the git-refs primary.
 	t.Run("git-refs primary", func(t *testing.T) {
-		assertSeamVariants(t, stores.Persistent, cid)
+		assertSeamVariants(t, stores.Persistent, cid, reservedCID)
 		// The primary is the per-checkpoint-ref store, not a fan-out of nothing.
 		_, err := repo.Reference(mustRefName(t, cid), true)
 		assert.NoError(t, err, "primary should have written the per-checkpoint ref")
@@ -72,18 +78,18 @@ func TestSeam_GitRefsPrimaryWithGitBranchMirror(t *testing.T) {
 	// The git-branch mirror independently received every write on the v1 branch.
 	t.Run("git-branch mirror", func(t *testing.T) {
 		mirror := NewGitStore(repo, DefaultV1Refs())
-		assertSeamVariants(t, mirror, cid)
+		assertSeamVariants(t, mirror, cid, reservedCID)
 	})
 
 	// Reads must be served by the git-refs primary, not the mirror: after the
 	// mirror's v1 branch is deleted, the composed store still reads everything.
 	t.Run("reads resolve from primary", func(t *testing.T) {
 		require.NoError(t, repo.Storer.RemoveReference(v1BranchRef()))
-		assertSeamVariants(t, stores.Persistent, cid)
+		assertSeamVariants(t, stores.Persistent, cid, reservedCID)
 	})
 }
 
-func assertSeamVariants(t *testing.T, store PersistentStore, cid id.CheckpointID) {
+func assertSeamVariants(t *testing.T, store PersistentStore, cid, reservedCID id.CheckpointID) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -102,4 +108,8 @@ func assertSeamVariants(t *testing.T, store PersistentStore, cid id.CheckpointID
 	require.NoError(t, err)
 	require.NotNil(t, meta.Summary)
 	assert.Equal(t, "intent-x", meta.Summary.Intent)
+
+	reservedContent, err := store.ReadSessionContent(ctx, reservedCID, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("reserved transcript"), reservedContent.Transcript)
 }

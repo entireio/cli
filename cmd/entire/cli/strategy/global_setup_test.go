@@ -156,6 +156,26 @@ func TestMaybeEnsureGlobalSetup_RepoLevelSetupWins(t *testing.T) {
 	}
 }
 
+func TestMaybeEnsureGlobalSetup_IncidentalSettingsInheritGlobal(t *testing.T) {
+	repoDir := newGlobalSetupRepo(t)
+	enableGlobalTier(t)
+	testutil.WriteFile(t, repoDir, ".entire/settings.local.json", `{"investigate":{"max_turns":4}}`)
+	paths.ClearInvisibleRuntimeCache()
+
+	MaybeEnsureGlobalSetup(t.Context())
+
+	if !IsGitHookInstalledInDir(t.Context(), repoDir) {
+		t.Error("lazy setup did not run for a globally tracked repo with incidental settings")
+	}
+	prefs, err := settings.LoadClonePreferences(t.Context())
+	if err != nil {
+		t.Fatalf("load clone preferences: %v", err)
+	}
+	if !prefs.GlobalSetupCompleted {
+		t.Error("clone preferences not marked after global lazy setup")
+	}
+}
+
 // TestMaybeEnsureGlobalSetup_WorktreeHooksPath pins the hooksPath guard: when
 // core.hooksPath resolves inside the worktree (e.g. a committed .husky dir),
 // the lazy setup must not install hooks there — a worktree write would break
@@ -337,6 +357,24 @@ func TestEnsureSetupForHook_GloballyTracked_NoWorktreeWrites(t *testing.T) {
 	}
 	if !IsGitHookInstalledInDir(ctx, repoDir) {
 		t.Error("git hooks not installed via hook-path setup")
+	}
+}
+
+func TestEnsureSetupForHook_IncidentalSettingsUseGlobalSetup(t *testing.T) {
+	repoDir := newGlobalSetupRepo(t)
+	enableGlobalTier(t)
+	testutil.WriteFile(t, repoDir, ".entire/settings.local.json", `{"investigate":{"max_turns":4}}`)
+	paths.ClearInvisibleRuntimeCache()
+
+	if err := EnsureSetupForHook(t.Context()); err != nil {
+		t.Fatalf("EnsureSetupForHook: %v", err)
+	}
+
+	if _, err := os.Lstat(filepath.Join(repoDir, ".entire", ".gitignore")); !os.IsNotExist(err) {
+		t.Errorf("full repo setup ran for incidental settings (err=%v)", err)
+	}
+	if !IsGitHookInstalledInDir(t.Context(), repoDir) {
+		t.Error("global lazy setup did not install git hooks")
 	}
 }
 

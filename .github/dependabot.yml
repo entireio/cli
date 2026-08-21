@@ -18,6 +18,9 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+      # goredact bumps are gated by the redaction corpus A/B (same regime as
+      # betterleaks); upgrade deliberately, never automatically.
+      - dependency-name: "github.com/lastpersonlabs/goredact"
 
   # Maintain dependencies for GitHub Actions
   - package-ecosystem: "github-actions"

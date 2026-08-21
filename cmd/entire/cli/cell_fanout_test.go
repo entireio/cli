@@ -14,26 +14,46 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
+// Placement ULIDs and cell/slug names reused across the fan-out tests.
+const (
+	testPlacementFallback = "01FALLBACK"
+	testClusterSlugEU     = "eu-prod"
+	testPlacementUS       = "01US"
+	testPlacementA        = "01A"
+	usEastCell            = "aws-us-east-2"
+	euCentralCell         = "aws-eu-central-1"
+	testPlacementEU       = "01EU"
+	testPlacementAU       = "01AU"
+)
+
+// readyPlacement is the common fan-out fixture. Mirror is true because real
+// /repos rows mark EVERY placement Mirror:true (the pick must never key on
+// it); deliberate exceptions (unready, empty ID, no slug) stay literal so the
+// exception is the thing that looks unusual.
+func readyPlacement(id, cell, slug, jurisdiction string) coreapi.RepoPlacement {
+	return coreapi.RepoPlacement{ID: id, Cell: cell, ClusterSlug: slug, Jurisdiction: jurisdiction, Mirror: true, Status: coreapi.RepoPlacementStatusReady}
+}
+
 func TestGroupReposByCell(t *testing.T) {
 	t.Parallel()
 	repos := []coreapi.RepoIndexEntry{
-		{ID: "01B", Cell: "aws-us-east-2", ClusterSlug: "us-prod", Jurisdiction: "us"},
-		{ID: "01C", Cell: "AWS-US-EAST-2", ClusterSlug: "us-prod", Jurisdiction: "US"}, // case-folds into same group
-		{ID: "01A", Cell: euWestCell, ClusterSlug: "eu-prod", Jurisdiction: "eu"},
+		{ID: "01B", Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us"},
+		{ID: "01C", Cell: "AWS-US-EAST-2", ClusterSlug: testClusterSlugUS, Jurisdiction: "US"}, // case-folds into same group
+		{ID: testPlacementA, Cell: euWestCell, ClusterSlug: testClusterSlugEU, Jurisdiction: "eu"},
 		{ID: "", Cell: euWestCell}, // no ID → skipped
 		// Blank cell in different jurisdictions must NOT collapse into one
 		// group — each routes via its own jurisdiction fallback.
 		{ID: "01D", Jurisdiction: "eu"},
 		{ID: "01E", Jurisdiction: "us"},
 	}
-	cells := groupReposByCell(repos)
+	cells, _ := groupReposByCell(repos)
 	if len(cells) != 4 {
 		t.Fatalf("groups = %d, want 4: %+v", len(cells), cells)
 	}
 	// Deterministic order by cell name, jurisdiction tiebreak:
 	// ""/eu < ""/us < aws-eu-west-1 < aws-us-east-2.
 	order := []struct{ cell, jurisdiction string }{
-		{"", "eu"}, {"", "us"}, {euWestCell, "eu"}, {"aws-us-east-2", "us"},
+		{"", "eu"}, {"", "us"}, {euWestCell, "eu"}, {usEastCell, "us"},
 	}
 	for i, want := range order {
 		if cells[i].cell != want.cell || cells[i].jurisdiction != want.jurisdiction {
@@ -52,110 +72,260 @@ func TestGroupReposByCell(t *testing.T) {
 	}
 }
 
-// TestGroupReposByCell_Placements verifies that when a repo has Placements,
-// each placement is grouped into its own cell group with the placement-specific
-// repo ID. This is the fix for cross-region fan-out: a US-homed repo with an
-// EU mirror produces two cell groups so both cells are searched.
+// TestGroupReposByCell_Placements verifies that a repo with Placements routes
+// to ONE placement — with no election on the row, the canonical convention
+// picks the placement whose ID equals the entry's ID, never the Mirror flag
+// (see routedRepoPlacement).
 func TestGroupReposByCell_Placements(t *testing.T) {
 	t.Parallel()
 	repos := []coreapi.RepoIndexEntry{
 		{
-			// US-homed repo with an EU mirror — the real-world scenario. Each
-			// placement carries its OWN cluster slug (the /repos spec bump).
-			ID: "01US", Cell: "aws-us-east-2", ClusterSlug: "us-prod", Jurisdiction: "us",
+			// US-homed repo with an EU mirror.
+			ID: testPlacementUS, Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us",
 			Placements: []coreapi.RepoPlacement{
-				{ID: "01US", Cell: "aws-us-east-2", ClusterSlug: "us-prod", Jurisdiction: "us"},
-				{ID: "01EU", Cell: "aws-eu-central-1", ClusterSlug: "eu-prod", Jurisdiction: "eu", Mirror: true},
+				readyPlacement(testPlacementUS, usEastCell, testClusterSlugUS, "us"),
+				readyPlacement(testPlacementEU, euCentralCell, testClusterSlugEU, "eu"),
 			},
 		},
 		{
 			// Repo without placements (legacy index) — top-level fields used.
-			ID: "01LEGACY", Cell: "aws-us-east-2", ClusterSlug: "us-prod", Jurisdiction: "us",
+			ID: "01LEGACY", Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us",
 		},
 	}
-	cells := groupReposByCell(repos)
-	if len(cells) != 2 {
-		t.Fatalf("groups = %d, want 2 (one per cell): %+v", len(cells), cells)
+	cells, skipped := groupReposByCell(repos)
+	if len(skipped) != 0 {
+		t.Fatalf("skipped = %v, want none", skipped)
 	}
-	// Sorted: aws-eu-central-1 < aws-us-east-2.
-	eu := cells[0]
-	us := cells[1]
-	if eu.cell != "aws-eu-central-1" || eu.jurisdiction != "eu" {
-		t.Fatalf("eu group = %+v", eu)
+	if len(cells) != 1 {
+		t.Fatalf("groups = %d, want 1 (canonical cell only): %+v", len(cells), cells)
 	}
-	if got := strings.Join(eu.repoIDs, ","); got != "01EU" {
-		t.Fatalf("eu repoIDs = %q, want 01EU", got)
-	}
-	// The EU mirror carries its own slug, so the group can do the exact
-	// catalog join instead of falling back to jurisdiction-default routing.
-	if eu.clusterSlug != "eu-prod" {
-		t.Fatalf("eu clusterSlug = %q, want eu-prod", eu.clusterSlug)
-	}
-	if us.cell != "aws-us-east-2" || us.jurisdiction != "us" {
+	us := cells[0]
+	if us.cell != usEastCell || us.jurisdiction != "us" {
 		t.Fatalf("us group = %+v", us)
 	}
-	// US group has both the placement ID and the legacy entry.
+	// Canonical placement ID plus the legacy entry; the EU mirror ID must not
+	// appear anywhere.
 	if got := strings.Join(us.repoIDs, ","); got != "01US,01LEGACY" {
 		t.Fatalf("us repoIDs = %q, want 01US,01LEGACY", got)
 	}
-	// US group gets its slug from the placement (and the legacy entry agrees).
 	if us.clusterSlug != testClusterSlugUS {
 		t.Fatalf("us clusterSlug = %q, want us-prod", us.clusterSlug)
 	}
 }
 
-// TestGroupReposByCell_PlacementEmptyID verifies that placements with empty IDs
-// are skipped, matching the top-level behavior.
+// TestGroupReposByCell_ProcessingPrimaryPreferred verifies that core's
+// explicit primaries.processing ULID outranks the row-ID convention: when the
+// two disagree, the processing primary wins (it names the cell doing the
+// repo's heavy lifting — where searchable content originates). An unknown
+// processing ULID (not among the placements) falls back to the convention.
+func TestGroupReposByCell_ProcessingPrimaryPreferred(t *testing.T) {
+	t.Parallel()
+	repos := []coreapi.RepoIndexEntry{
+		{
+			// Row ID says US, primaries.processing says EU — EU must win.
+			ID: testPlacementUS, Jurisdiction: "us",
+			Primaries: coreapi.NewOptRepoPrimaries(coreapi.RepoPrimaries{Processing: testPlacementEU}),
+			Placements: []coreapi.RepoPlacement{
+				readyPlacement(testPlacementUS, usEastCell, testClusterSlugUS, "us"),
+				readyPlacement(testPlacementEU, euCentralCell, testClusterSlugEU, "eu"),
+			},
+		},
+		{
+			// primaries.processing names a ULID that is not among the
+			// placements (inconsistent row) — fall back to the row-ID match.
+			ID: testPlacementFallback, Jurisdiction: "us",
+			Primaries: coreapi.NewOptRepoPrimaries(coreapi.RepoPrimaries{Processing: "01ELSEWHERE"}),
+			Placements: []coreapi.RepoPlacement{
+				readyPlacement(testPlacementFallback, usEastCell, testClusterSlugUS, "us"),
+			},
+		},
+	}
+	cells, skipped := groupReposByCell(repos)
+	if len(skipped) != 0 {
+		t.Fatalf("skipped = %v, want none", skipped)
+	}
+	if len(cells) != 2 {
+		t.Fatalf("groups = %d, want 2: %+v", len(cells), cells)
+	}
+	// Sorted: aws-eu-central-1 < aws-us-east-2.
+	eu, us := cells[0], cells[1]
+	if eu.cell != euCentralCell || strings.Join(eu.repoIDs, ",") != testPlacementEU {
+		t.Fatalf("eu group = %+v, want processing primary %s", eu, testPlacementEU)
+	}
+	if us.cell != usEastCell || strings.Join(us.repoIDs, ",") != testPlacementFallback {
+		t.Fatalf("us group = %+v, want row-ID fallback %s", us, testPlacementFallback)
+	}
+}
+
+// TestGroupReposByCell_CanonicalNotFirst verifies fallback selection (rows
+// predating primaries.processing) scans all placements for the row-ID match
+// rather than assuming position, and that with no ID match the first
+// placement serves as fallback (the BFF's canonicalPlacement convention:
+// placements.find(p => p.id === row.id) ?? placements[0]).
+func TestGroupReposByCell_CanonicalNotFirst(t *testing.T) {
+	t.Parallel()
+	repos := []coreapi.RepoIndexEntry{
+		{
+			ID: testPlacementAU, Jurisdiction: "us",
+			Placements: []coreapi.RepoPlacement{
+				readyPlacement(testPlacementUS, usEastCell, testClusterSlugUS, "us"),
+				readyPlacement(testPlacementEU, euCentralCell, testClusterSlugEU, "eu"),
+				readyPlacement(testPlacementAU, "aws-ap-southeast-2", "au-prod", "au"),
+			},
+		},
+		{
+			// No placement matches the entry ID — fall back to placements[0].
+			ID: "01GONE", Jurisdiction: "us",
+			Placements: []coreapi.RepoPlacement{
+				readyPlacement("01FIRST", usEastCell, testClusterSlugUS, "us"),
+				readyPlacement("01SECOND", euCentralCell, testClusterSlugEU, "eu"),
+			},
+		},
+	}
+	cells, skipped := groupReposByCell(repos)
+	if len(skipped) != 0 {
+		t.Fatalf("skipped = %v, want none", skipped)
+	}
+	if len(cells) != 2 {
+		t.Fatalf("groups = %d, want 2: %+v", len(cells), cells)
+	}
+	// Sorted: aws-ap-southeast-2 < aws-us-east-2.
+	au, us := cells[0], cells[1]
+	if au.cell != "aws-ap-southeast-2" || strings.Join(au.repoIDs, ",") != testPlacementAU {
+		t.Fatalf("au group = %+v, want canonical %s", au, testPlacementAU)
+	}
+	if us.cell != usEastCell || strings.Join(us.repoIDs, ",") != "01FIRST" {
+		t.Fatalf("us group = %+v, want fallback 01FIRST", us)
+	}
+}
+
+// TestGroupReposByCell_UnreadyCanonicalSkipped verifies a picked placement
+// that is not ready (processing/failed/suspended) is not routed — there is
+// nothing searchable there yet — and the repo is reported so callers can warn
+// instead of silently narrowing the search.
+func TestGroupReposByCell_UnreadyCanonicalSkipped(t *testing.T) {
+	t.Parallel()
+	repos := []coreapi.RepoIndexEntry{
+		{
+			ID: "01CLONING", FullName: "acme/cloning", Jurisdiction: "us",
+			Placements: []coreapi.RepoPlacement{
+				{ID: "01CLONING", Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us", Status: coreapi.RepoPlacementStatusProcessing},
+				readyPlacement("01CLONEEU", euCentralCell, testClusterSlugEU, "eu"),
+			},
+		},
+	}
+	cells, skipped := groupReposByCell(repos)
+	// The unready canonical is skipped entirely — the ready mirror is NOT a
+	// substitute (it may predate the clone; the BFF treats the repo as
+	// unroutable the same way).
+	if strings.Join(skipped, ",") != "acme/cloning" {
+		t.Fatalf("skipped = %v, want [acme/cloning]", skipped)
+	}
+	if len(cells) != 0 {
+		t.Fatalf("groups = %d, want 0: %+v", len(cells), cells)
+	}
+}
+
+// TestRoutedRepoPlacement_NoPlacements pins the defensive guard: an entry
+// with no placements is unroutable (ok=false), never a panic. groupReposByCell
+// routes such entries via the top-level legacy fields before calling this.
+func TestRoutedRepoPlacement_NoPlacements(t *testing.T) {
+	t.Parallel()
+	if _, ok := routedRepoPlacement(coreapi.RepoIndexEntry{ID: testPlacementA}); ok {
+		t.Fatal("ok = true for entry with no placements, want false")
+	}
+}
+
+// TestPlacementByID pins the normalization contract: both sides of the match
+// are trimmed, and an empty or blank id never matches anything.
+func TestPlacementByID(t *testing.T) {
+	t.Parallel()
+	placements := []coreapi.RepoPlacement{{ID: " 01X "}}
+	if p, ok := placementByID(placements, "01X"); !ok || p.ID != " 01X " {
+		t.Fatalf("trimmed match = %+v, %v; want the placement, true", p, ok)
+	}
+	for _, id := range []string{"", "   ", "01MISSING"} {
+		if _, ok := placementByID(placements, id); ok {
+			t.Fatalf("id %q matched, want no match", id)
+		}
+	}
+}
+
+// TestReportableSkippedRepos pins the surfacing gate: pinned requests report
+// every skip; broad requests stay silent while any cell is queried, but
+// report when the skips left nothing to query (a bare "no results" would be
+// misleading). Regression guard for inverting the gate — nothing else fails.
+func TestReportableSkippedRepos(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	skipped := []string{"acme/cloning"}
+	cases := []struct {
+		name         string
+		pinned       bool
+		queriedCells int
+		want         int
+	}{
+		{"pinned always reports", true, 2, 1},
+		{"broad with cells stays silent", false, 2, 0},
+		{"broad with nothing to query reports", false, 0, 1},
+	}
+	for _, tc := range cases {
+		if got := reportableSkippedRepos(ctx, tc.pinned, tc.queriedCells, skipped); len(got) != tc.want {
+			t.Fatalf("%s: reported %v, want %d entries", tc.name, got, tc.want)
+		}
+	}
+	if got := reportableSkippedRepos(ctx, true, 0, nil); got != nil {
+		t.Fatalf("no skips: reported %v, want nil", got)
+	}
+}
+
+// TestGroupReposByCell_PlacementEmptyID verifies that a canonical placement
+// with an empty ID is not routed AND is reported via skipped — an ID-less
+// placement must not become a silent-loss path now that a reporting channel
+// exists.
 func TestGroupReposByCell_PlacementEmptyID(t *testing.T) {
 	t.Parallel()
 	repos := []coreapi.RepoIndexEntry{
 		{
-			ID: "01A", Cell: "aws-us-east-2", Jurisdiction: "us",
+			ID: testPlacementA, Cell: usEastCell, Jurisdiction: "us",
 			Placements: []coreapi.RepoPlacement{
-				{ID: "", Cell: "aws-us-east-2", Jurisdiction: "us"}, // empty ID → skipped
+				{ID: "", Cell: usEastCell, Jurisdiction: "us"}, // empty ID → skipped + reported
 			},
 		},
 	}
-	cells := groupReposByCell(repos)
+	cells, skipped := groupReposByCell(repos)
 	if len(cells) != 0 {
 		t.Fatalf("groups = %d, want 0 (all placement IDs empty): %+v", len(cells), cells)
 	}
+	if strings.Join(skipped, ",") != testPlacementA {
+		t.Fatalf("skipped = %v, want the ID-less repo reported as [%s]", skipped, testPlacementA)
+	}
 }
 
-// TestGroupReposByCell_PlacementUsesOwnSlug verifies each placement routes by
-// its OWN cluster slug (home and mirror alike), independent of the Mirror flag
-// and of the deprecated top-level Cell/ClusterSlug. This is the fix for the
-// mirror-miss: a mirror placement that carries its slug gets the exact catalog
-// join instead of the jurisdiction-default fallback. A placement that genuinely
-// omits its slug still falls back (empty slug on its group).
+// TestGroupReposByCell_PlacementUsesOwnSlug verifies the canonical placement
+// routes by its OWN cluster slug, independent of the deprecated top-level
+// Cell/ClusterSlug, so resolveCellBaseURLs can do the exact catalog join
+// instead of the jurisdiction-default fallback.
 func TestGroupReposByCell_PlacementUsesOwnSlug(t *testing.T) {
 	t.Parallel()
 	repos := []coreapi.RepoIndexEntry{
 		{
 			// Top-level Cell/ClusterSlug intentionally empty; routing must come
-			// entirely from the per-placement fields.
-			ID: "01US", Jurisdiction: "us",
+			// entirely from the canonical placement's fields.
+			ID: testPlacementUS, Jurisdiction: "us",
 			Placements: []coreapi.RepoPlacement{
-				{ID: "01US", Cell: "aws-us-east-2", ClusterSlug: "us-prod", Jurisdiction: "us", Mirror: false},
-				{ID: "01EU", Cell: "aws-eu-central-1", ClusterSlug: "eu-prod", Jurisdiction: "eu", Mirror: true},
-				{ID: "01AP", Cell: "aws-ap-south-1", Jurisdiction: "ap", Mirror: true}, // no slug → fallback
+				{ID: testPlacementUS, Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us", Status: coreapi.RepoPlacementStatusReady},
+				{ID: testPlacementEU, Cell: euCentralCell, ClusterSlug: testClusterSlugEU, Jurisdiction: "eu", Mirror: true, Status: coreapi.RepoPlacementStatusReady},
 			},
 		},
 	}
-	cells := groupReposByCell(repos)
-	if len(cells) != 3 {
-		t.Fatalf("groups = %d, want 3: %+v", len(cells), cells)
+	cells, _ := groupReposByCell(repos)
+	if len(cells) != 1 {
+		t.Fatalf("groups = %d, want 1: %+v", len(cells), cells)
 	}
-	// Sorted by cell: aws-ap-south-1 < aws-eu-central-1 < aws-us-east-2.
-	ap, eu, us := cells[0], cells[1], cells[2]
-	if us.cell != "aws-us-east-2" || us.clusterSlug != testClusterSlugUS {
-		t.Fatalf("home group = %+v, want cell aws-us-east-2 with slug us-prod", us)
-	}
-	if eu.cell != "aws-eu-central-1" || eu.clusterSlug != "eu-prod" {
-		t.Fatalf("mirror group = %+v, want cell aws-eu-central-1 with slug eu-prod", eu)
-	}
-	if ap.cell != "aws-ap-south-1" || ap.clusterSlug != "" {
-		t.Fatalf("slugless mirror group = %+v, want cell aws-ap-south-1 with empty slug", ap)
+	us := cells[0]
+	if us.cell != usEastCell || us.clusterSlug != testClusterSlugUS {
+		t.Fatalf("canonical group = %+v, want cell aws-us-east-2 with slug us-prod", us)
 	}
 }
 
@@ -165,9 +335,9 @@ func TestGroupReposByCell_PlacementUsesOwnSlug(t *testing.T) {
 // home routing instead of dialing a foreign cell with a home token.
 func TestResolveCellBaseURLs_RefusesBaseURLWithoutJurisdiction(t *testing.T) {
 	t.Parallel()
-	cells := []cellGroup{{cell: "aws-eu-west-1", clusterSlug: "eu-prod"}} // no jurisdiction anywhere
+	cells := []cellGroup{{cell: "aws-eu-west-1", clusterSlug: testClusterSlugEU}} // no jurisdiction anywhere
 	fake := &fakeCellCore{clusters: []coreapi.Cluster{
-		{Slug: "eu-prod", ApiUrl: coreapi.NewOptString(euCellAPIURL)}, // row has no jurisdiction either
+		{Slug: testClusterSlugEU, ApiUrl: coreapi.NewOptString(euCellAPIURL)}, // row has no jurisdiction either
 	}}
 	resolveCellBaseURLs(context.Background(), fake, cells)
 	if cells[0].baseURL != "" || cells[0].jurisdiction != "" {
@@ -182,8 +352,8 @@ func TestResolveCellBaseURLs_RefusesBaseURLWithoutJurisdiction(t *testing.T) {
 func TestResolveCellBaseURLs_JoinsOnClusterSlug(t *testing.T) {
 	t.Parallel()
 	cells := []cellGroup{
-		// Slug ("eu-prod") differs from the cell name (euWestCell).
-		{cell: euWestCell, clusterSlug: "eu-prod", jurisdiction: "eu"},
+		// Slug (testClusterSlugEU) differs from the cell name (euWestCell).
+		{cell: euWestCell, clusterSlug: testClusterSlugEU, jurisdiction: "eu"},
 		{cell: "aws-ap-south-1", clusterSlug: "ap-prod", jurisdiction: "ap"}, // not in catalog
 	}
 	fake := &fakeCellCore{clusters: []coreapi.Cluster{
@@ -208,13 +378,13 @@ func TestResolveCellBaseURLs_JurisdictionFallbackForPlacements(t *testing.T) {
 	t.Parallel()
 	cells := []cellGroup{
 		// Home group with slug — resolved via slug join.
-		{cell: "aws-us-east-2", clusterSlug: "us-prod", jurisdiction: "us"},
+		{cell: usEastCell, clusterSlug: testClusterSlugUS, jurisdiction: "us"},
 		// Mirror group without slug — must fall back to jurisdiction join.
-		{cell: "aws-eu-central-1", clusterSlug: "", jurisdiction: "eu"},
+		{cell: euCentralCell, clusterSlug: "", jurisdiction: "eu"},
 	}
 	fake := &fakeCellCore{clusters: []coreapi.Cluster{
-		{Slug: "us-prod", Jurisdiction: "us", ApiUrl: coreapi.NewOptString("https://aws-us-east-2.api.entire.io")},
-		{Slug: "eu-prod", Jurisdiction: "eu", ApiUrl: coreapi.NewOptString("https://aws-eu-central-1.api.entire.io")},
+		{Slug: testClusterSlugUS, Jurisdiction: "us", ApiUrl: coreapi.NewOptString("https://aws-us-east-2.api.entire.io")},
+		{Slug: testClusterSlugEU, Jurisdiction: "eu", ApiUrl: coreapi.NewOptString("https://aws-eu-central-1.api.entire.io")},
 	}}
 	resolveCellBaseURLs(context.Background(), fake, cells)
 	if cells[0].baseURL != "https://aws-us-east-2.api.entire.io" {
@@ -233,7 +403,7 @@ func TestResolveCellBaseURLs_CellURLMatchOverJurisdiction(t *testing.T) {
 	t.Parallel()
 	cells := []cellGroup{
 		// Mirror group whose cell name appears in the second cluster's URL.
-		{cell: "aws-eu-central-1", clusterSlug: "", jurisdiction: "eu"},
+		{cell: euCentralCell, clusterSlug: "", jurisdiction: "eu"},
 	}
 	fake := &fakeCellCore{clusters: []coreapi.Cluster{
 		// Different EU cell — must NOT be picked even though it's first and default.
@@ -260,7 +430,7 @@ func TestResolveCellBaseURLs_JurisdictionFallbackPrefersDefault(t *testing.T) {
 		// Non-default listed first — must not win.
 		{Slug: "eu-staging", Jurisdiction: "eu", ApiUrl: coreapi.NewOptString("https://eu-staging.api.entire.io")},
 		// Default cluster — should be preferred.
-		{Slug: "eu-prod", Jurisdiction: "eu", IsDefault: true, ApiUrl: coreapi.NewOptString("https://eu-default.api.entire.io")},
+		{Slug: testClusterSlugEU, Jurisdiction: "eu", IsDefault: true, ApiUrl: coreapi.NewOptString("https://eu-default.api.entire.io")},
 	}}
 	resolveCellBaseURLs(context.Background(), fake, cells)
 	if cells[0].baseURL != "https://eu-default.api.entire.io" {
@@ -270,7 +440,7 @@ func TestResolveCellBaseURLs_JurisdictionFallbackPrefersDefault(t *testing.T) {
 
 func TestResolveCellBaseURLs_CatalogErrorLeavesJurisdictionRouting(t *testing.T) {
 	t.Parallel()
-	cells := []cellGroup{{cell: euWestCell, clusterSlug: "eu-prod", jurisdiction: "eu"}}
+	cells := []cellGroup{{cell: euWestCell, clusterSlug: testClusterSlugEU, jurisdiction: "eu"}}
 	resolveCellBaseURLs(context.Background(), &fakeCellCore{clustersErr: errors.New("boom")}, cells)
 	if cells[0].baseURL != "" {
 		t.Fatalf("baseURL = %q, want empty after catalog error", cells[0].baseURL)
@@ -334,8 +504,8 @@ func TestFanOutCells_PartialFailureIsPerCell(t *testing.T) {
 	// Not parallel: swaps the package-level newCellClientBuilder seam.
 	withFakeCellClientBuilder(t, &fakeCellClientBuilder{})
 	cells := []cellGroup{
-		{cell: euWestCell, jurisdiction: "eu", baseURL: "https://eu.api.example", repoIDs: []string{"01A"}},
-		{cell: "aws-us-east-2", jurisdiction: "us", baseURL: "https://us.api.example", repoIDs: []string{"01B"}},
+		{cell: euWestCell, jurisdiction: "eu", baseURL: "https://eu.api.example", repoIDs: []string{testPlacementA}},
+		{cell: usEastCell, jurisdiction: "us", baseURL: "https://us.api.example", repoIDs: []string{"01B"}},
 	}
 	boom := errors.New("cell down")
 	results, err := fanOutCells(context.Background(), false, time.Second, cells,

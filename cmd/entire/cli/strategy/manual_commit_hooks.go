@@ -465,9 +465,9 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	}
 	readCommitMessageSpan.End()
 
-	// Generate a fresh checkpoint ID and resolve session metadata
+	// Resolve the checkpoint ID and session metadata.
 	_, resolveMetadataSpan := perf.Start(ctx, "resolve_session_metadata")
-	checkpointID, err := checkpoint.GenerateCheckpointID(ctx)
+	checkpointID, err := checkpointIDForSessions(ctx, sessionsWithContent)
 	if err != nil {
 		resolveMetadataSpan.RecordError(err)
 		resolveMetadataSpan.End()
@@ -1201,6 +1201,15 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 ) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+	reservedCheckpointID := state.PendingCondensationID()
+	if reservedCheckpointID != id.EmptyCheckpointID && reservedCheckpointID != checkpointID {
+		logging.Warn(logCtx, "post-commit: preserving interrupted condensation with a different checkpoint ID",
+			slog.String("session_id", state.SessionID),
+			slog.String("reserved_checkpoint_id", reservedCheckpointID.String()),
+			slog.String("commit_checkpoint_id", checkpointID.String()))
+		uncondensedActiveOnBranch[shadowBranchName] = true
+		return
+	}
 
 	// Pre-resolve shadow branch ref and tree for this session.
 	// These are read 4+ times across sessionHasNewContent, filesOverlapWithContent,
@@ -1431,7 +1440,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	// Save checkpoint ID so subsequent commits can reuse it (e.g., amend restores trailer).
 	// LastCheckpointCommitHash records the exact commit SHA so the reconcile path can
 	// distinguish a true reset (same SHA) from cherry-pick/rebase (same trailer, new SHA).
-	state.LastCheckpointID = checkpointID
+	state.LastCheckpointID = result.CheckpointID
 	state.LastCheckpointCommitHash = newHead
 
 	logging.Info(logCtx, "session condensed",
@@ -1607,6 +1616,15 @@ type contentCheckOpts struct {
 // The opts parameter provides pre-computed values to avoid redundant work.
 func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *git.Repository, state *SessionState, opts contentCheckOpts) (bool, error) {
 	logCtx := logging.WithComponent(ctx, "manual-commit")
+
+	// Task records are pending checkpoint content that registers on neither the shadow branch nor transcript growth.
+	if state.HasTaskContent() {
+		logging.Debug(logCtx, "sessionHasNewContent: session has task records",
+			slog.String("session_id", state.SessionID),
+			slog.Int("task_records", len(state.TaskRecords)),
+		)
+		return true, nil
+	}
 
 	// Use cached shadow tree if provided
 	var tree *object.Tree
@@ -2084,12 +2102,13 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 		}
 		activeSessions++
 		// Skip sessions that have no condensable content: no transcript path,
-		// no tracked files, and no shadow branch data (StepCount == 0). These
+		// no tracked files, no SaveStep checkpoints, and no task records. These
 		// would produce a Skipped result in CondenseSession, leaving the
 		// Entire-Checkpoint trailer pointing to nothing on the metadata branch.
 		// NOTE: conservative approximation of the skip gate in CondenseSession
 		// (which checks extracted data, not raw state). Keep aligned.
-		if state.TranscriptPath == "" && len(state.FilesTouched) == 0 && state.StepCount == 0 {
+		if state.TranscriptPath == "" && len(state.FilesTouched) == 0 &&
+			state.StepCount == 0 && !state.HasTaskContent() {
 			emptyActiveSessions++
 			logging.Debug(logCtx, "prepare-commit-msg: fast path skipping empty session",
 				slog.String("session_id", state.SessionID),
@@ -2120,10 +2139,19 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 }
 
 // addTrailerForAgentCommit handles the fast path when an agent is committing
-// (ACTIVE session + no TTY). Generates a checkpoint ID and adds the trailer
+// (ACTIVE session + no TTY). It resolves a checkpoint ID and adds the trailer
 // directly, bypassing content detection and interactive prompts.
+//
+// The ID is resolved from this one ACTIVE session, deliberately NOT from every
+// session in the worktree the way PrepareCommitMsg's slow path does. Widening it
+// would let a stale reservation held by some other, already-ended session become
+// this commit's checkpoint ID, merging a live session's work into a checkpoint
+// reserved for an unrelated transcript range. The reserved session loses nothing
+// by being left out: ENDED + GitCommit carries ActionCondenseIfFilesTouched, so
+// PostCommit does not condense a no-files ENDED session under any ID, and
+// `entire doctor` is its retry path.
 func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string) error { //nolint:unparam // kept for signature stability
-	cpID, err := checkpoint.GenerateCheckpointID(logCtx)
+	cpID, err := checkpointIDForSessions(logCtx, []*SessionState{state})
 	if err != nil {
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}
@@ -2153,6 +2181,19 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}
 	return nil
+}
+
+func checkpointIDForSessions(ctx context.Context, states []*SessionState) (id.CheckpointID, error) {
+	for _, state := range states {
+		if checkpointID := state.PendingCondensationID(); checkpointID != id.EmptyCheckpointID {
+			return checkpointID, nil
+		}
+	}
+	checkpointID, err := checkpoint.GenerateCheckpointID(ctx)
+	if err != nil {
+		return id.EmptyCheckpointID, fmt.Errorf("generate checkpoint ID: %w", err)
+	}
+	return checkpointID, nil
 }
 
 // addCheckpointTrailer adds the Entire-Checkpoint trailer to a commit message.
@@ -2911,6 +2952,15 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	redactedTranscript, redactErr := redact.JSONLBytes(fullTranscript)
 	redactSpan.End()
 	if redactErr != nil {
+		if errors.Is(redactErr, redact.ErrScannerDegraded) {
+			// Keep TurnCheckpointIDs: the flag is per-process, so the next
+			// hook process retries.
+			logging.Warn(logCtx, "finalize: transcript redaction degraded, skipping",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", redactErr.Error()),
+			)
+			return 1
+		}
 		logging.Warn(logCtx, "finalize: transcript redaction failed, dropping transcript",
 			slog.String("session_id", state.SessionID),
 			slog.String("error", redactErr.Error()),
