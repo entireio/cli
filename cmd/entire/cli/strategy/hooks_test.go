@@ -2927,7 +2927,6 @@ func TestRewriteHuskyOwnedHooks_RotatesStaleBackupBeforeHeal(t *testing.T) {
 	}
 }
 
-
 func TestPreserveCurrentHookOverStaleBackup_PreservesMode0644(t *testing.T) {
 	dir := t.TempDir()
 	hookPath := filepath.Join(dir, "prepare-commit-msg")
