@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -19,14 +18,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
-// handleClaudeCodePostTodo handles the PostToolUse[TodoWrite] hook for subagent checkpoints.
-// Creates a checkpoint if we're in a subagent context (active pre-task file exists).
-// Skips silently if not in subagent context (main agent).
-func handleClaudeCodePostTodo(ctx context.Context) error {
-	return handleClaudeCodePostTodoFromReader(ctx, os.Stdin)
-}
-
-// handleClaudeCodePostTodoFromReader is the testable version that accepts an io.Reader.
+// handleClaudeCodePostTodoFromReader handles PostToolUse[TodoWrite] hooks for
+// subagent checkpoints from the hook registry's replayable input buffer.
 func handleClaudeCodePostTodoFromReader(ctx context.Context, reader io.Reader) error {
 	input, err := parseSubagentCheckpointHookInput(reader)
 	if err != nil {
