@@ -2926,3 +2926,33 @@ func TestRewriteHuskyOwnedHooks_RotatesStaleBackupBeforeHeal(t *testing.T) {
 		t.Fatalf("healed stub should forward, got:\n%s", gotHook)
 	}
 }
+
+
+func TestPreserveCurrentHookOverStaleBackup_PreservesMode0644(t *testing.T) {
+	dir := t.TempDir()
+	hookPath := filepath.Join(dir, "prepare-commit-msg")
+	backupPath := hookPath + backupSuffix
+	oldBackup := "#!/bin/sh\necho old-backup\n"
+	current := "#!/bin/sh\necho current-0644\n"
+	if err := os.WriteFile(backupPath, []byte(oldBackup), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte(current), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := preserveCurrentHookOverStaleBackup(hookPath, backupPath, []byte(current)); err != nil {
+		t.Fatalf("preserveCurrentHookOverStaleBackup: %v", err)
+	}
+
+	info, err := os.Lstat(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o111 != 0 {
+		t.Fatalf("rotated backup mode = %o, want non-executable (0644)", info.Mode().Perm())
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Fatalf("rotated backup mode = %o, want 0644", info.Mode().Perm())
+	}
+}

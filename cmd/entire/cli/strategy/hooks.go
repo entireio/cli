@@ -823,8 +823,13 @@ func huskySafeHookContent(hookName, entireContent string, existing []byte, exist
 // bytes when they differ, so reinstall does not discard newer user logic.
 // hookPath is the live hook that the caller will overwrite next; it is left in
 // place here so a crash or later write failure cannot erase the only copy.
+// The rotated backup keeps hookPath's permission bits so a mode-0644 file that
+// Git ignored does not become executable under the non-Husky chain.
 func preserveCurrentHookOverStaleBackup(hookPath, backupPath string, current []byte) error {
-	_ = hookPath
+	mode := os.FileMode(0o644)
+	if info, statErr := os.Lstat(hookPath); statErr == nil {
+		mode = info.Mode().Perm()
+	}
 	prev, err := os.ReadFile(backupPath) //nolint:gosec // path is controlled
 	if err != nil {
 		return fmt.Errorf("read existing backup: %w", err)
@@ -840,7 +845,7 @@ func preserveCurrentHookOverStaleBackup(hookPath, backupPath string, current []b
 			return fmt.Errorf("rotate stale backup: %w", err)
 		}
 	}
-	if err := os.WriteFile(backupPath, current, 0o755); err != nil { //nolint:gosec // hook backup may be executed
+	if err := os.WriteFile(backupPath, current, mode); err != nil { //nolint:gosec // preserve caller mode
 		return fmt.Errorf("write updated backup: %w", err)
 	}
 	// Confirm the backup is readable and complete before the caller overwrites
@@ -1142,13 +1147,16 @@ func rewriteHuskyOwnedHooks(hooksDir string, backfillMissing bool) (int, error) 
 			changed++
 			if backfillMissing {
 				live, liveErr := os.ReadFile(hookPath) //nolint:gosec // path is controlled
-				if liveErr != nil || !hasActiveHuskyStubDispatch(string(live)) {
+				if liveErr != nil {
+					// Do not overwrite the just-restored file if we cannot
+					// inspect it — that would drop the only remaining copy.
+					return changed, fmt.Errorf("read restored husky stub %s: %w", hookPath, liveErr)
+				}
+				if !hasActiveHuskyStubDispatch(string(live)) {
 					// Restored bytes are not a forwarding stub — keep them as
 					// backup and install the canonical stub so Git reaches parent.
-					if liveErr == nil {
-						if err := os.Rename(hookPath, backupPath); err != nil {
-							return changed, fmt.Errorf("re-backup non-stub restore %s: %w", hookPath, err)
-						}
+					if err := os.Rename(hookPath, backupPath); err != nil {
+						return changed, fmt.Errorf("re-backup non-stub restore %s: %w", hookPath, err)
 					}
 					if err := writeHuskyForwardingStub(hookPath); err != nil {
 						return changed, fmt.Errorf("replace restored non-stub %s: %w", hookPath, err)
