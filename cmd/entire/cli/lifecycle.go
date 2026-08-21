@@ -1003,11 +1003,13 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// under repoRoot is evidence the foreign clamp cannot see (home-as-repo
 	// dotfiles setups make everything path-wise "inside"); the tap only reads
 	// it, so relModifiedFiles feeds capture below byte-identical.
-	recordForeignEvidence(ctx, sessionID, binding.SessionMeta{
-		AgentType:      string(ag.Type()),
-		TranscriptPath: event.SessionRef,
-		LaunchRoot:     repoRoot,
-	}, repoRoot, foreignModifiedFiles, relModifiedFiles)
+	if !bindingReplayActive() {
+		recordForeignEvidence(ctx, sessionID, binding.SessionMeta{
+			AgentType:      string(ag.Type()),
+			TranscriptPath: event.SessionRef,
+			LaunchRoot:     repoRoot,
+		}, repoRoot, foreignModifiedFiles, relModifiedFiles)
+	}
 	var relNewFiles, relDeletedFiles []string
 	if changes != nil {
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
@@ -1019,6 +1021,26 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		// Git status catches any tracked file with working-tree changes.
 		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
 	}
+	if bindingReplayActive() && preState == nil {
+		relNewFiles = filterBindingReplayNewFiles(relNewFiles, relModifiedFiles)
+		if len(relNewFiles) > 0 {
+			newSet := make(map[string]struct{}, len(relNewFiles))
+			for _, file := range relNewFiles {
+				newSet[file] = struct{}{}
+			}
+			mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+				state.UntrackedFilesAtStart = slices.DeleteFunc(state.UntrackedFilesAtStart, func(file string) bool {
+					_, createdThisTurn := newSet[file]
+					return createdThisTurn
+				})
+				return nil
+			})
+			if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+				logging.Warn(logCtx, "failed to repair replayed untracked-file baseline",
+					slog.String("error", mutErr.Error()))
+			}
+		}
+	}
 
 	// Filter transcript-extracted files to exclude files already committed to HEAD.
 	// When an agent commits files mid-turn, those files are condensed by PostCommit
@@ -1029,6 +1051,13 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 	// Check if there are any changes
 	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
+	currentCommonDir := ""
+	if currentRepo, ok := binding.ResolveRepoForPath(ctx, filepath.Join(repoRoot, ".git")); ok {
+		currentCommonDir = currentRepo.CommonDir
+	}
+	if !bindingReplayActive() {
+		selectBindingTurnPrimary(ctx, bindingTurnCollectorFromContext(ctx), repoRoot, modifiedFiles, totalChanges > 0)
+	}
 	if totalChanges == 0 {
 		logging.Info(logCtx, "no files modified during session, skipping checkpoint")
 		recordCaptureDegraded(ctx, sessionID, captureDegraded)
@@ -1087,6 +1116,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	tokenUsage := event.TokenUsage
 	if tokenUsage == nil {
 		tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
+	}
+	if !bindingTurnKeepsTokenUsage(ctx, currentCommonDir) {
+		tokenUsage = nil
 	}
 
 	// Build fully-populated step context and delegate to strategy

@@ -92,17 +92,22 @@ func recordForeignEvidence(ctx context.Context, sessionID string, meta binding.S
 			slog.String("session_id", sessionID),
 			slog.String("repo", ev.Repo.WorktreeRoot),
 			slog.Bool("enabled", ev.Enabled))
-		if err := ensureSessionReplicated(ctx, sessionID, meta, currentWorktreeRoot, ev); err != nil {
+		replicated, err := ensureSessionReplicated(ctx, sessionID, meta, currentWorktreeRoot, ev)
+		if err != nil {
 			logging.Debug(logCtx, "failed to replicate session into bound repo",
 				slog.String("session_id", sessionID),
 				slog.String("repo", ev.Repo.WorktreeRoot),
 				slog.String("error", err.Error()))
+			continue
+		}
+		if replicated {
+			bindingTurnCollectorFromContext(ctx).recordSuccessfulReplay(ev)
 		}
 	}
 }
 
 // resolveForeignRepos resolves evidence paths to the distinct foreign repos
-// they live in — first-seen order, deduped by CommonDir, budget-capped — with
+// they live in — last-activity order, deduped by CommonDir, budget-capped — with
 // each repo's Enabled flag computed at its worktree root. It only resolves;
 // recording is the caller's: the in-repo tap writes each result with its own
 // RecordBinding, while the no-repo turn-end path needs the resolved evidence
@@ -122,6 +127,8 @@ func resolveForeignRepos(ctx context.Context, sessionID, currentWorktreeRoot str
 	}
 
 	found := make(map[string]binding.RepoIdentity)
+	foundFiles := make(map[string][]string)
+	seenFiles := make(map[string]map[string]struct{})
 	order := make([]string, 0, len(foreignPaths))
 	// Budget by filepath.Dir(path): the resolver's real cache key is the
 	// nearest EXISTING ancestor, but at this layer filepath.Dir is the right
@@ -161,16 +168,33 @@ func resolveForeignRepos(ctx context.Context, sessionID, currentWorktreeRoot str
 		if id.WorktreeRoot == currentWorktreeRoot {
 			continue
 		}
-		if _, seen := found[id.CommonDir]; !seen {
-			found[id.CommonDir] = id
-			order = append(order, id.CommonDir)
+		if _, seen := found[id.CommonDir]; seen {
+			for i, commonDir := range order {
+				if commonDir == id.CommonDir {
+					order = append(order[:i], order[i+1:]...)
+					break
+				}
+			}
 		}
+		found[id.CommonDir] = id
+		rel, relErr := filepath.Rel(id.WorktreeRoot, p)
+		rel = filepath.ToSlash(rel)
+		if relErr == nil && rel != "." && rel != ".git" && !strings.HasPrefix(rel, "../") && !strings.HasPrefix(rel, ".git/") && !shouldIgnoreSessionTrackingPath(rel) {
+			if seenFiles[id.CommonDir] == nil {
+				seenFiles[id.CommonDir] = make(map[string]struct{})
+			}
+			if _, seen := seenFiles[id.CommonDir][rel]; !seen {
+				seenFiles[id.CommonDir][rel] = struct{}{}
+				foundFiles[id.CommonDir] = append(foundFiles[id.CommonDir], rel)
+			}
+		}
+		order = append(order, id.CommonDir)
 	}
 
 	evs := make([]binding.Evidence, 0, len(order))
 	for _, commonDir := range order {
 		id := found[commonDir]
-		evs = append(evs, binding.Evidence{Repo: id, Enabled: settings.IsSetUpAtRoot(id.WorktreeRoot)})
+		evs = append(evs, binding.Evidence{Repo: id, Enabled: settings.IsSetUpAtRoot(id.WorktreeRoot), Files: foundFiles[commonDir]})
 	}
 	return evs
 }

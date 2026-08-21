@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -91,6 +92,13 @@ func getHookType(hookName string) string {
 // built-in and external hook commands both pass true; tests may pass false
 // when session stamping is irrelevant.
 func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, stampSession bool) error {
+	payload, err := io.ReadAll(cmd.InOrStdin())
+	if err != nil {
+		return fmt.Errorf("failed to read hook event: %w", err)
+	}
+	collector := newBindingTurnCollector()
+	cmd.SetContext(withBindingTurnCollector(cmd.Context(), collector))
+
 	// Skip if not in a git repository - hooks shouldn't prevent the agent
 	// from working. On SessionStart only, and only when the user opted in to
 	// global tracking (tier configured AND enabled), leave a one-line notice:
@@ -107,7 +115,10 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		// No repo at cwd: capture is impossible, but the session's evidence
 		// may name repos elsewhere (parent-dir launches, #1098). Record it
 		// best-effort and still exit 0 so the agent is never blocked.
-		recordNoRepoEvidence(cmd.Context(), agentName, hookName, cmd.InOrStdin())
+		event := recordNoRepoEvidence(cmd.Context(), agentName, hookName, bytes.NewReader(payload))
+		if event != nil && event.Type == agent.TurnEnd {
+			replayBindingTurn(cmd.Context(), collector, string(agentName), hookName, payload)
+		}
 		return nil
 	}
 	ctx, policy, policyErr := prepareHookPolicy(cmd.Context())
@@ -191,7 +202,7 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	}
 
 	// Use cmd.InOrStdin() to support testing with cmd.SetIn()
-	event, parseErr := handler.ParseHookEvent(ctx, hookName, cmd.InOrStdin())
+	event, parseErr := handler.ParseHookEvent(ctx, hookName, bytes.NewReader(payload))
 	if parseErr != nil {
 		return fmt.Errorf("failed to parse hook event: %w", parseErr)
 	}
@@ -238,6 +249,9 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	} else if claudePostTodoCheckpointHook {
 		// PostTodo is Claude-specific: creates incremental checkpoints during subagent execution
 		hookErr = handleClaudeCodePostTodo(ctx)
+	}
+	if eventType == agent.TurnEnd {
+		replayBindingTurn(ctx, collector, string(agentName), hookName, payload)
 	}
 	// Other pass-through hooks (nil event, no special handling) are no-ops
 

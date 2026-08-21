@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -93,6 +94,7 @@ func TestRecordForeignEvidence_ReplicatesStateWithoutRetiringSource(t *testing.T
 		testutil.GitCommit(t, root, "initial")
 	}
 	enableEntireAt(t, rootB)
+	testutil.WriteFile(t, rootB, "preexisting.tmp", "keep me\n")
 	testutil.WriteFile(t, rootB, "agent.go", "package agent\n")
 	t.Chdir(rootA)
 
@@ -137,6 +139,9 @@ func TestRecordForeignEvidence_ReplicatesStateWithoutRetiringSource(t *testing.T
 	}
 	if len(target.FilesTouched) != 1 || target.FilesTouched[0] != "agent.go" {
 		t.Errorf("target files touched = %v, want [agent.go]", target.FilesTouched)
+	}
+	if !slices.Contains(target.UntrackedFilesAtStart, "preexisting.tmp") {
+		t.Errorf("pre-existing untracked baseline = %v, want preexisting.tmp preserved", target.UntrackedFilesAtStart)
 	}
 	if target.Phase != session.PhaseActive || target.AdoptedIntoWorktreePath != "" {
 		t.Errorf("replicated state must be active and additive, got phase=%s tombstone=%q", target.Phase, target.AdoptedIntoWorktreePath)

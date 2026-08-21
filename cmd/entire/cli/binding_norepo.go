@@ -36,7 +36,7 @@ import (
 // logging.Init never ran here (initHookLogging no-ops outside a repo), so only
 // logging.Debug may be used: pre-Init it is a silent no-op, while
 // Info/Warn/Error would leak raw slog text onto the agent's stderr.
-func recordNoRepoEvidence(ctx context.Context, agentName types.AgentName, hookName string, stdin io.Reader) {
+func recordNoRepoEvidence(ctx context.Context, agentName types.AgentName, hookName string, stdin io.Reader) (result *agent.Event) {
 	logCtx := logging.WithComponent(ctx, "binding")
 	defer func() {
 		if r := recover(); r != nil {
@@ -48,7 +48,7 @@ func recordNoRepoEvidence(ctx context.Context, agentName types.AgentName, hookNa
 
 	ag, err := agent.Get(agentName)
 	if err != nil {
-		return
+		return result
 	}
 	// Deliberately no shouldSkipForwardedHook here: it needs a repo root. A
 	// forwarded hook (e.g. a Cursor-forwarded claude event) records evidence
@@ -56,18 +56,19 @@ func recordNoRepoEvidence(ctx context.Context, agentName types.AgentName, hookNa
 	// meta is first-write-only.
 	handler, ok := agent.AsHookSupport(ag)
 	if !ok {
-		return
+		return result
 	}
 	event, parseErr := handler.ParseHookEvent(ctx, hookName, stdin)
 	if parseErr != nil || event == nil {
-		return
+		return result
 	}
 	// Require a real session ID: an empty ID has nothing to key the record on,
 	// and the tap's unknownSessionID guard only covers its own entry point —
 	// the turn-end evidence+cursor write below bypasses it.
 	if event.SessionID == "" || event.SessionID == unknownSessionID {
-		return
+		return result
 	}
+	result = event
 
 	meta := binding.SessionMeta{
 		AgentType:      string(ag.Type()),
@@ -85,11 +86,11 @@ func recordNoRepoEvidence(ctx context.Context, agentName types.AgentName, hookNa
 		recordForeignEvidence(ctx, event.SessionID, meta, "", absoluteToolUsePaths(event))
 	case agent.TurnEnd:
 		if event.SessionRef == "" {
-			return
+			return result
 		}
 		scan, ok := scanTranscriptForeign(logCtx, ag, event)
 		if !ok {
-			return
+			return result
 		}
 		// currentWorktreeRoot="" — there is no current repo, so every resolved
 		// repo is foreign and the same-worktree skip can never match.
@@ -105,14 +106,19 @@ func recordNoRepoEvidence(ctx context.Context, agentName types.AgentName, hookNa
 			logging.Debug(logCtx, "no-repo evidence: failed to record transcript scan",
 				slog.String("session_id", event.SessionID),
 				slog.String("error", err.Error()))
-			return
+			return result
 		}
 		for _, ev := range evs {
-			if err := ensureSessionReplicated(logCtx, event.SessionID, meta, "", ev); err != nil {
+			replicated, err := ensureSessionReplicated(logCtx, event.SessionID, meta, "", ev)
+			if err != nil {
 				logging.Debug(logCtx, "no-repo evidence: failed to replicate session",
 					slog.String("session_id", event.SessionID),
 					slog.String("repo", ev.Repo.WorktreeRoot),
 					slog.String("error", err.Error()))
+				continue
+			}
+			if replicated {
+				bindingTurnCollectorFromContext(ctx).recordSuccessfulReplay(ev)
 			}
 		}
 	case agent.SessionStart, agent.TurnStart, agent.Compaction, agent.SessionEnd,
@@ -120,6 +126,7 @@ func recordNoRepoEvidence(ctx context.Context, agentName types.AgentName, hookNa
 		// No path evidence; the session-start notice UX is a separate slice.
 	default:
 	}
+	return result
 }
 
 // absoluteToolUsePaths flattens a ToolUse event's path payloads to absolute
