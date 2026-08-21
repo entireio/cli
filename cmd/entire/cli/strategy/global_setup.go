@@ -215,7 +215,7 @@ func EnsureSetupForHook(ctx context.Context) error {
 		logging.Debug(logging.WithComponent(ctx, "global-setup"),
 			"hook setup: repo settings unreadable; skipping",
 			slog.String("error", err.Error()))
-		return nil //nolint:nilerr // hook setup is explicitly best-effort
+		return nil
 	}
 	if !repoConfigured {
 		MaybeEnsureGlobalSetup(ctx)
