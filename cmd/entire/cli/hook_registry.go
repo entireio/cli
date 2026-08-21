@@ -80,12 +80,13 @@ func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cob
 }
 
 // getHookType returns the hook type based on the hook name.
-// Returns "subagent" for task-related hooks (pre-task, post-task, post-todo),
-// "tool" for tool-related hooks (before-tool, after-tool),
+// Returns "subagent" for task-related hooks (pre-task, post-task, post-todo,
+// subagent-stop), "tool" for tool-related hooks (before-tool, after-tool),
 // "agent" for all other agent hooks.
 func getHookType(hookName string) string {
 	switch hookName {
-	case claudecode.HookNamePreTask, claudecode.HookNamePostTask, claudecode.HookNamePostTodo:
+	case claudecode.HookNamePreTask, claudecode.HookNamePostTask, claudecode.HookNamePostTodo,
+		claudecode.HookNameSubagentStop:
 		return "subagent"
 	case geminicli.HookNameBeforeTool, geminicli.HookNameAfterTool:
 		return "tool"

@@ -2,7 +2,9 @@ package redact
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -1640,5 +1642,135 @@ func TestJSONLContent_CrossContextValueCollision(t *testing.T) {
 	}
 	if strings.Count(result, `"password":"REDACTED"`) != 2 {
 		t.Errorf("expected both password fields redacted, got: %s", result)
+	}
+}
+
+func TestConfigureScanners_GoredactLayer(t *testing.T) {
+	t.Cleanup(func() {
+		if err := ConfigureScanners(ScannersConfig{Betterleaks: true}); err != nil {
+			t.Fatalf("restore default scanners: %v", err)
+		}
+	})
+
+	// Baseline: both scanners off (legal at the package level; the settings
+	// layer forbids this combination in production). This LOW-entropy,
+	// shape-valid PAT (entropy ≈3.22 full token, ≈2.99 over the suffix — below
+	// layer 1's 4.5 threshold) survives
+	// unchanged, proving no non-scanner layer catches it — every redaction
+	// asserted below is scanner-attributable — and pinning the betterleaks
+	// gate-off direction (betterleaks-only DOES redact this PAT).
+	if err := ConfigureScanners(ScannersConfig{}); err != nil {
+		t.Fatalf("ConfigureScanners(none): %v", err)
+	}
+	in := "auth with token ghp_a1b2c1d2e1f2g1h2a1b2c1d2e1f2g1h2a1b2"
+	if got := String(in); got != in {
+		t.Errorf("no-scanners String() = %q, want input preserved", got)
+	}
+
+	// goredact-only: with betterleaks gated off, a redaction of the PAT can
+	// only come from goredact's shape-only GitHubPAT validator. This is the
+	// non-vacuous wiring proof for the OnFinding collector and offset
+	// conversion.
+	if err := ConfigureScanners(ScannersConfig{Goredact: true}); err != nil {
+		t.Fatalf("ConfigureScanners: %v", err)
+	}
+	if got := String(in); strings.Contains(got, "ghp_a1b2c1d2e1f2g1h2a1b2c1d2e1f2g1h2a1b2") {
+		t.Errorf("goredact-only String() left a GitHub PAT unredacted: %q", got)
+	}
+
+	// Regression pin: placeholders stay preserved under goredact-only.
+	// goredact's own validators reject placeholder shapes; the filter loop
+	// in detectGoredact is defensive belt-and-braces on top of that.
+	if got := String("password=changeme"); got != "password=changeme" {
+		t.Errorf("goredact-only String(changeme) = %q, want preserved", got)
+	}
+
+	// Non-scanner layers stay on under every configuration: layer 7
+	// (bounded credential key/values) is scanner-independent.
+	if got := String("database_password=secret123"); got != "database_password=REDACTED" {
+		t.Errorf("goredact-only String(db kv) = %q, want layer-7 redaction", got)
+	}
+
+	// Gate-off pin: a betterleaks-1.8.0-exclusive detection (the
+	// generic-password rule; goredact rejects the low-entropy value and no
+	// other layer matches) must NOT fire under goredact-only.
+	if got := String("password=not-a-secret-setting"); got != "password=not-a-secret-setting" {
+		t.Errorf("goredact-only String() = %q, want unchanged (betterleaks gated off)", got)
+	}
+
+	// Both engines: goredact remains active alongside betterleaks.
+	if err := ConfigureScanners(ScannersConfig{Betterleaks: true, Goredact: true}); err != nil {
+		t.Fatalf("ConfigureScanners(both): %v", err)
+	}
+	if got := String(in); strings.Contains(got, "ghp_a1b2c1d2e1f2g1h2a1b2c1d2e1f2g1h2a1b2") {
+		t.Errorf("both-scanners String() left the PAT unredacted: %q", got)
+	}
+	// ...and betterleaks remains active too (same 1.8.0-exclusive detection).
+	if got := String("password=not-a-secret-setting"); got != "password=REDACTED" {
+		t.Errorf("both-scanners String() = %q, want betterleaks generic-password detection", got)
+	}
+}
+
+func TestConfigureScanners_DefaultConfig(t *testing.T) {
+	// Explicit default config = betterleaks-only, identical to the
+	// pre-feature pipeline; the existing betterleaks-layer tests in this
+	// file remain the pin for the unconfigured state.
+	if err := ConfigureScanners(ScannersConfig{Betterleaks: true}); err != nil {
+		t.Fatalf("ConfigureScanners: %v", err)
+	}
+	// The low-entropy PAT is invisible to every non-scanner layer (pinned by
+	// the all-off baseline in TestConfigureScanners_GoredactLayer), so this
+	// redaction is attributable to betterleaks running under the default
+	// config.
+	if got := String("auth with token ghp_a1b2c1d2e1f2g1h2a1b2c1d2e1f2g1h2a1b2"); strings.Contains(got, "ghp_a1b2c1d2e1f2g1h2a1b2c1d2e1f2g1h2a1b2") {
+		t.Errorf("betterleaks-only String() left the PAT unredacted: %q", got)
+	}
+}
+
+func TestJSONLBytes_ScannerDegradedSentinel(t *testing.T) {
+	t.Cleanup(func() {
+		SetScannerDegradedForTest(false)
+		if err := ConfigureScanners(ScannersConfig{Betterleaks: true}); err != nil {
+			t.Fatalf("restore: %v", err)
+		}
+	})
+	if err := ConfigureScanners(ScannersConfig{Goredact: true}); err != nil {
+		t.Fatalf("ConfigureScanners: %v", err)
+	}
+	SetScannerDegradedForTest(true)
+
+	// Secret-free input: redaction leaves it byte-identical, so this pins
+	// the degradation check running before the `redacted == s` short-circuit
+	// rather than depending on a redaction actually happening.
+	if _, err := JSONLBytes([]byte(`{"message":"hello"}`)); !errors.Is(err, ErrScannerDegraded) {
+		t.Fatalf("JSONLBytes error = %v, want ErrScannerDegraded", err)
+	}
+
+	// Degradation with betterleaks also enabled is logged-only: no error.
+	if err := ConfigureScanners(ScannersConfig{Betterleaks: true, Goredact: true}); err != nil {
+		t.Fatalf("ConfigureScanners(both): %v", err)
+	}
+	SetScannerDegradedForTest(true)
+	if _, err := JSONLBytes([]byte(`{"message":"hello"}`)); err != nil {
+		t.Fatalf("JSONLBytes with betterleaks covering = %v, want nil", err)
+	}
+}
+
+func TestJSONLBytesWithPrivacyFilter_ScannerDegradedSentinel(t *testing.T) {
+	t.Cleanup(func() {
+		SetScannerDegradedForTest(false)
+		if err := ConfigureScanners(ScannersConfig{Betterleaks: true}); err != nil {
+			t.Fatalf("restore: %v", err)
+		}
+	})
+	if err := ConfigureScanners(ScannersConfig{Goredact: true}); err != nil {
+		t.Fatalf("ConfigureScanners: %v", err)
+	}
+	SetScannerDegradedForTest(true)
+
+	// OPF is unconfigured, so this falls back to the plain JSONLContent flow;
+	// the sentinel must still surface from that path.
+	if _, err := JSONLBytesWithPrivacyFilter(context.Background(), []byte(`{"message":"hello"}`)); !errors.Is(err, ErrScannerDegraded) {
+		t.Fatalf("JSONLBytesWithPrivacyFilter error = %v, want ErrScannerDegraded", err)
 	}
 }

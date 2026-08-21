@@ -6,7 +6,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -101,12 +100,6 @@ func NewRootCmd() *cobra.Command {
 			ensureLogger(cmd)
 		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
-			// Deferred so it runs after the telemetry and version-check calls
-			// below, which log, and so the hidden-command early return still
-			// flushes. main.go closes again for the paths cobra skips this hook
-			// on; Close is idempotent and nil-safe.
-			defer func() { _ = logging.LoggerFromContext(cmd.Context()).Close() }()
-
 			// Skip for hidden commands (walk parent chain — Cobra doesn't propagate Hidden)
 			for c := cmd; c != nil; c = c.Parent() {
 				if c.Hidden {

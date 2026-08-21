@@ -96,6 +96,12 @@ func main() {
 	}
 
 	executed, err := rootCmd.ExecuteContextC(ctx)
+	// The only place the logger is closed, and it must be here: cobra returns out
+	// of Command.execute() as soon as RunE errors or required-flag validation
+	// fails, both before its PersistentPostRun loop, so those paths would
+	// otherwise exit with up to 8KB of buffered diagnostics unwritten. The logger
+	// rides the executed command's context, where the root pre-run put it; a
+	// failure raised before any pre-run carries none, and nothing logged yet.
 	if l := logging.LoggerFromContext(executed.Context()); l != nil {
 		_ = l.Close()
 	}

@@ -1012,14 +1012,19 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr, ty
 		return renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), owner+"/"+repoName, err)
 	}
 
-	branchState, err := prepareTrailCreateBranch(w, errW, repo, branch, currentBranch, noBranch)
+	pushRemote, err := resolveTrailPushRemote(ctx, branch)
+	if err != nil {
+		return err
+	}
+
+	branchState, err := prepareTrailCreateBranch(ctx, w, errW, repo, pushRemote, branch, currentBranch, noBranch)
 	if err != nil {
 		return err
 	}
 
 	createResp, err := postTrailCreate(ctx, client, forge, owner, repoName, title, body, branch, base, statusStr, strings.TrimSpace(typeStr), strings.TrimSpace(priorityStr), assignees)
 	if err != nil {
-		cleanupCreatedTrailBranch(repo, branch, branchState.LocalCreated, branchState.RemotePushed, errW)
+		cleanupCreatedTrailBranch(ctx, repo, pushRemote, branch, branchState.LocalCreated, branchState.RemotePushed, errW)
 		return err
 	}
 	printCreatedTrail(w, createResp.Trail, forge, owner, repoName)
@@ -1097,7 +1102,7 @@ func validateTrailCreateFields(ctx context.Context, title, branch, statusStr str
 	return nil
 }
 
-func prepareTrailCreateBranch(w, errW io.Writer, repo *git.Repository, branch, currentBranch string, noBranch bool) (trailCreateBranchState, error) {
+func prepareTrailCreateBranch(ctx context.Context, w, errW io.Writer, repo *git.Repository, remote, branch, currentBranch string, noBranch bool) (trailCreateBranchState, error) {
 	var state trailCreateBranchState
 	if noBranch || branch == "" {
 		// Branchless trails have no remote branch to create, fetch, or push.
@@ -1105,41 +1110,41 @@ func prepareTrailCreateBranch(w, errW io.Writer, repo *git.Repository, branch, c
 	}
 
 	state.NeedsCreation = branchNeedsCreation(repo, branch)
-	existedOnOrigin, existErr := branchExistsOnOrigin(branch)
+	existedOnRemote, existErr := remoteHasBranch(ctx, remote, branch)
 	if existErr != nil {
-		fmt.Fprintf(errW, "Warning: could not check whether branch %s already exists on origin: %v\n", branch, existErr)
-		existedOnOrigin = true
+		fmt.Fprintf(errW, "Warning: could not check whether branch %s already exists on %s: %v\n", branch, remote, existErr)
+		existedOnRemote = true
 	}
 
-	if err := ensureTrailCreateBranchExists(w, repo, branch, currentBranch, existedOnOrigin, &state); err != nil {
+	if err := ensureTrailCreateBranchExists(ctx, w, repo, remote, branch, currentBranch, existedOnRemote, &state); err != nil {
 		return state, err
 	}
 
 	// For branch-backed trails, always push the branch first: the trail binds to a
 	// remote branch, so deliver it before creating the trail rather than letting
 	// the server backfill it at the base tip. Branchless trails skip this entirely.
-	if err := pushBranchToOrigin(branch); err != nil {
-		cleanupCreatedTrailBranch(repo, branch, state.LocalCreated, false, errW)
-		return state, fmt.Errorf("failed to push branch %q to origin: %w\nhint: the trail was not created because its branch could not be delivered to the remote.\n  - if this is an auth error, link your GitHub account and retry\n  - if this is a non-fast-forward, update branch %q from origin and retry", branch, err, branch)
+	if err := pushBranchToRemote(ctx, remote, branch); err != nil {
+		cleanupCreatedTrailBranch(ctx, repo, remote, branch, state.LocalCreated, false, errW)
+		return state, fmt.Errorf("failed to push branch %q to %q: %w\nhint: the trail was not created because its branch could not be delivered to the remote.\n  - if this is an auth error, link your GitHub account and retry\n  - if this is a non-fast-forward, update branch %q from %q and retry", branch, remote, err, branch, remote)
 	}
-	state.RemotePushed = !existedOnOrigin
-	fmt.Fprintf(w, "Pushed branch %s to origin\n", branch)
+	state.RemotePushed = !existedOnRemote
+	fmt.Fprintf(w, "Pushed branch %s to %s\n", branch, remote)
 	return state, nil
 }
 
-func ensureTrailCreateBranchExists(w io.Writer, repo *git.Repository, branch, currentBranch string, existedOnOrigin bool, state *trailCreateBranchState) error {
+func ensureTrailCreateBranchExists(ctx context.Context, w io.Writer, repo *git.Repository, remote, branch, currentBranch string, existedOnRemote bool, state *trailCreateBranchState) error {
 	if !state.NeedsCreation {
 		if currentBranch != branch {
 			fmt.Fprintf(w, "Note: trail will be created for branch %q (not the current branch)\n", branch)
 		}
 		return nil
 	}
-	if existedOnOrigin {
-		if err := fetchBranchFromOrigin(branch); err != nil {
-			return fmt.Errorf("failed to fetch branch %q from origin: %w", branch, err)
+	if existedOnRemote {
+		if err := fetchBranchFromRemote(ctx, remote, branch); err != nil {
+			return fmt.Errorf("failed to fetch branch %q from %q: %w", branch, remote, err)
 		}
 		state.LocalCreated = true
-		fmt.Fprintf(w, "Fetched branch %s from origin\n", branch)
+		fmt.Fprintf(w, "Fetched branch %s from %s\n", branch, remote)
 		return nil
 	}
 	if err := createBranch(repo, branch); err != nil {
@@ -2225,6 +2230,47 @@ func resolveTrailBranch(ctx context.Context, branchOverride string) (string, err
 	return GetCurrentBranch(ctx)
 }
 
+// defaultTrailPushRemote is where a trail branch goes when git config declares
+// nothing — git's own fallback for a bare push. Not defaultMirrorRemote, which
+// shares the value but means "the remote `mirror use` repoints".
+const defaultTrailPushRemote = "origin"
+
+// resolveTrailPushRemote returns the remote a trail's branch is delivered to,
+// following git's own push precedence for that branch: branch.<name>.pushRemote,
+// then remote.pushDefault, then branch.<name>.remote, and "origin" when nothing
+// is declared.
+//
+// A hardcoded "origin" delivered the branch to the wrong remote, with no warning,
+// in any repo whose branch pushes somewhere else — a fork workflow holding the
+// upstream as origin, or any repo with remote.pushDefault set. A branch being
+// newly created has no branch.<name>.* config yet, so it resolves through
+// remote.pushDefault to "origin": unchanged for the common case.
+//
+// Scope: this fixes delivery only. resolveTrailRemote still reads the trail's
+// forge/owner/repo from "origin", so the two can name different repos in a fork
+// setup, and a repo with no "origin" at all fails there before reaching here.
+//
+// Not strategy.ResolveCheckpointSyncRemote — see
+// strategy.DeclaredPushRemoteForBranch for why those two questions differ.
+func resolveTrailPushRemote(ctx context.Context, branch string) (string, error) {
+	remote := strategy.DeclaredPushRemoteForBranch(ctx, branch)
+	if remote == "" {
+		return defaultTrailPushRemote, nil
+	}
+	// The name reaches git as an argv element, so the hazard is a leading "-"
+	// being read as a flag (`--upload-pack=...`), not shell metacharacters.
+	//
+	// Deliberately narrower than validateGitRemoteName: that whitelist vets names
+	// Entire is about to WRITE into .git/config and is stricter than git itself.
+	// Applied to config the user already has, it rejects values git accepts
+	// wherever a <repository> goes — "." (the local repo) and a bare URL both fail
+	// its leading-alphanumeric rule — turning a working repo into a hard failure.
+	if strings.HasPrefix(remote, "-") {
+		return "", fmt.Errorf("branch %q declares push remote %q, which git would read as a command-line flag", branch, remote)
+	}
+	return remote, nil
+}
+
 // parseTrailRepoArg parses an explicit --repo value into the forge/owner/repo
 // triple. It accepts the canonical "forge/owner/repo" form (e.g. gh/acme/app)
 // as well as a full clone URL (https://, git@, or entire://) that gitremote
@@ -2328,7 +2374,7 @@ func createBranch(repo *git.Repository, branchName string) error {
 	return nil
 }
 
-func cleanupCreatedTrailBranch(repo *git.Repository, branchName string, localCreated, remotePushed bool, errW io.Writer) {
+func cleanupCreatedTrailBranch(ctx context.Context, repo *git.Repository, remote, branchName string, localCreated, remotePushed bool, errW io.Writer) {
 	localRemoved := !localCreated
 	if localCreated {
 		branchRef := plumbing.NewBranchReferenceName(branchName)
@@ -2342,47 +2388,55 @@ func cleanupCreatedTrailBranch(repo *git.Repository, branchName string, localCre
 	}
 	if remotePushed {
 		if !localRemoved {
-			fmt.Fprintf(errW, "Warning: not deleting remote branch %s after trail creation failed because local cleanup did not complete; run 'git push origin --delete %s' if you do not need it\n", branchName, branchName)
+			fmt.Fprintf(errW, "Warning: not deleting remote branch %s after trail creation failed because local cleanup did not complete; run 'git push %s --delete %s' if you do not need it\n", branchName, remote, branchName)
 			return
 		}
-		if err := deleteBranchFromOrigin(branchName); err != nil {
+		if err := deleteBranchFromRemote(ctx, remote, branchName); err != nil {
 			fmt.Fprintf(errW, "Warning: failed to delete remote branch %s after trail creation failed: %v\n", branchName, err)
 		}
 	}
 }
 
-func fetchBranchFromOrigin(branchName string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+func fetchBranchFromRemote(ctx context.Context, remote, branchName string) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	if err := ValidateBranchName(ctx, branchName); err != nil {
 		return err
 	}
 	refspec := fmt.Sprintf("refs/heads/%s:refs/heads/%s", branchName, branchName)
-	cmd := exec.CommandContext(ctx, "git", "fetch", "--no-tags", "origin", refspec)
+	cmd := exec.CommandContext(ctx, "git", "fetch", "--no-tags", remote, refspec)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return nil
 }
 
-// pushBranchToOrigin pushes a branch to the origin remote.
-func pushBranchToOrigin(branchName string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+// pushBranchToRemote pushes a branch to remote, which callers resolve through
+// resolveTrailPushRemote rather than assuming "origin".
+func pushBranchToRemote(ctx context.Context, remote, branchName string) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", "-u", "origin", branchName)
+	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", "-u", remote, branchName)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return nil
 }
 
-// branchExistsOnOrigin reports whether origin already has a branch with the
-// given name, so callers can avoid treating a pre-existing remote branch as one
-// they created.
-func branchExistsOnOrigin(branchName string) (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+// remoteHasBranch reports whether remote already has a branch with the given
+// name, so callers can avoid treating a pre-existing remote branch as one they
+// created.
+//
+// Deliberately not the exported BranchExistsOnRemote in git_operations.go, whose
+// name this would otherwise shadow by case alone: that one is origin-only and
+// reports an ls-remote failure as "branch absent". Here a failed check must stay
+// distinguishable from a definite "absent", because callers use the answer to
+// decide whether they created the remote branch — and therefore whether cleanup
+// may delete it.
+func remoteHasBranch(ctx context.Context, remote, branchName string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", "origin", branchName)
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", remote, branchName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
@@ -2390,10 +2444,10 @@ func branchExistsOnOrigin(branchName string) (bool, error) {
 	return strings.TrimSpace(string(output)) != "", nil
 }
 
-func deleteBranchFromOrigin(branchName string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+func deleteBranchFromRemote(ctx context.Context, remote, branchName string) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", "origin", "--delete", branchName)
+	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", remote, "--delete", branchName)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		outputText := strings.TrimSpace(string(output))
 		if strings.Contains(outputText, "remote ref does not exist") {

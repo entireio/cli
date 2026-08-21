@@ -136,7 +136,19 @@ func withHookSession(ctx context.Context) context.Context {
 
 	// Hooks are the checkpoint-writing path, so this cannot be left to the root
 	// pre-run: without it only always-on secret scanning would run.
-	strategy.EnsureRedactionConfigured(ctx)
+	//
+	// A scanner-config failure is logged, not propagated: callers gate on
+	// IsSetUpAndEnabled, which already fails closed on the settings error that
+	// carries ErrScannerConfig, and the built-in goredact config cannot fail to
+	// construct — so this branch is unreachable from a hook. The loud paths for
+	// a bad scanner config are status, doctor, import, and attach. If a future
+	// engine constructor ever does fail here, the process falls back to the
+	// default betterleaks-only set: different coverage, not merely less.
+	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
+		logging.Error(logging.WithComponent(ctx, "redaction"),
+			"redaction scanner configuration failed",
+			slog.String("error", err.Error()))
+	}
 
 	return ctx
 }
