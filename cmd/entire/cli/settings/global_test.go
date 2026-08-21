@@ -577,6 +577,47 @@ func TestIsActiveForRepo(t *testing.T) {
 	})
 }
 
+func TestRepoActivationConfigured_TrustBoundary(t *testing.T) {
+	t.Run("tracked local activation is ignored", func(t *testing.T) {
+		dir := newGlobalTestRepo(t)
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		writeUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+		testutil.WriteFile(t, dir, ".entire/settings.local.json", `{"enabled":false}`)
+		testutil.GitAdd(t, dir, ".entire/settings.local.json")
+		ClearVersionedPathCache()
+		t.Cleanup(ClearVersionedPathCache)
+		t.Chdir(dir)
+
+		configured, err := RepoActivationConfigured(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if configured {
+			t.Fatal("a tracked settings.local.json must not record repo activation intent")
+		}
+		if !IsActiveForRepo(t.Context()) {
+			t.Fatal("a tracked settings.local.json must not override the active global tier")
+		}
+	})
+
+	t.Run("invalid repo activation schema fails closed", func(t *testing.T) {
+		dir := newGlobalTestRepo(t)
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		writeUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+		testutil.WriteFile(t, dir, ".entire/settings.json", `{"enabled":"yes"}`)
+		t.Chdir(dir)
+
+		if _, err := RepoActivationConfigured(t.Context()); err == nil {
+			t.Fatal("an enabled key with an invalid value must return a schema error")
+		}
+		if IsActiveForRepo(t.Context()) {
+			t.Fatal("an enabled key with an invalid value must fail closed")
+		}
+	})
+}
+
 // TestIsActiveForRepo_IncidentalSettings verifies that settings written for
 // unrelated features do not become an implicit repo-level activation choice.
 // No t.Parallel: each subtest changes the process working directory.
