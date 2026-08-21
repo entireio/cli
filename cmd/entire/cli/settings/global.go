@@ -93,11 +93,15 @@ type UserSettings struct {
 // global tier is unconfigured). A malformed file returns an error; callers on
 // the hook path must treat that as global-off (fail closed).
 func LoadUserSettings(_ context.Context) (*UserSettings, error) {
+	configDir, err := userdirs.ResolveConfig()
+	if err != nil {
+		return nil, fmt.Errorf("resolving user settings directory: %w", err)
+	}
 	// Deliberately plain os.ReadFile: readConfined/os.Root rejects absolute
 	// symlinks, and ~/.config/entire/settings.json is commonly symlinked by
 	// dotfile managers — with fail-closed semantics that would silently
 	// disable global mode.
-	data, err := os.ReadFile(filepath.Join(userdirs.Config(), UserSettingsFileName))
+	data, err := os.ReadFile(filepath.Join(configDir, UserSettingsFileName)) //nolint:gosec // configDir is resolved by the userdirs trust boundary
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return &UserSettings{}, nil
@@ -139,7 +143,7 @@ func normalizeOrigin(rawURL string) string {
 	return strings.ToLower(host + "/" + info.Owner + "/" + info.Repo)
 }
 
-// expandTilde expands a leading "~" or "~/" to the user home directory and
+// expandTilde expands a leading "~", "~/", or "~\" to the user home directory and
 // cleans the result, so a trailing slash cannot break matching. Surrounding
 // whitespace is trimmed first: the file is hand-edited, and a stray trailing
 // space would otherwise make the pattern silently never match — a quiet
@@ -153,12 +157,14 @@ func expandTilde(pattern string) (string, error) {
 	if pattern == "" {
 		return "", nil
 	}
-	if pattern == "~" || strings.HasPrefix(pattern, "~/") {
+	if pattern == "~" || strings.HasPrefix(pattern, "~/") || strings.HasPrefix(pattern, `~\`) {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("expanding ~: %w", err)
 		}
-		return filepath.ToSlash(filepath.Join(home, strings.TrimPrefix(pattern, "~"))), nil
+		suffix := strings.TrimPrefix(pattern, "~")
+		suffix = strings.TrimLeft(strings.ReplaceAll(suffix, `\`, "/"), "/")
+		return filepath.ToSlash(filepath.Join(home, filepath.FromSlash(suffix))), nil
 	}
 	if strings.HasPrefix(pattern, "~") {
 		return "", errors.New("unsupported ~user form")
@@ -474,21 +480,26 @@ func GlobalModeActive(ctx context.Context) bool {
 // IsActiveForRepo is the gate predicate for hooks: is Entire active for the
 // current worktree, via either repo-level setup or the user-global tier?
 //
-//	repo setup | repo enabled | global tier              | result
-//	-----------+--------------+---------------------------+-------
-//	yes        | true         | (ignored)                 | true
-//	yes        | false        | (ignored)                 | false (explicit veto)
-//	yes        | read error   | (ignored)                 | false (fail closed)
-//	no         | —            | enabled and not excluded  | true
-//	no         | —            | otherwise                 | false
+//	enabled key | repo enabled | global tier              | result
+//	------------+--------------+---------------------------+-------
+//	present     | true         | (ignored)                 | true
+//	present     | false        | (ignored)                 | false (explicit veto)
+//	present     | read error   | (ignored)                 | false (fail closed)
+//	absent      | —            | enabled and not excluded  | true
+//	absent      | —            | otherwise                 | false
 //
-// The global tier is a fallback, not a merge layer: any repo-level setup
-// (either settings file) makes the repo-level answer final.
+// The global tier is a fallback, not a merge layer: an explicit top-level
+// enabled key in either repo settings file makes the repo-level answer final.
+// Settings files created for unrelated features do not record activation
+// intent and therefore continue through the global tier.
 func IsActiveForRepo(ctx context.Context) bool {
-	if IsSetUpAny(ctx) {
-		// IsSetUpAny just established setup exists; going through
-		// IsSetUpAndEnabled here would repeat its Lstat pair on every hook
-		// invocation.
+	configured, err := RepoActivationConfigured(ctx)
+	if err != nil {
+		logging.Debug(ctx, "repo settings unreadable; treating repo as inactive",
+			slog.String("error", err.Error()))
+		return false
+	}
+	if configured {
 		return repoSettingsEnabled(ctx)
 	}
 	return GlobalModeActive(ctx)

@@ -115,6 +115,7 @@ func TestMatchesExcludePath(t *testing.T) {
 		wantErr  bool
 	}{
 		{"tilde doublestar", []string{"~/oss/**"}, filepath.Join(home, "oss", "some", "repo"), true, false},
+		{"windows tilde doublestar", []string{`~\oss\**`}, filepath.Join(home, "oss", "some", "repo"), true, false},
 		{"bare dir excludes subtree", []string{"~/oss"}, filepath.Join(home, "oss", "repo"), true, false},
 		{"exact dir", []string{"~/oss"}, filepath.Join(home, "oss"), true, false},
 		{"non-match", []string{"~/oss/**"}, filepath.Join(home, "work", "repo"), false, false},
@@ -572,6 +573,61 @@ func TestIsActiveForRepo(t *testing.T) {
 		t.Chdir(dir)
 		if IsActiveForRepo(t.Context()) {
 			t.Fatal("a local-only repo-level disable must veto global mode")
+		}
+	})
+}
+
+// TestIsActiveForRepo_IncidentalSettings verifies that settings written for
+// unrelated features do not become an implicit repo-level activation choice.
+// No t.Parallel: each subtest changes the process working directory.
+func TestIsActiveForRepo_IncidentalSettings(t *testing.T) {
+	writeIncidentalSettings := func(t *testing.T, dir string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(dir, ".entire"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".entire", "settings.local.json"), []byte(`{"investigate":{"max_turns":4}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("active global tier remains active", func(t *testing.T) {
+		dir := newGlobalTestRepo(t)
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		writeUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+		writeIncidentalSettings(t, dir)
+		t.Chdir(dir)
+		if !IsActiveForRepo(t.Context()) {
+			t.Fatal("a settings file without enabled must continue using the active global tier")
+		}
+	})
+
+	t.Run("global disable still applies", func(t *testing.T) {
+		dir := newGlobalTestRepo(t)
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		writeUserSettings(t, cfg, `{"global":{"enabled":false}}`)
+		writeIncidentalSettings(t, dir)
+		t.Chdir(dir)
+		if IsActiveForRepo(t.Context()) {
+			t.Fatal("a settings file without enabled must not override global disable")
+		}
+	})
+
+	t.Run("global exclusion still applies", func(t *testing.T) {
+		dir := newGlobalTestRepo(t)
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+		writeUserSettings(t, cfg, `{"global":{"enabled":true,"exclude_paths":["`+filepath.ToSlash(resolved)+`"]}}`)
+		writeIncidentalSettings(t, dir)
+		t.Chdir(dir)
+		if IsActiveForRepo(t.Context()) {
+			t.Fatal("a settings file without enabled must not bypass global exclusions")
 		}
 	})
 }

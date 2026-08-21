@@ -1447,6 +1447,26 @@ func IsSetUpAny(ctx context.Context) bool {
 	return err == nil
 }
 
+// RepoActivationConfigured reports whether either repository settings file
+// contains an explicit top-level "enabled" key. This is narrower than
+// IsSetUpAny: unrelated features may create a settings file without choosing
+// repo-local activation, and those repositories must continue inheriting the
+// user-global tier. A malformed or unreadable settings file returns an error
+// so activation gates can fail closed.
+func RepoActivationConfigured(ctx context.Context) (bool, error) {
+	_, project, _, err := LoadProjectRaw(ctx)
+	if err != nil {
+		return false, err
+	}
+	_, local, _, err := LoadLocalRaw(ctx)
+	if err != nil {
+		return false, err
+	}
+	_, projectConfigured := project["enabled"]
+	_, localConfigured := local["enabled"]
+	return projectConfigured || localConfigured, nil
+}
+
 // IsSetUpAndEnabled returns true if Entire is both set up and enabled.
 // "Set up" spans either scope — .entire/settings.json OR
 // .entire/settings.local.json — so it must check IsSetUpAny, not IsSetUp.
