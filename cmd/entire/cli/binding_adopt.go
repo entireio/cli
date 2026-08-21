@@ -81,18 +81,18 @@ func ensureSessionReplicated(ctx context.Context, sessionID string, meta binding
 	lockCtx, cancel := context.WithTimeout(ctx, bindingAdoptLockTimeout)
 	defer cancel()
 	err = strategy.WithSessionStateLocks(lockCtx, sessionID, []string{ev.Repo.CommonDir}, func() error {
-		existing, loadErr := targetStore.Load(ctx, sessionID)
+		existing, loadErr := targetStore.Load(lockCtx, sessionID)
 		if loadErr != nil {
 			return fmt.Errorf("load target session state: %w", loadErr)
 		}
 		if existing != nil {
 			return nil
 		}
-		state, buildErr := buildReplicatedSessionState(ctx, source, rec, meta, ev.Repo, ev.Files)
+		state, buildErr := buildReplicatedSessionState(lockCtx, source, rec, meta, ev.Repo, ev.Files)
 		if buildErr != nil {
 			return buildErr
 		}
-		if saveErr := targetStore.Save(ctx, state); saveErr != nil {
+		if saveErr := targetStore.Save(lockCtx, state); saveErr != nil {
 			return fmt.Errorf("save target session state: %w", saveErr)
 		}
 		return nil
