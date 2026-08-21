@@ -630,6 +630,11 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, bool, 
 
 		content := spec.content
 		if backupExists {
+			// allowShFallback=false intentionally: plain .git/hooks only runs
+			// executable files. A mode-0644 .pre-entire was never an active
+			// hook; forcing it through `sh -e` (as husky does) can execute
+			// Python/Node/disabled scripts and break commits/pushes. Husky
+			// installs use injectEntireManagedBlock above, not this path.
 			content = generateChainedContent(spec.content, spec.name, false)
 		}
 
