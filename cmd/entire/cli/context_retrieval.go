@@ -61,6 +61,9 @@ func redactContextQuery(query string) string {
 }
 
 func truncateUTF8Bytes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
 	if len(value) <= limit {
 		return value
 	}
@@ -71,35 +74,187 @@ func truncateUTF8Bytes(value string, limit int) string {
 	return strings.TrimSpace(value)
 }
 
-func stripEntireContextBlocks(value string) string {
-	const start, end = "<entire-context>", "</entire-context>"
-	for {
-		lower := strings.ToLower(value)
-		i := strings.Index(lower, start)
-		if i < 0 {
-			j := strings.Index(lower, end)
-			if j < 0 {
-				return value
-			}
-			value = value[:j] + value[j+len(end):]
-			continue
-		}
-		j := strings.Index(lower[i+len(start):], end)
-		if j < 0 {
-			return value[:i]
-		}
-		value = value[:i] + value[i+len(start)+j+len(end):]
+const (
+	contextPacketOpenTag  = "<entire-context>"
+	contextPacketCloseTag = "</entire-context>"
+)
+
+// asciiFoldByte lowercases an ASCII letter and passes every other byte
+// through. Used instead of unicode case folding wherever a match offset is
+// used to slice the ORIGINAL string; see indexASCIIFold.
+func asciiFoldByte(b byte) byte {
+	if b >= 'A' && b <= 'Z' {
+		return b + ('a' - 'A')
 	}
+	return b
 }
 
-func sanitizeEvidenceText(value string) string {
-	value = stripEntireContextBlocks(value)
-	value = strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\t' || (!unicode.IsControl(r) && r != utf8.RuneError) {
+// hasASCIIFoldPrefixAt reports whether s, starting at offset, begins with the
+// ASCII substr, compared case-insensitively.
+func hasASCIIFoldPrefixAt(s string, offset int, substr string) bool {
+	if offset < 0 || offset+len(substr) > len(s) {
+		return false
+	}
+	for k := range len(substr) {
+		if asciiFoldByte(s[offset+k]) != asciiFoldByte(substr[k]) {
+			return false
+		}
+	}
+	return true
+}
+
+// indexASCIIFold returns the byte offset of the first ASCII-case-insensitive
+// occurrence of substr in s, or -1.
+//
+// strings.ToLower is unusable for this: Unicode case folding changes byte
+// length (U+023A lowercases to a rune one byte LONGER, U+212A to one two bytes
+// SHORTER), so an offset found in the lowercased copy does not address the same
+// byte in the original. Slicing the original at such an offset cut the wrong
+// bytes out of untrusted evidence — leaving delimiter fragments behind, and on
+// the growth cases panicking with a slice-bounds error inside the hook's
+// evidence goroutine, which no recover() can catch.
+func indexASCIIFold(s, substr string) int {
+	if substr == "" {
+		return 0
+	}
+	first := asciiFoldByte(substr[0])
+	for i := 0; i+len(substr) <= len(s); i++ {
+		if asciiFoldByte(s[i]) != first {
+			continue
+		}
+		if hasASCIIFoldPrefixAt(s, i, substr) {
+			return i
+		}
+	}
+	return -1
+}
+
+// hasASCIIFoldSuffix reports whether b ends with the ASCII suffix, compared
+// case-insensitively.
+func hasASCIIFoldSuffix(b []byte, suffix string) bool {
+	if len(b) < len(suffix) {
+		return false
+	}
+	for k := range len(suffix) {
+		if asciiFoldByte(b[len(b)-len(suffix)+k]) != asciiFoldByte(suffix[k]) {
+			return false
+		}
+	}
+	return true
+}
+
+// dropContextDelimiters guarantees the postcondition the packet depends on:
+// the result contains neither packet delimiter, in any ASCII casing.
+//
+// It is the backstop for splices. Removing one delimiter joins the text on
+// either side of it, and that join can spell a NEW delimiter
+// ("<entire-cont" + "</entire-context>" + "ext>"), so a single left-to-right
+// removal pass is not enough. Appending one byte at a time and collapsing the
+// tail whenever it spells a delimiter catches every such case in linear time:
+// any delimiter in the output would have been detected as its last byte landed.
+func dropContextDelimiters(value string) string {
+	out := make([]byte, 0, len(value))
+	for i := range len(value) {
+		out = append(out, value[i])
+		for {
+			if hasASCIIFoldSuffix(out, contextPacketCloseTag) {
+				out = out[:len(out)-len(contextPacketCloseTag)]
+				continue
+			}
+			if hasASCIIFoldSuffix(out, contextPacketOpenTag) {
+				out = out[:len(out)-len(contextPacketOpenTag)]
+				continue
+			}
+			break
+		}
+	}
+	return string(out)
+}
+
+// stripEntireContextBlocks removes every <entire-context> … </entire-context>
+// block from untrusted text, along with any unpaired delimiter, so evidence can
+// neither close the packet Entire wraps it in nor open a fake one. Matching is
+// ASCII-case-insensitive; the result is guaranteed delimiter-free after a
+// SINGLE call.
+//
+// That guarantee is the point. An earlier version returned early when an
+// opening tag had no closing tag, without rescanning the prefix it kept — so
+// "</entire-context> LEAK <entire-context>" sanitized to
+// "</entire-context> LEAK", handing untrusted text a live closing delimiter.
+// It only failed to be exploitable because every caller happened to sanitize
+// more than once. Callers must be able to rely on one call.
+func stripEntireContextBlocks(value string) string {
+	var b strings.Builder
+	b.Grow(len(value))
+	for rest := value; rest != ""; {
+		open := indexASCIIFold(rest, contextPacketOpenTag)
+		closed := indexASCIIFold(rest, contextPacketCloseTag)
+		switch {
+		case open < 0 && closed < 0:
+			b.WriteString(rest)
+			rest = ""
+		case open < 0 || (closed >= 0 && closed < open):
+			// Unpaired closing tag: drop the tag, keep the text around it.
+			b.WriteString(rest[:closed])
+			rest = rest[closed+len(contextPacketCloseTag):]
+		default:
+			b.WriteString(rest[:open])
+			after := rest[open+len(contextPacketOpenTag):]
+			inner := indexASCIIFold(after, contextPacketCloseTag)
+			if inner < 0 {
+				// Unpaired opening tag: drop it and everything after it. The
+				// prefix already written is rescanned by dropContextDelimiters.
+				rest = ""
+				break
+			}
+			rest = after[inner+len(contextPacketCloseTag):]
+		}
+	}
+	return dropContextDelimiters(b.String())
+}
+
+// stripInvisibleRunes removes characters that carry no visible content but do
+// carry attack surface: C0/C1 control codes (NUL, BEL, ANSI escapes) and the
+// whole Unicode Cf "format" category — zero-width space/joiners, the bidi
+// embedding, isolate and OVERRIDE controls (U+202A–U+202E, U+2066–U+2069), the
+// word joiner and the BOM. unicode.IsControl covers only Cc, so Cf is named
+// separately.
+//
+// Cf matters here for the same reason it matters in source code (CVE-2021-42574,
+// "Trojan Source"): U+202E reorders how the packet renders wherever a human or a
+// tool displays it, so an evidence item can make the untrusted-evidence preamble
+// and the closing delimiter appear somewhere they are not, and zero-width
+// characters split keywords so a payload survives review. The whole category is
+// dropped rather than an allowlist of "the dangerous ones": evidence text is
+// plain reference prose in a security packet, joiners carry nothing the model
+// needs, and one category is auditable where a hand-picked list rots.
+//
+// Newline and tab are the only control characters kept — the packet is
+// line-structured. Invalid UTF-8 arrives here as utf8.RuneError and is dropped.
+func stripInvisibleRunes(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
 			return r
 		}
-		return -1
+		if r == utf8.RuneError || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
 	}, value)
+}
+
+// sanitizeEvidenceText makes untrusted text safe to place inside the
+// <entire-context> packet.
+//
+// The order is load-bearing and must not be swapped: invisible characters are
+// removed BEFORE the delimiter scan, because a delimiter split by one of them
+// is invisible to the scan and reassembles into a live delimiter once the
+// character is dropped — "a</entire-\x00context>EVIL" sanitized to
+// "a</entire-context>EVIL" under the old order, which is a complete packet
+// escape from a single NUL byte.
+func sanitizeEvidenceText(value string) string {
+	value = stripInvisibleRunes(value)
+	value = stripEntireContextBlocks(value)
 	return strings.TrimSpace(value)
 }
 
