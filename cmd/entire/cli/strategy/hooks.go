@@ -23,8 +23,23 @@ const backupSuffix = ".pre-entire"
 const chainComment = "# Chain: run pre-existing hook"
 
 // preEntireExcludePattern keeps hook backups out of accidental `git add -A`
-// commits (critical for husky-safe installs into tracked user-hook dirs).
+// commits (legacy husky-safe installs that still use .pre-entire companions).
 const preEntireExcludePattern = "**/*" + backupSuffix
+
+// Delimited so RemoveGitHook can strip Entire's exclude entry without leaving a
+// forever-broad pattern that hides unrelated *{backupSuffix} paths.
+const (
+	preEntireExcludeBegin = "# BEGIN Entire CLI pre-entire exclude"
+	preEntireExcludeEnd   = "# END Entire CLI pre-entire exclude"
+)
+
+// Managed block markers for husky-safe installs: Entire is injected into the
+// tracked user hook so clones keep the original team logic.
+const (
+	entireManagedBegin = "# BEGIN Entire CLI managed block"
+	entireManagedEnd   = "# END Entire CLI managed block"
+)
+
 const missingEntireGitHookWarning = "[entire] Entire CLI is enabled but not installed or not on PATH. Skipping Entire Git hook; continuing. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
 
 // gitHookNames are the git hooks managed by Entire CLI
@@ -228,10 +243,19 @@ func CheckGitHookStateInDir(ctx context.Context, repoDir string) GitHookState {
 }
 
 // huskyForwardingStubsPresent reports whether each managed hook under the
-// husky-owned directory is a non-Entire stub that sources `_/h`.
+// husky-owned directory is a regular, executable, non-Entire stub that actively
+// sources `_/h` (not merely a commented-out dispatch line).
 func huskyForwardingStubsPresent(hooksDir string) bool {
 	for _, hook := range gitHookNames {
-		data, err := os.ReadFile(filepath.Join(hooksDir, hook)) //nolint:gosec // path from constants
+		hookPath := filepath.Join(hooksDir, hook)
+		info, err := os.Lstat(hookPath)
+		if err != nil || !info.Mode().IsRegular() {
+			return false
+		}
+		if info.Mode()&0o111 == 0 {
+			return false
+		}
+		data, err := os.ReadFile(hookPath) //nolint:gosec // path from constants
 		if err != nil {
 			return false
 		}
@@ -239,11 +263,26 @@ func huskyForwardingStubsPresent(hooksDir string) bool {
 		if strings.Contains(content, entireHookMarker) {
 			return false
 		}
-		if !strings.Contains(content, huskyStubDispatchMarker) {
+		if !hasActiveHuskyStubDispatch(content) {
 			return false
 		}
 	}
 	return true
+}
+
+// hasActiveHuskyStubDispatch reports whether content contains an uncommented
+// huskyStubDispatchMarker line.
+func hasActiveHuskyStubDispatch(content string) bool {
+	for line := range strings.SplitSeq(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, huskyStubDispatchMarker) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsGitHookInstalled reports whether a CURRENT set of Entire git hooks is
@@ -331,7 +370,7 @@ func gitHookStateInInstallDir(hooksDir string) GitHookState {
 			return GitHooksAbsent
 		}
 		content := string(data)
-		if !strings.Contains(content, entireHookMarker) {
+		if !strings.Contains(content, entireHookMarker) && !strings.Contains(content, entireManagedBegin) {
 			return GitHooksAbsent
 		}
 		if entireHookLineRunsFromWorkingTree(content) {
@@ -544,8 +583,33 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, bool, 
 		backupPath := hookPath + backupSuffix
 		backupExists := fileExists(backupPath)
 
-		// Back up existing non-Entire hooks
 		existing, existingErr := os.ReadFile(hookPath) //nolint:gosec // path is controlled
+
+		// Husky-safe: inject Entire into the tracked user hook so clones keep
+		// the original team logic. Legacy `.pre-entire` companions are migrated
+		// into the injected form when present.
+		if huskySafe {
+			content, touchedUser, err := huskySafeHookContent(spec.content, existing, existingErr, backupPath, backupExists)
+			if err != nil {
+				return installedCount, huskySafe, fmt.Errorf("failed to prepare %s hook: %w", spec.name, err)
+			}
+			if touchedUser {
+				backedUpUserHook = true
+			}
+			written, err := writeHookFile(hookPath, content)
+			if err != nil {
+				return installedCount, huskySafe, fmt.Errorf("failed to install %s hook: %w", spec.name, err)
+			}
+			if written {
+				installedCount++
+			}
+			if backupExists {
+				_ = os.Remove(backupPath) //nolint:errcheck // best-effort migrate away from legacy backup
+			}
+			continue
+		}
+
+		// Non-Husky: back up existing non-Entire hooks and chain.
 		if existingErr == nil && !strings.Contains(string(existing), entireHookMarker) {
 			if !backupExists {
 				if err := os.Rename(hookPath, backupPath); err != nil {
@@ -554,16 +618,19 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, bool, 
 				fmt.Fprintf(os.Stderr, "[entire] Backed up existing %s to %s%s\n", spec.name, spec.name, backupSuffix)
 				backedUpUserHook = true
 			} else {
-				fmt.Fprintf(os.Stderr, "[entire] Warning: replacing %s (backup %s%s already exists from a previous install)\n", spec.name, spec.name, backupSuffix)
+				// Stale backup must not win over a newer current hook.
+				if err := preserveCurrentHookOverStaleBackup(hookPath, backupPath, existing); err != nil {
+					return installedCount, huskySafe, fmt.Errorf("failed to rotate backup for %s: %w", spec.name, err)
+				}
+				fmt.Fprintf(os.Stderr, "[entire] Warning: replaced stale %s%s with current %s before reinstall\n", spec.name, backupSuffix, spec.name)
 				backedUpUserHook = true
 			}
 			backupExists = true
 		}
 
-		// Chain to backup if one exists
 		content := spec.content
 		if backupExists {
-			content = generateChainedContent(spec.content, spec.name)
+			content = generateChainedContent(spec.content, spec.name, false)
 		}
 
 		written, err := writeHookFile(hookPath, content)
@@ -583,16 +650,14 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, bool, 
 		if err := migrateEntireHooksFromHuskyOwnedDir(hooksDir); err != nil {
 			return installedCount, huskySafe, fmt.Errorf("failed to migrate hooks out of husky-owned directory: %w", err)
 		}
-		// Keep .pre-entire backups out of accidental commits when we shadow
-		// tracked user hooks under the husky parent directory. Heal exclude
-		// whenever any backup is present (not only on this invocation).
+		// Keep any leftover legacy .pre-entire backups out of accidental commits.
 		if backedUpUserHook || huskyUserDirHasPreEntireBackups(installDir) {
 			if exclErr := ensurePreEntireExcluded(ctx); exclErr != nil {
 				fmt.Fprintf(os.Stderr, "[entire] Warning: could not exclude %s backups from git: %v\n", backupSuffix, exclErr)
 			}
 		}
 		if backedUpUserHook {
-			fmt.Fprintf(os.Stderr, "[entire] Note: existing hooks in %s were backed up to *%s and chained; commit the Entire wrappers intentionally and keep backups local\n", filepath.Base(installDir), backupSuffix)
+			fmt.Fprintf(os.Stderr, "[entire] Note: injected Entire into existing hooks under %s/ (original logic stays in the tracked file)\n", filepath.Base(installDir))
 		}
 	}
 
@@ -613,9 +678,78 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, bool, 
 	return installedCount, huskySafe, nil
 }
 
-// ensurePreEntireExcluded appends preEntireExcludePattern to info/exclude in the
-// shared git common dir so husky-safe backups are not half-committed beside
-// Entire wrappers. Uses `git rev-parse --git-path info/exclude` so linked
+// huskySafeHookContent builds the on-disk content for a husky user-hook path.
+// It injects Entire into the existing (or legacy-backup) script so clones keep
+// team logic. touchedUser is true when preexisting user content was preserved.
+func huskySafeHookContent(entireContent string, existing []byte, existingErr error, backupPath string, backupExists bool) (content string, touchedUser bool, err error) {
+	var userScript string
+	switch {
+	case existingErr == nil && strings.Contains(string(existing), entireManagedBegin):
+		userScript = stripEntireManagedBlock(string(existing))
+		touchedUser = strings.TrimSpace(stripShebang(userScript)) != ""
+	case existingErr == nil && strings.Contains(string(existing), entireHookMarker):
+		// Legacy Entire wrapper (possibly chained). Prefer the backup as the
+		// original user script when present.
+		if backupExists {
+			backupData, readErr := os.ReadFile(backupPath) //nolint:gosec // path is controlled
+			if readErr != nil {
+				return "", false, fmt.Errorf("read legacy backup: %w", readErr)
+			}
+			userScript = string(backupData)
+			touchedUser = true
+		} else {
+			return entireContent, false, nil
+		}
+	case existingErr == nil:
+		userScript = string(existing)
+		touchedUser = true
+	case backupExists:
+		backupData, readErr := os.ReadFile(backupPath) //nolint:gosec // path is controlled
+		if readErr != nil {
+			return "", false, fmt.Errorf("read legacy backup: %w", readErr)
+		}
+		userScript = string(backupData)
+		touchedUser = true
+	case errors.Is(existingErr, os.ErrNotExist):
+		return entireContent, false, nil
+	default:
+		return "", false, existingErr
+	}
+
+	if strings.TrimSpace(stripShebang(userScript)) == "" {
+		return entireContent, touchedUser, nil
+	}
+	return injectEntireManagedBlock(userScript, entireContent), touchedUser, nil
+}
+
+// preserveCurrentHookOverStaleBackup replaces backupPath with the current hook
+// bytes when they differ, so reinstall does not discard newer user logic.
+func preserveCurrentHookOverStaleBackup(hookPath, backupPath string, current []byte) error {
+	prev, err := os.ReadFile(backupPath) //nolint:gosec // path is controlled
+	if err != nil {
+		return err
+	}
+	if string(prev) == string(current) {
+		return nil
+	}
+	stalePath := backupPath + ".stale"
+	if err := os.Rename(backupPath, stalePath); err != nil {
+		// If a prior stale exists, overwrite it.
+		_ = os.Remove(stalePath) //nolint:errcheck
+		if err := os.Rename(backupPath, stalePath); err != nil {
+			return fmt.Errorf("rotate stale backup: %w", err)
+		}
+	}
+	if err := os.WriteFile(backupPath, current, 0o755); err != nil { //nolint:gosec // hook backup may be executed
+		return fmt.Errorf("write updated backup: %w", err)
+	}
+	_ = os.Remove(hookPath) //nolint:errcheck // about to rewrite; best-effort clear
+	return nil
+}
+
+// ensurePreEntireExcluded appends a delimited preEntireExcludePattern block to
+// info/exclude in the shared git common dir so leftover husky-safe backups are
+// not half-committed. Uses `git rev-parse --git-path info/exclude` so linked
 // worktrees write into the common exclude (not .git/worktrees/<name>/info/).
 func ensurePreEntireExcluded(ctx context.Context) error {
 	excludePath, err := gitInfoExcludePath(ctx)
@@ -631,25 +765,72 @@ func ensurePreEntireExcluded(ctx context.Context) error {
 		return fmt.Errorf("read git exclude: %w", err)
 	}
 	content := string(existing)
-	for _, line := range strings.Split(content, "\n") {
-		if strings.TrimSpace(line) == preEntireExcludePattern {
-			return nil
-		}
+	if strings.Contains(content, preEntireExcludeBegin) && strings.Contains(content, preEntireExcludePattern) {
+		return nil
 	}
+	// Drop a prior undelimited pattern so we don't leave a forever-broad rule.
+	content = removeUndelimitedPreEntireExclude(content)
+
 	var b strings.Builder
 	b.WriteString(content)
 	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
 		b.WriteByte('\n')
 	}
-	if !strings.Contains(content, "# Entire CLI") {
-		b.WriteString("# Entire CLI\n")
-	}
+	b.WriteString(preEntireExcludeBegin)
+	b.WriteByte('\n')
 	b.WriteString(preEntireExcludePattern)
+	b.WriteByte('\n')
+	b.WriteString(preEntireExcludeEnd)
 	b.WriteByte('\n')
 	if err := os.WriteFile(excludePath, []byte(b.String()), 0o644); err != nil { //nolint:gosec // git exclude is not executable
 		return fmt.Errorf("write git exclude: %w", err)
 	}
 	return nil
+}
+
+// removePreEntireExcluded strips Entire's managed exclude block (and any legacy
+// undelimited pattern) when no managed backups remain.
+func removePreEntireExcluded(ctx context.Context) error {
+	excludePath, err := gitInfoExcludePath(ctx)
+	if err != nil {
+		return err
+	}
+	existing, err := os.ReadFile(excludePath) //nolint:gosec // path from git
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read git exclude: %w", err)
+	}
+	content := stripDelimitedBlock(string(existing), preEntireExcludeBegin, preEntireExcludeEnd)
+	content = removeUndelimitedPreEntireExclude(content)
+	if content == string(existing) {
+		return nil
+	}
+	if strings.TrimSpace(content) == "" {
+		_ = os.Remove(excludePath) //nolint:errcheck // best-effort
+		return nil
+	}
+	if err := os.WriteFile(excludePath, []byte(content), 0o644); err != nil { //nolint:gosec // git exclude is not executable
+		return fmt.Errorf("write git exclude: %w", err)
+	}
+	return nil
+}
+
+func removeUndelimitedPreEntireExclude(content string) string {
+	var lines []string
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == preEntireExcludePattern || trimmed == "# Entire CLI" {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	out := strings.Join(lines, "\n")
+	if content != "" && strings.HasSuffix(content, "\n") && out != "" && !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	return out
 }
 
 // gitInfoExcludePath resolves the repo's info/exclude path via git so linked
@@ -685,12 +866,18 @@ func huskyUserDirHasPreEntireBackups(installDir string) bool {
 }
 
 // writeHookFile writes a hook file if it doesn't exist or has different content.
-// Returns true if the file was written, false if it already had the same content.
+// Returns true if the file was written or its mode was healed to executable.
 func writeHookFile(path, content string) (bool, error) {
-	// Check if file already exists with same content
 	existing, err := os.ReadFile(path) //nolint:gosec // path is controlled
 	if err == nil && string(existing) == content {
-		return false, nil // Already up to date
+		info, statErr := os.Stat(path)
+		if statErr == nil && info.Mode()&0o111 != 0 {
+			return false, nil // Already up to date
+		}
+		if chmodErr := os.Chmod(path, 0o755); chmodErr != nil { //nolint:gosec // Git hooks require executable permissions
+			return false, fmt.Errorf("failed to heal executable bit on %s: %w", path, chmodErr)
+		}
+		return true, nil
 	}
 
 	// Git hooks must be executable (0o755)
@@ -736,6 +923,13 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 			return removed, parentErr
 		}
 		removed += parentRemoved
+	}
+
+	// Drop the managed exclude block once no backups remain in either dir.
+	if !huskyUserDirHasPreEntireBackups(installDir) && !huskyUserDirHasPreEntireBackups(hooksDir) {
+		if exclErr := removePreEntireExcluded(ctx); exclErr != nil {
+			fmt.Fprintf(os.Stderr, "[entire] Warning: could not remove %s exclude rule: %v\n", backupSuffix, exclErr)
+		}
 	}
 	return removed, nil
 }
@@ -799,8 +993,21 @@ func rewriteHuskyOwnedHooks(hooksDir string, backfillMissing bool) (int, error) 
 			if !backfillMissing {
 				continue
 			}
-			if strings.Contains(string(data), huskyStubDispatchMarker) {
-				continue // already a valid forwarding stub
+			if hasActiveHuskyStubDispatch(string(data)) {
+				// Heal executable bit on an otherwise-valid stub.
+				if _, err := writeHookFile(hookPath, string(data)); err != nil {
+					return changed, fmt.Errorf("heal husky stub %s: %w", hookPath, err)
+				}
+				continue
+			}
+			// Preserve unknown content before healing.
+			if !fileExists(backupPath) {
+				if err := os.Rename(hookPath, backupPath); err != nil {
+					return changed, fmt.Errorf("back up non-forwarding husky stub %s: %w", hookPath, err)
+				}
+				fmt.Fprintf(os.Stderr, "[entire] Backed up existing %s to %s%s\n", filepath.Base(hookPath), filepath.Base(hookPath), backupSuffix)
+			} else {
+				fmt.Fprintf(os.Stderr, "[entire] Warning: replacing %s (backup %s%s already exists)\n", filepath.Base(hookPath), filepath.Base(hookPath), backupSuffix)
 			}
 			if err := writeHookFileForced(hookPath, huskyForwardingStub); err != nil {
 				return changed, fmt.Errorf("replace non-forwarding husky stub %s: %w", hookPath, err)
@@ -820,7 +1027,8 @@ func writeHookFileForced(path, content string) error {
 }
 
 // removeEntireHooksFromDir removes Entire-managed hooks from dir, restoring
-// .pre-entire backups when present. Returns the number of Entire hooks removed.
+// .pre-entire backups when present, or stripping injected managed blocks.
+// Returns the number of Entire hooks removed.
 func removeEntireHooksFromDir(dir string) (int, error) {
 	removed := 0
 	var removeErrors []string
@@ -829,10 +1037,31 @@ func removeEntireHooksFromDir(dir string) (int, error) {
 		hookPath := filepath.Join(dir, hook)
 		backupPath := hookPath + backupSuffix
 
-		// Remove the hook if it contains our marker
 		data, err := os.ReadFile(hookPath) //nolint:gosec // path is controlled
-		hookIsOurs := err == nil && strings.Contains(string(data), entireHookMarker)
 		hookExists := err == nil
+		content := ""
+		if hookExists {
+			content = string(data)
+		}
+		hookIsOurs := hookExists && strings.Contains(content, entireHookMarker)
+		hasManaged := hookExists && strings.Contains(content, entireManagedBegin)
+
+		if hasManaged {
+			restored := stripEntireManagedBlock(content)
+			if strings.TrimSpace(stripShebang(restored)) == "" {
+				if err := os.Remove(hookPath); err != nil {
+					removeErrors = append(removeErrors, fmt.Sprintf("%s: %v", hook, err))
+					continue
+				}
+			} else if err := os.WriteFile(hookPath, []byte(restored), 0o755); err != nil { //nolint:gosec // restore user hook
+				removeErrors = append(removeErrors, fmt.Sprintf("strip managed block %s: %v", hook, err))
+				continue
+			}
+			removed++
+			// Managed-block installs should not leave a companion backup behind.
+			_ = os.Remove(backupPath) //nolint:errcheck
+			continue
+		}
 
 		if hookIsOurs {
 			if err := os.Remove(hookPath); err != nil {
@@ -844,8 +1073,7 @@ func removeEntireHooksFromDir(dir string) (int, error) {
 
 		// Restore .pre-entire backup if it exists
 		if fileExists(backupPath) {
-			if hookExists && !hookIsOurs {
-				// A non-Entire hook is present — don't overwrite it with the backup
+			if hookExists && !hookIsOurs && !hasManaged {
 				fmt.Fprintf(os.Stderr, "[entire] Warning: %s was modified since install; backup %s%s left in place\n", hook, hook, backupSuffix)
 			} else {
 				if err := os.Rename(backupPath, hookPath); err != nil {
@@ -865,30 +1093,34 @@ func removeEntireHooksFromDir(dir string) (int, error) {
 // so the pre-existing hook (backed up to .pre-entire) is called after our hook.
 //
 // Executable backups are run directly so shebang interpreters (Python, Node,
-// …) keep working. Non-executable backups (common for husky mode-0644 hooks)
-// fall back to `sh -e`, matching husky's own runner.
+// …) keep working. When allowShFallback is true (Husky-safe installs only),
+// non-executable backups fall back to `sh -e`, matching husky's own runner.
+// Outside Husky, non-executable backups stay inert — git ignored them before.
 //
 // Entire's exit status is preserved: a successful backup must not mask a
 // failing pre-push (OPF abort). A failing backup still fails the hook.
-func generateChainedContent(baseContent, hookName string) string {
+func generateChainedContent(baseContent, hookName string, allowShFallback bool) string {
 	if hookName == "post-rewrite" {
-		return generatePostRewriteChainedContent(baseContent)
+		return generatePostRewriteChainedContent(baseContent, allowShFallback)
 	}
 
-	return baseContent + fmt.Sprintf(`
+	chain := fmt.Sprintf(`
 _entire_status=$?
 %s
 _entire_hook_dir="$(dirname "$0")"
 if [ -x "$_entire_hook_dir/%s%s" ]; then
     "$_entire_hook_dir/%s%s" "$@" || exit $?
-elif [ -f "$_entire_hook_dir/%s%s" ]; then
+`, chainComment, hookName, backupSuffix, hookName, backupSuffix)
+	if allowShFallback {
+		chain += fmt.Sprintf(`elif [ -f "$_entire_hook_dir/%s%s" ]; then
     sh -e "$_entire_hook_dir/%s%s" "$@" || exit $?
-fi
-exit $_entire_status
-`, chainComment, hookName, backupSuffix, hookName, backupSuffix, hookName, backupSuffix, hookName, backupSuffix)
+`, hookName, backupSuffix, hookName, backupSuffix)
+	}
+	chain += "fi\nexit $_entire_status\n"
+	return baseContent + chain
 }
 
-func generatePostRewriteChainedContent(baseContent string) string {
+func generatePostRewriteChainedContent(baseContent string, allowShFallback bool) string {
 	const original = `hooks git post-rewrite "$1" 2>/dev/null || true`
 	const replacement = `hooks git post-rewrite "$1" < "$_entire_stdin" 2>/dev/null || true`
 
@@ -901,17 +1133,88 @@ trap 'rm -f "$_entire_stdin"' EXIT
 	body := strings.TrimPrefix(baseContent, "#!/bin/sh\n")
 	body = strings.Replace(body, original, replacement, 1)
 
-	return replayPrefix + body + fmt.Sprintf(`
+	chain := fmt.Sprintf(`
 _entire_status=$?
 %s
 _entire_hook_dir="$(dirname "$0")"
 if [ -x "$_entire_hook_dir/post-rewrite%s" ]; then
     "$_entire_hook_dir/post-rewrite%s" "$@" < "$_entire_stdin" || exit $?
-elif [ -f "$_entire_hook_dir/post-rewrite%s" ]; then
+`, chainComment, backupSuffix, backupSuffix)
+	if allowShFallback {
+		chain += fmt.Sprintf(`elif [ -f "$_entire_hook_dir/post-rewrite%s" ]; then
     sh -e "$_entire_hook_dir/post-rewrite%s" "$@" < "$_entire_stdin" || exit $?
-fi
-exit $_entire_status
-`, chainComment, backupSuffix, backupSuffix, backupSuffix, backupSuffix)
+`, backupSuffix, backupSuffix)
+	}
+	chain += "fi\nexit $_entire_status\n"
+	return replayPrefix + body + chain
+}
+
+// injectEntireManagedBlock inserts Entire's hook body into an existing user
+// script so the original logic remains in the same tracked file.
+func injectEntireManagedBlock(existing, entireContent string) string {
+	existing = stripEntireManagedBlock(existing)
+	shebang, rest := splitShebang(existing)
+	entireBody := strings.TrimSpace(stripShebang(entireContent))
+
+	var b strings.Builder
+	if shebang != "" {
+		b.WriteString(shebang)
+		b.WriteByte('\n')
+	} else {
+		b.WriteString("#!/bin/sh\n")
+	}
+	b.WriteString(entireManagedBegin)
+	b.WriteByte('\n')
+	b.WriteString(entireBody)
+	b.WriteByte('\n')
+	b.WriteString(entireManagedEnd)
+	b.WriteByte('\n')
+	rest = strings.TrimLeft(rest, "\n")
+	if rest != "" {
+		b.WriteString(rest)
+		if !strings.HasSuffix(rest, "\n") {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+func stripEntireManagedBlock(content string) string {
+	return stripDelimitedBlock(content, entireManagedBegin, entireManagedEnd)
+}
+
+func stripDelimitedBlock(content, begin, end string) string {
+	start := strings.Index(content, begin)
+	if start < 0 {
+		return content
+	}
+	endRel := strings.Index(content[start:], end)
+	if endRel < 0 {
+		return content
+	}
+	endAbs := start + endRel + len(end)
+	after := content[endAbs:]
+	after = strings.TrimPrefix(after, "\n")
+	before := content[:start]
+	if strings.HasSuffix(before, "\n\n") {
+		before = strings.TrimSuffix(before, "\n")
+	}
+	return before + after
+}
+
+func stripShebang(content string) string {
+	_, rest := splitShebang(content)
+	return rest
+}
+
+func splitShebang(content string) (shebang, rest string) {
+	if strings.HasPrefix(content, "#!") {
+		if i := strings.IndexByte(content, '\n'); i >= 0 {
+			return content[:i], content[i+1:]
+		}
+		return content, ""
+	}
+	return "", content
 }
 
 // hookCmdPrefix returns the command prefix for hook scripts and warning messages.

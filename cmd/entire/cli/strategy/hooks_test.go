@@ -1686,7 +1686,7 @@ func TestGitHookCommitMsg_MissingEntireStillRunsChainedHook(t *testing.T) {
 
 	hook := findHookSpec(t, buildHookSpecs("entire"), "commit-msg")
 	hookPath := filepath.Join(tempDir, "commit-msg")
-	content := generateChainedContent(hook.content, "commit-msg")
+	content := generateChainedContent(hook.content, "commit-msg", false)
 	if err := os.WriteFile(hookPath, []byte(content), 0o755); err != nil {
 		t.Fatalf("failed to write hook: %v", err)
 	}
@@ -1752,7 +1752,7 @@ func TestInstallGitHook_DoesNotOverwriteExistingBackup(t *testing.T) {
 		t.Fatalf("failed to create backup: %v", err)
 	}
 
-	// Create a second custom hook at the standard path
+	// Create a second custom hook at the standard path (newer than the backup)
 	secondCustomContent := "#!/bin/sh\necho 'second custom hook'\n"
 	hookPath := filepath.Join(hooksDir, "prepare-commit-msg")
 	if err := os.WriteFile(hookPath, []byte(secondCustomContent), 0o755); err != nil {
@@ -1764,13 +1764,20 @@ func TestInstallGitHook_DoesNotOverwriteExistingBackup(t *testing.T) {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
 
-	// Verify the original backup was NOT overwritten
+	// Newer current hook must win: backup is rotated, then replaced with current.
 	backupData, err := os.ReadFile(backupPath)
 	if err != nil {
 		t.Fatalf("backup should still exist: %v", err)
 	}
-	if string(backupData) != firstBackupContent {
-		t.Errorf("backup content = %q, want original %q", string(backupData), firstBackupContent)
+	if string(backupData) != secondCustomContent {
+		t.Errorf("backup content = %q, want newer current %q", string(backupData), secondCustomContent)
+	}
+	staleData, err := os.ReadFile(backupPath + ".stale")
+	if err != nil {
+		t.Fatalf("stale backup should be preserved: %v", err)
+	}
+	if string(staleData) != firstBackupContent {
+		t.Errorf("stale backup = %q, want original %q", string(staleData), firstBackupContent)
 	}
 
 	// Verify our hook was installed with chain call
@@ -1977,7 +1984,7 @@ func TestGenerateChainedContent(t *testing.T) {
 	t.Parallel()
 
 	base := "#!/bin/sh\n# Entire CLI hooks\nentire hooks git pre-push \"$1\" || true\n"
-	result := generateChainedContent(base, "pre-push")
+	result := generateChainedContent(base, "pre-push", true)
 
 	// Should start with the base content
 	if !strings.HasPrefix(result, base) {
@@ -2020,7 +2027,7 @@ func TestGenerateChainedContent_PostRewritePreservesStdinForBackup(t *testing.T)
 	t.Parallel()
 
 	base := "#!/bin/sh\n# Entire CLI hooks\n# Post-rewrite hook: remap session linkage after amend/rebase rewrites\nentire hooks git post-rewrite \"$1\" 2>/dev/null || true\n"
-	result := generateChainedContent(base, "post-rewrite")
+	result := generateChainedContent(base, "post-rewrite", true)
 
 	if !strings.Contains(result, `_entire_stdin="$(mktemp "${TMPDIR:-/tmp}/entire-post-rewrite.XXXXXX")"`) {
 		t.Fatalf("post-rewrite chained content should create temp stdin copy, got:\n%s", result)
@@ -2251,7 +2258,7 @@ func TestGenerateChainedContent_PreservesEntireExitStatus(t *testing.T) {
 	}
 
 	base := "#!/bin/sh\n# Entire CLI hooks\nfalse\n"
-	script := generateChainedContent(base, "pre-push")
+	script := generateChainedContent(base, "pre-push", true)
 	scriptPath := filepath.Join(tmp, "pre-push")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write chained hook: %v", err)
@@ -2282,7 +2289,7 @@ func TestGenerateChainedContent_RunsMode0644Backup(t *testing.T) {
 	}
 
 	base := "#!/bin/sh\n# Entire CLI hooks\ntrue\n"
-	script := generateChainedContent(base, "pre-push")
+	script := generateChainedContent(base, "pre-push", true)
 	scriptPath := filepath.Join(tmp, "pre-push")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write chained hook: %v", err)
@@ -2295,6 +2302,38 @@ func TestGenerateChainedContent_RunsMode0644Backup(t *testing.T) {
 	}
 	if _, err := os.Stat(sentinel); err != nil {
 		t.Fatalf("mode-0644 backup should have run via sh -e: %v", err)
+	}
+}
+
+func TestGenerateChainedContent_NonHuskySkipsMode0644Backup(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	backupName := "pre-push" + backupSuffix
+	backupPath := filepath.Join(tmp, backupName)
+	sentinel := filepath.Join(tmp, "ran")
+	backupBody := "#!/bin/sh\ntouch \"" + sentinel + "\"\n"
+	if err := os.WriteFile(backupPath, []byte(backupBody), 0o644); err != nil {
+		t.Fatalf("write backup: %v", err)
+	}
+
+	base := "#!/bin/sh\n# Entire CLI hooks\ntrue\n"
+	script := generateChainedContent(base, "pre-push", false)
+	if strings.Contains(script, "sh -e") {
+		t.Fatalf("non-husky chain must not use sh -e fallback, got:\n%s", script)
+	}
+	scriptPath := filepath.Join(tmp, "pre-push")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write chained hook: %v", err)
+	}
+
+	cmd := exec.CommandContext(context.Background(), "sh", scriptPath)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("chained hook failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Fatal("non-executable backup must stay inert outside husky")
 	}
 }
 
@@ -2312,7 +2351,7 @@ func TestGenerateChainedContent_RunsExecutableShebangBackup(t *testing.T) {
 	}
 
 	base := "#!/bin/sh\n# Entire CLI hooks\ntrue\n"
-	script := generateChainedContent(base, "pre-push")
+	script := generateChainedContent(base, "pre-push", false)
 	scriptPath := filepath.Join(tmp, "pre-push")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write chained hook: %v", err)
@@ -2575,12 +2614,8 @@ func TestInstallGitHook_ChainsPreExistingHuskyUserHook(t *testing.T) {
 	}
 
 	backupPath := userHook + backupSuffix
-	data, err := os.ReadFile(backupPath)
-	if err != nil {
-		t.Fatalf("expected .pre-entire backup of tracked user hook: %v", err)
-	}
-	if string(data) != custom {
-		t.Errorf("backup = %q, want %q", data, custom)
+	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
+		t.Fatalf("husky-safe inject must not leave a .pre-entire companion, stat err=%v", err)
 	}
 	installed, err := os.ReadFile(userHook)
 	if err != nil {
@@ -2590,8 +2625,14 @@ func TestInstallGitHook_ChainsPreExistingHuskyUserHook(t *testing.T) {
 	if !strings.Contains(content, entireHookMarker) {
 		t.Error("installed hook should contain Entire marker")
 	}
-	if !strings.Contains(content, chainComment) || !strings.Contains(content, `sh -e`) {
-		t.Errorf("installed hook should chain preexisting backup via sh -e, got:\n%s", content)
+	if !strings.Contains(content, entireManagedBegin) || !strings.Contains(content, entireManagedEnd) {
+		t.Errorf("installed hook should wrap Entire in managed markers, got:\n%s", content)
+	}
+	if !strings.Contains(content, "preexisting user hook") {
+		t.Errorf("installed hook must keep original user logic for clones, got:\n%s", content)
+	}
+	if strings.Contains(content, `sh -e`) {
+		t.Errorf("injected husky hook should not chain via sh -e backup, got:\n%s", content)
 	}
 
 	removed, err := RemoveGitHook(context.Background())
@@ -2610,12 +2651,10 @@ func TestInstallGitHook_ChainsPreExistingHuskyUserHook(t *testing.T) {
 	}
 
 	excludePath := filepath.Join(tmpDir, ".git", "info", "exclude")
-	excludeData, err := os.ReadFile(excludePath)
-	if err != nil {
-		t.Fatalf("expected .git/info/exclude after husky-safe backup: %v", err)
-	}
-	if !strings.Contains(string(excludeData), preEntireExcludePattern) {
-		t.Errorf("exclude should contain %q, got %q", preEntireExcludePattern, excludeData)
+	if data, err := os.ReadFile(excludePath); err == nil {
+		if strings.Contains(string(data), preEntireExcludePattern) {
+			t.Errorf("exclude should be cleared when no backups remain, got %q", data)
+		}
 	}
 }
 
