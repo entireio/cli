@@ -1153,9 +1153,14 @@ func rewriteHuskyOwnedHooks(hooksDir string, backfillMissing bool) (int, error) 
 					return changed, fmt.Errorf("read restored husky stub %s: %w", hookPath, liveErr)
 				}
 				if !hasActiveHuskyStubDispatch(string(live)) {
-					// Restored bytes are not a forwarding stub — keep them as
-					// backup and install the canonical stub so Git reaches parent.
-					if err := os.Rename(hookPath, backupPath); err != nil {
+					// Restored bytes are not a forwarding stub — copy them to
+					// backup first (leaving hookPath intact), then atomically
+					// replace the live path with the canonical stub.
+					mode := os.FileMode(0o644)
+					if info, statErr := os.Lstat(hookPath); statErr == nil {
+						mode = info.Mode().Perm()
+					}
+					if err := os.WriteFile(backupPath, live, mode); err != nil { //nolint:gosec // preserve restored mode
 						return changed, fmt.Errorf("re-backup non-stub restore %s: %w", hookPath, err)
 					}
 					if err := writeHuskyForwardingStub(hookPath); err != nil {
