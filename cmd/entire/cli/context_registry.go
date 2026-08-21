@@ -15,6 +15,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -30,6 +31,42 @@ type localContextSession struct {
 	SessionDir     string    `json:"sessionDir"`
 	TranscriptPath string    `json:"transcriptPath"`
 	LastSeen       time.Time `json:"lastSeen"`
+
+	// Owner fingerprints the agent process that owns this live session (PID +
+	// start time + boot + host). It is re-resolved on every heartbeat, so an
+	// agent that restarts under a new PID cannot leave a stale fingerprint
+	// behind. Without it, "live" would mean nothing more than "wrote a
+	// heartbeat within localContextRecentWindow", so a crashed agent kept
+	// being offered as a live context source for the rest of that window.
+	Owner *proclive.Identity `json:"owner,omitempty"`
+}
+
+// localContextSessionLive reports whether a registered session may still be
+// offered as a live context source.
+//
+// Only a positively dead owner excludes the entry. proclive.LivenessUnknown —
+// no recorded owner, another host, or a platform that cannot introspect
+// processes — degrades to the caller's LastSeen recency window, matching how
+// the session-owner sweep in the strategy package treats an unknown owner.
+// Being conservative here costs a stale evidence item; being aggressive would
+// silently drop live sessions on Windows and for cross-host registries.
+func localContextSessionLive(session localContextSession) bool {
+	if session.Owner == nil {
+		return true
+	}
+	return proclive.Check(*session.Owner) != proclive.LivenessDead
+}
+
+// captureContextSessionOwner records the owning agent process into entry.
+// It mirrors the strategy package's captureSessionOwner: clear first so a
+// failed resolve can never leave a stale owner from an earlier turn, then
+// re-resolve. The hook runs as a short-lived child of the agent, so
+// proclive.ResolveOwner walks up past our own binary and any shells.
+func captureContextSessionOwner(entry *localContextSession) {
+	entry.Owner = nil
+	if owner, ok := proclive.ResolveOwner(); ok {
+		entry.Owner = &owner
+	}
 }
 
 type contextRegistry struct {
@@ -162,6 +199,9 @@ func refreshContextRegistrySession(ctx context.Context, path, sessionID string, 
 		for i := range registry.Sessions {
 			if registry.Sessions[i].SessionID == sessionID {
 				registry.Sessions[i].LastSeen = now
+				// Re-resolve every heartbeat: the agent may have restarted
+				// under a new PID since this entry was written.
+				captureContextSessionOwner(&registry.Sessions[i])
 				return
 			}
 		}
@@ -270,7 +310,7 @@ func currentContextRegistryPath(ctx context.Context) (string, error) {
 	if raw, ok := os.LookupEnv(auth.EnvTokenVar); ok {
 		coreURL, token, err := auth.ParseEnvToken(raw)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("parse %s: %w", auth.EnvTokenVar, err)
 		}
 		return contextRegistryPathForToken(coreURL, token)
 	}

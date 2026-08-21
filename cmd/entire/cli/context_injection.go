@@ -304,6 +304,7 @@ func registerLocalContextSession(ctx context.Context, ag agent.Agent, event *age
 			WorktreeRoot: worktreeRoot, GitCommonDir: commonDir, SessionDir: sessionDir,
 			TranscriptPath: transcript, LastSeen: time.Now(),
 		}
+		captureContextSessionOwner(&entry)
 		for i := range registry.Sessions {
 			if registry.Sessions[i].RepoID == repoID && registry.Sessions[i].SessionID == event.SessionID {
 				registry.Sessions[i] = entry

@@ -430,6 +430,12 @@ func loadLocalContextEvidence(ctx context.Context, query, targetRepoID, currentS
 		if !localContextSourceAllowed(session.RepoID, targetRepoID, session.SessionID, currentSessionID, allowedRepoIDs) || now.Sub(session.LastSeen) > localContextRecentWindow {
 			continue
 		}
+		// A heartbeat within the recency window is not proof the agent is
+		// still running: it may have crashed seconds later. Exclude a
+		// positively dead owner so a vanished session stops being offered.
+		if !localContextSessionLive(session) {
+			continue
+		}
 		file, err := openTranscriptWithinSessionDir(session.TranscriptPath, session.SessionDir)
 		if err != nil {
 			continue
