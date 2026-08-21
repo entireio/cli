@@ -106,6 +106,18 @@ func TestDescribeSyncRemote(t *testing.T) {
 			absent: []string{"no session history", "right now", "sync to one remote"},
 		},
 		{
+			// Reachable when the per-remote probes failed transiently while the
+			// election's own probe succeeded. The pushes do reach the store, so
+			// the note drops the clause instead of naming none of them.
+			name: "dedicated store with no pinned remote drops the carrier clause",
+			topo: remoteTopology{
+				destinations: []remoteDestination{oneURL("colleague", false), oneURL("upstream", false)},
+				sync:         checkpointSyncInfo{Remote: "me/checkpoints", Source: checkpointSyncSourceDedicated},
+			},
+			want:   []string{`"me/checkpoints"`, "not to any of these remotes"},
+			absent: []string{"Pushes to", "no remote"},
+		},
+		{
 			// The resolver answers with no name and no error when its own git
 			// read fails transiently. Staying silent would leave the caller's
 			// remote count with nothing explaining what happens to it.

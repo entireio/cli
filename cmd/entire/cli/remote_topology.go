@@ -282,9 +282,16 @@ func (t remoteTopology) describeSyncRemote(w io.Writer) {
 	// here.
 	if t.sync.dedicated() {
 		fmt.Fprintf(w, "    Checkpoints go to the dedicated store %q (set by\n", t.sync.Remote)
-		fmt.Fprintf(w, "    checkpoint_remote), not to any of these remotes. Pushes to %s\n",
-			quoteNames(t.pinnedNames()))
-		fmt.Fprintln(w, "    carry them there.")
+		fmt.Fprintln(w, "    checkpoint_remote), not to any of these remotes.")
+		// Normally at least the elected remote is pinned — being pinned is what
+		// put us in dedicated mode. It can still come back empty, because the
+		// per-remote probes in inspectRemoteTopology drop their errors while the
+		// election's own probe succeeded, so a transient git failure leaves the
+		// carrier unnamed. Then say nothing: the pushes do reach the store, so
+		// naming none of them would be the one claim that is false.
+		if names := t.pinnedNames(); len(names) > 0 {
+			fmt.Fprintf(w, "    Pushes to %s carry them there.\n", quoteNames(names))
+		}
 		return
 	}
 	if t.sync.Remote == "" {
@@ -373,12 +380,9 @@ func (t remoteTopology) pinnedNames() []string {
 }
 
 // quoteNames renders remote names for prose: `"a"`, `"a" and "b"`, `"a", "b", and "c"`.
-// The empty case is worded here rather than in the shared joiner, which has no
-// remotes to speak of.
+// Empty in, empty out — callers that have no names to print must drop the
+// sentence rather than print one about nothing.
 func quoteNames(names []string) string {
-	if len(names) == 0 {
-		return "no remote"
-	}
 	quoted := make([]string, 0, len(names))
 	for _, n := range names {
 		quoted = append(quoted, fmt.Sprintf("%q", n))
