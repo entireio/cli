@@ -297,3 +297,56 @@ func TestRecordLoginContext_ReloginKeepsJurisdictionAudiences(t *testing.T) {
 		t.Fatalf("recorded audiences after re-login = %v, want [%s]", got, audience)
 	}
 }
+
+// Contexts reports the ACTING identity (honouring --context/$ENTIRE_CONTEXT) while
+// StoredContexts reports the PERSISTED default. Conflating them made
+// `entire logout --context X` and a plain `entire logout` leave different state
+// for the same target: promoteNextLogin asked for the acting identity, which by
+// then named the just-deleted context, so Active failed and the promotion was
+// silently skipped.
+//
+// Mutates the process-wide override and env, so no t.Parallel.
+func TestContextsVsStoredContexts_OverrideScope(t *testing.T) {
+	const (
+		defaultCtx  = "prod"    // the stored current_context
+		overrideCtx = "staging" // selected for one invocation
+	)
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	t.Cleanup(tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json")))
+	t.Setenv(contexts.EnvContextVar, "")
+
+	if err := contexts.Save(cfgDir, &contexts.File{
+		CurrentContext: defaultCtx,
+		Contexts: []*contexts.Context{
+			{Name: defaultCtx, CoreURL: testCoreURL, Handle: "me", KeychainService: "kc:prod"},
+			{Name: overrideCtx, CoreURL: "https://staging.example.com", Handle: "me", KeychainService: "kc:staging"},
+		},
+	}); err != nil {
+		t.Fatalf("seed contexts: %v", err)
+	}
+
+	contexts.SetFlagOverrideForTest(t, overrideCtx)
+
+	if _, acting, err := Contexts(); err != nil || acting != overrideCtx {
+		t.Fatalf("Contexts() acting = %q, %v; want staging (the override)", acting, err)
+	}
+	all, stored, err := StoredContexts()
+	if err != nil || stored != defaultCtx {
+		t.Fatalf("StoredContexts() stored = %q, %v; want prod (the persisted default)", stored, err)
+	}
+	// promoteNextLogin picks all[0] as the next default, so the list matters too.
+	if len(all) != 2 || all[0].Name != defaultCtx {
+		t.Fatalf("StoredContexts() list = %v, want the saved contexts in on-disk order", all)
+	}
+
+	// The regression: an override naming a context that no longer exists must not
+	// stop StoredContexts from answering "is a default still set?".
+	contexts.SetFlagOverrideForTest(t, "deleted-by-logout")
+	if _, _, err := Contexts(); err == nil {
+		t.Fatal("Contexts() should fail on an override naming no saved context")
+	}
+	if got, stored, err := StoredContexts(); err != nil || stored != defaultCtx || len(got) != 2 {
+		t.Fatalf("StoredContexts() = %v/%q, %v; must ignore the override entirely", got, stored, err)
+	}
+}

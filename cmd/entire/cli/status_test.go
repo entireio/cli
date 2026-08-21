@@ -614,6 +614,41 @@ func TestWriteActiveSessions_EndedSessionsExcluded(t *testing.T) {
 	}
 }
 
+// A session ended by `entire session attach` carries PhaseEnded with no EndedAt
+// stamp. Status must drop it like any other ended session — filtering on EndedAt
+// alone left it listed as active while `entire session stop`, which filters on
+// IsEnded, refused to offer it.
+func TestWriteActiveSessions_PhaseEndedWithoutEndedAtExcluded(t *testing.T) {
+	setupTestRepo(t)
+
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatalf("NewStateStore() error = %v", err)
+	}
+
+	state := &session.State{
+		SessionID:    "attach-ended-session",
+		WorktreePath: "/Users/test/repo",
+		StartedAt:    time.Now().Add(-10 * time.Minute),
+		Phase:        session.PhaseEnded,
+	}
+
+	if err := store.Save(context.Background(), state); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	sty := newStatusStyles(&buf)
+	writeActiveSessions(context.Background(), &buf, sty)
+
+	if buf.Len() != 0 {
+		t.Errorf("Expected empty output for a PhaseEnded session with no EndedAt, got: %s", buf.String())
+	}
+	if got := filterActiveSessions([]*session.State{state}); len(got) != 0 {
+		t.Errorf("filterActiveSessions kept %d ended session(s); status and stop must agree", len(got))
+	}
+}
+
 func TestWriteActiveSessions_ShowsDivergenceWarningWhenBaseCommitStale(t *testing.T) {
 	setupTestRepo(t)
 
@@ -1254,6 +1289,62 @@ func TestRunStatus_ShowsEnabledAgents(t *testing.T) {
 	}
 }
 
+// TestRunStatus_ScannerSelectionLine covers the "Secret scanners · ..." line
+// across both effective-settings call sites (short and --detailed) and both
+// the non-default and default (line absent) cases.
+func TestRunStatus_ScannerSelectionLine(t *testing.T) {
+	tests := []struct {
+		name        string
+		settings    string
+		detailed    bool
+		want        string // substring checked for presence or absence per wantPresent
+		wantPresent bool
+	}{
+		{
+			name:        "goredact only, short",
+			settings:    testSettingsGoredactOnly,
+			want:        "Secret scanners · goredact",
+			wantPresent: true,
+		},
+		{
+			name:        "both enabled, short",
+			settings:    `{"enabled": true, "redaction": {"betterleaks": {"enabled": true}, "goredact": {"enabled": true}}}`,
+			want:        "Secret scanners · betterleaks, goredact",
+			wantPresent: true,
+		},
+		{
+			name:        "default, short",
+			settings:    testSettingsEnabled,
+			want:        "Secret scanners",
+			wantPresent: false,
+		},
+		{
+			name:        "goredact only, detailed",
+			settings:    testSettingsGoredactOnly,
+			detailed:    true,
+			want:        "Secret scanners · goredact",
+			wantPresent: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setupTestRepo(t)
+			writeSettings(t, tc.settings)
+
+			var stdout bytes.Buffer
+			if err := runStatus(context.Background(), &stdout, tc.detailed, false); err != nil {
+				t.Fatalf("runStatus() error = %v", err)
+			}
+
+			output := stdout.String()
+			if got := strings.Contains(output, tc.want); got != tc.wantPresent {
+				t.Errorf("strings.Contains(output, %q) = %v, want %v; output: %s", tc.want, got, tc.wantPresent, output)
+			}
+		})
+	}
+}
+
 func TestRunStatus_EnabledNoAgentsHidesHooksLine(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
@@ -1717,6 +1808,38 @@ func TestRunStatusJSON_Enabled(t *testing.T) {
 	}
 }
 
+// secret_scanners is omitted for the default selection and lists the enabled
+// engines for a non-default one.
+func TestRunStatusJSON_SecretScanners(t *testing.T) {
+	cases := []struct {
+		name     string
+		settings string
+		want     []string // nil: field omitted for the default selection
+	}{
+		{"default omitted", testSettingsEnabled, nil},
+		{"goredact only listed", testSettingsGoredactOnly, []string{"goredact"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupTestRepo(t)
+			writeSettings(t, tc.settings)
+
+			var stdout bytes.Buffer
+			if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+				t.Fatalf("runStatus() error = %v", err)
+			}
+
+			var result statusJSON
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if !slices.Equal(result.SecretScanners, tc.want) {
+				t.Errorf("secret_scanners = %v, want %v", result.SecretScanners, tc.want)
+			}
+		})
+	}
+}
+
 // TestRunStatusJSON_HooksOutdated — when Claude Code hooks are installed under
 // the outdated Task/TodoWrite matchers, `entire status --json` reports the agent
 // under hooks_outdated so scripts/agents can detect the drift.
@@ -2085,6 +2208,29 @@ func TestRunStatus_CheckpointSyncDestination_ConfigAnnotated(t *testing.T) {
 	out := stdout.String()
 	if !strings.Contains(out, "Checkpoints sync to: private (set by checkpoint_push_remote)") {
 		t.Errorf("expected annotated destination line for configured remote, got:\n%s", out)
+	}
+}
+
+func TestRunStatus_CheckpointSyncDestination_CapturedAnnotated(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, ".", "fork", "https://example.com/fork.git")
+	// A captured election (evidence-elected by a past tracked push) must be
+	// distinguishable from both the silent default and the explicit setting.
+	if err := os.WriteFile(filepath.Join(".git", "entire-checkpoint-sync-remotes.json"), []byte(`{"remotes":["fork"]}`), 0o600); err != nil {
+		t.Fatalf("write capture state: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints sync to: fork (follows your branch's push destination)") {
+		t.Errorf("expected annotated destination line for captured remote, got:\n%s", out)
 	}
 }
 

@@ -3,6 +3,7 @@ package remote
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -23,9 +24,52 @@ import (
 // pays a dead network once, briefly.
 const WriteProbeFetchBudget = 15 * time.Second
 
-// readFetchTimeout bounds the interactive read-path fetch (unchanged from
-// the historical FetchCheckpointRef behavior).
-const readFetchTimeout = 2 * time.Minute
+// ReadFetchTimeout bounds each interactive read-candidate attempt. Exported
+// because the cli-side read paths nest their own per-candidate budgets inside
+// ReadChainBudget and the two must be sized against each other; when this was
+// unexported those paths hardcoded their own 2-minute literals and the
+// relationship below held only inside this package.
+const ReadFetchTimeout = 2 * time.Minute
+
+// readFetchTimeout is the unexported alias kept for this package's own call
+// sites.
+const readFetchTimeout = ReadFetchTimeout
+
+// ReadChainBudget bounds a complete read-candidate chain — every candidate
+// attempt inside it, and for blob hydration its fallback fetches too.
+//
+// Per-candidate budgets alone are not enough: they stop a hung leader from
+// starving the legacy tier (which one shared budget did), but they make the
+// worst-case stall scale with the number of candidates, and the read paths have
+// no outer deadline to catch that — `entire resume` sets none, and main() uses
+// context.WithCancel, not WithTimeout. Nesting per-candidate budgets inside this
+// ceiling keeps both properties: every candidate gets its own window, and the
+// total a user can wait stays bounded.
+//
+// Deliberately an absolute number rather than a multiple of ReadFetchTimeout and
+// the tier count. Sized as "n tiers x one full window" it equals the loop's own
+// worst case, so it cannot bind and buys nothing — the mistake this constant
+// shipped with first: at 2 x ReadFetchTimeout with today's two tiers the chain
+// could consume the entire ceiling and blob hydration's fallbacks inherited an
+// already-expired context. An absolute ceiling binds for every chain of two or
+// more candidates, leaves a single-candidate chain untouched (ReadFetchTimeout
+// is below it), and does not silently go wrong when a third tier appears.
+const ReadChainBudget = 3 * time.Minute
+
+// WithReadChainBudget derives the ceiling context for one read-candidate chain.
+// Callers nest their per-candidate budgets inside the returned context, so the
+// rule and its rationale live here instead of being hand-rolled per read path.
+func WithReadChainBudget(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, ReadChainBudget)
+}
+
+// ReadChainLoopBudget is the slice of a chain ceiling a candidate loop may spend
+// when its caller runs recovery work afterwards, leaving the remainder for that
+// recovery. A fraction rather than a fixed duration so a smaller injected budget
+// (tests) scales with it instead of going negative.
+func ReadChainLoopBudget(chainBudget time.Duration) time.Duration {
+	return chainBudget - chainBudget/6
+}
 
 // CheckpointFetchTarget returns the git remote (URL or name) that checkpoint
 // data is fetched from. It prefers the effective URL resolved by FetchURL,
@@ -38,13 +82,47 @@ func CheckpointFetchTarget(ctx context.Context) string {
 }
 
 // checkpointFetchTarget is CheckpointFetchTarget plus whether the target is
-// authoritative for checkpoint refs (see fetchURLAuthoritative). The bare
-// "origin" fallbacks are non-authoritative: they exist so a fetch can still
-// be attempted, not to certify where checkpoint refs live.
+// authoritative for checkpoint refs (see fetchURLAuthoritative). A resolved
+// origin is also non-authoritative when checkpoint_push_remote elects another
+// remote: it may still be probed as a fallback, but cannot certify absence.
 func checkpointFetchTarget(ctx context.Context) (string, bool) {
-	url, authoritative, err := fetchURLAuthoritative(ctx)
+	target, authoritative := checkpointFetchTargetFrom(ctx, "")
+	if !authoritative {
+		return target, false
+	}
+
+	s, err := settings.Load(ctx)
+	if err != nil {
+		return target, false
+	}
+	if s.HasCheckpointRemoteKey() {
+		return target, s.GetCheckpointRemote() != nil
+	}
+
+	pushRemote := s.GetCheckpointPushRemote()
+	return target, pushRemote == "" || pushRemote == originRemote
+}
+
+// CheckpointFetchTargetFrom is CheckpointFetchTarget for one checkpoint read
+// candidate: when no checkpoint_remote is configured the target is derived
+// from leadRemote instead of unconditionally from origin. The dedicated
+// checkpoint_remote derivation is unchanged.
+func CheckpointFetchTargetFrom(ctx context.Context, leadRemote string) string {
+	target, _ := checkpointFetchTargetFrom(ctx, leadRemote)
+	return target
+}
+
+// checkpointFetchTargetFrom resolves the fetch target for checkpoint data,
+// honoring an optional read candidate (see FetchURLOptions.LeadReadRemote).
+// The bare remote-name fallbacks are non-authoritative: they exist so a fetch
+// can still be attempted, not to certify where checkpoint refs live.
+func checkpointFetchTargetFrom(ctx context.Context, leadRemote string) (string, bool) {
+	url, authoritative, err := fetchURLAuthoritative(ctx, FetchURLOptions{LeadReadRemote: leadRemote})
 	if err == nil && url != "" {
 		return url, authoritative
+	}
+	if leadRemote != "" {
+		return leadRemote, false
 	}
 	return "origin", false
 }
@@ -107,11 +185,124 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 		}
 	}
 
+	return probeAndFetchCheckpointRef(ctx, ref, fetchTarget, authoritative)
+}
+
+// FetchCheckpointRefFrom is FetchCheckpointRef with an explicit ordered chain
+// of checkpoint read-candidate remotes (elected sync remote first, then the
+// legacy origin tier), supplied by cli/strategy callers — this package cannot
+// resolve the election itself.
+//
+// Per-operation candidate semantics: candidates are tried in order, and only
+// AUTHORITATIVE ABSENCE advances the chain. A transport-level failure aborts
+// it: unlike the pure remote-tracking reads elsewhere in the read chain, this
+// fetch installs the canonical LOCAL checkpoint ref (+ref:ref), checkpoint
+// refs advance (backfills parent onto the tip), and hydration only runs when
+// the local ref is absent — so serving from the legacy tier while the elected
+// remote (the only remote writes confine to, hence the newest tip) is merely
+// unreachable would permanently install a stale tip that later backfills
+// parent onto. Only positive absence from every candidate wraps
+// plumbing.ErrReferenceNotFound. A provably remoteless repository (below) also
+// wraps plumbing.ErrReferenceNotFound.
+//
+// A configured checkpoint_remote is a dedicated store with a single
+// authoritative target, so the chain does not apply and the legacy
+// single-target behavior is preserved; the same holds when settings cannot be
+// read (a configured checkpoint remote cannot be ruled out).
+//
+// An empty chain classifies the ref as absent only on positive evidence on
+// every axis: a live caller context, readable settings without a
+// checkpoint_remote key in any form, and a successful, empty `git remote`
+// listing. Anything less surfaces an error — never a silent "absent". When
+// electionErr is non-nil, the fail-open origin candidate may still satisfy a
+// read, but its emptiness cannot certify global absence.
+func FetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, readRemotes []string, electionErr error) error {
+	return fetchCheckpointRefFrom(ctx, ref, readRemotes, readFetchTimeout, ReadChainBudget, electionErr)
+}
+
+func fetchCheckpointRefFrom(
+	ctx context.Context,
+	ref plumbing.ReferenceName,
+	readRemotes []string,
+	fetchTimeout time.Duration,
+	chainBudget time.Duration,
+	electionErr error,
+) error {
+	s, loadErr := settings.Load(ctx)
+	if loadErr != nil || s.HasCheckpointRemoteKey() {
+		return FetchCheckpointRef(ctx, ref)
+	}
+
+	if len(readRemotes) == 0 {
+		if electionErr != nil {
+			return fmt.Errorf("checkpoint ref %s: checkpoint remote election failed; no authoritative read candidate is available: %w", ref, electionErr)
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+		defer cancel()
+		if probeCtx.Err() == nil && !s.HasCheckpointRemoteKey() && repoHasNoRemotes(probeCtx) {
+			logging.Debug(probeCtx, "checkpoint probe: repository has no git remotes; classifying ref as absent",
+				slog.String("ref", ref.String()))
+			return fmt.Errorf("checkpoint ref %s: repository has no git remotes to fetch from: %w", ref, plumbing.ErrReferenceNotFound)
+		}
+		return fmt.Errorf("checkpoint ref %s: no checkpoint read candidates available and the repository is not provably remoteless; refusing to treat this as absence", ref)
+	}
+
+	// Per-candidate budgets nested inside one chain ceiling: a hung candidate
+	// burns only its own window, and the total stall stays bounded (see
+	// ReadChainBudget).
+	chainCtx, cancelChain := context.WithTimeout(ctx, chainBudget)
+	defer cancelChain()
+
+	var firstErr error
+	for i, remoteName := range readRemotes {
+		candidateCtx, cancel := context.WithTimeout(chainCtx, fetchTimeout)
+		target, authoritative := checkpointFetchTargetFrom(candidateCtx, remoteName)
+		err := probeAndFetchCheckpointRef(candidateCtx, ref, target, authoritative)
+		cancel()
+		if err == nil {
+			if i > 0 {
+				// Tier observability: a hydration served by a later (legacy)
+				// candidate installed the canonical local ref from somewhere
+				// other than the elected remote — legitimate under
+				// authoritative elected-absence, but must be diagnosable.
+				logging.Debug(ctx, "checkpoint ref hydrated from a later read candidate",
+					slog.String("ref", ref.String()),
+					slog.String("candidate", remoteName),
+					slog.Int("candidate_index", i))
+			}
+			return nil
+		}
+		if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+			// Transport uncertainty: a later (legacy) candidate must not
+			// install a possibly-stale tip as the canonical local ref while
+			// the authoritative candidate is merely unreachable.
+			return err
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		if i+1 < len(readRemotes) {
+			logging.Debug(ctx, "checkpoint ref fetch: candidate reports absence; trying next candidate",
+				slog.String("ref", ref.String()),
+				slog.String("candidate", remoteName),
+				slog.String("error", err.Error()))
+		}
+	}
+	if electionErr != nil && errors.Is(firstErr, plumbing.ErrReferenceNotFound) {
+		return fmt.Errorf("checkpoint ref %s: checkpoint remote election failed; origin fallback cannot certify absence: %w", ref, electionErr)
+	}
+	return firstErr
+}
+
+// probeAndFetchCheckpointRef runs the ls-remote existence probe and, on a hit,
+// fetches ref from fetchTarget into the local ref of the same name. It carries
+// FetchCheckpointRef's absence-vs-failure contract for a single target.
+func probeAndFetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName, fetchTarget string, authoritative bool) error {
 	out, err := LsRemoteInDir(ctx, "", fetchTarget, ref.String())
 	if err != nil {
 		// Redact: fetchTarget can be a remote URL with embedded credentials
 		// (CI origin URLs), and this error is logged and shown to users.
-		return fmt.Errorf("probe checkpoint ref %s on %s: %w", ref, RedactURL(fetchTarget), err)
+		return fmt.Errorf("probe checkpoint ref %s on %s: %w", ref, RedactURLOrPath(fetchTarget), err)
 	}
 	if len(bytes.TrimSpace(out)) == 0 {
 		if !authoritative {
@@ -120,9 +311,9 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 			// host the configured checkpoint refs. Emptiness there proves
 			// nothing; classifying it as absence would silently drop backfills
 			// for checkpoints that exist on the real checkpoint remote.
-			return fmt.Errorf("checkpoint ref %s not visible on fallback remote %s, and the configured checkpoint remote could not be resolved; refusing to treat this as absence", ref, RedactURL(fetchTarget))
+			return fmt.Errorf("checkpoint ref %s not visible on fallback remote %s, and the configured checkpoint remote could not be resolved; refusing to treat this as absence", ref, RedactURLOrPath(fetchTarget))
 		}
-		return fmt.Errorf("checkpoint ref %s not found on %s: %w", ref, RedactURL(fetchTarget), plumbing.ErrReferenceNotFound)
+		return fmt.Errorf("checkpoint ref %s not found on %s: %w", ref, RedactURLOrPath(fetchTarget), plumbing.ErrReferenceNotFound)
 	}
 
 	refSpec := "+" + ref.String() + ":" + ref.String()
@@ -134,11 +325,12 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 		// Fold git's own output into the error (redacted): a bare
 		// "exit status 128" is undebuggable in hook Warn logs.
 		msg := strings.TrimSpace(string(fetchOut))
-		msg = strings.ReplaceAll(msg, fetchTarget, RedactURL(fetchTarget))
+		safeTarget := RedactURLOrPath(fetchTarget)
+		msg = strings.ReplaceAll(msg, fetchTarget, safeTarget)
 		if msg != "" {
-			return fmt.Errorf("fetch checkpoint ref %s from %s: %s: %w", ref, RedactURL(fetchTarget), msg, err)
+			return fmt.Errorf("fetch checkpoint ref %s from %s: %s: %w", ref, safeTarget, msg, err)
 		}
-		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, RedactURL(fetchTarget), err)
+		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, safeTarget, err)
 	}
 	return nil
 }
@@ -158,6 +350,10 @@ func repoHasNoRemotes(ctx context.Context) bool {
 // bounded budget plus BatchMode SSH, so a passphrase-protected key can never
 // prompt — or invisibly hang — inside a hook the user's git command is
 // waiting on.
+//
+// Deliberately single-target (FetchCheckpointRef, not FetchCheckpointRefFrom):
+// these are write-side hook probes whose target the push flow already
+// confines, so the read-candidate chain does not apply here.
 func HookCheckpointRefFetcher() func(context.Context, plumbing.ReferenceName) error {
 	bounded := BoundedCheckpointRefFetcher(WriteProbeFetchBudget)
 	return func(ctx context.Context, ref plumbing.ReferenceName) error {

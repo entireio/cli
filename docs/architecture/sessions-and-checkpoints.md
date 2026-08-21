@@ -182,7 +182,7 @@ Contains full worktree snapshot plus metadata overlay. **Multiple concurrent ses
 .entire/metadata/<session-id-1>/
 ├── full.jsonl           # Session 1 transcript
 ├── prompt.txt           # Checkpoint-scoped user prompts
-└── tasks/<tool-use-id>/ # Task checkpoints
+└── tasks/<tool-use-id>/ # Post-todo incremental task checkpoints only
 .entire/metadata/<session-id-2>/
 ├── full.jsonl           # Session 2 transcript (concurrent)
 ├── ...
@@ -236,6 +236,98 @@ makes the comparison false forever and the session silently stops condensing.
 - Deleted after condensation to `entire/checkpoints/v1`
 - Reset if orphaned (no session state file exists)
 
+### Task Records (Subagent Work)
+
+A subagent invocation (Claude Code's Task tool) is captured through a durable
+**task record** — `session.TaskRecord` (json `task_records`) on session state
+(`session/state.go`): `ToolUseID`, `AgentID`, `StartedAt`, `SubagentType`,
+`TaskDescription`, `DeclaredTranscriptPath`, `Files`, `TokenUsage`,
+`CompletedAt` (zero = still in flight). Mid-turn the record is a **pointer,
+not a payload**: the subagent's transcript stays wherever the agent wrote it,
+and the record remembers how to find it — the transcript path the agent's
+stop hook declared (Claude Code's `agent_transcript_path`), with the
+agent-layout convention as fallback. Nothing is written to the shadow branch
+for task work; the payload is materialized at condensation (below).
+
+**Producers.**
+
+- **Background launch** (`run_in_background: true` in the Task tool's input):
+  Claude Code's PostToolUse for a backgrounded Task fires at the launch
+  acknowledgment, seconds after dispatch, so the launch only records an
+  in-flight record and captures nothing. `SubagentType`/`TaskDescription` are
+  captured here because `SubagentStop`'s payload carries none of them.
+- **Foreground completion** (post-task, non-final): PostToolUse fires at true
+  completion, so the record is created-and-completed in one step, files and
+  transcript path attached.
+- **SubagentStop (final, authoritative)**: the real completion signal for
+  background tasks. `handleSubagentStopFinal` completes the live record —
+  bypassing any "no changes, skip" instinct: a read-only subagent (reviewer,
+  search agent) still produced a transcript worth materializing. File
+  attribution is analyzer-only (the subagent's own transcript, never a
+  whole-worktree scan that would sweep in the parent's concurrent work); the
+  accepted trade is that shell side-effect files the transcript never names,
+  and deletions, are under-captured. A record already completed (foreground
+  dedup, duplicate/racing Final event) is skipped.
+- **SessionEnd sweep** (`completeLiveTaskRecords`): a session closing with
+  tasks still in flight completes every remaining live record, strictly
+  **before** `endSessionNow` marks `PhaseEnded` and eagerly condenses, so the
+  condense materializes them.
+- **Factory Droid Workers** upsert (`UpsertCompletedTaskRecord`): a worker
+  spans multiple turns, so repeat completions merge files into the same record
+  instead of claiming exactly-once.
+
+**Exactly-once completion.** Completion goes through
+`strategy.CompleteTaskRecord`: one `MutateSessionState` closure marks
+`CompletedAt` exactly once (a racing duplicate sees false and skips), attaches
+the extraction results (files, token usage, declared transcript path) to the
+claimed record, and merges files into the session's `FilesTouched`. Completion
+happens **last**, after successful extraction, so a failed capture leaves the
+record live for the SessionEnd sweep to retry. Late-arrival guard: a
+`SubagentStop` whose parent session state is missing entirely skips outright —
+re-creating state would resurrect a zombie session; state present but
+`PhaseEnded` → complete the record, then eagerly condense
+(`CondenseAndMarkFullyCondensed`) so it doesn't linger as post-condensation
+data. Hard-killed agents get the same terminal state from the exited-owner
+sweep (`finalizeExitedSessions`, run inside `entire status`/`doctor`), which
+completes live records before ending the session — the transcript-so-far
+still reaches a permanent checkpoint.
+
+**Materialization (condensation).** `materializeTaskRecords`
+(`manual_commit_condensation.go`) resolves each record's transcript — declared
+path first, agent-layout fallback — runs the same sanitize → externalize →
+redact pipeline the session transcript gets
+(`prepareTaskTranscriptForStorage`), and writes
+`tasks/<tool-use-id>/{agent-<agent-id>.jsonl, task.json}` inside the parent
+session's checkpoint, on both persistent backends via the shared
+`applySessionWrite`. An unresolvable, unreadable, or empty transcript still
+gets a `task.json` carrying a stable, path-free
+`transcript_unavailable_reason` — the record is never silently dropped.
+Records with an empty/unsafe `ToolUseID` or `AgentID` are skipped with a
+warning, never allowed to wedge condensation.
+
+**Self-contained checkpoints.** Live records are materialized too: each
+condensation stores the transcript-so-far, so a mid-task commit carries a
+partial transcript and a later checkpoint carries the full one — the same
+self-containment rule the compact transcript follows. Live records survive
+condensation for retry; completed records are removed only after a successful
+write (`removeCompletedTaskRecords`, run from `resetCheckpointWindow`).
+
+**Trigger currency.** "Does this session have task content?" is
+`State.HasTaskContent()` (`len(TaskRecords) > 0`) everywhere — condensation
+triggers, empty-session guards, doctor classification, shadow-branch
+deletability. Records never touch the shadow branch: a records-only session
+(no shadow branch, no steps, empty parent transcript) still condenses, and
+shadow-branch existence no longer implies task content (shadow pinning keys on
+`StepCount` only). `checkpoint list --pending` renders `[Task]` rows from
+records, with `Running`/`Completed` verbs.
+
+**Shadow-branch task checkpoints** still exist in exactly one form: post-todo
+incrementals. `SaveTaskStep` (`strategy/manual_commit_git.go`) is formally
+incremental-only — it errors on non-incremental use — and its sole production
+caller is the Claude Code post-todo hook, writing under
+`.entire/metadata/<session-id>/tasks/<tool-use-id>/` when a TodoWrite fires
+inside a subagent.
+
 ### Committed Checkpoints
 
 Branch: `entire/checkpoints/v1`
@@ -246,22 +338,34 @@ sync remote, resolved in this order:
 1. `strategy_options.checkpoint_push_remote` if set — fail-closed when it
    names a remote that is not configured (checkpoint sync is disabled until
    fixed, since this is explicit user intent).
-2. `origin`, if configured.
-3. The sole configured remote.
-4. The first remote in `.git/config` order.
+2. The **captured** election, if its remote is still configured — fail-soft
+   otherwise (capture is automatic state, so a renamed/removed remote falls
+   through instead of disabling sync).
+3. `origin`, if configured.
+4. The sole configured remote.
+5. The first remote in `.git/config` order.
 
-The branch's tracking config (`branch.<name>.pushRemote`,
-`remote.pushDefault`, `branch.<name>.remote`) is deliberately **not** a tier.
-Election is compared against the remote of the push being made, so electing
-the tracking remote turns every push to a different remote into a silent
-no-op — `git push <other> HEAD`, a `git clone -o base` whose checkpoints go to
-a separately added `origin`, any repo with `remote.pushDefault` set. It would
-also elect a remote the read paths cannot see, since `resume` and `explain`
-resolve checkpoints through origin's remote-tracking refs.
+**Capture** is how the election follows the user's actual push habit with
+zero configuration: during pre-push, when the push target agrees with the
+branch's declared push destination (`branch.<name>.pushRemote` →
+`remote.pushDefault` → `branch.<name>.remote` — the config a bare `git push`
+resolves through) and differs from the current election, that remote is
+persisted as the captured election (git common dir,
+`entire-checkpoint-sync-remotes.json`, list-shaped for the future multi-remote
+set), a one-line stderr notice announces the change, and the same push carries
+the checkpoints. Declaration alone never elects (the config-at-rest bug that
+got the static tracking tier dropped in `74e239a9` — it turned pushes to every
+other remote into silent no-ops, e.g. `git clone -o base` pushing a separately
+added `origin`); a bare push to an undeclared remote never elects either (the
+pre-single-remote transcript leak). Phase-1 rules: at most one captured
+remote, and the first still-configured capture sticks — a mixed-habit repo whose branches push
+two remotes must not flip the election per push. An explicit
+`checkpoint_push_remote` always outranks and disables capture. See
+`strategy/checkpoint_sync_capture.go`.
 
-For the fork setup where `origin` is an unpushable base repo, name the fork
-explicitly with `checkpoint_push_remote` — the only form of it where the
-checkpoints can also be read back.
+For the fork setup where `origin` is an unpushable base repo, capture elects
+the fork automatically on the first tracked push; `checkpoint_push_remote`
+remains the explicit override.
 
 The pre-push hook carries checkpoint data only when the push targets the
 elected remote; pushes to any other remote or to a raw URL sync nothing, on
@@ -270,6 +374,50 @@ intact for the next elected-remote push). The dedicated `checkpoint_remote`
 URL mode is exempt — it addresses a separate metadata store directly. `entire
 status` shows the sync destination and how many checkpoints have not reached
 it yet.
+
+A gated push is not fully silent: when checkpoints are waiting for the
+elected remote, the hook prints a two-line stderr hint naming the elected
+destination, the waiting count, and the `checkpoint_push_remote` setting
+(pointed at `.entire/settings.local.json` — a remote name is a per-clone
+fact) that re-routes sync to the remote being pushed. The hint stays quiet
+when the election was explicit (`checkpoint_push_remote` is already set),
+when the push target is a raw URL rather than a configured remote, when
+nothing is waiting, when the election failed (the fail-closed case logs a
+warning instead), and when the push target is not the branch's declared push
+destination — a deploy target or a one-off `git push upstream` must never be
+recommended as the checkpoint sync remote, which would publish transcripts
+there. With capture taking a declared destination on the first agreeing push,
+what remains for the hint is a declared remote capture will not elect because
+one is already in force (phase-1 first-capture-sticks), where naming the
+setting is genuinely the only way to re-route. See `hintGatedCheckpointSync` in
+`strategy/checkpoint_sync_remote.go`.
+
+**Reads follow the election.** Where writes confine to one remote, reads
+consult an ordered candidate chain: the elected sync remote first, then
+`origin` as a **read-only legacy tier** — every pre-election repo has its
+checkpoint data on origin, and a fresh clone may lack the local settings that
+elected something else. `strategy.CheckpointReadRemotes` (and
+`CheckpointReadRemotesWithElection`, which bundles the election result for
+callers that need both) resolves the chain, failing *open* to `[origin]` when
+the election fails — failing reads closed would only prevent *finding* data.
+Every checkpoint-data read iterates the chain per operation (metadata-branch
+fetches, tracking-ref readers, per-checkpoint ref fetches, blob hydration,
+checkpoint-policy reads). Metadata-branch fetches refresh every candidate's
+tracking ref because branch existence alone does not prove that branch contains
+the requested checkpoint; they succeed when any candidate fetch succeeds.
+Other reads try candidates in order, advancing on missing data or transport
+failure and surfacing the first candidate's error when all fail. Local-ref advancement stays
+**elected-remote-only** — `EnsurePrimaryRef`, the metadata-fetch advance step,
+`promoteRemoteTrackingPrimary`, and the local checkpoint-policy ref update
+never act on the legacy tier, keyed on the explicit election result rather
+than the chain's first entry (a stale origin feeding `SafelyAdvanceLocalRef`
+would replay local v1 onto stale history — the issue-#1374 hazard). Legacy
+data on origin is therefore served through origin's *tracking ref* (resume's
+final metadata tier and the store's tracking-ref fallback), never by moving
+local refs. A repository with no remotes keeps its "checkpoint absent"
+classification, which requires positive evidence on every axis (a successful
+empty `git remote` listing, a live context, readable settings without a
+`checkpoint_remote` key).
 
 Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkpoint**:
 
@@ -286,7 +434,10 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 │   ├── metadata.json
 │   ├── full.jsonl
 │   └── ...
-└── 2/                   # Third session...
+├── 2/                   # Third session...
+└── tasks/<tool-use-id>/ # Subagent task records, materialized at condensation
+    ├── agent-<agent-id>.jsonl # Subagent transcript, sanitized + redacted (omitted when unavailable)
+    └── task.json        # Record metadata (files, tokens, timings, unavailable reason)
 ```
 
 **Compact transcript (`transcript.jsonl`):** generated best-effort from
@@ -594,7 +745,7 @@ Strategies determine checkpoint timing and type:
 | Event | Checkpoint Type |
 |-------|----------------|
 | On Save | Temporary |
-| On Task Complete | Temporary |
+| On Task Complete | Task record on session state → materialized at condensation |
 | On User Commit | Condense → Committed |
 
 ## Rewind

@@ -11,12 +11,24 @@ import (
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
-// RemoveCurrentContext deletes the active context's keyring tokens and its
-// contexts.json entry, clearing current_context. It is a no-op (returns nil)
-// when there is no current context. Used by logout.
+// RemoveCurrentContext deletes the acting context's keyring tokens and its
+// contexts.json entry, clearing current_context when it pointed there. It is a
+// no-op (returns nil) when there is no acting context. Used by logout.
+//
+// It resolves through File.Active, so `entire logout --context staging` removes
+// the login it just revoked. Resolving the removal target differently from the
+// revocation target (which comes from resolveStatusTarget, also via Active)
+// would end one session server-side while deleting a different login's
+// credentials locally.
 func RemoveCurrentContext() error {
 	if err := removeContextLocked(func(f *contexts.File) *contexts.Context {
-		return f.Find(f.CurrentContext)
+		sel, err := f.Active()
+		if err != nil {
+			// Unresolvable explicit selection: remove nothing rather than
+			// falling back to current_context, which is not what was asked for.
+			return nil
+		}
+		return sel.Context
 	}); err != nil {
 		return fmt.Errorf("remove current context: %w", err)
 	}
@@ -147,9 +159,39 @@ func SetCurrentContext(name string) error {
 	return nil
 }
 
-// Contexts returns all stored login contexts and the current context name,
-// for listing/switching. Order matches on-disk order.
+// Contexts returns all stored login contexts and the name of the one currently
+// acting, for listing/switching and for the status/logout targets. Order matches
+// on-disk order.
+//
+// The second return is the EFFECTIVE active name, so a `--context`/
+// $ENTIRE_CONTEXT selection is what `auth status` reports, what `auth contexts`
+// marks, and what `logout` revokes — the alternative is status describing one
+// identity while every other command uses another.
 func Contexts() ([]*contexts.Context, string, error) {
+	f, err := contexts.Load(userdirs.Config())
+	if err != nil {
+		return nil, "", fmt.Errorf("load contexts: %w", err)
+	}
+	sel, err := f.Active()
+	if err != nil {
+		return nil, "", err //nolint:wrapcheck // UnknownContextError is already a complete operator message
+	}
+	if sel.Context == nil {
+		return f.Contexts, "", nil
+	}
+	return f.Contexts, sel.Context.Name, nil
+}
+
+// StoredContexts returns all stored login contexts and the STORED
+// current_context, ignoring any `--context`/$ENTIRE_CONTEXT override.
+//
+// Use this for questions about what is *persisted* — does a default exist, what
+// should become the new default — as opposed to which identity is *acting*,
+// which is Contexts. Resolving the acting identity here would answer the wrong
+// question: after `logout --context staging` the override names a context that
+// no longer exists, so Active fails and a caller asking "is a default still
+// set?" would silently get an error instead of "no".
+func StoredContexts() ([]*contexts.Context, string, error) {
 	f, err := contexts.Load(userdirs.Config())
 	if err != nil {
 		return nil, "", fmt.Errorf("load contexts: %w", err)

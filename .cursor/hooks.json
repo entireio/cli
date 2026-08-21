@@ -2,37 +2,37 @@
   "hooks": {
     "beforeSubmitPrompt": [
       {
-        "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks cursor before-submit-prompt"
+        "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks cursor before-submit-prompt'"
       }
     ],
     "preCompact": [
       {
-        "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks cursor pre-compact"
+        "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks cursor pre-compact'"
       }
     ],
     "sessionEnd": [
       {
-        "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks cursor session-end"
+        "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks cursor session-end'"
       }
     ],
     "sessionStart": [
       {
-        "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks cursor session-start"
+        "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks cursor session-start'"
       }
     ],
     "stop": [
       {
-        "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks cursor stop"
+        "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks cursor stop'"
       }
     ],
     "subagentStart": [
       {
-        "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks cursor subagent-start"
+        "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks cursor subagent-start'"
       }
     ],
     "subagentStop": [
       {
-        "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks cursor subagent-stop"
+        "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks cursor subagent-stop'"
       }
     ]
   },

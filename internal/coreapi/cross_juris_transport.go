@@ -213,7 +213,14 @@ func (t *crossJurisRoundTripper) send(req *http.Request, body []byte, originalAu
 
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
-		return nil, fmt.Errorf("cross-juris transport: base round trip: %w", err)
+		// Returned verbatim: http.Client wraps every RoundTripper failure in a
+		// *url.Error that already names the method and URL, so a prefix here
+		// only pads the one line a user sees when a core is unreachable
+		// ("...: cross-juris transport: base round trip: dial tcp ...: connection
+		// refused") without locating the failure any better. The other failure
+		// sites in this file keep their prefixes — they name mechanisms a bare
+		// error wouldn't reveal (body buffering, the 421/401 exchange).
+		return nil, err //nolint:wrapcheck // see above
 	}
 
 	switch resp.StatusCode {

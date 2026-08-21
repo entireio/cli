@@ -16,16 +16,44 @@ If your repository is **public**, this data is visible to the entire internet.
 
 ### What Entire redacts automatically
 
-Entire automatically scans transcript and metadata content before writing it to the `entire/checkpoints/v1` branch. Six always-on secret detection methods run during condensation, plus a conditional seventh pass for user-defined secret rules (see [Customizing redaction](#customizing-redaction) below), an opt-in eighth pass for PII (see [Optional PII redaction](#optional-pii-redaction) below), and an opt-in ninth pass that shells out to the OpenAI Privacy Filter model (see [Optional OpenAI Privacy Filter](#optional-openai-privacy-filter-opf) below):
+Entire automatically scans transcript and metadata content before writing it to the `entire/checkpoints/v1` branch. Five always-on secret detection methods plus a configurable scanner layer (pattern matching, method 2 below) run during condensation, plus a conditional seventh pass for user-defined secret rules (see [Customizing redaction](#customizing-redaction) below), an opt-in eighth pass for PII (see [Optional PII redaction](#optional-pii-redaction) below), and an opt-in ninth pass that shells out to the OpenAI Privacy Filter model (see [Optional OpenAI Privacy Filter](#optional-openai-privacy-filter-opf) below):
 
 1. **Entropy scoring** — Identifies high-entropy strings (Shannon entropy > 4.5) that look like randomly generated secrets, even if they don't match a known pattern.
-2. **Pattern matching** — Uses [Betterleaks](https://github.com/betterleaks/betterleaks) built-in rules to detect known secret formats.
+2. **Pattern matching** — Runs one or both configurable scanner engines against known secret formats: [Betterleaks](https://github.com/betterleaks/betterleaks) (default on) and/or [goredact](https://github.com/lastpersonlabs/goredact) (default off). See [Choosing secret-scanner engines](#choosing-secret-scanner-engines) below.
 3. **Provider token prefixes** — Deterministically redacts known secret-key prefixes (e.g. Supabase `sb_secret_`, `sbp_`) regardless of entropy or surrounding context.
 4. **Credentialed URI detection** — Redacts URLs with embedded passwords, such as `scheme://user:password@host`.
 5. **Database connection-string detection** — Redacts JDBC, Postgres keyword DSN, SQL Server, and ODBC-style connection strings containing passwords.
 6. **Bounded credential value detection** — Redacts password-like config values such as `DB_PASSWORD=...` and `PGPASSWORD=...` while preserving the surrounding key.
 
-Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. The six secret-detection passes above are **always on** and cannot be disabled. User-defined rules (inline `custom_redactions` and rule packs) add a seventh secret-detection pass that only runs when configured.
+Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. Of the six secret-detection passes above, the scanner layer (pass 2) is configurable — see [Choosing secret-scanner engines](#choosing-secret-scanner-engines) below — while the other five are **always on** and cannot be disabled. User-defined rules (inline `custom_redactions` and rule packs) add a seventh secret-detection pass that only runs when configured.
+
+### Choosing secret-scanner engines
+
+Pattern matching (layer 2 above) is served by two independent scanner engines, each of which can be turned on or off:
+
+- **Betterleaks** — a broad rule-set auditor with several hundred built-in detectors for known secret formats (cloud providers, VCS platforms, payment processors, private key blocks, generic credentials, and more). Default: **on**.
+- **goredact** — a streaming, validator-based scanner that checks a smaller set of provider/contextual token shapes against structural validators (e.g. checksum or length checks) rather than pure regex. Default: **off**.
+
+Configure them under `redaction.betterleaks` / `redaction.goredact` in `.entire/settings.json`:
+
+```json
+"redaction": {
+  "betterleaks": { "enabled": true },
+  "goredact":   { "enabled": false }
+}
+```
+
+Omitting either key, or the key's `enabled` field, keeps that engine at its default. All other redaction layers — entropy scoring, provider token prefixes, credentialed URI detection, connection-string detection, custom rules, bounded credential key/value detection, and PII — are unaffected by these two toggles; they keep running exactly as described elsewhere in this document regardless of which scanner engine(s) are selected.
+
+**Fail-closed rules:**
+
+- At least one scanner engine must be enabled. Setting both `betterleaks.enabled` and `goredact.enabled` to `false` is a settings error: Entire refuses to load the (merged) settings rather than run condensation with no pattern-matching coverage at all.
+- Scanner selection is honored **only** from the committed `.entire/settings.json`. A `betterleaks` or `goredact` key present in `.entire/settings.local.json` is ignored, and Entire logs a warning naming the ignored key. This is deliberate: unlike most `settings.local.json` overrides, which are personal and don't affect anyone else, the scanner selection changes what gets redacted into checkpoints that every reader of the repository's history will see — so it has to be a team-visible, committed decision, not a per-developer one.
+- Disabling Betterleaks narrows layer-2 coverage to whatever engine(s) remain enabled. The first time a hook or CLI command runs with Betterleaks disabled, Entire logs a one-time notice to that effect (printed on the terminal when stderr is a TTY; suppressed on subsequent runs via a marker file under `.entire/tmp/`).
+
+**Runtime degradation:** if goredact is the only enabled scanner and it fails at runtime (a scan error, not a missing finding), Entire treats that as scanner degradation and fails the transcript write rather than persisting content that only received partial pattern-matching coverage. This is a deliberate fail-closed choice: with Betterleaks also enabled, a goredact failure degrades gracefully to Betterleaks-only coverage for that write; with Betterleaks disabled, there is no fallback engine left, so the write itself must fail instead of shipping under-scanned content.
+
+**The coverage trade-off, honestly stated:** Betterleaks' several-hundred-rule set covers a long tail of structured, often low-entropy token formats that a smaller rule set would miss; goredact covers roughly 67 provider/contextual token shapes but checks each one with a dedicated validator, trading breadth for precision. Neither engine is a strict superset of the other — running both (the default plus opting into goredact) gives the widest coverage.
 
 ### Optional PII redaction
 
@@ -71,7 +99,7 @@ Prerequisites:
 pip install opf
 ```
 
-Verify `opf --help` works; the CLI defaults to resolving the binary via `$PATH`. Override with the `command` setting if you need a specific path.
+Verify `opf --help` works; the CLI defaults to resolving the binary via `$PATH`. If you need a specific path, set `command` in `.entire/settings.local.json` — it is deliberately not honored from the committed `.entire/settings.json`. See [Why `command` is local-only](#why-command-is-local-only).
 
 Enable in `.entire/settings.json`:
 
@@ -103,6 +131,8 @@ Available categories (set to `true` to enable, `false` or omit to skip):
 
 Unknown category names are rejected at settings load time so typos surface immediately instead of silently disabling a category.
 
+The filter needs at least one enabled category to run. This is enforced at push time, not settings load: with `enabled: true` and no effective category (`categories` omitted, empty, or all-false) the model scan cannot run, so the push aborts with a configuration error rather than tagging commits as OPF-applied without a scan. Enable a category, set `enabled: false`, or pass `ENTIRE_OPF=no` on a push to skip the filter for that push only.
+
 Full settings reference:
 
 ```json
@@ -120,16 +150,64 @@ Full settings reference:
         "account_number": false,
         "secret": false
       },
-      "command": "opf",
       "timeout_seconds": 30
     }
   }
 }
 ```
 
-- `command` — path or PATH-resolvable name of the `opf` binary. Defaults to `opf`.
+- `command` — path or PATH-resolvable name of the `opf` binary. Defaults to `opf`. **Only read from `.entire/settings.local.json`**, and only when that file is untracked; see [Why `command` is local-only](#why-command-is-local-only).
 - `timeout_seconds` — per-invocation timeout. Defaults to `30`.
 - `prompt_default` — `"ask"` (default), `"never"`, or `"always"`. Controls whether the pre-push hook surfaces an interactive prompt before running OPF. `ENTIRE_OPF=yes` or `ENTIRE_OPF=no` on a single `git push` invocation overrides this for that push only.
+
+### Why `command` is local-only
+
+`command` becomes `argv[0]` of a process Entire executes during `git push`, so
+whoever controls that string controls what runs on the developer's machine.
+`.entire/settings.json` is version-controlled, which would let an ordinary pull
+request pair a `command` with a payload committed alongside it — and a JSON
+settings diff does not read as executable to a reviewer. The pre-push prompt is
+no defense either: it never names the command, `prompt_default: "always"` skips
+it, and non-TTY pushes (CI, agent-driven) auto-run.
+
+Entire therefore honors `command` only when it is genuinely developer-owned:
+
+- it must come from `.entire/settings.local.json`, not `.entire/settings.json`
+- that file must be **untracked** — absent from both the git index and `HEAD`
+
+The second check matters because the filename alone proves nothing:
+`.gitignore` does not apply to a path that is already tracked, so
+`git add -f .entire/settings.local.json` commits it and a fresh clone
+materializes it with the committed content.
+
+This is enforced for the whole file, not just this setting: a tracked
+`.entire/settings.local.json` is ignored in its entirety, because it is not
+local to your clone — it arrives with the repository and would override project
+settings for everyone. Entire warns on stderr and tells you to run
+`git rm --cached .entire/settings.local.json`. The load still succeeds using
+project settings, so a committed file cannot brick the repository.
+
+The two checks also differ in depth. The layer check looks at the git index; the
+`command` check also looks at `HEAD`. A pull request that commits the file puts
+it in the index of every clone that checks the branch out, so the index is what
+catches a delivered attack — and checkout cannot produce a file that is absent
+from the index, so "committed, then `git rm --cached`" is a state you created
+locally, not one that arrived with the repository. Reading `HEAD` is the
+expensive half, so it is reserved for the setting that gets executed.
+
+The two checks fail in opposite directions on purpose. If the repository cannot
+be read at all, the local layer is still applied — losing every local
+preference over an unreadable repo is worse than the risk. The executed
+`command` is dropped in that case, because being wrong there means running
+someone else's binary. With no repository at all, nothing can have arrived by
+cloning, so the file is treated as yours.
+
+When a `command` fails these checks it is ignored with a warning in
+`.entire/logs/entire.log` and OPF falls back to resolving `opf` on `$PATH`. If
+that binary is missing, the pre-push rewrite fails closed rather than pushing
+content you believed OPF had scanned. Everything else in the OPF block
+(`enabled`, `categories`, `timeout_seconds`, `prompt_default`) is ordinary
+configuration and still works from the shared project file.
 
 The interactive prompt offers three options and reacts to **Ctrl-C** for cancellation:
 
@@ -152,11 +230,16 @@ Non-interactive contexts (CI, scripted pipes with no TTY) skip the prompt and ru
 
 **CI consideration**: if you've enabled OPF locally and your CI runs `git push` (e.g. an agent-driven workflow), the CI push will attempt to run OPF too. If the `opf` binary isn't installed in CI, the push will abort with `OPFRuntimeFailedError` rather than silently shipping under-redacted content — by design, since "I enabled OPF" should mean "no content leaves my machines without OPF." The remedies are (a) install `opf` in CI, (b) set `ENTIRE_OPF=no` for CI pushes, or (c) set `prompt_default: "never"` if you only want OPF on interactive pushes.
 
-OPF failures at push time are **fail-closed**: if OPF is not on PATH, fails to start, or times out during the pre-push rewrite, the per-process circuit breaker trips and the rewrite aborts the push with `OPF runtime failed; aborting push`. Nothing reaches the remote. The intent is that "the user enabled OPF" means "I do not want unredacted content leaving this machine" — falling back to 8-layer silently on the push path would violate that contract. Fix the install or set `ENTIRE_OPF=no` for a one-off push.
+OPF failures at push time are **fail-closed**: if OPF is not on PATH, fails to start, or times out during the pre-push rewrite, the per-process circuit breaker trips and no under-redacted content reaches the remote. The intent is that "the user enabled OPF" means "I do not want unredacted content leaving this machine" — falling back to 8-layer silently on the push path would violate that contract. Fix the install or set `ENTIRE_OPF=no` for a one-off push.
+
+How that is enforced depends on the checkpoint backend, because they have different escape hatches:
+
+- **git-branch**: the rewrite aborts the push with `OPF runtime failed; aborting push`. Your `git push` exits non-zero. The checkpoint branch travels with that push, so refusing the push is the only way to withhold it.
+- **git-refs**: checkpoint refs are pushed separately from your branch and stay queued when they are not flushed, so the failure withholds the checkpoint push and lets your own `git push` succeed. Nothing under-redacted ships either way. This is not silent: a warning names the failure and states that checkpoint refs stayed queued for the next push.
 
 (The circuit breaker is per-process, so a broken install costs one warning instead of one timeout per blob — but the push still aborts.)
 
-Cost note: each shell-out loads the OPF model (~1.5B parameters on CPU). The pre-push rewrite batches **every redactable leaf across every unpushed v1 commit** into a single inference pass, so a typical real-world push pays the model-load cost once (~6s) plus inference (~5s per 100KB of leaf content) — not multiplied by the number of commits or blobs. A 3-commit push with ~250KB of total prose content runs in ~12–15s, not the ~50–100s a per-blob flow would take. Per-commit latency is unaffected because OPF doesn't run at commit time.
+Cost note: each shell-out loads the OPF model (~1.5B parameters on CPU). The pre-push rewrite batches **every redactable leaf across every unpushed commit** — v1 commits on git-branch, every unpushed commit on every queued ref on git-refs — into a single inference pass, so a typical real-world push pays the model-load cost once (~6s) plus inference (~5s per 100KB of leaf content) — not multiplied by the number of commits or blobs. A 3-commit push with ~250KB of total prose content runs in ~12–15s, not the ~50–100s a per-blob flow would take. Per-commit latency is unaffected because OPF doesn't run at commit time.
 
 #### When OPF actually runs
 
@@ -245,7 +328,7 @@ If your AI sessions will touch sensitive data:
 
 ### Secrets (always on)
 
-Betterleaks pattern matching covers cloud providers (AWS, GCP, Azure), version control platforms (GitHub, GitLab, Bitbucket), payment processors (Stripe, Square), communication tools (Slack, Discord, Twilio), private key blocks (RSA, DSA, EC, PGP, OpenSSH), and generic credentials (bearer tokens, basic auth, JWTs). Dedicated credentialed URI detection covers URLs that embed passwords. Additional database connection-string detection covers DB DSNs and query-parameter passwords not reliably covered by generic secret rules. Entropy scoring catches secrets that don't match any known pattern.
+Secret detection as a whole is always on, though the pattern-matching scanner layer within it is configurable per [Choosing secret-scanner engines](#choosing-secret-scanner-engines). Betterleaks pattern matching covers cloud providers (AWS, GCP, Azure), version control platforms (GitHub, GitLab, Bitbucket), payment processors (Stripe, Square), communication tools (Slack, Discord, Twilio), private key blocks (RSA, DSA, EC, PGP, OpenSSH), and generic credentials (bearer tokens, basic auth, JWTs). Dedicated credentialed URI detection covers URLs that embed passwords. Additional database connection-string detection covers DB DSNs and query-parameter passwords not reliably covered by generic secret rules. Entropy scoring catches secrets that don't match any known pattern.
 
 All detected secrets are replaced with `REDACTED`. PII matches are replaced with category-tagged tokens like `[REDACTED_EMAIL]` (see [Optional PII redaction](#optional-pii-redaction)).
 

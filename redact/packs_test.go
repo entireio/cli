@@ -251,7 +251,7 @@ rules:
 	mustWrite(t, dir, "ignored.txt", `not a pack`)
 	mustWrite(t, dir, "broken.yaml", `name: [this is malformed`)
 
-	packs, err := LoadPacks(dir)
+	packs, err := LoadPacks(dir, nil)
 	if err != nil {
 		t.Fatalf("LoadPacks: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestLoadPacks_MissingDirReturnsEmpty(t *testing.T) {
 	t.Parallel()
 
 	dir := filepath.Join(t.TempDir(), "does-not-exist")
-	packs, err := LoadPacks(dir)
+	packs, err := LoadPacks(dir, nil)
 	if err != nil {
 		t.Fatalf("LoadPacks should be tolerant of missing dirs, got: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestLoadPacks_RejectsNonDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := LoadPacks(path)
+	_, err := LoadPacks(path, nil)
 	if err == nil {
 		t.Fatal("expected error for non-directory redactors path")
 	}
@@ -317,7 +317,7 @@ rules:
 		t.Skipf("symlink not supported: %v", err)
 	}
 
-	packs, err := LoadPacks(dir)
+	packs, err := LoadPacks(dir, nil)
 	if err != nil {
 		t.Fatalf("LoadPacks: %v", err)
 	}
@@ -352,7 +352,7 @@ rules:
     regex: 'P+'
 `)
 
-	packs, err := LoadPacks(dir)
+	packs, err := LoadPacks(dir, nil)
 	if err != nil {
 		t.Fatalf("LoadPacks: %v", err)
 	}
@@ -383,7 +383,7 @@ rules:
 	b.WriteString("\nrules:\n  - id: h\n    regex: 'H+'\n")
 	mustWrite(t, dir, "huge.yaml", b.String())
 
-	packs, err := LoadPacks(dir)
+	packs, err := LoadPacks(dir, nil)
 	if err != nil {
 		t.Fatalf("LoadPacks: %v", err)
 	}

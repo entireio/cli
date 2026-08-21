@@ -27,6 +27,11 @@ type OPFConfig struct {
 	Command    string // path or name of the opf binary; "" defaults to "opf"
 	Timeout    int    // seconds; 0 defaults to 30
 
+	// Logger receives OPF runtime-failure diagnostics. nil means
+	// slog.Default(); the CLI injects its entry-point-initialized logger
+	// so warnings land in .entire/logs/.
+	Logger *slog.Logger
+
 	// runtime is private and constructed by ConfigurePrivacyFilter.
 	// Tests inject a fake via ConfigurePrivacyFilterWithRuntime.
 	runtime opfRuntime
@@ -96,6 +101,43 @@ func getOPFConfig() *OPFConfig {
 func OPFEnabled() bool {
 	cfg := getOPFConfig()
 	return cfg != nil && cfg.Enabled
+}
+
+// ErrOPFNoEnabledCategories is returned by BatchBytesWithPrivacyFilter
+// — the trailer-stamping path — when OPF is enabled but the effective
+// category set is empty (categories omitted, {}, all-false, or only
+// unknown keys). The model scan cannot run in this state; succeeding
+// silently would let the caller attest OPF ran (Entire-OPF-Applied
+// trailer) when it never did. The non-batched entry points (detectOPF,
+// JSONLContentWithPrivacyFilter) still fall back silently in this
+// state because their callers do not attest that OPF ran.
+var ErrOPFNoEnabledCategories = errors.New(
+	"redaction.openai_privacy_filter is enabled but no detection category is enabled; " +
+		"enable at least one category (e.g. \"private_person\": true) under " +
+		"redaction.openai_privacy_filter.categories in .entire/settings.json " +
+		"(or .entire/settings.local.json), or set enabled: false")
+
+// errOPFNilRuntime guards the trailer-stamping batch path against a
+// config that is enabled but carries no runtime. Unreachable through
+// ConfigurePrivacyFilter, which always constructs the shell-out
+// runtime; only ConfigurePrivacyFilterWithRuntime can produce it. The
+// no-silent-regex-only guarantee must hold by construction, not by
+// that property of the config lifecycle.
+var errOPFNilRuntime = errors.New(
+	"openai privacy filter is enabled but has no runtime; " +
+		"refusing regex-only output on the trailer-stamping path")
+
+// OPFMisconfiguredNoCategories reports whether OPF is enabled for this
+// process with an empty effective category set — the state described by
+// ErrOPFNoEnabledCategories. The pre-push flow checks this twice: when
+// resolving the run/skip decision (so the user is never prompted to run
+// a scan that cannot run) and again at the start of the rewrite (so
+// direct callers fail closed too). Explicit opt-outs (ENTIRE_OPF=no,
+// prompt_default: never) still resolve to skip and push regex-only
+// content without the trailer.
+func OPFMisconfiguredNoCategories() bool {
+	cfg := getOPFConfig()
+	return cfg != nil && cfg.Enabled && len(enabledCategories(cfg)) == 0
 }
 
 // OPFBreakerTripped reports whether the per-process OPF circuit breaker
@@ -260,7 +302,7 @@ func handleOPFFailure(ctx context.Context, cfg *OPFConfig, err error) {
 	if !opfBreakerTripped.CompareAndSwap(false, true) {
 		return
 	}
-	slog.WarnContext(ctx, "OpenAI Privacy Filter call failed; disabling for the rest of this process",
+	loggerOrDefault(cfg.Logger).WarnContext(ctx, "OpenAI Privacy Filter call failed; disabling for the rest of this process",
 		slog.String("component", "redaction"),
 		slog.String("command", cfg.Command),
 		slog.String("error", err.Error()),

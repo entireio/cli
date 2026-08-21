@@ -79,7 +79,7 @@ func maybeTrackPluginInvocation(ctx context.Context, pluginName string) {
 	if err != nil {
 		return
 	}
-	if s.Telemetry == nil || !*s.Telemetry {
+	if !s.IsTelemetryEnabled() {
 		return
 	}
 	telemetry.TrackPluginDetached(pluginName, s.Enabled, versioninfo.Version)

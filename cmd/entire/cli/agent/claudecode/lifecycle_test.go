@@ -259,6 +259,12 @@ func TestParseHookEvent_SubagentEnd(t *testing.T) {
 	if event.SubagentID != "agent-subagent-001" {
 		t.Errorf("expected subagent_id 'agent-subagent-001', got %q", event.SubagentID)
 	}
+	// PostToolUse fires at the background launch stub, seconds after launch,
+	// not at true completion — Final must stay false so downstream lifecycle
+	// code can key its capture-now-vs-defer decision on this flag alone.
+	if event.Final {
+		t.Error("expected Final to be false for post-task (launch-time) event")
+	}
 }
 
 func TestParseHookEvent_SubagentEnd_NoAgentID(t *testing.T) {
@@ -286,6 +292,72 @@ func TestParseHookEvent_SubagentEnd_NoAgentID(t *testing.T) {
 	if event.SubagentID != "" {
 		t.Errorf("expected empty subagent_id, got %q", event.SubagentID)
 	}
+}
+
+// TestParseHookEvent_SubagentStop covers the true-completion signal for
+// background subagents. Background subagents return a launch stub
+// immediately, so the launch-time post-task (PostToolUse) hook fires seconds
+// after launch, before any work happens — the resulting SubagentEnd event is
+// never captured beyond the stub. SubagentStop fires at real completion, even
+// after the parent's turn ended, and must translate into the same
+// agent.SubagentEnd event, marked Final so lifecycle code can tell the two
+// apart and prefer the payload's own transcript path over resolution.
+func TestParseHookEvent_SubagentStop(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"session_id":"parent-sess","transcript_path":"/tmp/parent.jsonl","hook_event_name":"SubagentStop","agent_id":"a123","agent_transcript_path":"/tmp/parent/subagents/agent-a123.jsonl","tool_use_id":"toolu_01X","cwd":"/repo"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.NotNil(t, event, "expected event, got nil")
+	if event.Type != agent.SubagentEnd {
+		t.Errorf("expected event type %v, got %v", agent.SubagentEnd, event.Type)
+	}
+	if event.SessionID != "parent-sess" {
+		t.Errorf("expected session_id 'parent-sess', got %q", event.SessionID)
+	}
+	if event.SessionRef != "/tmp/parent.jsonl" {
+		t.Errorf("expected session_ref '/tmp/parent.jsonl', got %q", event.SessionRef)
+	}
+	if event.SubagentID != "a123" {
+		t.Errorf("expected subagent_id 'a123', got %q", event.SubagentID)
+	}
+	if event.ToolUseID != "toolu_01X" {
+		t.Errorf("expected tool_use_id 'toolu_01X', got %q", event.ToolUseID)
+	}
+	if event.SubagentTranscriptPath != "/tmp/parent/subagents/agent-a123.jsonl" {
+		t.Errorf("expected subagent_transcript '/tmp/parent/subagents/agent-a123.jsonl', got %q", event.SubagentTranscriptPath)
+	}
+	if !event.Final {
+		t.Error("expected Final to be true for SubagentStop (true-completion) event")
+	}
+
+	// Defensive case: agent_transcript_path is SDK-documented for the Agent
+	// SDK but unverified for Claude Code's settings-file hook payloads, so a
+	// payload missing it must leave SubagentTranscriptPath empty rather than
+	// error, falling back to ResolveAgentTranscriptPath downstream.
+	t.Run("no transcript path", func(t *testing.T) {
+		t.Parallel()
+
+		input := `{"session_id":"parent-sess","transcript_path":"/tmp/parent.jsonl","hook_event_name":"SubagentStop","agent_id":"a123","tool_use_id":"toolu_01X","cwd":"/repo"}`
+
+		event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		require.NotNil(t, event, "expected event, got nil")
+		if event.SubagentTranscriptPath != "" {
+			t.Errorf("expected empty subagent_transcript, got %q", event.SubagentTranscriptPath)
+		}
+		if !event.Final {
+			t.Error("expected Final to be true for SubagentStop event")
+		}
+	})
 }
 
 func TestParseHookEvent_PostTodo_ReturnsNil(t *testing.T) {

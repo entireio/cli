@@ -40,7 +40,7 @@ func (m *mockBuiltinHookAgent) HookNames() []string { return nil }
 func (m *mockBuiltinHookAgent) ParseHookEvent(context.Context, string, io.Reader) (*Event, error) {
 	return nil, nil //nolint:nilnil // test mock
 }
-func (m *mockBuiltinHookAgent) InstallHooks(context.Context, bool, bool) (int, error) {
+func (m *mockBuiltinHookAgent) InstallHooks(context.Context, bool) (int, error) {
 	return 0, nil
 }
 func (m *mockBuiltinHookAgent) UninstallHooks(context.Context) error   { return nil }
@@ -60,9 +60,9 @@ func (m *mockFullAgent) HookNames() []string { return nil }
 func (m *mockFullAgent) ParseHookEvent(context.Context, string, io.Reader) (*Event, error) {
 	return nil, nil //nolint:nilnil // test mock
 }
-func (m *mockFullAgent) InstallHooks(context.Context, bool, bool) (int, error) { return 0, nil }
-func (m *mockFullAgent) UninstallHooks(context.Context) error                  { return nil }
-func (m *mockFullAgent) AreHooksInstalled(context.Context) bool                { return false }
+func (m *mockFullAgent) InstallHooks(context.Context, bool) (int, error) { return 0, nil }
+func (m *mockFullAgent) UninstallHooks(context.Context) error            { return nil }
+func (m *mockFullAgent) AreHooksInstalled(context.Context) bool          { return false }
 
 // TranscriptAnalyzer
 func (m *mockFullAgent) GetTranscriptPosition(string) (int, error) { return 0, nil }

@@ -48,6 +48,27 @@ func BenchmarkRedactJSONLBytes(b *testing.B) {
 				}
 			}
 		})
+
+		b.Run(tc.name+"/goredact-only", func(b *testing.B) {
+			if err := ConfigureScanners(ScannersConfig{Goredact: true}); err != nil {
+				b.Fatal(err)
+			}
+			b.Cleanup(func() {
+				// b.Errorf, not b.Fatal: this runs during cleanup, possibly
+				// after the loop body already called Fatal/Goexit, so a
+				// second Goexit here would be a Goexit-inside-Goexit.
+				if err := ConfigureScanners(ScannersConfig{Betterleaks: true}); err != nil {
+					b.Errorf("restore default scanners: %v", err)
+				}
+			})
+			b.ReportAllocs()
+			b.SetBytes(int64(len(tc.data)))
+			for b.Loop() {
+				if _, err := JSONLBytes(tc.data); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 

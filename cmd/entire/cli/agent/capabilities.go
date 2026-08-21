@@ -183,6 +183,15 @@ func AsSubagentAwareExtractor(ag Agent) (SubagentAwareExtractor, bool) {
 	return declaredCapability[SubagentAwareExtractor](ag, func(c DeclaredCaps) bool { return c.SubagentAwareExtractor })
 }
 
+// AsSubagentSessionResolver returns the agent as SubagentSessionResolver if it
+// implements the interface. No capability declaration is needed: whether an
+// agent's subagents run as sessions of their own is a property of the agent's
+// own hook protocol, which only built-in agents model. External agents report
+// subagent boundaries through their own hooks.
+func AsSubagentSessionResolver(ag Agent) (SubagentSessionResolver, bool) {
+	return builtinCapability[SubagentSessionResolver](ag)
+}
+
 // AsSessionBaseDirProvider returns the agent as SessionBaseDirProvider if it implements
 // the interface. No capability declaration is needed since this is a built-in-only feature
 // (external agents use the agent binary's own session resolution).
@@ -203,4 +212,14 @@ func AsModelExtractor(ag Agent) (ModelExtractor, bool) {
 // agents do not expose this optional interface through declared capabilities.
 func AsSkillEventExtractor(ag Agent) (SkillEventExtractor, bool) {
 	return builtinCapability[SkillEventExtractor](ag)
+}
+
+// AsSessionEndBudgeter returns the agent as SessionEndBudgeter if it implements
+// the interface. Built-in only because no external agent needs it yet — not
+// because external agents could enforce a budget themselves: a plugin supplies
+// only parse-hook, while the work being bounded (endSessionNow, the condense)
+// runs in the entire process. Widen DeclaredCaps with a session_end_budget
+// field when an external agent has a host that clamps its session-end hook.
+func AsSessionEndBudgeter(ag Agent) (SessionEndBudgeter, bool) {
+	return builtinCapability[SessionEndBudgeter](ag)
 }

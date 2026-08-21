@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -104,6 +105,36 @@ type BrowserAuthFlow struct {
 // AuthorizationURL is the URL to open in the user's browser.
 func (f *BrowserAuthFlow) AuthorizationURL() string { return f.inner.AuthorizationURL }
 
+// Issuer is the RFC 9207 `iss` parameter the login server attached to the
+// loopback callback, or "" when it sent none. Only populated after Wait.
+//
+// It is reported verbatim and is NOT validated here — a dispatching login
+// server legitimately names a different host than the one dialled, so the
+// caller has to apply the trust rule (see issMatches in login.go) before
+// handing the value to UseTokenIssuer.
+func (f *BrowserAuthFlow) Issuer() string { return f.inner.Issuer() }
+
+// UseTokenIssuer redeems the authorization code at origin instead of the
+// dialled login server, for an apex that dispatches the browser to a
+// regional login server and serves no token endpoint of its own. The
+// authorization code and the resulting tokens travel to origin, so callers
+// must vet it first.
+func (f *BrowserAuthFlow) UseTokenIssuer(origin string) error {
+	normalized := api.NormalizeOriginURL(origin)
+	// Same stricter-than-the-dialled-host rule the device flow applies in
+	// Client.UseTokenIssuer, and for the same reason: --insecure-http-auth is
+	// an explicit choice about a host the operator typed, and must not extend
+	// to whatever host that server later names. Applied here too rather than
+	// left to auth-go's SetTokenBaseURL, which honours AllowInsecureHTTP for
+	// any host. Unreachable while adoptIssuer demands https on both sides
+	// before calling either shim — but the two paths must not disagree about
+	// policy, or loosening adoptIssuer would silently loosen only one of them.
+	if err := api.RequireSecureURL(normalized); err != nil && !isLoopbackHTTP(normalized) {
+		return fmt.Errorf("token issuer %s: %w", normalized, err)
+	}
+	return f.inner.SetTokenBaseURL(normalized) //nolint:wrapcheck // shim returns authcode errors verbatim so callers can errors.Is on sentinels
+}
+
 // Wait blocks until the browser is redirected to the loopback listener,
 // returning the authorization code.
 func (f *BrowserAuthFlow) Wait(ctx context.Context) (string, error) {
@@ -134,8 +165,33 @@ func (c *Client) StartBrowserAuth(ctx context.Context) (*BrowserAuthFlow, error)
 	return &BrowserAuthFlow{inner: f}, nil
 }
 
-// BaseURL returns the issuer base URL this client talks to.
+// BaseURL returns the login-server origin this client dialled.
 func (c *Client) BaseURL() string { return c.inner.BaseURL }
+
+// UseTokenIssuer points subsequent device-flow token polls at origin
+// instead of BaseURL, for an apex login server that redirected
+// /device_authorization to a regional one and serves no token endpoint of
+// its own (DeviceAuthStart.ResponseOrigin reports where the request landed).
+// The device code and the resulting tokens travel to origin, so callers must
+// vet it first. An empty origin clears the override.
+func (c *Client) UseTokenIssuer(origin string) error {
+	if strings.TrimSpace(origin) == "" {
+		c.inner.TokenBaseURL = ""
+		return nil
+	}
+	normalized := api.NormalizeOriginURL(origin)
+	// A runtime handoff gets a stricter transport rule than the dialled
+	// login server: --insecure-http-auth (and the automatic loopback
+	// exemption) is an explicit choice about a host the operator typed,
+	// and must not silently extend to whatever host that server later
+	// names. Plaintext is only tolerated here when it stays on loopback,
+	// matching what auth-go permits at request time.
+	if err := api.RequireSecureURL(normalized); err != nil && !isLoopbackHTTP(normalized) {
+		return fmt.Errorf("token issuer %s: %w", normalized, err)
+	}
+	c.inner.TokenBaseURL = normalized
+	return nil
+}
 
 // StartDeviceAuth requests a fresh device code.
 func (c *Client) StartDeviceAuth(ctx context.Context) (*DeviceAuthStart, error) {

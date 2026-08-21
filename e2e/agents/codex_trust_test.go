@@ -1,13 +1,16 @@
 package agents
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/stretchr/testify/require"
 )
 
@@ -84,6 +87,63 @@ func TestCodexHookTrustState_GeneratesEntriesForEveryDeclaredHandler(t *testing.
 	// Two declared handlers → two state entries.
 	require.Equal(t, 2, strings.Count(state, "[hooks.state."))
 	require.Equal(t, 2, strings.Count(state, "trusted_hash ="))
+}
+
+// TestCodexHookTrustState_CoversEveryInstalledEvent guards the hand-maintained
+// event table against the CLI's install set. Codex silently skips hooks with no
+// trusted_hash, so an event the table doesn't know is installed but inert for
+// the entire e2e suite: the hook never fires, and no test fails to say so —
+// they just quietly stop covering it. SessionEnd was exactly that gap.
+func TestCodexHookTrustState_CoversEveryInstalledEvent(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir) // InstallHooks falls back to cwd when there's no worktree root
+
+	if _, err := (&codex.CodexAgent{}).InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, ".codex", "hooks.json"))
+	require.NoError(t, err)
+
+	// Read the events generically rather than through codexHookEvents, whose
+	// fields are the very thing under test.
+	var installed struct {
+		Hooks map[string][]codexHookGroup `json:"hooks"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &installed))
+
+	state, err := codexHookTrustState(dir)
+	require.NoError(t, err)
+
+	known := make(map[string]string, len(codexHookEventLabels))
+	for _, ev := range codexHookEventLabels {
+		known[ev.displayName] = ev.keyLabel
+	}
+
+	for event, groups := range installed.Hooks {
+		for _, group := range groups {
+			for _, handler := range group.Hooks {
+				if !strings.Contains(handler.Command, "entire hooks codex") {
+					continue
+				}
+				label, ok := known[event]
+				require.Truef(t, ok, "codexHookEventLabels has no entry for %s: the CLI installs it, so e2e leaves it untrusted and Codex never fires it", event)
+				require.Containsf(t, state, label+":", "no trusted_hash generated for %s", event)
+
+				// The hash is computed over the configured timeout, while Codex
+				// caps SessionEnd handlers at SESSION_END_MAX_TIMEOUT_SEC. If it
+				// applies that clamp before hashing, anything above the ceiling
+				// would hash differently here and leave session_end untrusted —
+				// silently, since an untrusted hook simply never fires. Installing
+				// exactly the ceiling keeps both orderings identical, so pin it.
+				if event == "SessionEnd" {
+					require.NotNilf(t, handler.Timeout, "SessionEnd handler has no timeout; expected the %ds ceiling", codex.SessionEndTimeoutSec)
+					require.EqualValuesf(t, codex.SessionEndTimeoutSec, *handler.Timeout,
+						"SessionEnd installed above Codex's clamp ceiling: the pre-trust hash here may no longer match what Codex computes, which would leave the hook untrusted and silently dead in e2e")
+				}
+			}
+		}
+	}
 }
 
 // TestCodexHookTrustState_MissingFileIsNoop returns empty trust state

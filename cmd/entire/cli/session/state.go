@@ -96,6 +96,14 @@ func (k Kind) IsImported() bool {
 	return k == KindImported
 }
 
+// CondensationAttempt records the durable intent for an in-progress
+// condensation. RecoveryPending is set only when doctor must first look for a
+// checkpoint written before attempt IDs existed.
+type CondensationAttempt struct {
+	CheckpointID    id.CheckpointID `json:"checkpoint_id"`
+	RecoveryPending bool            `json:"recovery_pending,omitempty"`
+}
+
 // State represents the state of an active session.
 // This is stored in .git/entire-sessions/<session-id>.json
 type State struct {
@@ -201,6 +209,13 @@ type State struct {
 	// Used for stale session detection in "entire doctor".
 	LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`
 
+	// CaptureDegradedAt records when the session's most recent turn degraded
+	// capture because a worktree status scan breached its budget (new-file
+	// detection skipped, or the checkpoint itself skipped). Set at turn end,
+	// cleared by the next turn whose scans stay within budget. Surfaced as a
+	// warning by `entire status`.
+	CaptureDegradedAt *time.Time `json:"capture_degraded_at,omitempty"`
+
 	// StepCount is the number of checkpoints/steps created in this session.
 	// JSON tag kept as "checkpoint_count" for backward compatibility with existing state files.
 	StepCount int `json:"checkpoint_count"`
@@ -231,6 +246,10 @@ type State struct {
 	// Used to restore the Entire-Checkpoint trailer on amend and to identify
 	// sessions that have been condensed at least once. Cleared on new prompt.
 	LastCheckpointID id.CheckpointID `json:"last_checkpoint_id,omitempty"`
+
+	// CondensationAttempt is saved before a persistent checkpoint write so a
+	// retry after process death keeps both the intended ID and recovery mode.
+	CondensationAttempt *CondensationAttempt `json:"condensation_attempt,omitempty"`
 
 	// LastCheckpointCommitHash is the exact commit SHA that carried
 	// LastCheckpointID at condensation time. Used by the reconcile path to
@@ -367,6 +386,164 @@ type State struct {
 	// resolved, in which case liveness falls back to the StuckActiveThreshold
 	// timeout. Only meaningful on Owner.Host.
 	Owner *proclive.Identity `json:"owner,omitempty"`
+
+	// TaskRecords tracks subagents dispatched by this session — the durable
+	// pointer ledger for subagent work. See TaskRecord.
+	TaskRecords []TaskRecord `json:"task_records,omitempty"`
+}
+
+// TaskRecord is the durable pointer ledger entry for a subagent dispatched by
+// this session: a small session-state record (correlation ID, agent type,
+// description, declared transcript path, files touched, tokens) rather than a
+// shadow-tree write. Condensation is what materializes a record's transcript
+// (sanitize → externalize → redact) into the parent session's checkpoint —
+// see docs/superpowers/plans/2026-08-19-subagent-durable-records.md.
+//
+// CompletedAt zero means the record is still in flight (background launch
+// observed, no completion signal yet); non-zero means the record was
+// completed — via CompleteTaskRecord — by a foreground/background post-task
+// capture, SubagentStop, or the SessionEnd sweep. Unlike the prior
+// remove-on-claim model, a completed record is NOT deleted: it must persist
+// so a later condensation can materialize its transcript. Consumed by the
+// Final captures — the SubagentStop handler (handleSubagentStopFinal) and the
+// SessionEnd sweep (completeLiveTaskRecords). A Final capture completes the
+// record LAST, after successful extraction (strategy.CompleteTaskRecord's
+// exactly-once mutation), so a failed capture leaves the record live for the
+// SessionEnd sweep to retry.
+type TaskRecord struct {
+	// ToolUseID is the Task tool invocation's tool_use_id — the same ID used
+	// to key TaskMetadataDir. Dedup key for AddTaskRecord.
+	ToolUseID string `json:"tool_use_id"`
+
+	// AgentID is the subagent identifier (tool_response.agentId at launch
+	// time), used to resolve the subagent's own transcript file.
+	AgentID string `json:"agent_id,omitempty"`
+
+	// StartedAt is when the background launch was observed.
+	StartedAt time.Time `json:"started_at"`
+
+	// SubagentType and TaskDescription are captured at launch time because
+	// SubagentStop payloads carry no tool_input — a Final-path capture has no
+	// way to derive them from the event itself (ParseSubagentTypeAndDescription
+	// yields empty strings on a nil ToolInput). The Final handler reads these
+	// from the record to label the task step, falling back to the event's own
+	// fields only when the record is absent.
+	SubagentType    string `json:"subagent_type,omitempty"`
+	TaskDescription string `json:"task_description,omitempty"`
+
+	// DeclaredTranscriptPath is the subagent transcript path an agent's stop
+	// hook declared (e.g. Claude Code's agent_transcript_path, or the
+	// equivalent Codex/Cursor field) — the path #2058 says must not be lost
+	// between mid-turn capture and condensation-time materialization. Empty
+	// when no declared path was available; the materializer falls back to
+	// ResolveAgentTranscriptPath in that case.
+	DeclaredTranscriptPath string `json:"declared_transcript_path,omitempty"`
+
+	// Files is the set of files touched by this subagent, merged into the
+	// session's FilesTouched at completion time. Populated when the record
+	// is completed; empty for a still in-flight record and for a completed
+	// read-only subagent.
+	Files []string `json:"files,omitempty"`
+
+	// TokenUsage is this subagent's token usage, when the completing hook
+	// payload provided one. nil when unavailable.
+	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
+
+	// CompletedAt is when this record was completed (CompleteTaskRecord).
+	// Zero means the record is still in flight. See the type doc comment.
+	CompletedAt time.Time `json:"completed_at,omitempty"`
+}
+
+// AddTaskRecord records a subagent launch, replacing any existing entry with
+// the same ToolUseID. Dedup by ToolUseID: a retried or duplicate launch event
+// must not create two records for the same task, which would make
+// RemoveTaskRecord leave a stale entry behind after the first is cleared.
+func (s *State) AddTaskRecord(task TaskRecord) {
+	for i, existing := range s.TaskRecords {
+		if existing.ToolUseID == task.ToolUseID {
+			s.TaskRecords[i] = task
+			return
+		}
+	}
+	s.TaskRecords = append(s.TaskRecords, task)
+}
+
+// RemoveTaskRecord clears the record for toolUseID, if present. No-op when no
+// record matches. Retained for tests and any caller that genuinely wants to
+// discard a record outright — ordinary completion should use
+// CompleteTaskRecord instead, which keeps the record for the materializer.
+func (s *State) RemoveTaskRecord(toolUseID string) {
+	for i, existing := range s.TaskRecords {
+		if existing.ToolUseID == toolUseID {
+			s.TaskRecords = append(s.TaskRecords[:i], s.TaskRecords[i+1:]...)
+			return
+		}
+	}
+}
+
+// FindTaskRecord returns a pointer to the record for toolUseID, or nil if
+// none exists. The pointer aliases the slice element, so callers must not
+// retain it across a mutation that could reallocate TaskRecords (e.g.
+// AddTaskRecord, RemoveTaskRecord).
+func (s *State) FindTaskRecord(toolUseID string) *TaskRecord {
+	for i := range s.TaskRecords {
+		if s.TaskRecords[i].ToolUseID == toolUseID {
+			return &s.TaskRecords[i]
+		}
+	}
+	return nil
+}
+
+// CompleteTaskRecord marks the record for toolUseID as consumed exactly
+// once: it sets CompletedAt and returns true, or returns false — a no-op —
+// when no record exists for toolUseID or it was already completed
+// (CompletedAt already non-zero). This is the exactly-once completion guard
+// equivalent to the old claim-and-remove semantics: whichever caller
+// observes true proceeds with the capture, a racing duplicate sees false and
+// skips.
+//
+// The data fields (DeclaredTranscriptPath, Files, TokenUsage) are NOT set
+// here. They are populated separately by the producer after successful
+// extraction, via direct field mutation on the claimed record within the
+// same MutateSessionState closure that called CompleteTaskRecord — see
+// strategy.CompleteTaskRecord, the producer-facing wrapper that pairs the
+// claim with the attach inside one lock.
+func (s *State) CompleteTaskRecord(toolUseID string, completedAt time.Time) bool {
+	for i := range s.TaskRecords {
+		if s.TaskRecords[i].ToolUseID != toolUseID {
+			continue
+		}
+		if !s.TaskRecords[i].CompletedAt.IsZero() {
+			return false
+		}
+		s.TaskRecords[i].CompletedAt = completedAt
+		return true
+	}
+	return false
+}
+
+// HasTaskContent reports whether this session carries pending subagent task
+// content: any task record — live (transcript-so-far still needs capturing)
+// or completed-unmaterialized (awaiting condensation) — counts. Condensation
+// triggers and session-empty guards key on this, not on shadow-branch
+// existence: task records never touch the shadow branch.
+func (s *State) HasTaskContent() bool {
+	return len(s.TaskRecords) > 0
+}
+
+// LiveTaskRecords returns the records not yet completed (CompletedAt zero) —
+// i.e. still in flight. In-flight consumers (the SessionEnd sweep's "any
+// in-flight work?" check) must use this rather than the raw TaskRecords
+// slice: since CompleteTaskRecord no longer removes a record, TaskRecords
+// mixes live records with already-completed ones awaiting materialization.
+func (s *State) LiveTaskRecords() []TaskRecord {
+	var live []TaskRecord
+	for _, r := range s.TaskRecords {
+		if r.CompletedAt.IsZero() {
+			live = append(live, r)
+		}
+	}
+	return live
 }
 
 // PromptAttribution captures line-level attribution data at the start of each prompt.
@@ -456,6 +633,39 @@ func (s *State) ClearLegacyTranscriptOffsets() {
 	s.TranscriptLinesAtStart = 0
 }
 
+// PendingCondensationID returns the checkpoint ID reserved for an in-progress
+// condensation, or the empty ID when no attempt is pending.
+func (s *State) PendingCondensationID() id.CheckpointID {
+	if s.CondensationAttempt == nil {
+		return id.EmptyCheckpointID
+	}
+	return s.CondensationAttempt.CheckpointID
+}
+
+// BeginCondensationAttempt records a checkpoint ID before its persistent write.
+func (s *State) BeginCondensationAttempt(checkpointID id.CheckpointID) {
+	s.CondensationAttempt = &CondensationAttempt{CheckpointID: checkpointID}
+}
+
+// RequireCondensationRecovery keeps legacy orphan reconciliation enabled for
+// the current attempt. It has no effect when no attempt is pending.
+func (s *State) RequireCondensationRecovery() {
+	if s.CondensationAttempt != nil {
+		s.CondensationAttempt.RecoveryPending = true
+	}
+}
+
+// NeedsCondensationRecovery reports whether doctor must reconcile a checkpoint
+// written before attempt IDs existed.
+func (s *State) NeedsCondensationRecovery() bool {
+	return s.CondensationAttempt != nil && s.CondensationAttempt.RecoveryPending
+}
+
+// ClearCondensationAttempt completes or abandons the pending condensation.
+func (s *State) ClearCondensationAttempt() {
+	s.CondensationAttempt = nil
+}
+
 // RebaselineSubagentTokens snapshots the current cumulative subagent total
 // (TokenUsage.SubagentTokens) into SubagentTokensBaseline so the next checkpoint
 // window's CheckpointTokenUsage.SubagentTokens is rescoped to "since this
@@ -510,18 +720,38 @@ func (s *State) OwnerLiveness() proclive.Liveness {
 	return proclive.Check(*s.Owner)
 }
 
-// OwnerExited reports true when this session is ACTIVE but its owning agent
-// process is gone — exited cleanly, crashed, was killed, or the machine
-// rebooted — without a SessionStop hook firing. Unlike IsStuckActive (a
-// time-based heuristic), this is detected immediately, regardless of how
-// recently the session interacted. It returns false when liveness is Unknown
-// (no owner recorded, cross-host state, or an unsupported platform) so behavior
-// degrades to the StuckActiveThreshold timeout.
+// OwnerExited reports true when this session's owning agent process is gone —
+// exited cleanly, crashed, was killed, or the machine rebooted — without a
+// SessionStop hook firing. Unlike IsStuckActive (a time-based heuristic), this
+// is detected immediately, regardless of how recently the session interacted.
+// It returns false when liveness is Unknown (no owner recorded, cross-host
+// state, or an unsupported platform) so behavior degrades to the
+// StuckActiveThreshold timeout.
+//
+// It deliberately covers IDLE as well as ACTIVE. An agent that finishes its
+// last turn and then quits leaves the session IDLE, so gating on ACTIVE alone
+// missed precisely the sessions left behind by agents with no session-end hook
+// (Codex before 0.146) or killed before that hook could run: they lingered as
+// "active" in `entire status` until StaleSessionThreshold deleted the state
+// file outright, discarding pending checkpoint work instead of condensing it.
+// Only already-finalized sessions are excluded — see IsEnded.
 func (s *State) OwnerExited() bool {
-	if !s.Phase.IsActive() {
+	if s.IsEnded() {
 		return false
 	}
 	return s.OwnerLiveness() == proclive.LivenessDead
+}
+
+// IsEnded reports whether this session has been finalized — the canonical
+// "no longer a live session" predicate.
+//
+// Both halves matter and neither implies the other in practice: Phase is what
+// the state machine sets, EndedAt is what the finalizing write stamps, and a
+// state file can carry one without the other (a legacy record, or a partial
+// write). Callers that filter for active sessions must agree on this rule, so
+// it lives here rather than being re-spelled at each site.
+func (s *State) IsEnded() bool {
+	return s.Phase == PhaseEnded || s.EndedAt != nil
 }
 
 func (s *State) IsStale() bool {

@@ -3,15 +3,13 @@
 package integration
 
 import (
-	"strings"
 	"testing"
-
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// TestSubagentCheckpoints_StoresSubagentTranscript asserts the task checkpoint
-// captures the subagent's own transcript, in both layouts agents have used for it —
-// see ResolveAgentTranscriptPath for which one wins and why the fallback exists.
+// TestSubagentCheckpoints_StoresSubagentTranscript asserts the completed task
+// record points at the subagent's own transcript, in both layouts agents have
+// used for it — see ResolveAgentTranscriptPath for which one wins and why the
+// fallback exists. The materializer follows the recorded path at condensation.
 //
 // Claude Code writes an agent-<id>.meta.json sidecar next to the nested transcript;
 // nothing in the CLI reads it, so these tests do not create one.
@@ -47,7 +45,7 @@ func TestSubagentCheckpoints_StoresSubagentTranscript(t *testing.T) {
 			env := NewFeatureBranchEnv(t)
 			session := env.NewSession()
 			session.CreateTranscript("delegate "+editedFile+" to a subagent", nil)
-			tt.write(session, tt.subagentID, []FileChange{{Path: editedFile, Content: "content"}})
+			subagentTranscriptPath := tt.write(session, tt.subagentID, []FileChange{{Path: editedFile, Content: "content"}})
 
 			if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
 				t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
@@ -68,14 +66,20 @@ func TestSubagentCheckpoints_StoresSubagentTranscript(t *testing.T) {
 				t.Fatalf("SimulatePostTask failed: %v", err)
 			}
 
-			wantPath := paths.EntireMetadataDir + "/" + session.ID +
-				"/tasks/" + tt.taskToolUseID + "/" + paths.AgentTranscriptFileName(tt.subagentID)
-			content, ok := env.ReadFileFromBranch(env.GetShadowBranchName(), wantPath)
-			if !ok {
-				t.Fatalf("subagent transcript not stored in shadow branch at %s", wantPath)
+			state, err := env.GetSessionState(session.ID)
+			if err != nil {
+				t.Fatalf("GetSessionState failed: %v", err)
 			}
-			if !strings.Contains(content, editedFile) {
-				t.Errorf("stored subagent transcript does not reference the subagent's edit: %q", content)
+			rec := state.FindTaskRecord(tt.taskToolUseID)
+			if rec == nil || rec.CompletedAt.IsZero() {
+				t.Fatalf("expected a completed task record for %s, got %+v", tt.taskToolUseID, rec)
+			}
+			if rec.DeclaredTranscriptPath != subagentTranscriptPath {
+				t.Errorf("the record must point at the layout-resolved subagent transcript: got %q, want %q",
+					rec.DeclaredTranscriptPath, subagentTranscriptPath)
+			}
+			if !containsFile(rec.Files, editedFile) {
+				t.Errorf("the record must carry the subagent's edit, got %v", rec.Files)
 			}
 		})
 	}

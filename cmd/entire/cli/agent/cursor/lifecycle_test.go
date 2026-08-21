@@ -811,3 +811,37 @@ func TestPrepareTranscript_ContextCanceled(t *testing.T) {
 		t.Fatalf("expected context.Canceled, got: %v", err)
 	}
 }
+
+// TestParseSubagentStop_ForwardsAgentTranscriptPath guards a field that was parsed
+// and then dropped. Cursor names the subagent's transcript in the payload; without
+// forwarding it the framework fell back to guessing Claude Code's layout, which does
+// not exist under Cursor's session directory, so the task checkpoint stored no
+// subagent transcript and file extraction read the main one instead.
+func TestParseSubagentStop_ForwardsAgentTranscriptPath(t *testing.T) {
+	t.Parallel()
+
+	stdin := strings.NewReader(`{
+		"hook_event_name": "subagentStop",
+		"conversation_id": "conv-1",
+		"transcript_path": "/cursor/conv-1.jsonl",
+		"subagent_id": "sub-7",
+		"subagent_type": "generalPurpose",
+		"task": "write docs",
+		"agent_transcript_path": "/cursor/subagents/sub-7.jsonl",
+		"modified_files": ["docs/red.md"]
+	}`)
+
+	ev, err := (&CursorAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStop, stdin)
+	if err != nil {
+		t.Fatalf("ParseHookEvent: %v", err)
+	}
+	if ev == nil {
+		t.Fatal("expected a SubagentEnd event")
+	}
+	if ev.SubagentTranscriptPath != "/cursor/subagents/sub-7.jsonl" {
+		t.Errorf("SubagentTranscriptPath = %q, want the payload's agent_transcript_path", ev.SubagentTranscriptPath)
+	}
+	if ev.SessionRef != "/cursor/conv-1.jsonl" {
+		t.Errorf("SessionRef = %q, want the main transcript", ev.SessionRef)
+	}
+}

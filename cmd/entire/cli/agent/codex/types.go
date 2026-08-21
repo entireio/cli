@@ -10,10 +10,13 @@ type HooksFile struct {
 // HookEvents contains the hook configurations by event type.
 type HookEvents struct {
 	SessionStart     []MatcherGroup `json:"SessionStart,omitempty"`
+	SessionEnd       []MatcherGroup `json:"SessionEnd,omitempty"`
 	UserPromptSubmit []MatcherGroup `json:"UserPromptSubmit,omitempty"`
 	Stop             []MatcherGroup `json:"Stop,omitempty"`
 	PreToolUse       []MatcherGroup `json:"PreToolUse,omitempty"`
 	PostToolUse      []MatcherGroup `json:"PostToolUse,omitempty"`
+	SubagentStart    []MatcherGroup `json:"SubagentStart,omitempty"`
+	SubagentStop     []MatcherGroup `json:"SubagentStop,omitempty"`
 }
 
 // MatcherGroup groups hooks under an optional matcher pattern.
@@ -29,15 +32,22 @@ type HookEntry struct {
 	Timeout int    `json:"timeout,omitempty"`
 }
 
-// sessionStartRaw is the JSON structure from SessionStart hooks.
-type sessionStartRaw struct {
+// sessionInfoRaw is the JSON structure shared by the session-scoped hooks,
+// SessionStart and SessionEnd, which differ only in the event they represent.
+//
+// SessionEnd's payload is a strict subset: it carries no model or
+// permission_mode (it fires after teardown, not within a turn), and swaps
+// `source` for a `reason` that is the constant "other" in Codex today, so it
+// cannot distinguish quit from /clear. Unmarshalling is not strict, so the
+// absent fields simply stay zero.
+type sessionInfoRaw struct {
 	SessionID      string  `json:"session_id"`
-	TranscriptPath *string `json:"transcript_path"` // nullable
+	TranscriptPath *string `json:"transcript_path"` // nullable (ephemeral mode)
 	CWD            string  `json:"cwd"`
 	HookEventName  string  `json:"hook_event_name"`
 	Model          string  `json:"model"`
 	PermissionMode string  `json:"permission_mode"`
-	Source         string  `json:"source"` // "startup", "resume", "clear"
+	Source         string  `json:"source"` // SessionStart: "startup", "resume", "clear"
 }
 
 // userPromptSubmitRaw is the JSON structure from UserPromptSubmit hooks.
@@ -90,4 +100,41 @@ func derefString(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// subagentStartRaw is Codex's SubagentStart payload
+// (codex-rs/hooks/schema/generated/subagent-start.command.input.schema.json).
+//
+// session_id is the identity shared by the root thread and all descendants — the
+// user's session — while agent_id is this subagent thread's own id.
+type subagentStartRaw struct {
+	SessionID      string  `json:"session_id"`
+	AgentID        string  `json:"agent_id"`
+	AgentType      string  `json:"agent_type"`
+	TranscriptPath *string `json:"transcript_path"` // nullable; parent rollout
+	CWD            string  `json:"cwd"`
+	HookEventName  string  `json:"hook_event_name"`
+	Model          string  `json:"model"`
+	PermissionMode string  `json:"permission_mode"`
+	TurnID         string  `json:"turn_id"`
+}
+
+// subagentStopRaw is Codex's SubagentStop payload
+// (codex-rs/hooks/schema/generated/subagent-stop.command.input.schema.json).
+//
+// Note the two transcripts: transcript_path is the parent thread's rollout,
+// agent_transcript_path is the subagent's own.
+type subagentStopRaw struct {
+	SessionID            string  `json:"session_id"`
+	AgentID              string  `json:"agent_id"`
+	AgentType            string  `json:"agent_type"`
+	TranscriptPath       *string `json:"transcript_path"`       // nullable; parent rollout
+	AgentTranscriptPath  *string `json:"agent_transcript_path"` // nullable; subagent rollout
+	LastAssistantMessage *string `json:"last_assistant_message"`
+	CWD                  string  `json:"cwd"`
+	HookEventName        string  `json:"hook_event_name"`
+	Model                string  `json:"model"`
+	PermissionMode       string  `json:"permission_mode"`
+	StopHookActive       bool    `json:"stop_hook_active"`
+	TurnID               string  `json:"turn_id"`
 }

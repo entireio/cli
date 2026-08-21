@@ -176,6 +176,7 @@ Note: IDE also sends `composer_mode: "agent"` — CLI omits this field.
 {"role":"assistant","message":{"content":[{"type":"text","text":"Created the file."}]}}
 ```
 
+- Cursor may prepend a `<timestamp>...</timestamp>` line inside the text before `<user_query>`; both are stripped by `textutil.StripIDEContextTags`. The timestamp strip is anchored to the start of the message so `<timestamp>` elements in pasted user content survive.
 - Note: Transcript does NOT contain tool_use blocks — file detection relies on git status
 - Override for testing: set `ENTIRE_TEST_CURSOR_PROJECT_DIR` env var to override the transcript directory
 

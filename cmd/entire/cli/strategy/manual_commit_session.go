@@ -110,10 +110,11 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		// with LastCheckpointID (needed for checkpoint ID reuse on subsequent commits).
 		// Clean up everything else: stale pre-state-machine sessions (empty phase),
 		// IDLE/ENDED sessions that were never condensed, etc.
+		// Record-bearing sessions hold condensable content off the shadow branch — never orphaned.
 		shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		refName := plumbing.NewBranchReferenceName(shadowBranch)
 		if _, err := repo.Reference(refName, true); err != nil {
-			if !state.Phase.IsActive() && state.LastCheckpointID.IsEmpty() {
+			if !state.Phase.IsActive() && state.LastCheckpointID.IsEmpty() && !state.HasTaskContent() {
 				//nolint:errcheck,gosec // G104: Cleanup is best-effort, shouldn't fail the list operation
 				store.Clear(ctx, state.SessionID)
 				continue
@@ -128,7 +129,8 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 // isWarnableStaleEndedSession reports whether an ENDED session is still both
 // expensive in PostCommit and actionable via 'entire doctor'.
 func isWarnableStaleEndedSession(repo *git.Repository, state *SessionState) bool {
-	if state.Phase != session.PhaseEnded || state.FullyCondensed || state.StepCount <= 0 {
+	if state.Phase != session.PhaseEnded || state.FullyCondensed ||
+		(state.StepCount <= 0 && !state.HasTaskContent()) {
 		return false
 	}
 
@@ -137,6 +139,10 @@ func isWarnableStaleEndedSession(repo *git.Repository, state *SessionState) bool
 	// branches during condensation, so a branch that existed at list-load time
 	// may be gone by the time we reach the warning check. Without this re-check
 	// we would warn about sessions that this commit just cleaned up.
+	// Record-bearing sessions stay warnable: their content never lives on the shadow branch.
+	if state.HasTaskContent() {
+		return true
+	}
 	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	refName := plumbing.NewBranchReferenceName(shadowBranch)
 	_, err := repo.Reference(refName, true)
@@ -275,6 +281,78 @@ func sessionsFromSingleWorktree(candidates []*SessionState) []*SessionState {
 		}
 	}
 	return candidates
+}
+
+// reconcileWorktreePathForResumedTurn repoints a main-worktree session's recorded
+// WorktreePath when a turn starts from a different main worktree AND the recorded
+// path no longer resolves to this repository's git common dir. That is the
+// repo-relocation case (#1890): the whole repo directory was renamed or moved
+// while the session was stopped, then the agent resumed the same session from the
+// new location. WorktreePath is matched by exact string equality at commit time
+// (findSessionsForWorktree), so without this the resumed session's commits
+// silently lose their Entire-Checkpoint trailer.
+//
+// Scope is deliberately restricted to relocations between MAIN worktrees
+// (WorktreeID == "" on both the recorded state and the current worktree). Doing
+// so keeps WorktreePath and WorktreeID aligned by construction: both stay "".
+// Repointing a linked-worktree session (WorktreeID != "") onto the main worktree
+// would leave WorktreeID describing a different worktree than WorktreePath, and
+// that disalignment breaks every consumer that re-derives the worktree id from
+// the current directory — `entire clean` and `entire explain` compute the wrong
+// shadow-branch name (orphaning or hiding the session's checkpoints), and the
+// post-commit base/attribution updates follow the wrong worktree's HEAD.
+// Linked-worktree relocation is a rare, documented non-goal; the zero-match path
+// still warns so the trailer loss is not silent.
+//
+// The session store lives in the git common dir, so a state loaded here is by
+// construction the same repo; when its recorded worktree no longer maps back to
+// that common dir, the only safe target is the current worktree. A still-valid
+// recorded path (e.g. a concurrent sibling worktree that resolves to the same
+// common dir) is left untouched so we never steal a session from a live sibling.
+func reconcileWorktreePathForResumedTurn(ctx context.Context, state *SessionState) {
+	// Only main-worktree sessions are reconciled — see the disalignment note above.
+	if state.WorktreeID != "" {
+		return
+	}
+
+	current, err := paths.WorktreeRoot(ctx)
+	if err != nil || current == "" || state.WorktreePath == "" {
+		return
+	}
+	if filepath.Clean(current) == filepath.Clean(state.WorktreePath) {
+		return
+	}
+
+	// Only repoint onto another main worktree. Resuming into a linked worktree
+	// would reintroduce the WorktreeID/WorktreePath disalignment from the other
+	// direction, so leave those alone.
+	currentWorktreeID, err := paths.GetWorktreeID(current)
+	if err != nil || currentWorktreeID != "" {
+		return
+	}
+
+	// Resolve both through the same probe so normalization matches. An empty
+	// current common dir means we can't establish our own repo — bail. When the
+	// recorded path still resolves to our common dir it remains a valid
+	// worktree, so leave it alone.
+	currentCommonDir := gitCommonDirForWorktreeOrEmpty(ctx, current)
+	if currentCommonDir == "" {
+		return
+	}
+	if gitCommonDirForWorktreeOrEmpty(ctx, state.WorktreePath) == currentCommonDir {
+		return
+	}
+
+	old := state.WorktreePath
+	state.WorktreePath = current
+	// WorktreeID stays "" — both the recorded and current worktrees are the main
+	// worktree, so WorktreePath and WorktreeID remain aligned and the shadow branch
+	// (entire/<base>-hash("")) is unchanged.
+	logging.Info(logging.WithComponent(ctx, "hooks"), "reconciled main-worktree session path after relocation",
+		slog.String("session_id", state.SessionID),
+		slog.String("from", old),
+		slog.String("to", current),
+	)
 }
 
 func gitCommonDirForWorktreeOrEmpty(ctx context.Context, worktreePath string) string {
@@ -453,7 +531,7 @@ func (s *ManualCommitStrategy) CountOtherActiveSessionsWithCheckpoints(ctx conte
 		// Sessions from different base commits are independent and shouldn't be counted
 		if state.SessionID != currentSessionID &&
 			state.WorktreePath == currentWorktree &&
-			state.StepCount > 0 &&
+			(state.StepCount > 0 || state.HasTaskContent()) &&
 			state.BaseCommit == currentHead {
 			count++
 		}

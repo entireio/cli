@@ -134,22 +134,26 @@ func TestEnableOffersImport_NotOfferedOnReEnable(t *testing.T) {
 		"re-enable must not run import at all; got: %s", second)
 }
 
-// TestEnable_RoutesLoggingToLogFile pins that `entire enable` initializes file
-// logging like every other command — see the logging.Init call in enable's
-// RunE for why its absence put operational warnings on the user's terminal
-// instead of in the log.
-func TestEnable_RoutesLoggingToLogFile(t *testing.T) {
+// TestEnable_KeepsOperationalLogsOffTheTerminal pins the regression that made
+// enable build a logger at all: without one, its operational lines landed on the
+// user's terminal mid-flow instead of in .entire/logs.
+//
+// It cannot assert the log file exists. The file is created on the first line
+// written, and enable's happy path logs nothing — so requiring it here only ever
+// proved a logger had been constructed, not that anything was routed.
+func TestEnable_KeepsOperationalLogsOffTheTerminal(t *testing.T) {
 	t.Parallel()
 	env := freshRepoEnv(t)
-	logPath := filepath.Join(env.RepoDir, ".entire", "logs", "entire.log")
-
-	// Nothing has run in this repo yet, so the log file's existence after
-	// enable can only come from enable itself.
-	require.NoFileExists(t, logPath)
 
 	out := env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
 	require.Contains(t, out, "Ready.", "enable should complete; got: %s", out)
-	require.FileExists(t, logPath, "enable should route its logging to .entire/logs; got output: %s", out)
+
+	// slog's text handler, which is where a line goes when no logger is
+	// installed. Its shape is level-then-message: "INFO msg key=value".
+	for _, marker := range []string{"level=INFO", "level=WARN", "level=DEBUG", "component="} {
+		require.NotContains(t, out, marker,
+			"enable put an operational log line on the terminal; got: %s", out)
+	}
 }
 
 // TestEnable_RejectedInvocationLeavesRepoUntouched pins that enable's logging

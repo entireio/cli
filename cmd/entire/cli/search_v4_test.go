@@ -12,6 +12,75 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/search"
 )
 
+// --- dedup ------------------------------------------------------------------
+
+// TestDedupSemanticResults_SessionsOnly exercises the deduper's web-parity
+// contract (ENT-1777): SESSION rows are the one type deduped across cells —
+// by global session id, else the repo-qualified carrier checkpoint
+// (server-folded legacy rows, ENT-1595) — while repo-bound types pass through
+// untouched, since the fan-out routes each repo to one home placement and
+// cross-cell duplicates of them are structurally impossible (ENT-1672/1776).
+func TestDedupSemanticResults_SessionsOnly(t *testing.T) {
+	t.Parallel()
+
+	// Distinct legacy sessions in the same repo must all survive.
+	if out := dedupSemanticResults([]search.Result{
+		v4RepoScopedRow(search.TypeSession, "id-a", "backend", 0.9),
+		v4RepoScopedRow(search.TypeSession, "id-b", "backend", 0.8),
+	}); len(out) != 2 {
+		t.Errorf("distinct ids collapsed: in=2 out=%d", len(out))
+	}
+
+	// The SAME legacy session from a repo mirrored across cells collapses,
+	// first (higher-ranked) copy winning.
+	out := dedupSemanticResults([]search.Result{
+		v4RepoScopedRow(search.TypeSession, "id-x", "backend", 0.9),
+		v4RepoScopedRow(search.TypeSession, "id-x", "backend", 0.8),
+	})
+	if len(out) != 1 {
+		t.Errorf("mirrored session not deduped: in=2 out=%d", len(out))
+	} else if out[0].Meta.Score != 0.9 {
+		t.Errorf("kept score = %v, want the first/higher-ranked 0.9", out[0].Meta.Score)
+	}
+
+	// Repo casing skew across cells (git remote vs repo index) still dedupes.
+	if out := dedupSemanticResults([]search.Result{
+		v4RepoScopedRow(search.TypeSession, "id-x", "backend", 0.9),
+		v4RepoScopedRow(search.TypeSession, "id-x", "Backend", 0.8),
+	}); len(out) != 1 {
+		t.Errorf("casing skew leaked a duplicate: in=2 out=%d", len(out))
+	}
+
+	// The same carrier id in DIFFERENT repos is a distinct result.
+	if out := dedupSemanticResults([]search.Result{
+		v4RepoScopedRow(search.TypeSession, "id-dup", "backend", 0.9),
+		v4RepoScopedRow(search.TypeSession, "id-dup", "frontend", 0.8),
+	}); len(out) != 2 {
+		t.Errorf("cross-repo same carrier collapsed: in=2 out=%d", len(out))
+	}
+
+	// A session with a global id dedupes ACROSS repos — that is the case the
+	// session-only rule exists for (a crosslinked session attached to repos
+	// homed in different cells).
+	if out := dedupSemanticResults([]search.Result{
+		v4Session("sess-1", "backend", 0.9),
+		v4Session("sess-1", "frontend", 0.8),
+	}); len(out) != 1 {
+		t.Errorf("crosslinked session not deduped: in=2 out=%d", len(out))
+	}
+
+	// Checkpoint and commit duplicates pass through untouched — the web does
+	// not dedupe repo-bound types.
+	for _, typ := range []string{search.TypeCheckpoint, search.TypeCommit} {
+		if out := dedupSemanticResults([]search.Result{
+			v4RepoScopedRow(typ, "id-x", "backend", 0.9),
+			v4RepoScopedRow(typ, "id-x", "backend", 0.8),
+		}); len(out) != 2 {
+			t.Errorf("%s rows deduped: in=2 out=%d, want pass-through", typ, len(out))
+		}
+	}
+}
+
 // --- helpers -----------------------------------------------------------------
 
 func fptr(f float64) *float64 { return &f }
@@ -30,14 +99,43 @@ func v4Ckpt(id string, tier int, meta search.Meta) search.Result {
 	}
 }
 
-func v4Commit(sha string, tier int, meta search.Meta) search.Result {
-	if tier >= 0 {
-		meta.Tier = iptr(tier)
-	}
+// v4Commit builds a tier-1 commit result (every merge test uses tier 1 for
+// commits; tier variation is exercised via checkpoints).
+func v4Commit(sha string, meta search.Meta) search.Result {
+	meta.Tier = iptr(1)
 	return search.Result{
 		Type:   search.TypeCommit,
 		Meta:   meta,
 		Commit: &search.CommitResult{CommitSHA: sha},
+	}
+}
+
+// v4RepoScopedRow builds a result whose dedup identity is repo-qualified: a
+// server-folded legacy session (ENT-1595, empty sessionId), a raw checkpoint, or
+// a commit — all under org acme, with the given repo. id is the checkpoint id /
+// commit SHA the row carries.
+func v4RepoScopedRow(typ, id, repo string, score float64) search.Result {
+	r := search.Result{Type: typ, Meta: search.Meta{Score: score}}
+	switch typ {
+	case search.TypeSession:
+		r.Session = &search.SessionResult{SessionID: "", MatchedCheckpointID: id, Org: "acme", Repo: repo}
+	case search.TypeCheckpoint:
+		r.Checkpoint = &search.CheckpointResult{ID: id, Org: "acme", Repo: repo}
+	case search.TypeCommit:
+		r.Commit = &search.CommitResult{CommitSHA: id, Org: "acme", Repo: repo}
+	}
+	return r
+}
+
+// v4Session builds a session row with a GLOBAL session id (the primary dedup
+// key) in the given repo.
+func v4Session(sessionID, repo string, score float64) search.Result {
+	return search.Result{
+		Type: search.TypeSession,
+		Meta: search.Meta{Score: score, Tier: iptr(1)},
+		Session: &search.SessionResult{
+			SessionID: sessionID, Org: "acme", Repo: repo,
+		},
 	}
 }
 
@@ -78,22 +176,26 @@ func v4ResultIDs(t *testing.T, results []search.Result) []string {
 // --- merge: tier ordering ------------------------------------------------------
 
 // TestMergeSemanticV4Responses_TierOrdering verifies the cross-cell interleave
-// applies query-serve's own ordering: repos first, then tier-0 by BM25 desc,
-// tier-1 by rerank score desc, then promoted tier-2 by ANN asc — regardless of
-// which cell each result came from.
+// applies the shared ordering contract: repos first, then tier 0 and tier 1
+// EACH by rerank score desc (ENT-1425/ENT-1431), tier-2 dropped — regardless
+// of which cell each result came from. The BM25/Score values are set
+// to the OPPOSITE order from the rerank scores so the assertion fails if the
+// merge ever regresses to sorting by BM25 (tier 0) or Score (tier 1).
 func TestMergeSemanticV4Responses_TierOrdering(t *testing.T) {
 	t.Parallel()
 
 	cellA := &search.Response{Results: []search.Result{
-		v4Ckpt("a-t1-low", 1, search.Meta{Score: 0.5}),
-		v4Ckpt("a-t0-high", 0, search.Meta{BM25Score: fptr(9.0)}),
+		// tier-1: high Score but LOW rerank → must sort below b-t1 (higher rerank).
+		v4Ckpt("a-t1-rr-lo", 1, search.Meta{Score: 0.9, RerankScore: fptr(0.20)}),
+		// tier-0: high BM25 but LOW rerank → must sort below b-t0 (higher rerank).
+		v4Ckpt("a-t0-rr-lo", 0, search.Meta{BM25Score: fptr(9.0), RerankScore: fptr(0.20)}),
 		// tier-2 alongside upper tiers in the same cell → promoted.
 		v4Ckpt("a-t2", 2, search.Meta{ANNScore: fptr(0.30)}),
 	}, Total: 3}
 	cellB := &search.Response{Results: []search.Result{
 		v4RepoRow(t, "repo-1", 0.9),
-		v4Ckpt("b-t0-low", 0, search.Meta{BM25Score: fptr(3.0)}),
-		v4Ckpt("b-t1-high", 1, search.Meta{Score: 0.8}),
+		v4Ckpt("b-t0-rr-hi", 0, search.Meta{BM25Score: fptr(3.0), RerankScore: fptr(0.80)}),
+		v4Ckpt("b-t1-rr-hi", 1, search.Meta{Score: 0.1, RerankScore: fptr(0.90)}),
 		v4Ckpt("b-t2", 2, search.Meta{ANNScore: fptr(0.10)}),
 	}, Total: 4}
 
@@ -104,16 +206,81 @@ func TestMergeSemanticV4Responses_TierOrdering(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"repo-1", "a-t0-high", "b-t0-low", "b-t1-high", "a-t1-low", "b-t2", "a-t2"}
+	// Tier-2 rows (a-t2, b-t2) are dropped — the retired ANN-only fallback
+	// never merges, matching the BFF.
+	want := []string{"repo-1", "b-t0-rr-hi", "a-t0-rr-lo", "b-t1-rr-hi", "a-t1-rr-lo"}
 	got := v4ResultIDs(t, resp.Results)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("merged order = %v, want %v", got, want)
 	}
-	if resp.Total != 7 {
-		t.Errorf("total = %d, want 7", resp.Total)
+	if resp.Total != 5 {
+		t.Errorf("total = %d, want 5 (derived from the final list)", resp.Total)
 	}
 	if resp.Page != 1 {
 		t.Errorf("page = %d, want 1", resp.Page)
+	}
+}
+
+// TestMergeSemanticV4Responses_Tier0MixedCapabilityFallback verifies the tier-0
+// fallback used when not every row was reranked (a cell predating tier-0
+// reranking): rows interleave positionally by their rank within their own cell
+// (each cell's #1, then each cell's #2, …), BM25 breaking ties between same-rank
+// rows — never a global rerank sort that would demote the un-scored cell's hits.
+func TestMergeSemanticV4Responses_Tier0MixedCapabilityFallback(t *testing.T) {
+	t.Parallel()
+
+	// cellA is a current cell (rows carry a rerank score); cellB predates tier-0
+	// reranking (no rerank score) — so the whole band uses the positional fallback.
+	cellA := &search.Response{Results: []search.Result{
+		v4Ckpt("a0", 0, search.Meta{BM25Score: fptr(1.0), RerankScore: fptr(0.90)}), // cellRank 0
+		v4Ckpt("a1", 0, search.Meta{BM25Score: fptr(2.0), RerankScore: fptr(0.80)}), // cellRank 1
+	}, Total: 2}
+	cellB := &search.Response{Results: []search.Result{
+		v4Ckpt("b0", 0, search.Meta{BM25Score: fptr(5.0)}), // cellRank 0, no rerank score
+		v4Ckpt("b1", 0, search.Meta{BM25Score: fptr(4.0)}), // cellRank 1, no rerank score
+	}, Total: 2}
+
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellOK(cellA), v4CellOK(cellB),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// rank 0: b0 (BM25 5) before a0 (BM25 1); rank 1: b1 (BM25 4) before a1 (BM25 2).
+	want := []string{"b0", "a0", "b1", "a1"}
+	got := v4ResultIDs(t, resp.Results)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("merged order = %v, want %v", got, want)
+	}
+}
+
+// TestMergeSemanticV4Responses_EqualRerankTieBreaks verifies the secondary keys
+// when rerank scores tie: tier 0 falls back to BM25 desc and tier 1 to retrieval
+// Score desc, matching the BFF's `|| bm25Of` / `|| scoreOf` tie-breaks.
+func TestMergeSemanticV4Responses_EqualRerankTieBreaks(t *testing.T) {
+	t.Parallel()
+
+	cell := &search.Response{Results: []search.Result{
+		// tier 0, equal rerank → BM25 desc decides: t0-hi before t0-lo.
+		v4Ckpt("t0-lo", 0, search.Meta{RerankScore: fptr(0.50), BM25Score: fptr(2.0)}),
+		v4Ckpt("t0-hi", 0, search.Meta{RerankScore: fptr(0.50), BM25Score: fptr(8.0)}),
+		// tier 1, equal rerank → Score desc decides: t1-hi before t1-lo.
+		v4Ckpt("t1-lo", 1, search.Meta{RerankScore: fptr(0.30), Score: 0.1}),
+		v4Ckpt("t1-hi", 1, search.Meta{RerankScore: fptr(0.30), Score: 0.9}),
+	}, Total: 4}
+
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellOK(cell),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"t0-hi", "t0-lo", "t1-hi", "t1-lo"}
+	got := v4ResultIDs(t, resp.Results)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("merged order = %v, want %v", got, want)
 	}
 }
 
@@ -135,70 +302,75 @@ func TestMergeSemanticV4Responses_PagePassthrough(t *testing.T) {
 	}
 }
 
-// TestMergeSemanticV4Responses_ANNFallback verifies that when no cell produced
-// tier 0/1 results, the ANN-only tail is shown, ordered ANN asc and capped at
-// mergedTier2Max. Results without a tier field count as the fallback tier.
-func TestMergeSemanticV4Responses_ANNFallback(t *testing.T) {
+// TestMergeSemanticV4Responses_TierlessAndTier2Dropped verifies rows outside
+// tiers 0/1 — the retired ANN-only fallback (tier 2) and rows with no tier at
+// all — never merge, even when they are all a cell returned. The BFF drops
+// them identically (ENT-1777).
+func TestMergeSemanticV4Responses_TierlessAndTier2Dropped(t *testing.T) {
 	t.Parallel()
 
-	var results []search.Result
-	for i := range mergedTier2Max + 5 {
-		results = append(results, v4Ckpt(
-			"c-"+string(rune('a'+i)), -1,
-			search.Meta{ANNScore: fptr(float64(i) / 100)},
-		))
-	}
 	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
-		v4CellOK(&search.Response{Results: results, Total: len(results)}),
+		v4CellOK(&search.Response{Results: []search.Result{
+			v4Ckpt("tierless", -1, search.Meta{ANNScore: fptr(0.01)}),
+			v4Ckpt("tier2", 2, search.Meta{ANNScore: fptr(0.02)}),
+		}, Total: 2}),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Results) != mergedTier2Max {
-		t.Errorf("fallback results = %d, want capped at %d", len(resp.Results), mergedTier2Max)
+	if len(resp.Results) != 0 {
+		t.Errorf("results = %v, want none (tier-2/tier-less rows dropped)", v4ResultIDs(t, resp.Results))
 	}
-	// ANN asc: the lowest scores survive the cap, in ascending order.
-	for i := 1; i < len(resp.Results); i++ {
-		if *resp.Results[i-1].Meta.ANNScore > *resp.Results[i].Meta.ANNScore {
-			t.Errorf("fallback not sorted ANN asc at %d", i)
-		}
+	if resp.Total != 0 {
+		t.Errorf("total = %d, want 0 (derived from the final list)", resp.Total)
 	}
 }
 
-// TestMergeSemanticV4Responses_FallbackCapAfterDedup guards the cap ordering:
-// cross-cell duplicates in the fallback tail must not shrink the visible page
-// below mergedTier2Max when enough unique results exist.
-func TestMergeSemanticV4Responses_FallbackCapAfterDedup(t *testing.T) {
+// TestMergeSemanticV4Responses_PerTypeWindowAndLowerBounds verifies the BFF's
+// per-type window: at most `limit` rows of each facet survive, overflowing
+// facets are flagged in truncated_types, and counts_lower_bound mirrors them —
+// counts describe what the caller can see, never the cells' corpus counts.
+func TestMergeSemanticV4Responses_PerTypeWindowAndLowerBounds(t *testing.T) {
 	t.Parallel()
 
-	// Two cells return the same 20 ANN-only checkpoints (mirrored repo).
-	mk := func() []search.Result {
-		var rs []search.Result
-		for i := range mergedTier2Max + 5 {
-			rs = append(rs, v4Ckpt(
-				"c-"+string(rune('a'+i)), -1,
-				search.Meta{ANNScore: fptr(float64(i) / 100)},
-			))
-		}
-		return rs
-	}
-	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
-		v4CellOK(&search.Response{Results: mk(), Total: mergedTier2Max + 5}),
-		v4CellOK(&search.Response{Results: mk(), Total: mergedTier2Max + 5}),
+	resp, err := mergeSemanticV4Responses(context.Background(), 1, 0, []cellCallResult[*search.Response]{
+		v4CellOK(&search.Response{Results: []search.Result{
+			v4RepoRow(t, "repo-1", 0.9),
+			v4Ckpt("ck-a", 1, search.Meta{Score: 0.9}),
+			v4Ckpt("ck-b", 1, search.Meta{Score: 0.8}),
+			v4Commit("sha-a", search.Meta{Score: 0.7}),
+			v4Commit("sha-b", search.Meta{Score: 0.6}),
+		}, Total: 5, Counts: &search.TypeCounts{Repos: 1, Checkpoints: 999, Commits: 999}}),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Results) != mergedTier2Max {
-		t.Errorf("fallback results = %d, want the full cap %d despite duplicates (dedup must run before the cap)", len(resp.Results), mergedTier2Max)
+	got := v4ResultIDs(t, resp.Results)
+	want := []string{"repo-1", "ck-a", "sha-a"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("results = %v, want %v (one per facet at limit 1)", got, want)
+	}
+	if resp.Total != 3 {
+		t.Errorf("total = %d, want 3 — derived from the final list, never the cells' corpus counts", resp.Total)
+	}
+	if resp.Counts.Checkpoints != 1 || resp.Counts.Commits != 1 || resp.Counts.Repos != 1 {
+		t.Errorf("counts = %+v, want 1/1/1 derived", resp.Counts)
+	}
+	for _, facet := range []string{"checkpoints", "commits", "repos"} {
+		wantFlag := facet != "repos"
+		if resp.TruncatedTypes[facet] != wantFlag {
+			t.Errorf("truncated_types[%s] = %v, want %v", facet, resp.TruncatedTypes[facet], wantFlag)
+		}
+		if resp.CountsLowerBound[facet] != wantFlag {
+			t.Errorf("counts_lower_bound[%s] = %v, want %v", facet, resp.CountsLowerBound[facet], wantFlag)
+		}
 	}
 }
 
 // TestMergeSemanticV4Responses_FallbackDroppedWhenUpperTiersExist documents
-// that a cell whose page is entirely tier-2 (its ANN fallback) contributes
-// nothing when another cell produced tier 0/1 — matching how query-serve only
-// shows the fallback tail when there is nothing better. Its Total must be
-// excluded too: those matches are unreachable, so they must not be advertised.
+// that a cell whose page is entirely tier-2 contributes nothing — tier-2 is
+// dropped unconditionally — and its corpus Total is never advertised: totals
+// and counts derive from the final merged list alone (ENT-1777).
 func TestMergeSemanticV4Responses_FallbackDroppedWhenUpperTiersExist(t *testing.T) {
 	t.Parallel()
 
@@ -273,26 +445,27 @@ func TestMergeSemanticV4Responses_RepoOnlyPageCountsJustRepos(t *testing.T) {
 
 // --- merge: dedup ---------------------------------------------------------------
 
-// TestMergeSemanticV4Responses_DedupAdjustsTotalsAndCounts verifies a result
-// mirrored across cells is kept once (first/higher-ranked wins) and that both
-// the total and the per-type counts are reduced accordingly.
+// TestMergeSemanticV4Responses_DedupAdjustsTotalsAndCounts verifies a session
+// mirrored across cells (a crosslinked session, the one legitimate cross-cell
+// duplicate) is kept once — first/higher-ranked copy wins — and that totals
+// and counts, derived from the final list, reflect the deduped set.
 func TestMergeSemanticV4Responses_DedupAdjustsTotalsAndCounts(t *testing.T) {
 	t.Parallel()
 
 	cellA := &search.Response{
 		Results: []search.Result{
-			v4Ckpt("dup", 1, search.Meta{Score: 0.9}),
-			v4Commit("sha1", 1, search.Meta{Score: 0.6}),
+			v4Session("sess-dup", "backend", 0.9),
+			v4Commit("sha1", search.Meta{Score: 0.6}),
 		},
 		Total:  2,
-		Counts: &search.TypeCounts{Checkpoints: 1, Commits: 1},
+		Counts: &search.TypeCounts{Sessions: 1, Commits: 1},
 	}
 	cellB := &search.Response{
 		Results: []search.Result{
-			v4Ckpt("dup", 1, search.Meta{Score: 0.4}),
+			v4Session("sess-dup", "frontend", 0.4),
 		},
 		Total:  1,
-		Counts: &search.TypeCounts{Checkpoints: 1},
+		Counts: &search.TypeCounts{Sessions: 1},
 	}
 
 	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
@@ -301,37 +474,38 @@ func TestMergeSemanticV4Responses_DedupAdjustsTotalsAndCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := v4ResultIDs(t, resp.Results)
-	want := []string{"dup", "sha1"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("results = %v, want %v", got, want)
+	if len(resp.Results) != 2 {
+		t.Fatalf("results = %v, want 2 (session deduped)", v4ResultIDs(t, resp.Results))
 	}
-	// The kept "dup" is cell A's higher-ranked copy.
-	if resp.Results[0].Meta.Score != 0.9 {
-		t.Errorf("kept dup score = %v, want the first/higher-ranked 0.9", resp.Results[0].Meta.Score)
+	// The kept copy is cell A's higher-ranked one.
+	kept := resp.Results[0]
+	if kept.Type != search.TypeSession || kept.Meta.Score != 0.9 {
+		t.Errorf("kept session = %+v, want the first/higher-ranked 0.9 copy", kept.Meta)
 	}
 	if resp.Total != 2 {
-		t.Errorf("total = %d, want 2 (3 rows - 1 dupe)", resp.Total)
+		t.Errorf("total = %d, want 2 (3 rows - 1 session dupe, derived)", resp.Total)
 	}
-	if resp.Counts.Checkpoints != 1 || resp.Counts.Commits != 1 {
-		t.Errorf("counts = %+v, want checkpoints=1 commits=1", resp.Counts)
+	if resp.Counts.Sessions != 1 || resp.Counts.Commits != 1 {
+		t.Errorf("counts = %+v, want sessions=1 commits=1", resp.Counts)
 	}
 }
 
-// TestMergeSemanticV4Responses_RepoRowsDedupAcrossCells verifies the mirrored-
-// repo case the fan-out exists for: both cells return the same logical repo
-// row, which must appear once (repo rows carry their id in the raw payload).
-func TestMergeSemanticV4Responses_RepoRowsDedupAcrossCells(t *testing.T) {
+// TestMergeSemanticV4Responses_RepoRowsNotDeduped documents the web-parity
+// dedupe scope (ENT-1777): only sessions dedupe. Repo rows — like every other
+// repo-bound type — pass through untouched, because the fan-out routes each
+// repo to its single home placement (ENT-1672/ENT-1776), so a genuine
+// cross-cell duplicate is structurally impossible; a fabricated one here
+// stays visible rather than being silently collapsed.
+func TestMergeSemanticV4Responses_RepoRowsNotDeduped(t *testing.T) {
 	t.Parallel()
 
 	mk := func(score float64) *search.Response {
 		return &search.Response{
 			Results: []search.Result{
 				v4RepoRow(t, "repo-dup", score),
-				v4Ckpt("ck-"+jsonFloat(score), 1, search.Meta{Score: score}),
 			},
-			Total:  2,
-			Counts: &search.TypeCounts{Repos: 1, Checkpoints: 1},
+			Total:  1,
+			Counts: &search.TypeCounts{Repos: 1},
 		}
 	}
 	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
@@ -340,20 +514,9 @@ func TestMergeSemanticV4Responses_RepoRowsDedupAcrossCells(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repoRows := 0
-	for _, r := range resp.Results {
-		if r.Type == search.TypeRepo {
-			repoRows++
-		}
-	}
-	if repoRows != 1 {
-		t.Errorf("repo rows = %d, want 1 (mirrored repo deduped across cells)", repoRows)
-	}
-	if resp.Counts.Repos != 1 {
-		t.Errorf("counts.Repos = %d, want 1 after dedup", resp.Counts.Repos)
-	}
-	if resp.Total != 3 {
-		t.Errorf("total = %d, want 3 (4 rows - 1 repo dupe)", resp.Total)
+	if len(resp.Results) != 2 || resp.Counts.Repos != 2 || resp.Total != 2 {
+		t.Errorf("results=%d counts.Repos=%d total=%d, want 2/2/2 (no repo dedupe)",
+			len(resp.Results), resp.Counts.Repos, resp.Total)
 	}
 }
 
@@ -365,7 +528,7 @@ func TestMergeSemanticV4Responses_SameIDDifferentTypeNotDeduped(t *testing.T) {
 	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
 		v4CellOK(&search.Response{Results: []search.Result{
 			v4Ckpt("x", 1, search.Meta{Score: 0.9}),
-			v4Commit("x", 1, search.Meta{Score: 0.8}),
+			v4Commit("x", search.Meta{Score: 0.8}),
 		}, Total: 2}),
 	})
 	if err != nil {
@@ -395,6 +558,9 @@ func TestMergeSemanticV4Responses_PartialFailureMergesSurvivorsWithWarning(t *te
 	}
 	if len(resp.Warnings) != 1 || !strings.Contains(resp.Warnings[0], "1 of 2 regions") {
 		t.Errorf("warnings = %v, want a visible partial-failure warning naming 1 of 2 regions", resp.Warnings)
+	}
+	if !resp.Partial || !resp.CoverageIncomplete {
+		t.Errorf("partial=%v coverage_incomplete=%v, want both true on a cell failure", resp.Partial, resp.CoverageIncomplete)
 	}
 }
 
@@ -502,8 +668,11 @@ func TestMergeSemanticV4Responses_LimitCapsResults(t *testing.T) {
 	if len(resp.Results) != 2 {
 		t.Errorf("results = %d, want capped at limit 2", len(resp.Results))
 	}
-	if resp.Total != 3 {
-		t.Errorf("total = %d, want 3 (limit caps the page, not the total)", resp.Total)
+	if resp.Total != 2 {
+		t.Errorf("total = %d, want 2 — totals derive from the final list; the cap is reported via counts_lower_bound instead", resp.Total)
+	}
+	if !resp.CountsLowerBound["checkpoints"] || !resp.TruncatedTypes["checkpoints"] {
+		t.Errorf("lower-bound flags = %v/%v, want checkpoints flagged", resp.CountsLowerBound, resp.TruncatedTypes)
 	}
 }
 
@@ -515,14 +684,66 @@ func TestMergeSemanticV4Responses_NilCountsBodiesTolerated(t *testing.T) {
 			v4Ckpt("a", 1, search.Meta{Score: 0.9}),
 		}, Total: 1}), // no Counts
 		v4CellOK(&search.Response{Results: []search.Result{
-			v4Commit("sha", 1, search.Meta{Score: 0.5}),
+			v4Commit("sha", search.Meta{Score: 0.5}),
 		}, Total: 1, Counts: &search.TypeCounts{Commits: 1}}),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Counts == nil || resp.Counts.Commits != 1 || resp.Counts.Checkpoints != 0 {
-		t.Errorf("counts = %+v, want commits=1 from the one counted body", resp.Counts)
+	if resp.Counts == nil || resp.Counts.Commits != 1 || resp.Counts.Checkpoints != 1 {
+		t.Errorf("counts = %+v, want commits=1 checkpoints=1 derived from the merged list", resp.Counts)
+	}
+}
+
+// TestMergeSemanticV4Responses_FlagSynthesis mirrors the BFF's flag rules:
+// truncated = any cell truncated; partial adds cell failures, cell-reported
+// partial, and mixed rerank capability; coverage_incomplete excludes only the
+// rerank-mix case; reranked = every cell reranked; the cells' own
+// truncated_types union into the merged map.
+func TestMergeSemanticV4Responses_FlagSynthesis(t *testing.T) {
+	t.Parallel()
+
+	tr, fa := true, false
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellOK(&search.Response{
+			Results:        []search.Result{v4Ckpt("a", 1, search.Meta{Score: 0.9, RerankScore: fptr(0.5)})},
+			Total:          1,
+			Truncated:      true,
+			TruncatedTypes: map[string]bool{"sessions": true},
+			Reranked:       &tr,
+		}),
+		v4CellOK(&search.Response{
+			Results:  []search.Result{v4Ckpt("b", 1, search.Meta{Score: 0.8})},
+			Total:    1,
+			Reranked: &fa,
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Truncated {
+		t.Error("truncated: want true when any cell truncated")
+	}
+	if !resp.Partial || !resp.CoverageIncomplete {
+		t.Errorf("partial=%v coverage=%v, want both (truncation implies both)", resp.Partial, resp.CoverageIncomplete)
+	}
+	if resp.Reranked == nil || *resp.Reranked {
+		t.Errorf("reranked = %v, want false (not every cell reranked)", resp.Reranked)
+	}
+	if !resp.TruncatedTypes["sessions"] {
+		t.Errorf("truncated_types = %v, want the cell's sessions flag unioned in", resp.TruncatedTypes)
+	}
+
+	// Mixed rerank capability alone: partial without coverage_incomplete.
+	resp, err = mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellOK(&search.Response{Results: []search.Result{v4Ckpt("a", 1, search.Meta{Score: 0.9})}, Total: 1, Reranked: &tr}),
+		v4CellOK(&search.Response{Results: []search.Result{v4Ckpt("b", 1, search.Meta{Score: 0.8})}, Total: 1, Reranked: &fa}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Partial || resp.CoverageIncomplete {
+		t.Errorf("partial=%v coverage=%v, want partial-only for a rerank mix", resp.Partial, resp.CoverageIncomplete)
 	}
 }
 

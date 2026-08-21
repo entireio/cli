@@ -342,6 +342,8 @@ func agentHelpRepoContext(ctx context.Context) (repoLine string, trailsEnabled b
 // because agent-help is an explicit command whose output must reflect the
 // current availability decision. SessionStart uses the detached
 // refreshTrailsEnabledCacheIfStaleForScope path instead to avoid hook latency.
+// Routes through trailRefreshAPIClient (see its doc for why) rather than the
+// generic data-API/BFF client.
 func refreshAgentHelpTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEnablementScope) error {
 	if cachedTrailsEnablementForScope(ctx, scope, time.Now()) != trailEnablementCacheUnknown {
 		return nil
@@ -349,7 +351,14 @@ func refreshAgentHelpTrailsEnabledCacheIfStaleForScope(ctx context.Context, scop
 	if !scope.Supported {
 		return saveTrailsEnabledForScope(ctx, scope, false, time.Now())
 	}
-	client, err := NewAuthenticatedAPIClient(ctx, false)
+	client, notOnboarded, err := trailsCellClient(ctx, false, scope.Owner+"/"+scope.Repo)
+	if notOnboarded {
+		// Definitive negative: cache it for trailEnablementCacheTTL rather than
+		// falling into the short refresh-failure backoff, which would re-pay the
+		// whole control-plane round trip every 5 minutes forever. The save itself
+		// survives this refresh's spent deadline — see saveTrailsEnabledForScope.
+		return saveTrailsEnabledForScope(ctx, scope, false, time.Now())
+	}
 	if err != nil {
 		return err
 	}

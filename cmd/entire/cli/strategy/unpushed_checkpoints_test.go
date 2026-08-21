@@ -2,7 +2,6 @@ package strategy
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -37,10 +36,7 @@ func initCountTestRepo(t *testing.T) (dir, first, second string) {
 // git-refs primary checkpoint backend.
 func writeGitRefsBackendSetting(t *testing.T, dir string) {
 	t.Helper()
-	entireDir := filepath.Join(dir, ".entire")
-	require.NoError(t, os.MkdirAll(entireDir, 0o755))
-	content := `{"enabled": true, "checkpoints": {"primary": {"type": "git-refs"}}}`
-	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(content), 0o644))
+	writeSettingsJSON(t, dir, `{"enabled": true, "checkpoints": {"primary": {"type": "git-refs"}}}`)
 }
 
 const v1LocalRef = "refs/heads/" + paths.MetadataBranchName

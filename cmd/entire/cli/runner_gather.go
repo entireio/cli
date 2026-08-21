@@ -277,23 +277,16 @@ func gatherCheckpoints(ctx context.Context) string {
 
 func gatherTrails(ctx context.Context, errW io.Writer, limit int, insecureHTTP bool) string {
 	var out strings.Builder
-	err := runAuthenticatedDataAPI(ctx, errW, insecureHTTP, func(ctx context.Context, client *api.Client) error {
+	err := runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, "", func(ctx context.Context, client *api.Client) error {
 		forge, owner, repo, err := resolveTrailRemote(ctx)
 		if err != nil {
 			return err
 		}
-		resp, err := client.Get(ctx, trailsBasePath(forge, owner, repo)+trailListQuery(nil, "", limit))
+		resources, _, err := listTrailResources(ctx, client, forge, owner, repo, nil, "", limit)
 		if err != nil {
-			return fmt.Errorf("list trails: %w", err)
-		}
-		defer resp.Body.Close()
-		if err := checkTrailResponse(resp); err != nil {
 			return err
 		}
-		var list api.TrailListResponse
-		if err := api.DecodeJSON(resp, &list); err != nil {
-			return fmt.Errorf("decode trail list: %w", err)
-		}
+		list := api.TrailListResponse{Trails: resources}
 		if len(list.Trails) == 0 {
 			out.WriteString("Trails are enabled but none exist yet.\n")
 			return nil
@@ -310,6 +303,7 @@ func gatherTrails(ctx context.Context, errW io.Writer, limit int, insecureHTTP b
 			scanned = scanned[:tuneMaxTrailsForFindings]
 		}
 		for i := range scanned {
+			client.SetTrailRoute(scanned[i].ID, trailNumberPath(forge, owner, repo, scanned[i].Number))
 			comments, err := fetchAllTrailReviewComments(ctx, client, scanned[i].ID, trailReviewSummaryOptions())
 			if err != nil {
 				fetchFailures++

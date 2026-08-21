@@ -34,20 +34,33 @@ type NamedBlob struct {
 // (cross-blob walker) needs an explicit signal that OPF did not
 // finish.
 //
-// When OPF is unconfigured, disabled, has no enabled categories, or
-// the per-process circuit breaker has tripped, returns regex-only
-// output for every blob with no error. This matches the existing
-// non-batched paths and keeps the caller's hot-path code clean.
+// When OPF is unconfigured, disabled, or the per-process circuit
+// breaker has tripped, returns regex-only output for every blob with
+// no error. This matches the existing non-batched paths and keeps the
+// caller's hot-path code clean. Enabled with zero effective categories
+// is different: that returns ErrOPFNoEnabledCategories, because the
+// caller is about to stamp the Entire-OPF-Applied trailer and a silent
+// regex-only success here would make that attestation false. Enabled
+// with a nil runtime errors for the same reason. Both fail-closed
+// checks run BEFORE the breaker check so the guarantee is
+// unconditional — a tripped breaker must not downgrade a
+// misconfiguration back into silent regex-only success.
 func BatchBytesWithPrivacyFilter(ctx context.Context, inputs []NamedBlob) ([][]byte, error) {
 	if len(inputs) == 0 {
 		return nil, nil
 	}
 	cfg := getOPFConfig()
-	if cfg == nil || !cfg.Enabled || cfg.runtime == nil || opfBreakerTripped.Load() {
+	if cfg == nil || !cfg.Enabled {
 		return applyRegexLayersToBlobs(inputs), nil
 	}
 	cats := enabledCategories(cfg)
 	if len(cats) == 0 {
+		return nil, ErrOPFNoEnabledCategories
+	}
+	if cfg.runtime == nil {
+		return nil, errOPFNilRuntime
+	}
+	if opfBreakerTripped.Load() {
 		return applyRegexLayersToBlobs(inputs), nil
 	}
 
@@ -121,7 +134,7 @@ func collectLeaves(in NamedBlob, add func(string)) {
 		if _, err := jsonlContentImpl(string(in.Content), func(v string) string {
 			add(v)
 			return v
-		}); err == nil {
+		}, concurrencyUnsafeRedactor); err == nil {
 			return
 		}
 		// JSONL parse failed — fall through to whole-content.
@@ -139,7 +152,7 @@ func applyToBlob(in NamedBlob, spansByInput map[string][]Span, cfg *OPFConfig) [
 		return applyRegions(v, regions)
 	}
 	if isJSONLikeName(in.Name) {
-		if redacted, err := jsonlContentImpl(string(in.Content), applier); err == nil {
+		if redacted, err := jsonlContentImpl(string(in.Content), applier, concurrencySafeRedactor); err == nil {
 			return []byte(redacted)
 		}
 	}
@@ -153,7 +166,7 @@ func applyRegexLayersToBlobs(inputs []NamedBlob) [][]byte {
 	out := make([][]byte, len(inputs))
 	for i, in := range inputs {
 		if isJSONLikeName(in.Name) {
-			if redacted, err := jsonlContentImpl(string(in.Content), String); err == nil {
+			if redacted, err := jsonlContentImpl(string(in.Content), String, concurrencySafeRedactor); err == nil {
 				out[i] = []byte(redacted)
 				continue
 			}
@@ -195,7 +208,7 @@ func SumProseLeafBytes(inputs []NamedBlob) int {
 					total += len(v)
 				}
 				return v
-			}); err == nil {
+			}, concurrencyUnsafeRedactor); err == nil {
 				continue
 			}
 			// JSON parse failed — fall through to whole-content (matches

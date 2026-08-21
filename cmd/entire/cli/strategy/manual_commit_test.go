@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
@@ -241,7 +242,15 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 		LastCheckpointID: "a1b2c3d4e5f6",
 	}
 
-	for _, state := range []*SessionState{staleEmpty, staleIdle, staleEnded, activeNoShadow, condensedIdle} {
+	// Session 6: ENDED record-bearing session, no shadow branch. Should be
+	// KEPT: task records never live on the shadow branch, so its absence
+	// must not make this session look orphaned.
+	recordEnded := &SessionState{
+		SessionID: "record-ended", BaseCommit: "fff6666", StartedAt: now.Add(-2 * time.Hour), Phase: "ended",
+		TaskRecords: []session.TaskRecord{{ToolUseID: "toolu_keep", StartedAt: now, CompletedAt: now}},
+	}
+
+	for _, state := range []*SessionState{staleEmpty, staleIdle, staleEnded, activeNoShadow, condensedIdle, recordEnded} {
 		if err := s.saveSessionState(context.Background(), state); err != nil {
 			t.Fatalf("saveSessionState(%s) error = %v", state.SessionID, err)
 		}
@@ -252,13 +261,13 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 		t.Fatalf("listAllSessionStates() error = %v", err)
 	}
 
-	// Only active-no-shadow and condensed-idle should survive
-	if len(states) != 2 {
+	// Only active-no-shadow, condensed-idle, and record-ended should survive
+	if len(states) != 3 {
 		var ids []string
 		for _, st := range states {
 			ids = append(ids, st.SessionID)
 		}
-		t.Fatalf("listAllSessionStates() returned %d states %v, want 2 [active-no-shadow, condensed-idle]", len(states), ids)
+		t.Fatalf("listAllSessionStates() returned %d states %v, want 3 [active-no-shadow, condensed-idle, record-ended]", len(states), ids)
 	}
 
 	kept := make(map[string]bool)
@@ -270,6 +279,9 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 	}
 	if !kept["condensed-idle"] {
 		t.Error("session with LastCheckpointID should be kept")
+	}
+	if !kept["record-ended"] {
+		t.Error("ended record-bearing session must not be cleared as orphaned")
 	}
 
 	// Verify stale sessions were actually cleared from disk
@@ -452,6 +464,42 @@ func TestShadowStrategy_GetRewindPoints_NoShadowBranch(t *testing.T) {
 	if len(points) != 0 {
 		t.Errorf("GetRewindPoints() returned %d points, want 0", len(points))
 	}
+}
+
+// Pending subagent work lives on task records now, so `checkpoint list
+// --pending`'s [Task] rows must come from TaskRecords. The session is ENDED
+// with no shadow branch — the shape the orphan cleanup used to discard.
+func TestShadowStrategy_GetRewindPoints_TaskRecordRows(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	head, err := repo.Head()
+	require.NoError(t, err)
+
+	now := time.Now()
+	s := NewManualCommitStrategy()
+	require.NoError(t, s.saveSessionState(context.Background(), &SessionState{
+		SessionID: "task-row-session", BaseCommit: head.Hash().String(), StartedAt: now, Phase: "ended",
+		TaskRecords: []session.TaskRecord{
+			{ToolUseID: "toolu_completed", SubagentType: "reviewer", TaskDescription: "Review the diff", StartedAt: now, CompletedAt: now},
+			{ToolUseID: "toolu_live", SubagentType: "dev", TaskDescription: "Implement widget", StartedAt: now},
+		},
+	}))
+
+	points, err := s.GetRewindPoints(context.Background(), 10)
+	require.NoError(t, err)
+	require.Len(t, points, 2, "both completed-unmaterialized and live records must produce pending [Task] rows")
+	assert.True(t, points[0].IsTaskCheckpoint && points[1].IsTaskCheckpoint)
+	assert.Equal(t, "task-row-session", points[0].SessionID)
+	messages := points[0].Message + " | " + points[1].Message
+	assert.Contains(t, messages, "Completed 'reviewer' agent: Review the diff", "completed record renders the Completed verb")
+	assert.Contains(t, messages, "Running 'dev' agent: Implement widget", "live record renders the Running verb")
 }
 
 // When the most-recent session of a multi-session condensed checkpoint has no

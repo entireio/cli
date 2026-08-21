@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/spf13/cobra"
 )
+
+const runnerSetupLimitErrorMessage = "limit must be greater than 0"
 
 type runnerSetupOptions struct {
 	runner       string // optional: limit to one runner (id, with or without "trail-")
@@ -87,6 +90,9 @@ If <runner> is given (e.g. "risk" or "trail-risk"), only that runner is tuned.`,
 }
 
 func runRunnerSetup(ctx context.Context, w, errW io.Writer, opts runnerSetupOptions) error {
+	if opts.limit <= 0 {
+		return errors.New(runnerSetupLimitErrorMessage)
+	}
 	src, err := parseTuneSources(opts.sources)
 	if err != nil {
 		return err

@@ -5,17 +5,25 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/spf13/cobra"
 )
 
 const agentHelpTestRepo = "gh/acme/app"
+
+// testTrailCellRoutedFullName is the "owner/repo" fullName the entire-api
+// cell-routed client (trailRefreshAPIClient) is expected to receive when a
+// repo-scoped trails probe routes correctly through it, shared by the tests
+// covering the two legacy-BFF-routing fixes.
+const testTrailCellRoutedFullName = "acme/widget"
 
 // commandNames returns the Use-name of each command, for assertions.
 func commandNames(cmds []*cobra.Command) []string {
@@ -223,6 +231,78 @@ func TestAgentHelpRepoContext_SkipsRefreshWithoutLocalIdentity(t *testing.T) {
 	}
 	if enabled {
 		t.Fatal("trails should not be advertised without a local auth identity")
+	}
+}
+
+// refreshAgentHelpTrailsEnabledCacheIfStaleForScope must route the repo-scoped
+// trails-enablement probe through the entire-api cell that hosts THIS repo
+// (trailRefreshAPIClient), never through the generic data-API/BFF client — the
+// BFF does not proxy /api/v1/trails/... for bearer callers (COR-666).
+// Not parallel: changes the process working directory.
+func TestRefreshAgentHelpTrailsEnabledCacheIfStaleForScope_RoutesThroughRepoCell(t *testing.T) {
+	// A non-repo cwd makes the shared cache lookup return "unknown", so the
+	// refresh path below always runs.
+	t.Chdir(t.TempDir())
+
+	previous := trailRefreshAPIClient
+	var gotFullName string
+	wantErr := errors.New("cell client unavailable")
+	trailRefreshAPIClient = func(_ context.Context, _ bool, fullName string) (*api.Client, error) {
+		gotFullName = fullName
+		return nil, wantErr
+	}
+	t.Cleanup(func() { trailRefreshAPIClient = previous })
+
+	scope := trailEnablementScope{
+		Forge:     "gh",
+		Owner:     "acme",
+		Repo:      "widget",
+		RepoKey:   trailEnablementRepoKey("gh", "acme", "widget"),
+		APIBase:   api.BaseURL(),
+		AuthKey:   "test-auth-key",
+		Supported: true,
+	}
+
+	err := refreshAgentHelpTrailsEnabledCacheIfStaleForScope(t.Context(), scope)
+
+	if gotFullName != testTrailCellRoutedFullName {
+		t.Fatalf("trailRefreshAPIClient fullName = %q, want %s", gotFullName, testTrailCellRoutedFullName)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+}
+
+// refreshAgentHelpTrailsEnabledCacheIfStaleForScope must persist a definitive
+// negative when trailRefreshAPIClient fails because the repo has no
+// processing placement (errRepoNotOnboarded), matching
+// runTrailEnablementRefresh's handling of the same sentinel. Without this,
+// agent-help falls into the short refresh-failure backoff instead, re-paying
+// the full control-plane round trip every 5 minutes forever instead of caching
+// the hour-long definitive negative like every other trails-enablement
+// consumer.
+// Not parallel: changes the process working directory.
+func TestRefreshAgentHelpTrailsEnabledCacheIfStaleForScope_NotOnboardedSavesDisabledCache(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/acme/widget.git")
+
+	previous := trailRefreshAPIClient
+	trailRefreshAPIClient = func(context.Context, bool, string) (*api.Client, error) {
+		return nil, fmt.Errorf("resolve the Entire cell for acme/widget: %w", errRepoNotOnboarded)
+	}
+	t.Cleanup(func() { trailRefreshAPIClient = previous })
+
+	scope, err := currentTrailEnablementScope(t.Context())
+	if err != nil {
+		t.Fatalf("resolve trail scope: %v", err)
+	}
+
+	if err := refreshAgentHelpTrailsEnabledCacheIfStaleForScope(t.Context(), scope); err != nil {
+		t.Fatalf("err = %v, want nil (not-onboarded is a definitive negative, not a refresh failure)", err)
+	}
+
+	if got := cachedTrailsEnablementForScope(t.Context(), scope, time.Now()); got != trailEnablementCacheDisabled {
+		t.Fatalf("cached enablement = %v, want trailEnablementCacheDisabled (saved, not left unknown)", got)
 	}
 }
 

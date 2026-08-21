@@ -2,11 +2,14 @@ package cli
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
@@ -18,6 +21,28 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const testCheckpointRefZN = "refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN"
+
+func TestFetchCheckpointRef_ElectionFailureCannotCertifyAbsence(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	originBare := t.TempDir()
+	gitRun(t, originBare, "init", "--bare", "-q", originBare)
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	gitRun(t, dir, "remote", "add", "origin", originBare)
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "gone")
+	t.Chdir(dir)
+
+	err := FetchCheckpointRef(context.Background(), plumbing.ReferenceName(testCheckpointRefZN))
+	require.Error(t, err)
+	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"fail-open origin cannot prove absence when checkpoint remote election failed")
+}
 
 // gitCheckout uses git CLI instead of go-git to work around go-git v5 bug
 // where Checkout deletes untracked files (see https://github.com/go-git/go-git/issues/970).
@@ -547,9 +572,8 @@ func setupRepoWithBlobOnMetadataBranch(t *testing.T) (string, plumbing.Hash) {
 }
 
 // Not parallel: uses t.Chdir()
-// Tests basic FetchBlobsByHash mechanics: when the resolved fetch target has
-// the blob, the function brings it into the local object store.
-// Target selection is tested separately in TestResolveCheckpointFetchTarget_*.
+// Tests blob hydration from the normal target and from the legacy tier after a
+// slow elected target exhausts only its own budget.
 func TestFetchBlobsByHash_FetchesMissingBlob(t *testing.T) {
 	ctx := context.Background()
 
@@ -578,6 +602,34 @@ func TestFetchBlobsByHash_FetchesMissingBlob(t *testing.T) {
 	freshRepo, err := git.PlainOpen(localDir)
 	require.NoError(t, err)
 	require.NoError(t, freshRepo.Storer.HasEncodedObject(blobHash), "blob should exist locally after fetch")
+
+	upstreamDir := t.TempDir()
+	testutil.InitRepo(t, upstreamDir)
+	originDir := t.TempDir()
+	testutil.InitRepo(t, originDir)
+
+	fallbackDir := t.TempDir()
+	testutil.InitRepo(t, fallbackDir)
+	testutil.WriteFile(t, fallbackDir, "f.txt", "init")
+	testutil.GitAdd(t, fallbackDir, "f.txt")
+	testutil.GitCommit(t, fallbackDir, "init")
+	gitRun(t, fallbackDir, "remote", "add", "upstream", upstreamDir)
+	gitRun(t, fallbackDir, "remote", "add", "origin", originDir)
+	testutil.WriteCheckpointPushRemoteSetting(t, fallbackDir, "upstream")
+	t.Chdir(fallbackDir)
+	require.Equal(t, []string{upstreamDir, originDir}, checkpointBlobFetchTargets(ctx))
+
+	var attempted []string
+	fetch := func(candidateCtx context.Context, target string, _ []string) error {
+		attempted = append(attempted, target)
+		if target == upstreamDir {
+			<-candidateCtx.Done()
+			return candidateCtx.Err()
+		}
+		return candidateCtx.Err()
+	}
+	require.NoError(t, fetchBlobsByHash(ctx, []plumbing.Hash{blobHash}, 10*time.Millisecond, time.Second, fetch))
+	require.Equal(t, []string{upstreamDir, originDir}, attempted)
 }
 
 // Not parallel: uses t.Chdir()
@@ -647,7 +699,7 @@ func TestParseCheckpointRefNames(t *testing.T) {
 	output := []byte(strings.Join([]string{
 		sha + "\tHEAD",
 		sha + "\trefs/heads/main",
-		sha + "\trefs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN",
+		sha + "\t" + testCheckpointRefZN,
 		sha + "\trefs/entire/checkpoints/f6/a1b2c3d4e5f6",
 		sha + "\trefs/tags/v1.0.0",
 		sha + "\trefs/tags/v1.0.0^{}",
@@ -660,7 +712,7 @@ func TestParseCheckpointRefNames(t *testing.T) {
 		got[i] = n.String()
 	}
 	assert.ElementsMatch(t, []string{
-		"refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN",
+		testCheckpointRefZN,
 		"refs/entire/checkpoints/f6/a1b2c3d4e5f6",
 	}, got)
 }
@@ -681,7 +733,7 @@ func TestParseCheckpointRefNames_RealLsRemote(t *testing.T) {
 	testutil.GitAdd(t, workDir, "f.txt")
 	testutil.GitCommit(t, workDir, "init")
 	head := gitOutput(t, workDir, "rev-parse", "HEAD")
-	gitRun(t, workDir, "update-ref", "refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN", head)
+	gitRun(t, workDir, "update-ref", testCheckpointRefZN, head)
 	gitRun(t, workDir, "update-ref", "refs/entire/checkpoints/f6/a1b2c3d4e5f6", head)
 	gitRun(t, workDir, "remote", "add", "origin", bareDir)
 	gitRun(t, workDir, "push", "-q", "origin", "refs/entire/checkpoints/*:refs/entire/checkpoints/*")
@@ -695,14 +747,15 @@ func TestParseCheckpointRefNames_RealLsRemote(t *testing.T) {
 		got[i] = n.String()
 	}
 	assert.ElementsMatch(t, []string{
-		"refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN",
+		testCheckpointRefZN,
 		"refs/entire/checkpoints/f6/a1b2c3d4e5f6",
 	}, got)
 }
 
-// TestListCheckpointRefsOnRemote_NotConfigured proves the authority gate: with
-// no checkpoint_remote configured, enumeration is a no-op (nil, no error, no
-// network) so List stays local-only. Not parallel: uses t.Chdir.
+// TestListCheckpointRefsOnRemote_NotConfigured: with no checkpoint_remote and
+// no git remotes at all (empty read-candidate chain), enumeration is a no-op
+// (nil, no error, no network) so List stays local-only.
+// Not parallel: uses t.Chdir.
 func TestListCheckpointRefsOnRemote_NotConfigured(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -713,7 +766,107 @@ func TestListCheckpointRefsOnRemote_NotConfigured(t *testing.T) {
 
 	names, err := ListCheckpointRefsOnRemote(context.Background())
 	require.NoError(t, err)
-	assert.Nil(t, names, "no checkpoint_remote configured must leave List local-only (no remote enumeration)")
+	assert.Nil(t, names, "a remoteless repo must leave List local-only (no remote enumeration)")
+
+	bareDir := t.TempDir()
+	gitRun(t, bareDir, "init", "--bare", "-q", bareDir)
+	head := gitOutput(t, dir, "rev-parse", "HEAD")
+	ref := testCheckpointRefZN
+	gitRun(t, dir, "remote", "add", "origin", bareDir)
+	gitRun(t, dir, "push", "-q", "origin", head+":"+ref)
+	testutil.WriteFile(t, dir, ".entire/settings.json",
+		`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github"}}}`)
+
+	names, err = ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, names, "a malformed checkpoint_remote must not activate candidate discovery")
+}
+
+// TestListCheckpointRefsOnRemote_MergesReadCandidateListings: without a
+// dedicated checkpoint_remote, discovery ls-remotes every read candidate and
+// merges the listings — a union deduped by ref name. Refs are seeded
+// DISJOINTLY (one on the elected upstream, one on legacy origin, one on both)
+// to pin that merging, not first-non-empty, is the semantics.
+// Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_MergesReadCandidateListings(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	originBare := t.TempDir()
+	upstreamBare := t.TempDir()
+	gitRun(t, originBare, "init", "--bare", "-q", originBare)
+	gitRun(t, upstreamBare, "init", "--bare", "-q", upstreamBare)
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	head := gitOutput(t, dir, "rev-parse", "HEAD")
+	gitRun(t, dir, "remote", "add", "origin", originBare)
+	gitRun(t, dir, "remote", "add", "upstream", upstreamBare)
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "upstream")
+
+	upstreamRef := testCheckpointRefZN
+	originRef := "refs/entire/checkpoints/f6/a1b2c3d4e5f6"
+	sharedRef := "refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9"
+	gitRun(t, dir, "push", "-q", "upstream", head+":"+upstreamRef, head+":"+sharedRef)
+	gitRun(t, dir, "push", "-q", "origin", head+":"+originRef, head+":"+sharedRef)
+	t.Chdir(dir)
+
+	names, err := ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err)
+	got := make([]string, len(names))
+	for i, n := range names {
+		got[i] = n.String()
+	}
+	assert.ElementsMatch(t, []string{upstreamRef, originRef, sharedRef}, got,
+		"discovery must union the candidates' listings and dedupe by ref name")
+}
+
+// TestListCheckpointRefsOnRemote_CandidateFailureDoesNotBlockOthers: discovery
+// is best-effort — an unreachable elected remote logs and continues, so the
+// legacy origin tier's refs are still discovered. When EVERY candidate fails,
+// an error restores the store's local-only warning.
+// Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_CandidateFailureDoesNotBlockOthers(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	originBare := t.TempDir()
+	gitRun(t, originBare, "init", "--bare", "-q", originBare)
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	head := gitOutput(t, dir, "rev-parse", "HEAD")
+	gitRun(t, dir, "remote", "add", "origin", originBare)
+	gitRun(t, dir, "remote", "add", "upstream", filepath.Join(dir, "nonexistent-remote"))
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "upstream")
+
+	originRef := "refs/entire/checkpoints/f6/a1b2c3d4e5f6"
+	gitRun(t, dir, "push", "-q", "origin", head+":"+originRef)
+	t.Chdir(dir)
+
+	names, err := ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err, "one candidate failing must not fail discovery")
+	require.Len(t, names, 1)
+	assert.Equal(t, originRef, names[0].String())
+
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+	gitRun(t, dir, "remote", "set-url", "upstream", server.URL+"/repo.git")
+
+	names, err = listCheckpointRefsOnRemote(context.Background(), time.Second)
+	require.NoError(t, err, "a slow candidate must not consume origin's discovery budget")
+	require.Len(t, names, 1)
+	assert.Equal(t, originRef, names[0].String())
+
+	gitRun(t, dir, "remote", "set-url", "upstream", filepath.Join(dir, "nonexistent-remote"))
+	gitRun(t, dir, "remote", "set-url", "origin", filepath.Join(dir, "also-nonexistent"))
+	names, err = ListCheckpointRefsOnRemote(context.Background())
+	require.Error(t, err, "all candidates failing must trigger the store's local-only warning")
+	assert.Nil(t, names)
 }
 
 // TestListCheckpointRefsOnRemote_ResolvesFromSubdir proves worktree pinning for
@@ -731,7 +884,7 @@ func TestListCheckpointRefsOnRemote_ResolvesFromSubdir(t *testing.T) {
 	testutil.GitAdd(t, dir, "f.txt")
 	testutil.GitCommit(t, dir, "init")
 	head := gitOutput(t, dir, "rev-parse", "HEAD")
-	ref := "refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN"
+	ref := testCheckpointRefZN
 	gitRun(t, dir, "update-ref", ref, head)
 	gitRun(t, dir, "remote", "add", "origin", bareDir)
 	gitRun(t, dir, "push", "-q", "origin", ref+":"+ref)
@@ -785,4 +938,65 @@ func TestListCheckpointRefsOnRemote_HonorsCanceledContext(t *testing.T) {
 
 	_, err := ListCheckpointRefsOnRemote(ctx)
 	require.Error(t, err, "canceled context must reach ls-remote (regression: deleting WithTimeout would still pass a constant-only test)")
+}
+
+// TestFetchBlobsByHash_ChainBudgetBoundsTheWholeOperation pins the ceiling that
+// per-target budgets alone do not give. Before the read-candidate chain this
+// function was wrapped in one 2-minute budget covering its fallbacks; per-target
+// budgets replaced it, so worst-case latency scaled with the target count and the
+// fallback metadata chain ran on the caller's uncapped context on top of that.
+//
+// Every target here stalls until its context expires, so without the ceiling the
+// elapsed time would be at least perTarget × len(targets).
+func TestFetchBlobsByHash_ChainBudgetBoundsTheWholeOperation(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir modifies process-global state.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "x")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, dir, "fork", "https://example.com/fork.git")
+	// Elect a non-origin remote so the read chain is genuinely two tiers
+	// (elected, then the legacy origin tier). With origin elected the chain
+	// collapses to one candidate and the loop's worst case is a single window —
+	// nothing for a ceiling to bind against.
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "fork")
+	t.Chdir(dir)
+
+	// Production-shaped ratio, scaled down: the ceiling sits BELOW the loop's own
+	// worst case (targets x perTarget), which is the whole point — sized at or
+	// above it the ceiling cannot bind and buys nothing. That was the original
+	// defect here, and the first version of this test hid it by inverting the
+	// relationship (perTarget far larger than the ceiling), which proves only that
+	// some ceiling can bind, not that this one does.
+	const perTarget = 400 * time.Millisecond
+	const chainBudget = 500 * time.Millisecond // < 2 targets x perTarget
+
+	var attempts int
+	stall := func(ctx context.Context, _ string, _ []string) error {
+		attempts++
+		<-ctx.Done() // hang until this attempt's budget expires
+		return ctx.Err()
+	}
+
+	start := time.Now()
+	err := fetchBlobsByHash(t.Context(), []plumbing.Hash{plumbing.NewHash(
+		"1111111111111111111111111111111111111111")}, perTarget, chainBudget, stall)
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "every target stalled, so hydration cannot succeed")
+	assert.GreaterOrEqual(t, attempts, 1, "at least one target must be attempted")
+
+	// The ceiling, not targets x perTarget, decides how long the user waits. The
+	// bound has to be below the loop's own worst case or it proves nothing;
+	// slack on top absorbs a loaded CI box.
+	targetCount := len(checkpointBlobFetchTargets(t.Context()))
+	require.GreaterOrEqual(t, targetCount, 2,
+		"setup: the ceiling can only be shown to bind against a multi-candidate chain")
+	loopWorstCase := time.Duration(targetCount) * perTarget
+	assert.Less(t, elapsed, chainBudget+300*time.Millisecond,
+		"the chain ceiling must bound the whole operation including fallbacks (elapsed %s)", elapsed)
+	assert.Less(t, elapsed, loopWorstCase,
+		"a ceiling at or above the loop's worst case (%s) cannot bind — that was the original defect", loopWorstCase)
 }

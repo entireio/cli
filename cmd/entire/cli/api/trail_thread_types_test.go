@@ -11,19 +11,19 @@ func TestTrailThreadDetailDecodes(t *testing.T) {
 	t.Parallel()
 	payload := []byte(`{
 	  "thread": {
-	    "id": "th1", "trail_id": "tr1", "kind": "discussion", "title": "Design",
-	    "review_comment_id": null, "resolved": false,
-	    "resolved_by": null, "resolved_at": null,
-	    "created_by": "actor-uuid", "created_at": "2026-07-10T00:00:00Z",
-	    "updated_at": "2026-07-10T00:01:00Z",
-	    "last_message_at": "2026-07-10T00:01:00Z", "last_message_author": "alice",
-	    "message_count": 2, "participants": [{"login":"alice"},{"login":"bob"}]
+	    "id": "th1", "trailId": "tr1", "kind": "discussion", "title": "Design",
+	    "reviewCommentId": null, "resolved": false,
+	    "resolvedBy": null, "resolvedAt": null,
+	    "createdBy": "actor-uuid", "createdAt": "2026-07-10T00:00:00Z",
+	    "updatedAt": "2026-07-10T00:01:00Z",
+	    "lastMessageAt": "2026-07-10T00:01:00Z", "lastMessageAuthor": "alice",
+	    "messageCount": 2, "participants": [{"login":"alice"},{"login":"bob"}]
 	  },
 	  "messages": [
-	    {"id":"m1","author":"alice","created_at":"2026-07-10T00:00:00Z","body":"hi",
-	     "replies":[{"id":"r1","author":"bob","created_at":"2026-07-10T00:00:30Z","body":"yo"}]}
+	    {"id":"m1","author":"alice","createdAt":"2026-07-10T00:00:00Z","body":"hi",
+	     "replies":[{"id":"r1","author":"bob","createdAt":"2026-07-10T00:00:30Z","body":"yo"}]}
 	  ],
-	  "event_cursor": "42"
+	  "eventCursor": "42"
 	}`)
 	var out TrailThreadDetailResponse
 	if err := json.Unmarshal(payload, &out); err != nil {

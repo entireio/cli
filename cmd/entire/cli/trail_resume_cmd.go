@@ -201,7 +201,7 @@ func validateTrailResumeOptions(opts trailResumeOptions) error {
 }
 
 func runTrailResume(cmd *cobra.Command, opts trailResumeOptions) error {
-	return runAuthenticatedDataAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), func(ctx context.Context, client *api.Client) error {
+	return runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), "", func(ctx context.Context, client *api.Client) error {
 		forge, owner, repo, err := resolveTrailRemote(ctx)
 		if err != nil {
 			return err
@@ -236,6 +236,7 @@ func runTrailResume(cmd *cobra.Command, opts trailResumeOptions) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load trail checkpoint sessions: %s\n", sessionsUnavailable)
 		}
 
+		client.SetTrailRoute(found.ID, trailNumberPath(forge, owner, repo, found.Number))
 		findings, findingsErr := loadTrailResumeFindingsContext(ctx, client, found.ID)
 		if findingsErr != nil {
 			findings.Unavailable = findingsErr.Error()
@@ -462,13 +463,13 @@ func resolveTrailCheckpointSessions(ctx context.Context, branch string) ([]trail
 		return nil, 0, nil
 	}
 
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, 0, fmt.Errorf("open checkpoint store: %w", err)
 	}
 	store := stores.Persistent
 	refs := stores.Refs()
-	if refs.ReadBootstrappableFromOrigin() {
+	if refs.ReadBootstrappableFromRemote() {
 		promoteRemoteTrackingPrimary(ctx, repo, refs)
 	}
 

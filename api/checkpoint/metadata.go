@@ -19,6 +19,60 @@ type TranscriptAsset struct {
 	Data      []byte
 }
 
+// TaskPayload materializes one subagent task record's transcript and metadata
+// into a session checkpoint's tasks/<tool-use-id>/ subtree. Produced by
+// condensation from session.TaskRecords (see
+// docs/superpowers/plans/2026-08-19-subagent-durable-records.md) and consumed
+// by the write path via WriteOptions.Tasks — the replacement for the old
+// unreachable IsTask/ToolUseID per-write route (#2058): no producer ever set
+// that route's fields, so every subagent transcript died at condensation
+// until this payload existed.
+type TaskPayload struct {
+	// ToolUseID is the Task tool invocation's tool_use_id — also the
+	// directory name under tasks/.
+	ToolUseID string
+
+	// AgentID is the subagent identifier, used to name agent-<id>.jsonl.
+	AgentID string
+
+	// SubagentType and TaskDescription label the task in task.json.
+	SubagentType    string
+	TaskDescription string
+
+	// Transcript is the subagent's transcript content, already run through
+	// the sanitize -> externalize -> redact pipeline (the same one the
+	// session transcript gets — see redact.RedactedBytes for why callers
+	// must not hand this field raw bytes). Empty (Len() == 0) means the
+	// transcript was unavailable — see TranscriptUnavailableReason, which is
+	// non-empty exactly when this is empty — and no agent-<id>.jsonl is
+	// written. This mirrors how WriteOptions.Transcript itself expresses
+	// "no content": a value type, not a pointer, with emptiness read via Len().
+	Transcript redact.RedactedBytes
+
+	// Files is the set of files touched by this subagent.
+	Files []string
+
+	// TokenUsage is this subagent's token usage, when known. nil when
+	// unavailable.
+	TokenUsage *types.TokenUsage
+
+	// StartedAt is when the subagent launch was observed.
+	StartedAt time.Time
+
+	// CompletedAt is when the task record was completed. Zero means the task
+	// was still in flight when this checkpoint was materialized — its
+	// transcript (if any) is a transcript-so-far snapshot, not the final one.
+	CompletedAt time.Time
+
+	// TranscriptUnavailableReason explains why Transcript is empty. A stable
+	// category string (e.g. "transcript unreadable", "transcript path
+	// unresolvable", "transcript empty") — never the underlying error detail,
+	// which may embed an absolute local path and must not enter a pushed
+	// task.json; log that detail via logging.Warn instead. Empty exactly when
+	// Transcript is non-empty.
+	TranscriptUnavailableReason string
+}
+
 // WriteOptions contains options for writing a persistent checkpoint.
 type WriteOptions struct {
 	// CheckpointID is the stable 12-hex-char identifier
@@ -89,23 +143,19 @@ type WriteOptions struct {
 	// This is useful for copying task metadata files, subagent transcripts, etc.
 	MetadataDir string
 
-	// Task checkpoint fields (for task/subagent checkpoints)
-	IsTask    bool   // Whether this is a task checkpoint
-	ToolUseID string // Tool use ID for task checkpoints
+	// TranscriptPath is a path to the session transcript file, used as a
+	// fallback source when Transcript is empty (e.g. a caller that wants the
+	// store to read and redact the file itself rather than doing so in memory).
+	TranscriptPath string
 
-	// Additional task checkpoint fields for subagent checkpoints
-	AgentID                string // Subagent identifier
-	CheckpointUUID         string // UUID for transcript truncation when rewinding
-	TranscriptPath         string // Path to session transcript file (alternative to in-memory Transcript)
-	SubagentTranscriptPath string // Path to subagent's transcript file
+	// Tasks materializes subagent task records dispatched by this session into
+	// this checkpoint's tasks/<tool-use-id>/ subtree — see TaskPayload. Empty
+	// for sessions with no subagent work (the vast majority) and for backends
+	// or write paths that predate subagent-work durability (#2058); the writer
+	// treats an empty slice as a no-op.
+	Tasks []TaskPayload
 
-	// Incremental checkpoint fields
-	IsIncremental       bool   // Whether this is an incremental checkpoint
-	IncrementalSequence int    // Checkpoint sequence number
-	IncrementalType     string // Tool type that triggered this checkpoint
-	IncrementalData     []byte // Tool input payload for this checkpoint
-
-	// Commit message fields (used for task checkpoints)
+	// Commit message fields
 	CommitSubject string // Subject line for the metadata commit (overrides default)
 
 	// Agent identifies the agent that created this checkpoint (e.g., "Claude Code", "Cursor")

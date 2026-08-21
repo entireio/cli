@@ -243,7 +243,7 @@ func TestHooksRunAfterLocalOnlyEnable(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(entireDir, "tmp"), 0o755); err != nil {
 		t.Fatalf("mkdir .entire/tmp: %v", err)
 	}
-	localSettings := `{"enabled":true,"local_dev":true,"strategy_options":{"filtered_fetches":true}}`
+	localSettings := `{"enabled":true,"strategy_options":{"filtered_fetches":true}}`
 	if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(localSettings), 0o644); err != nil {
 		t.Fatalf("write settings.local.json: %v", err)
 	}

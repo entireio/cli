@@ -220,6 +220,11 @@ func (c *CursorAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 		Timestamp:       time.Now(),
 		SubagentID:      raw.SubagentID,
 		ModifiedFiles:   raw.ModifiedFiles,
+		// Cursor names the subagent's transcript in the payload. This field was
+		// parsed but never forwarded, so the framework fell back to guessing Claude
+		// Code's layout — which does not exist under Cursor's session dir, so the
+		// task checkpoint stored no subagent transcript at all.
+		SubagentTranscriptPath: raw.AgentTranscriptPath,
 	}
 	return event, nil
 }

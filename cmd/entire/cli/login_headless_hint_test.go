@@ -54,7 +54,7 @@ func TestPersistLogin_StoreWriteFailureIncludesHeadlessHint(t *testing.T) {
 			failingTokenStore(t)
 
 			var out bytes.Buffer
-			err := persistLogin(&out, "https://example.test", loginTestJWT(t, "https://example.test"), refreshToken)
+			err := persistLogin(&out, "https://example.test", "", loginTestJWT(t, "https://example.test"), refreshToken)
 			if err == nil {
 				t.Fatal("persistLogin should fail when the token store rejects writes")
 			}
@@ -77,7 +77,7 @@ func TestPersistLogin_StoreWriteFailureOnFileBackend_NoHint(t *testing.T) {
 	failingTokenStore(t)
 
 	var out bytes.Buffer
-	err := persistLogin(&out, "https://example.test", loginTestJWT(t, "https://example.test"), "refresh-token")
+	err := persistLogin(&out, "https://example.test", "", loginTestJWT(t, "https://example.test"), "refresh-token")
 	if err == nil {
 		t.Fatal("persistLogin should fail when the token store rejects writes")
 	}
@@ -106,7 +106,7 @@ func TestPersistLogin_NonStoreFailure_NoHint(t *testing.T) {
 	token := makeJWT(t, `{"alg":"RS256"}`, fmt.Sprintf(`{"iss":"https://other.test","handle":"alice","exp":%d}`, exp))
 
 	var out bytes.Buffer
-	err := persistLogin(&out, "https://example.test", token, "refresh-token")
+	err := persistLogin(&out, "https://example.test", "", token, "refresh-token")
 	if err == nil {
 		t.Fatal("persistLogin should reject a token from the wrong issuer")
 	}

@@ -283,6 +283,58 @@ func TestRestoredPromptPreviewFallsBackInOrder(t *testing.T) {
 	}
 }
 
+func TestFirstDisplayPrompt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		prompts []string
+		want    string
+	}{
+		{
+			name:    "first prompt is genuine",
+			prompts: []string{"fix the login bug", "second prompt"},
+			want:    "fix the login bug",
+		},
+		{
+			name: "skips codex environment context prefix",
+			prompts: []string{
+				"<environment_context>\n  <cwd>/repo</cwd>\n  <shell>zsh</shell>\n</environment_context>",
+				"investigate the flaky test",
+			},
+			want: "investigate the flaky test",
+		},
+		{
+			name: "skips AGENTS.md instruction prefix",
+			prompts: []string{
+				"# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nread the docs\n</INSTRUCTIONS>",
+				"add error handling",
+			},
+			want: "add error handling",
+		},
+		{
+			name:    "skips empty and separator-only entries",
+			prompts: []string{"   ", "---", "apply the fixes"},
+			want:    "apply the fixes",
+		},
+		{
+			name:    "only injected prompts yields empty",
+			prompts: []string{"<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>"},
+			want:    "",
+		},
+		{name: "empty list yields empty", prompts: nil, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := FirstDisplayPrompt(tt.prompts); got != tt.want {
+				t.Errorf("FirstDisplayPrompt(%v) = %q, want %q", tt.prompts, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveAgentForRewind(t *testing.T) {
 	t.Parallel()
 

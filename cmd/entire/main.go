@@ -13,8 +13,11 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli"
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/procsignal"
+
 	"github.com/spf13/cobra"
 )
 
@@ -24,6 +27,14 @@ func main() {
 
 	// Create context that cancels on interrupt
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Memoize this process's .git/config remote reads. The checkpoint sync
+	// election re-runs per call by design and each run shells out to git for the
+	// same two answers; one command can elect several times. Answers are
+	// partitioned per git working directory, so a command walking several repos
+	// stays correct. `entire repo mirror use` invalidates after re-pointing a
+	// remote, and `entire mcp` narrows this to one window per request.
+	ctx = strategy.WithGitRemoteCache(ctx)
 
 	// Handle interrupt signals
 	sigChan := make(chan os.Signal, 1)
@@ -85,6 +96,16 @@ func main() {
 	}
 
 	executed, err := rootCmd.ExecuteContextC(ctx)
+	// The only place the logger is closed, and it must be here: cobra returns out
+	// of Command.execute() as soon as RunE errors or required-flag validation
+	// fails, both before its PersistentPostRun loop, so those paths would
+	// otherwise exit with up to 8KB of buffered diagnostics unwritten. The logger
+	// rides the executed command's context, where the root pre-run put it; a
+	// failure raised before any pre-run carries none, and nothing logged yet.
+	if l := logging.LoggerFromContext(executed.Context()); l != nil {
+		_ = l.Close()
+	}
+
 	if err != nil {
 		var silent *cli.SilentError
 
@@ -123,7 +144,10 @@ func main() {
 			// deepest matched command, which is the one that failed.
 			showSuggestion(executed, err)
 		default:
-			fmt.Fprintln(rootCmd.OutOrStderr(), err)
+			// The choke point for everything a command returns rather than
+			// prints itself: see cli.RenderUserFacingError for what it strips
+			// and which other render sites exist.
+			fmt.Fprintln(rootCmd.OutOrStderr(), cli.RenderUserFacingError(err))
 		}
 
 		cancel()

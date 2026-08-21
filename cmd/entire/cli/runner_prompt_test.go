@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,6 +77,16 @@ func TestLoadTuneRunners_Errors(t *testing.T) {
 	root := setupRunnersDir(t)
 	if _, err := loadTuneRunners(root, "nope"); err == nil {
 		t.Error("expected error when filter matches nothing")
+	}
+}
+
+func TestRunRunnerSetupRejectsNonPositiveLimit(t *testing.T) {
+	t.Parallel()
+	for _, limit := range []int{0, -1} {
+		err := runRunnerSetup(context.Background(), io.Discard, io.Discard, runnerSetupOptions{limit: limit})
+		if err == nil || err.Error() != runnerSetupLimitErrorMessage {
+			t.Fatalf("limit %d error = %v, want limit validation error", limit, err)
+		}
 	}
 }
 

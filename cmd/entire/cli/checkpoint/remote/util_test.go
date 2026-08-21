@@ -228,6 +228,7 @@ func TestPushURL(t *testing.T) {
 		originPushURL     string
 		pushRemote        string
 		pushURL           string
+		extraPushURLs     []string
 		settingsJSON      string
 		settingsLocalJSON string
 		token             string
@@ -386,17 +387,110 @@ func TestPushURL(t *testing.T) {
 			wantEnabled:  false,
 		},
 		{
-			// Ownership follows origin, so pushing to a differently-owned remote
-			// (a backup, a colleague's fork) no longer disables our own
-			// checkpoint_remote — which previously sent the checkpoints to that
-			// remote instead of the configured checkpoint repo.
-			name:         "differently owned push remote still uses our checkpoint remote when origin owner matches",
+			// A differently-owned push destination reads as inherited even when
+			// origin's owner matches, because that combination is exactly the
+			// "cloned the base repo, added my fork" contributor topology and is
+			// indistinguishable from this one (own repo + backup remote in
+			// another org) using local git config alone. Erring toward "not
+			// ours" keeps transcripts out of repositories we cannot confirm we
+			// own; pushes to origin still route to the checkpoint repo, and
+			// ENT-1451's pre-push gate blocks checkpoint sync on pushes to a
+			// non-elected remote anyway.
+			name:         "differently owned push remote reads as inherited even when origin owner matches",
 			originURL:    "https://github.com/acme/app.git",
 			pushRemote:   "backup",
 			pushURL:      "https://github.com/otherorg/backup.git",
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
-			wantURL:      "https://github.com/acme/checkpoints.git",
-			wantEnabled:  true,
+			wantURL:      "https://github.com/acme/app.git",
+			wantEnabled:  false,
+		},
+		{
+			// git fans out to every push URL on the git-branch backend, so
+			// ownership has to hold for the whole set: a differently-owned mirror
+			// in SECOND position would otherwise read as ours and receive session
+			// transcripts. The same-owner URL is deliberately first, so a
+			// first-URL-only check would pass this.
+			//
+			// Two extraPushURLs, not one: the first `pushurl` REPLACES the
+			// remote's url as a push destination (git's push_url_of_remote), so a
+			// single --push --add yields a one-URL remote, not a two-URL one.
+			name:          "differently owned second push url reads as inherited",
+			originURL:     "https://github.com/acme/app.git",
+			pushRemote:    "mirror",
+			pushURL:       "https://github.com/acme/app.git",
+			extraPushURLs: []string{"https://github.com/acme/app.git", "https://github.com/otherorg/mirror.git"},
+			settingsJSON:  `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:       "https://github.com/acme/app.git",
+			wantEnabled:   false,
+		},
+		{
+			// Same shape, every push URL owned by the checkpoint owner: still ours.
+			name:          "multiple same-owner push urls keep the checkpoint remote",
+			originURL:     "https://github.com/acme/app.git",
+			pushRemote:    "mirror",
+			pushURL:       "https://github.com/acme/app.git",
+			extraPushURLs: []string{"https://github.com/acme/app.git", "https://github.com/acme/mirror.git"},
+			settingsJSON:  `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:       "https://github.com/acme/checkpoints.git",
+			wantEnabled:   true,
+		},
+		{
+			// The regression this change exists for: a contributor who cloned
+			// the UPSTREAM base repo and added their own fork. Origin belongs to
+			// upstream, so an origin-only ownership check read the inherited
+			// committed setting as ours and aimed the contributor's session
+			// transcripts at the upstream project's checkpoint repo.
+			name:         "committed setting is inherited when origin is upstream and we push to our fork",
+			originURL:    "https://github.com/acme/app.git",
+			pushRemote:   "myfork",
+			pushURL:      "https://github.com/contributor/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "https://github.com/acme/app.git",
+			wantEnabled:  false,
+		},
+		{
+			// Trail finding 01M0AK6Q03PQ argued that deduplicating a push URL
+			// equal to origin's drops the push-destination signal and reduces the
+			// check to origin-only, reinstating the row above. It cannot: the two
+			// identities are the same string, so parsing an owner from either is
+			// identical and the all-identities-must-match loop is unchanged by
+			// removing a duplicate. This case pins that — pushing straight to
+			// origin's own URL in the upstream topology keeps the setting, which
+			// is correct, because upstream IS the push destination here and no
+			// fork is involved.
+			name:          "push url equal to origin keeps a same-owner committed setting",
+			originURL:     "https://github.com/acme/app.git",
+			originPushURL: "https://github.com/acme/app.git",
+			pushRemote:    "origin",
+			settingsJSON:  `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:       "https://github.com/acme/checkpoints.git",
+			wantEnabled:   true,
+		},
+		{
+			// The mirror image, and the case that would actually regress if the
+			// dedup were wrong: same equal-URL shape, mismatched owner. The
+			// ownership refusal still fires.
+			name:          "push url equal to origin still refuses a mismatched owner",
+			originURL:     "https://github.com/contributor/app.git",
+			originPushURL: "https://github.com/contributor/app.git",
+			pushRemote:    "origin",
+			settingsJSON:  `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:       "https://github.com/contributor/app.git",
+			wantEnabled:   false,
+		},
+		{
+			// Same topology, but the developer confirmed the checkpoint repo is
+			// theirs by putting it in the gitignored settings.local.json. That
+			// provenance short-circuit still wins — it is the escape hatch for
+			// every case the owner comparison has to refuse.
+			name:              "settings.local.json still wins in the fork topology",
+			originURL:         "https://github.com/acme/app.git",
+			pushRemote:        "myfork",
+			pushURL:           "https://github.com/contributor/app.git",
+			settingsJSON:      `{"enabled":true}`,
+			settingsLocalJSON: `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:           "https://github.com/acme/checkpoints.git",
+			wantEnabled:       true,
 		},
 		{
 			// The escape hatch for a checkpoint repo owned by a different account
@@ -457,6 +551,9 @@ func TestPushURL(t *testing.T) {
 			}
 			if tt.pushURL != "" {
 				runGit(t, repoDir, "remote", "add", tt.pushRemote, tt.pushURL)
+			}
+			for _, extra := range tt.extraPushURLs {
+				runGit(t, repoDir, "remote", "set-url", "--push", "--add", tt.pushRemote, extra)
 			}
 			writeSettings(t, repoDir, tt.settingsJSON)
 			if tt.settingsLocalJSON != "" {

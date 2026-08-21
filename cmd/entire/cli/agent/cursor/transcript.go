@@ -8,7 +8,6 @@ import (
 	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
@@ -67,9 +66,11 @@ func (c *CursorAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]strin
 		if lines[i].Type != transcript.TypeUser {
 			continue
 		}
+		// ExtractUserContent already strips IDE tags; stripping again is not a
+		// no-op now that the <timestamp> strip is position-anchored.
 		content := transcript.ExtractUserContent(lines[i].Message)
 		if content != "" {
-			prompts = append(prompts, textutil.StripIDEContextTags(content))
+			prompts = append(prompts, content)
 		}
 	}
 	return prompts, nil

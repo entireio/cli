@@ -23,6 +23,24 @@ type BlobFetchFunc func(ctx context.Context, hashes []plumbing.Hash) error
 // package cannot resolve the remote target itself, so the CLI layer injects it.
 type RefFetchFunc func(ctx context.Context, ref plumbing.ReferenceName) error
 
+// MetadataBranchFetchFunc fetches the v1 metadata branch from the configured
+// checkpoint remote into the local ref. It is the git-branch store's counterpart
+// to RefFetchFunc: the git-refs store resolves one missing per-checkpoint ref,
+// while the git-branch store's whole record lives on a single branch, so a
+// missing local branch is resolved by fetching that branch.
+//
+// Without it, a clone whose checkpoints live on a dedicated checkpoint_remote
+// cannot read any committed checkpoint until something else happens to populate
+// the branch: the store falls back to origin's remote-tracking ref, which a
+// checkpoint_remote setup does not have. The checkpoint package cannot resolve
+// the remote target itself, so the CLI layer injects it.
+//
+// Only wire it on foreground, user-initiated read paths. It fires only when the
+// branch is missing both locally and on origin — i.e. when the read would
+// otherwise fail outright — but it is still a network call, and hook paths must
+// stay network-free.
+type MetadataBranchFetchFunc func(ctx context.Context) error
+
 // RemoteRefListFunc enumerates the per-checkpoint refs present on the configured
 // checkpoint remote (names only, via `ls-remote refs/entire/checkpoints/*` — no
 // object transfer), returning their full ref names. The git-refs store uses it

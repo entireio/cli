@@ -9,6 +9,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -426,6 +427,53 @@ func TestCondenseAndMarkFullyCondensed_Guards(t *testing.T) {
 		assert.False(t, state.FullyCondensed)
 		assert.Equal(t, []string{"some_file.txt"}, state.FilesTouched)
 	})
+}
+
+func TestCondenseAndMarkFullyCondensed_FilesWaitingForCommitDoesNotWaitForStateLock(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	s := &ManualCommitStrategy{}
+	const sessionID = "files-waiting-for-commit"
+	require.NoError(t, s.InitializeSession(ctx, sessionID, "Claude Code", "", "", ""))
+
+	state, err := s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	now := time.Now()
+	state.Phase = session.PhaseEnded
+	state.EndedAt = &now
+	state.FilesTouched = []string{"some_file.txt"}
+	require.NoError(t, s.saveSessionState(ctx, state))
+
+	lockPath, err := stateLockPath(ctx, sessionID)
+	require.NoError(t, err)
+	release, err := flock.Acquire(lockPath)
+	require.NoError(t, err)
+	released := false
+	defer func() {
+		if !released {
+			release()
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.CondenseAndMarkFullyCondensed(ctx, sessionID)
+	}()
+
+	select {
+	case condenseErr := <-done:
+		require.NoError(t, condenseErr)
+	case <-time.After(500 * time.Millisecond):
+		release()
+		released = true
+		require.NoError(t, <-done)
+		t.Fatal("file-bearing session waited for the state lock instead of leaving the work for PostCommit")
+	}
+
+	release()
+	released = true
 }
 
 // writeTestFile is a helper to create a test file with given content.

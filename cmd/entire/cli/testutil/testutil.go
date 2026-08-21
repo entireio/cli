@@ -160,6 +160,29 @@ func GetHeadHash(t *testing.T, repoDir string) string {
 	return head.Hash().String()
 }
 
+// RunGit runs one git command in dir with an isolated git config, failing the
+// test on error and returning combined output. Use it for operations go-git
+// cannot express (force-add past .gitignore, rm --cached, worktree add) or
+// where shelling out is simply clearer.
+func RunGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...) //nolint:noctx // test helper, no context needed
+	cmd.Dir = dir
+	cmd.Env = GitIsolatedEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return string(out)
+}
+
+// GitAddForce stages paths past .gitignore. GitAdd goes through go-git's
+// worktree.Add, which has no force option.
+func GitAddForce(t *testing.T, repoDir string, paths ...string) {
+	t.Helper()
+	RunGit(t, repoDir, append([]string{"add", "-f"}, paths...)...)
+}
+
 // CreateBranch creates a local branch at the current HEAD.
 func CreateBranch(t *testing.T, dir string, name string) {
 	t.Helper()

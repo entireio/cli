@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/trail"
@@ -45,6 +46,46 @@ func TestTrailResourceDecodesServerURL(t *testing.T) {
 	}
 }
 
+func TestTrailListResponseDecodesEntireAPIContract(t *testing.T) {
+	t.Parallel()
+	payload := []byte(`{
+		"items":[{
+			"id":"01JTRAIL","number":7,"title":"Native trail","status":"open",
+			"branch":null,"originalBranch":"feature/native","base":"main",
+			"requestedReviewers":["reviewer"],"phase":"reviewing",
+			"createdAt":"2026-08-10T10:00:00.000Z","updatedAt":"2026-08-10T11:00:00.000Z"
+		}],
+		"nextPageToken":"cursor-2","totalCount":12
+	}`)
+	var got TrailListResponse
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatalf("decode native list: %v", err)
+	}
+	if got.Total != 12 || got.NextPageToken == nil || *got.NextPageToken != "cursor-2" {
+		t.Fatalf("pagination = total %d token %v", got.Total, got.NextPageToken)
+	}
+	if len(got.Trails) != 1 || got.Trails[0].Branch != "" || got.Trails[0].OriginalBranch != "feature/native" || got.Trails[0].Phase != "reviewing" {
+		t.Fatalf("trail = %#v", got.Trails)
+	}
+}
+
+func TestTrailRequestsUseEntireAPICasing(t *testing.T) {
+	t.Parallel()
+	body, err := json.Marshal(TrailCreateRequest{Title: "T", BranchName: "feature/x", BranchAction: "link"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, want := range []string{`"branchName"`, `"branchAction"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("request %s missing %s", text, want)
+		}
+	}
+	if strings.Contains(text, "branch_name") || strings.Contains(text, "branch_action") {
+		t.Fatalf("request still uses snake_case: %s", text)
+	}
+}
+
 func TestTrailResourceToMetadataUsesID(t *testing.T) {
 	t.Parallel()
 
@@ -83,26 +124,22 @@ func TestToMetadataMapsTypePriorityReviewers(t *testing.T) {
 	}
 }
 
-// TestTrailApprovalDecodesStringAuthor pins the wire shape of an approval's
-// author. GET .../trails/{forge}/{owner}/{repo}/{number}/approvals sends it as a
-// plain GitHub login string:
+// TestTrailApprovalDecodesStringAuthor pins the current entire-api approvals
+// wire shape. Re-verified against entire-api's TrailApprovalWire: the HTTP
+// response uses commitSha/createdAt and a bare login string for author. The
+// server's similarly named storedTrailApproval remains snake_case, but is an
+// internal JSONB shape that is converted before the response is written.
 //
-//	{"approvals":[{"id":"59ef5b87","event":"approved","author":"nodo",…}]}
-//
-// This is deliberately unlike TrailResource.author, which is an
-// {"id":…,"login":…} object — so the two cannot share a type. Declaring the
-// approval's author as *trail.Author made every populated response fail to
-// decode with "cannot unmarshal string into Go struct field
-// TrailApproval.approvals.author", which meant `entire trail approvals` could
-// only ever print approvals it did not have: an empty list decodes fine, so a
-// trail with no approvals looked healthy while an approved trail errored out.
+// Author deliberately remains a string rather than *trail.Author. A populated
+// approvals response otherwise fails to decode even though an empty response
+// appears healthy, breaking both `trail approvals` and the post-write response
+// from `trail approve`.
 func TestTrailApprovalDecodesStringAuthor(t *testing.T) {
 	t.Parallel()
 
-	// Verbatim response body from the production API.
 	const body = `{"approvals":[{"id":"59ef5b87","body":null,"event":"approved",` +
-		`"author":"nodo","commit_sha":"e9a9dcbf1fbc55580e7212096824a01e1691853d",` +
-		`"created_at":"2026-08-11T09:35:11.714Z"}]}`
+		`"author":"nodo","commitSha":"e9a9dcbf1fbc55580e7212096824a01e1691853d",` +
+		`"createdAt":"2026-08-11T09:35:11.714Z"}]}`
 
 	var got TrailApprovalsResponse
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
@@ -131,14 +168,12 @@ func TestTrailApprovalDecodesStringAuthor(t *testing.T) {
 	}
 }
 
-// TestTrailApprovalResponseDecodesStringAuthor covers the POST path. It embeds the
-// same struct, so `entire trail approve` reported a decode failure *after* the
-// server had already recorded the approval.
+// The submit response embeds the same camelCase TrailApprovalWire shape.
 func TestTrailApprovalResponseDecodesStringAuthor(t *testing.T) {
 	t.Parallel()
 
 	const body = `{"ok":true,"approval":{"id":"9f65e574","event":"approved",` +
-		`"author":"nodo","created_at":"2026-08-11T09:35:34.998Z"}}`
+		`"author":"nodo","createdAt":"2026-08-11T09:35:34.998Z"}}`
 
 	var got TrailApprovalResponse
 	if err := json.Unmarshal([]byte(body), &got); err != nil {

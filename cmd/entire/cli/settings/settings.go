@@ -46,6 +46,13 @@ func WithWorktreeRoot(ctx context.Context, worktreeRoot string) context.Context 
 	return context.WithValue(ctx, worktreeRootContextKey{}, filepath.Clean(worktreeRoot))
 }
 
+// WorktreeRoot returns the explicit worktree root carried by ctx. Consumers
+// that combine settings resolution with repo-local git commands use this to
+// keep both operations scoped to the same repository.
+func WorktreeRoot(ctx context.Context) (string, bool) {
+	return worktreeRootFromContext(ctx)
+}
+
 func worktreeRootFromContext(ctx context.Context) (string, bool) {
 	root, ok := ctx.Value(worktreeRootContextKey{}).(string)
 	return root, ok && root != ""
@@ -61,12 +68,22 @@ const (
 
 // EntireSettings represents the .entire/settings.json configuration
 type EntireSettings struct {
+	// localLayerRejection records why .entire/settings.local.json was ignored.
+	// Unexported so it never serializes. Surfaced via LocalLayerRejection.
+	localLayerRejection string
+
 	// Enabled indicates whether Entire is active. When false, CLI commands
 	// show a disabled message and hooks exit silently. Defaults to true.
 	Enabled bool `json:"enabled"`
 
-	// LocalDev indicates whether to use "go run" instead of the "entire" binary
-	// This is used for development when the binary is not installed
+	// Deprecated: no longer used, and deliberately not read anywhere — not even
+	// merged from an override (see mergeScalarFields). Kept so the strict loader
+	// (DisallowUnknownFields) still accepts a "local_dev" key in settings files
+	// written before it was removed.
+	//
+	// It let a tracked settings file decide that hooks run repo content; see
+	// agent.LegacyLocalDevHookScript for the full rationale. Do not reintroduce a
+	// setting that influences hook command generation.
 	LocalDev bool `json:"local_dev,omitempty"`
 
 	// LogLevel sets the logging verbosity (debug, info, warn, error).
@@ -264,6 +281,21 @@ type RedactionSettings struct {
 	// into the checkpoint's assets/ store (off by default). Restore re-injects
 	// them regardless of this flag.
 	ExternalizeImages bool `json:"externalize_images,omitempty"`
+
+	// Betterleaks toggles the betterleaks scanner engine (layer 2 of the
+	// redaction stack). Omitted, or present with `enabled` omitted, means
+	// enabled. Honored from the committed settings file only; ignored in
+	// settings.local.json.
+	Betterleaks *ScannerSettings `json:"betterleaks,omitempty"`
+
+	// Goredact toggles the goredact scanner engine. Omitted, or present
+	// with `enabled` omitted, means disabled. Same committed-file-only rule.
+	Goredact *ScannerSettings `json:"goredact,omitempty"`
+}
+
+// ScannerSettings toggles one secret-scanner engine.
+type ScannerSettings struct {
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // PIISettings configures PII detection categories.
@@ -285,10 +317,23 @@ type PIISettings struct {
 // future user who tries to set it. Adding the field again should land in
 // lockstep with the runtime enforcement.
 type OPFSettings struct {
-	Enabled        bool            `json:"enabled,omitempty"`
-	Categories     map[string]bool `json:"categories,omitempty"`
-	Command        string          `json:"command,omitempty"`
-	TimeoutSeconds int             `json:"timeout_seconds,omitempty"`
+	Enabled    bool            `json:"enabled,omitempty"`
+	Categories map[string]bool `json:"categories,omitempty"`
+
+	// Command is executed, so Load() honors it only when it is
+	// developer-owned — set in an untracked .entire/settings.local.json — and
+	// resets it to "" otherwise. See enforceOPFCommandTrust. Readers that
+	// obtain settings by any route other than Load() (LoadFromFile,
+	// LoadFromBytes) get the ungated value and must not pass it to exec.
+	Command        string `json:"command,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+
+	// rejectedCommand/rejectionReason record a Command dropped by the trust
+	// gate, for the consumer to report on stderr. Unexported so they never
+	// serialize — a rejected command must not be written back to disk as if
+	// the user had unset it. See enforceOPFCommandTrust.
+	rejectedCommand string
+	rejectionReason string
 
 	// PromptDefault controls whether the pre-push hook asks the user
 	// before running OPF. "" (default) and "ask" both surface the
@@ -296,6 +341,17 @@ type OPFSettings struct {
 	// "always" runs without asking. ENTIRE_OPF=yes|no on the push
 	// invocation overrides this setting per-push.
 	PromptDefault string `json:"prompt_default,omitempty"`
+}
+
+// CommandRejection reports a Command that Load dropped as untrusted: the
+// original value, why it was rejected, and whether a rejection happened.
+// Callers that configure the OPF runtime should surface this — it is the only
+// signal the user's configured binary is being ignored.
+func (o *OPFSettings) CommandRejection() (command, reason string, rejected bool) {
+	if o == nil || o.rejectionReason == "" {
+		return "", "", false
+	}
+	return o.rejectedCommand, o.rejectionReason, true
 }
 
 // Valid PromptDefault values. Empty == OPFPromptAsk.
@@ -431,6 +487,17 @@ func (c *InvestigateConfig) IsZero() bool {
 	return len(c.Agents) == 0 && c.MaxTurns == 0 && c.Quorum == 0 && c.AlwaysPrompt == ""
 }
 
+// LocalLayerRejection reports why .entire/settings.local.json was ignored, or
+// "" when it was applied (or absent). A tracked local file is not local: it
+// arrives by cloning, so honoring it would let one developer's overrides —
+// including ones that pick binaries to execute — apply to everyone.
+func (s *EntireSettings) LocalLayerRejection() string {
+	if s == nil {
+		return ""
+	}
+	return s.localLayerRejection
+}
+
 // InvestigateConfig returns the configured investigate config. Returns nil
 // when no configuration is present; callers should check IsZero (or guard
 // for nil) to decide whether configuration is present.
@@ -439,6 +506,42 @@ func (s *EntireSettings) InvestigateConfig() *InvestigateConfig {
 		return nil
 	}
 	return s.Investigate
+}
+
+// BetterleaksEnabled reports whether the betterleaks scanner runs.
+// Default (nil settings, nil redaction, nil scanner, nil enabled): true.
+func (s *EntireSettings) BetterleaksEnabled() bool {
+	if s == nil || s.Redaction == nil || s.Redaction.Betterleaks == nil || s.Redaction.Betterleaks.Enabled == nil {
+		return true
+	}
+	return *s.Redaction.Betterleaks.Enabled
+}
+
+// GoredactEnabled reports whether the goredact scanner runs.
+// Default: false.
+func (s *EntireSettings) GoredactEnabled() bool {
+	if s == nil || s.Redaction == nil || s.Redaction.Goredact == nil || s.Redaction.Goredact.Enabled == nil {
+		return false
+	}
+	return *s.Redaction.Goredact.Enabled
+}
+
+// ErrScannerConfig marks scanner-configuration failures. Consumers use
+// errors.Is to distinguish these (fail-closed) from ordinary settings
+// problems (warn-and-default).
+var ErrScannerConfig = errors.New("invalid redaction scanner configuration")
+
+// validateScannerSettings enforces the fail-closed rule: at least one secret
+// scanner must be enabled. This runs only on merged settings (see
+// loadMergedSettings) — never in the per-file loaders — because those loaders
+// serve display/inspection consumers reading a single file in isolation
+// (entire status via LoadFromFile, investigate via LoadFromBytes), and a
+// local file may legally contain scanner keys that are inert even after merge.
+func validateScannerSettings(s *EntireSettings) error {
+	if !s.BetterleaksEnabled() && !s.GoredactEnabled() {
+		return fmt.Errorf("%w: at least one secret scanner must be enabled; re-enable redaction.betterleaks or enable redaction.goredact", ErrScannerConfig)
+	}
+	return nil
 }
 
 // Load loads the Entire settings from .entire/settings.json, then applies
@@ -465,7 +568,7 @@ func Load(ctx context.Context) (*EntireSettings, error) {
 			slog.String("error", prefErr.Error()))
 	}
 
-	return loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAbs)
+	return loadMergedSettings(ctx, settingsFileAbs, preferencesFileAbs, localSettingsFileAbs)
 }
 
 // settingsAbsPaths resolves the base and local settings file paths relative to
@@ -498,7 +601,7 @@ func loadForWorktreeRoot(ctx context.Context, worktreeRoot string) (*EntireSetti
 		logging.Debug(ctx, "clone preferences path unresolved; skipping preferences layer",
 			slog.String("error", prefErr.Error()))
 	}
-	return loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAbs)
+	return loadMergedSettings(ctx, settingsFileAbs, preferencesFileAbs, localSettingsFileAbs)
 }
 
 func clonePreferencesPathForWorktreeRoot(ctx context.Context, worktreeRoot string) (string, error) {
@@ -515,7 +618,7 @@ func clonePreferencesPathForWorktreeRoot(ctx context.Context, worktreeRoot strin
 	return filepath.Join(filepath.Clean(commonDir), ClonePreferencesFile), nil
 }
 
-func loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAbs string) (*EntireSettings, error) {
+func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs, localSettingsFileAbs string) (*EntireSettings, error) {
 	// Load base settings
 	settings, err := loadFromFile(settingsFileAbs)
 	if err != nil {
@@ -530,24 +633,38 @@ func loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAb
 		applyClonePreferences(settings, preferences)
 	}
 
-	// Apply local overrides if they exist
+	// Apply local overrides if they exist — but only from a file that is
+	// genuinely local. See localLayerTrackedReason.
 	localData, err := readConfined(localSettingsFileAbs)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("reading local settings file: %w", err)
 		}
 		// Local file doesn't exist, continue without overrides
-	} else {
-		if err := mergeJSON(settings, localData); err != nil {
-			return nil, fmt.Errorf("merging local settings: %w", err)
-		}
+	} else if classifyLocalSettings(ctx, localSettingsFileAbs) == localTracked {
+		// Dropped only on PROOF that the file is tracked. Discarding every
+		// local setting because a repository could not be read would be a
+		// worse failure than the one being guarded against — the exec-bearing
+		// OPF command applies the stricter policy for itself.
+		settings.localLayerRejection = localLayerTrackedReason
+		localData = nil
+	} else if err := mergeJSON(settings, localData); err != nil {
+		return nil, fmt.Errorf("merging local settings: %w", err)
 	}
+
+	// openai_privacy_filter.command is executed, so it is honored only from a
+	// local file positively verified as this developer's own.
+	enforceOPFCommandTrust(ctx, settings, localSettingsFileAbs, localData)
 
 	// Re-validate after merge. Individual files are validated by loadFromFile,
 	// but mergeJSON patches fields independently and can produce combinations
 	// (e.g. model without provider when the local override sets only a model
 	// on top of a base with no provider) that neither file alone contained.
 	if err := settings.SummaryGeneration.Validate(); err != nil {
+		return nil, fmt.Errorf("merged settings invalid: %w", err)
+	}
+
+	if err := validateScannerSettings(settings); err != nil {
 		return nil, fmt.Errorf("merged settings invalid: %w", err)
 	}
 
@@ -579,6 +696,12 @@ func LoadProjectRaw(ctx context.Context) (path string, raw map[string]json.RawMe
 	return loadRaw(ctx, EntireSettingsFile, "project")
 }
 
+// LoadLocalRaw reads the raw local file and is deliberately UNGATED: it is the
+// read half of read-modify-write for every caller that saves the file back, so
+// hiding a tracked file here would make those writers clobber its other keys.
+// Readers that need the "is this the developer's own choice?" guarantee must
+// apply the tracked check themselves — see CheckpointRemoteIsLocalOnly.
+//
 // LoadLocalRaw reads .entire/settings.local.json as a generic JSON object,
 // mirroring LoadProjectRaw for the per-developer overrides file. Returns
 // exists=false (and an empty raw map) when the file does not exist — the
@@ -956,9 +1079,8 @@ func mergeScalarFields(settings *EntireSettings, raw map[string]json.RawMessage)
 	if err := mergeRawBool(raw, "enabled", &settings.Enabled); err != nil {
 		return err
 	}
-	if err := mergeRawBool(raw, "local_dev", &settings.LocalDev); err != nil {
-		return err
-	}
+	// "local_dev" is deliberately absent — a deprecated no-op, see
+	// EntireSettings.LocalDev.
 	if err := mergeRawBool(raw, "absolute_git_hook_path", &settings.AbsoluteGitHookPath); err != nil {
 		return err
 	}
@@ -1157,6 +1279,16 @@ func mergeRedaction(dst *RedactionSettings, data json.RawMessage) error {
 		}
 		dst.ExternalizeImages = v
 	}
+
+	// Scanner engine selection affects everyone who reads the repo's
+	// checkpoints, so it is honored from the committed settings file only.
+	for _, k := range []string{"betterleaks", "goredact"} {
+		if _, ok := raw[k]; ok {
+			slog.Warn("redaction scanner settings are ignored in settings.local.json; set them in .entire/settings.json",
+				slog.String("key", "redaction."+k))
+		}
+	}
+
 	return nil
 }
 
@@ -1362,6 +1494,25 @@ func IsFilteredFetchesEnabled(ctx context.Context) bool {
 	return s.IsFilteredFetchesEnabled()
 }
 
+// IsTelemetryEnabled reports whether the user opted in to anonymous usage
+// analytics. Telemetry is opt-in: an absent key means no, so every tracker
+// call site must gate on this rather than on Telemetry being non-nil. Does not
+// consider ENTIRE_TELEMETRY_OPTOUT — the trackers honor that env opt-out
+// themselves (telemetry.IsEnvOptedOut).
+func (s *EntireSettings) IsTelemetryEnabled() bool {
+	return s != nil && s.Telemetry != nil && *s.Telemetry
+}
+
+// IsTelemetryEnabled loads settings and reports the telemetry opt-in. Returns
+// false when settings cannot be loaded — telemetry never fails open.
+func IsTelemetryEnabled(ctx context.Context) bool {
+	s, err := Load(ctx)
+	if err != nil {
+		return false
+	}
+	return s.IsTelemetryEnabled()
+}
+
 // IsSummarizeEnabled checks if auto-summarize is enabled in settings.
 // Returns false by default if settings cannot be loaded or the key is missing.
 func IsSummarizeEnabled(ctx context.Context) bool {
@@ -1437,28 +1588,28 @@ func (s *EntireSettings) HasCheckpointRemoteKey() bool {
 // present in .entire/settings.local.json.
 //
 // That file is gitignored and per-clone, so a checkpoint_remote living there
-// cannot have arrived by cloning or forking someone else's project — it is this
-// developer's own explicit choice. Callers use this to distinguish "I configured
-// where my checkpoints go" from "I inherited a committed setting that points at
-// the upstream project's checkpoint repo".
+// is this developer's own explicit choice. Callers use this to distinguish
+// "I configured where my checkpoints go" from "I inherited a committed setting
+// that points at the upstream project's checkpoint repo".
 //
-// Best-effort: an unreadable or malformed local file reports false, which is the
-// conservative answer (callers then fall back to weaker ownership signals).
+// The filename alone does not establish that — see localLayerTrackedReason.
+// This reads the file directly rather than through Load, so it repeats the
+// tracked check the loader applies to the local layer —
+// without it, the ownership signal this gates could be inherited from the very
+// upstream it is meant to distinguish.
+//
+// Best-effort: an unreadable, malformed, or unverifiable local file reports
+// false, which is the conservative answer (callers then fall back to weaker
+// ownership signals).
 func CheckpointRemoteIsLocalOnly(ctx context.Context) bool {
-	_, raw, exists, err := LoadLocalRaw(ctx)
+	path, raw, exists, err := LoadLocalRaw(ctx)
 	if err != nil || !exists {
 		return false
 	}
-	optionsRaw, ok := raw["strategy_options"]
-	if !ok {
+	if classifyLocalSettings(ctx, path) != localOwn {
 		return false
 	}
-	var options map[string]json.RawMessage
-	if err := json.Unmarshal(optionsRaw, &options); err != nil {
-		return false
-	}
-	_, ok = options["checkpoint_remote"]
-	return ok
+	return rawHasKey(raw, "strategy_options", "checkpoint_remote")
 }
 
 // GetCheckpointRemote returns the configured checkpoint remote.

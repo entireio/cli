@@ -17,6 +17,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
@@ -94,7 +96,8 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 		return ""
 	}
 	defer repo.Close()
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	repoCtx := settings.WithWorktreeRoot(ctx, worktreeRoot)
+	stores, err := checkpoint.Open(repoCtx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(repoCtx)})
 	if err != nil {
 		logging.Debug(ctx, "review checkpoint context: open store", slog.String("error", err.Error()))
 		return ""
@@ -116,12 +119,12 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 				continue
 			}
 
-			summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
+			summary, err := checkpoint.ReadCheckpoint(repoCtx, store, cpID)
 			if err != nil {
 				lines = append(lines, fmt.Sprintf("- %s: checkpoint metadata unavailable", cpID))
 				continue
 			}
-			detail := reviewCheckpointDetail(ctx, store, cpID, summary)
+			detail := reviewCheckpointDetail(repoCtx, store, cpID, summary)
 			if detail == "" {
 				detail = "no summary or prompt recorded"
 			}

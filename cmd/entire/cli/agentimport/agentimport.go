@@ -117,6 +117,14 @@ type Options struct {
 	// Progress, when non-nil, receives session/turn progress notifications
 	// as Run executes. Nil (the default) reports nothing.
 	Progress *Progress
+
+	// ReadRemotes is the ordered checkpoint read-candidate chain (see
+	// checkpoint.OpenOptions.ReadRemotes) used by the idempotency listing.
+	// Without it the listing reads only origin's tracking refs: turns already
+	// on the elected sync remote get re-imported, and turns present solely in
+	// origin's stale tracking ref get skipped. Callers resolve it via
+	// strategy.CheckpointReadRemotes.
+	ReadRemotes []string
 }
 
 // Result summarizes an import run.
@@ -192,7 +200,7 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		return res, fmt.Errorf("discover %s sessions: %w", imp.Name(), err)
 	}
 
-	stores, err := cp.Open(ctx, repo, cp.OpenOptions{})
+	stores, err := cp.Open(ctx, repo, cp.OpenOptions{ReadRemotes: opts.ReadRemotes})
 	if err != nil {
 		return res, fmt.Errorf("open checkpoint store: %w", err)
 	}

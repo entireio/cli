@@ -168,9 +168,10 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 
 	if names := t.unpinnedNames(); len(names) > 1 {
 		fmt.Fprintf(w, "  This repo has %d remotes (%s).\n", len(names), strings.Join(names, ", "))
-		fmt.Fprintln(w, "    Checkpoints follow whichever remote you push to, while reading them back")
-		fmt.Fprintln(w, "    (resume, explain) always looks at origin — so checkpoints pushed elsewhere")
-		fmt.Fprintln(w, "    are not found again from this clone.")
+		fmt.Fprintln(w, "    Checkpoints sync to a single elected remote — not to whichever one you")
+		fmt.Fprintln(w, "    push to. A push to any other remote carries your code but no session")
+		fmt.Fprintln(w, "    history. Run `entire status` to see the elected destination and how many")
+		fmt.Fprintln(w, "    checkpoints are waiting for it.")
 	}
 
 	fmt.Fprintln(w, "  To pin one repository for checkpoints, set checkpoint_remote in")

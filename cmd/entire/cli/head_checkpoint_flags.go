@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
@@ -52,7 +53,7 @@ func headCheckpointFlags(ctx context.Context) (hasReview, hasInvestigation bool,
 		return false, false, ""
 	}
 	defer repo.Close()
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		logging.Debug(ctx, "head checkpoint flags: open store", slog.String("error", err.Error()))
 		return false, false, ""

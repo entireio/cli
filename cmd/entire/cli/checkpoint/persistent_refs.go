@@ -14,6 +14,15 @@ type PersistentRefs struct {
 	Primary plumbing.ReferenceName
 	Read    plumbing.ReferenceName
 	Push    []plumbing.ReferenceName
+
+	// localReadOnly pins reads to the local Read ref with no remote-tracking
+	// tiers at all — set via PrimaryAsLocalRead. Guards (attach's
+	// local-presence gates) that must answer "would the next LOCAL write see
+	// this checkpoint?" need it: the ordinary read chain selects per
+	// checkpoint across local and remote-tracking trees, so a checkpoint
+	// present only on a remote would otherwise read as present and a write
+	// based on the stale local branch would clobber the remote on push.
+	localReadOnly bool
 }
 
 // DefaultV1Refs returns the v1-only topology.
@@ -26,20 +35,33 @@ func DefaultV1Refs() PersistentRefs {
 	}
 }
 
-// PrimaryFetchableFromOrigin reports whether Primary has an origin-tracking shadow.
-func (r PersistentRefs) PrimaryFetchableFromOrigin() bool {
+// PrimaryFetchableFromRemote reports whether Primary has a remote-tracking
+// shadow on whichever remote carries checkpoint data (the caller supplies the
+// remote-tracking ref).
+func (r PersistentRefs) PrimaryFetchableFromRemote() bool {
 	return r.Primary.IsBranch() && slices.Contains(r.Push, r.Primary)
 }
 
-// ReadBootstrappableFromOrigin reports whether reads can be bootstrapped from
-// origin: true when reads target Primary and Primary is fetchable from origin.
-func (r PersistentRefs) ReadBootstrappableFromOrigin() bool {
-	return r.Read == r.Primary && r.PrimaryFetchableFromOrigin()
+// ReadBootstrappableFromRemote reports whether reads can be bootstrapped from
+// whichever remote carries checkpoint data (the caller supplies the
+// remote-tracking ref): true when reads target Primary and Primary is
+// fetchable from a remote, and the topology was not pinned local-only.
+func (r PersistentRefs) ReadBootstrappableFromRemote() bool {
+	return !r.localReadOnly && r.Read == r.Primary && r.PrimaryFetchableFromRemote()
 }
 
 // PrimaryAsRead returns a copy of r with Read pinned to Primary.
 func (r PersistentRefs) PrimaryAsRead() PersistentRefs {
 	r.Read = r.Primary
+	return r
+}
+
+// PrimaryAsLocalRead returns a copy of r with Read pinned to Primary and
+// every remote read tier disabled — see the localReadOnly field for when a
+// caller needs this instead of PrimaryAsRead.
+func (r PersistentRefs) PrimaryAsLocalRead() PersistentRefs {
+	r.Read = r.Primary
+	r.localReadOnly = true
 	return r
 }
 

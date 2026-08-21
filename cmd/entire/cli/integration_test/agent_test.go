@@ -109,14 +109,15 @@ func TestAgentHookInstallation(t *testing.T) {
 			t.Fatal("claude-code agent does not implement HookSupport")
 		}
 
-		count, err := hookAgent.InstallHooks(context.Background(), false, false)
+		count, err := hookAgent.InstallHooks(context.Background(), false)
 		if err != nil {
 			t.Fatalf("InstallHooks() error = %v", err)
 		}
 
-		// Should install 7 hooks: SessionStart, SessionEnd, Stop, UserPromptSubmit, PreToolUse[Task], PostToolUse[Task], PostToolUse[TodoWrite]
-		if count != 7 {
-			t.Errorf("InstallHooks() count = %d, want 7", count)
+		// Should install 8 hooks: SessionStart, SessionEnd, Stop, SubagentStop,
+		// UserPromptSubmit, PreToolUse[Task], PostToolUse[Task], PostToolUse[TodoWrite]
+		if count != 8 {
+			t.Errorf("InstallHooks() count = %d, want 8", count)
 		}
 
 		// Verify hooks are installed
@@ -155,50 +156,18 @@ func TestAgentHookInstallation(t *testing.T) {
 		hookAgent, _ := agent.AsHookSupport(ag)
 
 		// First install
-		_, err = hookAgent.InstallHooks(context.Background(), false, false)
+		_, err = hookAgent.InstallHooks(context.Background(), false)
 		if err != nil {
 			t.Fatalf("first InstallHooks() error = %v", err)
 		}
 
 		// Second install should be idempotent
-		count, err := hookAgent.InstallHooks(context.Background(), false, false)
+		count, err := hookAgent.InstallHooks(context.Background(), false)
 		if err != nil {
 			t.Fatalf("second InstallHooks() error = %v", err)
 		}
 		if count != 0 {
 			t.Errorf("second InstallHooks() count = %d, want 0 (idempotent)", count)
-		}
-	})
-
-	t.Run("localDev mode delegates to entire-dev script", func(t *testing.T) {
-		// Not parallel - uses os.Chdir
-		env := NewTestEnv(t)
-		env.InitRepo()
-
-		t.Chdir(env.RepoDir)
-
-		ag, err := agent.Get(agentClaudeCode)
-		if err != nil {
-			t.Fatalf("Get(claude-code) error = %v", err)
-		}
-		hookAgent, _ := agent.AsHookSupport(ag)
-
-		_, err = hookAgent.InstallHooks(context.Background(), true, false) // localDev = true
-		if err != nil {
-			t.Fatalf("InstallHooks(localDev=true) error = %v", err)
-		}
-
-		// Read settings and verify commands delegate to scripts/entire-dev,
-		// which handles compile-on-demand with a PATH-binary fallback.
-		settingsPath := filepath.Join(env.RepoDir, ".claude", claudecode.ClaudeSettingsFileName)
-		data, err := os.ReadFile(settingsPath)
-		if err != nil {
-			t.Fatalf("failed to read settings.json: %v", err)
-		}
-
-		content := string(data)
-		if !strings.Contains(content, "scripts/entire-dev") {
-			t.Error("localDev hooks should delegate to scripts/entire-dev, but settings.json doesn't contain it")
 		}
 	})
 }
@@ -473,8 +442,7 @@ func TestGeminiCLIHookInstallation(t *testing.T) {
 
 	t.Run("installs all required hooks", testGeminiCLIInstallsAllHooks)
 	t.Run("idempotent - second install returns 0", testGeminiCLIIdempotentInstall)
-	t.Run("localDev mode delegates to entire-dev script", testGeminiCLILocalDevMode)
-	t.Run("production mode uses entire binary", testGeminiCLIProductionMode)
+	t.Run("installed hooks invoke the entire binary", testGeminiCLIProductionMode)
 	t.Run("force flag reinstalls hooks", testGeminiCLIForceReinstall)
 }
 
@@ -496,7 +464,7 @@ func testGeminiCLIInstallsAllHooks(t *testing.T) {
 		t.Fatal("gemini agent does not implement HookSupport")
 	}
 
-	count, err := hookAgent.InstallHooks(context.Background(), false, false)
+	count, err := hookAgent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -580,52 +548,18 @@ func testGeminiCLIIdempotentInstall(t *testing.T) {
 	hookAgent, _ := agent.AsHookSupport(ag)
 
 	// First install
-	_, err = hookAgent.InstallHooks(context.Background(), false, false)
+	_, err = hookAgent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
 
 	// Second install should be idempotent
-	count, err := hookAgent.InstallHooks(context.Background(), false, false)
+	count, err := hookAgent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("second InstallHooks() error = %v", err)
 	}
 	if count != 0 {
 		t.Errorf("second InstallHooks() count = %d, want 0 (idempotent)", count)
-	}
-}
-
-func testGeminiCLILocalDevMode(t *testing.T) {
-	// Not parallel - uses os.Chdir
-	env := NewTestEnv(t)
-	env.InitRepo()
-
-	t.Chdir(env.RepoDir)
-
-	ag, err := agent.Get("gemini")
-	if err != nil {
-		t.Fatalf("Get(gemini) error = %v", err)
-	}
-	hookAgent, _ := agent.AsHookSupport(ag)
-
-	_, err = hookAgent.InstallHooks(context.Background(), true, false) // localDev = true
-	if err != nil {
-		t.Fatalf("InstallHooks(localDev=true) error = %v", err)
-	}
-
-	// Read settings and verify commands delegate to scripts/entire-dev
-	settingsPath := filepath.Join(env.RepoDir, ".gemini", geminicli.GeminiSettingsFileName)
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatalf("failed to read settings.json: %v", err)
-	}
-
-	content := string(data)
-	if !strings.Contains(content, "scripts/entire-dev") {
-		t.Error("localDev hooks should delegate to scripts/entire-dev, but settings.json doesn't contain it")
-	}
-	if !strings.Contains(content, "$(git rev-parse --show-toplevel)") {
-		t.Error("localDev hooks should use '$(git rev-parse --show-toplevel)', but settings.json doesn't contain it")
 	}
 }
 
@@ -642,9 +576,9 @@ func testGeminiCLIProductionMode(t *testing.T) {
 	}
 	hookAgent, _ := agent.AsHookSupport(ag)
 
-	_, err = hookAgent.InstallHooks(context.Background(), false, false) // localDev = false
+	_, err = hookAgent.InstallHooks(context.Background(), false)
 	if err != nil {
-		t.Fatalf("InstallHooks(localDev=false) error = %v", err)
+		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
 	// Read settings and verify commands use "entire" binary
@@ -674,13 +608,13 @@ func testGeminiCLIForceReinstall(t *testing.T) {
 	hookAgent, _ := agent.AsHookSupport(ag)
 
 	// First install
-	_, err = hookAgent.InstallHooks(context.Background(), false, false)
+	_, err = hookAgent.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
 
 	// Force reinstall should return count > 0
-	count, err := hookAgent.InstallHooks(context.Background(), false, true) // force = true
+	count, err := hookAgent.InstallHooks(context.Background(), true) // force = true
 	if err != nil {
 		t.Fatalf("force InstallHooks() error = %v", err)
 	}
@@ -887,8 +821,7 @@ func TestFactoryAIDroidHookInstallation(t *testing.T) {
 
 	t.Run("installs all required hooks", testFactoryAIDroidInstallsAllHooks)
 	t.Run("idempotent - second install returns 0", testFactoryAIDroidIdempotentInstall)
-	t.Run("localDev mode delegates to entire-dev script", testFactoryAIDroidLocalDevMode)
-	t.Run("production mode uses entire binary", testFactoryAIDroidProductionMode)
+	t.Run("installed hooks invoke the entire binary", testFactoryAIDroidProductionMode)
 	t.Run("force flag reinstalls hooks", testFactoryAIDroidForceReinstall)
 }
 
@@ -911,7 +844,7 @@ func testFactoryAIDroidInstallsAllHooks(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	count, err := hookAgent.InstallHooks(ctx, false, false)
+	count, err := hookAgent.InstallHooks(ctx, false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -984,53 +917,18 @@ func testFactoryAIDroidIdempotentInstall(t *testing.T) {
 
 	ctx := context.Background()
 	// First install
-	_, err = hookAgent.InstallHooks(ctx, false, false)
+	_, err = hookAgent.InstallHooks(ctx, false)
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
 
 	// Second install should be idempotent
-	count, err := hookAgent.InstallHooks(ctx, false, false)
+	count, err := hookAgent.InstallHooks(ctx, false)
 	if err != nil {
 		t.Fatalf("second InstallHooks() error = %v", err)
 	}
 	if count != 0 {
 		t.Errorf("second InstallHooks() count = %d, want 0 (idempotent)", count)
-	}
-}
-
-func testFactoryAIDroidLocalDevMode(t *testing.T) {
-	// Not parallel - uses os.Chdir
-	env := NewTestEnv(t)
-	env.InitRepo()
-
-	t.Chdir(env.RepoDir)
-
-	ag, err := agent.Get("factoryai-droid")
-	if err != nil {
-		t.Fatalf("Get(factoryai-droid) error = %v", err)
-	}
-	hookAgent, _ := agent.AsHookSupport(ag)
-
-	ctx := context.Background()
-	_, err = hookAgent.InstallHooks(ctx, true, false) // localDev = true
-	if err != nil {
-		t.Fatalf("InstallHooks(localDev=true) error = %v", err)
-	}
-
-	// Read settings and verify commands delegate to scripts/entire-dev
-	settingsPath := filepath.Join(env.RepoDir, ".factory", factoryaidroid.FactorySettingsFileName)
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatalf("failed to read settings.json: %v", err)
-	}
-
-	content := string(data)
-	if !strings.Contains(content, "scripts/entire-dev") {
-		t.Error("localDev hooks should delegate to scripts/entire-dev, but settings.json doesn't contain it")
-	}
-	if !strings.Contains(content, "$(git rev-parse --show-toplevel)") {
-		t.Error("localDev hooks should use '$(git rev-parse --show-toplevel)', but settings.json doesn't contain it")
 	}
 }
 
@@ -1048,9 +946,9 @@ func testFactoryAIDroidProductionMode(t *testing.T) {
 	hookAgent, _ := agent.AsHookSupport(ag)
 
 	ctx := context.Background()
-	_, err = hookAgent.InstallHooks(ctx, false, false) // localDev = false
+	_, err = hookAgent.InstallHooks(ctx, false)
 	if err != nil {
-		t.Fatalf("InstallHooks(localDev=false) error = %v", err)
+		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
 	// Read settings and verify commands use "entire" binary
@@ -1081,13 +979,13 @@ func testFactoryAIDroidForceReinstall(t *testing.T) {
 
 	ctx := context.Background()
 	// First install
-	_, err = hookAgent.InstallHooks(ctx, false, false)
+	_, err = hookAgent.InstallHooks(ctx, false)
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
 
 	// Force reinstall should return count > 0
-	count, err := hookAgent.InstallHooks(ctx, false, true) // force = true
+	count, err := hookAgent.InstallHooks(ctx, true) // force = true
 	if err != nil {
 		t.Fatalf("force InstallHooks() error = %v", err)
 	}
@@ -1305,7 +1203,7 @@ func TestOpenCodeHookInstallation(t *testing.T) {
 			t.Fatal("opencode agent does not implement HookSupport")
 		}
 
-		count, err := hookAgent.InstallHooks(context.Background(), false, false)
+		count, err := hookAgent.InstallHooks(context.Background(), false)
 		if err != nil {
 			t.Fatalf("InstallHooks() error = %v", err)
 		}
@@ -1341,13 +1239,13 @@ func TestOpenCodeHookInstallation(t *testing.T) {
 		hookAgent, _ := agent.AsHookSupport(ag)
 
 		// First install
-		_, err = hookAgent.InstallHooks(context.Background(), false, false)
+		_, err = hookAgent.InstallHooks(context.Background(), false)
 		if err != nil {
 			t.Fatalf("first InstallHooks() error = %v", err)
 		}
 
 		// Second install should be idempotent
-		count, err := hookAgent.InstallHooks(context.Background(), false, false)
+		count, err := hookAgent.InstallHooks(context.Background(), false)
 		if err != nil {
 			t.Fatalf("second InstallHooks() error = %v", err)
 		}

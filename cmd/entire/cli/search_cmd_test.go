@@ -556,6 +556,48 @@ func TestWriteCodeSearchText_Empty(t *testing.T) {
 	}
 }
 
+// TestWriteCodeSearchText_SkippedRepos pins the skipped-repo channel in both
+// shapes: the empty-results explanation (a search emptied by skips must not
+// print a bare "no results") and the trailing warning under real results.
+func TestWriteCodeSearchText_SkippedRepos(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	writeCodeSearchText(&buf, &codesearch.SearchResponse{SkippedRepos: []string{"acme/cloning"}}, newStatusStyles(&buf), false)
+	if got := buf.String(); !strings.Contains(got, "skipped repos with no searchable placement: acme/cloning") {
+		t.Errorf("empty-results output missing skip explanation:\n%s", got)
+	}
+
+	buf.Reset()
+	writeCodeSearchText(&buf, &codesearch.SearchResponse{
+		Results:      []codesearch.Result{{Repo: "acme/web", Path: "main.go", Line: 1, ContextLine: "x"}},
+		SkippedRepos: []string{"acme/cloning"},
+	}, newStatusStyles(&buf), false)
+	if got := buf.String(); !strings.Contains(got, "Warning: skipped repo(s) with no searchable placement (missing or not ready): acme/cloning") {
+		t.Errorf("results output missing skip warning:\n%s", got)
+	}
+}
+
+// TestWriteCodeSearchJSON_SkippedRepos pins skipped_repos in the JSON shape —
+// the agent-facing channel for a narrowed scope.
+func TestWriteCodeSearchJSON_SkippedRepos(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	if err := writeCodeSearchJSON(&buf, &codesearch.SearchResponse{SkippedRepos: []string{"acme/cloning"}}); err != nil {
+		t.Fatalf("writeCodeSearchJSON: %v", err)
+	}
+	var out struct {
+		SkippedRepos []string `json:"skipped_repos"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if strings.Join(out.SkippedRepos, ",") != "acme/cloning" {
+		t.Fatalf("skipped_repos = %v, want [acme/cloning]", out.SkippedRepos)
+	}
+}
+
 func TestMergeSearchResults(t *testing.T) {
 	t.Parallel()
 
@@ -724,12 +766,12 @@ func TestMergeSearchResults_DeduplicatesOverlappingCells(t *testing.T) {
 func TestMergeSearchResults_MirrorPlacementsDoNotDoubleCount(t *testing.T) {
 	t.Parallel()
 
-	// A US-homed repo with an EU mirror indexes the same content, so the
-	// fan-out queries both cells and each returns the SAME matches. Merged
-	// results dedupe by repo+path+line; the stats must dedupe too, or the
-	// summary reports "6 matches across 4 files in 2 repos" for 3 unique
-	// results (and falsely claims truncation). Regression guard for the
-	// mirror fan-out this trail introduced.
+	// Two cells answering with the SAME repo's content (the fan-out is
+	// canonical-only since ENT-1672, but overlapping cell scopes — e.g. an
+	// empty-jurisdiction group queried via both home and an explicit cell —
+	// can still do this). Merged results dedupe by repo+path+line; the stats
+	// must dedupe too, or the summary reports "6 matches across 4 files in
+	// 2 repos" for 3 unique results (and falsely claims truncation).
 	matches := []codesearch.Result{
 		{Repo: "acme/web", Path: "main.go", Line: 1, Column: 0, Score: 0.9},
 		{Repo: "acme/web", Path: "main.go", Line: 2, Column: 0, Score: 0.8},

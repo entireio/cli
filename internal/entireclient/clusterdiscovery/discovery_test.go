@@ -2,6 +2,7 @@ package clusterdiscovery
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,8 +21,64 @@ func hostPinningClient(t *testing.T, srv *httptest.Server) *http.Client {
 	srvURL, err := url.Parse(srv.URL)
 	require.NoError(t, err)
 	return &http.Client{
-		Transport: rewritingTransport{base: http.DefaultTransport, scheme: srvURL.Scheme, host: srvURL.Host},
+		Transport: rewritingTransport{base: newTestTransport(t), scheme: srvURL.Scheme, host: srvURL.Host},
 	}
+}
+
+// deadPinningClient returns a client pinned to a 127.0.0.1 address that
+// accepts connections and immediately closes them, so every request
+// through it fails. fetchWellKnownJSON wraps any transport error as
+// ErrUnreachable, so callers asserting on that keep working.
+//
+// Do not build this by starting an httptest.Server and closing it to free
+// the port. Tests here run with t.Parallel(), so another test's
+// httptest.NewServer can be handed the released port and answer a request
+// this client expects to fail — and that foreign request also trips the
+// other test's in-handler path assertion. CI hit exactly that: one event
+// failed both TestResolve_PreAudienceEntryNotUsedAsDiscoveryFallback
+// (its "unreachable" cluster answered) and TestResolveContextForAPI
+// (apiHandler saw /.well-known/entire-cluster.json). Holding the listener
+// for the test's lifetime keeps the port ours.
+func deadPinningClient(t *testing.T) *http.Client {
+	t.Helper()
+	var lc net.ListenConfig
+	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		// If Accept ever fails for a reason other than our own Close, drop the
+		// listener with it. A bound port with nobody accepting completes the
+		// handshake from the kernel backlog, so requests would hang instead of
+		// failing.
+		defer func() { _ = l.Close() }()
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	return &http.Client{
+		Transport: rewritingTransport{base: newTestTransport(t), scheme: "http", host: l.Addr().String()},
+	}
+}
+
+// newTestTransport gives each test its own connection pool. Sharing
+// http.DefaultTransport is unsafe here: httptest.Server.Close calls
+// http.DefaultTransport.CloseIdleConnections as a courtesy to its users
+// (net/http/httptest/server.go), so one parallel test's teardown can close
+// a pooled connection another test is about to reuse — and net/http does
+// not retry that error.
+func newTestTransport(t *testing.T) *http.Transport {
+	t.Helper()
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		t.Fatalf("http.DefaultTransport is %T, want *http.Transport", http.DefaultTransport)
+	}
+	tr := base.Clone()
+	t.Cleanup(tr.CloseIdleConnections)
+	return tr
 }
 
 type rewritingTransport struct {
@@ -86,12 +143,10 @@ func TestDiscover(t *testing.T) {
 	})
 
 	t.Run("transport error → ErrUnreachable", func(t *testing.T) {
-		// Closed server: connection refused. From the caller's POV this
-		// is indistinguishable from a typo'd host like "foo.invalid";
+		// A host that never answers. From the caller's POV this is
+		// indistinguishable from a typo'd host like "foo.invalid";
 		// both deserve the same actionable nudge.
-		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-		client := hostPinningClient(t, srv)
-		srv.Close()
+		client := deadPinningClient(t)
 
 		_, err := Discover(t.Context(), "rc.partial.to", client, t.Logf)
 		assert.ErrorIs(t, err, ErrUnreachable)
@@ -121,4 +176,13 @@ func TestDiscover(t *testing.T) {
 		_, err := Discover(t.Context(), "rc.partial.to", hostPinningClient(t, srv), nil)
 		assert.Error(t, err)
 	})
+}
+
+// TestTrustedLoginServers normalises the advertised cores for display: whitespace
+// and trailing slashes trimmed, blanks dropped, duplicates collapsed, advertised
+// order kept (the resource lists its preferred core first).
+func TestTrustedLoginServers(t *testing.T) {
+	t.Parallel()
+	got := trustedLoginServers([]string{"https://us.entire.io/", " ", " https://eu.entire.io ", "https://us.entire.io", ""})
+	assert.Equal(t, []string{"https://us.entire.io", "https://eu.entire.io"}, got)
 }

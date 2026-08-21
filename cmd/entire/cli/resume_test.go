@@ -1226,6 +1226,9 @@ func TestPromoteRemoteTrackingMetadataBranch_FastForwardsStaleLocal(t *testing.T
 	t.Chdir(tmpDir)
 
 	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+	// Configure origin so the election elects it — promotion is confined to
+	// the elected remote's tracking ref.
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
 
 	initialHash := readMetadataBranchHash(t, repo)
 	_ = createCheckpointOnMetadataBranch(t, repo, "2025-01-01-test-session-uuid")
@@ -1250,6 +1253,9 @@ func TestResumeFromCurrentBranch_FastForwardsStaleLocalMetadata(t *testing.T) {
 	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", filepath.Join(tmpDir, "claude-projects"))
 
 	repo, w, _ := setupResumeTestRepo(t, tmpDir, false)
+	// Configure origin so the election elects it — the stale-local promotion
+	// this test pins is confined to the elected remote's tracking ref.
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
 	initialHash := readMetadataBranchHash(t, repo)
 
 	ctx := context.Background()
@@ -1270,7 +1276,7 @@ func TestResumeFromCurrentBranch_FastForwardsStaleLocalMetadata(t *testing.T) {
 		t.Fatalf("WriteCommitted: %v", err)
 	}
 
-	_ = makeLocalMetadataBranchStale(t, repo, initialHash)
+	descendantHash := makeLocalMetadataBranchStale(t, repo, initialHash)
 
 	featureFile := filepath.Join(tmpDir, "feature.txt")
 	if err := os.WriteFile(featureFile, []byte("feature content"), 0o644); err != nil {
@@ -1294,6 +1300,12 @@ func TestResumeFromCurrentBranch_FastForwardsStaleLocalMetadata(t *testing.T) {
 	combined := stdout.String() + stderr.String()
 	if strings.Contains(combined, "session log not available") {
 		t.Errorf("resume reported missing log even though origin has the checkpoint metadata:\n%s", combined)
+	}
+	// Positive pin: the stale local ref must actually have been fast-forwarded
+	// to the elected remote's tracking ref — without this the test passes
+	// vacuously when the promotion silently no-ops.
+	if got := readMetadataBranchHash(t, repo); got != descendantHash {
+		t.Errorf("resume should fast-forward the stale local metadata branch: got %s, want %s", got, descendantHash)
 	}
 }
 

@@ -275,22 +275,10 @@ func codexUserText(raw json.RawMessage) string {
 }
 
 // isCodexSystemContent returns true for content blocks that are system-injected
-// rather than user-authored.
+// rather than user-authored. The prefix list is shared with the session-title and
+// turn-counting paths (textutil.IsInjectedPrompt) so the two cannot drift.
 func isCodexSystemContent(text string) bool {
-	prefixes := []string{
-		"<permissions",
-		"<collaboration_mode>",
-		"<skills_instructions>",
-		"<environment_context>",
-		"<turn_aborted>",
-		"# AGENTS.md",
-	}
-	for _, p := range prefixes {
-		if len(text) >= len(p) && text[:len(p)] == p {
-			return true
-		}
-	}
-	return false
+	return textutil.IsInjectedPrompt(text)
 }
 
 // codexAssistantText extracts text from a Codex assistant message content array.

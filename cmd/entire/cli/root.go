@@ -49,6 +49,34 @@ func inGroup(c *cobra.Command, groupID string) *cobra.Command {
 	return c
 }
 
+// Run every ancestor's persistent hook, root first, not only the closest one
+// cobra picks by default. Without this, the `checkpoint`, `session`, and `agent`
+// pre-runs shadow the root's and it never builds a logger — silently, since the
+// only symptom is missing log lines.
+//
+// Set in init() rather than NewRootCmd: it is a cobra package global, so writing
+// it per construction races with cobra reading it during Execute (parallel tests
+// do both at once).
+//
+//nolint:gochecknoinits // Set a cobra package global once, before any goroutine can read it (see above).
+func init() {
+	cobra.EnableTraverseRunHooks = true
+}
+
+// isShellCompletion reports whether this is one of cobra's hidden completion
+// requests. The shell runs them on every TAB press, so they skip building a
+// logger: MkdirAll + OpenFile + the settings read that resolves the level (which
+// shells out to git) is real latency, and it left a 0-byte entire.log behind.
+func isShellCompletion(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		switch c.Name() {
+		case cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
+			return true
+		}
+	}
+	return false
+}
+
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "entire",
@@ -61,6 +89,15 @@ func NewRootCmd() *cobra.Command {
 		// Hide completion command from help but keep it functional
 		CompletionOptions: cobra.CompletionOptions{
 			HiddenDefaultCmd: true,
+		},
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+			if isShellCompletion(cmd) {
+				return
+			}
+			if !settings.IsSetUpAny(cmd.Context()) {
+				return
+			}
+			ensureLogger(cmd)
 		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
 			// Skip for hidden commands (walk parent chain — Cobra doesn't propagate Hidden)
@@ -101,6 +138,8 @@ func NewRootCmd() *cobra.Command {
 			return cmd.Help()
 		},
 	}
+
+	addContextFlag(cmd)
 
 	// Help groups; AddGroup order is display order in `entire --help`.
 	cmd.AddGroup(
@@ -192,7 +231,7 @@ func newSendAnalyticsCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.ExactArgs(1),
 		Run: func(_ *cobra.Command, args []string) {
-			telemetry.SendEvent(args[0])
+			telemetry.SendEvents(args[0])
 		},
 	}
 }

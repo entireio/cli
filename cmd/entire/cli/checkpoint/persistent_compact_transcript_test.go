@@ -27,7 +27,7 @@ func claudeStyleTranscript() []byte {
 // Returns ("", false) when the file does not exist.
 func readBranchFile(t *testing.T, store *GitStore, path string) (string, bool) {
 	t.Helper()
-	tree, err := store.getSessionsBranchTree()
+	tree, err := store.getSessionsBranchTree(t.Context())
 	if err != nil {
 		t.Fatalf("getSessionsBranchTree() error = %v", err)
 	}

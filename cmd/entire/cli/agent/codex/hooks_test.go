@@ -3,12 +3,13 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"testing"
-
-	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/stretchr/testify/require"
 )
 
 // setupTestEnv creates a temp dir, sets CWD and CODEX_HOME for test isolation.
@@ -25,19 +26,14 @@ func TestInstallHooks_CreatesHooksJSONOnly(t *testing.T) {
 	tempDir := setupTestEnv(t)
 
 	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
-	require.Equal(t, 4, count) // SessionStart, UserPromptSubmit, Stop, PostToolUse
+	require.Equal(t, len(managedHooks), count)
 
-	// Verify hooks.json was created in the repo
-	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
-	data, err := os.ReadFile(hooksPath)
-	require.NoError(t, err)
-
-	var hooksFile HooksFile
-	require.NoError(t, json.Unmarshal(data, &hooksFile))
+	hooksFile, _ := readHooksFile(t, tempDir)
 
 	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.SessionEnd, agentpkg.WrapProductionSilentHookCommand("entire hooks codex session-end"), "SessionEnd")
 	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
 	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapProductionSilentHookCommand("entire hooks codex stop"), "Stop")
 	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
@@ -56,18 +52,14 @@ func TestInstallHooks_WindowsWrapperProbeSuccessKeepsWrappedCommands(t *testing.
 	withCodexHookEnvironment(t, "windows", true)
 
 	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
-	require.Equal(t, 4, count)
+	require.Equal(t, len(managedHooks), count)
 
-	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
-	data, err := os.ReadFile(hooksPath)
-	require.NoError(t, err)
-
-	var hooksFile HooksFile
-	require.NoError(t, json.Unmarshal(data, &hooksFile))
+	hooksFile, _ := readHooksFile(t, tempDir)
 
 	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.SessionEnd, agentpkg.WrapProductionSilentHookCommand("entire hooks codex session-end"), "SessionEnd")
 	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
 	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapProductionSilentHookCommand("entire hooks codex stop"), "Stop")
 	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
@@ -78,18 +70,14 @@ func TestInstallHooks_WindowsWrapperProbeFailureUsesWindowsCommands(t *testing.T
 	withCodexHookEnvironment(t, "windows", false)
 
 	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
-	require.Equal(t, 4, count)
+	require.Equal(t, len(managedHooks), count)
 
-	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
-	data, err := os.ReadFile(hooksPath)
-	require.NoError(t, err)
-
-	var hooksFile HooksFile
-	require.NoError(t, json.Unmarshal(data, &hooksFile))
+	hooksFile, data := readHooksFile(t, tempDir)
 
 	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.SessionEnd, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex session-end"), "SessionEnd")
 	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
 	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex stop"), "Stop")
 	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
@@ -106,23 +94,19 @@ func TestInstallHooks_WindowsWrapperProbeFailureMigratesToWindowsCommands(t *tes
 	})
 
 	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
-	require.Equal(t, 4, count)
+	require.Equal(t, len(managedHooks), count)
 
 	wrapperWorks = false
-	count, err = ag.InstallHooks(context.Background(), false, false)
+	count, err = ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
-	require.Equal(t, 4, count)
+	require.Equal(t, len(managedHooks), count)
 
-	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
-	data, err := os.ReadFile(hooksPath)
-	require.NoError(t, err)
-
-	var hooksFile HooksFile
-	require.NoError(t, json.Unmarshal(data, &hooksFile))
+	hooksFile, data := readHooksFile(t, tempDir)
 
 	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.SessionEnd, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex session-end"), "SessionEnd")
 	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
 	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex stop"), "Stop")
 	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
@@ -136,28 +120,29 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 
 	ag := &CodexAgent{}
 
-	count1, err := ag.InstallHooks(context.Background(), false, false)
+	count1, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
-	require.Equal(t, 4, count1)
+	require.Equal(t, len(managedHooks), count1)
 
-	count2, err := ag.InstallHooks(context.Background(), false, false)
+	count2, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 	require.Equal(t, 0, count2)
 }
 
-func TestInstallHooks_LocalDev(t *testing.T) {
+func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 	tempDir := setupTestEnv(t)
-
+	ctx := context.Background()
 	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), true, false)
-	require.NoError(t, err)
-	require.Equal(t, 4, count)
 
-	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
-	data, err := os.ReadFile(hooksPath)
-	require.NoError(t, err)
-	require.Contains(t, string(data), `\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks codex session-start`)
-	require.Contains(t, string(data), `\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks codex post-tool-use`)
+	testutil.AssertLegacyHookReplaced(t,
+		filepath.Join(tempDir, ".codex", HooksFileName),
+		agentpkg.WrapProductionSilentHookCommandForOS("entire hooks codex stop", agentpkg.UseWindowsProductionHooks(ctx)),
+		testutil.LegacyLocalDevCommand("hooks codex stop"),
+		func() {
+			if _, err := ag.InstallHooks(ctx, false); err != nil {
+				t.Fatalf("InstallHooks() error = %v", err)
+			}
+		})
 }
 
 func TestInstallHooks_Force(t *testing.T) {
@@ -165,12 +150,85 @@ func TestInstallHooks_Force(t *testing.T) {
 
 	ag := &CodexAgent{}
 
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 
-	count, err := ag.InstallHooks(context.Background(), false, true)
+	count, err := ag.InstallHooks(context.Background(), true)
 	require.NoError(t, err)
-	require.Equal(t, 4, count)
+	require.Equal(t, len(managedHooks), count)
+}
+
+// Codex clamps SessionEnd handlers to SESSION_END_MAX_TIMEOUT_SEC = 3 and
+// prints "clamping SessionEnd hook timeout" at every startup when a config asks
+// for more, so SessionEnd must be installed at exactly the ceiling while the
+// between-turn hooks keep the standard timeout.
+func TestInstallHooks_SessionEndUsesCodexTimeoutCeiling(t *testing.T) {
+	tempDir := setupTestEnv(t)
+
+	ag := &CodexAgent{}
+	_, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+
+	hooksFile, _ := readHooksFile(t, tempDir)
+
+	require.Equal(t, SessionEndTimeoutSec, entireHookTimeout(t, hooksFile.Hooks.SessionEnd, "SessionEnd"))
+	require.Equal(t, defaultHookTimeoutSec, entireHookTimeout(t, hooksFile.Hooks.Stop, "Stop"))
+}
+
+// A SessionEnd hook left behind by an older Entire carries the 30s default,
+// which makes Codex warn on every startup. Reinstalling must rewrite it rather
+// than treat the command match alone as up to date.
+func TestInstallHooks_RewritesSessionEndWithStaleTimeout(t *testing.T) {
+	tempDir := setupTestEnv(t)
+
+	codexDir := filepath.Join(tempDir, ".codex")
+	require.NoError(t, os.MkdirAll(codexDir, 0o750))
+	staleCommand := agentpkg.WrapProductionSilentHookCommand("entire hooks codex session-end")
+	stale := HooksFile{Hooks: HookEvents{
+		SessionEnd: []MatcherGroup{{
+			Hooks: []HookEntry{{Type: "command", Command: staleCommand, Timeout: 30}},
+		}},
+	}}
+	staleData, err := json.Marshal(stale)
+	require.NoError(t, err)
+	hooksPath := filepath.Join(codexDir, HooksFileName)
+	require.NoError(t, os.WriteFile(hooksPath, staleData, 0o600))
+
+	ag := &CodexAgent{}
+	_, err = ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+
+	hooksFile, _ := readHooksFile(t, tempDir)
+
+	require.Equal(t, SessionEndTimeoutSec, entireHookTimeout(t, hooksFile.Hooks.SessionEnd, "SessionEnd"))
+}
+
+// readHooksFile reads and parses .codex/hooks.json under repoRoot, returning
+// both the parsed form and the raw bytes (some assertions check the literal
+// text, e.g. that no POSIX shell wrapper leaked into a Windows config).
+func readHooksFile(t *testing.T, repoRoot string) (HooksFile, []byte) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoRoot, ".codex", HooksFileName))
+	require.NoError(t, err)
+	var hooksFile HooksFile
+	require.NoError(t, json.Unmarshal(data, &hooksFile))
+	return hooksFile, data
+}
+
+// entireHookTimeout returns the timeout of the single Entire-managed hook in
+// groups, failing if there is not exactly one.
+func entireHookTimeout(t *testing.T, groups []MatcherGroup, label string) int {
+	t.Helper()
+	var timeouts []int
+	for _, group := range groups {
+		for _, hook := range group.Hooks {
+			if isEntireHook(hook.Command) {
+				timeouts = append(timeouts, hook.Timeout)
+			}
+		}
+	}
+	require.Len(t, timeouts, 1, "%s should have exactly one Entire hook", label)
+	return timeouts[0]
 }
 
 func TestUninstallHooks(t *testing.T) {
@@ -178,7 +236,7 @@ func TestUninstallHooks(t *testing.T) {
 
 	ag := &CodexAgent{}
 
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 
 	err = ag.UninstallHooks(context.Background())
@@ -208,7 +266,7 @@ func TestUninstallHooks_PreservesUserHookContainingEntireSubstring(t *testing.T)
 	require.NoError(t, os.WriteFile(hooksPath, []byte(existingConfig), 0o600))
 
 	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 
 	err = ag.UninstallHooks(context.Background())
@@ -231,7 +289,7 @@ func TestAreHooksInstalled_WithHooks(t *testing.T) {
 	setupTestEnv(t)
 
 	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 
 	require.True(t, ag.AreHooksInstalled(context.Background()))
@@ -259,6 +317,30 @@ func TestAreHooksInstalled_PartialHooks(t *testing.T) {
 	require.False(t, ag.AreHooksInstalled(context.Background()))
 }
 
+// TestAreHooksInstalled_PreSessionEndInstall — a user who enabled Codex before
+// SessionEnd and the subagent hooks joined the install set still counts as
+// installed, so Codex keeps
+// appearing in `entire status` and the agent pickers instead of vanishing until
+// they re-run enable. The gap is drift, and MissingEntireHooks reports it.
+func TestAreHooksInstalled_PreSessionEndInstall(t *testing.T) {
+	tempDir := setupTestEnv(t)
+
+	codexDir := filepath.Join(tempDir, ".codex")
+	require.NoError(t, os.MkdirAll(codexDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(codexDir, HooksFileName), []byte(`{
+		"hooks": {
+			"SessionStart": [{"matcher": null, "hooks": [{"type": "command", "command": "entire hooks codex session-start", "timeout": 30}]}],
+			"UserPromptSubmit": [{"matcher": null, "hooks": [{"type": "command", "command": "entire hooks codex user-prompt-submit", "timeout": 30}]}],
+			"Stop": [{"matcher": null, "hooks": [{"type": "command", "command": "entire hooks codex stop", "timeout": 30}]}],
+			"PostToolUse": [{"matcher": null, "hooks": [{"type": "command", "command": "entire hooks codex post-tool-use", "timeout": 30}]}]
+		}
+	}`), 0o600))
+
+	ag := &CodexAgent{}
+	require.True(t, ag.AreHooksInstalled(context.Background()))
+	require.Equal(t, []string{"session_end", "subagent_start", "subagent_stop"}, MissingEntireHooks(tempDir))
+}
+
 func TestInstallHooks_PreservesExistingHooksJSON(t *testing.T) {
 	tempDir := setupTestEnv(t)
 
@@ -280,7 +362,7 @@ func TestInstallHooks_PreservesExistingHooksJSON(t *testing.T) {
 	}`
 	require.NoError(t, os.WriteFile(filepath.Join(codexDir, HooksFileName), []byte(existingConfig), 0o600))
 
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(codexDir, HooksFileName))
@@ -311,7 +393,7 @@ func TestInstallHooks_ErrorsOnMalformedManagedHook(t *testing.T) {
 	require.NoError(t, os.WriteFile(hooksPath, []byte(existingConfig), 0o600))
 
 	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "failed to parse SessionStart hooks")
 
@@ -352,7 +434,7 @@ func TestInstallHooks_DoesNotModifyUserConfig(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(existingConfig), 0o600))
 
 	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 
 	configData, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
@@ -381,7 +463,7 @@ func TestInstallHooks_LeavesExistingLocalConfigUntouched(t *testing.T) {
 			require.NoError(t, os.WriteFile(configPath, []byte(content), 0o600))
 
 			ag := &CodexAgent{}
-			_, err := ag.InstallHooks(context.Background(), false, false)
+			_, err := ag.InstallHooks(context.Background(), false)
 			require.NoError(t, err)
 
 			data, err := os.ReadFile(configPath)
@@ -414,4 +496,60 @@ func withCodexHookEnvironment(t *testing.T, goos string, wrapperWorks bool) {
 func withCodexHookEnvironmentFunc(t *testing.T, goos string, wrapperWorks func(context.Context, string) bool) {
 	t.Helper()
 	t.Cleanup(agentpkg.SetWindowsHookProbeForTesting(goos, wrapperWorks))
+}
+
+// TestInstallHooks_DropsLegacyHookAlongsideCurrent is the regression test for
+// syncHookCommand returning early when the current command was already present,
+// which left a legacy local-dev hook beside it so both fired.
+func TestInstallHooks_DropsLegacyHookAlongsideCurrent(t *testing.T) {
+	tempDir := setupTestEnv(t)
+	ctx := context.Background()
+	ag := &CodexAgent{}
+
+	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
+	current := agentpkg.WrapProductionSilentHookCommandForOS("entire hooks codex stop", agentpkg.UseWindowsProductionHooks(ctx))
+	legacy := testutil.LegacyLocalDevCommand("hooks codex stop")
+
+	testutil.AssertStaleHookDroppedAlongsideCurrent(t, hooksPath, current, legacy,
+		func() {
+			// Install, then append the legacy hook into the same Stop group.
+			if _, err := ag.InstallHooks(ctx, false); err != nil {
+				t.Fatalf("seed InstallHooks() error = %v", err)
+			}
+			raw, err := os.ReadFile(hooksPath)
+			require.NoError(t, err)
+			var topLevel map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(raw, &topLevel))
+			var rawHooks map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(topLevel["hooks"], &rawHooks))
+			var stop []MatcherGroup
+			require.NoError(t, parseHookType(rawHooks, "Stop", &stop))
+			require.NotEmpty(t, stop)
+			stop[0].Hooks = append(stop[0].Hooks, HookEntry{Type: "command", Command: legacy, Timeout: 30})
+			marshalHookType(rawHooks, "Stop", stop)
+			// Same marshaller InstallHooks uses: the production command contains
+			// `>`, which encoding/json would escape to >.
+			hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
+			require.NoError(t, err)
+			topLevel["hooks"] = hooksJSON
+			out, err := jsonutil.MarshalIndentWithNewline(topLevel, "", "  ")
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(hooksPath, out, 0o600))
+		},
+		func() {
+			if _, err := ag.InstallHooks(ctx, false); err != nil {
+				t.Fatalf("InstallHooks() error = %v", err)
+			}
+		})
+}
+
+// TestCommittedDogfoodHooksIsCurrent guards this repo's own committed agent config against drifting from what
+// InstallHooks writes. A stale committed config is how the pi extension ended up
+// invoking a launcher script that had been deleted.
+func TestCommittedDogfoodHooksIsCurrent(t *testing.T) {
+	testutil.AssertCommittedDogfoodConfigStable(t, ".codex/hooks.json", func(t *testing.T, dir string) (int, error) {
+		t.Helper()
+		t.Chdir(dir)
+		return (&CodexAgent{}).InstallHooks(context.Background(), false)
+	})
 }

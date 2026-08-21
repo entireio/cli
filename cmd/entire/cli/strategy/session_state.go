@@ -523,12 +523,27 @@ func goroutineID() int64 {
 // PostToolUse hook cannot revert fields written by lifecycle handlers
 // (TurnEnd, PostCommit, ModelUpdate) that ran between our load and our save.
 func MutateSessionState(ctx context.Context, sessionID string, fn func(*SessionState) error) error {
+	_, err := MutateSessionStateSaved(ctx, sessionID, fn)
+	return err
+}
+
+// MutateSessionStateSaved is MutateSessionState plus whether the mutation was
+// actually persisted. A nil error is NOT proof of a save: ErrMutationSkip
+// reports success without writing, so callers with side effects that must only
+// follow a durable write (telemetry that would otherwise double-report a
+// re-derived event) have to distinguish the two.
+//
+// saved is true for a nested call whose fn succeeded, because the outer frame
+// flushes those mutations; if that outer frame then skips or fails, the caller
+// has acted on an unsaved change — the same exposure the plain error return
+// always had, and self-correcting for events that later re-derive.
+func MutateSessionStateSaved(ctx context.Context, sessionID string, fn func(*SessionState) error) (saved bool, err error) {
 	if sessionID == "" {
-		return ErrStateNotFound
+		return false, ErrStateNotFound
 	}
 	gate, isOuter, release, err := acquireSessionGate(ctx, sessionID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer release()
 
@@ -536,34 +551,37 @@ func MutateSessionState(ctx context.Context, sessionID string, fn func(*SessionS
 		// Nested call: reuse the outer's state pointer. The outer save will
 		// flush our mutations; we don't load or save here.
 		if gate.activeState == nil {
-			return ErrStateNotFound
+			return false, ErrStateNotFound
 		}
-		if err := fn(gate.activeState); err != nil && !errors.Is(err, ErrMutationSkip) {
-			return err
+		if err := fn(gate.activeState); err != nil {
+			if errors.Is(err, ErrMutationSkip) {
+				return false, nil
+			}
+			return false, err
 		}
-		return nil
+		return true, nil
 	}
 
 	state, err := LoadSessionState(ctx, sessionID)
 	if err != nil {
-		return fmt.Errorf("load session state: %w", err)
+		return false, fmt.Errorf("load session state: %w", err)
 	}
 	if state == nil {
-		return ErrStateNotFound
+		return false, ErrStateNotFound
 	}
 	gate.activeState = state
 	defer func() { gate.activeState = nil }()
 
 	if err := fn(state); err != nil {
 		if errors.Is(err, ErrMutationSkip) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	if err := SaveSessionState(ctx, state); err != nil {
-		return fmt.Errorf("save session state: %w", err)
+		return false, fmt.Errorf("save session state: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 // acquireSessionGate takes the per-process gate (in-memory) and, on the

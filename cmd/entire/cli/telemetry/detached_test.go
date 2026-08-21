@@ -150,9 +150,9 @@ func TestBuildEventPayloadAgent(t *testing.T) {
 
 func TestSendEventHandlesInvalidJSON(_ *testing.T) {
 	// Should not panic with invalid JSON
-	SendEvent("invalid json")
-	SendEvent("")
-	SendEvent("{}")
+	SendEvents("invalid json")
+	SendEvents("")
+	SendEvents("{}")
 }
 
 func TestParseGitVersion(t *testing.T) {
@@ -177,5 +177,79 @@ func TestParseGitVersion(t *testing.T) {
 				t.Errorf("parseGitVersion(%q) = %q, want %q", tt.out, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestBuildSkillEventPayload(t *testing.T) {
+	t.Parallel()
+	payload := BuildSkillEventPayload(SkillInvocation{
+		Skill:     "entire",
+		Agent:     "claude-code",
+		Signal:    "prompt_slash_command",
+		EventType: "prompt_invocation",
+	}, true, "1.2.3")
+	if payload == nil {
+		t.Fatal("BuildSkillEventPayload returned nil")
+		return
+	}
+	if payload.Event != "cli_skill_invoked" {
+		t.Errorf("Event = %q, want %q", payload.Event, "cli_skill_invoked")
+	}
+	if got := payload.Properties["skill"]; got != "entire" {
+		t.Errorf("skill property = %v, want %q", got, "entire")
+	}
+	if got := payload.Properties["agent"]; got != "claude-code" {
+		t.Errorf("agent property = %v, want %q", got, "claude-code")
+	}
+	if got := payload.Properties["signal"]; got != "prompt_slash_command" {
+		t.Errorf("signal property = %v, want %q", got, "prompt_slash_command")
+	}
+	if got := payload.Properties["event_type"]; got != "prompt_invocation" {
+		t.Errorf("event_type property = %v, want %q", got, "prompt_invocation")
+	}
+	if got := payload.Properties["cli_version"]; got != "1.2.3" {
+		t.Errorf("cli_version property = %v, want %q", got, "1.2.3")
+	}
+	if got := payload.Properties["isEntireEnabled"]; got != true {
+		t.Errorf("isEntireEnabled property = %v, want true", got)
+	}
+	// The payload must stay content-free: skill/plugin names only, never
+	// prompt text, arguments, or flags.
+	for _, forbidden := range []string{"prompt", "args", "flags"} {
+		if _, ok := payload.Properties[forbidden]; ok {
+			t.Errorf("skill payload must not include %q", forbidden)
+		}
+	}
+}
+
+func TestBuildSkillEventPayload_EmptySkill(t *testing.T) {
+	t.Parallel()
+	if got := BuildSkillEventPayload(SkillInvocation{Agent: "claude-code"}, true, "1.0.0"); got != nil {
+		t.Errorf("expected nil for empty skill name, got %+v", got)
+	}
+}
+
+func TestBuildSkillEventPayload_UnlistedSkillNameIsNotSent(t *testing.T) {
+	t.Parallel()
+	// Skill names are user-defined tokens: a custom slash command like
+	// /customer-acme-incident-123 can carry sensitive identifiers, so only
+	// allowlisted names pass through verbatim.
+	payload := BuildSkillEventPayload(SkillInvocation{
+		Skill:     "customer-acme-incident-123",
+		Agent:     "claude-code",
+		Signal:    "prompt_slash_command",
+		EventType: "prompt_invocation",
+	}, true, "1.2.3")
+	if payload == nil {
+		t.Fatal("BuildSkillEventPayload returned nil")
+		return
+	}
+	if got := payload.Properties["skill"]; got != "custom" {
+		t.Errorf("skill property = %v, want %q", got, "custom")
+	}
+	for _, v := range payload.Properties {
+		if s, ok := v.(string); ok && s == "customer-acme-incident-123" {
+			t.Errorf("raw skill name leaked into payload property %v", v)
+		}
 	}
 }

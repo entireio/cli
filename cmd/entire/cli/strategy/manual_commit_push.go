@@ -81,8 +81,24 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// remote selected by this push. The gate must stay BELOW
 	// resolvePushSettings: hasCheckpointURL is only known after resolution,
 	// so hoisting the gate above it would break the exemption.
-	if !ps.hasCheckpointURL() && !checkpointSyncAllowedForRemote(ctx, ps.remote) {
-		return nil
+	//
+	// Capture is two-phase, straddling this whole function. The proposal runs
+	// before the gate so that the push which elects a remote by evidence (push
+	// target agrees with the branch's declared push destination) is also the
+	// first push to carry checkpoints there; the election is persisted only at
+	// the delivery points below, once those checkpoints actually arrived.
+	// Everything in between can still stop delivery, and the election is
+	// permanent, so intent is not enough to move it. The hint below then speaks
+	// only for what capture left gated — see hintGatedCheckpointSync.
+	var pendingCapture string
+	if !ps.hasCheckpointURL() {
+		if pendingCaptureCheckpointSyncRemote(ctx, ps.remote) {
+			pendingCapture = ps.remote
+		}
+		if !checkpointSyncAllowedForRemote(ctx, ps.remote, pendingCapture) {
+			hintGatedCheckpointSync(ctx, ps.remote)
+			return nil
+		}
 	}
 
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
@@ -91,8 +107,8 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// branch — the empty-remote guard below is unnecessary for this backend.
 	// (A configured git-branch mirror's v1 ref is not pushed here yet — mirror
 	// push for downgrade safety is a later step.)
-	if cpCfg, _ := settings.LoadCheckpointsConfig(ctx); checkpoint.PrimaryIsRefs(cpCfg) { //nolint:errcheck // fail-soft: a bad checkpoints block already surfaces via Open; default to no refs push
-		return s.prePushCheckpointRefs(ctx, ps)
+	if ps.primaryIsRefs {
+		return s.prePushCheckpointRefs(ctx, ps, pendingCapture)
 	}
 
 	// git-branch primary: entire/checkpoints/v1 is a real refs/heads branch, so
@@ -121,12 +137,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// 9-layer pipeline) before pushing. Skipped entirely when OPF is off,
 	// so the common-case fast path is unchanged.
 	if redact.OPFEnabled() {
-		cfg, _ := settings.Load(ctx) //nolint:errcheck // Load already failed at hook init; fall back to nil
-		var opfCfg *settings.OPFSettings
-		if cfg != nil && cfg.Redaction != nil {
-			opfCfg = cfg.Redaction.OpenAIPrivacyFilter
-		}
-		decision, decisionErr := resolveOPFDecisionForPrePush(ctx, opfCfg, opfPrePushProgressWriter)
+		decision, decisionErr := opfPrePushDecision(ctx)
 		if decisionErr != nil {
 			logging.Warn(ctx, "OPF pre-push decision failed; aborting push",
 				slog.String("error", decisionErr.Error()),
@@ -174,17 +185,92 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// Thread the span's context into the push so the network push and any
 	// fetch+rebase recovery nest beneath it as child steps in the perf trace.
 	pushCtx, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoint_refs")
+	// Capture needs checkpoint data CONFIRMED on this remote, so count what
+	// landed rather than trusting the absence of an error: every ref that was due
+	// has to deliver, and at least one has to actually do so. Delivery must come
+	// from pushRefIfNeeded's delivered return and NOT from err, which is
+	// fail-soft and nil even when the remote refused the ref.
+	deliveredCount, anyFailed := 0, false
 	for _, ref := range refs.Push {
-		if err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref); err != nil {
+		delivered, err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref)
+		if err != nil {
 			pushCheckpointsSpan.RecordError(err)
 			pushCheckpointsSpan.End()
 			return err
 		}
+		if delivered {
+			deliveredCount++
+		} else {
+			anyFailed = true
+		}
 	}
 	pushCheckpointsSpan.End()
 
+	// Delivered: the election may now follow the push that carried it. A push that
+	// carried nothing — an empty ref set, or a v1 ref that does not exist locally
+	// yet — leaves the election alone. It is safe either way (nothing is stranded
+	// when there was nothing to strand), but capturing would announce a move that
+	// moved no data, which is the class of claim this whole path exists to stop
+	// making. The next push that carries a checkpoint captures instead.
+	if pendingCapture != "" && deliveredCount > 0 && !anyFailed {
+		commitCapturedSyncRemote(ctx, pendingCapture)
+	}
+
 	cleanupPushedShadowBranches(ctx)
 	return nil
+}
+
+// opfPrePushDecision resolves the user's OPF decision for this push (env >
+// settings > prompt > non-TTY auto-run). Shared by both checkpoint backends so
+// the precedence cannot drift between them.
+func opfPrePushDecision(ctx context.Context) (OPFDecision, error) {
+	cfg, _ := settings.Load(ctx) //nolint:errcheck // Load already failed at hook init; fall back to nil
+	var opfCfg *settings.OPFSettings
+	if cfg != nil && cfg.Redaction != nil {
+		opfCfg = cfg.Redaction.OpenAIPrivacyFilter
+	}
+	return resolveOPFDecisionForPrePush(ctx, opfCfg, opfPrePushProgressWriter)
+}
+
+// runOPFForCheckpointRefs resolves the OPF decision and, when it says run,
+// rewrites the queued checkpoint refs. It reports whether the flush may
+// proceed: false means OPF failed or the user aborted, so the caller withholds
+// the checkpoint push and leaves the refs queued.
+func runOPFForCheckpointRefs(ctx context.Context, repo *git.Repository) bool {
+	decision, err := opfPrePushDecision(ctx)
+	if err != nil {
+		warnOPFCheckpointRefsWithheld(ctx, err)
+		return false
+	}
+	switch decision {
+	case OPFAbort:
+		warnOPFCheckpointRefsWithheld(ctx, errOPFAbortedByUser)
+		return false
+	case OPFSkip:
+		// Explicit opt-out for this push: flush the 8-layer content as-is,
+		// untagged — same as the v1 path.
+		logging.Info(ctx, "OPF skipped for this push (user choice or settings)")
+	case OPFRun:
+		_, opfSpan := perf.Start(ctx, "opf_pre_push_rewrite_refs")
+		defer opfSpan.End()
+		if rewriteErr := RewriteQueuedCheckpointRefsWithOPF(ctx, repo); rewriteErr != nil {
+			opfSpan.RecordError(rewriteErr)
+			warnOPFCheckpointRefsWithheld(ctx, rewriteErr)
+			return false
+		}
+	}
+	return true
+}
+
+// warnOPFCheckpointRefsWithheld reports a withheld flush on both channels: the
+// log for diagnosis, and the user's terminal so a silently un-synced checkpoint
+// is never the first they hear of it.
+func warnOPFCheckpointRefsWithheld(ctx context.Context, err error) {
+	logging.Warn(ctx, "OPF pre-push failed; skipping checkpoint ref push, refs left queued",
+		slog.String("error", err.Error()),
+	)
+	fmt.Fprintf(stderrWriter,
+		"[entire] OPF did not run, so checkpoint refs were not pushed and stay queued for your next push: %v\n", err)
 }
 
 // deferCheckpointPushOnEmptyRemote reports whether publication of the git-branch
@@ -241,7 +327,24 @@ func isConfiguredRemote(ctx context.Context, name string) bool {
 	if name == "" {
 		return false
 	}
-	return exec.CommandContext(ctx, "git", "remote", "get-url", name).Run() == nil
+	return cachedIsConfiguredRemote(ctx, name, func() (bool, error) {
+		cmd := exec.CommandContext(ctx, "git", "remote", "get-url", name)
+		if worktreeRoot, ok := settings.WorktreeRoot(ctx); ok {
+			cmd.Dir = worktreeRoot
+		}
+		err := cmd.Run()
+		if err == nil {
+			return true, nil
+		}
+		// git ran and said no: a real answer worth caching. git failing to run at
+		// all says nothing about the remote, and memoizing that false would
+		// fail-close checkpoint_push_remote for the rest of the process.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return false, nil
+		}
+		return false, fmt.Errorf("probe remote %q: %w", name, err)
+	})
 }
 
 // remoteHasTrackingRefs reports whether any refs/remotes/<remote>/* ref exists
@@ -264,14 +367,14 @@ func remoteHasTrackingRefs(ctx context.Context, remote string) bool {
 // recorded refs fast-forward-only (git-refs primary; never a force push — a
 // diverged ref is recovered via fetch+replay). Transient push failures are logged and
 // swallowed — like the v1 path, they must not block the user's git push — and the
-// refs stay queued for the next pre-push. OPF is not applied (it is descoped for
-// the git-refs store for now).
+// refs stay queued for the next pre-push. When OPF is enabled the queued refs
+// are re-redacted with it first (RewriteQueuedCheckpointRefsWithOPF).
 //
 // It honors the checkpoint policy exactly like the v1 path: the policy gates on
 // checkpoint *format* compatibility (diverged from the remote, or an unsupported
 // local format), which is independent of the storage backend, so a blocked
 // policy skips the ref push (leaving refs queued) rather than pushing.
-func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pushSettings) error {
+func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pushSettings, pendingCapture string) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		logging.Warn(ctx, "git-refs pre-push: open repo failed; skipping checkpoint push",
@@ -288,7 +391,22 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		return nil
 	}
 
-	if _, err := flushCheckpointRefsQueue(ctx, repo, ps); err != nil {
+	// OPF backend divergence: both paths fail closed, but this one does it
+	// without blocking the user. The v1 path aborts the user's git push; here a
+	// checkpoint-ref failure must never do that (see this function's doc), so
+	// failing closed means withholding the flush — nothing un-OPF'd ships, the
+	// refs stay queued, and the user's push proceeds.
+	if redact.OPFEnabled() && !runOPFForCheckpointRefs(ctx, repo) {
+		return nil
+	}
+
+	if flushed, err := flushCheckpointRefsQueue(ctx, repo, ps); err == nil {
+		// Delivered, and only if something actually was: an empty queue pushed
+		// nothing, so it must not move the election or announce that it had.
+		if pendingCapture != "" && flushed > 0 {
+			commitCapturedSyncRemote(ctx, pendingCapture)
+		}
+	} else {
 		// Fail-soft: a checkpoint-ref push failure must never block the user's
 		// git push. The refs stay queued for the next pre-push.
 		logging.Warn(ctx, "git-refs pre-push: checkpoint ref push failed; refs left queued",

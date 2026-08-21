@@ -483,7 +483,7 @@ func formatGitCommandError(ctx context.Context, err error, remote string) error 
 	if errors.As(err, &exitErr) {
 		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
 			if remote != "" {
-				stderr = strings.ReplaceAll(stderr, remote, RedactURL(remote))
+				stderr = strings.ReplaceAll(stderr, remote, RedactURLOrPath(remote))
 			}
 			// Collapse whitespace so multi-line git stderr stays one log/attr value.
 			stderr = strings.Join(strings.Fields(stderr), " ")

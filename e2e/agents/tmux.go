@@ -13,6 +13,7 @@ import (
 type TmuxSession struct {
 	name         string
 	stableAtSend string   // stable content snapshot when Send was last called
+	rawAtSend    string   // unstripped snapshot from the same moment
 	cleanups     []func() // run on Close
 }
 
@@ -79,6 +80,7 @@ func (s *TmuxSession) Send(input string) error {
 	// on prompt characters (e.g. ❯) in the echoed input. Taken before Enter so
 	// it can never include response output from a fast agent.
 	s.stableAtSend = stableContent(settled)
+	s.rawAtSend = settled
 
 	// Verify the pane reacted to Enter; a swallowed Enter leaves the prompt
 	// sitting unsubmitted in the input box. Retry a couple of times — TUIs
@@ -162,6 +164,17 @@ func stableContent(content string) string {
 	return strings.Join(lines, "\n")
 }
 
+// paneLines counts the lines in a pane capture. WaitFor compares growth
+// rather than raw inequality: the tail lines a capture ends with repaint on
+// their own (spinners, clocks, prompt redraws) without adding lines, so only
+// growth is evidence of appended output.
+func paneLines(content string) int {
+	if content == "" {
+		return 0
+	}
+	return strings.Count(content, "\n") + 1
+}
+
 func (s *TmuxSession) WaitFor(pattern string, timeout time.Duration) (string, error) {
 	re, err := regexp.Compile(pattern)
 	if err != nil {
@@ -191,8 +204,14 @@ func (s *TmuxSession) WaitFor(pattern string, timeout time.Duration) (string, er
 			continue
 		}
 
-		// Detect content change since Send was called
-		if !contentChanged && stable != s.stableAtSend {
+		// Detect content change since Send was called. The stripped compare
+		// aliases when a fast agent's entire response fits in the stripped
+		// tail (a 2-line echo is identical before and after "Working/Done/>"
+		// are appended and stripped), so also accept the raw pane having
+		// grown: an unsubmitted echo plus tail-chrome repaints adds no lines.
+		// Copilot's custom Send leaves rawAtSend unset; the empty check keeps
+		// its exact previous behavior.
+		if !contentChanged && (stable != s.stableAtSend || (s.rawAtSend != "" && paneLines(content) > paneLines(s.rawAtSend))) {
 			contentChanged = true
 		}
 

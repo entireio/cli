@@ -55,9 +55,8 @@ var chunkTranscript = agent.ChunkTranscript
 // writeSession writes a committed checkpoint to the entire/checkpoints/v1 branch.
 // Checkpoints are stored at sharded paths: <id[:2]>/<id[2:]>/
 //
-// For task checkpoints (IsTask=true), additional files are written under tasks/<tool-use-id>/:
-//   - For incremental checkpoints: checkpoints/NNN-<tool-use-id>.json
-//   - For final checkpoints: checkpoint.json and agent-<agent-id>.jsonl
+// Subagent task records (opts.Tasks) are written under tasks/<tool-use-id>/ —
+// see writeTaskRecordEntries.
 func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
 	// Parity with this store's backfill writers and with the git-refs store: a
 	// canceled ctx means stop doing work, and creating a checkpoint is the most
@@ -73,12 +72,6 @@ func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
 		return errors.New("invalid checkpoint options: checkpoint ID is required")
 	}
 	if err := validation.ValidateSessionID(opts.SessionID); err != nil {
-		return fmt.Errorf("invalid checkpoint options: %w", err)
-	}
-	if err := validation.ValidateToolUseID(opts.ToolUseID); err != nil {
-		return fmt.Errorf("invalid checkpoint options: %w", err)
-	}
-	if err := validation.ValidateAgentID(opts.AgentID); err != nil {
 		return fmt.Errorf("invalid checkpoint options: %w", err)
 	}
 
@@ -100,7 +93,7 @@ func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
 	if err != nil {
 		return err
 	}
-	checkpointSubtree, taskMetadataPath, err := s.applySessionWrite(ctx, opts, existing, opts.CheckpointID.Path()+"/")
+	checkpointSubtree, err := s.applySessionWrite(ctx, opts, existing, opts.CheckpointID.Path()+"/")
 	if err != nil {
 		return err
 	}
@@ -114,7 +107,7 @@ func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
 		return err
 	}
 
-	commitMsg := s.buildCommitMessage(opts, taskMetadataPath)
+	commitMsg := s.buildCommitMessage(opts)
 	newCommitHash, err := CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail)
 	if err != nil {
 		return err
@@ -219,33 +212,25 @@ func (s *GitStore) spliceCheckpointSubtree(rootTreeHash plumbing.Hash, checkpoin
 	}, UpdateSubtreeOptions{MergeMode: MergeKeepExisting})
 }
 
-// applySessionWrite applies a Session write to a checkpoint's current subtree and
-// returns the new checkpoint subtree hash plus the task metadata path (for the
-// commit trailer). It is backing-independent: the v1-branch store passes the
-// sharded basePath and the per-checkpoint-ref store passes "".
-func (s *treeWriter) applySessionWrite(ctx context.Context, opts WriteOptions, existing *object.Tree, basePath string) (plumbing.Hash, string, error) {
+// applySessionWrite applies a Session write to a checkpoint's current subtree
+// and returns the new checkpoint subtree hash. It is backing-independent: the
+// v1-branch store passes the sharded basePath and the per-checkpoint-ref
+// store passes "".
+func (s *treeWriter) applySessionWrite(ctx context.Context, opts WriteOptions, existing *object.Tree, basePath string) (plumbing.Hash, error) {
 	entries, err := s.flattenExisting(existing, basePath)
 	if err != nil {
-		return plumbing.ZeroHash, "", err
+		return plumbing.ZeroHash, err
 	}
 
-	var taskMetadataPath string
-	if opts.IsTask && opts.ToolUseID != "" {
-		taskMetadataPath, err = s.writeTaskCheckpointEntries(ctx, opts, basePath, entries)
-		if err != nil {
-			return plumbing.ZeroHash, "", err
-		}
+	if err := s.writeTaskRecordEntries(opts, basePath, entries); err != nil {
+		return plumbing.ZeroHash, err
 	}
 
 	if err := s.writeStandardCheckpointEntries(ctx, opts, basePath, entries); err != nil {
-		return plumbing.ZeroHash, "", err
+		return plumbing.ZeroHash, err
 	}
 
-	subtree, err := s.buildCheckpointSubtree(ctx, entries, basePath)
-	if err != nil {
-		return plumbing.ZeroHash, "", err
-	}
-	return subtree, taskMetadataPath, nil
+	return s.buildCheckpointSubtree(ctx, entries, basePath)
 }
 
 // applyAttributionBackfill rewrites the checkpoint root summary's combined
@@ -481,102 +466,75 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 	return s.buildCheckpointSubtree(ctx, entries, basePath)
 }
 
-// writeTaskCheckpointEntries writes task-specific checkpoint entries and returns the task metadata path.
-func (s *treeWriter) writeTaskCheckpointEntries(ctx context.Context, opts WriteOptions, basePath string, entries map[string]object.TreeEntry) (string, error) {
-	taskDir := checkpointSubtreePath(basePath, "tasks", opts.ToolUseID)
-
-	if opts.IsIncremental {
-		return s.writeIncrementalTaskCheckpoint(opts, taskDir, entries)
+// writeTaskRecordEntries materializes each of opts.Tasks into
+// tasks/<tool-use-id>/{agent-<agent-id>.jsonl, task.json} inside the
+// checkpoint tree at basePath. Iterates unconditionally — an empty Tasks
+// slice (every session before subagent-work durability landed, and every
+// session with no subagent work) is a no-op — replacing the old
+// opts.IsTask/opts.ToolUseID single-task-per-checkpoint route, which no
+// producer ever set (#2058's "dead writer": the whole path was unreachable).
+// Transcript content is expected pre-redacted by the caller (the condensation
+// materializer runs the same sanitize -> externalize -> redact pipeline the
+// session transcript gets); this writer does no redaction of its own.
+func (s *treeWriter) writeTaskRecordEntries(opts WriteOptions, basePath string, entries map[string]object.TreeEntry) error {
+	for _, task := range opts.Tasks {
+		if err := validation.ValidateToolUseID(task.ToolUseID); err != nil {
+			return fmt.Errorf("invalid task payload: %w", err)
+		}
+		if err := validation.ValidateAgentID(task.AgentID); err != nil {
+			return fmt.Errorf("invalid task payload: %w", err)
+		}
+		if err := s.writeTaskRecordEntry(task, basePath, entries); err != nil {
+			return err
+		}
 	}
-	return s.writeFinalTaskCheckpoint(ctx, opts, taskDir, entries)
+	return nil
 }
 
-// writeIncrementalTaskCheckpoint writes an incremental checkpoint file during task execution.
-func (s *treeWriter) writeIncrementalTaskCheckpoint(opts WriteOptions, taskDir string, entries map[string]object.TreeEntry) (string, error) {
-	incData, err := redact.JSONLBytes(opts.IncrementalData)
-	if err != nil {
-		return "", fmt.Errorf("failed to redact incremental checkpoint: %w", err)
-	}
-	checkpoint := incrementalCheckpointData{
-		Type:      opts.IncrementalType,
-		ToolUseID: opts.ToolUseID,
-		Timestamp: time.Now().UTC(),
-		Data:      json.RawMessage(incData.Bytes()),
-	}
-	cpData, err := jsonutil.MarshalIndentWithNewline(checkpoint, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal incremental checkpoint: %w", err)
-	}
-	cpBlobHash, err := CreateBlobFromContent(s.repo, cpData)
-	if err != nil {
-		return "", fmt.Errorf("failed to create incremental checkpoint blob: %w", err)
-	}
+// writeTaskRecordEntry writes one TaskPayload's agent-<agent-id>.jsonl (when
+// its transcript is available) and task.json into entries.
+func (s *treeWriter) writeTaskRecordEntry(task TaskPayload, basePath string, entries map[string]object.TreeEntry) error {
+	taskDir := checkpointSubtreePath(basePath, "tasks", task.ToolUseID)
 
-	cpFilename := fmt.Sprintf("%03d-%s.json", opts.IncrementalSequence, opts.ToolUseID)
-	cpPath := checkpointSubtreePath(taskDir, "checkpoints", cpFilename)
-	entries[cpPath] = object.TreeEntry{
-		Name: cpPath,
-		Mode: filemode.Regular,
-		Hash: cpBlobHash,
-	}
-	return cpPath, nil
-}
-
-// writeFinalTaskCheckpoint writes the final checkpoint.json and subagent transcript.
-func (s *treeWriter) writeFinalTaskCheckpoint(ctx context.Context, opts WriteOptions, taskDir string, entries map[string]object.TreeEntry) (string, error) {
-	checkpoint := taskCheckpointData{
-		SessionID:      opts.SessionID,
-		ToolUseID:      opts.ToolUseID,
-		CheckpointUUID: opts.CheckpointUUID,
-		AgentID:        opts.AgentID,
-	}
-	checkpointData, err := jsonutil.MarshalIndentWithNewline(checkpoint, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal task checkpoint: %w", err)
-	}
-	blobHash, err := CreateBlobFromContent(s.repo, checkpointData)
-	if err != nil {
-		return "", fmt.Errorf("failed to create task checkpoint blob: %w", err)
-	}
-
-	checkpointFile := checkpointSubtreePath(taskDir, "checkpoint.json")
-	entries[checkpointFile] = object.TreeEntry{
-		Name: checkpointFile,
-		Mode: filemode.Regular,
-		Hash: blobHash,
-	}
-
-	// Write subagent transcript if available
-	if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
-		agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
-		if readErr == nil {
-			// Try JSONL-aware redaction first; fall back to plain string redaction
-			// if the content is not valid JSONL (avoids silently dropping the transcript).
-			redacted, jsonlErr := redact.JSONLBytes(agentContent)
-			if jsonlErr != nil {
-				logging.Warn(ctx, "subagent transcript is not valid JSONL, falling back to plain redaction",
-					slog.String("path", opts.SubagentTranscriptPath),
-					slog.String("error", jsonlErr.Error()),
-				)
-				agentContent = redact.Bytes(agentContent)
-			} else {
-				agentContent = redacted.Bytes()
-			}
-
-			agentBlobHash, agentBlobErr := CreateBlobFromContent(s.repo, agentContent)
-			if agentBlobErr == nil {
-				agentPath := checkpointSubtreePath(taskDir, "agent-"+opts.AgentID+".jsonl")
-				entries[agentPath] = object.TreeEntry{
-					Name: agentPath,
-					Mode: filemode.Regular,
-					Hash: agentBlobHash,
-				}
-			}
+	if task.Transcript.Len() > 0 {
+		agentBlobHash, err := CreateBlobFromContent(s.repo, task.Transcript.Bytes())
+		if err != nil {
+			return fmt.Errorf("failed to create task transcript blob: %w", err)
+		}
+		agentPath := checkpointSubtreePath(taskDir, "agent-"+task.AgentID+".jsonl")
+		entries[agentPath] = object.TreeEntry{
+			Name: agentPath,
+			Mode: filemode.Regular,
+			Hash: agentBlobHash,
 		}
 	}
 
-	// taskDir is already a clean path (no trailing slash).
-	return taskDir, nil
+	metadata := taskRecordMetadata{
+		ToolUseID:                   task.ToolUseID,
+		AgentID:                     task.AgentID,
+		SubagentType:                task.SubagentType,
+		TaskDescription:             task.TaskDescription,
+		Files:                       task.Files,
+		TokenUsage:                  task.TokenUsage,
+		StartedAt:                   task.StartedAt,
+		CompletedAt:                 task.CompletedAt,
+		TranscriptUnavailableReason: task.TranscriptUnavailableReason,
+	}
+	metadataJSON, err := jsonutil.MarshalIndentWithNewline(metadata, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal task metadata: %w", err)
+	}
+	blobHash, err := CreateBlobFromContent(s.repo, metadataJSON)
+	if err != nil {
+		return fmt.Errorf("failed to create task metadata blob: %w", err)
+	}
+	taskFile := checkpointSubtreePath(taskDir, "task.json")
+	entries[taskFile] = object.TreeEntry{
+		Name: taskFile,
+		Mode: filemode.Regular,
+		Hash: blobHash,
+	}
+	return nil
 }
 
 // writeStandardCheckpointEntries writes session files to numbered subdirectories and
@@ -768,8 +726,6 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		Agent:                       opts.Agent,
 		Model:                       opts.Model,
 		TurnID:                      opts.TurnID,
-		IsTask:                      opts.IsTask,
-		ToolUseID:                   opts.ToolUseID,
 		TranscriptIdentifierAtStart: opts.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   opts.CheckpointTranscriptStart,
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, // Deprecated: kept for backward compat
@@ -1317,14 +1273,21 @@ func (s *treeWriter) readMetadataFromBlob(hash plumbing.Hash) (*Metadata, error)
 
 // buildCommitMessage constructs the commit message with proper trailers.
 // The commit subject is always "Checkpoint: <id>" for consistency.
-// If CommitSubject is provided (e.g., for task checkpoints), it's included in the body.
-func (s *treeWriter) buildCommitMessage(opts WriteOptions, taskMetadataPath string) string {
+// If CommitSubject is provided, it's included in the body.
+//
+// No task-metadata trailer is written here: the old single-task-per-checkpoint
+// route (Entire-Metadata-Task, still read by the ephemeral shadow-branch
+// listing path) fed it from the now-deleted IsTask/ToolUseID fields, which no
+// producer ever set — this trailer was always absent on real checkpoints.
+// opts.Tasks can now name several tasks in one checkpoint, so there is no
+// single path to trailer-point at even in principle.
+func (s *treeWriter) buildCommitMessage(opts WriteOptions) string {
 	var commitMsg strings.Builder
 
 	// Subject line is always the checkpoint ID for consistent formatting
 	fmt.Fprintf(&commitMsg, "Checkpoint: %s\n\n", opts.CheckpointID)
 
-	// Include custom description in body if provided (e.g., task checkpoint details)
+	// Include custom description in body if provided
 	if opts.CommitSubject != "" {
 		commitMsg.WriteString(opts.CommitSubject + "\n\n")
 	}
@@ -1336,29 +1299,28 @@ func (s *treeWriter) buildCommitMessage(opts WriteOptions, taskMetadataPath stri
 	if opts.EphemeralBranch != "" {
 		fmt.Fprintf(&commitMsg, "%s: %s\n", trailers.EphemeralBranchTrailerKey, opts.EphemeralBranch)
 	}
-	if taskMetadataPath != "" {
-		fmt.Fprintf(&commitMsg, "%s: %s\n", trailers.MetadataTaskTrailerKey, taskMetadataPath)
-	}
 
 	return commitMsg.String()
 }
 
-// incrementalCheckpointData represents an incremental checkpoint during subagent execution.
-// This mirrors strategy.SubagentCheckpoint but avoids import cycles.
-type incrementalCheckpointData struct {
-	Type      string          `json:"type"`
-	ToolUseID string          `json:"tool_use_id"`
-	Timestamp time.Time       `json:"timestamp"`
-	Data      json.RawMessage `json:"data"`
-}
-
-// taskCheckpointData represents a final task checkpoint.
-// This mirrors strategy.TaskCheckpoint but avoids import cycles.
-type taskCheckpointData struct {
-	SessionID      string `json:"session_id"`
-	ToolUseID      string `json:"tool_use_id"`
-	CheckpointUUID string `json:"checkpoint_uuid"`
-	AgentID        string `json:"agent_id,omitempty"`
+// taskRecordMetadata is the on-disk shape of a materialized task record's
+// task.json — the durable record of one subagent's work inside a session
+// checkpoint. See TaskPayload for field semantics.
+type taskRecordMetadata struct {
+	ToolUseID       string            `json:"tool_use_id"`
+	AgentID         string            `json:"agent_id,omitempty"`
+	SubagentType    string            `json:"subagent_type,omitempty"`
+	TaskDescription string            `json:"task_description,omitempty"`
+	Files           []string          `json:"files,omitempty"`
+	TokenUsage      *types.TokenUsage `json:"token_usage,omitempty"`
+	// StartedAt/CompletedAt use omitzero (not omitempty, which classic
+	// encoding/json never treats a struct as "empty" for): CompletedAt's
+	// absence from the JSON is exactly what marks the task in flight when
+	// this checkpoint was materialized, so a zero time.Time must actually be
+	// omitted, not serialized as "0001-01-01T00:00:00Z".
+	StartedAt                   time.Time `json:"started_at,omitzero"`
+	CompletedAt                 time.Time `json:"completed_at,omitzero"`
+	TranscriptUnavailableReason string    `json:"transcript_unavailable_reason,omitempty"`
 }
 
 // Read reads a committed checkpoint's summary by ID from the entire/checkpoints/v1 branch.
@@ -1381,13 +1343,7 @@ func (s *GitStore) Read(ctx context.Context, checkpointID id.CheckpointID) (*Che
 		return nil, err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	ft, err := s.getFetchingTree(ctx)
-	if err != nil {
-		return nil, nil //nolint:nilnil,nilerr // No sessions branch means no checkpoint exists
-	}
-
-	checkpointPath := checkpointID.Path()
-	checkpointTree, err := ft.Tree(checkpointPath)
+	checkpointTree, err := s.getCheckpointFetchingTree(ctx, checkpointID)
 	if err != nil {
 		return nil, nil //nolint:nilnil,nilerr // Checkpoint directory not found
 	}
@@ -1429,12 +1385,7 @@ func (s *GitStore) getSessionTree(ctx context.Context, checkpointID id.Checkpoin
 		return nil, err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	ft, err := s.getFetchingTree(ctx)
-	if err != nil {
-		return nil, ErrCheckpointNotFound
-	}
-
-	checkpointTree, err := ft.Tree(checkpointID.Path())
+	checkpointTree, err := s.getCheckpointFetchingTree(ctx, checkpointID)
 	if err != nil {
 		return nil, ErrCheckpointNotFound
 	}
@@ -1624,23 +1575,40 @@ func (s *GitStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 		return nil, err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	tree, err := s.getSessionsBranchTree()
+	trees, err := s.getSessionsBranchTrees(ctx)
 	if err != nil {
 		return []CheckpointInfo{}, nil //nolint:nilerr // No sessions branch means empty list
 	}
 
 	var checkpoints []CheckpointInfo
+	seen := make(map[id.CheckpointID]struct{})
 
 	// Scan sharded structure: <2-char-prefix>/<remaining-id>/metadata.json
-	_ = WalkCheckpointShards(ctx, s.repo, tree, func(checkpointID id.CheckpointID, cpTreeHash plumbing.Hash) error { //nolint:errcheck // callback never returns errors
-		checkpointTree, cpTreeErr := s.repo.TreeObject(cpTreeHash)
-		if cpTreeErr != nil {
-			return nil //nolint:nilerr // skip unreadable entries, continue walking
-		}
+	for _, entry := range trees {
+		before := len(checkpoints)
+		_ = WalkCheckpointShards(ctx, s.repo, entry.tree, func(checkpointID id.CheckpointID, cpTreeHash plumbing.Hash) error { //nolint:errcheck // callback never returns errors
+			if _, ok := seen[checkpointID]; ok {
+				return nil
+			}
+			checkpointTree, cpTreeErr := s.repo.TreeObject(cpTreeHash)
+			if cpTreeErr != nil {
+				return nil //nolint:nilerr // skip unreadable entries, continue walking
+			}
 
-		checkpoints = append(checkpoints, readCommittedInfoFromCheckpointTree(checkpointID, checkpointTree))
-		return nil
-	})
+			seen[checkpointID] = struct{}{}
+			checkpoints = append(checkpoints, readCommittedInfoFromCheckpointTree(checkpointID, checkpointTree))
+			return nil
+		})
+		if contributed := len(checkpoints) - before; contributed > 0 && !entry.local(s.refs.Read) {
+			// Tier observability: checkpoints visible only through a
+			// remote-tracking tier are expected for legacy data, but must be
+			// diagnosable when they are a symptom (stale local branch,
+			// mis-elected remote).
+			logging.Debug(ctx, "checkpoint list: remote-tracking tier contributed checkpoints",
+				slog.String("ref", entry.ref.String()),
+				slog.Int("contributed", contributed))
+		}
+	}
 
 	sortCheckpointInfosByRecency(checkpoints) // most recent first
 
@@ -2212,44 +2180,230 @@ func (s *GitStore) maybeMergeVercelConfig(ctx context.Context, rootTreeHash plum
 	return mergedTreeHash, nil
 }
 
-// getFetchingTree returns a FetchingTree for the metadata branch.
-// If a blob fetcher is configured on the store, File() calls on the returned
-// tree will automatically fetch missing blobs from the remote.
-func (s *GitStore) getFetchingTree(ctx context.Context) (*FetchingTree, error) {
-	tree, err := s.getSessionsBranchTree()
+// getCheckpointFetchingTree resolves a checkpoint against each available
+// metadata tree in precedence order. Selecting by checkpoint path—not merely
+// by ref existence—lets a local orphan or partial elected-remote history fall
+// through to a legacy remote that still contains the requested checkpoint.
+func (s *GitStore) getCheckpointFetchingTree(ctx context.Context, checkpointID id.CheckpointID) (*FetchingTree, error) {
+	trees, err := s.getSessionsBranchTrees(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return NewFetchingTree(ctx, tree, s.repo.Storer, s.blobFetcher), nil
+	for _, entry := range trees {
+		fetchingTree := NewFetchingTree(ctx, entry.tree, s.repo.Storer, s.blobFetcher)
+		checkpointTree, treeErr := fetchingTree.Tree(checkpointID.Path())
+		if treeErr == nil {
+			if !entry.local(s.refs.Read) {
+				// The wrong-tier hazard made observable: a read served by a
+				// remote-tracking tier instead of the local primary is
+				// legitimate (legacy data, stale local branch) but must be
+				// diagnosable when it is not.
+				logging.Debug(ctx, "checkpoint read served from a remote-tracking tier",
+					slog.String("checkpoint_id", checkpointID.String()),
+					slog.String("ref", entry.ref.String()))
+			}
+			return checkpointTree, nil
+		}
+	}
+	return nil, ErrCheckpointNotFound
 }
 
-// getSessionsBranchTree returns the tree object at refs.Read. Falls back to
-// origin's remote-tracking ref for Primary when ReadBootstrappableFromOrigin
-// is true.
-func (s *GitStore) getSessionsBranchTree() (*object.Tree, error) {
-	ref, err := s.repo.Reference(s.refs.Read, true)
+// getSessionsBranchTree returns the first available committed metadata tree. See
+// getSessionsBranchTrees for the precedence and recovery it delegates to.
+func (s *GitStore) getSessionsBranchTree(ctx context.Context) (*object.Tree, error) {
+	trees, err := s.getSessionsBranchTrees(ctx)
 	if err != nil {
-		if !s.refs.ReadBootstrappableFromOrigin() {
-			return nil, fmt.Errorf("sessions ref %s not found: %w", s.refs.Read, err)
+		return nil, err
+	}
+	return trees[0].tree, nil
+}
+
+// getSessionsBranchTrees returns every available committed metadata tree in read
+// precedence: refs.Read first, then each checkpoint read candidate's
+// remote-tracking ref for Primary when ReadBootstrappableFromRemote is true
+// (legacy origin-only when no chain was injected). Trees pointing at the same
+// commit are deduplicated. Resolving several — and selecting by requested
+// checkpoint downstream — lets a local orphan or a partial elected-remote history
+// fall through to a candidate that still holds the checkpoint. The candidate reads
+// are pure: the chain never seeds or advances local refs.
+//
+// When no candidate carries checkpoint data and a metadata-branch fetcher is
+// wired, the branch is fetched once from the configured checkpoint remote and the
+// candidates are resolved again. That tier matters for a fresh clone of a repo
+// whose checkpoints live on a dedicated checkpoint_remote: the branch is absent
+// locally and origin never received it, so without the fetch every committed
+// checkpoint reads as "not found" with no way to recover.
+//
+// The trigger is "no candidate holds data", not merely "no candidate resolved": a
+// local orphan carrying nothing but initialization artifacts is, to a reader,
+// indistinguishable from no branch at all, but it makes a ref resolve and would
+// otherwise mask the miss and leave the real checkpoints permanently unreachable.
+//
+// Ordering is local-then-network by construction — candidates are free ref reads,
+// the fetch is not — and tryFetchMetadataBranch latches one attempt per store, so
+// N candidates across repeated entries still pay at most one fetch.
+func (s *GitStore) getSessionsBranchTrees(ctx context.Context) ([]metadataTree, error) {
+	trees, firstErr := s.resolveSessionsBranchTrees()
+	if anyTreeHasCheckpointData(trees) {
+		return trees, nil
+	}
+	if s.tryFetchMetadataBranch(ctx) {
+		fetched, fetchedErr := s.resolveSessionsBranchTrees()
+		if len(fetched) > 0 {
+			return fetched, nil
 		}
-		remoteRefName := plumbing.NewRemoteReferenceName("origin", s.refs.Primary.Short())
-		ref, err = s.repo.Reference(remoteRefName, true)
+		if firstErr == nil {
+			firstErr = fetchedErr
+		}
+	}
+	if len(trees) == 0 {
+		if !s.refs.ReadBootstrappableFromRemote() {
+			return nil, fmt.Errorf("sessions ref %s not found: %w", s.refs.Read, firstErr)
+		}
+		return nil, fmt.Errorf("sessions branch not found: %w", firstErr)
+	}
+	// Unrecovered but resolvable: return what is there rather than firstErr.
+	// Callers such as List treat a data-free tree as an empty result, so
+	// surfacing a transport error here would turn an offline read into a hard
+	// failure.
+	return trees, nil
+}
+
+// anyTreeHasCheckpointData reports whether any candidate tree holds checkpoint
+// data, generalizing treeHasCheckpointData's single-tree question to the
+// candidate chain.
+func anyTreeHasCheckpointData(trees []metadataTree) bool {
+	for _, entry := range trees {
+		if treeHasCheckpointData(entry.tree) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveSessionsBranchTrees resolves each read candidate's ref and loads its root
+// tree, deduplicated by commit. Purely local: no network. The returned error is
+// advisory — the first resolution failure — and is only fatal to the caller when
+// no tree resolved at all.
+// metadataTree is one resolved read-candidate tree together with the ref it
+// came from, so consumers can report WHICH tier served a read — the risk the
+// chain carries is a wrong-tier read going unnoticed, and "silently" is the
+// part observability removes.
+type metadataTree struct {
+	tree *object.Tree
+	ref  plumbing.ReferenceName
+}
+
+// local reports whether this tree came from the local read ref rather than a
+// remote-tracking tier.
+func (m metadataTree) local(readRef plumbing.ReferenceName) bool {
+	return m.ref == readRef
+}
+
+func (s *GitStore) resolveSessionsBranchTrees() ([]metadataTree, error) {
+	refNames := []plumbing.ReferenceName{s.refs.Read}
+	if s.refs.ReadBootstrappableFromRemote() {
+		remotes := s.readRemotes
+		if len(remotes) == 0 {
+			remotes = []string{"origin"}
+		}
+		for _, remoteName := range remotes {
+			refNames = append(refNames, plumbing.NewRemoteReferenceName(remoteName, s.refs.Primary.Short()))
+		}
+	}
+
+	trees := make([]metadataTree, 0, len(refNames))
+	kept := make([]*object.Commit, 0, len(refNames))
+	seen := make(map[plumbing.Hash]struct{}, len(refNames))
+	var firstErr error
+	for _, refName := range refNames {
+		ref, err := s.repo.Reference(refName, true)
 		if err != nil {
-			return nil, fmt.Errorf("sessions branch not found: %w", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if _, ok := seen[ref.Hash()]; ok {
+			continue
+		}
+		commit, err := s.repo.CommitObject(ref.Hash())
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to get commit object for %s: %w", refName, err)
+			}
+			continue
+		}
+		// A candidate whose commit is an ancestor of an already-kept tree
+		// contributes nothing: every checkpoint in it is in the descendant.
+		// This is the common shape — the local branch ahead of a tracking
+		// ref — and skipping it saves consumers a full duplicate shard walk
+		// on every List. Best-effort: an ancestry-check error keeps the tree
+		// (a duplicate walk is cheaper than a missed checkpoint).
+		if treeIsAncestorOfKept(commit, kept) {
+			continue
+		}
+		tree, err := commit.Tree()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to get commit tree for %s: %w", refName, err)
+			}
+			continue
+		}
+		seen[ref.Hash()] = struct{}{}
+		kept = append(kept, commit)
+		trees = append(trees, metadataTree{tree: tree, ref: refName})
+	}
+	return trees, firstErr
+}
+
+// treeIsAncestorOfKept reports whether commit is an ancestor of (or equal to)
+// any already-kept candidate commit. Errors read as false — keep the tree.
+func treeIsAncestorOfKept(commit *object.Commit, kept []*object.Commit) bool {
+	for _, k := range kept {
+		if ancestor, err := commit.IsAncestor(k); err == nil && ancestor {
+			return true
 		}
 	}
+	return false
+}
 
-	commit, err := s.repo.CommitObject(ref.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit object: %w", err)
+// treeHasCheckpointData reports whether a metadata branch root tree holds
+// anything beyond orphan-initialization artifacts. It mirrors
+// strategy.metadataBranchHasData, which decides the same question when healing
+// an un-initialized orphan; the two must agree on what "un-initialized" means or
+// enable and read disagree about whether a branch is worth recovering.
+func treeHasCheckpointData(tree *object.Tree) bool {
+	if tree == nil {
+		return false
 	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit tree: %w", err)
+	for _, entry := range tree.Entries {
+		if entry.Name != vercelconfig.FileName {
+			return true
+		}
 	}
+	return false
+}
 
-	return tree, nil
+// tryFetchMetadataBranch runs the injected metadata-branch fetcher at most once
+// per store, reporting whether it succeeded. The once-per-store latch matters:
+// a single command re-enters getSessionsBranchTree several times (List, then
+// getFetchingTree for each read), so without it a repo the fetch cannot recover
+// — remote has no v1, is unreachable, or refuses auth — would re-pay the whole
+// fetch budget on every entry.
+func (s *GitStore) tryFetchMetadataBranch(ctx context.Context) bool {
+	if s.metadataBranchFetcher == nil || s.metadataBranchFetchTried {
+		return false
+	}
+	s.metadataBranchFetchTried = true
+	if err := s.metadataBranchFetcher(ctx); err != nil {
+		logging.Debug(ctx, "sessions branch: checkpoint remote fetch failed",
+			slog.String("ref", s.refs.Read.String()),
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+	return true
 }
 
 // CreateBlobFromContent creates a blob object from in-memory content.
@@ -2328,7 +2482,10 @@ func (s *treeWriter) copyMetadataDir(ctx context.Context, metadataDir, sessionDi
 		// tree, re-redacts these blobs with OPF when enabled, and
 		// rewrites entire/checkpoints/v1 into OPF-applied (9-layer)
 		// commits before they leave the local machine.
-		blobHash, mode, err := createRedactedBlobFromFile(ctx, s.repo, path, relPath)
+		// No prefix cache here: this path is unreachable in production (no
+		// production WriteOptions sets MetadataDir) and relPath is not
+		// session-scoped, so it would key every session to one slot.
+		blobHash, mode, err := createRedactedBlobFromFile(ctx, s.repo, nil, path, relPath)
 		if err != nil {
 			return fmt.Errorf("failed to create blob for %s: %w", path, err)
 		}
@@ -2357,7 +2514,7 @@ func (s *treeWriter) copyMetadataDir(ctx context.Context, metadataDir, sessionDi
 // regex-only blobs into OPF-applied (9-layer) commits before they leave the
 // local machine.
 // JSONL files get JSONL-aware redaction; all other files get plain byte redaction.
-func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, filePath, treePath string) (plumbing.Hash, filemode.FileMode, error) {
+func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, cache *redactCache, filePath, treePath string) (plumbing.Hash, filemode.FileMode, error) {
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return plumbing.ZeroHash, 0, fmt.Errorf("failed to stat file: %w", err)
@@ -2384,12 +2541,29 @@ func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, fileP
 		return hash, mode, nil
 	}
 
-	content = RedactBlobBytes(ctx, content, treePath, false)
+	// Large append-only transcripts reuse the prefix redacted for the previous
+	// checkpoint and redact only what was appended; see redact_cache.go. Output is
+	// identical to redacting the whole file.
+	result, err := redactIncrementally(ctx, repo, cache, content, treePath)
+	if err != nil {
+		return plumbing.ZeroHash, 0, err
+	}
+	if result.Redacted == nil {
+		result.Redacted, err = RedactBlobBytes(ctx, content, treePath, false)
+		if err != nil {
+			return plumbing.ZeroHash, 0, err
+		}
+	}
 
-	hash, err := CreateBlobFromContent(repo, content)
+	hash, err := CreateBlobFromContent(repo, result.Redacted)
 	if err != nil {
 		return plumbing.ZeroHash, 0, fmt.Errorf("failed to create blob: %w", err)
 	}
+
+	if result.StorePrefix {
+		cache.storePrefix(ctx, treePath, result.SourceHash, len(content), hash)
+	}
+
 	return hash, mode, nil
 }
 
@@ -2400,6 +2574,11 @@ func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, fileP
 // usePrivacyFilter is true the full 9-layer pipeline (the eight regex
 // layers plus OPF) runs; otherwise just the eight regex layers.
 //
+// Returns an error wrapping redact.ErrScannerDegraded (content nil) when
+// the sole configured scanner degraded on a JSON-shaped blob — callers
+// must match it with errors.Is and fail the write rather than fall back
+// to under-scanned plain redaction.
+//
 // .json is handled alongside .jsonl because checkpoint metadata files
 // (metadata.json, per-session metadata.json) carry free-form fields
 // like Summary.Intent / Summary.Outcome / ReviewPrompt that can
@@ -2407,9 +2586,13 @@ func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, fileP
 // string leaves and applies OPF only to those, preserving the JSON
 // structure.
 //
-// Post-commit condensation uses false (fast path). The pre-push rewrite
-// (strategy/manual_commit_opf_rewrite.go) uses true.
-func RedactBlobBytes(ctx context.Context, content []byte, treePath string, usePrivacyFilter bool) []byte {
+// Post-commit condensation uses false (fast path). The pre-push
+// rewrite does NOT come through here — it batches all blobs through
+// redact.BatchBytesWithPrivacyFilter, which fails closed on an
+// enabled-but-no-categories OPF config; the true path below silently
+// falls back to regex-only in that state, so it must not be wired
+// into any flow that stamps the Entire-OPF-Applied trailer.
+func RedactBlobBytes(ctx context.Context, content []byte, treePath string, usePrivacyFilter bool) ([]byte, error) {
 	if strings.HasSuffix(treePath, ".jsonl") || strings.HasSuffix(treePath, ".json") {
 		var (
 			redacted redact.RedactedBytes
@@ -2421,14 +2604,17 @@ func RedactBlobBytes(ctx context.Context, content []byte, treePath string, usePr
 			redacted, err = redact.JSONLBytes(content)
 		}
 		if err == nil {
-			return redacted.Bytes()
+			return redacted.Bytes(), nil
+		}
+		if errors.Is(err, redact.ErrScannerDegraded) {
+			return nil, fmt.Errorf("redact %s: %w", treePath, err)
 		}
 		// JSONL parse failed — fall through to plain bytes.
 	}
 	if usePrivacyFilter {
-		return redact.BytesWithPrivacyFilter(ctx, content)
+		return redact.BytesWithPrivacyFilter(ctx, content), nil
 	}
-	return redact.Bytes(content)
+	return redact.Bytes(content), nil
 }
 
 // GetGitAuthorFromRepo retrieves the git user.name and user.email,
@@ -2689,8 +2875,38 @@ type AuthorReader interface {
 // committed-read ref history.
 // Finds the commit whose subject matches "Checkpoint: <id>" and returns its author.
 // Returns empty Author if the checkpoint is not found or the sessions branch doesn't exist.
+// GetCheckpointAuthor consults the same read-candidate chain as content
+// reads: the local read ref first, then the read remotes' tracking refs. A
+// checkpoint whose commit exists only on a remote tier (a legacy checkpoint
+// on origin, or one on the elected sync remote a stale local branch lacks)
+// would otherwise show an empty author in explain while its content resolves
+// fine through the chain.
 func (s *GitStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (Author, error) {
-	return getCheckpointAuthorFromRef(ctx, s.repo, s.refs.Read, checkpointID)
+	refNames := []plumbing.ReferenceName{s.refs.Read}
+	if s.refs.ReadBootstrappableFromRemote() {
+		remotes := s.readRemotes
+		if len(remotes) == 0 {
+			remotes = []string{"origin"}
+		}
+		for _, remoteName := range remotes {
+			refNames = append(refNames, plumbing.NewRemoteReferenceName(remoteName, s.refs.Primary.Short()))
+		}
+	}
+	for _, refName := range refNames {
+		author, err := getCheckpointAuthorFromRef(ctx, s.repo, refName, checkpointID)
+		if err != nil {
+			return Author{}, err
+		}
+		if author != (Author{}) {
+			if refName != s.refs.Read {
+				logging.Debug(ctx, "checkpoint author served from a remote-tracking tier",
+					slog.String("checkpoint_id", checkpointID.String()),
+					slog.String("ref", refName.String()))
+			}
+			return author, nil
+		}
+	}
+	return Author{}, nil
 }
 
 func getCheckpointAuthorFromRef(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, checkpointID id.CheckpointID) (Author, error) {

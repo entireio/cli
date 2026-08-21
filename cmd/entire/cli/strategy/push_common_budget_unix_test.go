@@ -42,7 +42,7 @@ func TestDoPushRef_SharedBudget_BoundsTotalWallClock(t *testing.T) {
 	const target = "ssh://git@localhost/checkpoints.git"
 
 	start := time.Now()
-	err := doPushRef(context.Background(), target, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	_, err := doPushRef(context.Background(), target, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	elapsed := time.Since(start)
 
 	require.NoError(t, err, "doPushRef degrades gracefully on a stuck transport")

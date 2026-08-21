@@ -487,7 +487,12 @@ func TestShadow_PostRewriteRebaseRemapsSessionState(t *testing.T) {
 	env.GitCommit("Upstream change")
 	env.gitCheckout("feature/post-rewrite-rebase")
 
-	cmd := exec.CommandContext(t.Context(), "git", "rebase", "master")
+	// Rebase with repo hooks disabled: this test drives post-rewrite explicitly
+	// below in order to observe the session state on both sides of it. Letting
+	// git fire the installed post-rewrite hook here would remap BaseCommit before
+	// the assertion that it is still the original, and would make the test's
+	// outcome depend on whether an `entire` binary happens to be on PATH.
+	cmd := exec.CommandContext(t.Context(), "git", "-c", "core.hooksPath="+t.TempDir(), "rebase", "master")
 	cmd.Dir = env.RepoDir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git rebase failed: %v\nOutput: %s", err, output)

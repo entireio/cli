@@ -446,7 +446,7 @@ func TestExternalAgent_HookSupport(t *testing.T) {
 		t.Errorf("HookNames() = %v, want 2 names", names)
 	}
 
-	installed, err := ea.InstallHooks(context.Background(), false, false)
+	installed, err := ea.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks: %v", err)
 	}

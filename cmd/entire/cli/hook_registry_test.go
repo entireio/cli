@@ -85,9 +85,12 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	// Enable debug logging
 	t.Setenv(logging.LogLevelEnvVar, "DEBUG")
 
-	// Initialize logging (normally done by PersistentPreRunE)
-	cleanup := initHookLogging(context.Background())
-	defer cleanup()
+	// Open the log sink (normally done by the root PersistentPreRun)
+	l, err := logging.New(logging.Config{Dir: logsDir, Level: resolveLogLevel(context.Background())})
+	if err != nil {
+		t.Fatalf("logging.New() error = %v", err)
+	}
+	defer func() { _ = l.Close() }()
 
 	// Create a transcript file for the hook input
 	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
@@ -110,14 +113,18 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
+	// Executing the verb directly skips the root PersistentPreRun, so inject the
+	// logger it would have put in the context. Nothing resolves through package
+	// state any more: a hook logs where its context says, or nowhere.
+	cmd.SetContext(logging.WithLogger(context.Background(), l))
+
 	// Execute the command
-	err := cmd.Execute()
-	if err != nil {
+	if err := cmd.Execute(); err != nil {
 		t.Fatalf("command execution failed: %v", err)
 	}
 
 	// Close logging to flush
-	cleanup()
+	_ = l.Close()
 
 	// Verify log file was created and contains expected content
 	logFile := filepath.Join(logsDir, "entire.log")
@@ -571,61 +578,39 @@ func TestExecuteAgentHookPostTodoFailsWhenPolicyUnsupported(t *testing.T) {
 	require.Contains(t, stderr.String(), "No Entire checkpoints will be created until the CLI is upgraded.")
 }
 
-func TestClaudeCodeHooksCmd_HasLoggingHooks(t *testing.T) {
-	// This test verifies that the claude-code hooks command has PersistentPreRunE
-	// and PersistentPostRunE for logging initialization and cleanup
-
-	// Get the actual hooks command which contains the claude-code subcommand
+// TestAgentHooksCmd_AttachesHookSessionContext pins where each agent hook tree
+// gets its context and where flushing happens. PersistentPreRun attaches the
+// hook session context; PersistentPostRun/E must stay unset, because the log
+// sink is opened by the root PersistentPreRun and flushed by its
+// PersistentPostRun (and again by main.go for the error path cobra skips
+// post-runs on).
+//
+// Both variants are asserted because cobra picks PersistentPreRunE over
+// PersistentPreRun when both are set, so a stray E would silently shadow this
+// one.
+func TestAgentHooksCmd_AttachesHookSessionContext(t *testing.T) {
 	hooksCmd := newHooksCmd()
 
-	// Find the claude-code subcommand
-	var claudeCodeCmd *cobra.Command
-	for _, sub := range hooksCmd.Commands() {
-		if sub.Use == testAgentName {
-			claudeCodeCmd = sub
-			break
-		}
-	}
+	for _, agentSubcommand := range []string{testAgentName, "gemini"} {
+		t.Run(agentSubcommand, func(t *testing.T) {
+			var agentCmd *cobra.Command
+			for _, sub := range hooksCmd.Commands() {
+				if sub.Use == agentSubcommand {
+					agentCmd = sub
+					break
+				}
+			}
+			require.NotNil(t, agentCmd, "expected to find %s subcommand under hooks", agentSubcommand)
 
-	require.NotNil(t, claudeCodeCmd, "expected to find claude-code subcommand under hooks")
-
-	// Verify PersistentPreRunE is set
-	if claudeCodeCmd.PersistentPreRunE == nil {
-		t.Error("expected PersistentPreRunE to be set for logging initialization")
-	}
-
-	// Verify PersistentPostRunE is set
-	if claudeCodeCmd.PersistentPostRunE == nil {
-		t.Error("expected PersistentPostRunE to be set for logging cleanup")
-	}
-}
-
-func TestGeminiCLIHooksCmd_HasLoggingHooks(t *testing.T) {
-	// This test verifies that the gemini hooks command has PersistentPreRunE
-	// and PersistentPostRunE for logging initialization and cleanup
-
-	// Get the actual hooks command which contains the gemini subcommand
-	hooksCmd := newHooksCmd()
-
-	// Find the gemini subcommand
-	var geminiCmd *cobra.Command
-	for _, sub := range hooksCmd.Commands() {
-		if sub.Use == "gemini" {
-			geminiCmd = sub
-			break
-		}
-	}
-
-	require.NotNil(t, geminiCmd, "expected to find gemini subcommand under hooks")
-
-	// Verify PersistentPreRunE is set
-	if geminiCmd.PersistentPreRunE == nil {
-		t.Error("expected PersistentPreRunE to be set for logging initialization")
-	}
-
-	// Verify PersistentPostRunE is set
-	if geminiCmd.PersistentPostRunE == nil {
-		t.Error("expected PersistentPostRunE to be set for logging cleanup")
+			require.NotNil(t, agentCmd.PersistentPreRun,
+				"PersistentPreRun must attach the hook session context")
+			require.Nil(t, agentCmd.PersistentPreRunE,
+				"PersistentPreRunE must stay unset: cobra would run it instead of PersistentPreRun")
+			require.Nil(t, agentCmd.PersistentPostRun,
+				"PersistentPostRun must stay unset: the root PersistentPostRun and main.go flush the log sink")
+			require.Nil(t, agentCmd.PersistentPostRunE,
+				"PersistentPostRunE must stay unset: the root PersistentPostRun and main.go flush the log sink")
+		})
 	}
 }
 

@@ -16,7 +16,7 @@ import (
 // in <user_query> tags, and contains no tool_use blocks.
 func sampleTranscriptLines() []string {
 	return []string{
-		`{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nhello\n</user_query>"}]}}`,
+		`{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Tuesday, Aug 18, 2026, 2:37 PM GMT+2</timestamp>\n<user_query>\n<timestamp>2026-01-01</timestamp> is my format, hello\n</user_query>"}]}}`,
 		`{"role":"assistant","message":{"content":[{"type":"text","text":"Hi there!"}]}}`,
 		`{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nadd 'one' to a file and commit\n</user_query>"}]}}`,
 		`{"role":"assistant","message":{"content":[{"type":"text","text":"Created one.txt with one and committed."}]}}`,

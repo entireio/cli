@@ -41,7 +41,7 @@ func installHooksForCmdTest(t *testing.T, agentName types.AgentName) {
 	if !ok {
 		t.Fatalf("agent %q does not support hooks", agentName)
 	}
-	if _, err := hs.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := hs.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks(%q): %v", agentName, err)
 	}
 }

@@ -1,21 +1,31 @@
 package redact
 
 import (
+	"errors"
 	"log/slog"
 	"regexp"
+	"regexp/syntax"
 	"sync"
 )
 
 // CustomRulesConfig configures inline custom_redactions and parsed rule packs.
 type CustomRulesConfig struct {
 	// Inline maps a label (used only in logs/diagnostics) to a Go RE2 regex
-	// string. Failed compilations are logged via slog.Warn and dropped.
+	// string. Failed compilations are logged to Logger and dropped.
 	Inline map[string]string
 
 	// Packs are pre-parsed rule packs (see LoadPacks). Per-rule regex
 	// compilation failures are logged and dropped; sample mismatches are
 	// logged but do not drop the rule.
 	Packs []*Pack
+
+	// Logger receives this package's diagnostics (rule compile errors,
+	// sample mismatches). The CLI injects the logger its entry point
+	// initialized so warnings reach .entire/logs/ instead of the
+	// process-default stderr logger, which hook contexts swallow.
+	// nil means slog.Default(), preserving standalone behavior for
+	// library consumers and tests.
+	Logger *slog.Logger
 }
 
 // compiledCustomRule is a compiled regex retained across calls.
@@ -40,6 +50,44 @@ var (
 // (`logging.WithComponent(ctx, "redaction")`).
 var componentAttr = slog.String("component", "redaction")
 
+// loggerOrDefault resolves an injected diagnostics logger, falling back to
+// the process-default slog logger when the caller didn't provide one. No
+// package-level sink exists on purpose: the logger arrives by injection
+// (config field or parameter) from whichever entry point initialized it.
+func loggerOrDefault(l *slog.Logger) *slog.Logger {
+	if l != nil {
+		return l
+	}
+	return slog.Default()
+}
+
+// compileErrorAttr describes a regex compile failure without the pattern
+// text: regexp error strings quote the full pattern verbatim, and these
+// warnings are persisted to .entire/logs/ and packaged by doctor bundle. A
+// user who pastes a literal secret as a custom_redactions value and gets the
+// regex wrong must not have it stored there — the rule that would have
+// redacted it is exactly the one that failed to compile. The rule label/id
+// attrs beside this identify which pattern to fix; the user owns its text.
+func compileErrorAttr(err error) slog.Attr {
+	var serr *syntax.Error
+	if errors.As(err, &serr) {
+		return slog.String("error", string(serr.Code))
+	}
+	return slog.String("error", "regex compile failed")
+}
+
+// ActiveCustomRules reports how many user-defined rules (inline + pack)
+// actually compiled and are live in the detection pipeline — as opposed to
+// how many were configured, which silently diverges when a regex fails to
+// compile.
+func ActiveCustomRules() int {
+	cfg := getCustomRulesConfig()
+	if cfg == nil {
+		return 0
+	}
+	return len(cfg.rules)
+}
+
 // ConfigureCustomRules compiles user-defined redaction rules and stores the
 // result for use by redact.String(). Sample-validation runs here too, so
 // failures surface the next time any process initializes redaction.
@@ -47,9 +95,11 @@ var componentAttr = slog.String("component", "redaction")
 // Call once at process startup after loading settings. Thread-safe.
 func ConfigureCustomRules(cfg CustomRulesConfig) {
 	state := &customRulesState{}
+	logger := loggerOrDefault(cfg.Logger)
 
 	for label, pattern := range cfg.Inline {
 		compiled, ok := compileCustomRule(
+			logger,
 			label,
 			pattern,
 			"skipping invalid custom_redactions pattern",
@@ -63,6 +113,7 @@ func ConfigureCustomRules(cfg CustomRulesConfig) {
 	for _, pack := range cfg.Packs {
 		for _, rule := range pack.Rules {
 			compiled, ok := compileCustomRule(
+				logger,
 				pack.Name+"."+rule.ID,
 				rule.Regex,
 				"skipping invalid pack rule",
@@ -71,7 +122,7 @@ func ConfigureCustomRules(cfg CustomRulesConfig) {
 			)
 			if ok {
 				state.rules = append(state.rules, compiled)
-				runRuleSamples(pack, rule, compiled.regex)
+				runRuleSamples(logger, pack, rule, compiled.regex)
 			}
 		}
 	}
@@ -81,14 +132,14 @@ func ConfigureCustomRules(cfg CustomRulesConfig) {
 	customConfig = state
 }
 
-func compileCustomRule(label, pattern, warning string, attrs ...any) (compiledCustomRule, bool) {
+func compileCustomRule(logger *slog.Logger, label, pattern, warning string, attrs ...any) (compiledCustomRule, bool) {
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {
 		all := make([]any, 0, len(attrs)+2)
 		all = append(all, componentAttr)
 		all = append(all, attrs...)
-		all = append(all, slog.String("error", err.Error()))
-		slog.Warn(warning, all...)
+		all = append(all, compileErrorAttr(err))
+		logger.Warn(warning, all...)
 		return compiledCustomRule{}, false
 	}
 	return compiledCustomRule{label: label, regex: compiled}, true
@@ -97,11 +148,11 @@ func compileCustomRule(label, pattern, warning string, attrs ...any) (compiledCu
 // runRuleSamples checks each sample against the compiled regex and logs a
 // warning per mismatch. Failures never drop the rule — sample validation
 // is informational, not gating.
-func runRuleSamples(pack *Pack, rule Rule, compiled *regexp.Regexp) {
+func runRuleSamples(logger *slog.Logger, pack *Pack, rule Rule, compiled *regexp.Regexp) {
 	for i, s := range rule.Samples {
 		got := compiled.MatchString(s.Input)
 		if got != s.Redacted {
-			slog.Warn("redactor pack sample mismatch",
+			logger.Warn("redactor pack sample mismatch",
 				componentAttr,
 				slog.String("pack", pack.sourcePath),
 				slog.String("rule", rule.ID),

@@ -110,7 +110,7 @@ func assertManualHint(t *testing.T, out, wantCmd string) {
 	if !strings.Contains(out, "To update, run:") {
 		t.Errorf("missing manual-update hint: %q", out)
 	}
-	if !strings.Contains(out, wantCmd) {
+	if !strings.Contains(out, "  "+wantCmd) {
 		t.Errorf("manual hint missing installer command %q: %q", wantCmd, out)
 	}
 }
@@ -208,25 +208,57 @@ func TestMaybeAutoUpdate_WindowsUnknownInstallerNoAutoRun(t *testing.T) {
 	}
 }
 
-// TestMaybeAutoUpdate_WindowsScoopStillAutoRuns verifies that a Windows
-// scoop install still takes the interactive path — only unknown install
-// managers are blocked on Windows.
-func TestMaybeAutoUpdate_WindowsScoopStillAutoRuns(t *testing.T) {
-	f := newAutoUpdateFixture(t)
-	useScoopExecutable(t)
-
-	origGOOS := goos
-	goos = goosWindows
-	t.Cleanup(func() { goos = origGOOS })
-
-	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
-
-	if f.installCalls != 1 {
-		t.Fatalf("scoop install should auto-run on Windows; calls=%d", f.installCalls)
+// TestMaybeAutoUpdate_WindowsNeverAutoRuns verifies that on Windows the update
+// is never auto-run — a running entire.exe can't replace its own shim — so the
+// command is printed for the user to run once entire has exited. This holds for
+// every auto-installable manager on Windows, not just Scoop: mise is covered so
+// narrowing the branch back to Scoop can't silently regress it.
+func TestMaybeAutoUpdate_WindowsNeverAutoRuns(t *testing.T) {
+	tests := []struct {
+		name    string
+		setup   func(*testing.T)
+		wantCmd string
+	}{
+		{
+			name:    "scoop cli app prints migration command",
+			setup:   useScoopExecutable,
+			wantCmd: `cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"`,
+		},
+		{
+			name:    "mise prints upgrade command",
+			setup:   useMiseExecutable,
+			wantCmd: "mise upgrade entire",
+		},
 	}
-	if f.lastCommand != "scoop update entire/cli" {
-		t.Errorf("got %q, want scoop update entire/cli", f.lastCommand)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newAutoUpdateFixture(t)
+			tt.setup(t)
+
+			origGOOS := goos
+			goos = goosWindows
+			t.Cleanup(func() { goos = origGOOS })
+
+			var buf bytes.Buffer
+			action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+
+			if f.installCalls != 0 {
+				t.Fatalf("installer must not auto-run on Windows; calls=%d", f.installCalls)
+			}
+			// Plain skip, not skip-until-next-version: Windows gets no prompt,
+			// so there is no per-version choice to persist.
+			if action != autoUpdateActionSkip {
+				t.Errorf("action = %q, want %q", action, autoUpdateActionSkip)
+			}
+			out := buf.String()
+			if !strings.Contains(out, "when entire is not running") {
+				t.Errorf("missing Windows manual-run hint: %q", out)
+			}
+			if !strings.Contains(out, "  "+tt.wantCmd) {
+				t.Errorf("manual hint missing command %q: %q", tt.wantCmd, out)
+			}
+		})
 	}
 }
 
@@ -300,10 +332,13 @@ type installerCase struct {
 }
 
 func nonWindowsAutoInstallers() []installerCase {
+	// Scoop is intentionally absent: it is a Windows-only installer, and on
+	// Windows the update is print-only (never auto-run). Its command building is
+	// covered by TestUpdateCommand and its print-only path by
+	// TestMaybeAutoUpdate_WindowsNeverAutoRuns.
 	return []installerCase{
 		{name: "brew", setup: useBrewExecutable, wantCmd: brewUpgradeCmd},
 		{name: "mise", setup: useMiseExecutable, wantCmd: "mise upgrade entire"},
-		{name: "scoop", setup: useScoopExecutable, wantCmd: "scoop update entire/cli"},
 		{name: "unknown_curl_bash", setup: useUnknownExecutable, wantCmd: "curl -fsSL https://entire.io/install.sh | bash"},
 	}
 }

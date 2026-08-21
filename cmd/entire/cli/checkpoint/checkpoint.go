@@ -184,6 +184,11 @@ type WriteEphemeralTaskOptions struct {
 	// AgentID is the subagent identifier
 	AgentID string
 
+	// Agent identifies the agent that spawned the subagent. Needed to sanitize the
+	// stored subagent transcript: the type cannot be recovered from content, since
+	// DetectAgentTypeFromContent only recognizes Gemini.
+	Agent types.AgentType
+
 	// ModifiedFiles are files that have been modified (relative paths)
 	ModifiedFiles []string
 

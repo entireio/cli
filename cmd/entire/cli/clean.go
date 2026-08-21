@@ -11,7 +11,6 @@ import (
 
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -59,16 +58,8 @@ func newCleanCmd() *cobra.Command {
 				return errors.New("--all and --session cannot be used together")
 			}
 
-			// Check if in git repository before initializing logging,
-			// to avoid creating .entire/logs in arbitrary directories.
 			if _, err := paths.WorktreeRoot(ctx); err != nil {
 				return errors.New("not a git repository")
-			}
-
-			// Initialize logging
-			logging.SetLogLevelGetter(GetLogLevel)
-			if err := logging.Init(ctx, ""); err == nil {
-				defer logging.Close()
 			}
 
 			if allFlag {
@@ -317,7 +308,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	}
 
 	// Group items by type for display
-	var branches, states, checkpoints []strategy.CleanupItem
+	var branches, states, checkpoints, redactCaches []strategy.CleanupItem
 	for _, item := range items {
 		switch item.Type {
 		case strategy.CleanupTypeShadowBranch:
@@ -326,6 +317,8 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 			states = append(states, item)
 		case strategy.CleanupTypeCheckpoint:
 			checkpoints = append(checkpoints, item)
+		case strategy.CleanupTypeRedactCache:
+			redactCaches = append(redactCaches, item)
 		}
 	}
 
@@ -337,6 +330,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printSection(w, "Shadow branches", cleanupItemIDs(branches))
 		printSection(w, "Session states", cleanupItemIDs(states))
 		printSection(w, "Checkpoint metadata", cleanupItemIDs(checkpoints))
+		printSection(w, "Redaction cache", cleanupItemIDs(redactCaches))
 		printSection(w, "Temp files", tempFiles)
 
 		if dryRun {

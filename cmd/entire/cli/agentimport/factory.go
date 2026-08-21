@@ -1,6 +1,7 @@
 package agentimport
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -44,7 +45,7 @@ func (factoryImporter) Discover(repoRoot, overridePath string, now time.Time, se
 // modtime — the same fallback the Gemini importer uses.
 func (factoryImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
 	subagentsDir := paths.SubagentsDir(filepath.Dir(sf.Path), sf.SessionID)
-	model := factoryaidroid.ExtractModelFromTranscript(sf.Path)
+	model := factoryaidroid.ExtractModelFromTranscript(context.Background(), sf.Path)
 	var createdAt time.Time
 	if info, statErr := os.Stat(sf.Path); statErr == nil {
 		createdAt = info.ModTime()

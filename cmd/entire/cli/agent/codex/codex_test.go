@@ -57,6 +57,7 @@ func TestCodexAgent_HookNames(t *testing.T) {
 	ag := &CodexAgent{}
 	names := ag.HookNames()
 	require.Contains(t, names, "session-start")
+	require.Contains(t, names, "session-end")
 	require.Contains(t, names, "user-prompt-submit")
 	require.Contains(t, names, "stop")
 	require.Contains(t, names, "pre-tool-use")
