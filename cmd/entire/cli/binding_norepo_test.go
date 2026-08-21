@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/binding"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -83,6 +84,9 @@ func TestRecordNoRepoEvidence_StopBindsTranscriptRepo(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	launchDir := chdirNonRepo(t)
 	rootB := newBindingRepo(t)
+	testutil.WriteFile(t, rootB, "tracked.txt", "base\n")
+	testutil.GitAdd(t, rootB, "tracked.txt")
+	testutil.GitCommit(t, rootB, "initial")
 	enableEntireAt(t, rootB)
 
 	transcriptPath := filepath.Join(launchDir, "transcript.jsonl")
@@ -467,8 +471,12 @@ func TestRecordNoRepoEvidence_FailedWriteLeavesCursorForRescan(t *testing.T) {
 // still exits 0 so the agent is never blocked).
 func TestExecuteAgentHook_NonRepoCwdRecordsEvidence(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv(bindingReplayEnv, "")
 	launchDir := chdirNonRepo(t)
 	rootB := newBindingRepo(t)
+	testutil.WriteFile(t, rootB, "tracked.txt", "base\n")
+	testutil.GitAdd(t, rootB, "tracked.txt")
+	testutil.GitCommit(t, rootB, "initial")
 	enableEntireAt(t, rootB)
 
 	transcriptPath := filepath.Join(launchDir, "transcript.jsonl")
@@ -480,6 +488,17 @@ func TestExecuteAgentHook_NonRepoCwdRecordsEvidence(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	originalRunner := runBindingReplayHook
+	t.Cleanup(func() { runBindingReplayHook = originalRunner })
+	var replayRoot string
+	var replayPayload []byte
+	var replayPrimary bool
+	runBindingReplayHook = func(_ context.Context, targetRoot string, _, _ string, raw []byte, primary bool) error {
+		replayRoot = targetRoot
+		replayPayload = append([]byte(nil), raw...)
+		replayPrimary = primary
+		return nil
 	}
 
 	cmd := newAgentHookVerbCmdWithLogging(agent.AgentNameClaudeCode, claudecode.HookNameStop)
@@ -493,5 +512,11 @@ func TestExecuteAgentHook_NonRepoCwdRecordsEvidence(t *testing.T) {
 	rec := loadNoRepoRecord(t)
 	if rec == nil || len(rec.BoundRepos) != 1 || rec.BoundRepos[0].WorktreeRoot != rootB {
 		t.Fatalf("expected repo B bound through the hook entry point, got %+v", rec)
+	}
+	if rec.BoundRepos[0].AdoptedAt == nil {
+		t.Fatalf("expected hook entry point to replicate target state, got %+v", rec.BoundRepos[0])
+	}
+	if replayRoot != rootB || !bytes.Equal(replayPayload, payload) || !replayPrimary {
+		t.Fatalf("turn-end replay = root %q primary %v payload %q; want root %q primary true original payload", replayRoot, replayPrimary, replayPayload, rootB)
 	}
 }

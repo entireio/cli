@@ -86,6 +86,7 @@ func recordPath(sessionID string) (string, error) {
 type Evidence struct {
 	Repo    RepoIdentity
 	Enabled bool
+	Files   []string // repo-root-relative paths observed in this hook invocation
 }
 
 // RecordBinding upserts evidence that sessionID touched a repo: it creates

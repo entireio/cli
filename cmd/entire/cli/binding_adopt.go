@@ -26,21 +26,21 @@ const bindingAdoptLockTimeout = 2 * time.Second
 // the same session becomes active in the target repo without retiring or
 // modifying its source state. The binding record's marker is only written
 // after target state exists durably, so every failure is safe to retry.
-func ensureSessionReplicated(ctx context.Context, sessionID string, meta binding.SessionMeta, currentWorktreeRoot string, ev binding.Evidence) error {
+func ensureSessionReplicated(ctx context.Context, sessionID string, meta binding.SessionMeta, currentWorktreeRoot string, ev binding.Evidence) (bool, error) {
 	if !ev.Enabled {
-		return nil
+		return false, nil
 	}
 	// Enabled is evidence-time data. Re-check immediately before the repo write
 	// so a concurrent explicit disable remains an absolute veto.
 	if !settings.IsSetUpAtRoot(ev.Repo.WorktreeRoot) {
-		return nil
+		return false, nil
 	}
 	rec, err := binding.LoadRecord(ctx, sessionID)
 	if err != nil {
-		return fmt.Errorf("load session binding record: %w", err)
+		return false, fmt.Errorf("load session binding record: %w", err)
 	}
 	if rec == nil {
-		return errors.New("session binding record not found")
+		return false, errors.New("session binding record not found")
 	}
 	markedAdopted := false
 	for _, br := range rec.BoundRepos {
@@ -51,22 +51,22 @@ func ensureSessionReplicated(ctx context.Context, sessionID string, meta binding
 	}
 
 	if sameAdoptPath(currentWorktreeRoot, ev.Repo.WorktreeRoot) {
-		return nil
+		return false, nil
 	}
 	// ResolveRepoForPath accepts an evidence FILE path and starts at its parent;
 	// use the repo's .git entry so the first probed directory is the worktree.
 	resolved, ok := binding.ResolveRepoForPath(ctx, filepath.Join(ev.Repo.WorktreeRoot, ".git"))
 	if !ok || !sameAdoptStore(resolved.CommonDir, ev.Repo.CommonDir) {
-		return errors.New("target repo identity changed before adoption")
+		return false, errors.New("target repo identity changed before adoption")
 	}
 	targetStore := session.NewStateStoreWithDir(filepath.Join(ev.Repo.CommonDir, session.SessionStateDirName))
 	if markedAdopted {
 		existing, loadErr := targetStore.Load(ctx, sessionID)
 		if loadErr != nil {
-			return fmt.Errorf("verify adopted target session state: %w", loadErr)
+			return false, fmt.Errorf("verify adopted target session state: %w", loadErr)
 		}
 		if existing != nil {
-			return nil
+			return true, nil
 		}
 	}
 
@@ -74,7 +74,7 @@ func ensureSessionReplicated(ctx context.Context, sessionID string, meta binding
 	if currentWorktreeRoot != "" {
 		source, err = strategy.LoadSessionState(ctx, sessionID)
 		if err != nil {
-			return fmt.Errorf("load source session state: %w", err)
+			return false, fmt.Errorf("load source session state: %w", err)
 		}
 	}
 
@@ -88,7 +88,7 @@ func ensureSessionReplicated(ctx context.Context, sessionID string, meta binding
 		if existing != nil {
 			return nil
 		}
-		state, buildErr := buildReplicatedSessionState(ctx, source, rec, meta, ev.Repo)
+		state, buildErr := buildReplicatedSessionState(ctx, source, rec, meta, ev.Repo, ev.Files)
 		if buildErr != nil {
 			return buildErr
 		}
@@ -98,15 +98,15 @@ func ensureSessionReplicated(ctx context.Context, sessionID string, meta binding
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("replicate target session state: %w", err)
+		return false, fmt.Errorf("replicate target session state: %w", err)
 	}
 	if err := binding.MarkRepoAdopted(ctx, sessionID, ev.Repo.CommonDir); err != nil {
-		return fmt.Errorf("mark target repo adopted: %w", err)
+		return false, fmt.Errorf("mark target repo adopted: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
-func buildReplicatedSessionState(ctx context.Context, source *session.State, rec *binding.SessionRecord, meta binding.SessionMeta, target binding.RepoIdentity) (*session.State, error) {
+func buildReplicatedSessionState(ctx context.Context, source *session.State, rec *binding.SessionRecord, meta binding.SessionMeta, target binding.RepoIdentity, evidenceFiles []string) (*session.State, error) {
 	repo, err := gitrepo.OpenPath(target.WorktreeRoot)
 	if err != nil {
 		return nil, fmt.Errorf("open target repository: %w", err)
@@ -120,7 +120,7 @@ func buildReplicatedSessionState(ctx context.Context, source *session.State, rec
 	if err != nil {
 		return nil, fmt.Errorf("resolve target worktree ID: %w", err)
 	}
-	filesTouched, untrackedFiles := targetDirtyFiles(ctx, repo)
+	untrackedFiles := targetUntrackedFiles(ctx, repo)
 
 	now := time.Now()
 	var replicated session.State
@@ -161,31 +161,27 @@ func buildReplicatedSessionState(ctx context.Context, source *session.State, rec
 		worktreeRoot:   target.WorktreeRoot,
 		worktreeID:     worktreeID,
 		branch:         strategy.GetCurrentBranchName(repo),
-		filesTouched:   filesTouched,
+		filesTouched:   append([]string(nil), evidenceFiles...),
 		untrackedFiles: untrackedFiles,
 		now:            now,
 	}, true)
 	return &replicated, nil
 }
 
-func targetDirtyFiles(ctx context.Context, repo *git.Repository) (touched, untracked []string) {
+func targetUntrackedFiles(ctx context.Context, repo *git.Repository) []string {
 	status, err := gitrepo.StatusWithBudget(ctx, repo)
 	if err != nil {
-		return nil, nil
+		return nil
 	}
+	var untracked []string
 	for name, fileStatus := range status {
 		if name == ".entire" || strings.HasPrefix(name, ".entire/") {
 			continue
 		}
-		if fileStatus.Worktree == git.Unmodified && fileStatus.Staging == git.Unmodified {
-			continue
-		}
-		touched = append(touched, filepath.ToSlash(name))
 		if fileStatus.Worktree == git.Untracked || fileStatus.Staging == git.Untracked {
 			untracked = append(untracked, filepath.ToSlash(name))
 		}
 	}
-	sort.Strings(touched)
 	sort.Strings(untracked)
-	return touched, untracked
+	return untracked
 }
