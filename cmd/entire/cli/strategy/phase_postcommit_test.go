@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -1373,6 +1374,59 @@ func TestHandleTurnEnd_PartialFailure(t *testing.T) {
 		assert.Contains(t, string(content.Transcript), "now test it",
 			"Checkpoint %s should contain the full transcript (including later messages)", cpIDStr)
 	}
+}
+
+// TestFinalizeAllTurnCheckpoints_ScannerDegraded verifies that a degraded sole
+// scanner skips the finalize rewrite entirely: the provisional checkpoint's
+// transcript stays intact (no empty-transcript finalize), the call counts as
+// an error, and TurnCheckpointIDs is preserved so the next turn's fresh hook
+// process retries instead of orphaning the provisional checkpoints.
+func TestFinalizeAllTurnCheckpoints_ScannerDegraded(t *testing.T) {
+	// No t.Parallel: t.Chdir plus redact's process-global scanner state.
+	workDir := setupGitRepo(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = repo.Close() })
+
+	sessionID := "degraded-turn-finalize"
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	require.NoError(t, store.Write(context.Background(), checkpoint.Session{
+		CheckpointID: testTrailerCheckpointID,
+		SessionID:    sessionID,
+		Strategy:     StrategyNameManualCommit,
+		Transcript:   redact.AlreadyRedacted([]byte("old transcript\n")),
+		Prompts:      []string{"old prompt"},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+		Agent:        "Claude Code",
+	}))
+
+	metadataDir := filepath.Join(workDir, ".entire", "metadata", sessionID)
+	require.NoError(t, os.MkdirAll(metadataDir, 0o755))
+	transcriptPath := filepath.Join(metadataDir, paths.TranscriptFileName)
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(testTranscriptPromptResponse), 0o644))
+
+	state := &SessionState{
+		SessionID:         sessionID,
+		AgentType:         "Claude Code",
+		TranscriptPath:    transcriptPath,
+		TurnCheckpointIDs: []string{testTrailerCheckpointID.String()},
+	}
+
+	redact.WithScannerDegradedSole(t)
+
+	errCount := NewManualCommitStrategy().finalizeAllTurnCheckpoints(context.Background(), state)
+	require.Equal(t, 1, errCount)
+	require.Equal(t, []string{testTrailerCheckpointID.String()}, state.TurnCheckpointIDs,
+		"TurnCheckpointIDs must survive a degraded finalize so a later process retries")
+
+	content, err := store.ReadSessionContent(context.Background(), testTrailerCheckpointID, 0)
+	require.NoError(t, err)
+	require.Equal(t, "old transcript\n", string(content.Transcript),
+		"prior checkpoint transcript must stay intact when the finalize is skipped")
 }
 
 // setupSessionWithCheckpoint initializes a session and creates one checkpoint

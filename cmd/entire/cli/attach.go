@@ -342,6 +342,12 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 
 	tokenUsage := agent.CalculateTokenUsage(logCtx, ag, transcriptData, 0, "")
 
+	// attach writes checkpoints and historically never configured
+	// redaction; a scanner-config failure must fail the attach.
+	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
+		return fmt.Errorf("configuring redaction: %w", err)
+	}
+
 	_, redactSpan := perf.Start(ctx, "redact_transcript")
 	redactedTranscript, redactErr := redact.JSONLBytes(storedTranscript)
 	redactSpan.End()

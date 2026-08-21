@@ -318,6 +318,10 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		writeCheckpointSyncLines(ctx, &b, s, sty)
 	}
 
+	if s.Enabled {
+		writeSecretScannersLine(&b, s, sty)
+	}
+
 	// Show review status for HEAD's checkpoint, if any.
 	if reviewed, meta := headHasReviewCheckpoint(ctx); reviewed {
 		b.WriteString("\n")
@@ -339,6 +343,34 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 	}
 
 	return b.String()
+}
+
+// nonDefaultSecretScanners reports the enabled engines (betterleaks, then
+// goredact) when the selection differs from the default (betterleaks only);
+// nil otherwise. Both disabled is unreachable via these callers:
+// validateScannerSettings fail-closes merged settings before status loads them.
+func nonDefaultSecretScanners(s *EntireSettings) []string {
+	if s.BetterleaksEnabled() && !s.GoredactEnabled() {
+		return nil
+	}
+	var parts []string
+	if s.BetterleaksEnabled() {
+		parts = append(parts, "betterleaks")
+	}
+	if s.GoredactEnabled() {
+		parts = append(parts, "goredact")
+	}
+	return parts
+}
+
+func writeSecretScannersLine(b *strings.Builder, s *EntireSettings, sty statusStyles) {
+	parts := nonDefaultSecretScanners(s)
+	if len(parts) == 0 {
+		return
+	}
+	b.WriteString("\n")
+	b.WriteString(sty.render(sty.dim, "  Secret scanners · "))
+	b.WriteString(strings.Join(parts, ", "))
 }
 
 // formatSettingsStatus formats a settings status line with source prefix.
@@ -864,6 +896,8 @@ type statusJSON struct {
 	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|observed|default|sole|first|dedicated
 	CheckpointSyncError        string `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
 	UnpushedCheckpoints        int    `json:"unpushed_checkpoints,omitempty"`
+	// SecretScanners lists the enabled engines when non-default; omitted when default.
+	SecretScanners []string `json:"secret_scanners,omitempty"`
 	// GlobalTracking reports the machine-wide tracking tier. Omitted while
 	// unconfigured (the one-time question was never answered). Present on
 	// every output shape, including the not-a-git-repository one — status
@@ -972,6 +1006,8 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		if names := InstalledAgentDisplayNames(ctx); len(names) > 0 {
 			result.Agents = names
 		}
+
+		result.SecretScanners = nonDefaultSecretScanners(s)
 
 		for _, name := range OutdatedHookAgents(ctx) {
 			result.HooksOutdated = append(result.HooksOutdated, string(name))

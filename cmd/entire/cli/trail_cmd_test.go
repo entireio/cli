@@ -86,7 +86,7 @@ func TestPrepareTrailCreateBranchSkipsBranchlessTrail(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			state, err := prepareTrailCreateBranch(io.Discard, io.Discard, nil, tc.branch, "main", tc.noBranch)
+			state, err := prepareTrailCreateBranch(context.Background(), io.Discard, io.Discard, nil, "origin", tc.branch, "main", tc.noBranch)
 
 			require.NoError(t, err)
 			require.False(t, state.NeedsCreation)
@@ -331,7 +331,7 @@ func TestCleanupCreatedTrailBranch(t *testing.T) {
 			}
 
 			var errBuf bytes.Buffer
-			cleanupCreatedTrailBranch(repo, branch, tc.localCreated, tc.remotePushed, &errBuf)
+			cleanupCreatedTrailBranch(context.Background(), repo, "origin", branch, tc.localCreated, tc.remotePushed, &errBuf)
 
 			require.Equal(t, tc.wantLocalBranch, gitBranchExistsTrailTest(t, localDir, branch), "local branch mismatch; stderr: %s", errBuf.String())
 			require.Equal(t, tc.wantRemoteBranch, gitBranchExistsTrailTest(t, originDir, branch), "remote branch mismatch; stderr: %s", errBuf.String())
@@ -345,6 +345,7 @@ func TestCleanupCreatedTrailBranch(t *testing.T) {
 func initTrailCleanupRepo(t *testing.T) (localDir, originDir string, repo *git.Repository) {
 	t.Helper()
 
+	testutil.IsolateGitConfigEnv(t)
 	tmp := t.TempDir()
 	localDir = filepath.Join(tmp, "local")
 	originDir = filepath.Join(tmp, "origin.git")
@@ -2609,4 +2610,137 @@ func TestBuildTrailUpdateRequestTrimsTypeAndPriority(t *testing.T) {
 	if req.Priority == nil || *req.Priority != string(trail.PriorityHigh) {
 		t.Fatalf("Priority on wire = %v, want trimmed high", req.Priority)
 	}
+}
+
+// TestResolveTrailPushRemote covers the precedence a trail branch's delivery
+// follows. The tiers are git's own, so a repo whose branch pushes somewhere other
+// than "origin" (a fork workflow, remote.pushDefault) gets its branch delivered
+// there instead of silently to whatever "origin" happens to be.
+func TestResolveTrailPushRemote(t *testing.T) {
+	cases := []struct {
+		name    string
+		config  [][]string
+		branch  string
+		want    string
+		wantErr string
+	}{
+		{
+			name:   "nothing declared falls back to origin",
+			branch: "feature/x",
+			want:   "origin",
+		},
+		{
+			name:   "remote.pushDefault wins over nothing",
+			config: [][]string{{"remote.pushDefault", "fork"}},
+			branch: "feature/x",
+			want:   "fork",
+		},
+		{
+			name:   "branch.<name>.remote is used when it is all that is set",
+			config: [][]string{{"branch.feature/x.remote", "base"}},
+			branch: "feature/x",
+			want:   "base",
+		},
+		{
+			name: "branch.<name>.pushRemote outranks both",
+			config: [][]string{
+				{"remote.pushDefault", "fork"},
+				{"branch.feature/x.remote", "base"},
+				{"branch.feature/x.pushRemote", "mine"},
+			},
+			branch: "feature/x",
+			want:   "mine",
+		},
+		{
+			name: "remote.pushDefault outranks branch.<name>.remote",
+			config: [][]string{
+				{"remote.pushDefault", "fork"},
+				{"branch.feature/x.remote", "base"},
+			},
+			branch: "feature/x",
+			want:   "fork",
+		},
+		{
+			// The declaration is read for the branch being created, not for HEAD:
+			// `trail create --branch other` while on feature/x must not inherit
+			// feature/x's push remote.
+			name:   "declaration is read for the target branch, not HEAD",
+			config: [][]string{{"branch.feature/x.pushRemote", "mine"}},
+			branch: "other",
+			want:   "origin",
+		},
+		{
+			// Loud, not silently retargeted at origin: silent retargeting is the
+			// failure this resolver replaced.
+			name:    "a declared name git would read as a flag fails loudly",
+			config:  [][]string{{"remote.pushDefault", "--upload-pack=touched"}},
+			branch:  "feature/x",
+			wantErr: "would read as a command-line flag",
+		},
+		{
+			// A legal git value that the stricter write-direction validator in
+			// repo_mirror_use.go would reject. "." means the local repo.
+			name:   "a legal dot remote is accepted",
+			config: [][]string{{"branch.feature/x.remote", "."}},
+			branch: "feature/x",
+			want:   ".",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Without this, a developer or CI machine carrying a global
+			// remote.pushDefault resolves that instead of the repo-local config
+			// under test — and the "falls back to origin" case fails.
+			testutil.IsolateGitConfigEnv(t)
+			dir := t.TempDir()
+			testutil.InitRepo(t, dir)
+			for _, kv := range tc.config {
+				runGitTrailTest(t, dir, "config", kv[0], kv[1])
+			}
+			t.Chdir(dir)
+
+			got, err := resolveTrailPushRemote(context.Background(), tc.branch)
+
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestPrepareTrailCreateBranchPushesToDeclaredRemote is the end-to-end shape of
+// the bug: origin exists and is a perfectly good remote, but the branch's
+// declared push destination is a different one. The branch must arrive there and
+// nowhere else, and cleanup must undo it on that same remote.
+func TestPrepareTrailCreateBranchPushesToDeclaredRemote(t *testing.T) {
+	localDir, originDir, repo := initTrailCleanupRepo(t)
+	defer repo.Close()
+	forkDir := filepath.Join(filepath.Dir(localDir), "fork.git")
+	runGitTrailTest(t, localDir, "init", "--bare", forkDir)
+	runGitTrailTest(t, localDir, "remote", "add", "fork", forkDir)
+	runGitTrailTest(t, localDir, "config", "remote.pushDefault", "fork")
+	t.Chdir(localDir)
+
+	const branch = "feature/declared"
+	ctx := context.Background()
+	remote, err := resolveTrailPushRemote(ctx, branch)
+	require.NoError(t, err)
+	require.Equal(t, "fork", remote)
+
+	var out, errOut bytes.Buffer
+	state, err := prepareTrailCreateBranch(ctx, &out, &errOut, repo, remote, branch, "main", false)
+
+	require.NoError(t, err, "stderr: %s", errOut.String())
+	require.True(t, state.NeedsCreation)
+	require.True(t, state.RemotePushed)
+	require.True(t, gitBranchExistsTrailTest(t, forkDir, branch), "branch missing from declared remote")
+	require.False(t, gitBranchExistsTrailTest(t, originDir, branch), "branch leaked to origin")
+	require.Contains(t, out.String(), "Pushed branch "+branch+" to fork")
+
+	cleanupCreatedTrailBranch(ctx, repo, remote, branch, state.LocalCreated, state.RemotePushed, &errOut)
+	require.False(t, gitBranchExistsTrailTest(t, forkDir, branch), "cleanup left the branch on the declared remote; stderr: %s", errOut.String())
 }

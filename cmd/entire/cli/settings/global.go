@@ -108,7 +108,19 @@ func (us *UserSettings) GlobalEnabled() bool {
 // UserSettingsPath returns the absolute path of the user-global settings
 // file, for callers that name it in error messages.
 func UserSettingsPath() string {
-	return filepath.Join(userdirs.Config(), UserSettingsFileName)
+	path, err := resolveUserSettingsPath()
+	if err != nil {
+		return filepath.Join(userdirs.Config(), UserSettingsFileName)
+	}
+	return path
+}
+
+func resolveUserSettingsPath() (string, error) {
+	configDir, err := userdirs.ResolveConfig()
+	if err != nil {
+		return "", fmt.Errorf("resolving user settings directory: %w", err)
+	}
+	return filepath.Join(configDir, UserSettingsFileName), nil
 }
 
 // LoadUserSettings reads the user-global settings file. A missing file is not
@@ -116,11 +128,15 @@ func UserSettingsPath() string {
 // global tier is unconfigured). A malformed file returns an error; callers on
 // the hook path must treat that as global-off (fail closed).
 func LoadUserSettings(_ context.Context) (*UserSettings, error) {
+	path, err := resolveUserSettingsPath()
+	if err != nil {
+		return nil, err
+	}
 	// Deliberately plain os.ReadFile: readConfined/os.Root rejects absolute
 	// symlinks, and ~/.config/entire/settings.json is commonly symlinked by
 	// dotfile managers — with fail-closed semantics that would silently
 	// disable global mode.
-	data, err := os.ReadFile(UserSettingsPath())
+	data, err := os.ReadFile(path) //nolint:gosec // path is resolved by the userdirs trust boundary
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return &UserSettings{}, nil
@@ -150,11 +166,14 @@ func LoadUserSettings(_ context.Context) (*UserSettings, error) {
 // error aborts without writing. A load failure aborts too: the strict decoder
 // is what keeps this rewrite from silently dropping a newer binary's keys.
 func ModifyUserSettings(ctx context.Context, fn func(*UserSettings) error) error {
-	dir := userdirs.Config()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	path, err := resolveUserSettingsPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
-	release, err := flock.Acquire(UserSettingsPath() + ".lock")
+	release, err := flock.Acquire(path + ".lock")
 	if err != nil {
 		return fmt.Errorf("lock user settings: %w", err)
 	}
@@ -166,7 +185,7 @@ func ModifyUserSettings(ctx context.Context, fn func(*UserSettings) error) error
 	if err := fn(us); err != nil {
 		return err
 	}
-	return persistUserSettings(us)
+	return persistUserSettings(path, us)
 }
 
 // SaveUserSettings replaces the user-global settings file with us, delegating
@@ -190,7 +209,7 @@ func SaveUserSettings(ctx context.Context, us *UserSettings) error {
 // It also resets the process-level caches derived from the file (the
 // global-mode memo and the invisible-routing decision), so a writer process
 // observes its own write. Callers hold the user-settings lock.
-func persistUserSettings(us *UserSettings) error {
+func persistUserSettings(path string, us *UserSettings) error {
 	data, err := jsonutil.MarshalIndentWithNewline(us, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding user settings: %w", err)
@@ -198,7 +217,7 @@ func persistUserSettings(us *UserSettings) error {
 	// Symlink-following write: a settings.json symlinked by a dotfile manager
 	// (the same reason LoadUserSettings avoids readConfined) must be rewritten
 	// through to its target, not replaced by the atomic rename.
-	if err := jsonutil.WriteFileAtomicFollowingSymlinks(UserSettingsPath(), data, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicFollowingSymlinks(path, data, 0o600); err != nil {
 		return fmt.Errorf("writing user settings: %w", err)
 	}
 	ClearGlobalModeCache()
@@ -226,7 +245,7 @@ func normalizeOrigin(rawURL string) string {
 	return strings.ToLower(host + "/" + info.Owner + "/" + info.Repo)
 }
 
-// expandTilde expands a leading "~" or "~/" to the user home directory and
+// expandTilde expands a leading "~", "~/", or "~\" to the user home directory and
 // cleans the result, so a trailing slash cannot break matching. Surrounding
 // whitespace is trimmed first: the file is hand-edited, and a stray trailing
 // space would otherwise make the pattern silently never match — a quiet
@@ -240,12 +259,14 @@ func expandTilde(pattern string) (string, error) {
 	if pattern == "" {
 		return "", nil
 	}
-	if pattern == "~" || strings.HasPrefix(pattern, "~/") {
+	if pattern == "~" || strings.HasPrefix(pattern, "~/") || strings.HasPrefix(pattern, `~\`) {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("expanding ~: %w", err)
 		}
-		return filepath.ToSlash(filepath.Join(home, strings.TrimPrefix(pattern, "~"))), nil
+		suffix := strings.TrimPrefix(pattern, "~")
+		suffix = strings.TrimLeft(strings.ReplaceAll(suffix, `\`, "/"), "/")
+		return filepath.ToSlash(filepath.Join(home, filepath.FromSlash(suffix))), nil
 	}
 	if strings.HasPrefix(pattern, "~") {
 		return "", errors.New("unsupported ~user form")
@@ -667,16 +688,18 @@ func computeGlobalModeStatus(ctx context.Context) (bool, InactiveReason) {
 // IsActiveForRepo is the gate predicate for hooks: is Entire active for the
 // current worktree, via either repo-level setup or the user-global tier?
 //
-//	repo setup | repo enabled | global tier              | result
-//	-----------+--------------+---------------------------+-------
-//	yes        | true         | (ignored)                 | true
-//	yes        | false        | (ignored)                 | false (explicit veto)
-//	yes        | read error   | (ignored)                 | false (fail closed)
-//	no         | —            | enabled and not excluded  | true
-//	no         | —            | otherwise                 | false
+//	enabled key | repo enabled | global tier              | result
+//	------------+--------------+---------------------------+-------
+//	present     | true         | (ignored)                 | true
+//	present     | false        | (ignored)                 | false (explicit veto)
+//	present     | read error   | (ignored)                 | false (fail closed)
+//	absent      | —            | enabled and not excluded  | true
+//	absent      | —            | otherwise                 | false
 //
-// The global tier is a fallback, not a merge layer: any repo-level setup
-// (either settings file) makes the repo-level answer final.
+// The global tier is a fallback, not a merge layer: an explicit top-level
+// enabled key in either repo settings file makes the repo-level answer final.
+// Settings files created for unrelated features do not record activation
+// intent and therefore continue through the global tier.
 func IsActiveForRepo(ctx context.Context) bool {
 	active, _ := IsActiveForRepoWithReason(ctx)
 	return active
@@ -699,10 +722,13 @@ func GlobalTierEnabled(ctx context.Context) bool {
 // warning). It must stay the same decision as IsActiveForRepo — the reason is
 // derived inside the gate, never re-computed by callers.
 func IsActiveForRepoWithReason(ctx context.Context) (bool, InactiveReason) {
-	if IsSetUpAny(ctx) {
-		// IsSetUpAny just established setup exists; going through
-		// IsSetUpAndEnabled here would repeat its Lstat pair on every hook
-		// invocation.
+	configured, err := RepoActivationConfigured(ctx)
+	if err != nil {
+		logging.Debug(ctx, "repo settings unreadable; treating repo as inactive",
+			slog.String("error", err.Error()))
+		return false, InactiveReasonRepoDisabled
+	}
+	if configured {
 		if repoSettingsEnabled(ctx) {
 			return true, InactiveReasonNone
 		}

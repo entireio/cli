@@ -60,6 +60,11 @@ type SearchResponse struct {
 	// FailedJurisdictions is set by the CLI's merge layer (not by peregrine)
 	// when one or more cells failed during multi-region fan-out.
 	FailedJurisdictions []string `json:"failed_jurisdictions,omitempty"`
+
+	// SkippedRepos is set by the CLI's fan-out layer (not by peregrine) when
+	// explicitly requested repos had no routable home placement (missing or
+	// not ready) and were excluded from the search.
+	SkippedRepos []string `json:"skipped_repos,omitempty"`
 }
 
 // Search calls peregrine's code search endpoint through the cell's entire-api
