@@ -103,9 +103,13 @@ func TestSubagentCheckpoints_UncommittedWork_StillCheckpoints(t *testing.T) {
 		t.Fatalf("SimulatePostTask failed: %v", err)
 	}
 
-	wantPath := ".entire/metadata/" + session.ID + "/tasks/" + taskToolUseID + "/checkpoint.json"
-	if !env.FileExistsInBranch(env.GetShadowBranchName(), wantPath) {
-		t.Errorf("task checkpoint missing for uncommitted subagent work (%s)", wantPath)
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	rec := state.FindTaskRecord(taskToolUseID)
+	if rec == nil || rec.CompletedAt.IsZero() || !containsFile(rec.Files, editedFile) {
+		t.Errorf("expected a completed task record carrying uncommitted subagent work, got %+v", rec)
 	}
 }
 

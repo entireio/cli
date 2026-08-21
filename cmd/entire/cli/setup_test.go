@@ -3854,6 +3854,15 @@ func TestRunEnableInteractive_FirstRunDefaultsToGitRefs(t *testing.T) {
 		}
 	})
 
+	t.Run("incidental settings still count as first run", func(t *testing.T) {
+		setupTestRepo(t)
+		writeLocalSettings(t, `{"investigate":{"max_turns":4}}`)
+		cfg := enable(t, EnableOptions{Yes: true, Telemetry: true})
+		if cfg == nil || cfg.Primary.Type != checkpoint.BackendTypeGitRefs {
+			t.Errorf("Checkpoints = %+v, want first-run git-refs primary", cfg)
+		}
+	})
+
 	t.Run("explicit --checkpoint-backend branch wins", func(t *testing.T) {
 		setupTestRepo(t)
 		cfg := enable(t, EnableOptions{Yes: true, Telemetry: true, CheckpointBackend: "branch"})

@@ -678,6 +678,11 @@ func TestRunDisable_GloballyTrackedRepoTakeover(t *testing.T) {
 		t.Fatal(err)
 	}
 	clearGlobalRoutingCaches(t)
+	// An unrelated feature may already have created a settings file without
+	// recording repo-local activation. Disable is still the first activation
+	// choice and therefore still owes the routed-data takeover.
+	testutil.WriteFile(t, dir, ".entire/settings.local.json", `{"investigate":{"max_turns":4}}`)
+	paths.ClearInvisibleRuntimeCache()
 
 	// Globally tracked state: routed runtime data plus the lazy-setup marker.
 	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")

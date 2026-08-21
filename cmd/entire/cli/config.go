@@ -95,14 +95,6 @@ func resolveLogLevel(ctx context.Context) slog.Level {
 	return level
 }
 
-// newLogger opens .entire/logs/entire.log for the current worktree.
-//
-// It CREATES the log directory, so every caller must already have decided that
-// writing into this repo is allowed: the root PersistentPreRun gates on
-// IsActiveForRepo, and enable calls this only after every check that can still
-// reject the invocation, so a rejected enable leaves an untouched repo
-// untouched. For a globally tracked repo the directory resolves under the git
-// common dir, so "creates" never means a worktree file.
 // ensureLogger attaches a logger to cmd's context unless one is already there,
 // and is the only place that installs one. Two loggers on the same file means
 // two 8KB buffers, and whichever lands in the context second orphans the first —
@@ -120,6 +112,11 @@ func ensureLogger(cmd *cobra.Command) {
 	cmd.SetContext(logging.WithLogger(ctx, l))
 }
 
+// newLogger builds the logger for .entire/logs/entire.log in the current
+// worktree. Nothing is created on disk here — the directory and file arrive
+// with the first line actually written. In a globally tracked repo AbsPath
+// routes those writes under the git common dir, preserving the invisible
+// worktree contract.
 func newLogger(ctx context.Context) (*logging.Logger, error) {
 	// AbsPath, not a bare worktree join: in a globally tracked repo it
 	// reroutes .entire/logs under the git common dir, so logging never

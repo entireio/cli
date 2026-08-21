@@ -13,8 +13,8 @@ import (
 )
 
 // MaybeEnsureGlobalSetup performs the lazy, invisible, once-per-clone setup
-// for a globally tracked repo: a repo with no repo-level settings whose hooks
-// run because the user-global tier is active (settings.GlobalModeActive).
+// for a globally tracked repo: a repo with no explicit repo activation whose
+// hooks run because the user-global tier is active (settings.GlobalModeActive).
 // It installs the git hooks (skipped when core.hooksPath resolves inside the
 // worktree — see below), ensures the checkpoint metadata ref, and marks the
 // clone preferences with global_setup_completed. Everything it writes lives
@@ -34,10 +34,15 @@ import (
 func MaybeEnsureGlobalSetup(ctx context.Context) {
 	logCtx := logging.WithComponent(ctx, "global-setup")
 
-	// Repo-level setup owns installation via EnsureSetup / `entire enable`.
-	// Checked first so the common repo-enabled path exits on two Lstats,
-	// without reading clone preferences.
-	if settings.IsSetUpAny(ctx) {
+	// Explicit repo-level activation owns installation via EnsureSetup /
+	// `entire enable`. Incidental settings files keep inheriting global mode.
+	repoConfigured, err := settings.RepoActivationConfigured(ctx)
+	if err != nil {
+		logging.Debug(logCtx, "global lazy setup: repo settings unreadable; skipping",
+			slog.String("error", err.Error()))
+		return
+	}
+	if repoConfigured {
 		return
 	}
 
@@ -203,7 +208,16 @@ func resolveExistingPrefix(p string) string {
 // receive worktree writes: when the user-global tier is active they get the
 // invisible MaybeEnsureGlobalSetup instead, otherwise nothing happens.
 func EnsureSetupForHook(ctx context.Context) error {
-	if !settings.IsSetUpAny(ctx) {
+	repoConfigured, err := settings.RepoActivationConfigured(ctx)
+	if err != nil {
+		// Hook setup is best-effort. A malformed settings file must fail
+		// closed without turning the user's hook invocation into an error.
+		logging.Debug(logging.WithComponent(ctx, "global-setup"),
+			"hook setup: repo settings unreadable; skipping",
+			slog.String("error", err.Error()))
+		return nil
+	}
+	if !repoConfigured {
 		MaybeEnsureGlobalSetup(ctx)
 		return nil
 	}

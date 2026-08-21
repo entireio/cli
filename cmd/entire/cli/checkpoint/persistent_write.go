@@ -13,6 +13,8 @@ func (s *GitStore) Write(ctx context.Context, req WriteRequest) error {
 	switch r := req.(type) {
 	case Session:
 		return s.writeSession(ctx, WriteOptions(r))
+	case ReservedSession:
+		return s.writeSession(ctx, WriteOptions(r))
 	case SessionTranscript:
 		return s.backfillTranscript(ctx, UpdateOptions(r))
 	case SessionSummary:

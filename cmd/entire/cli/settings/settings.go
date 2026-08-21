@@ -297,6 +297,21 @@ type RedactionSettings struct {
 	// into the checkpoint's assets/ store (off by default). Restore re-injects
 	// them regardless of this flag.
 	ExternalizeImages bool `json:"externalize_images,omitempty"`
+
+	// Betterleaks toggles the betterleaks scanner engine (layer 2 of the
+	// redaction stack). Omitted, or present with `enabled` omitted, means
+	// enabled. Honored from the committed settings file only; ignored in
+	// settings.local.json.
+	Betterleaks *ScannerSettings `json:"betterleaks,omitempty"`
+
+	// Goredact toggles the goredact scanner engine. Omitted, or present
+	// with `enabled` omitted, means disabled. Same committed-file-only rule.
+	Goredact *ScannerSettings `json:"goredact,omitempty"`
+}
+
+// ScannerSettings toggles one secret-scanner engine.
+type ScannerSettings struct {
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // PIISettings configures PII detection categories.
@@ -509,6 +524,42 @@ func (s *EntireSettings) InvestigateConfig() *InvestigateConfig {
 	return s.Investigate
 }
 
+// BetterleaksEnabled reports whether the betterleaks scanner runs.
+// Default (nil settings, nil redaction, nil scanner, nil enabled): true.
+func (s *EntireSettings) BetterleaksEnabled() bool {
+	if s == nil || s.Redaction == nil || s.Redaction.Betterleaks == nil || s.Redaction.Betterleaks.Enabled == nil {
+		return true
+	}
+	return *s.Redaction.Betterleaks.Enabled
+}
+
+// GoredactEnabled reports whether the goredact scanner runs.
+// Default: false.
+func (s *EntireSettings) GoredactEnabled() bool {
+	if s == nil || s.Redaction == nil || s.Redaction.Goredact == nil || s.Redaction.Goredact.Enabled == nil {
+		return false
+	}
+	return *s.Redaction.Goredact.Enabled
+}
+
+// ErrScannerConfig marks scanner-configuration failures. Consumers use
+// errors.Is to distinguish these (fail-closed) from ordinary settings
+// problems (warn-and-default).
+var ErrScannerConfig = errors.New("invalid redaction scanner configuration")
+
+// validateScannerSettings enforces the fail-closed rule: at least one secret
+// scanner must be enabled. This runs only on merged settings (see
+// loadMergedSettings) — never in the per-file loaders — because those loaders
+// serve display/inspection consumers reading a single file in isolation
+// (entire status via LoadFromFile, investigate via LoadFromBytes), and a
+// local file may legally contain scanner keys that are inert even after merge.
+func validateScannerSettings(s *EntireSettings) error {
+	if !s.BetterleaksEnabled() && !s.GoredactEnabled() {
+		return fmt.Errorf("%w: at least one secret scanner must be enabled; re-enable redaction.betterleaks or enable redaction.goredact", ErrScannerConfig)
+	}
+	return nil
+}
+
 // Load loads the Entire settings from .entire/settings.json, then applies
 // clone-local preferences from the git common dir, then applies any overrides
 // from .entire/settings.local.json if it exists.
@@ -626,6 +677,10 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	// (e.g. model without provider when the local override sets only a model
 	// on top of a base with no provider) that neither file alone contained.
 	if err := settings.SummaryGeneration.Validate(); err != nil {
+		return nil, fmt.Errorf("merged settings invalid: %w", err)
+	}
+
+	if err := validateScannerSettings(settings); err != nil {
 		return nil, fmt.Errorf("merged settings invalid: %w", err)
 	}
 
@@ -1258,6 +1313,16 @@ func mergeRedaction(dst *RedactionSettings, data json.RawMessage) error {
 		}
 		dst.ExternalizeImages = v
 	}
+
+	// Scanner engine selection affects everyone who reads the repo's
+	// checkpoints, so it is honored from the committed settings file only.
+	for _, k := range []string{"betterleaks", "goredact"} {
+		if _, ok := raw[k]; ok {
+			slog.Warn("redaction scanner settings are ignored in settings.local.json; set them in .entire/settings.json",
+				slog.String("key", "redaction."+k))
+		}
+	}
+
 	return nil
 }
 
@@ -1414,6 +1479,26 @@ func IsSetUpAny(ctx context.Context) bool {
 	}
 	_, err = os.Lstat(localFileAbs)
 	return err == nil
+}
+
+// RepoActivationConfigured reports whether either repository settings file
+// contains an explicit top-level "enabled" key. This is narrower than
+// IsSetUpAny: unrelated features may create a settings file without choosing
+// repo-local activation, and those repositories must continue inheriting the
+// user-global tier. A malformed or unreadable settings file returns an error
+// so activation gates can fail closed.
+func RepoActivationConfigured(ctx context.Context) (bool, error) {
+	_, project, _, err := LoadProjectRaw(ctx)
+	if err != nil {
+		return false, err
+	}
+	_, local, _, err := LoadLocalRaw(ctx)
+	if err != nil {
+		return false, err
+	}
+	_, projectConfigured := project["enabled"]
+	_, localConfigured := local["enabled"]
+	return projectConfigured || localConfigured, nil
 }
 
 // IsSetUpAndEnabled returns true if Entire is both set up and enabled.

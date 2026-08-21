@@ -393,8 +393,9 @@ type HookResponseWriter interface {
 // Declaring a budget makes Entire stop itself just short of that ceiling rather
 // than being killed mid-write: the session is marked ENDED first (a single
 // atomic state-file rename), and only the eager condense — which is fail-open
-// and retried by PostCommit — runs against the remaining budget. Agents whose
-// session-end hook has a normal timeout should not implement this.
+// — runs against the remaining budget. PostCommit handles sessions with pending
+// files; doctor retries no-file ENDED sessions. Agents whose session-end hook
+// has a normal timeout should not implement this.
 type SessionEndBudgeter interface {
 	Agent
 

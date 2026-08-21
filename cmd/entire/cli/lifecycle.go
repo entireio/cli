@@ -29,7 +29,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/perf"
 )
@@ -998,7 +997,6 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 			modifiedFiles: relModifiedFiles,
 			newFiles:      relNewFiles,
 			deletedFiles:  relDeletedFiles,
-			author:        author,
 			agentType:     agentType,
 			strat:         strat,
 		})
@@ -1129,6 +1127,18 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 	// the transcript to extract file changes. Cleanup is handled by
 	// `entire clean` or when the session state is fully removed.
 
+	// Finalize any background subagent still in flight BEFORE endSessionNow:
+	// endSessionNow marks the session ended and immediately runs the eager
+	// condense, which materializes whatever records are completed by then.
+	// Completing after it would leave records nothing then condenses — the
+	// zombie class handleSubagentStopFinal's late-arrival guard exists to
+	// prevent. See completeLiveTaskRecords.
+	// NOTE: this runs ahead of the session-end condense deadline
+	// (sessionEndCondenseDeadline) that budget-capped agents get; Claude Code
+	// sets no budget, and for agents that do, bounding the final captures
+	// against the same deadline is a known follow-up.
+	completeLiveTaskRecords(ctx, ag, event.SessionID, event.SessionRef)
+
 	if _, err := endSessionNow(ctx, event, event.SessionID, nil, sessionEndCondenseDeadline(ag), endedNow); err != nil {
 		logging.Warn(logCtx, "failed to mark session ended",
 			slog.String("error", err.Error()))
@@ -1167,7 +1177,7 @@ func sessionEndCondenseDeadline(ag agent.Agent) time.Time {
 // (handleLifecycleSessionEnd) and the exited-session sweep
 // (finalizeExitedSessions), so the two stay in lockstep.
 //
-// The condense is fail-open (PostCommit retries on the next commit); an error
+// The condense is fail-open. Doctor retries no-files ENDED sessions; an error
 // marking the session ended is returned so callers can react, and skips the
 // condense since the state may be inconsistent. event may be nil when no hook
 // event drives the end (the sweep), which skips event-metadata persistence.
@@ -1189,14 +1199,11 @@ func sessionEndCondenseDeadline(ag agent.Agent) time.Time {
 // killed. The exited-owner sweep is the backstop for that: the session is
 // reclaimed on the next `entire status` / `entire doctor`.
 //
-// Losing the race costs duplication, not data. One window is worth knowing:
-// CondenseSession commits the checkpoint to entire/checkpoints/v1 inside the
-// MutateSessionState callback, and the state is saved only after that callback
-// returns. A kill in between leaves the checkpoint committed with
-// CheckpointTranscriptStart / LastCheckpointID / StepCount / FullyCondensed
-// un-advanced, so PostCommit mints a fresh checkpoint ID over the same
-// transcript range. Everywhere else, an incomplete condense simply leaves
-// FullyCondensed false and PostCommit retries.
+// Condensation reserves its checkpoint ID in session state before the durable
+// write. If the process dies after the checkpoint lands but before the remaining
+// bookkeeping is saved, a retry writes the same ID instead of creating a second
+// checkpoint. Doctor also reconciles the pre-reservation state left by older
+// versions when it can prove the stored session range and transcript match.
 func endSessionNow(ctx context.Context, event *agent.Event, sessionID string, guard func(*strategy.SessionState) bool, condenseDeadline time.Time, when endedAtPolicy) (ended bool, err error) {
 	ended, err = markSessionEnded(ctx, event, sessionID, guard, when)
 	if err != nil || !ended {
@@ -1266,7 +1273,21 @@ func declaredSubagentTranscript(ctx context.Context, event *agent.Event) string 
 	return declared
 }
 
-// handleLifecycleSubagentEnd handles subagent end: detects changes, saves task checkpoint.
+// handleLifecycleSubagentEnd handles subagent completion. It dispatches on
+// event.Final — never on any payload sentinel — to tell a real completion
+// signal (SubagentStop) from the launch-time PostToolUse (post-task) stub:
+//
+//   - event.Final == true (SubagentStop): the authoritative final capture.
+//     See handleSubagentStopFinal.
+//   - event.Final == false, background launch (run_in_background: true in
+//     ToolInput): post-task fires seconds after launch, before any real work
+//     happens. Records an in-flight marker and defers the real capture to
+//     SubagentStop instead of completing the record from the stub.
+//   - event.Final == false, foreground: post-task fires at true completion, so
+//     the record is completed immediately via completeSubagentTaskRecord.
+//     ensureSessionState preserves SaveTaskStep's old create-if-missing parent
+//     state guarantee for this path (the Final path deliberately never
+//     resurrects state — see handleSubagentStopFinal's zombie guard).
 func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	if event.SubagentType == "" && event.TaskDescription == "" {
@@ -1274,7 +1295,230 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		event.SubagentType, event.TaskDescription = ParseSubagentTypeAndDescription(event.ToolInput)
 	}
 
-	// Prefer what the agent declared; see Event.SubagentTranscriptPath.
+	if event.Final {
+		return handleSubagentStopFinal(logCtx, ag, event)
+	}
+
+	if isBackgroundLaunch(logCtx, event.ToolInput) {
+		return recordInFlightTaskLaunch(logCtx, event)
+	}
+
+	return completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{ensureSessionState: true})
+}
+
+// recordInFlightTaskLaunch handles a background Task launch. It records an
+// in-flight marker on session state and completes nothing yet;
+// the real capture happens at SubagentStop (handleSubagentStopFinal), which
+// is the first point that sees the subagent's actual work. Tolerates
+// strategy.ErrStateNotFound the way the completion producers tolerate a launch
+// event arriving before session state exists.
+func recordInFlightTaskLaunch(logCtx context.Context, event *agent.Event) error {
+	logging.Debug(logCtx, "background subagent launch detected; deferring capture to subagent-stop",
+		slog.String("session_id", event.SessionID),
+		slog.String("tool_use_id", event.ToolUseID),
+		slog.String("agent_id", event.SubagentID),
+	)
+
+	mutErr := strategy.MutateSessionState(logCtx, event.SessionID, func(state *strategy.SessionState) error {
+		state.AddTaskRecord(session.TaskRecord{
+			ToolUseID:       event.ToolUseID,
+			AgentID:         event.SubagentID,
+			StartedAt:       time.Now(),
+			SubagentType:    event.SubagentType,
+			TaskDescription: event.TaskDescription,
+		})
+		return nil
+	})
+	switch {
+	case errors.Is(mutErr, strategy.ErrStateNotFound):
+		logging.Info(logCtx, "no session state to record in-flight marker on; background task will not be captured",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID))
+	case mutErr != nil:
+		logging.Warn(logCtx, "failed to record in-flight task marker",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID),
+			slog.String("error", mutErr.Error()))
+	}
+	return nil
+}
+
+// handleSubagentStopFinal is the authoritative final capture, run for
+// SubagentStop (event.Final == true) and, via captureInFlightTaskFinal, for
+// SessionEnd's sweep of any task still in flight when the session closes. It
+// guards against a late SubagentStop resurrecting an ended/swept session —
+// creating parent state here would mint a zombie session, the exact class the
+// session sweep exists to prevent — then completes the record (bypassing the
+// no-changes skip gate: a read-only subagent still produced a transcript worth
+// materializing). Completion happens LAST, inside completeSubagentTaskRecord's
+// exactly-once mutation (strategy.CompleteTaskRecord), so a failed capture —
+// analyzer error, worktree error — leaves the record live for the SessionEnd
+// sweep to retry, and two Final events racing for the same ToolUseID complete
+// it exactly once (the loser's extraction is discarded; nothing was written).
+//
+// The state loaded at the top of the function is only good for the zombie
+// guard above (state missing entirely), the live-record skip check, and
+// logging: it predates the capture that follows, and a racing SessionEnd can
+// land during that window (both serialize on the per-session gate, so the
+// interleaving reduces to ordering). The eager-condense decision near the end
+// of the function therefore reloads session state and decides on that fresh
+// phase, never on this initial snapshot.
+func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agent.Event) error {
+	state, err := strategy.LoadSessionState(logCtx, event.SessionID)
+	if err != nil {
+		// A real load failure (corrupt/unreadable state file) — distinct from
+		// the state simply not existing, for which LoadSessionState returns
+		// (nil, nil) and the branch below logs truthfully.
+		logging.Warn(logCtx, "skipping subagent-stop capture: failed to load session state",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID),
+			slog.String("error", err.Error()))
+		return nil
+	}
+	if state == nil {
+		// Session state missing entirely (ended and swept, or never existed).
+		// The subagent transcript remains on disk in the agent's own directory;
+		// there is nothing here to attach it to, and re-creating session state
+		// for a late event would resurrect a zombie session. Nothing to
+		// complete either: the record lived on that same missing state.
+		logging.Info(logCtx, "skipping subagent-stop capture: session state not found",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID))
+		return nil
+	}
+
+	marker := state.FindTaskRecord(event.ToolUseID)
+	if marker == nil || !marker.CompletedAt.IsZero() {
+		// No live marker: this ToolUseID was already completed at launch-time
+		// post-task (foreground task), or another Final event for the same
+		// ToolUseID (a duplicate SubagentStop, or a race against the
+		// SessionEnd final capture) already completed it. Skip.
+		// An event carrying a SubagentID or a subagent transcript path is the
+		// louder variant: those fields mean a real subagent completed, so an
+		// unclaimed skip is either the expected foreground dedup, a duplicate
+		// event, or a misintegrated agent that sets Final without ever
+		// emitting the launch-time marker — worth surfacing over Debug.
+		if event.SubagentID != "" || event.SubagentTranscriptPath != "" {
+			logging.Warn(logCtx, "no in-flight marker for completed subagent — foreground dedup, a duplicate event, or a misintegrated agent setting Final without launch markers",
+				slog.String("session_id", event.SessionID),
+				slog.String("tool_use_id", event.ToolUseID),
+				slog.String("agent_id", event.SubagentID))
+			return nil
+		}
+		logging.Debug(logCtx, "no live in-flight marker for subagent-stop; skipping duplicate/foreground/racing capture",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID))
+		return nil
+	}
+
+	// SubagentStop payloads carry no tool_input, so event.SubagentType/
+	// TaskDescription/SubagentID are typically empty at this point; the marker
+	// recorded all three at launch time. Each field falls back independently —
+	// not as an all-or-nothing pair — so a marker that only captured one of
+	// them (e.g. a legacy marker written before a field existed) still
+	// contributes what it has instead of being discarded wholesale.
+	if marker.SubagentType != "" {
+		event.SubagentType = marker.SubagentType
+	}
+	if marker.TaskDescription != "" {
+		event.TaskDescription = marker.TaskDescription
+	}
+	if event.SubagentID == "" && marker.AgentID != "" {
+		event.SubagentID = marker.AgentID
+	}
+
+	// analyzerFilesOnly: true because reaching this point means a live marker
+	// WAS found above — every Final capture that runs through this function is
+	// a background task (foreground tasks complete immediately at launch and
+	// are never marked in-flight), so the worktree-wide DetectFileChanges scan
+	// would risk sweeping in the parent's or another agent's later edits. See
+	// subagentCaptureOptions.analyzerFilesOnly.
+	captureErr := completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{bypassNoChangesSkip: true, analyzerFilesOnly: true})
+	if captureErr != nil {
+		return captureErr
+	}
+
+	// The eager-condense decision below must use the FRESH phase, not the
+	// snapshot loaded at the top of this function. That snapshot is only
+	// valid for the zombie guard (missing state), the live-record check, and
+	// logging above — the capture we just did is exactly the window where a
+	// racing SessionEnd can flip the session to PhaseEnded (both serialize on
+	// the per-session gate, so this reduces to ordering). Deciding on the
+	// stale pre-capture phase would miss that transition and skip the eager
+	// condense, leaving the record we just completed unmaterialized until some
+	// later condensation that may never come.
+	freshPhase := state.Phase
+	if freshState, reloadErr := strategy.LoadSessionState(logCtx, event.SessionID); reloadErr != nil {
+		// A read hiccup here must not silently skip the condense decision: if
+		// the stale snapshot already said ended, fall back to it rather than
+		// treating the reload failure as "not ended".
+		logging.Warn(logCtx, "failed to reload session state after subagent-stop capture; falling back to pre-capture phase for condense decision",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID),
+			slog.String("error", reloadErr.Error()))
+	} else if freshState != nil {
+		freshPhase = freshState.Phase
+	} else {
+		// Swept between capture and reload. The sweeper (finalizeExitedSessions
+		// or endSessionNow) condenses as part of ending the session, so the
+		// record we just completed is materialized by whoever removed the
+		// state — there is nothing left here to condense from. Logged so this
+		// is distinguishable from the read-error fallback above.
+		logging.Debug(logCtx, "session state swept during subagent-stop capture; leaving the condense to the sweeper",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID))
+	}
+
+	if freshPhase == session.PhaseEnded {
+		// The session ended before or during this SubagentStop's capture.
+		// Trigger the same eager condense SessionEnd uses so the
+		// newly-completed record is materialized into a permanent checkpoint
+		// now rather than lingering on ended session state.
+		if condErr := GetStrategy(logCtx).CondenseAndMarkFullyCondensed(logCtx, event.SessionID); condErr != nil {
+			logging.Warn(logCtx, "eager condense after late subagent-stop capture failed",
+				slog.String("session_id", event.SessionID),
+				slog.String("error", condErr.Error()))
+		}
+	}
+
+	return nil
+}
+
+// subagentCaptureOptions controls completeSubagentTaskRecord's behavior across
+// its two callers (launch-time foreground capture vs. SubagentStop final
+// capture).
+type subagentCaptureOptions struct {
+	// bypassNoChangesSkip, when true, completes the record even when no file
+	// changes were detected. Only set for Final (SubagentStop) captures: a
+	// read-only background subagent (e.g. a reviewer) still produced a
+	// transcript worth materializing, and this is the only chance to record it.
+	bypassNoChangesSkip bool
+
+	// analyzerFilesOnly, when true, skips the whole-worktree
+	// LoadPreTaskState/DetectFileChanges merge in completeSubagentTaskRecord and
+	// captures only event.ModifiedFiles plus the transcript-analyzer-extracted
+	// files. Set ONLY for background Final (SubagentStop) captures — see the
+	// comment on that skip in completeSubagentTaskRecord for the attribution
+	// rationale. Never set for the foreground launch-time path, which keeps
+	// its original (correct, worktree-scan-based) behavior unchanged.
+	analyzerFilesOnly bool
+
+	// ensureSessionState, when true, creates missing session state before
+	// completing the record — SaveTaskStep's old create-if-missing guarantee.
+	// Set only for the foreground path; the Final path must never resurrect a
+	// swept session (handleSubagentStopFinal's zombie guard).
+	ensureSessionState bool
+}
+
+// completeSubagentTaskRecord detects a completed subagent invocation's changes
+// and completes its durable task record (#2058): files, labels, tokens, and the
+// declared transcript path land on the record; condensation later materializes
+// the transcript into the checkpoint. No shadow task step is written.
+func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *agent.Event, opts subagentCaptureOptions) error {
+	// Prefer what the agent declared (Claude Code's SubagentStop, Codex, and
+	// Cursor all carry agent_transcript_path); see Event.SubagentTranscriptPath.
+	// The layout probe is the fallback for launch-time PostToolUse events, which
+	// don't carry it.
 	subagentTranscriptPath := declaredSubagentTranscript(logCtx, event)
 	if subagentTranscriptPath == "" {
 		subagentTranscriptPath = ResolveAgentTranscriptPath(filepath.Dir(event.SessionRef), event.SessionID, event.SubagentID)
@@ -1297,15 +1541,47 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	// Extract modified files from hook payload and/or subagent transcript
 	var modifiedFiles []string
 	modifiedFiles = append(modifiedFiles, event.ModifiedFiles...)
-	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
+	switch analyzer, ok := agent.AsTranscriptAnalyzer(ag); {
+	case !ok:
+		// No analyzer: modifiedFiles stays event.ModifiedFiles only.
+	case opts.analyzerFilesOnly && subagentTranscriptPath == "":
+		// Background Final capture with no resolvable subagent transcript:
+		// falling back to scanning event.SessionRef (the PARENT transcript)
+		// from offset 0 would attribute the whole session's file activity to
+		// this one background task. Skip the analyzer scan entirely — the
+		// capture proceeds with only event.ModifiedFiles (typically empty,
+		// yielding a transcript-less, file-less record). The foreground
+		// path (analyzerFilesOnly unset) keeps the parent-scan fallback: there
+		// the worktree-diff merge below dominates the file lists anyway.
+		logging.Warn(logCtx, "subagent transcript unresolvable; final capture proceeding without file attribution",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID),
+			slog.String("agent_id", event.SubagentID))
+	default:
 		transcriptToScan := event.SessionRef
 		if subagentTranscriptPath != "" {
 			transcriptToScan = subagentTranscriptPath
 		}
-		if files, _, fileErr := analyzer.ExtractModifiedFilesFromOffset(transcriptToScan, 0); fileErr != nil {
+		files, _, fileErr := analyzer.ExtractModifiedFilesFromOffset(transcriptToScan, 0)
+		switch {
+		case fileErr != nil && opts.analyzerFilesOnly:
+			// The analyzer scan is this capture's ONLY file source (no
+			// worktree-diff backup in analyzer-only mode), so a transient
+			// read error here must fail the capture rather than complete a
+			// zero-file record that permanently misstates the task as
+			// read-only. Returning BEFORE completion leaves the record live,
+			// so the SessionEnd sweep retries it.
+			logging.Warn(logCtx, "failed to extract modified files from subagent; aborting final capture",
+				slog.String("session_id", event.SessionID),
+				slog.String("tool_use_id", event.ToolUseID),
+				slog.String("error", fileErr.Error()))
+			return fmt.Errorf("extract modified files from subagent transcript: %w", fileErr)
+		case fileErr != nil:
+			// Foreground path: the worktree-diff merge below is the backup
+			// file source, so the capture proceeds without the analyzer.
 			logging.Warn(logCtx, "failed to extract modified files from subagent",
 				slog.String("error", fileErr.Error()))
-		} else {
+		default:
 			modifiedFiles = mergeUnique(modifiedFiles, files)
 		}
 	}
@@ -1315,28 +1591,47 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	// to the session's pre-prompt state. Without either, DetectFileChanges receives
 	// nil and treats ALL untracked files as new — which would create spurious task
 	// checkpoints for pre-existing untracked files (e.g., .github/hooks/entire.json).
-	preState, err := LoadPreTaskState(ctx, event.ToolUseID)
-	if err != nil {
-		logging.Warn(logCtx, "failed to load pre-task state",
-			slog.String("error", err.Error()))
-	}
-	var preUntrackedFiles []string
-	if preState != nil {
-		preUntrackedFiles = preState.PreUntrackedFiles()
-	}
-	changes, err := DetectFileChanges(ctx, preUntrackedFiles)
-	if err != nil {
-		logStatusDegrade(logCtx, "failed to compute file changes", err)
-	}
-	if changes != nil && preState != nil && preState.UntrackedScanSkipped {
-		// Same degradation as turn-end: without a pre-task baseline, every
-		// untracked file would be misreported as created by this task.
-		logging.Warn(logCtx, "skipping new-file detection: pre-task untracked scan was skipped")
-		changes.New = nil
+	//
+	// Skipped entirely when opts.analyzerFilesOnly is set. DetectFileChanges is a
+	// git-status scan of the ENTIRE worktree against the launch-time pre-task
+	// baseline. For a foreground capture that's correct: the parent is blocked on
+	// the subagent, so the worktree delta since launch really is the subagent's.
+	// For a background Final (SubagentStop/SessionEnd) capture, launch and
+	// completion can be minutes to hours apart, so the same scan sweeps in
+	// whatever the parent — or any other concurrent agent — changed in the
+	// meantime, misattributing it to this task's checkpoint. Falling back to only
+	// event.ModifiedFiles plus the analyzer-extracted files can under-capture a
+	// subagent's shell side-effect files that its transcript never names, and
+	// deletions by the subagent are also uncapturable in analyzer-only mode
+	// (only the worktree scan detects them), but those are the lesser
+	// failures: over-capture steals attribution from someone else's work,
+	// which is worse and harder to notice.
+	var changes *FileChanges
+	if !opts.analyzerFilesOnly {
+		preState, preErr := LoadPreTaskState(logCtx, event.ToolUseID)
+		if preErr != nil {
+			logging.Warn(logCtx, "failed to load pre-task state",
+				slog.String("error", preErr.Error()))
+		}
+		var preUntrackedFiles []string
+		if preState != nil {
+			preUntrackedFiles = preState.PreUntrackedFiles()
+		}
+		var changesErr error
+		changes, changesErr = DetectFileChanges(logCtx, preUntrackedFiles)
+		if changesErr != nil {
+			logStatusDegrade(logCtx, "failed to compute file changes", changesErr)
+		}
+		if changes != nil && preState != nil && preState.UntrackedScanSkipped {
+			// Same degradation as turn-end: without a pre-task baseline, every
+			// untracked file would be misreported as created by this task.
+			logging.Warn(logCtx, "skipping new-file detection: pre-task untracked scan was skipped")
+			changes.New = nil
+		}
 	}
 
 	// Get worktree root and normalize paths
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	repoRoot, err := paths.WorktreeRoot(logCtx)
 	if err != nil {
 		return fmt.Errorf("failed to get worktree root: %w", err)
 	}
@@ -1353,7 +1648,7 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	// filterToUncommittedFiles is the same guard the turn-end path already applies
 	// for this exact reason; it fails open, so a git error keeps the list as-is
 	// rather than silently dropping a real checkpoint.
-	relModifiedFiles := filterToUncommittedFiles(ctx, FilterAndNormalizePaths(modifiedFiles, repoRoot), repoRoot)
+	relModifiedFiles := filterToUncommittedFiles(logCtx, FilterAndNormalizePaths(modifiedFiles, repoRoot), repoRoot)
 	var relNewFiles, relDeletedFiles []string
 	if changes != nil {
 		// changes come from git status, so they are uncommitted by construction.
@@ -1362,64 +1657,122 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
 	}
 
-	// If no changes, skip
+	// If no changes, skip — unless this is a Final (SubagentStop) capture: a
+	// read-only background subagent (e.g. a reviewer) still produced a
+	// transcript worth materializing, and SubagentStop is the only chance to
+	// record it (bypassNoChangesSkip is never set for the foreground
+	// launch-time path, which keeps its original skip-on-no-changes behavior).
 	if len(relModifiedFiles) == 0 && len(relNewFiles) == 0 && len(relDeletedFiles) == 0 {
-		logging.Info(logCtx, "no file changes detected, skipping task checkpoint")
-		_ = CleanupPreTaskState(ctx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
-		return nil
-	}
-
-	// Find checkpoint UUID from main transcript (best-effort)
-	var checkpointUUID string
-	// Use the existing CLI-level checkpoint UUID finder
-	mainLines, _ := parseTranscriptForCheckpointUUID(event.SessionRef) //nolint:errcheck // best-effort
-	if mainLines != nil {
-		checkpointUUID, _ = FindCheckpointUUID(mainLines, event.ToolUseID)
-	}
-
-	// Get git author
-	author, err := GetGitAuthor(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get git author: %w", err)
-	}
-
-	// Build task checkpoint context
-	strat := GetStrategy(ctx)
-	agentType := ag.Type()
-
-	taskStepCtx := strategy.TaskStepContext{
-		SessionID:              event.SessionID,
-		ToolUseID:              event.ToolUseID,
-		AgentID:                event.SubagentID,
-		ModifiedFiles:          relModifiedFiles,
-		NewFiles:               relNewFiles,
-		DeletedFiles:           relDeletedFiles,
-		TranscriptPath:         event.SessionRef,
-		SubagentTranscriptPath: subagentTranscriptPath,
-		CheckpointUUID:         checkpointUUID,
-		AuthorName:             author.Name,
-		AuthorEmail:            author.Email,
-		SubagentType:           event.SubagentType,
-		TaskDescription:        event.TaskDescription,
-		AgentType:              agentType,
-	}
-
-	if err := strat.SaveTaskStep(ctx, taskStepCtx); err != nil {
-		if errors.Is(err, gitrepo.ErrStatusBudgetExceeded) {
-			// Defensive symmetry with turn-end, not a live path today: task
-			// saves write via writeTask, which reads no worktree status, so
-			// nothing under SaveTaskStep currently emits the sentinel. Kept so
-			// the degrade posture is already correct if that changes.
-			logging.Warn(logCtx, "task checkpoint skipped: status budget exceeded during save",
-				slog.String("error", err.Error()))
-			_ = CleanupPreTaskState(ctx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+		if !opts.bypassNoChangesSkip {
+			logging.Info(logCtx, "no file changes detected, skipping task record")
+			_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 			return nil
 		}
-		return fmt.Errorf("failed to save task step: %w", err)
+		logging.Info(logCtx, "no file changes detected but completing record anyway (final subagent-stop capture)")
 	}
 
-	_ = CleanupPreTaskState(ctx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+	if opts.ensureSessionState {
+		if err := GetStrategy(logCtx).EnsureSessionExists(logCtx, event.SessionID, ag.Type()); err != nil {
+			return fmt.Errorf("failed to ensure session state: %w", err)
+		}
+	}
+
+	files := mergeUnique(mergeUnique(relModifiedFiles, relNewFiles), relDeletedFiles)
+	rec := session.TaskRecord{
+		ToolUseID:              event.ToolUseID,
+		AgentID:                event.SubagentID,
+		StartedAt:              time.Now(),
+		SubagentType:           event.SubagentType,
+		TaskDescription:        event.TaskDescription,
+		DeclaredTranscriptPath: subagentTranscriptPath,
+		Files:                  files,
+		TokenUsage:             event.TokenUsage,
+	}
+	// Exactly-once needs an identity to be "once" about. Copilot CLI's
+	// SubagentEnd carries no correlation ID at all, so every one of its
+	// subagents keys on "" — the claim would match the first one's completed
+	// record and silently drop each later subagent's files. Merge instead, the
+	// same shape multi-turn Droid Workers use.
+	if event.ToolUseID == "" && event.SubagentID == "" {
+		if err := strategy.UpsertCompletedTaskRecord(logCtx, event.SessionID, rec); err != nil {
+			return fmt.Errorf("failed to record uncorrelated task: %w", err)
+		}
+		_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+		return nil
+	}
+	completed, err := strategy.CompleteTaskRecord(logCtx, event.SessionID, rec)
+	if err != nil {
+		return fmt.Errorf("failed to complete task record: %w", err)
+	}
+	if !completed {
+		// A racing Final event won the exactly-once completion, or the session
+		// state is gone (ended and swept mid-capture) — nothing was written.
+		logging.Debug(logCtx, "task record not completed by this capture (raced or state gone)",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID))
+	}
+
+	_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 	return nil
+}
+
+// loadLiveTaskRecords returns sessionID's still-in-flight task records, or nil
+// when there is no state (or it cannot be read — logged, best-effort).
+func loadLiveTaskRecords(logCtx context.Context, sessionID string) []session.TaskRecord {
+	state, err := strategy.LoadSessionState(logCtx, sessionID)
+	if err != nil {
+		logging.Warn(logCtx, "failed to load session state for in-flight task capture",
+			slog.String("session_id", sessionID),
+			slog.String("error", err.Error()))
+		return nil
+	}
+	if state == nil {
+		return nil
+	}
+	return state.LiveTaskRecords()
+}
+
+// completeLiveTaskRecords is the SessionEnd sweep: the session is closing with
+// these tasks still in flight, so each gets the same completion SubagentStop
+// would have performed, via the same handleSubagentStopFinal machinery (see
+// captureInFlightTaskFinal). SessionEnd is every record's last completion
+// chance, so it processes every live marker, and MUST run before the caller
+// marks the session ended and eagerly condenses (endSessionNow), so the
+// condense materializes the just-completed records.
+// Best-effort: one task's failure does not stop the others.
+func completeLiveTaskRecords(ctx context.Context, ag agent.Agent, sessionID, sessionRef string) {
+	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
+	for _, task := range loadLiveTaskRecords(logCtx, sessionID) {
+		captureInFlightTaskFinal(logCtx, ag, sessionID, sessionRef, task)
+	}
+}
+
+// captureInFlightTaskFinal runs the SessionEnd sweep's final capture for a
+// single in-flight task by synthesizing the same Event shape a real
+// SubagentStop would carry (SubagentStop payloads carry no tool_input either,
+// which is why the marker itself is the source for SubagentType/
+// TaskDescription/AgentID here) and delegating to handleSubagentStopFinal —
+// the exact machinery a genuine late SubagentStop would run, including the
+// exactly-once completion guard against a real SubagentStop for the same task
+// arriving around the same time.
+func captureInFlightTaskFinal(logCtx context.Context, ag agent.Agent, sessionID, sessionRef string, task session.TaskRecord) {
+	event := &agent.Event{
+		Type:            agent.SubagentEnd,
+		SessionID:       sessionID,
+		SessionRef:      sessionRef,
+		ToolUseID:       task.ToolUseID,
+		SubagentID:      task.AgentID,
+		SubagentType:    task.SubagentType,
+		TaskDescription: task.TaskDescription,
+		Final:           true,
+		Timestamp:       time.Now(),
+	}
+	if err := handleSubagentStopFinal(logCtx, ag, event); err != nil {
+		logging.Warn(logCtx, "failed to finalize in-flight task at session end",
+			slog.String("session_id", sessionID),
+			slog.String("tool_use_id", task.ToolUseID),
+			slog.String("error", err.Error()))
+	}
 }
 
 // resolveSubagentSessionLink reports whether this turn belongs to a subagent
@@ -1470,7 +1823,7 @@ func resolveSubagentSessionLink(
 }
 
 // subagentSessionStep carries the turn-end inputs needed to record a detached
-// subagent session as a task checkpoint on its parent.
+// subagent session as a task record on its parent.
 type subagentSessionStep struct {
 	link          agent.SubagentSessionLink
 	sessionID     string
@@ -1479,21 +1832,24 @@ type subagentSessionStep struct {
 	modifiedFiles []string
 	newFiles      []string
 	deletedFiles  []string
-	author        *GitAuthor
 	agentType     types.AgentType
 	strat         *strategy.ManualCommitStrategy
 }
 
-// saveSubagentSessionTaskStep writes a subagent session's turn as a task
-// checkpoint under its parent session.
+// saveSubagentSessionTaskStep writes a subagent session's turn as a COMPLETED
+// task record on its parent session (created on completion — a Worker's launch
+// fires no hook that could stub a record, so its turn-end is the first point a
+// record can exist).
 //
-// The checkpoint is keyed by the parent's session and tool-use ID, so the
-// subagent's files land in the parent's FilesTouched and its work condenses with
-// the parent's next commit. The subagent's own session ID doubles as the agent
-// ID, which is what stores its transcript beside the parent's in the checkpoint.
+// The record is keyed by the parent's session and tool-use ID, so the
+// subagent's files land in the parent's FilesTouched and condensation
+// materializes its transcript with the parent's next checkpoint. The
+// subagent's own session ID doubles as the agent ID; the declared transcript
+// path is the Worker session's transcript, known here at attribution time —
+// if it is gone by condensation, the materializer records it unavailable.
 func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) error {
 	logCtx := logging.WithComponent(ctx, "lifecycle")
-	logging.Info(logCtx, "recording subagent session as task checkpoint",
+	logging.Info(logCtx, "recording subagent session as task record",
 		slog.String("subagent_session_id", step.sessionID),
 		slog.String("parent_session_id", step.link.ParentSessionID),
 		slog.String("tool_use_id", step.link.ToolUseID),
@@ -1501,24 +1857,23 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 		slog.Int("new_files", len(step.newFiles)),
 		slog.Int("deleted_files", len(step.deletedFiles)))
 
-	taskStepCtx := strategy.TaskStepContext{
-		SessionID:              step.link.ParentSessionID,
-		ToolUseID:              step.link.ToolUseID,
-		AgentID:                step.sessionID,
-		ModifiedFiles:          step.modifiedFiles,
-		NewFiles:               step.newFiles,
-		DeletedFiles:           step.deletedFiles,
-		TranscriptPath:         step.link.ParentTranscriptPath,
-		SubagentTranscriptPath: step.transcriptRef,
-		AuthorName:             step.author.Name,
-		AuthorEmail:            step.author.Email,
-		SubagentType:           step.link.SubagentType,
-		TaskDescription:        step.link.TaskDescription,
-		AgentType:              step.agentType,
+	// SaveTaskStep's old parent-state guarantee: the parent may not have any
+	// session state yet when its Worker finishes first.
+	if err := step.strat.EnsureSessionExists(ctx, step.link.ParentSessionID, step.agentType); err != nil {
+		return fmt.Errorf("failed to ensure parent session state: %w", err)
 	}
 
-	if err := step.strat.SaveTaskStep(ctx, taskStepCtx); err != nil {
-		return fmt.Errorf("failed to save subagent session task step: %w", err)
+	files := mergeUnique(mergeUnique(step.modifiedFiles, step.newFiles), step.deletedFiles)
+	if err := strategy.UpsertCompletedTaskRecord(ctx, step.link.ParentSessionID, session.TaskRecord{
+		ToolUseID:              step.link.ToolUseID,
+		AgentID:                step.sessionID,
+		StartedAt:              time.Now(),
+		SubagentType:           step.link.SubagentType,
+		TaskDescription:        step.link.TaskDescription,
+		DeclaredTranscriptPath: step.transcriptRef,
+		Files:                  files,
+	}); err != nil {
+		return fmt.Errorf("failed to record subagent session task: %w", err)
 	}
 
 	// Retire the subagent's own session the same way an ordinary turn-end does,
@@ -1557,16 +1912,6 @@ func resolveTranscriptOffset(ctx context.Context, preState *PrePromptState, sess
 	}
 
 	return 0
-}
-
-// parseTranscriptForCheckpointUUID is a thin wrapper around transcript parsing for checkpoint UUID lookup.
-// Returns parsed transcript lines for use with FindCheckpointUUID.
-func parseTranscriptForCheckpointUUID(transcriptPath string) ([]transcriptLine, error) {
-	lines, err := transcript.ParseFromFileAtLine(transcriptPath, 0)
-	if err != nil {
-		return nil, fmt.Errorf("parsing transcript for checkpoint UUID: %w", err)
-	}
-	return lines, nil
 }
 
 // recordCaptureDegraded persists (or clears) the capture-degraded timestamp on
@@ -1682,6 +2027,11 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 				slog.String("error", transErr.Error()))
 		}
 		state.EndedAt = &endedAt
+		if prepareErr := strategy.PrepareSessionEndCondensation(ctx, state); prepareErr != nil {
+			logging.Warn(logging.WithComponent(ctx, "lifecycle"), "failed to prepare session-end condensation",
+				slog.String("session_id", sessionID),
+				slog.String("error", prepareErr.Error()))
+		}
 		ended = true
 		return nil
 	})

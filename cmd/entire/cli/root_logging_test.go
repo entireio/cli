@@ -30,7 +30,8 @@ func markRepoSetUpForLogging(t *testing.T) {
 }
 
 // executeThroughRoot runs args through a real root command — the only way to
-// exercise the pre-run that builds the logger and the post-run that flushes it.
+// exercise the pre-run that builds the logger — then closes it the way main.go
+// does so buffered lines reach the file.
 func executeThroughRoot(t *testing.T, args ...string) error {
 	t.Helper()
 
@@ -38,7 +39,12 @@ func executeThroughRoot(t *testing.T, args ...string) error {
 	root.SetOut(&bytes.Buffer{})
 	root.SetErr(&bytes.Buffer{})
 	root.SetArgs(args)
-	return root.ExecuteContext(context.Background())
+
+	executed, err := root.ExecuteContextC(context.Background())
+	if closeErr := logging.LoggerFromContext(executed.Context()).Close(); closeErr != nil {
+		t.Fatalf("Close(): %v", closeErr)
+	}
+	return err
 }
 
 // setUpRepoForRootLogging makes cwd a set-up git repo. setupStopTestRepo also
@@ -54,8 +60,8 @@ func setUpRepoForRootLogging(t *testing.T) string {
 }
 
 // runProbeUnder attaches a probe under the given command path, runs it through
-// the real root, and reports the logger its RunE saw — writing probeMarker while
-// the file is still open, since the post-run closes on the way out.
+// the real root, and reports the logger its RunE saw, closing it the way main.go
+// does so buffered lines reach the file.
 //
 // Hidden so the post-run's Hidden walk short-circuits before its telemetry and
 // version-check calls, which would otherwise hit the network mid-test.
@@ -92,6 +98,9 @@ func runProbeUnder(t *testing.T, parents ...string) *logging.Logger {
 	root.SetArgs(append(append([]string{}, parents...), probe.Use))
 	if err := root.Execute(); err != nil {
 		t.Fatalf("execute %v %s: %v", parents, probe.Use, err)
+	}
+	if err := observed.Close(); err != nil {
+		t.Fatalf("Close(): %v", err)
 	}
 	return observed
 }
@@ -147,9 +156,8 @@ func TestInitRootLogging_SkipsRepoThatNeverEnabledEntire(t *testing.T) {
 
 // Pins the flush main.go depends on: cobra returns out of execute() as soon as
 // RunE errors or required-flag validation fails, both before its post-run loop,
-// so root's flush never runs and the command ExecuteContextC hands back is the
-// only route to the buffered lines. (Errors raised before any pre-run carry no
-// logger, so there is nothing to lose.)
+// so the command ExecuteContextC hands back is the only route to the buffered
+// lines.
 func TestExecutedCommandCarriesLoggerOnFailure(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -212,8 +220,7 @@ func TestExecutedCommandCarriesLoggerOnFailure(t *testing.T) {
 
 			logFile := filepath.Join(dir, paths.EntireDir, "logs", "entire.log")
 
-			// Exactly what main.go does after ExecuteContextC. Nothing else can
-			// have flushed: cobra skips its PostRun loop on both these paths.
+			// Exactly what main.go does after ExecuteContextC.
 			if closeErr := logging.LoggerFromContext(executed.Context()).Close(); closeErr != nil {
 				t.Fatalf("Close() error = %v", closeErr)
 			}
