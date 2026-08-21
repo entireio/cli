@@ -46,8 +46,10 @@ const (
 	configureSaveLocal          = "local"
 	configureSaveCancel         = "cancel"
 	// configureUpstreamKeep is the explicit leave-unchanged upstream choice. It
-	// is not a cluster host, so selecting it never repoints the mirror remote.
+	// is not a cluster host: choosing it leaves every remote exactly as the user
+	// has it, so the repository keeps fetching from its current upstream.
 	configureUpstreamKeep       = "keep-current"
+	configureForgeHost          = "github.com"
 	configureSaveMaxFieldHeight = 4 // title plus the maximum three visible actions
 	configureGitProtocolSSH     = "ssh"
 )
@@ -122,39 +124,9 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 		return err
 	}
 
-	reporter, err := deps.accessClient(ctx)
+	placements, err := configureConnectRepository(ctx, outW, errW, owner, repo, cleanRemote, profile.Jurisdiction, opts.Yes, deps)
 	if err != nil {
-		if errors.Is(err, auth.ErrNotLoggedIn) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return renderDataAPIAuthError(errW, err)
-		}
-		return fmt.Errorf("connect to Entire: %w", err)
-	}
-	access, err := reporter.ReportEnable(ctx, cleanRemote)
-	if err != nil {
-		return fmt.Errorf("check repository access: %w", err)
-	}
-	if !access.Connected {
-		if err := ensureConfigureRepoAccess(ctx, outW, errW, reporter, access, cleanRemote, owner, repo, opts.Yes, deps); err != nil {
-			return err
-		}
-	}
-
-	client, err := deps.coreClient()
-	if err != nil {
-		return fmt.Errorf("connect to Entire control plane: %w", err)
-	}
-	placements, err := resolvePullablePlacements(ctx, client, owner, repo)
-	if err != nil {
-		return renderCoreError(err)
-	}
-	if len(placements) == 0 {
-		placements, err = configureCreateMirrors(ctx, outW, errW, client, owner, repo, profile.Jurisdiction, opts.Yes)
-		if err != nil {
-			return err
-		}
-	}
-	if len(placements) == 0 {
-		return errors.New("no usable mirror was selected")
+		return err
 	}
 
 	manageRegionsHint := ""
@@ -162,40 +134,20 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 		manageRegionsHint = fmt.Sprintf("Manage regions: entire repo mirror create · or %s/gh/%s/%s/settings",
 			configureWebBaseURL(), url.PathEscape(owner), url.PathEscape(repo))
 	}
-	initialChanges, err := configureGitChanges(ctx, repoRoot)
+	state, err := configureResolveBranchState(ctx, repoRoot, owner, repo, opts.Yes)
 	if err != nil {
 		return err
 	}
-	branch, branchErr := gitRunner(ctx, repoRoot, "branch", "--show-current")
-	if branchErr != nil {
-		// Best-effort: local-only saves do not need a branch.
-		branch = ""
-	}
-	protected := false
-	protectionKnown := branch == ""
-	if branch != "" {
-		if detected, protectionErr := configureBranchProtected(ctx, owner, repo, branch); protectionErr == nil {
-			protected = detected
-			protectionKnown = true
-		}
-	}
-	// Non-interactive onboarding has no confirmation step. If GitHub protection
-	// cannot be checked (common when gh is unavailable in CI), fail closed and
-	// use the review branch rather than pushing directly to the checked-out
-	// branch. Interactive users can still explicitly choose a direct push when
-	// protection is known not to block it.
-	protected = configureEffectiveProtection(protected, protectionKnown, opts.Yes)
-	branchPushSafe := false
-	if branch != "" && len(initialChanges) == 0 {
-		branchPushSafe = configureBranchHasNoUnpushedCommits(ctx, repoRoot, branch)
-	}
-	chosen, selectedAgents, saveChoice, agentsChanged, err := promptConfigureUpstreamAndAgents(
+	branch, protected := state.branch, state.protected
+	keepLabel := configureCurrentUpstreamLabel(ctx, repoRoot, placements, owner, repo)
+	choices, err := promptConfigureUpstreamAndAgents(
 		ctx, errW, repoRoot, placements, profile.Jurisdiction, manageRegionsHint,
-		branch, protected, branchPushSafe, opts.Yes,
+		keepLabel, branch, protected, state.pushSafe, opts.Yes,
 	)
 	if err != nil {
 		return err
 	}
+	saveChoice, selectedAgents, agentsChanged := choices.saveChoice, choices.agents, choices.agentsChanged
 	if saveChoice == configureSaveCancel {
 		fmt.Fprintln(outW, "Configuration cancelled.")
 		return nil
@@ -208,7 +160,8 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 	// Configure remotes before taking the worktree baseline. This mutates only Git
 	// metadata, but doing it first ensures any tool reacting to that metadata has
 	// settled before generated configuration changes are measured.
-	forgeRemote, err := configureUseMirror(ctx, outW, errW, repoRoot, owner, repo, chosen)
+	needPush := saveChoice == configureSaveDirect || saveChoice == configureSaveNewBranch
+	forgeRemote, err := configureApplyUpstream(ctx, outW, errW, repoRoot, owner, repo, choices, needPush)
 	if err != nil {
 		return err
 	}
@@ -261,6 +214,96 @@ func runConfigureOnboardingFlow(cmd *cobra.Command, opts EnableOptions, deps con
 	fmt.Fprintln(outW, "  You're set. Start a session with any selected agent —")
 	fmt.Fprintf(outW, "  checkpoints will show up on %s/gh/%s/%s\n", configureWebBaseURL(), url.PathEscape(owner), url.PathEscape(repo))
 	return nil
+}
+
+// configureConnectRepository confirms Entire can reach the repository, guiding
+// GitHub App installation when it cannot, and resolves the mirror placements it
+// can serve, creating them when the repository has none yet.
+func configureConnectRepository(ctx context.Context, outW, errW io.Writer, owner, repo, cleanRemote, jurisdiction string, nonInteractive bool, deps configureFlowDeps) ([]coreapi.ResolvedPlacement, error) {
+	reporter, err := deps.accessClient(ctx)
+	if err != nil {
+		if errors.Is(err, auth.ErrNotLoggedIn) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, renderDataAPIAuthError(errW, err)
+		}
+		return nil, fmt.Errorf("connect to Entire: %w", err)
+	}
+	access, err := reporter.ReportEnable(ctx, cleanRemote)
+	if err != nil {
+		return nil, fmt.Errorf("check repository access: %w", err)
+	}
+	if !access.Connected {
+		if err := ensureConfigureRepoAccess(ctx, outW, errW, reporter, access, cleanRemote, owner, repo, nonInteractive, deps); err != nil {
+			return nil, err
+		}
+	}
+
+	client, err := deps.coreClient()
+	if err != nil {
+		return nil, fmt.Errorf("connect to Entire control plane: %w", err)
+	}
+	placements, err := resolvePullablePlacements(ctx, client, owner, repo)
+	if err != nil {
+		return nil, renderCoreError(err)
+	}
+	if len(placements) == 0 {
+		placements, err = configureCreateMirrors(ctx, outW, errW, client, owner, repo, jurisdiction, nonInteractive)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(placements) == 0 {
+		return nil, errors.New("no usable mirror was selected")
+	}
+	return placements, nil
+}
+
+// configureBranchState is the save-relevant state of the checked-out branch.
+type configureBranchState struct {
+	branch    string
+	protected bool
+	// pushSafe reports that the branch is clean and level with its live forge
+	// head, so a configuration commit can be pushed without surprising the user.
+	pushSafe bool
+}
+
+func configureResolveBranchState(ctx context.Context, repoRoot, owner, repo string, nonInteractive bool) (configureBranchState, error) {
+	initialChanges, err := configureGitChanges(ctx, repoRoot)
+	if err != nil {
+		return configureBranchState{}, err
+	}
+	branch, branchErr := gitRunner(ctx, repoRoot, "branch", "--show-current")
+	if branchErr != nil {
+		// Best-effort: local-only saves do not need a branch.
+		branch = ""
+	}
+	protected := false
+	protectionKnown := branch == ""
+	if branch != "" {
+		if detected, protectionErr := configureBranchProtected(ctx, owner, repo, branch); protectionErr == nil {
+			protected = detected
+			protectionKnown = true
+		}
+	}
+	state := configureBranchState{branch: branch}
+	// Non-interactive onboarding has no confirmation step. If GitHub protection
+	// cannot be checked (common when gh is unavailable in CI), fail closed and
+	// use the review branch rather than pushing directly to the checked-out
+	// branch. Interactive users can still explicitly choose a direct push when
+	// protection is known not to block it.
+	state.protected = configureEffectiveProtection(protected, protectionKnown, nonInteractive)
+	if branch != "" && len(initialChanges) == 0 {
+		state.pushSafe = configureBranchHasNoUnpushedCommits(ctx, repoRoot, branch)
+	}
+	return state, nil
+}
+
+// configureApplyUpstream carries out the upstream choice: adopting the selected
+// Entire mirror, or leaving the user's own remotes exactly as they are.
+func configureApplyUpstream(ctx context.Context, outW, errW io.Writer, repoRoot, owner, repo string, choices configureChoices, needPush bool) (string, error) {
+	if choices.keepUpstream {
+		return configureKeepUpstream(ctx, outW, repoRoot, owner, repo, needPush)
+	}
+	return configureUseMirror(ctx, outW, errW, repoRoot, owner, repo, choices.placement)
 }
 
 func configureOnboardingEnableOptions(opts EnableOptions) EnableOptions {
@@ -580,23 +623,36 @@ func pickConfigureRegions(ctx context.Context, outW io.Writer, regions []regionC
 	return chosen, nil
 }
 
+// configureChoices is what the onboarding form resolved to. keepUpstream means
+// the user chose to leave their current upstream in place, in which case
+// placement carries no mirror to adopt.
+type configureChoices struct {
+	placement     coreapi.ResolvedPlacement
+	agents        []agent.Agent
+	saveChoice    string
+	keepUpstream  bool
+	agentsChanged bool
+}
+
 // promptConfigureUpstreamAndAgents presents upstream, agents, and the dynamic
 // save action as one persistent form. Save is always visible, while its actions
 // change based on whether the choices require only local state or a commit and
 // push. Arrow keys stay within the active section; Enter advances, while
 // shift+tab revisits the previous section.
-func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoRoot string, placements []coreapi.ResolvedPlacement, jurisdiction, manageRegionsHint, branch string, protected, cleanWorktree, nonInteractive bool) (coreapi.ResolvedPlacement, []agent.Agent, string, bool, error) {
+func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoRoot string, placements []coreapi.ResolvedPlacement, jurisdiction, manageRegionsHint, keepLabel, branch string, protected, cleanWorktree, nonInteractive bool) (configureChoices, error) {
 	currentHost := configureCurrentUpstream(ctx, repoRoot)
 	placements = configurePlacementOrder(placements, currentHost, jurisdiction)
 	if len(placements) == 0 {
-		return coreapi.ResolvedPlacement{}, nil, "", false, errors.New("no upstreams available")
+		return configureChoices{}, errors.New("no upstreams available")
 	}
 
-	// An already-mirrored repository opens on the explicit leave-unchanged
-	// choice. Without an Entire upstream yet, configurePlacementOrder puts the
-	// jurisdiction-preferred placement first, which becomes the initial choice.
+	// A repository already fetching through an Entire mirror opens on the
+	// leave-unchanged choice, so revisiting configure changes nothing by default.
+	// One that is not mirrored yet opens on the jurisdiction-preferred placement
+	// configurePlacementOrder put first, since adopting a mirror is what
+	// onboarding is for; staying put remains one keypress away.
 	selectedHost := placements[0].ClusterHost
-	if _, hasCurrent := configureCurrentPlacement(placements, currentHost); hasCurrent {
+	if _, hasCurrent := configureCurrentPlacement(placements, currentHost); hasCurrent && keepLabel != "" {
 		selectedHost = configureUpstreamKeep
 	}
 	placementByHost := make(map[string]coreapi.ResolvedPlacement, len(placements))
@@ -604,17 +660,23 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		placementByHost[placement.ClusterHost] = placement
 	}
 	upstreamOptions := func() []huh.Option[string] {
-		return configureUpstreamChoiceOptions(placements, currentHost)
+		return configureUpstreamChoiceOptions(placements, currentHost, keepLabel)
 	}
+	keepUpstream := func() bool { return selectedHost == configureUpstreamKeep }
+	// Staying put leaves the configured upstream in place, so it is compared
+	// against itself and never reports a mirror change.
 	resolvedHost := func() string {
-		return configureResolvedUpstreamHost(selectedHost, placements, currentHost)
+		if keepUpstream() {
+			return currentHost
+		}
+		return selectedHost
 	}
 
 	external.DiscoverAndRegisterAlways(ctx)
 	preselected := configureAgentPreselection(ctx)
 	agentOptions := configureAgentOptions(hookAgentOptions(preselected), preselected)
 	if len(agentOptions) == 0 {
-		return coreapi.ResolvedPlacement{}, nil, "", false, errors.New("no agents with hook support available")
+		return configureChoices{}, errors.New("no agents with hook support available")
 	}
 	installedAgentNames := make([]string, 0)
 	for _, name := range GetAgentsWithHooksInstalled(ctx) {
@@ -678,19 +740,25 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 
 	if nonInteractive {
 		chosen, ok := placementByHost[resolvedHost()]
-		if !ok {
-			return coreapi.ResolvedPlacement{}, nil, "", false, errors.New("default upstream is no longer available")
+		if !ok && !keepUpstream() {
+			return configureChoices{}, errors.New("default upstream is no longer available")
 		}
 		selection, selectionErr := configureNonInteractiveAgentSelection(selectedAgentNames, agentOptions)
 		if selectionErr != nil {
-			return coreapi.ResolvedPlacement{}, nil, "", false, selectionErr
+			return configureChoices{}, selectionErr
 		}
 		selectedAgentNames = selection
 		selectedAgents, err := configureSelectedAgents(selectedAgentNames)
 		if err != nil {
-			return coreapi.ResolvedPlacement{}, nil, "", false, err
+			return configureChoices{}, err
 		}
-		return chosen, selectedAgents, configureNonInteractiveSaveChoice(hasChanges(), requiresPush(), protected), agentsChanged(), nil
+		return configureChoices{
+			placement:     chosen,
+			keepUpstream:  keepUpstream(),
+			agents:        selectedAgents,
+			saveChoice:    configureNonInteractiveSaveChoice(hasChanges(), requiresPush(), protected),
+			agentsChanged: agentsChanged(),
+		}, nil
 	}
 
 	group := huh.NewGroup(upstreamControl, agentControl, saveControl)
@@ -699,23 +767,29 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 	fmt.Fprintln(errW)
 	if err := form.RunWithContext(ctx); err != nil {
 		if cancelErr := handleFormCancellation(errW, "Configure", err); cancelErr != nil {
-			return coreapi.ResolvedPlacement{}, nil, "", false, cancelErr
+			return configureChoices{}, cancelErr
 		}
-		return coreapi.ResolvedPlacement{}, nil, "", false, NewSilentError(errors.New("configure cancelled"))
+		return configureChoices{}, NewSilentError(errors.New("configure cancelled"))
 	}
 
 	chosen, ok := placementByHost[resolvedHost()]
-	if !ok {
-		return coreapi.ResolvedPlacement{}, nil, "", false, errors.New("selected upstream is no longer available")
+	if !ok && !keepUpstream() {
+		return configureChoices{}, errors.New("selected upstream is no longer available")
 	}
 	selectedAgents, err := configureSelectedAgents(selectedAgentNames)
 	if err != nil {
-		return coreapi.ResolvedPlacement{}, nil, "", false, err
+		return configureChoices{}, err
 	}
 	if !hasChanges() && saveChoice != configureSaveCancel {
 		saveChoice = ""
 	}
-	return chosen, selectedAgents, saveChoice, agentsChanged(), nil
+	return configureChoices{
+		placement:     chosen,
+		keepUpstream:  keepUpstream(),
+		agents:        selectedAgents,
+		saveChoice:    saveChoice,
+		agentsChanged: agentsChanged(),
+	}, nil
 }
 
 func newConfigureAgentControl(options []huh.Option[string], selected *[]string, requireOne bool) *uiform.Checklist[string] {
@@ -894,40 +968,75 @@ func configureSelectedAgents(names []string) ([]agent.Agent, error) {
 	return selected, nil
 }
 
-// configureUpstreamChoiceOptions lists the upstream choices. A repository that
-// already has an Entire upstream leads with an explicit leave-unchanged choice
-// naming its current region, so keeping the mirror is a visible decision rather
-// than the absence of one.
-func configureUpstreamChoiceOptions(placements []coreapi.ResolvedPlacement, currentHost string) []huh.Option[string] {
-	current, ok := configureCurrentPlacement(placements, currentHost)
-	if !ok {
+// configureUpstreamChoiceOptions lists the upstream choices, led by an explicit
+// leave-unchanged choice naming the repository's current upstream. Choosing it
+// keeps the user's own remote — usually GitHub — rather than fetching through an
+// Entire mirror, so staying put is a visible decision rather than the absence of
+// one. keepLabel is empty when the current upstream cannot be described.
+func configureUpstreamChoiceOptions(placements []coreapi.ResolvedPlacement, currentHost, keepLabel string) []huh.Option[string] {
+	if keepLabel == "" {
 		return configureUpstreamOptions(placements, currentHost)
 	}
-	// The leave-unchanged choice already names the configured region, so listing
-	// that region again would offer two rows with identical outcomes.
+	// When the current upstream is already an Entire mirror, its region would
+	// otherwise appear twice: once as leave-unchanged, once as a separate choice
+	// with the identical outcome.
 	alternatives := make([]coreapi.ResolvedPlacement, 0, len(placements))
 	for _, placement := range placements {
-		if !strings.EqualFold(placement.ClusterHost, current.ClusterHost) {
+		if !strings.EqualFold(placement.ClusterHost, currentHost) {
 			alternatives = append(alternatives, placement)
 		}
 	}
-	keep := huh.NewOption("Leave as is — "+configurePlacementLabel(current), configureUpstreamKeep)
+	keep := huh.NewOption("Leave as is — "+keepLabel, configureUpstreamKeep)
 	return append([]huh.Option[string]{keep}, configureUpstreamOptions(alternatives, currentHost)...)
 }
 
-// configureResolvedUpstreamHost maps a selection to the cluster host it means,
-// translating the leave-unchanged choice back to the configured upstream.
-func configureResolvedUpstreamHost(selected string, placements []coreapi.ResolvedPlacement, currentHost string) string {
-	if selected != configureUpstreamKeep {
-		return selected
+// configureCurrentUpstreamLabel describes what the repository fetches from
+// today, for the leave-unchanged choice: the mirror region when origin already
+// points at Entire, otherwise the forge repository the user's own remote names.
+func configureCurrentUpstreamLabel(ctx context.Context, repoRoot string, placements []coreapi.ResolvedPlacement, owner, repo string) string {
+	raw, err := gitremote.GetRemoteURLInDir(ctx, repoRoot, defaultMirrorRemote)
+	if err != nil {
+		// No origin: the repository was identified through another GitHub remote,
+		// which staying put leaves untouched.
+		return configureForgeHost + "/" + owner + "/" + repo
 	}
-	if current, ok := configureCurrentPlacement(placements, currentHost); ok {
-		return current.ClusterHost
+	info, err := gitremote.ParseURL(raw)
+	if err != nil {
+		return ""
 	}
-	if len(placements) > 0 {
-		return placements[0].ClusterHost
+	if info.Protocol == gitremote.ProtocolEntire {
+		if current, ok := configureCurrentPlacement(placements, info.Host); ok {
+			return configurePlacementLabel(current)
+		}
+		return info.Host
 	}
-	return ""
+	return info.CanonicalHost() + "/" + info.Owner + "/" + info.Repo
+}
+
+// configureKeepUpstream honors the leave-unchanged choice: no remote is
+// repointed and no branch tracking is rewritten. A GitHub remote is added only
+// when a configuration push needs somewhere to land and none exists yet.
+func configureKeepUpstream(ctx context.Context, outW io.Writer, repoRoot, owner, repo string, needPush bool) (string, error) {
+	remotes, err := listGitRemotes(ctx, repoRoot)
+	if err != nil {
+		return "", err
+	}
+	// Nothing is excluded: staying put means origin still points at the forge, so
+	// it is itself a valid push destination.
+	forgeRemote, err := configureExistingForgeRemote(ctx, repoRoot, owner, repo, remotes, "")
+	if err != nil {
+		return "", err
+	}
+	if forgeRemote != "" || !needPush {
+		return forgeRemote, nil
+	}
+	forgeRemote = availableConfigureRemoteName(remotes, mirrorCloneProviderGitHub)
+	forgeURL := configureGitHubForgeURL(ctx, owner, repo)
+	if _, err := gitRunner(ctx, repoRoot, "remote", "add", forgeRemote, forgeURL); err != nil {
+		return "", fmt.Errorf("add GitHub push remote %q: %w", forgeRemote, err)
+	}
+	fmt.Fprintf(outW, "✓ Added GitHub push remote %q\n  %s\n", forgeRemote, forgeURL)
+	return forgeRemote, nil
 }
 
 // configureCurrentPlacement returns the placement matching the repository's

@@ -457,42 +457,114 @@ func TestConfigureUpstreamChoiceOptionsLeadWithLeaveAsIs(t *testing.T) {
 		{ClusterHost: "aws-eu-central-1.entire.io", Jurisdiction: coreapi.NewOptString("eu")},
 		{ClusterHost: "aws-us-east-2.entire.io", Jurisdiction: coreapi.NewOptString("us")},
 	}
-
-	options := configureUpstreamChoiceOptions(placements, placements[0].ClusterHost)
-	got := make([]string, len(options))
-	for i, option := range options {
-		got[i] = ansi.Strip(option.Key)
-	}
-	want := []string{"Leave as is — European Union", "United States"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("options = %v, want the current region offered once as %v", got, want)
-	}
-	if options[0].Value != configureUpstreamKeep {
-		t.Fatalf("first option value = %q, want the leave-unchanged choice", options[0].Value)
+	labels := func(options []huh.Option[string]) []string {
+		out := make([]string, len(options))
+		for i, option := range options {
+			out[i] = ansi.Strip(option.Key)
+		}
+		return out
 	}
 
-	withoutUpstream := configureUpstreamChoiceOptions(placements, "")
-	if len(withoutUpstream) != len(placements) {
-		t.Fatalf("options without an upstream = %d, want placements only", len(withoutUpstream))
+	// A repository still fetching from GitHub can keep doing so, with every
+	// mirror region offered alongside.
+	notMirrored := configureUpstreamChoiceOptions(placements, "", "github.com/acme/widget")
+	want := []string{"Leave as is — github.com/acme/widget", "European Union", "United States"}
+	if got := labels(notMirrored); !reflect.DeepEqual(got, want) {
+		t.Fatalf("options = %v, want %v", got, want)
+	}
+	if notMirrored[0].Value != configureUpstreamKeep {
+		t.Fatalf("first option value = %q, want the leave-unchanged choice", notMirrored[0].Value)
+	}
+
+	// An already-mirrored repository names its region once, as leave-unchanged.
+	mirrored := configureUpstreamChoiceOptions(placements, placements[0].ClusterHost, "European Union")
+	want = []string{"Leave as is — European Union", "United States"}
+	if got := labels(mirrored); !reflect.DeepEqual(got, want) {
+		t.Fatalf("mirrored options = %v, want %v", got, want)
+	}
+
+	if got := configureUpstreamChoiceOptions(placements, "", ""); len(got) != len(placements) {
+		t.Fatalf("options without a describable upstream = %d, want placements only", len(got))
 	}
 }
 
-func TestConfigureLeaveAsIsResolvesToCurrentUpstream(t *testing.T) {
+func TestConfigureKeepUpstreamLeavesRemotesAlone(t *testing.T) {
+	setupTestRepo(t)
+	addConfigureTestRemote(t, defaultMirrorRemote, "https://github.com/acme/widget.git")
+
+	var out bytes.Buffer
+	forgeRemote, err := configureKeepUpstream(t.Context(), &out, ".", testConfigureOwner, testConfigureRepo, true)
+	if err != nil {
+		t.Fatalf("configureKeepUpstream() error = %v", err)
+	}
+	if forgeRemote != defaultMirrorRemote {
+		t.Fatalf("forge remote = %q, want the existing GitHub origin", forgeRemote)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("staying put reported remote changes: %q", out.String())
+	}
+	url, err := gitRunner(t.Context(), ".", "remote", "get-url", defaultMirrorRemote)
+	if err != nil {
+		t.Fatalf("read origin: %v", err)
+	}
+	if url != "https://github.com/acme/widget.git" {
+		t.Fatalf("origin = %q, want it left untouched", url)
+	}
+}
+
+func TestConfigureKeepUpstreamAddsPushRemoteOnlyWhenPushing(t *testing.T) {
+	setupTestRepo(t)
+	addConfigureTestRemote(t, defaultMirrorRemote, "entire://aws-eu-central-1.entire.io/gh/acme/widget")
+
+	forgeRemote, err := configureKeepUpstream(t.Context(), io.Discard, ".", testConfigureOwner, testConfigureRepo, false)
+	if err != nil {
+		t.Fatalf("configureKeepUpstream() error = %v", err)
+	}
+	if forgeRemote != "" {
+		t.Fatalf("forge remote = %q, want none added for a local-only save", forgeRemote)
+	}
+
+	var out bytes.Buffer
+	forgeRemote, err = configureKeepUpstream(t.Context(), &out, ".", testConfigureOwner, testConfigureRepo, true)
+	if err != nil {
+		t.Fatalf("configureKeepUpstream() error = %v", err)
+	}
+	if forgeRemote != mirrorCloneProviderGitHub {
+		t.Fatalf("forge remote = %q, want a GitHub push remote", forgeRemote)
+	}
+	if !strings.Contains(out.String(), "Added GitHub push remote") {
+		t.Fatalf("push remote addition was not reported: %q", out.String())
+	}
+	url, err := gitRunner(t.Context(), ".", "remote", "get-url", defaultMirrorRemote)
+	if err != nil {
+		t.Fatalf("read origin: %v", err)
+	}
+	if url != "entire://aws-eu-central-1.entire.io/gh/acme/widget" {
+		t.Fatalf("origin = %q, want the current upstream preserved", url)
+	}
+}
+
+func TestConfigureCurrentUpstreamLabelDescribesTheUsersUpstream(t *testing.T) {
 	placements := []coreapi.ResolvedPlacement{
 		{ClusterHost: "aws-eu-central-1.entire.io", Jurisdiction: coreapi.NewOptString("eu")},
-		{ClusterHost: "aws-us-east-2.entire.io", Jurisdiction: coreapi.NewOptString("us")},
 	}
-	currentHost := "AWS-US-EAST-2.entire.io"
 
-	resolved := configureResolvedUpstreamHost(configureUpstreamKeep, placements, currentHost)
-	if resolved != "aws-us-east-2.entire.io" {
-		t.Fatalf("resolved host = %q, want the configured upstream", resolved)
+	setupTestRepo(t)
+	if got := configureCurrentUpstreamLabel(t.Context(), ".", placements, testConfigureOwner, testConfigureRepo); got != "github.com/acme/widget" {
+		t.Fatalf("label without a remote = %q, want the identified GitHub repository", got)
 	}
-	if mirrorChanged, _ := configureSelectionChanges(resolved, currentHost, nil, nil); mirrorChanged {
-		t.Fatal("leaving the upstream as is must not count as a mirror change")
+
+	addConfigureTestRemote(t, defaultMirrorRemote, "https://github.com/acme/widget.git")
+	if got := configureCurrentUpstreamLabel(t.Context(), ".", placements, testConfigureOwner, testConfigureRepo); got != "github.com/acme/widget" {
+		t.Fatalf("label for a GitHub origin = %q, want the forge repository", got)
 	}
-	if got := configureResolvedUpstreamHost(placements[0].ClusterHost, placements, currentHost); got != placements[0].ClusterHost {
-		t.Fatalf("explicit selection = %q, want it preserved", got)
+
+	if _, err := gitRunner(t.Context(), ".", "remote", "set-url", defaultMirrorRemote,
+		"entire://aws-eu-central-1.entire.io/gh/acme/widget"); err != nil {
+		t.Fatalf("repoint origin at the mirror: %v", err)
+	}
+	if got := configureCurrentUpstreamLabel(t.Context(), ".", placements, testConfigureOwner, testConfigureRepo); got != "European Union" {
+		t.Fatalf("label for a mirrored origin = %q, want the region name", got)
 	}
 }
 
