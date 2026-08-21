@@ -452,6 +452,50 @@ func TestConfigureUpstreamOptionsUseRegionLabels(t *testing.T) {
 	}
 }
 
+func TestConfigureUpstreamChoiceOptionsLeadWithLeaveAsIs(t *testing.T) {
+	placements := []coreapi.ResolvedPlacement{
+		{ClusterHost: "aws-eu-central-1.entire.io", Jurisdiction: coreapi.NewOptString("eu")},
+		{ClusterHost: "aws-us-east-2.entire.io", Jurisdiction: coreapi.NewOptString("us")},
+	}
+
+	options := configureUpstreamChoiceOptions(placements, placements[0].ClusterHost)
+	got := make([]string, len(options))
+	for i, option := range options {
+		got[i] = ansi.Strip(option.Key)
+	}
+	want := []string{"Leave as is — European Union", "United States"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("options = %v, want the current region offered once as %v", got, want)
+	}
+	if options[0].Value != configureUpstreamKeep {
+		t.Fatalf("first option value = %q, want the leave-unchanged choice", options[0].Value)
+	}
+
+	withoutUpstream := configureUpstreamChoiceOptions(placements, "")
+	if len(withoutUpstream) != len(placements) {
+		t.Fatalf("options without an upstream = %d, want placements only", len(withoutUpstream))
+	}
+}
+
+func TestConfigureLeaveAsIsResolvesToCurrentUpstream(t *testing.T) {
+	placements := []coreapi.ResolvedPlacement{
+		{ClusterHost: "aws-eu-central-1.entire.io", Jurisdiction: coreapi.NewOptString("eu")},
+		{ClusterHost: "aws-us-east-2.entire.io", Jurisdiction: coreapi.NewOptString("us")},
+	}
+	currentHost := "AWS-US-EAST-2.entire.io"
+
+	resolved := configureResolvedUpstreamHost(configureUpstreamKeep, placements, currentHost)
+	if resolved != "aws-us-east-2.entire.io" {
+		t.Fatalf("resolved host = %q, want the configured upstream", resolved)
+	}
+	if mirrorChanged, _ := configureSelectionChanges(resolved, currentHost, nil, nil); mirrorChanged {
+		t.Fatal("leaving the upstream as is must not count as a mirror change")
+	}
+	if got := configureResolvedUpstreamHost(placements[0].ClusterHost, placements, currentHost); got != placements[0].ClusterHost {
+		t.Fatalf("explicit selection = %q, want it preserved", got)
+	}
+}
+
 func TestConfigurePlacementLabelUsesProductionRegionNames(t *testing.T) {
 	tests := []struct {
 		jurisdiction string

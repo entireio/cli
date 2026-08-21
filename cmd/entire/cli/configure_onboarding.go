@@ -45,6 +45,9 @@ const (
 	configureSaveNewBranch      = "new-branch"
 	configureSaveLocal          = "local"
 	configureSaveCancel         = "cancel"
+	// configureUpstreamKeep is the explicit leave-unchanged upstream choice. It
+	// is not a cluster host, so selecting it never repoints the mirror remote.
+	configureUpstreamKeep       = "keep-current"
 	configureSaveMaxFieldHeight = 4 // title plus the maximum three visible actions
 	configureGitProtocolSSH     = "ssh"
 )
@@ -589,16 +592,22 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		return coreapi.ResolvedPlacement{}, nil, "", false, errors.New("no upstreams available")
 	}
 
-	// configurePlacementOrder puts the configured upstream first, so it is also
-	// the initial selection. If this repo has no Entire upstream yet, it falls
-	// back to the jurisdiction-preferred placement.
+	// An already-mirrored repository opens on the explicit leave-unchanged
+	// choice. Without an Entire upstream yet, configurePlacementOrder puts the
+	// jurisdiction-preferred placement first, which becomes the initial choice.
 	selectedHost := placements[0].ClusterHost
+	if _, hasCurrent := configureCurrentPlacement(placements, currentHost); hasCurrent {
+		selectedHost = configureUpstreamKeep
+	}
 	placementByHost := make(map[string]coreapi.ResolvedPlacement, len(placements))
 	for _, placement := range placements {
 		placementByHost[placement.ClusterHost] = placement
 	}
 	upstreamOptions := func() []huh.Option[string] {
-		return configureUpstreamOptions(placements, currentHost)
+		return configureUpstreamChoiceOptions(placements, currentHost)
+	}
+	resolvedHost := func() string {
+		return configureResolvedUpstreamHost(selectedHost, placements, currentHost)
 	}
 
 	external.DiscoverAndRegisterAlways(ctx)
@@ -631,11 +640,11 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 	agentControl := newConfigureAgentControl(agentOptions, &selectedAgentNames, true)
 
 	mirrorChanged := func() bool {
-		mirror, _ := configureSelectionChanges(selectedHost, currentHost, selectedAgentNames, installedAgentNames)
+		mirror, _ := configureSelectionChanges(resolvedHost(), currentHost, selectedAgentNames, installedAgentNames)
 		return mirror
 	}
 	agentsChanged := func() bool {
-		_, agents := configureSelectionChanges(selectedHost, currentHost, selectedAgentNames, installedAgentNames)
+		_, agents := configureSelectionChanges(resolvedHost(), currentHost, selectedAgentNames, installedAgentNames)
 		return agents
 	}
 	requiresPush := func() bool {
@@ -668,7 +677,7 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 	agentControl.ShowSectionGapWhen(func() bool { return true })
 
 	if nonInteractive {
-		chosen, ok := placementByHost[selectedHost]
+		chosen, ok := placementByHost[resolvedHost()]
 		if !ok {
 			return coreapi.ResolvedPlacement{}, nil, "", false, errors.New("default upstream is no longer available")
 		}
@@ -695,7 +704,7 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		return coreapi.ResolvedPlacement{}, nil, "", false, NewSilentError(errors.New("configure cancelled"))
 	}
 
-	chosen, ok := placementByHost[selectedHost]
+	chosen, ok := placementByHost[resolvedHost()]
 	if !ok {
 		return coreapi.ResolvedPlacement{}, nil, "", false, errors.New("selected upstream is no longer available")
 	}
@@ -883,6 +892,56 @@ func configureSelectedAgents(names []string) ([]agent.Agent, error) {
 		selected = append(selected, ag)
 	}
 	return selected, nil
+}
+
+// configureUpstreamChoiceOptions lists the upstream choices. A repository that
+// already has an Entire upstream leads with an explicit leave-unchanged choice
+// naming its current region, so keeping the mirror is a visible decision rather
+// than the absence of one.
+func configureUpstreamChoiceOptions(placements []coreapi.ResolvedPlacement, currentHost string) []huh.Option[string] {
+	current, ok := configureCurrentPlacement(placements, currentHost)
+	if !ok {
+		return configureUpstreamOptions(placements, currentHost)
+	}
+	// The leave-unchanged choice already names the configured region, so listing
+	// that region again would offer two rows with identical outcomes.
+	alternatives := make([]coreapi.ResolvedPlacement, 0, len(placements))
+	for _, placement := range placements {
+		if !strings.EqualFold(placement.ClusterHost, current.ClusterHost) {
+			alternatives = append(alternatives, placement)
+		}
+	}
+	keep := huh.NewOption("Leave as is — "+configurePlacementLabel(current), configureUpstreamKeep)
+	return append([]huh.Option[string]{keep}, configureUpstreamOptions(alternatives, currentHost)...)
+}
+
+// configureResolvedUpstreamHost maps a selection to the cluster host it means,
+// translating the leave-unchanged choice back to the configured upstream.
+func configureResolvedUpstreamHost(selected string, placements []coreapi.ResolvedPlacement, currentHost string) string {
+	if selected != configureUpstreamKeep {
+		return selected
+	}
+	if current, ok := configureCurrentPlacement(placements, currentHost); ok {
+		return current.ClusterHost
+	}
+	if len(placements) > 0 {
+		return placements[0].ClusterHost
+	}
+	return ""
+}
+
+// configureCurrentPlacement returns the placement matching the repository's
+// configured upstream, if that upstream is still an available placement.
+func configureCurrentPlacement(placements []coreapi.ResolvedPlacement, currentHost string) (coreapi.ResolvedPlacement, bool) {
+	if strings.TrimSpace(currentHost) == "" {
+		return coreapi.ResolvedPlacement{}, false
+	}
+	for _, placement := range placements {
+		if strings.EqualFold(placement.ClusterHost, currentHost) {
+			return placement, true
+		}
+	}
+	return coreapi.ResolvedPlacement{}, false
 }
 
 func configureUpstreamOptions(placements []coreapi.ResolvedPlacement, currentHost string) []huh.Option[string] {
