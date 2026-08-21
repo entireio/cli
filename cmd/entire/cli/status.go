@@ -297,10 +297,9 @@ func formatSettingsStatus(prefix string, s *EntireSettings, sty statusStyles) st
 // stays pure "which configured git remote" (spec Unit 1).
 const checkpointSyncSourceDedicated = "dedicated"
 
-// checkpointSyncInfo is the single shared computation behind both the text and
-// JSON checkpoint-sync sections of `entire status`, so the two outputs cannot
-// drift. Everything here reads local state only (settings, .git/config, local
-// refs, the push queue) — status must stay network-free.
+// checkpointSyncInfo is where checkpoints go, plus the unpushed count the
+// `entire status` sections add on top. Read from local state only (settings,
+// .git/config, local refs, the push queue) — status must stay network-free.
 type checkpointSyncInfo struct {
 	// Remote is the elected git remote name, or the org/repo slug in
 	// dedicated checkpoint_remote mode. Empty when nothing resolved (no
@@ -327,6 +326,11 @@ type checkpointSyncInfo struct {
 // dedicated reports that a checkpoint_remote store is the destination, rather
 // than one of the repo's git remotes.
 func (i checkpointSyncInfo) dedicated() bool { return i.Source == checkpointSyncSourceDedicated }
+
+// storeConfigured reports that a checkpoint_remote exists at all: dedicated is
+// the half where it is in effect, IgnoredStore the half where it is not. Both
+// mean advising the user to configure one would be advice they already took.
+func (i checkpointSyncInfo) storeConfigured() bool { return i.dedicated() || i.IgnoredStore != "" }
 
 // resolveCheckpointSyncDestination answers only *where* checkpoints go — the
 // elected remote, the dedicated store, or the fail-closed error — with no
@@ -389,10 +393,10 @@ func resolveCheckpointSyncDestination(ctx context.Context, s *EntireSettings) ch
 // needs.
 func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpointSyncInfo {
 	info := resolveCheckpointSyncDestination(ctx, s)
-	switch {
-	case info.Err != "" || info.Remote == "":
+	if info.Err != "" || info.Remote == "" {
 		return info
-	case info.dedicated():
+	}
+	if info.dedicated() {
 		// The unpushed counter is meaningful here only on the git-refs
 		// backend (push-queue length is local and accurate). The git-branch
 		// comparison is omitted: pushes to a raw URL update no remote-tracking
@@ -400,9 +404,9 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 		if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
 			info.Unpushed = countUnpushedCheckpointsForStatus(ctx, "")
 		}
-	default:
-		info.Unpushed = countUnpushedCheckpointsForStatus(ctx, info.Remote)
+		return info
 	}
+	info.Unpushed = countUnpushedCheckpointsForStatus(ctx, info.Remote)
 	return info
 }
 

@@ -9,10 +9,34 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// syncTopology builds a topology carrying only a checkpoint-sync result, for
-// the cases that exercise wording rather than remote layout.
-func syncTopology(info checkpointSyncInfo) remoteTopology {
-	return remoteTopology{sync: info}
+// oneURL and twoURLs build the two remote shapes these tests care about: an
+// ordinary remote, and one whose pushes fan out across several repositories.
+func oneURL(name string, pinned bool) remoteDestination {
+	return remoteDestination{name: name, pushURLs: []string{"https://github.com/x/" + name + ".git"}, pinned: pinned}
+}
+
+func twoURLs(name string) remoteDestination {
+	return remoteDestination{name: name, pushURLs: []string{
+		"https://github.com/x/" + name + ".git",
+		"https://github.com/x/" + name + "-mirror.git",
+	}}
+}
+
+// assertNote checks the phrases a note must and must not contain, reporting the
+// whole output on failure — the wording is the behaviour under test, so the
+// surrounding lines are what make a failure diagnosable.
+func assertNote(t *testing.T, out string, want, absent []string) {
+	t.Helper()
+	for _, w := range want {
+		if !strings.Contains(out, w) {
+			t.Errorf("note should mention %q:\n%s", w, out)
+		}
+	}
+	for _, a := range absent {
+		if strings.Contains(out, a) {
+			t.Errorf("note should not mention %q:\n%s", a, out)
+		}
+	}
 }
 
 // TestDescribeSyncRemote covers every tier the note words differently, plus
@@ -28,7 +52,7 @@ func TestDescribeSyncRemote(t *testing.T) {
 	}{
 		{
 			name: "pinned by setting says nothing further",
-			topo: syncTopology(checkpointSyncInfo{Remote: "publish", Source: string(strategy.SyncRemoteSourceConfig)}),
+			topo: remoteTopology{sync: checkpointSyncInfo{Remote: "publish", Source: string(strategy.SyncRemoteSourceConfig)}},
 			// A settled election is the case where "no session history" is
 			// unconditionally true: no push can displace the setting, so every
 			// push elsewhere really does leave the transcripts behind.
@@ -39,13 +63,13 @@ func TestDescribeSyncRemote(t *testing.T) {
 		},
 		{
 			name:   "captured election is settled",
-			topo:   syncTopology(checkpointSyncInfo{Remote: "fork", Source: string(strategy.SyncRemoteSourceObserved)}),
+			topo:   remoteTopology{sync: checkpointSyncInfo{Remote: "fork", Source: string(strategy.SyncRemoteSourceObserved)}},
 			want:   []string{`"fork"`, "push destination", "no session history", "Set strategy_options.checkpoint_push_remote"},
 			absent: []string{"right now"},
 		},
 		{
 			name: "open election says a push can move it",
-			topo: syncTopology(checkpointSyncInfo{Remote: "origin", Source: string(strategy.SyncRemoteSourceDefault)}),
+			topo: remoteTopology{sync: checkpointSyncInfo{Remote: "origin", Source: string(strategy.SyncRemoteSourceDefault)}},
 			want: []string{`right now "origin"`, "entire status", "Set strategy_options.checkpoint_push_remote"},
 			// False on an open tier: the electing push is exactly the one that
 			// carries its session history to the remote it elects.
@@ -53,13 +77,13 @@ func TestDescribeSyncRemote(t *testing.T) {
 		},
 		{
 			name:   "first-remote election words like any other open one",
-			topo:   syncTopology(checkpointSyncInfo{Remote: "base", Source: string(strategy.SyncRemoteSourceFirst)}),
+			topo:   remoteTopology{sync: checkpointSyncInfo{Remote: "base", Source: string(strategy.SyncRemoteSourceFirst)}},
 			want:   []string{`right now "base"`, "entire status"},
 			absent: []string{"no session history"},
 		},
 		{
 			name: "fail-closed election reports sync is off",
-			topo: syncTopology(checkpointSyncInfo{Err: `checkpoint_push_remote "gone" is not a configured git remote`}),
+			topo: remoteTopology{sync: checkpointSyncInfo{Err: `checkpoint_push_remote "gone" is not a configured git remote`}},
 			want: []string{"NOT syncing", `"gone"`},
 			// No destination may be named when the push side has none.
 			absent: []string{"sync to one remote", "single elected remote"},
@@ -97,16 +121,7 @@ func TestDescribeSyncRemote(t *testing.T) {
 			t.Parallel()
 			var b strings.Builder
 			tt.topo.describeSyncRemote(&b)
-			for _, want := range tt.want {
-				if !strings.Contains(b.String(), want) {
-					t.Errorf("note should mention %q:\n%s", want, b.String())
-				}
-			}
-			for _, absent := range tt.absent {
-				if strings.Contains(b.String(), absent) {
-					t.Errorf("note should not mention %q:\n%s", absent, b.String())
-				}
-			}
+			assertNote(t, b.String(), tt.want, tt.absent)
 		})
 	}
 }
@@ -116,16 +131,6 @@ func TestDescribeSyncRemote(t *testing.T) {
 // about a remote that carries no checkpoints.
 func TestDescribeCheckpointDestination(t *testing.T) {
 	t.Parallel()
-
-	oneURL := func(name string, pinned bool) remoteDestination {
-		return remoteDestination{name: name, pushURLs: []string{"https://github.com/x/" + name + ".git"}, pinned: pinned}
-	}
-	twoURLs := func(name string) remoteDestination {
-		return remoteDestination{name: name, pushURLs: []string{
-			"https://github.com/x/" + name + ".git",
-			"https://github.com/x/" + name + "-mirror.git",
-		}}
-	}
 
 	tests := []struct {
 		name   string
@@ -173,7 +178,8 @@ func TestDescribeCheckpointDestination(t *testing.T) {
 					IgnoredStore: "them/checkpoints",
 				},
 			},
-			want: []string{`"them/checkpoints"`, "not in effect", "settings.local.json", `right now "origin"`},
+			// Phrases chosen to survive the paragraph's line wrapping.
+			want: []string{`"them/checkpoints"`, "configured but not in", "settings.local.json", `right now "origin"`},
 			// A checkpoint_remote already exists; advising one reads as a task.
 			absent: []string{"To pin one repository"},
 		},
@@ -223,16 +229,7 @@ func TestDescribeCheckpointDestination(t *testing.T) {
 				}
 				return
 			}
-			for _, want := range tt.want {
-				if !strings.Contains(b.String(), want) {
-					t.Errorf("note should mention %q:\n%s", want, b.String())
-				}
-			}
-			for _, absent := range tt.absent {
-				if strings.Contains(b.String(), absent) {
-					t.Errorf("note should not mention %q:\n%s", absent, b.String())
-				}
-			}
+			assertNote(t, b.String(), tt.want, tt.absent)
 		})
 	}
 }
@@ -261,18 +258,9 @@ func TestInspectRemoteTopology_DedicatedStore(t *testing.T) {
 	inspectRemoteTopology(context.Background()).describeCheckpointDestination(&b, "Checkpoint destination: REVIEW")
 	out := b.String()
 
-	for _, want := range []string{
-		"This repo has 3 remotes (colleague, origin, upstream).",
-		`"org/checkpoints"`,
-		`Pushes to "origin"`,
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("note should mention %q:\n%s", want, out)
-		}
-	}
-	// The regression: origin was named as the destination while being absent
-	// from the list, and checkpoints go to the store, not to origin.
-	if strings.Contains(out, `right now "origin"`) {
-		t.Errorf("note must not name a remote as the destination in dedicated mode:\n%s", out)
-	}
+	assertNote(t, out,
+		[]string{"This repo has 3 remotes (colleague, origin, upstream).", `"org/checkpoints"`, `Pushes to "origin"`},
+		// The regression: origin was named as the destination while being
+		// absent from the list, and checkpoints go to the store, not to origin.
+		[]string{`right now "origin"`})
 }

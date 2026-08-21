@@ -179,28 +179,22 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 	// Destination first: every claim below it is about how checkpoints reach
 	// that destination, and the URL breakdown read as the whole answer when it
 	// came first.
-	if names := t.unpinnedNames(); len(names) > 1 {
-		// Every remote, not just the unpinned ones. The count orients the
+	if len(t.unpinnedNames()) > 1 {
+		// Every remote, not just the unpinned ones: the count orients the
 		// reader in their own repo, and omitting a pinned remote let the note
 		// name a destination missing from its own list.
-		all := make([]string, 0, len(t.destinations))
-		for _, d := range t.destinations {
-			all = append(all, d.name)
-		}
-		fmt.Fprintf(w, "  This repo has %d remotes (%s).\n", len(all), strings.Join(all, ", "))
+		fmt.Fprintf(w, "  This repo has %d remotes (%s).\n", len(t.destinations), strings.Join(t.allNames(), ", "))
 		t.describeSyncRemote(w)
 	}
 
 	t.describeIgnoredStore(w)
 
-	for _, d := range t.destinations {
-		// Only the elected remote's URLs are a checkpoint destination. Another
-		// remote's pushes are gated out entirely (checkpointSyncAllowedForRemote),
-		// so "checkpoints go to the first URL only" would be false of it — as it
-		// is of every remote when the election failed or resolved to nothing.
-		if !d.fansOut() || t.dedicated() || d.name != t.sync.Remote {
-			continue
-		}
+	// Only the elected remote's URLs are a checkpoint destination. Another
+	// remote's pushes are gated out entirely (checkpointSyncAllowedForRemote),
+	// so "checkpoints go to the first URL only" would be false of it — as it is
+	// of every remote when the election failed or resolved to nothing, and of
+	// all of them when a dedicated store bypasses the remotes altogether.
+	if d := t.electedDestination(); d != nil && d.fansOut() && !t.sync.dedicated() {
 		fmt.Fprintf(w, "  Remote %q pushes to %d URLs:\n", d.name, len(d.pushURLs))
 		for i, u := range d.pushURLs {
 			marker := "  "
@@ -219,19 +213,15 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 		}
 	}
 
-	// The advice is "configure a checkpoint_remote" — already done in both
+	// The advice is "configure a checkpoint_remote" — already taken in both
 	// states where one exists, and off-target when a fail-closed election means
 	// nothing is syncing at all.
-	if t.dedicated() || t.sync.IgnoredStore != "" || t.sync.Err != "" {
+	if t.sync.storeConfigured() || t.sync.Err != "" {
 		return
 	}
 	fmt.Fprintln(w, "  To pin one repository for checkpoints, set checkpoint_remote in")
 	fmt.Fprintln(w, "  .entire/settings.json (or .entire/settings.local.json to keep it to this clone).")
 }
-
-// dedicated reports that a checkpoint_remote store is the destination, so none
-// of this repo's remotes is where checkpoints land.
-func (t remoteTopology) dedicated() bool { return t.sync.dedicated() }
 
 // describeIgnoredStore reports a checkpoint_remote that is configured but not in
 // effect. Everywhere else this is a logging.Warn inside remote.PushURL, so the
@@ -244,10 +234,14 @@ func (t remoteTopology) describeIgnoredStore(w io.Writer) {
 	if t.sync.IgnoredStore == "" {
 		return
 	}
-	fmt.Fprintf(w, "    A checkpoint_remote (%q) is configured but not in effect\n", t.sync.IgnoredStore)
-	fmt.Fprintln(w, "    here — most often because it looks like it belongs to another owner.")
-	fmt.Fprintf(w, "    Checkpoints go to %q instead; set it in .entire/settings.local.json\n", t.sync.Remote)
-	fmt.Fprintln(w, "    if the store is yours.")
+	// Two-space indent, like the remote count and unlike describeSyncRemote's
+	// detail lines: this is a fact about the repo's configuration, and it prints
+	// even when no remote list preceded it (a lone fanning-out remote is enough
+	// to reach here), where a deeper indent would hang off nothing.
+	fmt.Fprintf(w, "  A checkpoint_remote (%q) is configured but not in\n", t.sync.IgnoredStore)
+	fmt.Fprintln(w, "  effect here — most often because it looks like it belongs to another owner.")
+	fmt.Fprintf(w, "  Checkpoints go to %q instead; set it in .entire/settings.local.json\n", t.sync.Remote)
+	fmt.Fprintln(w, "  if the store is yours.")
 }
 
 // describeSyncRemote names the one remote that carries checkpoints. It stays
@@ -286,7 +280,7 @@ func (t remoteTopology) describeSyncRemote(w io.Writer) {
 	// it — so it is answered before the switch, which stays typed on the
 	// resolver's enum so `exhaustive` keeps turning a new tier into a decision
 	// here.
-	if t.dedicated() {
+	if t.sync.dedicated() {
 		fmt.Fprintf(w, "    Checkpoints go to the dedicated store %q (set by\n", t.sync.Remote)
 		fmt.Fprintf(w, "    checkpoint_remote), not to any of these remotes. Pushes to %s\n",
 			quoteNames(t.pinnedNames()))
@@ -339,6 +333,31 @@ func (t remoteTopology) describeSyncRemote(w io.Writer) {
 	}
 }
 
+// allNames lists every configured remote, in the sorted order inspectRemoteTopology
+// built them.
+func (t remoteTopology) allNames() []string {
+	names := make([]string, 0, len(t.destinations))
+	for _, d := range t.destinations {
+		names = append(names, d.name)
+	}
+	return names
+}
+
+// electedDestination returns the remote whose pushes carry checkpoints, or nil
+// when the election named nothing, failed, or named something that is not one of
+// this repo's remotes (a dedicated store's org/repo slug).
+func (t remoteTopology) electedDestination() *remoteDestination {
+	if t.sync.Remote == "" {
+		return nil
+	}
+	for i, d := range t.destinations {
+		if d.name == t.sync.Remote {
+			return &t.destinations[i]
+		}
+	}
+	return nil
+}
+
 // pinnedNames lists the remotes a checkpoint_remote is in effect for — which is
 // exactly the set whose pushes reach the store, since the pre-push exemption
 // (pushSettings.hasCheckpointURL) is the same remote.PushURL answer that sets
@@ -353,20 +372,18 @@ func (t remoteTopology) pinnedNames() []string {
 	return names
 }
 
-// quoteNames renders remote names for prose: `"a"`, `"a" and "b"`, `"a", "b" and "c"`.
+// quoteNames renders remote names for prose: `"a"`, `"a" and "b"`, `"a", "b", and "c"`.
+// The empty case is worded here rather than in the shared joiner, which has no
+// remotes to speak of.
 func quoteNames(names []string) string {
+	if len(names) == 0 {
+		return "no remote"
+	}
 	quoted := make([]string, 0, len(names))
 	for _, n := range names {
 		quoted = append(quoted, fmt.Sprintf("%q", n))
 	}
-	switch len(quoted) {
-	case 0:
-		return "no remote"
-	case 1:
-		return quoted[0]
-	default:
-		return strings.Join(quoted[:len(quoted)-1], ", ") + " and " + quoted[len(quoted)-1]
-	}
+	return formatProseList(quoted)
 }
 
 // unpinnedNames lists the remotes whose checkpoint destination is not already
