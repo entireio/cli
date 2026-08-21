@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -11,12 +12,14 @@ import (
 	"strings"
 	"time"
 
+	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
 // Caps how many worktrees prepare-commit-msg will resolve via git when hunting
@@ -83,7 +86,12 @@ func shouldTryAutoAdoptOnPrepareCommitMsg(ctx context.Context, source string) bo
 // guards. Idle sessions are never auto-adopted. Ambiguity skips.
 //
 // Best-effort: never returns an error to the git hook caller.
-func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
+type pendingAutoAdoption struct {
+	SessionID string
+	AttemptID string
+}
+
+func tryAutoAdoptCrossCommonDirSession(ctx context.Context) (pending *pendingAutoAdoption) {
 	logCtx := logging.WithComponent(ctx, "session")
 
 	// This runs inside prepare-commit-msg, whose stderr the hook swallows. A
@@ -95,6 +103,7 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 			logging.Error(logCtx, "auto-adopt: recovered from panic",
 				slog.Any("panic", r),
 			)
+			pending = nil
 		}
 	}()
 
@@ -113,12 +122,13 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 		return
 	}
 	targetCtx, targetCancel := context.WithTimeout(ctx, autoAdoptGitResolveTimeout)
-	targetStore, _, targetCommonDir, err := stateStoreForWorktree(targetCtx, targetWorktree)
+	targetStore, targetWorktree, targetCommonDir, err := stateStoreForWorktree(targetCtx, targetWorktree)
 	targetCancel()
 	if err != nil {
 		return
 	}
-	if hasLocalActiveSession(ctx, targetStore) {
+	targetWorktreeID, err := paths.GetWorktreeID(targetWorktree)
+	if err != nil || hasLocalActiveSession(ctx, targetStore, targetWorktree, targetWorktreeID) {
 		return
 	}
 
@@ -139,16 +149,20 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 	}
 
 	regCtx, regCancel := context.WithTimeout(ctx, autoAdoptDiscoveryTimeout)
-	registryCandidates := collectRegistryAutoAdoptCandidates(regCtx, targetCommonDir, staged, owner, hasOwner)
+	registryResult := collectRegistryAutoAdoptCandidates(regCtx, targetCommonDir, staged, owner, hasOwner)
 	regCancel()
 	scanCtx, scanCancel := context.WithTimeout(ctx, autoAdoptDiscoveryTimeout)
-	siblingCandidates := collectSiblingAutoAdoptCandidates(scanCtx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
+	siblingResult := collectSiblingAutoAdoptCandidates(scanCtx, targetWorktree, targetCommonDir, staged, owner, hasOwner)
 	scanCancel()
+	if !registryResult.Complete || !siblingResult.Complete {
+		logging.Debug(logCtx, "auto-adopt: skipped because candidate discovery was incomplete")
+		return nil
+	}
 	// Union both discovery sources (deduped by session ID) BEFORE the uniqueness
 	// test. Gating the sibling scan on an empty registry would let a single
 	// registry hit bypass the ambiguity guard when a second, distinct candidate
 	// exists on disk — auto-adopt would then silently steal one of two sessions.
-	candidates := unionAutoAdoptCandidates(registryCandidates, siblingCandidates)
+	candidates := unionAutoAdoptCandidates(registryResult.Candidates, siblingResult.Candidates)
 	if len(candidates) != 1 {
 		if len(candidates) > 1 {
 			logging.Debug(logCtx, "auto-adopt: skipped ambiguous cross-common-dir sessions",
@@ -170,6 +184,10 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 		slog.String("to_worktree", targetWorktree),
 	)
 
+	attemptID, err := checkpointid.Generate()
+	if err != nil {
+		return nil
+	}
 	adoptCtx, adoptCancel := context.WithTimeout(ctx, autoAdoptAdoptTimeout)
 	_, _, adoptErr := adoptFromExternalSessionStore(
 		adoptCtx,
@@ -183,7 +201,7 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 		// exists. Register the adopted session here (so the trailer lands) but
 		// defer the destructive source retire to post-commit, where the commit is
 		// a fact — an aborted commit must not tombstone the source.
-		adoptOptions{Force: true, SkipTranscriptValidation: true, DeferSourceRetire: true},
+		adoptOptions{Force: true, SkipTranscriptValidation: true, DeferSourceRetire: true, AdoptionAttemptID: attemptID.String()},
 	)
 	adoptCancel()
 	if adoptErr != nil {
@@ -210,7 +228,113 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) {
 				slog.String("error", adoptErr.Error()),
 			)
 		}
+		return nil
 	}
+	return &pendingAutoAdoption{SessionID: source.SessionID, AttemptID: attemptID.String()}
+}
+
+// finishPreparedAutoAdoption binds the deferred retire to the exact checkpoint
+// trailer produced by this prepare-commit-msg invocation. If no trailer was
+// written (including the documented user opt-out), it rolls back only this
+// attempt's target copy and restores the source registry pointer.
+func finishPreparedAutoAdoption(ctx context.Context, pending *pendingAutoAdoption, commitMsgFile string) {
+	if pending == nil {
+		return
+	}
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // path is supplied by git
+	if err != nil {
+		cancelPendingAutoAdoption(ctx, pending)
+		return
+	}
+	cpID, found := trailers.ParseCheckpoint(string(content))
+	if !found {
+		cancelPendingAutoAdoption(ctx, pending)
+		return
+	}
+	mutatePendingAutoAdoption(ctx, pending, func(_ *session.State, marker *session.PendingSourceRetire) error {
+		marker.ExpectedCheckpointID = cpID
+		return nil
+	})
+}
+
+func mutatePendingAutoAdoption(
+	ctx context.Context,
+	pending *pendingAutoAdoption,
+	mutate func(*session.State, *session.PendingSourceRetire) error,
+) {
+	targetWorktree, err := paths.WorktreeRoot(ctx)
+	if err != nil || targetWorktree == "" {
+		return
+	}
+	targetStore, _, targetCommonDir, err := stateStoreForWorktree(ctx, targetWorktree)
+	if err != nil {
+		return
+	}
+	target, err := targetStore.Load(ctx, pending.SessionID)
+	if err != nil || target == nil || target.PendingSourceRetire == nil ||
+		target.PendingSourceRetire.AdoptionAttemptID != pending.AttemptID {
+		return
+	}
+	marker := target.PendingSourceRetire
+	_ = strategy.WithSessionStateLocks(ctx, pending.SessionID, []string{marker.SourceCommonDir, targetCommonDir}, func() error {
+		target, err = targetStore.Load(ctx, pending.SessionID)
+		if err != nil || target == nil || target.PendingSourceRetire == nil ||
+			target.PendingSourceRetire.AdoptionAttemptID != pending.AttemptID {
+			return err
+		}
+		if err := mutate(target, target.PendingSourceRetire); err != nil {
+			return err
+		}
+		return targetStore.Save(ctx, target)
+	})
+}
+
+func cancelPendingAutoAdoption(ctx context.Context, pending *pendingAutoAdoption) {
+	targetWorktree, err := paths.WorktreeRoot(ctx)
+	if err != nil || targetWorktree == "" {
+		return
+	}
+	targetStore, _, targetCommonDir, err := stateStoreForWorktree(ctx, targetWorktree)
+	if err != nil {
+		return
+	}
+	target, err := targetStore.Load(ctx, pending.SessionID)
+	if err != nil || target == nil || target.PendingSourceRetire == nil ||
+		target.PendingSourceRetire.AdoptionAttemptID != pending.AttemptID {
+		return
+	}
+	marker := target.PendingSourceRetire
+	_ = strategy.WithSessionStateLocks(ctx, pending.SessionID, []string{marker.SourceCommonDir, targetCommonDir}, func() error {
+		target, err = targetStore.Load(ctx, pending.SessionID)
+		if err != nil || target == nil || target.PendingSourceRetire == nil ||
+			target.PendingSourceRetire.AdoptionAttemptID != pending.AttemptID {
+			return err
+		}
+		marker = target.PendingSourceRetire
+		expected := pendingClaimFor(targetCommonDir, target, marker)
+		claim, claimErr := session.LiveSessionClaimContext(ctx, target.SessionID)
+		if claimErr != nil {
+			return claimErr
+		}
+		owned := claimMatchesPending(claim, expected)
+		if owned {
+			if _, releaseErr := session.ReleaseLiveSessionClaimIfOwned(ctx, target.SessionID, expected); releaseErr != nil {
+				return releaseErr
+			}
+		}
+		if err := targetStore.Clear(ctx, target.SessionID); err != nil {
+			return err
+		}
+		if !owned {
+			return nil
+		}
+		sourceStore := session.NewStateStoreWithDir(filepath.Join(marker.SourceCommonDir, session.SessionStateDirName))
+		source, loadErr := sourceStore.Load(ctx, target.SessionID)
+		if loadErr != nil || source == nil {
+			return loadErr
+		}
+		return session.RegisterLiveSession(source, marker.SourceCommonDir)
+	})
 }
 
 // finalizePendingSourceRetires completes cross-common-dir auto-adopts that were
@@ -252,6 +376,14 @@ func finalizePendingSourceRetires(ctx context.Context) {
 		return
 	}
 
+	targetWorktreeID, err := paths.GetWorktreeID(targetWorktree)
+	if err != nil {
+		return
+	}
+	headCheckpoints, err := headCheckpointSet(ctx, targetWorktree)
+	if err != nil {
+		return
+	}
 	states, err := targetStore.List(ctx)
 	if err != nil {
 		return
@@ -263,7 +395,22 @@ func finalizePendingSourceRetires(ctx context.Context) {
 		if state.PendingSourceRetire == nil {
 			continue
 		}
-		retirePendingSource(ctx, targetStore, targetCommonDir, state)
+		if !stateBelongsToTargetWorktree(state, targetWorktree, targetWorktreeID) {
+			continue
+		}
+		marker := state.PendingSourceRetire
+		if marker.AdoptionAttemptID == "" {
+			continue // legacy marker: preserve source, never retire blindly
+		}
+		if marker.ExpectedCheckpointID.IsEmpty() {
+			cancelPendingAutoAdoption(ctx, &pendingAutoAdoption{SessionID: state.SessionID, AttemptID: marker.AdoptionAttemptID})
+			continue
+		}
+		if _, ok := headCheckpoints[marker.ExpectedCheckpointID]; !ok {
+			cancelPendingAutoAdoption(ctx, &pendingAutoAdoption{SessionID: state.SessionID, AttemptID: marker.AdoptionAttemptID})
+			continue
+		}
+		retirePendingSource(ctx, targetStore, targetCommonDir, targetWorktree, targetWorktreeID, state)
 	}
 }
 
@@ -272,7 +419,12 @@ func finalizePendingSourceRetires(ctx context.Context) {
 // if the source is already gone or already retired it just clears the marker, so
 // a crash between the source retire and the marker clear self-heals on the next
 // post-commit.
-func retirePendingSource(ctx context.Context, targetStore *session.StateStore, targetCommonDir string, adopted *session.State) {
+func retirePendingSource(
+	ctx context.Context,
+	targetStore *session.StateStore,
+	targetCommonDir, targetWorktree, targetWorktreeID string,
+	adopted *session.State,
+) {
 	logCtx := logging.WithComponent(ctx, "session")
 	marker := adopted.PendingSourceRetire
 	if marker == nil || marker.SourceCommonDir == "" {
@@ -293,15 +445,44 @@ func retirePendingSource(ctx context.Context, targetStore *session.StateStore, t
 		if target == nil || target.PendingSourceRetire == nil {
 			return nil // already finalized by a concurrent hook
 		}
+		marker = target.PendingSourceRetire
+		if !stateBelongsToTargetWorktree(target, targetWorktree, targetWorktreeID) ||
+			marker.AdoptionAttemptID == "" || marker.ExpectedCheckpointID.IsEmpty() {
+			return errors.New("pending adoption no longer belongs to this worktree")
+		}
+		headCheckpoints, headErr := headCheckpointSet(retireCtx, targetWorktree)
+		if headErr != nil {
+			return fmt.Errorf("revalidate committed checkpoint: %w", headErr)
+		}
+		if _, ok := headCheckpoints[marker.ExpectedCheckpointID]; !ok {
+			return errors.New("pending adoption checkpoint is not on HEAD")
+		}
+		expectedClaim := pendingClaimFor(targetCommonDir, target, marker)
 		sourceState, err := sourceStore.Load(retireCtx, adopted.SessionID)
 		if err != nil {
 			return fmt.Errorf("load source session state: %w", err)
 		}
 		if sourceState != nil && isAdoptableSourceSession(sourceState) {
+			claim, claimErr := session.LiveSessionClaimContext(retireCtx, adopted.SessionID)
+			if claimErr != nil {
+				return fmt.Errorf("reload adoption claim: %w", claimErr)
+			}
+			if !claimMatchesPending(claim, expectedClaim) {
+				return errors.New("pending adoption claim was replaced")
+			}
 			retired := retireAdoptedSourceSession(sourceState, target)
 			if err := sourceStore.Save(retireCtx, &retired); err != nil {
 				return fmt.Errorf("retire source session state: %w", err)
 			}
+		} else if sourceState != nil && sourceState.AdoptedIntoWorktreePath != "" &&
+			!sameAdoptPath(sourceState.AdoptedIntoWorktreePath, target.WorktreePath) {
+			return errors.New("source was retired into a different worktree")
+		}
+		// Release before clearing the marker. If the target save fails, the next
+		// post-commit observes the already-retired source and safely retries the
+		// marker clear without requiring a claim that no longer exists.
+		if _, err := session.ReleaseLiveSessionClaimIfOwned(retireCtx, adopted.SessionID, expectedClaim); err != nil {
+			return fmt.Errorf("release live-session claim: %w", err)
 		}
 		target.PendingSourceRetire = nil
 		if err := targetStore.Save(retireCtx, target); err != nil {
@@ -316,21 +497,42 @@ func retirePendingSource(ctx context.Context, targetStore *session.StateStore, t
 		)
 		return
 	}
-	// Clear the live-session claim now that the adopt has fully completed.
-	// Without this, UnregisterLiveSession's common-dir check above never fires
-	// (the registry entry's CommonDir is the target's, not the source's), so
-	// the claim would otherwise sit until AdoptClaimMaxAge, blocking other
-	// adoptions of the same session for up to an hour after this one finished.
-	if err := session.ReleaseLiveSessionClaim(adopted.SessionID, targetCommonDir); err != nil {
-		logging.Warn(logCtx, "auto-adopt finalize: failed to release live-session claim",
-			slog.String("session_id", adopted.SessionID),
-			slog.String("error", err.Error()),
-		)
-	}
 	logging.Info(logCtx, "auto-adopt finalize: retired source session after commit",
 		slog.String("session_id", adopted.SessionID),
 		slog.String("source_common_dir", marker.SourceCommonDir),
 	)
+}
+
+func pendingClaimFor(targetCommonDir string, target *session.State, marker *session.PendingSourceRetire) session.AdoptClaim {
+	return session.AdoptClaim{
+		ByCommonDir:    targetCommonDir,
+		ByWorktreePath: target.WorktreePath,
+		ByWorktreeID:   target.WorktreeID,
+		AttemptID:      marker.AdoptionAttemptID,
+	}
+}
+
+func claimMatchesPending(actual *session.AdoptClaim, expected session.AdoptClaim) bool {
+	if actual == nil {
+		return false
+	}
+	return sameAdoptStore(actual.ByCommonDir, expected.ByCommonDir) &&
+		sameAdoptPath(actual.ByWorktreePath, expected.ByWorktreePath) &&
+		actual.ByWorktreeID == expected.ByWorktreeID &&
+		actual.AttemptID == expected.AttemptID
+}
+
+func headCheckpointSet(ctx context.Context, worktree string) (map[checkpointid.CheckpointID]struct{}, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", worktree, "show", "-s", "--format=%B", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[checkpointid.CheckpointID]struct{})
+	for _, cpID := range trailers.ParseAllCheckpoints(string(out)) {
+		result[cpID] = struct{}{}
+	}
+	return result, nil
 }
 
 type autoAdoptCandidate struct {
@@ -338,6 +540,11 @@ type autoAdoptCandidate struct {
 	WorktreePath string
 	CommonDir    string
 	Store        *session.StateStore
+}
+
+type autoAdoptDiscoveryResult struct {
+	Candidates []autoAdoptCandidate
+	Complete   bool
 }
 
 // unionAutoAdoptCandidates concatenates candidate sets, deduping by session ID
@@ -359,7 +566,7 @@ func unionAutoAdoptCandidates(sets ...[]autoAdoptCandidate) []autoAdoptCandidate
 	return out
 }
 
-func hasLocalActiveSession(ctx context.Context, store *session.StateStore) bool {
+func hasLocalActiveSession(ctx context.Context, store *session.StateStore, worktreePath, worktreeID string) bool {
 	states, err := store.List(ctx)
 	if err != nil {
 		logging.Debug(logging.WithComponent(ctx, "session"),
@@ -369,6 +576,9 @@ func hasLocalActiveSession(ctx context.Context, store *session.StateStore) bool 
 		return true // fail closed: do not steal when local store is unreadable
 	}
 	for _, state := range states {
+		if !stateBelongsToTargetWorktree(state, worktreePath, worktreeID) {
+			continue
+		}
 		// Bound by the same recency window as the candidate guards. Without it a
 		// single months-old Idle state file would count as a local session and
 		// permanently disable cross-common-dir auto-adopt for the whole repo.
@@ -385,23 +595,35 @@ func collectRegistryAutoAdoptCandidates(
 	staged []string,
 	owner proclive.Identity,
 	hasOwner bool,
-) []autoAdoptCandidate {
-	entries, err := session.ListLiveSessions()
-	if err != nil || len(entries) == 0 {
-		return nil
+) autoAdoptDiscoveryResult {
+	entries, complete, err := session.ListLiveSessionsContext(ctx, maxRegistryAutoAdoptScan+1)
+	if err != nil {
+		return autoAdoptDiscoveryResult{Complete: false}
+	}
+	if !complete {
+		return autoAdoptDiscoveryResult{Complete: false}
+	}
+	if len(entries) == 0 {
+		return autoAdoptDiscoveryResult{Complete: true}
 	}
 
 	var out []autoAdoptCandidate
 	resolved := 0
 	for _, entry := range entries {
-		if ctx.Err() != nil || resolved >= maxRegistryAutoAdoptScan {
-			break
+		if ctx.Err() != nil {
+			return autoAdoptDiscoveryResult{Candidates: out, Complete: false}
 		}
 		if sameAdoptStore(entry.CommonDir, targetCommonDir) {
 			continue
 		}
 		if !isRecentLiveEntry(entry) {
 			continue
+		}
+		if freshAdoptClaim(entry.AdoptClaim) {
+			continue
+		}
+		if resolved >= maxRegistryAutoAdoptScan {
+			return autoAdoptDiscoveryResult{Candidates: out, Complete: false}
 		}
 		// The registry path deliberately does NOT gate on parent-dir proximity
 		// (unlike the sibling scan, which is inherently parent-scoped). Issue
@@ -422,7 +644,7 @@ func collectRegistryAutoAdoptCandidates(
 			out = append(out, cand)
 		}
 	}
-	return out
+	return autoAdoptDiscoveryResult{Candidates: out, Complete: true}
 }
 
 func collectSiblingAutoAdoptCandidates(
@@ -431,58 +653,77 @@ func collectSiblingAutoAdoptCandidates(
 	staged []string,
 	owner proclive.Identity,
 	hasOwner bool,
-) []autoAdoptCandidate {
+) autoAdoptDiscoveryResult {
 	parent := filepath.Dir(targetWorktree)
 	if parent == "" || parent == targetWorktree {
-		return nil
+		return autoAdoptDiscoveryResult{Complete: true}
 	}
-	entries, err := os.ReadDir(parent)
+	dir, err := os.Open(parent)
 	if err != nil {
-		return nil
+		return autoAdoptDiscoveryResult{Complete: false}
 	}
+	defer dir.Close()
 
 	var out []autoAdoptCandidate
 	scanned := 0
-	for _, entry := range entries {
-		if ctx.Err() != nil || scanned >= maxSiblingAutoAdoptScan {
-			break
+	for {
+		if ctx.Err() != nil {
+			return autoAdoptDiscoveryResult{Candidates: out, Complete: false}
 		}
-		if !entry.IsDir() {
-			continue
+		entries, readErr := dir.ReadDir(32)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return autoAdoptDiscoveryResult{Candidates: out, Complete: false}
 		}
-		sibling := filepath.Join(parent, entry.Name())
-		if sameAdoptPath(sibling, targetWorktree) {
-			continue
-		}
-		// Cheap pre-filters before shelling out to git rev-parse:
-		//  1. .git entry (skip node_modules / build outputs)
-		//  2. .entire/ (skip git repos that don't use Entire — no sessions to adopt)
-		if !siblingLooksLikeGitWorktree(sibling) || !siblingLooksLikeEntireRepo(sibling) {
-			continue
-		}
-		scanned++
-
-		resolveCtx, resolveCancel := context.WithTimeout(ctx, autoAdoptGitResolveTimeout)
-		store, worktree, commonDir, err := stateStoreForWorktree(resolveCtx, sibling)
-		resolveCancel()
-		if err != nil || sameAdoptStore(commonDir, targetCommonDir) {
-			continue
-		}
-		states, err := store.List(ctx)
-		if err != nil {
-			continue
-		}
-		for _, state := range states {
-			if !isRecentAdoptCandidate(state) {
+		for _, entry := range entries {
+			if !entry.IsDir() {
 				continue
 			}
-			cand, ok := candidateFromLoaded(store, worktree, commonDir, targetCommonDir, state, staged, owner, hasOwner)
-			if ok {
-				out = append(out, cand)
+			sibling := filepath.Join(parent, entry.Name())
+			if sameAdoptPath(sibling, targetWorktree) {
+				continue
+			}
+			// Cheap pre-filters before shelling out to git rev-parse:
+			//  1. .git entry (skip node_modules / build outputs)
+			//  2. .entire/ (skip git repos that don't use Entire — no sessions to adopt)
+			if !siblingLooksLikeGitWorktree(sibling) || !siblingLooksLikeEntireRepo(sibling) {
+				continue
+			}
+			if scanned >= maxSiblingAutoAdoptScan {
+				return autoAdoptDiscoveryResult{Candidates: out, Complete: false}
+			}
+			scanned++
+
+			resolveCtx, resolveCancel := context.WithTimeout(ctx, autoAdoptGitResolveTimeout)
+			store, worktree, commonDir, err := stateStoreForWorktree(resolveCtx, sibling)
+			resolveCancel()
+			if err != nil || sameAdoptStore(commonDir, targetCommonDir) {
+				continue
+			}
+			states, err := store.List(ctx)
+			if err != nil {
+				continue
+			}
+			for _, state := range states {
+				if !isRecentAdoptCandidate(state) {
+					continue
+				}
+				claim, claimErr := session.LiveSessionClaimContext(ctx, state.SessionID)
+				if claimErr != nil {
+					return autoAdoptDiscoveryResult{Candidates: out, Complete: false}
+				}
+				if freshAdoptClaim(claim) {
+					continue
+				}
+				cand, ok := candidateFromLoaded(store, worktree, commonDir, targetCommonDir, state, staged, owner, hasOwner)
+				if ok {
+					out = append(out, cand)
+				}
 			}
 		}
+		if errors.Is(readErr, io.EOF) {
+			return autoAdoptDiscoveryResult{Candidates: out, Complete: true}
+		}
 	}
-	return out
 }
 
 func candidateFromSource(
@@ -516,14 +757,6 @@ func candidateFromLoaded(
 	if !isRecentAdoptCandidate(state) {
 		return autoAdoptCandidate{}, false
 	}
-	// A source already carrying a FRESH adoption claim by a DIFFERENT target is
-	// mid-adopt by another commit; drop it so this commit does not double-adopt.
-	// Our own claim (same common dir) and a stale claim (aborted commit) do not
-	// exclude. This is the best-effort discovery-time skip; the authoritative
-	// serialization is the under-lock claim check in adoptFromExternalSessionStore.
-	if adoptClaimBlocks(state.AdoptClaim, targetCommonDir) {
-		return autoAdoptCandidate{}, false
-	}
 	// Auto-adopt is ACTIVE-only (matches the live-registry prefilter; see
 	// docs/architecture/sessions-and-checkpoints.md, "Automatic cross-common-dir
 	// adoption").
@@ -554,6 +787,16 @@ func candidateFromLoaded(
 		CommonDir:    commonDir,
 		Store:        store,
 	}, true
+}
+
+func stateBelongsToTargetWorktree(state *session.State, worktreePath, worktreeID string) bool {
+	if state == nil {
+		return false
+	}
+	if state.WorktreePath != "" && sameAdoptPath(state.WorktreePath, worktreePath) {
+		return true
+	}
+	return state.WorktreeID != "" && worktreeID != "" && state.WorktreeID == worktreeID
 }
 
 func isRecentLiveEntry(entry session.LiveSessionEntry) bool {

@@ -224,10 +224,12 @@ func newHooksGitPrepareCommitMsgCmd() *cobra.Command {
 			// Skip the same cases PrepareCommitMsg skips (merge/squash/amend
 			// and rebase/cherry-pick/revert): adopting there would retire a
 			// live session with no trailer written.
+			var pendingAdoption *pendingAutoAdoption
 			if shouldTryAutoAdoptOnPrepareCommitMsg(g.ctx, source) {
-				tryAutoAdoptCrossCommonDirSession(g.ctx)
+				pendingAdoption = tryAutoAdoptCrossCommonDirSession(g.ctx)
 			}
 			hookErr := g.strategy.PrepareCommitMsg(g.ctx, commitMsgFile, source)
+			finishPreparedAutoAdoption(g.ctx, pendingAdoption, commitMsgFile)
 			g.logCompleted(hookErr)
 
 			return nil

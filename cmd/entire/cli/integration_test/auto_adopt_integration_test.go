@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -58,7 +59,7 @@ func seedSourceSession(t *testing.T, repoDir, sessionID string) {
 // seedAdoptedTargetWithMarker writes an ACTIVE adopted session into targetRepo
 // carrying a PendingSourceRetire marker pointing at sourceRepo — the exact state
 // prepare-commit-msg leaves behind before post-commit completes the retire.
-func seedAdoptedTargetWithMarker(t *testing.T, targetRepo, sourceRepo, sessionID, baseCommit string) {
+func seedAdoptedTargetWithMarker(t *testing.T, targetRepo, sourceRepo, sessionID, baseCommit, checkpointID string) {
 	t.Helper()
 	store := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
 	last := time.Now().Add(-1 * time.Minute)
@@ -72,11 +73,19 @@ func seedAdoptedTargetWithMarker(t *testing.T, targetRepo, sourceRepo, sessionID
 		WorktreePath:          targetRepo,
 		FilesTouched:          []string{"feature.txt"},
 		PendingSourceRetire: &session.PendingSourceRetire{
-			SourceCommonDir:    filepath.Join(sourceRepo, ".git"),
-			SourceWorktreePath: sourceRepo,
+			SourceCommonDir:      filepath.Join(sourceRepo, ".git"),
+			SourceWorktreePath:   sourceRepo,
+			AdoptionAttemptID:    "integration-attempt-" + sessionID,
+			ExpectedCheckpointID: checkpointid.CheckpointID(checkpointID),
 		},
 	}); err != nil {
 		t.Fatalf("seed adopted target session: %v", err)
+	}
+	if claimed, err := session.ClaimLiveSessionContext(context.Background(), sessionID, session.AdoptClaim{
+		ByCommonDir: filepath.Join(targetRepo, ".git"), ByWorktreePath: targetRepo,
+		AttemptID: "integration-attempt-" + sessionID, At: time.Now(),
+	}); err != nil || !claimed {
+		t.Fatalf("seed adoption claim = %v, %v", claimed, err)
 	}
 }
 
@@ -91,14 +100,17 @@ func runPostCommitHook(t *testing.T, env *TestEnv) {
 	t.Logf("post-commit hook: %s (err: %v)", out, err)
 }
 
-// realCommit makes a real `git commit` (git CLI) touching feature.txt in
-// env.RepoDir. The message carries no Entire-Checkpoint trailer, so post-commit
-// takes its no-trailer path and then runs finalizePendingSourceRetires.
-func realCommit(t *testing.T, env *TestEnv, content string) {
+// realCommit makes a real `git commit` touching feature.txt. checkpointID may
+// be empty to exercise the documented no-trailer opt-out.
+func realCommit(t *testing.T, env *TestEnv, content, checkpointID string) {
 	t.Helper()
 	testutil.WriteFile(t, env.RepoDir, "feature.txt", content)
 	testutil.GitAdd(t, env.RepoDir, "feature.txt")
-	testutil.GitCommit(t, env.RepoDir, "plain commit (no trailer)")
+	message := "integration commit"
+	if checkpointID != "" {
+		message += "\n\nEntire-Checkpoint: " + checkpointID
+	}
+	testutil.GitCommit(t, env.RepoDir, message)
 }
 
 func loadState(t *testing.T, repoDir, sessionID string) *session.State {
@@ -128,10 +140,11 @@ func TestAutoAdopt_Integration_PostCommitFinalizeRetiresSource(t *testing.T) {
 	targetEnv := NewFeatureBranchEnv(t)
 
 	sessionID := "test-auto-adopt-integration-finalize"
+	checkpointID := "a1b2c3d4e5f6"
 	seedSourceSession(t, sourceEnv.RepoDir, sessionID)
-	seedAdoptedTargetWithMarker(t, targetEnv.RepoDir, sourceEnv.RepoDir, sessionID, targetEnv.GetHeadHash())
+	seedAdoptedTargetWithMarker(t, targetEnv.RepoDir, sourceEnv.RepoDir, sessionID, targetEnv.GetHeadHash(), checkpointID)
 
-	realCommit(t, targetEnv, "agent change\n")
+	realCommit(t, targetEnv, "agent change\n", checkpointID)
 	runPostCommitHook(t, targetEnv)
 
 	// Source must now be tombstoned.
@@ -157,6 +170,27 @@ func TestAutoAdopt_Integration_PostCommitFinalizeRetiresSource(t *testing.T) {
 	}
 }
 
+func TestAutoAdopt_Integration_NoTrailerPreservesSource(t *testing.T) {
+	t.Parallel()
+
+	sourceEnv := NewFeatureBranchEnv(t)
+	targetEnv := NewFeatureBranchEnv(t)
+	sessionID := "test-auto-adopt-integration-no-trailer"
+	checkpointID := "d1e2f3a4b5c6"
+	seedSourceSession(t, sourceEnv.RepoDir, sessionID)
+	seedAdoptedTargetWithMarker(t, targetEnv.RepoDir, sourceEnv.RepoDir, sessionID, targetEnv.GetHeadHash(), checkpointID)
+
+	realCommit(t, targetEnv, "manual change\n", "")
+	runPostCommitHook(t, targetEnv)
+
+	if src := loadState(t, sourceEnv.RepoDir, sessionID); !stateIsAdoptable(src) {
+		t.Fatal("a commit without the expected trailer must not retire the source")
+	}
+	if tgt := loadState(t, targetEnv.RepoDir, sessionID); tgt != nil {
+		t.Fatal("a commit without the expected trailer must cancel the pending target copy")
+	}
+}
+
 // TestAutoAdopt_Integration_ContendedSourceLockLeavesSourceActive holds the
 // source session's cross-process flock while the real post-commit hook runs. The
 // finalize step must give up within its timeout WITHOUT corrupting state: the
@@ -168,10 +202,11 @@ func TestAutoAdopt_Integration_ContendedSourceLockLeavesSourceActive(t *testing.
 	targetEnv := NewFeatureBranchEnv(t)
 
 	sessionID := "test-auto-adopt-integration-contended"
+	checkpointID := "b1c2d3e4f5a6"
 	seedSourceSession(t, sourceEnv.RepoDir, sessionID)
-	seedAdoptedTargetWithMarker(t, targetEnv.RepoDir, sourceEnv.RepoDir, sessionID, targetEnv.GetHeadHash())
+	seedAdoptedTargetWithMarker(t, targetEnv.RepoDir, sourceEnv.RepoDir, sessionID, targetEnv.GetHeadHash(), checkpointID)
 
-	realCommit(t, targetEnv, "agent change\n")
+	realCommit(t, targetEnv, "agent change\n", checkpointID)
 
 	// Hold the SOURCE session lock (OS flock, cross-process) so the spawned
 	// post-commit's finalize contends and must time out.
@@ -217,10 +252,11 @@ func TestAutoAdopt_Integration_DisabledTargetDoesNotFinalize(t *testing.T) {
 	targetEnv := NewFeatureBranchEnv(t)
 
 	sessionID := "test-auto-adopt-integration-disabled"
+	checkpointID := "c1d2e3f4a5b6"
 	seedSourceSession(t, sourceEnv.RepoDir, sessionID)
-	seedAdoptedTargetWithMarker(t, targetEnv.RepoDir, sourceEnv.RepoDir, sessionID, targetEnv.GetHeadHash())
+	seedAdoptedTargetWithMarker(t, targetEnv.RepoDir, sourceEnv.RepoDir, sessionID, targetEnv.GetHeadHash(), checkpointID)
 
-	realCommit(t, targetEnv, "agent change\n")
+	realCommit(t, targetEnv, "agent change\n", checkpointID)
 
 	// Disable Entire in the target: its git hooks must become inert.
 	targetEnv.RunCLI("disable")

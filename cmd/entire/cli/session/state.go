@@ -143,18 +143,10 @@ type State struct {
 	// (finalizePendingSourceRetires). nil in the normal steady state.
 	PendingSourceRetire *PendingSourceRetire `json:"pending_source_retire,omitempty"`
 
-	// AdoptClaim is a non-destructive, in-flight cross-common-dir adoption
-	// marker written on the SOURCE session at prepare-commit-msg time when the
-	// destructive retire is deferred to post-commit (DeferSourceRetire). It is
-	// what restores the cross-process mutual exclusion the in-band tombstone used
-	// to provide: a second target that concurrently discovers the same unique
-	// candidate observes a FRESH claim by a different common dir and skips, so the
-	// session is never double-adopted. Unlike a tombstone it does NOT end the
-	// session — the source agent keeps checkpointing, preserving the abort-safety
-	// of the deferral. Superseded by finalizePendingSourceRetires' retire. A claim
-	// older than the adopt-recency window is ignored, so an abandoned claim (an
-	// aborted commit that never reached post-commit) self-heals and frees the
-	// source for a later legitimate adopt. nil in the normal steady state.
+	// AdoptClaim is retained only for backward-compatible decoding of state files
+	// written by early cross-common-dir builds. New claims live exclusively in the
+	// cross-repo live-session registry, where competing repositories can observe
+	// and atomically update them.
 	AdoptClaim *AdoptClaim `json:"adopt_claim,omitempty"`
 
 	// Branch is the git branch HEAD pointed at the last time this session took a
@@ -404,12 +396,18 @@ type PendingSourceRetire struct {
 	SourceCommonDir string `json:"source_common_dir"`
 	// SourceWorktreePath is the source worktree root (best-effort, for logging).
 	SourceWorktreePath string `json:"source_worktree_path,omitempty"`
+	// AdoptionAttemptID binds this marker to the exact registry claim created by
+	// prepare-commit-msg. It prevents a stale marker from retiring a source after
+	// another worktree has legitimately replaced an expired claim.
+	AdoptionAttemptID string `json:"adoption_attempt_id,omitempty"`
+	// ExpectedCheckpointID is the trailer written by the same prepare-commit-msg
+	// invocation. Post-commit must observe this exact ID on HEAD before it may
+	// destructively retire the source.
+	ExpectedCheckpointID id.CheckpointID `json:"expected_checkpoint_id,omitempty"`
 }
 
-// AdoptClaim stamps a source session as being adopted, in-flight, by a specific
-// target worktree while its destructive retire is deferred to post-commit. It is
-// the lightweight lock marker that a concurrent adopter must observe to avoid
-// double-adopting the same unique session across processes. See State.AdoptClaim.
+// AdoptClaim records an in-flight adoption in the cross-repo live-session
+// registry. It binds one target worktree and one prepare-commit-msg attempt.
 type AdoptClaim struct {
 	// ByCommonDir is the git common dir of the TARGET worktree that claimed this
 	// source. A claim by a *different* common dir blocks a new adoption; a
@@ -417,6 +415,10 @@ type AdoptClaim struct {
 	ByCommonDir string `json:"by_common_dir"`
 	// ByWorktreePath is the target worktree root (best-effort, for logging).
 	ByWorktreePath string `json:"by_worktree_path,omitempty"`
+	// ByWorktreeID distinguishes linked worktrees that share a git common dir.
+	ByWorktreeID string `json:"by_worktree_id,omitempty"`
+	// AttemptID uniquely identifies one prepare-commit-msg adoption attempt.
+	AttemptID string `json:"attempt_id,omitempty"`
 	// At is when the claim was written. A claim older than the adopt-recency
 	// window is treated as abandoned (aborted commit) and no longer blocks.
 	At time.Time `json:"at"`
@@ -692,8 +694,6 @@ func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error)
 
 // Save saves the session state atomically.
 func (s *StateStore) Save(ctx context.Context, state *State) error {
-	_ = ctx // Reserved for future use
-
 	// Validate session ID to prevent path traversal
 	if err := validation.ValidateSessionID(state.SessionID); err != nil {
 		return fmt.Errorf("invalid session ID: %w", err)
@@ -751,19 +751,17 @@ func (s *StateStore) Save(ctx context.Context, state *State) error {
 	// common dir can auto-adopt a unique ACTIVE session (#1439).
 	commonDir := CommonDirFromStateDir(s.stateDir)
 	if ShouldRegisterLive(state) {
-		_ = RegisterLiveSession(state, commonDir) //nolint:errcheck // hook-path resilient
+		_ = registerLiveSession(ctx, state, commonDir) //nolint:errcheck // hook-path resilient
 	} else {
 		// Common-dir-scoped: retiring a source session (cross-repo adopt) must not
 		// delete the target's freshly-written entry for the same session ID.
-		_ = UnregisterLiveSession(state.SessionID, commonDir) //nolint:errcheck // hook-path resilient
+		_ = unregisterLiveSession(ctx, state.SessionID, commonDir, state.WorktreePath) //nolint:errcheck // hook-path resilient
 	}
 	return nil
 }
 
 // Clear removes the session state file for the given session ID.
 func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
-	_ = ctx // Reserved for future use
-
 	// Validate session ID to prevent path traversal
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("invalid session ID: %w", err)
@@ -774,6 +772,12 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 	// session ID is user-controlled, and a glob pattern would let metacharacters
 	// match and delete other sessions' files. os.Root ensures traversal-resistant
 	// removal.
+	var registryOwner struct {
+		WorktreePath string `json:"worktree_path"`
+	}
+	if data, err := os.ReadFile(filepath.Join(s.stateDir, sessionID+".json")); err == nil { //nolint:gosec // validated session ID and owned state dir
+		_ = json.Unmarshal(data, &registryOwner)
+	}
 	matches := matchSessionFiles(s.stateDir, sessionID)
 	if len(matches) > 0 {
 		root, rootErr := os.OpenRoot(s.stateDir)
@@ -786,7 +790,7 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 		}
 	}
 
-	_ = UnregisterLiveSession(sessionID, CommonDirFromStateDir(s.stateDir)) //nolint:errcheck // best-effort registry cleanup
+	_ = unregisterLiveSession(ctx, sessionID, CommonDirFromStateDir(s.stateDir), registryOwner.WorktreePath) //nolint:errcheck // best-effort registry cleanup
 	return nil
 }
 

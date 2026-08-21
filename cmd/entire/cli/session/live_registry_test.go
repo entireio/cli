@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,6 +51,128 @@ func TestLiveRegistry_RegisterListUnregister(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("after unregister len=%d, want 0", len(entries))
+	}
+}
+
+func TestListLiveSessionsContext_FailsClosedAtCapAndSkipsOversizedFiles(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	now := time.Now()
+	for _, sessionID := range []string{"bounded-reg-001", "bounded-reg-002"} {
+		if err := RegisterLiveSession(&State{
+			SessionID: sessionID, Phase: PhaseActive, WorktreePath: "/tmp/" + sessionID,
+			LastInteractionTime: &now,
+		}, "/tmp/.git"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if entries, complete, err := ListLiveSessionsContext(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	} else if complete || len(entries) != 1 {
+		t.Fatalf("cap=1 got len=%d complete=%v, want len=1 complete=false", len(entries), complete)
+	}
+	if entries, complete, err := ListLiveSessionsContext(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	} else if !complete || len(entries) != 2 {
+		t.Fatalf("cap=2 got len=%d complete=%v, want len=2 complete=true", len(entries), complete)
+	}
+
+	oversizedID := "bounded-reg-oversized"
+	if err := os.WriteFile(filepath.Join(liveSessionsDir(), oversizedID+".json"),
+		[]byte(strings.Repeat("x", maxLiveSessionEntryBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := readLiveSessionEntry(context.Background(), oversizedID); err == nil || found {
+		t.Fatalf("oversized entry read = found %v, err %v; want bounded rejection", found, err)
+	}
+}
+
+func TestLiveRegistry_ClaimOwnershipIncludesWorktreeAndAttempt(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	now := time.Now()
+	sessionID := "claim-owner-001"
+	first := AdoptClaim{ByCommonDir: "/repo/.git", ByWorktreePath: "/repo/wt-a", ByWorktreeID: "a", AttemptID: "one", At: now}
+	if claimed, err := ClaimLiveSessionContext(context.Background(), sessionID, first); err != nil || !claimed {
+		t.Fatalf("first claim = %v, %v", claimed, err)
+	}
+	for _, contender := range []AdoptClaim{
+		{ByCommonDir: first.ByCommonDir, ByWorktreePath: "/repo/wt-b", ByWorktreeID: "b", AttemptID: "two", At: now},
+		{ByCommonDir: first.ByCommonDir, ByWorktreePath: first.ByWorktreePath, ByWorktreeID: first.ByWorktreeID, AttemptID: "two", At: now},
+	} {
+		if claimed, err := ClaimLiveSessionContext(context.Background(), sessionID, contender); err != nil || claimed {
+			t.Fatalf("contender %+v claim = %v, %v; want refused", contender, claimed, err)
+		}
+	}
+	if released, err := ReleaseLiveSessionClaimIfOwned(context.Background(), sessionID, AdoptClaim{
+		ByCommonDir: first.ByCommonDir, ByWorktreePath: first.ByWorktreePath,
+		ByWorktreeID: first.ByWorktreeID, AttemptID: "wrong",
+	}); err != nil || released {
+		t.Fatalf("wrong-attempt release = %v, %v; want no-op", released, err)
+	}
+	if released, err := ReleaseLiveSessionClaimIfOwned(context.Background(), sessionID, first); err != nil || !released {
+		t.Fatalf("exact release = %v, %v", released, err)
+	}
+}
+
+func TestLiveRegistry_ConcurrentRegisterCannotEraseClaim(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	now := time.Now()
+	state := &State{SessionID: "claim-register-race", Phase: PhaseActive, WorktreePath: "/source/wt", LastInteractionTime: &now}
+	if err := RegisterLiveSession(state, "/source/.git"); err != nil {
+		t.Fatal(err)
+	}
+	claim := AdoptClaim{ByCommonDir: "/target/.git", ByWorktreePath: "/target/wt", AttemptID: "attempt", At: now}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			_ = RegisterLiveSession(state, "/source/.git")
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = ClaimLiveSessionContext(context.Background(), state.SessionID, claim)
+	}()
+	wg.Wait()
+	got, err := LiveSessionClaim(state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.AttemptID != claim.AttemptID {
+		t.Fatalf("concurrent register erased claim: %+v", got)
+	}
+}
+
+func TestLiveRegistry_NonLiveSavePreservesFreshAdoptionClaim(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	now := time.Now()
+	commonDir := filepath.Join(t.TempDir(), ".git")
+	store := NewStateStoreWithDir(filepath.Join(commonDir, SessionStateDirName))
+	state := &State{SessionID: "claimed-target-condensed", Phase: PhaseActive, WorktreePath: "/target/wt", LastInteractionTime: &now}
+	if err := store.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	claim := AdoptClaim{ByCommonDir: commonDir, ByWorktreePath: state.WorktreePath, AttemptID: "attempt", At: now}
+	if claimed, err := ClaimLiveSessionContext(context.Background(), state.SessionID, claim); err != nil || !claimed {
+		t.Fatalf("claim = %v, %v", claimed, err)
+	}
+	ended := now
+	state.Phase, state.EndedAt, state.FullyCondensed = PhaseEnded, &ended, true
+	if err := store.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := LiveSessionClaim(state.SessionID); err != nil || got == nil || got.AttemptID != claim.AttemptID {
+		t.Fatalf("post-commit-like non-live save erased claim: %+v, %v", got, err)
+	}
+	if released, err := ReleaseLiveSessionClaimIfOwned(context.Background(), state.SessionID, claim); err != nil || !released {
+		t.Fatalf("release = %v, %v", released, err)
+	}
+	if err := store.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := ListLiveSessions(); err != nil || len(entries) != 0 {
+		t.Fatalf("ended state remained registered after claim release: %+v, %v", entries, err)
 	}
 }
 

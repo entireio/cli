@@ -42,6 +42,9 @@ type adoptOptions struct {
 	// completes the retire via finalizePendingSourceRetires. Manual
 	// `entire session adopt` leaves it false and retires immediately.
 	DeferSourceRetire bool
+	// AdoptionAttemptID binds a deferred target marker to its exact registry
+	// claim. Auto-adopt supplies a fresh value for every prepare invocation.
+	AdoptionAttemptID string
 }
 
 // adoptRecentWindow bounds how recently a session must have been active to be
@@ -190,12 +193,14 @@ func adoptFromExternalSessionStore(
 		// session ID alone — one file every repo on the machine shares — so it is the
 		// only store both racers can see. Reading it here (under the shared source
 		// lock) is what makes the loser OBSERVE the winner and refuse.
-		claim, err := session.LiveSessionClaim(sessionID)
-		if err != nil {
-			return fmt.Errorf("read adopt claim: %w", err)
-		}
-		if adoptClaimBlocks(claim, targetCommonDir) {
-			return &sourceClaimedError{sessionID: sessionID, claimedBy: adoptClaimLabel(claim)}
+		if !opts.DeferSourceRetire {
+			claim, err := session.LiveSessionClaimContext(ctx, sessionID)
+			if err != nil {
+				return fmt.Errorf("read adopt claim: %w", err)
+			}
+			if freshAdoptClaim(claim) {
+				return &sourceClaimedError{sessionID: sessionID, claimedBy: adoptClaimLabel(claim)}
+			}
 		}
 		if !sessionBelongsToSourceWorktree(sourceState, sourceWorktree, sourceWorktreeID) {
 			return fmt.Errorf("session %s belongs to %s, not %s",
@@ -222,6 +227,13 @@ func adoptFromExternalSessionStore(
 			return fmt.Errorf("session %s is already tracked in this repo; rerun with --force to replace it", next.SessionID)
 		}
 		if opts.DeferSourceRetire {
+			if opts.AdoptionAttemptID == "" {
+				attemptID, generateErr := id.Generate()
+				if generateErr != nil {
+					return fmt.Errorf("generate adoption attempt ID: %w", generateErr)
+				}
+				opts.AdoptionAttemptID = attemptID.String()
+			}
 			// Stage the source-side tombstone instead of applying it: record where
 			// the source lives so post-commit can retire it once the commit is a
 			// fact. The source stays ACTIVE for now — if the commit aborts,
@@ -229,6 +241,7 @@ func adoptFromExternalSessionStore(
 			next.PendingSourceRetire = &session.PendingSourceRetire{
 				SourceCommonDir:    sourceCommonDir,
 				SourceWorktreePath: sourceWorktree,
+				AdoptionAttemptID:  opts.AdoptionAttemptID,
 			}
 		}
 		if opts.DeferSourceRetire {
@@ -243,20 +256,28 @@ func adoptFromExternalSessionStore(
 			// store, claimed first, a later failure leaves at worst a recency-bounded
 			// claim held by US — which self-heals and which our own re-adopt treats as
 			// idempotent.
-			claimed, err := session.ClaimLiveSession(sessionID, targetCommonDir, next.WorktreePath, time.Now())
+			claim := session.AdoptClaim{
+				ByCommonDir:    targetCommonDir,
+				ByWorktreePath: next.WorktreePath,
+				ByWorktreeID:   next.WorktreeID,
+				AttemptID:      opts.AdoptionAttemptID,
+				At:             time.Now(),
+			}
+			claimed, err := session.ClaimLiveSessionContext(ctx, sessionID, claim)
 			if err != nil {
 				return fmt.Errorf("claim source session: %w", err)
 			}
 			if !claimed {
 				// Lost the race between the read above and here. The registry claim is
 				// authoritative; the earlier read is only a fast path.
-				current, readErr := session.LiveSessionClaim(sessionID)
+				current, readErr := session.LiveSessionClaimContext(ctx, sessionID)
 				if readErr != nil {
 					return fmt.Errorf("read adopt claim: %w", readErr)
 				}
 				return &sourceClaimedError{sessionID: sessionID, claimedBy: adoptClaimLabel(current)}
 			}
 			if err := targetStore.Save(ctx, next); err != nil {
+				_, _ = session.ReleaseLiveSessionClaimIfOwned(context.WithoutCancel(ctx), sessionID, claim)
 				return fmt.Errorf("save adopted session state: %w", err)
 			}
 			adopted = next
@@ -569,19 +590,8 @@ func isAdoptableSourceSession(state *session.State) bool {
 		!state.FullyCondensed
 }
 
-// adoptClaimBlocks reports whether a source session's in-flight adoption claim
-// should block a NEW adoption by targetCommonDir. A claim blocks only when it is
-// (a) present, (b) FRESH — within adoptClaimWindow, so a stale claim left by an
-// aborted commit self-heals rather than pinning the source forever — and (c) held
-// by a DIFFERENT common dir, since a re-adopt by the same target is idempotent.
-func adoptClaimBlocks(claim *session.AdoptClaim, targetCommonDir string) bool {
-	if claim == nil || claim.At.IsZero() {
-		return false
-	}
-	if time.Since(claim.At) > session.AdoptClaimMaxAge {
-		return false
-	}
-	return !sameAdoptStore(claim.ByCommonDir, targetCommonDir)
+func freshAdoptClaim(claim *session.AdoptClaim) bool {
+	return claim != nil && !claim.At.IsZero() && time.Since(claim.At) <= session.AdoptClaimMaxAge
 }
 
 func adoptClaimLabel(claim *session.AdoptClaim) string {
