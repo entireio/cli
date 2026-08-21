@@ -623,13 +623,16 @@ func pickConfigureRegions(ctx context.Context, outW io.Writer, regions []regionC
 	return chosen, nil
 }
 
-// configureChoices is what the onboarding form resolved to. keepUpstream means
-// the user chose to leave their current upstream in place, in which case
-// placement carries no mirror to adopt.
+// configureChoices is what the onboarding form resolved to.
 type configureChoices struct {
-	placement     coreapi.ResolvedPlacement
-	agents        []agent.Agent
-	saveChoice    string
+	// placement is the mirror to adopt. It is meaningful only when keepUpstream
+	// is false, and is left zero-valued otherwise so no caller can mistake a
+	// leave-unchanged run for one that repoints the mirror remote.
+	placement  coreapi.ResolvedPlacement
+	agents     []agent.Agent
+	saveChoice string
+	// keepUpstream reports that the user chose to leave their current upstream,
+	// and with it every remote, exactly as it is.
 	keepUpstream  bool
 	agentsChanged bool
 }
@@ -738,10 +741,23 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 	agentControl.OnSelectionChanged(refreshSave)
 	agentControl.ShowSectionGapWhen(func() bool { return true })
 
+	// Staying put adopts no mirror, so the placement stays zero-valued rather
+	// than reporting whatever the current upstream happens to be.
+	resolvePlacement := func(unavailable string) (coreapi.ResolvedPlacement, error) {
+		if keepUpstream() {
+			return coreapi.ResolvedPlacement{}, nil
+		}
+		chosen, ok := placementByHost[selectedHost]
+		if !ok {
+			return coreapi.ResolvedPlacement{}, errors.New(unavailable)
+		}
+		return chosen, nil
+	}
+
 	if nonInteractive {
-		chosen, ok := placementByHost[resolvedHost()]
-		if !ok && !keepUpstream() {
-			return configureChoices{}, errors.New("default upstream is no longer available")
+		chosen, chosenErr := resolvePlacement("default upstream is no longer available")
+		if chosenErr != nil {
+			return configureChoices{}, chosenErr
 		}
 		selection, selectionErr := configureNonInteractiveAgentSelection(selectedAgentNames, agentOptions)
 		if selectionErr != nil {
@@ -772,9 +788,9 @@ func promptConfigureUpstreamAndAgents(ctx context.Context, errW io.Writer, repoR
 		return configureChoices{}, NewSilentError(errors.New("configure cancelled"))
 	}
 
-	chosen, ok := placementByHost[resolvedHost()]
-	if !ok && !keepUpstream() {
-		return configureChoices{}, errors.New("selected upstream is no longer available")
+	chosen, err := resolvePlacement("selected upstream is no longer available")
+	if err != nil {
+		return configureChoices{}, err
 	}
 	selectedAgents, err := configureSelectedAgents(selectedAgentNames)
 	if err != nil {
