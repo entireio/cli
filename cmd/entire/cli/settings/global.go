@@ -330,6 +330,9 @@ func matchesExcludePath(ctx context.Context, patterns []string, worktreeRoot str
 // pattern still matches a physical root and vice versa.
 func matchesExcludePathFold(_ context.Context, patterns []string, worktreeRoot string, fold bool) (bool, error) {
 	roots := rootMatchForms(worktreeRoot)
+	if fold {
+		foldPathForms(roots)
+	}
 	for i, p := range patterns {
 		expanded, err := expandTilde(p)
 		if err != nil {
@@ -342,14 +345,11 @@ func matchesExcludePathFold(_ context.Context, patterns []string, worktreeRoot s
 		if alt := resolveGlobPrefixSymlinks(expanded); alt != "" {
 			variants = append(variants, alt)
 		}
+		if fold {
+			foldPathForms(variants)
+		}
 		for _, pv := range variants {
-			if fold {
-				pv = strings.ToLower(pv)
-			}
 			for _, root := range roots {
-				if fold {
-					root = strings.ToLower(root)
-				}
 				ok, matchErr := doublestar.Match(pv, root)
 				if matchErr != nil {
 					return false, fmt.Errorf("exclude_paths[%d]: invalid glob: %w", i, matchErr)
@@ -380,6 +380,12 @@ func rootMatchForms(worktreeRoot string) []string {
 	return roots
 }
 
+func foldPathForms(forms []string) {
+	for i := range forms {
+		forms[i] = strings.ToLower(forms[i])
+	}
+}
+
 // matchesExcludePathExact reports whether worktreeRoot IS one of the
 // exclude_paths_exact entries. Entries are plain paths, not globs, and there
 // is deliberately no subtree cascade — a repo checked out BENEATH an
@@ -397,6 +403,9 @@ func matchesExcludePathExact(ctx context.Context, entries []string, worktreeRoot
 // git reports, and vice versa.
 func matchesExcludePathExactFold(_ context.Context, entries []string, worktreeRoot string, fold bool) (bool, error) {
 	roots := rootMatchForms(worktreeRoot)
+	if fold {
+		foldPathForms(roots)
+	}
 	for i, e := range entries {
 		expanded, err := expandTilde(e)
 		if err != nil {
@@ -411,12 +420,11 @@ func matchesExcludePathExactFold(_ context.Context, entries []string, worktreeRo
 				variants = append(variants, s)
 			}
 		}
+		if fold {
+			foldPathForms(variants)
+		}
 		for _, v := range variants {
 			for _, root := range roots {
-				if fold {
-					v = strings.ToLower(v)
-					root = strings.ToLower(root)
-				}
 				if v == root {
 					return true, nil
 				}
