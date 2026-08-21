@@ -825,6 +825,10 @@ func huskySafeHookContent(hookName, entireContent string, existing []byte, exist
 // place here so a crash or later write failure cannot erase the only copy.
 // The rotated backup keeps hookPath's permission bits so a mode-0644 file that
 // Git ignored does not become executable under the non-Husky chain.
+//
+// Write order is important: the new backup is staged beside the old one and
+// only after it verifies do we move the old file to `.stale`. A failed write
+// therefore leaves the previous backup intact.
 func preserveCurrentHookOverStaleBackup(hookPath, backupPath string, current []byte) error {
 	mode := os.FileMode(0o644)
 	if info, statErr := os.Lstat(hookPath); statErr == nil {
@@ -837,26 +841,35 @@ func preserveCurrentHookOverStaleBackup(hookPath, backupPath string, current []b
 	if string(prev) == string(current) {
 		return nil
 	}
+
+	newPath := backupPath + ".new"
+	if err := os.WriteFile(newPath, current, mode); err != nil { //nolint:gosec // preserve caller mode
+		return fmt.Errorf("write updated backup: %w", err)
+	}
+	got, err := os.ReadFile(newPath) //nolint:gosec // path is controlled
+	if err != nil {
+		_ = os.Remove(newPath)
+		return fmt.Errorf("verify updated backup: %w", err)
+	}
+	if string(got) != string(current) {
+		_ = os.Remove(newPath)
+		return fmt.Errorf("verify updated backup: wrote %d bytes, read back %d", len(current), len(got))
+	}
+
 	stalePath := backupPath + ".stale"
 	if err := os.Rename(backupPath, stalePath); err != nil {
 		// If a prior stale exists, overwrite it.
 		_ = os.Remove(stalePath)
 		if err := os.Rename(backupPath, stalePath); err != nil {
+			_ = os.Remove(newPath)
 			return fmt.Errorf("rotate stale backup: %w", err)
 		}
 	}
-	if err := os.WriteFile(backupPath, current, mode); err != nil { //nolint:gosec // preserve caller mode
-		return fmt.Errorf("write updated backup: %w", err)
-	}
-	// Confirm the backup is readable and complete before the caller overwrites
-	// hookPath. Do not delete hookPath here — that would open a window where a
-	// crash or later write failure loses the only live copy of the user hook.
-	got, err := os.ReadFile(backupPath) //nolint:gosec // path is controlled
-	if err != nil {
-		return fmt.Errorf("verify updated backup: %w", err)
-	}
-	if string(got) != string(current) {
-		return fmt.Errorf("verify updated backup: wrote %d bytes, read back %d", len(current), len(got))
+	if err := os.Rename(newPath, backupPath); err != nil {
+		// Best-effort restore of the previous backup.
+		_ = os.Rename(stalePath, backupPath)
+		_ = os.Remove(newPath)
+		return fmt.Errorf("install updated backup: %w", err)
 	}
 	return nil
 }
