@@ -127,6 +127,20 @@ func TestAbsPath_InvisibleRouting_RepoActivationWinsWithCanceledContext(t *testi
 	}
 }
 
+func TestAbsPath_InvisibleRouting_UntrackedLocalActivationPropagatesCanceledContext(t *testing.T) {
+	repo := newInvisibleTestRepo(t)
+	setGlobalTier(t, `{"global":{"enabled":true}}`)
+	testutil.WriteFile(t, repo, ".entire/settings.local.json", `{"enabled": true}`)
+	_ = mustAbsPath(t, "src/main.go") // prime only the worktree-root cache
+	paths.ClearInvisibleRuntimeCache()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := paths.AbsPath(ctx, ".entire/metadata/s1"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("AbsPath with unresolved local activation = %v, want context.Canceled", err)
+	}
+}
+
 func TestAbsPath_InvisibleRouting_TrackedLocalActivationStaysInvisible(t *testing.T) {
 	repo := newInvisibleTestRepo(t)
 	setGlobalTier(t, `{"global":{"enabled":true}}`)

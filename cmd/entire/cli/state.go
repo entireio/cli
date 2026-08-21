@@ -733,6 +733,11 @@ func GetNextCheckpointSequence(ctx context.Context, sessionID, taskToolUseID str
 		// cwd-relative read below would look inside the worktree of a repo
 		// that must stay invisible. Skip the read; the sequence starts at 1.
 		return 1
+	default:
+		// AbsPath also carries cancellation and repository-resolution errors.
+		// A cwd-relative fallback after either one can inspect the wrong repo;
+		// this helper is best-effort, so restart the sequence at 1 instead.
+		return 1
 	}
 
 	entries, err := os.ReadDir(checkpointsDir)
