@@ -19,9 +19,10 @@ import (
 // drops unknown fields on the round-trip, so an older binary would silently
 // erase whatever a newer schema added (e.g. slice 2's adopt marker).
 //
-// Version 2 added LastScannedTranscriptCursor. Consequence: v1-only binaries
-// refuse to mutate v2 records and degrade to a Debug-logged skip.
-const CurrentRecordVersion = 2
+// Version 2 added LastScannedTranscriptCursor. Version 3 added the per-repo
+// AdoptedAt marker. Consequence: older binaries refuse to mutate newer records
+// and degrade to a Debug-logged skip instead of erasing fields they do not know.
+const CurrentRecordVersion = 3
 
 // SessionRecord is the machine-level record of a session: which repos its
 // activity has touched. Lives under userdirs.Config()/sessions/, outside any
@@ -55,10 +56,11 @@ type SessionRecord struct {
 type BoundRepo struct {
 	RepoIdentity
 
-	FirstEvidenceAt time.Time `json:"first_evidence_at"`
-	LastEvidenceAt  time.Time `json:"last_evidence_at"`
-	EvidenceCount   int       `json:"evidence_count"`
-	Enabled         bool      `json:"enabled"` // repo had .entire setup when last observed
+	FirstEvidenceAt time.Time  `json:"first_evidence_at"`
+	LastEvidenceAt  time.Time  `json:"last_evidence_at"`
+	EvidenceCount   int        `json:"evidence_count"`
+	Enabled         bool       `json:"enabled"` // repo had .entire setup when last observed
+	AdoptedAt       *time.Time `json:"adopted_at,omitempty"`
 }
 
 // SessionMeta carries session identity fields for the record. They are filled
@@ -94,6 +96,25 @@ func RecordBinding(ctx context.Context, sessionID string, meta SessionMeta, ev E
 		fillMetaIfEmpty(rec, meta)
 		upsertBoundRepo(rec, now, ev)
 		return nil
+	})
+}
+
+// MarkRepoAdopted records that the session state has been durably replicated
+// into the repo identified by canonical git common dir. It is intentionally a
+// separate mutation from RecordBinding: callers set the marker only AFTER the
+// target state write succeeds, so a failed write remains retryable.
+func MarkRepoAdopted(ctx context.Context, sessionID, commonDir string) error {
+	return mutateRecord(ctx, sessionID, func(now time.Time, rec *SessionRecord) error {
+		for i := range rec.BoundRepos {
+			if rec.BoundRepos[i].CommonDir != commonDir {
+				continue
+			}
+			if rec.BoundRepos[i].AdoptedAt == nil {
+				rec.BoundRepos[i].AdoptedAt = &now
+			}
+			return nil
+		}
+		return fmt.Errorf("bound repo %s not found in session record", commonDir)
 	})
 }
 

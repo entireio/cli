@@ -3,9 +3,9 @@
 // (~/dev/acme — #1098's loudest scenario) fires every hook with a non-repo
 // cwd, where checkpoint capture is impossible; the session's evidence can
 // still name the repos it touched. This path parses the event, extracts file
-// paths, and records foreign repos in the machine-level session record —
-// nothing else: no session state, no checkpoints, no logging.Init, no repo
-// writes.
+// paths, records foreign repos in the machine-level session record, and
+// additively replicates state into already-enabled targets. It still creates no
+// checkpoints and never initializes repository logging.
 package cli
 
 import (
@@ -105,6 +105,15 @@ func recordNoRepoEvidence(ctx context.Context, agentName types.AgentName, hookNa
 			logging.Debug(logCtx, "no-repo evidence: failed to record transcript scan",
 				slog.String("session_id", event.SessionID),
 				slog.String("error", err.Error()))
+			return
+		}
+		for _, ev := range evs {
+			if err := ensureSessionReplicated(logCtx, event.SessionID, meta, "", ev); err != nil {
+				logging.Debug(logCtx, "no-repo evidence: failed to replicate session",
+					slog.String("session_id", event.SessionID),
+					slog.String("repo", ev.Repo.WorktreeRoot),
+					slog.String("error", err.Error()))
+			}
 		}
 	case agent.SessionStart, agent.TurnStart, agent.Compaction, agent.SessionEnd,
 		agent.SubagentStart, agent.SubagentEnd, agent.ModelUpdate:
