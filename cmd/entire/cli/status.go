@@ -315,9 +315,30 @@ type checkpointSyncInfo struct {
 	// when none, when counting failed, or when the count would be a lie
 	// (dedicated URL mode on the git-branch backend).
 	Unpushed int
+	// IgnoredStore names a checkpoint_remote that is configured but NOT in
+	// effect for the elected remote, so checkpoints fall back to that remote.
+	// Empty in every other state, dedicated mode included — there the store IS
+	// in effect. Reported because the rejection is otherwise invisible: it is a
+	// logging.Warn inside remote.PushURL, and every other surface renders the
+	// fallback as if no store had been configured at all.
+	IgnoredStore string
 }
 
-func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpointSyncInfo {
+// dedicated reports that a checkpoint_remote store is the destination, rather
+// than one of the repo's git remotes.
+func (i checkpointSyncInfo) dedicated() bool { return i.Source == checkpointSyncSourceDedicated }
+
+// resolveCheckpointSyncDestination answers only *where* checkpoints go — the
+// elected remote, the dedicated store, or the fail-closed error — with no
+// unpushed count. Split out from computeCheckpointSyncInfo so surfaces that need
+// the destination alone can share this one election instead of re-deriving it:
+// the checkpoint-destination note in remote_topology.go opted out and drifted,
+// which is the bug this split closes. Local-only and cheap — no ref walk, no
+// push-queue read, no network.
+//
+// s may be nil when the caller could not load settings; dedicated mode is then
+// simply not detected, which is the right degradation for a best-effort caller.
+func resolveCheckpointSyncDestination(ctx context.Context, s *EntireSettings) checkpointSyncInfo {
 	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
 	if err != nil {
 		// Fail-closed: checkpoint_push_remote names a remote that does not
@@ -341,26 +362,48 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 	// metadata fetch dials, and status must stay network-free.
 	// Accepted divergence: a real push to a different named remote may derive
 	// PushURL differently than this elected-remote probe does.
-	if cr := s.GetCheckpointRemote(); cr != nil {
-		if _, enabled, purlErr := checkpointremote.PushURL(ctx, elected.Name); purlErr == nil && enabled {
-			info := checkpointSyncInfo{Remote: cr.Repo, Source: checkpointSyncSourceDedicated}
-			// The unpushed counter is meaningful here only on the git-refs
-			// backend (push-queue length is local and accurate). The
-			// git-branch comparison is omitted: pushes to a raw URL update
-			// no remote-tracking ref, so it would permanently read "all
-			// unpushed".
-			if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
-				info.Unpushed = countUnpushedCheckpointsForStatus(ctx, "")
+	ignoredStore := ""
+	if s != nil {
+		if cr := s.GetCheckpointRemote(); cr != nil {
+			if _, enabled, purlErr := checkpointremote.PushURL(ctx, elected.Name); purlErr == nil && enabled {
+				return checkpointSyncInfo{Remote: cr.Repo, Source: checkpointSyncSourceDedicated}
 			}
-			return info
+			// Configured but not in effect for the elected remote, so
+			// checkpoints fall back to that remote. Recorded rather than
+			// dropped: PushURL only logs the rejection, and the fallback is
+			// otherwise indistinguishable from never having configured a store.
+			ignoredStore = cr.Repo
 		}
 	}
 
 	return checkpointSyncInfo{
-		Remote:   elected.Name,
-		Source:   string(elected.Source),
-		Unpushed: countUnpushedCheckpointsForStatus(ctx, elected.Name),
+		Remote:       elected.Name,
+		Source:       string(elected.Source),
+		IgnoredStore: ignoredStore,
 	}
+}
+
+// computeCheckpointSyncInfo is the single shared computation behind both the
+// text and JSON checkpoint-sync sections of `entire status`: the destination
+// above, plus the unpushed counter those two sections show and no other surface
+// needs.
+func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpointSyncInfo {
+	info := resolveCheckpointSyncDestination(ctx, s)
+	switch {
+	case info.Err != "" || info.Remote == "":
+		return info
+	case info.dedicated():
+		// The unpushed counter is meaningful here only on the git-refs
+		// backend (push-queue length is local and accurate). The git-branch
+		// comparison is omitted: pushes to a raw URL update no remote-tracking
+		// ref, so it would permanently read "all unpushed".
+		if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
+			info.Unpushed = countUnpushedCheckpointsForStatus(ctx, "")
+		}
+	default:
+		info.Unpushed = countUnpushedCheckpointsForStatus(ctx, info.Remote)
+	}
+	return info
 }
 
 // countUnpushedCheckpointsForStatus counts best-effort: status must never fail
@@ -387,7 +430,7 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		b.WriteString(sty.render(sty.yellow, "  ! Checkpoints NOT syncing: "+info.Err))
 	case info.Remote == "":
 		return
-	case info.Source == checkpointSyncSourceDedicated:
+	case info.dedicated():
 		b.WriteString("\n  Checkpoints sync to: ")
 		b.WriteString(sty.render(sty.cyan, "dedicated checkpoint remote ("+info.Remote+")"))
 	default:
@@ -399,6 +442,13 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		case string(strategy.SyncRemoteSourceObserved):
 			b.WriteString(sty.render(sty.dim, " (follows your branch's push destination)"))
 		}
+	}
+	if info.IgnoredStore != "" {
+		// The rejection is per-push and local-only, so this is the first place
+		// a user can see that the store they configured is not being used.
+		b.WriteString("\n")
+		b.WriteString(sty.render(sty.yellow, fmt.Sprintf(
+			"  ! checkpoint_remote %q is not in effect; checkpoints go to %s", info.IgnoredStore, info.Remote)))
 	}
 	if info.Unpushed > 0 {
 		b.WriteString("\n  ")
@@ -416,7 +466,7 @@ func formatUnpushedCheckpointsLine(info checkpointSyncInfo) string {
 		noun = "checkpoint"
 		pronoun = "it syncs"
 	}
-	if info.Source == checkpointSyncSourceDedicated {
+	if info.dedicated() {
 		return fmt.Sprintf("%d %s not yet pushed", info.Unpushed, noun)
 	}
 	return fmt.Sprintf("%d %s not yet on %s — %s with your next 'git push %s'",
@@ -797,7 +847,10 @@ type statusJSON struct {
 	CheckpointSyncRemote       string `json:"checkpoint_sync_remote,omitempty"`
 	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|observed|default|sole|first|dedicated
 	CheckpointSyncError        string `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
-	UnpushedCheckpoints        int    `json:"unpushed_checkpoints,omitempty"`
+	// CheckpointRemoteIgnored names a checkpoint_remote that is configured but
+	// not in effect, so checkpoints go to CheckpointSyncRemote instead.
+	CheckpointRemoteIgnored string `json:"checkpoint_remote_ignored,omitempty"`
+	UnpushedCheckpoints     int    `json:"unpushed_checkpoints,omitempty"`
 	// SecretScanners lists the enabled engines when non-default; omitted when default.
 	SecretScanners []string `json:"secret_scanners,omitempty"`
 	Error          string   `json:"error,omitempty"`
@@ -872,6 +925,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.CheckpointSyncRemote = syncInfo.Remote
 		result.CheckpointSyncRemoteSource = syncInfo.Source
 		result.CheckpointSyncError = syncInfo.Err
+		result.CheckpointRemoteIgnored = syncInfo.IgnoredStore
 		result.UnpushedCheckpoints = syncInfo.Unpushed
 
 		if store, err := session.NewStateStore(ctx); err == nil {

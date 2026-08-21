@@ -2355,6 +2355,11 @@ func TestRunStatus_CheckpointSyncDedicated_GitBranch_NoCounter(t *testing.T) {
 	if !strings.Contains(out, "Checkpoints sync to: dedicated checkpoint remote (org/checkpoints)") {
 		t.Errorf("expected dedicated destination line with repo slug, got:\n%s", out)
 	}
+	// In effect is the opposite of ignored; the warning belongs only to the
+	// fallback case.
+	if strings.Contains(out, "is not in effect") {
+		t.Errorf("dedicated mode must not warn about an ignored store, got:\n%s", out)
+	}
 	if strings.Contains(out, "not yet") {
 		t.Errorf("dedicated + git-branch: counter must be suppressed, got:\n%s", out)
 	}
@@ -2513,6 +2518,11 @@ func TestRunStatus_CheckpointSyncDedicated_IneligibleFallsBackToElected(t *testi
 	if !strings.Contains(out, "2 checkpoints not yet on origin") {
 		t.Errorf("expected elected-remote counter in fallback mode, got:\n%s", out)
 	}
+	// The rejection is a log line everywhere else, so status is where a user
+	// learns the store they configured is not being used.
+	if !strings.Contains(out, `checkpoint_remote "org/checkpoints" is not in effect; checkpoints go to origin`) {
+		t.Errorf("expected the ignored-store warning, got:\n%s", out)
+	}
 }
 
 func TestRunStatusJSON_CheckpointSync_DedicatedIneligible(t *testing.T) {
@@ -2538,6 +2548,9 @@ func TestRunStatusJSON_CheckpointSync_DedicatedIneligible(t *testing.T) {
 	}
 	if result.CheckpointSyncError != "" {
 		t.Errorf("checkpoint_sync_error should be empty, got %q", result.CheckpointSyncError)
+	}
+	if result.CheckpointRemoteIgnored != "org/checkpoints" {
+		t.Errorf("checkpoint_remote_ignored = %q, want the configured store", result.CheckpointRemoteIgnored)
 	}
 }
 

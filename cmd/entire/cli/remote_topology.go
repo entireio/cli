@@ -52,21 +52,20 @@ type remoteTopology struct {
 	// primaryIsRefs reports whether the git-refs backend is active, which
 	// decides what a fanning-out remote means for checkpoints.
 	primaryIsRefs bool
-	// syncRemote is the elected checkpoint sync remote — the one remote whose
-	// pushes carry checkpoints — and syncSource says which tier elected it.
-	// Both are empty when the election found nothing or failed, and the note
-	// then names no destination: naming one the push side would not use is the
-	// failure this note exists to prevent.
-	syncRemote string
-	syncSource strategy.CheckpointSyncRemoteSource
-	// syncErr is the election failure, kept rather than swallowed because a
-	// fail-closed election is the one case where checkpoints are going
-	// nowhere at all, which the note must not stay silent about. It is not
-	// the only way syncRemote ends up empty: the resolver also returns an
-	// unnamed remote with no error when its own `git config` read fails
-	// transiently (cachedRemotesInConfigOrder answers nil rather than caching
-	// the failure), so the note carries a tier-agnostic fallback too.
-	syncErr error
+	// sync is where checkpoints actually go, from the same computation behind
+	// `entire status` and `entire status --json` (status.go), so the three
+	// surfaces cannot disagree about one election. Its Unpushed is always 0
+	// here: the note needs the destination only, and must stay cheap.
+	//
+	// sync.Remote is empty when the election found nothing or failed, and the
+	// note then names no destination — naming one the push side would not use
+	// is the failure this note exists to prevent. sync.Err is a fail-closed
+	// election, the one case where checkpoints go nowhere at all, which the
+	// note must not stay silent about. An empty name with no error is the
+	// third case: the resolver answers that way when its own `git config` read
+	// fails transiently (cachedRemotesInConfigOrder returns nil rather than
+	// caching the failure), so the note carries a tier-agnostic fallback too.
+	sync checkpointSyncInfo
 }
 
 // inspectRemoteTopology reads the repo's remotes and checkpoint configuration.
@@ -109,17 +108,22 @@ func inspectRemoteTopology(ctx context.Context) remoteTopology {
 		t.primaryIsRefs = checkpoint.PrimaryIsRefs(cpCfg)
 	}
 
-	// Ask the resolver rather than reading checkpoint_push_remote out of
-	// settings, for the same reason `pinned` does: the destination shown must
-	// be the one pushes actually use, never a re-derivation that can disagree.
-	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
+	// Share the status computation rather than re-deriving the destination, for
+	// the same reason `pinned` asks the resolver: what is shown must be what
+	// pushes actually use. A local re-derivation here is what let this note
+	// name a remote while `entire status` named a dedicated store.
+	//
+	// A settings read failure degrades to a nil settings object — dedicated
+	// mode simply goes undetected — rather than becoming an Err, which the note
+	// renders as "Checkpoints are NOT syncing". A transient read failure is not
+	// that, and this note must never obstruct enable or doctor.
+	s, err := LoadEntireSettings(ctx)
 	if err != nil {
-		t.syncErr = err
-		logging.Debug(ctx, "remote topology: could not resolve the checkpoint sync remote",
+		logging.Debug(ctx, "remote topology: could not load settings",
 			slog.String("error", err.Error()))
-	} else {
-		t.syncRemote, t.syncSource = elected.Name, elected.Source
+		s = nil
 	}
+	t.sync = resolveCheckpointSyncDestination(ctx, s)
 
 	return t
 }
@@ -172,8 +176,29 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 
 	fmt.Fprintln(w, header)
 
+	// Destination first: every claim below it is about how checkpoints reach
+	// that destination, and the URL breakdown read as the whole answer when it
+	// came first.
+	if names := t.unpinnedNames(); len(names) > 1 {
+		// Every remote, not just the unpinned ones. The count orients the
+		// reader in their own repo, and omitting a pinned remote let the note
+		// name a destination missing from its own list.
+		all := make([]string, 0, len(t.destinations))
+		for _, d := range t.destinations {
+			all = append(all, d.name)
+		}
+		fmt.Fprintf(w, "  This repo has %d remotes (%s).\n", len(all), strings.Join(all, ", "))
+		t.describeSyncRemote(w)
+	}
+
+	t.describeIgnoredStore(w)
+
 	for _, d := range t.destinations {
-		if !d.fansOut() {
+		// Only the elected remote's URLs are a checkpoint destination. Another
+		// remote's pushes are gated out entirely (checkpointSyncAllowedForRemote),
+		// so "checkpoints go to the first URL only" would be false of it — as it
+		// is of every remote when the election failed or resolved to nothing.
+		if !d.fansOut() || t.dedicated() || d.name != t.sync.Remote {
 			continue
 		}
 		fmt.Fprintf(w, "  Remote %q pushes to %d URLs:\n", d.name, len(d.pushURLs))
@@ -194,13 +219,35 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 		}
 	}
 
-	if names := t.unpinnedNames(); len(names) > 1 {
-		fmt.Fprintf(w, "  This repo has %d remotes (%s).\n", len(names), strings.Join(names, ", "))
-		t.describeSyncRemote(w)
+	// The advice is "configure a checkpoint_remote" — already done in both
+	// states where one exists, and off-target when a fail-closed election means
+	// nothing is syncing at all.
+	if t.dedicated() || t.sync.IgnoredStore != "" || t.sync.Err != "" {
+		return
 	}
-
 	fmt.Fprintln(w, "  To pin one repository for checkpoints, set checkpoint_remote in")
 	fmt.Fprintln(w, "  .entire/settings.json (or .entire/settings.local.json to keep it to this clone).")
+}
+
+// dedicated reports that a checkpoint_remote store is the destination, so none
+// of this repo's remotes is where checkpoints land.
+func (t remoteTopology) dedicated() bool { return t.sync.dedicated() }
+
+// describeIgnoredStore reports a checkpoint_remote that is configured but not in
+// effect. Everywhere else this is a logging.Warn inside remote.PushURL, so the
+// setting is silently ignored and the fallback looks like an ordinary election.
+//
+// The cause is stated as a likelihood, not a fact: PushURL returns a bare
+// enabled=false for the ownership rejection, an unparseable push URL and an
+// unmappable protocol alike, so the note cannot tell which applied.
+func (t remoteTopology) describeIgnoredStore(w io.Writer) {
+	if t.sync.IgnoredStore == "" {
+		return
+	}
+	fmt.Fprintf(w, "    A checkpoint_remote (%q) is configured but not in effect\n", t.sync.IgnoredStore)
+	fmt.Fprintln(w, "    here — most often because it looks like it belongs to another owner.")
+	fmt.Fprintf(w, "    Checkpoints go to %q instead; set it in .entire/settings.local.json\n", t.sync.Remote)
+	fmt.Fprintln(w, "    if the store is yours.")
 }
 
 // describeSyncRemote names the one remote that carries checkpoints. It stays
@@ -226,13 +273,32 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 // The exception to the orientation-not-warning rule is a failed election: that
 // is fail-closed, so checkpoints are going nowhere at all and the note has to
 // say so.
+//
+// A dedicated checkpoint_remote store is answered before the tier switch, and
+// deliberately drops the "no session history" clause the settled tiers carry:
+// in dedicated mode checkpoints never ride a code push to a remote at all, so
+// there is no "other remote" for that sentence to be about. It names the pinned
+// remotes instead, because those are the pushes that reach the store — a repo
+// where none of them is ever pushed strands its transcripts, and nothing else
+// in this note would say so.
 func (t remoteTopology) describeSyncRemote(w io.Writer) {
-	if t.syncRemote == "" {
-		if t.syncErr != nil {
+	// A dedicated store is not a tier of the election — status.go synthesizes
+	// it — so it is answered before the switch, which stays typed on the
+	// resolver's enum so `exhaustive` keeps turning a new tier into a decision
+	// here.
+	if t.dedicated() {
+		fmt.Fprintf(w, "    Checkpoints go to the dedicated store %q (set by\n", t.sync.Remote)
+		fmt.Fprintf(w, "    checkpoint_remote), not to any of these remotes. Pushes to %s\n",
+			quoteNames(t.pinnedNames()))
+		fmt.Fprintln(w, "    carry them there.")
+		return
+	}
+	if t.sync.Remote == "" {
+		if t.sync.Err != "" {
 			// Same fact `entire status` reports as "Checkpoints NOT syncing":
 			// the pre-push gate is skipping checkpoint sync entirely until the
 			// setting is fixed.
-			fmt.Fprintf(w, "    Checkpoints are NOT syncing: %v\n", t.syncErr)
+			fmt.Fprintf(w, "    Checkpoints are NOT syncing: %s\n", t.sync.Err)
 			return
 		}
 		// The election could not be read at all. Saying nothing here would
@@ -242,16 +308,16 @@ func (t remoteTopology) describeSyncRemote(w io.Writer) {
 		fmt.Fprintln(w, "    Checkpoints sync to a single elected remote; `entire status` shows which.")
 		return
 	}
-	switch t.syncSource {
+	switch strategy.CheckpointSyncRemoteSource(t.sync.Source) {
 	case strategy.SyncRemoteSourceConfig:
 		// The decision is already made; repeating the setting key as advice
 		// would read as a warning that something still needs doing.
-		fmt.Fprintf(w, "    Checkpoints sync to one remote — %q (set by checkpoint_push_remote).\n", t.syncRemote)
+		fmt.Fprintf(w, "    Checkpoints sync to one remote — %q (set by checkpoint_push_remote).\n", t.sync.Remote)
 		fmt.Fprintln(w, "    A push to any other remote carries your code but no session history.")
 	case strategy.SyncRemoteSourceObserved:
 		// Same fact `entire status` reports as "follows your branch's push
 		// destination", shortened to hold one line at this indent.
-		fmt.Fprintf(w, "    Checkpoints sync to one remote — %q, your branch's push destination.\n", t.syncRemote)
+		fmt.Fprintf(w, "    Checkpoints sync to one remote — %q, your branch's push destination.\n", t.sync.Remote)
 		fmt.Fprintln(w, "    A push to any other remote carries your code but no session history.")
 		fmt.Fprintln(w, "    Set strategy_options.checkpoint_push_remote to pin a different one.")
 	case strategy.SyncRemoteSourceDefault, strategy.SyncRemoteSourceSole, strategy.SyncRemoteSourceFirst:
@@ -267,9 +333,39 @@ func (t remoteTopology) describeSyncRemote(w io.Writer) {
 		// requires the push target to both agree with the branch's declared
 		// push destination and differ from today's election, so on the common
 		// setup where they already agree, no push moves anything.
-		fmt.Fprintf(w, "    Checkpoints sync to one remote — right now %q. A push to a different\n", t.syncRemote)
+		fmt.Fprintf(w, "    Checkpoints sync to one remote — right now %q. A push to a different\n", t.sync.Remote)
 		fmt.Fprintln(w, "    remote of your own can move it; `entire status` shows where they go.")
 		fmt.Fprintln(w, "    Set strategy_options.checkpoint_push_remote to pin one yourself.")
+	}
+}
+
+// pinnedNames lists the remotes a checkpoint_remote is in effect for — which is
+// exactly the set whose pushes reach the store, since the pre-push exemption
+// (pushSettings.hasCheckpointURL) is the same remote.PushURL answer that sets
+// `pinned`.
+func (t remoteTopology) pinnedNames() []string {
+	var names []string
+	for _, d := range t.destinations {
+		if d.pinned {
+			names = append(names, d.name)
+		}
+	}
+	return names
+}
+
+// quoteNames renders remote names for prose: `"a"`, `"a" and "b"`, `"a", "b" and "c"`.
+func quoteNames(names []string) string {
+	quoted := make([]string, 0, len(names))
+	for _, n := range names {
+		quoted = append(quoted, fmt.Sprintf("%q", n))
+	}
+	switch len(quoted) {
+	case 0:
+		return "no remote"
+	case 1:
+		return quoted[0]
+	default:
+		return strings.Join(quoted[:len(quoted)-1], ", ") + " and " + quoted[len(quoted)-1]
 	}
 }
 
