@@ -212,6 +212,13 @@ func computeInvisibleRuntimeBase(ctx context.Context, root string) (string, erro
 	if repoActivationConfigured(ctx, root) {
 		return "", nil
 	}
+	// Explicit repo activation above is authoritative even on a canceled
+	// context. If the decision was not explicit, stop before consulting the
+	// user tier or running another git probe after local-settings ownership
+	// detection observed cancellation.
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("classifying repo activation: %w", err)
+	}
 	if !userGlobalTierEnabled() {
 		return "", nil
 	}
@@ -257,7 +264,10 @@ func repoActivationConfigured(ctx context.Context, root string) bool {
 		}
 		if name == settingsLocalFileName {
 			tracked, err := localSettingsTracked(ctx, root)
-			if err != nil || tracked {
+			if err != nil {
+				return false
+			}
+			if tracked {
 				continue
 			}
 		}
