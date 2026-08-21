@@ -421,6 +421,42 @@ func TestInstallUserHooks_RepairsIncompleteInstalls(t *testing.T) {
 	})
 }
 
+func TestAreUserHooksInstalled_RequiresEveryLifecycleHook(t *testing.T) {
+	for _, missing := range []string{"SessionStart", "SessionEnd", "UserPromptSubmit"} {
+		t.Run(missing, func(t *testing.T) {
+			home := setUserHome(t)
+			agent := &ClaudeCodeAgent{}
+			if _, err := agent.InstallUserHooks(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+
+			path := userSettingsTestPath(t, home)
+			raw := readRawSettings(t, path)
+			var hooks map[string]json.RawMessage
+			if err := json.Unmarshal(raw["hooks"], &hooks); err != nil {
+				t.Fatal(err)
+			}
+			delete(hooks, missing)
+			hooksJSON, err := json.Marshal(hooks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw["hooks"] = hooksJSON
+			data, err := json.Marshal(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || ok {
+				t.Fatalf("AreUserHooksInstalled() with %s missing = (%v, %v), want (false, nil)", missing, ok, err)
+			}
+		})
+	}
+}
+
 // A managed hook section in an unexpected shape aborts install AND uninstall
 // with an error naming the section, leaving the file byte-identical.
 func TestInstallUserHooks_UnparseableHookSectionErrorsCleanly(t *testing.T) {

@@ -59,8 +59,8 @@ func (c *ClaudeCodeAgent) UninstallUserHooks(_ context.Context) error {
 
 // AreUserHooksInstalled reports whether Entire's hooks are COMPLETELY
 // installed in ~/.claude/settings.json — the same completeness spec as the
-// repo-level CheckHookConfig (Stop present plus the current tool-use
-// matchers), so a partial install reads as not-installed, doctor prompts
+// install contract (all lifecycle hooks plus the current tool-use matchers),
+// so a partial install reads as not-installed, doctor prompts
 // repair, and the idempotent installer repairs it. A missing file is
 // (false, nil); an unreadable or unparseable one returns the error rather
 // than posing as "not installed".
@@ -76,7 +76,11 @@ func (c *ClaudeCodeAgent) AreUserHooksInstalled(_ context.Context) (bool, error)
 		}
 		return false, err
 	}
-	if !hasEntireHook(settings.Hooks.Stop) || !hasEntireHook(settings.Hooks.SubagentStop) {
+	if !hasEntireHook(settings.Hooks.SessionStart) ||
+		!hasEntireHook(settings.Hooks.SessionEnd) ||
+		!hasEntireHook(settings.Hooks.UserPromptSubmit) ||
+		!hasEntireHook(settings.Hooks.Stop) ||
+		!hasEntireHook(settings.Hooks.SubagentStop) {
 		return false, nil
 	}
 	subagentTools := splitMatcherTools(subagentToolMatcher)
