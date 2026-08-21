@@ -57,19 +57,6 @@ func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cob
 		Use:    string(agentName),
 		Short:  handler.Description() + " hook handlers",
 		Hidden: true,
-		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
-			// withHookSession scans session state and loads redactors, so it must
-			// not run in a repo Entire is not active in. Same fail-closed gate
-			// the git-hook tree applies before its own call — IsActiveForRepo,
-			// so globally-tracked repos get session stamping and redaction too.
-			if !settings.IsActiveForRepo(cmd.Context()) {
-				return
-			}
-			// Cobra invokes this PersistentPreRun with the leaf command, so
-			// SetContext hands the session-stamped context straight to the
-			// hook verb's RunE via cmd.Context().
-			cmd.SetContext(withHookSession(cmd.Context()))
-		},
 	}
 
 	for _, hookName := range handler.HookNames() {
@@ -99,10 +86,9 @@ func getHookType(hookName string) string {
 // It handles git repo checks, enabled checks, the hook logging context, event
 // parsing, and lifecycle dispatch.
 // Used by both the registered subcommand path and the RunE fallback for external agents.
-// When stampSession is true, it attaches the hook session context itself (used by
-// the RunE fallback since it doesn't go through PersistentPreRun). Built-in agent
-// subcommands pass false since their parent command's PersistentPreRun already
-// did it.
+// When stampSession is true, it attaches the hook session context after taking
+// the runtime-migration gate. Production built-in and external hook commands
+// both pass true; tests may pass false when session stamping is irrelevant.
 func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, stampSession bool) error {
 	// Skip if not in a git repository - hooks shouldn't prevent the agent
 	// from working. On SessionStart only, and only when the user opted in to
@@ -115,7 +101,7 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	worktreeRoot, err := paths.WorktreeRoot(cmd.Context())
 	if err != nil {
 		if hookName == sessionStartHookVerb && settings.GlobalTierEnabled(cmd.Context()) {
-			warnInactiveOnSessionStart(cmd.ErrOrStderr(), agentName, hookName, notGitRepoSessionStartNotice)
+			warnInactiveOnSessionStart(cmd.Context(), cmd.ErrOrStderr(), agentName, hookName, notGitRepoSessionStartNotice)
 		}
 		return nil
 	}
@@ -133,9 +119,20 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	// IsSetUpAndEnabled with the user-global tier: repos with no repo-level
 	// setup proceed when global mode is on and the repo is not excluded.
 	if active, reason := settings.IsActiveForRepoWithReason(cmd.Context()); !active {
-		warnInactiveOnSessionStart(cmd.ErrOrStderr(), agentName, hookName, inactiveSessionStartNotice(reason))
+		warnInactiveOnSessionStart(cmd.Context(), cmd.ErrOrStderr(), agentName, hookName, inactiveSessionStartNotice(reason))
 		return nil
 	}
+
+	// Repo-level takeover moves invisible runtime data into the worktree. Every
+	// active hook participates in the same worktree-scoped gate so migration
+	// cannot copy or rename a file while this hook is writing it. Take the gate
+	// before session stamping and lazy setup: both can inspect or create runtime
+	// state used by lifecycle dispatch.
+	releaseMigrationGate, err := acquireGlobalRuntimeMigrationGate(cmd.Context(), worktreeRoot)
+	if err != nil {
+		return fmt.Errorf("acquire global runtime migration gate: %w", err)
+	}
+	defer releaseMigrationGate()
 
 	if stampSession {
 		cmd.SetContext(withHookSession(cmd.Context()))
@@ -297,15 +294,19 @@ func inactiveSessionStartNotice(reason settings.InactiveReason) string {
 // fails the hook — the agent must always be allowed to start. Reached only
 // from the agent-hook route (executeAgentHook); git hooks gate in
 // hooks_git_cmd.go and never produce this notice, so git output stays clean.
-func warnInactiveOnSessionStart(errW io.Writer, agentName types.AgentName, hookName, notice string) {
+func warnInactiveOnSessionStart(ctx context.Context, errW io.Writer, agentName types.AgentName, hookName, notice string) {
 	if hookName != sessionStartHookVerb || notice == "" {
 		return
 	}
 	if ag, err := agent.Get(agentName); err == nil {
 		if writer, ok := agent.AsHookResponseWriter(ag); ok {
-			if writer.WriteHookResponse(notice) == nil {
+			writeErr := writer.WriteHookResponse(notice)
+			if writeErr == nil {
 				return
 			}
+			logging.Debug(logging.WithAgent(logging.WithComponent(ctx, "hooks"), agentName),
+				"inactive session-start response write failed; falling back to stderr",
+				slog.String("error", writeErr.Error()))
 		}
 	}
 	fmt.Fprintln(errW, notice)
@@ -459,7 +460,7 @@ func newAgentHookVerbCmdWithLogging(agentName types.AgentName, hookName string) 
 		Hidden: true,
 		Short:  "Called on " + hookName,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return executeAgentHook(cmd, agentName, hookName, false)
+			return executeAgentHook(cmd, agentName, hookName, true)
 		},
 	}
 }

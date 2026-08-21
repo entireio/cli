@@ -108,6 +108,39 @@ func TestAbsPath_InvisibleRouting_RepoLevelSetupWins(t *testing.T) {
 	}
 }
 
+func TestAbsPath_InvisibleRouting_RepoActivationWinsWithCanceledContext(t *testing.T) {
+	repo := newInvisibleTestRepo(t)
+	setGlobalTier(t, `{"global":{"enabled":true}}`)
+	testutil.WriteFile(t, repo, ".entire/settings.json", `{"enabled": true}`)
+	_ = mustAbsPath(t, ".entire/settings.json") // prime the worktree-root cache
+	paths.ClearInvisibleRuntimeCache()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	want := filepath.Join(repo, ".entire", "metadata", "s1")
+	got, err := paths.AbsPath(ctx, ".entire/metadata/s1")
+	if err != nil {
+		t.Fatalf("AbsPath with explicit repo activation: %v", err)
+	}
+	if got != want {
+		t.Fatalf("AbsPath = %q, want worktree path %q", got, want)
+	}
+}
+
+func TestAbsPath_InvisibleRouting_TrackedLocalActivationStaysInvisible(t *testing.T) {
+	repo := newInvisibleTestRepo(t)
+	setGlobalTier(t, `{"global":{"enabled":true}}`)
+	testutil.WriteFile(t, repo, ".entire/settings.local.json", `{"enabled": true}`)
+	testutil.GitAdd(t, repo, ".entire/settings.local.json")
+	paths.ClearInvisibleRuntimeCache()
+
+	base := filepath.Join(repo, ".git", "entire", "worktree", paths.HashWorktreeID(""))
+	want := filepath.Join(base, "metadata", "s1")
+	if got := mustAbsPath(t, ".entire/metadata/s1"); got != want {
+		t.Errorf("AbsPath = %q, want invisible path %q", got, want)
+	}
+}
+
 func TestAbsPath_InvisibleRouting_IncidentalSettingsStayInvisible(t *testing.T) {
 	for _, settingsFile := range []string{"settings.json", "settings.local.json"} {
 		t.Run(settingsFile, func(t *testing.T) {

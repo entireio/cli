@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
@@ -187,13 +188,40 @@ func newHooksGitCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(newHooksGitPrepareCommitMsgCmd())
-	cmd.AddCommand(newHooksGitCommitMsgCmd())
-	cmd.AddCommand(newHooksGitPostCommitCmd())
-	cmd.AddCommand(newHooksGitPostRewriteCmd())
-	cmd.AddCommand(newHooksGitPrePushCmd())
+	addMigrationGatedGitHooks(cmd,
+		newHooksGitPrepareCommitMsgCmd(),
+		newHooksGitCommitMsgCmd(),
+		newHooksGitPostCommitCmd(),
+		newHooksGitPostRewriteCmd(),
+		newHooksGitPrePushCmd(),
+	)
 
 	return cmd
+}
+
+// addMigrationGatedGitHooks wraps every Git-hook verb at the command boundary
+// so current and future handlers cannot mutate routed runtime data during a
+// repo-level takeover migration.
+func addMigrationGatedGitHooks(parent *cobra.Command, children ...*cobra.Command) {
+	for _, child := range children {
+		run := child.RunE
+		child.RunE = func(cmd *cobra.Command, args []string) error {
+			if gitHooksDisabled {
+				return nil
+			}
+			root, err := paths.WorktreeRoot(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("resolve worktree for runtime migration gate: %w", err)
+			}
+			release, err := acquireGlobalRuntimeMigrationGate(cmd.Context(), root)
+			if err != nil {
+				return fmt.Errorf("acquire global runtime migration gate: %w", err)
+			}
+			defer release()
+			return run(cmd, args)
+		}
+		parent.AddCommand(child)
+	}
 }
 
 func newHooksGitPrepareCommitMsgCmd() *cobra.Command {

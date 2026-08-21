@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,11 +12,49 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/spf13/cobra"
 )
+
+func TestWarnInactiveOnSessionStart_LogsResponseWriteFailure(t *testing.T) {
+	logDir := t.TempDir()
+	logger, err := logging.New(logging.Config{Dir: logDir, Level: slog.LevelDebug})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := logging.WithLogger(context.Background(), logger)
+
+	_, closedStdout, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closedStdout.Close(); err != nil {
+		t.Fatal(err)
+	}
+	oldStdout := os.Stdout
+	os.Stdout = closedStdout
+	t.Cleanup(func() { os.Stdout = oldStdout })
+
+	var stderr bytes.Buffer
+	warnInactiveOnSessionStart(ctx, &stderr, agent.AgentNameClaudeCode, sessionStartHookVerb, "test notice")
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(stderr.String(), "test notice") {
+		t.Fatalf("stderr fallback = %q, want notice", stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(logDir, "entire.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "inactive session-start response write failed") {
+		t.Fatalf("debug log did not record response failure: %s", data)
+	}
+}
 
 // No t.Parallel in this file: the executeAgentHook tests use t.Chdir/t.Setenv,
 // and the notice-delivery tests swap os.Stdout to observe the agent

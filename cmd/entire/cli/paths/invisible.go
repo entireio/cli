@@ -1,6 +1,7 @@
 package paths
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -208,7 +209,7 @@ func invisibleRuntimeBase(ctx context.Context, root string) (string, error) {
 // ErrUnroutableRuntimePath instead of "" — for tier-owned repos, unroutable
 // means skip, never worktree.
 func computeInvisibleRuntimeBase(ctx context.Context, root string) (string, error) {
-	if repoActivationConfigured(root) {
+	if repoActivationConfigured(ctx, root) {
 		return "", nil
 	}
 	if !userGlobalTierEnabled() {
@@ -241,7 +242,7 @@ func computeInvisibleRuntimeBase(ctx context.Context, root string) (string, erro
 // route. Unreadable or malformed files are ignored here deliberately: the
 // strict settings gate fails closed, while this lower-level probe must fail
 // toward invisibility and never create worktree runtime data.
-func repoActivationConfigured(root string) bool {
+func repoActivationConfigured(ctx context.Context, root string) bool {
 	for _, name := range []string{SettingsFileName, settingsLocalFileName} {
 		data, err := os.ReadFile(filepath.Join(root, EntireDir, name)) //nolint:gosec // entire-join-ok: this read decides whether invisible routing applies; root is the resolved worktree and names are fixed
 		if err != nil {
@@ -251,11 +252,44 @@ func repoActivationConfigured(root string) bool {
 		if json.Unmarshal(data, &raw) != nil {
 			continue
 		}
-		if _, ok := raw["enabled"]; ok {
-			return true
+		if !hasValidActivationKey(raw) {
+			continue
 		}
+		if name == settingsLocalFileName {
+			tracked, err := localSettingsTracked(ctx, root)
+			if err != nil || tracked {
+				continue
+			}
+		}
+		return true
 	}
 	return false
+}
+
+func hasValidActivationKey(raw map[string]json.RawMessage) bool {
+	v, ok := raw["enabled"]
+	if !ok || bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+		return false
+	}
+	var enabled bool
+	return json.Unmarshal(v, &enabled) == nil
+}
+
+// localSettingsTracked mirrors the settings loader's index-level ownership
+// check without importing settings (which would create a package cycle).
+// Any verification error is handled by the caller as "not configured", the
+// fail-toward-invisibility direction for this routing layer.
+func localSettingsTracked(ctx context.Context, root string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "--error-unmatch", "--", filepath.ToSlash(filepath.Join(EntireDir, settingsLocalFileName)))
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("checking local settings ownership: %w", err)
 }
 
 // userGlobalTierEnabled reports whether the user-global settings file enables
