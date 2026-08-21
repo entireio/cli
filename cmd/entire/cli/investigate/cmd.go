@@ -2,6 +2,7 @@ package investigate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -454,25 +455,16 @@ func runEdit(ctx context.Context, cmd *cobra.Command, deps Deps) error {
 // reading the local file first, mutating, and writing it back. The
 // committed .entire/settings.json is never touched.
 func saveInvestigateConfig(ctx context.Context, cfg *settings.InvestigateConfig) error {
-	localPath, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
+	path, raw, _, err := settings.LoadLocalRaw(ctx)
 	if err != nil {
-		localPath = settings.EntireSettingsLocalFile
+		return fmt.Errorf("load local settings: %w", err)
 	}
-
-	local := &settings.EntireSettings{}
-	data, readErr := os.ReadFile(localPath) //nolint:gosec // path is from AbsPath
-	if readErr != nil && !os.IsNotExist(readErr) {
-		return fmt.Errorf("read local settings: %w", readErr)
+	investigateJSON, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal investigate settings: %w", err)
 	}
-	if len(data) > 0 {
-		local, err = settings.LoadFromBytes(data)
-		if err != nil {
-			return fmt.Errorf("parse local settings: %w", err)
-		}
-	}
-
-	local.Investigate = cfg
-	if err := settings.SaveLocal(ctx, local); err != nil {
+	raw["investigate"] = investigateJSON
+	if err := settings.SaveLocalRaw(path, raw); err != nil {
 		return fmt.Errorf("save local settings: %w", err)
 	}
 	return nil

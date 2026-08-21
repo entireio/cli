@@ -152,19 +152,21 @@ func TestRunStatus_GlobalTrust(t *testing.T) {
 		name         string
 		userSettings string
 		trustRepo    bool
-		repoSetup    bool
+		repoSettings string
 		wantText     string // "" = neither trust line renders
 		wantJSON     []string
 	}{
-		{"untrusted enrolled repo shows sync held", `{"global":{"enabled":true}}`, false, false,
+		{"untrusted enrolled repo shows sync held", `{"global":{"enabled":true}}`, false, "",
 			"sync held — repo not trusted · run `entire trust`",
 			[]string{`"trust_state":"untrusted"`, `"trust_source":"none"`}},
-		{"trusted repo names the per-repo source", `{"global":{"enabled":true}}`, true, false,
+		{"trusted repo names the per-repo source", `{"global":{"enabled":true}}`, true, "",
 			"trusted (this repo)",
 			[]string{`"trust_state":"trusted"`, `"trust_source":"repo"`}},
-		{"trust_all names trust_all", `{"global":{"enabled":true,"trust_all":true}}`, false, false,
+		{"trust_all names trust_all", `{"global":{"enabled":true,"trust_all":true}}`, false, "",
 			"trusted (trust_all)", []string{`"trust_source":"trust_all"`}},
-		{"repo-level setup is not_applicable and silent", `{"global":{"enabled":true}}`, false, true,
+		{"incidental repo settings retain global trust", `{"global":{"enabled":true,"trust_all":true}}`, false, `{"investigate":{"max_turns":4}}`,
+			"trusted (trust_all)", []string{`"trust_state":"trusted"`, `"trust_source":"trust_all"`}},
+		{"repo-level setup is not_applicable and silent", `{"global":{"enabled":true}}`, false, `{"enabled":true}`,
 			"", []string{`"trust_state":"not_applicable"`}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -174,8 +176,8 @@ func TestRunStatus_GlobalTrust(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if tc.repoSetup {
-				writeSettings(t, testSettingsEnabled)
+			if tc.repoSettings != "" {
+				writeSettings(t, tc.repoSettings)
 			}
 
 			var text bytes.Buffer

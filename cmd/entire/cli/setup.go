@@ -743,7 +743,7 @@ Examples:
 				return nil
 			}
 
-			if !settings.IsSetUpAny(ctx) {
+			if !repoActivationConfiguredOrUnreadable(ctx) {
 				cmd.SilenceUsage = true
 				fmt.Fprintln(cmd.ErrOrStderr(), "Entire is not configured in this repository yet. Run 'entire enable' first.")
 				return NewSilentError(errors.New("entire not configured"))
@@ -937,7 +937,7 @@ git repository.`,
 
 			// Any setup-mutating flags should behave like `configure` on repos that
 			// are already set up. Bare `enable` remains the lightweight re-enable path.
-			if settings.IsSetUpAny(ctx) {
+			if repoActivationConfiguredOrUnreadable(ctx) {
 				return runEnableOnConfiguredRepo(ctx, cmd, opts)
 			}
 
@@ -1309,11 +1309,20 @@ func scopeExplicitlyDisabled(ctx context.Context, useProject bool) bool {
 	return !enabled
 }
 
+// repoActivationConfiguredOrUnreadable distinguishes an explicit repo-level
+// activation choice from settings files created by unrelated features. A read
+// error returns true so setup flows fail closed and never overwrite malformed
+// configuration as though the repository were fresh.
+func repoActivationConfiguredOrUnreadable(ctx context.Context) bool {
+	configured, err := settings.RepoActivationConfigured(ctx)
+	return err != nil || configured
+}
+
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
-	// Capture first-run status before we write any settings: setupEntireDirectory
-	// and saveSettings below make IsSetUpAny report true. maybeOfferSessionImport
-	// uses this so the import offer only fires on the very first enable.
-	firstRun := !settings.IsSetUpAny(ctx)
+	// Capture first-run status before we write enabled: setupEntireDirectory may
+	// already exist for unrelated features, but only explicit activation intent
+	// makes this a reconfiguration. maybeOfferSessionImport uses the result too.
+	firstRun := !repoActivationConfiguredOrUnreadable(ctx)
 
 	// Uninstall hooks for agents that were previously active but are no longer selected
 	if err := uninstallDeselectedAgentHooks(ctx, w, agents); err != nil {
@@ -1564,12 +1573,12 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 	// clone, that write strands its routed runtime data under .git, so the
 	// takeover (gitignore + migration + marker clear) is owed here exactly as
 	// on enable. Captured pre-write; takeover runs after the successful flip.
-	firstRepoSettingsFile := !settings.IsSetUpAny(ctx)
+	firstRepoActivation := !repoActivationConfiguredOrUnreadable(ctx)
 
 	if err := setEnabledFlag(ctx, false, targetFile == settings.EntireSettingsFile); err != nil {
 		return err
 	}
-	if firstRepoSettingsFile {
+	if firstRepoActivation {
 		ensureRepoLevelTakeover(ctx, w)
 	}
 
@@ -1963,9 +1972,9 @@ func printWrongAgentError(w io.Writer, name string) {
 // setupAgentHooksNonInteractive sets up hooks for a specific agent non-interactively.
 // If strategyName is provided, it sets the strategy; otherwise uses default.
 func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Agent, opts EnableOptions) error {
-	// Capture first-run status before setupEntireDirectory/saveEnabledState make
-	// IsSetUpAny report true, so the import offer fires only on first enable.
-	firstRun := !settings.IsSetUpAny(ctx)
+	// Capture first-run status before saveEnabledState records activation.
+	// Incidental settings files do not make this a reconfiguration.
+	firstRun := !repoActivationConfiguredOrUnreadable(ctx)
 
 	agentName := ag.Name()
 	// Check if agent supports hooks

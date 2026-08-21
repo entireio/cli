@@ -214,9 +214,7 @@ func commitCapturedSyncRemote(ctx context.Context, pushRemote string) {
 }
 
 // declaredPushDestination resolves where a bare `git push` on the current
-// branch would go, through git's own precedence: branch.<name>.pushRemote,
-// then remote.pushDefault, then branch.<name>.remote. Empty when HEAD is
-// detached or nothing is declared.
+// branch would go. Empty when HEAD is detached or nothing is declared.
 //
 // Phase-1 simplification: the pre-push hook receives only the remote name
 // (refspecs are not plumbed through), so the declaration is read from HEAD's
@@ -227,7 +225,24 @@ func declaredPushDestination(ctx context.Context) string {
 	if err != nil {
 		return ""
 	}
-	branch := strings.TrimSpace(string(out))
+	return DeclaredPushRemoteForBranch(ctx, strings.TrimSpace(string(out)))
+}
+
+// DeclaredPushRemoteForBranch resolves where `git push` would send branch,
+// through git's own precedence: branch.<name>.pushRemote, then
+// remote.pushDefault, then branch.<name>.remote. Empty when branch is empty or
+// nothing is declared — callers supply their own default, since the right one
+// differs per caller ("origin" for a command issuing its own push; "no capture"
+// for the checkpoint gate).
+//
+// This is the "where does this branch push" question, which is NOT the question
+// ResolveCheckpointSyncRemote answers ("which single remote may carry checkpoint
+// data"). Do not substitute one for the other in either direction; that
+// resolver's doc comment holds the full argument, including why checkpoint sync
+// deliberately does not elect from the declaration returned here. The short
+// version: that objection is about a gate deciding whether to piggyback on
+// someone else's push, and does not apply to a caller issuing its own.
+func DeclaredPushRemoteForBranch(ctx context.Context, branch string) string {
 	if branch == "" {
 		return ""
 	}

@@ -144,6 +144,98 @@ func TestLogger_UnusableDirDropsLinesAndCloseReports(t *testing.T) {
 	}
 }
 
+// EnsureOpen is the only way a caller can learn about an unusable log directory
+// before lines start disappearing into it, which is what `entire doctor` needs:
+// the deferred open drops the line and returns nil, so silence is otherwise
+// indistinguishable from a healthy repo that logged nothing.
+func TestEnsureOpen_ReportsUnusableDir(t *testing.T) {
+	t.Parallel()
+
+	occupied := filepath.Join(t.TempDir(), "logs")
+	if err := os.WriteFile(occupied, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("failed to write blocking file: %v", err)
+	}
+	l, err := New(Config{Dir: occupied})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	if err := l.EnsureOpen(); err == nil {
+		t.Error("EnsureOpen() = nil error for a directory that cannot be created")
+	}
+}
+
+// Nil-safe because the caller cannot know whether the entry point installed a
+// logger: a repo where Entire was never set up has none, and that is not a
+// failure to report.
+func TestEnsureOpen_NilLoggerIsNotAnError(t *testing.T) {
+	t.Parallel()
+
+	var l *Logger
+	if err := l.EnsureOpen(); err != nil {
+		t.Errorf("(*Logger)(nil).EnsureOpen() = %v, want nil", err)
+	}
+}
+
+// open() reassigns buf and file unconditionally, so a second EnsureOpen must not
+// reach it — that would leak the first handle and orphan any buffered line.
+func TestEnsureOpen_IsIdempotentAndKeepsWriting(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	l, err := New(Config{Dir: dir})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := l.EnsureOpen(); err != nil {
+		t.Fatalf("first EnsureOpen() error = %v", err)
+	}
+	l.Slog().Warn("before the second call")
+	firstFile := l.file
+	if err := l.EnsureOpen(); err != nil {
+		t.Fatalf("second EnsureOpen() error = %v", err)
+	}
+	if l.file != firstFile {
+		t.Error("second EnsureOpen() replaced the open file, leaking the first handle")
+	}
+	l.Slog().Warn("after the second call")
+
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, logFileName))
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	for _, want := range []string{"before the second call", "after the second call"} {
+		if !strings.Contains(string(content), want) {
+			t.Errorf("log missing %q, so a line was lost across EnsureOpen: %s", want, content)
+		}
+	}
+}
+
+// The file is created up front, unlike the deferred open New documents — the
+// property doctor trades away for being able to report the failure at all.
+func TestEnsureOpen_CreatesTheFileBeforeAnyLine(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	l, err := New(Config{Dir: dir})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	if err := l.EnsureOpen(); err != nil {
+		t.Fatalf("EnsureOpen() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, logFileName)); err != nil {
+		t.Errorf("EnsureOpen() did not create the log file: %v", err)
+	}
+}
+
 func TestLogger_WritesJSON(t *testing.T) {
 	t.Parallel()
 

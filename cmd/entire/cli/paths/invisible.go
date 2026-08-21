@@ -49,18 +49,19 @@ func SetInvisibleProbeFailureForTesting(fail bool) {
 
 // Invisible-mode routing.
 //
-// A repo tracked only by the user-global settings tier (no
-// .entire/settings.json or .entire/settings.local.json in the worktree,
-// global.enabled true in the user settings file) must never gain files in the
-// worktree — that is the product guarantee of global tracking. AbsPath
+// A repo tracked only by the user-global settings tier (no explicit enabled
+// key in either repo settings file, global.enabled true in the user settings
+// file) must never gain runtime files in the worktree — that is the product
+// guarantee of global tracking. AbsPath
 // therefore reroutes the runtime-data directories below from
 // <worktree>/.entire/<sub> to
 // <git-common-dir>/entire/worktree/<worktree-key>/<sub> for such repos. The
 // worktree key namespaces the shared common dir per worktree (linked
 // worktrees of one clone share the common dir but must not interleave
 // runtime data); it is the same worktree-ID hash shadow branch names use.
-// Any repo-level setup pins every path to the worktree, byte-identical to
-// the historical behavior.
+// Explicit repo-level activation pins every path to the worktree,
+// byte-identical to the historical behavior. Settings created by unrelated
+// features do not change routing.
 
 // invisibleRuntimeSubdir is the directory inside the git common dir that
 // holds rerouted runtime data, one <worktree-key> namespace per worktree.
@@ -203,17 +204,12 @@ func invisibleRuntimeBase(ctx context.Context, root string) (string, error) {
 // mismatched cwd would resolve another repo's common dir.
 //
 // Failure direction: once the global tier is known to own the repo (no
-// repo-level settings, tier enabled), a probe failure returns
+// explicit repo activation, tier enabled), a probe failure returns
 // ErrUnroutableRuntimePath instead of "" — for tier-owned repos, unroutable
 // means skip, never worktree.
 func computeInvisibleRuntimeBase(ctx context.Context, root string) (string, error) {
-	// Any repo-level setup — either settings scope — pins .entire to the
-	// worktree. Lstat (not Stat) matches settings.IsSetUpAny: a dangling
-	// symlink still counts as setup.
-	for _, name := range []string{SettingsFileName, settingsLocalFileName} {
-		if _, err := os.Lstat(filepath.Join(root, EntireDir, name)); err == nil { // entire-join-ok: routing discriminator — this Lstat DECIDES whether rerouting applies
-			return "", nil
-		}
+	if repoActivationConfigured(root) {
+		return "", nil
 	}
 	if !userGlobalTierEnabled() {
 		return "", nil
@@ -238,6 +234,30 @@ func computeInvisibleRuntimeBase(ctx context.Context, root string) (string, erro
 	return base, nil
 }
 
+// repoActivationConfigured mirrors settings.RepoActivationConfigured at the
+// path-routing layer. paths cannot import settings because settings imports
+// paths. Only a top-level enabled key records repo-local activation intent;
+// incidental settings files keep runtime data on the invisible git-side
+// route. Unreadable or malformed files are ignored here deliberately: the
+// strict settings gate fails closed, while this lower-level probe must fail
+// toward invisibility and never create worktree runtime data.
+func repoActivationConfigured(root string) bool {
+	for _, name := range []string{SettingsFileName, settingsLocalFileName} {
+		data, err := os.ReadFile(filepath.Join(root, EntireDir, name)) //nolint:gosec // entire-join-ok: this read decides whether invisible routing applies; root is the resolved worktree and names are fixed
+		if err != nil {
+			continue
+		}
+		var raw map[string]json.RawMessage
+		if json.Unmarshal(data, &raw) != nil {
+			continue
+		}
+		if _, ok := raw["enabled"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // userGlobalTierEnabled reports whether the user-global settings file enables
 // global mode. This is a minimal mirror of settings.LoadUserSettings +
 // GlobalModeActive's enabled bit — paths cannot import settings (settings
@@ -249,8 +269,12 @@ func computeInvisibleRuntimeBase(ctx context.Context, root string) (string, erro
 // strict gate, so divergence can only route runtime I/O to an empty
 // .git-side location, never produce worktree writes.
 func userGlobalTierEnabled() bool {
-	// settings.json inside userdirs.Config() = settings.UserSettingsFileName.
-	data, err := os.ReadFile(filepath.Join(userdirs.Config(), "settings.json"))
+	configDir, err := userdirs.ResolveConfig()
+	if err != nil {
+		return false
+	}
+	// settings.json inside userdirs.ResolveConfig() = settings.UserSettingsFileName.
+	data, err := os.ReadFile(filepath.Join(configDir, "settings.json")) //nolint:gosec // configDir is resolved by the userdirs trust boundary
 	if err != nil {
 		return false
 	}

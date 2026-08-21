@@ -29,6 +29,8 @@ func TestIsActiveForRepoWithReason(t *testing.T) {
 		{"no setup and global unconfigured is global-off", "", "", false, false, InactiveReasonGlobalOff},
 		{"no setup and global disabled is global-off", "", `{"global":{"enabled":false}}`, false, false, InactiveReasonGlobalOff},
 		{"global on is active", "", `{"global":{"enabled":true}}`, false, true, InactiveReasonNone},
+		{"incidental repo settings inherit global on", `{"investigate":{"max_turns":4}}`, `{"global":{"enabled":true}}`, false, true, InactiveReasonNone},
+		{"incidental repo settings inherit global off", `{"investigate":{"max_turns":4}}`, `{"global":{"enabled":false}}`, false, false, InactiveReasonGlobalOff},
 		{"excluded worktree reads as excluded", "", "", true, false, InactiveReasonGlobalExcluded},
 	}
 	for _, c := range cases {

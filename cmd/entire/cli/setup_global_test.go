@@ -538,6 +538,61 @@ func TestMaybeMigrateGlobalRuntimeData_DefersWhileSessionActive(t *testing.T) {
 	}
 }
 
+// A session that goes active DURING the migration cannot be excluded (hook
+// writes take no lock), but the routed tree must then be left in place: the
+// only destructive step left is directory removal, which would turn a live
+// hook's write into ENOENT. Leftovers cost only a later sweep — a non-empty
+// routed dir re-triggers migration on the next enable.
+func TestMaybeMigrateGlobalRuntimeData_SessionActivatingMidMigrationKeepsTree(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	paths.ClearWorktreeRootCache()
+	paths.ClearInvisibleRuntimeCache()
+	session.ClearGitCommonDirCache()
+	t.Cleanup(func() {
+		paths.ClearWorktreeRootCache()
+		paths.ClearInvisibleRuntimeCache()
+		session.ClearGitCommonDirCache()
+	})
+
+	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
+	testutil.WriteFile(t, dir, sourceRel+"/logs/entire.log", "routed")
+
+	// Activate a session mid-migration, through the rename seam the moves go
+	// through: this is the window the pre-move check cannot see.
+	store, err := session.NewStateStore(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	restore := migrateRenameFile
+	migrateRenameFile = func(oldpath, newpath string) error {
+		if err := store.Save(t.Context(), &session.State{
+			SessionID: "sess-mid", Phase: session.PhaseActive, WorktreePath: dir, StartedAt: time.Now(),
+		}); err != nil {
+			t.Errorf("save session: %v", err)
+		}
+		return restore(oldpath, newpath)
+	}
+	t.Cleanup(func() { migrateRenameFile = restore })
+
+	var buf bytes.Buffer
+	maybeMigrateGlobalRuntimeData(t.Context(), &buf)
+
+	// The file still moved (rename is atomic; the writer's fd follows it)...
+	if _, err := os.Stat(filepath.Join(dir, ".entire", "logs", "entire.log")); err != nil {
+		t.Errorf("file should still have migrated: %v", err)
+	}
+	// ...but the routed tree stays, so no live hook loses its parent dir.
+	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(sourceRel))); err != nil {
+		t.Errorf("routed tree must be left in place when a session activates mid-migration: %v", err)
+	}
+}
+
 func TestMaybeMigrateGlobalRuntimeData_NoTriggerIsSilentNoop(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -828,6 +883,11 @@ func TestRunDisable_GloballyTrackedRepoTakeover(t *testing.T) {
 		t.Fatal(err)
 	}
 	clearGlobalRoutingCaches(t)
+	// An unrelated feature may already have created a settings file without
+	// recording repo-local activation. Disable is still the first activation
+	// choice and therefore still owes the routed-data takeover.
+	testutil.WriteFile(t, dir, ".entire/settings.local.json", `{"investigate":{"max_turns":4}}`)
+	paths.ClearInvisibleRuntimeCache()
 
 	// Globally tracked state: routed runtime data plus the lazy-setup marker.
 	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")

@@ -46,6 +46,30 @@ func TestSaveInvestigateConfig_WritesLocalFile(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(local), `"agents"`)
 	require.Contains(t, string(local), `"claude-code"`)
+	require.NotContains(t, string(local), `"enabled"`,
+		"saving investigate config must not invent repo-level activation intent")
+}
+
+// TestSaveInvestigateConfig_PreservesExplicitActivation verifies that the raw
+// settings update does not erase an enabled key the user already recorded.
+// NOTE: This test uses t.Chdir, so it cannot run in parallel.
+func TestSaveInvestigateConfig_PreservesExplicitActivation(t *testing.T) {
+	tmp := t.TempDir()
+	t.Chdir(tmp)
+	testutil.InitRepo(t, tmp)
+
+	localDir := filepath.Join(tmp, ".entire")
+	require.NoError(t, os.MkdirAll(localDir, 0o755))
+	localPath := filepath.Join(localDir, "settings.local.json")
+	require.NoError(t, os.WriteFile(localPath, []byte(`{"enabled":false,"future_setting":{"keep":true}}`), 0o600))
+
+	cfg := &settings.InvestigateConfig{Agents: []string{"codex"}, MaxTurns: 2, Quorum: 1}
+	require.NoError(t, saveInvestigateConfig(context.Background(), cfg))
+
+	local, err := os.ReadFile(localPath)
+	require.NoError(t, err)
+	require.Contains(t, string(local), `"enabled": false`)
+	require.Contains(t, string(local), `"future_setting"`)
 }
 
 // TestResolveDocPaths_PerRunIsolation verifies that two runs land in

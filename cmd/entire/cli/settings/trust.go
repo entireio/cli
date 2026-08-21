@@ -102,12 +102,16 @@ func currentTrustIdentity(ctx context.Context) (TrustIdentity, string, error) {
 }
 
 // CheckpointEgressAllowed reports whether checkpoint data may leave this
-// machine for the current repository: repo-level setup is explicit consent
+// machine for the current repository: repo-level activation intent is explicit consent
 // (which also makes any checkpoint_remote configuration moot — it can only
 // live in repo-level settings); otherwise the globally-enrolled repo must be
 // trusted. Every error path returns false (fail closed).
 func CheckpointEgressAllowed(ctx context.Context) bool {
-	return IsSetUpAny(ctx) || globalTrustSource(ctx) != TrustSourceNone
+	configured, err := RepoActivationConfigured(ctx)
+	if err != nil {
+		return false
+	}
+	return configured || globalTrustSource(ctx) != TrustSourceNone
 }
 
 // CurrentTrustSource names what grants egress consent in the global trust
@@ -118,10 +122,11 @@ func CurrentTrustSource(ctx context.Context) TrustSource {
 }
 
 // RepoUntrustedEnrolled reports the held state: enrolled by the global tier,
-// no repo-level setup, egress not consented. It is the ONE predicate behind
+// no repo-level activation intent, egress not consented. It is the ONE predicate behind
 // every untrusted-enrolled surface (banner, status, doctor).
 func RepoUntrustedEnrolled(ctx context.Context) bool {
-	return !IsSetUpAny(ctx) && GlobalModeActive(ctx) && globalTrustSource(ctx) == TrustSourceNone
+	configured, err := RepoActivationConfigured(ctx)
+	return err == nil && !configured && GlobalModeActive(ctx) && globalTrustSource(ctx) == TrustSourceNone
 }
 
 // globalTrustSource is the single trust decision tree behind both

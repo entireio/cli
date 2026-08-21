@@ -40,7 +40,11 @@ func runTrust(cmd *cobra.Command, revoke bool) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Run 'entire trust' from within a git repository.")
 		return NewSilentError(errors.New("not a git repository"))
 	}
-	if settings.IsSetUpAny(ctx) {
+	configured, err := settings.RepoActivationConfigured(ctx)
+	if err != nil {
+		return fmt.Errorf("reading repo activation settings: %w", err)
+	}
+	if configured {
 		fmt.Fprintln(out, "not applicable — this repo is explicitly enabled; trust applies only to globally tracked repos")
 		return nil
 	}

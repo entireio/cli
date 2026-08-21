@@ -74,6 +74,26 @@ func TestTrustCmd_Refusals(t *testing.T) {
 	}
 }
 
+func TestTrustCmd_IncidentalRepoSettingsStillUsesGlobalTrust(t *testing.T) {
+	setupTestRepo(t)
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	t.Cleanup(settings.ClearGlobalModeCache)
+	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+	writeSettings(t, `{"investigate":{"max_turns":4}}`)
+
+	stdout, stderr, err := runTrustCmd(t)
+	if err != nil {
+		t.Fatalf("trust failed: %v (%s)", err, stderr)
+	}
+	if !strings.Contains(stdout, "Trusted") {
+		t.Fatalf("trust confirmation missing, got: %q", stdout)
+	}
+	if !settings.CheckpointEgressAllowed(t.Context()) {
+		t.Fatal("trust must open egress when repo settings contain no activation intent")
+	}
+}
+
 // TestTrustCmd_RevokeHonesty: revoke closes the gate and says it is not
 // retroactive; under trust_all it must say the revoke is masked.
 func TestTrustCmd_RevokeHonesty(t *testing.T) {

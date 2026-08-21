@@ -8,8 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/go-git/go-git/v6"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestFinalizeExitedSessions finalizes sessions whose owner process is gone
@@ -125,6 +129,38 @@ func TestFinalizeExitedSessions_StampsLastSeenNotNow(t *testing.T) {
 		t.Errorf("EndedAt = %s, want the last-seen time %s (sweep back-stamped 'now')",
 			got.EndedAt.Format(time.RFC3339), lastSeen.Format(time.RFC3339))
 	}
+}
+
+// A hard-killed agent fires neither SubagentStop nor SessionEnd, leaving its
+// background record LIVE. The sweep must complete it (no SubagentStop can ever
+// arrive) before ending, so the eager condense materializes and removes it.
+// Not parallel: setupSubagentEndTestRepo uses t.Chdir.
+func TestFinalizeExitedSessions_CompletesLiveTaskRecords(t *testing.T) {
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "sweep-live-record-session"
+	mainTranscriptPath, _ := writeSubagentTranscripts(t, "sweeprec1")
+
+	store, err := session.NewStateStore(ctx)
+	require.NoError(t, err)
+	st := &session.State{
+		SessionID: sessionID, BaseCommit: headHash, StartedAt: time.Now(), Phase: session.PhaseActive,
+		AgentType: agent.AgentTypeClaudeCode, TranscriptPath: mainTranscriptPath,
+		Owner:       &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"},
+		TaskRecords: []session.TaskRecord{{ToolUseID: "toolu_sweep1", AgentID: "sweeprec1", StartedAt: time.Now(), SubagentType: "reviewer"}},
+	}
+	require.NoError(t, store.Save(ctx, st))
+	require.Equal(t, 1, finalizeExitedSessions(ctx, []*session.State{st}))
+
+	got, err := store.Load(ctx, sessionID)
+	require.NoError(t, err)
+	assert.True(t, got.FullyCondensed, "sweep condense should have run")
+	assert.Empty(t, got.TaskRecords, "completed record must materialize and be removed")
+	_, found := readCheckpointTaskFile(ctx, t, repoDir, sessionID, "tasks/toolu_sweep1/agent-sweeprec1.jsonl")
+	assert.True(t, found, "swept record's transcript-so-far must materialize under tasks/")
+	repo, err := git.PlainOpen(repoDir)
+	require.NoError(t, err)
+	assert.Nil(t, classifySession(got, repo, time.Now()), "doctor must classify the swept session healthy")
 }
 
 // TestEndSessionNow_SpentBudgetStillMarksEnded pins the split that makes the

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -321,54 +322,86 @@ func TestInstallGitHooks_BackupNoticeWriter(t *testing.T) {
 }
 
 // Global mode runs first-ever installs from hook processes that can fire
-// concurrently; without the install lock, one racer renames the other's
-// half-installed wrapper over the user's backup — destroying the user's hook
-// and leaving a wrapper that chains to itself.
-func TestInstallGitHook_ConcurrentFirstInstall_PreservesUserHook(t *testing.T) {
-	tmpDir := t.TempDir()
-	initCmd := exec.CommandContext(t.Context(), "git", "init")
-	initCmd.Dir = tmpDir
-	if err := initCmd.Run(); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-	t.Chdir(tmpDir)
-	paths.ClearWorktreeRootCache()
-	t.Cleanup(paths.ClearWorktreeRootCache)
-
-	const userHook = "#!/bin/sh\necho user-commit-msg\n"
-	hookPath := filepath.Join(tmpDir, ".git", "hooks", "commit-msg")
-	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(hookPath, []byte(userHook), 0o755); err != nil {
-		t.Fatal(err)
+// concurrently. Without the install lock, two losing interleavings exist and
+// BOTH must fail this test: a racer can rename a half-installed wrapper over
+// the user's backup (destroying the user's script), or read after the winner
+// wrote its wrapper, skip the backup, and write UNCHAINED content — leaving
+// the backup intact but orphaning the user's hook so it never runs again.
+//
+// Shape is mutation-tuned, not arbitrary: 4 installers (measured peak
+// interleave rate — more racers hit the marker short-circuit and make the
+// race RARER), every managed hook seeded (independent chances per round), and
+// many rounds because one round is a coin flip at any installer count.
+func TestInstallGitHook_ConcurrentFirstInstall_PreservesUserHooks(t *testing.T) {
+	const (
+		rounds     = 60
+		installers = 4
+	)
+	userScript := func(name string) string {
+		return "#!/bin/sh\necho user-" + name + "\n"
 	}
 
-	var wg sync.WaitGroup
-	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if _, err := InstallGitHook(t.Context(), true, false); err != nil {
-				t.Errorf("InstallGitHook: %v", err)
+	for round := range rounds {
+		t.Run(fmt.Sprintf("round-%d", round), func(t *testing.T) {
+			tmpDir := t.TempDir()
+			initCmd := exec.CommandContext(t.Context(), "git", "init")
+			initCmd.Dir = tmpDir
+			if err := initCmd.Run(); err != nil {
+				t.Fatalf("git init: %v", err)
 			}
-		}()
-	}
-	wg.Wait()
+			t.Chdir(tmpDir)
+			paths.ClearWorktreeRootCache()
+			ClearHooksDirCache()
+			t.Cleanup(func() {
+				paths.ClearWorktreeRootCache()
+				ClearHooksDirCache()
+			})
 
-	backup, err := os.ReadFile(hookPath + backupSuffix)
-	if err != nil {
-		t.Fatalf("user hook backup missing: %v", err)
-	}
-	if string(backup) != userHook {
-		t.Fatalf("user hook destroyed: backup contains %q", backup)
-	}
-	installed, err := os.ReadFile(hookPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(installed), entireHookMarker) {
-		t.Fatalf("installed hook is not Entire's: %q", installed)
+			hooksDir := filepath.Join(tmpDir, ".git", "hooks")
+			if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range ManagedGitHookNames() {
+				if err := os.WriteFile(filepath.Join(hooksDir, name), []byte(userScript(name)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var wg sync.WaitGroup
+			for range installers {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if _, err := InstallGitHook(t.Context(), true, false); err != nil {
+						t.Errorf("InstallGitHook: %v", err)
+					}
+				}()
+			}
+			wg.Wait()
+
+			for _, name := range ManagedGitHookNames() {
+				hookPath := filepath.Join(hooksDir, name)
+				backup, err := os.ReadFile(hookPath + backupSuffix)
+				if err != nil {
+					t.Fatalf("%s: user hook backup missing: %v", name, err)
+				}
+				if string(backup) != userScript(name) {
+					t.Fatalf("%s: user hook destroyed, backup holds: %q", name, backup)
+				}
+				installed, err := os.ReadFile(hookPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(installed), entireHookMarker) {
+					t.Fatalf("%s: installed hook is not Entire's: %q", name, installed)
+				}
+				// Without the chain the backup is orphaned: the user's hook
+				// survives on disk but git never runs it again.
+				if !strings.Contains(string(installed), name+backupSuffix) {
+					t.Fatalf("%s: installed hook does not chain to its backup: %q", name, installed)
+				}
+			}
+		})
 	}
 }
 
@@ -1504,10 +1537,14 @@ func TestGitHookCommitMsg_EntireFailureAllowsCommit(t *testing.T) {
 		t.Fatalf("failed to write commit message: %v", err)
 	}
 
-	fakeEntire := filepath.Join(binDir, "entire")
-	if err := os.WriteFile(fakeEntire, []byte("#!/bin/sh\nexit 42\n"), 0o755); err != nil {
-		t.Fatalf("failed to write fake entire: %v", err)
-	}
+	// The hook only needs an `entire` that exists and fails: it emits
+	// `if command -v entire ...; then entire hooks git commit-msg "$1" || true;
+	// else <warn>; fi`, so the name has to resolve (or the warning this test
+	// forbids would print) and `|| true` discards whatever it exits with. The
+	// script this replaces exited 42, but no code path read that value, so
+	// linking `false` preserves the behaviour under test and — being a link,
+	// not a written file — cannot hit the ETXTBSY race described above.
+	linkExecutable(t, filepath.Join(binDir, "entire"), "false")
 
 	hook := findHookSpec(t, buildHookSpecs("entire"), "commit-msg")
 	hookPath := filepath.Join(tempDir, "commit-msg")
@@ -1537,10 +1574,11 @@ func TestGitHookCommitMsg_MissingEntireStillRunsChainedHook(t *testing.T) {
 	if err := os.WriteFile(msgFile, []byte("commit message\n"), 0o600); err != nil {
 		t.Fatalf("failed to write commit message: %v", err)
 	}
-	fakeDirname := "#!/bin/sh\ncase \"$1\" in */*) printf '%s\\n' \"${1%/*}\" ;; *) printf '.\\n' ;; esac\n"
-	if err := os.WriteFile(filepath.Join(binDir, "dirname"), []byte(fakeDirname), 0o755); err != nil {
-		t.Fatalf("failed to write fake dirname: %v", err)
-	}
+	// The generated hook calls dirname (hooks.go: _entire_hook_dir=...), and
+	// envWithPath makes binDir the entire PATH, so binDir has to provide it.
+	// The stand-in it replaces only reimplemented ${1%/*}, so linking the real
+	// one is behaviour-identical.
+	linkExecutable(t, filepath.Join(binDir, "dirname"), "dirname")
 
 	hook := findHookSpec(t, buildHookSpecs("entire"), "commit-msg")
 	hookPath := filepath.Join(tempDir, "commit-msg")
@@ -1562,6 +1600,40 @@ func TestGitHookCommitMsg_MissingEntireStillRunsChainedHook(t *testing.T) {
 	}
 	if _, err := os.Stat(markerFile); err != nil {
 		t.Fatalf("backup hook did not run: %v\n%s", err, output)
+	}
+}
+
+// linkExecutable places an ETXTBSY-immune stand-in for the real `name` binary
+// at dst, for tests that hand a fabricated PATH to a shell subprocess.
+//
+// Writing the stand-in as a script is the shape to avoid: a written-then-exec'd
+// file is an ETXTBSY target (golang/go#22315). Between os.WriteFile's
+// open-for-write and its close, any of this package's parallel tests can fork,
+// the child inherits the write fd, and exec of that file then fails with "Text
+// file busy" until the child closes it. Go's os/exec retries ETXTBSY for
+// commands it starts, but these execs happen inside the sh subprocess, so
+// nothing retries: the hook dies mid-script and the test reports whichever
+// later assertion noticed, which points nowhere near the cause. A link is never
+// a write target, so the race has no purchase.
+//
+// Symlink first, hard link second: Windows without Developer Mode or admin
+// refuses symlinks, while a hard link is the same inode (equally immune) but
+// cannot cross filesystems, which is the common case here since t.TempDir and
+// the system binary usually differ. Skip if neither works — this is a test
+// prerequisite, like requireShell's missing sh, not a failure of the code under
+// test.
+func linkExecutable(t *testing.T, dst, name string) {
+	t.Helper()
+
+	realPath, err := exec.LookPath(name)
+	if err != nil {
+		t.Skipf("%s not available on PATH", name)
+	}
+	if symlinkErr := os.Symlink(realPath, dst); symlinkErr == nil {
+		return
+	}
+	if linkErr := os.Link(realPath, dst); linkErr != nil {
+		t.Skipf("cannot link %s into the fake PATH: %v", name, linkErr)
 	}
 }
 

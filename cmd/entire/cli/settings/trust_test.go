@@ -107,6 +107,36 @@ func TestCheckpointEgressAllowed(t *testing.T) {
 	}
 }
 
+func TestCheckpointEgressAllowed_IncidentalRepoSettingsRequireGlobalTrust(t *testing.T) {
+	dir, cfg := newTrustTestRepo(t)
+	if err := os.MkdirAll(filepath.Join(dir, ".entire"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(`{"investigate":{"max_turns":4}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+
+	if CheckpointEgressAllowed(t.Context()) {
+		t.Fatal("an incidental repo settings file must not grant checkpoint egress")
+	}
+	if !RepoUntrustedEnrolled(t.Context()) {
+		t.Fatal("an incidental repo settings file must retain the globally enrolled trust hold")
+	}
+
+	writeUserSettings(t, cfg, `{"global":{"enabled":true,"trust_all":true}}`)
+	if !CheckpointEgressAllowed(t.Context()) {
+		t.Fatal("trust_all must grant egress when repo settings contain no activation intent")
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(`{"enabled":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if CheckpointEgressAllowed(t.Context()) {
+		t.Fatal("malformed repo settings must fail closed even when trust_all is enabled")
+	}
+}
+
 // TestTrustAndRevokeCurrentRepo: trusting writes ALL origin keys once
 // (idempotent) and prunes the stale path entry; revoking removes the keys AND
 // the path entry, so removing the origin later cannot resurrect trust.
