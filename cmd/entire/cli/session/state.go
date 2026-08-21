@@ -776,7 +776,9 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 		WorktreePath string `json:"worktree_path"`
 	}
 	if data, err := os.ReadFile(filepath.Join(s.stateDir, sessionID+".json")); err == nil { //nolint:gosec // validated session ID and owned state dir
-		_ = json.Unmarshal(data, &registryOwner)
+		if err := json.Unmarshal(data, &registryOwner); err != nil {
+			registryOwner.WorktreePath = ""
+		}
 	}
 	matches := matchSessionFiles(s.stateDir, sessionID)
 	if len(matches) > 0 {

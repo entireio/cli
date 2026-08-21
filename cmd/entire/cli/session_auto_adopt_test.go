@@ -1181,7 +1181,7 @@ func TestSiblingDiscovery_ReportsTruncationBeyondCap(t *testing.T) {
 			}
 		}
 	}
-	for i := 0; i < maxSiblingAutoAdoptScan; i++ {
+	for i := range maxSiblingAutoAdoptScan {
 		seed(i)
 	}
 	result := collectSiblingAutoAdoptCandidates(context.Background(), target, "/target/.git", nil, proclive.Identity{}, false)
@@ -1206,7 +1206,7 @@ func TestRegistryDiscovery_ReportsTruncationBeyondCap(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for i := 0; i < maxRegistryAutoAdoptScan; i++ {
+	for i := range maxRegistryAutoAdoptScan {
 		seed(i)
 	}
 	result := collectRegistryAutoAdoptCandidates(context.Background(), "/target/.git", []string{"feature.txt"}, proclive.Identity{}, false)

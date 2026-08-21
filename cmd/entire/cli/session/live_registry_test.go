@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,18 +124,33 @@ func TestLiveRegistry_ConcurrentRegisterCannotEraseClaim(t *testing.T) {
 	}
 	claim := AdoptClaim{ByCommonDir: "/target/.git", ByWorktreePath: "/target/wt", AttemptID: "attempt", At: now}
 	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 50; i++ {
-			_ = RegisterLiveSession(state, "/source/.git")
+		for range 50 {
+			if err := RegisterLiveSession(state, "/source/.git"); err != nil {
+				errCh <- err
+				return
+			}
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = ClaimLiveSessionContext(context.Background(), state.SessionID, claim)
+		claimed, err := ClaimLiveSessionContext(context.Background(), state.SessionID, claim)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		if !claimed {
+			errCh <- errors.New("initial claim was unexpectedly refused")
+		}
 	}()
 	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
 	got, err := LiveSessionClaim(state.SessionID)
 	if err != nil {
 		t.Fatal(err)

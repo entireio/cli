@@ -168,7 +168,7 @@ func readLiveSessionEntry(ctx context.Context, sessionID string) (LiveSessionEnt
 	defer root.Close()
 
 	if err := ctx.Err(); err != nil {
-		return LiveSessionEntry{}, false, err
+		return LiveSessionEntry{}, false, fmt.Errorf("live session read canceled: %w", err)
 	}
 	fileName := sessionID + ".json"
 	info, err := root.Stat(fileName)
@@ -179,7 +179,7 @@ func readLiveSessionEntry(ctx context.Context, sessionID string) (LiveSessionEnt
 		return LiveSessionEntry{}, false, fmt.Errorf("stat live session: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return LiveSessionEntry{}, false, fmt.Errorf("live session entry is not a regular file")
+		return LiveSessionEntry{}, false, errors.New("live session entry is not a regular file")
 	}
 	if info.Size() > maxLiveSessionEntryBytes {
 		return LiveSessionEntry{}, false, fmt.Errorf("live session entry exceeds %d bytes", maxLiveSessionEntryBytes)
@@ -197,7 +197,7 @@ func readLiveSessionEntry(ctx context.Context, sessionID string) (LiveSessionEnt
 		return LiveSessionEntry{}, false, fmt.Errorf("live session entry exceeds %d bytes", maxLiveSessionEntryBytes)
 	}
 	if err := ctx.Err(); err != nil {
-		return LiveSessionEntry{}, false, err
+		return LiveSessionEntry{}, false, fmt.Errorf("live session read canceled: %w", err)
 	}
 	var entry LiveSessionEntry
 	if err := json.Unmarshal(data, &entry); err != nil {
@@ -293,7 +293,7 @@ func ListLiveSessionsContext(ctx context.Context, maxEntries int) ([]LiveSession
 		return nil, false, errors.New("live-session scan cap must be positive")
 	}
 	dir := liveSessionsDir()
-	dirFile, err := os.Open(dir)
+	dirFile, err := os.Open(dir) //nolint:gosec // dir is the fixed per-user Entire cache directory
 	if os.IsNotExist(err) {
 		return nil, true, nil
 	}

@@ -114,22 +114,22 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) (pending *pendingAut
 	defer cancel()
 
 	if !targetIsEntireEnabled(ctx) {
-		return
+		return nil
 	}
 
 	targetWorktree, err := paths.WorktreeRoot(ctx)
 	if err != nil || targetWorktree == "" {
-		return
+		return nil
 	}
 	targetCtx, targetCancel := context.WithTimeout(ctx, autoAdoptGitResolveTimeout)
 	targetStore, targetWorktree, targetCommonDir, err := stateStoreForWorktree(targetCtx, targetWorktree)
 	targetCancel()
 	if err != nil {
-		return
+		return nil
 	}
 	targetWorktreeID, err := paths.GetWorktreeID(targetWorktree)
 	if err != nil || hasLocalActiveSession(ctx, targetStore, targetWorktree, targetWorktreeID) {
-		return
+		return nil
 	}
 
 	stagedCtx, stagedCancel := context.WithTimeout(ctx, autoAdoptStagedFilesTimeout)
@@ -141,11 +141,11 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) (pending *pendingAut
 	// Owner + staged overlap are both required for every candidate. Bail before
 	// any registry/sibling I/O when either is missing (ordinary human commits).
 	if len(staged) == 0 {
-		return
+		return nil
 	}
 	owner, hasOwner := proclive.ResolveOwner()
 	if !hasOwner {
-		return
+		return nil
 	}
 
 	regCtx, regCancel := context.WithTimeout(ctx, autoAdoptDiscoveryTimeout)
@@ -169,13 +169,13 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) (pending *pendingAut
 				slog.Int("candidates", len(candidates)),
 			)
 		}
-		return
+		return nil
 	}
 
 	source := candidates[0]
 	existing, err := targetStore.Load(ctx, source.SessionID)
 	if err != nil || existing != nil {
-		return
+		return nil
 	}
 
 	logging.Info(logCtx, "auto-adopt: adopting cross-common-dir session for commit",
@@ -276,17 +276,25 @@ func mutatePendingAutoAdoption(
 		return
 	}
 	marker := target.PendingSourceRetire
-	_ = strategy.WithSessionStateLocks(ctx, pending.SessionID, []string{marker.SourceCommonDir, targetCommonDir}, func() error {
+	if lockErr := strategy.WithSessionStateLocks(ctx, pending.SessionID, []string{marker.SourceCommonDir, targetCommonDir}, func() error {
 		target, err = targetStore.Load(ctx, pending.SessionID)
 		if err != nil || target == nil || target.PendingSourceRetire == nil ||
 			target.PendingSourceRetire.AdoptionAttemptID != pending.AttemptID {
-			return err
+			if err != nil {
+				return fmt.Errorf("reload pending adoption: %w", err)
+			}
+			return nil
 		}
 		if err := mutate(target, target.PendingSourceRetire); err != nil {
 			return err
 		}
 		return targetStore.Save(ctx, target)
-	})
+	}); lockErr != nil {
+		logging.Debug(logging.WithComponent(ctx, "session"), "failed to update pending auto-adoption",
+			slog.String("session_id", pending.SessionID),
+			slog.String("error", lockErr.Error()),
+		)
+	}
 }
 
 func cancelPendingAutoAdoption(ctx context.Context, pending *pendingAutoAdoption) {
@@ -304,37 +312,48 @@ func cancelPendingAutoAdoption(ctx context.Context, pending *pendingAutoAdoption
 		return
 	}
 	marker := target.PendingSourceRetire
-	_ = strategy.WithSessionStateLocks(ctx, pending.SessionID, []string{marker.SourceCommonDir, targetCommonDir}, func() error {
+	if lockErr := strategy.WithSessionStateLocks(ctx, pending.SessionID, []string{marker.SourceCommonDir, targetCommonDir}, func() error {
 		target, err = targetStore.Load(ctx, pending.SessionID)
 		if err != nil || target == nil || target.PendingSourceRetire == nil ||
 			target.PendingSourceRetire.AdoptionAttemptID != pending.AttemptID {
-			return err
+			if err != nil {
+				return fmt.Errorf("reload pending adoption for cancellation: %w", err)
+			}
+			return nil
 		}
 		marker = target.PendingSourceRetire
 		expected := pendingClaimFor(targetCommonDir, target, marker)
 		claim, claimErr := session.LiveSessionClaimContext(ctx, target.SessionID)
 		if claimErr != nil {
-			return claimErr
+			return fmt.Errorf("read pending adoption claim: %w", claimErr)
 		}
 		owned := claimMatchesPending(claim, expected)
 		if owned {
 			if _, releaseErr := session.ReleaseLiveSessionClaimIfOwned(ctx, target.SessionID, expected); releaseErr != nil {
-				return releaseErr
+				return fmt.Errorf("release pending adoption claim: %w", releaseErr)
 			}
 		}
 		if err := targetStore.Clear(ctx, target.SessionID); err != nil {
-			return err
+			return fmt.Errorf("clear canceled target adoption: %w", err)
 		}
 		if !owned {
 			return nil
 		}
 		sourceStore := session.NewStateStoreWithDir(filepath.Join(marker.SourceCommonDir, session.SessionStateDirName))
 		source, loadErr := sourceStore.Load(ctx, target.SessionID)
-		if loadErr != nil || source == nil {
-			return loadErr
+		if loadErr != nil {
+			return fmt.Errorf("reload source after canceled adoption: %w", loadErr)
+		}
+		if source == nil {
+			return nil
 		}
 		return session.RegisterLiveSession(source, marker.SourceCommonDir)
-	})
+	}); lockErr != nil {
+		logging.Debug(logging.WithComponent(ctx, "session"), "failed to cancel pending auto-adoption",
+			slog.String("session_id", pending.SessionID),
+			slog.String("error", lockErr.Error()),
+		)
+	}
 }
 
 // finalizePendingSourceRetires completes cross-common-dir auto-adopts that were
@@ -526,7 +545,7 @@ func headCheckpointSet(ctx context.Context, worktree string) (map[checkpointid.C
 	cmd := exec.CommandContext(ctx, "git", "-C", worktree, "show", "-s", "--format=%B", "HEAD")
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read HEAD commit message: %w", err)
 	}
 	result := make(map[checkpointid.CheckpointID]struct{})
 	for _, cpID := range trailers.ParseAllCheckpoints(string(out)) {
@@ -658,7 +677,7 @@ func collectSiblingAutoAdoptCandidates(
 	if parent == "" || parent == targetWorktree {
 		return autoAdoptDiscoveryResult{Complete: true}
 	}
-	dir, err := os.Open(parent)
+	dir, err := os.Open(parent) //nolint:gosec // parent derives from the validated current worktree root
 	if err != nil {
 		return autoAdoptDiscoveryResult{Complete: false}
 	}
@@ -748,7 +767,7 @@ func candidateFromSource(
 func candidateFromLoaded(
 	store *session.StateStore,
 	worktree, commonDir string,
-	targetCommonDir string,
+	_ string,
 	state *session.State,
 	staged []string,
 	owner proclive.Identity,

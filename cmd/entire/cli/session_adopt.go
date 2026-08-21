@@ -277,7 +277,12 @@ func adoptFromExternalSessionStore(
 				return &sourceClaimedError{sessionID: sessionID, claimedBy: adoptClaimLabel(current)}
 			}
 			if err := targetStore.Save(ctx, next); err != nil {
-				_, _ = session.ReleaseLiveSessionClaimIfOwned(context.WithoutCancel(ctx), sessionID, claim)
+				if _, releaseErr := session.ReleaseLiveSessionClaimIfOwned(context.WithoutCancel(ctx), sessionID, claim); releaseErr != nil {
+					logging.Debug(logging.WithComponent(ctx, "session"), "failed to release auto-adopt claim after target save failure",
+						slog.String("session_id", sessionID),
+						slog.String("error", releaseErr.Error()),
+					)
+				}
 				return fmt.Errorf("save adopted session state: %w", err)
 			}
 			adopted = next
