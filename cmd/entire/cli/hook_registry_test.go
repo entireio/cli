@@ -578,17 +578,11 @@ func TestExecuteAgentHookPostTodoFailsWhenPolicyUnsupported(t *testing.T) {
 	require.Contains(t, stderr.String(), "No Entire checkpoints will be created until the CLI is upgraded.")
 }
 
-// TestAgentHooksCmd_AttachesHookSessionContext pins where each agent hook tree
-// gets its context and where flushing happens. PersistentPreRun attaches the
-// hook session context; PersistentPostRun/E must stay unset, because the log
-// sink is opened by the root PersistentPreRun and flushed by its
-// PersistentPostRun (and again by main.go for the error path cobra skips
-// post-runs on).
-//
-// Both variants are asserted because cobra picks PersistentPreRunE over
-// PersistentPreRun when both are set, so a stray E would silently shadow this
-// one.
-func TestAgentHooksCmd_AttachesHookSessionContext(t *testing.T) {
+// Agent hook trees must defer session stamping to executeAgentHook, after it
+// acquires the runtime-migration gate. A parent pre-run would execute first and
+// reopen the migration race. Post-runs stay unset because flushing belongs to
+// the root command (and main.go handles Cobra's error path).
+func TestAgentHooksCmd_DefersSessionContextUntilGatedRun(t *testing.T) {
 	hooksCmd := newHooksCmd()
 
 	for _, agentSubcommand := range []string{testAgentName, "gemini"} {
@@ -602,10 +596,10 @@ func TestAgentHooksCmd_AttachesHookSessionContext(t *testing.T) {
 			}
 			require.NotNil(t, agentCmd, "expected to find %s subcommand under hooks", agentSubcommand)
 
-			require.NotNil(t, agentCmd.PersistentPreRun,
-				"PersistentPreRun must attach the hook session context")
+			require.Nil(t, agentCmd.PersistentPreRun,
+				"session stamping must happen inside the migration-gated RunE")
 			require.Nil(t, agentCmd.PersistentPreRunE,
-				"PersistentPreRunE must stay unset: cobra would run it instead of PersistentPreRun")
+				"session stamping must happen inside the migration-gated RunE")
 			require.Nil(t, agentCmd.PersistentPostRun,
 				"PersistentPostRun must stay unset: the root PersistentPostRun and main.go flush the log sink")
 			require.Nil(t, agentCmd.PersistentPostRunE,

@@ -261,9 +261,7 @@ func repoActivationConfigured(ctx context.Context, root string) bool {
 				continue
 			}
 		}
-		if ctx.Err() == nil {
-			return true
-		}
+		return true
 	}
 	return false
 }
