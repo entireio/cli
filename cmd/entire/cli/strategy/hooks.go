@@ -604,7 +604,7 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, bool, 
 				installedCount++
 			}
 			if backupExists {
-				_ = os.Remove(backupPath) //nolint:errcheck // best-effort migrate away from legacy backup
+				_ = os.Remove(backupPath)
 			}
 			continue
 		}
@@ -732,7 +732,7 @@ func huskySafeHookContent(entireContent string, existing []byte, existingErr err
 func preserveCurrentHookOverStaleBackup(hookPath, backupPath string, current []byte) error {
 	prev, err := os.ReadFile(backupPath) //nolint:gosec // path is controlled
 	if err != nil {
-		return err
+		return fmt.Errorf("read existing backup: %w", err)
 	}
 	if string(prev) == string(current) {
 		return nil
@@ -740,7 +740,7 @@ func preserveCurrentHookOverStaleBackup(hookPath, backupPath string, current []b
 	stalePath := backupPath + ".stale"
 	if err := os.Rename(backupPath, stalePath); err != nil {
 		// If a prior stale exists, overwrite it.
-		_ = os.Remove(stalePath) //nolint:errcheck
+		_ = os.Remove(stalePath)
 		if err := os.Rename(backupPath, stalePath); err != nil {
 			return fmt.Errorf("rotate stale backup: %w", err)
 		}
@@ -748,7 +748,7 @@ func preserveCurrentHookOverStaleBackup(hookPath, backupPath string, current []b
 	if err := os.WriteFile(backupPath, current, 0o755); err != nil { //nolint:gosec // hook backup may be executed
 		return fmt.Errorf("write updated backup: %w", err)
 	}
-	_ = os.Remove(hookPath) //nolint:errcheck // about to rewrite; best-effort clear
+	_ = os.Remove(hookPath)
 	return nil
 }
 
@@ -813,7 +813,7 @@ func removePreEntireExcluded(ctx context.Context) error {
 		return nil
 	}
 	if strings.TrimSpace(content) == "" {
-		_ = os.Remove(excludePath) //nolint:errcheck // best-effort
+		_ = os.Remove(excludePath)
 		return nil
 	}
 	if err := os.WriteFile(excludePath, []byte(content), 0o644); err != nil { //nolint:gosec // git exclude is not executable
@@ -1064,7 +1064,7 @@ func removeEntireHooksFromDir(dir string) (int, error) {
 			}
 			removed++
 			// Managed-block installs should not leave a companion backup behind.
-			_ = os.Remove(backupPath) //nolint:errcheck
+			_ = os.Remove(backupPath)
 			continue
 		}
 

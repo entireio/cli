@@ -16,6 +16,9 @@ import (
 
 const goosWindows = "windows"
 
+// Shared base body for chained-content execution tests.
+const chainedHookBaseTrue = "#!/bin/sh\n# Entire CLI hooks\ntrue\n"
+
 // clearGlobalHooksPath overrides any global core.hooksPath setting so that
 // test repos use their default .git/hooks directory. Setting the local value
 // takes precedence over the global one.
@@ -2288,7 +2291,7 @@ func TestGenerateChainedContent_RunsMode0644Backup(t *testing.T) {
 		t.Fatalf("write backup: %v", err)
 	}
 
-	base := "#!/bin/sh\n# Entire CLI hooks\ntrue\n"
+	base := chainedHookBaseTrue
 	script := generateChainedContent(base, "pre-push", true)
 	scriptPath := filepath.Join(tmp, "pre-push")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
@@ -2317,7 +2320,7 @@ func TestGenerateChainedContent_NonHuskySkipsMode0644Backup(t *testing.T) {
 		t.Fatalf("write backup: %v", err)
 	}
 
-	base := "#!/bin/sh\n# Entire CLI hooks\ntrue\n"
+	base := chainedHookBaseTrue
 	script := generateChainedContent(base, "pre-push", false)
 	if strings.Contains(script, "sh -e") {
 		t.Fatalf("non-husky chain must not use sh -e fallback, got:\n%s", script)
@@ -2350,7 +2353,7 @@ func TestGenerateChainedContent_RunsExecutableShebangBackup(t *testing.T) {
 		t.Fatalf("write backup: %v", err)
 	}
 
-	base := "#!/bin/sh\n# Entire CLI hooks\ntrue\n"
+	base := chainedHookBaseTrue
 	script := generateChainedContent(base, "pre-push", false)
 	scriptPath := filepath.Join(tmp, "pre-push")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
