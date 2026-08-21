@@ -248,7 +248,7 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		hookErr = DispatchLifecycleEvent(ctx, ag, event)
 	} else if claudePostTodoCheckpointHook {
 		// PostTodo is Claude-specific: creates incremental checkpoints during subagent execution
-		hookErr = handleClaudeCodePostTodo(ctx)
+		hookErr = handleClaudeCodePostTodoFromReader(ctx, bytes.NewReader(payload))
 	}
 	if eventType == agent.TurnEnd {
 		replayBindingTurn(ctx, collector, string(agentName), hookName, payload)
