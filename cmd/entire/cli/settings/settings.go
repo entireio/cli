@@ -1492,13 +1492,62 @@ func RepoActivationConfigured(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	_, local, _, err := LoadLocalRaw(ctx)
+	projectConfigured, err := activationKeyPresent(project, "project")
 	if err != nil {
 		return false, err
 	}
-	_, projectConfigured := project["enabled"]
-	_, localConfigured := local["enabled"]
-	return projectConfigured || localConfigured, nil
+	localPath, local, _, err := LoadLocalRaw(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	localConfigured := false
+	if _, present := local["enabled"]; present {
+		switch classifyLocalSettings(ctx, localPath) {
+		case localTracked:
+			// A versioned "local" file is repository content, not this
+			// developer's activation choice. The normal loader ignores it too.
+		case localOwn:
+			localConfigured, err = activationKeyPresent(local, "local")
+		case localUnverifiable:
+			if _, keyErr := activationKeyPresent(local, "local"); keyErr != nil {
+				return false, keyErr
+			}
+			if !projectConfigured {
+				return false, errors.New("cannot verify that local activation settings are developer-owned")
+			}
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+
+	configured := projectConfigured || localConfigured
+	if !configured {
+		return false, nil
+	}
+	// Key presence is policy intent only when the effective settings schema is
+	// valid. In particular, consent callers must not treat an unknown field or
+	// invalid enabled value as permission merely because raw JSON contained it.
+	if _, err := Load(ctx); err != nil {
+		return false, fmt.Errorf("validating repo activation settings: %w", err)
+	}
+	return true, nil
+}
+
+func activationKeyPresent(raw map[string]json.RawMessage, label string) (bool, error) {
+	v, ok := raw["enabled"]
+	if !ok {
+		return false, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+		return false, fmt.Errorf("%s settings enabled must be a boolean", label)
+	}
+	var enabled bool
+	if err := json.Unmarshal(v, &enabled); err != nil {
+		return false, fmt.Errorf("%s settings enabled must be a boolean: %w", label, err)
+	}
+	return true, nil
 }
 
 // IsSetUpAndEnabled returns true if Entire is both set up and enabled.

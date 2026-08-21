@@ -566,8 +566,8 @@ func TestMaybeMigrateGlobalRuntimeData_SessionActivatingMidMigrationKeepsTree(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	restore := migrateRenameFile
-	migrateRenameFile = func(oldpath, newpath string) error {
+	restore := migrateMoveFile
+	migrateMoveFile = func(oldpath, newpath string) (bool, error) {
 		if err := store.Save(t.Context(), &session.State{
 			SessionID: "sess-mid", Phase: session.PhaseActive, WorktreePath: dir, StartedAt: time.Now(),
 		}); err != nil {
@@ -575,7 +575,7 @@ func TestMaybeMigrateGlobalRuntimeData_SessionActivatingMidMigrationKeepsTree(t 
 		}
 		return restore(oldpath, newpath)
 	}
-	t.Cleanup(func() { migrateRenameFile = restore })
+	t.Cleanup(func() { migrateMoveFile = restore })
 
 	var buf bytes.Buffer
 	maybeMigrateGlobalRuntimeData(t.Context(), &buf)
@@ -1139,8 +1139,8 @@ func TestMaybeMigrateGlobalRuntimeData_CrossDeviceFallback(t *testing.T) {
 		session.ClearGitCommonDirCache()
 	})
 
-	migrateRenameFile = func(string, string) error { return errors.New("simulated EXDEV") }
-	t.Cleanup(func() { migrateRenameFile = os.Rename })
+	migrateLinkFile = func(string, string) error { return errors.New("simulated EXDEV") }
+	t.Cleanup(func() { migrateLinkFile = os.Link })
 
 	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
 	testutil.WriteFile(t, dir, sourceRel+"/metadata/sess-1/prompt.txt", "routed prompt")
@@ -1157,6 +1157,53 @@ func TestMaybeMigrateGlobalRuntimeData_CrossDeviceFallback(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "✓ Moved 1") {
 		t.Fatalf("fallback move must count as moved, got: %q", buf.String())
+	}
+}
+
+func TestMaybeMigrateGlobalRuntimeData_DoesNotOverwriteConcurrentDestination(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	t.Cleanup(func() {
+		paths.ClearWorktreeRootCache()
+		session.ClearGitCommonDirCache()
+	})
+
+	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
+	source := filepath.Join(dir, filepath.FromSlash(sourceRel), "logs", "entire.log")
+	destination := filepath.Join(dir, ".entire", "logs", "entire.log")
+	testutil.WriteFile(t, dir, sourceRel+"/logs/entire.log", "older routed data")
+
+	restore := migrateLinkFile
+	migrateLinkFile = func(oldpath, newpath string) error {
+		if err := os.WriteFile(newpath, []byte("new live data"), 0o600); err != nil {
+			return err
+		}
+		return restore(oldpath, newpath)
+	}
+	t.Cleanup(func() { migrateLinkFile = restore })
+
+	var buf bytes.Buffer
+	maybeMigrateGlobalRuntimeData(t.Context(), &buf)
+
+	got, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new live data" {
+		t.Fatalf("concurrent destination was overwritten: %q", got)
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatalf("source must remain for a later retry: %v", err)
+	}
+	if !strings.Contains(buf.String(), "1 could not be moved") {
+		t.Fatalf("race must be reported as a retained migration failure, got %q", buf.String())
 	}
 }
 

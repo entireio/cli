@@ -265,7 +265,7 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 var errGlobalAnswerSuperseded = errors.New("global tier configured while the prompt was open")
 
 // askGlobalTrackingConfirm runs the machine-wide tracking confirm prompt and
-// returns the answer. A package var (same seam pattern as migrateRenameFile)
+// returns the answer. A package var (same seam pattern as migrateMoveFile)
 // so tests can pin the persistence contract of each outcome — durable yes,
 // durable no, cancelled — without a TTY.
 var askGlobalTrackingConfirm = func(ctx context.Context) (bool, error) {
@@ -506,9 +506,13 @@ func activeSessionCountInWorktree(ctx context.Context, root string) int {
 	return n
 }
 
-// migrateRenameFile is the rename used by moveDirContents; a seam so tests
-// can force the cross-device (EXDEV) fallback deterministically.
-var migrateRenameFile = os.Rename
+// migrateMoveFile and migrateLinkFile are seams over the no-replace move and
+// its same-filesystem fast path. Tests use them to open the live-writer race
+// and force the cross-device fallback deterministically.
+var (
+	migrateMoveFile = moveFileNoReplace
+	migrateLinkFile = os.Link
+)
 
 // migrationWarnLimit caps the per-file Warn records one migration emits. The
 // one-line summary carries the user-facing signal (counts + source path); the
@@ -599,22 +603,13 @@ func moveDirContents(ctx context.Context, warnLog *migrationWarnLog, src, dst st
 			failed++
 			continue
 		}
-		if renameErr := migrateRenameFile(srcPath, dstPath); renameErr != nil {
-			// Rename fails with EXDEV when the git common dir and the
-			// worktree live on different filesystems (--separate-git-dir,
-			// linked worktree on another volume); fall back to copy+remove.
-			copied, copyErr := copyFileThenRemove(srcPath, dstPath)
-			switch {
-			case copyErr == nil:
-				// Fully moved via the fallback.
-			case copied:
-				// The copy landed in .entire; only removing the source
-				// failed. The data IS where the user needs it, so count it
-				// moved — claiming it "could not be moved" would be false —
-				// and record the residue left under .git.
-				warnLog.warn(ctx, "global runtime data migration: file copied but source residue remains", "path", srcPath, "error", copyErr)
-			default:
-				warnLog.warn(ctx, "global runtime data migration: file could not be moved", "path", srcPath, "rename_error", renameErr, "copy_error", copyErr)
+		copied, moveErr := migrateMoveFile(srcPath, dstPath)
+		if moveErr != nil {
+			if copied {
+				// The destination landed; only removing the source failed.
+				warnLog.warn(ctx, "global runtime data migration: file copied but source residue remains", "path", srcPath, "error", moveErr)
+			} else {
+				warnLog.warn(ctx, "global runtime data migration: file could not be moved", "path", srcPath, "error", moveErr)
 				failed++
 				continue
 			}
@@ -649,8 +644,32 @@ func filesIdentical(pathA, pathB string) (bool, error) {
 	return sumA == sumB, nil
 }
 
-// copyFileThenRemove copies src to dst (temp file in dst's directory, then
-// rename, so a partial copy is never left at dst) and removes src on success.
+// moveFileNoReplace atomically publishes src at dst only when dst is absent.
+// A hard-link fast path preserves the file without copying on one filesystem;
+// filesystems that cannot link src to dst fall back to a destination-side
+// temp copy. Both publication paths reject an existing destination.
+func moveFileNoReplace(src, dst string) (copied bool, err error) {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return false, fmt.Errorf("stat source: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("not a regular file: %s", src)
+	}
+	if err := migrateLinkFile(src, dst); err == nil {
+		if err := os.Remove(src); err != nil {
+			return true, fmt.Errorf("remove source: %w", err)
+		}
+		return true, nil
+	} else if errors.Is(err, fs.ErrExist) {
+		return false, fmt.Errorf("publish destination: %w", err)
+	}
+	return copyFileThenRemove(src, dst)
+}
+
+// copyFileThenRemove copies src to a temp file in dst's directory, then
+// hard-links that complete temp file into place without replacement and
+// removes src on success. A partial copy is never visible at dst.
 // Only regular files are copied; anything else stays behind as failed.
 // copied reports whether dst landed: (true, non-nil error) means the copy
 // succeeded and only the source removal failed, leaving a residue at src.
@@ -672,11 +691,8 @@ func copyFileThenRemove(src, dst string) (copied bool, err error) {
 		return false, fmt.Errorf("create temp: %w", err)
 	}
 	tmpName := tmp.Name()
-	removeTmp := true
 	defer func() {
-		if removeTmp {
-			_ = os.Remove(tmpName)
-		}
+		_ = os.Remove(tmpName)
 	}()
 	if _, err := io.Copy(tmp, in); err != nil {
 		_ = tmp.Close()
@@ -696,10 +712,9 @@ func copyFileThenRemove(src, dst string) (copied bool, err error) {
 	if err := tmp.Close(); err != nil {
 		return false, fmt.Errorf("close temp: %w", err)
 	}
-	if err := os.Rename(tmpName, dst); err != nil {
-		return false, fmt.Errorf("rename into place: %w", err)
+	if err := os.Link(tmpName, dst); err != nil {
+		return false, fmt.Errorf("publish destination: %w", err)
 	}
-	removeTmp = false
 	if err := os.Remove(src); err != nil {
 		return true, fmt.Errorf("remove source: %w", err)
 	}

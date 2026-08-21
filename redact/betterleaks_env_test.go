@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -28,7 +29,7 @@ go 1.26.2
 
 require github.com/entireio/cli v0.0.0
 
-replace github.com/entireio/cli => ` + filepath.ToSlash(repoRoot) + `
+replace github.com/entireio/cli => ` + strconv.Quote(filepath.ToSlash(repoRoot)) + `
 `
 	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(goMod), 0o644); err != nil {
 		t.Fatalf("write go.mod: %v", err)
