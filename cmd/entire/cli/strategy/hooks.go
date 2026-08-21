@@ -729,7 +729,10 @@ func huskySafeHookContent(entireContent string, existing []byte, existingErr err
 
 // preserveCurrentHookOverStaleBackup replaces backupPath with the current hook
 // bytes when they differ, so reinstall does not discard newer user logic.
+// hookPath is the live hook that the caller will overwrite next; it is left in
+// place here so a crash or later write failure cannot erase the only copy.
 func preserveCurrentHookOverStaleBackup(hookPath, backupPath string, current []byte) error {
+	_ = hookPath
 	prev, err := os.ReadFile(backupPath) //nolint:gosec // path is controlled
 	if err != nil {
 		return fmt.Errorf("read existing backup: %w", err)
@@ -748,7 +751,16 @@ func preserveCurrentHookOverStaleBackup(hookPath, backupPath string, current []b
 	if err := os.WriteFile(backupPath, current, 0o755); err != nil { //nolint:gosec // hook backup may be executed
 		return fmt.Errorf("write updated backup: %w", err)
 	}
-	_ = os.Remove(hookPath)
+	// Confirm the backup is readable and complete before the caller overwrites
+	// hookPath. Do not delete hookPath here — that would open a window where a
+	// crash or later write failure loses the only live copy of the user hook.
+	got, err := os.ReadFile(backupPath) //nolint:gosec // path is controlled
+	if err != nil {
+		return fmt.Errorf("verify updated backup: %w", err)
+	}
+	if string(got) != string(current) {
+		return fmt.Errorf("verify updated backup: wrote %d bytes, read back %d", len(current), len(got))
+	}
 	return nil
 }
 
@@ -1193,18 +1205,46 @@ func stripDelimitedBlock(content, begin, end string) string {
 	if start < 0 {
 		return content
 	}
-	endRel := strings.Index(content[start:], end)
-	if endRel < 0 {
+	// Match only a line-anchored end marker so a mention of `end` inside the
+	// managed body (comment/string) cannot truncate the block early.
+	endAbs := indexLineAnchored(content, end, start+len(begin))
+	if endAbs < 0 {
 		return content
 	}
-	endAbs := start + endRel + len(end)
-	after := content[endAbs:]
+	after := content[endAbs+len(end):]
 	after = strings.TrimPrefix(after, "\n")
 	before := content[:start]
 	if strings.HasSuffix(before, "\n\n") {
 		before = strings.TrimSuffix(before, "\n")
 	}
 	return before + after
+}
+
+// indexLineAnchored returns the absolute index of needle in content at or after
+// from, but only when needle starts a line (offset 0 or preceded by '\n') and
+// ends at EOF or a newline. Returns -1 if no such match exists.
+func indexLineAnchored(content, needle string, from int) int {
+	if needle == "" || from < 0 {
+		return -1
+	}
+	if from > len(content) {
+		return -1
+	}
+	searchFrom := from
+	for {
+		rel := strings.Index(content[searchFrom:], needle)
+		if rel < 0 {
+			return -1
+		}
+		abs := searchFrom + rel
+		atLineStart := abs == 0 || content[abs-1] == '\n'
+		after := abs + len(needle)
+		atLineEnd := after == len(content) || content[after] == '\n'
+		if atLineStart && atLineEnd {
+			return abs
+		}
+		searchFrom = abs + 1
+	}
 }
 
 func stripShebang(content string) string {

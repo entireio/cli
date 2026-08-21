@@ -2712,3 +2712,76 @@ func TestEnsurePreEntireExcluded_LinkedWorktreeUsesCommonExclude(t *testing.T) {
 		t.Fatalf("git check-ignore from linked worktree should match %s: %v", backupRel, err)
 	}
 }
+
+func TestPreserveCurrentHookOverStaleBackup_KeepsHookUntilOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	hookPath := filepath.Join(dir, "prepare-commit-msg")
+	backupPath := hookPath + backupSuffix
+	oldBackup := "#!/bin/sh\necho old-backup\n"
+	current := "#!/bin/sh\necho current-hook\n"
+	if err := os.WriteFile(backupPath, []byte(oldBackup), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte(current), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := preserveCurrentHookOverStaleBackup(hookPath, backupPath, []byte(current)); err != nil {
+		t.Fatalf("preserveCurrentHookOverStaleBackup: %v", err)
+	}
+
+	// Live hook must still exist so a later install failure cannot erase it.
+	gotHook, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("hookPath should remain until overwrite: %v", err)
+	}
+	if string(gotHook) != current {
+		t.Errorf("hookPath = %q, want %q", gotHook, current)
+	}
+	gotBackup, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	if string(gotBackup) != current {
+		t.Errorf("backup = %q, want %q", gotBackup, current)
+	}
+	gotStale, err := os.ReadFile(backupPath + ".stale")
+	if err != nil {
+		t.Fatalf("stale: %v", err)
+	}
+	if string(gotStale) != oldBackup {
+		t.Errorf("stale = %q, want %q", gotStale, oldBackup)
+	}
+}
+
+func TestStripDelimitedBlock_IgnoresEndMarkerInsideManagedBody(t *testing.T) {
+	body := "#!/bin/sh\n" +
+		entireManagedBegin + "\n" +
+		"echo 'mention " + entireManagedEnd + " in a comment'\n" +
+		"entire-real\n" +
+		entireManagedEnd + "\n" +
+		"echo user-hook\n"
+	got := stripEntireManagedBlock(body)
+	if strings.Contains(got, "entire-real") {
+		t.Fatalf("managed body leaked into stripped output:\n%s", got)
+	}
+	if !strings.Contains(got, "echo user-hook") {
+		t.Fatalf("user hook lost:\n%s", got)
+	}
+	if strings.Contains(got, entireManagedBegin) || strings.Contains(got, "entire-real") {
+		t.Fatalf("managed markers/body remain:\n%s", got)
+	}
+	// Mid-body mention must not truncate: user line stays, fake end text only in stripped-away region.
+	wantPrefix := "#!/bin/sh\necho user-hook\n"
+	if got != wantPrefix {
+		t.Fatalf("got:\n%q\nwant:\n%q", got, wantPrefix)
+	}
+}
+
+func TestStripDelimitedBlock_IgnoresEndMarkerEmbeddedMidLine(t *testing.T) {
+	content := "before\n" + entireManagedBegin + "\nmid " + entireManagedEnd + " mid\nkeep\n" + entireManagedEnd + "\nafter\n"
+	got := stripDelimitedBlock(content, entireManagedBegin, entireManagedEnd)
+	if got != "before\nafter\n" {
+		t.Fatalf("got %q", got)
+	}
+}
