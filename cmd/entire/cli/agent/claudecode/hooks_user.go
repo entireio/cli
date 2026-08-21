@@ -76,7 +76,7 @@ func (c *ClaudeCodeAgent) AreUserHooksInstalled(_ context.Context) (bool, error)
 		}
 		return false, err
 	}
-	if !hasEntireHook(settings.Hooks.Stop) {
+	if !hasEntireHook(settings.Hooks.Stop) || !hasEntireHook(settings.Hooks.SubagentStop) {
 		return false, nil
 	}
 	subagentTools := splitMatcherTools(subagentToolMatcher)

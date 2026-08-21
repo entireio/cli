@@ -377,6 +377,48 @@ func TestInstallUserHooks_RepairsIncompleteInstalls(t *testing.T) {
 			t.Errorf("wrapped Stop entry count after repair = %d, want 1", got)
 		}
 	})
+
+	t.Run("missing SubagentStop is detected and repaired", func(t *testing.T) {
+		home := setUserHome(t)
+		agent := &ClaudeCodeAgent{}
+		if _, err := agent.InstallUserHooks(context.Background()); err != nil {
+			t.Fatalf("initial InstallUserHooks() error = %v", err)
+		}
+
+		path := userSettingsTestPath(t, home)
+		raw := readRawSettings(t, path)
+		var hooks map[string]json.RawMessage
+		if err := json.Unmarshal(raw["hooks"], &hooks); err != nil {
+			t.Fatalf("parse hooks: %v", err)
+		}
+		delete(hooks, "SubagentStop")
+		hooksJSON, err := json.Marshal(hooks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw["hooks"] = hooksJSON
+		data, err := json.Marshal(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || ok {
+			t.Fatalf("AreUserHooksInstalled() = (%v, %v), want (false, nil)", ok, err)
+		}
+		res, err := agent.InstallUserHooks(context.Background())
+		if err != nil {
+			t.Fatalf("repair InstallUserHooks() error = %v", err)
+		}
+		if !res.Repaired {
+			t.Fatalf("missing SubagentStop must be reported as a repair, got %+v", res)
+		}
+		if ok, err := agent.AreUserHooksInstalled(context.Background()); err != nil || !ok {
+			t.Fatalf("AreUserHooksInstalled() after repair = (%v, %v), want (true, nil)", ok, err)
+		}
+	})
 }
 
 // A managed hook section in an unexpected shape aborts install AND uninstall
