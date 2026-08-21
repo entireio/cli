@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -305,6 +306,19 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 		}
 	}
 
+	// Every lifecycle hook for this worktree takes the same cross-process gate
+	// before it can create or mutate routed runtime data. Holding it across the
+	// active-session check and all moves closes the check/move race: a hook that
+	// was already active is observed below, while a new hook waits until the
+	// migration has finished.
+	release, lockErr := acquireGlobalRuntimeMigrationGate(ctx, root)
+	if lockErr != nil {
+		logging.Warn(ctx, "global runtime data migration deferred: could not acquire worktree migration gate", "error", lockErr)
+		fmt.Fprintln(w, "  Runtime data migration deferred: could not safely exclude active hooks — re-run 'entire enable'.")
+		return
+	}
+	defer release()
+
 	// An active session in this worktree means a hook process may be writing
 	// under source right now: a rename can strand its in-flight file and the
 	// EXDEV copy fallback can snapshot a half-written one. Defer the whole
@@ -333,13 +347,11 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 		failed += f
 	}
 	warnLog.flush(ctx)
-	// Re-check before the only remaining destructive step. A session that went
-	// active DURING the moves is the residual window this cannot close (hook
-	// writes take no lock, so nothing here can exclude them), but directory
-	// removal is the one step that can turn a live hook's write into ENOENT:
-	// it MkdirAll'd its session dir, and removing the still-empty dir under it
-	// fails that turn's capture. Leaving the tree costs only a later sweep —
-	// the next enable re-triggers migration on a non-empty routed dir.
+	// Re-check before the only remaining destructive step. Participating hooks
+	// cannot become active while the migration gate is held, but this remains a
+	// defense against old binaries or direct state writers that do not yet take
+	// the gate. Leaving the tree costs only a later sweep — the next enable
+	// re-triggers migration on a non-empty routed dir.
 	if n := activeSessionCountInWorktree(ctx, root); n > 0 {
 		logging.Warn(ctx, "skipping routed-directory cleanup: session(s) became active during migration", "count", n)
 	} else {
@@ -367,6 +379,30 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 		line += fmt.Sprintf(", %d could not be moved (left in %s)", failed, source)
 	}
 	fmt.Fprintln(w, line)
+}
+
+// acquireGlobalRuntimeMigrationGate serializes lifecycle hooks with takeover
+// migration for one worktree. The lock file is a sibling of the routed
+// namespace rather than a child, so successful cleanup can remove the runtime
+// tree without unlinking the inode that carries the lock.
+func acquireGlobalRuntimeMigrationGate(ctx context.Context, root string) (func(), error) {
+	commonDir, err := session.GetGitCommonDir(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve git common dir: %w", err)
+	}
+	runtimeDir, err := paths.InvisibleRuntimeDir(commonDir, root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve worktree runtime namespace: %w", err)
+	}
+	lockPath := runtimeDir + ".migration.lock"
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o750); err != nil {
+		return nil, fmt.Errorf("create migration lock directory: %w", err)
+	}
+	release, err := flock.AcquireContext(ctx, lockPath)
+	if err != nil {
+		return nil, fmt.Errorf("acquire migration lock: %w", err)
+	}
+	return release, nil
 }
 
 // activeSessionCountInWorktree reports how many sessions are in an active

@@ -323,12 +323,10 @@ func TestMaybeMigrateGlobalRuntimeData_DefersWhileSessionActive(t *testing.T) {
 	}
 }
 
-// A session that goes active DURING the migration cannot be excluded (hook
-// writes take no lock), but the routed tree must then be left in place: the
-// only destructive step left is directory removal, which would turn a live
-// hook's write into ENOENT. Leftovers cost only a later sweep — a non-empty
-// routed dir re-triggers migration on the next enable.
-func TestMaybeMigrateGlobalRuntimeData_SessionActivatingMidMigrationKeepsTree(t *testing.T) {
+// A hook that starts DURING migration must wait until every routed file has
+// landed. The production hook dispatcher takes the same worktree-scoped lock
+// before lifecycle work, closing the pre-check/move TOCTOU window.
+func TestMaybeMigrateGlobalRuntimeData_BlocksHookDuringMigration(t *testing.T) {
 	dir := t.TempDir()
 	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = resolved
@@ -348,33 +346,49 @@ func TestMaybeMigrateGlobalRuntimeData_SessionActivatingMidMigrationKeepsTree(t 
 	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
 	testutil.WriteFile(t, dir, sourceRel+"/logs/entire.log", "routed")
 
-	// Activate a session mid-migration, through the rename seam the moves go
-	// through: this is the window the pre-move check cannot see.
-	store, err := session.NewStateStore(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
+	moveStarted := make(chan struct{})
+	allowMove := make(chan struct{})
 	restore := migrateMoveFile
 	migrateMoveFile = func(oldpath, newpath string) (bool, error) {
-		if err := store.Save(t.Context(), &session.State{
-			SessionID: "sess-mid", Phase: session.PhaseActive, WorktreePath: dir, StartedAt: time.Now(),
-		}); err != nil {
-			t.Errorf("save session: %v", err)
-		}
+		close(moveStarted)
+		<-allowMove
 		return restore(oldpath, newpath)
 	}
 	t.Cleanup(func() { migrateMoveFile = restore })
 
 	var buf bytes.Buffer
-	maybeMigrateGlobalRuntimeData(t.Context(), &buf)
+	migrationDone := make(chan struct{})
+	go func() {
+		maybeMigrateGlobalRuntimeData(t.Context(), &buf)
+		close(migrationDone)
+	}()
+	<-moveStarted
 
-	// The file still moved (rename is atomic; the writer's fd follows it)...
-	if _, err := os.Stat(filepath.Join(dir, ".entire", "logs", "entire.log")); err != nil {
-		t.Errorf("file should still have migrated: %v", err)
+	hookAcquired := make(chan struct{})
+	hookDone := make(chan struct{})
+	go func() {
+		release, lockErr := acquireGlobalRuntimeMigrationGate(t.Context(), dir)
+		if lockErr != nil {
+			t.Errorf("acquire hook migration gate: %v", lockErr)
+			close(hookDone)
+			return
+		}
+		close(hookAcquired)
+		release()
+		close(hookDone)
+	}()
+
+	select {
+	case <-hookAcquired:
+		t.Fatal("hook acquired migration gate while routed-file move was in progress")
+	case <-time.After(100 * time.Millisecond):
 	}
-	// ...but the routed tree stays, so no live hook loses its parent dir.
-	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(sourceRel))); err != nil {
-		t.Errorf("routed tree must be left in place when a session activates mid-migration: %v", err)
+	close(allowMove)
+	<-migrationDone
+	<-hookDone
+
+	if _, err := os.Stat(filepath.Join(dir, ".entire", "logs", "entire.log")); err != nil {
+		t.Errorf("file should have migrated before hook gate released: %v", err)
 	}
 }
 

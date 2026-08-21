@@ -16,7 +16,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/go-git/go-git/v6"
-	"github.com/spf13/cobra"
 )
 
 // TestWithHookSession_StampsMostRecentSession pins the one thing the hook path
@@ -57,13 +56,12 @@ func TestWithHookSession_StampsMostRecentSession(t *testing.T) {
 	}
 }
 
-// TestHookPreRuns_GateSkipsRepo covers the gate each hook pre-run applies before
-// calling withHookSession, which scans session state and loads redactors: a repo
-// Entire never set up, and one where it is disabled, must come back with the
-// context untouched. The gate lives at the call sites — withHookSession itself
-// does not repeat it, because that costs an uncached settings.Load on the
-// per-commit and per-turn paths.
-func TestHookPreRuns_GateSkipsRepo(t *testing.T) {
+// TestGitHookPreRun_GateSkipsRepo covers the Git-hook pre-run gate before
+// withHookSession scans state and loads redactors. Agent hooks perform the same
+// gate and stamping inside executeAgentHook so they can first take the runtime
+// migration lock; their disabled/global behavior is covered in
+// hook_registry_test.go.
+func TestGitHookPreRun_GateSkipsRepo(t *testing.T) {
 	tests := []struct {
 		name     string
 		settings string
@@ -89,30 +87,21 @@ func TestHookPreRuns_GateSkipsRepo(t *testing.T) {
 				}
 			}
 
-			// Drive the real pre-runs. A gated pre-run returns before
-			// SetContext, so the command's context is still the one we handed it.
-			for name, hookCmd := range map[string]*cobra.Command{
-				"git hooks":   newHooksGitCmd(),
-				"agent hooks": agentHooksCmd(t, testAgentName),
-			} {
-				base := context.Background()
-				hookCmd.SetContext(base)
-				hookCmd.PersistentPreRun(hookCmd, nil)
-				if hookCmd.Context() != base {
-					t.Errorf("%s pre-run derived a context in a repo it must skip", name)
-				}
+			hookCmd := newHooksGitCmd()
+			base := context.Background()
+			hookCmd.SetContext(base)
+			hookCmd.PersistentPreRun(hookCmd, nil)
+			if hookCmd.Context() != base {
+				t.Error("git hook pre-run derived a context in a repo it must skip")
 			}
 		})
 	}
 }
 
-// TestHookPreRuns_ProceedUnderGlobalMode is the positive mirror of
-// TestHookPreRuns_GateSkipsRepo: with NO repo-level setup but the user-global
-// tier enabled, both pre-run gates must PASS (settings.IsActiveForRepo, not
-// IsSetUpAndEnabled) so globally-tracked repos get session stamping and
-// redaction configuration — and the logs those runs would write must resolve
-// under the git common dir, never into the worktree.
-func TestHookPreRuns_ProceedUnderGlobalMode(t *testing.T) {
+// TestGitHookPreRun_ProceedUnderGlobalMode is the positive mirror: with no
+// repo-level setup, the user-global tier still enables Git-hook session
+// stamping and invisible log routing.
+func TestGitHookPreRun_ProceedUnderGlobalMode(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 	testutil.InitRepo(t, tmpDir)
@@ -127,16 +116,12 @@ func TestHookPreRuns_ProceedUnderGlobalMode(t *testing.T) {
 	paths.ClearInvisibleRuntimeCache()
 	t.Cleanup(paths.ClearInvisibleRuntimeCache)
 
-	for name, hookCmd := range map[string]*cobra.Command{
-		"git hooks":   newHooksGitCmd(),
-		"agent hooks": agentHooksCmd(t, testAgentName),
-	} {
-		base := context.Background()
-		hookCmd.SetContext(base)
-		hookCmd.PersistentPreRun(hookCmd, nil)
-		if hookCmd.Context() == base {
-			t.Errorf("%s pre-run skipped a globally-tracked repo", name)
-		}
+	hookCmd := newHooksGitCmd()
+	base := context.Background()
+	hookCmd.SetContext(base)
+	hookCmd.PersistentPreRun(hookCmd, nil)
+	if hookCmd.Context() == base {
+		t.Error("git hook pre-run skipped a globally-tracked repo")
 	}
 
 	// Log routing stays invisible: the resolved logs dir lives under the git
@@ -399,18 +384,4 @@ func TestHooksGitCmd_PersistentPreRun_GlobalMode(t *testing.T) {
 			t.Fatal("a globally excluded repo must disable git hooks")
 		}
 	})
-}
-
-// agentHooksCmd returns the hooks subcommand for one agent, whose pre-run is the
-// call site that used to rely on withHookSession's own gate.
-func agentHooksCmd(t *testing.T, agentName string) *cobra.Command {
-	t.Helper()
-
-	for _, sub := range newHooksCmd().Commands() {
-		if sub.Use == agentName {
-			return sub
-		}
-	}
-	t.Fatalf("no hooks subcommand for %q", agentName)
-	return nil
 }
