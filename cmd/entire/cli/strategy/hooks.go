@@ -1154,12 +1154,20 @@ func rewriteHuskyOwnedHooks(hooksDir string, backfillMissing bool) (int, error) 
 
 		switch {
 		case hookIsOurs && fileExists(backupPath):
-			if err := os.Remove(hookPath); err != nil {
-				return changed, fmt.Errorf("remove legacy %s: %w", hookPath, err)
+			// Move the Entire wrapper aside first so a failed restore cannot
+			// leave `_/<hook>` missing with the backup also gone.
+			asidePath := hookPath + ".entire-old"
+			_ = os.Remove(asidePath)
+			if err := os.Rename(hookPath, asidePath); err != nil {
+				return changed, fmt.Errorf("aside legacy %s: %w", hookPath, err)
 			}
 			if err := os.Rename(backupPath, hookPath); err != nil {
+				if restoreErr := os.Rename(asidePath, hookPath); restoreErr != nil {
+					return changed, fmt.Errorf("restore %s%s: %w (also failed to put Entire wrapper back: %w)", hookPath, backupSuffix, err, restoreErr)
+				}
 				return changed, fmt.Errorf("restore %s%s: %w", hookPath, backupSuffix, err)
 			}
+			_ = os.Remove(asidePath)
 			changed++
 			if backfillMissing {
 				live, liveErr := os.ReadFile(hookPath) //nolint:gosec // path is controlled
