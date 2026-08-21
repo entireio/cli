@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,6 +93,42 @@ func TestContextFanoutCompletenessErrorPreservesMergeError(t *testing.T) {
 	}
 }
 
+func TestRetrieveContextEvidenceReturnsEmptyArrayNotNil(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/me/context-sharing/scope":
+			_, _ = fmt.Fprint(w, `{"enabled":true,"allowCrossJurisdiction":false,"includeLocalLive":false,"sources":[]}`)
+		case "/api/v1/clusters":
+			_, _ = fmt.Fprint(w, `{"clusters":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client, err := coreapi.NewWithBearer(server.URL, "test-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	evidence, _, err := retrieveContextEvidence(t.Context(), client, "01KXGTTNGCEACC83QZEJ5YAF0D", "useful query", 5, "", false)
+	if err != nil {
+		t.Fatalf("retrieve empty context evidence: %v", err)
+	}
+	if evidence == nil {
+		t.Fatal("empty context evidence is nil; JSON output would be null instead of []")
+	}
+	encoded, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != "[]" {
+		t.Fatalf("empty context evidence JSON = %s, want []", encoded)
+	}
+}
+
 func TestContextEvidenceIDStableAndRepoScoped(t *testing.T) {
 	t.Parallel()
 	a := contextEvidenceID("checkpoint", "repo-a", "result-1")
@@ -97,6 +136,24 @@ func TestContextEvidenceIDStableAndRepoScoped(t *testing.T) {
 	c := contextEvidenceID("checkpoint", "repo-b", "result-1")
 	if a != b || a == c || !strings.HasPrefix(a, "ctx_") {
 		t.Fatalf("evidence ids = %q %q %q", a, b, c)
+	}
+}
+
+func TestRemoteSessionEvidenceUsesContextInspectDrillDown(t *testing.T) {
+	t.Parallel()
+
+	evidence, ok := remoteContextEvidence(search.Result{
+		Type: search.TypeSession,
+		Session: &search.SessionResult{
+			SessionID: "foreign-session", Org: "acme", Repo: "source",
+		},
+	}, map[string]string{"acme/source": "repo-source"})
+	if !ok {
+		t.Fatal("remote session was not converted to context evidence")
+	}
+	want := "entire context inspect " + evidence.ID
+	if evidence.DrillDown != want {
+		t.Fatalf("session drilldown = %q, want %q", evidence.DrillDown, want)
 	}
 }
 

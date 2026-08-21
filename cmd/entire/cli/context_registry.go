@@ -267,6 +267,13 @@ func accountIDFromJWT(token string) (string, error) {
 }
 
 func currentContextRegistryPath(ctx context.Context) (string, error) {
+	if raw, ok := os.LookupEnv(auth.EnvTokenVar); ok {
+		coreURL, token, err := auth.ParseEnvToken(raw)
+		if err != nil {
+			return "", err
+		}
+		return contextRegistryPathForToken(coreURL, token)
+	}
 	target, err := auth.ResolveControlPlaneTarget()
 	if err != nil {
 		return "", fmt.Errorf("resolve control plane target: %w", err)
@@ -275,11 +282,15 @@ func currentContextRegistryPath(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("load control plane token: %w", err)
 	}
+	return contextRegistryPathForToken(target.CoreURL, token)
+}
+
+func contextRegistryPathForToken(coreURL, token string) (string, error) {
 	accountID, err := accountIDFromJWT(token)
 	if err != nil {
 		return "", err
 	}
-	return contextRegistryPath(defaultContextRegistryRoot(), target.CoreURL, accountID), nil
+	return contextRegistryPath(defaultContextRegistryRoot(), coreURL, accountID), nil
 }
 
 func removeLocalContextNamespace(ctx context.Context) error {

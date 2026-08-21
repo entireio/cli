@@ -130,7 +130,8 @@ func SanitizeTranscriptForStorage(ag Agent, data []byte) []byte {
 
 func stripDelimitedBlocks(data, start, end, escapedStart, escapedEnd []byte) []byte {
 	strip := func(input, open, closeMarker []byte) []byte {
-		out := append([]byte(nil), input...)
+		out := input
+		copied := false
 		for {
 			startIndex := bytes.Index(out, open)
 			if startIndex < 0 {
@@ -138,9 +139,16 @@ func stripDelimitedBlocks(data, start, end, escapedStart, escapedEnd []byte) []b
 			}
 			endOffset := bytes.Index(out[startIndex+len(open):], closeMarker)
 			if endOffset < 0 {
-				return out[:startIndex]
+				// Only a balanced pair identifies an injected block. An unmatched
+				// opener may be user text; truncating here would discard every later
+				// transcript record from the stored copy.
+				return out
 			}
 			endIndex := startIndex + len(open) + endOffset + len(closeMarker)
+			if !copied {
+				out = append([]byte(nil), out...)
+				copied = true
+			}
 			out = append(out[:startIndex], out[endIndex:]...)
 		}
 	}

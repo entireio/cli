@@ -206,12 +206,12 @@ func remoteContextEvidence(result search.Result, sourceIDs map[string]string) (c
 		if resultID == "" {
 			resultID = e.CheckpointID
 		}
+		e.ID = contextEvidenceID(e.SourceType, repoID, resultID)
 		if e.CheckpointID != "" {
 			e.DrillDown = fmt.Sprintf("entire checkpoint explain %s --repo %s", e.CheckpointID, repoName)
 		} else {
-			e.DrillDown = "entire session info " + e.SessionID
+			e.DrillDown = "entire context inspect " + e.ID
 		}
-		e.ID = contextEvidenceID(e.SourceType, repoID, resultID)
 	}
 	e = sanitizeContextEvidence(e)
 	return e, e.ID != ""
@@ -346,7 +346,8 @@ func retrieveContextEvidence(ctx context.Context, coreClient *coreapi.Client, ta
 	for _, source := range scope.Sources {
 		sourceIDs[strings.ToLower(source.FullName)] = source.RepoId
 	}
-	evidence := append([]contextEvidence(nil), local...)
+	evidence := make([]contextEvidence, 0, len(local))
+	evidence = append(evidence, local...)
 	if merged != nil {
 		for _, result := range merged.Results {
 			if item, ok := remoteContextEvidence(result, sourceIDs); ok {

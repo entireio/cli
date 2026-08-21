@@ -112,6 +112,17 @@ func TestSanitizeTranscriptForStorage_NilReturnFailsSafe(t *testing.T) {
 	}
 }
 
+func TestSanitizeTranscriptForStorage_NoMarkersReturnsOriginalBuffer(t *testing.T) {
+	t.Parallel()
+
+	in := []byte("ordinary transcript without injected context")
+	got := SanitizeTranscriptForStorage(&mockBaseAgent{}, in)
+
+	if len(got) == 0 || &got[0] != &in[0] {
+		t.Fatal("marker-free transcript was copied instead of returning the original buffer")
+	}
+}
+
 func TestSanitizeTranscriptForStorage_StripsEntireContextBlocks(t *testing.T) {
 	t.Parallel()
 
@@ -127,7 +138,7 @@ func TestSanitizeTranscriptForStorage_StripsEntireContextBlocks(t *testing.T) {
 	}
 }
 
-func TestSanitizeTranscriptForStorage_StripsUnmatchedContextOpenerToEOF(t *testing.T) {
+func TestSanitizeTranscriptForStorage_PreservesUnmatchedContextOpener(t *testing.T) {
 	t.Parallel()
 
 	for name, in := range map[string][]byte{
@@ -137,8 +148,8 @@ func TestSanitizeTranscriptForStorage_StripsUnmatchedContextOpenerToEOF(t *testi
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			got := SanitizeTranscriptForStorage(&mockBaseAgent{}, in)
-			if !bytes.Equal(got, []byte("safe prefix ")) {
-				t.Fatalf("unmatched context block was not stripped to EOF: %q", got)
+			if !bytes.Equal(got, in) {
+				t.Fatalf("unmatched context opener truncated the transcript: %q", got)
 			}
 		})
 	}

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 )
 
@@ -163,5 +164,25 @@ func TestRefreshContextRegistrySessionUpdatesHeartbeat(t *testing.T) {
 	}
 	if len(got.Sessions) != 1 || !got.Sessions[0].LastSeen.Equal(now) {
 		t.Fatalf("heartbeat = %+v, want %s", got.Sessions, now)
+	}
+}
+
+func TestCurrentContextRegistryPathHonorsEnvToken(t *testing.T) {
+	const (
+		coreURL   = "https://ci-core.example"
+		accountID = "ci-runner"
+	)
+	cacheRoot := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv(auth.EnvTokenVar, makeJWT(t, `{"alg":"RS256"}`, `{"sub":"`+accountID+`","aud":"`+coreURL+`"}`))
+
+	got, err := currentContextRegistryPath(t.Context())
+	if err != nil {
+		t.Fatalf("resolve env-token context registry: %v", err)
+	}
+	want := contextRegistryPath(filepath.Join(cacheRoot, "entire", "context"), coreURL, accountID)
+	if got != want {
+		t.Fatalf("registry path = %q, want %q", got, want)
 	}
 }
