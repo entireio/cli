@@ -867,7 +867,10 @@ func preserveCurrentHookOverStaleBackup(hookPath, backupPath string, current []b
 	}
 	if err := os.Rename(newPath, backupPath); err != nil {
 		// Best-effort restore of the previous backup.
-		_ = os.Rename(stalePath, backupPath)
+		if restoreErr := os.Rename(stalePath, backupPath); restoreErr != nil {
+			_ = os.Remove(newPath)
+			return fmt.Errorf("install updated backup: %w (also failed to restore previous backup: %w)", err, restoreErr)
+		}
 		_ = os.Remove(newPath)
 		return fmt.Errorf("install updated backup: %w", err)
 	}
