@@ -127,16 +127,20 @@ func TestSanitizeTranscriptForStorage_StripsEntireContextBlocks(t *testing.T) {
 	}
 }
 
-func TestSanitizeTranscriptForStorage_PreservesUnmatchedContextOpener(t *testing.T) {
+func TestSanitizeTranscriptForStorage_StripsUnmatchedContextOpenerToEOF(t *testing.T) {
 	t.Parallel()
 
-	in := []byte("{\"type\":\"user\",\"message\":\"literal <entire-context> text\"}\n" +
-		"{\"type\":\"assistant\",\"message\":\"later record must survive\"}\n")
-
-	got := SanitizeTranscriptForStorage(&mockBaseAgent{}, in)
-
-	if !bytes.Equal(got, in) {
-		t.Fatalf("unmatched marker changed stored transcript:\n got=%q\nwant=%q", got, in)
+	for name, in := range map[string][]byte{
+		"literal": []byte("safe prefix <entire-context>untrusted evidence without a closer"),
+		"escaped": []byte(`safe prefix \u003centire-context\u003euntrusted evidence without a closer`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got := SanitizeTranscriptForStorage(&mockBaseAgent{}, in)
+			if !bytes.Equal(got, []byte("safe prefix ")) {
+				t.Fatalf("unmatched context block was not stripped to EOF: %q", got)
+			}
+		})
 	}
 }
 

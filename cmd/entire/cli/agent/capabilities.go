@@ -138,7 +138,7 @@ func stripDelimitedBlocks(data, start, end, escapedStart, escapedEnd []byte) []b
 			}
 			endOffset := bytes.Index(out[startIndex+len(open):], closeMarker)
 			if endOffset < 0 {
-				return out
+				return out[:startIndex]
 			}
 			endIndex := startIndex + len(open) + endOffset + len(closeMarker)
 			out = append(out[:startIndex], out[endIndex:]...)

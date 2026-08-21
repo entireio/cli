@@ -89,6 +89,25 @@ func TestTranscriptPathWithinSessionDir(t *testing.T) {
 	if transcriptPathWithinSessionDir(outside, dir) {
 		t.Fatal("path outside session dir accepted")
 	}
+	t.Run("symlink escape", func(t *testing.T) {
+		t.Parallel()
+		outsideDir := t.TempDir()
+		outsideTarget := filepath.Join(outsideDir, "transcript.jsonl")
+		if err := os.WriteFile(outsideTarget, []byte("outside"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(dir, "linked-transcript.jsonl")
+		if err := os.Symlink(outsideTarget, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if transcriptPathWithinSessionDir(link, dir) {
+			t.Fatal("symlink escaping session dir accepted")
+		}
+		if file, err := openTranscriptWithinSessionDir(link, dir); err == nil {
+			_ = file.Close()
+			t.Fatal("opened transcript through symlink escaping session dir")
+		}
+	})
 }
 
 func TestRemoveContextNamespaceWaitsForRegistryWriter(t *testing.T) {

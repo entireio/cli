@@ -268,7 +268,18 @@ func registerLocalContextSession(ctx context.Context, ag agent.Agent, event *age
 	if transcriptRef == "" {
 		transcriptRef = ag.ResolveSessionFile(sessionDir, event.SessionID)
 	}
-	if transcriptRef == "" || !transcriptPathWithinSessionDir(transcriptRef, sessionDir) {
+	if transcriptRef == "" {
+		return errors.New("transcript is outside the agent session directory")
+	}
+	transcript, err := filepath.Abs(filepath.Clean(transcriptRef))
+	if err != nil {
+		return fmt.Errorf("resolve transcript path: %w", err)
+	}
+	sessionDir, err = filepath.Abs(filepath.Clean(sessionDir))
+	if err != nil {
+		return fmt.Errorf("resolve session directory path: %w", err)
+	}
+	if !transcriptPathWithinSessionDir(transcript, sessionDir) {
 		return errors.New("transcript is outside the agent session directory")
 	}
 	commonDir, err := session.GetGitCommonDir(ctx)
@@ -279,19 +290,11 @@ func registerLocalContextSession(ctx context.Context, ag agent.Agent, event *age
 	if err != nil {
 		return err
 	}
-	transcript, err := filepath.Abs(transcriptRef)
-	if err != nil {
-		return fmt.Errorf("resolve transcript path: %w", err)
-	}
-	sessionDir, err = filepath.Abs(sessionDir)
-	if err != nil {
-		return fmt.Errorf("resolve session directory path: %w", err)
-	}
-	worktreeRoot, err = filepath.Abs(worktreeRoot)
+	worktreeRoot, err = filepath.Abs(filepath.Clean(worktreeRoot))
 	if err != nil {
 		return fmt.Errorf("resolve worktree path: %w", err)
 	}
-	commonDir, err = filepath.Abs(commonDir)
+	commonDir, err = filepath.Abs(filepath.Clean(commonDir))
 	if err != nil {
 		return fmt.Errorf("resolve git common directory path: %w", err)
 	}

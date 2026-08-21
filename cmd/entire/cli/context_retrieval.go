@@ -426,10 +426,10 @@ func loadLocalContextEvidence(ctx context.Context, query, targetRepoID, currentS
 	now := time.Now()
 	var out []contextEvidence
 	for _, session := range registry.Sessions {
-		if !localContextSourceAllowed(session.RepoID, targetRepoID, session.SessionID, currentSessionID, allowedRepoIDs) || now.Sub(session.LastSeen) > localContextRecentWindow || !transcriptPathWithinSessionDir(session.TranscriptPath, session.SessionDir) {
+		if !localContextSourceAllowed(session.RepoID, targetRepoID, session.SessionID, currentSessionID, allowedRepoIDs) || now.Sub(session.LastSeen) > localContextRecentWindow {
 			continue
 		}
-		file, err := os.Open(session.TranscriptPath)
+		file, err := openTranscriptWithinSessionDir(session.TranscriptPath, session.SessionDir)
 		if err != nil {
 			continue
 		}

@@ -188,16 +188,64 @@ func pruneContextRegistry(registry *contextRegistry, now time.Time) {
 }
 
 func transcriptPathWithinSessionDir(transcriptPath, sessionDir string) bool {
-	transcriptPath, err := filepath.Abs(filepath.Clean(transcriptPath))
+	transcriptPath, err := canonicalPathForContainment(transcriptPath)
 	if err != nil {
 		return false
 	}
-	sessionDir, err = filepath.Abs(filepath.Clean(sessionDir))
+	sessionDir, err = canonicalPathForContainment(sessionDir)
 	if err != nil {
 		return false
 	}
 	rel, err := filepath.Rel(sessionDir, transcriptPath)
 	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func canonicalPathForContainment(path string) (string, error) {
+	abs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute path: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		return resolved, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("resolve path symlinks: %w", err)
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	if err != nil {
+		return "", fmt.Errorf("resolve parent directory symlinks: %w", err)
+	}
+	return filepath.Join(parent, filepath.Base(abs)), nil
+}
+
+func openTranscriptWithinSessionDir(transcriptPath, sessionDir string) (*os.File, error) {
+	transcriptPath, err := filepath.Abs(filepath.Clean(transcriptPath))
+	if err != nil {
+		return nil, fmt.Errorf("resolve transcript path: %w", err)
+	}
+	sessionDir, err = filepath.Abs(filepath.Clean(sessionDir))
+	if err != nil {
+		return nil, fmt.Errorf("resolve session directory: %w", err)
+	}
+	rel, err := filepath.Rel(sessionDir, transcriptPath)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, errors.New("transcript is outside the agent session directory")
+	}
+	root, err := os.OpenRoot(sessionDir)
+	if err != nil {
+		return nil, fmt.Errorf("open agent session directory: %w", err)
+	}
+	file, openErr := root.Open(rel)
+	closeErr := root.Close()
+	if openErr != nil {
+		return nil, fmt.Errorf("open transcript beneath agent session directory: %w", openErr)
+	}
+	if closeErr != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("close agent session directory: %w", closeErr)
+	}
+	return file, nil
 }
 
 func accountIDFromJWT(token string) (string, error) {

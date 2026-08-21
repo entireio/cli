@@ -43,6 +43,15 @@ func TestCrossRepoContextEligibilityPendingAndFailureBackoff(t *testing.T) {
 	}
 }
 
+func TestPromptHashJaccardIsSymmetric(t *testing.T) {
+	t.Parallel()
+	a := promptTokenHashes("debug oauth refresh failure")
+	b := promptTokenHashes("oauth refresh timeout")
+	if got, want := promptHashJaccard(a, b), promptHashJaccard(b, a); got != want {
+		t.Fatalf("jaccard similarity is asymmetric: a,b=%v b,a=%v", got, want)
+	}
+}
+
 func TestRenderCrossRepoContextPacketIsBoundedAndUntrusted(t *testing.T) {
 	t.Parallel()
 	evidence := []contextEvidence{{
