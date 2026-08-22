@@ -13,6 +13,14 @@ import (
 // session-end (ENDED) → session-start (ENDED→IDLE) → new turn → git commit
 // sequence. prepare-commit-msg must still attach Entire-Checkpoint after the
 // session restarts from ENDED into IDLE.
+//
+// The first turn is committed before the session ends so that FilesTouched is
+// empty at session-end and eager condensation actually runs. That is what the
+// historical #411 failure needed: the restarted session must have been
+// FullyCondensed while ENDED. Without the commit, eager condensation skips on
+// non-empty FilesTouched, the session reaches ENDED with FullyCondensed still
+// false, and the test would stay green even if SessionStart stopped clearing
+// the flag.
 func TestEndedToIdle_PrepareCommitMsgAddsTrailer(t *testing.T) {
 	t.Parallel()
 
@@ -32,11 +40,22 @@ func TestEndedToIdle_PrepareCommitMsgAddsTrailer(t *testing.T) {
 	require.NotNil(t, state)
 	require.Equal(t, session.PhaseIdle, state.Phase)
 
+	// Commit the first turn so no carry-forward files remain: eager condensation
+	// at session end is skipped while FilesTouched is non-empty.
+	env.GitCommitWithShadowHooks("Add first before session end", "first.go")
+	state, err = env.GetSessionState(sess.ID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Empty(t, state.FilesTouched,
+		"first turn must be fully committed so session-end eager condensation runs")
+
 	require.NoError(t, env.SimulateSessionEnd(sess.ID))
 	state, err = env.GetSessionState(sess.ID)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, session.PhaseEnded, state.Phase)
+	require.True(t, state.FullyCondensed,
+		"session end must eagerly condense so the restart exercises the fully-condensed state")
 
 	// Reported trigger: SessionStart after ENDED (ended → idle).
 	out := env.SimulateSessionStartWithOutput(sess.ID)
@@ -46,6 +65,8 @@ func TestEndedToIdle_PrepareCommitMsgAddsTrailer(t *testing.T) {
 	require.NotNil(t, state)
 	require.Equal(t, session.PhaseIdle, state.Phase)
 	require.Nil(t, state.EndedAt)
+	require.False(t, state.FullyCondensed,
+		"SessionStart must clear FullyCondensed or post-restart work is skipped in PostCommit")
 
 	require.NoError(t, env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(
 		sess.ID, "Work after restart", sess.TranscriptPath))
