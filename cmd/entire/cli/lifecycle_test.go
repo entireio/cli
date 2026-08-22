@@ -2774,11 +2774,131 @@ func TestHandleLifecycleSubagentEnd_ConcurrentCleanupBetweenResolveAndLoadSkipsC
 	// No checkpoint (shadow branch) should have been created for this task: the
 	// handler must have skipped rather than minting a spurious one out of a
 	// pre-existing untracked file it never touched.
-	out, err := exec.Command("git", "branch", "--list", "entire/*").Output()
+	out, err := exec.CommandContext(ctx, "git", "branch", "--list", "entire/*").Output()
 	if err != nil {
 		t.Fatalf("git branch --list failed: %v", err)
 	}
 	if branches := strings.TrimSpace(string(out)); branches != "" {
 		t.Errorf("expected no shadow checkpoint branch after a vanished pre-task state, got: %s", branches)
+	}
+}
+
+// TestHandleLifecycleSubagentEnd_NoChangesKeepsUncorroboratedPreTaskState pins
+// the other half of the ambiguous-resolve contract. The vanished-state guard
+// covers preState == nil; this covers preState != nil with no file changes,
+// where the handler used to delete the pre-task file it had only guessed at.
+//
+// The single-active-file fallback (no ID and no description) names the one
+// active file, which here belongs to a sibling that is still running and has
+// not written anything yet. Deleting it would make the sibling's own
+// SubagentEnd hit the vanished-state guard and drop a real checkpoint, so the
+// file must survive.
+func TestHandleLifecycleSubagentEnd_NoChangesKeepsUncorroboratedPreTaskState(t *testing.T) {
+	// NOT parallel: uses t.Chdir.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+
+	ctx := context.Background()
+
+	// The still-running sibling's baseline, captured at its SubagentStart. It
+	// is the only active pre-task file, so the fallback will name it.
+	const siblingToolUseID = "toolu_sibling"
+	if err := CapturePreTaskStateWithMeta(ctx, siblingToolUseID, ""); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta() error = %v", err)
+	}
+
+	// The transcript lives outside the repo: inside it, it would itself be an
+	// untracked new file and the handler would take the checkpoint path instead
+	// of the "no file changes detected" path this test is about.
+	transcriptPath := filepath.Join(t.TempDir(), "main.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  "test-session",
+		SessionRef: transcriptPath,
+		ToolUseID:  "", // no ID and no description: single-active-file fallback
+		Timestamp:  time.Now(),
+	}
+
+	if err := DispatchLifecycleEvent(ctx, ag, event); err != nil {
+		t.Fatalf("DispatchLifecycleEvent(SubagentEnd) error = %v", err)
+	}
+
+	// Nothing changed, so no checkpoint should exist — this is the no-changes
+	// path, not the post-SaveTaskStep cleanup.
+	out, err := exec.CommandContext(ctx, "git", "branch", "--list", "entire/*").Output()
+	if err != nil {
+		t.Fatalf("git branch --list failed: %v", err)
+	}
+	if branches := strings.TrimSpace(string(out)); branches != "" {
+		t.Fatalf("expected no shadow checkpoint branch with no file changes, got: %s", branches)
+	}
+	if _, err := os.Stat(preTaskStateFile(ctx, siblingToolUseID)); err != nil {
+		t.Errorf("pre-task file for %q must survive an uncorroborated no-changes resolve, stat err = %v", siblingToolUseID, err)
+	}
+}
+
+// TestHandleLifecycleSubagentEnd_NoChangesCleansDescriptionMatchedPreTaskState
+// is the counterpart: a description-corroborated resolve is evidence that the
+// pre-task file really is this subagent's, so the no-changes path must still
+// clean it up. Skipping cleanup here would leak a file on Cursor's designed
+// path and break the single-active-file fallback for every later subagent.
+func TestHandleLifecycleSubagentEnd_NoChangesCleansDescriptionMatchedPreTaskState(t *testing.T) {
+	// NOT parallel: uses t.Chdir.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+
+	ctx := context.Background()
+
+	const toolUseID = "toolu_target"
+	const description = "review the changelog"
+	if err := CapturePreTaskStateWithMeta(ctx, toolUseID, description); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta() error = %v", err)
+	}
+
+	// Outside the repo, so it is not itself an untracked change — see the
+	// sibling test above.
+	transcriptPath := filepath.Join(t.TempDir(), "main.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:            agent.SubagentEnd,
+		SessionID:       "test-session",
+		SessionRef:      transcriptPath,
+		ToolUseID:       "", // Cursor's real subagentStop payload: no subagent_id
+		TaskDescription: description,
+		Timestamp:       time.Now(),
+	}
+
+	if err := DispatchLifecycleEvent(ctx, ag, event); err != nil {
+		t.Fatalf("DispatchLifecycleEvent(SubagentEnd) error = %v", err)
+	}
+
+	// No checkpoint was minted (nothing changed), so this must be the no-changes
+	// cleanup rather than the post-SaveTaskStep one.
+	out, err := exec.CommandContext(ctx, "git", "branch", "--list", "entire/*").Output()
+	if err != nil {
+		t.Fatalf("git branch --list failed: %v", err)
+	}
+	if branches := strings.TrimSpace(string(out)); branches != "" {
+		t.Fatalf("expected no shadow checkpoint branch with no file changes, got: %s", branches)
+	}
+	if _, err := os.Stat(preTaskStateFile(ctx, toolUseID)); !os.IsNotExist(err) {
+		t.Errorf("description-matched pre-task file for %q should still be cleaned up with no changes, stat err = %v", toolUseID, err)
 	}
 }

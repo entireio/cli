@@ -1210,11 +1210,12 @@ func declaredSubagentTranscript(ctx context.Context, event *agent.Event) string 
 
 // afterAmbiguousSubagentEndResolve runs immediately after
 // handleLifecycleSubagentEnd's ambiguous-ID resolution, before LoadPreTaskState.
-// No-op in production; tests override it to deterministically simulate a
-// concurrent SubagentEnd's CleanupPreTaskState landing in that window.
+// It receives (resolvedAmbiguously, toolUseID). No-op in production; tests
+// override it to deterministically simulate a concurrent SubagentEnd's
+// CleanupPreTaskState landing in that window.
 //
 //nolint:gochecknoglobals // test seam; see doc comment
-var afterAmbiguousSubagentEndResolve = func(resolvedAmbiguously bool, toolUseID string) {}
+var afterAmbiguousSubagentEndResolve = func(bool, string) {}
 
 // handleLifecycleSubagentEnd handles subagent end: detects changes, saves task checkpoint.
 func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agent.Event) error {
@@ -1352,6 +1353,25 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	// If no changes, skip
 	if len(relModifiedFiles) == 0 && len(relNewFiles) == 0 && len(relDeletedFiles) == 0 {
 		logging.Info(logCtx, "no file changes detected, skipping task checkpoint")
+		// Deleting the pre-task file is only safe when we know it is this
+		// subagent's. An ambiguous resolve corroborated by an exact
+		// task-description match has that evidence; the single-active-file
+		// fallback (no ID and no description, so event.TaskDescription is
+		// empty) has none, and the file it named may belong to a sibling that
+		// is still running and has simply not written anything yet. Deleting
+		// that baseline makes the sibling's own SubagentEnd hit the
+		// vanished-state guard above and drop a real checkpoint, so leave the
+		// file for the sibling — or for this subagent's own later retry.
+		//
+		// The paired cleanup after SaveTaskStep below is deliberately not
+		// gated: it runs only once a checkpoint has been minted from this
+		// baseline, so the baseline is spent and keeping it would double-count
+		// on a later resolve.
+		if resolvedAmbiguously && event.TaskDescription == "" {
+			logging.Warn(logCtx, "leaving pre-task state in place: resolved only by the single-active-file fallback with nothing to checkpoint",
+				slog.String("tool_use_id", event.ToolUseID))
+			return nil
+		}
 		_ = CleanupPreTaskState(ctx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 		return nil
 	}
