@@ -155,6 +155,95 @@ func TestSanitizeTranscriptForStorage_PreservesUnmatchedContextOpener(t *testing
 	}
 }
 
+// TestSanitizeTranscriptForStorage_KeepsRecordsBetweenStrayOpenerAndPacket is the
+// data-loss case: a user turn that legitimately mentions the delimiter must not
+// pair with a later packet's closer and delete every record in between.
+func TestSanitizeTranscriptForStorage_KeepsRecordsBetweenStrayOpenerAndPacket(t *testing.T) {
+	t.Parallel()
+
+	for name, opener := range map[string]string{
+		"literal": "<entire-context>",
+		"escaped": `\u003centire-context\u003e`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			in := []byte(`{"type":"user","text":"how does ` + opener + ` framing work?"}` + "\n" +
+				`{"type":"assistant","text":"KEEP THIS ANSWER"}` + "\n" +
+				`{"type":"tool_result","text":"KEEP THIS TOOL OUTPUT"}` + "\n" +
+				`{"type":"user","text":"<entire-context>untrusted evidence</entire-context>"}` + "\n")
+
+			got := SanitizeTranscriptForStorage(&mockBaseAgent{}, in)
+
+			if bytes.Contains(got, []byte("untrusted evidence")) {
+				t.Fatalf("injected packet survived: %q", got)
+			}
+			for _, want := range []string{"framing work?", "KEEP THIS ANSWER", "KEEP THIS TOOL OUTPUT", opener} {
+				if !bytes.Contains(got, []byte(want)) {
+					t.Fatalf("stripping deleted %q from unrelated records: %q", want, got)
+				}
+			}
+			if want := bytes.Count(in, []byte("\n")); bytes.Count(got, []byte("\n")) != want {
+				t.Fatalf("record count changed, want %d newlines: %q", want, got)
+			}
+		})
+	}
+}
+
+// TestSanitizeTranscriptForStorage_StrayOpenerBesidePacketInOneRecord covers the
+// record an appending transport actually produces: the user's prompt and the
+// packet land in the SAME record, so pairing has to take the packet's own opener,
+// not the earlier one in user text.
+func TestSanitizeTranscriptForStorage_StrayOpenerBesidePacketInOneRecord(t *testing.T) {
+	t.Parallel()
+
+	in := []byte(`{"type":"user","text":"why is <entire-context> mentioned? <entire-context>untrusted evidence</entire-context>"}`)
+	got := SanitizeTranscriptForStorage(&mockBaseAgent{}, in)
+
+	if bytes.Contains(got, []byte("untrusted evidence")) {
+		t.Fatalf("injected packet survived: %q", got)
+	}
+	if !bytes.Contains(got, []byte("why is <entire-context> mentioned? ")) {
+		t.Fatalf("user text before the packet was rewritten: %q", got)
+	}
+}
+
+// TestSanitizeTranscriptForStorage_StripsBlockSplicedByRemoval keeps the seam
+// honest: removing one block must not leave a delimiter assembled from the two
+// halves it joined.
+func TestSanitizeTranscriptForStorage_StripsBlockSplicedByRemoval(t *testing.T) {
+	t.Parallel()
+
+	// Removing the inner block joins "</entire-cont" to "ext>", assembling a
+	// closer that pairs with the opener still standing to its left.
+	in := []byte(`{"text":"<entire-context>outer</entire-cont<entire-context>inner</entire-context>ext>TAIL"}`)
+	got := SanitizeTranscriptForStorage(&mockBaseAgent{}, in)
+
+	if bytes.Contains(got, []byte("outer")) || bytes.Contains(got, []byte("inner")) {
+		t.Fatalf("splice left injected content behind: %q", got)
+	}
+	if bytes.Contains(got, []byte("entire-context")) {
+		t.Fatalf("splice left a live delimiter: %q", got)
+	}
+	if !bytes.Contains(got, []byte("TAIL")) {
+		t.Fatalf("stripping ran past the block: %q", got)
+	}
+}
+
+func TestStripInjectedContext_Idempotent(t *testing.T) {
+	t.Parallel()
+
+	in := []byte(`{"type":"user","text":"stray <entire-context> here"}` + "\n" +
+		`{"type":"user","text":"a<entire-context>packet</entire-context>b"}` + "\n" +
+		`{"type":"user","text":"esc \u003centire-context\u003epacket\u003c/entire-context\u003e"}`)
+
+	once := StripInjectedContext(in)
+	twice := StripInjectedContext(once)
+
+	if !bytes.Equal(once, twice) {
+		t.Fatalf("not idempotent:\n once=%q\ntwice=%q", once, twice)
+	}
+}
+
 func TestAsTranscriptSanitizer(t *testing.T) {
 	t.Parallel()
 

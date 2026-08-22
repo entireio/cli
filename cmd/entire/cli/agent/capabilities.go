@@ -124,35 +124,88 @@ func SanitizeTranscriptForStorage(ag Agent, data []byte) []byte {
 			sanitized = candidate
 		}
 	}
-	return stripDelimitedBlocks(sanitized, []byte("<entire-context>"), []byte("</entire-context>"),
-		[]byte(`\u003centire-context\u003e`), []byte(`\u003c/entire-context\u003e`))
+	return StripInjectedContext(sanitized)
 }
 
-func stripDelimitedBlocks(data, start, end, escapedStart, escapedEnd []byte) []byte {
-	strip := func(input, open, closeMarker []byte) []byte {
-		out := input
-		copied := false
-		for {
-			startIndex := bytes.Index(out, open)
-			if startIndex < 0 {
-				return out
-			}
-			endOffset := bytes.Index(out[startIndex+len(open):], closeMarker)
-			if endOffset < 0 {
-				// Only a balanced pair identifies an injected block. An unmatched
-				// opener may be user text; truncating here would discard every later
-				// transcript record from the stored copy.
-				return out
-			}
-			endIndex := startIndex + len(open) + endOffset + len(closeMarker)
-			if !copied {
-				out = append([]byte(nil), out...)
-				copied = true
-			}
-			out = append(out[:startIndex], out[endIndex:]...)
+// Delimiters framing an Entire context injection, in the literal form and in the
+// \u-escaped form a JSON-encoding agent writes into its transcript.
+var (
+	injectedContextOpen         = []byte("<entire-context>")
+	injectedContextClose        = []byte("</entire-context>")
+	injectedContextOpenEscaped  = []byte(`\u003centire-context\u003e`)
+	injectedContextCloseEscaped = []byte(`\u003c/entire-context\u003e`)
+)
+
+// StripInjectedContext removes Entire's <entire-context> … </entire-context>
+// packets from a transcript copy on its way to storage. Callers that hold a live
+// Agent get this through SanitizeTranscriptForStorage; the type-based storage
+// paths call it directly (checkpoint.SanitizeTranscriptForAgentType).
+//
+// Two rules keep a delimiter appearing in the user's own text from destroying
+// history in the stored copy — the transcript is the audit record, so deleting
+// more than the injected packet is a data-loss and audit-evasion bug, not a
+// cosmetic one:
+//
+//   - Pairing is record-local. A transcript is JSONL and a JSON string cannot
+//     contain a raw newline, so a line is a safe boundary. Pairing across records
+//     let one stray opener in an earlier user turn swallow every intervening
+//     record up to the next packet's closer.
+//   - Each closer pairs with the NEAREST PRECEDING opener. An Entire packet is
+//     sealed — the evidence it carries has its delimiters stripped first — so its
+//     own opener is always the nearest one before its closer, and removal is
+//     exact even when user text in the same record mentions the delimiter.
+//
+// A closer with no opener before it, and an opener with no closer after it, are
+// both left alone: either may be ordinary user text.
+func StripInjectedContext(data []byte) []byte {
+	if !bytes.Contains(data, injectedContextClose) && !bytes.Contains(data, injectedContextCloseEscaped) {
+		return data
+	}
+	records := bytes.Split(data, []byte("\n"))
+	changed := false
+	for i, record := range records {
+		stripped := stripInjectedContextBlocks(record, injectedContextOpen, injectedContextClose)
+		stripped = stripInjectedContextBlocks(stripped, injectedContextOpenEscaped, injectedContextCloseEscaped)
+		if len(stripped) != len(record) {
+			records[i] = stripped
+			changed = true
 		}
 	}
-	return strip(strip(data, start, end), escapedStart, escapedEnd)
+	if !changed {
+		return data
+	}
+	return bytes.Join(records, []byte("\n"))
+}
+
+// stripInjectedContextBlocks removes every open…close pair within one record,
+// pairing each closer with the nearest preceding opener. It never writes into
+// record: removals build a new buffer, so the caller's input is untouched when
+// nothing matches.
+func stripInjectedContextBlocks(record, open, closeMarker []byte) []byte {
+	out := record
+	from := 0
+	for {
+		offset := bytes.Index(out[from:], closeMarker)
+		if offset < 0 {
+			return out
+		}
+		closeStart := from + offset
+		openStart := bytes.LastIndex(out[:closeStart], open)
+		if openStart < 0 {
+			// Nothing opened this block, so the closer is text of its own.
+			from = closeStart + len(closeMarker)
+			continue
+		}
+		closeEnd := closeStart + len(closeMarker)
+		trimmed := make([]byte, 0, len(out)-(closeEnd-openStart))
+		trimmed = append(trimmed, out[:openStart]...)
+		trimmed = append(trimmed, out[closeEnd:]...)
+		out = trimmed
+		// Removing the block splices its neighbours together, which can form a
+		// delimiter across the seam ("</entire-cont" + "ext>"). Resume far enough
+		// back that such a closer is still found.
+		from = max(openStart-len(closeMarker)+1, 0)
+	}
 }
 
 // AsTokenCalculator returns the agent as TokenCalculator if it both
