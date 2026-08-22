@@ -182,6 +182,15 @@ type Event struct {
 	// Metadata holds agent-specific state that the framework stores and makes available
 	// on subsequent events. Examples: Pi's activeLeafId, Cursor's is_background_agent.
 	Metadata map[string]string
+
+	// NativeHook is the agent's own name for the hook that produced this event,
+	// in the agent's own vocabulary. Normalizing to Type is the point of this
+	// struct, so this stays empty for almost every agent; set it only when one
+	// Entire hook verb is installed under several native hooks (Factory AI Droid
+	// runs user-prompt-submit under native SessionStart too, so TurnStart fires in
+	// droid exec mode) AND the agent's response schema differs between them. It
+	// reaches the renderer through ContextInjection.NativeHook.
+	NativeHook string
 }
 
 // ReadAndParseHookInput decodes a single JSON hook payload from stdin into the

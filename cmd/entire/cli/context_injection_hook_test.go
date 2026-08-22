@@ -103,11 +103,13 @@ func TestCrossRepoContextInjectionSealsHostileLocalLiveTranscript(t *testing.T) 
 	const basePrompt = "BASE PROMPT: why does ingest time out?"
 	for _, tc := range []struct {
 		agentName types.AgentName
-		field     string
-		wantExact bool
+		// nativeHook is the hook name an additionalContext transport must echo;
+		// empty marks a replacement transport, which returns the whole prompt.
+		nativeHook string
+		wantExact  bool
 	}{
-		{agent.AgentNameCopilotCLI, "modifiedTransformedPrompt", false},
-		{agent.AgentNameFactoryAIDroid, "additionalContext", true},
+		{agent.AgentNameCopilotCLI, "", false},
+		{agent.AgentNameFactoryAIDroid, "UserPromptSubmit", true},
 	} {
 		t.Run(string(tc.agentName), func(t *testing.T) {
 			ag, err := agent.Get(tc.agentName)
@@ -119,18 +121,31 @@ func TestCrossRepoContextInjectionSealsHostileLocalLiveTranscript(t *testing.T) 
 				t.Fatalf("%s is not a context injector", tc.agentName)
 			}
 			raw, err := injector.RenderContextInjection(agent.ContextInjection{
-				Text: packet, BaseText: basePrompt,
+				Text: packet, BaseText: basePrompt, NativeHook: tc.nativeHook,
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			var payload map[string]string
+			var payload struct {
+				ModifiedTransformedPrompt string `json:"modifiedTransformedPrompt"`
+				HookSpecificOutput        struct {
+					HookEventName     string `json:"hookEventName"`
+					AdditionalContext string `json:"additionalContext"`
+				} `json:"hookSpecificOutput"`
+			}
 			if err := json.Unmarshal(raw, &payload); err != nil {
 				t.Fatalf("agent payload is not JSON: %v (%s)", err, raw)
 			}
-			text, ok := payload[tc.field]
-			if !ok {
-				t.Fatalf("agent payload has no %q field: %s", tc.field, raw)
+			text := payload.ModifiedTransformedPrompt
+			if tc.nativeHook != "" {
+				text = payload.HookSpecificOutput.AdditionalContext
+				if payload.HookSpecificOutput.HookEventName != tc.nativeHook {
+					t.Fatalf("payload names hook %q, want %q: %s",
+						payload.HookSpecificOutput.HookEventName, tc.nativeHook, raw)
+				}
+			}
+			if text == "" {
+				t.Fatalf("agent payload carries no context text: %s", raw)
 			}
 			base, body, found := strings.Cut(text, "<entire-context>")
 			if !found {

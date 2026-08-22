@@ -15,6 +15,13 @@ type ContextInjection struct {
 	// BaseText is the hook's existing model-facing content. It is used only by
 	// replacement-style transports, which must include it in their response.
 	BaseText string
+
+	// NativeHook is the agent's own name for the hook that produced this event,
+	// carried through from Event.NativeHook. It is set only by agents that serve
+	// one Entire hook verb from several native hooks and whose response schema
+	// depends on which one fired; every other agent leaves it empty and renders
+	// its single shape.
+	NativeHook string
 }
 
 // ContextInjector is implemented by agents that can place additional context

@@ -16,6 +16,15 @@ import (
 // Ensure FactoryAIDroidAgent implements HookSupport
 var _ agent.HookSupport = (*FactoryAIDroidAgent)(nil)
 
+// Factory AI Droid's own names for the hooks it fires, as they appear in
+// hookSpecificOutput.hookEventName on the way back. A response naming a hook that
+// did not fire is discarded, so which one Entire echoes is load-bearing — see
+// RenderContextInjection.
+const (
+	NativeHookSessionStart     = "SessionStart"
+	NativeHookUserPromptSubmit = "UserPromptSubmit"
+)
+
 // Factory AI Droid hook names - these become subcommands under `entire hooks factoryai-droid`
 const (
 	HookNameSessionStart     = "session-start"

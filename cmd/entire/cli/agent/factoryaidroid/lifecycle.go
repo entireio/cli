@@ -30,18 +30,24 @@ var (
 // in the UserPromptSubmit hook response.
 func (f *FactoryAIDroidAgent) InjectionEvent() agent.EventType { return agent.TurnStart }
 
-// RenderContextInjection renders Droid's native UserPromptSubmit response.
+// RenderContextInjection renders Droid's hookSpecificOutput.additionalContext
+// response, naming the native hook that actually fired. Factory documents this
+// shape for both UserPromptSubmit and SessionStart and discards a response whose
+// hookEventName names the other one — and TurnStart alone cannot say which fired,
+// because the user-prompt-submit handler is installed under native SessionStart
+// too so that droid exec mode gets a TurnStart at all (see InstallHooks). Echoing
+// UserPromptSubmit unconditionally therefore threw away every exec-mode
+// injection.
 func (f *FactoryAIDroidAgent) RenderContextInjection(inj agent.ContextInjection) ([]byte, error) {
-	if strings.TrimSpace(inj.Text) == "" {
-		return nil, nil
+	hookEventName := NativeHookUserPromptSubmit
+	if inj.NativeHook == NativeHookSessionStart {
+		hookEventName = NativeHookSessionStart
 	}
-	out, err := json.Marshal(struct {
-		AdditionalContext string `json:"additionalContext"`
-	}{AdditionalContext: inj.Text})
+	out, err := agent.RenderAdditionalContextHookOutput(hookEventName, inj.Text)
 	if err != nil {
 		return nil, fmt.Errorf("render Factory Droid context injection: %w", err)
 	}
-	return append(out, '\n'), nil
+	return out, nil
 }
 
 // WriteHookResponse outputs the hook response as plain text to stdout.
@@ -201,17 +207,31 @@ func (f *FactoryAIDroidAgent) parseSessionInfoEvent(stdin io.Reader, eventType a
 	}, nil
 }
 
+// parseTurnStart handles the user-prompt-submit hook, which Factory fires for
+// native UserPromptSubmit and — because InstallHooks also registers it there —
+// for native SessionStart, whose payload is a subset with `source` added. Both
+// stay TurnStart so exec mode, where UserPromptSubmit never fires, still opens a
+// turn; the native name is recorded alongside it for the response schema.
 func (f *FactoryAIDroidAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[userPromptSubmitRaw](stdin)
 	if err != nil {
 		return nil, err
 	}
+	prompt := ""
+	if raw.Prompt != nil {
+		prompt = *raw.Prompt
+	}
+	nativeHook := NativeHookUserPromptSubmit
+	if prompt == "" && (raw.Prompt == nil || raw.Source != "") {
+		nativeHook = NativeHookSessionStart
+	}
 	return &agent.Event{
 		Type:       agent.TurnStart,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
-		Prompt:     raw.Prompt,
+		Prompt:     prompt,
 		Model:      raw.Model,
+		NativeHook: nativeHook,
 		Timestamp:  time.Now(),
 	}, nil
 }

@@ -491,8 +491,9 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 		return
 	}
 	payload, err := injector.RenderContextInjection(agent.ContextInjection{
-		Text:     strings.Join(injections, "\n\n"),
-		BaseText: event.TransformedPrompt,
+		Text:       strings.Join(injections, "\n\n"),
+		BaseText:   event.TransformedPrompt,
+		NativeHook: event.NativeHook,
 	})
 	if err != nil {
 		logging.Warn(logCtx, "failed to render context injection", slog.String("error", err.Error()))

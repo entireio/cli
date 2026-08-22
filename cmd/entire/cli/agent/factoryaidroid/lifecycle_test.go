@@ -50,6 +50,7 @@ func TestParseHookEvent_TurnStart(t *testing.T) {
 	if event.Prompt != "Fix the bug" {
 		t.Errorf("expected prompt 'Fix the bug', got %q", event.Prompt)
 	}
+	require.Equal(t, NativeHookUserPromptSubmit, event.NativeHook)
 }
 
 func TestFactoryAIDroidAgent_ContextInjector(t *testing.T) {
@@ -58,11 +59,63 @@ func TestFactoryAIDroidAgent_ContextInjector(t *testing.T) {
 	ag := &FactoryAIDroidAgent{}
 	require.Equal(t, agent.TurnStart, ag.InjectionEvent())
 
-	out, err := ag.RenderContextInjection(agent.ContextInjection{Text: "cross-repo evidence"})
+	out, err := ag.RenderContextInjection(agent.ContextInjection{
+		Text: "cross-repo evidence", NativeHook: NativeHookUserPromptSubmit,
+	})
 	require.NoError(t, err)
 	require.JSONEq(t, `{
-		"additionalContext": "cross-repo evidence"
+		"hookSpecificOutput": {
+			"hookEventName": "UserPromptSubmit",
+			"additionalContext": "cross-repo evidence"
+		}
 	}`, string(out))
+}
+
+// TestFactoryAIDroidAgent_ContextInjectionNamesTheNativeHook is the exec-mode
+// transport: `droid exec` never fires UserPromptSubmit, so entire installs the
+// user-prompt-submit hook under native SessionStart as well. Both produce
+// TurnStart, but Factory discards a response whose hookEventName names the hook
+// that did not fire — so the whole injection was silently dropped in exec mode
+// until the native name travelled with the event.
+func TestFactoryAIDroidAgent_ContextInjectionNamesTheNativeHook(t *testing.T) {
+	t.Parallel()
+
+	ag := &FactoryAIDroidAgent{}
+	// The payload Factory sends to a SessionStart-registered hook: no prompt key,
+	// and its own `source`.
+	input := `{"session_id": "exec-sess", "transcript_path": "/tmp/exec.jsonl", "source": "startup"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameUserPromptSubmit, strings.NewReader(input))
+	require.NoError(t, err)
+	require.Equal(t, agent.TurnStart, event.Type, "exec mode must still open a turn")
+	require.Equal(t, NativeHookSessionStart, event.NativeHook)
+
+	out, err := ag.RenderContextInjection(agent.ContextInjection{
+		Text: "cross-repo evidence", NativeHook: event.NativeHook,
+	})
+	require.NoError(t, err)
+	require.JSONEq(t, `{
+		"hookSpecificOutput": {
+			"hookEventName": "SessionStart",
+			"additionalContext": "cross-repo evidence"
+		}
+	}`, string(out))
+}
+
+// TestFactoryAIDroidAgent_ContextInjectionDefaultsToUserPromptSubmit keeps the
+// interactive path working for callers that carry no native hook name.
+func TestFactoryAIDroidAgent_ContextInjectionDefaultsToUserPromptSubmit(t *testing.T) {
+	t.Parallel()
+
+	ag := &FactoryAIDroidAgent{}
+
+	out, err := ag.RenderContextInjection(agent.ContextInjection{Text: "cross-repo evidence"})
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"hookEventName":"UserPromptSubmit"`)
+
+	empty, err := ag.RenderContextInjection(agent.ContextInjection{Text: "   "})
+	require.NoError(t, err)
+	require.Empty(t, empty, "blank text must write nothing to stdout")
 }
 
 func TestParseHookEvent_TurnStart_IncludesModel(t *testing.T) {
@@ -124,6 +177,8 @@ func TestParseHookEvent_TurnStart_SessionStartFormat(t *testing.T) {
 	if event.Prompt != "" {
 		t.Errorf("expected empty prompt, got %q", event.Prompt)
 	}
+	require.Equal(t, NativeHookSessionStart, event.NativeHook,
+		"a payload with no prompt key came from native SessionStart, whatever else it carries")
 }
 
 func TestParseHookEvent_TurnEnd(t *testing.T) {
