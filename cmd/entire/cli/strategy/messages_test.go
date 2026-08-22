@@ -1,6 +1,90 @@
 package strategy
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+// TestSanitizeSubjectContent_StripsUnsafeControls covers the characters a JSON
+// string may legally carry that must never reach a commit subject: NUL, ESC,
+// C1/DEL, and the Unicode bidi controls that can make `git log` render
+// something other than what was committed.
+func TestSanitizeSubjectContent_StripsUnsafeControls(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"nul", "before\x00after", "beforeafter"},
+		{"escape", "before\x1b[31mred\x1b[0m", "before[31mred[0m"},
+		{"del", "before\x7fafter", "beforeafter"},
+		{"c1", "before\x9bafter", "beforeafter"},
+		{"bidi override", "safe.txt\u202e" + "gnp.exe", "safe.txtgnp.exe"},
+		{"bidi isolate", "a\u2066b\u2069c", "abc"},
+		{"zero width joiner", "a\u200db", "ab"},
+		{"newlines collapse to one space", "line one\nline two", "line one line two"},
+		{"tabs collapse", "a\t\tb", "a b"},
+		{"line separator collapses", "a\u2028b", "a b"},
+		{"surrounding whitespace trimmed", "  padded  ", "padded"},
+		{"normal unicode preserved", "café 日本語 🎉", "café 日本語 🎉"},
+		{"only controls becomes empty", "\x00\x1b\u202e", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SanitizeSubjectContent(tt.input); got != tt.want {
+				t.Errorf("SanitizeSubjectContent(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFormatSubagentEndMessage_RedactsSecretBeforeGit is the regression test for
+// model output becoming Git metadata. Codex forwards the whole
+// last_assistant_message into TaskDescription, so a reply that opens with a
+// credential copied out of tool output would otherwise be committed verbatim.
+func TestFormatSubagentEndMessage_RedactsSecretBeforeGit(t *testing.T) {
+	const secret = "ghp_1234567890abcdefghijklmnopqrstuvwx"
+
+	got := FormatSubagentEndMessage("dev", secret+" is the key I used", "toolu_019t1c")
+	if strings.Contains(got, secret) {
+		t.Errorf("commit subject must not contain the raw secret, got %q", got)
+	}
+	if !strings.Contains(got, "REDACTED") {
+		t.Errorf("commit subject should carry a redaction placeholder, got %q", got)
+	}
+}
+
+// TestFormatSubagentEndMessage_RedactsBeforeTruncating pins the ordering.
+// Truncating first can cut a secret short of any rule's match, leaving the
+// surviving prefix in the subject.
+func TestFormatSubagentEndMessage_RedactsBeforeTruncating(t *testing.T) {
+	const secret = "ghp_1234567890abcdefghijklmnopqrstuvwx"
+	// Push the secret across the MaxDescriptionLength boundary so truncation
+	// would keep only its first few characters.
+	description := strings.Repeat("a", MaxDescriptionLength-10) + " " + secret
+
+	got := FormatSubagentEndMessage("dev", description, "toolu_019t1c")
+	if strings.Contains(got, secret[:6]) {
+		t.Errorf("a secret straddling the truncation boundary must be redacted before truncation, got %q", got)
+	}
+}
+
+// TestFormatIncrementalMessage_SanitizesTodoContent confirms the same boundary
+// guards TodoWrite content, which is model output on the same path.
+func TestFormatIncrementalMessage_SanitizesTodoContent(t *testing.T) {
+	got := FormatIncrementalMessage("wire\x1b[31m the\nparser", 1, "toolu_01CJhrr")
+	want := "wire[31m the parser (toolu_01CJhrr)"
+	if got != want {
+		t.Errorf("FormatIncrementalMessage() = %q, want %q", got, want)
+	}
+
+	// All-control content is empty after sanitizing, so it must take the
+	// no-content fallback rather than emit a blank subject.
+	if got := FormatIncrementalMessage("\x00\x1b", 3, "toolu_01CJhrr"); got != "Checkpoint #3: toolu_01CJhrr" {
+		t.Errorf("all-control todo content should fall back to the checkpoint format, got %q", got)
+	}
+}
 
 func TestTruncateDescription(t *testing.T) {
 	tests := []struct {
