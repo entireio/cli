@@ -34,7 +34,10 @@ func claudeTranscriptWithImage(t *testing.T) (raw []byte, b64 string) {
 // payload, returning the raw inline bytes and the base64 string.
 func claudeImagePayload(t *testing.T, payload string) (raw []byte, b64 string) {
 	t.Helper()
-	b64 = base64.StdEncoding.EncodeToString([]byte(payload + "-padded-so-the-base64-clears-the-externalize-threshold"))
+	// Externalization only lifts out bytes that identify themselves as an image
+	// (see imageextract.detectMediaType), so the fixture carries a PNG signature.
+	img := append([]byte("\x89PNG\r\n\x1a\n"), payload+"-padded-so-the-base64-clears-the-externalize-threshold"...)
+	b64 = base64.StdEncoding.EncodeToString(img)
 	line := `{"type":"user","message":{"role":"user","content":[` +
 		`{"type":"text","text":"look"},` +
 		`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + b64 + `"}}` +

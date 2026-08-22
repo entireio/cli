@@ -13,6 +13,11 @@
 // ever swapping the base64 image *value* in place (never re-marshalling the JSON)
 // and by refusing to externalize any image whose raw bytes don't re-encode to the
 // exact original base64 string.
+//
+// Safety contract: only base64 that decodes to verifiable image bytes is ever
+// externalized. Assets become raw git blobs and do not pass through transcript
+// redaction, so lifting arbitrary base64 out of an image-shaped field would move
+// unredacted content into git. Anything unrecognized stays inline.
 package imageextract
 
 import (
@@ -103,6 +108,21 @@ const minExternalizedBase64Len = 64
 // (not a const) only so tests can lower it without allocating a 50MB fixture.
 var maxExternalizedImageBytes = agent.MaxChunkSize
 
+// Aggregate bounds on one extraction pass. The per-image cap above bounds a
+// single asset but says nothing about the set, and the set is what this process
+// holds in memory: every accepted image's decoded bytes are retained until the
+// caller has written them all. A transcript carrying many large images (or a
+// crafted one) would otherwise be allowed to allocate without limit inside a
+// git hook.
+//
+// Exceeding either bound is not an error: extraction stops accepting new images
+// and the rest stay inline, which is always a valid transcript. Vars only so
+// tests can lower them.
+var (
+	maxExternalizedImageCount = 256
+	maxExternalizedTotalBytes = agent.MaxChunkSize
+)
+
 var codecs = map[types.AgentType]ImageCodec{
 	agent.AgentTypeClaudeCode: claudeCodec{},
 	agent.AgentTypeCodex:      codexCodec{},
@@ -118,9 +138,11 @@ func HasPlaceholders(transcript []byte) bool {
 	return bytes.Contains(transcript, []byte(placeholderPrefix))
 }
 
-// imgHit is one image found by a collector: the bare base64 value to swap out and
-// its declared media type (used only to pick the asset filename extension).
-type imgHit struct{ data, mediaType string }
+// imgHit is one candidate image found by a collector: the bare base64 value to
+// swap out. The transcript's declared media type is deliberately not carried
+// here — extraction classifies the decoded bytes itself (see detectMediaType)
+// and never trusts the declaration.
+type imgHit struct{ data string }
 
 // extractImagesWith is the shared extraction engine. It parses each JSONL line,
 // gathers image hits via the per-agent collector, dedupes, decodes and re-encodes
@@ -137,8 +159,16 @@ func extractImagesWith(transcript []byte, collect func(v any, out *[]imgHit)) ([
 	seen := map[string]Asset{}
 	var order []string             // unique base64 values, later sorted longest-first
 	usedNames := map[string]bool{} // guards distinct-data -> distinct-name
+	totalBytes := 0                // decoded bytes accepted so far
+
+	atCapacity := func() bool {
+		return len(order) >= maxExternalizedImageCount || totalBytes >= maxExternalizedTotalBytes
+	}
 
 	for _, line := range bytes.Split(transcript, []byte("\n")) {
+		if atCapacity() {
+			break
+		}
 		trimmed := bytes.TrimSpace(line)
 		// Accept object- and array-rooted JSON lines; the collectors walk both.
 		if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
@@ -151,10 +181,20 @@ func extractImagesWith(transcript []byte, collect func(v any, out *[]imgHit)) ([
 		var hits []imgHit
 		collect(v, &hits)
 		for _, h := range hits {
+			if atCapacity() {
+				break
+			}
 			if len(h.data) < minExternalizedBase64Len {
 				continue // too small to be a real image; also keeps it out of placeholders
 			}
 			if _, ok := seen[h.data]; ok {
+				continue
+			}
+			// Reject on the encoded length before decoding. The decoded-size check
+			// below cannot protect the decode itself: DecodeString allocates the
+			// full output first, so a multi-hundred-megabyte base64 value would be
+			// materialized inside a git hook only to be rejected a line later.
+			if base64.StdEncoding.DecodedLen(len(h.data)) > maxExternalizedImageBytes {
 				continue
 			}
 			raw, err := base64.StdEncoding.DecodeString(h.data)
@@ -166,6 +206,13 @@ func extractImagesWith(transcript []byte, collect func(v any, out *[]imgHit)) ([
 			if base64.StdEncoding.EncodeToString(raw) != h.data {
 				continue
 			}
+			// Keep the aggregate a hard bound rather than one that can overshoot by
+			// a whole image: refuse anything that would push the total past it.
+			// Refusing (not stopping) lets a smaller later image still fit after an
+			// outsized one is turned away.
+			if totalBytes+len(raw) > maxExternalizedTotalBytes {
+				continue
+			}
 			// Leave oversized images inline. Each asset is stored as one git blob,
 			// and a blob over MaxChunkSize would be unpushable; the transcript, by
 			// contrast, is chunked under that limit, so keeping the image inline
@@ -173,14 +220,24 @@ func extractImagesWith(transcript []byte, collect func(v any, out *[]imgHit)) ([
 			if len(raw) > maxExternalizedImageBytes {
 				continue
 			}
-			// Prefer the media type detected from the actual bytes over the declared
-			// one: agents mislabel it (real Codex data-URIs declare image/jpeg for
-			// PNG bytes), and the asset filename/manifest should reflect the content.
-			// This is metadata only — the transcript's declared type is untouched, so
-			// the round trip stays byte-exact.
+			// Externalize only bytes that are verifiably an image, per their own
+			// magic number — never on the strength of the transcript's declared
+			// media type. This is a redaction boundary, not a cosmetic one: assets
+			// are written to git as raw blobs and never pass through the redaction
+			// that the transcript body gets. Anything base64 sitting in an image
+			// field (an agent that packs a file dump into a data-URI, a mislabeled
+			// upload, a crafted transcript) would otherwise be lifted out of the
+			// redacted body and committed verbatim, turning a would-be-redacted
+			// secret into a plain git object. Unrecognized bytes stay inline, where
+			// redaction still sees them.
+			//
+			// Using the detected type also fixes the metadata: agents mislabel it
+			// (real Codex data-URIs declare image/jpeg for PNG bytes). This is
+			// metadata only — the transcript's declared type is untouched, so the
+			// round trip stays byte-exact.
 			mediaType := detectMediaType(raw)
 			if mediaType == "" {
-				mediaType = h.mediaType
+				continue
 			}
 			name, err := uniqueImageName(usedNames, mediaType)
 			if err != nil {
@@ -188,6 +245,7 @@ func extractImagesWith(transcript []byte, collect func(v any, out *[]imgHit)) ([
 			}
 			seen[h.data] = Asset{Name: name, MediaType: mediaType, Data: raw}
 			order = append(order, h.data)
+			totalBytes += len(raw)
 		}
 	}
 
@@ -290,11 +348,7 @@ func collectClaudeImages(v any, out *[]imgHit) {
 		if t["type"] == "image" {
 			if src, ok := t["source"].(map[string]any); ok && src["type"] == "base64" {
 				if data, ok := src["data"].(string); ok && data != "" {
-					var mediaType string
-					if mt, mok := src["media_type"].(string); mok {
-						mediaType = mt
-					}
-					*out = append(*out, imgHit{data: data, mediaType: mediaType})
+					*out = append(*out, imgHit{data: data})
 				}
 			}
 		}
@@ -330,7 +384,7 @@ func collectCodexImages(v any, out *[]imgHit) {
 		}
 	case string:
 		for _, m := range codexDataURIRe.FindAllStringSubmatch(t, -1) {
-			*out = append(*out, imgHit{data: m[2], mediaType: "image/" + m[1]})
+			*out = append(*out, imgHit{data: m[2]})
 		}
 	}
 }
@@ -343,7 +397,9 @@ const (
 )
 
 // detectMediaType returns the image media type implied by the leading magic
-// bytes, or "" if unrecognized (caller falls back to the declared type).
+// bytes, or "" if the bytes are not a recognized image format. Extraction treats
+// "" as "do not externalize", so this doubles as the gate that keeps non-image
+// payloads inline and therefore inside the redaction path.
 func detectMediaType(raw []byte) string {
 	switch {
 	case bytes.HasPrefix(raw, []byte("\x89PNG\r\n\x1a\n")):

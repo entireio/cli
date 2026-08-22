@@ -442,46 +442,14 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 
 		// Add subagent transcript if available
 		if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
-			agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
-			var taskAssets []TranscriptAsset
-			var tooLarge bool
-			if readErr == nil {
-				agentContent, taskAssets, tooLarge = prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, agentContent)
-			}
-			if readErr == nil && !tooLarge {
-				redacted, jsonlErr := redact.JSONLBytes(agentContent)
-				if jsonlErr != nil {
-					logging.Warn(ctx, "subagent transcript is not valid JSONL, falling back to plain redaction",
-						slog.String("path", opts.SubagentTranscriptPath),
-						slog.String("error", jsonlErr.Error()),
-					)
-					agentContent = redact.Bytes(agentContent)
-				} else {
-					agentContent = redacted.Bytes()
-				}
-				if blobHash, blobErr := CreateBlobFromContent(s.repo, agentContent); blobErr == nil {
-					agentPath := taskMetadataDir + "/agent-" + opts.AgentID + ".jsonl"
-					changes = append(changes, TreeChange{
-						Path:  agentPath,
-						Entry: &object.TreeEntry{Mode: filemode.Regular, Hash: blobHash},
-					})
-				}
-
-				// Write externalized image assets under the task's own assets/
-				// subtree, same layout as the persistent-store session path
-				// (writeAssets), so reinject-on-read finds them at
-				// tasks/<id>/assets/<name>.
-				if len(taskAssets) > 0 {
-					assetChanges, assetErr := s.buildTaskAssetChanges(taskAssets, taskMetadataDir)
-					if assetErr != nil {
-						logging.Warn(ctx, "failed to write subagent transcript image assets",
-							slog.String("path", opts.SubagentTranscriptPath),
-							slog.String("error", assetErr.Error()),
-						)
-					} else {
-						changes = append(changes, assetChanges...)
-					}
-				}
+			bundle, bundleErr := s.buildSubagentTranscriptChanges(ctx, opts, taskMetadataDir)
+			if bundleErr != nil {
+				logging.Warn(ctx, "failed to store subagent transcript, checkpoint written without it",
+					slog.String("path", opts.SubagentTranscriptPath),
+					slog.String("error", bundleErr.Error()),
+				)
+			} else {
+				changes = append(changes, bundle...)
 			}
 		}
 
@@ -505,6 +473,72 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 	}
 
 	return ApplyTreeChanges(ctx, s.repo, baseTreeHash, changes)
+}
+
+// buildSubagentTranscriptChanges builds the tree changes that store a task's
+// subagent transcript plus the image assets externalized out of it. It is the
+// shadow-branch counterpart of treeWriter.writeSubagentTranscriptBundle and
+// keeps the same two guarantees:
+//
+// Atomic: the returned slice is all-or-nothing. An externalized transcript is
+// only placeholders — the image bytes live nowhere else — so appending the
+// transcript without its assets is data loss, and appending assets without the
+// transcript leaves unreachable blobs. Any blob failure returns an error and no
+// changes, so the caller's checkpoint is simply written without the transcript.
+//
+// Replacing: the task's assets/ subtree is dropped before the new set is added,
+// so a rewrite of the same task cannot accumulate the previous attempt's assets
+// (whose names are random, hence never overwritten). This holds when the new set
+// is empty too — an empty set clears the subtree, which is what must happen when
+// a rewrite no longer externalizes anything.
+//
+// An unreadable or oversize transcript yields no changes at all, deliberately:
+// whatever is already stored is internally consistent, and half-updating it is
+// worse than leaving it.
+func (s *ephemeralStore) buildSubagentTranscriptChanges(ctx context.Context, opts WriteEphemeralTaskOptions, taskMetadataDir string) ([]TreeChange, error) {
+	content, readErr := os.ReadFile(opts.SubagentTranscriptPath)
+	if readErr != nil {
+		return nil, fmt.Errorf("read subagent transcript: %w", readErr)
+	}
+	prepared, assets, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, content)
+	if tooLarge {
+		return nil, nil // prepareSubagentTranscript logged why.
+	}
+
+	// Try JSONL-aware redaction first; fall back to plain string redaction if the
+	// content is not valid JSONL (avoids silently dropping the transcript).
+	var body []byte
+	if redacted, jsonlErr := redact.JSONLBytes(prepared); jsonlErr != nil {
+		logging.Warn(ctx, "subagent transcript is not valid JSONL, falling back to plain redaction",
+			slog.String("path", opts.SubagentTranscriptPath),
+			slog.String("error", jsonlErr.Error()),
+		)
+		body = redact.Bytes(prepared)
+	} else {
+		body = redacted.Bytes()
+	}
+
+	transcriptHash, err := CreateBlobFromContent(s.repo, body)
+	if err != nil {
+		return nil, fmt.Errorf("create subagent transcript blob: %w", err)
+	}
+	assetChanges, err := s.buildTaskAssetChanges(assets, taskMetadataDir)
+	if err != nil {
+		return nil, fmt.Errorf("build subagent transcript assets: %w", err)
+	}
+
+	changes := make([]TreeChange, 0, len(assetChanges)+2)
+	// A nil Entry on the directory path drops the whole assets/ subtree.
+	// ApplyTreeChanges resolves the removal before the additions grouped under
+	// the same path, and then builds the subtree from the empty hash, so the
+	// pair below is a replacement rather than a merge.
+	changes = append(changes, TreeChange{Path: taskMetadataDir + "/" + paths.AssetsDirName})
+	changes = append(changes, assetChanges...)
+	changes = append(changes, TreeChange{
+		Path:  taskMetadataDir + "/" + paths.AgentTranscriptFileName(opts.AgentID),
+		Entry: &object.TreeEntry{Mode: filemode.Regular, Hash: transcriptHash},
+	})
+	return changes, nil
 }
 
 // buildTaskAssetChanges stores each externalized subagent-transcript image
