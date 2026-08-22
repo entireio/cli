@@ -362,6 +362,11 @@ func TestRememberAndLookupAgentTaskLink(t *testing.T) {
 		t.Fatal("LookupAgentTaskLink() found = true before any link was remembered")
 	}
 
+	// A link is only honored while its task is still active, so the task needs
+	// its pre-task state on disk.
+	if err := CapturePreTaskState(ctx, "toolu_task_a"); err != nil {
+		t.Fatalf("CapturePreTaskState() error = %v", err)
+	}
 	if err := RememberAgentTaskLink(ctx, "agent-A", "toolu_task_a"); err != nil {
 		t.Fatalf("RememberAgentTaskLink() error = %v", err)
 	}
@@ -407,6 +412,54 @@ func TestLookupAgentTaskLink_EmptyOrInvalidAgentID(t *testing.T) {
 	}
 }
 
+// TestLookupAgentTaskLink_IgnoresAndRemovesDanglingLink covers the stale-link
+// case. CleanupPreTaskState's link removal is best-effort, so a failed cleanup
+// can leave a link naming a task that no longer exists. Honoring it would pin a
+// resumed agent to a finished task indefinitely, so the lookup must ignore it
+// and delete it so the caller bootstraps fresh.
+func TestLookupAgentTaskLink_IgnoresAndRemovesDanglingLink(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	if err := CapturePreTaskState(ctx, "toolu_task_a"); err != nil {
+		t.Fatalf("CapturePreTaskState() error = %v", err)
+	}
+	if err := RememberAgentTaskLink(ctx, "agent-A", "toolu_task_a"); err != nil {
+		t.Fatalf("RememberAgentTaskLink() error = %v", err)
+	}
+
+	// Simulate a cleanup that removed the pre-task file but not the link.
+	if err := os.Remove(filepath.Join(paths.EntireTmpDir, "pre-task-toolu_task_a.json")); err != nil {
+		t.Fatalf("failed to remove pre-task file: %v", err)
+	}
+
+	if got, found := LookupAgentTaskLink(ctx, "agent-A"); found {
+		t.Errorf("LookupAgentTaskLink() = (%q, true), want (\"\", false) for a link whose task is gone", got)
+	}
+
+	linkPath := filepath.Join(paths.EntireTmpDir, agentTaskLinkFileName("agent-A"))
+	if _, err := os.Stat(linkPath); !os.IsNotExist(err) {
+		t.Errorf("dangling link file should have been removed, stat err = %v", err)
+	}
+}
+
+// TestLookupAgentTaskLink_RejectsUnsafeStoredToolUseID proves the stored value is
+// re-validated on read. RememberAgentTaskLink validates on write, but the file
+// lives in a writable tmp dir and its tool_use_id keys the task metadata paths.
+func TestLookupAgentTaskLink_RejectsUnsafeStoredToolUseID(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	linkPath := filepath.Join(paths.EntireTmpDir, agentTaskLinkFileName("agent-A"))
+	if err := os.WriteFile(linkPath, []byte(`{"tool_use_id": "../../evil"}`), 0o600); err != nil {
+		t.Fatalf("failed to write link file: %v", err)
+	}
+
+	if got, found := LookupAgentTaskLink(ctx, "agent-A"); found {
+		t.Errorf("LookupAgentTaskLink() = (%q, true), want (\"\", false) for a path-unsafe stored tool_use_id", got)
+	}
+}
+
 func TestCleanupPreTaskState_RemovesMatchingAgentTaskLinks(t *testing.T) {
 	setupTmpDirRepo(t)
 	ctx := context.Background()
@@ -421,6 +474,9 @@ func TestCleanupPreTaskState_RemovesMatchingAgentTaskLinks(t *testing.T) {
 		t.Fatalf("RememberAgentTaskLink() error = %v", err)
 	}
 	// A sibling task's link should survive cleanup of an unrelated task.
+	if err := CapturePreTaskState(ctx, "toolu_task_b"); err != nil {
+		t.Fatalf("CapturePreTaskState() error = %v", err)
+	}
 	if err := RememberAgentTaskLink(ctx, "agent-B", "toolu_task_b"); err != nil {
 		t.Fatalf("RememberAgentTaskLink() error = %v", err)
 	}

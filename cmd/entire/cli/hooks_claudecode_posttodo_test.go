@@ -141,6 +141,59 @@ func TestResolveIncrementalCheckpointTask_BootstrapPrefersUnclaimed(t *testing.T
 	}
 }
 
+// TestResolveIncrementalCheckpointTask_BootstrapClaimsInSpawnOrder pins the
+// bootstrap ordering. Sibling Tasks are spawned in tool-call order, so pre-task
+// mtimes ascend in spawn order. Claiming the NEWEST unclaimed file hands the
+// most recently spawned task to whichever agent reports first, which is the
+// reversed assignment in the common case where subagents start reporting in the
+// order they were launched. Claims must go out oldest-first instead.
+func TestResolveIncrementalCheckpointTask_BootstrapClaimsInSpawnOrder(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	// task-A was spawned first, task-B second.
+	writePreTaskFileWithModTime(t, testTaskToolUseA, time.Now().Add(-1*time.Minute))
+	writePreTaskFileWithModTime(t, testTaskToolUseB, time.Now())
+
+	// The first agent to report gets the first-spawned task.
+	first, found := resolveIncrementalCheckpointTask(ctx, "agent-A")
+	if !found || first != testTaskToolUseA {
+		t.Errorf("first bootstrap = (%q, %v), want (%q, true) — claims must follow spawn order",
+			first, found, testTaskToolUseA)
+	}
+
+	// The next agent gets the remaining unclaimed task.
+	second, found := resolveIncrementalCheckpointTask(ctx, "agent-B")
+	if !found || second != testTaskToolUseB {
+		t.Errorf("second bootstrap = (%q, %v), want (%q, true)", second, found, testTaskToolUseB)
+	}
+}
+
+// TestResolveIncrementalCheckpointTask_ClaimWriteFailureSkipsCheckpoint proves the
+// resolver fails closed when the claim cannot be persisted, matching the
+// lock-acquisition policy. Returning the task anyway would checkpoint against a
+// claim no sibling can see, so a later sibling could select the same task and
+// this agent could be remapped on its next TodoWrite.
+func TestResolveIncrementalCheckpointTask_ClaimWriteFailureSkipsCheckpoint(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	writePreTaskFileWithModTime(t, testTaskToolUseA, time.Now())
+
+	// Force the link write to fail deterministically: writing to a path that is
+	// already a directory returns EISDIR.
+	linkPath := filepath.Join(paths.EntireTmpDir, agentTaskLinkFileName("agent-A"))
+	if err := os.MkdirAll(linkPath, 0o755); err != nil {
+		t.Fatalf("failed to create directory at link path: %v", err)
+	}
+
+	taskToolUseID, found := resolveIncrementalCheckpointTask(ctx, "agent-A")
+	if found {
+		t.Errorf("resolveIncrementalCheckpointTask() = (%q, true), want (\"\", false) when the claim cannot be written",
+			taskToolUseID)
+	}
+}
+
 // No agent_id at all (older Claude Code, or an agent that doesn't send it) preserves the
 // pre-existing FindActivePreTaskFile behavior and never remembers a link.
 func TestResolveIncrementalCheckpointTask_NoAgentIDFallsBackToMtimeHeuristic(t *testing.T) {

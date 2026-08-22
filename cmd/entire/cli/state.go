@@ -13,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -564,12 +565,31 @@ func LoadPreTaskState(ctx context.Context, toolUseID string) (*PreTaskState, err
 
 // CleanupPreTaskState removes the task state file after use, along with any
 // agent-task link files that point at it (best-effort; see forgetAgentTaskLinksForTask).
+//
+// The two removals are serialized against resolveIncrementalCheckpointTask's
+// bootstrap under the same lock, and the pre-task file goes first. Dropping the
+// links first would briefly expose the task as unclaimed while its state file
+// still existed, so a sibling's bootstrap could claim a task that is already
+// being torn down and end up with a link this cleanup no longer sees. Removing
+// the target first means the task is invisible to bootstrap before its claim
+// slot is freed.
+//
+// The lock is best-effort here, unlike in bootstrap: skipping cleanup entirely
+// would leak the pre-task file for the rest of the session, which is worse than
+// the narrow race the ordering above already closes.
 func CleanupPreTaskState(ctx context.Context, toolUseID string) error {
 	if err := validation.ValidateToolUseID(toolUseID); err != nil {
 		return fmt.Errorf("invalid tool use ID for pre-task state cleanup: %w", err)
 	}
+	if release, err := flock.Acquire(agentTaskBootstrapLockPath(ctx)); err == nil {
+		defer release()
+	} else {
+		logging.Warn(ctx, "failed to acquire agent-task bootstrap lock for pre-task cleanup; proceeding unserialized",
+			slog.String("error", err.Error()))
+	}
+	err := cleanupTmpStateFile(ctx, fmt.Sprintf("pre-task-%s.json", toolUseID))
 	forgetAgentTaskLinksForTask(ctx, toolUseID)
-	return cleanupTmpStateFile(ctx, fmt.Sprintf("pre-task-%s.json", toolUseID))
+	return err
 }
 
 // AgentTaskLink records which task tool_use_id a Claude Code subagent instance's
@@ -633,6 +653,14 @@ func RememberAgentTaskLink(ctx context.Context, agentID, taskToolUseID string) e
 
 // LookupAgentTaskLink returns the task tool_use_id previously remembered for agentID via
 // RememberAgentTaskLink. Returns ("", false) if agentID is empty, invalid, or has no link.
+//
+// A link is only authoritative while the task it names is still active, so the
+// stored tool_use_id is re-validated and its pre-task state must still exist.
+// RememberAgentTaskLink validates on write, but the file can be stale rather
+// than merely malformed: CleanupPreTaskState's link removal is best-effort, so a
+// failed cleanup would otherwise leave a resumed agent pinned to a finished task
+// forever. A link whose target is gone is deleted here so the caller falls
+// through to a fresh bootstrap instead of retrying the same dead lookup.
 func LookupAgentTaskLink(ctx context.Context, agentID string) (taskToolUseID string, found bool) {
 	if agentID == "" {
 		return "", false
@@ -648,13 +676,24 @@ func LookupAgentTaskLink(ctx context.Context, agentID string) (taskToolUseID str
 	}
 	defer root.Close()
 
-	data, err := osroot.ReadFile(root, agentTaskLinkFileName(agentID))
+	fileName := agentTaskLinkFileName(agentID)
+	data, err := osroot.ReadFile(root, fileName)
 	if err != nil {
 		return "", false
 	}
 
 	var link AgentTaskLink
 	if err := json.Unmarshal(data, &link); err != nil || link.ToolUseID == "" {
+		return "", false
+	}
+	// A corrupt or hand-edited link must not smuggle an unsafe ID into the task
+	// metadata paths this value keys.
+	if err := validation.ValidateToolUseID(link.ToolUseID); err != nil {
+		_ = osroot.Remove(root, fileName) //nolint:errcheck // best-effort cleanup
+		return "", false
+	}
+	if _, err := root.Stat(fmt.Sprintf("pre-task-%s.json", link.ToolUseID)); err != nil {
+		_ = osroot.Remove(root, fileName) //nolint:errcheck // best-effort cleanup
 		return "", false
 	}
 	return link.ToolUseID, true
@@ -701,21 +740,51 @@ func forgetAgentTaskLinksForTask(ctx context.Context, taskToolUseID string) {
 // preTaskFilePrefix is the prefix for pre-task state files
 const preTaskFilePrefix = "pre-task-"
 
+// preTaskSelection chooses which candidate wins when several pre-task files are
+// active at once.
+type preTaskSelection int
+
+const (
+	// newestPreTask returns the most recently modified candidate. This is the
+	// nested-subagent rule: the innermost task is the one that started last.
+	newestPreTask preTaskSelection = iota
+	// oldestPreTask returns the least recently modified candidate, so claims are
+	// handed out in task-spawn order. See FindUnclaimedActivePreTaskFile.
+	oldestPreTask
+)
+
 // FindActivePreTaskFile finds an active pre-task file in .entire/tmp/ and returns
 // the parent Task's tool_use_id. Returns ("", false) if no pre-task file exists.
 // When multiple pre-task files exist (nested subagents), returns the most recently
 // modified one.
 // Works correctly from any subdirectory within the repository.
 func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found bool) {
-	return findActivePreTaskFile(ctx, nil)
+	id, _, found := findActivePreTaskFile(ctx, nil, newestPreTask)
+	return id, found
 }
 
 // FindUnclaimedActivePreTaskFile is like FindActivePreTaskFile but skips pre-task
 // files that another subagent instance has already claimed via an agent-task link.
 // Used when bootstrapping a new agent→task link so parallel siblings each latch onto
-// a distinct Task instead of both inheriting the same mtime winner.
-func FindUnclaimedActivePreTaskFile(ctx context.Context) (taskToolUseID string, found bool) {
-	return findActivePreTaskFile(ctx, claimedTaskToolUseIDs(ctx))
+// a distinct Task instead of both inheriting the same mtime winner. It also reports
+// how many unclaimed candidates there were, so the caller can tell a certain
+// assignment from a guess.
+//
+// Candidates are ordered oldest-first, the opposite of FindActivePreTaskFile.
+// Sibling Tasks are spawned in tool-call order, so pre-task mtimes ascend in
+// spawn order and the newest unclaimed file names the most recently spawned
+// task — the one least likely to be the first to report progress. Handing out
+// the oldest unclaimed task instead matches claims to spawn order, which is the
+// correct assignment whenever subagents start reporting in the order they were
+// launched.
+//
+// This is still a heuristic, not a correlation: Claude Code's
+// PostToolUse[TodoWrite] payload carries agent_id but no parent tool_use_id, and
+// the two identifiers only ever appear together on SubagentEnd, after every one
+// of that subagent's TodoWrites. The flock in the caller guarantees each task is
+// claimed by at most one agent; it cannot guarantee the pairing is the true one.
+func FindUnclaimedActivePreTaskFile(ctx context.Context) (taskToolUseID string, candidates int, found bool) {
+	return findActivePreTaskFile(ctx, claimedTaskToolUseIDs(ctx), oldestPreTask)
 }
 
 // claimedTaskToolUseIDs returns the set of task tool_use_ids currently pointed at by
@@ -754,15 +823,19 @@ func claimedTaskToolUseIDs(ctx context.Context) map[string]struct{} {
 	return claimed
 }
 
-func findActivePreTaskFile(ctx context.Context, skip map[string]struct{}) (taskToolUseID string, found bool) {
+// findActivePreTaskFile returns the winning candidate under sel, plus how many
+// candidates were considered. Ties on mtime (siblings spawned in the same
+// tool-call batch land in the same filesystem timestamp granularity) are broken
+// by tool_use_id so the choice is at least deterministic across processes.
+func findActivePreTaskFile(ctx context.Context, skip map[string]struct{}, sel preTaskSelection) (taskToolUseID string, candidates int, found bool) {
 	tmpDirAbs := resolveTmpDir(ctx)
 	entries, err := os.ReadDir(tmpDirAbs)
 	if err != nil {
-		return "", false
+		return "", 0, false
 	}
 
-	var latestFile string
-	var latestTime time.Time
+	var bestID string
+	var bestTime time.Time
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -785,20 +858,29 @@ func findActivePreTaskFile(ctx context.Context, skip map[string]struct{}) (taskT
 		if err != nil {
 			continue
 		}
-		if latestFile == "" || info.ModTime().After(latestTime) {
-			latestFile = name
-			latestTime = info.ModTime()
+		candidates++
+		if bestID == "" || betterPreTaskCandidate(sel, info.ModTime(), bestTime, candidateID, bestID) {
+			bestID = candidateID
+			bestTime = info.ModTime()
 		}
 	}
 
-	if latestFile == "" {
-		return "", false
+	if bestID == "" {
+		return "", candidates, false
 	}
+	return bestID, candidates, true
+}
 
-	// Extract tool_use_id from filename: pre-task-<tool_use_id>.json
-	toolUseID := strings.TrimPrefix(latestFile, preTaskFilePrefix)
-	toolUseID = strings.TrimSuffix(toolUseID, ".json")
-	return toolUseID, true
+// betterPreTaskCandidate reports whether (modTime, id) beats the incumbent
+// (bestTime, bestID) under sel.
+func betterPreTaskCandidate(sel preTaskSelection, modTime, bestTime time.Time, id, bestID string) bool {
+	if modTime.Equal(bestTime) {
+		return id < bestID
+	}
+	if sel == oldestPreTask {
+		return modTime.Before(bestTime)
+	}
+	return modTime.After(bestTime)
 }
 
 // GetNextCheckpointSequence returns the next sequence number for incremental checkpoints.
