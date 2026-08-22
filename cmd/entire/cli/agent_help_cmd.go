@@ -146,10 +146,16 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	// rather than assumed, so a future mutating child cannot inherit the claim.
 	"tokens profile": {agentHelpAudienceReadOnly, false},
 
-	// Context is mixed: querying and inspection are read-only, while consent
-	// changes remain explicitly user-owned.
+	// Context is mixed: inspection is read-only, while consent changes remain
+	// explicitly user-owned. query sits with the writers: it fans out to other
+	// repositories' cells and caches every evidence item it returns under the
+	// clone's Entire namespace, pruning older items to stay bounded. Bounded and
+	// local is still Entire state changing, and the read-only label is a promise
+	// that nothing changes — so query is task-driven, run when the task calls for
+	// cross-repository evidence. `context inspect` reads that cache and writes
+	// nothing, so it keeps the read-only label.
 	"context":         {agentHelpAudienceTaskDriven, false},
-	"context query":   {agentHelpAudienceReadOnly, false},
+	"context query":   {agentHelpAudienceTaskDriven, false},
 	"context inspect": {agentHelpAudienceReadOnly, false},
 	"context status":  {agentHelpAudienceReadOnly, false},
 	"context enable":  {agentHelpAudienceUserOwned, false},
