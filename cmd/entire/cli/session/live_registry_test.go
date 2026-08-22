@@ -389,3 +389,149 @@ func TestListLiveSessions_SweepsExpiredEntries(t *testing.T) {
 		t.Fatalf("expected only fresh entry after TTL sweep, got %+v", entries)
 	}
 }
+
+// plantUnreadableLiveEntry writes an oversized registry file for sessionID, which
+// readLiveSessionEntry rejects. It stands in for any entry that cannot be
+// inspected (corrupt, oversized, not a regular file).
+func plantUnreadableLiveEntry(t *testing.T, sessionID string) string {
+	t.Helper()
+	dir := liveSessionsDir()
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, sessionID+".json")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", maxLiveSessionEntryBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// An entry we cannot read may hold a live adoption claim. Overwriting it with a
+// claimless entry would erase that claim and reopen double-adoption, so Register
+// must fail instead of writing.
+func TestRegisterLiveSession_FailsClosedOnUnreadableEntry(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	sessionID := "live-reg-unreadable"
+	path := plantUnreadableLiveEntry(t, sessionID)
+
+	now := time.Now()
+	err := RegisterLiveSession(&State{
+		SessionID: sessionID, Phase: PhaseActive,
+		WorktreePath: "/tmp/repo-a", LastInteractionTime: &now,
+	}, filepath.Join(t.TempDir(), ".git"))
+	if err == nil {
+		t.Fatal("RegisterLiveSession must fail closed when the existing entry cannot be read")
+	}
+
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		t.Fatalf("unreadable entry must be left in place: %v", statErr)
+	}
+	if info.Size() <= maxLiveSessionEntryBytes {
+		t.Fatal("unreadable entry was overwritten by a claimless entry")
+	}
+}
+
+// Same reasoning in the other direction: deleting an entry we could not inspect
+// would drop whatever claim it held.
+func TestUnregisterLiveSession_FailsClosedOnUnreadableEntry(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	sessionID := "live-unreg-unreadable"
+	path := plantUnreadableLiveEntry(t, sessionID)
+
+	if err := UnregisterLiveSession(sessionID, filepath.Join(t.TempDir(), ".git")); err == nil {
+		t.Fatal("UnregisterLiveSession must fail closed when the entry cannot be read")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("unreadable entry must not be removed: %v", err)
+	}
+}
+
+// A fresh entry we cannot inspect might name a session that would have matched,
+// so uniqueness-dependent callers must see complete=false rather than treating it
+// as a non-match.
+func TestListLiveSessionsContext_IncompleteOnUnreadableEntry(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	now := time.Now()
+	if err := RegisterLiveSession(&State{
+		SessionID: "live-list-readable", Phase: PhaseActive,
+		WorktreePath: "/tmp/repo-a", LastInteractionTime: &now,
+	}, "/tmp/.git"); err != nil {
+		t.Fatal(err)
+	}
+	plantUnreadableLiveEntry(t, "live-list-unreadable")
+
+	entries, complete, err := ListLiveSessionsContext(context.Background(), 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if complete {
+		t.Fatal("an unreadable registry entry must make the scan incomplete")
+	}
+	if len(entries) != 1 {
+		t.Fatalf("readable entries len=%d, want 1", len(entries))
+	}
+}
+
+// Failing closed forever on a corrupt file would disable auto-adopt permanently,
+// so an unreadable entry is swept once it is older than the registry TTL — by
+// which point no claim inside it could still be fresh.
+func TestListLiveSessionsContext_SweepsUnreadableStaleEntry(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	path := plantUnreadableLiveEntry(t, "live-list-stale-unreadable")
+	old := time.Now().Add(-2 * LiveSessionMaxAge)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, complete, err := ListLiveSessionsContext(context.Background(), 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !complete {
+		t.Fatal("a swept stale entry must not leave the scan incomplete")
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entries len=%d, want 0", len(entries))
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("stale unreadable entry should have been swept, stat err = %v", statErr)
+	}
+}
+
+// The TTL sweep re-reads under the per-session lock, so a claim written between
+// the scan's read and the delete survives instead of being erased by a staleness
+// decision made from bytes that no longer exist.
+func TestListLiveSessionsContext_SweepKeepsRefreshedClaim(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	sessionID := "live-sweep-claimed"
+	// Expired by interaction time: LastInteractionTime is nil, which
+	// liveSessionExpired treats as expired.
+	if err := writeLiveSessionEntry(LiveSessionEntry{
+		SessionID: sessionID, CommonDir: "/tmp/.git", Phase: PhaseActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := ClaimLiveSessionContext(context.Background(), sessionID, AdoptClaim{
+		ByCommonDir: "/tmp/target/.git", ByWorktreePath: "/tmp/target",
+		AttemptID: "attempt-1", At: time.Now(),
+	}); err != nil || !claimed {
+		t.Fatalf("ClaimLiveSessionContext = %v, %v", claimed, err)
+	}
+
+	entries, complete, err := ListLiveSessionsContext(context.Background(), 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !complete {
+		t.Fatal("scan should be complete")
+	}
+	if len(entries) != 1 || entries[0].AdoptClaim == nil {
+		t.Fatalf("a fresh claim must pin the entry against the sweep, got %+v", entries)
+	}
+}

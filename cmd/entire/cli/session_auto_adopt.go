@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,7 +50,25 @@ const (
 	// bounds their sum so an ordinary human commit (the miss path) can add at
 	// most this much latency to git commit.
 	autoAdoptOverallBudget = 5 * time.Second
+	// autoAdoptMarkerTimeout bounds the post-prepare marker update and the
+	// cancellation path. Both take the same cross-process session-state flocks as
+	// the adopt itself, and both run straight off the git hook — outside the
+	// prepare-side attempt budget — so without their own deadline a lock held by a
+	// hung process would block `git commit` indefinitely.
+	autoAdoptMarkerTimeout = 2 * time.Second
 )
+
+// autoAdoptCommitLookback bounds how many recent commits the finalize path
+// searches for the checkpoint an adoption is bound to.
+//
+// Git releases the ref lock before running post-commit, so HEAD can already have
+// advanced to a newer commit by the time this hook inspects it — reading only the
+// current tip would fail to find the trailer of the very commit that triggered
+// this hook and cancel a successful adoption. The bound checkpoint ID is a nonce
+// issued by one prepare-commit-msg invocation, so any commit carrying it is that
+// commit; widening the search from the mutable tip to a short window of recent
+// commits identifies it without weakening the guard.
+const autoAdoptCommitLookback = 16
 
 // prepareCommitMsgSourceAmend is git's prepare-commit-msg source for `git commit --amend`.
 const prepareCommitMsgSourceAmend = "commit"
@@ -201,7 +221,19 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) (pending *pendingAut
 		// exists. Register the adopted session here (so the trailer lands) but
 		// defer the destructive source retire to post-commit, where the commit is
 		// a fact — an aborted commit must not tombstone the source.
-		adoptOptions{Force: true, SkipTranscriptValidation: true, DeferSourceRetire: true, AdoptionAttemptID: attemptID.String()},
+		adoptOptions{
+			Force:                    true,
+			SkipTranscriptValidation: true,
+			DeferSourceRetire:        true,
+			AdoptionAttemptID:        attemptID.String(),
+			// Everything discovery decided was read WITHOUT the source lock. Re-run
+			// the exact same predicate against the state loaded under the lock so a
+			// source that went Idle, changed owner, moved worktree, or was replaced
+			// in between cannot be adopted on the strength of the earlier read.
+			RevalidateSource: func(locked *session.State) error {
+				return revalidateAutoAdoptSource(locked, source, staged, owner, hasOwner)
+			},
+		},
 	)
 	adoptCancel()
 	if adoptErr != nil {
@@ -233,12 +265,48 @@ func tryAutoAdoptCrossCommonDirSession(ctx context.Context) (pending *pendingAut
 	return &pendingAutoAdoption{SessionID: source.SessionID, AttemptID: attemptID.String()}
 }
 
+// autoAdoptTrailerSnapshot records the checkpoint trailers already present in
+// the commit message BEFORE prepare-commit-msg runs, so
+// finishPreparedAutoAdoption can tell a trailer this invocation issued from one
+// that was handed in by the caller.
+func autoAdoptTrailerSnapshot(commitMsgFile string) map[checkpointid.CheckpointID]struct{} {
+	existing := make(map[checkpointid.CheckpointID]struct{})
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // path is supplied by git
+	if err != nil {
+		return existing
+	}
+	for _, cpID := range trailers.ParseAllCheckpoints(string(content)) {
+		existing[cpID] = struct{}{}
+	}
+	return existing
+}
+
 // finishPreparedAutoAdoption binds the deferred retire to the exact checkpoint
-// trailer produced by this prepare-commit-msg invocation. If no trailer was
-// written (including the documented user opt-out), it rolls back only this
+// trailer newly issued by this prepare-commit-msg invocation. If no such trailer
+// was written (including the documented user opt-out), it rolls back only this
 // attempt's target copy and restores the source registry pointer.
-func finishPreparedAutoAdoption(ctx context.Context, pending *pendingAutoAdoption, commitMsgFile string) {
+//
+// before is the trailer set captured by autoAdoptTrailerSnapshot and prepareErr
+// is the result of the PrepareCommitMsg call this adoption is riding on.
+func finishPreparedAutoAdoption(
+	ctx context.Context,
+	pending *pendingAutoAdoption,
+	commitMsgFile string,
+	before map[checkpointid.CheckpointID]struct{},
+	prepareErr error,
+) {
 	if pending == nil {
+		return
+	}
+	// The whole finish runs straight off the git hook, so give it its own
+	// wall-clock bound: both branches below take cross-process state flocks.
+	ctx, cancel := context.WithTimeout(ctx, autoAdoptMarkerTimeout)
+	defer cancel()
+
+	// A failed prepare wrote no trailer we can attribute to this adoption (and may
+	// have left the message half-written), so there is nothing to bind to.
+	if prepareErr != nil {
+		cancelPendingAutoAdoption(ctx, pending)
 		return
 	}
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // path is supplied by git
@@ -246,7 +314,7 @@ func finishPreparedAutoAdoption(ctx context.Context, pending *pendingAutoAdoptio
 		cancelPendingAutoAdoption(ctx, pending)
 		return
 	}
-	cpID, found := trailers.ParseCheckpoint(string(content))
+	cpID, found := newlyIssuedCheckpoint(before, string(content))
 	if !found {
 		cancelPendingAutoAdoption(ctx, pending)
 		return
@@ -257,11 +325,32 @@ func finishPreparedAutoAdoption(ctx context.Context, pending *pendingAutoAdoptio
 	})
 }
 
+// newlyIssuedCheckpoint returns the first checkpoint trailer in message that was
+// not already present in before.
+//
+// Only a freshly issued trailer may authorize retiring the source.
+// ManualCommitStrategy.PrepareCommitMsg deliberately PRESERVES a pre-existing
+// Entire-Checkpoint — a user can hand one in with `git commit -m` — and such a
+// trailer links the commit to some unrelated session's checkpoint, so it is no
+// evidence that this adoption was recorded anywhere.
+func newlyIssuedCheckpoint(before map[checkpointid.CheckpointID]struct{}, message string) (checkpointid.CheckpointID, bool) {
+	for _, cpID := range trailers.ParseAllCheckpoints(message) {
+		if _, existed := before[cpID]; !existed {
+			return cpID, true
+		}
+	}
+	return checkpointid.EmptyCheckpointID, false
+}
+
 func mutatePendingAutoAdoption(
 	ctx context.Context,
 	pending *pendingAutoAdoption,
 	mutate func(*session.State, *session.PendingSourceRetire) error,
 ) {
+	// Independent bound on the state-lock wait; see autoAdoptMarkerTimeout.
+	ctx, cancel := context.WithTimeout(ctx, autoAdoptMarkerTimeout)
+	defer cancel()
+
 	targetWorktree, err := paths.WorktreeRoot(ctx)
 	if err != nil || targetWorktree == "" {
 		return
@@ -298,6 +387,12 @@ func mutatePendingAutoAdoption(
 }
 
 func cancelPendingAutoAdoption(ctx context.Context, pending *pendingAutoAdoption) {
+	// Bound the lock waits below: cancellation is reached directly from
+	// prepare-commit-msg as well as from the already-bounded finalize path, and a
+	// contended source lock must not hold up `git commit`.
+	ctx, cancel := context.WithTimeout(ctx, autoAdoptMarkerTimeout)
+	defer cancel()
+
 	targetWorktree, err := paths.WorktreeRoot(ctx)
 	if err != nil || targetWorktree == "" {
 		return
@@ -328,16 +423,29 @@ func cancelPendingAutoAdoption(ctx context.Context, pending *pendingAutoAdoption
 			return fmt.Errorf("read pending adoption claim: %w", claimErr)
 		}
 		owned := claimMatchesPending(claim, expected)
-		if owned {
-			if _, releaseErr := session.ReleaseLiveSessionClaimIfOwned(ctx, target.SessionID, expected); releaseErr != nil {
-				return fmt.Errorf("release pending adoption claim: %w", releaseErr)
-			}
-		}
+		// Remove the target copy FIRST and release the claim only once that removal
+		// is confirmed gone. The claim is this rollback's guard: while it is held no
+		// other repo can adopt the source. Releasing it before the target copy is
+		// actually deleted would let a second repo claim a source that is still
+		// ACTIVE while this repo keeps a live adopted copy of the same session —
+		// the double registration the claim exists to prevent. A failed cleanup
+		// therefore keeps both the marker and the claim, and the next post-commit
+		// retries the cancellation.
 		if err := targetStore.Clear(ctx, target.SessionID); err != nil {
 			return fmt.Errorf("clear canceled target adoption: %w", err)
 		}
+		remaining, loadErr := targetStore.Load(ctx, target.SessionID)
+		if loadErr != nil {
+			return fmt.Errorf("verify canceled target removal: %w", loadErr)
+		}
+		if remaining != nil {
+			return errors.New("canceled target adoption is still registered")
+		}
 		if !owned {
 			return nil
+		}
+		if _, releaseErr := session.ReleaseLiveSessionClaimIfOwned(ctx, target.SessionID, expected); releaseErr != nil {
+			return fmt.Errorf("release pending adoption claim: %w", releaseErr)
 		}
 		sourceStore := session.NewStateStoreWithDir(filepath.Join(marker.SourceCommonDir, session.SessionStateDirName))
 		source, loadErr := sourceStore.Load(ctx, target.SessionID)
@@ -399,7 +507,7 @@ func finalizePendingSourceRetires(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	headCheckpoints, err := headCheckpointSet(ctx, targetWorktree)
+	committed, err := committedCheckpointSet(ctx, targetWorktree)
 	if err != nil {
 		return
 	}
@@ -421,16 +529,61 @@ func finalizePendingSourceRetires(ctx context.Context) {
 		if marker.AdoptionAttemptID == "" {
 			continue // legacy marker: preserve source, never retire blindly
 		}
+		pending := &pendingAutoAdoption{SessionID: state.SessionID, AttemptID: marker.AdoptionAttemptID}
 		if marker.ExpectedCheckpointID.IsEmpty() {
-			cancelPendingAutoAdoption(ctx, &pendingAutoAdoption{SessionID: state.SessionID, AttemptID: marker.AdoptionAttemptID})
+			cancelPendingAutoAdoption(ctx, pending)
 			continue
 		}
-		if _, ok := headCheckpoints[marker.ExpectedCheckpointID]; !ok {
-			cancelPendingAutoAdoption(ctx, &pendingAutoAdoption{SessionID: state.SessionID, AttemptID: marker.AdoptionAttemptID})
-			continue
+		if _, ok := committed[marker.ExpectedCheckpointID]; !ok {
+			// The bound checkpoint never landed. Before canceling, check for the
+			// abort-after-prepare retry: the first commit aborted, so on the next
+			// commit this worktree already owned the adopted session locally,
+			// auto-adopt correctly skipped, and PrepareCommitMsg issued a NEW
+			// checkpoint that did commit. The adoption succeeded — just under a
+			// different checkpoint — so rebind the marker instead of canceling a
+			// session the user has committed against.
+			rebound, ok := reboundRetryCheckpoint(state, committed)
+			if !ok {
+				cancelPendingAutoAdoption(ctx, pending)
+				continue
+			}
+			logging.Info(logCtx, "auto-adopt finalize: rebinding pending adoption to the retried commit",
+				slog.String("session_id", state.SessionID),
+				slog.String("checkpoint_id", rebound.String()),
+			)
+			mutatePendingAutoAdoption(ctx, pending, func(_ *session.State, m *session.PendingSourceRetire) error {
+				m.ExpectedCheckpointID = rebound
+				return nil
+			})
+			// retirePendingSource reloads the marker under the lock and revalidates
+			// it against the commit window, so a failed rebind simply declines to
+			// retire rather than retiring on unverified state.
+			state.PendingSourceRetire.ExpectedCheckpointID = rebound
 		}
 		retirePendingSource(ctx, targetStore, targetCommonDir, targetWorktree, targetWorktreeID, state)
 	}
+}
+
+// reboundRetryCheckpoint returns the checkpoint this session was actually
+// committed under, when the checkpoint its pending adoption was bound to never
+// made it into a commit.
+//
+// LastCheckpointID is written by PostCommit condensation and names the checkpoint
+// that linked THIS session to the commit that just landed; adoption resets it to
+// empty, so a non-empty value can only have come from a target-side commit. It is
+// the only ID attributable to this adoption, and it still has to appear in the
+// commit window before it may authorize the destructive source retire.
+func reboundRetryCheckpoint(
+	state *session.State,
+	committed map[checkpointid.CheckpointID]struct{},
+) (checkpointid.CheckpointID, bool) {
+	if state.LastCheckpointID.IsEmpty() {
+		return checkpointid.EmptyCheckpointID, false
+	}
+	if _, ok := committed[state.LastCheckpointID]; !ok {
+		return checkpointid.EmptyCheckpointID, false
+	}
+	return state.LastCheckpointID, true
 }
 
 // retirePendingSource tombstones the source session recorded on adopted's
@@ -469,12 +622,12 @@ func retirePendingSource(
 			marker.AdoptionAttemptID == "" || marker.ExpectedCheckpointID.IsEmpty() {
 			return errors.New("pending adoption no longer belongs to this worktree")
 		}
-		headCheckpoints, headErr := headCheckpointSet(retireCtx, targetWorktree)
+		committed, headErr := committedCheckpointSet(retireCtx, targetWorktree)
 		if headErr != nil {
 			return fmt.Errorf("revalidate committed checkpoint: %w", headErr)
 		}
-		if _, ok := headCheckpoints[marker.ExpectedCheckpointID]; !ok {
-			return errors.New("pending adoption checkpoint is not on HEAD")
+		if _, ok := committed[marker.ExpectedCheckpointID]; !ok {
+			return errors.New("pending adoption checkpoint is not in any recent commit")
 		}
 		expectedClaim := pendingClaimFor(targetCommonDir, target, marker)
 		sourceState, err := sourceStore.Load(retireCtx, adopted.SessionID)
@@ -541,15 +694,24 @@ func claimMatchesPending(actual *session.AdoptClaim, expected session.AdoptClaim
 		actual.AttemptID == expected.AttemptID
 }
 
-func headCheckpointSet(ctx context.Context, worktree string) (map[checkpointid.CheckpointID]struct{}, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", worktree, "show", "-s", "--format=%B", "HEAD")
+// committedCheckpointSet returns the checkpoint IDs trailered on the last
+// autoAdoptCommitLookback commits reachable from HEAD. See
+// autoAdoptCommitLookback for why the tip alone is not enough.
+func committedCheckpointSet(ctx context.Context, worktree string) (map[checkpointid.CheckpointID]struct{}, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", worktree, "log",
+		"-n", strconv.Itoa(autoAdoptCommitLookback), "--format=%B%x00", "HEAD")
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("read HEAD commit message: %w", err)
+		return nil, fmt.Errorf("read recent commit messages: %w", err)
 	}
 	result := make(map[checkpointid.CheckpointID]struct{})
-	for _, cpID := range trailers.ParseAllCheckpoints(string(out)) {
-		result[cpID] = struct{}{}
+	// Split on the NUL separator so each commit message is parsed on its own:
+	// ParseAllCheckpoints is trailer-aware, and concatenating bodies could let one
+	// commit's text change how another's trailer block parses.
+	for _, message := range strings.Split(string(out), "\x00") {
+		for _, cpID := range trailers.ParseAllCheckpoints(message) {
+			result[cpID] = struct{}{}
+		}
 	}
 	return result, nil
 }
@@ -657,8 +819,20 @@ func collectRegistryAutoAdoptCandidates(
 		// alone therefore cannot steal across unrelated repos.
 		resolved++
 		resolveCtx, resolveCancel := context.WithTimeout(ctx, autoAdoptGitResolveTimeout)
-		cand, ok := candidateFromSource(resolveCtx, entry.WorktreePath, entry.SessionID, targetCommonDir, staged, owner, hasOwner)
+		cand, ok, inspectErr := candidateFromSource(resolveCtx, entry.WorktreePath, entry.SessionID, staged, owner, hasOwner)
 		resolveCancel()
+		if inspectErr != nil {
+			// An entry we could not inspect may name a session that WOULD have
+			// matched, so the uniqueness test downstream can no longer be trusted:
+			// with one readable and one unreadable match, treating the unreadable
+			// one as a non-match would adopt the readable one as if it were unique.
+			logging.Debug(logging.WithComponent(ctx, "session"),
+				"auto-adopt: registry candidate could not be inspected; failing closed",
+				slog.String("session_id", entry.SessionID),
+				slog.String("error", inspectErr.Error()),
+			)
+			return autoAdoptDiscoveryResult{Candidates: out, Complete: false}
+		}
 		if ok {
 			out = append(out, cand)
 		}
@@ -715,12 +889,29 @@ func collectSiblingAutoAdoptCandidates(
 			resolveCtx, resolveCancel := context.WithTimeout(ctx, autoAdoptGitResolveTimeout)
 			store, worktree, commonDir, err := stateStoreForWorktree(resolveCtx, sibling)
 			resolveCancel()
-			if err != nil || sameAdoptStore(commonDir, targetCommonDir) {
+			if err != nil {
+				// The pre-filters above already established that this sibling has both
+				// a .git entry and a .entire directory, so it is a plausible Entire
+				// repo whose sessions we simply could not enumerate. Fail closed
+				// rather than count it as holding no candidates.
+				logging.Debug(logging.WithComponent(ctx, "session"),
+					"auto-adopt: sibling repo could not be resolved; failing closed",
+					slog.String("sibling", sibling),
+					slog.String("error", err.Error()),
+				)
+				return autoAdoptDiscoveryResult{Candidates: out, Complete: false}
+			}
+			if sameAdoptStore(commonDir, targetCommonDir) {
 				continue
 			}
 			states, err := store.List(ctx)
 			if err != nil {
-				continue
+				logging.Debug(logging.WithComponent(ctx, "session"),
+					"auto-adopt: sibling session store could not be listed; failing closed",
+					slog.String("sibling", sibling),
+					slog.String("error", err.Error()),
+				)
+				return autoAdoptDiscoveryResult{Candidates: out, Complete: false}
 			}
 			for _, state := range states {
 				if !isRecentAdoptCandidate(state) {
@@ -733,7 +924,7 @@ func collectSiblingAutoAdoptCandidates(
 				if freshAdoptClaim(claim) {
 					continue
 				}
-				cand, ok := candidateFromLoaded(store, worktree, commonDir, targetCommonDir, state, staged, owner, hasOwner)
+				cand, ok := candidateFromLoaded(store, worktree, commonDir, state, staged, owner, hasOwner)
 				if ok {
 					out = append(out, cand)
 				}
@@ -745,29 +936,53 @@ func collectSiblingAutoAdoptCandidates(
 	}
 }
 
+// worktreePathGone reports whether path no longer exists. Any other stat error
+// (permissions, I/O) is deliberately NOT "gone": the caller uses this only to
+// separate a definitively stale registry pointer from a candidate it merely
+// failed to inspect, and it must fail closed on the latter.
+func worktreePathGone(path string) bool {
+	_, err := os.Stat(path)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// candidateFromSource resolves and screens one registry entry. The bool reports
+// whether the session is a candidate; a non-nil error means the entry could NOT
+// be screened either way, which callers must treat as an incomplete scan rather
+// than a rejection. A registry entry whose worktree no longer exists on disk is
+// a definitive rejection (a stale pointer), not an inspection failure — treating
+// it as one would disable auto-adopt for the registry TTL after every
+// `git worktree remove`.
 func candidateFromSource(
 	ctx context.Context,
 	sourceWorktree, sessionID string,
-	targetCommonDir string,
 	staged []string,
 	owner proclive.Identity,
 	hasOwner bool,
-) (autoAdoptCandidate, bool) {
+) (autoAdoptCandidate, bool, error) {
+	if strings.TrimSpace(sourceWorktree) == "" {
+		return autoAdoptCandidate{}, false, nil
+	}
+	if worktreePathGone(sourceWorktree) {
+		return autoAdoptCandidate{}, false, nil
+	}
 	store, worktree, commonDir, err := stateStoreForWorktree(ctx, sourceWorktree)
 	if err != nil {
-		return autoAdoptCandidate{}, false
+		return autoAdoptCandidate{}, false, fmt.Errorf("resolve candidate worktree %s: %w", sourceWorktree, err)
 	}
 	state, err := store.Load(ctx, sessionID)
-	if err != nil || state == nil {
-		return autoAdoptCandidate{}, false
+	if err != nil {
+		return autoAdoptCandidate{}, false, fmt.Errorf("load candidate session state: %w", err)
 	}
-	return candidateFromLoaded(store, worktree, commonDir, targetCommonDir, state, staged, owner, hasOwner)
+	if state == nil {
+		return autoAdoptCandidate{}, false, nil
+	}
+	cand, ok := candidateFromLoaded(store, worktree, commonDir, state, staged, owner, hasOwner)
+	return cand, ok, nil
 }
 
 func candidateFromLoaded(
 	store *session.StateStore,
 	worktree, commonDir string,
-	_ string,
 	state *session.State,
 	staged []string,
 	owner proclive.Identity,
@@ -808,14 +1023,55 @@ func candidateFromLoaded(
 	}, true
 }
 
+// revalidateAutoAdoptSource re-applies the automatic-adoption guards to the
+// source state as loaded under the source lock.
+//
+// The locked reload inside adoptFromExternalSessionStore only re-checks the broad
+// manual-adopt eligibility (not ended / not condensed, belongs to the source
+// worktree). Every guard that makes AUTOMATIC adoption safe — ACTIVE phase,
+// recency, matching process owner, distinctive overlap with the staged paths —
+// was evaluated on an unlocked read, so it is re-run here against the same
+// candidate. Reusing candidateFromLoaded keeps discovery and revalidation from
+// drifting apart.
+func revalidateAutoAdoptSource(
+	locked *session.State,
+	expected autoAdoptCandidate,
+	staged []string,
+	owner proclive.Identity,
+	hasOwner bool,
+) error {
+	if locked == nil {
+		return errors.New("source session state disappeared under the adopt lock")
+	}
+	if locked.SessionID != expected.SessionID {
+		return fmt.Errorf("source session identity changed under the adopt lock: got %s, want %s",
+			locked.SessionID, expected.SessionID)
+	}
+	if _, ok := candidateFromLoaded(
+		expected.Store, expected.WorktreePath, expected.CommonDir, locked, staged, owner, hasOwner,
+	); !ok {
+		return errors.New("source no longer satisfies the automatic-adoption guards")
+	}
+	return nil
+}
+
+// stateBelongsToTargetWorktree reports whether state was written by the worktree
+// identified by worktreePath/worktreeID.
+//
+// The worktree ID is the durable identity and wins whenever both sides have one;
+// the path is only a fallback for states written before WorktreeID was recorded.
+// Matching on either would make a reused path sufficient: remove worktree A and
+// create B at the same path, and A's leftover state would suppress auto-adopt in
+// B, or B's post-commit would finalize (and destructively retire the source of)
+// A's pending adoption. Mirrors sessionBelongsToSourceWorktree.
 func stateBelongsToTargetWorktree(state *session.State, worktreePath, worktreeID string) bool {
 	if state == nil {
 		return false
 	}
-	if state.WorktreePath != "" && sameAdoptPath(state.WorktreePath, worktreePath) {
-		return true
+	if state.WorktreeID != "" && worktreeID != "" {
+		return state.WorktreeID == worktreeID
 	}
-	return state.WorktreeID != "" && worktreeID != "" && state.WorktreeID == worktreeID
+	return state.WorktreePath != "" && sameAdoptPath(state.WorktreePath, worktreePath)
 }
 
 func isRecentLiveEntry(entry session.LiveSessionEntry) bool {

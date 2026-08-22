@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -666,7 +667,7 @@ func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error)
 	defer root.Close()
 
 	fileName := sessionID + ".json"
-	data, err := osroot.ReadFile(root, fileName)
+	data, err := readStateFile(ctx, root, fileName)
 	if os.IsNotExist(err) {
 		return nil, nil //nolint:nilnil // nil,nil indicates session not found (expected case)
 	}
@@ -678,6 +679,15 @@ func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error)
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal session state: %w", err)
 	}
+	// The filename is the session's identity everywhere else in the codebase
+	// (locks, registry keys, adopt claims are all keyed by the requested ID). A
+	// body whose session_id disagrees would let a replaced or hand-edited file
+	// redirect a caller onto a different session than the one it validated and
+	// locked, so refuse it instead of returning the mismatched state.
+	if state.SessionID != "" && state.SessionID != sessionID {
+		return nil, fmt.Errorf("session state file %s declares session ID %q", fileName, state.SessionID)
+	}
+	state.SessionID = sessionID
 	state.NormalizeAfterLoad(ctx)
 
 	if state.IsStale() {
@@ -690,6 +700,48 @@ func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error)
 	}
 
 	return &state, nil
+}
+
+// maxStateFileBytes caps a single session state read. Session state is
+// operational metadata (paths, counters, attribution maps); real files are a few
+// hundred kilobytes at the extreme. The cap exists so a git hook running under
+// the auto-adopt budget cannot be made to read an arbitrarily large file.
+const maxStateFileBytes = 64 << 20
+
+// readStateFile reads one session state file with the bounds a git-hook caller
+// needs: it refuses anything that is not a regular file (a fifo would block the
+// hook forever), caps the read at maxStateFileBytes, and honors ctx before and
+// after the read so a cancelled hook budget stops the scan.
+func readStateFile(ctx context.Context, root *os.Root, name string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("session state read canceled: %w", err)
+	}
+	info, err := root.Stat(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // preserve os.IsNotExist for callers
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("session state %s is not a regular file", name)
+	}
+	if info.Size() > maxStateFileBytes {
+		return nil, fmt.Errorf("session state %s exceeds %d bytes", name, maxStateFileBytes)
+	}
+	f, err := root.Open(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // preserve os.IsNotExist for callers
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxStateFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read session state %s: %w", name, err)
+	}
+	if len(data) > maxStateFileBytes {
+		return nil, fmt.Errorf("session state %s exceeds %d bytes", name, maxStateFileBytes)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("session state read canceled: %w", err)
+	}
+	return data, nil
 }
 
 // Save saves the session state atomically.
@@ -780,6 +832,7 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 			registryOwner.WorktreePath = ""
 		}
 	}
+	primaryFile := sessionID + ".json"
 	matches := matchSessionFiles(s.stateDir, sessionID)
 	if len(matches) > 0 {
 		root, rootErr := os.OpenRoot(s.stateDir)
@@ -788,7 +841,15 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 		}
 		defer root.Close()
 		for _, name := range matches {
-			_ = osroot.Remove(root, name) //nolint:errcheck // best-effort cleanup
+			removeErr := osroot.Remove(root, name)
+			// Auxiliary hint files (.model, …) are best-effort, but the primary
+			// state file IS the session's registration in this store. Callers that
+			// roll back an adoption depend on its removal to know the session is no
+			// longer active here; swallowing that failure would leave the session
+			// registered in two repos with nothing to retry from.
+			if removeErr != nil && name == primaryFile {
+				return fmt.Errorf("failed to remove session state file: %w", removeErr)
+			}
 		}
 	}
 
@@ -825,7 +886,16 @@ func (s *StateStore) RemoveAll() error {
 }
 
 // List returns all session states.
+//
+// The scan is context-aware: it is reached from git hooks that run under a
+// wall-clock budget (cross-common-dir auto-adopt), so an expired ctx aborts with
+// an error rather than returning a silently partial list that a caller could
+// mistake for "no other sessions exist". Individual unreadable or oversized
+// state files are skipped (see readStateFile for the per-file bounds).
 func (s *StateStore) List(ctx context.Context) ([]*State, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("session state list canceled: %w", err)
+	}
 	entries, err := os.ReadDir(s.stateDir)
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -836,6 +906,9 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 
 	var states []*State
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("session state list canceled: %w", err)
+		}
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
@@ -846,6 +919,9 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 		sessionID := strings.TrimSuffix(entry.Name(), ".json")
 		state, err := s.Load(ctx, sessionID)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("session state list canceled: %w", ctxErr)
+			}
 			continue // Skip corrupted state files
 		}
 		if state == nil {

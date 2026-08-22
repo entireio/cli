@@ -100,7 +100,15 @@ func registerLiveSession(ctx context.Context, state *State, commonDir string) er
 		// Preserve any in-flight adoption claim. The registry lock makes this
 		// read-modify-write atomic with ClaimLiveSession and other StateStore.Save
 		// calls, so a stale Save cannot erase a just-written claim.
-		if prev, found, err := readLiveSessionEntry(ctx, state.SessionID); err == nil && found {
+		//
+		// Fail closed on a read error rather than writing a claimless entry: a
+		// context expiry or an unparseable read would otherwise erase a live claim
+		// and reopen the double-adoption window the claim exists to close.
+		prev, found, err := readLiveSessionEntry(ctx, state.SessionID)
+		if err != nil {
+			return fmt.Errorf("read existing live session: %w", err)
+		}
+		if found {
 			entry.AdoptClaim = prev.AdoptClaim
 		}
 		return writeLiveSessionEntry(entry)
@@ -214,8 +222,10 @@ func readLiveSessionEntry(ctx context.Context, sessionID string) (LiveSessionEnt
 // of the tombstoned source state → this unregister). Without the common-dir
 // scope the source retire would delete the entry the target just wrote, erasing
 // the adopted session from the registry. An entry owned by a different common
-// dir is therefore left untouched; a missing entry, or one we cannot read/parse
-// (junk), is removed best-effort.
+// dir is therefore left untouched, and so is one we cannot read or parse — an
+// unreadable entry may still hold a live adoption claim, so it is left for the
+// age-bounded sweep in ListLiveSessionsContext instead of being deleted here.
+// A missing entry is a no-op.
 func UnregisterLiveSession(sessionID, commonDir string) error {
 	return unregisterLiveSession(context.Background(), sessionID, commonDir, "")
 }
@@ -243,7 +253,13 @@ func unregisterLiveSession(ctx context.Context, sessionID, commonDir, worktreePa
 
 		fileName := sessionID + ".json"
 		existing, found, readErr := readLiveSessionEntry(ctx, sessionID)
-		if readErr == nil && found && existing.CommonDir != "" && strings.TrimSpace(commonDir) != "" {
+		if readErr != nil {
+			// Fail closed: removing an entry we could not inspect would drop a live
+			// adoption claim (and with it adopt-exactly-once) on a context expiry or
+			// a corrupt read. Leave it to the age-bounded registry sweep.
+			return fmt.Errorf("read live session before unregister: %w", readErr)
+		}
+		if found && existing.CommonDir != "" && strings.TrimSpace(commonDir) != "" {
 			// A live adoption claim is the cross-repository handoff token. A target
 			// may become ended/condensed during strategy.PostCommit before the
 			// deferred source retire runs; its StateStore.Save must not erase that
@@ -311,6 +327,12 @@ func ListLiveSessionsContext(ctx context.Context, maxEntries int) ([]LiveSession
 	logCtx := logging.WithComponent(context.Background(), "session")
 	out := make([]LiveSessionEntry, 0, min(maxEntries, 32))
 	seen := 0
+	// inspectFailed records that at least one registry file could not be
+	// inspected. Such a file may describe a session that would have matched, so
+	// the scan is no longer authoritative and complete must be false — callers
+	// that depend on uniqueness have to fail closed rather than treat the
+	// unreadable entry as a non-match.
+	inspectFailed := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return out, false, nil
@@ -338,25 +360,95 @@ func ListLiveSessionsContext(ctx context.Context, maxEntries int) ([]LiveSession
 			// registry dir cannot redirect the read outside it (os.ReadFile follows
 			// symlinks; osroot.ReadFile refuses to traverse them).
 			live, found, err := readLiveSessionEntry(ctx, sessionID)
-			if err != nil || !found {
+			if err != nil {
+				// Unreadable (corrupt, oversized, not a regular file). It could be
+				// hiding a matching candidate or a live claim, so do not silently
+				// treat it as absent. Delete it only once it is older than the
+				// registry TTL, by which point no claim inside it can still be
+				// fresh; until then report the scan as incomplete.
+				if info, statErr := root.Stat(entry.Name()); statErr == nil &&
+					time.Since(info.ModTime()) > LiveSessionMaxAge {
+					logging.Debug(logCtx, "live-registry: sweeping unreadable stale entry",
+						slog.String("session_id", sessionID),
+					)
+					_ = osroot.Remove(root, entry.Name()) //nolint:errcheck // TTL sweep
+					continue
+				}
+				inspectFailed = true
+				continue
+			}
+			if !found {
 				continue
 			}
 			if live.SessionID == "" {
 				live.SessionID = sessionID
 			}
 			if liveSessionExpired(live) {
-				logging.Debug(logCtx, "live-registry: sweeping expired entry",
-					slog.String("session_id", live.SessionID),
-				)
-				_ = osroot.Remove(root, entry.Name()) //nolint:errcheck // TTL sweep
-				continue
+				refreshed, swept, sweepErr := sweepExpiredLiveSessionEntry(ctx, live.SessionID)
+				if sweepErr != nil {
+					inspectFailed = true
+					continue
+				}
+				if swept {
+					logging.Debug(logCtx, "live-registry: sweeping expired entry",
+						slog.String("session_id", live.SessionID),
+					)
+					continue
+				}
+				// Refreshed (or claimed) between the scan read and the locked
+				// re-read: keep the current contents instead of the stale copy.
+				live = refreshed
 			}
 			out = append(out, live)
 		}
 		if errors.Is(readErr, io.EOF) {
-			return out, true, nil
+			return out, !inspectFailed, nil
 		}
 	}
+}
+
+// sweepExpiredLiveSessionEntry deletes an entry that looked expired during an
+// unlocked scan, re-reading it under the per-session entry lock first.
+//
+// Without the lock the sweep races every writer: ClaimLiveSession or a
+// StateStore.Save refresh can land between the scan's read and the delete, and
+// the delete would then erase a brand-new claim (or a live pointer) based on a
+// staleness decision made from bytes that no longer exist. swept is false when
+// the locked re-read shows the entry is no longer expired, in which case
+// refreshed carries its current contents.
+func sweepExpiredLiveSessionEntry(ctx context.Context, sessionID string) (refreshed LiveSessionEntry, swept bool, err error) {
+	err = withLiveSessionEntryLock(ctx, sessionID, func() error {
+		entry, found, readErr := readLiveSessionEntry(ctx, sessionID)
+		if readErr != nil {
+			return readErr
+		}
+		if !found {
+			swept = true // already gone; nothing to remove
+			return nil
+		}
+		if entry.SessionID == "" {
+			entry.SessionID = sessionID
+		}
+		if !liveSessionExpired(entry) {
+			refreshed = entry
+			return nil
+		}
+		root, rootErr := os.OpenRoot(liveSessionsDir())
+		if rootErr != nil {
+			if os.IsNotExist(rootErr) {
+				swept = true
+				return nil
+			}
+			return fmt.Errorf("open live-sessions dir: %w", rootErr)
+		}
+		defer root.Close()
+		if removeErr := osroot.Remove(root, sessionID+".json"); removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("remove expired live session: %w", removeErr)
+		}
+		swept = true
+		return nil
+	})
+	return refreshed, swept, err
 }
 
 func liveSessionExpired(entry LiveSessionEntry) bool {

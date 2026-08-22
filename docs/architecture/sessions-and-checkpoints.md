@@ -201,17 +201,47 @@ post-commit) and time-bounded. Manual `entire session adopt` retires
 immediately, in-band.
 
 Because the deferred split no longer tombstones the source at prepare time, the
-prepare phase also writes a lightweight, **non-destructive `AdoptClaim`** on the
-source (under the shared source-common-dir lock) recording which target common
-dir is adopting it. Two targets that concurrently discover the same unique
-candidate serialize on that lock; the loser re-reads the source under the lock,
-observes the winner's claim, and refuses — restoring the cross-process mutual
-exclusion the in-band tombstone used to provide, without ending the source (it
-keeps checkpointing). Unlike the tombstone the claim does not retire the session,
-so it is **recency-bounded** by the same `adoptRecentWindow`: an abandoned claim
-left by an aborted commit ages out and frees the source for a later legitimate
-adopt. `post-commit`'s retire supersedes the claim; a re-adopt by the same target
-is idempotent.
+prepare phase also writes a lightweight, **non-destructive `AdoptClaim`** — in
+the live-session registry, which is keyed by session ID alone and is therefore
+the only store two competing repositories both see. It records which target
+common dir, worktree, and adoption attempt is adopting the session. Two targets
+that concurrently discover the same unique candidate serialize on the shared
+source-common-dir lock; the loser re-reads the claim under that lock, observes the
+winner, and refuses — restoring the cross-process mutual exclusion the in-band
+tombstone used to provide, without ending the source (it keeps checkpointing).
+Unlike the tombstone the claim does not retire the session, so it is
+**recency-bounded** by `AdoptClaimMaxAge`: an abandoned claim left by an aborted
+commit ages out and frees the source for a later legitimate adopt.
+`post-commit`'s retire supersedes the claim; a re-adopt by the same target is
+idempotent. Every registry mutation is **fail-closed** on a read it cannot
+complete — a register that could not read the existing entry, or an unregister
+that could not inspect it, returns rather than writing or deleting, because
+either would silently erase a live claim and reopen double-adoption. The TTL
+sweep re-reads under the per-session entry lock before deleting, so a claim
+written between the scan and the delete survives.
+
+**Binding the retire to a commit.** The marker records the exact checkpoint ID
+that *this* `prepare-commit-msg` invocation newly issued — not merely whatever
+`Entire-Checkpoint` trailer the message ends up carrying, since
+`PrepareCommitMsg` deliberately preserves a pre-existing trailer a user handed in
+with `git commit -m`, and that trailer names an unrelated session. `post-commit`
+retires the source only after finding that exact ID in a bounded window of recent
+commits. The window, rather than `HEAD` alone, is what makes this correct: git
+releases the ref lock before running `post-commit`, so another commit can advance
+`HEAD` while the first hook is still finalizing, and reading only the tip would
+cancel a completed adoption. Because the bound ID is a nonce issued by one
+invocation, any commit carrying it is that commit, so widening the search does not
+weaken the guard.
+
+One asymmetric case gets a **rebind** instead of a cancellation: if the first
+commit aborts after prepare, the target already owns the adopted session locally,
+so the next commit correctly skips auto-adopt and `PrepareCommitMsg` issues a
+*new* checkpoint, which then commits. The originally bound ID is nowhere, but the
+adoption did succeed. Finalize detects this by checking the session's own
+`LastCheckpointID` — written by post-commit condensation, and reset to empty by
+adoption, so a non-empty value can only come from a target-side commit — and
+rebinds the marker to it when that ID is in the commit window. Any other missing
+ID still cancels: the adopted copy is removed and the source restored.
 
 Because this adoption is **automatic** and eventually retires the source session
 as a commit side effect, it fires only when every one of these adoption-safety
@@ -238,12 +268,30 @@ invariants holds — any ambiguity or missing signal skips silently:
   owner + non-boilerplate-overlap + uniqueness guards instead.
 - **Uniqueness**: the registry and sibling candidate sets are unioned (deduped
   by session ID) and exactly one candidate must remain.
+- **Complete discovery**: uniqueness only means something over a scan that saw
+  everything, so discovery **fails closed** on any candidate it could not inspect
+  — a truncated registry scan, an unreadable registry entry, a sibling repo git
+  cannot resolve, a session store it cannot list. Treating an uninspectable
+  candidate as a non-match is exactly how two matching sessions would be mistaken
+  for one and the readable one silently stolen. A registry entry whose worktree is
+  simply gone from disk is a stale pointer, not a blind spot, and is rejected
+  without failing the scan.
+- **Still valid under the lock**: every guard above is first evaluated on an
+  unlocked read, so all of them are re-run against the source state loaded *under*
+  the source lock before the adopt commits (`revalidateAutoAdoptSource`, which
+  reuses the discovery predicate so the two cannot drift). `StateStore.Load` also
+  refuses a state file whose body declares a different session ID than its
+  filename, so a replaced file cannot redirect the adopt onto another session.
 
 Each discovery/adopt step is bounded by a timeout and the whole attempt by an
 overall wall-clock budget, so a miss adds only a small, capped latency to `git
-commit`. Adopt failures are logged at Warn (Error when a failed source-retire
-could not be rolled back, leaving the session registered in both repos); the
-adopt path is panic-guarded so a fault never breaks the commit.
+commit`. The post-prepare marker update and the cancellation path carry their own
+budgets, since both take cross-process state flocks straight off the hook. State
+reads are bounded too: `StateStore` refuses non-regular and oversized state files
+and honors the caller's context, so a fifo or a huge file cannot hang a commit.
+Adopt failures are logged at Warn (Error when a failed source-retire could not be
+rolled back, leaving the session registered in both repos); the adopt path is
+panic-guarded so a fault never breaks the commit.
 
 ### Temporary Checkpoints
 

@@ -12,10 +12,12 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
 func TestAutoAdopt_PrepareCommitMsg_CrossCommonDirSibling(t *testing.T) {
@@ -571,7 +573,7 @@ func TestAutoAdopt_NoTrailerCancelsPendingAdoption(t *testing.T) {
 	if err := os.WriteFile(msg, []byte("manual commit without trailer\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	finishPreparedAutoAdoption(context.Background(), pending, msg)
+	finishPreparedAutoAdoption(context.Background(), pending, msg, autoAdoptTrailerSnapshot(msg), nil)
 
 	targetStore := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
 	if target, err := targetStore.Load(context.Background(), sessionID); err != nil {
@@ -617,10 +619,11 @@ func TestAutoAdopt_PostCommitFinalizeRetiresSource(t *testing.T) {
 	if err := os.WriteFile(commitMsgFile, []byte("commit in target\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	trailersBefore := autoAdoptTrailerSnapshot(commitMsgFile)
 	if err := strategy.NewManualCommitStrategy().PrepareCommitMsg(context.Background(), commitMsgFile, ""); err != nil {
 		t.Fatal(err)
 	}
-	finishPreparedAutoAdoption(context.Background(), pending, commitMsgFile)
+	finishPreparedAutoAdoption(context.Background(), pending, commitMsgFile, trailersBefore, nil)
 	testutil.RunGit(t, targetRepo, "commit", "-F", commitMsgFile)
 	// post-commit phase: commit is a fact, so complete the retire.
 	finalizePendingSourceRetires(context.Background())
@@ -688,10 +691,11 @@ func TestAutoAdopt_FinalizeRejectsReplacementClaim(t *testing.T) {
 	if err := os.WriteFile(msg, []byte("commit in target\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	trailersBefore := autoAdoptTrailerSnapshot(msg)
 	if err := strategy.NewManualCommitStrategy().PrepareCommitMsg(context.Background(), msg, ""); err != nil {
 		t.Fatal(err)
 	}
-	finishPreparedAutoAdoption(context.Background(), pending, msg)
+	finishPreparedAutoAdoption(context.Background(), pending, msg, trailersBefore, nil)
 	testutil.RunGit(t, targetRepo, "commit", "-F", msg)
 
 	claim, err := session.LiveSessionClaim(sessionID)
@@ -1168,18 +1172,21 @@ func TestFinalizePendingSourceRetires_IsWorktreeScoped(t *testing.T) {
 }
 
 func TestSiblingDiscovery_ReportsTruncationBeyondCap(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	parent := t.TempDir()
 	target := filepath.Join(parent, "target")
 	if err := os.MkdirAll(target, 0o750); err != nil {
 		t.Fatal(err)
 	}
+	// Real repos, not just dirs carrying .git/.entire markers: a sibling git
+	// cannot resolve is a blind spot that fails discovery closed, which would
+	// mask the cap behavior this test is about.
 	seed := func(count int) {
 		dir := filepath.Join(parent, fmt.Sprintf("candidate-%02d", count))
-		for _, marker := range []string{".git", ".entire"} {
-			if err := os.MkdirAll(filepath.Join(dir, marker), 0o750); err != nil {
-				t.Fatal(err)
-			}
+		if err := os.MkdirAll(filepath.Join(dir, ".entire"), 0o750); err != nil {
+			t.Fatal(err)
 		}
+		testutil.InitRepo(t, dir)
 	}
 	for i := range maxSiblingAutoAdoptScan {
 		seed(i)
@@ -1273,13 +1280,13 @@ func TestCandidateFromLoaded_OwnerMismatchRejectsDistinctivePath(t *testing.T) {
 	// Distinctive overlap present, but the recorded owner differs → rejected by
 	// the owner guard even though overlap passes.
 	mismatch := &proclive.Identity{PID: current.PID + 1, Start: "different", Host: current.Host, Boot: current.Boot}
-	if _, ok := candidateFromLoaded(nil, "", "", "/target", newState(mismatch), staged, current, true); ok {
+	if _, ok := candidateFromLoaded(nil, "", "", newState(mismatch), staged, current, true); ok {
 		t.Fatal("owner mismatch must reject a distinctive-path candidate")
 	}
 
 	// Positive control: only the owner changed — a matching owner is accepted.
 	matching := current
-	if _, ok := candidateFromLoaded(nil, "", "", "/target", newState(&matching), staged, current, true); !ok {
+	if _, ok := candidateFromLoaded(nil, "", "", newState(&matching), staged, current, true); !ok {
 		t.Fatal("matching owner with distinctive overlap must be accepted")
 	}
 }
@@ -1327,7 +1334,7 @@ func TestCandidateFromLoaded_RejectsWorktreePathMismatch(t *testing.T) {
 		WorktreePath:        "/other/worktree",
 		FilesTouched:        []string{"feature.txt"},
 	}
-	_, ok := candidateFromLoaded(nil, "/scanned/worktree", "/common", "/target", state, []string{"feature.txt"}, proclive.Identity{}, false)
+	_, ok := candidateFromLoaded(nil, "/scanned/worktree", "/common", state, []string{"feature.txt"}, proclive.Identity{}, false)
 	if ok {
 		t.Fatal("stale WorktreePath mismatch must reject candidate")
 	}
@@ -1346,7 +1353,7 @@ func TestCandidateFromLoaded_RejectsIdle(t *testing.T) {
 		FilesTouched:        []string{"feature.txt"},
 		Owner:               &owner,
 	}
-	_, ok := candidateFromLoaded(nil, "/scanned/worktree", "/common", "/target", state, []string{"feature.txt"}, owner, true)
+	_, ok := candidateFromLoaded(nil, "/scanned/worktree", "/common", state, []string{"feature.txt"}, owner, true)
 	if ok {
 		t.Fatal("Idle session must not be an auto-adopt candidate")
 	}
@@ -1405,5 +1412,454 @@ func TestStagedFilesForAutoAdopt_NonASCIIAndSpacedPaths(t *testing.T) {
 		if !got[want] {
 			t.Fatalf("staged = %v, want to contain %q (unquoted UTF-8)", staged, want)
 		}
+	}
+}
+
+// runAutoAdoptPreparePhase performs the prepare-commit-msg half of a
+// cross-common-dir auto-adopt against the current working directory: adopt, let
+// the strategy write a fresh trailer, and bind the pending retire to it.
+func runAutoAdoptPreparePhase(t *testing.T, targetRepo string) string {
+	t.Helper()
+	pending := tryAutoAdoptCrossCommonDirSession(context.Background())
+	if pending == nil {
+		t.Fatal("expected a pending auto-adoption")
+	}
+	commitMsgFile := filepath.Join(targetRepo, "COMMIT_EDITMSG")
+	if err := os.WriteFile(commitMsgFile, []byte("commit in target\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := autoAdoptTrailerSnapshot(commitMsgFile)
+	if err := strategy.NewManualCommitStrategy().PrepareCommitMsg(context.Background(), commitMsgFile, ""); err != nil {
+		t.Fatal(err)
+	}
+	finishPreparedAutoAdoption(context.Background(), pending, commitMsgFile, before, nil)
+	return commitMsgFile
+}
+
+// Git releases the ref lock before post-commit runs, so by the time this hook
+// inspects the repo another commit may already have advanced HEAD past the commit
+// that triggered it. Reading only the tip would fail to find our checkpoint and
+// cancel a completed adoption.
+//
+// Uses t.Chdir(), so no t.Parallel().
+func TestAutoAdopt_FinalizeSurvivesHeadAdvancingAfterCommit(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+	sessionID := "test-auto-adopt-head-advanced"
+	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"services/billing/handler.go"}, true)
+	testutil.WriteFile(t, targetRepo, "services/billing/handler.go", "agent change\n")
+	testutil.GitAdd(t, targetRepo, "services/billing/handler.go")
+	t.Chdir(targetRepo)
+
+	commitMsgFile := runAutoAdoptPreparePhase(t, targetRepo)
+	testutil.RunGit(t, targetRepo, "commit", "-F", commitMsgFile)
+
+	// A second commit lands (concurrent committer, or a script) before this
+	// adoption's post-commit hook gets to inspect the repo.
+	testutil.WriteFile(t, targetRepo, "unrelated.txt", "someone else\n")
+	testutil.GitAdd(t, targetRepo, "unrelated.txt")
+	testutil.RunGit(t, targetRepo, "commit", "-m", "unrelated follow-up")
+
+	finalizePendingSourceRetires(context.Background())
+
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	sourceAfter, err := sourceStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isAdoptableSourceSession(sourceAfter) {
+		t.Fatal("HEAD advancing past the triggering commit must not cancel a completed adoption")
+	}
+	targetStore := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	adopted, err := targetStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted == nil || adopted.PendingSourceRetire != nil {
+		t.Fatalf("finalize should have completed and cleared the marker, got %+v", adopted)
+	}
+}
+
+// Abort-after-prepare then retry: the first commit aborted so checkpoint A never
+// landed, and on the retry this worktree already owned the session locally, so
+// auto-adopt skipped and PrepareCommitMsg issued checkpoint B. B committed, so
+// the adoption succeeded — finalize must rebind to B, not cancel a session the
+// user has already committed against.
+//
+// Uses t.Chdir(), so no t.Parallel().
+func TestAutoAdopt_RebindsPendingAdoptionOnCommitRetry(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+	sessionID := "test-auto-adopt-retry-rebind"
+	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"services/billing/handler.go"}, true)
+	testutil.WriteFile(t, targetRepo, "services/billing/handler.go", "agent change\n")
+	testutil.GitAdd(t, targetRepo, "services/billing/handler.go")
+	t.Chdir(targetRepo)
+
+	// First attempt: prepare binds the marker to checkpoint A, then the commit is
+	// aborted so A never reaches a commit and post-commit never runs.
+	runAutoAdoptPreparePhase(t, targetRepo)
+
+	targetStore := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	adopted, err := targetStore.Load(context.Background(), sessionID)
+	if err != nil || adopted == nil || adopted.PendingSourceRetire == nil {
+		t.Fatalf("expected a bound pending marker after prepare, got %+v (%v)", adopted, err)
+	}
+	abortedCheckpoint := adopted.PendingSourceRetire.ExpectedCheckpointID
+	if abortedCheckpoint.IsEmpty() {
+		t.Fatal("prepare should have bound a checkpoint")
+	}
+
+	// Retry commit: a NEW checkpoint B lands, and PostCommit condensation records
+	// it on the session as LastCheckpointID.
+	retryCheckpoint, err := checkpointid.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryMsg := filepath.Join(targetRepo, "RETRY_EDITMSG")
+	body := "retry commit\n\n" + trailers.CheckpointTrailerKey + ": " + retryCheckpoint.String() + "\n"
+	if err := os.WriteFile(retryMsg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	testutil.RunGit(t, targetRepo, "commit", "-F", retryMsg)
+
+	adopted.LastCheckpointID = retryCheckpoint
+	if err := targetStore.Save(context.Background(), adopted); err != nil {
+		t.Fatal(err)
+	}
+
+	finalizePendingSourceRetires(context.Background())
+
+	after, err := targetStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after == nil {
+		t.Fatal("a successful retry commit must not cancel the adopted session")
+	}
+	if after.PendingSourceRetire != nil {
+		t.Fatalf("finalize should have retired the source and cleared the marker, got %+v", after.PendingSourceRetire)
+	}
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	sourceAfter, err := sourceStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isAdoptableSourceSession(sourceAfter) {
+		t.Fatal("a rebound adoption must retire the source")
+	}
+}
+
+// The rebind is bound to THIS session's own committed checkpoint. A commit that
+// merely carries some other checkpoint trailer is no evidence this adoption was
+// recorded, so the adoption must still be canceled.
+//
+// Uses t.Chdir(), so no t.Parallel().
+func TestAutoAdopt_DoesNotRebindToUnrelatedCheckpoint(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+	sessionID := "test-auto-adopt-no-rebind"
+	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"services/billing/handler.go"}, true)
+	testutil.WriteFile(t, targetRepo, "services/billing/handler.go", "agent change\n")
+	testutil.GitAdd(t, targetRepo, "services/billing/handler.go")
+	t.Chdir(targetRepo)
+
+	runAutoAdoptPreparePhase(t, targetRepo)
+
+	// A commit lands carrying an unrelated checkpoint trailer, but nothing ever
+	// attributed a checkpoint to this session (LastCheckpointID stays empty).
+	unrelated, err := checkpointid.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := filepath.Join(targetRepo, "OTHER_EDITMSG")
+	body := "someone else's commit\n\n" + trailers.CheckpointTrailerKey + ": " + unrelated.String() + "\n"
+	if err := os.WriteFile(msg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	testutil.RunGit(t, targetRepo, "commit", "-F", msg)
+
+	finalizePendingSourceRetires(context.Background())
+
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	sourceAfter, err := sourceStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isAdoptableSourceSession(sourceAfter) {
+		t.Fatal("an unrelated checkpoint must not authorize retiring the source")
+	}
+}
+
+// PrepareCommitMsg deliberately preserves a pre-existing Entire-Checkpoint, so a
+// trailer the user handed in with `git commit -m` must not be mistaken for one
+// this invocation issued — it links the commit to an unrelated session and is no
+// evidence the adoption was recorded.
+//
+// Uses t.Chdir(), so no t.Parallel().
+func TestAutoAdopt_PreexistingTrailerDoesNotBindRetire(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+	sessionID := "test-auto-adopt-foreign-trailer"
+	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"services/billing/handler.go"}, true)
+	testutil.WriteFile(t, targetRepo, "services/billing/handler.go", "agent change\n")
+	testutil.GitAdd(t, targetRepo, "services/billing/handler.go")
+	t.Chdir(targetRepo)
+
+	pending := tryAutoAdoptCrossCommonDirSession(context.Background())
+	if pending == nil {
+		t.Fatal("expected pending adoption")
+	}
+
+	foreign, err := checkpointid.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := filepath.Join(targetRepo, "COMMIT_EDITMSG")
+	body := "user supplied message\n\n" + trailers.CheckpointTrailerKey + ": " + foreign.String() + "\n"
+	if err := os.WriteFile(msg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := autoAdoptTrailerSnapshot(msg)
+	if err := strategy.NewManualCommitStrategy().PrepareCommitMsg(context.Background(), msg, "message"); err != nil {
+		t.Fatal(err)
+	}
+	finishPreparedAutoAdoption(context.Background(), pending, msg, before, nil)
+
+	targetStore := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	if target, err := targetStore.Load(context.Background(), sessionID); err != nil {
+		t.Fatal(err)
+	} else if target != nil {
+		t.Fatal("a pre-existing trailer must not bind the adoption; it should have been rolled back")
+	}
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	if source, err := sourceStore.Load(context.Background(), sessionID); err != nil {
+		t.Fatal(err)
+	} else if !isAdoptableSourceSession(source) {
+		t.Fatal("a pre-existing trailer must leave the source active")
+	}
+}
+
+// A failed prepare wrote no trailer attributable to this adoption, so the
+// adoption must be rolled back rather than left bound to whatever is in the file.
+//
+// Uses t.Chdir(), so no t.Parallel().
+func TestAutoAdopt_FailedPrepareCancelsPendingAdoption(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+	sessionID := "test-auto-adopt-prepare-failed"
+	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"services/billing/handler.go"}, true)
+	testutil.WriteFile(t, targetRepo, "services/billing/handler.go", "agent change\n")
+	testutil.GitAdd(t, targetRepo, "services/billing/handler.go")
+	t.Chdir(targetRepo)
+
+	pending := tryAutoAdoptCrossCommonDirSession(context.Background())
+	if pending == nil {
+		t.Fatal("expected pending adoption")
+	}
+	msg := filepath.Join(targetRepo, "COMMIT_EDITMSG")
+	trailer, err := checkpointid.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := "message\n\n" + trailers.CheckpointTrailerKey + ": " + trailer.String() + "\n"
+	if err := os.WriteFile(msg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	finishPreparedAutoAdoption(context.Background(), pending, msg, nil, errors.New("prepare blew up"))
+
+	targetStore := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	if target, err := targetStore.Load(context.Background(), sessionID); err != nil {
+		t.Fatal(err)
+	} else if target != nil {
+		t.Fatal("a failed prepare must roll back the adoption")
+	}
+}
+
+func TestStateBelongsToTargetWorktree_PrefersWorktreeID(t *testing.T) {
+	t.Parallel()
+
+	// Worktree A was removed and B created at the same path with a fresh ID. A's
+	// leftover state must not be attributed to B.
+	reused := &session.State{SessionID: "reused-path", WorktreePath: "/repo/wt", WorktreeID: "id-a"}
+	if stateBelongsToTargetWorktree(reused, "/repo/wt", "id-b") {
+		t.Fatal("a reused path must not match when both worktree IDs are known and differ")
+	}
+	if !stateBelongsToTargetWorktree(reused, "/repo/wt", "id-a") {
+		t.Fatal("matching worktree IDs must match")
+	}
+	// A different path with the same ID still matches: the ID is the identity.
+	if !stateBelongsToTargetWorktree(reused, "/moved/wt", "id-a") {
+		t.Fatal("worktree ID equality must win over a path difference")
+	}
+	// Legacy state with no recorded ID falls back to the path.
+	legacy := &session.State{SessionID: "legacy", WorktreePath: "/repo/wt"}
+	if !stateBelongsToTargetWorktree(legacy, "/repo/wt", "id-b") {
+		t.Fatal("a state without a worktree ID must fall back to path matching")
+	}
+}
+
+func TestRevalidateAutoAdoptSource(t *testing.T) {
+	t.Parallel()
+
+	owner, ok := proclive.ResolveOwner()
+	if !ok {
+		t.Skip("ResolveOwner unavailable on this platform")
+	}
+	now := time.Now()
+	staged := []string{"services/billing/handler.go"}
+	candidate := autoAdoptCandidate{
+		SessionID:    "revalidate-001",
+		WorktreePath: "/source/wt",
+		CommonDir:    "/source/.git",
+	}
+	base := func() *session.State {
+		return &session.State{
+			SessionID:           "revalidate-001",
+			Phase:               session.PhaseActive,
+			StartedAt:           now.Add(-time.Minute),
+			LastInteractionTime: &now,
+			WorktreePath:        "/source/wt",
+			FilesTouched:        []string{"services/billing/handler.go"},
+			Owner:               &owner,
+		}
+	}
+
+	if err := revalidateAutoAdoptSource(base(), candidate, staged, owner, true); err != nil {
+		t.Fatalf("an unchanged source must revalidate: %v", err)
+	}
+	if err := revalidateAutoAdoptSource(nil, candidate, staged, owner, true); err == nil {
+		t.Fatal("a vanished source must fail revalidation")
+	}
+
+	// The state file was replaced by a different session between discovery and
+	// the lock — adoption must not silently redirect onto it.
+	swapped := base()
+	swapped.SessionID = "someone-else"
+	if err := revalidateAutoAdoptSource(swapped, candidate, staged, owner, true); err == nil {
+		t.Fatal("a session ID change under the lock must fail revalidation")
+	}
+
+	// Guards that discovery checked on an unlocked read must be re-checked.
+	idle := base()
+	idle.Phase = session.PhaseIdle
+	if err := revalidateAutoAdoptSource(idle, candidate, staged, owner, true); err == nil {
+		t.Fatal("a source that went Idle must fail revalidation")
+	}
+	lostOwner := base()
+	lostOwner.Owner = nil
+	if err := revalidateAutoAdoptSource(lostOwner, candidate, staged, owner, true); err == nil {
+		t.Fatal("a source that lost its owner must fail revalidation")
+	}
+	moved := base()
+	moved.WorktreePath = "/elsewhere"
+	if err := revalidateAutoAdoptSource(moved, candidate, staged, owner, true); err == nil {
+		t.Fatal("a source that moved worktree must fail revalidation")
+	}
+}
+
+// A registry entry we cannot inspect may name a session that would have matched,
+// so it must make the scan incomplete instead of counting as a non-match — with
+// one readable and one unreadable match, the readable one would otherwise be
+// adopted as if it were unique.
+func TestCollectRegistryAutoAdoptCandidates_FailsClosedOnUnresolvableWorktree(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	owner, ok := proclive.ResolveOwner()
+	if !ok {
+		t.Skip("ResolveOwner unavailable on this platform")
+	}
+
+	// A directory that exists but is not a git repo: rev-parse fails, so its
+	// sessions cannot be enumerated at all.
+	notARepo := filepath.Join(t.TempDir(), "not-a-repo")
+	if err := os.MkdirAll(notARepo, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := session.RegisterLiveSession(&session.State{
+		SessionID: "registry-unresolvable", Phase: session.PhaseActive,
+		WorktreePath: notARepo, LastInteractionTime: &now,
+	}, filepath.Join(notARepo, ".git")); err != nil {
+		t.Fatal(err)
+	}
+
+	result := collectRegistryAutoAdoptCandidates(
+		context.Background(), "/target/.git", []string{"services/billing/handler.go"}, owner, true)
+	if result.Complete {
+		t.Fatal("an unresolvable registry candidate must make discovery incomplete")
+	}
+}
+
+// A registry entry whose worktree is gone from disk is a stale pointer, not a
+// blind spot. Failing closed on it would disable auto-adopt for the whole
+// registry TTL after every `git worktree remove`.
+func TestCollectRegistryAutoAdoptCandidates_StaleEntryIsRejectionNotFailure(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	owner, ok := proclive.ResolveOwner()
+	if !ok {
+		t.Skip("ResolveOwner unavailable on this platform")
+	}
+
+	removed := filepath.Join(t.TempDir(), "removed-worktree")
+	now := time.Now()
+	if err := session.RegisterLiveSession(&session.State{
+		SessionID: "registry-removed-worktree", Phase: session.PhaseActive,
+		WorktreePath: removed, LastInteractionTime: &now,
+	}, filepath.Join(removed, ".git")); err != nil {
+		t.Fatal(err)
+	}
+
+	result := collectRegistryAutoAdoptCandidates(
+		context.Background(), "/target/.git", []string{"services/billing/handler.go"}, owner, true)
+	if !result.Complete {
+		t.Fatal("a removed worktree is a definitive rejection, not an inspection failure")
+	}
+	if len(result.Candidates) != 0 {
+		t.Fatalf("candidates = %d, want 0", len(result.Candidates))
+	}
+}
+
+// A sibling carrying both the .git and .entire markers that git nonetheless
+// cannot resolve is a blind spot: its sessions cannot be enumerated, so counting
+// it as holding no candidates would let a second, readable match be adopted as
+// if it were unique.
+func TestSiblingDiscovery_FailsClosedOnUnresolvableSibling(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	parent := t.TempDir()
+	target := filepath.Join(parent, "target")
+	if err := os.MkdirAll(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	blind := filepath.Join(parent, "blind-spot")
+	for _, marker := range []string{".git", ".entire"} {
+		if err := os.MkdirAll(filepath.Join(blind, marker), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result := collectSiblingAutoAdoptCandidates(
+		context.Background(), target, "/target/.git", []string{"feature.txt"}, proclive.Identity{}, false)
+	if result.Complete {
+		t.Fatal("an unresolvable sibling repo must make discovery incomplete")
 	}
 }

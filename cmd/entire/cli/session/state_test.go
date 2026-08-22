@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -743,5 +744,117 @@ func TestState_InvestigateRoundTrip(t *testing.T) {
 		if strings.Contains(zs, `"`+key+`"`) {
 			t.Errorf("expected zero-value State to omit %q, got %s", key, zs)
 		}
+	}
+}
+
+// The filename is the session's identity everywhere else (locks, registry keys,
+// adopt claims), so a body claiming a different ID must be refused rather than
+// silently redirecting the caller onto another session.
+func TestStateStore_Load_RejectsSessionIDMismatch(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	stateDir := filepath.Join(t.TempDir(), SessionStateDirName)
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"session_id":"impostor-session","phase":"ACTIVE","started_at":"` +
+		time.Now().Format(time.RFC3339Nano) + `"}`
+	if err := os.WriteFile(filepath.Join(stateDir, "requested-session.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewStateStoreWithDir(stateDir)
+	state, err := store.Load(context.Background(), "requested-session")
+	if err == nil {
+		t.Fatalf("Load must reject a session ID mismatch, got state = %+v", state)
+	}
+	if state != nil {
+		t.Fatalf("Load returned a state alongside the mismatch error: %+v", state)
+	}
+}
+
+// A fifo (or any non-regular file) would block a git hook forever, and an
+// arbitrarily large file would blow the hook's wall-clock budget.
+func TestStateStore_Load_RejectsOversizedState(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	stateDir := filepath.Join(t.TempDir(), SessionStateDirName)
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(stateDir, "huge-session.json")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sparse: reserves the size without writing 64MB.
+	if err := f.Truncate(maxStateFileBytes + 1); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewStateStoreWithDir(stateDir).Load(context.Background(), "huge-session"); err == nil {
+		t.Fatal("Load must reject a state file over the size cap")
+	}
+}
+
+// List runs under the auto-adopt hook budget; an expired context must surface as
+// an error, never as a silently short list a caller could read as "no other
+// sessions exist".
+func TestStateStore_List_HonorsContextCancellation(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	stateDir := filepath.Join(t.TempDir(), SessionStateDirName)
+	store := NewStateStoreWithDir(stateDir)
+	now := time.Now()
+	if err := store.Save(context.Background(), &State{
+		SessionID: "ctx-list-001", Phase: PhaseActive, StartedAt: now, LastInteractionTime: &now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if states, err := store.List(ctx); err == nil {
+		t.Fatalf("List with a canceled context must fail, got %d states", len(states))
+	}
+}
+
+// Clear's removal of the primary state file is what tells a caller the session is
+// no longer registered in this store; an adoption rollback depends on it, so the
+// failure must not be swallowed.
+func TestStateStore_Clear_SurfacesPrimaryRemovalFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not block removal on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	stateDir := filepath.Join(t.TempDir(), SessionStateDirName)
+	store := NewStateStoreWithDir(stateDir)
+	now := time.Now()
+	if err := store.Save(context.Background(), &State{
+		SessionID: "clear-fail-001", Phase: PhaseActive, StartedAt: now, LastInteractionTime: &now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read+execute only: entries are still listable, but unlink is denied.
+	if err := os.Chmod(stateDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(stateDir, 0o750); err != nil {
+			t.Errorf("restore state dir permissions: %v", err)
+		}
+	})
+
+	if err := store.Clear(context.Background(), "clear-fail-001"); err == nil {
+		t.Fatal("Clear must report a failure to remove the primary state file")
 	}
 }

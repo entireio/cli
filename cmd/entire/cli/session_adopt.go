@@ -45,6 +45,13 @@ type adoptOptions struct {
 	// AdoptionAttemptID binds a deferred target marker to its exact registry
 	// claim. Auto-adopt supplies a fresh value for every prepare invocation.
 	AdoptionAttemptID string
+	// RevalidateSource re-runs the caller's own admission checks against the
+	// source state as loaded UNDER the source lock. The locked reload here only
+	// re-establishes manual-adopt eligibility; a caller whose decision rested on
+	// additional unlocked reads (automatic adoption: phase, recency, process
+	// owner, staged-path overlap) supplies those checks here so they hold at the
+	// moment the adopt commits. nil for manual `entire session adopt`.
+	RevalidateSource func(*session.State) error
 }
 
 // adoptRecentWindow bounds how recently a session must have been active to be
@@ -205,6 +212,11 @@ func adoptFromExternalSessionStore(
 		if !sessionBelongsToSourceWorktree(sourceState, sourceWorktree, sourceWorktreeID) {
 			return fmt.Errorf("session %s belongs to %s, not %s",
 				sessionID, adoptSessionWorktreeLabel(sourceState), sourceWorktree)
+		}
+		if opts.RevalidateSource != nil {
+			if err := opts.RevalidateSource(sourceState); err != nil {
+				return fmt.Errorf("revalidate adoption source: %w", err)
+			}
 		}
 		if !opts.SkipTranscriptValidation {
 			if err := validateAdoptSourceTranscript(sourceState, sourceWorktree); err != nil {
