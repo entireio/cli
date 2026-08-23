@@ -1197,26 +1197,44 @@ func TestCheckpointStepCount(t *testing.T) {
 func TestCondenseSession_TaskRecordImageExternalizationBoundary(t *testing.T) {
 	sessionID := "2026-08-23-task-image-boundary"
 	repo, state := setupCondensableSessionWithTranscript(t, sessionID)
-
 	// Enable image externalization for the test via env.
 	t.Setenv("ENTIRE_EXTERNALIZE_IMAGES", "1")
 	state.AgentType = agent.AgentTypeClaudeCode
-
 	dir := t.TempDir()
 	agentTranscriptPath := filepath.Join(dir, "agent-transcript.jsonl")
 
-	// Create a transcript with a large base64 image.
-	// 40 MiB decoded -> ~53.3 MiB base64.
-	// This exceeds agent.MaxChunkSize (50 MiB).
-	// After externalization, the transcript will only contain a placeholder (~100 bytes).
-	imgData := make([]byte, 40*1024*1024)
-	for i := range imgData {
-		imgData[i] = byte(i % 256)
-	}
-	base64Image := base64.StdEncoding.EncodeToString(imgData)
-	line := `{"role":"assistant","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + base64Image + `"}}],"message":{"id":"msg_123"}}` + "\n"
+	// Helper to write a transcript with a base64 image of specified decoded size.
+	writeImageTranscript := func(path string, decodedSize int) {
+		f, err := os.Create(path)
+		require.NoError(t, err)
+		defer f.Close()
 
-	require.NoError(t, os.WriteFile(agentTranscriptPath, []byte(line), 0o644))
+		_, err = f.WriteString(`{"role":"assistant","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"`)
+		require.NoError(t, err)
+
+		// Stream base64 to avoid huge memory allocations.
+		// 3 bytes -> 4 base64 chars.
+		buf := make([]byte, 3072) // multiple of 3
+		for i := 0; i < decodedSize; i += len(buf) {
+			n := len(buf)
+			if i+n > decodedSize {
+				n = decodedSize - i
+			}
+			for j := 0; j < n; j++ {
+				buf[j] = byte((i + j) % 256)
+			}
+			_, err = f.WriteString(base64.StdEncoding.EncodeToString(buf[:n]))
+			require.NoError(t, err)
+		}
+
+		_, err = f.WriteString(`"}}],"message":{"id":"msg_123"}}` + "\n")
+		require.NoError(t, err)
+	}
+
+	// Case 1: 40 MiB decoded -> ~53.3 MiB base64.
+	// This exceeds agent.MaxChunkSize (50 MiB) in raw form.
+	// After externalization, the transcript will only contain a placeholder.
+	writeImageTranscript(agentTranscriptPath, 40*1024*1024)
 
 	state.TaskRecords = []session.TaskRecord{
 		{
@@ -1227,7 +1245,6 @@ func TestCondenseSession_TaskRecordImageExternalizationBoundary(t *testing.T) {
 		},
 	}
 	require.NoError(t, SaveSessionState(context.Background(), state))
-
 	checkpointID := id.MustCheckpointID("aabbccdd2063")
 	result, err := (&ManualCommitStrategy{}).CondenseSession(context.Background(), repo, checkpointID, state, nil)
 	require.NoError(t, err)
@@ -1237,17 +1254,12 @@ func TestCondenseSession_TaskRecordImageExternalizationBoundary(t *testing.T) {
 	jsonl, ok := checkpointTaskFile(t, repo, checkpointID, "tasks/toolu_boundary/agent-agent-boundary.jsonl")
 	require.True(t, ok, "transcript must be stored because externalized size is under cap")
 	require.Contains(t, jsonl, "entire-asset:assets/", "transcript must contain the asset placeholder")
-	require.NotContains(t, jsonl, base64Image, "transcript must not contain the raw base64")
+	// The transcript still contains "content" (the field name), but not the large base64 data.
+	require.Less(t, len(jsonl), 1024, "transcript must be shrunken")
 
 	// Case 2: >50 MiB DECODED image.
 	// This should remain inline (per imageextract.go policy) and then hit the cap.
-	imgDataLarge := make([]byte, 51*1024*1024)
-	for i := range imgDataLarge {
-		imgDataLarge[i] = byte(i % 256)
-	}
-	base64Large := base64.StdEncoding.EncodeToString(imgDataLarge)
-	largeLine := `{"role":"assistant","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + base64Large + `"}}],"message":{"id":"msg_456"}}` + "\n"
-	require.NoError(t, os.WriteFile(agentTranscriptPath, []byte(largeLine), 0o644))
+	writeImageTranscript(agentTranscriptPath, 51*1024*1024)
 
 	state.TaskRecords[0].ToolUseID = "toolu_oversize"
 	checkpointID2 := id.MustCheckpointID("aabbccdd2064")

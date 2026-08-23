@@ -213,7 +213,7 @@ func prepareTranscriptForStorage(
 	return externalized, assets, int64(len(sanitized))
 }
 
-// prepareTaskTranscriptForStorage runs the sanitize -> externalize -> redact
+// prepareTaskTranscriptForStorage runs the sanitize -> externalize -> cap -> redact
 // chain for a single subagent transcript, mirroring prepareTranscriptForStorage's
 // first two steps and then completing with the same redaction the session
 // transcript gets (see redactSessionTranscript). It is a SEPARATE entry point
@@ -228,10 +228,11 @@ func prepareTranscriptForStorage(
 //
 // It also carries checkpoint.prepareSubagentTranscript's size guard, for the
 // same reason: agent-<agent-id>.jsonl is neither chunked nor capped, and
-// redaction runs at roughly 220ms/MB. The cap is measured against the SANITIZED
-// bytes, not the raw ones — sanitizing strips the bulk (Codex encrypted_content
-// runs to ~20% of a rollout's bytes), so measuring raw would drop a transcript
-// oversized only by payloads about to be discarded.
+// redaction runs at roughly 220ms/MB. The cap is measured against the
+// EXTERNALIZED bytes (after sanitization and image extraction). This ensures
+// that a transcript which is only large because of inline images can still be
+// stored if those images are externalized into separate assets, while still
+// protecting the metadata branch from oversized text blobs.
 func prepareTaskTranscriptForStorage(
 	ctx, logCtx context.Context,
 	ag agent.Agent,
