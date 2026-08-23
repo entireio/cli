@@ -3,8 +3,11 @@ package strategy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -321,6 +324,144 @@ func TestPostCommit_ReadOnlyActiveSessionNotCondensed(t *testing.T) {
 	_, err = repo.Reference(refName, true)
 	assert.NoError(t, err,
 		"shadow branch should be preserved — uncondensed ACTIVE session still references it")
+}
+
+// TestPostCommit_StaleActiveSession_DoesNotInheritOtherSessionFiles is a
+// regression test for the multi-session inheritance bug observed in the wild:
+// a recent ACTIVE session that did no real work (e.g. a Codex shell where
+// the user typed "exit" hours ago — phase still ACTIVE, LastInteractionTime
+// within 24h, no FilesTouched, transcript only contains a startup banner)
+// gets condensed onto a commit authored entirely by a different ACTIVE
+// session and inherits that commit's file list via filterFilesTouched's
+// evidence-of-work fallback.
+//
+// The bug requires sessionsWithCommittedFiles to be 0 at gate-check time —
+// i.e. no session's state.FilesTouched overlaps with the committed set —
+// because the read-only-skip in shouldCondenseWithOverlapCheck only fires
+// when sessionsWithCommittedFiles > 0. In production this happens when the
+// working session's state.FilesTouched on disk is empty at the moment
+// PostCommit runs (e.g. SaveStep populated the shadow branch but tool-use
+// hooks haven't merged the file list back into the on-disk state, or
+// state.FilesTouched was cleared by a previous condensation and the next
+// SaveStep hasn't run yet). The shadow branch still has the actual content
+// so the working session condenses fine, but the stale session — with no
+// shadow branch contribution and no real transcript activity — slips
+// through the gate and inherits the committed files via filterFilesTouched.
+//
+// Expected behavior: the stale session must be skipped or, if it is
+// condensed, must not inherit a different session's file list.
+func TestPostCommit_StaleActiveSession_DoesNotInheritOtherSessionFiles(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	workingSessionID := "claude-working"
+	staleSessionID := "codex-stale"
+
+	// Working session: ACTIVE with a SaveStep-populated shadow branch
+	// (analogous to a Claude session mid-edit) but state.FilesTouched on disk
+	// is empty at gate-check time. See doc comment above for why this
+	// matters.
+	setupSessionWithCheckpoint(t, s, repo, dir, workingSessionID)
+	workingState, err := s.loadSessionState(context.Background(), workingSessionID)
+	require.NoError(t, err)
+	now := time.Now()
+	workingState.Phase = session.PhaseActive
+	workingState.LastInteractionTime = &now
+	workingState.FilesTouched = nil
+	require.NoError(t, s.saveSessionState(context.Background(), workingState))
+
+	// Stale session: ACTIVE in the same worktree at the same base commit,
+	// LastInteractionTime within 24h (so isRecentInteraction == true). No
+	// shadow branch contribution. Transcript file exists with content from
+	// before the last condensation (CheckpointTranscriptStart matches the
+	// current line count — no growth this checkpoint window), mirroring the
+	// real-world Codex case where the user typed "exit" hours ago and the
+	// session has been idle since.
+	staleTranscript := filepath.Join(dir, "stale-transcript.jsonl")
+	staleTranscriptLines := []string{
+		`{"type":"event_msg","payload":{"type":"session_meta","session_id":"codex","tool":"codex"}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"exit"}]}}`,
+	}
+	staleTranscriptBytes := []byte(strings.Join(staleTranscriptLines, "\n") + "\n")
+	require.NoError(t, os.WriteFile(staleTranscript, staleTranscriptBytes, 0o644))
+
+	staleState := &SessionState{
+		SessionID:                 staleSessionID,
+		BaseCommit:                workingState.BaseCommit,
+		WorktreePath:              workingState.WorktreePath,
+		WorktreeID:                workingState.WorktreeID,
+		StartedAt:                 now,
+		Phase:                     session.PhaseActive,
+		LastInteractionTime:       &now,
+		StepCount:                 0,
+		AgentType:                 agent.AgentTypeCodex,
+		TranscriptPath:            staleTranscript,
+		CheckpointTranscriptStart: len(staleTranscriptLines),
+		CheckpointTranscriptSize:  int64(len(staleTranscriptBytes)),
+	}
+	require.NoError(t, s.saveSessionState(context.Background(), staleState))
+
+	commitWithCheckpointTrailer(t, repo, dir, "ddccbbaa1122")
+
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	// Working session: should be condensed onto this checkpoint.
+	workingState, err = s.loadSessionState(context.Background(), workingSessionID)
+	require.NoError(t, err)
+	assert.Equal(t, id.CheckpointID("ddccbbaa1122"), workingState.LastCheckpointID,
+		"working session should be condensed onto this checkpoint")
+
+	// The bug: stale session also gets condensed and inherits the working
+	// session's committed files. Either outcome below is a fix:
+	//   (a) the gate skips the stale session entirely (LastCheckpointID empty), or
+	//   (b) the stale session is condensed but its metadata blob does not
+	//       claim files it didn't touch.
+	staleState, err = s.loadSessionState(context.Background(), staleSessionID)
+	require.NoError(t, err)
+	if !staleState.LastCheckpointID.IsEmpty() {
+		// Gate let it through — verify it didn't inherit. Read the metadata
+		// blob from entire/checkpoints/v1 and check files_touched.
+		staleMetadata := readCondensedSessionMetadata(t, repo, "ddccbbaa1122", staleSessionID)
+		assert.Empty(t, staleMetadata.FilesTouched,
+			"stale session must not inherit committed files from another session "+
+				"(got files_touched=%v)", staleMetadata.FilesTouched)
+	}
+}
+
+// readCondensedSessionMetadata loads the per-session metadata.json blob from
+// the entire/checkpoints/v1 tree for a given checkpoint and session id.
+// Walks the indexed session subdirs (0/, 1/, ...) and returns the one whose
+// session_id field matches.
+func readCondensedSessionMetadata(t *testing.T, repo *git.Repository, checkpointIDStr, sessionID string) checkpoint.CommittedMetadata {
+	t.Helper()
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err, "metadata branch should exist")
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+
+	cpDir := checkpointIDStr[:2] + "/" + checkpointIDStr[2:]
+	for i := range 10 {
+		blobPath := cpDir + "/" + strconv.Itoa(i) + "/metadata.json"
+		file, err := tree.File(blobPath)
+		if err != nil {
+			break
+		}
+		contents, err := file.Contents()
+		require.NoError(t, err)
+		var meta checkpoint.CommittedMetadata
+		require.NoError(t, json.Unmarshal([]byte(contents), &meta))
+		if meta.SessionID == sessionID {
+			return meta
+		}
+	}
+	t.Fatalf("no metadata.json found for session %s under checkpoint %s", sessionID, checkpointIDStr)
+	return checkpoint.CommittedMetadata{}
 }
 
 // TestPostCommit_CondensationFailure_PreservesShadowBranch verifies that when

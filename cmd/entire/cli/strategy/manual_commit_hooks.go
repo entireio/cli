@@ -667,6 +667,8 @@ type postCommitActionHandler struct {
 	shadowBranchesToDelete     map[string]struct{}
 	committedFileSet           map[string]struct{}
 	hasNew                     bool
+	hasTranscriptGrowth        bool // true when state's live transcript advanced past CheckpointTranscriptStart
+	hasShadowContributions     bool // true when SaveStep ran in this checkpoint window (state.StepCount > 0)
 	filesTouchedBefore         []string
 	sessionsWithCommittedFiles int // number of processable sessions that have tracked files
 
@@ -756,10 +758,11 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 }
 
 // shouldCondenseWithOverlapCheck returns true if the session should be condensed
-// into this commit. Active sessions with recent interaction condense unless they
-// have no tracked files and another session claims the committed files (read-only
-// gate). Stale ACTIVE and IDLE/ENDED sessions require file overlap evidence
-// between tracked files and committed files.
+// into this commit. Active sessions with recent interaction condense if they
+// have evidence of work in this checkpoint window — either tracked files or
+// transcript growth past the last condensation point. Stale ACTIVE and
+// IDLE/ENDED sessions require file overlap evidence between tracked files
+// and committed files.
 func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time) bool {
 	if !h.hasNew {
 		return false
@@ -769,22 +772,42 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, 
 	// (added trailer). The overlap check is only meaningful when we need
 	// heuristic evidence that a commit was related to the session.
 	//
-	// Exception: when another session's tracked files overlap with the
-	// committed files, skip this ACTIVE session if it has no tracked files
-	// itself. This prevents read-only sessions (e.g., codex exec from tools
-	// like summarize) from being condensed when a different session's commit
-	// triggers PostCommit. When no other session claims the committed files,
-	// the ACTIVE session is assumed to own the commit.
+	// Exception: skip ACTIVE sessions that have no evidence of work in this
+	// checkpoint window — neither tracked files nor transcript growth past
+	// CheckpointTranscriptStart. This catches read-only sessions (e.g.,
+	// codex exec from summarize tooling) and stale-but-still-ACTIVE sessions
+	// (e.g., a Codex shell where the user typed "exit" hours ago but the
+	// process is still alive). Without this check, those sessions would be
+	// condensed onto another session's commit and inherit its committed
+	// files via filterFilesTouched's evidence-of-work fallback.
 	//
-	// We check LastInteractionTime to avoid condensing stale ACTIVE sessions
-	// (agent killed without Stop hook) into every subsequent commit. A stale
-	// session has no recent interaction and falls through to the overlap check.
+	// We check LastInteractionTime to avoid condensing very stale ACTIVE
+	// sessions (agent killed without Stop hook) into every subsequent
+	// commit. A very stale session has no recent interaction and falls
+	// through to the overlap check.
 	if isActive && isRecentInteraction(lastInteraction) {
-		if h.sessionsWithCommittedFiles > 0 && len(h.filesTouchedBefore) == 0 {
-			logging.Debug(h.ctx, "post-commit: skipping read-only ACTIVE session (no tracked files, other sessions claim committed files)",
-				slog.Int("sessions_with_committed_files", h.sessionsWithCommittedFiles),
-			)
-			return false
+		if len(h.filesTouchedBefore) == 0 {
+			// No tracked files for this session. Skip when EITHER:
+			//   (a) another session's tracked files overlap with the
+			//       committed set — that session "owns" the commit, and
+			//       this one is read-only relative to it (e.g. codex exec
+			//       summarize triggered alongside the real edit session);
+			//   (b) this session has no evidence of work in the current
+			//       checkpoint window — no transcript growth past
+			//       CheckpointTranscriptStart and no SaveStep contributions
+			//       (StepCount == 0). This catches stale-but-still-ACTIVE
+			//       sessions like a Codex shell where the user typed "exit"
+			//       hours ago but the process is still alive. Without (b),
+			//       such a session would slip through and inherit the
+			//       committed files via filterFilesTouched's fallback.
+			if h.sessionsWithCommittedFiles > 0 || (!h.hasTranscriptGrowth && !h.hasShadowContributions) {
+				logging.Debug(h.ctx, "post-commit: skipping ACTIVE session with no tracked files",
+					slog.Int("sessions_with_committed_files", h.sessionsWithCommittedFiles),
+					slog.Bool("has_transcript_growth", h.hasTranscriptGrowth),
+					slog.Bool("has_shadow_contributions", h.hasShadowContributions),
+				)
+				return false
+			}
 		}
 		return true
 	}
@@ -862,6 +885,29 @@ const activeSessionInteractionThreshold = 24 * time.Hour
 // activeSessionInteractionThreshold of now.
 func isRecentInteraction(lastInteraction *time.Time) bool {
 	return lastInteraction != nil && time.Since(*lastInteraction) < activeSessionInteractionThreshold
+}
+
+// liveTranscriptGrew reports whether the session's live transcript file has
+// grown beyond the size captured at the last condensation
+// (CheckpointTranscriptSize). When the session has never been condensed
+// (CheckpointTranscriptSize == 0), any non-empty transcript counts as
+// growth — the agent has produced *some* content this checkpoint window.
+//
+// Agent-agnostic: relies only on file size, so it works for agents without
+// a TranscriptAnalyzer implementation. Returns false on stat errors or
+// when no transcript path is recorded.
+func liveTranscriptGrew(state *SessionState) bool {
+	if state == nil || state.TranscriptPath == "" {
+		return false
+	}
+	info, err := os.Stat(state.TranscriptPath)
+	if err != nil {
+		return false
+	}
+	if state.CheckpointTranscriptSize > 0 {
+		return info.Size() > state.CheckpointTranscriptSize
+	}
+	return info.Size() > 0
 }
 
 func (h *postCommitActionHandler) HandleDiscardIfNoFiles(state *session.State) error {
@@ -1275,6 +1321,24 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		filesTouchedBefore = make([]string, len(state.FilesTouched))
 		copy(filesTouchedBefore, state.FilesTouched)
 	}
+
+	// Probe the live transcript for growth so the gate can distinguish a
+	// stale-but-still-ACTIVE session (transcript unchanged since last
+	// condensation) from a session genuinely doing work this turn. We use
+	// file-size against state.CheckpointTranscriptSize so this works for
+	// any agent that writes a transcript file, even those without a
+	// TranscriptAnalyzer implementation (e.g. vogon in the canary suite).
+	// Cost is a single os.Stat.
+	var hasTranscriptGrowth bool
+	if state.Phase.IsActive() {
+		hasTranscriptGrowth = liveTranscriptGrew(state)
+	}
+	// Track shadow-branch contributions explicitly: if SaveStep ran since
+	// the last condensation, StepCount is > 0 and we must condense even
+	// when the agent's transcript hasn't grown further (e.g., a Claude
+	// session whose Stop hook fired and populated the shadow branch but
+	// whose state.FilesTouched got cleared by a subsequent flow).
+	hasShadowContributions := state.StepCount > 0
 	checkContentSpan.End()
 
 	logging.Debug(logCtx, "post-commit: carry-forward prep",
@@ -1282,6 +1346,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		slog.Bool("is_active", state.Phase.IsActive()),
 		slog.String("transcript_path", state.TranscriptPath),
 		slog.Int("files_touched_before", len(filesTouchedBefore)),
+		slog.Bool("transcript_growth", hasTranscriptGrowth),
 		slog.Any("files", filesTouchedBefore),
 	)
 
@@ -1300,6 +1365,8 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		shadowBranchesToDelete:     shadowBranchesToDelete,
 		committedFileSet:           committedFileSet,
 		hasNew:                     hasNew,
+		hasTranscriptGrowth:        hasTranscriptGrowth,
+		hasShadowContributions:     hasShadowContributions,
 		filesTouchedBefore:         filesTouchedBefore,
 		headTree:                   headTree,
 		parentTree:                 parentTree,
