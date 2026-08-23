@@ -240,16 +240,22 @@ func prepareTaskTranscriptForStorage(
 	raw []byte,
 ) (redacted redact.RedactedBytes, assets []cpkg.TranscriptAsset, tooLarge bool, err error) {
 	sanitized := agent.SanitizeTranscriptForStorage(ag, raw)
-	if len(sanitized) > agent.MaxChunkSize {
+	externalized, assets := externalizeSessionImages(ctx, logCtx, state, sanitized)
+
+	// cap measures the size of the transcript that will be stored in git (after
+	// sanitization and image externalization, but before redaction). Oversized
+	// transcripts are dropped to keep the metadata branch pushable.
+	if len(externalized) > agent.MaxChunkSize {
 		logging.Warn(logCtx, "subagent transcript exceeds the blob size cap; storing task without it",
 			slog.String("session_id", state.SessionID),
 			slog.String("path", path),
 			slog.Int("raw_bytes", len(raw)),
 			slog.Int("sanitized_bytes", len(sanitized)),
+			slog.Int("externalized_bytes", len(externalized)),
 			slog.Int("cap", agent.MaxChunkSize))
 		return redact.RedactedBytes{}, nil, true, nil
 	}
-	externalized, assets := externalizeSessionImages(ctx, logCtx, state, sanitized)
+
 	redacted, _, err = redactSessionTranscript(logCtx, externalized)
 	if err != nil {
 		return redact.RedactedBytes{}, nil, false, err
