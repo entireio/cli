@@ -653,6 +653,16 @@ func retirePendingSource(
 		// Release before clearing the marker. If the target save fails, the next
 		// post-commit observes the already-retired source and safely retries the
 		// marker clear without requiring a claim that no longer exists.
+		//
+		// Re-read HEAD immediately before release: source retire above may have
+		// taken long enough for a new commit to land without the bound checkpoint.
+		committed, headErr = committedCheckpointSet(retireCtx, targetWorktree)
+		if headErr != nil {
+			return fmt.Errorf("revalidate committed checkpoint before release: %w", headErr)
+		}
+		if _, ok := committed[marker.ExpectedCheckpointID]; !ok {
+			return errors.New("pending adoption checkpoint is not in any recent commit")
+		}
 		if _, err := session.ReleaseLiveSessionClaimIfOwned(retireCtx, adopted.SessionID, expectedClaim); err != nil {
 			return fmt.Errorf("release live-session claim: %w", err)
 		}
