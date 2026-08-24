@@ -1,7 +1,9 @@
 package gitrepo
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +14,94 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
+
+// TestStatusWithBudget_BreachAbandonsWalkPromptly pins the zombie-hook
+// regression (a stray `git init` in $HOME made the status walk grind for
+// hours in an orphaned hook process): a walk that outlives its budget must
+// surface ErrStatusBudgetExceeded as soon as the budget expires — not block
+// until the walk finishes — and every later walk in the same process must
+// short-circuit without re-entering the worktree.
+func TestStatusWithBudget_BreachAbandonsWalkPromptly(t *testing.T) {
+	// Not parallel: mutates the process-global breach latch.
+	t.Cleanup(func() { statusBudgetBreached.Store(false) })
+
+	walkRelease := make(chan struct{})
+	defer close(walkRelease)
+	blockedWalk := func() (git.Status, error) {
+		<-walkRelease // a walk that grinds far past the budget
+		return git.Status{}, nil
+	}
+
+	start := time.Now()
+	_, err := statusWithBudget(context.Background(), "/pathological/root", 20*time.Millisecond, blockedWalk)
+	require.ErrorIs(t, err, ErrStatusBudgetExceeded)
+	require.Less(t, time.Since(start), 10*time.Second, "breach must surface at the budget, not when the walk ends")
+	require.Contains(t, err.Error(), "/pathological/root")
+
+	// Second walk in the same process must not start at all: re-entering the
+	// same pathological worktree would keep the hook process alive past the
+	// agent's timeout — the zombie the budget exists to prevent.
+	walkStarted := false
+	_, err = statusWithBudget(context.Background(), "/pathological/root", time.Minute, func() (git.Status, error) {
+		walkStarted = true
+		return git.Status{}, nil
+	})
+	require.ErrorIs(t, err, ErrStatusBudgetExceeded)
+	require.False(t, walkStarted)
+}
+
+// TestStatusWithBudget_CancellationArmsLatchAndCarriesSentinel pins the
+// fail-open guarantee against cancellation: a walk abandoned because the
+// context died must degrade exactly like a timer breach — callers match on
+// ErrStatusBudgetExceeded, and the latch must stop this process from
+// re-entering the abandoned walk — while cancellation stays visible in the
+// error chain.
+func TestStatusWithBudget_CancellationArmsLatchAndCarriesSentinel(t *testing.T) {
+	// Not parallel: mutates the process-global breach latch.
+	t.Cleanup(func() { statusBudgetBreached.Store(false) })
+
+	walkRelease := make(chan struct{})
+	defer close(walkRelease)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := statusWithBudget(ctx, "/pathological/root", time.Minute, func() (git.Status, error) {
+		<-walkRelease
+		return git.Status{}, nil
+	})
+	require.ErrorIs(t, err, ErrStatusBudgetExceeded)
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, statusBudgetBreached.Load(), "cancellation must arm the latch like a timer breach")
+}
+
+// TestStatusWithBudget_BreachWarnsWithRepoRoot pins the observability half of
+// the incident: the original failure was completely silent, so the breach
+// Warn must name the repo root (plus elapsed/budget) for doctor/logs
+// investigation to find which repository degraded capture.
+func TestStatusWithBudget_BreachWarnsWithRepoRoot(t *testing.T) {
+	// Not parallel: swaps slog's process-wide default logger and mutates the
+	// breach latch.
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() {
+		slog.SetDefault(prevLogger)
+		statusBudgetBreached.Store(false)
+	})
+
+	walkRelease := make(chan struct{})
+	defer close(walkRelease)
+	_, err := statusWithBudget(context.Background(), "/pathological/root", 20*time.Millisecond, func() (git.Status, error) {
+		<-walkRelease
+		return git.Status{}, nil
+	})
+	require.ErrorIs(t, err, ErrStatusBudgetExceeded)
+
+	logged := logBuf.String()
+	require.Contains(t, logged, `"repo_root":"/pathological/root"`)
+	require.Contains(t, logged, "capture degraded")
+	require.Contains(t, logged, "budget")
+}
 
 // TestStatus_SkipsNestedCheckouts pins the repository-boundary rule: untracked
 // files inside a nested git checkout belong to that checkout, not to this one.

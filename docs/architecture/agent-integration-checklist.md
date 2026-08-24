@@ -68,6 +68,20 @@ Map agent-native hooks to these `EventType` constants (see `agent/event.go`):
 - [ ] **TurnEnd**: Fire when agent finishes responding (for checkpoint creation)
 - [ ] **SessionStart**: Fire when a new session begins
 - [ ] **SessionEnd**: Fire when session is explicitly ended (optional but recommended)
+- [ ] **SubagentEnd true-completion signal, not just launch**: If the agent can run
+      subagents in the background — a launch-time hook fires immediately with a
+      stub, before any work happened, and real completion is notified later out
+      of band — map that separate true-completion hook to `SubagentEnd` as well,
+      with `agent.Event.Final = true` (never a payload sentinel) as the only thing
+      framework code branches on. Claude Code does this: `post-task`
+      (PostToolUse[Task]) fires at the launch stub (`Final: false`) and
+      `subagent-stop` (the `SubagentStop` hook, wired to `entire hooks
+      claude-code subagent-stop`) fires at true completion, per-agent, including
+      after the parent's own turn already ended (`Final: true`). Without the
+      second hook, everything a background subagent does is invisible — see the
+      "Task Records (Subagent Work)" section of [Sessions and
+      Checkpoints](sessions-and-checkpoints.md) for the full launch-stub →
+      task-record completion → condensation-materializer design this drives.
 
 ### Hook Installation
 

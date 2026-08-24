@@ -908,24 +908,12 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				selectedAgent = ag
 			}
 
-			// Route setup's logging to .entire/logs/ like every other command.
-			// Without Init the package logger stays nil and every logging.*
-			// call under setup — agent detection, hook install, session import,
-			// the checkpoint layer's push/remote warnings — falls back to
-			// slog.Default(), which prints them straight onto the user's
-			// terminal mid-flow (and writes nothing to the log file).
-			//
-			// Placement is load-bearing in both directions: after the git-repo
-			// check above so it cannot create .entire/logs/ outside a
-			// repository, and after every check that can still reject this
-			// invocation, because Init CREATES .entire/logs/ — a rejected
-			// enable must leave a previously untouched repo untouched rather
-			// than seeding it with an untracked directory Entire's gitignore
-			// entry does not exist yet to cover.
-			logging.SetLogLevelGetter(GetLogLevel)
-			if err := logging.Init(ctx, ""); err == nil {
-				defer logging.Close()
-			}
+			// enable runs before the repo is set up, which is exactly when the
+			// root pre-run's IsSetUpAny gate declines to build a logger. Placed
+			// after every check that can still reject this invocation, so a
+			// rejected enable leaves an untouched repo untouched.
+			ensureLogger(cmd)
+			ctx = cmd.Context()
 
 			if selectedAgent != nil {
 				// --agent is a targeted operation: set up this specific agent without

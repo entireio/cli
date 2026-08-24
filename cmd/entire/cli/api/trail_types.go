@@ -50,9 +50,12 @@ type TrailResource struct {
 // is the rendered plain text displayed by the CLI. The document is also what a
 // body write returns (see TrailBodyRequest), so both directions decode into this
 // type; the fields the CLI does not use (id, documentKey, schemaVersion,
-// contentJson, updatedAt) are simply left out of it.
+// contentJson, updatedAt) are simply left out of it. ETag is populated on a
+// read as well as on a write response, and is what makes If-Match viable on
+// the next write (see sendTrailBody).
 type TrailBodyDocument struct {
 	TextSnapshot string `json:"textSnapshot"`
+	ETag         string `json:"etag,omitempty"`
 }
 
 // ToMetadata converts a TrailResource to display metadata.
@@ -128,9 +131,10 @@ type TrailUpdateResponse struct {
 // rejected as "exactly one of markdown/contentJson is required".
 //
 // The route also accepts contentJson (ProseMirror JSON, written as-is) in place
-// of markdown, and an If-Match header for optimistic concurrency. Neither is
-// modeled here: the CLI writes Markdown, and it has no ETag to send — that
-// value only comes back from a prior write through this same route.
+// of markdown; the CLI only ever writes Markdown, so contentJson is not
+// modeled here. The route also accepts an If-Match header for optimistic
+// concurrency, populated from a prior read of TrailBodyDocument.ETag — see
+// sendTrailBody for the dispatch between If-Match and Overwrite.
 type TrailBodyRequest struct {
 	Markdown  string `json:"markdown"`
 	Overwrite bool   `json:"overwrite,omitempty"`

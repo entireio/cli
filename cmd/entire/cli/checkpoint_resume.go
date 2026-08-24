@@ -12,7 +12,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"charm.land/huh/v2"
@@ -58,12 +57,6 @@ Existing local session logs are never overwritten unless --force is given.`,
 				positional = args[0]
 				if checkpointFlag != "" || commitFlag != "" || branchFlag != "" {
 					return errors.New("cannot combine positional argument with --checkpoint, --commit, or --branch")
-				}
-			}
-			if _, err := paths.WorktreeRoot(cmd.Context()); err == nil {
-				logging.SetLogLevelGetter(GetLogLevel)
-				if err := logging.Init(cmd.Context(), ""); err == nil {
-					defer logging.Close()
 				}
 			}
 			external.DiscoverAndRegister(cmd.Context())

@@ -59,16 +59,8 @@ func newCleanCmd() *cobra.Command {
 				return errors.New("--all and --session cannot be used together")
 			}
 
-			// Check if in git repository before initializing logging,
-			// to avoid creating .entire/logs in arbitrary directories.
 			if _, err := paths.WorktreeRoot(ctx); err != nil {
 				return errors.New("not a git repository")
-			}
-
-			// Initialize logging
-			logging.SetLogLevelGetter(GetLogLevel)
-			if err := logging.Init(ctx, ""); err == nil {
-				defer logging.Close()
 			}
 
 			if allFlag {
@@ -317,7 +309,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	}
 
 	// Group items by type for display
-	var branches, states, checkpoints []strategy.CleanupItem
+	var branches, states, checkpoints, redactCaches []strategy.CleanupItem
 	for _, item := range items {
 		switch item.Type {
 		case strategy.CleanupTypeShadowBranch:
@@ -326,6 +318,8 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 			states = append(states, item)
 		case strategy.CleanupTypeCheckpoint:
 			checkpoints = append(checkpoints, item)
+		case strategy.CleanupTypeRedactCache:
+			redactCaches = append(redactCaches, item)
 		}
 	}
 
@@ -337,6 +331,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printSection(w, "Shadow branches", cleanupItemIDs(branches))
 		printSection(w, "Session states", cleanupItemIDs(states))
 		printSection(w, "Checkpoint metadata", cleanupItemIDs(checkpoints))
+		printSection(w, "Redaction cache", cleanupItemIDs(redactCaches))
 		printSection(w, "Temp files", tempFiles)
 
 		if dryRun {
@@ -479,10 +474,18 @@ func deleteTempFiles(ctx context.Context, files []string) (deleted []string, fai
 	defer root.Close()
 
 	for _, file := range files {
-		if err := root.Remove(file); err != nil {
-			failed = append(failed, TempFileDeleteError{File: file, Err: err})
-		} else {
+		err := root.Remove(file)
+		switch {
+		case err == nil:
 			deleted = append(deleted, file)
+		case os.IsNotExist(err):
+			// The listing is a snapshot, and .entire/tmp now holds transient files:
+			// an OpenCode export stages under .export-* and renames it away (see
+			// agent/opencode/stage_export.go), so a name can legitimately vanish
+			// between the walk and the delete. Nothing to remove is not a failure.
+			logging.Debug(ctx, "temp file already gone before deletion", "file", file)
+		default:
+			failed = append(failed, TempFileDeleteError{File: file, Err: err})
 		}
 	}
 	return deleted, failed

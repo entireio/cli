@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,6 +68,148 @@ func TestAttach_TranscriptNotFound(t *testing.T) {
 	err := runAttach(context.Background(), &out, &out, "nonexistent-session-id", agent.AgentNameClaudeCode, attachOptions{Force: true})
 	if err == nil {
 		t.Fatal("expected error for missing transcript")
+	}
+	if !strings.Contains(err.Error(), `transcript not found for agent "claude-code"`) {
+		t.Fatalf("runAttach error = %v, want existing transcript-not-found error", err)
+	}
+	// Auto-detection does not export on the user's behalf, so the error has to
+	// point at the agent that could have.
+	if !strings.Contains(err.Error(), "--agent opencode") {
+		t.Errorf("runAttach error = %v, want a hint naming the on-demand-export agent", err)
+	}
+}
+
+func TestUnprobedFetcherHint(t *testing.T) {
+	t.Parallel()
+
+	hint := unprobedFetcherHint(agent.AgentNameClaudeCode)
+	if !strings.Contains(hint, "--agent opencode") {
+		t.Errorf("unprobedFetcherHint(claude-code) = %q, want it to name opencode", hint)
+	}
+	if got := unprobedFetcherHint(agent.AgentNameOpenCode); got != "" {
+		t.Errorf("unprobedFetcherHint(opencode) = %q, want empty (nothing left to suggest)", got)
+	}
+}
+
+type failingTranscriptFetcher struct {
+	agent.Agent
+
+	baseDir    string
+	baseDirErr error
+	err        error
+	calls      int
+}
+
+func (a *failingTranscriptFetcher) FetchTranscript(context.Context, string) (string, error) {
+	a.calls++
+	return "", a.err
+}
+
+func (a *failingTranscriptFetcher) GetSessionBaseDir() (string, error) {
+	return a.baseDir, a.baseDirErr
+}
+
+func TestResolveAndValidateTranscript_PreservesFetchFailureAfterFallback(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	baseAgent, err := agent.Get(agent.AgentNameClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("opencode export timed out")
+	ag := &failingTranscriptFetcher{
+		Agent:      baseAgent,
+		baseDirErr: errors.New("fallback unavailable"),
+		err:        wantErr,
+	}
+
+	_, err = resolveAndValidateTranscript(context.Background(), "test-fetch-failure", ag, lookupAllowFetch)
+	if err == nil || err.Error() != wantErr.Error() {
+		t.Fatalf("resolveAndValidateTranscript error = %v, want %q", err, wantErr)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatal("final error does not retain the fetch failure")
+	}
+}
+
+// TestResolveAndValidateTranscript_LocalOnlyDoesNotFetch pins the gate that keeps
+// auto-detection cheap: probing an agent the user did not name must not spawn its
+// export subprocess or write into the repo.
+func TestResolveAndValidateTranscript_LocalOnlyDoesNotFetch(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	baseAgent, err := agent.Get(agent.AgentNameClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag := &failingTranscriptFetcher{
+		Agent:      baseAgent,
+		baseDirErr: errors.New("fallback unavailable"),
+		err:        errors.New("fetch must not run"),
+	}
+
+	_, err = resolveAndValidateTranscript(context.Background(), "test-local-only", ag, lookupLocalOnly)
+	if err == nil {
+		t.Fatal("expected transcript-not-found error")
+	}
+	if ag.calls != 0 {
+		t.Errorf("FetchTranscript called %d times during a local-only lookup, want 0", ag.calls)
+	}
+	if !strings.Contains(err.Error(), "transcript not found for agent") {
+		t.Errorf("error = %v, want the generic transcript-not-found error", err)
+	}
+}
+
+func TestResolveAndValidateTranscript_FallbackWinsAfterFetchFailure(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	const sessionID = "test-fetch-fallback"
+	baseAgent, err := agent.Get(agent.AgentNameClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseDir := t.TempDir()
+	fallbackDir := filepath.Join(baseDir, "project")
+	if err := os.MkdirAll(fallbackDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	fallbackPath := baseAgent.ResolveSessionFile(fallbackDir, sessionID)
+	if err := os.WriteFile(fallbackPath, []byte("transcript"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ag := &failingTranscriptFetcher{
+		Agent:   baseAgent,
+		baseDir: baseDir,
+		err:     errors.New("fetch failed"),
+	}
+
+	got, err := resolveAndValidateTranscript(context.Background(), sessionID, ag, lookupAllowFetch)
+	if err != nil {
+		t.Fatalf("expected fallback transcript to win, got: %v", err)
+	}
+	if got != fallbackPath {
+		t.Fatalf("resolved path = %q, want %q", got, fallbackPath)
+	}
+}
+
+func TestResolveAgentAndTranscript_HidesFailedAutoDetectionAfterFetchFailure(t *testing.T) {
+	setupAttachTestRepo(t)
+	t.Setenv("ENTIRE_TEST_OPENCODE_MOCK_EXPORT", "1")
+	t.Setenv("HOME", t.TempDir())
+
+	var out bytes.Buffer
+	_, _, err := resolveAgentAndTranscript(
+		context.Background(),
+		&out,
+		"test-fetch-failure-autodetect",
+		agent.AgentNameOpenCode,
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "mock export file not found") {
+		t.Fatalf("resolveAgentAndTranscript error = %v, want fetch failure", err)
+	}
+	if strings.Contains(err.Error(), "also tried auto-detecting") {
+		t.Fatalf("error contains noisy auto-detection failure: %v", err)
 	}
 }
 
@@ -2009,5 +2152,80 @@ func runGitInDir(t *testing.T, dir string, args ...string) {
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+	}
+}
+
+// TestAttach_OpenCodeFetchesTranscriptForUntrackedSession is a regression test
+// for sessions spawned outside a hooked terminal (e.g. by an external session
+// host): no hook ever cached an export under .entire/tmp, and
+// resolveAndValidateTranscript used to give up because PrepareTranscript was
+// only called when the file already existed. OpenCode can materialize the
+// transcript via `opencode export`, so attach now consults the
+// TranscriptFetcher capability before failing.
+func TestAttach_OpenCodeFetchesTranscriptForUntrackedSession(t *testing.T) {
+	setupAttachTestRepo(t)
+	// Mock-export mode: fetchAndCacheExport returns the pre-written file
+	// instead of invoking the opencode CLI.
+	t.Setenv("ENTIRE_TEST_OPENCODE_MOCK_EXPORT", "1")
+
+	sessionID := "test-attach-opencode-untracked"
+	repoRoot := mustGetwd(t)
+	tmpDir := filepath.Join(repoRoot, ".entire", "tmp")
+	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	export := `{
+  "info": {"id": "test-attach-opencode-untracked", "title": "docs: example"},
+  "messages": [
+    {
+      "info": {"id": "msg_u1", "role": "user", "time": {"created": 1767225600000}},
+      "parts": [{"type": "text", "text": "Update the example doc"}]
+    },
+    {
+      "info": {
+        "id": "msg_a1", "role": "assistant",
+        "providerID": "fireworks-ai", "modelID": "accounts/fireworks/routers/kimi-k3-fast",
+        "time": {"created": 1767225660000, "completed": 1767225700000},
+        "tokens": {"total": 100, "input": 90, "output": 10, "reasoning": 0, "cache": {"write": 0, "read": 0}}
+      },
+      "parts": [
+        {"type": "tool", "tool": "bash", "callID": "bash_0",
+         "state": {"status": "completed", "input": {"command": "git commit -m \"docs: example\""}, "output": "ok"}}
+      ]
+    }
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(tmpDir, sessionID+".json"), []byte(export), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameOpenCode, attachOptions{Force: true})
+	if err != nil {
+		t.Fatalf("runAttach failed: %v", err)
+	}
+
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil {
+		t.Fatal("expected session state to be created")
+		return
+	}
+	if state.LastCheckpointID.IsEmpty() {
+		t.Error("expected LastCheckpointID to be set after attach")
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "Attached session") {
+		t.Errorf("expected 'Attached session' in output, got: %s", output)
+	}
+	if !strings.Contains(output, "Created checkpoint") {
+		t.Errorf("expected 'Created checkpoint' in output, got: %s", output)
 	}
 }

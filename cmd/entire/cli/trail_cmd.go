@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -243,7 +244,7 @@ func runTrailShowWithClient(ctx context.Context, w, errW io.Writer, client *api.
 			bodyText = snapshot
 		}
 	case found.Number > 0:
-		if bt, derr := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number); derr == nil {
+		if bt, _, derr := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number); derr == nil {
 			// A successful fetch means we authoritatively consulted the
 			// description, but it only supersedes the seeded list body when
 			// it actually carries text: an older/partial server that omits
@@ -428,27 +429,28 @@ func trailWebURL(base, forge, owner, repo string, number int) string {
 }
 
 // fetchTrailDescription fetches a trail's rendered description text
-// (`trail.body_document.text_snapshot`), which the list endpoint omits, by
-// integer number. It returns only the description — the list result already
-// supplies the metadata — and decodes only the fields it needs, so it is
-// unaffected by the shape of sibling fields like `checkpoints`/`thread`.
-func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, error) {
+// (`trail.body_document.text_snapshot`) and its etag, which the list endpoint
+// omits, by integer number. It returns only the description and etag — the
+// list result already supplies the metadata — and decodes only the fields it
+// needs, so it is unaffected by the shape of sibling fields like
+// `checkpoints`/`thread`.
+func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, string, error) {
 	resp, err := client.Get(ctx, trailNumberPath(forge, owner, repo, number))
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch trail detail: %w", err)
+		return "", "", fmt.Errorf("failed to fetch trail detail: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
-		return "", err
+		return "", "", err
 	}
 	detail, err := decodeTrailResource(resp)
 	if err != nil {
-		return "", fmt.Errorf("failed to decode trail detail: %w", err)
+		return "", "", fmt.Errorf("failed to decode trail detail: %w", err)
 	}
 	if detail.BodyDocument == nil {
-		return "", nil
+		return "", "", nil
 	}
-	return strings.TrimSpace(detail.BodyDocument.TextSnapshot), nil
+	return strings.TrimSpace(detail.BodyDocument.TextSnapshot), detail.BodyDocument.ETag, nil
 }
 
 // decodeTrailResource decodes entire-api's direct detail resource.
@@ -1010,14 +1012,19 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr, ty
 		return renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), owner+"/"+repoName, err)
 	}
 
-	branchState, err := prepareTrailCreateBranch(w, errW, repo, branch, currentBranch, noBranch)
+	pushRemote, err := resolveTrailPushRemote(ctx, branch)
+	if err != nil {
+		return err
+	}
+
+	branchState, err := prepareTrailCreateBranch(ctx, w, errW, repo, pushRemote, branch, currentBranch, noBranch)
 	if err != nil {
 		return err
 	}
 
 	createResp, err := postTrailCreate(ctx, client, forge, owner, repoName, title, body, branch, base, statusStr, strings.TrimSpace(typeStr), strings.TrimSpace(priorityStr), assignees)
 	if err != nil {
-		cleanupCreatedTrailBranch(repo, branch, branchState.LocalCreated, branchState.RemotePushed, errW)
+		cleanupCreatedTrailBranch(ctx, repo, pushRemote, branch, branchState.LocalCreated, branchState.RemotePushed, errW)
 		return err
 	}
 	printCreatedTrail(w, createResp.Trail, forge, owner, repoName)
@@ -1095,7 +1102,7 @@ func validateTrailCreateFields(ctx context.Context, title, branch, statusStr str
 	return nil
 }
 
-func prepareTrailCreateBranch(w, errW io.Writer, repo *git.Repository, branch, currentBranch string, noBranch bool) (trailCreateBranchState, error) {
+func prepareTrailCreateBranch(ctx context.Context, w, errW io.Writer, repo *git.Repository, remote, branch, currentBranch string, noBranch bool) (trailCreateBranchState, error) {
 	var state trailCreateBranchState
 	if noBranch || branch == "" {
 		// Branchless trails have no remote branch to create, fetch, or push.
@@ -1103,41 +1110,41 @@ func prepareTrailCreateBranch(w, errW io.Writer, repo *git.Repository, branch, c
 	}
 
 	state.NeedsCreation = branchNeedsCreation(repo, branch)
-	existedOnOrigin, existErr := branchExistsOnOrigin(branch)
+	existedOnRemote, existErr := remoteHasBranch(ctx, remote, branch)
 	if existErr != nil {
-		fmt.Fprintf(errW, "Warning: could not check whether branch %s already exists on origin: %v\n", branch, existErr)
-		existedOnOrigin = true
+		fmt.Fprintf(errW, "Warning: could not check whether branch %s already exists on %s: %v\n", branch, remote, existErr)
+		existedOnRemote = true
 	}
 
-	if err := ensureTrailCreateBranchExists(w, repo, branch, currentBranch, existedOnOrigin, &state); err != nil {
+	if err := ensureTrailCreateBranchExists(ctx, w, repo, remote, branch, currentBranch, existedOnRemote, &state); err != nil {
 		return state, err
 	}
 
 	// For branch-backed trails, always push the branch first: the trail binds to a
 	// remote branch, so deliver it before creating the trail rather than letting
 	// the server backfill it at the base tip. Branchless trails skip this entirely.
-	if err := pushBranchToOrigin(branch); err != nil {
-		cleanupCreatedTrailBranch(repo, branch, state.LocalCreated, false, errW)
-		return state, fmt.Errorf("failed to push branch %q to origin: %w\nhint: the trail was not created because its branch could not be delivered to the remote.\n  - if this is an auth error, link your GitHub account and retry\n  - if this is a non-fast-forward, update branch %q from origin and retry", branch, err, branch)
+	if err := pushBranchToRemote(ctx, remote, branch); err != nil {
+		cleanupCreatedTrailBranch(ctx, repo, remote, branch, state.LocalCreated, false, errW)
+		return state, fmt.Errorf("failed to push branch %q to %q: %w\nhint: the trail was not created because its branch could not be delivered to the remote.\n  - if this is an auth error, link your GitHub account and retry\n  - if this is a non-fast-forward, update branch %q from %q and retry", branch, remote, err, branch, remote)
 	}
-	state.RemotePushed = !existedOnOrigin
-	fmt.Fprintf(w, "Pushed branch %s to origin\n", branch)
+	state.RemotePushed = !existedOnRemote
+	fmt.Fprintf(w, "Pushed branch %s to %s\n", branch, remote)
 	return state, nil
 }
 
-func ensureTrailCreateBranchExists(w io.Writer, repo *git.Repository, branch, currentBranch string, existedOnOrigin bool, state *trailCreateBranchState) error {
+func ensureTrailCreateBranchExists(ctx context.Context, w io.Writer, repo *git.Repository, remote, branch, currentBranch string, existedOnRemote bool, state *trailCreateBranchState) error {
 	if !state.NeedsCreation {
 		if currentBranch != branch {
 			fmt.Fprintf(w, "Note: trail will be created for branch %q (not the current branch)\n", branch)
 		}
 		return nil
 	}
-	if existedOnOrigin {
-		if err := fetchBranchFromOrigin(branch); err != nil {
-			return fmt.Errorf("failed to fetch branch %q from origin: %w", branch, err)
+	if existedOnRemote {
+		if err := fetchBranchFromRemote(ctx, remote, branch); err != nil {
+			return fmt.Errorf("failed to fetch branch %q from %q: %w", branch, remote, err)
 		}
 		state.LocalCreated = true
-		fmt.Fprintf(w, "Fetched branch %s from origin\n", branch)
+		fmt.Fprintf(w, "Fetched branch %s from %s\n", branch, remote)
 		return nil
 	}
 	if err := createBranch(repo, branch); err != nil {
@@ -1215,32 +1222,40 @@ func newTrailCreateRequest(title, body, branch, base, statusStr, typeStr, priori
 }
 
 // resolveTrailUpdateBody returns the body text to seed the interactive update
-// form with. The list resource omits the description (it lives in
-// body_document, served only by the detail endpoint), so update must fetch the
-// detail body — otherwise the form prefills from the empty list body and a
-// user edit against that blank baseline can overwrite a description they never
-// saw. Best-effort: on a failed detail fetch it returns the list body plus the
-// error so the caller can warn (mirroring runTrailShow); an empty detail body
-// (older/partial server) falls back to the list body with no error.
-func resolveTrailUpdateBody(ctx context.Context, client *api.Client, forge, owner, repo string, found *api.TrailResource) (string, error) {
-	body := found.Body
+// form with, plus the etag of the description as read (empty when unavailable,
+// e.g. an older server or a fallback to the list body — see sendTrailBody for
+// how a missing etag is handled). The list resource omits the description (it
+// lives in body_document, served only by the detail endpoint), so update must
+// fetch the detail body — otherwise the form prefills from the empty list body
+// and a user edit against that blank baseline can overwrite a description they
+// never saw. Best-effort: on a failed detail fetch it returns the list body
+// (and no etag) plus the error so the caller can warn (mirroring
+// runTrailShow); an empty detail body (older/partial server) falls back to the
+// list body with no error.
+func resolveTrailUpdateBody(ctx context.Context, client *api.Client, forge, owner, repo string, found *api.TrailResource) (body, etag string, err error) {
+	body = found.Body
 	if found.Number > 0 {
-		bt, err := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number)
-		if err != nil {
-			return body, err
+		bt, et, ferr := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number)
+		if ferr != nil {
+			return body, "", ferr
 		}
 		// fetchTrailDescription already trims; a non-empty result supersedes
 		// the list body, an empty one (older/partial server) leaves it intact.
+		// The etag is kept either way — it describes the document read, not
+		// the text, so it's valid even when the description is legitimately
+		// empty (avoids a redundant refetch below).
+		etag = et
 		if bt != "" {
 			body = bt
 		}
 	}
-	return body, nil
+	return body, etag, nil
 }
 
 func newTrailUpdateCmd() *cobra.Command {
 	var statusStr, title, body, branch, typeStr, priorityStr string
 	var assigneeAdd, assigneeRemove, reviewerAdd, reviewerRemove []string
+	var overwrite bool
 
 	cmd := &cobra.Command{
 		Use:   "update",
@@ -1257,6 +1272,7 @@ func newTrailUpdateCmd() *cobra.Command {
 				TitleChanged:    cmd.Flags().Changed("title"),
 				Body:            body,
 				BodyChanged:     cmd.Flags().Changed("body"),
+				Overwrite:       overwrite,
 				Branch:          branch,
 				Repo:            trailRepoFlag(cmd),
 				AssigneeAdd:     assigneeAdd,
@@ -1274,6 +1290,7 @@ func newTrailUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&statusStr, "status", "", "Update status")
 	cmd.Flags().StringVar(&title, "title", "", "Update title")
 	cmd.Flags().StringVar(&body, "body", "", "Replace the description (--body= clears it)")
+	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "Replace the description unconditionally, even if it changed since being read (only applies when --body is also given)")
 	cmd.Flags().StringVar(&branch, "branch", "", "Branch to update trail for (defaults to current)")
 	cmd.Flags().StringSliceVar(&assigneeAdd, "add-assignee", nil, "Add assignee(s) by login")
 	cmd.Flags().StringSliceVar(&assigneeRemove, "remove-assignee", nil, "Remove assignee(s) by login")
@@ -1292,6 +1309,7 @@ type trailUpdateInputs struct {
 	TitleChanged    bool
 	Body            string
 	BodyChanged     bool
+	Overwrite       bool
 	Branch          string
 	Repo            string
 	AssigneeAdd     []string
@@ -1340,6 +1358,7 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 	statusStr := inputs.Status
 	title := inputs.Title
 	body := inputs.Body
+	var bodyETag string
 	noFlags := !inputs.StatusChanged && !inputs.TitleChanged && !inputs.BodyChanged &&
 		inputs.AssigneeAdd == nil && inputs.AssigneeRemove == nil &&
 		inputs.ReviewerAdd == nil && inputs.ReviewerRemove == nil &&
@@ -1364,11 +1383,12 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 		// the form prefills with the current text and change detection below
 		// compares against the real server value. Warn on a fetch failure so
 		// a blank baseline doesn't silently overwrite an unseen description.
-		seedBody, bodyErr := resolveTrailUpdateBody(ctx, client, forge, owner, repoName, found)
+		seedBody, seedETag, bodyErr := resolveTrailUpdateBody(ctx, client, forge, owner, repoName, found)
 		if bodyErr != nil {
 			fmt.Fprintf(errW, "Warning: could not load current trail body: %v\n", bodyErr)
 		}
 		body = seedBody
+		bodyETag = seedETag
 		origStatus, origTitle, origBody := statusStr, title, body
 
 		form := NewAccessibleForm(
@@ -1453,8 +1473,28 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 			return err
 		}
 	}
+	if !noFlags && inputs.BodyChanged && bodyETag == "" && !inputs.Overwrite {
+		// Non-interactive --body path only (noFlags is the interactive
+		// branch, which already read the body and its etag above to seed the
+		// editor — gating on that branch rather than on bodyETag=="" matters:
+		// an interactive session can legitimately end with no etag too (e.g.
+		// the seed read failed and the user was already warned), and redoing
+		// the read here would silently pair an etag for content the user
+		// never saw with their edit). A --body caller supplied the
+		// replacement text directly and skipped that read, so do it here,
+		// best-effort, purely for the etag. A failure just leaves bodyETag
+		// empty and falls through to sendTrailBody's graceful Overwrite
+		// fallback rather than failing the whole command — but say so, since
+		// this is the unattended path most likely to run without anyone
+		// watching for a silently downgraded conflict check.
+		if _, etag, ferr := fetchTrailDescription(ctx, client, forge, owner, repoName, found.Number); ferr != nil {
+			fmt.Fprintf(errW, "Warning: could not verify trail body is unchanged (%v); writing without conflict detection\n", ferr)
+		} else {
+			bodyETag = etag
+		}
+	}
 	if inputs.BodyChanged {
-		if err := sendTrailBody(ctx, client, trailBodyPath(forge, owner, repoName, found.Number), body); err != nil {
+		if err := sendTrailBody(ctx, client, trailBodyPath(forge, owner, repoName, found.Number), body, bodyETag, inputs.Overwrite); err != nil {
 			if hasMeta {
 				return fmt.Errorf("trail metadata was updated, but the body update failed (the metadata change already applied; retry only the --body change): %w", err)
 			}
@@ -1616,31 +1656,48 @@ func sendTrailPatch(ctx context.Context, client *api.Client, path string, req ap
 // one that serves body writes (api.TrailUpdateRequest documents why the metadata
 // PATCH does not). path must already be that route — see trailBodyPath.
 //
-// Overwrite is set because that is what `trail update --body` already means: the
-// caller named the replacement text, and the interactive path shows them the
-// current description before they edit it (resolveTrailUpdateBody). Left false,
-// the route refuses with 409 document_not_empty against any trail whose
-// description is non-empty — i.e. everything except a first write — so the flag
-// is what makes editing an existing description work at all.
+// Three dispatch modes, in order:
 //
-// The cost is that a description changed elsewhere between that read and this
-// write is replaced rather than reported. The route's If-Match is not a fix for
-// that here: its ETag comes only from a body write's own response (including the
-// 409's), so the CLI can obtain one just by being refused and retrying — which
-// clobbers exactly as overwrite does, one round trip later. A true
-// compare-and-set would need the ETag of the document the user actually read,
-// and a trail read carries none (bodyDocument has no ETag, and its updatedAt is
-// formatted to a different precision than the header, so reconstructing one from
-// a read yields a value that never matches). Giving the user that choice is a
-// flag decision, not something to bury here.
-func sendTrailBody(ctx context.Context, client *api.Client, path, body string) error {
-	resp, err := client.Put(ctx, path, api.TrailBodyRequest{Markdown: body, Overwrite: true})
+//   - overwrite: sends Overwrite: true and no If-Match. This is the explicit
+//     --overwrite flag — the caller wants the replacement to win regardless of
+//     what's there.
+//   - ifMatch non-empty (and !overwrite): sends If-Match instead of Overwrite,
+//     so the write is rejected with 412 if the description changed since
+//     ifMatch was read (resolveTrailUpdateBody / the non-interactive etag
+//     fetch in runTrailUpdateWithClient).
+//   - neither: falls back to Overwrite: true. This is deliberate graceful
+//     degradation, not a shortcut to remove — it's what runs against a server
+//     that predates the etag field, a trail with no body document yet, or
+//     after a failed best-effort etag read. Refusing to write in that case
+//     would make `trail update --body` unusable against anything older or
+//     partial than the newest server.
+func sendTrailBody(ctx context.Context, client *api.Client, path, body, ifMatch string, overwrite bool) error {
+	req := api.TrailBodyRequest{Markdown: body}
+	var headers http.Header
+	if ifMatch != "" && !overwrite {
+		headers = http.Header{"If-Match": []string{ifMatch}}
+	} else {
+		req.Overwrite = true
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal trail body request: %w", err)
+	}
+	resp, err := client.Request(ctx, http.MethodPut, path, headers, bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("failed to update trail body: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
-		return err
+		switch {
+		case api.IsHTTPErrorStatus(err, http.StatusPreconditionFailed):
+			return fmt.Errorf("%w — trail body changed since it was read; run 'entire trail show' to see the current text and merge it in, then re-run — or pass --overwrite to discard it", err)
+		case api.IsHTTPErrorStatus(err, http.StatusConflict):
+			return fmt.Errorf("%w — trail body is not empty; pass --overwrite to replace it", err)
+		default:
+			return err
+		}
 	}
 	// Nothing reads the document back; decoding it only confirms the success
 	// really was this route's JSON response, and drains the body — the same
@@ -2173,6 +2230,47 @@ func resolveTrailBranch(ctx context.Context, branchOverride string) (string, err
 	return GetCurrentBranch(ctx)
 }
 
+// defaultTrailPushRemote is where a trail branch goes when git config declares
+// nothing — git's own fallback for a bare push. Not defaultMirrorRemote, which
+// shares the value but means "the remote `mirror use` repoints".
+const defaultTrailPushRemote = "origin"
+
+// resolveTrailPushRemote returns the remote a trail's branch is delivered to,
+// following git's own push precedence for that branch: branch.<name>.pushRemote,
+// then remote.pushDefault, then branch.<name>.remote, and "origin" when nothing
+// is declared.
+//
+// A hardcoded "origin" delivered the branch to the wrong remote, with no warning,
+// in any repo whose branch pushes somewhere else — a fork workflow holding the
+// upstream as origin, or any repo with remote.pushDefault set. A branch being
+// newly created has no branch.<name>.* config yet, so it resolves through
+// remote.pushDefault to "origin": unchanged for the common case.
+//
+// Scope: this fixes delivery only. resolveTrailRemote still reads the trail's
+// forge/owner/repo from "origin", so the two can name different repos in a fork
+// setup, and a repo with no "origin" at all fails there before reaching here.
+//
+// Not strategy.ResolveCheckpointSyncRemote — see
+// strategy.DeclaredPushRemoteForBranch for why those two questions differ.
+func resolveTrailPushRemote(ctx context.Context, branch string) (string, error) {
+	remote := strategy.DeclaredPushRemoteForBranch(ctx, branch)
+	if remote == "" {
+		return defaultTrailPushRemote, nil
+	}
+	// The name reaches git as an argv element, so the hazard is a leading "-"
+	// being read as a flag (`--upload-pack=...`), not shell metacharacters.
+	//
+	// Deliberately narrower than validateGitRemoteName: that whitelist vets names
+	// Entire is about to WRITE into .git/config and is stricter than git itself.
+	// Applied to config the user already has, it rejects values git accepts
+	// wherever a <repository> goes — "." (the local repo) and a bare URL both fail
+	// its leading-alphanumeric rule — turning a working repo into a hard failure.
+	if strings.HasPrefix(remote, "-") {
+		return "", fmt.Errorf("branch %q declares push remote %q, which git would read as a command-line flag", branch, remote)
+	}
+	return remote, nil
+}
+
 // parseTrailRepoArg parses an explicit --repo value into the forge/owner/repo
 // triple. It accepts the canonical "forge/owner/repo" form (e.g. gh/acme/app)
 // as well as a full clone URL (https://, git@, or entire://) that gitremote
@@ -2276,7 +2374,7 @@ func createBranch(repo *git.Repository, branchName string) error {
 	return nil
 }
 
-func cleanupCreatedTrailBranch(repo *git.Repository, branchName string, localCreated, remotePushed bool, errW io.Writer) {
+func cleanupCreatedTrailBranch(ctx context.Context, repo *git.Repository, remote, branchName string, localCreated, remotePushed bool, errW io.Writer) {
 	localRemoved := !localCreated
 	if localCreated {
 		branchRef := plumbing.NewBranchReferenceName(branchName)
@@ -2290,47 +2388,55 @@ func cleanupCreatedTrailBranch(repo *git.Repository, branchName string, localCre
 	}
 	if remotePushed {
 		if !localRemoved {
-			fmt.Fprintf(errW, "Warning: not deleting remote branch %s after trail creation failed because local cleanup did not complete; run 'git push origin --delete %s' if you do not need it\n", branchName, branchName)
+			fmt.Fprintf(errW, "Warning: not deleting remote branch %s after trail creation failed because local cleanup did not complete; run 'git push %s --delete %s' if you do not need it\n", branchName, remote, branchName)
 			return
 		}
-		if err := deleteBranchFromOrigin(branchName); err != nil {
+		if err := deleteBranchFromRemote(ctx, remote, branchName); err != nil {
 			fmt.Fprintf(errW, "Warning: failed to delete remote branch %s after trail creation failed: %v\n", branchName, err)
 		}
 	}
 }
 
-func fetchBranchFromOrigin(branchName string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+func fetchBranchFromRemote(ctx context.Context, remote, branchName string) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	if err := ValidateBranchName(ctx, branchName); err != nil {
 		return err
 	}
 	refspec := fmt.Sprintf("refs/heads/%s:refs/heads/%s", branchName, branchName)
-	cmd := exec.CommandContext(ctx, "git", "fetch", "--no-tags", "origin", refspec)
+	cmd := exec.CommandContext(ctx, "git", "fetch", "--no-tags", remote, refspec)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return nil
 }
 
-// pushBranchToOrigin pushes a branch to the origin remote.
-func pushBranchToOrigin(branchName string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+// pushBranchToRemote pushes a branch to remote, which callers resolve through
+// resolveTrailPushRemote rather than assuming "origin".
+func pushBranchToRemote(ctx context.Context, remote, branchName string) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", "-u", "origin", branchName)
+	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", "-u", remote, branchName)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return nil
 }
 
-// branchExistsOnOrigin reports whether origin already has a branch with the
-// given name, so callers can avoid treating a pre-existing remote branch as one
-// they created.
-func branchExistsOnOrigin(branchName string) (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+// remoteHasBranch reports whether remote already has a branch with the given
+// name, so callers can avoid treating a pre-existing remote branch as one they
+// created.
+//
+// Deliberately not the exported BranchExistsOnRemote in git_operations.go, whose
+// name this would otherwise shadow by case alone: that one is origin-only and
+// reports an ls-remote failure as "branch absent". Here a failed check must stay
+// distinguishable from a definite "absent", because callers use the answer to
+// decide whether they created the remote branch — and therefore whether cleanup
+// may delete it.
+func remoteHasBranch(ctx context.Context, remote, branchName string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", "origin", branchName)
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", remote, branchName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
@@ -2338,10 +2444,10 @@ func branchExistsOnOrigin(branchName string) (bool, error) {
 	return strings.TrimSpace(string(output)) != "", nil
 }
 
-func deleteBranchFromOrigin(branchName string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+func deleteBranchFromRemote(ctx context.Context, remote, branchName string) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", "origin", "--delete", branchName)
+	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", remote, "--delete", branchName)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		outputText := strings.TrimSpace(string(output))
 		if strings.Contains(outputText, "remote ref does not exist") {

@@ -314,15 +314,6 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 				return nil
 			}
 
-			// Only initialize logging when inside a git worktree to avoid
-			// creating .entire/logs/ in arbitrary directories.
-			if _, err := paths.WorktreeRoot(cmd.Context()); err == nil {
-				logging.SetLogLevelGetter(GetLogLevel)
-				if err := logging.Init(cmd.Context(), ""); err == nil {
-					defer logging.Close()
-				}
-			}
-
 			// Positional arg is mutually exclusive with --checkpoint, --commit, --session
 			var positional string
 			if len(args) > 0 {
