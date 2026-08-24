@@ -17,6 +17,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -328,6 +329,96 @@ type checkpointSyncInfo struct {
 // than one of the repo's git remotes.
 func (i checkpointSyncInfo) dedicated() bool { return i.Source == checkpointSyncSourceDedicated }
 
+// checkpointStoreProbe answers "is the configured checkpoint_remote in effect
+// for this remote?" from state read once.
+//
+// One value, built once per command, is the point: the answer depends on the
+// repo's remote URLs and on settings, and asking git again per remote produced
+// answers that disagreed with each other inside a single command — the note
+// naming a store while claiming no remote reached it. Everything here is derived
+// from the snapshot it was built with.
+type checkpointStoreProbe struct {
+	snap gitremote.Snapshot
+	// store is the configured checkpoint_remote, nil when none is configured or
+	// the entry is malformed.
+	store *settings.CheckpointRemoteConfig
+	// localOnly records that the store was declared in
+	// .entire/settings.local.json, which exempts it from the ownership test. Read
+	// once for the same reason as the snapshot: the read answers false on
+	// failure, so re-reading per remote can flip the verdict mid-command.
+	localOnly bool
+}
+
+// newCheckpointStoreProbe builds the probe. s may be nil when the caller could
+// not load settings; the probe then reports no store, which degrades to ordinary
+// elected-remote sync rather than guessing.
+func newCheckpointStoreProbe(ctx context.Context, s *EntireSettings, snap gitremote.Snapshot) checkpointStoreProbe {
+	p := checkpointStoreProbe{snap: snap}
+	if s == nil {
+		return p
+	}
+	if p.store = s.GetCheckpointRemote(); p.store != nil {
+		p.localOnly = settings.CheckpointRemoteIsLocalOnly(ctx)
+	}
+	return p
+}
+
+// configured reports whether a checkpoint_remote is configured at all, whether
+// or not it turns out to apply.
+func (p checkpointStoreProbe) configured() bool { return p.store != nil }
+
+// storeRepo is the configured store's org/repo slug, empty when none.
+func (p checkpointStoreProbe) storeRepo() string {
+	if p.store == nil {
+		return ""
+	}
+	return p.store.Repo
+}
+
+// inEffectFor reports whether a push to remote delivers to the store rather than
+// to the remote's own repositories. Same predicate the pre-push hook applies
+// (pushSettings.hasCheckpointURL), evaluated against the snapshot.
+func (p checkpointStoreProbe) inEffectFor(ctx context.Context, remote string) bool {
+	if p.store == nil || remote == "" {
+		return false
+	}
+	urls, ok := p.snap.Get(remote)
+	if !ok || len(urls.Push) == 0 {
+		return false
+	}
+	_, enabled, err := checkpointremote.CheckpointPushURL(ctx, checkpointremote.PushDecision{
+		Remote:           remote,
+		Config:           p.store,
+		OriginURL:        p.snap.OriginURL(),
+		RemoteFetchURL:   urls.Fetch,
+		PushURLs:         urls.Push,
+		StoreIsLocalOnly: p.localOnly,
+	})
+	return err == nil && enabled
+}
+
+// loadRemoteSnapshot reads the repo's remotes once, best-effort: an unreadable
+// repo yields an empty snapshot, which reports no store in effect — the same
+// degradation as unreadable settings, and never an obstruction.
+func loadRemoteSnapshot(ctx context.Context) gitremote.Snapshot {
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return gitremote.Snapshot{}
+	}
+	snap, err := gitremote.LoadSnapshot(ctx, repoRoot)
+	if err != nil {
+		logging.Debug(ctx, "checkpoint sync: could not read git remotes",
+			slog.String("error", err.Error()))
+		return gitremote.Snapshot{}
+	}
+	return snap
+}
+
+// storeConfigured reports that a checkpoint_remote exists at all: dedicated is
+// the half where it is in effect, IgnoredStore the half where it is not. Both
+// mean advising the user to configure one would be advice they already took.
+func (i checkpointSyncInfo) storeConfigured() bool { return i.dedicated() || i.IgnoredStore != "" }
+
 // resolveCheckpointSyncDestination answers only *where* checkpoints go — the
 // elected remote, the dedicated store, or the fail-closed error — with no
 // unpushed count. Split out from computeCheckpointSyncInfo so surfaces that need
@@ -335,10 +426,7 @@ func (i checkpointSyncInfo) dedicated() bool { return i.Source == checkpointSync
 // the checkpoint-destination note in remote_topology.go opted out and drifted,
 // which is the bug this split closes. Local-only and cheap — no ref walk, no
 // push-queue read, no network.
-//
-// s may be nil when the caller could not load settings; dedicated mode is then
-// simply not detected, which is the right degradation for a best-effort caller.
-func resolveCheckpointSyncDestination(ctx context.Context, s *EntireSettings) checkpointSyncInfo {
+func resolveCheckpointSyncDestination(ctx context.Context, probe checkpointStoreProbe) checkpointSyncInfo {
 	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
 	if err != nil {
 		// Fail-closed: checkpoint_push_remote names a remote that does not
@@ -347,40 +435,35 @@ func resolveCheckpointSyncDestination(ctx context.Context, s *EntireSettings) ch
 		// Accepted divergence: if a structured checkpoint_remote is also
 		// configured, the gate's dedicated exemption may still sync checkpoint
 		// data even while this fail-closed warning is shown, since there is no
-		// elected remote left to probe PushURL against here.
+		// elected remote left to probe against here.
 		return checkpointSyncInfo{Err: err.Error()}
 	}
 	if elected.Name == "" {
 		return checkpointSyncInfo{} // no remotes configured: show nothing
 	}
 
-	// Dedicated checkpoint_remote mode is reported only when PushURL derives
-	// an eligible URL for the elected remote, mirroring the pre-push
-	// exemption (ps.hasCheckpointURL); otherwise the gate applies normal
-	// single-remote sync, so status reports that instead. PushURL is
-	// local-only; never call resolvePushSettings here — its follow-up
-	// metadata fetch dials, and status must stay network-free.
+	// Dedicated checkpoint_remote mode is reported only when the store is in
+	// effect for the elected remote, mirroring the pre-push exemption
+	// (ps.hasCheckpointURL); otherwise the gate applies normal single-remote
+	// sync, so status reports that instead.
 	// Accepted divergence: a real push to a different named remote may derive
-	// PushURL differently than this elected-remote probe does.
-	ignoredStore := ""
-	if s != nil {
-		if cr := s.GetCheckpointRemote(); cr != nil {
-			if _, enabled, purlErr := checkpointremote.PushURL(ctx, elected.Name); purlErr == nil && enabled {
-				return checkpointSyncInfo{Remote: cr.Repo, Source: checkpointSyncSourceDedicated}
-			}
-			// Configured but not in effect for the elected remote, so
-			// checkpoints fall back to that remote. Recorded rather than
-			// dropped: PushURL only logs the rejection, and the fallback is
-			// otherwise indistinguishable from never having configured a store.
-			ignoredStore = cr.Repo
+	// its URL differently than this elected-remote probe does.
+	if probe.configured() {
+		if probe.inEffectFor(ctx, elected.Name) {
+			return checkpointSyncInfo{Remote: probe.storeRepo(), Source: checkpointSyncSourceDedicated}
+		}
+		// Configured but not in effect for the elected remote, so checkpoints
+		// fall back to that remote. Recorded rather than dropped: the rejection
+		// is otherwise only a logging.Warn, and the fallback is
+		// indistinguishable from never having configured a store.
+		return checkpointSyncInfo{
+			Remote:       elected.Name,
+			Source:       string(elected.Source),
+			IgnoredStore: probe.storeRepo(),
 		}
 	}
 
-	return checkpointSyncInfo{
-		Remote:       elected.Name,
-		Source:       string(elected.Source),
-		IgnoredStore: ignoredStore,
-	}
+	return checkpointSyncInfo{Remote: elected.Name, Source: string(elected.Source)}
 }
 
 // computeCheckpointSyncInfo is the single shared computation behind both the
@@ -388,15 +471,15 @@ func resolveCheckpointSyncDestination(ctx context.Context, s *EntireSettings) ch
 // above, plus the unpushed counter those two sections show and no other surface
 // needs.
 func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpointSyncInfo {
-	info := resolveCheckpointSyncDestination(ctx, s)
+	info := resolveCheckpointSyncDestination(ctx, newCheckpointStoreProbe(ctx, s, loadRemoteSnapshot(ctx)))
 	switch {
 	case info.Err != "" || info.Remote == "":
 		return info
-	case info.dedicated():
-		// The unpushed counter is meaningful here only on the git-refs
-		// backend (push-queue length is local and accurate). The git-branch
-		// comparison is omitted: pushes to a raw URL update no remote-tracking
-		// ref, so it would permanently read "all unpushed".
+	case info.Source == checkpointSyncSourceDedicated:
+		// The unpushed counter is meaningful here only on the git-refs backend
+		// (push-queue length is local and accurate). The git-branch comparison is
+		// omitted: pushes to a raw URL update no remote-tracking ref, so it would
+		// permanently read "all unpushed".
 		if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
 			info.Unpushed = countUnpushedCheckpointsForStatus(ctx, "")
 		}

@@ -176,6 +176,139 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 	return checkpointURL, true, nil
 }
 
+// PushDecision is the state CheckpointPushURL decides from: everything about
+// this repository's remotes and settings that the answer depends on, gathered by
+// the caller.
+//
+// It exists so a caller with several questions to ask — "is the store in effect
+// for each of these remotes?" — can read git once and answer them all from that
+// one read. Asking through PushURL instead re-reads the same two git values per
+// remote, and two reads of the same fact can disagree when a subprocess fails in
+// one call and succeeds in the next.
+type PushDecision struct {
+	// Remote is the remote being pushed to. Used for the fallback URL and for
+	// log context; never for a config lookup.
+	Remote string
+	// Config is the configured checkpoint_remote. Must be non-nil: "no store
+	// configured" is not a decision this makes.
+	Config *settings.CheckpointRemoteConfig
+	// OriginURL is origin's fetch URL, empty when the repo has no origin.
+	OriginURL string
+	// RemoteFetchURL is Remote's own fetch URL, used for the fallback when
+	// there is no origin to fall back to. May be empty.
+	RemoteFetchURL string
+	// PushURLs is every URL a push to Remote delivers to, in git's order. Must
+	// be non-empty; the first drives transport derivation.
+	PushURLs []string
+	// StoreIsLocalOnly reports that checkpoint_remote came from
+	// .entire/settings.local.json, which makes it this developer's own choice
+	// and exempt from the ownership test. Passed in rather than read here so
+	// that a caller deciding for several remotes gets one answer for all of
+	// them: the read behind it returns false on failure, so re-reading per
+	// remote can flip the ownership verdict mid-command.
+	StoreIsLocalOnly bool
+}
+
+// CheckpointPushURL decides the effective checkpoint push URL from already-read
+// state. The boolean reports whether the configured checkpoint_remote is in
+// effect; when false, the returned URL is the fallback the caller should push to
+// instead.
+//
+// PushURL is the same decision with the reads attached; see it for the rules.
+func CheckpointPushURL(ctx context.Context, in PushDecision) (string, bool, error) {
+	pushRemoteURL := in.PushURLs[0]
+
+	// Whether to use the checkpoint remote at all is a question about ownership
+	// ("is this checkpoint_remote mine, or did I inherit it by cloning?"), which
+	// both remotes get a vote on: origin says which project this is, the push
+	// destinations say which repos we are writing to. Any one of them owned by
+	// somebody other than the checkpoint repo's owner means inherited. See
+	// checkpointRemoteIsInherited.
+	if inherited, reason := checkpointRemoteIsInherited(in.Config, in.OriginURL, in.PushURLs, in.StoreIsLocalOnly); inherited {
+		fallbackURL, fallbackErr := in.fallbackURL()
+		if fallbackErr != nil {
+			return "", false, fmt.Errorf("no push URL found: %w", fallbackErr)
+		}
+		logging.Warn(ctx, "checkpoint-remote: ignoring checkpoint_remote that appears to belong to another owner; pushing checkpoints to the push remote instead",
+			slog.String("checkpoint_repo", in.Config.Repo),
+			slog.String("reason", reason),
+			slog.String("hint", "if this checkpoint repo is yours, configure checkpoint_remote in .entire/settings.local.json"),
+		)
+		return fallbackURL, false, nil
+	}
+
+	pushInfo, err := ParseURL(pushRemoteURL)
+	if err != nil {
+		if in.OriginURL != "" {
+			logFallback(ctx, "push", in.OriginURL, "parse push remote URL", err,
+				slog.String("push_remote", in.Remote),
+			)
+			return in.OriginURL, false, nil
+		}
+		return "", true, fmt.Errorf("no push URL found: %w", err)
+	}
+	withToken := strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)) != ""
+	if withToken && isDirectGitTransport(pushInfo.Protocol) {
+		// Coerce a direct (ssh/https) remote to HTTPS so the token applies,
+		// keeping the host so enterprise installations stay on their own host.
+		// An entire:// remote carries a cluster host that isn't a usable HTTPS
+		// host, so it's handled separately after the owner check below.
+		//
+		// Keep the port only when the source was already HTTPS. SSH ports
+		// (e.g., :2222) don't map to HTTPS ports on the same host.
+		port := ""
+		if pushInfo.Protocol == ProtocolHTTPS {
+			port = pushInfo.Port
+		}
+		pushInfo = &Info{
+			Protocol: ProtocolHTTPS,
+			Host:     pushInfo.Host,
+			Port:     port,
+			Owner:    pushInfo.Owner,
+			Repo:     pushInfo.Repo,
+		}
+	}
+
+	if withToken && pushInfo.Protocol == ProtocolEntire {
+		// The checkpoint token is an HTTPS credential for the provider host;
+		// it can't ride through the entire:// helper (which does its own
+		// auth). Route to the provider over HTTPS instead of the mirror.
+		if providerURL, ok := resolveProviderCheckpointURL(ctx, in.Config, ""); ok {
+			return providerURL, true, nil
+		}
+	}
+
+	pushURL, err := deriveCheckpointURLFromInfo(pushInfo, in.Config)
+	if err != nil {
+		// The push remote's protocol can't be mapped to a checkpoint URL
+		// (e.g. file://, or an entire:// mirror of a different forge than the
+		// configured provider). Honor the configured checkpoint_remote by
+		// targeting the provider's canonical host over HTTPS rather than
+		// misrouting checkpoints to the origin remote.
+		if providerURL, ok := resolveProviderCheckpointURL(ctx, in.Config, ""); ok {
+			return providerURL, true, nil
+		}
+		fallbackURL, fallbackErr := in.fallbackURL()
+		if fallbackErr == nil {
+			logFallback(ctx, "push", fallbackURL, "derive push checkpoint URL", err,
+				slog.String("push_remote", in.Remote),
+			)
+			return fallbackURL, false, nil
+		}
+		return "", true, fmt.Errorf("no push URL found: %w", err)
+	}
+
+	return pushURL, true, nil
+}
+
+// fallbackURL is where checkpoints go when the configured store does not apply:
+// origin, or this remote's own fetch URL when there is no origin. Mirrors
+// resolvePushFallbackURL without its git read, since the caller already has both
+// URLs.
+func (in PushDecision) fallbackURL() (string, error) {
+	return pushFallbackURL(in.Remote, in.OriginURL, in.RemoteFetchURL)
+}
+
 // PushURL returns the effective checkpoint push URL for the current repository.
 // Unlike FetchURL:
 //   - it derives protocol from the requested push remote, not always origin
@@ -191,6 +324,11 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 // The boolean return value reports whether a dedicated checkpoint_remote is
 // configured and should be used for push. When false, the returned URL is the
 // repository's origin URL as a fallback.
+//
+// This is the read-it-yourself entry point, for callers with one remote to ask
+// about — the pre-push hook, which must see current state. Callers asking about
+// several remotes should read a gitremote.Snapshot once and call
+// CheckpointPushURL, so their answers cannot disagree with each other.
 func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 	originURL := ""
 	if resolvedOriginURL, err := GetRemoteURL(ctx, originRemote); err == nil {
@@ -233,89 +371,24 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 		}
 		return "", true, fmt.Errorf("no push URL found: %w", err)
 	}
-	pushRemoteURL := pushRemoteURLs[0]
 
-	// Whether to use the checkpoint remote at all is a question about ownership
-	// ("is this checkpoint_remote mine, or did I inherit it by cloning?"), which
-	// both remotes get a vote on: origin says which project this is, the push
-	// destinations say which repos we are writing to. Any one of them owned by
-	// somebody other than the checkpoint repo's owner means inherited. See
-	// checkpointRemoteIsInherited.
-	if inherited, reason := checkpointRemoteIsInherited(ctx, config, originURL, pushRemoteURLs); inherited {
-		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
-		if fallbackErr != nil {
-			return "", false, fmt.Errorf("no push URL found: %w", fallbackErr)
-		}
-		logging.Warn(ctx, "checkpoint-remote: ignoring checkpoint_remote that appears to belong to another owner; pushing checkpoints to the push remote instead",
-			slog.String("checkpoint_repo", config.Repo),
-			slog.String("reason", reason),
-			slog.String("hint", "if this checkpoint repo is yours, configure checkpoint_remote in .entire/settings.local.json"),
-		)
-		return fallbackURL, false, nil
-	}
-
-	pushInfo, err := ParseURL(pushRemoteURL)
-	if err != nil {
-		if originURL != "" {
-			logFallback(ctx, "push", originURL, "parse push remote URL", err,
-				slog.String("push_remote", pushRemoteName),
-			)
-			return originURL, false, nil
-		}
-		return "", true, fmt.Errorf("no push URL found: %w", err)
-	}
-	withToken := strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)) != ""
-	if withToken && isDirectGitTransport(pushInfo.Protocol) {
-		// Coerce a direct (ssh/https) remote to HTTPS so the token applies,
-		// keeping the host so enterprise installations stay on their own host.
-		// An entire:// remote carries a cluster host that isn't a usable HTTPS
-		// host, so it's handled separately after the owner check below.
-		//
-		// Keep the port only when the source was already HTTPS. SSH ports
-		// (e.g., :2222) don't map to HTTPS ports on the same host.
-		port := ""
-		if pushInfo.Protocol == ProtocolHTTPS {
-			port = pushInfo.Port
-		}
-		pushInfo = &Info{
-			Protocol: ProtocolHTTPS,
-			Host:     pushInfo.Host,
-			Port:     port,
-			Owner:    pushInfo.Owner,
-			Repo:     pushInfo.Repo,
+	// Read only when the fallback would need it — there is no origin to fall
+	// back to — so the ordinary repo pays for two git reads, as before.
+	remoteFetchURL := ""
+	if originURL == "" && pushRemoteName != "" && pushRemoteName != originRemote {
+		if u, urlErr := GetRemoteURL(ctx, pushRemoteName); urlErr == nil {
+			remoteFetchURL = u
 		}
 	}
 
-	if withToken && pushInfo.Protocol == ProtocolEntire {
-		// The checkpoint token is an HTTPS credential for the provider host;
-		// it can't ride through the entire:// helper (which does its own
-		// auth). Route to the provider over HTTPS instead of the mirror.
-		if providerURL, ok := resolveProviderCheckpointURL(ctx, config, ""); ok {
-			return providerURL, true, nil
-		}
-	}
-
-	pushURL, err := deriveCheckpointURLFromInfo(pushInfo, config)
-	if err != nil {
-		// The push remote's protocol can't be mapped to a checkpoint URL
-		// (e.g. file://, or an entire:// mirror of a different forge than the
-		// configured provider). Honor the configured checkpoint_remote by
-		// targeting the provider's canonical host over HTTPS rather than
-		// misrouting checkpoints to the origin remote.
-		if providerURL, ok := resolveProviderCheckpointURL(ctx, config, ""); ok {
-			return providerURL, true, nil
-		}
-		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
-		if fallbackErr == nil {
-			logFallback(ctx, "push", fallbackURL, "derive push checkpoint URL", err,
-				slog.String("push_remote", pushRemoteName),
-			)
-			return fallbackURL, false, nil
-		}
-		return "", true, fmt.Errorf("no push URL found: %w", err)
-	}
-
-	return pushURL, true, nil
+	return CheckpointPushURL(ctx, PushDecision{
+		Remote:           pushRemoteName,
+		Config:           config,
+		OriginURL:        originURL,
+		RemoteFetchURL:   remoteFetchURL,
+		PushURLs:         pushRemoteURLs,
+		StoreIsLocalOnly: settings.CheckpointRemoteIsLocalOnly(ctx),
+	})
 }
 
 // Configured reports whether a structured checkpoint_remote is configured.
@@ -402,14 +475,14 @@ func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
 // setting we cannot confirm ownership, and falling back preserves the previous
 // behavior for those repos. settings.local.json is the escape hatch when the
 // checkpoint repo is genuinely ours but owned by a different account or org.
-func checkpointRemoteIsInherited(ctx context.Context, config *settings.CheckpointRemoteConfig, originURL string, pushRemoteURLs []string) (bool, string) {
+func checkpointRemoteIsInherited(config *settings.CheckpointRemoteConfig, originURL string, pushRemoteURLs []string, storeIsLocalOnly bool) (bool, string) {
 	checkpointOwner := config.Owner()
 	if checkpointOwner == "" {
 		// No owner to compare (malformed repo field). Matches the predecessor,
 		// which skipped the check rather than blocking on it.
 		return false, ""
 	}
-	if settings.CheckpointRemoteIsLocalOnly(ctx) {
+	if storeIsLocalOnly {
 		return false, ""
 	}
 
@@ -651,6 +724,41 @@ func logFallback(ctx context.Context, operation, fallbackURL, reason string, err
 	logging.Warn(ctx, "checkpoint remote URL resolution fell back to alternate remote URL", logAttrs...)
 }
 
+// pushFallbackURL is the fallback destination, decided from URLs the caller
+// already has. resolvePushFallbackURL is the same rule with the git read for
+// remoteFetchURL attached.
+func pushFallbackURL(pushRemoteName, originURL, remoteFetchURL string) (string, error) {
+	if originURL != "" {
+		if withCheckpointToken() {
+			if tokenURL, ok := deriveTokenOriginURL(originURL); ok {
+				return tokenURL, nil
+			}
+		}
+		return originURL, nil
+	}
+	if pushRemoteName == "" {
+		return "", fmt.Errorf("no push remote specified and remote %q not found", originRemote)
+	}
+	if pushRemoteName == originRemote {
+		return "", fmt.Errorf("remote %q not found", originRemote)
+	}
+	if remoteFetchURL == "" {
+		return "", fmt.Errorf("remote %q not found", pushRemoteName)
+	}
+	if withCheckpointToken() {
+		if tokenURL, ok := deriveTokenOriginURL(remoteFetchURL); ok {
+			return tokenURL, nil
+		}
+	}
+	return remoteFetchURL, nil
+}
+
+// withCheckpointToken reports whether ENTIRE_CHECKPOINT_TOKEN is set, which
+// forces HTTPS so the token can be used.
+func withCheckpointToken() bool {
+	return strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)) != ""
+}
+
 func resolvePushFallbackURL(ctx context.Context, pushRemoteName, originURL string) (string, error) {
 	if originURL != "" {
 		if strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)) != "" {
@@ -670,10 +778,5 @@ func resolvePushFallbackURL(ctx context.Context, pushRemoteName, originURL strin
 	if err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)) != "" {
-		if tokenURL, ok := deriveTokenOriginURL(pushURL); ok {
-			return tokenURL, nil
-		}
-	}
-	return pushURL, nil
+	return pushFallbackURL(pushRemoteName, originURL, pushURL)
 }
