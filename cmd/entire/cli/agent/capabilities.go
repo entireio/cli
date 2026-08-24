@@ -203,8 +203,14 @@ func stripInjectedContextBlocks(record, open, closeMarker []byte) []byte {
 		out = trimmed
 		// Removing the block splices its neighbours together, which can form a
 		// delimiter across the seam ("</entire-cont" + "ext>"). Resume far enough
-		// back that such a closer is still found.
-		from = max(openStart-len(closeMarker)+1, 0)
+		// back that such a closer is still found. When the opener sits in the first
+		// len(closeMarker)-1 bytes, a splice can only start at 0; otherwise resume
+		// from the opener so we do not rescan the whole prefix on every removal.
+		if rewind := openStart - len(closeMarker) + 1; rewind >= 0 {
+			from = rewind
+		} else {
+			from = openStart
+		}
 	}
 }
 

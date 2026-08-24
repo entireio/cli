@@ -287,19 +287,22 @@ func canonicalPathForContainment(path string) (string, error) {
 }
 
 func openTranscriptWithinSessionDir(transcriptPath, sessionDir string) (*os.File, error) {
-	transcriptPath, err := filepath.Abs(filepath.Clean(transcriptPath))
+	if !transcriptPathWithinSessionDir(transcriptPath, sessionDir) {
+		return nil, errors.New("transcript is outside the agent session directory")
+	}
+	resolvedTranscript, err := canonicalPathForContainment(transcriptPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve transcript path: %w", err)
 	}
-	sessionDir, err = filepath.Abs(filepath.Clean(sessionDir))
+	resolvedSession, err := canonicalPathForContainment(sessionDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve session directory: %w", err)
 	}
-	rel, err := filepath.Rel(sessionDir, transcriptPath)
+	rel, err := filepath.Rel(resolvedSession, resolvedTranscript)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return nil, errors.New("transcript is outside the agent session directory")
 	}
-	root, err := os.OpenRoot(sessionDir)
+	root, err := os.OpenRoot(resolvedSession)
 	if err != nil {
 		return nil, fmt.Errorf("open agent session directory: %w", err)
 	}

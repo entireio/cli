@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -163,15 +164,18 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 		return "", nil
 	}
 
+	var failed sync.Once
 	fail := func() {
-		stateErr := strategy.MutateSessionState(strategy.WithSessionLockWait(hookCtx, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
-			state.CrossRepoContext.PendingUntil = time.Time{}
-			state.CrossRepoContext.FailureBackoffUntil = time.Now().Add(crossRepoFailureBackoff)
-			return nil
+		failed.Do(func() {
+			stateErr := strategy.MutateSessionState(strategy.WithSessionLockWait(ctx, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
+				state.CrossRepoContext.PendingUntil = time.Time{}
+				state.CrossRepoContext.FailureBackoffUntil = time.Now().Add(crossRepoFailureBackoff)
+				return nil
+			})
+			if stateErr != nil && !errors.Is(stateErr, strategy.ErrStateNotFound) {
+				logging.Debug(ctx, "failed to record context injection backoff", "error", stateErr.Error())
+			}
 		})
-		if stateErr != nil && !errors.Is(stateErr, strategy.ErrStateNotFound) {
-			logging.Debug(hookCtx, "failed to record context injection backoff", "error", stateErr.Error())
-		}
 	}
 	evidence, scope, err := retrieveContextEvidence(hookCtx, coreClient, targetRepoID, prompt, 6, event.SessionID, false)
 	// Registration is consent-gated by Core scope, but independent of whether
@@ -214,7 +218,7 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 		renderedIDs[i] = item.ID
 	}
 	finalize := func() error {
-		return strategy.MutateSessionState(strategy.WithSessionLockWait(hookCtx, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
+		return strategy.MutateSessionState(strategy.WithSessionLockWait(ctx, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
 			state.CrossRepoContext.PendingUntil = time.Time{}
 			state.CrossRepoContext.FailureBackoffUntil = time.Time{}
 			state.CrossRepoContext.LastSuccessfulAt = finishedAt
