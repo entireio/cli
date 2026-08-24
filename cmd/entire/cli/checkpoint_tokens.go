@@ -428,7 +428,7 @@ func buildCheckpointTokensComparison(target, baseline checkpointTokensReport) *c
 	comparison.Status = checkpointComparisonStatus(comparison.Total)
 	comparison.Qualification = checkpointComparisonQualification(comparison.Status)
 	if classes := checkpointCostProxyPressureIncreased(comparison); len(classes) > 0 {
-		comparison.Qualification += fmt.Sprintf(" Cost-proxy pressure increased for %s even though total tokens decreased.", formatProseList(classes))
+		comparison.Qualification += fmt.Sprintf(" Cost-proxy pressure increased for %s even though total tokens decreased.", formatTokenClassList(classes))
 	}
 	return comparison
 }
@@ -447,19 +447,16 @@ func checkpointCostProxyPressureIncreased(comparison *checkpointTokensComparison
 	return classes
 }
 
-// formatProseList joins items for prose: "a", "a and b", "a, b, and c". Shared
-// with the checkpoint-destination note's remote lists (quoteNames), so the two
-// commands punctuate lists the same way.
-func formatProseList(items []string) string {
-	switch len(items) {
+func formatTokenClassList(classes []string) string {
+	switch len(classes) {
 	case 0:
 		return ""
 	case 1:
-		return items[0]
+		return classes[0]
 	case 2:
-		return items[0] + " and " + items[1]
+		return classes[0] + " and " + classes[1]
 	default:
-		return strings.Join(items[:len(items)-1], ", ") + ", and " + items[len(items)-1]
+		return strings.Join(classes[:len(classes)-1], ", ") + ", and " + classes[len(classes)-1]
 	}
 }
 
