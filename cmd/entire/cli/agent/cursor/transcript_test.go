@@ -71,9 +71,11 @@ func TestCursorAgent_ExtractPrompts(t *testing.T) {
 	if len(prompts) != 2 {
 		t.Fatalf("ExtractPrompts() returned %d prompts, want 2", len(prompts))
 	}
-	// Verify <user_query> tags are stripped
-	if prompts[0] != "hello" {
-		t.Errorf("prompts[0] = %q, want %q", prompts[0], "hello")
+	// Cursor's injected leading <timestamp> and the <user_query> wrapper are stripped
+	// exactly once: the user's own pasted <timestamp>, exposed at the head of the
+	// query by the unwrap, must survive (a second strip pass would eat it).
+	if prompts[0] != "<timestamp>2026-01-01</timestamp> is my format, hello" {
+		t.Errorf("prompts[0] = %q, want %q", prompts[0], "<timestamp>2026-01-01</timestamp> is my format, hello")
 	}
 	if prompts[1] != "add 'one' to a file and commit" {
 		t.Errorf("prompts[1] = %q, want %q", prompts[1], "add 'one' to a file and commit")

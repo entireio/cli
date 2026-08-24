@@ -54,13 +54,17 @@ type cellGroup struct {
 // collapse across jurisdictions into one group routed by whichever repo came
 // first — they stay per-jurisdiction and route via the jurisdiction fallback.
 //
-// When a RepoIndexEntry has Placements, each placement is added to the group
-// for its own cell/jurisdiction with its placement-specific repo ID. This
-// ensures mirror placements in other regions (e.g. a US-homed repo with an EU
-// mirror) are searched in both cells — matching the BFF's fan-out behavior.
-// When Placements is empty, the top-level Cell/Jurisdiction/ID are used as
-// before (backward compat for index responses that predate placements).
-func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
+// A RepoIndexEntry with Placements routes to exactly ONE placement, picked by
+// routedRepoPlacement (see its doc for the selection rule and the BFF/leaf
+// parity notes). Mirror placements are replicated copies of the same content
+// indexed under their own namespaces — searching them returns duplicate and
+// stale rows, and diverges from the web (ENT-1672). When Placements is empty,
+// the top-level Cell/Jurisdiction/ID are used (backward compat for index
+// responses that predate placements).
+//
+// skipped names repos with no routable placement — the picked placement is
+// not ready or carries no ID. Callers report it via reportableSkippedRepos.
+func groupReposByCell(repos []coreapi.RepoIndexEntry) (cells []cellGroup, skipped []string) {
 	byCell := make(map[string]*cellGroup)
 
 	addToGroup := func(id, cell, jurisdiction, clusterSlug string) {
@@ -92,22 +96,28 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
 
 	for _, r := range repos {
 		if len(r.Placements) > 0 {
-			for _, p := range r.Placements {
-				// Each placement carries its own cluster slug, cell, and
-				// jurisdiction (the /repos spec bump; the top-level RepoIndexEntry
-				// fields are deprecated). Route every placement — home and mirror
-				// alike — by its OWN slug so resolveCellBaseURLs can do the exact
-				// catalog join (bySlug), instead of leaving mirrors slugless and
-				// falling back to jurisdiction-default routing, which can query
-				// the wrong cell within a jurisdiction and silently miss a mirror.
-				addToGroup(p.ID, p.Cell, p.Jurisdiction, p.ClusterSlug)
+			p, ok := routedRepoPlacement(r)
+			if !ok {
+				skipped = append(skipped, skippedRepoLabel(r))
+				continue
 			}
+			// The picked placement carries its own cluster slug, cell, and
+			// jurisdiction (the /repos spec bump; the top-level RepoIndexEntry
+			// fields are deprecated), so resolveCellBaseURLs can do the exact
+			// catalog join (bySlug) instead of jurisdiction-default routing.
+			addToGroup(p.ID, p.Cell, p.Jurisdiction, p.ClusterSlug)
 		} else {
+			// An ID-less legacy row goes through the same reporting channel as
+			// the placement path above; addToGroup would drop it silently.
+			if strings.TrimSpace(r.ID) == "" {
+				skipped = append(skipped, skippedRepoLabel(r))
+				continue
+			}
 			addToGroup(r.ID, r.Cell, r.Jurisdiction, r.ClusterSlug) //nolint:staticcheck // top-level Cell/ClusterSlug deprecated by /repos spec bump; migrate to per-placement fields separately
 		}
 	}
 
-	cells := make([]cellGroup, 0, len(byCell))
+	cells = make([]cellGroup, 0, len(byCell))
 	for _, g := range byCell {
 		cells = append(cells, *g)
 	}
@@ -117,7 +127,123 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
 		}
 		return cells[i].jurisdiction < cells[j].jurisdiction
 	})
-	return cells
+	return cells, skipped
+}
+
+// skippedRepoLabel names an unroutable repo in the skipped list. FullName is
+// what the user typed and recognizes; the row ID is the fallback. The
+// placeholder keeps a row carrying neither from rendering as an empty name in
+// the user-facing warning.
+func skippedRepoLabel(r coreapi.RepoIndexEntry) string {
+	if name := strings.TrimSpace(r.FullName); name != "" {
+		return name
+	}
+	if id := strings.TrimSpace(r.ID); id != "" {
+		return id
+	}
+	return "(unidentified repo)"
+}
+
+// routedRepoPlacement picks the entry's PROCESSING placement — the one every
+// fan-out reads from (the BFF's searchPlacement in list-repos-index.ts).
+// Selection order:
+//
+//  1. the placement named by core's explicit `primaries.processing` ULID —
+//     the cell that does the repo's heavy lifting (trails, runners,
+//     checkpoint ingest), where searchable content originates;
+//  2. fallback for rows predating that field, or naming a ULID absent from
+//     the placement list: the canonical convention — the placement whose ID
+//     equals the entry's own ID, else the first.
+//
+// One rule for pinned and pin-less requests alike: pins resolve from the
+// leaves' all-accessible-placements byID sets, and both leaves narrow
+// pin-less broad scope by the same election since ENT-1776
+// (entire-search#188, peregrine#214).
+//
+// Selection must never key on the Mirror flag: real /repos rows mark every
+// placement Mirror:true, primary included. (The other primary, data_primary,
+// is the git-data writer — GitHub itself for github mirrors — so it can never
+// route a search.)
+//
+// ok is false when r has no placements at all (the caller routes those via
+// the top-level legacy fields, so this arm is defensive), or when the chosen
+// placement carries no ID or is not ready. An elected-but-unready primary is
+// NOT substituted with a ready mirror — it may predate the clone, and the
+// BFF's searchPlacement returns the same pick as-is for its caller to skip;
+// the two clients must choose identically. This is stricter than
+// cell_target.go's resolveProcessingPlacement, which tolerates a
+// mid-processing placement for single-repo reads (trail data can exist
+// mid-clone) — nothing is INDEXED to search until the placement is ready.
+// Expected symptom while that holds: during a placement migration (a new
+// cell elected while it is still cloning), the repo drops out of broad
+// search and a pinned search answers no results plus a skip warning, even
+// though the previously ready placement still holds a full index. Trails
+// and experts keep working throughout (they tolerate mid-processing).
+// The ListRepos decoder validates status against the closed enum, so "not
+// ready" here means processing, failed, or suspended; a status this build
+// doesn't know fails the whole index read upstream, never this pick.
+func routedRepoPlacement(r coreapi.RepoIndexEntry) (coreapi.RepoPlacement, bool) {
+	if len(r.Placements) == 0 {
+		return coreapi.RepoPlacement{}, false
+	}
+	var processingID string
+	if primaries, ok := r.Primaries.Get(); ok {
+		processingID = primaries.Processing
+	}
+	p, ok := placementByID(r.Placements, processingID)
+	if !ok {
+		p, ok = placementByID(r.Placements, r.ID)
+	}
+	if !ok {
+		p = r.Placements[0]
+	}
+	if strings.TrimSpace(p.ID) == "" {
+		return coreapi.RepoPlacement{}, false
+	}
+	if p.Status != coreapi.RepoPlacementStatusReady {
+		return coreapi.RepoPlacement{}, false
+	}
+	return p, true
+}
+
+// placementByID returns the placement with the given ID; ok is false when id
+// is empty or names no placement. Both sides of the comparison are trimmed so
+// the match cannot depend on which caller normalized its input. Shared with
+// cell_target.go's resolveProcessingPlacement: the two resolvers differ in
+// what they do with an unready placement, deliberately, but must never
+// disagree on whether an ID names one at all.
+func placementByID(placements []coreapi.RepoPlacement, id string) (coreapi.RepoPlacement, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return coreapi.RepoPlacement{}, false
+	}
+	for _, p := range placements {
+		if strings.TrimSpace(p.ID) == id {
+			return p, true
+		}
+	}
+	return coreapi.RepoPlacement{}, false
+}
+
+// reportableSkippedRepos debug-logs groupReposByCell's skipped repos and
+// returns the subset the caller should surface to the user:
+//
+//   - pinned requests report every skip — the repo was explicitly asked for
+//     and is genuinely excluded;
+//   - pin-less broad requests stay silent while at least one cell is queried
+//     (a skip only stops contributing to WHICH cells are queried; the leaves
+//     scope each queried cell themselves, so claiming exclusion would be
+//     wrong) — but when the skips left NOTHING to query, the search is empty
+//     because of them, and a bare "no results" would be misleading.
+func reportableSkippedRepos(ctx context.Context, pinned bool, queriedCells int, skipped []string) []string {
+	if len(skipped) == 0 {
+		return nil
+	}
+	logging.Debug(ctx, "search fan-out: repos without a routable processing placement", "repos", strings.Join(skipped, ","))
+	if pinned || queriedCells == 0 {
+		return skipped
+	}
+	return nil
 }
 
 // resolveCellBaseURLs fills each group's baseURL from the cluster catalog,

@@ -5,8 +5,6 @@ import (
 	"os"
 	"runtime"
 	"time"
-
-	"github.com/denisbrodbeck/machineid"
 )
 
 // Property values for the checkpoint_policy_blocked event.
@@ -37,7 +35,7 @@ type CheckpointPolicyBlockedEvent struct {
 // BuildCheckpointPolicyBlockedPayload constructs the event payload. Exported for
 // testing. Returns nil if the machine ID cannot be resolved.
 func BuildCheckpointPolicyBlockedPayload(event CheckpointPolicyBlockedEvent, version string) *EventPayload {
-	machineID, err := machineid.ProtectedID("entire-cli")
+	machineID, err := telemetryMachineID()
 	if err != nil {
 		return nil
 	}

@@ -117,7 +117,7 @@ func TestCollectTraceEntries(t *testing.T) {
 		t.Parallel()
 		logFile := writeFixture(t)
 
-		entries, err := collectTraceEntries(logFile, 2, "")
+		entries, err := collectTraceEntries(logFile, 2, "", false)
 		if err != nil {
 			t.Fatalf("collectTraceEntries returned error: %v", err)
 		}
@@ -145,7 +145,7 @@ func TestCollectTraceEntries(t *testing.T) {
 		t.Parallel()
 		logFile := writeFixture(t)
 
-		entries, err := collectTraceEntries(logFile, 10, testOpPostCommit)
+		entries, err := collectTraceEntries(logFile, 10, testOpPostCommit, false)
 		if err != nil {
 			t.Fatalf("collectTraceEntries returned error: %v", err)
 		}
@@ -161,7 +161,7 @@ func TestCollectTraceEntries(t *testing.T) {
 	t.Run("file not found returns empty", func(t *testing.T) {
 		t.Parallel()
 
-		entries, err := collectTraceEntries("/nonexistent/path/trace.jsonl", 10, "")
+		entries, err := collectTraceEntries("/nonexistent/path/trace.jsonl", 10, "", false)
 		if err != nil {
 			t.Fatalf("expected nil error for missing file, got %v", err)
 		}

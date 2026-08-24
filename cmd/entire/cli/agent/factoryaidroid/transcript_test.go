@@ -1,6 +1,7 @@
 package factoryaidroid
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"strings"
@@ -843,7 +844,7 @@ func TestExtractModelFromTranscript_SettingsFile(t *testing.T) {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
-	model := ExtractModelFromTranscript(transcriptPath)
+	model := ExtractModelFromTranscript(context.Background(), transcriptPath)
 	if model != "Gemini-2.5-Pro-0" {
 		t.Errorf("ExtractModelFromTranscript() = %q, want %q", model, "Gemini-2.5-Pro-0")
 	}
@@ -865,7 +866,7 @@ func TestExtractModelFromTranscript_NoCustomPrefix(t *testing.T) {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
-	model := ExtractModelFromTranscript(transcriptPath)
+	model := ExtractModelFromTranscript(context.Background(), transcriptPath)
 	if model != "claude-opus-4-6" {
 		t.Errorf("ExtractModelFromTranscript() = %q, want %q", model, "claude-opus-4-6")
 	}
@@ -882,7 +883,7 @@ func TestExtractModelFromTranscript_NoSettingsFile(t *testing.T) {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	model := ExtractModelFromTranscript(transcriptPath)
+	model := ExtractModelFromTranscript(context.Background(), transcriptPath)
 	if model != "" {
 		t.Errorf("ExtractModelFromTranscript() = %q, want empty", model)
 	}
@@ -904,7 +905,7 @@ func TestExtractModelFromTranscript_CorruptSettingsFile(t *testing.T) {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
-	model := ExtractModelFromTranscript(transcriptPath)
+	model := ExtractModelFromTranscript(context.Background(), transcriptPath)
 	if model != "" {
 		t.Errorf("ExtractModelFromTranscript() = %q, want empty for corrupt settings", model)
 	}
@@ -913,7 +914,7 @@ func TestExtractModelFromTranscript_CorruptSettingsFile(t *testing.T) {
 func TestExtractModelFromTranscript_EmptyPath(t *testing.T) {
 	t.Parallel()
 
-	model := ExtractModelFromTranscript("")
+	model := ExtractModelFromTranscript(context.Background(), "")
 	if model != "" {
 		t.Errorf("ExtractModelFromTranscript(\"\") = %q, want empty", model)
 	}

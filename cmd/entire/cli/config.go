@@ -3,13 +3,19 @@ package cli
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+
+	"github.com/spf13/cobra"
 
 	// Import agents to register them
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
@@ -72,32 +78,60 @@ func GetStrategy(_ context.Context) *strategy.ManualCommitStrategy {
 	return s
 }
 
-// GetLogLevel returns the configured log level from settings.
-// Returns empty string if not configured (caller should use default).
-// Note: ENTIRE_LOG_LEVEL env var takes precedence; check it first.
-func GetLogLevel() string {
-	s, err := settings.Load(context.TODO()) //nolint:contextcheck // Called as a callback via SetLogLevelGetter, no ctx available
-	if err != nil {
-		return ""
+// resolveLogLevel resolves the level for a new logger: the environment first,
+// then repo settings. An unreadable settings file leaves the default. An
+// unrecognized name warns on stderr rather than logging, because there is no
+// logger yet to warn through.
+func resolveLogLevel(ctx context.Context) slog.Level {
+	name := os.Getenv(logging.LogLevelEnvVar)
+	if name == "" {
+		if s, err := settings.Load(ctx); err == nil {
+			name = s.LogLevel
+		}
 	}
-	return s.LogLevel
+	level, ok := logging.ParseLevel(name)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: invalid log level %q, defaulting to INFO\n", name)
+	}
+	return level
 }
 
-// ensureCommandLogging routes logging to .entire/logs/ for a plain command that
-// would otherwise emit logging.* calls with no logger installed, and returns the
-// teardown. Commands reached from a hook already have one, and this leaves it
-// alone; see logging.EnsureInitialized.
-//
-// The level getter is paired with the init here — the same pairing every
-// command-level Init site needs — because without it `log_level` from settings
-// is ignored on this path.
-//
-// Scope the returned cleanup to the whole command, not to the one call that
-// needed a logger: it closes the log file, so anything logged afterwards goes
-// back to the user's terminal via slog.Default().
-func ensureCommandLogging(ctx context.Context) func() {
-	logging.SetLogLevelGetter(GetLogLevel)
-	return logging.EnsureInitialized(ctx)
+// ensureLogger attaches a logger to cmd's context unless one is already there,
+// and is the only place that installs one. Two loggers on the same file means
+// two 8KB buffers, and whichever lands in the context second orphans the first —
+// nothing flushes it. Best-effort: a command must not die because a log file
+// could not be opened.
+func ensureLogger(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	if logging.LoggerFromContext(ctx) != nil {
+		return
+	}
+	l, err := newLogger(ctx)
+	if err != nil {
+		return
+	}
+	cmd.SetContext(logging.WithLogger(ctx, l))
+}
+
+// newLogger builds the logger for .entire/logs/entire.log in the current
+// worktree. Nothing is created on disk here — the directory and file arrive with
+// the first line actually written — so the caller's remaining obligation is
+// narrower than it once was but has not gone away: `enable` still calls this
+// only after every check that can still reject the invocation, so a rejected
+// enable that goes on to log leaves an untouched repo untouched.
+func newLogger(ctx context.Context) (*logging.Logger, error) {
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve worktree root: %w", err)
+	}
+	l, err := logging.New(logging.Config{
+		Dir:   filepath.Join(root, logging.LogsDir),
+		Level: resolveLogLevel(ctx),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open log sink: %w", err)
+	}
+	return l, nil
 }
 
 // GetAgentsWithHooksInstalled returns names of agents that have hooks installed.

@@ -290,6 +290,14 @@ func runExperts(ctx context.Context, out, errOut io.Writer, args []string, f *ex
 	}
 	client, err := newExpertsAPIClient(ctx, f.insecureHTTP, cellFullName, cellULID)
 	if err != nil {
+		// Not-onboarded is the most common way cell resolution fails, and its
+		// raw chain is internal resolution steps; render it like the trail
+		// commands do instead of burying it under another wrap. cellFullName is
+		// "" for the ULID form, where renderRepoNotOnboarded falls back to
+		// naming no repo.
+		if rendered := renderRepoNotOnboarded(errOut, cellFullName, err); rendered != nil {
+			return rendered
+		}
 		return fmt.Errorf("create experts API client: %w", err)
 	}
 

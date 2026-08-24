@@ -62,6 +62,14 @@ type CondenseResult struct {
 	// a TranscriptSanitizer, so the session silently stops condensing after its
 	// first commit.
 	TranscriptSizeBaseline int64
+
+	// NewSkillEvents are the transcript-extracted skill events this
+	// condensation appended to session state (already deduped against
+	// everything previously recorded). Callers forward them to
+	// EmitSkillInvocationTelemetry after their MutateSessionState saves — an
+	// unsaved append is re-derived by the next extraction pass, so emitting
+	// early would double-report.
+	NewSkillEvents []agent.SkillEvent
 }
 
 // ExtractedSessionData contains data extracted from a shadow branch.

@@ -118,19 +118,34 @@ func cellTargetForClusterHost(ctx context.Context, c cellCoreClient, clusterHost
 	return cellTargetFromCluster(cluster)
 }
 
-// cellTargetForClusterSlug maps a known cluster slug (a RepoPlacement's
-// ClusterSlug) to a cell apiUrl + jurisdiction via the coreapi cluster
-// catalog. The slug, not the host, is the reliable join key for a
-// RepoPlacement — see cell_fanout.go's groupReposByCell for the same rule
-// applied to the repo-set fan-out path.
-func cellTargetForClusterSlug(ctx context.Context, c cellCoreClient, clusterSlug string) (*auth.CellTarget, error) {
+// cellTargetForPlacement maps a RepoPlacement to its cell's apiUrl +
+// jurisdiction via the coreapi cluster catalog, trying the same two joins the
+// multi-repo fan-out uses: ClusterSlug against Cluster.Slug first (the
+// reliable key for a placement — see cell_fanout.go's groupReposByCell), then
+// the placement's Cell name against the catalog's URLs.
+//
+// Both tiers exist because resolveCellBaseURLs — the sibling path resolving
+// the same data for a repo SET — needs both in practice; its own comments name
+// the misses it survives ("cluster not in catalog", "cell name does not appear
+// in any catalog URL"). Joining on slug alone here made the single-repo path
+// hard-fail on exactly the catalog gap the fan-out was written to tolerate,
+// leaving `entire trail`, `entire experts` and `explain --repo` strictly
+// narrower than `entire search`.
+//
+// Unlike the fan-out there is deliberately no jurisdiction-default tier: that
+// is home-cell routing, i.e. the wrong-region "success" this resolver exists
+// to refuse. Two joins, then a loud failure.
+func cellTargetForPlacement(ctx context.Context, c cellCoreClient, placement coreapi.RepoPlacement) (*auth.CellTarget, error) {
 	clusters, err := c.ListClusters(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list clusters: %w", err)
 	}
-	cluster, ok := matchClusterBySlug(clusters.Clusters, clusterSlug)
+	cluster, ok := matchClusterBySlug(clusters.Clusters, placement.ClusterSlug)
 	if !ok {
-		return nil, fmt.Errorf("no cluster matches slug %q", clusterSlug)
+		cluster, ok = matchClusterByCellInURL(clusters.Clusters, placement.Cell)
+	}
+	if !ok {
+		return nil, fmt.Errorf("no cluster matches slug %q or cell %q", placement.ClusterSlug, placement.Cell)
 	}
 	return cellTargetFromCluster(cluster)
 }
@@ -191,13 +206,22 @@ func resolveProcessingPlacement(ctx context.Context, c cellCoreClient, fullName 
 	if !strings.EqualFold(strings.TrimSpace(entry.FullName), strings.TrimSpace(fullName)) {
 		return coreapi.RepoPlacement{}, fmt.Errorf("control plane returned %q for %s", entry.FullName, fullName)
 	}
-	// A Filter lookup bypasses ListRepos' default scope=onboarded restriction
-	// (see the OpenAPI doc on ListReposParams.Filter), so it can return a row
-	// for a repo that exists on the forge and is visible to the caller but was
-	// never onboarded to Entire: a Candidate set, with no placements or
-	// primaries to resolve. This is the common real-world "not onboarded"
-	// shape — a repo a developer just happens to work in — as opposed to the
-	// zero-rows case below (caller can't see it, or it doesn't exist at all).
+	// A Candidate row is a repo that exists on the forge and is visible to the
+	// caller but was never onboarded: no placements or primaries to resolve.
+	//
+	// Kept as its own branch, but NOT because it is the common case — the
+	// opposite is true today. The OpenAPI text on ListReposParams.Filter says
+	// scope is ignored for a Filter lookup, which would make Candidate rows
+	// reachable; the live control plane does not behave that way. Verified
+	// against prod 2026-08-19: filter=torvalds/linux (public, plainly not
+	// onboarded) returns ZERO rows, not a Candidate row, and
+	// repo_mirror.go's runRepoMirrorGetByName documents the same server
+	// behaviour. So the zero-rows branch above is the common real-world "not
+	// onboarded" shape and this branch is currently unreachable.
+	//
+	// Both return errRepoNotOnboarded, so which one fires is not
+	// behaviour-visible. Do not re-document this as the common case without
+	// re-checking the server.
 	if _, isCandidate := entry.Candidate.Get(); isCandidate {
 		return coreapi.RepoPlacement{}, errRepoNotOnboarded
 	}
@@ -208,18 +232,19 @@ func resolveProcessingPlacement(ctx context.Context, c cellCoreClient, fullName 
 	if processingID == "" {
 		return coreapi.RepoPlacement{}, errRepoNotOnboarded
 	}
-	for _, p := range entry.Placements {
-		if p.ID != processingID {
-			continue
-		}
-		if p.Status == coreapi.RepoPlacementStatusFailed || p.Status == coreapi.RepoPlacementStatusSuspended {
-			return coreapi.RepoPlacement{}, fmt.Errorf("processing placement is %s", p.Status)
-		}
-		return p, nil
+	// Shares the fan-out's matcher (cell_fanout.go) so the two resolvers can
+	// never disagree on whether an ID names a placement — only on what they
+	// do with the answer, which is the deliberate part (see below).
+	p, ok := placementByID(entry.Placements, processingID)
+	if !ok {
+		// Defensive: primaries.processing should always name a placement
+		// present in the same response.
+		return coreapi.RepoPlacement{}, fmt.Errorf("processing placement %q is not in the repo's placement list", processingID)
 	}
-	// Defensive: primaries.processing should always name a placement present
-	// in the same response.
-	return coreapi.RepoPlacement{}, fmt.Errorf("processing placement %q is not in the repo's placement list", processingID)
+	if p.Status == coreapi.RepoPlacementStatusFailed || p.Status == coreapi.RepoPlacementStatusSuspended {
+		return coreapi.RepoPlacement{}, fmt.Errorf("processing placement is %s", p.Status)
+	}
+	return p, nil
 }
 
 // repoCellPlacement is a repo's processing placement: the id entire-api keys
@@ -263,11 +288,15 @@ func resolveRepoCellPlacement(ctx context.Context, owner, repo string) (repoCell
 	if err != nil {
 		return repoCellPlacement{}, cellPlacementError(ctx, fullName, fmt.Errorf("resolve processing placement for %s: %w", fullName, err))
 	}
-	target, err := cellTargetForClusterSlug(ctx, c, placement.ClusterSlug)
+	target, err := cellTargetForPlacement(ctx, c, placement)
 	if err != nil {
 		return repoCellPlacement{}, cellPlacementError(ctx, fullName, fmt.Errorf("resolve cell for %s: %w", fullName, err))
 	}
-	return repoCellPlacement{RepoID: placement.ID, Target: target}, nil
+	// Trimmed for the same reason the match is: RepoID becomes a path segment
+	// in entire-api URLs, so tolerating a padded id in the lookup without
+	// normalizing it here would trade a loud "not in the placement list" for
+	// a malformed request.
+	return repoCellPlacement{RepoID: strings.TrimSpace(placement.ID), Target: target}, nil
 }
 
 // cellPlacementError reports a timeout as a timeout: without this, a fired

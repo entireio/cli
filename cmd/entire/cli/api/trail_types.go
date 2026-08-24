@@ -9,43 +9,10 @@ import (
 )
 
 // TrailListResponse is the response from entire-api's trail list endpoint.
-// Trails is retained as the CLI-facing page field; UnmarshalJSON fills it from
-// the backend's standard {items,nextPageToken,totalCount} envelope.
 type TrailListResponse struct {
 	Trails        []TrailResource `json:"items"`
 	Total         int             `json:"totalCount"`
 	NextPageToken *string         `json:"nextPageToken"`
-
-	// Legacy metadata fields remain source-compatible for integration fixtures;
-	// entire-api's standard list envelope no longer emits them.
-	Limit         int       `json:"-"`
-	Offset        int       `json:"-"`
-	RepoFullName  string    `json:"-"`
-	DefaultBranch string    `json:"-"`
-	UpdatedAt     time.Time `json:"-"`
-}
-
-func (r *TrailListResponse) UnmarshalJSON(data []byte) error {
-	var wire struct {
-		Items         []TrailResource `json:"items"`
-		Trails        []TrailResource `json:"trails"`
-		TotalCount    int             `json:"totalCount"`
-		Total         int             `json:"total"`
-		NextPageToken *string         `json:"nextPageToken"`
-	}
-	if err := decodeNormalizedTrailJSON(data, &wire); err != nil {
-		return fmt.Errorf("decode trail list: %w", err)
-	}
-	r.Trails = wire.Items
-	if r.Trails == nil {
-		r.Trails = wire.Trails
-	}
-	r.Total = wire.TotalCount
-	if r.Total == 0 {
-		r.Total = wire.Total
-	}
-	r.NextPageToken = wire.NextPageToken
-	return nil
 }
 
 // TrailResource represents a trail returned by entire-api. The backend uses
@@ -79,18 +46,16 @@ type TrailResource struct {
 	BodyDocument       *TrailBodyDocument `json:"bodyDocument,omitempty"`
 }
 
-func (r *TrailResource) UnmarshalJSON(data []byte) error {
-	type plain TrailResource
-	return decodeNormalizedTrailJSON(data, (*plain)(r))
-}
-
 // TrailBodyDocument is the trail's description editor document. TextSnapshot
 // is the rendered plain text displayed by the CLI. The document is also what a
 // body write returns (see TrailBodyRequest), so both directions decode into this
 // type; the fields the CLI does not use (id, documentKey, schemaVersion,
-// contentJson, updatedAt) are simply left out of it.
+// contentJson, updatedAt) are simply left out of it. ETag is populated on a
+// read as well as on a write response, and is what makes If-Match viable on
+// the next write (see sendTrailBody).
 type TrailBodyDocument struct {
 	TextSnapshot string `json:"textSnapshot"`
+	ETag         string `json:"etag,omitempty"`
 }
 
 // ToMetadata converts a TrailResource to display metadata.
@@ -166,9 +131,10 @@ type TrailUpdateResponse struct {
 // rejected as "exactly one of markdown/contentJson is required".
 //
 // The route also accepts contentJson (ProseMirror JSON, written as-is) in place
-// of markdown, and an If-Match header for optimistic concurrency. Neither is
-// modeled here: the CLI writes Markdown, and it has no ETag to send — that
-// value only comes back from a prior write through this same route.
+// of markdown; the CLI only ever writes Markdown, so contentJson is not
+// modeled here. The route also accepts an If-Match header for optimistic
+// concurrency, populated from a prior read of TrailBodyDocument.ETag — see
+// sendTrailBody for the dispatch between If-Match and Overwrite.
 type TrailBodyRequest struct {
 	Markdown  string `json:"markdown"`
 	Overwrite bool   `json:"overwrite,omitempty"`
@@ -196,7 +162,7 @@ func (a *TrailApproval) UnmarshalJSON(data []byte) error {
 		CommitSHA string          `json:"commitSha"`
 		CreatedAt time.Time       `json:"createdAt"`
 	}
-	if err := decodeNormalizedTrailJSON(data, &wire); err != nil {
+	if err := json.Unmarshal(data, &wire); err != nil {
 		return fmt.Errorf("decode trail approval: %w", err)
 	}
 	a.ID, a.Event, a.CommitSHA, a.CreatedAt = wire.ID, wire.Event, wire.CommitSHA, wire.CreatedAt

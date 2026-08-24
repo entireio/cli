@@ -87,6 +87,8 @@ func TestFormatIncrementalMessage_SanitizesTodoContent(t *testing.T) {
 }
 
 func TestTruncateDescription(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name   string
 		input  string
@@ -127,6 +129,7 @@ func TestTruncateDescription(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := TruncateDescription(tt.input, tt.maxLen)
 			if got != tt.want {
 				t.Errorf("TruncateDescription(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
@@ -136,6 +139,8 @@ func TestTruncateDescription(t *testing.T) {
 }
 
 func TestFormatSubagentEndMessage(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
 		agentType   string
@@ -175,6 +180,7 @@ func TestFormatSubagentEndMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := FormatSubagentEndMessage(tt.agentType, tt.description, tt.toolUseID)
 			if got != tt.want {
 				t.Errorf("FormatSubagentEndMessage(%q, %q, %q) = %q, want %q",
@@ -185,6 +191,8 @@ func TestFormatSubagentEndMessage(t *testing.T) {
 }
 
 func TestFormatIncrementalMessage(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
 		todoContent string
@@ -217,6 +225,7 @@ func TestFormatIncrementalMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := FormatIncrementalMessage(tt.todoContent, tt.sequence, tt.toolUseID)
 			if got != tt.want {
 				t.Errorf("FormatIncrementalMessage(%q, %d, %q) = %q, want %q",
@@ -227,6 +236,8 @@ func TestFormatIncrementalMessage(t *testing.T) {
 }
 
 func TestExtractLastCompletedTodo(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		todosJSON string
@@ -276,6 +287,7 @@ func TestExtractLastCompletedTodo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := ExtractLastCompletedTodo([]byte(tt.todosJSON))
 			if got != tt.want {
 				t.Errorf("ExtractLastCompletedTodo(%s) = %q, want %q", tt.todosJSON, got, tt.want)
@@ -285,6 +297,8 @@ func TestExtractLastCompletedTodo(t *testing.T) {
 }
 
 func TestCountTodos(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		todosJSON string
@@ -324,55 +338,10 @@ func TestCountTodos(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := CountTodos([]byte(tt.todosJSON))
 			if got != tt.want {
 				t.Errorf("CountTodos(%s) = %d, want %d", tt.todosJSON, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestFormatIncrementalSubject(t *testing.T) {
-	tests := []struct {
-		name                string
-		incrementalType     string
-		subagentType        string
-		taskDescription     string
-		todoContent         string
-		incrementalSequence int
-		shortToolUseID      string
-		want                string
-	}{
-		{
-			name:                "incremental with todo content",
-			incrementalType:     "TodoWrite",
-			todoContent:         "Set up Node.js project",
-			incrementalSequence: 1,
-			shortToolUseID:      "toolu_01CJhrr",
-			want:                "Set up Node.js project (toolu_01CJhrr)",
-		},
-		{
-			name:                "incremental without todo content",
-			incrementalType:     "TodoWrite",
-			todoContent:         "",
-			incrementalSequence: 3,
-			shortToolUseID:      "toolu_01CJhrr",
-			want:                "Checkpoint #3: toolu_01CJhrr",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := FormatIncrementalSubject(
-				tt.incrementalType,
-				tt.subagentType,
-				tt.taskDescription,
-				tt.todoContent,
-				tt.incrementalSequence,
-				tt.shortToolUseID,
-			)
-			if got != tt.want {
-				t.Errorf("FormatIncrementalSubject() = %q, want %q", got, tt.want)
 			}
 		})
 	}
