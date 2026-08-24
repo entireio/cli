@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -2158,6 +2159,13 @@ func TestRunStatus_PrintsBothReviewAndInvestigation(t *testing.T) {
 
 // --- Checkpoint sync visibility (single-remote gate observability) ---
 
+// electedOriginRemote and testCheckpointStoreRepo are the remote name and
+// checkpoint_remote slug the checkpoint-sync tests assert against.
+const (
+	electedOriginRemote     = "origin"
+	testCheckpointStoreRepo = "org/checkpoints"
+)
+
 // checkpointSyncTestCommit creates a commit in the cwd test repo and returns
 // its hash. setupTestRepo leaves the repo without commits, and both the v1
 // counter and ref updates need at least one.
@@ -2420,7 +2428,7 @@ func TestRunStatusJSON_CheckpointSync_Elected(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if result.CheckpointSyncRemote != "origin" {
+	if result.CheckpointSyncRemote != electedOriginRemote {
 		t.Errorf("checkpoint_sync_remote = %q, want %q", result.CheckpointSyncRemote, "origin")
 	}
 	if result.CheckpointSyncRemoteSource != "default" {
@@ -2475,7 +2483,7 @@ func TestRunStatusJSON_CheckpointSync_Dedicated(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if result.CheckpointSyncRemote != "org/checkpoints" {
+	if result.CheckpointSyncRemote != testCheckpointStoreRepo {
 		t.Errorf("checkpoint_sync_remote = %q, want the org/repo slug", result.CheckpointSyncRemote)
 	}
 	if result.CheckpointSyncRemoteSource != "dedicated" {
@@ -2540,7 +2548,7 @@ func TestRunStatusJSON_CheckpointSync_DedicatedIneligible(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if result.CheckpointSyncRemote != "origin" {
+	if result.CheckpointSyncRemote != electedOriginRemote {
 		t.Errorf("checkpoint_sync_remote = %q, want the elected remote %q", result.CheckpointSyncRemote, "origin")
 	}
 	if result.CheckpointSyncRemoteSource != "default" {
@@ -2549,8 +2557,47 @@ func TestRunStatusJSON_CheckpointSync_DedicatedIneligible(t *testing.T) {
 	if result.CheckpointSyncError != "" {
 		t.Errorf("checkpoint_sync_error should be empty, got %q", result.CheckpointSyncError)
 	}
-	if result.CheckpointRemoteIgnored != "org/checkpoints" {
+	if result.CheckpointRemoteIgnored != testCheckpointStoreRepo {
 		t.Errorf("checkpoint_remote_ignored = %q, want the configured store", result.CheckpointRemoteIgnored)
+	}
+}
+
+// TestResolveCheckpointSyncDestination_UnreadableSnapshot pins the degradation
+// for a failed `git remote -v`: the probe cannot judge the store, and "cannot
+// tell" must not surface as the "store ignored" warning — that warning claims
+// the store was rejected, which a transient read failure does not establish.
+//
+// Not parallel: setupTestRepo chdirs.
+func TestResolveCheckpointSyncDestination_UnreadableSnapshot(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
+	// Remote owner "other" != store owner "org": with a readable snapshot this
+	// is exactly the rejected-store state.
+	testutil.AddRemote(t, ".", "origin", "https://github.com/other/repo.git")
+
+	ctx := context.Background()
+	s, err := LoadEntireSettings(ctx)
+	if err != nil {
+		t.Fatalf("LoadEntireSettings() error = %v", err)
+	}
+
+	// Control: the live snapshot judges the store and reports it ignored.
+	live := resolveCheckpointSyncDestination(ctx, newCheckpointStoreProbe(ctx, s, loadRemoteSnapshot(ctx)))
+	if live.IgnoredStore != testCheckpointStoreRepo {
+		t.Errorf("live snapshot: IgnoredStore = %q, want the configured store", live.IgnoredStore)
+	}
+
+	// An empty snapshot is what a failed `git remote -v` degrades to.
+	info := resolveCheckpointSyncDestination(ctx, newCheckpointStoreProbe(ctx, s, gitremote.Snapshot{}))
+	if info.IgnoredStore != "" {
+		t.Errorf("unreadable snapshot: IgnoredStore = %q, want none — a transient read failure is not a rejection", info.IgnoredStore)
+	}
+	if info.dedicated() {
+		t.Errorf("unreadable snapshot must not claim dedicated mode, got source %q", info.Source)
+	}
+	if info.Remote != electedOriginRemote {
+		t.Errorf("Remote = %q, want plain elected-remote sync to %q", info.Remote, "origin")
 	}
 }
 

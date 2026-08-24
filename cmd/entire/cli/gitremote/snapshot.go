@@ -84,8 +84,9 @@ func parseRemoteVerbose(out string) Snapshot {
 				entry.Push = append(entry.Push, url)
 			}
 		case strings.HasSuffix(rest, "(fetch)"):
-			// First wins: git prints one fetch line per remote, but a
-			// malformed read must not silently prefer a later value.
+			// First wins: a multi-url remote gets one fetch line per
+			// configured url, and the first is the one GetRemoteURL reports,
+			// so a later line must not silently replace it.
 			if entry.Fetch == "" {
 				entry.Fetch = strings.TrimSpace(strings.TrimSuffix(rest, "(fetch)"))
 			}

@@ -192,7 +192,9 @@ func (t remoteTopology) writeDestinationBody(b *strings.Builder) {
 // left a broken checkpoint_push_remote as the state that said least.
 //
 // Only the tier wording is genuinely about choosing among several remotes, so
-// only it stays gated.
+// only it stays gated. The note as a whole still sits behind ambiguous(),
+// though: a single-remote, single-URL repo prints nothing even in these states,
+// and `entire status` is the surface that always reports them.
 func (t remoteTopology) describeDestination(b *strings.Builder) {
 	switch {
 	case t.sync.Err != "":

@@ -397,6 +397,16 @@ func (p checkpointStoreProbe) inEffectFor(ctx context.Context, remote string) bo
 	return err == nil && enabled
 }
 
+// canJudge reports whether the snapshot carries enough about remote to say if
+// the store applies to it. False when the snapshot read failed (empty) or the
+// remote is missing from it — inEffectFor answers false there too, but that
+// "no" means "cannot tell", not "the store was rejected", and only a genuine
+// rejection may surface as a user-facing warning.
+func (p checkpointStoreProbe) canJudge(remote string) bool {
+	urls, ok := p.snap.Get(remote)
+	return ok && len(urls.Push) > 0
+}
+
 // loadRemoteSnapshot reads the repo's remotes once, best-effort: an unreadable
 // repo yields an empty snapshot, which reports no store in effect — the same
 // degradation as unreadable settings, and never an obstruction.
@@ -452,15 +462,22 @@ func resolveCheckpointSyncDestination(ctx context.Context, probe checkpointStore
 		if probe.inEffectFor(ctx, elected.Name) {
 			return checkpointSyncInfo{Remote: probe.storeRepo(), Source: checkpointSyncSourceDedicated}
 		}
-		// Configured but not in effect for the elected remote, so checkpoints
-		// fall back to that remote. Recorded rather than dropped: the rejection
-		// is otherwise only a logging.Warn, and the fallback is
-		// indistinguishable from never having configured a store.
-		return checkpointSyncInfo{
-			Remote:       elected.Name,
-			Source:       string(elected.Source),
-			IgnoredStore: probe.storeRepo(),
+		if probe.canJudge(elected.Name) {
+			// Configured but rejected for the elected remote, so checkpoints
+			// fall back to that remote. Recorded rather than dropped: the
+			// rejection is otherwise only a logging.Warn, and the fallback is
+			// indistinguishable from never having configured a store.
+			return checkpointSyncInfo{
+				Remote:       elected.Name,
+				Source:       string(elected.Source),
+				IgnoredStore: probe.storeRepo(),
+			}
 		}
+		// The snapshot has nothing on the elected remote: its read failed while
+		// the election's own git read succeeded. Whether the store applies is
+		// unknowable this run, and a transient read failure must not surface as
+		// a "store ignored" warning, so degrade to plain elected-remote sync
+		// exactly as if no store were configured.
 	}
 
 	return checkpointSyncInfo{Remote: elected.Name, Source: string(elected.Source)}
