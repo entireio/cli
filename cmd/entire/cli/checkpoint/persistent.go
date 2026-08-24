@@ -87,6 +87,12 @@ func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
 		return fmt.Errorf("failed to ensure sessions branch: %w", err)
 	}
 
+	return writeWithRefRaceRetry(ctx, "session write", func() error {
+		return s.tryWriteSession(ctx, opts)
+	})
+}
+
+func (s *GitStore) tryWriteSession(ctx context.Context, opts WriteOptions) error {
 	// Get branch ref and root tree hash (O(1), no flatten)
 	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
 	if err != nil {
@@ -120,7 +126,7 @@ func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
 		return err
 	}
 
-	return s.setPrimaryRef(newCommitHash)
+	return s.casPrimaryRef(parentHash, newCommitHash)
 }
 
 // subtreeObjAt returns the tree object for one checkpoint's subtree within a root
@@ -947,6 +953,12 @@ func (s *GitStore) backfillAttribution(ctx context.Context, checkpointID id.Chec
 		return err
 	}
 
+	return writeWithRefRaceRetry(ctx, "attribution backfill", func() error {
+		return s.tryBackfillAttribution(ctx, checkpointID, combinedAttribution)
+	})
+}
+
+func (s *GitStore) tryBackfillAttribution(ctx context.Context, checkpointID id.CheckpointID, combinedAttribution *Attribution) error {
 	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
 	if err != nil {
 		return err
@@ -973,7 +985,7 @@ func (s *GitStore) backfillAttribution(ctx context.Context, checkpointID id.Chec
 		return err
 	}
 
-	return s.setPrimaryRef(newCommitHash)
+	return s.casPrimaryRef(parentHash, newCommitHash)
 }
 
 // backfillEntityDeltas attaches a session's entity-delta document to an
@@ -1869,6 +1881,12 @@ func (s *GitStore) backfillSummary(ctx context.Context, checkpointID id.Checkpoi
 		return err
 	}
 
+	return writeWithRefRaceRetry(ctx, "summary backfill", func() error {
+		return s.tryBackfillSummary(ctx, checkpointID, summary)
+	})
+}
+
+func (s *GitStore) tryBackfillSummary(ctx context.Context, checkpointID id.CheckpointID, summary *Summary) error {
 	// Get branch ref and root tree hash (O(1), no flatten)
 	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
 	if err != nil {
@@ -1896,7 +1914,7 @@ func (s *GitStore) backfillSummary(ctx context.Context, checkpointID id.Checkpoi
 		return err
 	}
 
-	return s.setPrimaryRef(newCommitHash)
+	return s.casPrimaryRef(parentHash, newCommitHash)
 }
 
 // backfillTranscript replaces the transcript, prompts, and context for an existing
@@ -1920,6 +1938,12 @@ func (s *GitStore) backfillTranscript(ctx context.Context, opts UpdateOptions) e
 		return err
 	}
 
+	return writeWithRefRaceRetry(ctx, "transcript backfill", func() error {
+		return s.tryBackfillTranscript(ctx, opts)
+	})
+}
+
+func (s *GitStore) tryBackfillTranscript(ctx context.Context, opts UpdateOptions) error {
 	// Get branch ref and root tree hash (O(1), no flatten)
 	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
 	if err != nil {
@@ -1951,7 +1975,7 @@ func (s *GitStore) backfillTranscript(ctx context.Context, opts UpdateOptions) e
 		return err
 	}
 
-	return s.setPrimaryRef(newCommitHash)
+	return s.casPrimaryRef(parentHash, newCommitHash)
 }
 
 // updateSessionMetadata reads the session metadata blob from entries, applies

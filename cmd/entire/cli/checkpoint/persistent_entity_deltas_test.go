@@ -224,6 +224,40 @@ func TestBackfillEntityDeltas_TipMovedUnderTheWrite_KeepsBothCheckpoints(t *test
 	assert.NotEqual(t, before.Hash(), after.Hash(), "the backfill must have advanced the branch")
 }
 
+// The reverse of TestBackfillEntityDeltas_TipMovedUnderTheWrite: a plain
+// backfill that read the tip before entity-deltas landed must not force-set over
+// the winner's commit and orphan the deltas.
+func TestBackfillAttribution_EntityDeltasLandsUnderTheWrite_KeepsBoth(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	mine := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	writeEntityDeltasSession(t, store, mine, "session-000")
+
+	repo.Storer = &refRaceStorer{Storer: repo.Storer, advance: func() {
+		require.NoError(t, store.Write(context.Background(), SessionEntityDeltas{
+			CheckpointID: mine,
+			SessionID:    "session-000",
+			Document:     []byte(entityDeltasDoc),
+		}))
+	}}
+
+	require.NoError(t, store.Write(context.Background(), CheckpointAttribution{
+		CheckpointID: mine,
+		Attribution:  &Attribution{AgentLines: 42, AgentPercentage: 100},
+	}))
+
+	got, ok := readBranchFile(t, store, mine.Path()+"/0/"+paths.EntityDeltasFileName)
+	require.True(t, ok, "entity deltas must survive an attribution backfill that lost the ref race")
+	assert.JSONEq(t, entityDeltasDoc, got)
+
+	rootSummary, err := store.Read(context.Background(), mine)
+	require.NoError(t, err)
+	require.NotNil(t, rootSummary.CombinedAttribution)
+	assert.Equal(t, 42, rootSummary.CombinedAttribution.AgentLines)
+}
+
 // The git-refs backend races on the checkpoint's own ref instead of the branch:
 // a second session of the same checkpoint condensing mid-backfill moves exactly
 // the ref the backfill is writing.

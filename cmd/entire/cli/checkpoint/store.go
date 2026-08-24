@@ -157,8 +157,9 @@ const refRaceRetryAttempts = 5
 // the commit is rebuilt on whatever tip the winner left behind, so the loser's
 // document lands ON TOP of the winner's rather than replacing it.
 //
-// Used by the entity-deltas backfill, which runs in a detached child that holds
-// no lock the checkpoint writers take, so the tip genuinely can move under it.
+// Used by writers on the shared v1 metadata ref — session writes, backfills,
+// and the entity-deltas child — which hold no lock in common, so the tip
+// genuinely can move under any of them.
 func writeWithRefRaceRetry(ctx context.Context, what string, write func() error) error {
 	var err error
 	for attempt := 1; attempt <= refRaceRetryAttempts; attempt++ {
