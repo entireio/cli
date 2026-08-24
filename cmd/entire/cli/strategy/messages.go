@@ -38,16 +38,20 @@ const maxSubjectRedactionInput = 4096
 //     collapsing and can make `git log`, rewind output, and terminal UIs
 //     display something other than what was committed.
 //
-// Redaction runs before truncation: truncating first can cut a secret in half
-// so no rule matches it any more, leaving the surviving prefix in the subject.
+// Redaction runs on a bounded prefix of the input: feeding whole model replies
+// through the full regex/entropy pipeline is unbounded cost on a hook path.
+// Content past maxSubjectRedactionInput is dropped before redaction, so secrets
+// beyond that window never reach Git subjects anyway.
 func SanitizeSubjectContent(s string) string {
 	s = stripSubjectControls(s)
 	if s == "" {
 		return ""
 	}
-	// Redact the full input first, then bound what we keep — truncating before
-	// redaction can cut a secret short of any rule's match.
-	s = stringutil.TruncateRunes(redact.String(s), maxSubjectRedactionInput, "")
+	// Bound what enters the redaction pipeline first (whole model replies can be
+	// megabytes), then redact within that window. Content past the bound is
+	// dropped, not scanned.
+	bound := stringutil.TruncateRunes(s, maxSubjectRedactionInput, "")
+	s = stringutil.TruncateRunes(redact.String(bound), maxSubjectRedactionInput, "")
 	// Redaction placeholders are plain text, but a custom rule's replacement is
 	// caller-supplied, so re-run the control strip rather than trust it.
 	return stripSubjectControls(s)
