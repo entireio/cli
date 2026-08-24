@@ -47,7 +47,7 @@ func TestNormalizeReviewTargetSelector(t *testing.T) {
 	}
 }
 
-// The URL the CLI itself prints (trailReviewWebURL, review_bridge.go) must be
+// The URL the CLI itself prints (changeReviewWebURL, review_bridge.go) must be
 // accepted back by the --target parser it feeds into: a user copy-pasting the
 // CLI's own "View the change" link should never hit "invalid Entire change
 // URL". This is the round trip the "changes" vs "trails" split above doesn't
@@ -64,9 +64,9 @@ func TestNormalizeReviewTargetSelector_AcceptsGeneratedChangeURL(t *testing.T) {
 			Branch: "review-target",
 		},
 	}
-	generated := trailReviewWebURL(target)
+	generated := changeReviewWebURL(target)
 	if generated == "" {
-		t.Fatal("trailReviewWebURL returned empty URL for a valid target")
+		t.Fatal("changeReviewWebURL returned empty URL for a valid target")
 	}
 
 	got, gotURL, err := normalizeReviewTargetSelector(generated, target.Host, target.Owner, target.Repo)

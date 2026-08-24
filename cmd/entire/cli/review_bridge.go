@@ -60,7 +60,7 @@ func postReviewToTrail(ctx context.Context, out io.Writer, profileName, verdict 
 	}
 	inputs := reviewTrailFindingInputs(profileName, verdict)
 	if len(inputs) == 0 {
-		fmt.Fprintln(out, "Nothing to report, so nothing was posted to the trail.")
+		fmt.Fprintln(out, "Nothing to report, so nothing was posted to the change.")
 		return nil
 	}
 	return runAuthenticatedChangeAPI(ctx, out, false, "", func(ctx context.Context, client *api.Client) error {
@@ -80,7 +80,7 @@ func postReviewToTrail(ctx context.Context, out io.Writer, profileName, verdict 
 		} else {
 			fmt.Fprintf(out, "Posted the review verdict to the change as %d %s.\n", len(inputs), findingWord)
 		}
-		if link := trailReviewWebURL(target); link != "" {
+		if link := changeReviewWebURL(target); link != "" {
 			fmt.Fprintf(out, "View the change: %s\n", link)
 		}
 		return nil
@@ -362,11 +362,11 @@ func startsWithReviewSeverityMarker(s string) bool {
 	return false
 }
 
-// trailReviewWebURL builds the browser URL for a change, matching the server's
+// changeReviewWebURL builds the browser URL for a change, matching the server's
 // `<base>/<forge>/<owner>/<repo>/changes/<number>/<branch>` layout (the web UI
 // shares the API origin). Returns "" when the target lacks the parts needed for
 // a stable link.
-func trailReviewWebURL(target changeReviewTarget) string {
+func changeReviewWebURL(target changeReviewTarget) string {
 	if target.Change.Number <= 0 || target.Host == "" || target.Owner == "" || target.Repo == "" {
 		return ""
 	}

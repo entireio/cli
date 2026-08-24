@@ -288,7 +288,7 @@ func gatherTrails(ctx context.Context, errW io.Writer, limit int, insecureHTTP b
 		}
 		list := api.ChangeListResponse{Changes: resources}
 		if len(list.Changes) == 0 {
-			out.WriteString("Trails are enabled but none exist yet.\n")
+			out.WriteString("Changes are enabled but none exist yet.\n")
 			return nil
 		}
 		fmt.Fprintf(&out, "- %d recent changes\n", len(list.Changes))
@@ -324,15 +324,15 @@ func gatherTrails(ctx context.Context, errW io.Writer, limit int, insecureHTTP b
 			// Distinguish "genuinely no findings" from "couldn't fetch them" —
 			// they imply very different things for the tuning model.
 			if fetchFailures > 0 {
-				fmt.Fprintf(&out, "- Could not fetch review findings (%d of %d trails errored).\n", fetchFailures, len(scanned))
+				fmt.Fprintf(&out, "- Could not fetch review findings (%d of %d changes errored).\n", fetchFailures, len(scanned))
 			} else {
 				out.WriteString("- No past review findings recorded.\n")
 			}
 			return nil
 		}
-		fmt.Fprintf(&out, "- %d past review findings across %d trails\n", total, len(scanned))
+		fmt.Fprintf(&out, "- %d past review findings across %d changes\n", total, len(scanned))
 		if fetchFailures > 0 {
-			fmt.Fprintf(&out, "  - note: %d of %d trails' findings could not be fetched\n", fetchFailures, len(scanned))
+			fmt.Fprintf(&out, "  - note: %d of %d changes' findings could not be fetched\n", fetchFailures, len(scanned))
 		}
 		if len(sevCount) > 0 {
 			fmt.Fprintf(&out, "  - by severity: %s\n", joinCounts(sevCount, 5))

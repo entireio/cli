@@ -107,7 +107,7 @@ func TestMaybePostReviewToTrail(t *testing.T) {
 			return errors.New("boom")
 		}}
 		maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", postTrailSummary("a finding"), "")
-		if !strings.Contains(out.String(), "Could not post the review to the trail") {
+		if !strings.Contains(out.String(), "Could not post the review to the change") {
 			t.Errorf("expected an error confirmation, got %q", out.String())
 		}
 	})
@@ -124,7 +124,7 @@ func TestMaybePostReviewToTrail(t *testing.T) {
 		if strings.Count(got, "Not logged in") != 1 {
 			t.Fatalf("login hint count in output = %d, want 1; output: %q", strings.Count(got, "Not logged in"), got)
 		}
-		if strings.Contains(got, "Could not post the review to the trail") {
+		if strings.Contains(got, "Could not post the review to the change") {
 			t.Fatalf("already-rendered auth error was double printed: %q", got)
 		}
 	})

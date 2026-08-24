@@ -1531,7 +1531,7 @@ func maybePostReviewToTrail(
 		verdict = combinedReviewNarratives(summary)
 	}
 	if verdict == "" {
-		fmt.Fprintln(out, "Nothing to report, so nothing was posted to the trail.")
+		fmt.Fprintln(out, "Nothing to report, so nothing was posted to the change.")
 		return
 	}
 	if deps.PostReviewToTrail == nil {
@@ -1541,7 +1541,7 @@ func maybePostReviewToTrail(
 	// On success the hook prints its own confirmation and trail link.
 	if err := deps.PostReviewToTrail(ctx, out, profileName, verdict); err != nil {
 		if !userMessageAlreadyPrinted(err) {
-			fmt.Fprintf(out, "Could not post the review to the trail: %v\n", err)
+			fmt.Fprintf(out, "Could not post the review to the change: %v\n", err)
 		}
 	}
 }

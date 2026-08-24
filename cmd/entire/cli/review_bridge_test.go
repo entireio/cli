@@ -186,7 +186,7 @@ func TestSplitReviewVerdictFindingsNumberedList(t *testing.T) {
 	}
 }
 
-func TestTrailReviewWebURL(t *testing.T) {
+func TestChangeReviewWebURL(t *testing.T) {
 	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
 
 	cases := []struct {
@@ -205,7 +205,7 @@ func TestTrailReviewWebURL(t *testing.T) {
 			want: "https://entire.io/gh/entireio/cli/changes/466/review-profiles",
 		},
 		{
-			name: "no trail number yields no link",
+			name: "no change number yields no link",
 			target: changeReviewTarget{
 				Host:   "gh",
 				Owner:  "entireio",
@@ -226,14 +226,14 @@ func TestTrailReviewWebURL(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := trailReviewWebURL(c.target); got != c.want {
-				t.Errorf("trailReviewWebURL() = %q, want %q", got, c.want)
+			if got := changeReviewWebURL(c.target); got != c.want {
+				t.Errorf("changeReviewWebURL() = %q, want %q", got, c.want)
 			}
 		})
 	}
 }
 
-func TestTrailReviewWebURL_HonorsCustomBase(t *testing.T) {
+func TestChangeReviewWebURL_HonorsCustomBase(t *testing.T) {
 	t.Setenv(api.BaseURLEnvVar, "https://entire.example.com/")
 	target := changeReviewTarget{
 		Host:   "gh",
@@ -242,7 +242,7 @@ func TestTrailReviewWebURL_HonorsCustomBase(t *testing.T) {
 		Change: api.ChangeResource{Number: 7, Branch: "feat/x"},
 	}
 	want := "https://entire.example.com/gh/acme/app/changes/7/feat/x"
-	if got := trailReviewWebURL(target); got != want {
-		t.Errorf("trailReviewWebURL() = %q, want %q", got, want)
+	if got := changeReviewWebURL(target); got != want {
+		t.Errorf("changeReviewWebURL() = %q, want %q", got, want)
 	}
 }
