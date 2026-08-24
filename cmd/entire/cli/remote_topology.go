@@ -304,8 +304,10 @@ func (t remoteTopology) describeElectedTier(b *strings.Builder) {
 // unmappable protocol alike, so the note cannot tell which applied.
 func (t remoteTopology) describeIgnoredStore(b *strings.Builder) {
 	// IgnoredStore is only ever set alongside an elected remote, which is what
-	// the fallback destination named below is.
-	if t.sync.IgnoredStore == "" {
+	// the fallback destination named below is. The Remote check guards that
+	// invariant here as well: naming %q of an empty string would render
+	// `Checkpoints go to "" instead`.
+	if t.sync.IgnoredStore == "" || t.sync.Remote == "" {
 		return
 	}
 	fmt.Fprintf(b, "  A checkpoint_remote (%q) is configured but not in\n", t.sync.IgnoredStore)
