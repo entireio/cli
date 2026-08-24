@@ -393,7 +393,7 @@ func checkoutManagedBranchWorktree(
 
 // printTrailWorktreeLocation reports where the worktree lives. On a terminal
 // it prints the note and a copy-paste cd hint. Otherwise stdout carries only
-// the bare path — so `cd "$(entire trail checkout <n> --worktree)"` works —
+// the bare path — so `cd "$(entire change checkout <n> --worktree)"` works —
 // and the note goes to stderr.
 func printTrailWorktreeLocation(w, errW io.Writer, note, path string) {
 	if interactive.IsTerminalWriter(w) {

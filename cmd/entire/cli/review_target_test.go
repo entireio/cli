@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
 func TestNormalizeReviewTargetSelector(t *testing.T) {
@@ -16,12 +18,20 @@ func TestNormalizeReviewTargetSelector(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "branch", raw: "feature/review-me", want: "feature/review-me"},
-		{name: "trail id", raw: "01JABCDEF", want: "01JABCDEF"},
-		{name: "trail URL number", raw: "https://entire.io/gh/entireio/cli/trails/604/review-target", want: "604", wantURL: true},
-		{name: "trail URL id", raw: "https://app.entire.io/gh/entireio/cli/trails/01JABCDEF", want: "01JABCDEF", wantURL: true},
-		{name: "wrong repo", raw: "https://entire.io/gh/acme/other/trails/7/topic", wantURL: true, wantErr: true},
-		{name: "non Entire URL", raw: "https://example.com/gh/entireio/cli/trails/7", wantURL: true, wantErr: true},
-		{name: "malformed trail URL", raw: "https://entire.io/gh/entireio/cli/trails", wantURL: true, wantErr: true},
+		{name: "change id", raw: "01JABCDEF", want: "01JABCDEF"},
+		{name: "change URL number", raw: "https://entire.io/gh/entireio/cli/changes/604/review-target", want: "604", wantURL: true},
+		{name: "change URL id", raw: "https://app.entire.io/gh/entireio/cli/changes/01JABCDEF", want: "01JABCDEF", wantURL: true},
+		{name: "wrong repo", raw: "https://entire.io/gh/acme/other/changes/7/topic", wantURL: true, wantErr: true},
+		{name: "non Entire URL", raw: "https://example.com/gh/entireio/cli/changes/7", wantURL: true, wantErr: true},
+		{name: "malformed change URL", raw: "https://entire.io/gh/entireio/cli/changes", wantURL: true, wantErr: true},
+		// Legacy "/trails/" spelling: old links (GitHub PR bodies, chat
+		// history, ...) name it that way forever. entire.io redirects
+		// /trails/ to /changes/ only in the browser, never through this
+		// parser, so both spellings must keep working here.
+		{name: "legacy trail URL number", raw: "https://entire.io/gh/entireio/cli/trails/604/review-target", want: "604", wantURL: true},
+		{name: "legacy trail URL id", raw: "https://app.entire.io/gh/entireio/cli/trails/01JABCDEF", want: "01JABCDEF", wantURL: true},
+		{name: "legacy trail URL wrong repo", raw: "https://entire.io/gh/acme/other/trails/7/topic", wantURL: true, wantErr: true},
+		{name: "legacy trail URL malformed", raw: "https://entire.io/gh/entireio/cli/trails", wantURL: true, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -34,6 +44,40 @@ func TestNormalizeReviewTargetSelector(t *testing.T) {
 				t.Fatalf("normalizeReviewTargetSelector() = (%q, %v), want (%q, %v)", got, gotURL, tt.want, tt.wantURL)
 			}
 		})
+	}
+}
+
+// The URL the CLI itself prints (trailReviewWebURL, review_bridge.go) must be
+// accepted back by the --target parser it feeds into: a user copy-pasting the
+// CLI's own "View the change" link should never hit "invalid Entire change
+// URL". This is the round trip the "changes" vs "trails" split above doesn't
+// pin on its own, since it only exercises hand-written fixtures.
+func TestNormalizeReviewTargetSelector_AcceptsGeneratedChangeURL(t *testing.T) {
+	t.Parallel()
+
+	target := changeReviewTarget{
+		Host:  "gh",
+		Owner: "entireio",
+		Repo:  "cli",
+		Change: api.ChangeResource{
+			Number: 604,
+			Branch: "review-target",
+		},
+	}
+	generated := trailReviewWebURL(target)
+	if generated == "" {
+		t.Fatal("trailReviewWebURL returned empty URL for a valid target")
+	}
+
+	got, gotURL, err := normalizeReviewTargetSelector(generated, target.Host, target.Owner, target.Repo)
+	if err != nil {
+		t.Fatalf("normalizeReviewTargetSelector(%q) unexpected error: %v", generated, err)
+	}
+	if !gotURL {
+		t.Fatalf("normalizeReviewTargetSelector(%q) gotURL = false, want true", generated)
+	}
+	if want := "604"; got != want {
+		t.Fatalf("normalizeReviewTargetSelector(%q) = %q, want %q", generated, got, want)
 	}
 }
 

@@ -74,7 +74,7 @@ type Deps struct {
 	// case the run falls back to local output with a notice.
 	PostReviewToTrail func(ctx context.Context, out io.Writer, profileName, verdict string) error
 
-	// PrepareTarget resolves a branch, trail ID, or trail URL and checks its
+	// PrepareTarget resolves a branch, change ID, or change URL and checks its
 	// branch out in a worktree. It returns the worktree in which review should
 	// be re-run. Injected because trail API access lives in the parent package.
 	PrepareTarget func(ctx context.Context, out, errOut io.Writer, selector string) (TargetWorktree, error)
@@ -160,8 +160,8 @@ Flags:
                  PRs where the base is the parent feature branch, not main.
                  Default: first existing of origin/HEAD, origin/main,
                  origin/master, main, master.
-  --target REF   check out a branch identified by branch name, trail ID, or
-                 Entire trail URL in a worktree and run the review there.
+  --target REF   check out a branch identified by branch name, change ID, or
+                 Entire change URL in a worktree and run the review there.
   --cleanup-worktree
                  remove a newly-created target worktree after a successful
                  review. Interactive runs ask when this flag is omitted.
@@ -279,7 +279,7 @@ To tag an already-finished session as a review, use
 	cmd.Flags().StringVar(&profileOverride, "profile", "", "review profile to run (default: review_default_profile or general)")
 	cmd.Flags().StringVar(&perRunPrompt, "prompt", "", "one-off instructions appended to this review run")
 	cmd.Flags().StringVar(&baseOverride, "base", "", "git ref to scope the review against (default: origin/HEAD → origin/main → origin/master → main → master)")
-	cmd.Flags().StringVar(&target, "target", "", "branch, trail ID, or Entire trail URL to check out in a worktree and review")
+	cmd.Flags().StringVar(&target, "target", "", "branch, change ID, or Entire change URL to check out in a worktree and review")
 	cmd.Flags().BoolVar(&cleanupWorktree, "cleanup-worktree", false, "remove a newly-created target worktree after a successful review (interactive runs ask when omitted)")
 	cmd.Flags().DurationVar(&reviewTimeout, "timeout", 0, "optional hard cap per reviewer (default: none — reviewers run until they finish, like a skill invoked directly in a session). When set, it also bounds the consolidating judge; unset, the judge keeps its own 20m default")
 	// The listing modes and the action modes each select a distinct command

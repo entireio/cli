@@ -76,12 +76,12 @@ func postReviewToTrail(ctx context.Context, out io.Writer, profileName, verdict 
 			findingWord = "finding"
 		}
 		if target.Change.Number > 0 {
-			fmt.Fprintf(out, "Posted the review verdict to trail #%d as %d %s.\n", target.Change.Number, len(inputs), findingWord)
+			fmt.Fprintf(out, "Posted the review verdict to change #%d as %d %s.\n", target.Change.Number, len(inputs), findingWord)
 		} else {
-			fmt.Fprintf(out, "Posted the review verdict to the trail as %d %s.\n", len(inputs), findingWord)
+			fmt.Fprintf(out, "Posted the review verdict to the change as %d %s.\n", len(inputs), findingWord)
 		}
 		if link := trailReviewWebURL(target); link != "" {
-			fmt.Fprintf(out, "View the trail: %s\n", link)
+			fmt.Fprintf(out, "View the change: %s\n", link)
 		}
 		return nil
 	})

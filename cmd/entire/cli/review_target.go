@@ -144,14 +144,18 @@ func normalizeReviewTargetSelector(raw, forge, owner, repo string) (string, bool
 	}
 	host := strings.ToLower(u.Hostname())
 	if host != "entire.io" && !strings.HasSuffix(host, ".entire.io") {
-		return "", true, errors.New("review target URL must be an Entire trail URL")
+		return "", true, errors.New("review target URL must be an Entire change URL")
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(parts) < 5 || parts[3] != "trails" || strings.TrimSpace(parts[4]) == "" {
-		return "", true, fmt.Errorf("invalid Entire trail URL %q", raw)
+	// "trails" is accepted alongside the canonical "changes" because old links
+	// (GitHub PR bodies, chat history, ...) spell it that way forever — the web
+	// app redirects /trails/ to /changes/ in the browser, but this parser never
+	// sees that redirect, so it has to understand both spellings itself.
+	if len(parts) < 5 || (parts[3] != "changes" && parts[3] != "trails") || strings.TrimSpace(parts[4]) == "" {
+		return "", true, fmt.Errorf("invalid Entire change URL %q", raw)
 	}
 	if parts[0] != forge || parts[1] != owner || parts[2] != repo {
-		return "", true, fmt.Errorf("trail URL targets %s/%s/%s, but this clone is %s/%s/%s", parts[0], parts[1], parts[2], forge, owner, repo)
+		return "", true, fmt.Errorf("change URL targets %s/%s/%s, but this clone is %s/%s/%s", parts[0], parts[1], parts[2], forge, owner, repo)
 	}
 	return parts[4], true, nil
 }
