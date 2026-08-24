@@ -55,6 +55,19 @@ func TestFormatSubagentEndMessage_RedactsSecretBeforeGit(t *testing.T) {
 	}
 }
 
+// TestSanitizeSubjectContent_RedactsBeforeTruncating pins the ordering.
+// Truncating first can cut a secret short of any rule's match, leaving the
+// surviving prefix in persisted metadata and commit subjects.
+func TestSanitizeSubjectContent_RedactsBeforeTruncating(t *testing.T) {
+	const secret = "ghp_1234567890abcdefghijklmnopqrstuvwx"
+	description := strings.Repeat("a", maxSubjectRedactionInput-10) + " " + secret
+
+	got := SanitizeSubjectContent(description)
+	if strings.Contains(got, secret[:6]) {
+		t.Errorf("a secret straddling the truncation boundary must be redacted before truncation, got %q", got)
+	}
+}
+
 // TestFormatSubagentEndMessage_RedactsBeforeTruncating pins the ordering.
 // Truncating first can cut a secret short of any rule's match, leaving the
 // surviving prefix in the subject.

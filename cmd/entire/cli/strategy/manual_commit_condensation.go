@@ -351,7 +351,7 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 			ToolUseID:       record.ToolUseID,
 			AgentID:         record.AgentID,
 			SubagentType:    record.SubagentType,
-			TaskDescription: record.TaskDescription,
+			TaskDescription: SanitizeSubjectContent(record.TaskDescription),
 			Files:           record.Files,
 			TokenUsage:      record.TokenUsage,
 			StartedAt:       record.StartedAt,

@@ -45,8 +45,9 @@ func SanitizeSubjectContent(s string) string {
 	if s == "" {
 		return ""
 	}
-	// Bound the redaction input, not the output — see maxSubjectRedactionInput.
-	s = redact.String(stringutil.TruncateRunes(s, maxSubjectRedactionInput, ""))
+	// Redact the full input first, then bound what we keep — truncating before
+	// redaction can cut a secret short of any rule's match.
+	s = stringutil.TruncateRunes(redact.String(s), maxSubjectRedactionInput, "")
 	// Redaction placeholders are plain text, but a custom rule's replacement is
 	// caller-supplied, so re-run the control strip rather than trust it.
 	return stripSubjectControls(s)

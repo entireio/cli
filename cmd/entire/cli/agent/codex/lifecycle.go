@@ -181,10 +181,9 @@ func (c *CodexAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 // single spaces since this value can propagate into commit subjects via
 // strategy.FormatSubagentEndMessage, where multi-line text is unreadable.
 //
-// This is presentation only. Because the value is raw model output, the
-// guarantees that matter — secret redaction and stripping control/bidi
-// characters that strings.Fields preserves — are enforced for every agent at
-// the commit-subject boundary by strategy.SanitizeSubjectContent.
+// This is presentation only. Because the value is raw model output, callers
+// must sanitize before persisting it — strategy.SanitizeSubjectContent runs at
+// task-record launch/completion and again when materializing task.json.
 func trimmedLastAssistantMessage(msg *string) string {
 	if msg == nil {
 		return ""
