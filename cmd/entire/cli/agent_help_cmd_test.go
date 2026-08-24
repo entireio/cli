@@ -90,19 +90,19 @@ func TestAgentHelpCommands_GatesTrailOnTrailsEnabled(t *testing.T) {
 	root := NewRootCmd()
 
 	enabled := commandNames(agentHelpCommands(root, true))
-	if !contains(enabled, "trail") {
-		t.Errorf("trail should be advertised when trails are enabled, got %v", enabled)
+	if !contains(enabled, "change") {
+		t.Errorf("change should be advertised when trails are enabled, got %v", enabled)
 	}
 	if contains(enabled, "agent-help") {
 		t.Errorf("agent-help must not list itself, got %v", enabled)
 	}
 
 	disabled := commandNames(agentHelpCommands(root, false))
-	if contains(disabled, "trail") {
-		t.Errorf("trail must NOT be advertised when trails are disabled, got %v", disabled)
+	if contains(disabled, "change") {
+		t.Errorf("change must NOT be advertised when trails are disabled, got %v", disabled)
 	}
 	if !contains(disabled, "checkpoint") {
-		t.Errorf("non-trail commands should always be advertised, got %v", disabled)
+		t.Errorf("non-change commands should always be advertised, got %v", disabled)
 	}
 }
 
@@ -237,7 +237,7 @@ func TestAgentHelpRepoContext_SkipsRefreshWithoutLocalIdentity(t *testing.T) {
 // refreshAgentHelpTrailsEnabledCacheIfStaleForScope must route the repo-scoped
 // trails-enablement probe through the entire-api cell that hosts THIS repo
 // (trailRefreshAPIClient), never through the generic data-API/BFF client — the
-// BFF does not proxy /api/v1/trails/... for bearer callers (COR-666).
+// BFF does not proxy /api/v1/changes/... for bearer callers (COR-666).
 // Not parallel: changes the process working directory.
 func TestRefreshAgentHelpTrailsEnabledCacheIfStaleForScope_RoutesThroughRepoCell(t *testing.T) {
 	// A non-repo cwd makes the shared cache lookup return "unknown", so the
@@ -311,12 +311,12 @@ func TestRunAgentHelp_TrailDrillGatedOnTrailsEnabled(t *testing.T) {
 	t.Parallel()
 	root := NewRootCmd()
 
-	if _, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, false, true); err != nil {
-		t.Errorf("trail drill should resolve when trails enabled: %v", err)
+	if _, err := runAgentHelp(root, []string{"change"}, agentHelpTestRepo, false, true); err != nil {
+		t.Errorf("change drill should resolve when trails enabled: %v", err)
 	}
-	_, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, false, false)
+	_, err := runAgentHelp(root, []string{"change"}, agentHelpTestRepo, false, false)
 	if err == nil {
-		t.Fatalf("trail drill should be unavailable when trails disabled")
+		t.Fatalf("change drill should be unavailable when trails disabled")
 	}
 	if !strings.Contains(err.Error(), "trails are not enabled") {
 		t.Errorf("expected the requires-trails unavailable error, got: %v", err)
@@ -350,8 +350,8 @@ func TestRunAgentHelp_JSONGatesTrailOnTrailsEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json top (trails disabled): %v", err)
 	}
-	if hasSub(disabled, "trail") {
-		t.Errorf("trail must NOT appear in --json subcommands when trails disabled:\n%s", disabled)
+	if hasSub(disabled, "change") {
+		t.Errorf("change must NOT appear in --json subcommands when trails disabled:\n%s", disabled)
 	}
 	if !hasSub(disabled, "checkpoint") {
 		t.Errorf("checkpoint should always appear in --json subcommands:\n%s", disabled)
@@ -361,8 +361,8 @@ func TestRunAgentHelp_JSONGatesTrailOnTrailsEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json top (trails enabled): %v", err)
 	}
-	if !hasSub(enabled, "trail") {
-		t.Errorf("trail should appear in --json subcommands when trails enabled:\n%s", enabled)
+	if !hasSub(enabled, "change") {
+		t.Errorf("change should appear in --json subcommands when trails enabled:\n%s", enabled)
 	}
 }
 
@@ -397,8 +397,8 @@ func TestRenderAgentHelpTop_DisabledExampleIsNonTrail(t *testing.T) {
 	if !strings.Contains(out, "entire agent-help checkpoint") {
 		t.Errorf("disabled top should use checkpoint as the drill example:\n%s", out)
 	}
-	if strings.Contains(out, "agent-help trail") {
-		t.Errorf("disabled top must not point at the gated trail command:\n%s", out)
+	if strings.Contains(out, "agent-help change") {
+		t.Errorf("disabled top must not point at the gated change command:\n%s", out)
 	}
 }
 
@@ -505,7 +505,7 @@ func TestRenderAgentHelpTop_ListsCommandsRepoAndRule(t *testing.T) {
 	out := renderAgentHelpTop(root, agentHelpTestRepo, true)
 
 	for _, want := range []string{
-		"trail",             // hidden but revealed via annotation
+		"change",            // hidden but revealed via annotation
 		"checkpoint",        // visible
 		"status",            // visible
 		agentHelpTestRepo,   // auto-detected repo
@@ -529,19 +529,19 @@ func TestRunAgentHelp_Dispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("top: unexpected error: %v", err)
 	}
-	if !strings.Contains(top, "When to use entire") || !strings.Contains(top, "trail") {
+	if !strings.Contains(top, "When to use entire") || !strings.Contains(top, "change") {
 		t.Fatalf("top output unexpected:\n%s", top)
 	}
 
-	drill, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, false, true)
+	drill, err := runAgentHelp(root, []string{"change"}, agentHelpTestRepo, false, true)
 	if err != nil {
 		t.Fatalf("drill: unexpected error: %v", err)
 	}
-	if !strings.Contains(drill, "Manage trails for your branches") || !strings.Contains(drill, "--repo") {
+	if !strings.Contains(drill, "Manage changes for your branches") || !strings.Contains(drill, "--repo") {
 		t.Fatalf("drill output unexpected:\n%s", drill)
 	}
 
-	jsonOut, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, true, true)
+	jsonOut, err := runAgentHelp(root, []string{"change"}, agentHelpTestRepo, true, true)
 	if err != nil {
 		t.Fatalf("json: unexpected error: %v", err)
 	}
@@ -555,8 +555,8 @@ func TestRunAgentHelp_Dispatch(t *testing.T) {
 	if err := json.Unmarshal([]byte(jsonOut), &parsed); err != nil {
 		t.Fatalf("json output not valid JSON: %v\n%s", err, jsonOut)
 	}
-	if parsed.Command != "entire trail" {
-		t.Errorf("json command = %q, want %q", parsed.Command, "entire trail")
+	if parsed.Command != "entire change" {
+		t.Errorf("json command = %q, want %q", parsed.Command, "entire change")
 	}
 	if parsed.Repo != agentHelpTestRepo {
 		t.Errorf("json repo = %q, want %q", parsed.Repo, agentHelpTestRepo)
@@ -599,8 +599,8 @@ func TestAgentHelpCmd_Execute(t *testing.T) {
 			t.Fatalf("agent-help output missing %q:\n%s", want, out.String())
 		}
 	}
-	if strings.Contains(out.String(), "Manage trails for your branches") || strings.Contains(out.String(), "agent-help trail") {
-		t.Errorf("trail must be fully gated out (incl. the drill example) when trails are disabled:\n%s", out.String())
+	if strings.Contains(out.String(), "Manage changes for your branches") || strings.Contains(out.String(), "agent-help change") {
+		t.Errorf("change must be fully gated out (incl. the drill example) when trails are disabled:\n%s", out.String())
 	}
 
 	drill := newAgentHelpCmd(root)
@@ -699,10 +699,10 @@ func TestRenderAgentHelpTop_ListsCuratedSubsetWithInlineAudience(t *testing.T) {
 
 	// Listed commands appear with their audience.
 	for _, want := range []string{
-		"status", "trail", "checkpoint", "session", "why", "search",
+		"status", "change", "checkpoint", "session", "why", "search",
 		"read-only except: policy",                      // checkpoint, one line
 		"read-only except: adopt, attach, resume, stop", // session, one line
-		"read-only: approvals, list, show, watch",       // trail: minority side named
+		"read-only: approvals, list, show, watch",       // change: minority side named
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("listing missing %q:\n%s", want, out)

@@ -39,7 +39,7 @@ func continueRestoredSessions(ctx context.Context, w io.Writer, sessions []strat
 	}
 	launch := opts.Launch
 	if launch == nil {
-		launch = launchTrailRestoredSession
+		launch = launchChangeRestoredSession
 	}
 	promptStart := opts.PromptStartAgent
 	if promptStart == nil {
@@ -47,11 +47,11 @@ func continueRestoredSessions(ctx context.Context, w io.Writer, sessions []strat
 	}
 	promptSession := opts.PromptSession
 	if promptSession == nil {
-		promptSession = promptTrailRestoredSession
+		promptSession = promptChangeRestoredSession
 	}
 
 	if opts.PreferredSessionID != "" {
-		session, ok := findTrailRestoredSession(sessions, opts.PreferredSessionID)
+		session, ok := findChangeRestoredSession(sessions, opts.PreferredSessionID)
 		if !ok {
 			return fmt.Errorf("session %q was not found in the restored checkpoint", opts.PreferredSessionID)
 		}

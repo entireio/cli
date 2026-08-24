@@ -28,7 +28,7 @@ func prepareReviewTarget(ctx context.Context, out, errOut io.Writer, selector st
 	if reviewTargetMayBeBranch(selector) && reviewTargetBranchExists(ctx, selector) {
 		branch = selector
 	} else {
-		forge, owner, repo, err := resolveTrailRemote(ctx)
+		forge, owner, repo, err := resolveChangeRemote(ctx)
 		if err != nil {
 			return cliReview.TargetWorktree{}, err
 		}
@@ -36,14 +36,14 @@ func prepareReviewTarget(ctx context.Context, out, errOut io.Writer, selector st
 		if normalizeErr != nil {
 			return cliReview.TargetWorktree{}, normalizeErr
 		}
-		err = runAuthenticatedTrailAPI(ctx, errOut, false, "", func(ctx context.Context, client *api.Client) error {
-			found, findErr := resolveTrailBySelector(ctx, client, forge, owner, repo, normalized, "")
+		err = runAuthenticatedChangeAPI(ctx, errOut, false, "", func(ctx context.Context, client *api.Client) error {
+			found, findErr := resolveChangeBySelector(ctx, client, forge, owner, repo, normalized, "")
 			if findErr != nil {
 				return findErr
 			}
 			branch = strings.TrimSpace(found.Branch)
 			if branch == "" {
-				return fmt.Errorf("%s has no branch to review", describeTrailRef(found))
+				return fmt.Errorf("%s has no branch to review", describeChangeRef(found))
 			}
 			return nil
 		})
@@ -112,7 +112,7 @@ func reviewTargetMayBeBranch(selector string) bool {
 	if strings.Contains(selector, "://") {
 		return false
 	}
-	_, numeric := parseTrailNumberSelector(selector)
+	_, numeric := parseChangeNumberSelector(selector)
 	return !numeric
 }
 

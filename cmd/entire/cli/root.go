@@ -192,7 +192,7 @@ func NewRootCmd() *cobra.Command {
 	// Hidden infrastructure.
 	cmd.AddCommand(newMCPCmd(cmd)) // MCP stdio server for MCP-host agents
 	cmd.AddCommand(newHooksCmd())
-	cmd.AddCommand(newTrailCmd())
+	cmd.AddCommand(newChangeCmd())
 	cmd.AddCommand(newSendAnalyticsCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
 	cmd.AddCommand(newRefreshTrailEnablementCmd())

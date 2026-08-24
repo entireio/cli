@@ -63,20 +63,20 @@ func postReviewToTrail(ctx context.Context, out io.Writer, profileName, verdict 
 		fmt.Fprintln(out, "Nothing to report, so nothing was posted to the trail.")
 		return nil
 	}
-	return runAuthenticatedTrailAPI(ctx, out, false, "", func(ctx context.Context, client *api.Client) error {
-		target, err := resolveTrailReviewTarget(ctx, client, "", "", "")
+	return runAuthenticatedChangeAPI(ctx, out, false, "", func(ctx context.Context, client *api.Client) error {
+		target, err := resolveChangeReviewTarget(ctx, client, "", "", "")
 		if err != nil {
 			return err
 		}
-		if _, err := createTrailReviewFindings(ctx, client, target.Trail.ID, inputs); err != nil {
+		if _, err := createChangeReviewFindings(ctx, client, target.Change.ID, inputs); err != nil {
 			return err
 		}
 		findingWord := "findings"
 		if len(inputs) == 1 {
 			findingWord = "finding"
 		}
-		if target.Trail.Number > 0 {
-			fmt.Fprintf(out, "Posted the review verdict to trail #%d as %d %s.\n", target.Trail.Number, len(inputs), findingWord)
+		if target.Change.Number > 0 {
+			fmt.Fprintf(out, "Posted the review verdict to trail #%d as %d %s.\n", target.Change.Number, len(inputs), findingWord)
 		} else {
 			fmt.Fprintf(out, "Posted the review verdict to the trail as %d %s.\n", len(inputs), findingWord)
 		}
@@ -92,7 +92,7 @@ func postReviewToTrail(ctx context.Context, out io.Writer, profileName, verdict 
 // {"summary":"","comments":[...]}; when absent, it falls back to splitting
 // top-level markdown bullets. This keeps trail output structurally correct even
 // when custom judge prompts produce prose.
-func reviewTrailFindingInputs(profileName, verdict string) []api.TrailReviewCommentInput {
+func reviewTrailFindingInputs(profileName, verdict string) []api.ChangeReviewCommentInput {
 	if inputs, ok := reviewTrailFindingInputsFromJSON(verdict); ok {
 		return inputs
 	}
@@ -100,9 +100,9 @@ func reviewTrailFindingInputs(profileName, verdict string) []api.TrailReviewComm
 	if len(items) == 0 {
 		// The verdict spans the whole change, so it uses "verdict" kind:
 		// the API requires a valid granularity and rejects an empty value.
-		return []api.TrailReviewCommentInput{reviewTrailFindingInputWithKind(profileName, verdict, "verdict")}
+		return []api.ChangeReviewCommentInput{reviewTrailFindingInputWithKind(profileName, verdict, "verdict")}
 	}
-	inputs := make([]api.TrailReviewCommentInput, 0, len(items))
+	inputs := make([]api.ChangeReviewCommentInput, 0, len(items))
 	for _, item := range items {
 		input := reviewTrailFindingInputWithKind(profileName, item, "finding")
 		enrichReviewTrailFindingInputFromMarkdown(&input, item)
@@ -111,7 +111,7 @@ func reviewTrailFindingInputs(profileName, verdict string) []api.TrailReviewComm
 	return inputs
 }
 
-func reviewTrailFindingInputsFromJSON(verdict string) ([]api.TrailReviewCommentInput, bool) {
+func reviewTrailFindingInputsFromJSON(verdict string) ([]api.ChangeReviewCommentInput, bool) {
 	line := lastNonEmptyLine(verdict)
 	if !strings.HasPrefix(line, "{") || !strings.Contains(line, "\"comments\"") {
 		return nil, false
@@ -120,14 +120,14 @@ func reviewTrailFindingInputsFromJSON(verdict string) ([]api.TrailReviewCommentI
 	if err := json.Unmarshal([]byte(line), &payload); err != nil {
 		return nil, false
 	}
-	inputs := make([]api.TrailReviewCommentInput, 0, len(payload.Comments))
+	inputs := make([]api.ChangeReviewCommentInput, 0, len(payload.Comments))
 	for _, comment := range payload.Comments {
 		body := strings.TrimSpace(comment.Body)
 		if body == "" {
 			continue
 		}
-		input := api.TrailReviewCommentInput{
-			ClientID: generateTrailReviewClientID(),
+		input := api.ChangeReviewCommentInput{
+			ClientID: generateChangeReviewClientID(),
 			Body:     stringPtr(body),
 			Location: reviewTrailLocationFromJSON(comment.Location),
 		}
@@ -142,15 +142,15 @@ func reviewTrailFindingInputsFromJSON(verdict string) ([]api.TrailReviewCommentI
 	return inputs, true
 }
 
-func reviewTrailFindingInputWithKind(profileName, text, kind string) api.TrailReviewCommentInput {
+func reviewTrailFindingInputWithKind(profileName, text, kind string) api.ChangeReviewCommentInput {
 	body := strings.TrimSpace(text)
 	if p := strings.TrimSpace(profileName); p != "" {
 		body = fmt.Sprintf("Review %s (profile: %s)\n\n%s", kind, p, body)
 	}
-	return api.TrailReviewCommentInput{
-		ClientID: generateTrailReviewClientID(),
+	return api.ChangeReviewCommentInput{
+		ClientID: generateChangeReviewClientID(),
 		Body:     stringPtr(body),
-		Location: api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityWholeChange},
+		Location: api.ChangeReviewLocationCreateRequest{Granularity: reviewTrailGranularityWholeChange},
 	}
 }
 
@@ -174,9 +174,9 @@ type reviewTrailJSONLocation struct {
 	SelectedText string `json:"selected_text"`
 }
 
-func reviewTrailLocationFromJSON(loc reviewTrailJSONLocation) api.TrailReviewLocationCreateRequest {
+func reviewTrailLocationFromJSON(loc reviewTrailJSONLocation) api.ChangeReviewLocationCreateRequest {
 	filePath := strings.TrimSpace(loc.FilePath)
-	withSelectedText := func(req api.TrailReviewLocationCreateRequest) api.TrailReviewLocationCreateRequest {
+	withSelectedText := func(req api.ChangeReviewLocationCreateRequest) api.ChangeReviewLocationCreateRequest {
 		if strings.TrimSpace(loc.SelectedText) != "" {
 			req.SelectedText = stringPtr(loc.SelectedText)
 		}
@@ -185,26 +185,26 @@ func reviewTrailLocationFromJSON(loc reviewTrailJSONLocation) api.TrailReviewLoc
 	switch strings.ToLower(strings.TrimSpace(loc.Granularity)) {
 	case reviewTrailGranularityLine:
 		if filePath != "" && loc.StartLine > 0 {
-			return withSelectedText(api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: stringPtr(filePath), StartLine: &loc.StartLine})
+			return withSelectedText(api.ChangeReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: stringPtr(filePath), StartLine: &loc.StartLine})
 		}
 	case reviewTrailGranularityRange:
 		if filePath != "" && loc.StartLine > 0 && loc.EndLine > loc.StartLine {
-			return withSelectedText(api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityRange, FilePath: stringPtr(filePath), StartLine: &loc.StartLine, EndLine: &loc.EndLine})
+			return withSelectedText(api.ChangeReviewLocationCreateRequest{Granularity: reviewTrailGranularityRange, FilePath: stringPtr(filePath), StartLine: &loc.StartLine, EndLine: &loc.EndLine})
 		}
 		if filePath != "" && loc.StartLine > 0 {
 			// Preserve the precise start-line anchor for malformed, missing, or
 			// single-line ranges instead of silently degrading to whole-change.
-			return withSelectedText(api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: stringPtr(filePath), StartLine: &loc.StartLine})
+			return withSelectedText(api.ChangeReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: stringPtr(filePath), StartLine: &loc.StartLine})
 		}
 	case reviewTrailGranularityFile:
 		if filePath != "" {
-			return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityFile, FilePath: stringPtr(filePath)}
+			return api.ChangeReviewLocationCreateRequest{Granularity: reviewTrailGranularityFile, FilePath: stringPtr(filePath)}
 		}
 	}
-	return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityWholeChange}
+	return api.ChangeReviewLocationCreateRequest{Granularity: reviewTrailGranularityWholeChange}
 }
 
-func enrichReviewTrailFindingInputFromMarkdown(input *api.TrailReviewCommentInput, body string) {
+func enrichReviewTrailFindingInputFromMarkdown(input *api.ChangeReviewCommentInput, body string) {
 	if input == nil {
 		return
 	}
@@ -228,16 +228,16 @@ func lastNonEmptyLine(s string) string {
 
 var reviewTrailLocationPattern = regexp.MustCompile("(?:^|[\\s(`])([A-Za-z0-9_./-]+\\.[A-Za-z0-9_+-]+):(\\d+)")
 
-func inferReviewTrailLocation(body string) (api.TrailReviewLocationCreateRequest, bool) {
+func inferReviewTrailLocation(body string) (api.ChangeReviewLocationCreateRequest, bool) {
 	match := reviewTrailLocationPattern.FindStringSubmatch(body)
 	if len(match) != 3 {
-		return api.TrailReviewLocationCreateRequest{}, false
+		return api.ChangeReviewLocationCreateRequest{}, false
 	}
 	line, err := strconv.Atoi(match[2])
 	if err != nil || line <= 0 {
-		return api.TrailReviewLocationCreateRequest{}, false
+		return api.ChangeReviewLocationCreateRequest{}, false
 	}
-	return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: stringPtr(match[1]), StartLine: &line}, true
+	return api.ChangeReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: stringPtr(match[1]), StartLine: &line}, true
 }
 
 func inferReviewTrailSeverity(body string) *string {
@@ -247,11 +247,11 @@ func inferReviewTrailSeverity(body string) *string {
 	}
 	switch {
 	case strings.Contains(prefix, "[p0]") || strings.Contains(prefix, "[p1]") || strings.Contains(prefix, "[high]") || strings.Contains(prefix, "critical"):
-		return stringPtr(trailReviewSeverityHigh)
+		return stringPtr(changeReviewSeverityHigh)
 	case strings.Contains(prefix, "[p2]") || strings.Contains(prefix, "[medium]"):
-		return stringPtr(trailReviewSeverityMedium)
+		return stringPtr(changeReviewSeverityMedium)
 	case strings.Contains(prefix, "[p3]") || strings.Contains(prefix, "[low]") || strings.Contains(prefix, "[nit]") || strings.Contains(prefix, "nit:"):
-		return stringPtr(trailReviewSeverityLow)
+		return stringPtr(changeReviewSeverityLow)
 	default:
 		return nil
 	}
@@ -261,14 +261,14 @@ func normalizeReviewTrailSeverity(raw string) *string {
 	s := strings.ToLower(strings.TrimSpace(raw))
 	s = strings.Trim(s, "[](){}:*_ ")
 	switch s {
-	case trailReviewSeverityHigh, trailReviewSeverityMedium, trailReviewSeverityLow:
+	case changeReviewSeverityHigh, changeReviewSeverityMedium, changeReviewSeverityLow:
 		return stringPtr(s)
 	case "p0", "p1", "critical":
-		return stringPtr(trailReviewSeverityHigh)
+		return stringPtr(changeReviewSeverityHigh)
 	case "p2":
-		return stringPtr(trailReviewSeverityMedium)
+		return stringPtr(changeReviewSeverityMedium)
 	case "p3", "nit", "nits":
-		return stringPtr(trailReviewSeverityLow)
+		return stringPtr(changeReviewSeverityLow)
 	default:
 		return nil
 	}
@@ -362,17 +362,17 @@ func startsWithReviewSeverityMarker(s string) bool {
 	return false
 }
 
-// trailWebURL builds the browser URL for a trail, matching the server's
-// `<base>/<forge>/<owner>/<repo>/trails/<number>/<branch>` layout (the web UI
+// trailReviewWebURL builds the browser URL for a change, matching the server's
+// `<base>/<forge>/<owner>/<repo>/changes/<number>/<branch>` layout (the web UI
 // shares the API origin). Returns "" when the target lacks the parts needed for
 // a stable link.
-func trailReviewWebURL(target trailReviewTarget) string {
-	if target.Trail.Number <= 0 || target.Host == "" || target.Owner == "" || target.Repo == "" {
+func trailReviewWebURL(target changeReviewTarget) string {
+	if target.Change.Number <= 0 || target.Host == "" || target.Owner == "" || target.Repo == "" {
 		return ""
 	}
 	base := strings.TrimRight(api.BaseURL(), "/")
-	return fmt.Sprintf("%s/%s/%s/%s/trails/%d/%s",
-		base, target.Host, target.Owner, target.Repo, target.Trail.Number, target.Trail.Branch)
+	return fmt.Sprintf("%s/%s/%s/%s/changes/%d/%s",
+		base, target.Host, target.Owner, target.Repo, target.Change.Number, target.Change.Branch)
 }
 
 // launchableReviewerFor returns the AgentReviewer for agents with a review-runner

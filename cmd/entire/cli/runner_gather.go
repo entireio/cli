@@ -277,34 +277,34 @@ func gatherCheckpoints(ctx context.Context) string {
 
 func gatherTrails(ctx context.Context, errW io.Writer, limit int, insecureHTTP bool) string {
 	var out strings.Builder
-	err := runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, "", func(ctx context.Context, client *api.Client) error {
-		forge, owner, repo, err := resolveTrailRemote(ctx)
+	err := runAuthenticatedChangeAPI(ctx, errW, insecureHTTP, "", func(ctx context.Context, client *api.Client) error {
+		forge, owner, repo, err := resolveChangeRemote(ctx)
 		if err != nil {
 			return err
 		}
-		resources, _, err := listTrailResources(ctx, client, forge, owner, repo, nil, "", limit)
+		resources, _, err := listChangeResources(ctx, client, forge, owner, repo, nil, "", limit)
 		if err != nil {
 			return err
 		}
-		list := api.TrailListResponse{Trails: resources}
-		if len(list.Trails) == 0 {
+		list := api.ChangeListResponse{Changes: resources}
+		if len(list.Changes) == 0 {
 			out.WriteString("Trails are enabled but none exist yet.\n")
 			return nil
 		}
-		fmt.Fprintf(&out, "- %d recent trails\n", len(list.Trails))
+		fmt.Fprintf(&out, "- %d recent trails\n", len(list.Changes))
 
 		sevCount := map[string]int{}
 		statusCount := map[string]int{}
 		fileCount := map[string]int{}
 		total := 0
 		fetchFailures := 0
-		scanned := list.Trails
+		scanned := list.Changes
 		if len(scanned) > tuneMaxTrailsForFindings {
 			scanned = scanned[:tuneMaxTrailsForFindings]
 		}
 		for i := range scanned {
-			client.SetTrailRoute(scanned[i].ID, trailNumberPath(forge, owner, repo, scanned[i].Number))
-			comments, err := fetchAllTrailReviewComments(ctx, client, scanned[i].ID, trailReviewSummaryOptions())
+			client.SetChangeRoute(scanned[i].ID, changeNumberPath(forge, owner, repo, scanned[i].Number))
+			comments, err := fetchAllChangeReviewComments(ctx, client, scanned[i].ID, changeReviewSummaryOptions())
 			if err != nil {
 				fetchFailures++
 				continue

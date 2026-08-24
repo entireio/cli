@@ -117,22 +117,22 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"session resume":  {agentHelpAudienceTaskDriven, false}, // switches branch
 	"session stop":    {agentHelpAudienceTaskDriven, false},
 
-	// trail is the highest-traffic family by a wide margin, so its read-only
+	// change is the highest-traffic family by a wide margin, so its read-only
 	// subcommands must not disappear behind the group's write-capable label.
-	"trail":                 {agentHelpAudienceTaskDriven, true},
-	"trail approvals":       {agentHelpAudienceReadOnly, false},
-	"trail list":            {agentHelpAudienceReadOnly, false},
-	"trail show":            {agentHelpAudienceReadOnly, false},
-	"trail watch":           {agentHelpAudienceReadOnly, false},
-	"trail approve":         {agentHelpAudienceTaskDriven, false},
-	"trail checkout":        {agentHelpAudienceTaskDriven, false},
-	"trail comment":         {agentHelpAudienceTaskDriven, false},
-	"trail create":          {agentHelpAudienceTaskDriven, false},
-	"trail delete":          {agentHelpAudienceTaskDriven, false},
-	"trail finding":         {agentHelpAudienceTaskDriven, false},
-	"trail request-changes": {agentHelpAudienceTaskDriven, false},
-	"trail resume":          {agentHelpAudienceTaskDriven, false},
-	"trail update":          {agentHelpAudienceTaskDriven, false},
+	"change":                 {agentHelpAudienceTaskDriven, true},
+	"change approvals":       {agentHelpAudienceReadOnly, false},
+	"change list":            {agentHelpAudienceReadOnly, false},
+	"change show":            {agentHelpAudienceReadOnly, false},
+	"change watch":           {agentHelpAudienceReadOnly, false},
+	"change approve":         {agentHelpAudienceTaskDriven, false},
+	"change checkout":        {agentHelpAudienceTaskDriven, false},
+	"change comment":         {agentHelpAudienceTaskDriven, false},
+	"change create":          {agentHelpAudienceTaskDriven, false},
+	"change delete":          {agentHelpAudienceTaskDriven, false},
+	"change finding":         {agentHelpAudienceTaskDriven, false},
+	"change request-changes": {agentHelpAudienceTaskDriven, false},
+	"change resume":          {agentHelpAudienceTaskDriven, false},
+	"change update":          {agentHelpAudienceTaskDriven, false},
 
 	// ---- Unlisted: real commands, just not the default view. ---------------
 	"activity": {agentHelpAudienceReadOnly, false},
@@ -690,11 +690,11 @@ func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled b
 			b.WriteString(wrapIndented(strings.Join(names, " · "), "    ", 76))
 		}
 	}
-	// Use an example command that is actually advertised here (trail is gated on
+	// Use an example command that is actually advertised here (change is gated on
 	// trails being enabled), so we never point at a command the agent can't use.
 	example := "checkpoint"
 	if trailsEnabled {
-		example = "trail"
+		example = "change"
 	}
 	fmt.Fprintf(&b, "\nDrill in for exact, currently-installed flags:  entire agent-help <command>  (e.g. entire agent-help %s)\n", example)
 	b.WriteString("Add --json for structured output.\n")

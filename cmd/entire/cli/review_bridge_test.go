@@ -191,35 +191,35 @@ func TestTrailReviewWebURL(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		target trailReviewTarget
+		target changeReviewTarget
 		want   string
 	}{
 		{
 			name: "full target",
-			target: trailReviewTarget{
-				Host:  "gh",
-				Owner: "entireio",
-				Repo:  "cli",
-				Trail: api.TrailResource{Number: 466, Branch: "review-profiles"},
+			target: changeReviewTarget{
+				Host:   "gh",
+				Owner:  "entireio",
+				Repo:   "cli",
+				Change: api.ChangeResource{Number: 466, Branch: "review-profiles"},
 			},
-			want: "https://entire.io/gh/entireio/cli/trails/466/review-profiles",
+			want: "https://entire.io/gh/entireio/cli/changes/466/review-profiles",
 		},
 		{
 			name: "no trail number yields no link",
-			target: trailReviewTarget{
-				Host:  "gh",
-				Owner: "entireio",
-				Repo:  "cli",
-				Trail: api.TrailResource{Branch: "review-profiles"},
+			target: changeReviewTarget{
+				Host:   "gh",
+				Owner:  "entireio",
+				Repo:   "cli",
+				Change: api.ChangeResource{Branch: "review-profiles"},
 			},
 			want: "",
 		},
 		{
 			name: "missing forge yields no link",
-			target: trailReviewTarget{
-				Owner: "entireio",
-				Repo:  "cli",
-				Trail: api.TrailResource{Number: 1, Branch: "main"},
+			target: changeReviewTarget{
+				Owner:  "entireio",
+				Repo:   "cli",
+				Change: api.ChangeResource{Number: 1, Branch: "main"},
 			},
 			want: "",
 		},
@@ -235,13 +235,13 @@ func TestTrailReviewWebURL(t *testing.T) {
 
 func TestTrailReviewWebURL_HonorsCustomBase(t *testing.T) {
 	t.Setenv(api.BaseURLEnvVar, "https://entire.example.com/")
-	target := trailReviewTarget{
-		Host:  "gh",
-		Owner: "acme",
-		Repo:  "app",
-		Trail: api.TrailResource{Number: 7, Branch: "feat/x"},
+	target := changeReviewTarget{
+		Host:   "gh",
+		Owner:  "acme",
+		Repo:   "app",
+		Change: api.ChangeResource{Number: 7, Branch: "feat/x"},
 	}
-	want := "https://entire.example.com/gh/acme/app/trails/7/feat/x"
+	want := "https://entire.example.com/gh/acme/app/changes/7/feat/x"
 	if got := trailReviewWebURL(target); got != want {
 		t.Errorf("trailReviewWebURL() = %q, want %q", got, want)
 	}

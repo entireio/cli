@@ -63,7 +63,7 @@ func NewAuthenticatedAPIClient(ctx context.Context, insecureHTTP bool) (*api.Cli
 // resolution failure fails the command instead of falling back to the
 // caller's home cell, because for repo-scoped data a silent wrong-region
 // "success" is worse than an error — that fallback is exactly what used to
-// make `entire trail`/`entire experts` read the wrong region for a
+// make `entire change`/`entire experts` read the wrong region for a
 // multi-homed repo like entirehq/entire.io.
 func NewAuthenticatedEntireAPICellClient(ctx context.Context, insecureHTTP bool, fullName, ulid string) (*api.Client, error) {
 	target, err := resolveRepoCellTarget(ctx, fullName, ulid)
@@ -76,13 +76,13 @@ func NewAuthenticatedEntireAPICellClient(ctx context.Context, insecureHTTP bool,
 	return auth.NewEntireAPICellClient(ctx, insecureHTTP, target) //nolint:wrapcheck // pass through contextual auth errors
 }
 
-// newTrailAPIClient dials the entire-api cell that owns the repository. It is a
+// newChangeAPIClient dials the entire-api cell that owns the repository. It is a
 // package seam so tests can substitute a client pointed at a stub server.
-var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
+var newChangeAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
 	client, err := NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, fullName, "")
 	if errors.Is(err, clusterdiscovery.ErrNoAuthContext) {
 		// Preserve cluster discovery's detailed host/context hint while restoring
-		// the sentinel trail commands use for the standard login UX.
+		// the sentinel change commands use for the standard login UX.
 		return nil, fmt.Errorf("%w: %w", auth.ErrNotLoggedIn, err)
 	}
 	if err != nil {

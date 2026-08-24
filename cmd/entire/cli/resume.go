@@ -229,8 +229,8 @@ func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName 
 func continueSessionRestoredSessions(ctx context.Context, w io.Writer, sessions []strategy.RestoredSession) error {
 	return continueRestoredSessions(ctx, w, sessions, restoredSessionContinueOptions{
 		CanPrompt:     interactive.CanPromptInteractively(),
-		PromptSession: promptTrailRestoredSession,
-		Launch:        launchTrailRestoredSession,
+		PromptSession: promptChangeRestoredSession,
+		Launch:        launchChangeRestoredSession,
 		Display:       displayRestoredSessions,
 	})
 }
