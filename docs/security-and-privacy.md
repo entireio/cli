@@ -64,7 +64,7 @@ Built-in categories (when `enabled` is `true`):
 | Category | Default | Replacement token |
 |---|---|---|
 | `email` | on | `[REDACTED_EMAIL]` |
-| `phone` | on | `[REDACTED_PHONE]` |
+| `phone` (North American / NANP formats) | on | `[REDACTED_PHONE]` |
 | `address` (US street addresses) | off (more false-positive prone) | `[REDACTED_ADDRESS]` |
 
 Common bot/CI email addresses are not redacted (`noreply@*`, `actions@*`, `*@users.noreply.github.com`, `*@noreply.github.com`).
@@ -485,6 +485,7 @@ File an issue when the rule would benefit every Entire user (e.g., a major SaaS 
 - **Best-effort.** Novel or low-entropy secrets (short passwords, predictable tokens) may not be caught.
 - **Filenames and binary data.** Secrets in filenames, binary files, or deeply nested structures may not be detected.
 - **JSONL skip rules.** Entire skips scanning fields named `signature`, fields ending in `id`/`ids`, structural-path fields (`filepath`, `file_path`, `cwd`, `root`, `directory`, `dir`, `path`), and objects whose `type` starts with `image` or equals `base64` — all to avoid false positives.
+- **Built-in PII patterns are US-centric.** `phone` matches North American (NANP) formats only — international formats, including E.164 numbers outside `+1`, are not detected. `address` matches the street line only; city, state, and ZIP/postcode are preserved. If you handle personal data from other regions, add `custom_patterns` for your locale rather than relying on the built-in categories alone.
 - **Custom PII patterns are user-authored.** Teams own the correctness of their `custom_patterns`. An invalid regex is logged and skipped, not enforced.
 - **Users are ultimately responsible** for reviewing what they commit and push. Redaction is a safety net, not a guarantee.
 

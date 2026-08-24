@@ -171,11 +171,11 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	}
 	defer repo.Close()
 
-	// Finalize any ACTIVE session whose agent process has exited (no SessionStop
+	// Finalize any non-ended session whose agent process has exited (no SessionStop
 	// hook fired). A gone process is unambiguous, so these are condensed on the
 	// spot rather than left for the interactive prompt below; the sweep marks
 	// them ended in place so classifySession won't re-flag them.
-	if n := finalizeExitedSessions(ctx, states); n > 0 {
+	if n := finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget)); n > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Finalized %d exited session(s) (agent process gone).\n\n", n)
 	}
 

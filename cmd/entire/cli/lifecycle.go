@@ -248,13 +248,14 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// SessionStart can fire before InitializeSession creates the state file,
 	// so ErrStateNotFound is the normal first-session path — only warn on
 	// genuinely unexpected errors, matching the rest of this file.
-	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
+	var appendedSkillEvents []agent.SkillEvent
+	stateSaved, mutErr := strategy.MutateSessionStateSaved(ctx, event.SessionID, func(state *strategy.SessionState) error {
 		if state.AdoptedIntoWorktreePath != "" {
 			logging.Info(logCtx, "skipping adopted-away source session start",
 				slog.String("adopted_into_worktree", state.AdoptedIntoWorktreePath))
 			return strategy.ErrMutationSkip
 		}
-		persistEventMetadataToState(event, state)
+		appendedSkillEvents = persistEventMetadataToState(event, state)
 		if transErr := strategy.TransitionAndLog(ctx, state, session.EventSessionStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logCtx, "session start transition failed",
 				slog.String("error", transErr.Error()))
@@ -265,6 +266,15 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 		logging.Warn(logCtx, "failed to update session state on start",
 			slog.String("error", mutErr.Error()))
 	}
+	if stateSaved {
+		strategy.EmitSkillInvocationTelemetry(ctx, appendedSkillEvents)
+	}
+
+	// Opportunistic self-heal: if any session in this repo is a zombie
+	// (agent died without a stop hook, or ended >24h ago without condensing),
+	// spawn one detached sweep to fix it. Detached, so the hook's timeout
+	// budget is untouched; see runSessionSweep for the safety contract.
+	maybeSpawnSessionSweep(ctx)
 
 	return nil
 }
@@ -664,7 +674,8 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	// spawning each per-turn investigate agent process so this conflict cannot
 	// happen for fresh investigate spawns. Both functions short-circuit on
 	// state.Kind != "" to keep the conflict harmless if it ever arises.
-	if mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+	var appendedSkillEvents []agent.SkillEvent
+	stateSaved, mutErr := strategy.MutateSessionStateSaved(ctx, sessionID, func(state *strategy.SessionState) error {
 		before := *state
 		// Slice fields share their backing array under struct copy. If
 		// adoptReviewEnv ever mutates ReviewSkills in place, the diff check
@@ -685,19 +696,26 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 				event.Timestamp,
 			)
 		}
-		skillEventsChanged := appendEventSkillEventsToState(&skillEventSource, state)
+		appendedSkillEvents = appendEventSkillEventsToState(&skillEventSource, state)
 		if state.Kind == before.Kind &&
 			state.ReviewPrompt == before.ReviewPrompt &&
 			slices.Equal(state.ReviewSkills, before.ReviewSkills) &&
 			state.InvestigateRunID == before.InvestigateRunID &&
 			state.InvestigateTopic == before.InvestigateTopic &&
-			!skillEventsChanged {
+			len(appendedSkillEvents) == 0 {
 			return strategy.ErrMutationSkip
 		}
 		return nil
-	}); mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+	})
+	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
 		logging.Warn(logCtx, "failed to save session state after review/investigate env adoption",
 			slog.String("error", mutErr.Error()))
+	}
+	// Telemetry runs after the session gate is released — settings load and
+	// process spawn must not extend the lock hold (and only after a successful
+	// save, so we never report events that weren't persisted).
+	if stateSaved {
+		strategy.EmitSkillInvocationTelemetry(ctx, appendedSkillEvents)
 	}
 	initSpan.End()
 
@@ -1113,8 +1131,9 @@ func handleLifecycleCompaction(ctx context.Context, ag agent.Agent, event *agent
 	)
 
 	// Fire EventCompaction to trigger ActionCondenseIfFilesTouched (stays in ACTIVE)
-	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
-		persistEventMetadataToState(event, state)
+	var appendedSkillEvents []agent.SkillEvent
+	stateSaved, mutErr := strategy.MutateSessionStateSaved(ctx, event.SessionID, func(state *strategy.SessionState) error {
+		appendedSkillEvents = persistEventMetadataToState(event, state)
 		if transErr := strategy.TransitionAndLog(ctx, state, session.EventCompaction, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logCtx, "compaction transition failed",
 				slog.String("error", transErr.Error()))
@@ -1124,6 +1143,9 @@ func handleLifecycleCompaction(ctx context.Context, ag agent.Agent, event *agent
 	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
 		logging.Warn(logCtx, "failed to save session state after compaction",
 			slog.String("error", mutErr.Error()))
+	}
+	if stateSaved {
+		strategy.EmitSkillInvocationTelemetry(ctx, appendedSkillEvents)
 	}
 
 	logging.Info(logCtx, "context compaction detected")
@@ -1960,8 +1982,9 @@ func recordCaptureDegraded(ctx context.Context, sessionID string, degraded bool)
 // transitionSessionTurnEnd transitions the session phase to IDLE and dispatches turn-end actions.
 func transitionSessionTurnEnd(ctx context.Context, sessionID string, event *agent.Event) {
 	logCtx := logging.WithComponent(ctx, "lifecycle")
-	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
-		persistEventMetadataToState(event, state)
+	var appendedSkillEvents []agent.SkillEvent
+	stateSaved, mutErr := strategy.MutateSessionStateSaved(ctx, sessionID, func(state *strategy.SessionState) error {
+		appendedSkillEvents = persistEventMetadataToState(event, state)
 		if err := strategy.TransitionAndLog(ctx, state, session.EventTurnEnd, session.TransitionContext{}, session.NoOpActionHandler{}); err != nil {
 			logging.Warn(logCtx, "turn-end transition failed",
 				slog.String("error", err.Error()))
@@ -1970,15 +1993,28 @@ func transitionSessionTurnEnd(ctx context.Context, sessionID string, event *agen
 		// save flushes those changes. Any reentrant MutateSessionState calls
 		// it makes on this session ID share this state pointer via the gate.
 		strat := GetStrategy(ctx)
+		// The turn-end finalize extracts skill events from the full transcript
+		// and appends the new ones to state.SkillEvents — snapshot its growth
+		// so those events reach telemetry alongside the hook-provided ones.
+		skillEventsBefore := len(state.SkillEvents)
 		if err := strat.HandleTurnEnd(ctx, state); err != nil {
 			logging.Warn(logCtx, "turn-end action dispatch failed",
 				slog.String("error", err.Error()))
+		}
+		// Guarded rather than sliced blind: nothing shortens SkillEvents today,
+		// but a future path that rewrote or trimmed the list would turn this
+		// into a panic in a hook.
+		if len(state.SkillEvents) > skillEventsBefore {
+			appendedSkillEvents = append(appendedSkillEvents, state.SkillEvents[skillEventsBefore:]...)
 		}
 		return nil
 	})
 	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
 		logging.Warn(logCtx, "failed to update session phase on turn end",
 			slog.String("error", mutErr.Error()))
+	}
+	if stateSaved {
+		strategy.EmitSkillInvocationTelemetry(ctx, appendedSkillEvents)
 	}
 }
 
@@ -2030,12 +2066,13 @@ const (
 // session a concurrent turn just revived). It reports whether the session was
 // actually ended.
 func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string, guard func(*strategy.SessionState) bool, when endedAtPolicy) (ended bool, err error) {
-	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+	var appendedSkillEvents []agent.SkillEvent
+	stateSaved, mutErr := strategy.MutateSessionStateSaved(ctx, sessionID, func(state *strategy.SessionState) error {
 		if guard != nil && !guard(state) {
 			return strategy.ErrMutationSkip
 		}
 		if event != nil {
-			persistEventMetadataToState(event, state)
+			appendedSkillEvents = persistEventMetadataToState(event, state)
 		}
 		// Resolved before the transition, which is not a read-only step: the
 		// SessionStop edge carries ActionUpdateLastInteraction and stamps
@@ -2061,6 +2098,9 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 	if mutErr != nil {
 		return false, fmt.Errorf("failed to save session state: %w", mutErr)
 	}
+	if stateSaved {
+		strategy.EmitSkillInvocationTelemetry(ctx, appendedSkillEvents)
+	}
 	return ended, nil
 }
 
@@ -2073,12 +2113,16 @@ func logFileChanges(ctx context.Context, modified, newFiles, deleted []string) {
 		slog.Int("deleted", len(deleted)))
 }
 
-func persistEventMetadataToState(event *agent.Event, state *strategy.SessionState) {
+// persistEventMetadataToState returns the skill events newly appended to
+// state so callers can forward them to telemetry AFTER their surrounding
+// MutateSessionState closure releases the session gate — settings load and
+// detached-process spawn must never run while the lock is held.
+func persistEventMetadataToState(event *agent.Event, state *strategy.SessionState) []agent.SkillEvent {
 	// Update ModelName if provided (model is known by turn-end even on first turn)
 	if event.Model != "" {
 		state.ModelName = event.Model
 	}
-	appendEventSkillEventsToState(event, state)
+	appendedSkillEvents := appendEventSkillEventsToState(event, state)
 
 	// Persist hook-provided session metrics (e.g., from Cursor hooks)
 	if event.DurationMs > 0 {
@@ -2111,43 +2155,20 @@ func persistEventMetadataToState(event *agent.Event, state *strategy.SessionStat
 	if event.ContextWindowSize > 0 {
 		state.ContextWindowSize = event.ContextWindowSize
 	}
+	return appendedSkillEvents
 }
 
-func appendEventSkillEventsToState(event *agent.Event, state *strategy.SessionState) bool {
-	if event == nil || state == nil || len(event.SkillEvents) == 0 {
-		return false
+// appendEventSkillEventsToState appends the event's hook-provided skill events
+// to state and returns those that were actually appended (nil when nothing
+// changed) so callers can forward exactly the new ones to telemetry. Dedupe
+// lives in strategy.AppendNewSkillEvents, shared with the transcript-extraction
+// paths — hook-driven and extracted events land in one list, so they must agree
+// on what counts as already recorded.
+func appendEventSkillEventsToState(event *agent.Event, state *strategy.SessionState) []agent.SkillEvent {
+	if event == nil {
+		return nil
 	}
-	changed := false
-	for _, skillEvent := range event.SkillEvents {
-		if skillEvent.TurnID == "" {
-			skillEvent.TurnID = state.TurnID
-		}
-		if skillEventExists(state.SkillEvents, skillEvent) {
-			continue
-		}
-		state.SkillEvents = append(state.SkillEvents, skillEvent)
-		changed = true
-	}
-	return changed
-}
-
-func skillEventExists(events []agent.SkillEvent, candidate agent.SkillEvent) bool {
-	for _, existing := range events {
-		if existing.ID != "" && candidate.ID != "" {
-			if existing.ID == candidate.ID {
-				return true
-			}
-			continue
-		}
-		if existing.EventType == candidate.EventType &&
-			existing.Skill.Name == candidate.Skill.Name &&
-			existing.Source.Agent == candidate.Source.Agent &&
-			existing.Source.Signal == candidate.Source.Signal &&
-			existing.TurnID == candidate.TurnID {
-			return true
-		}
-	}
-	return false
+	return strategy.AppendNewSkillEvents(state, event.SkillEvents)
 }
 
 // envAdoptionSpec carries the kind-specific bits of env-driven session

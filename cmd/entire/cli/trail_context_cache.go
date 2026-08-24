@@ -431,6 +431,19 @@ func spawnDetachedTrailEnablementRefresh(ctx context.Context) {
 // hook. Best-effort: any error resolving, locking, or writing the marker falls
 // through to spawning — never worse than before this guard existed.
 func trailRefreshRecentlySpawned(commonDir string, now time.Time) bool {
+	return recentlySpawnedMarker(commonDir, "trail-refresh-spawn", trailRefreshSpawnThrottle, now)
+}
+
+// recentlySpawnedMarker reports whether the named spawn marker under the
+// shared git-common-dir was refreshed within ttl and, when it wasn't, records
+// now as the most recent spawn. The read-and-record is serialized with a flock
+// keyed to the marker (so every worktree of the repo agrees), collapsing a
+// burst of concurrent hooks to a single detached child rather than one per
+// hook. Best-effort: any error resolving, locking, or writing the marker falls
+// through to spawning — never worse than having no guard at all. Shared by the
+// trail-enablement refresh and the zombie-session sweep, each with its own
+// marker name and ttl.
+func recentlySpawnedMarker(commonDir, marker string, ttl time.Duration, now time.Time) bool {
 	dir := filepath.Join(commonDir, "entire")
 	// Create the directory before acquiring the lock: flock.Acquire opens the
 	// lock file, which fails if its parent doesn't exist yet (mirrors
@@ -438,7 +451,7 @@ func trailRefreshRecentlySpawned(commonDir string, now time.Time) bool {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return false
 	}
-	markerPath := filepath.Join(dir, "trail-refresh-spawn")
+	markerPath := filepath.Join(dir, marker)
 	release, err := flock.Acquire(markerPath + ".lock")
 	if err != nil {
 		return false
@@ -447,7 +460,7 @@ func trailRefreshRecentlySpawned(commonDir string, now time.Time) bool {
 
 	if data, readErr := os.ReadFile(markerPath); readErr == nil { //nolint:gosec // markerPath is derived from the trusted git-common-dir, not user input
 		if last, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data))); parseErr == nil &&
-			now.After(last) && now.Sub(last) < trailRefreshSpawnThrottle {
+			now.After(last) && now.Sub(last) < ttl {
 			return true
 		}
 	}

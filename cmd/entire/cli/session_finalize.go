@@ -12,8 +12,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
-// sweepCondenseBudget caps how much wall clock one sweep may spend condensing,
-// across all sessions it finalizes.
+// interactiveSweepCondenseBudget caps how much wall clock an interactive sweep
+// may spend condensing, across all sessions it finalizes.
 //
 // Marking a session ENDED is a single atomic state-file rename; condensing it
 // costs ~120ms at best and seconds for a large transcript. Since sessions stay
@@ -28,30 +28,38 @@ import (
 // stays false, PostCommit handles sessions with pending files, and doctor retries
 // no-files ENDED sessions. A backlog therefore drains over successive
 // invocations instead of stalling one.
-const sweepCondenseBudget = time.Second
+const interactiveSweepCondenseBudget = time.Second
+
+// isExitedSessionFinalizationCandidate keeps the exited-owner sweep away from
+// imported sessions, which are immutable historical records even if a legacy
+// state carries an inconsistent non-ended phase.
+func isExitedSessionFinalizationCandidate(st *session.State) bool {
+	return !st.Kind.IsImported() && st.OwnerExited()
+}
 
 // finalizeExitedSessions finalizes every non-ended session in states whose
 // owning agent process has exited (clean /exit, crash, kill, terminal close,
 // reboot) without a SessionStop hook firing — ACTIVE mid-turn, or IDLE because
 // the agent finished its turn before quitting. Each is finalized exactly as a
 // clean session stop would be: the session-stop transition runs (PhaseEnded +
-// EndedAt) and pending work is eagerly condensed, subject to
-// sweepCondenseBudget.
+// EndedAt) and pending work is eagerly condensed. condenseDeadline controls
+// how long the eager-condense work may run; a zero deadline is unbounded for a
+// detached caller, while status and doctor pass a bounded deadline because the
+// user is waiting for them.
 //
 // It refreshes the matched in-memory states from disk after finalizing — so
 // callers can re-filter/re-render without their own reload — and returns the
 // number finalized. Each session is best-effort: a failure to mark one ended is
 // logged and skipped; a condense failure is logged but the session is still
 // counted so PostCommit or doctor can retry it later, depending on pending files.
-func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
+func finalizeExitedSessions(ctx context.Context, states []*session.State, condenseDeadline time.Time) int {
 	// Nothing to do is overwhelmingly the common case, and returning here keeps
 	// the sweep off the logging and store setup below entirely.
-	if !slices.ContainsFunc(states, (*session.State).OwnerExited) {
+	if !slices.ContainsFunc(states, isExitedSessionFinalizationCandidate) {
 		return 0
 	}
 
 	logCtx := logging.WithComponent(ctx, "session")
-	condenseDeadline := time.Now().Add(sweepCondenseBudget)
 
 	// This sweep writes checkpoints; a scanner-config failure must not silently
 	// use the default scanner set, so skip the condense work (an already-expired
@@ -71,7 +79,7 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 	}
 	finalized := 0
 	for _, st := range states {
-		if !st.OwnerExited() {
+		if !isExitedSessionFinalizationCandidate(st) {
 			continue // cheap pre-filter on the (possibly stale) list snapshot
 		}
 
@@ -81,9 +89,7 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 		// re-validate OwnerExited on the freshly-loaded state under the lock:
 		// a turn may have started since the snapshot and replaced the dead
 		// owner with a live one, in which case ended is false and we leave it be.
-		ended, err := endSessionNow(ctx, nil, st.SessionID, func(s *session.State) bool {
-			return s.OwnerExited()
-		}, condenseDeadline, endedWhenLastSeen)
+		ended, err := endSessionNow(ctx, nil, st.SessionID, isExitedSessionFinalizationCandidate, condenseDeadline, endedWhenLastSeen)
 		if err != nil {
 			logging.Warn(logCtx, "failed to finalize exited session",
 				slog.String("session_id", st.SessionID),

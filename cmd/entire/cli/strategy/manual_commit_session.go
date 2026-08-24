@@ -126,23 +126,38 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 	return states, nil
 }
 
-// isWarnableStaleEndedSession reports whether an ENDED session is still both
-// expensive in PostCommit and actionable via 'entire doctor'.
-func isWarnableStaleEndedSession(repo *git.Repository, state *SessionState) bool {
+// IsCondensableEndedSession reports whether an ENDED session still carries
+// uncondensed content AND can be salvaged by condensing
+// (CondenseSessionByID). Two shapes qualify: checkpoint steps whose shadow
+// branch still exists, and record-bearing sessions (pending subagent task
+// records), whose content never lives on the shadow branch and so needs no
+// branch to condense. ENDED sessions with steps but no shadow branch and no
+// task records are NOT condensable; fixing those means discarding state,
+// which the background sweep never initiates — those sessions are left to
+// `entire doctor` (and the existing orphan cleanup in listAllSessionStates).
+// Used by the PostCommit stale-session warning and the background zombie
+// sweep.
+func IsCondensableEndedSession(repo *git.Repository, state *SessionState) bool {
 	if state.Phase != session.PhaseEnded || state.FullyCondensed ||
 		(state.StepCount <= 0 && !state.HasTaskContent()) {
 		return false
 	}
 
-	// Re-check shadow branch existence even though listAllSessionStates already
-	// filters orphaned sessions. This is intentional: PostCommit deletes shadow
-	// branches during condensation, so a branch that existed at list-load time
-	// may be gone by the time we reach the warning check. Without this re-check
-	// we would warn about sessions that this commit just cleaned up.
-	// Record-bearing sessions stay warnable: their content never lives on the shadow branch.
+	// Record-bearing sessions qualify without a shadow branch: task records
+	// are stored off-branch, so condensation can materialize them regardless.
 	if state.HasTaskContent() {
 		return true
 	}
+
+	// Check shadow branch existence. For PostCommit this is a re-check —
+	// its list arrives via listAllSessionStates, which already filters
+	// orphaned sessions — and it is intentional even there: condensation
+	// deletes shadow branches, so a branch that existed at list-load time may
+	// be gone by the time the warning re-checks here, and we'd otherwise warn
+	// about a session this commit (or a concurrent condense) just cleaned up.
+	// The background zombie sweep, by contrast, arrives via the raw
+	// ListSessionStates, so for the sweep this is the PRIMARY shadow-branch
+	// check, not a re-check — it is what keeps the sweep condense-only.
 	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	refName := plumbing.NewBranchReferenceName(shadowBranch)
 	_, err := repo.Reference(refName, true)
@@ -154,7 +169,7 @@ func isWarnableStaleEndedSession(repo *git.Repository, state *SessionState) bool
 func countWarnableStaleEndedSessions(repo *git.Repository, sessions []*SessionState) int {
 	n := 0
 	for _, state := range sessions {
-		if isWarnableStaleEndedSession(repo, state) {
+		if IsCondensableEndedSession(repo, state) {
 			n++
 		}
 	}
@@ -177,6 +192,13 @@ func (s *ManualCommitStrategy) findExactSessionsForWorktree(ctx context.Context,
 func exactWorktreeMatches(states []*SessionState, worktreePath string) []*SessionState {
 	var exact []*SessionState
 	for _, state := range states {
+		// Imported sessions are historical records reconstructed from
+		// transcripts; a fresh commit must never link to one (a leaked
+		// imported fixture once hijacked a commit's trailer — the sessC
+		// incident).
+		if state.Kind.IsImported() {
+			continue
+		}
 		if state.WorktreePath == worktreePath {
 			exact = append(exact, state)
 		}
@@ -187,27 +209,43 @@ func exactWorktreeMatches(states []*SessionState, worktreePath string) []*Sessio
 // findSessionsForWorktree finds all sessions for the given worktree path.
 // Exact WorktreePath matches win; otherwise sessions recorded in another
 // worktree of the same repository (shared git common dir) are matched, as long
-// as all candidates come from a single worktree.
+// as all candidates come from a single worktree. Callers that also run
+// identity matching use findSessionsForWorktreeFromStates to share one state
+// listing; this wrapper serves the paths that only need worktree semantics
+// (amend, post-rewrite) and deliberately drops the ambiguity signal — their
+// commits are history edits where an adopt hint would be noise.
 func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, worktreePath string) ([]*SessionState, error) {
 	allStates, err := s.listAllSessionStates(ctx)
 	if err != nil {
 		return nil, err
 	}
+	matches, _ := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
+	return matches, nil
+}
 
+// findSessionsForWorktreeFromStates is findSessionsForWorktree over an
+// already-loaded state list. The second result reports a multi-worktree
+// ambiguity decline — candidates existed but spanned several worktrees, so
+// nothing was linked; findSessionsForCommitLinking surfaces it to the user
+// only when identity matching cannot rescue the commit either.
+func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Context, allStates []*SessionState, worktreePath string) ([]*SessionState, bool) {
 	if exact := exactWorktreeMatches(allStates, worktreePath); len(exact) > 0 {
-		return exact, nil
+		return exact, false
 	}
 
 	worktreeCommonDir, err := gitCommonDirForWorktree(ctx, worktreePath)
 	if err != nil {
-		return nil, fmt.Errorf("resolve common dir for fallback session matching: %w", err)
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"),
+			"session matching: cannot resolve common dir for fallback matching",
+			slog.String("error", err.Error()))
+		return nil, false
 	}
 
 	var parentWorktreeMatches []*SessionState
 	var commonDirMatches []*SessionState
 	commonDirByPath := make(map[string]string)
 	for _, state := range allStates {
-		if state.WorktreePath == "" {
+		if state.WorktreePath == "" || state.Kind.IsImported() {
 			continue
 		}
 
@@ -229,17 +267,50 @@ func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, work
 	}
 
 	if len(parentWorktreeMatches) > 0 {
-		matches := sessionsFromSingleWorktree(parentWorktreeMatches)
-		if matches == nil {
-			warnAmbiguousWorktreeSessions(ctx, worktreePath, parentWorktreeMatches)
+		return resolveWorktreeCandidates(ctx, worktreePath, parentWorktreeMatches)
+	}
+	return resolveWorktreeCandidates(ctx, worktreePath, commonDirMatches)
+}
+
+// recentSessionWindow bounds the liveness filter below: a session that
+// interacted within this window is plausibly the one whose work is being
+// committed right now; one idle for days is not. This deliberately converts
+// some multi-worktree cases the old code declined into a best-candidate link:
+// a session in a long-running build or tool call can age out and leave the
+// other recent worktree to win. Commits normally follow agent activity by
+// seconds to minutes, so 15 minutes is the chosen correctness tradeoff.
+const recentSessionWindow = 15 * time.Minute
+
+// resolveWorktreeCandidates reduces fallback candidates to a linkable set.
+// All from one worktree: linked (the supported concurrent-session case).
+// Spanning several worktrees: filter to recently-interacting sessions and
+// link only if a single worktree remains — days-idle stragglers must not
+// veto the obviously-live session, but between two live worktrees there is
+// no safe guess. A refusal logs here and reports true, so the
+// commit-linking caller can announce it on stderr with the remedy (#1852:
+// silent loss of linkage) — but only after identity matching has also failed
+// to rescue the commit, and never on amend/post-rewrite.
+func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candidates []*SessionState) (matches []*SessionState, ambiguous bool) {
+	if len(candidates) == 0 {
+		return nil, false
+	}
+	if matches := sessionsFromSingleWorktree(candidates); matches != nil {
+		return matches, false
+	}
+	cutoff := time.Now().Add(-recentSessionWindow)
+	var live []*SessionState
+	for _, state := range candidates {
+		if state.LastInteractionTime != nil && state.LastInteractionTime.After(cutoff) {
+			live = append(live, state)
 		}
-		return matches, nil
 	}
-	matches := sessionsFromSingleWorktree(commonDirMatches)
-	if matches == nil && len(commonDirMatches) > 0 {
-		warnAmbiguousWorktreeSessions(ctx, worktreePath, commonDirMatches)
+	if len(live) > 0 {
+		if matches := sessionsFromSingleWorktree(live); matches != nil {
+			return matches, false
+		}
 	}
-	return matches, nil
+	warnAmbiguousWorktreeSessions(ctx, worktreePath, candidates)
+	return nil, true
 }
 
 // warnAmbiguousWorktreeSessions surfaces refused fallback matches: live

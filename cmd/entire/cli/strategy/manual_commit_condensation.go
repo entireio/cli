@@ -250,7 +250,9 @@ func prepareTaskTranscriptForStorage(
 		return redact.RedactedBytes{}, nil, true, nil
 	}
 	externalized, assets := externalizeSessionImages(ctx, logCtx, state, sanitized)
-	redacted, _, err = redactSessionTranscript(logCtx, externalized)
+	// nil repo declines prefix reuse: a subagent transcript is written once per
+	// task, not appended across checkpoints, so there is nothing to reuse.
+	redacted, _, err = redactSessionTranscript(logCtx, nil, "", externalized)
 	if err != nil {
 		return redact.RedactedBytes{}, nil, false, err
 	}
@@ -577,7 +579,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// externalized, redacted copy is stored.
 	externalizedTranscript, extractedAssets, transcriptSizeBaseline := prepareTranscriptForStorage(ctx, logCtx, ag, state, sessionData.Transcript)
 
-	redactedTranscript, redactDuration := redactOrDrop(logCtx, externalizedTranscript, state.SessionID, checkpointID)
+	redactedTranscript, redactDuration := redactOrDrop(logCtx, repo, state.SessionID, externalizedTranscript, checkpointID)
 	if skipped := skipIfPostRedactionEmpty(logCtx, redactedTranscript, sessionData, state, checkpointID); skipped != nil {
 		return skipped, nil
 	}
@@ -604,7 +606,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		return recovery.result, recovery.err
 	}
 
-	writeOpts, attributionDuration := buildCondensationWriteOptions(
+	writeOpts, attributionDuration, newSkillEvents := buildCondensationWriteOptions(
 		ctx, repo, ref, state, sessionData, redactedTranscript, extractedAssets,
 		taskPayloads, checkpointID, shadowBranchName, o,
 	)
@@ -646,6 +648,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		Prompts:                sessionData.Prompts,
 		TotalTranscriptLines:   sessionData.FullTranscriptLines,
 		TranscriptSizeBaseline: transcriptSizeBaseline,
+		NewSkillEvents:         newSkillEvents,
 	}, nil
 }
 
@@ -691,7 +694,7 @@ func buildCondensationWriteOptions(
 	checkpointID id.CheckpointID,
 	shadowBranchName string,
 	o condenseOpts,
-) (cpkg.WriteOptions, time.Duration) {
+) (cpkg.WriteOptions, time.Duration, []agent.SkillEvent) {
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
 	attrBase := state.AttributionBaseCommit
 	if attrBase == "" {
@@ -719,7 +722,7 @@ func buildCondensationWriteOptions(
 
 	// Post-commit emits regex-only blobs. OPF runs later in the
 	// pre-push rewrite path, never here.
-	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(sessionData.SkillEvents, state.TurnID))
+	newSkillEvents, skillEvents := persistNewSkillEvents(state, sessionData.SkillEvents)
 	return cpkg.WriteOptions{
 		CheckpointID:                checkpointID,
 		SessionID:                   state.SessionID,
@@ -753,14 +756,14 @@ func buildCondensationWriteOptions(
 		HasInvestigation:            state.Kind.IsInvestigate(),
 		InvestigateRunID:            state.InvestigateRunID,
 		InvestigateTopic:            state.InvestigateTopic,
-	}, attributionDuration
+	}, attributionDuration, newSkillEvents
 }
 
 // redactOrDrop runs redactSessionTranscript and, on failure, logs a warning
 // and returns empty bytes. Drop-on-failure is the long-standing contract here:
 // hooks have no retry path, and a failed redaction must not block the commit.
-func redactOrDrop(logCtx context.Context, transcript []byte, sessionID string, checkpointID id.CheckpointID) (redact.RedactedBytes, time.Duration) {
-	redactedTranscript, redactDuration, err := redactSessionTranscript(logCtx, transcript)
+func redactOrDrop(logCtx context.Context, repo *git.Repository, sessionID string, transcript []byte, checkpointID id.CheckpointID) (redact.RedactedBytes, time.Duration) {
+	redactedTranscript, redactDuration, err := redactSessionTranscript(logCtx, repo, sessionID, transcript)
 	if err != nil {
 		logging.Warn(logCtx, "failed to redact transcript secrets, dropping transcript for checkpoint",
 			slog.String("session_id", sessionID),
@@ -827,7 +830,17 @@ func newSkippedResult(checkpointID id.CheckpointID, sessionID string) *CondenseR
 // package and the checkpoint stores. Returns the redacted bytes and the duration
 // of the redaction operation for perf logging. Also the redaction step
 // prepareTaskTranscriptForStorage reuses for a subagent's own transcript.
-func redactSessionTranscript(ctx context.Context, transcript []byte) (redact.RedactedBytes, time.Duration, error) {
+//
+// A non-nil repo with a sessionID opts into prefix reuse (see
+// checkpoint/redact_cache.go); a nil repo or empty sessionID redacts the whole
+// content, which is what the per-subagent caller wants -- a task transcript is
+// not the append-only stream the cache assumes.
+func redactSessionTranscript(
+	ctx context.Context,
+	repo *git.Repository,
+	sessionID string,
+	transcript []byte,
+) (redact.RedactedBytes, time.Duration, error) {
 	start := time.Now()
 	_, span := perf.Start(ctx, "redact_transcript")
 	defer span.End()
@@ -836,7 +849,7 @@ func redactSessionTranscript(ctx context.Context, transcript []byte) (redact.Red
 		return redact.RedactedBytes{}, time.Since(start), nil
 	}
 
-	redacted, err := redactSessionJSONLBytes(ctx, transcript)
+	redacted, err := cpkg.RedactTranscriptCached(ctx, repo, sessionID, transcript, redactSessionJSONLBytes)
 	if err != nil {
 		span.RecordError(err)
 		return redact.RedactedBytes{}, time.Since(start), fmt.Errorf("failed to redact transcript secrets: %w", err)
@@ -1638,7 +1651,8 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 
 	var shadowBranchName string
 	var clearAfter bool
-	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+	var newSkillEvents []agent.SkillEvent
+	stateSaved, mutErr := MutateSessionStateSaved(ctx, sessionID, func(state *SessionState) error {
 		if state.PendingCondensationID() != checkpointID {
 			return ErrMutationSkip
 		}
@@ -1662,6 +1676,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		if err != nil {
 			return fmt.Errorf("failed to condense session: %w", err)
 		}
+		newSkillEvents = result.NewSkillEvents
 
 		if result.Skipped {
 			logging.Info(logCtx, "session condensation skipped (no transcript or files), marking fully condensed",
@@ -1694,6 +1709,9 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	}
 	if mutErr != nil {
 		return mutErr
+	}
+	if stateSaved {
+		EmitSkillInvocationTelemetry(ctx, newSkillEvents)
 	}
 
 	if clearAfter {
@@ -1812,7 +1830,8 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	}
 
 	var didCondense bool
-	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+	var newSkillEvents []agent.SkillEvent
+	stateSaved, mutErr := MutateSessionStateSaved(ctx, sessionID, func(state *SessionState) error {
 		var preflightErr error
 		shadowBranchName, shouldCondense, preflightErr = prepareEagerCondensation(logCtx, repo, state)
 		if preflightErr != nil || !shouldCondense {
@@ -1832,6 +1851,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			)
 			return ErrMutationSkip // fail-open
 		}
+		newSkillEvents = result.NewSkillEvents
 
 		if result.Skipped {
 			logging.Info(logCtx, "eager condense skipped (no transcript or files), marking fully condensed",
@@ -1864,6 +1884,9 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	}
 	if mutErr != nil {
 		return fmt.Errorf("failed to save session state: %w", mutErr)
+	}
+	if stateSaved {
+		EmitSkillInvocationTelemetry(ctx, newSkillEvents)
 	}
 
 	if didCondense && shadowBranchName != "" {

@@ -580,8 +580,8 @@ func TestExecuteAgentHookPostTodoFailsWhenPolicyUnsupported(t *testing.T) {
 
 // Agent hook trees must defer session stamping to executeAgentHook, after it
 // acquires the runtime-migration gate. A parent pre-run would execute first and
-// reopen the migration race. Post-runs stay unset because flushing belongs to
-// the root command (and main.go handles Cobra's error path).
+// reopen the migration race. Post-runs stay unset because main.go owns the log
+// sink's only close site, including Cobra's error path.
 func TestAgentHooksCmd_DefersSessionContextUntilGatedRun(t *testing.T) {
 	hooksCmd := newHooksCmd()
 
@@ -601,9 +601,9 @@ func TestAgentHooksCmd_DefersSessionContextUntilGatedRun(t *testing.T) {
 			require.Nil(t, agentCmd.PersistentPreRunE,
 				"session stamping must happen inside the migration-gated RunE")
 			require.Nil(t, agentCmd.PersistentPostRun,
-				"PersistentPostRun must stay unset: the root PersistentPostRun and main.go flush the log sink")
+				"PersistentPostRun must stay unset: main.go flushes the log sink")
 			require.Nil(t, agentCmd.PersistentPostRunE,
-				"PersistentPostRunE must stay unset: the root PersistentPostRun and main.go flush the log sink")
+				"PersistentPostRunE must stay unset: main.go flushes the log sink")
 		})
 	}
 }

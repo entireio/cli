@@ -1592,6 +1592,25 @@ func IsFilteredFetchesEnabled(ctx context.Context) bool {
 	return s.IsFilteredFetchesEnabled()
 }
 
+// IsTelemetryEnabled reports whether the user opted in to anonymous usage
+// analytics. Telemetry is opt-in: an absent key means no, so every tracker
+// call site must gate on this rather than on Telemetry being non-nil. Does not
+// consider ENTIRE_TELEMETRY_OPTOUT — the trackers honor that env opt-out
+// themselves (telemetry.IsEnvOptedOut).
+func (s *EntireSettings) IsTelemetryEnabled() bool {
+	return s != nil && s.Telemetry != nil && *s.Telemetry
+}
+
+// IsTelemetryEnabled loads settings and reports the telemetry opt-in. Returns
+// false when settings cannot be loaded — telemetry never fails open.
+func IsTelemetryEnabled(ctx context.Context) bool {
+	s, err := Load(ctx)
+	if err != nil {
+		return false
+	}
+	return s.IsTelemetryEnabled()
+}
+
 // IsSummarizeEnabled checks if auto-summarize is enabled in settings.
 // Returns false by default if settings cannot be loaded or the key is missing.
 func IsSummarizeEnabled(ctx context.Context) bool {

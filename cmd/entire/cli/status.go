@@ -634,11 +634,11 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 		return
 	}
 
-	// Finalize any ACTIVE session whose agent process has exited without a
+	// Finalize any non-ended session whose agent process has exited without a
 	// SessionStop hook firing, so it doesn't linger as "active" until the
 	// inactivity timeout. The sweep marks them ended in place, so the filter
 	// below drops them.
-	if n := finalizeExitedSessions(ctx, states); n > 0 {
+	if n := finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget)); n > 0 {
 		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("Finalized %d exited session(s) (agent process gone).", n)))
 	}
 
@@ -1101,9 +1101,9 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		if store, err := session.NewStateStore(ctx); err == nil {
 			if states, err := store.List(ctx); err == nil {
 				// Finalize sessions whose agent has exited (matches the human
-				// status path) so --json doesn't leave them orphaned ACTIVE or
+				// status path) so --json doesn't leave them orphaned or
 				// report them under active_sessions.
-				finalizeExitedSessions(ctx, states)
+				finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget))
 				// Deduplicate by agent: one entry per agent, "active" wins over "idle".
 				type agentEntry struct {
 					brief    sessionBriefJSON

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/denisbrodbeck/machineid"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/posthog/posthog-go"
 	"github.com/spf13/cobra"
@@ -49,7 +48,7 @@ func BuildEventPayload(cmd *cobra.Command, agent string, isEntireEnabled bool, v
 	}
 
 	// Get machine ID for distinct_id
-	machineID, err := machineid.ProtectedID("entire-cli")
+	machineID, err := telemetryMachineID()
 	if err != nil {
 		return nil
 	}
@@ -86,11 +85,77 @@ func BuildEventPayload(cmd *cobra.Command, agent string, isEntireEnabled bool, v
 	}
 }
 
+// spawnAnalyticsHook replaces the detached spawn when non-nil so tests can
+// assert how many sends a call performs and what each carries. Production
+// leaves it nil. execx.SpawnDetached itself no-ops under `go test`, so counting
+// sends needs a seam here rather than a spy on the child.
+//
+//nolint:gochecknoglobals // test seam, set and restored by in-package tests.
+var spawnAnalyticsHook func(payloadJSON string)
+
 // spawnDetachedAnalytics sends the payload from a detached `entire
 // __send_analytics` child so the network call never blocks the CLI. The empty
-// dir keeps the child out of the parent's working directory.
+// dir keeps the child out of the parent's working directory. payloadJSON is
+// one event object or an array of them — see SendEvents.
 func spawnDetachedAnalytics(payloadJSON string) {
+	if spawnAnalyticsHook != nil {
+		spawnAnalyticsHook(payloadJSON)
+		return
+	}
 	execx.SpawnDetached("", "__send_analytics", payloadJSON)
+}
+
+// maxDetachedPayloadBytes bounds the JSON handed to one child. The payload
+// travels as an argv element and argv limits are per-platform and modest
+// (macOS caps the whole vector near 256KB), so an oversized batch is split
+// across children rather than risking a spawn that fails wholesale. Far above
+// any realistic batch: one event payload runs a few hundred bytes.
+const maxDetachedPayloadBytes = 96 * 1024
+
+// spawnDetachedAnalyticsBatch sends every payload using as few detached
+// children as the size budget allows — normally exactly one.
+//
+// Nothing is dropped: a batch too large for one argv is split, so an unusually
+// long backlog costs an extra process instead of lost events. Batching also
+// means the child resolves the git version once per send rather than once per
+// event.
+func spawnDetachedAnalyticsBatch(payloads []*EventPayload) {
+	const (
+		bracketsBytes = 2 // "[" and "]"
+		commaBytes    = 1
+	)
+	batch := make([]json.RawMessage, 0, len(payloads))
+	size := bracketsBytes
+
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		if batchJSON, err := json.Marshal(batch); err == nil {
+			spawnDetachedAnalytics(string(batchJSON))
+		}
+		batch = batch[:0]
+		size = bracketsBytes
+	}
+
+	for _, payload := range payloads {
+		if payload == nil {
+			continue
+		}
+		payloadJSON, err := json.Marshal(payload)
+		if err != nil {
+			continue
+		}
+		// Flush before appending so the batch stays within budget. A single
+		// payload over the budget still goes out alone: dropping it would be
+		// the silent loss this batching exists to remove.
+		if len(batch) > 0 && size+len(payloadJSON)+commaBytes > maxDetachedPayloadBytes {
+			flush()
+		}
+		batch = append(batch, payloadJSON)
+		size += len(payloadJSON) + commaBytes
+	}
+	flush()
 }
 
 // TrackCommandDetached tracks a command execution by spawning a detached subprocess.
@@ -126,7 +191,7 @@ func BuildPluginEventPayload(pluginName string, isEntireEnabled bool, version st
 		return nil
 	}
 
-	machineID, err := machineid.ProtectedID("entire-cli")
+	machineID, err := telemetryMachineID()
 	if err != nil {
 		return nil
 	}
@@ -165,11 +230,98 @@ func TrackPluginDetached(pluginName string, isEntireEnabled bool, version string
 	}
 }
 
-// SendEvent processes an event payload in the detached subprocess.
+// SkillInvocation is the content-free view of one recorded skill event: which
+// skill fired, on which agent, and how it was detected. Deliberately no prompt
+// text, arguments, or transcript content — and the skill name itself is only
+// sent verbatim when allowlisted (see skillNameForTelemetry), because custom
+// slash-command names are user content too.
+type SkillInvocation struct {
+	// Skill is the invoked skill's name (e.g. "entire"). Names outside the
+	// official allowlist are reported as "custom".
+	Skill string
+	// Agent is the agent that surfaced the signal (e.g. "claude-code").
+	Agent string
+	// Signal is the detection signal (e.g. "prompt_slash_command",
+	// "skill_tool_use").
+	Signal string
+	// EventType is the skill event type ("prompt_invocation" or
+	// "tool_invocation").
+	EventType string
+}
+
+// BuildSkillEventPayload constructs the telemetry payload for one skill
+// invocation. Exported for testing. Returns nil if the payload cannot be built.
+func BuildSkillEventPayload(inv SkillInvocation, isEntireEnabled bool, version string) *EventPayload {
+	if inv.Skill == "" {
+		return nil
+	}
+
+	machineID, err := telemetryMachineID()
+	if err != nil {
+		return nil
+	}
+
+	// Match BuildEventPayload's defaulting so the agent property is always a
+	// non-empty, queryable value.
+	agentName := inv.Agent
+	if agentName == "" {
+		agentName = "auto"
+	}
+
+	properties := map[string]any{
+		"skill":           skillNameForTelemetry(inv.Skill),
+		"agent":           agentName,
+		"signal":          inv.Signal,
+		"event_type":      inv.EventType,
+		"isEntireEnabled": isEntireEnabled,
+		"cli_version":     version,
+		"os":              runtime.GOOS,
+		"arch":            runtime.GOARCH,
+	}
+
+	return &EventPayload{
+		Event:      "cli_skill_invoked",
+		DistinctID: machineID,
+		Properties: properties,
+		Timestamp:  time.Now(),
+	}
+}
+
+// TrackSkillInvocationsDetached records skill invocations, batching every
+// event into a single detached send (split only if it would exceed
+// maxDetachedPayloadBytes). Like TrackPluginDetached, it only honors the env
+// opt-out itself — call sites must gate on the user's opt-in telemetry setting.
+//
+// No per-call cap: an earlier version truncated to 10 events, which silently
+// dropped real invocations once condensation began extracting from transcript
+// offset 0 — the first condensation of a session drains its whole skill-event
+// backlog in one call, and a dropped event is never re-reported because the
+// dedupe in session state has already recorded it.
+func TrackSkillInvocationsDetached(invocations []SkillInvocation, isEntireEnabled bool, version string) {
+	if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+		return
+	}
+
+	payloads := make([]*EventPayload, 0, len(invocations))
+	for _, inv := range invocations {
+		if payload := BuildSkillEventPayload(inv, isEntireEnabled, version); payload != nil {
+			payloads = append(payloads, payload)
+		}
+	}
+	spawnDetachedAnalyticsBatch(payloads)
+}
+
+// SendEvents processes one or more event payloads in the detached subprocess.
 // This is called by the hidden __send_analytics command.
-func SendEvent(payloadJSON string) {
-	var payload EventPayload
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+//
+// The argv carries either a single event object or an array of them; both
+// shapes are accepted. Leniency matters beyond convenience: the child is
+// re-executed from os.Executable(), so a self-update that replaces the binary
+// between spawn and exec can hand a payload to a build other than the one that
+// wrote it.
+func SendEvents(payloadJSON string) {
+	payloads := decodeEventPayloads(payloadJSON)
+	if len(payloads) == 0 {
 		return
 	}
 
@@ -187,29 +339,47 @@ func SendEvent(payloadJSON string) {
 		_ = client.Close()
 	}()
 
-	// Resolve the installed git version best-effort. A missing or failing
-	// git must never block the rest of the telemetry — the property is simply
-	// omitted when it can't be determined.
-	if v := gitVersion(context.Background()); v != "" {
-		if payload.Properties == nil {
-			payload.Properties = map[string]any{}
+	// Resolve the installed git version best-effort, once for the whole batch.
+	// A missing or failing git must never block the rest of the telemetry — the
+	// property is simply omitted when it can't be determined.
+	gitVer := gitVersion(context.Background())
+
+	for _, payload := range payloads {
+		props := posthog.NewProperties()
+		for k, v := range payload.Properties {
+			props.Set(k, v)
 		}
-		payload.Properties["git_version"] = v
-	}
+		if gitVer != "" {
+			props.Set("git_version", gitVer)
+		}
 
-	// Build properties
-	props := posthog.NewProperties()
-	for k, v := range payload.Properties {
-		props.Set(k, v)
+		//nolint:errcheck // Best effort telemetry - don't block on result
+		_ = client.Enqueue(posthog.Capture{
+			DistinctId: payload.DistinctID,
+			Event:      payload.Event,
+			Properties: props,
+			Timestamp:  payload.Timestamp,
+		})
 	}
+}
 
-	//nolint:errcheck // Best effort telemetry - don't block on result
-	_ = client.Enqueue(posthog.Capture{
-		DistinctId: payload.DistinctID,
-		Event:      payload.Event,
-		Properties: props,
-		Timestamp:  payload.Timestamp,
-	})
+// decodeEventPayloads parses the argv payload as either an array of events or a
+// single event. Malformed input yields no payloads: telemetry is best-effort and
+// the detached child has nowhere to report a parse failure.
+func decodeEventPayloads(payloadJSON string) []EventPayload {
+	trimmed := strings.TrimSpace(payloadJSON)
+	if strings.HasPrefix(trimmed, "[") {
+		var batch []EventPayload
+		if err := json.Unmarshal([]byte(trimmed), &batch); err != nil {
+			return nil
+		}
+		return batch
+	}
+	var single EventPayload
+	if err := json.Unmarshal([]byte(trimmed), &single); err != nil {
+		return nil
+	}
+	return []EventPayload{single}
 }
 
 // gitVersion returns the installed git version (e.g. "2.43.0"), best-effort.
