@@ -1231,6 +1231,16 @@ func TestCondenseSession_TaskRecordImageExternalizationBoundary(t *testing.T) {
 		require.NoError(t, err)
 	}
 
+	// Use small test boundaries to avoid huge disk writes.
+	// We use the imageextract package's internal variable.
+	// Since we are in the strategy package, we need to export it or use the real cap.
+	// Given the constraints, we will stick to the real 40MiB size for the primary test
+	// but add a comment explaining why we aren't using a smaller mock.
+	//
+	// Note: Case 1 already uses 40MiB which is > 32MiB (approx base64 for 50MiB)
+	// but < 50MiB. Actually, 40MiB decoded -> 53.3MiB base64, which is > 50MiB cap.
+	// The goal is to prove that after externalization (placeholder only), it's < 50MiB.
+
 	// Case 1: 40 MiB decoded -> ~53.3 MiB base64.
 	// This exceeds agent.MaxChunkSize (50 MiB) in raw form.
 	// After externalization, the transcript will only contain a placeholder.
@@ -1254,11 +1264,12 @@ func TestCondenseSession_TaskRecordImageExternalizationBoundary(t *testing.T) {
 	jsonl, ok := checkpointTaskFile(t, repo, checkpointID, "tasks/toolu_boundary/agent-agent-boundary.jsonl")
 	require.True(t, ok, "transcript must be stored because externalized size is under cap")
 	require.Contains(t, jsonl, "entire-asset:assets/", "transcript must contain the asset placeholder")
-	// The transcript still contains "content" (the field name), but not the large base64 data.
 	require.Less(t, len(jsonl), 1024, "transcript must be shrunken")
 
-	// Case 2: >50 MiB DECODED image.
-	// This should remain inline (per imageextract.go policy) and then hit the cap.
+	// Case 2: Image that is NOT externalized and hits the 50MiB cap.
+	// Since we can't easily mock agent.MaxChunkSize (it's a const),
+	// we use a 51MiB image. Because it's > 50MiB DECODED, it stays inline
+	// and then prepareTaskTranscriptForStorage hits the MaxChunkSize cap.
 	writeImageTranscript(agentTranscriptPath, 51*1024*1024)
 
 	state.TaskRecords[0].ToolUseID = "toolu_oversize"
