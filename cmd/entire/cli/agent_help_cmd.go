@@ -192,7 +192,7 @@ var agentHelpClassification = map[string]agentHelpFacts{
 var agentHelpGuidance = map[string]string{
 	"api": "LAST RESORT. Right in two cases: you are developing against Entire's own\n" +
 		"APIs and want a raw response, or no first-class command covers your need.\n" +
-		"Otherwise prefer the command built for the job (checkpoint, session, trail,\n" +
+		"Otherwise prefer the command built for the job (checkpoint, session, change,\n" +
 		"status, repo, …) — its output is stable, raw endpoints are not. If you are\n" +
 		"reaching for this during ordinary work in a repo with Entire enabled, run\n" +
 		"`entire agent-help` first; there is probably a command for it. When you do\n" +
