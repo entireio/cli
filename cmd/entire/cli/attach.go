@@ -768,6 +768,11 @@ func resolveAgentAndTranscript(ctx context.Context, w io.Writer, sessionID strin
 
 	transcriptPath, err := resolveAndValidateTranscript(ctx, sessionID, ag, lookupAllowFetch)
 	if err != nil {
+		// A canceled attach stops here: the user asked to quit, so probing every
+		// other agent's transcript locations is work nobody is waiting for.
+		if errors.Is(err, context.Canceled) {
+			return nil, "", err
+		}
 		// Auto-detect: try all other agents.
 		detectedAg, detectedPath, detectErr := detectAgentByTranscript(ctx, sessionID, ag.Name())
 		if detectErr != nil {
