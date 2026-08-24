@@ -473,10 +473,18 @@ func deleteTempFiles(ctx context.Context, files []string) (deleted []string, fai
 	defer root.Close()
 
 	for _, file := range files {
-		if err := root.Remove(file); err != nil {
-			failed = append(failed, TempFileDeleteError{File: file, Err: err})
-		} else {
+		err := root.Remove(file)
+		switch {
+		case err == nil:
 			deleted = append(deleted, file)
+		case os.IsNotExist(err):
+			// The listing is a snapshot, and .entire/tmp now holds transient files:
+			// an OpenCode export stages under .export-* and renames it away (see
+			// agent/opencode/stage_export.go), so a name can legitimately vanish
+			// between the walk and the delete. Nothing to remove is not a failure.
+			logging.Debug(ctx, "temp file already gone before deletion", "file", file)
+		default:
+			failed = append(failed, TempFileDeleteError{File: file, Err: err})
 		}
 	}
 	return deleted, failed

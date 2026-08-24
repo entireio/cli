@@ -229,6 +229,20 @@ type TranscriptPreparer interface {
 	PrepareTranscript(ctx context.Context, sessionRef string) error
 }
 
+// TranscriptFetcher is implemented by agents that can materialize a session
+// transcript on demand (e.g. OpenCode via `opencode export`), including for
+// sessions Entire never tracked — where no hook-cached transcript file exists
+// (e.g. sessions spawned by an external host rather than a hooked terminal).
+// TranscriptPreparer, by contrast, only refreshes an already-existing file.
+type TranscriptFetcher interface {
+	Agent
+
+	// FetchTranscript writes the session's transcript to the agent's cache
+	// location and returns its path. Errors may be shown to users after other
+	// transcript sources fail, so they must be concise and safe to display.
+	FetchTranscript(ctx context.Context, sessionID string) (string, error)
+}
+
 // SidecarImageProvider is implemented by agents that keep images OUTSIDE the
 // transcript Entire condenses — e.g. Cursor stores pasted images in a per-session
 // SQLite blob store, not the JSONL transcript. The strategy layer calls this
