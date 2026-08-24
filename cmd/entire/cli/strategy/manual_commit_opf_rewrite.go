@@ -256,26 +256,10 @@ const rawByteCapMultiplier = 100
 // privacy-critical failures — the pre-push hook propagates these so
 // git push aborts.
 func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target string) (plumbing.Hash, error) {
-	// Exclude the detached entity-deltas backfill children for the whole
-	// rewrite. They are the one v1 mover that holds no lock the push path can
-	// observe, and one landing between the tip read below and the CAS at the
-	// bottom turns into V1RefMovedError and aborts the user's push. Holding
-	// their lock makes them park instead — nobody waits on a backfill, and its
-	// own critical section is a single small tree write, so the cost lands on
-	// the side that can absorb it. Other movers (another worktree's
-	// condensation) are unaffected: they never took this lock, and the CAS
-	// still catches them exactly as before.
-	if release, err := lockOutEntityDeltasBackfills(ctx, repo); err == nil {
-		defer release()
-	} else {
-		// Fail-soft on purpose: the lock is an optimization against a
-		// user-visible abort, not a correctness requirement (the CAS is). A
-		// rewrite that cannot take it behaves exactly as it did before the lock
-		// existed rather than refusing to push.
-		logging.Debug(ctx, "OPF pre-push: proceeding without the entity-deltas lock",
-			slog.String("error", err.Error()))
-	}
-
+	// Exclude detached entity-deltas backfill children only for the CAS window
+	// at the end. Holding their lock for the whole multi-second OPF rewrite
+	// blocks backfill children unnecessarily; a landing during OPF is caught by
+	// the pre-CAS tip re-read and surfaces as V1RefMovedError for retry.
 	localTip, err := readV1Tip(repo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("read local v1: %w", err)
@@ -422,6 +406,23 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 		parent = newHash
 	}
 
+	// Hold the backfill lock only for the CAS window. A multi-second rewrite
+	// must not block detached backfill children for its whole duration.
+	var release func()
+	if r, lockErr := lockOutEntityDeltasBackfills(ctx, repo); lockErr == nil {
+		release = r
+		defer release()
+	} else {
+		logging.Debug(ctx, "OPF pre-push: proceeding without the entity-deltas lock",
+			slog.String("error", lockErr.Error()))
+	}
+	currentTip, err := readV1Tip(repo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("re-read local v1 before CAS: %w", err)
+	}
+	if currentTip != localTip {
+		return plumbing.ZeroHash, &V1RefMovedError{Expected: localTip, Actual: currentTip}
+	}
 	if err := atomicSetV1Ref(repo, localTip, parent); err != nil {
 		return plumbing.ZeroHash, err
 	}
@@ -429,7 +430,7 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 }
 
 func readV1Tip(repo *git.Repository, refName plumbing.ReferenceName) (plumbing.Hash, error) {
-	ref, err := repo.Reference(refName, true)
+	ref, err := repo.Storer.Reference(refName)
 	if err != nil {
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			return plumbing.ZeroHash, nil

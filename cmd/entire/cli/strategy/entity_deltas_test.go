@@ -727,12 +727,11 @@ func shrinkEntityDeltasLockWaits(t *testing.T, wait time.Duration) {
 	})
 }
 
-// The defect this guards: a backfill landing between the rewrite's tip read and
-// its compare-and-swap makes the CAS fail, which the pre-push hook reports as
-// V1RefMovedError and turns into an aborted `git push`. The rewrite holds the
-// backfill lock for its duration, so the child parks instead — and lands as
-// soon as the rewrite is done.
-func TestRewriteUnpushedV1WithOPF_BackfillCannotLandMidRewrite(t *testing.T) {
+// The rewrite no longer holds the backfill lock for its whole duration — only
+// for the CAS window at the end. A backfill may therefore land during the
+// long OPF phase; the pre-CAS tip re-read turns that into V1RefMovedError so
+// the user re-runs push rather than aborting mid-rewrite with a stale CAS.
+func TestRewriteUnpushedV1WithOPF_BackfillDuringRewriteFailsCAS(t *testing.T) {
 	installEntityDeltasProducer(t, emitFixtureBody(t))
 	_, repo, base := setupEntityDeltasRepo(t)
 	t.Setenv("ENTIRE_ENTITY_DELTAS", "1")
@@ -753,20 +752,19 @@ func TestRewriteUnpushedV1WithOPF_BackfillCannotLandMidRewrite(t *testing.T) {
 	configureFakeOPF(t, &probingOPF{probe: func() {
 		probed = true
 		runEntityDeltasBackfill(context.Background(), job)
-		assert.Equal(t, tipDuringRewrite, metadataBranchHash(t, repo),
-			"a backfill must not advance v1 while the rewrite holds the lock")
 	}})
 
-	newTip, err := RewriteUnpushedV1WithOPF(context.Background(), repo, "origin")
-	require.NoError(t, err, "a concurrent backfill must never abort the user's push")
+	_, err := RewriteUnpushedV1WithOPF(context.Background(), repo, "origin")
+	require.Error(t, err)
+	var moved *V1RefMovedError
+	require.ErrorAs(t, err, &moved, "a backfill landing during OPF must surface at the CAS re-read")
 	require.True(t, probed, "the probe must have run mid-rewrite")
-	require.NotEqual(t, tipDuringRewrite, newTip, "the rewrite must have advanced v1 itself")
+	require.NotEqual(t, tipDuringRewrite, metadataBranchHash(t, repo),
+		"the backfill must have advanced v1 during the unlocked OPF phase")
 
-	// The lock is released with the rewrite, so the same work now lands.
-	runEntityDeltasBackfill(context.Background(), job)
 	tree := metadataBranchTree(t, repo)
 	_, err = tree.File(checkpointID.Path() + "/0/" + paths.EntityDeltasFileName)
-	require.NoError(t, err, "the parked backfill must land once the rewrite releases the lock")
+	require.NoError(t, err, "entity deltas from the mid-rewrite backfill must remain on v1")
 }
 
 // The lock is an optimization against a user-visible abort, not a correctness
