@@ -1850,7 +1850,7 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 		AgentID:                step.sessionID,
 		StartedAt:              time.Now(),
 		SubagentType:           step.link.SubagentType,
-		TaskDescription:        step.link.TaskDescription,
+		TaskDescription:        strategy.SanitizeSubjectContent(step.link.TaskDescription),
 		DeclaredTranscriptPath: step.transcriptRef,
 		Files:                  files,
 	}); err != nil {
