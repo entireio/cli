@@ -541,6 +541,50 @@ func TestFetchAndCacheExport_InstallsValidExportOverCachedTranscript(t *testing.
 	assertNoStagedExports(t, cachedPath)
 }
 
+// TestFetchAndCacheExport_FailedInstallKeepsStagedExport: once the export has been
+// validated it may be the only copy of the session, so a rename that cannot land
+// must preserve the staging file and say where it is — the one case where a staged
+// file is deliberately left behind.
+func TestFetchAndCacheExport_FailedInstallKeepsStagedExport(t *testing.T) {
+	const (
+		sessionID = "ses_install_fails"
+		fresh     = `{"info":{"id":"ses_install_fails"},"messages":[1,2]}`
+	)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	tmpDir := filepath.Join(repo, paths.EntireTmpDir)
+	require.NoError(t, os.MkdirAll(tmpDir, 0o750))
+	// A directory where the transcript belongs makes the install fail without
+	// stubbing os.Rename.
+	require.NoError(t, os.Mkdir(filepath.Join(tmpDir, sessionID+".json"), 0o750))
+
+	stubExport(t, func(_ context.Context, _, outputPath string) error {
+		return os.WriteFile(outputPath, []byte(fresh), 0o600)
+	})
+
+	_, err := (&OpenCodeAgent{}).fetchAndCacheExport(context.Background(), sessionID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "export saved at ")
+	require.Equal(t, 1, strings.Count(err.Error(), "failed to install export file"),
+		"the install failure should be named once, not once per wrapping layer")
+
+	entries, readErr := os.ReadDir(tmpDir)
+	require.NoError(t, readErr)
+	var staged []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), exportStagePrefix) {
+			staged = append(staged, entry.Name())
+		}
+	}
+	require.Len(t, staged, 1, "the validated export must be kept, not deleted")
+	content, readErr := os.ReadFile(filepath.Join(tmpDir, staged[0]))
+	require.NoError(t, readErr)
+	require.JSONEq(t, fresh, string(content))
+}
+
 func TestFetchTranscript_ValidatesSessionID(t *testing.T) {
 	t.Parallel()
 

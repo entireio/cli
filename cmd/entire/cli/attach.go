@@ -781,7 +781,7 @@ func resolveAgentAndTranscript(ctx context.Context, w io.Writer, sessionID strin
 			// "is the session ID correct?" for a session that is simply owned by
 			// an agent they did not name.
 			return nil, "", fmt.Errorf("%w (also tried auto-detecting other agents: %w)%s",
-				err, detectErr, unprobedFetcherHint(ag.Name()))
+				err, detectErr, unprobedFetcherHint(ag.Name(), sessionID))
 		}
 		ag = detectedAg
 		transcriptPath = detectedPath
@@ -794,9 +794,11 @@ func resolveAgentAndTranscript(ctx context.Context, w io.Writer, sessionID strin
 
 // unprobedFetcherHint names the registered agents that can materialize a
 // transcript on demand but were not asked to during auto-detection, so a user
-// who named the wrong agent learns the one-flag fix. Returns "" when the only
-// such agent is the one already tried.
-func unprobedFetcherHint(tried types.AgentName) string {
+// who named the wrong agent learns the one-flag fix — as a command to paste,
+// not a fix to assemble. With several such agents the command is labeled an
+// example (we cannot know which one owns the session), naming the first.
+// Returns "" when the only such agent is the one already tried.
+func unprobedFetcherHint(tried types.AgentName, sessionID string) string {
 	var names []string
 	for _, name := range agent.List() {
 		if name == tried {
@@ -813,8 +815,12 @@ func unprobedFetcherHint(tried types.AgentName) string {
 	if len(names) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("; %s can export transcripts on demand — retry with --agent %s",
-		strings.Join(names, " and "), names[0])
+	retryWith := "retry with"
+	if len(names) > 1 {
+		retryWith = "retry with e.g."
+	}
+	return fmt.Sprintf("; %s can export transcripts on demand — %s: entire session attach %s --agent %s",
+		strings.Join(names, " and "), retryWith, sessionID, names[0])
 }
 
 // transcriptFetchError keeps secondary auto-detection failures from obscuring
@@ -891,7 +897,10 @@ func resolveAndValidateTranscript(ctx context.Context, sessionID string, ag agen
 			return fetched, nil
 		}
 		if errors.Is(fetchErr, context.Canceled) {
-			return "", fmt.Errorf("fetch transcript: %w", fetchErr)
+			// Wrapped, not bare: resolveAgentAndTranscript suppresses the
+			// secondary auto-detection failure only for transcriptFetchError,
+			// and a canceled attach has even less use for it than a failed one.
+			return "", &transcriptFetchError{cause: fmt.Errorf("fetch transcript: %w", fetchErr)}
 		}
 		logging.Debug(ctx, "FetchTranscript failed, falling back to project-dir search", "error", fetchErr)
 	}

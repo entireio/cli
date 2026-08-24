@@ -165,6 +165,38 @@ func TestRenameOverExisting_ReplacesDestination(t *testing.T) {
 	}
 }
 
+// TestRenameOverExisting_LeavesUserFacingWordingToTheCaller covers the
+// non-contention branch. fetchAndCacheExport owns the "failed to install export
+// file" sentence, so this function passes os.Rename's error through untouched;
+// adding the sentence here too is what produced it twice in one message.
+func TestRenameOverExisting_LeavesUserFacingWordingToTheCaller(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	staged := filepath.Join(dir, ".export-ses_x.json-1")
+	if err := os.WriteFile(staged, []byte("fresh"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A directory at dest makes os.Rename fail on every platform, for a reason
+	// isRenameContention never treats as retryable.
+	dest := filepath.Join(dir, "ses_x.json")
+	if err := os.Mkdir(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	err := renameOverExisting(staged, dest)
+	if err == nil {
+		t.Fatal("expected rename onto a directory to fail")
+	}
+	if strings.Contains(err.Error(), "failed to install export file") {
+		t.Errorf("error = %q, want the caller to supply that wording", err)
+	}
+	var linkErr *os.LinkError
+	if !errors.As(err, &linkErr) {
+		t.Errorf("error = %v, want os.Rename's error passed through", err)
+	}
+}
+
 func TestIsRenameContention_NonSharingErrorsAreNotRetried(t *testing.T) {
 	t.Parallel()
 

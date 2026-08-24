@@ -48,6 +48,7 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | `HookHandler` | `GetHookNames` | **Required for CLI hook registration** — `entire hooks <agent> <verb>` subcommands are only created for agents implementing this interface. Typically delegates to `HookNames()`. |
 | `TranscriptAnalyzer` | `GetTranscriptPosition`, `ExtractModifiedFilesFromOffset` | You want richer checkpoints with transcript-derived file lists |
 | `TranscriptPreparer` | `PrepareTranscript` | Agent writes transcripts asynchronously and needs a flush/sync step |
+| `TranscriptFetcher` | `FetchTranscript` | Agent can export a transcript on demand, including for sessions Entire never tracked (no hook-cached file exists) |
 | `TokenCalculator` | `CalculateTokenUsage` | Agent's transcript contains token usage data |
 | `SubagentAwareExtractor` | `ExtractAllModifiedFiles`, `CalculateTotalTokenUsage` | Agent spawns subagents (like Claude Code's Task tool) |
 | `SubagentSessionResolver` | `ResolveSubagentSession` | Agent runs subagents as **detached sessions of their own** rather than as a blocking tool call (Factory AI Droid's Workers) |
@@ -482,6 +483,25 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 
 **Method:**
 - `PrepareTranscript(sessionRef) error` - Wait until the transcript is fully written. Called before `ReadTranscript`.
+
+### `TranscriptFetcher`
+
+**What it enables:** `entire session attach` on a session Entire never tracked — one spawned by an external session host rather than a hooked terminal, where no hook ever cached a transcript.
+
+**Without it:** Attach can only work from a transcript already on disk, so an untracked session fails with "transcript not found".
+
+**Implement when:** Your agent can produce a full transcript for an arbitrary session ID on request (e.g. OpenCode's `opencode export <id>`).
+
+**Not the same as `TranscriptPreparer`:** Preparer refreshes a file that already exists; Fetcher conjures one that never did. An agent that writes asynchronously wants Preparer; an agent with an export command wants Fetcher. Implementing both is fine.
+
+**Method:**
+- `FetchTranscript(sessionID) (path, error)` - Write the transcript to the agent's cache location and return that path.
+
+**Contract:**
+- **Errors are user-facing.** They surface after every other transcript source has failed, so return concise, safe-to-display messages rather than raw subprocess output. See `classifyOpenCodeExportError` in `opencode/cli_commands.go`, which maps a missing binary / unknown session / timeout to one sentence each and redacts anything it echoes from stderr.
+- **Never write in place.** Callers may already hold the only local copy of the session at the destination path; export to a staging file, validate it, then rename. See `stageExportPath` / `renameOverExisting` in `opencode/stage_export.go`.
+- **Builtin-only capability.** There is no `DeclaredCaps` gate — `agent.AsTranscriptFetcher` resolves by type assertion alone, like `TranscriptSanitizer`.
+- **Called only for the agent the user named.** Attach threads a `transcriptLookup` through transcript resolution (`cmd/entire/cli/attach.go`) so auto-detection, which probes every registered agent, never spawns your export subprocess on the user's behalf.
 
 ### `TokenCalculator`
 

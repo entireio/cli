@@ -55,7 +55,11 @@ func renameOverExisting(staged, dest string) error {
 			return nil
 		}
 		if !isRenameContention(err) {
-			return fmt.Errorf("failed to install export file: %w", err)
+			// Deliberately raw: fetchAndCacheExport owns the user-facing wording
+			// for a failed install, because it is also the one that knows where
+			// the validated export was kept. Phrasing it here too would print
+			// the same sentence twice.
+			return err //nolint:wrapcheck // caller (fetchAndCacheExport) wraps this
 		}
 		time.Sleep(renameBackoff)
 	}
