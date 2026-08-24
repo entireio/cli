@@ -27,87 +27,87 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-func TestTrailResumeCmdRejectsConflictingSelectors(t *testing.T) {
+func TestChangeResumeCmdRejectsConflictingSelectors(t *testing.T) {
 	t.Parallel()
 
-	cmd := newTrailResumeCmd()
+	cmd := newChangeResumeCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"575", "--trail", "feature/a"})
+	cmd.SetArgs([]string{"575", "--change", "feature/a"})
 
 	err := cmd.Execute()
 	if err == nil {
-		t.Fatal("expected error combining positional trail with --trail, got nil")
+		t.Fatal("expected error combining positional change with --change, got nil")
 	}
 	if !strings.Contains(err.Error(), "not both") {
 		t.Fatalf("error = %q, want it to mention 'not both'", err)
 	}
 }
 
-func TestValidateTrailResumeOptions(t *testing.T) {
+func TestValidateChangeResumeOptions(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
 		name    string
-		opts    trailResumeOptions
+		opts    changeResumeOptions
 		wantErr string
 	}{
 		{
 			name:    "session and checkpoint conflict",
-			opts:    trailResumeOptions{SessionID: "session-1", CheckpointID: "0123456789ab"},
+			opts:    changeResumeOptions{SessionID: "session-1", CheckpointID: "0123456789ab"},
 			wantErr: "cannot combine --session and --checkpoint",
 		},
 		{
 			name:    "json requires no resume",
-			opts:    trailResumeOptions{JSON: true},
+			opts:    changeResumeOptions{JSON: true},
 			wantErr: "--json can only be used with --no-resume",
 		},
 		{
 			name: "json no resume accepted",
-			opts: trailResumeOptions{JSON: true, NoResume: true},
+			opts: changeResumeOptions{JSON: true, NoResume: true},
 		},
 		{
 			name:    "invalid repo assertion",
-			opts:    trailResumeOptions{ExpectedRepo: "not a repo"},
+			opts:    changeResumeOptions{ExpectedRepo: "not a repo"},
 			wantErr: "validate --repo",
 		},
 		{
 			name: "repo assertion accepted",
-			opts: trailResumeOptions{ExpectedRepo: "entireio/cli"},
+			opts: changeResumeOptions{ExpectedRepo: "entireio/cli"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := validateTrailResumeOptions(tc.opts)
+			err := validateChangeResumeOptions(tc.opts)
 			if tc.wantErr == "" {
 				if err != nil {
-					t.Fatalf("validateTrailResumeOptions() = %v, want nil", err)
+					t.Fatalf("validateChangeResumeOptions() = %v, want nil", err)
 				}
 				return
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("validateTrailResumeOptions() = %v, want %q", err, tc.wantErr)
+				t.Fatalf("validateChangeResumeOptions() = %v, want %q", err, tc.wantErr)
 			}
 		})
 	}
 }
 
-func TestValidateTrailResumeExpectedRepo(t *testing.T) {
+func TestValidateChangeResumeExpectedRepo(t *testing.T) {
 	t.Parallel()
 
-	current := trailResumeRepository{Forge: "gh", Owner: "EntireIO", Repo: "CLI"}
-	expected := trailResumeRepository{Forge: "gh", Owner: "entireio", Repo: "cli"}
-	if err := validateTrailResumeExpectedRepo(current, expected); err != nil {
-		t.Fatalf("validateTrailResumeExpectedRepo() matching repo = %v, want nil", err)
+	current := changeResumeRepository{Forge: "gh", Owner: "EntireIO", Repo: "CLI"}
+	expected := changeResumeRepository{Forge: "gh", Owner: "entireio", Repo: "cli"}
+	if err := validateChangeResumeExpectedRepo(current, expected); err != nil {
+		t.Fatalf("validateChangeResumeExpectedRepo() matching repo = %v, want nil", err)
 	}
-	if err := validateTrailResumeExpectedRepo(current, trailResumeRepository{}); err != nil {
-		t.Fatalf("validateTrailResumeExpectedRepo() empty expected repo = %v, want nil", err)
+	if err := validateChangeResumeExpectedRepo(current, changeResumeRepository{}); err != nil {
+		t.Fatalf("validateChangeResumeExpectedRepo() empty expected repo = %v, want nil", err)
 	}
 
-	err := validateTrailResumeExpectedRepo(current, trailResumeRepository{Forge: "gh", Owner: "entireio", Repo: "entire.io"})
+	err := validateChangeResumeExpectedRepo(current, changeResumeRepository{Forge: "gh", Owner: "entireio", Repo: "entire.io"})
 	if err == nil {
-		t.Fatal("validateTrailResumeExpectedRepo() mismatch = nil, want error")
+		t.Fatal("validateChangeResumeExpectedRepo() mismatch = nil, want error")
 	}
 	for _, want := range []string{"targets repository entireio/entire.io", "current checkout is EntireIO/CLI"} {
 		if !strings.Contains(err.Error(), want) {
@@ -116,42 +116,42 @@ func TestValidateTrailResumeExpectedRepo(t *testing.T) {
 	}
 }
 
-func TestValidateTrailResumeExpectedBranch(t *testing.T) {
+func TestValidateChangeResumeExpectedBranch(t *testing.T) {
 	t.Parallel()
 
-	trail := &api.TrailResource{
+	change := &api.ChangeResource{
 		Number: 575,
-		Title:  "Add trail resume",
-		Branch: "feature/trail-resume",
+		Title:  "Add change resume",
+		Branch: "feature/change-resume",
 	}
-	if err := validateTrailResumeExpectedBranch(trail, " feature/trail-resume "); err != nil {
-		t.Fatalf("validateTrailResumeExpectedBranch() matching branch = %v, want nil", err)
+	if err := validateChangeResumeExpectedBranch(change, " feature/change-resume "); err != nil {
+		t.Fatalf("validateChangeResumeExpectedBranch() matching branch = %v, want nil", err)
 	}
-	if err := validateTrailResumeExpectedBranch(trail, ""); err != nil {
-		t.Fatalf("validateTrailResumeExpectedBranch() empty expected branch = %v, want nil", err)
+	if err := validateChangeResumeExpectedBranch(change, ""); err != nil {
+		t.Fatalf("validateChangeResumeExpectedBranch() empty expected branch = %v, want nil", err)
 	}
 
-	err := validateTrailResumeExpectedBranch(trail, "feature/other")
+	err := validateChangeResumeExpectedBranch(change, "feature/other")
 	if err == nil {
-		t.Fatal("validateTrailResumeExpectedBranch() mismatch = nil, want error")
+		t.Fatal("validateChangeResumeExpectedBranch() mismatch = nil, want error")
 	}
-	for _, want := range []string{"trail #575", "feature/trail-resume", "feature/other"} {
+	for _, want := range []string{"change #575", "feature/change-resume", "feature/other"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want it to mention %q", err, want)
 		}
 	}
 }
 
-func TestKnownTrailResumeSessionsForContextTreatsDiscoveryErrorAsUnavailable(t *testing.T) {
+func TestKnownChangeResumeSessionsForContextTreatsDiscoveryErrorAsUnavailable(t *testing.T) {
 	t.Parallel()
 
-	sessions := []trailResumeSessionContext{{
+	sessions := []changeResumeSessionContext{{
 		SessionID:    "known-session",
 		CheckpointID: "abc123def456",
 	}}
-	got, skipped, unavailable := knownTrailResumeSessionsForContext(sessions, 2, errors.New("branch not found locally or on origin"))
+	got, skipped, unavailable := knownChangeResumeSessionsForContext(sessions, 2, errors.New("branch not found locally or on origin"))
 	if len(got) != 0 {
-		t.Fatalf("knownTrailResumeSessionsForContext() len = %d, want 0: %#v", len(got), got)
+		t.Fatalf("knownChangeResumeSessionsForContext() len = %d, want 0: %#v", len(got), got)
 	}
 	if skipped != 0 {
 		t.Fatalf("skipped = %d, want 0 when sessions are unavailable", skipped)
@@ -161,19 +161,19 @@ func TestKnownTrailResumeSessionsForContextTreatsDiscoveryErrorAsUnavailable(t *
 	}
 }
 
-func TestBuildTrailResumeContextSortsCheckpointSessions(t *testing.T) {
+func TestBuildChangeResumeContextSortsCheckpointSessions(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 	const newSessionID = "new-session"
-	ctx := buildTrailResumeContextForRepoWithSkipped(api.TrailResource{
+	ctx := buildChangeResumeContextForRepoWithSkipped(api.ChangeResource{
 		ID:     "trl_1",
 		Number: 575,
-		Title:  "Add trail resume",
-		Branch: "feature/trail-resume",
+		Title:  "Add change resume",
+		Branch: "feature/change-resume",
 		Status: "open",
 		Phase:  "has_code",
-	}, []trailResumeSessionContext{
+	}, []changeResumeSessionContext{
 		{
 			SessionID:    "old-session",
 			Agent:        "claude-code",
@@ -188,13 +188,13 @@ func TestBuildTrailResumeContextSortsCheckpointSessions(t *testing.T) {
 			LastActive:   now,
 			CheckpointID: "aaaaaaaaaaaa",
 		},
-	}, "", 0, trailResumeFindingsContext{}, "")
+	}, "", 0, changeResumeFindingsContext{}, "")
 
 	if len(ctx.Sessions) != 2 {
 		t.Fatalf("sessions len = %d, want 2: %#v", len(ctx.Sessions), ctx.Sessions)
 	}
 	if ctx.Sessions[0].SessionID != newSessionID || ctx.Sessions[0].CheckpointID != "aaaaaaaaaaaa" {
-		t.Fatalf("first session = %#v, want newest trail session", ctx.Sessions[0])
+		t.Fatalf("first session = %#v, want newest change session", ctx.Sessions[0])
 	}
 	if ctx.Sessions[1].SessionID != "old-session" {
 		t.Fatalf("second session = %#v, want old-session", ctx.Sessions[1])
@@ -203,11 +203,11 @@ func TestBuildTrailResumeContextSortsCheckpointSessions(t *testing.T) {
 		t.Fatalf("DefaultResume = %#v, want new-session", ctx.DefaultResume)
 	}
 	wantCommands := []string{
-		"entire trail finding 575 --json",
-		"entire trail resume 575 --branch feature/trail-resume",
-		"entire trail resume 575 --branch feature/trail-resume --checkpoint aaaaaaaaaaaa",
-		"entire trail resume 575 --branch feature/trail-resume --session new-session",
-		"entire trail resume 575 --branch feature/trail-resume --session old-session",
+		"entire change finding 575 --json",
+		"entire change resume 575 --branch feature/change-resume",
+		"entire change resume 575 --branch feature/change-resume --checkpoint aaaaaaaaaaaa",
+		"entire change resume 575 --branch feature/change-resume --session new-session",
+		"entire change resume 575 --branch feature/change-resume --session old-session",
 	}
 	if len(ctx.Commands) != len(wantCommands) {
 		t.Fatalf("commands len = %d, want %d: %#v", len(ctx.Commands), len(wantCommands), ctx.Commands)
@@ -219,19 +219,19 @@ func TestBuildTrailResumeContextSortsCheckpointSessions(t *testing.T) {
 	}
 }
 
-func TestBuildTrailResumeContextWithRepoIncludesRepoInResumeCommands(t *testing.T) {
+func TestBuildChangeResumeContextWithRepoIncludesRepoInResumeCommands(t *testing.T) {
 	t.Parallel()
 
-	ctx := buildTrailResumeContextForRepoWithSkipped(api.TrailResource{
+	ctx := buildChangeResumeContextForRepoWithSkipped(api.ChangeResource{
 		ID:     "trl_1",
 		Number: 575,
-		Title:  "Add trail resume",
-		Branch: "feature/trail-resume",
-	}, nil, "", 0, trailResumeFindingsContext{}, "entireio/cli")
+		Title:  "Add change resume",
+		Branch: "feature/change-resume",
+	}, nil, "", 0, changeResumeFindingsContext{}, "entireio/cli")
 
 	wantCommands := []string{
-		"entire trail finding 575 --json",
-		"entire trail resume 575 --repo entireio/cli --branch feature/trail-resume",
+		"entire change finding 575 --json",
+		"entire change resume 575 --repo entireio/cli --branch feature/change-resume",
 	}
 	if len(ctx.Commands) != len(wantCommands) {
 		t.Fatalf("commands len = %d, want %d: %#v", len(ctx.Commands), len(wantCommands), ctx.Commands)
@@ -243,7 +243,7 @@ func TestBuildTrailResumeContextWithRepoIncludesRepoInResumeCommands(t *testing.
 	}
 }
 
-func newTrailResumeCheckpointTestRepo(t *testing.T) (string, *git.Repository, *git.Worktree) {
+func newChangeResumeCheckpointTestRepo(t *testing.T) (string, *git.Repository, *git.Worktree) {
 	t.Helper()
 
 	tmpDir := t.TempDir()
@@ -265,36 +265,36 @@ func newTrailResumeCheckpointTestRepo(t *testing.T) (string, *git.Repository, *g
 	if _, err := wt.Add("readme.md"); err != nil {
 		t.Fatalf("add readme: %v", err)
 	}
-	if _, err := wt.Commit("init", &git.CommitOptions{Author: testTrailResumeSignature(time.Date(2026, 6, 23, 9, 0, 0, 0, time.UTC))}); err != nil {
+	if _, err := wt.Commit("init", &git.CommitOptions{Author: testChangeResumeSignature(time.Date(2026, 6, 23, 9, 0, 0, 0, time.UTC))}); err != nil {
 		t.Fatalf("commit init: %v", err)
 	}
 
-	if err := wt.Checkout(&git.CheckoutOptions{Create: true, Branch: "refs/heads/feature/trail"}); err != nil {
+	if err := wt.Checkout(&git.CheckoutOptions{Create: true, Branch: "refs/heads/feature/change"}); err != nil {
 		t.Fatalf("checkout feature: %v", err)
 	}
 	return tmpDir, repo, wt
 }
 
-func TestResolveTrailCheckpointSessionsUsesBranchCheckpointMetadata(t *testing.T) {
-	tmpDir, repo, wt := newTrailResumeCheckpointTestRepo(t)
+func TestResolveChangeCheckpointSessionsUsesBranchCheckpointMetadata(t *testing.T) {
+	tmpDir, repo, wt := newChangeResumeCheckpointTestRepo(t)
 	cpID := id.MustCheckpointID("abc123def456")
 	firstTime := time.Date(2026, 6, 23, 10, 0, 0, 0, time.UTC)
 	secondTime := firstTime.Add(time.Hour)
-	writeTrailResumeCheckpointSession(t, repo, cpID, "session-alice", firstTime, agent.AgentTypeClaudeCode, "alice started this trail")
-	writeTrailResumeCheckpointSession(t, repo, cpID, "session-bob", secondTime, agent.AgentTypeCodex, "bob continued from another machine")
+	writeChangeResumeCheckpointSession(t, repo, cpID, "session-alice", firstTime, agent.AgentTypeClaudeCode, "alice started this change")
+	writeChangeResumeCheckpointSession(t, repo, cpID, "session-bob", secondTime, agent.AgentTypeCodex, "bob continued from another machine")
 	if err := os.WriteFile(filepath.Join(tmpDir, "readme.md"), []byte("feature\n"), 0o644); err != nil {
 		t.Fatalf("write feature: %v", err)
 	}
 	if _, err := wt.Add("readme.md"); err != nil {
 		t.Fatalf("add feature: %v", err)
 	}
-	if _, err := wt.Commit("feature work\n\nEntire-Checkpoint: "+cpID.String(), &git.CommitOptions{Author: testTrailResumeSignature(secondTime)}); err != nil {
+	if _, err := wt.Commit("feature work\n\nEntire-Checkpoint: "+cpID.String(), &git.CommitOptions{Author: testChangeResumeSignature(secondTime)}); err != nil {
 		t.Fatalf("commit feature: %v", err)
 	}
 
-	sessions, skipped, err := resolveTrailCheckpointSessions(context.Background(), "feature/trail")
+	sessions, skipped, err := resolveChangeCheckpointSessions(context.Background(), "feature/change")
 	if err != nil {
-		t.Fatalf("resolveTrailCheckpointSessions() error = %v", err)
+		t.Fatalf("resolveChangeCheckpointSessions() error = %v", err)
 	}
 	if skipped != 0 {
 		t.Fatalf("skipped = %d, want 0", skipped)
@@ -316,14 +316,14 @@ func TestResolveTrailCheckpointSessionsUsesBranchCheckpointMetadata(t *testing.T
 	}
 }
 
-func TestResolveTrailCheckpointSessionsIncludesAllBranchCheckpoints(t *testing.T) {
-	tmpDir, repo, wt := newTrailResumeCheckpointTestRepo(t)
+func TestResolveChangeCheckpointSessionsIncludesAllBranchCheckpoints(t *testing.T) {
+	tmpDir, repo, wt := newChangeResumeCheckpointTestRepo(t)
 	oldCP := id.MustCheckpointID("abc123def456")
 	newCP := id.MustCheckpointID("def456abc123")
 	oldTime := time.Date(2026, 6, 23, 10, 0, 0, 0, time.UTC)
 	newTime := oldTime.Add(time.Hour)
-	writeTrailResumeCheckpointSession(t, repo, oldCP, "old-session", oldTime, agent.AgentTypeClaudeCode, "older checkpoint work")
-	writeTrailResumeCheckpointSession(t, repo, newCP, "new-session", newTime, agent.AgentTypeCodex, "newer checkpoint work")
+	writeChangeResumeCheckpointSession(t, repo, oldCP, "old-session", oldTime, agent.AgentTypeClaudeCode, "older checkpoint work")
+	writeChangeResumeCheckpointSession(t, repo, newCP, "new-session", newTime, agent.AgentTypeCodex, "newer checkpoint work")
 	if err := os.WriteFile(filepath.Join(tmpDir, "readme.md"), []byte("feature\n"), 0o644); err != nil {
 		t.Fatalf("write feature: %v", err)
 	}
@@ -331,13 +331,13 @@ func TestResolveTrailCheckpointSessionsIncludesAllBranchCheckpoints(t *testing.T
 		t.Fatalf("add feature: %v", err)
 	}
 	message := "feature work\n\nEntire-Checkpoint: " + oldCP.String() + "\nEntire-Checkpoint: " + newCP.String()
-	if _, err := wt.Commit(message, &git.CommitOptions{Author: testTrailResumeSignature(newTime)}); err != nil {
+	if _, err := wt.Commit(message, &git.CommitOptions{Author: testChangeResumeSignature(newTime)}); err != nil {
 		t.Fatalf("commit feature: %v", err)
 	}
 
-	sessions, skipped, err := resolveTrailCheckpointSessions(context.Background(), "feature/trail")
+	sessions, skipped, err := resolveChangeCheckpointSessions(context.Background(), "feature/change")
 	if err != nil {
-		t.Fatalf("resolveTrailCheckpointSessions() error = %v", err)
+		t.Fatalf("resolveChangeCheckpointSessions() error = %v", err)
 	}
 	if skipped != 0 {
 		t.Fatalf("skipped = %d, want 0", skipped)
@@ -353,11 +353,11 @@ func TestResolveTrailCheckpointSessionsIncludesAllBranchCheckpoints(t *testing.T
 	}
 }
 
-func TestReadTrailCheckpointSessionContextsReportsSkippedSessions(t *testing.T) {
+func TestReadChangeCheckpointSessionContextsReportsSkippedSessions(t *testing.T) {
 	t.Parallel()
 
 	cpID := id.MustCheckpointID("abc123def456")
-	store := fakeTrailResumeCheckpointReader{
+	store := fakeChangeResumeCheckpointReader{
 		summary: &checkpoint.CheckpointSummary{
 			CheckpointID: cpID,
 			Sessions:     make([]checkpoint.SessionFilePaths, 2),
@@ -370,15 +370,15 @@ func TestReadTrailCheckpointSessionContextsReportsSkippedSessions(t *testing.T) 
 					Agent:        agent.AgentTypeCodex,
 					CreatedAt:    time.Date(2026, 6, 23, 10, 0, 0, 0, time.UTC),
 				},
-				Prompts: "continue the trail",
+				Prompts: "continue the change",
 			},
 		},
 		errs: map[int]error{1: errors.New("missing session blob")},
 	}
 
-	sessions, skipped, err := readTrailCheckpointSessionContexts(context.Background(), store, cpID)
+	sessions, skipped, err := readChangeCheckpointSessionContexts(context.Background(), store, cpID)
 	if err != nil {
-		t.Fatalf("readTrailCheckpointSessionContexts() error = %v", err)
+		t.Fatalf("readChangeCheckpointSessionContexts() error = %v", err)
 	}
 	if skipped != 1 {
 		t.Fatalf("skipped = %d, want 1", skipped)
@@ -388,21 +388,21 @@ func TestReadTrailCheckpointSessionContextsReportsSkippedSessions(t *testing.T) 
 	}
 }
 
-type fakeTrailResumeCheckpointReader struct {
+type fakeChangeResumeCheckpointReader struct {
 	summary  *checkpoint.CheckpointSummary
 	contents map[int]*checkpoint.SessionContent
 	errs     map[int]error
 }
 
-func (f fakeTrailResumeCheckpointReader) Read(context.Context, id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+func (f fakeChangeResumeCheckpointReader) Read(context.Context, id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
 	return f.summary, nil
 }
 
-func (f fakeTrailResumeCheckpointReader) List(context.Context) ([]checkpoint.CheckpointInfo, error) {
+func (f fakeChangeResumeCheckpointReader) List(context.Context) ([]checkpoint.CheckpointInfo, error) {
 	return nil, nil
 }
 
-func (f fakeTrailResumeCheckpointReader) ReadSessionMetadata(_ context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.Metadata, error) {
+func (f fakeChangeResumeCheckpointReader) ReadSessionMetadata(_ context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.Metadata, error) {
 	content, err := f.sessionContent(checkpointID, sessionIndex)
 	if err != nil {
 		return nil, err
@@ -410,7 +410,7 @@ func (f fakeTrailResumeCheckpointReader) ReadSessionMetadata(_ context.Context, 
 	return &content.Metadata, nil
 }
 
-func (f fakeTrailResumeCheckpointReader) ReadSessionMetadataAndPrompts(_ context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.Metadata, string, error) {
+func (f fakeChangeResumeCheckpointReader) ReadSessionMetadataAndPrompts(_ context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.Metadata, string, error) {
 	content, err := f.sessionContent(checkpointID, sessionIndex)
 	if err != nil {
 		return nil, "", err
@@ -418,7 +418,7 @@ func (f fakeTrailResumeCheckpointReader) ReadSessionMetadataAndPrompts(_ context
 	return &content.Metadata, content.Prompts, nil
 }
 
-func (f fakeTrailResumeCheckpointReader) sessionContent(checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.SessionContent, error) {
+func (f fakeChangeResumeCheckpointReader) sessionContent(checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.SessionContent, error) {
 	if err := f.errs[sessionIndex]; err != nil {
 		return nil, err
 	}
@@ -432,7 +432,7 @@ func (f fakeTrailResumeCheckpointReader) sessionContent(checkpointID id.Checkpoi
 	return content, nil
 }
 
-func testTrailResumeSignature(when time.Time) *object.Signature {
+func testChangeResumeSignature(when time.Time) *object.Signature {
 	return &object.Signature{
 		Name:  "Test User",
 		Email: "test@example.com",
@@ -440,7 +440,7 @@ func testTrailResumeSignature(when time.Time) *object.Signature {
 	}
 }
 
-func writeTrailResumeCheckpointSession(
+func writeChangeResumeCheckpointSession(
 	t *testing.T,
 	repo *git.Repository,
 	checkpointID id.CheckpointID,
@@ -456,7 +456,7 @@ func writeTrailResumeCheckpointSession(
 		SessionID:    sessionID,
 		CreatedAt:    createdAt,
 		Strategy:     resumeTestStrategy,
-		Branch:       "feature/trail",
+		Branch:       "feature/change",
 		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"` + prompt + `"}]}}` + "\n")),
 		Prompts:      []string{prompt},
 		Agent:        agentType,
@@ -467,37 +467,37 @@ func writeTrailResumeCheckpointSession(
 	}
 }
 
-func TestPrintTrailResumeContextIncludesSessionsFindingsAndCommands(t *testing.T) {
+func TestPrintChangeResumeContextIncludesSessionsFindingsAndCommands(t *testing.T) {
 	t.Parallel()
 
-	sev := trailReviewSeverityHigh
+	sev := changeReviewSeverityHigh
 	line := 42
-	file := "cmd/entire/cli/trail_cmd.go"
-	ctx := trailResumeContext{
-		Trail: trailResumeTrailContext{
+	file := "cmd/entire/cli/change_cmd.go"
+	ctx := changeResumeContext{
+		Change: changeResumeChangeContext{
 			ID:     "trl_1",
 			Number: 575,
-			Title:  "Add trail resume",
-			Branch: "feature/trail-resume",
+			Title:  "Add change resume",
+			Branch: "feature/change-resume",
 			Status: "open",
 			Phase:  "has_code",
-			URL:    "https://entire.io/gh/o/r/trails/575",
+			URL:    "https://entire.io/gh/o/r/changes/575",
 		},
-		Sessions: []trailResumeSessionContext{{
+		Sessions: []changeResumeSessionContext{{
 			SessionID:    "session-1",
 			Agent:        "codex",
-			LastPrompt:   "implement trail resume",
+			LastPrompt:   "implement change resume",
 			LastActive:   time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC),
 			CheckpointID: "aaaaaaaaaaaa",
 		}},
-		Findings: trailResumeFindingsContext{
-			Counts: trailReviewCommentCounts{Open: 1, OpenHigh: 1, Resolved: 2},
-			Top: []api.TrailReviewComment{{
+		Findings: changeResumeFindingsContext{
+			Counts: changeReviewCommentCounts{Open: 1, OpenHigh: 1, Resolved: 2},
+			Top: []api.ChangeReviewComment{{
 				ID:       "finding-1",
-				Body:     trailReviewStrPtr("Resume output should show context"),
+				Body:     changeReviewStrPtr("Resume output should show context"),
 				Severity: &sev,
-				Status:   trailReviewStatusOpen,
-				Location: api.TrailReviewLocation{
+				Status:   changeReviewStatusOpen,
+				Location: api.ChangeReviewLocation{
 					Granularity: "line",
 					FilePath:    &file,
 					StartLine:   &line,
@@ -505,17 +505,17 @@ func TestPrintTrailResumeContextIncludesSessionsFindingsAndCommands(t *testing.T
 			}},
 		},
 		Commands: []string{
-			"entire trail finding 575 --json",
-			"entire trail resume 575 --branch feature/trail-resume --session session-1",
+			"entire change finding 575 --json",
+			"entire change resume 575 --branch feature/change-resume --session session-1",
 		},
 	}
 
 	var out strings.Builder
-	printTrailResumeContext(&out, ctx)
+	printChangeResumeContext(&out, ctx)
 	text := out.String()
 	for _, want := range []string{
-		"Trail #575  Add trail resume",
-		"Status: open · Phase: has_code · Branch: feature/trail-resume",
+		"Change #575  Add change resume",
+		"Status: open · Phase: has_code · Branch: feature/change-resume",
 		"Checkpoint sessions:",
 		"session-1",
 		"codex",
@@ -523,11 +523,11 @@ func TestPrintTrailResumeContextIncludesSessionsFindingsAndCommands(t *testing.T
 		"Findings: open 1",
 		"high 1",
 		"finding-1",
-		"cmd/entire/cli/trail_cmd.go:42",
+		"cmd/entire/cli/change_cmd.go:42",
 		"Resume output should show context",
 		"Commands:",
-		"entire trail finding 575 --json",
-		"entire trail resume 575 --branch feature/trail-resume --session session-1",
+		"entire change finding 575 --json",
+		"entire change resume 575 --branch feature/change-resume --session session-1",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("context output missing %q:\n%s", want, text)
@@ -535,16 +535,16 @@ func TestPrintTrailResumeContextIncludesSessionsFindingsAndCommands(t *testing.T
 	}
 }
 
-func TestPrintTrailResumeContextShowsSkippedSessions(t *testing.T) {
+func TestPrintChangeResumeContextShowsSkippedSessions(t *testing.T) {
 	t.Parallel()
 
-	ctx := trailResumeContext{
-		Trail: trailResumeTrailContext{
+	ctx := changeResumeContext{
+		Change: changeResumeChangeContext{
 			Number: 575,
-			Title:  "Add trail resume",
-			Branch: "feature/trail-resume",
+			Title:  "Add change resume",
+			Branch: "feature/change-resume",
 		},
-		Sessions: []trailResumeSessionContext{{
+		Sessions: []changeResumeSessionContext{{
 			SessionID:    "session-1",
 			Agent:        "codex",
 			CheckpointID: "aaaaaaaaaaaa",
@@ -553,27 +553,27 @@ func TestPrintTrailResumeContextShowsSkippedSessions(t *testing.T) {
 	}
 
 	var out strings.Builder
-	printTrailResumeContext(&out, ctx)
+	printChangeResumeContext(&out, ctx)
 	text := out.String()
 	if !strings.Contains(text, "skipped 2 checkpoint sessions due to read errors") {
 		t.Fatalf("context output missing skipped sessions message:\n%s", text)
 	}
 }
 
-func TestPrintTrailResumeContextShowsUnavailableSessions(t *testing.T) {
+func TestPrintChangeResumeContextShowsUnavailableSessions(t *testing.T) {
 	t.Parallel()
 
-	ctx := trailResumeContext{
-		Trail: trailResumeTrailContext{
+	ctx := changeResumeContext{
+		Change: changeResumeChangeContext{
 			Number: 575,
-			Title:  "Add trail resume",
-			Branch: "feature/trail-resume",
+			Title:  "Add change resume",
+			Branch: "feature/change-resume",
 		},
 		SessionsUnavailable: "fetch checkpoint blob: object not found",
 	}
 
 	var out strings.Builder
-	printTrailResumeContext(&out, ctx)
+	printChangeResumeContext(&out, ctx)
 	text := out.String()
 	for _, want := range []string{
 		"Checkpoint sessions:",
@@ -588,22 +588,22 @@ func TestPrintTrailResumeContextShowsUnavailableSessions(t *testing.T) {
 	}
 }
 
-func TestPrintTrailResumeContextSuppressesCountsWhenFindingsUnavailable(t *testing.T) {
+func TestPrintChangeResumeContextSuppressesCountsWhenFindingsUnavailable(t *testing.T) {
 	t.Parallel()
 
-	ctx := trailResumeContext{
-		Trail: trailResumeTrailContext{
+	ctx := changeResumeContext{
+		Change: changeResumeChangeContext{
 			Number: 575,
-			Title:  "Add trail resume",
-			Branch: "feature/trail-resume",
+			Title:  "Add change resume",
+			Branch: "feature/change-resume",
 		},
-		Findings: trailResumeFindingsContext{
+		Findings: changeResumeFindingsContext{
 			Unavailable: "reviews API unavailable",
 		},
 	}
 
 	var out strings.Builder
-	printTrailResumeContext(&out, ctx)
+	printChangeResumeContext(&out, ctx)
 	text := out.String()
 	if !strings.Contains(text, "Findings:") || !strings.Contains(text, "unavailable: reviews API unavailable") {
 		t.Fatalf("context output missing unavailable findings message:\n%s", text)
@@ -613,39 +613,39 @@ func TestPrintTrailResumeContextSuppressesCountsWhenFindingsUnavailable(t *testi
 	}
 }
 
-func TestEncodeTrailResumeContextJSON(t *testing.T) {
+func TestEncodeChangeResumeContextJSON(t *testing.T) {
 	t.Parallel()
 
-	sev := trailReviewSeverityHigh
-	ctx := trailResumeContext{
-		Trail: trailResumeTrailContext{ID: "trl_1", Number: 575, Branch: "feature/trail-resume"},
-		Sessions: []trailResumeSessionContext{{
+	sev := changeReviewSeverityHigh
+	ctx := changeResumeContext{
+		Change: changeResumeChangeContext{ID: "trl_1", Number: 575, Branch: "feature/change-resume"},
+		Sessions: []changeResumeSessionContext{{
 			SessionID:    "session-1",
 			CheckpointID: "aaaaaaaaaaaa",
 		}},
 		SessionsUnavailable: "checkpoint store unavailable",
-		Findings: trailResumeFindingsContext{
-			Counts: trailReviewCommentCounts{Open: 1, OpenHigh: 1},
-			Top: []api.TrailReviewComment{{
+		Findings: changeResumeFindingsContext{
+			Counts: changeReviewCommentCounts{Open: 1, OpenHigh: 1},
+			Top: []api.ChangeReviewComment{{
 				ID:       "finding-1",
 				Severity: &sev,
-				Status:   trailReviewStatusOpen,
+				Status:   changeReviewStatusOpen,
 			}},
 		},
-		DefaultResume: &trailResumeDefaultContext{SessionID: "session-1", CheckpointID: "aaaaaaaaaaaa", Branch: "feature/trail-resume"},
-		Commands:      []string{"entire trail resume 575 --branch feature/trail-resume --session session-1"},
+		DefaultResume: &changeResumeDefaultContext{SessionID: "session-1", CheckpointID: "aaaaaaaaaaaa", Branch: "feature/change-resume"},
+		Commands:      []string{"entire change resume 575 --branch feature/change-resume --session session-1"},
 	}
 
 	var out bytes.Buffer
-	if err := encodeTrailResumeContextJSON(&out, ctx); err != nil {
-		t.Fatalf("encodeTrailResumeContextJSON: %v", err)
+	if err := encodeChangeResumeContextJSON(&out, ctx); err != nil {
+		t.Fatalf("encodeChangeResumeContextJSON: %v", err)
 	}
 	var decoded struct {
-		Trail struct {
+		Change struct {
 			ID     string `json:"id"`
 			Number int    `json:"number"`
 			Branch string `json:"branch"`
-		} `json:"trail"`
+		} `json:"change"`
 		Sessions []struct {
 			SessionID string `json:"session_id"`
 		} `json:"sessions"`
@@ -665,8 +665,8 @@ func TestEncodeTrailResumeContextJSON(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
 		t.Fatalf("unmarshal output: %v\n%s", err, out.String())
 	}
-	if decoded.Trail.ID != "trl_1" || decoded.Trail.Number != 575 || decoded.Trail.Branch != "feature/trail-resume" {
-		t.Fatalf("decoded trail = %#v", decoded.Trail)
+	if decoded.Change.ID != "trl_1" || decoded.Change.Number != 575 || decoded.Change.Branch != "feature/change-resume" {
+		t.Fatalf("decoded change = %#v", decoded.Change)
 	}
 	if len(decoded.Sessions) != 1 || decoded.Sessions[0].SessionID != "session-1" {
 		t.Fatalf("decoded sessions = %#v", decoded.Sessions)
@@ -685,20 +685,20 @@ func TestEncodeTrailResumeContextJSON(t *testing.T) {
 	}
 }
 
-func TestEncodeTrailResumeContextJSONOmitsUnsetLastActive(t *testing.T) {
+func TestEncodeChangeResumeContextJSONOmitsUnsetLastActive(t *testing.T) {
 	t.Parallel()
 
-	ctx := trailResumeContext{
-		Trail: trailResumeTrailContext{ID: "trl_1", Number: 575, Branch: "feature/trail-resume"},
-		Sessions: []trailResumeSessionContext{{
+	ctx := changeResumeContext{
+		Change: changeResumeChangeContext{ID: "trl_1", Number: 575, Branch: "feature/change-resume"},
+		Sessions: []changeResumeSessionContext{{
 			SessionID:    "session-1",
 			CheckpointID: "aaaaaaaaaaaa",
 		}},
 	}
 
 	var out bytes.Buffer
-	if err := encodeTrailResumeContextJSON(&out, ctx); err != nil {
-		t.Fatalf("encodeTrailResumeContextJSON: %v", err)
+	if err := encodeChangeResumeContextJSON(&out, ctx); err != nil {
+		t.Fatalf("encodeChangeResumeContextJSON: %v", err)
 	}
 	var decoded struct {
 		Sessions []map[string]any `json:"sessions"`
@@ -714,19 +714,19 @@ func TestEncodeTrailResumeContextJSONOmitsUnsetLastActive(t *testing.T) {
 	}
 }
 
-func TestEncodeTrailResumeContextJSONOmitsFindingsSummaryWhenUnavailable(t *testing.T) {
+func TestEncodeChangeResumeContextJSONOmitsFindingsSummaryWhenUnavailable(t *testing.T) {
 	t.Parallel()
 
-	ctx := trailResumeContext{
-		Trail: trailResumeTrailContext{ID: "trl_1", Number: 575, Branch: "feature/trail-resume"},
-		Findings: trailResumeFindingsContext{
+	ctx := changeResumeContext{
+		Change: changeResumeChangeContext{ID: "trl_1", Number: 575, Branch: "feature/change-resume"},
+		Findings: changeResumeFindingsContext{
 			Unavailable: "reviews API unavailable",
 		},
 	}
 
 	var out bytes.Buffer
-	if err := encodeTrailResumeContextJSON(&out, ctx); err != nil {
-		t.Fatalf("encodeTrailResumeContextJSON: %v", err)
+	if err := encodeChangeResumeContextJSON(&out, ctx); err != nil {
+		t.Fatalf("encodeChangeResumeContextJSON: %v", err)
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
@@ -740,12 +740,12 @@ func TestEncodeTrailResumeContextJSONOmitsFindingsSummaryWhenUnavailable(t *test
 	}
 }
 
-func TestBuildTrailResumeRestoredSessionChoicesDefaultsToMostRecent(t *testing.T) {
+func TestBuildChangeResumeRestoredSessionChoicesDefaultsToMostRecent(t *testing.T) {
 	t.Parallel()
 
 	oldTime := time.Date(2026, 6, 22, 14, 30, 0, 0, time.UTC)
 	newTime := time.Date(2026, 6, 23, 7, 39, 0, 0, time.UTC)
-	choices := buildTrailResumeRestoredSessionChoices([]strategy.RestoredSession{
+	choices := buildChangeResumeRestoredSessionChoices([]strategy.RestoredSession{
 		{
 			SessionID: "019eefbd-bb6a-7f51-a909-feb4cd95588d",
 			Agent:     types.AgentType("Codex"),
@@ -774,12 +774,12 @@ func TestBuildTrailResumeRestoredSessionChoicesDefaultsToMostRecent(t *testing.T
 	}
 }
 
-func TestBuildTrailResumeRestoredSessionChoicesPrefersWorkSessionOverReview(t *testing.T) {
+func TestBuildChangeResumeRestoredSessionChoicesPrefersWorkSessionOverReview(t *testing.T) {
 	t.Parallel()
 
 	workTime := time.Date(2026, 6, 23, 7, 30, 0, 0, time.UTC)
 	reviewTime := workTime.Add(10 * time.Minute)
-	choices := buildTrailResumeRestoredSessionChoices([]strategy.RestoredSession{
+	choices := buildChangeResumeRestoredSessionChoices([]strategy.RestoredSession{
 		{
 			SessionID: "work-session",
 			Agent:     types.AgentType("Codex"),
@@ -815,12 +815,12 @@ func TestBuildTrailResumeRestoredSessionChoicesPrefersWorkSessionOverReview(t *t
 	}
 }
 
-func TestBuildTrailResumeRestoredSessionChoicesPrefersWorkSessionOverReviewPrompt(t *testing.T) {
+func TestBuildChangeResumeRestoredSessionChoicesPrefersWorkSessionOverReviewPrompt(t *testing.T) {
 	t.Parallel()
 
 	workTime := time.Date(2026, 6, 23, 7, 30, 0, 0, time.UTC)
 	reviewTime := workTime.Add(10 * time.Minute)
-	choices := buildTrailResumeRestoredSessionChoices([]strategy.RestoredSession{
+	choices := buildChangeResumeRestoredSessionChoices([]strategy.RestoredSession{
 		{
 			SessionID: "work-session",
 			Agent:     types.AgentType("Codex"),
@@ -849,11 +849,11 @@ func TestBuildTrailResumeRestoredSessionChoicesPrefersWorkSessionOverReviewPromp
 	}
 }
 
-func TestPrintTrailRestoredSessionSummaryIdentifiesReviewOnlyCheckpointSessions(t *testing.T) {
+func TestPrintChangeRestoredSessionSummaryIdentifiesReviewOnlyCheckpointSessions(t *testing.T) {
 	t.Parallel()
 
 	var out strings.Builder
-	printTrailRestoredSessionSummary(&out, []strategy.RestoredSession{
+	printChangeRestoredSessionSummary(&out, []strategy.RestoredSession{
 		{
 			SessionID:    "review-session-1",
 			Kind:         string(session.KindAgentReview),
@@ -869,7 +869,7 @@ func TestPrintTrailRestoredSessionSummaryIdentifiesReviewOnlyCheckpointSessions(
 	for _, want := range []string{
 		"Restored 2 checkpoint sessions",
 		"Only review/investigation checkpoint sessions were found",
-		"may not appear as trail UI sessions",
+		"may not appear as change UI sessions",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("summary missing %q:\n%s", want, text)
@@ -877,11 +877,11 @@ func TestPrintTrailRestoredSessionSummaryIdentifiesReviewOnlyCheckpointSessions(
 	}
 }
 
-func TestDisplayTrailRestoredSessionsIncludesReviewWarning(t *testing.T) {
+func TestDisplayChangeRestoredSessionsIncludesReviewWarning(t *testing.T) {
 	t.Parallel()
 
 	var out strings.Builder
-	err := displayTrailRestoredSessions(&out, []strategy.RestoredSession{
+	err := displayChangeRestoredSessions(&out, []strategy.RestoredSession{
 		{
 			SessionID:    "019ef36b-a485-7ca2-992b-b4f164266e7f",
 			Agent:        types.AgentType("Codex"),
@@ -891,7 +891,7 @@ func TestDisplayTrailRestoredSessionsIncludesReviewWarning(t *testing.T) {
 		},
 	})
 	if err != nil {
-		t.Fatalf("displayTrailRestoredSessions() error = %v", err)
+		t.Fatalf("displayChangeRestoredSessions() error = %v", err)
 	}
 
 	text := out.String()
@@ -908,13 +908,13 @@ func TestDisplayTrailRestoredSessionsIncludesReviewWarning(t *testing.T) {
 	}
 }
 
-func TestDisplayTrailRestoredSessionsMarksActualMostRecent(t *testing.T) {
+func TestDisplayChangeRestoredSessionsMarksActualMostRecent(t *testing.T) {
 	t.Parallel()
 
 	workTime := time.Date(2026, 6, 23, 7, 30, 0, 0, time.UTC)
 	reviewTime := workTime.Add(10 * time.Minute)
 	var out strings.Builder
-	err := displayTrailRestoredSessions(&out, []strategy.RestoredSession{
+	err := displayChangeRestoredSessions(&out, []strategy.RestoredSession{
 		{
 			SessionID: "work-session",
 			Agent:     agent.AgentTypeClaudeCode,
@@ -930,7 +930,7 @@ func TestDisplayTrailRestoredSessionsMarksActualMostRecent(t *testing.T) {
 		},
 	})
 	if err != nil {
-		t.Fatalf("displayTrailRestoredSessions() error = %v", err)
+		t.Fatalf("displayChangeRestoredSessions() error = %v", err)
 	}
 
 	text := out.String()
@@ -944,13 +944,13 @@ func TestDisplayTrailRestoredSessionsMarksActualMostRecent(t *testing.T) {
 	}
 }
 
-func TestTrailResumeCanPromptRestoredSessionsHonorsForce(t *testing.T) {
+func TestChangeResumeCanPromptRestoredSessionsHonorsForce(t *testing.T) {
 	t.Setenv("ENTIRE_TEST_TTY", "1")
 
-	if trailResumeCanPromptRestoredSessions(true) {
+	if changeResumeCanPromptRestoredSessions(true) {
 		t.Fatal("force should suppress restored-session prompts even in an interactive terminal")
 	}
-	if !trailResumeCanPromptRestoredSessions(false) {
+	if !changeResumeCanPromptRestoredSessions(false) {
 		t.Fatal("interactive restored-session prompts should remain enabled without force")
 	}
 }
@@ -988,7 +988,7 @@ func TestContinueRestoredSessionsTTYDeclinePrintsAgentCommands(t *testing.T) {
 			launched = true
 			return nil
 		},
-		Display: displayTrailRestoredSessions,
+		Display: displayChangeRestoredSessions,
 	})
 	if err != nil {
 		t.Fatalf("continueRestoredSessions() error = %v", err)
@@ -1033,7 +1033,7 @@ func TestContinueRestoredSessionsTTYStartSingleLaunchesSession(t *testing.T) {
 			launched = selected.SessionID
 			return nil
 		},
-		Display: displayTrailRestoredSessions,
+		Display: displayChangeRestoredSessions,
 	})
 	if err != nil {
 		t.Fatalf("continueRestoredSessions() error = %v", err)
@@ -1070,7 +1070,7 @@ func TestContinueRestoredSessionsTTYStartMultipleLaunchesPickerSelection(t *test
 			launched = selected.SessionID
 			return nil
 		},
-		Display: displayTrailRestoredSessions,
+		Display: displayChangeRestoredSessions,
 	})
 	if err != nil {
 		t.Fatalf("continueRestoredSessions() error = %v", err)
@@ -1099,7 +1099,7 @@ func TestContinueRestoredSessionsPreferredDeclinePrintsOnlyPreferredSession(t *t
 			return false, nil
 		},
 		Launch:  func(context.Context, io.Writer, strategy.RestoredSession) error { return nil },
-		Display: displayTrailRestoredSessions,
+		Display: displayChangeRestoredSessions,
 	})
 	if err != nil {
 		t.Fatalf("continueRestoredSessions() error = %v", err)
@@ -1113,11 +1113,11 @@ func TestContinueRestoredSessionsPreferredDeclinePrintsOnlyPreferredSession(t *t
 	}
 }
 
-func TestPrintTrailRestoredSessionSummaryIncludesCheckpointID(t *testing.T) {
+func TestPrintChangeRestoredSessionSummaryIncludesCheckpointID(t *testing.T) {
 	t.Parallel()
 
 	var out strings.Builder
-	printTrailRestoredSessionSummary(&out, []strategy.RestoredSession{
+	printChangeRestoredSessionSummary(&out, []strategy.RestoredSession{
 		{
 			SessionID:    "019ef5f3-3472-7f70-82f7-6f0ce46691f4",
 			CheckpointID: "8a18ef79cd93",
@@ -1157,7 +1157,7 @@ func TestStartRestoredAgentPromptUsesYesNoLabels(t *testing.T) {
 	}
 }
 
-func TestLaunchTrailRestoredSessionTreatsAgentExitAsHandled(t *testing.T) {
+func TestLaunchChangeRestoredSessionTreatsAgentExitAsHandled(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses POSIX shell script fake executable")
 	}
@@ -1170,12 +1170,12 @@ func TestLaunchTrailRestoredSessionTreatsAgentExitAsHandled(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var out strings.Builder
-	err := launchTrailRestoredSession(context.Background(), &out, strategy.RestoredSession{
+	err := launchChangeRestoredSession(context.Background(), &out, strategy.RestoredSession{
 		SessionID: "codex-session",
 		Agent:     types.AgentType("Codex"),
 	})
 	if err != nil {
-		t.Fatalf("launchTrailRestoredSession() error = %v, want nil", err)
+		t.Fatalf("launchChangeRestoredSession() error = %v, want nil", err)
 	}
 	if !strings.Contains(out.String(), "Launching: codex resume codex-session") {
 		t.Fatalf("launch output missing command:\n%s", out.String())
@@ -1191,15 +1191,15 @@ func lineContaining(text, needle string) string {
 	return ""
 }
 
-func TestTrailResumeWorktreeClashMessage(t *testing.T) {
+func TestChangeResumeWorktreeClashMessage(t *testing.T) {
 	t.Parallel()
 
-	msg := trailResumeWorktreeClashMessage("feature/work", "/tmp/path with spaces")
+	msg := changeResumeWorktreeClashMessage("feature/work", "/tmp/path with spaces")
 	for _, want := range []string{
 		`Branch "feature/work" is already checked out in another worktree:`,
 		"/tmp/path with spaces",
 		"Resume from that worktree with:",
-		"cd '/tmp/path with spaces' && entire trail resume feature/work",
+		"cd '/tmp/path with spaces' && entire change resume feature/work",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("message missing %q:\n%s", want, msg)

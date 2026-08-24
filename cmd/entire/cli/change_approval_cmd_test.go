@@ -34,39 +34,39 @@ func TestBuildApprovalRequestApproveAllowsEmptyMessage(t *testing.T) {
 	}
 }
 
-func TestTrailApprovalsPath(t *testing.T) {
+func TestChangeApprovalsPath(t *testing.T) {
 	t.Parallel()
-	got := trailApprovalsPath("gh", "acme", "widgets", 7)
+	got := changeApprovalsPath("gh", "acme", "widgets", 7)
 	if !strings.HasSuffix(got, "/7/approvals") {
 		t.Fatalf("path = %q, want .../7/approvals suffix", got)
 	}
 }
 
-func TestTrailApprovalCmdsHaveExpectedFlags(t *testing.T) {
+func TestChangeApprovalCmdsHaveExpectedFlags(t *testing.T) {
 	t.Parallel()
-	if newTrailApproveCmd().Flags().Lookup("message") == nil {
+	if newChangeApproveCmd().Flags().Lookup("message") == nil {
 		t.Error("approve missing --message")
 	}
-	if newTrailRequestChangesCmd().Flags().Lookup("message") == nil {
+	if newChangeRequestChangesCmd().Flags().Lookup("message") == nil {
 		t.Error("request-changes missing --message")
 	}
-	if newTrailApprovalsCmd().Flags().Lookup("json") == nil {
+	if newChangeApprovalsCmd().Flags().Lookup("json") == nil {
 		t.Error("approvals missing --json")
 	}
 }
 
-// TestRenderTrailApprovalsShowsAuthorLogin covers the render path that the
+// TestRenderChangeApprovalsShowsAuthorLogin covers the render path that the
 // author-shape mismatch broke. The approvals endpoint sends `"author":"nodo"`, so
-// the login must reach the output; when this was decoded as a *trail.Author the
+// the login must reach the output; when this was decoded as a *change.Author the
 // whole response failed before rendering and the command printed only an error.
-func TestRenderTrailApprovalsShowsAuthorLogin(t *testing.T) {
+func TestRenderChangeApprovalsShowsAuthorLogin(t *testing.T) {
 	t.Parallel()
 
 	created, err := time.Parse(time.RFC3339, "2026-08-11T09:35:11Z")
 	if err != nil {
 		t.Fatalf("parse time: %v", err)
 	}
-	approvals := []api.TrailApproval{
+	approvals := []api.ChangeApproval{
 		{
 			ID:        "59ef5b87",
 			Author:    "nodo",
@@ -85,7 +85,7 @@ func TestRenderTrailApprovalsShowsAuthorLogin(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	renderTrailApprovals(&buf, approvals)
+	renderChangeApprovals(&buf, approvals)
 	out := buf.String()
 
 	for _, want := range []string{"approved", "nodo", "e9a9dcb", "changes_requested", "reviewer2", "needs a test"} {

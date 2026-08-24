@@ -10,7 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
-func TestParseTrailRepoArg(t *testing.T) {
+func TestParseChangeRepoArg(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -40,30 +40,30 @@ func TestParseTrailRepoArg(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			forge, owner, repo, err := parseTrailRepoArg(tt.raw)
+			forge, owner, repo, err := parseChangeRepoArg(tt.raw)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("parseTrailRepoArg(%q) = (%q,%q,%q), want error", tt.raw, forge, owner, repo)
+					t.Fatalf("parseChangeRepoArg(%q) = (%q,%q,%q), want error", tt.raw, forge, owner, repo)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("parseTrailRepoArg(%q): unexpected error %v", tt.raw, err)
+				t.Fatalf("parseChangeRepoArg(%q): unexpected error %v", tt.raw, err)
 			}
 			if forge != tt.wantForge || owner != tt.wantOwner || repo != tt.wantRepo {
-				t.Fatalf("parseTrailRepoArg(%q) = (%q,%q,%q), want (%q,%q,%q)",
+				t.Fatalf("parseChangeRepoArg(%q) = (%q,%q,%q), want (%q,%q,%q)",
 					tt.raw, forge, owner, repo, tt.wantForge, tt.wantOwner, tt.wantRepo)
 			}
 		})
 	}
 }
 
-// resolveTrailRepoOrRemote with an explicit override must not touch git: it
+// resolveChangeRepoOrRemote with an explicit override must not touch git: it
 // resolves straight from the flag value. (The fallback path needs a repo and is
 // covered elsewhere.)
-func TestResolveTrailRepoOrRemote_OverrideSkipsGit(t *testing.T) {
+func TestResolveChangeRepoOrRemote_OverrideSkipsGit(t *testing.T) {
 	t.Parallel()
-	forge, owner, repo, err := resolveTrailRepoOrRemote(t.Context(), "gh/acme/app")
+	forge, owner, repo, err := resolveChangeRepoOrRemote(t.Context(), "gh/acme/app")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -72,18 +72,18 @@ func TestResolveTrailRepoOrRemote_OverrideSkipsGit(t *testing.T) {
 	}
 }
 
-func TestRunAuthenticatedTrailAPIRoutesByRepo(t *testing.T) {
-	// newTrailAPIClient is a package seam, so this test must not run in parallel.
-	previous := newTrailAPIClient
+func TestRunAuthenticatedChangeAPIRoutesByRepo(t *testing.T) {
+	// newChangeAPIClient is a package seam, so this test must not run in parallel.
+	previous := newChangeAPIClient
 	var gotFullName string
-	newTrailAPIClient = func(_ context.Context, _ bool, fullName string) (*api.Client, error) {
+	newChangeAPIClient = func(_ context.Context, _ bool, fullName string) (*api.Client, error) {
 		gotFullName = fullName
 		return api.NewClientWithBaseURL("token", "https://cell.example"), nil
 	}
-	t.Cleanup(func() { newTrailAPIClient = previous })
+	t.Cleanup(func() { newChangeAPIClient = previous })
 
 	called := false
-	err := runAuthenticatedTrailAPI(t.Context(), io.Discard, false, "gh/acme/app", func(_ context.Context, _ *api.Client) error {
+	err := runAuthenticatedChangeAPI(t.Context(), io.Discard, false, "gh/acme/app", func(_ context.Context, _ *api.Client) error {
 		called = true
 		return nil
 	})
@@ -95,9 +95,9 @@ func TestRunAuthenticatedTrailAPIRoutesByRepo(t *testing.T) {
 	}
 }
 
-func TestResolveTrailBranch_OverrideWins(t *testing.T) {
+func TestResolveChangeBranch_OverrideWins(t *testing.T) {
 	t.Parallel()
-	got, err := resolveTrailBranch(t.Context(), "my/feature")
+	got, err := resolveChangeBranch(t.Context(), "my/feature")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -106,19 +106,19 @@ func TestResolveTrailBranch_OverrideWins(t *testing.T) {
 	}
 }
 
-// execTrailCmdExpectErr runs `entire trail <args...>` against a fresh command
+// execChangeCmdExpectErr runs `entire change <args...>` against a fresh command
 // tree and returns the error, with output discarded. Used to assert flag
 // validation that fires before any auth/network/git access.
-func execTrailCmdExpectErr(t *testing.T, args ...string) error {
+func execChangeCmdExpectErr(t *testing.T, args ...string) error {
 	t.Helper()
-	cmd := newTrailCmd()
+	cmd := newChangeCmd()
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs(args)
 	return cmd.Execute()
 }
 
-func TestTrailRepoOverride_RejectedByLocalCommands(t *testing.T) {
+func TestChangeRepoOverride_RejectedByLocalCommands(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
@@ -131,7 +131,7 @@ func TestTrailRepoOverride_RejectedByLocalCommands(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := execTrailCmdExpectErr(t, tt.args...)
+			err := execChangeCmdExpectErr(t, tt.args...)
 			if err == nil || !strings.Contains(err.Error(), "--repo is not supported") {
 				t.Fatalf("err = %v, want '--repo is not supported'", err)
 			}
@@ -139,7 +139,7 @@ func TestTrailRepoOverride_RejectedByLocalCommands(t *testing.T) {
 	}
 }
 
-func TestTrailSelectorAndBranchAreMutuallyExclusive(t *testing.T) {
+func TestChangeSelectorAndBranchAreMutuallyExclusive(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
@@ -149,12 +149,12 @@ func TestTrailSelectorAndBranchAreMutuallyExclusive(t *testing.T) {
 		{name: "show", args: []string{"show", "123", "--branch", "foo"}, wantSub: "not both"},
 		{name: "watch", args: []string{"watch", "5", "--branch", "foo"}, wantSub: "not both"},
 		{name: "finding list positional", args: []string{"finding", "list", "123", "--branch", "foo"}, wantSub: "not both"},
-		{name: "finding list --trail", args: []string{"finding", "list", "--trail", "123", "--branch", "foo"}, wantSub: "not both"},
+		{name: "finding list --change", args: []string{"finding", "list", "--change", "123", "--branch", "foo"}, wantSub: "not both"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := execTrailCmdExpectErr(t, tt.args...)
+			err := execChangeCmdExpectErr(t, tt.args...)
 			if err == nil || !strings.Contains(err.Error(), tt.wantSub) {
 				t.Fatalf("err = %v, want substring %q", err, tt.wantSub)
 			}
@@ -163,7 +163,7 @@ func TestTrailSelectorAndBranchAreMutuallyExclusive(t *testing.T) {
 }
 
 // --repo requires an explicit branch or selector rather than defaulting to the local branch.
-func TestTrailRepoRequiresExplicitTarget(t *testing.T) {
+func TestChangeRepoRequiresExplicitTarget(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
@@ -183,7 +183,7 @@ func TestTrailRepoRequiresExplicitTarget(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := execTrailCmdExpectErr(t, tt.args...)
+			err := execChangeCmdExpectErr(t, tt.args...)
 			if err == nil || !strings.Contains(err.Error(), "--repo requires an explicit target") {
 				t.Fatalf("err = %v, want '--repo requires an explicit target'", err)
 			}
@@ -191,11 +191,11 @@ func TestTrailRepoRequiresExplicitTarget(t *testing.T) {
 	}
 }
 
-// Sanity: the persistent --repo flag is registered on the trail root and shows
+// Sanity: the persistent --repo flag is registered on the change root and shows
 // up in help, so every read subcommand inherits it.
-func TestTrailRepoFlagRegisteredOnRoot(t *testing.T) {
+func TestChangeRepoFlagRegisteredOnRoot(t *testing.T) {
 	t.Parallel()
-	cmd := newTrailCmd()
+	cmd := newChangeCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(io.Discard)

@@ -17,7 +17,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// SSE control events for the trail-wide event stream. Domain events
+// SSE control events for the change-wide event stream. Domain events
 // (for example "session.started" or "comment.created") are emitted as their
 // code_review_events.event_type values.
 const (
@@ -36,7 +36,7 @@ const (
 	reconnectBackoffCap     = 30 * time.Second
 )
 
-func newTrailWatchCmd() *cobra.Command {
+func newChangeWatchCmd() *cobra.Command {
 	var (
 		jsonOutput bool
 		showPings  bool
@@ -45,21 +45,21 @@ func newTrailWatchCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "watch [<trail>]",
-		Short: "Tail a trail's events live",
-		Long: `Subscribe to the trail-wide SSE stream and print events as they arrive.
+		Use:   "watch [<change>]",
+		Short: "Tail a change's events live",
+		Long: `Subscribe to the change-wide SSE stream and print events as they arrive.
 Reconnects automatically when the server caps the connection (~50s) and on
 transient network errors.
 
-<trail> may be a number, id, or branch name. If omitted, the trail for the
+<change> may be a number, id, or branch name. If omitted, the change for the
 current branch is used.
 
-This command resolves the trail's id internally and streams
-GET /api/v1/trails/<id>/events with Accept: text/event-stream.
+This command resolves the change's id internally and streams
+GET /api/v1/changes/<id>/events with Accept: text/event-stream.
 
 Events emitted by the server:
-  ready              initial frame, includes trail and cursor
-  <event_type>       trail domain event (reviews, findings, runners, monitors, ...)
+  ready              initial frame, includes change and cursor
+  <event_type>       change domain event (reviews, findings, runners, monitors, ...)
   reconnect          server cap reached; re-establishing
   forbidden          access was revoked; stream ends
   error              server-side error; treated as reconnect`,
@@ -69,34 +69,34 @@ Events emitted by the server:
 			if len(args) == 1 {
 				selector = args[0]
 			}
-			// Delegates to the shared trail-review resolver so number/id/branch
+			// Delegates to the shared change-review resolver so number/id/branch
 			// selectors and insecure-HTTP handling stay in one place.
-			return runTrailReviewWatch(cmd, selector, jsonOutput, showPings, once)
+			return runChangeReviewWatch(cmd, selector, jsonOutput, showPings, once)
 		},
 	}
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print each event as a single JSON line")
 	cmd.Flags().BoolVar(&showPings, "show-pings", false, "Print SSE keepalive pings (otherwise suppressed)")
 	cmd.Flags().BoolVar(&once, "once", false, "Open one SSE connection then exit instead of reconnecting")
-	cmd.Flags().StringVar(&branch, "branch", "", "Watch the trail for this branch instead of the current branch; cannot be combined with a trail selector")
+	cmd.Flags().StringVar(&branch, "branch", "", "Watch the change for this branch instead of the current branch; cannot be combined with a change selector")
 
 	return cmd
 }
 
-func runTrailReviewWatch(cmd *cobra.Command, selector string, jsonOutput, showPings, once bool) error {
-	client, target, err := authenticatedTrailReviewTarget(cmd, selector)
+func runChangeReviewWatch(cmd *cobra.Command, selector string, jsonOutput, showPings, once bool) error {
+	client, target, err := authenticatedChangeReviewTarget(cmd, selector)
 	if err != nil {
 		return err
 	}
-	description := trailWatchDescription(target.Host, target.Owner, target.Repo, target.Trail.Number, target.Trail.ID)
-	return runTrailWatchResolved(cmd, client, target.Trail.ID, description, jsonOutput, showPings, once)
+	description := changeWatchDescription(target.Host, target.Owner, target.Repo, target.Change.Number, target.Change.ID)
+	return runChangeWatchResolved(cmd, client, target.Change.ID, description, jsonOutput, showPings, once)
 }
 
-func runTrailWatchResolved(cmd *cobra.Command, client *api.Client, trailID, description string, jsonOutput, showPings, once bool) error {
+func runChangeWatchResolved(cmd *cobra.Command, client *api.Client, changeID, description string, jsonOutput, showPings, once bool) error {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
-	streamPath := reviewEventsPath(trailID)
+	streamPath := reviewEventsPath(changeID)
 
 	fmt.Fprintf(errW, "Watching %s — Ctrl+C to stop\n", description)
 
@@ -166,15 +166,15 @@ func runTrailWatchResolved(cmd *cobra.Command, client *api.Client, trailID, desc
 	}
 }
 
-func trailWatchDescription(forge, owner, repo string, number int, trailID string) string {
+func changeWatchDescription(forge, owner, repo string, number int, changeID string) string {
 	if number > 0 {
-		return fmt.Sprintf("trail #%d (%s/%s/%s, id %s)", number, forge, owner, repo, trailID)
+		return fmt.Sprintf("change #%d (%s/%s/%s, id %s)", number, forge, owner, repo, changeID)
 	}
-	return fmt.Sprintf("trail %s (%s/%s/%s)", trailID, forge, owner, repo)
+	return fmt.Sprintf("change %s (%s/%s/%s)", changeID, forge, owner, repo)
 }
 
-func reviewEventsPath(trailID string) string {
-	return "/api/v1/trails/" + url.PathEscape(trailID) + "/events"
+func reviewEventsPath(changeID string) string {
+	return "/api/v1/changes/" + url.PathEscape(changeID) + "/events"
 }
 
 type streamCloseReason int
@@ -234,7 +234,7 @@ func streamOnce(
 	}
 	defer resp.Body.Close()
 
-	if err := checkTrailResponse(resp); err != nil {
+	if err := checkChangeResponse(resp); err != nil {
 		// Terminal: surface the error and don't reconnect. 429 deliberately
 		// falls through to streamCloseTransport so the caller backs off.
 		if isTerminalHTTPError(err) {
@@ -384,13 +384,13 @@ func printSSEEvent(w, errW io.Writer, eventName, data string, jsonOutput bool) {
 }
 
 type reviewReadyPayload struct {
-	TrailID string `json:"trailId"`
-	Cursor  int64  `json:"cursor"`
+	ChangeID string `json:"changeId"`
+	Cursor   int64  `json:"cursor"`
 }
 
 type reviewStreamEvent struct {
 	ID              any            `json:"id"`
-	TrailID         string         `json:"trailId"`
+	ChangeID        string         `json:"changeId"`
 	ReviewSessionID *string        `json:"reviewId"`
 	ActorID         string         `json:"actorId"`
 	EventType       string         `json:"eventType"`
@@ -404,8 +404,8 @@ func printReadyEvent(w io.Writer, data string) {
 	var p reviewReadyPayload
 	if err := json.Unmarshal([]byte(data), &p); err == nil {
 		parts := []string{"● connected"}
-		if p.TrailID != "" {
-			parts = append(parts, "to trail "+p.TrailID)
+		if p.ChangeID != "" {
+			parts = append(parts, "to change "+p.ChangeID)
 		}
 		if p.Cursor > 0 {
 			parts = append(parts, fmt.Sprintf("after event %d", p.Cursor))
@@ -508,13 +508,13 @@ func printReviewStreamEvent(w io.Writer, ev reviewStreamEvent) {
 	}
 }
 
-// importedTrailEventPayloadAliases covers historical event payloads imported
+// importedChangeEventPayloadAliases covers historical event payloads imported
 // into entire-api. The server always writes the event envelope in camelCase,
 // but forwards its stored payload JSONB verbatim; the importer preserves those
 // bytes, so imported rows can still contain these snake_case keys. Keep this
 // compatibility scoped to known payload fields rather than normalizing the
 // envelope or arbitrary user data.
-var importedTrailEventPayloadAliases = map[string]string{
+var importedChangeEventPayloadAliases = map[string]string{
 	"headSha":           "head_sha",
 	"baseSha":           "base_sha",
 	"codeVersionId":     "code_version_id",
@@ -532,7 +532,7 @@ func payloadString(payload map[string]any, key string) string {
 	}
 	v, ok := payload[key]
 	if !ok {
-		if alias, exists := importedTrailEventPayloadAliases[key]; exists {
+		if alias, exists := importedChangeEventPayloadAliases[key]; exists {
 			v, ok = payload[alias]
 		}
 	}

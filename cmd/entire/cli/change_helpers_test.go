@@ -9,7 +9,7 @@ import (
 
 func TestSeverityDisplay(t *testing.T) {
 	t.Parallel()
-	high := trailReviewSeverityHigh
+	high := changeReviewSeverityHigh
 	blank := "   "
 	tests := []struct {
 		name string
@@ -18,7 +18,7 @@ func TestSeverityDisplay(t *testing.T) {
 	}{
 		{"nil", nil, "-"},
 		{"blank", &blank, "-"},
-		{"value", &high, trailReviewSeverityHigh},
+		{"value", &high, changeReviewSeverityHigh},
 	}
 	for _, tt := range tests {
 		if got := severityDisplay(tt.in); got != tt.want {
@@ -27,75 +27,75 @@ func TestSeverityDisplay(t *testing.T) {
 	}
 }
 
-func TestTrailReviewTargetDisplay(t *testing.T) {
+func TestChangeReviewTargetDisplay(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name   string
-		target trailReviewTarget
+		target changeReviewTarget
 		want   string
 	}{
 		{
 			name:   "number wins",
-			target: trailReviewTarget{Trail: api.TrailResource{Number: 7, Title: "Fix auth", ID: "abc", Branch: "fix/auth"}},
-			want:   "trail #7 (Fix auth)",
+			target: changeReviewTarget{Change: api.ChangeResource{Number: 7, Title: "Fix auth", ID: "abc", Branch: "fix/auth"}},
+			want:   "change #7 (Fix auth)",
 		},
 		{
 			name:   "branch when no number",
-			target: trailReviewTarget{Trail: api.TrailResource{ID: "abc", Branch: "fix/auth"}},
-			want:   "trail abc on fix/auth",
+			target: changeReviewTarget{Change: api.ChangeResource{ID: "abc", Branch: "fix/auth"}},
+			want:   "change abc on fix/auth",
 		},
 		{
 			name:   "id only",
-			target: trailReviewTarget{Trail: api.TrailResource{ID: "abc"}},
-			want:   "trail abc",
+			target: changeReviewTarget{Change: api.ChangeResource{ID: "abc"}},
+			want:   "change abc",
 		},
 	}
 	for _, tt := range tests {
-		if got := trailReviewTargetDisplay(tt.target); got != tt.want {
-			t.Errorf("%s: trailReviewTargetDisplay = %q, want %q", tt.name, got, tt.want)
+		if got := changeReviewTargetDisplay(tt.target); got != tt.want {
+			t.Errorf("%s: changeReviewTargetDisplay = %q, want %q", tt.name, got, tt.want)
 		}
 	}
 }
 
-func TestDefaultTrailReviewStatusReason(t *testing.T) {
+func TestDefaultChangeReviewStatusReason(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		status, want string
 	}{
-		{trailReviewStatusResolved, "Resolved via Entire CLI"},
-		{trailReviewStatusDismissed, "Dismissed via Entire CLI"},
-		{trailReviewStatusOpen, "Reopened via Entire CLI"},
+		{changeReviewStatusResolved, "Resolved via Entire CLI"},
+		{changeReviewStatusDismissed, "Dismissed via Entire CLI"},
+		{changeReviewStatusOpen, "Reopened via Entire CLI"},
 		{"something-else", "Updated via Entire CLI"},
 	}
 	for _, tt := range tests {
-		if got := defaultTrailReviewStatusReason(tt.status); got != tt.want {
-			t.Errorf("defaultTrailReviewStatusReason(%q) = %q, want %q", tt.status, got, tt.want)
+		if got := defaultChangeReviewStatusReason(tt.status); got != tt.want {
+			t.Errorf("defaultChangeReviewStatusReason(%q) = %q, want %q", tt.status, got, tt.want)
 		}
 	}
 }
 
-func TestParseOptionalTrailSelector(t *testing.T) {
+func TestParseOptionalChangeSelector(t *testing.T) {
 	t.Parallel()
 
-	got, err := parseOptionalTrailSelector(nil, "  42  ")
+	got, err := parseOptionalChangeSelector(nil, "  42  ")
 	if err != nil || got != "42" {
 		t.Fatalf("flag only = (%q, %v), want (\"42\", nil)", got, err)
 	}
 
-	got, err = parseOptionalTrailSelector([]string{" main "}, "")
+	got, err = parseOptionalChangeSelector([]string{" main "}, "")
 	if err != nil || got != "main" {
 		t.Fatalf("positional only = (%q, %v), want (\"main\", nil)", got, err)
 	}
 
-	if _, err := parseOptionalTrailSelector([]string{"main"}, "42"); err == nil {
+	if _, err := parseOptionalChangeSelector([]string{"main"}, "42"); err == nil {
 		t.Error("both positional and flag should error")
 	}
 
-	if _, err := parseOptionalTrailSelector([]string{"   "}, ""); err == nil {
+	if _, err := parseOptionalChangeSelector([]string{"   "}, ""); err == nil {
 		t.Error("empty positional selector should error")
 	}
 
-	if got, err := parseOptionalTrailSelector(nil, ""); err != nil || got != "" {
+	if got, err := parseOptionalChangeSelector(nil, ""); err != nil || got != "" {
 		t.Fatalf("neither = (%q, %v), want (\"\", nil)", got, err)
 	}
 }

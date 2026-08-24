@@ -25,16 +25,16 @@ import (
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 )
 
-// trailResumeIntegrationClusterSlug is the fake processing placement's
+// changeResumeIntegrationClusterSlug is the fake processing placement's
 // cluster, used to join /api/v1/repos' RepoPlacement.ClusterSlug to
 // /api/v1/clusters' Cluster.Slug (see cell_target.go's cellTargetForPlacement).
-const trailResumeIntegrationClusterSlug = "trail-resume-cluster"
+const changeResumeIntegrationClusterSlug = "change-resume-cluster"
 
-func TestTrailResume_UsesCheckpointSessionsWhenLocalStateIsMissing(t *testing.T) {
+func TestChangeResume_UsesCheckpointSessionsWhenLocalStateIsMissing(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
-	addTrailResumeIntegrationOrigin(t, env, "https://github.com/entireio/cli.git")
+	addChangeResumeIntegrationOrigin(t, env, "https://github.com/entireio/cli.git")
 
 	firstSession := env.NewSession()
 	firstPrompt := "Create hello method"
@@ -70,50 +70,50 @@ func TestTrailResume_UsesCheckpointSessionsWhenLocalStateIsMissing(t *testing.T)
 		t.Fatalf("clear second session state: %v", err)
 	}
 
-	trail := api.TrailResource{
-		ID:        "trail-integration-321",
+	change := api.ChangeResource{
+		ID:        "change-integration-321",
 		Number:    321,
-		URL:       "https://entire.io/gh/entireio/cli/trails/321",
+		URL:       "https://entire.io/gh/entireio/cli/changes/321",
 		Branch:    env.GetCurrentBranch(),
 		Base:      masterBranch,
-		Title:     "Resume checkpoint sessions from trail",
+		Title:     "Resume checkpoint sessions from change",
 		Status:    "open",
 		Phase:     "building",
 		CreatedAt: time.Now().Add(-time.Hour).UTC(),
 		UpdatedAt: time.Now().UTC(),
 	}
-	server := newTrailResumeIntegrationAPIServer(t, trail)
+	server := newChangeResumeIntegrationAPIServer(t, change)
 	defer server.Close()
-	configureTrailResumeIntegrationAuth(t, env, server.URL)
+	configureChangeResumeIntegrationAuth(t, env, server.URL)
 
-	contextOutput := env.RunCLI("trail", "--insecure-http-auth", "resume", "321", "--no-resume")
+	contextOutput := env.RunCLI("change", "--insecure-http-auth", "resume", "321", "--no-resume")
 	for _, want := range []string{
-		"Trail #321",
+		"Change #321",
 		"Checkpoint sessions:",
 		firstSession.ID,
 		secondSession.ID,
 		checkpointID,
 		"Create hello method",
 		"Create goodbye method",
-		"entire trail resume 321 --repo entireio/cli --branch feature/test-branch --session " + firstSession.ID,
-		"entire trail resume 321 --repo entireio/cli --branch feature/test-branch --session " + secondSession.ID,
+		"entire change resume 321 --repo entireio/cli --branch feature/test-branch --session " + firstSession.ID,
+		"entire change resume 321 --repo entireio/cli --branch feature/test-branch --session " + secondSession.ID,
 	} {
 		if !strings.Contains(contextOutput, want) {
-			t.Fatalf("trail resume --no-resume output missing %q:\n%s", want, contextOutput)
+			t.Fatalf("change resume --no-resume output missing %q:\n%s", want, contextOutput)
 		}
 	}
 	if strings.Contains(contextOutput, "none found") {
-		t.Fatalf("trail resume should not report missing local sessions after reading checkpoint metadata:\n%s", contextOutput)
+		t.Fatalf("change resume should not report missing local sessions after reading checkpoint metadata:\n%s", contextOutput)
 	}
 
-	resumeOutput := env.RunCLI("trail", "--insecure-http-auth", "resume", "321", "--session", secondSession.ID)
+	resumeOutput := env.RunCLI("change", "--insecure-http-auth", "resume", "321", "--session", secondSession.ID)
 	for _, want := range []string{
 		"Restored checkpoint " + checkpointID + " (1 session)",
 		"claude -r " + secondSession.ID,
 		"Create goodbye method",
 	} {
 		if !strings.Contains(resumeOutput, want) {
-			t.Fatalf("trail resume --session output missing %q:\n%s", want, resumeOutput)
+			t.Fatalf("change resume --session output missing %q:\n%s", want, resumeOutput)
 		}
 	}
 
@@ -127,14 +127,14 @@ func TestTrailResume_UsesCheckpointSessionsWhenLocalStateIsMissing(t *testing.T)
 	}
 }
 
-func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *httptest.Server {
+func newChangeResumeIntegrationAPIServer(t *testing.T, change api.ChangeResource) *httptest.Server {
 	t.Helper()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == pathOAuthToken:
-			writeTrailResumeIntegrationJSON(t, w, map[string]any{
-				"access_token": "trail-resume-data-token",
+			writeChangeResumeIntegrationJSON(t, w, map[string]any{
+				"access_token": "change-resume-data-token",
 				"token_type":   "Bearer",
 				"expires_in":   3600,
 			})
@@ -147,7 +147,7 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 			// correctly omits unset Opt* fields via the generated jx encoder)
 			// has a pointer receiver, and stdlib encoding/json only picks that
 			// up if the boxed value's dynamic type is the pointer.
-			writeTrailResumeIntegrationJSON(t, w, &coreapi.ListReposOutputBody{
+			writeChangeResumeIntegrationJSON(t, w, &coreapi.ListReposOutputBody{
 				Repos: []coreapi.RepoIndexEntry{
 					{
 						FullName: "entireio/cli",
@@ -159,8 +159,8 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 						Placements: []coreapi.RepoPlacement{
 							{
 								ID:           "placement-primary",
-								ClusterSlug:  trailResumeIntegrationClusterSlug,
-								Cell:         trailResumeIntegrationClusterSlug,
+								ClusterSlug:  changeResumeIntegrationClusterSlug,
+								Cell:         changeResumeIntegrationClusterSlug,
 								Jurisdiction: "us",
 								Status:       coreapi.RepoPlacementStatusReady,
 							},
@@ -169,10 +169,10 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 				},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters":
-			writeTrailResumeIntegrationJSON(t, w, &coreapi.ListClustersOutputBody{
+			writeChangeResumeIntegrationJSON(t, w, &coreapi.ListClustersOutputBody{
 				Clusters: []coreapi.Cluster{
 					{
-						Slug:         trailResumeIntegrationClusterSlug,
+						Slug:         changeResumeIntegrationClusterSlug,
 						Jurisdiction: "us",
 						PublicUrl:    serverURLWithPath(r, ""),
 						ApiUrl:       coreapi.NewOptString(serverURLWithPath(r, "")),
@@ -180,15 +180,15 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 					},
 				},
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli":
-			writeTrailResumeIntegrationJSON(t, w, api.TrailListResponse{
-				Trails: []api.TrailResource{trail},
-				Total:  1,
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/changes/gh/entireio/cli":
+			writeChangeResumeIntegrationJSON(t, w, api.ChangeListResponse{
+				Changes: []api.ChangeResource{change},
+				Total:   1,
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/321":
-			writeTrailResumeIntegrationJSON(t, w, trail)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/321/reviews/comments":
-			writeTrailResumeIntegrationJSON(t, w, map[string]any{
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/changes/gh/entireio/cli/321":
+			writeChangeResumeIntegrationJSON(t, w, change)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/changes/gh/entireio/cli/321/reviews/comments":
+			writeChangeResumeIntegrationJSON(t, w, map[string]any{
 				"comments": []any{},
 				"hasMore":  false,
 			})
@@ -199,7 +199,7 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 	return server
 }
 
-func writeTrailResumeIntegrationJSON(t *testing.T, w http.ResponseWriter, body any) {
+func writeChangeResumeIntegrationJSON(t *testing.T, w http.ResponseWriter, body any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -208,7 +208,7 @@ func writeTrailResumeIntegrationJSON(t *testing.T, w http.ResponseWriter, body a
 	}
 }
 
-func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL string) {
+func configureChangeResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL string) {
 	t.Helper()
 
 	configDir := filepath.Join(env.RepoDir, ".entire-test-config")
@@ -218,10 +218,10 @@ func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL str
 	handle := "tester"
 
 	if err := contexts.Save(configDir, &contexts.File{
-		CurrentContext: "tester@trail-resume",
+		CurrentContext: "tester@change-resume",
 		Contexts: []*contexts.Context{
 			{
-				Name:            "tester@trail-resume",
+				Name:            "tester@change-resume",
 				CoreURL:         coreURL,
 				Handle:          handle,
 				KeychainService: service,
@@ -231,7 +231,7 @@ func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL str
 		t.Fatalf("save auth context: %v", err)
 	}
 
-	host := mustTrailResumeIntegrationHost(t, coreURL)
+	host := mustChangeResumeIntegrationHost(t, coreURL)
 	cacheDir := filepath.Join(xdgCacheHome, "entire")
 	if err := discovery.ModifyAPICores(cacheDir, func(c discovery.ClusterCoresCache) error {
 		c.SetEntry(host, discovery.CoresEntry{CoreURLs: []string{coreURL}})
@@ -242,7 +242,7 @@ func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL str
 
 	tokenStore := map[string]map[string]string{
 		service: {
-			handle: tokenstore.EncodeTokenWithExpiration(fakeTrailCellLoginJWT(coreURL), 7200),
+			handle: tokenstore.EncodeTokenWithExpiration(fakeChangeCellLoginJWT(coreURL), 7200),
 		},
 	}
 	tokenData, err := json.Marshal(tokenStore)
@@ -262,7 +262,7 @@ func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL str
 	)
 }
 
-func fakeTrailCellLoginJWT(iss string) string {
+func fakeChangeCellLoginJWT(iss string) string {
 	enc := base64.RawURLEncoding
 	header := enc.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
 	payload := enc.EncodeToString(fmt.Appendf(nil,
@@ -271,7 +271,7 @@ func fakeTrailCellLoginJWT(iss string) string {
 	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"))
 }
 
-func mustTrailResumeIntegrationHost(t *testing.T, rawURL string) string {
+func mustChangeResumeIntegrationHost(t *testing.T, rawURL string) string {
 	t.Helper()
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -283,7 +283,7 @@ func mustTrailResumeIntegrationHost(t *testing.T, rawURL string) string {
 	return parsed.Host
 }
 
-func addTrailResumeIntegrationOrigin(t *testing.T, env *TestEnv, remoteURL string) {
+func addChangeResumeIntegrationOrigin(t *testing.T, env *TestEnv, remoteURL string) {
 	t.Helper()
 
 	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", remoteURL)

@@ -18,13 +18,13 @@ import (
 	format "github.com/go-git/go-git/v6/plumbing/format/config"
 )
 
-// trailReviewPatchAnchor is the pre-image a machine-applicable suggested change
+// changeReviewPatchAnchor is the pre-image a machine-applicable suggested change
 // is pinned to: which file the patch rewrites, what that file hashed to when the
 // finding was written, and the exact lines the patch expects to find there. The
 // API requires all of it for a unified_diff ("unified_diff change requires
 // expected_file_path" and four sibling checks), so these fields are mandatory
 // rather than decorative — a patch sent without them is rejected outright.
-type trailReviewPatchAnchor struct {
+type changeReviewPatchAnchor struct {
 	FilePath  string
 	FileHash  string
 	StartLine int
@@ -32,11 +32,11 @@ type trailReviewPatchAnchor struct {
 	Lines     string
 }
 
-// resolveTrailReviewPatchAnchor derives the anchor from the patch plus the
+// resolveChangeReviewPatchAnchor derives the anchor from the patch plus the
 // working tree: the diff headers name the file and the old-side line span, and
 // the file on disk supplies the hash and the expected lines.
-func resolveTrailReviewPatchAnchor(ctx context.Context, patch string) (*trailReviewPatchAnchor, error) {
-	target, err := parseTrailReviewPatchTarget(patch)
+func resolveChangeReviewPatchAnchor(ctx context.Context, patch string) (*changeReviewPatchAnchor, error) {
+	target, err := parseChangeReviewPatchTarget(patch)
 	if err != nil {
 		return nil, err
 	}
@@ -58,11 +58,11 @@ func resolveTrailReviewPatchAnchor(ctx context.Context, patch string) (*trailRev
 	}
 	// Resolved only once the patch and the file have checked out, so a rejected
 	// patch does not pay for opening the repository.
-	hash, err := gitBlobHash(content, trailReviewObjectFormat(ctx))
+	hash, err := gitBlobHash(content, changeReviewObjectFormat(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("hash %s: %w", target.Path, err)
 	}
-	return &trailReviewPatchAnchor{
+	return &changeReviewPatchAnchor{
 		FilePath:  target.Path,
 		FileHash:  hash,
 		StartLine: target.StartLine,
@@ -71,10 +71,10 @@ func resolveTrailReviewPatchAnchor(ctx context.Context, patch string) (*trailRev
 	}, nil
 }
 
-// trailReviewObjectFormat reports the repository's git object format, so that
+// changeReviewObjectFormat reports the repository's git object format, so that
 // expected_file_hash is the blob OID `git hash-object` prints in this repo
 // rather than a sha1 value that a sha256 repository would never reproduce.
-func trailReviewObjectFormat(ctx context.Context) format.ObjectFormat {
+func changeReviewObjectFormat(ctx context.Context) format.ObjectFormat {
 	repo, err := gitrepo.OpenCurrent(ctx)
 	if err != nil {
 		return format.SHA1
@@ -87,18 +87,18 @@ func trailReviewObjectFormat(ctx context.Context) format.ObjectFormat {
 	return cfg.Extensions.ObjectFormat
 }
 
-// trailReviewPatchTarget is the single file a suggested-change patch rewrites
+// changeReviewPatchTarget is the single file a suggested-change patch rewrites
 // and the old-side line span it covers.
-type trailReviewPatchTarget struct {
+type changeReviewPatchTarget struct {
 	Path      string
 	StartLine int
 	EndLine   int
 }
 
-// trailReviewHunkRangePattern captures both sides of a unified-diff hunk header:
+// changeReviewHunkRangePattern captures both sides of a unified-diff hunk header:
 // "@@ -12,7 +12,8 @@" yields old 12,7 and new 12,8, and an omitted count means a
 // single line. Both sides are needed to know how long the hunk body is.
-var trailReviewHunkRangePattern = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
+var changeReviewHunkRangePattern = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
 
 // patchDevNull is the path a unified diff uses for "this side does not exist":
 // on the old side it means the patch creates the file, on the new side that it
@@ -158,12 +158,12 @@ func forEachPatchHeaderLine(patchText string, fn func(line string) error) error 
 	return nil
 }
 
-// parseTrailReviewPatchTarget reads the file and line span a unified diff
+// parseChangeReviewPatchTarget reads the file and line span a unified diff
 // targets. A suggestion anchors to exactly one file, so a multi-file patch is
 // rejected here with an actionable message instead of as a server 400.
-func parseTrailReviewPatchTarget(patch string) (trailReviewPatchTarget, error) {
+func parseChangeReviewPatchTarget(patch string) (changeReviewPatchTarget, error) {
 	var (
-		target  trailReviewPatchTarget
+		target  changeReviewPatchTarget
 		oldPath string
 		newPath string
 		sawFile bool
@@ -257,7 +257,7 @@ func patchSidePath(raw, prefix string) string {
 
 // parseUnifiedDiffHunkRange extracts the line accounting from a hunk header.
 func parseUnifiedDiffHunkRange(line string) (unifiedDiffHunk, bool) {
-	match := trailReviewHunkRangePattern.FindStringSubmatch(line)
+	match := changeReviewHunkRangePattern.FindStringSubmatch(line)
 	if match == nil {
 		return unifiedDiffHunk{}, false
 	}
@@ -292,7 +292,7 @@ func patchHunkCount(raw string) (int, bool) {
 // patchAnchorLines returns the file's bytes for lines [start, end] with their
 // line endings intact, which is what expected_lines records: the exact slice a
 // later apply compares against to tell whether the file has moved on. Unlike
-// trailReviewSelectedTextFromWorktree, it must not normalize CRLF — the value is
+// changeReviewSelectedTextFromWorktree, it must not normalize CRLF — the value is
 // a byte-for-byte pre-image, not display text.
 func patchAnchorLines(content []byte, start, end int) (string, error) {
 	lines := strings.SplitAfter(string(content), "\n")

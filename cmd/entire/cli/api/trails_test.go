@@ -29,13 +29,13 @@ func TestClient_TrailsEnabledEscapesPathComponents(t *testing.T) {
 	if !ok {
 		t.Fatal("enabled = false, want true")
 	}
-	want := "/api/v1/trails/g%2Fh/acme%3Forg/repo%23frag?pageSize=1"
+	want := "/api/v1/changes/g%2Fh/acme%3Forg/repo%23frag?pageSize=1"
 	if gotURI != want {
 		t.Errorf("request URI = %q, want %q", gotURI, want)
 	}
 }
 
-func TestClient_RewritesResolvedTrailReviewRoute(t *testing.T) {
+func TestClient_RewritesResolvedChangeReviewRoute(t *testing.T) {
 	t.Parallel()
 	var got string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,18 +45,18 @@ func TestClient_RewritesResolvedTrailReviewRoute(t *testing.T) {
 	defer server.Close()
 
 	c := NewClientWithBaseURL("tok", server.URL)
-	c.SetTrailRoute("trl/one", "/api/v1/trails/gh/acme/repo/42")
-	resp, err := c.Get(context.Background(), "/api/v1/trails/trl%2Fone/reviews/comments")
+	c.SetChangeRoute("trl/one", "/api/v1/changes/gh/acme/repo/42")
+	resp, err := c.Get(context.Background(), "/api/v1/changes/trl%2Fone/reviews/comments")
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if want := "/api/v1/trails/gh/acme/repo/42/reviews/comments"; got != want {
+	if want := "/api/v1/changes/gh/acme/repo/42/reviews/comments"; got != want {
 		t.Fatalf("path = %q, want %q", got, want)
 	}
 }
 
-func TestClient_TrailRequestsUseCamelCase(t *testing.T) {
+func TestClient_ChangeRequestsUseCamelCase(t *testing.T) {
 	t.Parallel()
 	var got map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +68,7 @@ func TestClient_TrailRequestsUseCamelCase(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithBaseURL("tok", server.URL)
-	resp, err := client.Post(context.Background(), "/api/v1/trails/gh/acme/repo", TrailCreateRequest{
+	resp, err := client.Post(context.Background(), "/api/v1/changes/gh/acme/repo", ChangeCreateRequest{
 		Title: "test", BranchName: "feature/test", BranchAction: "link",
 	})
 	if err != nil {
@@ -126,8 +126,8 @@ func TestClient_TrailsEnabled(t *testing.T) {
 			if ok != tt.wantOK {
 				t.Errorf("enabled = %v, want %v", ok, tt.wantOK)
 			}
-			if gotPath != "/api/v1/trails/gh/acme/repo" {
-				t.Errorf("path = %q, want /api/v1/trails/gh/acme/repo", gotPath)
+			if gotPath != "/api/v1/changes/gh/acme/repo" {
+				t.Errorf("path = %q, want /api/v1/changes/gh/acme/repo", gotPath)
 			}
 			if gotQuery != "pageSize=1" {
 				t.Errorf("query = %q, want pageSize=1", gotQuery)

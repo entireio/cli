@@ -12,19 +12,19 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
-func TestResolveTrailBySelector_FindsBySelector(t *testing.T) {
+func TestResolveChangeBySelector_FindsBySelector(t *testing.T) {
 	// Not t.Parallel(): the subtests share one httptest server closed on
 	// return, so they must run synchronously before the deferred Close.
-	alpha := api.TrailResource{ID: "trl_a", Number: 1, Branch: "feature/a", Title: "Alpha"}
-	bravo := api.TrailResource{ID: "trl_b", Number: 575, Branch: "feature/b", Title: "Bravo"}
+	alpha := api.ChangeResource{ID: "trl_a", Number: 1, Branch: "feature/a", Title: "Alpha"}
+	bravo := api.ChangeResource{ID: "trl_b", Number: 575, Branch: "feature/b", Title: "Bravo"}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A numeric selector resolves through the direct number route; the other
 		// selectors fall back to scanning the list.
-		var payload any = api.TrailListResponse{Trails: []api.TrailResource{alpha, bravo}, Total: 2}
+		var payload any = api.ChangeListResponse{Changes: []api.ChangeResource{alpha, bravo}, Total: 2}
 		switch r.URL.Path {
-		case trailTestBasePath + "/1":
+		case changeTestBasePath + "/1":
 			payload = alpha
-		case trailTestBasePath + "/575":
+		case changeTestBasePath + "/575":
 			payload = bravo
 		}
 		if err := json.NewEncoder(w).Encode(payload); err != nil {
@@ -47,9 +47,9 @@ func TestResolveTrailBySelector_FindsBySelector(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			found, err := resolveTrailBySelector(context.Background(), client, "gh", "acme", "repo", tc.selector, "")
+			found, err := resolveChangeBySelector(context.Background(), client, "gh", "acme", "repo", tc.selector, "")
 			if err != nil {
-				t.Fatalf("resolveTrailBySelector: %v", err)
+				t.Fatalf("resolveChangeBySelector: %v", err)
 			}
 			if found == nil || found.ID != tc.wantID {
 				t.Fatalf("found = %#v, want ID %q", found, tc.wantID)
@@ -58,20 +58,20 @@ func TestResolveTrailBySelector_FindsBySelector(t *testing.T) {
 	}
 }
 
-func TestResolveTrailBySelector_NotFoundIsAnError(t *testing.T) {
+func TestResolveChangeBySelector_NotFoundIsAnError(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{}}); err != nil {
+		if err := json.NewEncoder(w).Encode(api.ChangeListResponse{Changes: []api.ChangeResource{}}); err != nil {
 			t.Errorf("encode response: %v", err)
 		}
 	}))
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	found, err := resolveTrailBySelector(context.Background(), client, "gh", "acme", "repo", "does-not-exist", "")
+	found, err := resolveChangeBySelector(context.Background(), client, "gh", "acme", "repo", "does-not-exist", "")
 	if err == nil {
-		t.Fatalf("expected error for missing trail, got found = %#v", found)
+		t.Fatalf("expected error for missing change, got found = %#v", found)
 	}
 	if found != nil {
 		t.Fatalf("found = %#v, want nil on error", found)
@@ -81,19 +81,19 @@ func TestResolveTrailBySelector_NotFoundIsAnError(t *testing.T) {
 	}
 }
 
-func TestDescribeTrailRef(t *testing.T) {
+func TestDescribeChangeRef(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
 		name string
-		in   api.TrailResource
+		in   api.ChangeResource
 		want string
 	}{
-		{"number and title", api.TrailResource{Number: 575, Title: "Add foo"}, "trail #575 (Add foo)"},
-		{"number without title", api.TrailResource{Number: 575}, "trail #575"},
-		{"title without number", api.TrailResource{Title: "Add foo"}, `trail "Add foo"`},
-		{"neither", api.TrailResource{}, "trail"},
-		{"title trimmed", api.TrailResource{Number: 1, Title: "  Add foo  "}, "trail #1 (Add foo)"},
+		{"number and title", api.ChangeResource{Number: 575, Title: "Add foo"}, "change #575 (Add foo)"},
+		{"number without title", api.ChangeResource{Number: 575}, "change #575"},
+		{"title without number", api.ChangeResource{Title: "Add foo"}, `change "Add foo"`},
+		{"neither", api.ChangeResource{}, "change"},
+		{"title trimmed", api.ChangeResource{Number: 1, Title: "  Add foo  "}, "change #1 (Add foo)"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,35 +101,35 @@ func TestDescribeTrailRef(t *testing.T) {
 			// Copy the input into a local so the parallel subtest never takes the
 			// address of the shared range variable.
 			in := tc.in
-			got := describeTrailRef(&in)
+			got := describeChangeRef(&in)
 			if got != tc.want {
-				t.Fatalf("describeTrailRef(%#v) = %q, want %q", in, got, tc.want)
+				t.Fatalf("describeChangeRef(%#v) = %q, want %q", in, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestTrailCheckoutRejectsArgWithTrailFlag(t *testing.T) {
+func TestChangeCheckoutRejectsArgWithChangeFlag(t *testing.T) {
 	t.Parallel()
 
-	cmd := newTrailCheckoutCmd()
+	cmd := newChangeCheckoutCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"feature/b", "--trail", "575"})
+	cmd.SetArgs([]string{"feature/b", "--change", "575"})
 
 	err := cmd.Execute()
 	if err == nil {
-		t.Fatal("expected error combining a positional arg with --trail, got nil")
+		t.Fatal("expected error combining a positional arg with --change, got nil")
 	}
 	if !strings.Contains(err.Error(), "cannot combine") {
 		t.Fatalf("error = %q, want it to mention 'cannot combine'", err)
 	}
 }
 
-func TestTrailCheckoutHasWorktreeFlag(t *testing.T) {
+func TestChangeCheckoutHasWorktreeFlag(t *testing.T) {
 	t.Parallel()
 
-	cmd := newTrailCheckoutCmd()
+	cmd := newChangeCheckoutCmd()
 	flag := cmd.Flags().Lookup("worktree")
 	if flag == nil {
 		t.Fatal("worktree flag not registered")

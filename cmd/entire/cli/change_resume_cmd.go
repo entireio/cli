@@ -28,10 +28,10 @@ import (
 )
 
 const (
-	trailResumeNoPrompt = "(no prompt)"
+	changeResumeNoPrompt = "(no prompt)"
 )
 
-type trailResumeOptions struct {
+type changeResumeOptions struct {
 	Selector       string
 	ExpectedRepo   string
 	ExpectedBranch string
@@ -42,17 +42,17 @@ type trailResumeOptions struct {
 	NoResume       bool
 }
 
-type trailResumeContext struct {
-	Trail               trailResumeTrailContext     `json:"trail"`
-	Sessions            []trailResumeSessionContext `json:"sessions"`
-	SessionsUnavailable string                      `json:"sessions_unavailable,omitempty"`
-	SessionsSkipped     int                         `json:"sessions_skipped,omitempty"`
-	Findings            trailResumeFindingsContext  `json:"-"`
-	DefaultResume       *trailResumeDefaultContext  `json:"default_resume,omitempty"`
-	Commands            []string                    `json:"commands"`
+type changeResumeContext struct {
+	Change              changeResumeChangeContext    `json:"change"`
+	Sessions            []changeResumeSessionContext `json:"sessions"`
+	SessionsUnavailable string                       `json:"sessions_unavailable,omitempty"`
+	SessionsSkipped     int                          `json:"sessions_skipped,omitempty"`
+	Findings            changeResumeFindingsContext  `json:"-"`
+	DefaultResume       *changeResumeDefaultContext  `json:"default_resume,omitempty"`
+	Commands            []string                     `json:"commands"`
 }
 
-type trailResumeTrailContext struct {
+type changeResumeChangeContext struct {
 	ID     string `json:"id,omitempty"`
 	Number int    `json:"number,omitempty"`
 	Title  string `json:"title,omitempty"`
@@ -64,13 +64,13 @@ type trailResumeTrailContext struct {
 	URL    string `json:"url,omitempty"`
 }
 
-type trailResumeRepository struct {
+type changeResumeRepository struct {
 	Forge string
 	Owner string
 	Repo  string
 }
 
-type trailResumeSessionContext struct {
+type changeResumeSessionContext struct {
 	SessionID    string    `json:"session_id"`
 	Agent        string    `json:"agent,omitempty"`
 	LastPrompt   string    `json:"last_prompt,omitempty"`
@@ -78,8 +78,8 @@ type trailResumeSessionContext struct {
 	CheckpointID string    `json:"checkpoint_id"`
 }
 
-func (s trailResumeSessionContext) MarshalJSON() ([]byte, error) {
-	type trailResumeSessionContextJSON struct {
+func (s changeResumeSessionContext) MarshalJSON() ([]byte, error) {
+	type changeResumeSessionContextJSON struct {
 		SessionID    string     `json:"session_id"`
 		Agent        string     `json:"agent,omitempty"`
 		LastPrompt   string     `json:"last_prompt,omitempty"`
@@ -93,7 +93,7 @@ func (s trailResumeSessionContext) MarshalJSON() ([]byte, error) {
 		lastActive = &active
 	}
 
-	payload := trailResumeSessionContextJSON{
+	payload := changeResumeSessionContextJSON{
 		SessionID:    s.SessionID,
 		Agent:        s.Agent,
 		LastPrompt:   s.LastPrompt,
@@ -102,25 +102,25 @@ func (s trailResumeSessionContext) MarshalJSON() ([]byte, error) {
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("marshal trail resume session context: %w", err)
+		return nil, fmt.Errorf("marshal change resume session context: %w", err)
 	}
 	return data, nil
 }
 
-type trailResumeDefaultContext struct {
+type changeResumeDefaultContext struct {
 	Branch       string `json:"branch"`
 	SessionID    string `json:"session_id,omitempty"`
 	CheckpointID string `json:"checkpoint_id,omitempty"`
 }
 
-type trailResumeFindingsContext struct {
-	Counts      trailReviewCommentCounts `json:"counts"`
-	Top         []api.TrailReviewComment `json:"top"`
-	HasMore     bool                     `json:"has_more,omitempty"`
-	Unavailable string                   `json:"unavailable,omitempty"`
+type changeResumeFindingsContext struct {
+	Counts      changeReviewCommentCounts `json:"counts"`
+	Top         []api.ChangeReviewComment `json:"top"`
+	HasMore     bool                      `json:"has_more,omitempty"`
+	Unavailable string                    `json:"unavailable,omitempty"`
 }
 
-type trailResumeFindingCounts struct {
+type changeResumeFindingCounts struct {
 	Open       int `json:"open"`
 	OpenHigh   int `json:"open_high"`
 	OpenMedium int `json:"open_medium"`
@@ -130,56 +130,56 @@ type trailResumeFindingCounts struct {
 	Stale      int `json:"stale"`
 }
 
-func newTrailResumeCmd() *cobra.Command {
-	var opts trailResumeOptions
+func newChangeResumeCmd() *cobra.Command {
+	var opts changeResumeOptions
 
 	cmd := &cobra.Command{
-		Use:   "resume [<trail>]",
-		Short: "Resume a trail's agent session",
-		Long: `Resume an agent session for a trail.
+		Use:   "resume [<change>]",
+		Short: "Resume a change's agent session",
+		Long: `Resume an agent session for a change.
 
-The trail may be given as the first argument or via --trail, as a number, id, or
-branch. Without one, the trail for the current branch is used.
+The change may be given as the first argument or via --change, as a number, id, or
+branch. Without one, the change for the current branch is used.
 
-By default, interactive terminals show the trail context, restore the checkpoint
-sessions on the trail branch, and ask whether Entire should start the agent. If
+By default, interactive terminals show the change context, restore the checkpoint
+sessions on the change branch, and ask whether Entire should start the agent. If
 there are multiple sessions in the checkpoint, you can choose which one to
 start. Non-interactive runs show the same context and print resume commands for
-the latest checkpoint on the trail branch. Use --session or --checkpoint to
+the latest checkpoint on the change branch. Use --session or --checkpoint to
 resume an exact session or checkpoint.
 
 Use --repo to assert the GitHub repository for copied commands, and --branch
-with a trail number or id to assert the branch you expect the trail to be
-attached to. If either assertion does not match the current checkout or trail,
+with a change number or id to assert the branch you expect the change to be
+attached to. If either assertion does not match the current checkout or change,
 resume stops before checking anything out.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			selector, err := parseOptionalTrailSelector(args, opts.Selector)
+			selector, err := parseOptionalChangeSelector(args, opts.Selector)
 			if err != nil {
 				return err
 			}
 			opts.Selector = selector
-			if err := validateTrailResumeOptions(opts); err != nil {
+			if err := validateChangeResumeOptions(opts); err != nil {
 				return err
 			}
 			external.DiscoverAndRegister(cmd.Context())
-			return runTrailResume(cmd, opts)
+			return runChangeResume(cmd, opts)
 		},
 	}
 
-	cmd.Flags().StringVar(&opts.Selector, "trail", "", "Trail to resume (number, id, or branch; defaults to the current branch's trail)")
+	cmd.Flags().StringVar(&opts.Selector, "change", "", "Change to resume (number, id, or branch; defaults to the current branch's change)")
 	cmd.Flags().StringVar(&opts.ExpectedRepo, "repo", "", "Expected GitHub repository (owner/name); fails if the current checkout points elsewhere")
-	cmd.Flags().StringVar(&opts.ExpectedBranch, "branch", "", "Expected trail branch; fails if the trail is attached to a different branch")
-	cmd.Flags().StringVar(&opts.SessionID, "session", "", "Resume a specific known local session on the trail branch")
-	cmd.Flags().StringVar(&opts.CheckpointID, "checkpoint", "", "Resume a specific checkpoint on the trail branch")
+	cmd.Flags().StringVar(&opts.ExpectedBranch, "branch", "", "Expected change branch; fails if the change is attached to a different branch")
+	cmd.Flags().StringVar(&opts.SessionID, "session", "", "Resume a specific known local session on the change branch")
+	cmd.Flags().StringVar(&opts.CheckpointID, "checkpoint", "", "Resume a specific checkpoint on the change branch")
 	cmd.Flags().BoolVarP(&opts.Force, "force", "f", false, "Skip prompts and overwrite existing session logs from checkpoints")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output trail resume context as JSON")
-	cmd.Flags().BoolVar(&opts.NoResume, "no-resume", false, "Show trail resume context without restoring or resuming a session")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output change resume context as JSON")
+	cmd.Flags().BoolVar(&opts.NoResume, "no-resume", false, "Show change resume context without restoring or resuming a session")
 
 	return cmd
 }
 
-func validateTrailResumeOptions(opts trailResumeOptions) error {
+func validateChangeResumeOptions(opts changeResumeOptions) error {
 	if strings.TrimSpace(opts.SessionID) != "" && strings.TrimSpace(opts.CheckpointID) != "" {
 		return errors.New("cannot combine --session and --checkpoint")
 	}
@@ -189,7 +189,7 @@ func validateTrailResumeOptions(opts trailResumeOptions) error {
 	if opts.NoResume && (strings.TrimSpace(opts.SessionID) != "" || strings.TrimSpace(opts.CheckpointID) != "") {
 		return errors.New("cannot combine --no-resume with --session or --checkpoint")
 	}
-	if _, err := parseTrailResumeRepoFlag(opts.ExpectedRepo); err != nil {
+	if _, err := parseChangeResumeRepoFlag(opts.ExpectedRepo); err != nil {
 		return fmt.Errorf("validate --repo: %w", err)
 	}
 	if checkpointID := strings.TrimSpace(opts.CheckpointID); checkpointID != "" {
@@ -200,92 +200,92 @@ func validateTrailResumeOptions(opts trailResumeOptions) error {
 	return nil
 }
 
-func runTrailResume(cmd *cobra.Command, opts trailResumeOptions) error {
-	return runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), "", func(ctx context.Context, client *api.Client) error {
-		forge, owner, repo, err := resolveTrailRemote(ctx)
+func runChangeResume(cmd *cobra.Command, opts changeResumeOptions) error {
+	return runAuthenticatedChangeAPI(cmd.Context(), cmd.ErrOrStderr(), changeInsecureHTTP(cmd), "", func(ctx context.Context, client *api.Client) error {
+		forge, owner, repo, err := resolveChangeRemote(ctx)
 		if err != nil {
 			return err
 		}
-		targetRepo := trailResumeRepository{Forge: forge, Owner: owner, Repo: repo}
-		expectedRepo, err := parseTrailResumeRepoFlag(opts.ExpectedRepo)
+		targetRepo := changeResumeRepository{Forge: forge, Owner: owner, Repo: repo}
+		expectedRepo, err := parseChangeResumeRepoFlag(opts.ExpectedRepo)
 		if err != nil {
 			return fmt.Errorf("validate --repo: %w", err)
 		}
-		if err := validateTrailResumeExpectedRepo(targetRepo, expectedRepo); err != nil {
+		if err := validateChangeResumeExpectedRepo(targetRepo, expectedRepo); err != nil {
 			return err
 		}
 		if expectedRepo.Repo != "" {
 			forge, owner, repo = expectedRepo.Forge, expectedRepo.Owner, expectedRepo.Repo
 		}
 
-		found, err := resolveTrailBySelector(ctx, client, forge, owner, repo, opts.Selector, opts.ExpectedBranch)
+		found, err := resolveChangeBySelector(ctx, client, forge, owner, repo, opts.Selector, opts.ExpectedBranch)
 		if err != nil {
 			return err
 		}
 		branch := strings.TrimSpace(found.Branch)
 		if branch == "" {
-			return fmt.Errorf("%s has no branch to resume", describeTrailRef(found))
+			return fmt.Errorf("%s has no branch to resume", describeChangeRef(found))
 		}
-		if err := validateTrailResumeExpectedBranch(found, opts.ExpectedBranch); err != nil {
+		if err := validateChangeResumeExpectedBranch(found, opts.ExpectedBranch); err != nil {
 			return err
 		}
 
-		sessions, sessionsSkipped, sessionErr := resolveTrailResumeSessionContexts(ctx, branch)
-		sessions, sessionsSkipped, sessionsUnavailable := knownTrailResumeSessionsForContext(sessions, sessionsSkipped, sessionErr)
+		sessions, sessionsSkipped, sessionErr := resolveChangeResumeSessionContexts(ctx, branch)
+		sessions, sessionsSkipped, sessionsUnavailable := knownChangeResumeSessionsForContext(sessions, sessionsSkipped, sessionErr)
 		if sessionsUnavailable != "" {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load trail checkpoint sessions: %s\n", sessionsUnavailable)
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load change checkpoint sessions: %s\n", sessionsUnavailable)
 		}
 
-		client.SetTrailRoute(found.ID, trailNumberPath(forge, owner, repo, found.Number))
-		findings, findingsErr := loadTrailResumeFindingsContext(ctx, client, found.ID)
+		client.SetChangeRoute(found.ID, changeNumberPath(forge, owner, repo, found.Number))
+		findings, findingsErr := loadChangeResumeFindingsContext(ctx, client, found.ID)
 		if findingsErr != nil {
 			findings.Unavailable = findingsErr.Error()
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load trail findings: %v\n", findingsErr)
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load change findings: %v\n", findingsErr)
 		}
 
-		resumeCtx := buildTrailResumeContextForRepoWithSkipped(*found, sessions, sessionsUnavailable, sessionsSkipped, findings, owner+"/"+repo)
+		resumeCtx := buildChangeResumeContextForRepoWithSkipped(*found, sessions, sessionsUnavailable, sessionsSkipped, findings, owner+"/"+repo)
 		if opts.JSON {
-			return encodeTrailResumeContextJSON(cmd.OutOrStdout(), resumeCtx)
+			return encodeChangeResumeContextJSON(cmd.OutOrStdout(), resumeCtx)
 		}
 
-		printTrailResumeContext(cmd.OutOrStdout(), resumeCtx)
+		printChangeResumeContext(cmd.OutOrStdout(), resumeCtx)
 		if opts.NoResume {
 			return nil
 		}
 
 		if opts.CheckpointID != "" {
-			return resumeTrailCheckpoint(ctx, cmd, branch, id.CheckpointID(opts.CheckpointID), "", opts.Force)
+			return resumeChangeCheckpoint(ctx, cmd, branch, id.CheckpointID(opts.CheckpointID), "", opts.Force)
 		}
 
 		if opts.SessionID != "" {
-			sessionCtx, ok := findTrailResumeSession(resumeCtx.Sessions, opts.SessionID)
+			sessionCtx, ok := findChangeResumeSession(resumeCtx.Sessions, opts.SessionID)
 			if ok {
-				return resumeTrailCheckpoint(ctx, cmd, branch, id.CheckpointID(sessionCtx.CheckpointID), opts.SessionID, opts.Force)
+				return resumeChangeCheckpoint(ctx, cmd, branch, id.CheckpointID(sessionCtx.CheckpointID), opts.SessionID, opts.Force)
 			}
-			return resumeTrailLatest(ctx, cmd, branch, opts.Force, opts.SessionID)
+			return resumeChangeLatest(ctx, cmd, branch, opts.Force, opts.SessionID)
 		}
 
 		if interactive.CanPromptInteractively() && len(resumeCtx.Sessions) > 1 {
-			return runTrailResumePicker(ctx, cmd, branch, resumeCtx.Sessions, opts.Force)
+			return runChangeResumePicker(ctx, cmd, branch, resumeCtx.Sessions, opts.Force)
 		}
 
-		return resumeTrailLatest(ctx, cmd, branch, opts.Force, "")
+		return resumeChangeLatest(ctx, cmd, branch, opts.Force, "")
 	})
 }
 
-func parseTrailResumeRepoFlag(value string) (trailResumeRepository, error) {
+func parseChangeResumeRepoFlag(value string) (changeResumeRepository, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return trailResumeRepository{}, nil
+		return changeResumeRepository{}, nil
 	}
 	owner, repo, err := parseGitHubURL(value)
 	if err != nil {
-		return trailResumeRepository{}, err
+		return changeResumeRepository{}, err
 	}
-	return trailResumeRepository{Forge: "gh", Owner: owner, Repo: repo}, nil
+	return changeResumeRepository{Forge: "gh", Owner: owner, Repo: repo}, nil
 }
 
-func validateTrailResumeExpectedRepo(current, expected trailResumeRepository) error {
+func validateChangeResumeExpectedRepo(current, expected changeResumeRepository) error {
 	if strings.TrimSpace(expected.Repo) == "" {
 		return nil
 	}
@@ -297,7 +297,7 @@ func validateTrailResumeExpectedRepo(current, expected trailResumeRepository) er
 	return fmt.Errorf("this command targets repository %s/%s, but the current checkout is %s/%s", expected.Owner, expected.Repo, current.Owner, current.Repo)
 }
 
-func validateTrailResumeExpectedBranch(found *api.TrailResource, expectedBranch string) error {
+func validateChangeResumeExpectedBranch(found *api.ChangeResource, expectedBranch string) error {
 	expectedBranch = strings.TrimSpace(expectedBranch)
 	if expectedBranch == "" {
 		return nil
@@ -306,24 +306,24 @@ func validateTrailResumeExpectedBranch(found *api.TrailResource, expectedBranch 
 	if actualBranch == expectedBranch {
 		return nil
 	}
-	return fmt.Errorf("%s is attached to branch %q, not expected branch %q", describeTrailRef(found), actualBranch, expectedBranch)
+	return fmt.Errorf("%s is attached to branch %q, not expected branch %q", describeChangeRef(found), actualBranch, expectedBranch)
 }
 
-func knownTrailResumeSessionsForContext(sessions []trailResumeSessionContext, skipped int, sessionErr error) ([]trailResumeSessionContext, int, string) {
+func knownChangeResumeSessionsForContext(sessions []changeResumeSessionContext, skipped int, sessionErr error) ([]changeResumeSessionContext, int, string) {
 	if sessionErr != nil {
 		return nil, 0, sessionErr.Error()
 	}
 	return sessions, skipped, ""
 }
 
-func resumeTrailLatest(ctx context.Context, cmd *cobra.Command, branch string, force bool, preferredSessionID string) error {
+func resumeChangeLatest(ctx context.Context, cmd *cobra.Command, branch string, force bool, preferredSessionID string) error {
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
-	if !ensureTrailResumeBranchAvailable(ctx, w, branch) {
+	if !ensureChangeResumeBranchAvailable(ctx, w, branch) {
 		return nil
 	}
-	proceed, err := switchToBranchForResume(ctx, w, errW, branch, trailResumeSkipBranchPrompts(force))
+	proceed, err := switchToBranchForResume(ctx, w, errW, branch, changeResumeSkipBranchPrompts(force))
 	if err != nil || !proceed {
 		return err
 	}
@@ -331,17 +331,17 @@ func resumeTrailLatest(ctx context.Context, cmd *cobra.Command, branch string, f
 	if err != nil {
 		return err
 	}
-	return continueTrailRestoredSessions(ctx, cmd, sessions, preferredSessionID, force)
+	return continueChangeRestoredSessions(ctx, cmd, sessions, preferredSessionID, force)
 }
 
-func resumeTrailCheckpoint(ctx context.Context, cmd *cobra.Command, branch string, checkpointID id.CheckpointID, preferredSessionID string, force bool) error {
+func resumeChangeCheckpoint(ctx context.Context, cmd *cobra.Command, branch string, checkpointID id.CheckpointID, preferredSessionID string, force bool) error {
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
-	if !ensureTrailResumeBranchAvailable(ctx, w, branch) {
+	if !ensureChangeResumeBranchAvailable(ctx, w, branch) {
 		return nil
 	}
-	proceed, err := switchToBranchForResume(ctx, w, errW, branch, trailResumeSkipBranchPrompts(force))
+	proceed, err := switchToBranchForResume(ctx, w, errW, branch, changeResumeSkipBranchPrompts(force))
 	if err != nil || !proceed {
 		return err
 	}
@@ -349,30 +349,30 @@ func resumeTrailCheckpoint(ctx context.Context, cmd *cobra.Command, branch strin
 	if err != nil {
 		return err
 	}
-	return continueTrailRestoredSessions(ctx, cmd, sessions, preferredSessionID, force)
+	return continueChangeRestoredSessions(ctx, cmd, sessions, preferredSessionID, force)
 }
 
-func trailResumeSkipBranchPrompts(force bool) bool {
+func changeResumeSkipBranchPrompts(force bool) bool {
 	return force || !interactive.CanPromptInteractively()
 }
 
-func trailResumeCanPromptRestoredSessions(force bool) bool {
+func changeResumeCanPromptRestoredSessions(force bool) bool {
 	return !force && interactive.CanPromptInteractively()
 }
 
-func continueTrailRestoredSessions(ctx context.Context, cmd *cobra.Command, sessions []strategy.RestoredSession, preferredSessionID string, force bool) error {
+func continueChangeRestoredSessions(ctx context.Context, cmd *cobra.Command, sessions []strategy.RestoredSession, preferredSessionID string, force bool) error {
 	w := cmd.OutOrStdout()
 	return continueRestoredSessions(ctx, w, sessions, restoredSessionContinueOptions{
-		CanPrompt:          trailResumeCanPromptRestoredSessions(force),
+		CanPrompt:          changeResumeCanPromptRestoredSessions(force),
 		PreferredSessionID: preferredSessionID,
-		PromptSession:      promptTrailRestoredSession,
-		Launch:             launchTrailRestoredSession,
-		Display:            displayTrailRestoredSessions,
-		PrintSummary:       printTrailRestoredSessionSummary,
+		PromptSession:      promptChangeRestoredSession,
+		Launch:             launchChangeRestoredSession,
+		Display:            displayChangeRestoredSessions,
+		PrintSummary:       printChangeRestoredSessionSummary,
 	})
 }
 
-func printTrailRestoredSessionSummary(w io.Writer, sessions []strategy.RestoredSession) {
+func printChangeRestoredSessionSummary(w io.Writer, sessions []strategy.RestoredSession) {
 	checkpointID := restoredSessionsCheckpointID(sessions)
 	switch {
 	case checkpointID != "" && len(sessions) > 1:
@@ -384,17 +384,17 @@ func printTrailRestoredSessionSummary(w io.Writer, sessions []strategy.RestoredS
 	case len(sessions) == 1:
 		fmt.Fprintf(w, "✓ Restored checkpoint session %s.\n", sessions[0].SessionID)
 	}
-	if len(sessions) > 0 && trailRestoredSessionsAreAllReviewOrInvestigation(sessions) {
-		fmt.Fprintln(w, "  Only review/investigation checkpoint sessions were found; these are transcript logs and may not appear as trail UI sessions.")
+	if len(sessions) > 0 && changeRestoredSessionsAreAllReviewOrInvestigation(sessions) {
+		fmt.Fprintln(w, "  Only review/investigation checkpoint sessions were found; these are transcript logs and may not appear as change UI sessions.")
 	}
 }
 
-func displayTrailRestoredSessions(w io.Writer, sessions []strategy.RestoredSession) error {
+func displayChangeRestoredSessions(w io.Writer, sessions []strategy.RestoredSession) error {
 	if len(sessions) == 0 {
 		return nil
 	}
-	choices := buildTrailResumeRestoredSessionChoices(sessions)
-	printTrailRestoredSessionSummary(w, sessions)
+	choices := buildChangeResumeRestoredSessionChoices(sessions)
+	printChangeRestoredSessionSummary(w, sessions)
 	if len(choices) > 1 {
 		fmt.Fprintln(w, "To continue:")
 	} else {
@@ -408,7 +408,7 @@ func displayTrailRestoredSessions(w io.Writer, sessions []strategy.RestoredSessi
 		if err != nil {
 			return fmt.Errorf("failed to resolve agent for session %s: %w", choice.SessionID, err)
 		}
-		printSessionCommand(w, sessionAgent.FormatResumeCommand(choice.SessionID), trailRestoredSessionPrompt(choice.Session), isMulti, choice.SessionID == mostRecentSessionID)
+		printSessionCommand(w, sessionAgent.FormatResumeCommand(choice.SessionID), changeRestoredSessionPrompt(choice.Session), isMulti, choice.SessionID == mostRecentSessionID)
 	}
 	return nil
 }
@@ -428,27 +428,27 @@ func mostRecentRestoredSessionID(sessions []strategy.RestoredSession) string {
 	return latestID
 }
 
-func resolveTrailResumeSessionContexts(ctx context.Context, branch string) ([]trailResumeSessionContext, int, error) {
-	sessions, skipped, err := resolveTrailCheckpointSessions(ctx, branch)
+func resolveChangeResumeSessionContexts(ctx context.Context, branch string) ([]changeResumeSessionContext, int, error) {
+	sessions, skipped, err := resolveChangeCheckpointSessions(ctx, branch)
 	if err == nil && len(sessions) > 0 {
 		return sessions, skipped, nil
 	}
 
-	items, localErr := resolveTrailResumeSessions(ctx, branch)
+	items, localErr := resolveChangeResumeSessions(ctx, branch)
 	if localErr != nil {
 		if err != nil {
 			return nil, 0, err
 		}
 		return nil, skipped, localErr
 	}
-	localSessions := trailResumeSessionContextsFromLocal(branch, items)
+	localSessions := changeResumeSessionContextsFromLocal(branch, items)
 	if len(localSessions) > 0 {
 		return localSessions, skipped, nil
 	}
 	return sessions, skipped, err
 }
 
-func resolveTrailCheckpointSessions(ctx context.Context, branch string) ([]trailResumeSessionContext, int, error) {
+func resolveChangeCheckpointSessions(ctx context.Context, branch string) ([]changeResumeSessionContext, int, error) {
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return nil, 0, fmt.Errorf("not a git repository: %w", err)
@@ -473,10 +473,10 @@ func resolveTrailCheckpointSessions(ctx context.Context, branch string) ([]trail
 		promoteRemoteTrackingPrimary(ctx, repo, refs)
 	}
 
-	sessions := make([]trailResumeSessionContext, 0)
+	sessions := make([]changeResumeSessionContext, 0)
 	skipped := 0
 	for _, checkpointID := range result.checkpointIDs {
-		checkpointSessions, checkpointSkipped, readErr := readTrailCheckpointSessionContexts(ctx, store, checkpointID)
+		checkpointSessions, checkpointSkipped, readErr := readChangeCheckpointSessionContexts(ctx, store, checkpointID)
 		if readErr != nil {
 			return nil, 0, readErr
 		}
@@ -490,16 +490,16 @@ func resolveTrailCheckpointSessions(ctx context.Context, branch string) ([]trail
 	return sessions, skipped, nil
 }
 
-func readTrailCheckpointSessionContexts(ctx context.Context, store checkpointInfoReader, checkpointID id.CheckpointID) ([]trailResumeSessionContext, int, error) {
+func readChangeCheckpointSessionContexts(ctx context.Context, store checkpointInfoReader, checkpointID id.CheckpointID) ([]changeResumeSessionContext, int, error) {
 	summary, err := checkpoint.ReadCheckpoint(ctx, store, checkpointID)
 	if err != nil {
 		return nil, 0, fmt.Errorf("read checkpoint %s: %w", checkpointID, err)
 	}
 
-	sessions := make([]trailResumeSessionContext, 0, len(summary.Sessions))
+	sessions := make([]changeResumeSessionContext, 0, len(summary.Sessions))
 	skipped := 0
 	for i := range summary.Sessions {
-		content, contentErr := readTrailCheckpointSessionContent(ctx, store, checkpointID, i)
+		content, contentErr := readChangeCheckpointSessionContent(ctx, store, checkpointID, i)
 		if contentErr != nil {
 			skipped++
 			continue
@@ -512,7 +512,7 @@ func readTrailCheckpointSessionContexts(ctx context.Context, store checkpointInf
 		if prompt == "" {
 			prompt = strings.TrimSpace(metadata.ReviewPrompt)
 		}
-		sessions = append(sessions, trailResumeSessionContext{
+		sessions = append(sessions, changeResumeSessionContext{
 			SessionID:    metadata.SessionID,
 			Agent:        string(metadata.Agent),
 			LastPrompt:   prompt,
@@ -524,7 +524,7 @@ func readTrailCheckpointSessionContexts(ctx context.Context, store checkpointInf
 	if len(sessions) == 0 {
 		info, infoErr := readCheckpointInfoFromStore(ctx, store, checkpointID)
 		if infoErr == nil && strings.TrimSpace(info.SessionID) != "" {
-			sessions = append(sessions, trailResumeSessionContext{
+			sessions = append(sessions, changeResumeSessionContext{
 				SessionID:    info.SessionID,
 				Agent:        string(info.Agent),
 				LastActive:   info.CreatedAt,
@@ -539,7 +539,7 @@ func readTrailCheckpointSessionContexts(ctx context.Context, store checkpointInf
 	return sessions, skipped, nil
 }
 
-func readTrailCheckpointSessionContent(
+func readChangeCheckpointSessionContent(
 	ctx context.Context,
 	store checkpointInfoReader,
 	checkpointID id.CheckpointID,
@@ -567,7 +567,7 @@ func readTrailCheckpointSessionContent(
 	return &checkpoint.SessionContent{Metadata: *metadata}, nil
 }
 
-func resolveTrailResumeSessions(ctx context.Context, branch string) ([]resumableSession, error) {
+func resolveChangeResumeSessions(ctx context.Context, branch string) ([]resumableSession, error) {
 	states, err := strategy.ListSessionStates(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list sessions: %w", err)
@@ -600,13 +600,13 @@ func resolveTrailResumeSessions(ctx context.Context, branch string) ([]resumable
 	return items, nil
 }
 
-func trailResumeSessionContextsFromLocal(branch string, items []resumableSession) []trailResumeSessionContext {
-	var sessions []trailResumeSessionContext
+func changeResumeSessionContextsFromLocal(branch string, items []resumableSession) []changeResumeSessionContext {
+	var sessions []changeResumeSessionContext
 	for _, item := range items {
 		if item.state == nil || !item.isResumable() || item.branch != branch {
 			continue
 		}
-		sessions = append(sessions, trailResumeSessionContext{
+		sessions = append(sessions, changeResumeSessionContext{
 			SessionID:    item.state.SessionID,
 			Agent:        string(item.state.AgentType),
 			LastPrompt:   strings.TrimSpace(item.state.LastPrompt),
@@ -620,37 +620,37 @@ func trailResumeSessionContextsFromLocal(branch string, items []resumableSession
 	return sessions
 }
 
-func loadTrailResumeFindingsContext(ctx context.Context, client *api.Client, trailID string) (trailResumeFindingsContext, error) {
-	if strings.TrimSpace(trailID) == "" {
-		return trailResumeFindingsContext{}, nil
+func loadChangeResumeFindingsContext(ctx context.Context, client *api.Client, changeID string) (changeResumeFindingsContext, error) {
+	if strings.TrimSpace(changeID) == "" {
+		return changeResumeFindingsContext{}, nil
 	}
 
-	summaryComments, err := fetchAllTrailReviewComments(ctx, client, trailID, trailReviewSummaryOptions())
+	summaryComments, err := fetchAllChangeReviewComments(ctx, client, changeID, changeReviewSummaryOptions())
 	if err != nil {
-		return trailResumeFindingsContext{}, err
+		return changeResumeFindingsContext{}, err
 	}
-	top, hasMore, err := fetchTrailReviewComments(ctx, client, trailID, trailResumeTopFindingOptions())
+	top, hasMore, err := fetchChangeReviewComments(ctx, client, changeID, changeResumeTopFindingOptions())
 	if err != nil {
-		return trailResumeFindingsContext{}, err
+		return changeResumeFindingsContext{}, err
 	}
-	return trailResumeFindingsContext{
-		Counts:  countTrailReviewComments(summaryComments),
+	return changeResumeFindingsContext{
+		Counts:  countChangeReviewComments(summaryComments),
 		Top:     top,
 		HasMore: hasMore,
 	}, nil
 }
 
-func trailResumeTopFindingOptions() trailReviewListOptions {
-	return trailReviewListOptions{
-		Status:    trailReviewStatusOpen,
-		Severity:  strings.Join([]string{trailReviewSeverityHigh, trailReviewSeverityMedium}, ","),
-		Freshness: trailReviewFreshnessCurrent,
+func changeResumeTopFindingOptions() changeReviewListOptions {
+	return changeReviewListOptions{
+		Status:    changeReviewStatusOpen,
+		Severity:  strings.Join([]string{changeReviewSeverityHigh, changeReviewSeverityMedium}, ","),
+		Freshness: changeReviewFreshnessCurrent,
 		Limit:     3,
 	}
 }
 
-func buildTrailResumeContextForRepoWithSkipped(found api.TrailResource, sessions []trailResumeSessionContext, sessionsUnavailable string, sessionsSkipped int, findings trailResumeFindingsContext, repoFullName string) trailResumeContext {
-	trailCtx := trailResumeTrailContext{
+func buildChangeResumeContextForRepoWithSkipped(found api.ChangeResource, sessions []changeResumeSessionContext, sessionsUnavailable string, sessionsSkipped int, findings changeResumeFindingsContext, repoFullName string) changeResumeContext {
+	changeCtx := changeResumeChangeContext{
 		ID:     found.ID,
 		Number: found.Number,
 		Title:  strings.TrimSpace(found.Title),
@@ -666,44 +666,44 @@ func buildTrailResumeContextForRepoWithSkipped(found api.TrailResource, sessions
 		return sessions[i].LastActive.After(sessions[j].LastActive)
 	})
 
-	var defaultResume *trailResumeDefaultContext
+	var defaultResume *changeResumeDefaultContext
 	if len(sessions) > 0 {
-		defaultResume = &trailResumeDefaultContext{
-			Branch:       trailCtx.Branch,
+		defaultResume = &changeResumeDefaultContext{
+			Branch:       changeCtx.Branch,
 			SessionID:    sessions[0].SessionID,
 			CheckpointID: sessions[0].CheckpointID,
 		}
 	} else {
-		defaultResume = &trailResumeDefaultContext{Branch: trailCtx.Branch}
+		defaultResume = &changeResumeDefaultContext{Branch: changeCtx.Branch}
 	}
 
-	ctx := trailResumeContext{
-		Trail:               trailCtx,
+	ctx := changeResumeContext{
+		Change:              changeCtx,
 		Sessions:            sessions,
 		SessionsUnavailable: sessionsUnavailable,
 		SessionsSkipped:     sessionsSkipped,
 		Findings:            findings,
 		DefaultResume:       defaultResume,
 	}
-	ctx.Commands = buildTrailResumeCommands(ctx)
+	ctx.Commands = buildChangeResumeCommands(ctx)
 	return ctx
 }
 
-func buildTrailResumeCommands(ctx trailResumeContext) []string {
-	selector := trailResumeSelectorForCommands(ctx.Trail)
+func buildChangeResumeCommands(ctx changeResumeContext) []string {
+	selector := changeResumeSelectorForCommands(ctx.Change)
 	if selector == "" {
 		return nil
 	}
 	arg := shellArg(selector)
-	resumeCommand := "entire trail resume " + arg
-	if repo := strings.TrimSpace(ctx.Trail.Repo); repo != "" {
+	resumeCommand := "entire change resume " + arg
+	if repo := strings.TrimSpace(ctx.Change.Repo); repo != "" {
 		resumeCommand += " --repo " + shellArg(repo)
 	}
-	if branch := strings.TrimSpace(ctx.Trail.Branch); branch != "" {
+	if branch := strings.TrimSpace(ctx.Change.Branch); branch != "" {
 		resumeCommand += " --branch " + shellArg(branch)
 	}
 	commands := []string{
-		"entire trail finding " + arg + " --json",
+		"entire change finding " + arg + " --json",
 		resumeCommand,
 	}
 	if ctx.DefaultResume != nil && ctx.DefaultResume.CheckpointID != "" {
@@ -715,14 +715,14 @@ func buildTrailResumeCommands(ctx trailResumeContext) []string {
 	return commands
 }
 
-func trailResumeSelectorForCommands(trail trailResumeTrailContext) string {
-	if trail.Number > 0 {
-		return strconv.Itoa(trail.Number)
+func changeResumeSelectorForCommands(change changeResumeChangeContext) string {
+	if change.Number > 0 {
+		return strconv.Itoa(change.Number)
 	}
-	if trail.ID != "" {
-		return trail.ID
+	if change.ID != "" {
+		return change.ID
 	}
-	return trail.Branch
+	return change.Branch
 }
 
 func shellArg(s string) string {
@@ -739,46 +739,46 @@ func shellArg(s string) string {
 	return s
 }
 
-func printTrailResumeContext(w io.Writer, ctx trailResumeContext) {
-	printTrailResumeTrail(w, ctx.Trail)
-	printTrailResumeSessions(w, ctx.Sessions, ctx.SessionsUnavailable, ctx.SessionsSkipped)
-	printTrailResumeFindings(w, ctx.Findings)
-	printTrailResumeCommands(w, ctx.Commands)
+func printChangeResumeContext(w io.Writer, ctx changeResumeContext) {
+	printChangeResumeChange(w, ctx.Change)
+	printChangeResumeSessions(w, ctx.Sessions, ctx.SessionsUnavailable, ctx.SessionsSkipped)
+	printChangeResumeFindings(w, ctx.Findings)
+	printChangeResumeCommands(w, ctx.Commands)
 	fmt.Fprintln(w)
 }
 
-func printTrailResumeTrail(w io.Writer, trail trailResumeTrailContext) {
+func printChangeResumeChange(w io.Writer, change changeResumeChangeContext) {
 	switch {
-	case trail.Number > 0:
-		fmt.Fprintf(w, "  Trail #%d  %s\n", trail.Number, trail.Title)
-	case trail.ID != "":
-		fmt.Fprintf(w, "  Trail %s  %s\n", trail.ID, trail.Title)
+	case change.Number > 0:
+		fmt.Fprintf(w, "  Change #%d  %s\n", change.Number, change.Title)
+	case change.ID != "":
+		fmt.Fprintf(w, "  Change %s  %s\n", change.ID, change.Title)
 	default:
-		fmt.Fprintf(w, "  Trail  %s\n", trail.Title)
+		fmt.Fprintf(w, "  Change  %s\n", change.Title)
 	}
 	parts := []string{}
-	if trail.Status != "" {
-		parts = append(parts, "Status: "+trail.Status)
+	if change.Status != "" {
+		parts = append(parts, "Status: "+change.Status)
 	}
-	if trail.Phase != "" {
-		parts = append(parts, "Phase: "+trail.Phase)
+	if change.Phase != "" {
+		parts = append(parts, "Phase: "+change.Phase)
 	}
-	if trail.Branch != "" {
-		parts = append(parts, "Branch: "+trail.Branch)
+	if change.Branch != "" {
+		parts = append(parts, "Branch: "+change.Branch)
 	}
 	if len(parts) > 0 {
 		fmt.Fprintf(w, "  %s\n", strings.Join(parts, " · "))
 	}
-	if trail.Base != "" {
-		fmt.Fprintf(w, "  Base: %s\n", trail.Base)
+	if change.Base != "" {
+		fmt.Fprintf(w, "  Base: %s\n", change.Base)
 	}
-	if trail.URL != "" {
-		fmt.Fprintf(w, "  URL: %s\n", trail.URL)
+	if change.URL != "" {
+		fmt.Fprintf(w, "  URL: %s\n", change.URL)
 	}
 	fmt.Fprintln(w)
 }
 
-func printTrailResumeSessions(w io.Writer, sessions []trailResumeSessionContext, sessionsUnavailable string, sessionsSkipped int) {
+func printChangeResumeSessions(w io.Writer, sessions []changeResumeSessionContext, sessionsUnavailable string, sessionsSkipped int) {
 	fmt.Fprintln(w, "  Checkpoint sessions:")
 	if sessionsUnavailable != "" {
 		fmt.Fprintf(w, "    unavailable before restore: %s\n", sessionsUnavailable)
@@ -787,7 +787,7 @@ func printTrailResumeSessions(w io.Writer, sessions []trailResumeSessionContext,
 	}
 	if len(sessions) == 0 {
 		fmt.Fprintln(w, "    none found before restore")
-		printTrailResumeSkippedSessions(w, sessionsSkipped)
+		printChangeResumeSkippedSessions(w, sessionsSkipped)
 		fmt.Fprintln(w)
 		return
 	}
@@ -797,7 +797,7 @@ func printTrailResumeSessions(w io.Writer, sessions []trailResumeSessionContext,
 	for _, session := range sessions {
 		prompt := strings.TrimSpace(session.LastPrompt)
 		if prompt == "" {
-			prompt = trailResumeNoPrompt
+			prompt = changeResumeNoPrompt
 		} else {
 			prompt = stringutil.TruncateRunes(stringutil.CollapseWhitespace(prompt), 72, "...")
 		}
@@ -819,11 +819,11 @@ func printTrailResumeSessions(w io.Writer, sessions []trailResumeSessionContext,
 	}
 	_ = tw.Flush()
 	printIndentedBlock(w, table.String(), "    ")
-	printTrailResumeSkippedSessions(w, sessionsSkipped)
+	printChangeResumeSkippedSessions(w, sessionsSkipped)
 	fmt.Fprintln(w)
 }
 
-func printTrailResumeSkippedSessions(w io.Writer, skipped int) {
+func printChangeResumeSkippedSessions(w io.Writer, skipped int) {
 	if skipped == 0 {
 		return
 	}
@@ -834,7 +834,7 @@ func printTrailResumeSkippedSessions(w io.Writer, skipped int) {
 	fmt.Fprintf(w, "    skipped %d checkpoint %s due to read errors\n", skipped, label)
 }
 
-func printTrailResumeFindings(w io.Writer, findings trailResumeFindingsContext) {
+func printChangeResumeFindings(w io.Writer, findings changeResumeFindingsContext) {
 	if findings.Unavailable != "" {
 		fmt.Fprintln(w, "  Findings:")
 		fmt.Fprintf(w, "    unavailable: %s\n\n", findings.Unavailable)
@@ -855,8 +855,8 @@ func printTrailResumeFindings(w io.Writer, findings trailResumeFindingsContext) 
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
 			abbreviate12(finding.ID),
 			severityTableDisplay(finding.Severity),
-			trailReviewLocationDisplay(finding.Location),
-			trailReviewCommentSummary(finding),
+			changeReviewLocationDisplay(finding.Location),
+			changeReviewCommentSummary(finding),
 		)
 	}
 	_ = tw.Flush()
@@ -867,7 +867,7 @@ func printTrailResumeFindings(w io.Writer, findings trailResumeFindingsContext) 
 	fmt.Fprintln(w)
 }
 
-func printTrailResumeCommands(w io.Writer, commands []string) {
+func printChangeResumeCommands(w io.Writer, commands []string) {
 	if len(commands) == 0 {
 		return
 	}
@@ -877,20 +877,20 @@ func printTrailResumeCommands(w io.Writer, commands []string) {
 	}
 }
 
-func encodeTrailResumeContextJSON(w io.Writer, ctx trailResumeContext) error {
+func encodeChangeResumeContextJSON(w io.Writer, ctx changeResumeContext) error {
 	payload := struct {
-		Trail               trailResumeTrailContext     `json:"trail"`
-		Sessions            []trailResumeSessionContext `json:"sessions"`
-		SessionsUnavailable string                      `json:"sessions_unavailable,omitempty"`
-		SessionsSkipped     int                         `json:"sessions_skipped,omitempty"`
-		FindingsSummary     *trailResumeFindingCounts   `json:"findings_summary,omitempty"`
-		Findings            []api.TrailReviewComment    `json:"findings"`
-		FindingsHasMore     bool                        `json:"findings_has_more,omitempty"`
-		FindingsUnavailable string                      `json:"findings_unavailable,omitempty"`
-		DefaultResume       *trailResumeDefaultContext  `json:"default_resume,omitempty"`
-		Commands            []string                    `json:"commands"`
+		Change              changeResumeChangeContext    `json:"change"`
+		Sessions            []changeResumeSessionContext `json:"sessions"`
+		SessionsUnavailable string                       `json:"sessions_unavailable,omitempty"`
+		SessionsSkipped     int                          `json:"sessions_skipped,omitempty"`
+		FindingsSummary     *changeResumeFindingCounts   `json:"findings_summary,omitempty"`
+		Findings            []api.ChangeReviewComment    `json:"findings"`
+		FindingsHasMore     bool                         `json:"findings_has_more,omitempty"`
+		FindingsUnavailable string                       `json:"findings_unavailable,omitempty"`
+		DefaultResume       *changeResumeDefaultContext  `json:"default_resume,omitempty"`
+		Commands            []string                     `json:"commands"`
 	}{
-		Trail:               ctx.Trail,
+		Change:              ctx.Change,
 		Sessions:            ctx.Sessions,
 		SessionsUnavailable: ctx.SessionsUnavailable,
 		SessionsSkipped:     ctx.SessionsSkipped,
@@ -901,75 +901,75 @@ func encodeTrailResumeContextJSON(w io.Writer, ctx trailResumeContext) error {
 		Commands:            ctx.Commands,
 	}
 	if ctx.Findings.Unavailable == "" {
-		summary := trailResumeFindingCountsFromReviewCounts(ctx.Findings.Counts)
+		summary := changeResumeFindingCountsFromReviewCounts(ctx.Findings.Counts)
 		payload.FindingsSummary = &summary
 	}
 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(payload); err != nil {
-		return fmt.Errorf("encode trail resume JSON: %w", err)
+		return fmt.Errorf("encode change resume JSON: %w", err)
 	}
 	return nil
 }
 
-func trailResumeFindingCountsFromReviewCounts(counts trailReviewCommentCounts) trailResumeFindingCounts {
-	return trailResumeFindingCounts(counts)
+func changeResumeFindingCountsFromReviewCounts(counts changeReviewCommentCounts) changeResumeFindingCounts {
+	return changeResumeFindingCounts(counts)
 }
 
-func findTrailResumeSession(sessions []trailResumeSessionContext, sessionID string) (trailResumeSessionContext, bool) {
+func findChangeResumeSession(sessions []changeResumeSessionContext, sessionID string) (changeResumeSessionContext, bool) {
 	for _, session := range sessions {
 		if session.SessionID == sessionID {
 			return session, true
 		}
 	}
-	return trailResumeSessionContext{}, false
+	return changeResumeSessionContext{}, false
 }
 
-type trailResumeRestoredSessionChoice struct {
+type changeResumeRestoredSessionChoice struct {
 	SessionID string
 	Label     string
 	Session   strategy.RestoredSession
 }
 
-func buildTrailResumeRestoredSessionChoices(sessions []strategy.RestoredSession) []trailResumeRestoredSessionChoice {
+func buildChangeResumeRestoredSessionChoices(sessions []strategy.RestoredSession) []changeResumeRestoredSessionChoice {
 	sorted := append([]strategy.RestoredSession(nil), sessions...)
 	sort.SliceStable(sorted, func(i, j int) bool {
-		if trailRestoredSessionSortRank(sorted[i]) != trailRestoredSessionSortRank(sorted[j]) {
-			return trailRestoredSessionSortRank(sorted[i]) < trailRestoredSessionSortRank(sorted[j])
+		if changeRestoredSessionSortRank(sorted[i]) != changeRestoredSessionSortRank(sorted[j]) {
+			return changeRestoredSessionSortRank(sorted[i]) < changeRestoredSessionSortRank(sorted[j])
 		}
 		return sorted[i].CreatedAt.After(sorted[j].CreatedAt)
 	})
 
-	choices := make([]trailResumeRestoredSessionChoice, 0, len(sorted))
+	choices := make([]changeResumeRestoredSessionChoice, 0, len(sorted))
 	for i, session := range sorted {
-		choices = append(choices, trailResumeRestoredSessionChoice{
+		choices = append(choices, changeResumeRestoredSessionChoice{
 			SessionID: session.SessionID,
-			Label:     trailRestoredSessionChoiceLabel(session, i == 0 && len(sorted) > 1),
+			Label:     changeRestoredSessionChoiceLabel(session, i == 0 && len(sorted) > 1),
 			Session:   session,
 		})
 	}
 	return choices
 }
 
-func trailRestoredSessionSortRank(session strategy.RestoredSession) int {
+func changeRestoredSessionSortRank(session strategy.RestoredSession) int {
 	switch sessionpkg.Kind(session.Kind) {
 	case sessionpkg.KindAgentReview, sessionpkg.KindAgentInvestigate:
 		return 1
 	case sessionpkg.KindImported:
 		return 0
 	default:
-		if trailRestoredSessionLooksReviewLike(session) {
+		if changeRestoredSessionLooksReviewLike(session) {
 			return 1
 		}
 		return 0
 	}
 }
 
-func trailRestoredSessionChoiceLabel(session strategy.RestoredSession, isDefault bool) string {
-	prompt := trailRestoredSessionPrompt(session)
+func changeRestoredSessionChoiceLabel(session strategy.RestoredSession, isDefault bool) string {
+	prompt := changeRestoredSessionPrompt(session)
 	if prompt == "" {
-		prompt = trailResumeNoPrompt
+		prompt = changeResumeNoPrompt
 	} else {
 		prompt = stringutil.TruncateRunes(stringutil.CollapseWhitespace(prompt), 50, "...")
 	}
@@ -982,9 +982,9 @@ func trailRestoredSessionChoiceLabel(session strategy.RestoredSession, isDefault
 		when = timeAgo(session.CreatedAt)
 	}
 	parts := []string{session.SessionID, prompt, agentName, "last active " + when}
-	if kindLabel := trailRestoredSessionKindLabel(session.Kind); kindLabel != "" {
+	if kindLabel := changeRestoredSessionKindLabel(session.Kind); kindLabel != "" {
 		parts = append(parts, kindLabel)
-	} else if trailRestoredSessionLooksReviewLike(session) {
+	} else if changeRestoredSessionLooksReviewLike(session) {
 		parts = append(parts, "review")
 	}
 	if isDefault {
@@ -993,7 +993,7 @@ func trailRestoredSessionChoiceLabel(session strategy.RestoredSession, isDefault
 	return strings.Join(parts, " · ")
 }
 
-func trailRestoredSessionKindLabel(kind string) string {
+func changeRestoredSessionKindLabel(kind string) string {
 	switch sessionpkg.Kind(kind) {
 	case sessionpkg.KindAgentReview:
 		return "review"
@@ -1006,31 +1006,31 @@ func trailRestoredSessionKindLabel(kind string) string {
 	}
 }
 
-func trailRestoredSessionPrompt(session strategy.RestoredSession) string {
+func changeRestoredSessionPrompt(session strategy.RestoredSession) string {
 	if prompt := strings.TrimSpace(session.Prompt); prompt != "" {
 		return prompt
 	}
 	return strings.TrimSpace(session.ReviewPrompt)
 }
 
-func trailRestoredSessionLooksReviewLike(session strategy.RestoredSession) bool {
-	prompt := strings.ToLower(trailRestoredSessionPrompt(session))
+func changeRestoredSessionLooksReviewLike(session strategy.RestoredSession) bool {
+	prompt := strings.ToLower(changeRestoredSessionPrompt(session))
 	return strings.HasPrefix(prompt, "review the code changes") ||
 		strings.HasPrefix(prompt, "review this branch") ||
 		strings.HasPrefix(prompt, "review the branch")
 }
 
-func trailRestoredSessionsAreAllReviewOrInvestigation(sessions []strategy.RestoredSession) bool {
+func changeRestoredSessionsAreAllReviewOrInvestigation(sessions []strategy.RestoredSession) bool {
 	for _, session := range sessions {
-		if trailRestoredSessionSortRank(session) == 0 {
+		if changeRestoredSessionSortRank(session) == 0 {
 			return false
 		}
 	}
 	return len(sessions) > 0
 }
 
-func promptTrailRestoredSession(ctx context.Context, w io.Writer, sessions []strategy.RestoredSession) (strategy.RestoredSession, bool, error) {
-	choices := buildTrailResumeRestoredSessionChoices(sessions)
+func promptChangeRestoredSession(ctx context.Context, w io.Writer, sessions []strategy.RestoredSession) (strategy.RestoredSession, bool, error) {
+	choices := buildChangeResumeRestoredSessionChoices(sessions)
 	if len(choices) == 0 {
 		return strategy.RestoredSession{}, false, nil
 	}
@@ -1046,7 +1046,7 @@ func promptTrailRestoredSession(ctx context.Context, w io.Writer, sessions []str
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Choose a checkpoint session to resume").
-				Description("These are agent transcript logs restored from the branch checkpoint; they may not appear as trail UI sessions.").
+				Description("These are agent transcript logs restored from the branch checkpoint; they may not appear as change UI sessions.").
 				Options(options...).
 				Value(&selected),
 		),
@@ -1069,7 +1069,7 @@ func promptTrailRestoredSession(ctx context.Context, w io.Writer, sessions []str
 	return strategy.RestoredSession{}, false, fmt.Errorf("invalid selection %q", selected)
 }
 
-func findTrailRestoredSession(sessions []strategy.RestoredSession, sessionID string) (strategy.RestoredSession, bool) {
+func findChangeRestoredSession(sessions []strategy.RestoredSession, sessionID string) (strategy.RestoredSession, bool) {
 	for _, session := range sessions {
 		if session.SessionID == sessionID {
 			return session, true
@@ -1078,7 +1078,7 @@ func findTrailRestoredSession(sessions []strategy.RestoredSession, sessionID str
 	return strategy.RestoredSession{}, false
 }
 
-func launchTrailRestoredSession(ctx context.Context, w io.Writer, session strategy.RestoredSession) error {
+func launchChangeRestoredSession(ctx context.Context, w io.Writer, session strategy.RestoredSession) error {
 	resumeAgent, err := strategy.ResolveAgentForRewind(session.Agent)
 	if err != nil {
 		return fmt.Errorf("failed to resolve agent for session %s: %w", session.SessionID, err)
@@ -1107,14 +1107,14 @@ func launchTrailRestoredSession(ctx context.Context, w io.Writer, session strate
 	return nil
 }
 
-func runTrailResumePicker(ctx context.Context, cmd *cobra.Command, branch string, sessions []trailResumeSessionContext, force bool) error {
-	if !ensureTrailResumeBranchAvailable(ctx, cmd.OutOrStdout(), branch) {
+func runChangeResumePicker(ctx context.Context, cmd *cobra.Command, branch string, sessions []changeResumeSessionContext, force bool) error {
+	if !ensureChangeResumeBranchAvailable(ctx, cmd.OutOrStdout(), branch) {
 		return nil
 	}
 
 	options := make([]huh.Option[string], 0, len(sessions)+1)
 	for _, session := range sessions {
-		options = append(options, huh.NewOption(trailResumeSessionOptionLabel(session), session.SessionID))
+		options = append(options, huh.NewOption(changeResumeSessionOptionLabel(session), session.SessionID))
 	}
 	options = append(options, huh.NewOption("Cancel", resumePickerCancel))
 
@@ -1123,7 +1123,7 @@ func runTrailResumePicker(ctx context.Context, cmd *cobra.Command, branch string
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Choose a checkpoint session to resume").
-				Description("These sessions are recorded in the trail branch checkpoint.").
+				Description("These sessions are recorded in the change branch checkpoint.").
 				Options(options...).
 				Value(&selected),
 		),
@@ -1138,35 +1138,35 @@ func runTrailResumePicker(ctx context.Context, cmd *cobra.Command, branch string
 		fmt.Fprintln(cmd.OutOrStdout(), "Resume cancelled.")
 		return nil
 	}
-	sessionCtx, ok := findTrailResumeSession(sessions, selected)
+	sessionCtx, ok := findChangeResumeSession(sessions, selected)
 	if !ok {
 		return fmt.Errorf("invalid selection %q", selected)
 	}
-	return resumeTrailCheckpoint(ctx, cmd, branch, id.CheckpointID(sessionCtx.CheckpointID), sessionCtx.SessionID, force)
+	return resumeChangeCheckpoint(ctx, cmd, branch, id.CheckpointID(sessionCtx.CheckpointID), sessionCtx.SessionID, force)
 }
 
-func ensureTrailResumeBranchAvailable(ctx context.Context, w io.Writer, branch string) bool {
+func ensureChangeResumeBranchAvailable(ctx context.Context, w io.Writer, branch string) bool {
 	otherPath, ok := branchCheckedOutElsewhere(ctx, branch)
 	if !ok {
 		return true
 	}
-	fmt.Fprint(w, trailResumeWorktreeClashMessage(branch, otherPath))
+	fmt.Fprint(w, changeResumeWorktreeClashMessage(branch, otherPath))
 	return false
 }
 
-func trailResumeWorktreeClashMessage(branch, otherPath string) string {
+func changeResumeWorktreeClashMessage(branch, otherPath string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Branch %q is already checked out in another worktree:\n", branch)
 	fmt.Fprintf(&b, "  %s\n\n", otherPath)
 	fmt.Fprintf(&b, "Resume from that worktree with:\n")
-	fmt.Fprintf(&b, "  cd %s && entire trail resume %s\n", shellQuote(otherPath), shellArg(branch))
+	fmt.Fprintf(&b, "  cd %s && entire change resume %s\n", shellQuote(otherPath), shellArg(branch))
 	return b.String()
 }
 
-func trailResumeSessionOptionLabel(session trailResumeSessionContext) string {
+func changeResumeSessionOptionLabel(session changeResumeSessionContext) string {
 	prompt := strings.TrimSpace(session.LastPrompt)
 	if prompt == "" {
-		prompt = trailResumeNoPrompt
+		prompt = changeResumeNoPrompt
 	} else {
 		prompt = stringutil.TruncateRunes(stringutil.CollapseWhitespace(prompt), 50, "...")
 	}

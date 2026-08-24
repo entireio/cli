@@ -7,11 +7,11 @@ import (
 
 const threadTestLogin = "alice"
 
-func TestTrailThreadDetailDecodes(t *testing.T) {
+func TestChangeThreadDetailDecodes(t *testing.T) {
 	t.Parallel()
 	payload := []byte(`{
 	  "thread": {
-	    "id": "th1", "trailId": "tr1", "kind": "discussion", "title": "Design",
+	    "id": "th1", "changeId": "tr1", "kind": "discussion", "title": "Design",
 	    "reviewCommentId": null, "resolved": false,
 	    "resolvedBy": null, "resolvedAt": null,
 	    "createdBy": "actor-uuid", "createdAt": "2026-07-10T00:00:00Z",
@@ -25,7 +25,7 @@ func TestTrailThreadDetailDecodes(t *testing.T) {
 	  ],
 	  "eventCursor": "42"
 	}`)
-	var out TrailThreadDetailResponse
+	var out ChangeThreadDetailResponse
 	if err := json.Unmarshal(payload, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -52,10 +52,10 @@ func TestTrailThreadDetailDecodes(t *testing.T) {
 	}
 }
 
-func TestTrailThreadUpdateRequestMarshalsResolvedFalse(t *testing.T) {
+func TestChangeThreadUpdateRequestMarshalsResolvedFalse(t *testing.T) {
 	t.Parallel()
 	f := false
-	b, err := json.Marshal(TrailThreadUpdateRequest{Resolved: &f})
+	b, err := json.Marshal(ChangeThreadUpdateRequest{Resolved: &f})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestTrailThreadUpdateRequestMarshalsResolvedFalse(t *testing.T) {
 		t.Errorf("got %s, want {\"resolved\":false}", b)
 	}
 	// Omitting resolved (nil) must drop the field.
-	b2, err := json.Marshal(TrailThreadUpdateRequest{})
+	b2, err := json.Marshal(ChangeThreadUpdateRequest{})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
