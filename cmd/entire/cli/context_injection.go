@@ -207,17 +207,17 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 		return "", nil
 	}
 	for _, item := range evidence {
-		if persistErr := persistContextEvidence(hookCtx, item); persistErr != nil {
+		if persistErr := persistContextEvidence(ctx, item); persistErr != nil {
 			fail()
 			return "", nil
 		}
 	}
-	finishedAt := time.Now()
 	renderedIDs := make([]string, len(evidence))
 	for i, item := range evidence {
 		renderedIDs[i] = item.ID
 	}
 	finalize := func() error {
+		finishedAt := time.Now()
 		return strategy.MutateSessionState(strategy.WithSessionLockWait(ctx, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
 			state.CrossRepoContext.PendingUntil = time.Time{}
 			state.CrossRepoContext.FailureBackoffUntil = time.Time{}
