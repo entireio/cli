@@ -430,7 +430,10 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 }
 
 func readV1Tip(repo *git.Repository, refName plumbing.ReferenceName) (plumbing.Hash, error) {
-	ref, err := repo.Storer.Reference(refName)
+	// Resolve symbolic refs the same way atomicSetV1Ref does on CAS failure,
+	// so the pre-CAS tip check and the conflict Actual hash always refer to
+	// the same underlying ref.
+	ref, err := repo.Reference(refName, true)
 	if err != nil {
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			return plumbing.ZeroHash, nil
