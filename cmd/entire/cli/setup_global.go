@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
@@ -181,72 +183,141 @@ func printGlobalTrackingHintIfUnconfigured(ctx context.Context, w io.Writer) {
 	fmt.Fprintln(w, globalTrackingHint)
 }
 
-// ensureRepoLevelTakeover runs the bookkeeping owed whenever repo-level
-// settings take over a clone the user-global tier was (or may have been)
-// tracking. It is invoked from EVERY path that creates the first repo-level
-// settings file — the interactive and --agent enable flows, the raw
-// enable/disable flag flip (a bare `entire disable` also creates the routing
-// discriminator) — plus `entire enable` on an already-configured repo, which
-// is the user-initiated recovery point for clones a pre-fix binary stranded.
-//
-// It self-guards on the migration's own trigger logic (the clone's
-// global_setup_completed marker, or a non-empty routed runtime dir), so it is
-// a cheap no-op for repos the global tier never touched. When the guard
-// holds it, in order:
-//  1. ensures .entire/.gitignore exists, so the migrated runtime files are
-//     never visible in git status (order is load-bearing);
-//  2. migrates this worktree's routed runtime data into .entire/;
-//  3. clears the global_setup_completed marker — repo-level machinery owns
-//     hooks now, and a stale marker would short-circuit the lazy global
-//     setup if the repo ever returns to global-only tracking.
-//
-// It always clears the invisible-routing cache: the settings file being
-// created (or having been created) is the routing discriminator, and the
-// writer process must observe its own write.
-func ensureRepoLevelTakeover(ctx context.Context, w io.Writer) {
-	defer paths.ClearInvisibleRuntimeCache()
-	if !globalTakeoverRelevant(ctx) {
-		return
-	}
-	if err := strategy.EnsureEntireGitignore(ctx); err != nil {
-		logging.Warn(ctx, "repo takeover: could not ensure .entire/.gitignore before migrating runtime data; runtime files will appear untracked in git status until .entire/.gitignore exists — create it or re-run enable", "error", err)
-	}
-	maybeMigrateGlobalRuntimeData(ctx, w)
-	clearGlobalSetupMarker(ctx)
+// repoLevelTakeoverPlan captures the routing-independent locations needed to
+// reconcile a globally tracked worktree after repo settings become
+// authoritative. Capture happens before the settings write; reconciliation
+// happens after it. sourceErr is retained so a marker-backed retry is not
+// silently cleared when the old namespace cannot be resolved.
+type repoLevelTakeoverPlan struct {
+	source    string
+	root      string
+	markerSet bool
+	relevant  bool
+	sourceErr error
 }
 
-// globalTakeoverRelevant reports whether the global tier is or was relevant
-// for this clone: the once-per-clone lazy-setup marker is set, or the current
-// worktree's routed runtime dir is non-empty. This is the same trigger logic
-// maybeMigrateGlobalRuntimeData applies.
-func globalTakeoverRelevant(ctx context.Context) bool {
+func planRepoLevelTakeover(ctx context.Context) repoLevelTakeoverPlan {
+	plan := repoLevelTakeoverPlan{}
 	if prefs, err := settings.LoadClonePreferences(ctx); err == nil && prefs.GlobalSetupCompleted {
-		return true
+		plan.markerSet = true
+		plan.relevant = true
 	}
-	source, _, err := invisibleRuntimeLocations(ctx)
-	if err != nil {
-		return false
+	plan.source, plan.root, plan.sourceErr = invisibleRuntimeLocations(ctx)
+	if plan.sourceErr != nil {
+		return plan
 	}
-	entries, err := os.ReadDir(source)
-	return err == nil && len(entries) > 0
+	if entries, err := os.ReadDir(plan.source); err == nil && len(entries) > 0 {
+		plan.relevant = true
+	}
+	return plan
+}
+
+// reconcileRepoLevelTakeover performs best-effort cleanup only after the repo
+// settings discriminator has been persisted. Activation is never rolled back
+// and never waits behind a hook that began on the old route. The global setup
+// marker is a retry marker: it is cleared only after the whole file + state
+// reconciliation pass succeeds.
+func reconcileRepoLevelTakeover(ctx context.Context, w io.Writer, plan repoLevelTakeoverPlan) {
+	paths.ClearInvisibleRuntimeCache()
+	if plan.sourceErr != nil {
+		if plan.markerSet {
+			logging.Warn(ctx, "global runtime data reconciliation deferred: routed location unresolved", "error", plan.sourceErr)
+			fmt.Fprintln(w, "  Runtime data migration deferred: routed location could not be resolved — re-run 'entire enable'.")
+		}
+		return
+	}
+	if plan.root == "" || plan.source == "" {
+		return
+	}
+	if !plan.relevant && !transcriptPathRepairRelevant(ctx, plan) {
+		return
+	}
+
+	if plan.relevant {
+		if err := strategy.EnsureEntireGitignore(ctx); err != nil {
+			logging.Warn(ctx, "repo takeover: could not ensure .entire/.gitignore before migrating runtime data", "error", err)
+			fmt.Fprintln(w, "  Runtime data reconciliation incomplete: could not ensure .entire/.gitignore — re-run 'entire enable'.")
+			return
+		}
+	}
+
+	release, lockErr := tryAcquireGlobalRuntimeMigrationGate(ctx, plan.root)
+	if lockErr != nil {
+		logging.Warn(ctx, "global runtime data migration deferred: worktree migration gate is busy", "error", lockErr)
+		fmt.Fprintln(w, "  Runtime data migration deferred: an agent hook is still active — re-run 'entire enable'.")
+		return
+	}
+	defer release()
+
+	if n := activeSessionCountInWorktree(ctx, plan.root); n > 0 {
+		logging.Warn(ctx, "global runtime data migration deferred: active agent session(s) in this worktree", "count", n)
+		fmt.Fprintf(w, "  Runtime data migration deferred: %d agent session(s) active in this worktree — re-run 'entire enable' once they finish.\n", n)
+		return
+	}
+
+	result := runtimeMigrationResult{}
+	if plan.relevant {
+		result = migrateGlobalRuntimeData(ctx, plan)
+	}
+	result.unresolved += repairMigratedTranscriptPaths(ctx, plan)
+
+	if plan.relevant {
+		// Always prune emptied subtrees, even when a conflicting file keeps a
+		// different subtree retryable. Only treat a remaining root as an extra
+		// cleanup failure when no earlier file failure explains its presence.
+		removeEmptyDirTree(plan.source)
+		if result.failed == 0 {
+			if _, err := os.Stat(plan.source); err == nil || !errors.Is(err, fs.ErrNotExist) {
+				result.failed++
+				logging.Warn(ctx, "global runtime data migration: routed namespace cleanup incomplete", "path", plan.source, "error", err)
+			}
+		}
+		_ = os.Remove(filepath.Dir(plan.source))
+	}
+
+	if result.failed > 0 || result.unresolved > 0 {
+		if plan.relevant {
+			printRuntimeMigrationSummary(w, plan.source, result)
+		}
+		if !plan.relevant {
+			fmt.Fprintln(w, "  Runtime data reconciliation incomplete: a stored transcript path could not be repaired — re-run 'entire enable'.")
+		}
+		return
+	}
+	if !clearGlobalSetupMarker(ctx) {
+		result.maintenanceFailed++
+	}
+	if plan.relevant {
+		printRuntimeMigrationSummary(w, plan.source, result)
+	}
+	if result.maintenanceFailed > 0 && !plan.relevant {
+		fmt.Fprintln(w, "  Runtime data reconciliation incomplete: the global setup marker could not be cleared — re-run 'entire enable'.")
+	}
 }
 
 // clearGlobalSetupMarker clears the clone's global_setup_completed marker so
 // the lazy invisible setup re-runs the next time the global tier owns this
 // clone. Read-before-write keeps the common case (marker absent) to one
 // preferences read, without taking the preferences lock. Best-effort: a
-// failure is logged, and the stale marker's only cost is that a later
-// globally-tracked session skips hook reinstallation until doctor clears it.
-func clearGlobalSetupMarker(ctx context.Context) {
-	if prefs, err := settings.LoadClonePreferences(ctx); err != nil || !prefs.GlobalSetupCompleted {
-		return
+// failure is logged and reported to reconciliation so it cannot claim a fully
+// successful pass. The stale marker then preserves retryability.
+func clearGlobalSetupMarker(ctx context.Context) bool {
+	prefs, err := settings.LoadClonePreferences(ctx)
+	if err != nil {
+		logging.Warn(ctx, "could not read clone preferences while clearing the global_setup_completed marker", "error", err)
+		return false
+	}
+	if !prefs.GlobalSetupCompleted {
+		return true
 	}
 	if err := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
 		p.GlobalSetupCompleted = false
 		return nil
 	}); err != nil {
 		logging.Warn(ctx, "could not clear the global_setup_completed marker", "error", err)
+		return false
 	}
+	return true
 }
 
 // invisibleRuntimeLocations resolves the current worktree's routed runtime
@@ -270,13 +341,28 @@ func invisibleRuntimeLocations(ctx context.Context) (source, root string, err er
 	return source, root, nil
 }
 
-// maybeMigrateGlobalRuntimeData moves THIS worktree's invisible-routed
+// maybeMigrateGlobalRuntimeData is the direct migration/recovery entry point
+// retained for focused tests and internal callers. Repo activation paths must
+// instead capture planRepoLevelTakeover before their settings write and call
+// reconcileRepoLevelTakeover afterward.
+func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
+	reconcileRepoLevelTakeover(ctx, w, planRepoLevelTakeover(ctx))
+}
+
+type runtimeMigrationResult struct {
+	moved             int
+	skipped           int
+	failed            int
+	unresolved        int
+	maintenanceFailed int
+}
+
+// migrateGlobalRuntimeData moves THIS worktree's invisible-routed
 // runtime data (<git-common-dir>/entire/worktree/<worktree-key>/
 // {metadata,logs,tmp} — the subtrees paths.InvisibleRuntimeSubdirs
 // enumerates) into the worktree's .entire directory. Repo-level enable flows
-// call it (via ensureRepoLevelTakeover) BEFORE writing .entire/settings.json:
-// that write flips path routing to the worktree, which would otherwise strand
-// the routed files in .git. Only the current worktree's namespace is touched
+// call it only through post-activation reconciliation. Only the current
+// worktree's namespace is touched
 // — sibling worktrees of the same clone keep their own namespaces (and their
 // in-flight sessions) untouched. It triggers when the clone preferences carry
 // the global_setup_completed marker or when the routed directory is
@@ -286,52 +372,8 @@ func invisibleRuntimeLocations(ctx context.Context) (source, root string, err er
 // cannot be resolved while the marker says there may be data, the early
 // return logs one Warn — the data stays under .git and the marker persists,
 // so a later enable retries.
-func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
-	markerSet := false
-	if prefs, prefsErr := settings.LoadClonePreferences(ctx); prefsErr == nil && prefs.GlobalSetupCompleted {
-		markerSet = true
-	}
-	source, root, err := invisibleRuntimeLocations(ctx)
-	if err != nil {
-		if markerSet {
-			logging.Warn(ctx, "global runtime data migration skipped: routed location unresolved; any routed data stays under .git until a later enable retries", "error", err)
-		}
-		return
-	}
-
-	if !markerSet {
-		entries, readErr := os.ReadDir(source)
-		if readErr != nil || len(entries) == 0 {
-			return
-		}
-	}
-
-	// Every lifecycle hook for this worktree takes the same cross-process gate
-	// before it can create or mutate routed runtime data. Holding it across the
-	// active-session check and all moves closes the check/move race: a hook that
-	// was already active is observed below, while a new hook waits until the
-	// migration has finished.
-	release, lockErr := acquireGlobalRuntimeMigrationGate(ctx, root)
-	if lockErr != nil {
-		logging.Warn(ctx, "global runtime data migration deferred: could not acquire worktree migration gate", "error", lockErr)
-		fmt.Fprintln(w, "  Runtime data migration deferred: could not safely exclude active hooks — re-run 'entire enable'.")
-		return
-	}
-	defer release()
-
-	// An active session in this worktree means a hook process may be writing
-	// under source right now: a rename can strand its in-flight file and the
-	// EXDEV copy fallback can snapshot a half-written one. Defer the whole
-	// migration — the non-empty routed dir re-triggers it on the next enable,
-	// which is the documented recovery point — and say so, since silence here
-	// would read as "nothing to migrate".
-	if n := activeSessionCountInWorktree(ctx, root); n > 0 {
-		logging.Warn(ctx, "global runtime data migration deferred: active agent session(s) in this worktree", "count", n)
-		fmt.Fprintf(w, "  Runtime data migration deferred: %d agent session(s) active in this worktree — re-run 'entire enable' once they finish.\n", n)
-		return
-	}
-
-	var moved, skipped, failed int
+func migrateGlobalRuntimeData(ctx context.Context, plan repoLevelTakeoverPlan) runtimeMigrationResult {
+	result := runtimeMigrationResult{}
 	warnLog := &migrationWarnLog{}
 	for _, sub := range paths.InvisibleRuntimeSubdirs() {
 		// The migration's DESTINATION is deliberately the literal worktree
@@ -341,44 +383,138 @@ func maybeMigrateGlobalRuntimeData(ctx context.Context, w io.Writer) {
 		// onto themselves; on a takeover recovery routing already points at
 		// the worktree, and the destination must be that same literal dir
 		// regardless. Routing-independent by design.
-		m, s, f := moveDirContents(ctx, warnLog, filepath.Join(source, sub), filepath.Join(root, paths.EntireDir, sub)) // entire-join-ok: migration destination, routing-independent by design
-		moved += m
-		skipped += s
-		failed += f
+		m, s, f := moveDirContents(ctx, warnLog, filepath.Join(plan.source, sub), filepath.Join(plan.root, paths.EntireDir, sub)) // entire-join-ok: migration destination, routing-independent by design
+		result.moved += m
+		result.skipped += s
+		result.failed += f
 	}
 	warnLog.flush(ctx)
-	// Re-check before the only remaining destructive step. Participating hooks
-	// cannot become active while the migration gate is held, but this remains a
-	// defense against old binaries or direct state writers that do not yet take
-	// the gate. Leaving the tree costs only a later sweep — the next enable
-	// re-triggers migration on a non-empty routed dir.
-	if n := activeSessionCountInWorktree(ctx, root); n > 0 {
-		logging.Warn(ctx, "skipping routed-directory cleanup: session(s) became active during migration", "count", n)
-	} else {
-		removeEmptyDirTree(source)
-		// The parent (<git-common-dir>/entire/worktree) is shared with sibling
-		// worktrees' namespaces; os.Remove only succeeds once the last namespace
-		// is gone, which is exactly the desired cleanup.
-		_ = os.Remove(filepath.Dir(source))
-	}
+	return result
+}
 
-	if moved+skipped+failed == 0 {
+func printRuntimeMigrationSummary(w io.Writer, source string, result runtimeMigrationResult) {
+	if result.moved+result.skipped+result.failed+result.unresolved+result.maintenanceFailed == 0 {
 		return
 	}
 	// ✓ elsewhere in the enable output means unqualified success, so drop it
 	// when anything failed, and name the source so leftovers are findable.
 	prefix := "  ✓ "
-	if failed > 0 {
+	if result.failed > 0 || result.unresolved > 0 || result.maintenanceFailed > 0 {
 		prefix = "  "
 	}
-	line := fmt.Sprintf("%sMoved %d globally-tracked file(s) into .entire/", prefix, moved)
-	if skipped > 0 {
-		line += fmt.Sprintf(", %d already present", skipped)
+	line := fmt.Sprintf("%sMoved %d globally-tracked file(s) into .entire/", prefix, result.moved)
+	if result.skipped > 0 {
+		line += fmt.Sprintf(", %d already present", result.skipped)
 	}
-	if failed > 0 {
-		line += fmt.Sprintf(", %d could not be moved (left in %s)", failed, source)
+	if result.failed > 0 {
+		line += fmt.Sprintf(", %d could not be moved (left in %s)", result.failed, source)
+	}
+	if result.unresolved > 0 {
+		line += fmt.Sprintf(", %d transcript path(s) could not be repaired", result.unresolved)
+	}
+	if result.maintenanceFailed > 0 {
+		line += ", global setup marker could not be cleared"
 	}
 	fmt.Fprintln(w, line)
+}
+
+func repairMigratedTranscriptPaths(ctx context.Context, plan repoLevelTakeoverPlan) int {
+	states, err := strategy.ListSessionStates(ctx)
+	if err != nil {
+		logging.Warn(ctx, "could not list session states for runtime path repair", "error", err)
+		return 1
+	}
+	unresolved := 0
+	for _, state := range states {
+		if state.WorktreePath != plan.root || state.Phase.IsActive() || state.TranscriptPath == "" {
+			continue
+		}
+		newPath, belongs, targetExists := migratedRuntimePathCandidate(plan, state.TranscriptPath)
+		if !belongs {
+			continue
+		}
+		if !targetExists {
+			unresolved++
+			logging.Warn(ctx, "migrated transcript path destination is missing", "session_id", state.SessionID, "old_path", state.TranscriptPath, "new_path", newPath)
+			continue
+		}
+		didRepair := false
+		err := strategy.MutateSessionState(ctx, state.SessionID, func(current *strategy.SessionState) error {
+			if current.WorktreePath != plan.root || current.Phase.IsActive() || current.TranscriptPath != state.TranscriptPath {
+				return strategy.ErrMutationSkip
+			}
+			current.TranscriptPath = newPath
+			didRepair = true
+			return nil
+		})
+		if err != nil || !didRepair {
+			unresolved++
+			logging.Warn(ctx, "could not repair migrated transcript path", "session_id", state.SessionID, "error", err)
+		}
+	}
+	return unresolved
+}
+
+func transcriptPathRepairRelevant(ctx context.Context, plan repoLevelTakeoverPlan) bool {
+	states, err := strategy.ListSessionStates(ctx)
+	if err != nil {
+		// Explicit enable is a recovery point. If state cannot be inspected, run
+		// reconciliation so the failure is retained and reported, not mistaken
+		// for proof that there is nothing to repair.
+		return true
+	}
+	for _, state := range states {
+		if state.WorktreePath != plan.root || state.TranscriptPath == "" {
+			continue
+		}
+		if _, belongs, _ := migratedRuntimePathCandidate(plan, state.TranscriptPath); belongs {
+			return true
+		}
+	}
+	return false
+}
+
+func migratedRuntimePath(plan repoLevelTakeoverPlan, oldPath string) (string, bool) {
+	newPath, belongs, exists := migratedRuntimePathCandidate(plan, oldPath)
+	return newPath, belongs && exists
+}
+
+func migratedRuntimePathCandidate(plan repoLevelTakeoverPlan, oldPath string) (newPath string, belongs, targetExists bool) {
+	if !filepath.IsAbs(oldPath) || plan.source == "" || plan.root == "" {
+		return "", false, false
+	}
+	rel, err := filepath.Rel(filepath.Clean(plan.source), filepath.Clean(oldPath))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false, false
+	}
+	first, _, _ := strings.Cut(rel, string(filepath.Separator))
+	runtimeSubdir := false
+	for _, subdir := range paths.InvisibleRuntimeSubdirs() {
+		if first == subdir {
+			runtimeSubdir = true
+			break
+		}
+	}
+	if !runtimeSubdir {
+		return "", false, false
+	}
+	newPath = filepath.Join(plan.root, paths.EntireDir, rel) // entire-join-ok: migration destination, routing-independent by design
+	// A retained source means migration did not establish that the destination
+	// is its replacement (most commonly the no-overwrite conflict case). Never
+	// repoint state at merely-existing, potentially divergent destination data.
+	if _, sourceErr := os.Stat(filepath.Clean(oldPath)); sourceErr == nil {
+		return newPath, true, false
+	} else if !errors.Is(sourceErr, fs.ErrNotExist) {
+		return newPath, true, false
+	}
+	_, statErr := os.Stat(newPath)
+	return newPath, true, statErr == nil
+}
+
+func tryAcquireGlobalRuntimeMigrationGate(ctx context.Context, root string) (func(), error) {
+	tryCtx, cancel := context.WithDeadline(ctx, time.Now())
+	defer cancel()
+	return acquireGlobalRuntimeMigrationGate(tryCtx, root)
 }
 
 // acquireGlobalRuntimeMigrationGate serializes lifecycle hooks with takeover

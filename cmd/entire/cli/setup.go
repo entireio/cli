@@ -1247,13 +1247,11 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
 
-	// This repo has settings files, but the clone may still hold routed
-	// runtime data under .git: a pre-fix `entire disable` created the first
-	// settings file without migrating, stranding it. `entire enable` is the
-	// user-initiated recovery point, so run the takeover here too — it
-	// self-guards on the marker / routed-data trigger and is a no-op for
-	// repos the global tier never touched.
-	ensureRepoLevelTakeover(ctx, w)
+	// Explicit enable is also the recovery point for a pre-fix takeover that
+	// already moved files but left session state pointing at the old invisible
+	// namespace. Capture even when the repo is already configured; the repair
+	// pass deliberately does not depend on the marker or a non-empty source.
+	takeover := planRepoLevelTakeover(ctx)
 
 	// Resolve the target scope first, then decide whether there is anything to
 	// do. Enable writes to the scope resolved by settingsTargetFile, which is
@@ -1275,6 +1273,7 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 	// file is not itself explicitly disabled.
 	enabled, err := IsEnabled(ctx)
 	if err == nil && enabled && !scopeExplicitlyDisabled(ctx, useProject) {
+		reconcileRepoLevelTakeover(ctx, w, takeover)
 		if !usedSetupFlow {
 			fmt.Fprintln(w, "Entire is already enabled.")
 		}
@@ -1347,12 +1346,10 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		return fmt.Errorf("failed to setup .entire directory: %w", err)
 	}
 
-	// A globally tracked clone keeps its runtime data under .git; take it
-	// over BEFORE the settings write below flips invisible routing to the
-	// worktree (best-effort — see ensureRepoLevelTakeover), but AFTER
-	// setupEntireDirectory so .entire/.gitignore already exists and the moved
-	// files are never visible in git status.
-	ensureRepoLevelTakeover(ctx, w)
+	// Capture the exact old-route namespace before the settings write below.
+	// The write is the activation commit point; migration follows it as
+	// best-effort reconciliation so an active old hook cannot delay enable.
+	takeover := planRepoLevelTakeover(ctx)
 
 	// Load existing settings to preserve other options (like strategy_options.push)
 	settings, err := LoadEntireSettings(ctx)
@@ -1405,6 +1402,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	if err := saveSettings(); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
+	reconcileRepoLevelTakeover(ctx, w, takeover)
 
 	// Use settings values (merged from existing config + flags) for hook installation
 	// This ensures re-running `entire enable` without flags preserves existing settings
@@ -1535,9 +1533,11 @@ func firstRunCheckpointBackendDefault() string {
 // uses settingsTargetFile so a bare `entire enable` targets the committed
 // settings.json when present and can recover a repo disabled there.
 func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error {
+	takeover := planRepoLevelTakeover(ctx)
 	if err := setEnabledFlag(ctx, true, useProjectSettings); err != nil {
 		return err
 	}
+	reconcileRepoLevelTakeover(ctx, w, takeover)
 
 	fmt.Fprintln(w, "Entire is now enabled.")
 	printEnabledStatus(ctx, w)
@@ -1568,19 +1568,14 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 		configDisplay = configDisplayProject
 	}
 
-	// In a repo with no settings file yet, the flip below CREATES one — the
-	// invisible-routing discriminator. If the global tier was tracking this
-	// clone, that write strands its routed runtime data under .git, so the
-	// takeover (gitignore + migration + marker clear) is owed here exactly as
-	// on enable. Captured pre-write; takeover runs after the successful flip.
-	firstRepoActivation := !repoActivationConfiguredOrUnreadable(ctx)
+	// Capture before the write; activation is authoritative immediately and
+	// old-route cleanup follows without blocking disable.
+	takeover := planRepoLevelTakeover(ctx)
 
 	if err := setEnabledFlag(ctx, false, targetFile == settings.EntireSettingsFile); err != nil {
 		return err
 	}
-	if firstRepoActivation {
-		ensureRepoLevelTakeover(ctx, w)
-	}
+	reconcileRepoLevelTakeover(ctx, w, takeover)
 
 	fmt.Fprintf(w, "Entire is now disabled (%s).\n", configDisplay)
 	return nil
@@ -2001,12 +1996,9 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		return fmt.Errorf("failed to setup .entire directory: %w", err)
 	}
 
-	// A globally tracked clone keeps its runtime data under .git; take it
-	// over BEFORE the settings write below flips invisible routing to the
-	// worktree (best-effort — see ensureRepoLevelTakeover), but AFTER
-	// setupEntireDirectory so .entire/.gitignore already exists and the moved
-	// files are never visible in git status.
-	ensureRepoLevelTakeover(ctx, w)
+	// Capture the old route now; the successful settings write below activates
+	// repo routing before any potentially deferred migration work.
+	takeover := planRepoLevelTakeover(ctx)
 
 	// Resolve the target file up front so the load below is scoped to that
 	// file's own content rather than the merged view (see setEnabledFlag for
@@ -2066,6 +2058,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	if err := saveEnabledState(ctx, targetSettings, targetFile == EntireSettingsFile); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
+	reconcileRepoLevelTakeover(ctx, w, takeover)
 
 	// Hook installation decisions need the merged view across both settings
 	// files, not just the single scope we wrote to above: absolute_git_hook_path
@@ -2595,7 +2588,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// the git hooks this uninstall just removed (the marker means "setup
 	// believed converged", which is no longer true), and drop the memoized
 	// routing decision now that the discriminator settings files are gone.
-	clearGlobalSetupMarker(ctx)
+	_ = clearGlobalSetupMarker(ctx)
 	paths.ClearInvisibleRuntimeCache()
 
 	fmt.Fprintln(w, "\nEntire CLI uninstalled successfully.")

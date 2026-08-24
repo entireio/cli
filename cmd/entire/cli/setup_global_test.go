@@ -14,6 +14,8 @@ import (
 
 	"charm.land/huh/v2"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -392,6 +394,380 @@ func TestMaybeMigrateGlobalRuntimeData_BlocksHookDuringMigration(t *testing.T) {
 	}
 }
 
+func TestReconcileRepoLevelTakeover_DefersWithoutBlockingAndRetries(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	clearGlobalRoutingCaches(t)
+
+	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
+	testutil.WriteFile(t, dir, sourceRel+"/logs/before.log", "before activation")
+	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
+		p.GlobalSetupCompleted = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := planRepoLevelTakeover(t.Context())
+	release, err := acquireGlobalRuntimeMigrationGate(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The settings write is the activation commit point. Reconciliation must
+	// not wait for the old-route hook that already owns the gate.
+	testutil.WriteFile(t, dir, ".entire/settings.json", `{"enabled":true}`)
+	var out bytes.Buffer
+	started := time.Now()
+	reconcileRepoLevelTakeover(t.Context(), &out, plan)
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("activation reconciliation waited behind an old hook: %s", elapsed)
+	}
+	if !strings.Contains(out.String(), "deferred") {
+		t.Fatalf("busy gate must report a retryable deferral, got %q", out.String())
+	}
+	routedTmp, err := paths.AbsPath(t.Context(), paths.EntireTmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routedTmp != filepath.Join(dir, paths.EntireTmpDir) {
+		t.Fatalf("repo settings must route new hooks immediately: got %q", routedTmp)
+	}
+	prefs, err := settings.LoadClonePreferences(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prefs.GlobalSetupCompleted {
+		t.Fatal("deferred reconciliation must preserve the retry marker")
+	}
+
+	// The pre-activation hook may finish on its cached old route. A later
+	// explicit enable recovery pass must collect both files without loss.
+	testutil.WriteFile(t, dir, sourceRel+"/logs/after.log", "old hook completed")
+	release()
+	out.Reset()
+	reconcileRepoLevelTakeover(t.Context(), &out, planRepoLevelTakeover(t.Context()))
+	for _, name := range []string{"before.log", "after.log"} {
+		data, readErr := os.ReadFile(filepath.Join(dir, ".entire", "logs", name))
+		if readErr != nil {
+			t.Fatalf("recovery did not migrate %s: %v", name, readErr)
+		}
+		if len(data) == 0 {
+			t.Fatalf("recovery migrated empty %s", name)
+		}
+	}
+	prefs, err = settings.LoadClonePreferences(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prefs.GlobalSetupCompleted {
+		t.Fatal("successful reconciliation must clear the retry marker")
+	}
+}
+
+func TestReconcileRepoLevelTakeover_RepairsMigratedTranscriptPath(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	clearGlobalRoutingCaches(t)
+
+	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
+	oldTranscript := filepath.Join(dir, filepath.FromSlash(sourceRel), "tmp", "session.json")
+	testutil.WriteFile(t, dir, sourceRel+"/tmp/session.json", "transcript")
+	store, err := session.NewStateStore(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(t.Context(), &session.State{
+		SessionID: "session", Phase: session.PhaseIdle, WorktreePath: dir,
+		StartedAt: time.Now(), TranscriptPath: oldTranscript,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := planRepoLevelTakeover(t.Context())
+	testutil.WriteFile(t, dir, ".entire/settings.json", `{"enabled":true}`)
+	reconcileRepoLevelTakeover(t.Context(), io.Discard, plan)
+
+	state, err := store.Load(t.Context(), "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, ".entire", "tmp", "session.json")
+	if state == nil || state.TranscriptPath != want {
+		t.Fatalf("TranscriptPath = %q, want %q", state.TranscriptPath, want)
+	}
+}
+
+func TestReconcileRepoLevelTakeover_DoesNotRepairDivergentTranscriptConflict(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	clearGlobalRoutingCaches(t)
+
+	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
+	oldTranscript := filepath.Join(dir, filepath.FromSlash(sourceRel), "tmp", "session.json")
+	testutil.WriteFile(t, dir, sourceRel+"/tmp/session.json", "old routed transcript")
+	testutil.WriteFile(t, dir, ".entire/tmp/session.json", "different live transcript")
+	store, err := session.NewStateStore(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(t.Context(), &session.State{
+		SessionID: "session", Phase: session.PhaseIdle, WorktreePath: dir,
+		StartedAt: time.Now(), TranscriptPath: oldTranscript,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
+		p.GlobalSetupCompleted = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := planRepoLevelTakeover(t.Context())
+	testutil.WriteFile(t, dir, ".entire/settings.json", `{"enabled":true}`)
+	reconcileRepoLevelTakeover(t.Context(), io.Discard, plan)
+	state, err := store.Load(t.Context(), "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.TranscriptPath != oldTranscript {
+		t.Fatalf("divergent destination must not replace stored source path, got %q", state.TranscriptPath)
+	}
+	if _, err := os.Stat(oldTranscript); err != nil {
+		t.Fatalf("divergent source must remain retryable: %v", err)
+	}
+	prefs, err := settings.LoadClonePreferences(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prefs.GlobalSetupCompleted {
+		t.Fatal("divergent transcript conflict must preserve the retry marker")
+	}
+}
+
+func TestReconcileRepoLevelTakeover_RepairsAlreadyMigratedTranscriptWithoutTrigger(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	clearGlobalRoutingCaches(t)
+
+	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
+	oldTranscript := filepath.Join(dir, filepath.FromSlash(sourceRel), "tmp", "session.json")
+	want := filepath.Join(dir, ".entire", "tmp", "session.json")
+	testutil.WriteFile(t, dir, ".entire/settings.json", `{"enabled":true}`)
+	testutil.WriteFile(t, dir, ".entire/tmp/session.json", "already moved")
+	store, err := session.NewStateStore(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(t.Context(), &session.State{
+		SessionID: "session", Phase: session.PhaseIdle, WorktreePath: dir,
+		StartedAt: time.Now(), TranscriptPath: oldTranscript,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := planRepoLevelTakeover(t.Context())
+	if plan.relevant {
+		t.Fatal("test requires an empty source and no global marker")
+	}
+	reconcileRepoLevelTakeover(t.Context(), io.Discard, plan)
+	state, err := store.Load(t.Context(), "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.TranscriptPath != want {
+		t.Fatalf("recovery TranscriptPath = %q, want %q", state.TranscriptPath, want)
+	}
+}
+
+func TestReconcileRepoLevelTakeover_MissingTranscriptDestinationKeepsMarker(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	clearGlobalRoutingCaches(t)
+
+	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
+	oldTranscript := filepath.Join(dir, filepath.FromSlash(sourceRel), "tmp", "missing.json")
+	store, err := session.NewStateStore(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(t.Context(), &session.State{
+		SessionID: "session", Phase: session.PhaseIdle, WorktreePath: dir,
+		StartedAt: time.Now(), TranscriptPath: oldTranscript,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
+		p.GlobalSetupCompleted = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	reconcileRepoLevelTakeover(t.Context(), &out, planRepoLevelTakeover(t.Context()))
+	state, err := store.Load(t.Context(), "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.TranscriptPath != oldTranscript {
+		t.Fatalf("missing destination must preserve old path, got %q", state.TranscriptPath)
+	}
+	prefs, err := settings.LoadClonePreferences(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prefs.GlobalSetupCompleted {
+		t.Fatal("unresolved transcript repair must preserve the retry marker")
+	}
+	if !strings.Contains(out.String(), "1 transcript path(s) could not be repaired") || strings.Contains(out.String(), "✓") {
+		t.Fatalf("unresolved repair must be visible without a success checkmark, got %q", out.String())
+	}
+}
+
+func TestReconcileRepoLevelTakeover_ActiveTranscriptCandidateDefers(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	clearGlobalRoutingCaches(t)
+
+	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
+	oldTranscript := filepath.Join(dir, filepath.FromSlash(sourceRel), "tmp", "active.json")
+	testutil.WriteFile(t, dir, sourceRel+"/tmp/active.json", "active transcript")
+	store, err := session.NewStateStore(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(t.Context(), &session.State{
+		SessionID: "active", Phase: session.PhaseActive, WorktreePath: dir,
+		StartedAt: time.Now(), TranscriptPath: oldTranscript,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	reconcileRepoLevelTakeover(t.Context(), &out, planRepoLevelTakeover(t.Context()))
+	state, err := store.Load(t.Context(), "active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.TranscriptPath != oldTranscript {
+		t.Fatalf("active TranscriptPath must remain unchanged, got %q", state.TranscriptPath)
+	}
+	if !strings.Contains(out.String(), "deferred") {
+		t.Fatalf("active candidate must defer reconciliation, got %q", out.String())
+	}
+}
+
+func TestReconcileRepoLevelTakeover_DoesNotRepairSiblingWorktreeTranscript(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	clearGlobalRoutingCaches(t)
+
+	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
+	oldTranscript := filepath.Join(dir, filepath.FromSlash(sourceRel), "tmp", "sibling.json")
+	testutil.WriteFile(t, dir, ".entire/tmp/sibling.json", "destination")
+	store, err := session.NewStateStore(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(dir, "sibling-worktree")
+	if err := store.Save(t.Context(), &session.State{
+		SessionID: "sibling", Phase: session.PhaseIdle, WorktreePath: sibling,
+		StartedAt: time.Now(), TranscriptPath: oldTranscript,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reconcileRepoLevelTakeover(t.Context(), io.Discard, planRepoLevelTakeover(t.Context()))
+	state, err := store.Load(t.Context(), "sibling")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.TranscriptPath != oldTranscript {
+		t.Fatalf("sibling-worktree TranscriptPath must remain unchanged, got %q", state.TranscriptPath)
+	}
+}
+
+func TestReconcileRepoLevelTakeover_NoWorkDoesNotDeferForUnrelatedActiveSession(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	clearGlobalRoutingCaches(t)
+	testutil.WriteFile(t, dir, ".entire/settings.json", `{"enabled":true}`)
+	store, err := session.NewStateStore(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(t.Context(), &session.State{
+		SessionID: "active", Phase: session.PhaseActive, WorktreePath: dir,
+		StartedAt: time.Now(), TranscriptPath: filepath.Join(dir, "external-transcript.jsonl"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	reconcileRepoLevelTakeover(t.Context(), &out, planRepoLevelTakeover(t.Context()))
+	if out.Len() != 0 {
+		t.Fatalf("unrelated active session must not produce migration output, got %q", out.String())
+	}
+}
+
+func TestMigratedRuntimePathRejectsUnsafeOrUnrelatedPaths(t *testing.T) {
+	root := filepath.Join(string(filepath.Separator), "repo")
+	source := filepath.Join(string(filepath.Separator), "repo.git", "entire", "worktree", "key")
+	plan := repoLevelTakeoverPlan{root: root, source: source}
+	for _, old := range []string{
+		"tmp/session.json",
+		filepath.Join(source+"-lookalike", "tmp", "session.json"),
+		filepath.Join(source, "other", "session.json"),
+		filepath.Join(string(filepath.Separator), "outside", "tmp", "session.json"),
+	} {
+		if got, ok := migratedRuntimePath(plan, old); ok {
+			t.Errorf("migratedRuntimePath(%q) = %q, want rejected", old, got)
+		}
+	}
+}
+
 func TestMaybeMigrateGlobalRuntimeData_NoTriggerIsSilentNoop(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -741,6 +1117,149 @@ func TestRunDisable_GloballyTrackedRepoTakeover(t *testing.T) {
 	// And the disable itself still landed.
 	if !strings.Contains(buf.String(), "Entire is now disabled") {
 		t.Errorf("missing disable confirmation, got: %q", buf.String())
+	}
+}
+
+func TestRunDisable_GloballyTrackedRepoActivatesBeforeActiveSessionMigration(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	if err := os.WriteFile(filepath.Join(cfg, settings.UserSettingsFileName), []byte(`{"global":{"enabled":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clearGlobalRoutingCaches(t)
+
+	sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
+	sourceFile := filepath.Join(dir, filepath.FromSlash(sourceRel), "logs", "active.log")
+	testutil.WriteFile(t, dir, sourceRel+"/logs/active.log", "still active")
+	store, err := session.NewStateStore(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(t.Context(), &session.State{
+		SessionID: "active", Phase: session.PhaseActive, WorktreePath: dir, StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
+		p.GlobalSetupCompleted = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runDisable(t.Context(), &out, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "migration deferred") {
+		t.Fatalf("active session must report deferred cleanup, got %q", out.String())
+	}
+	routedTmp, err := paths.AbsPath(t.Context(), paths.EntireTmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routedTmp != filepath.Join(dir, paths.EntireTmpDir) {
+		t.Fatalf("disable settings must take routing ownership immediately: got %q", routedTmp)
+	}
+	if _, err := os.Stat(sourceFile); err != nil {
+		t.Fatalf("active-session source must remain for retry: %v", err)
+	}
+	prefs, err := settings.LoadClonePreferences(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prefs.GlobalSetupCompleted {
+		t.Fatal("active-session deferral must preserve retry marker")
+	}
+}
+
+func TestEnableSetupPathsActivateBeforeActiveSessionMigration(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		run  func(context.Context, io.Writer, agent.Agent) error
+	}{
+		{
+			name: "interactive",
+			run: func(ctx context.Context, w io.Writer, ag agent.Agent) error {
+				return runEnableInteractive(ctx, w, []agent.Agent{ag}, EnableOptions{Yes: true})
+			},
+		},
+		{
+			name: "agent flag",
+			run: func(ctx context.Context, w io.Writer, ag agent.Agent) error {
+				return setupAgentHooksNonInteractive(ctx, w, ag, EnableOptions{})
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+				dir = resolved
+			}
+			testutil.InitRepo(t, dir)
+			testutil.WriteFile(t, dir, "f.txt", "init")
+			testutil.GitAdd(t, dir, "f.txt")
+			testutil.GitCommit(t, dir, "init")
+			t.Chdir(dir)
+			isolateUserHome(t)
+			cfg := t.TempDir()
+			t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+			if err := os.WriteFile(filepath.Join(cfg, settings.UserSettingsFileName), []byte(`{"global":{"enabled":true}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			clearGlobalRoutingCaches(t)
+
+			sourceRel := ".git/entire/worktree/" + paths.HashWorktreeID("")
+			sourceFile := filepath.Join(dir, filepath.FromSlash(sourceRel), "logs", "active.log")
+			testutil.WriteFile(t, dir, sourceRel+"/logs/active.log", "still active")
+			store, err := session.NewStateStore(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Save(t.Context(), &session.State{
+				SessionID: "active", Phase: session.PhaseActive, WorktreePath: dir, StartedAt: time.Now(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
+				p.GlobalSetupCompleted = true
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			ag, err := agent.Get(types.AgentName("claude-code"))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := tt.run(t.Context(), &out, ag); err != nil {
+				t.Fatalf("enable setup path: %v\n%s", err, out.String())
+			}
+			if !strings.Contains(out.String(), "migration deferred") {
+				t.Fatalf("active session must defer cleanup, got %q", out.String())
+			}
+			enabled, err := IsEnabled(t.Context())
+			if err != nil || !enabled {
+				t.Fatalf("repo activation must be persisted before deferral (enabled=%v err=%v)", enabled, err)
+			}
+			routedTmp, err := paths.AbsPath(t.Context(), paths.EntireTmpDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if routedTmp != filepath.Join(dir, paths.EntireTmpDir) {
+				t.Fatalf("new hooks must route to repo runtime immediately: got %q", routedTmp)
+			}
+			if _, err := os.Stat(sourceFile); err != nil {
+				t.Fatalf("active-session source must remain for retry: %v", err)
+			}
+		})
 	}
 }
 
