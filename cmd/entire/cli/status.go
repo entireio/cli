@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -59,9 +60,14 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 		return runStatusJSON(ctx, w)
 	}
 
-	// Check if we're in a git repository
+	// Check if we're in a git repository. Not being in one is a valid status
+	// now that the global tier exists machine-wide: report the global line
+	// plus a short note instead of failing.
 	if _, repoErr := paths.WorktreeRoot(ctx); repoErr != nil {
+		sty := newStatusStyles(w)
 		fmt.Fprintln(w, "✕ not a git repository")
+		writeGlobalTrackingLine(ctx, w, sty)
+		fmt.Fprintln(w, sty.render(sty.dim, "Run inside a git repository for repo-level status."))
 		return nil //nolint:nilerr // Not being in a git repo is a valid status, not an error
 	}
 
@@ -87,12 +93,15 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	projectExists := projectErr == nil
 	localExists := localErr == nil
 
+	sty := newStatusStyles(w)
+
 	if !projectExists && !localExists {
 		fmt.Fprintln(w, "○ not set up (run `entire enable` to get started)")
+		// This is exactly where the global tier matters: a repo with no
+		// repo-level setup may still be tracked machine-wide.
+		writeGlobalTrackingLine(ctx, w, sty)
 		return nil
 	}
-
-	sty := newStatusStyles(w)
 
 	if detailed {
 		return runStatusDetailed(ctx, w, sty, settingsPath, localSettingsPath, projectExists, localExists)
@@ -105,12 +114,168 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	}
 
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
+	writeGlobalTrackingLine(ctx, w, sty)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
 	writeAgentHelpHint(w, sty)
 
 	return nil
+}
+
+// globalTrackingInfo is the shared computation behind the text and JSON
+// global-tracking status, so the two outputs cannot drift. Local reads only.
+type globalTrackingInfo struct {
+	// Configured is false while the machine-wide question was never answered
+	// (global tier absent from the user settings file, or the file is
+	// unreadable) — the status line is omitted entirely then.
+	Configured bool
+	Enabled    bool
+	// AgentsCovered counts agents whose user-level hooks are installed; only
+	// meaningful when Enabled.
+	AgentsCovered int
+	// InRepo reports whether the per-repo activation could be evaluated (a
+	// worktree resolved); ActiveHere/InactiveReason are meaningless otherwise.
+	InRepo bool
+	// ActiveHere is the hook gate's answer for THIS worktree
+	// (settings.IsActiveForRepoWithReason) — the machine-wide "on" must not
+	// read as coverage in a repo the gate carves out (excluded, disabled).
+	ActiveHere     bool
+	InactiveReason settings.InactiveReason
+	// TrustState is the per-repo checkpoint egress consent
+	// (trustStateTrusted/Untrusted/NotApplicable), "" outside a repository.
+	TrustState  string
+	TrustSource settings.TrustSource
+	// HeldCheckpoints counts checkpoints held locally (untrusted state only).
+	HeldCheckpoints int
+}
+
+// Trust-state identifiers, shared between the human line and the JSON field so
+// the two outputs cannot drift.
+const (
+	trustStateTrusted       = "trusted"
+	trustStateUntrusted     = "untrusted"
+	trustStateNotApplicable = "not_applicable"
+)
+
+func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
+	us, err := settings.LoadUserSettings(ctx)
+	if err != nil || !us.GlobalConfigured() {
+		return globalTrackingInfo{}
+	}
+	info := globalTrackingInfo{Configured: true, Enabled: us.GlobalEnabled()}
+	if !info.Enabled {
+		if _, err := paths.WorktreeRoot(ctx); err == nil {
+			info.TrustState = trustStateNotApplicable
+			info.TrustSource = settings.TrustSourceNone
+		}
+		return info
+	}
+	supports, _ := agent.UserHookSupports()
+	for _, ua := range supports {
+		// A config that cannot be read is not verified coverage; doctor
+		// surfaces the error itself.
+		if ok, err := ua.Support.AreUserHooksInstalled(ctx); err == nil && ok {
+			info.AgentsCovered++
+		}
+	}
+	if _, err := paths.WorktreeRoot(ctx); err == nil {
+		info.InRepo = true
+		info.ActiveHere, info.InactiveReason = settings.IsActiveForRepoWithReason(ctx)
+		info.TrustState, info.TrustSource = computeRepoTrustState(ctx, info.ActiveHere)
+		if info.TrustState == trustStateUntrusted {
+			info.HeldCheckpoints = heldCheckpointCount(ctx)
+		}
+	}
+	return info
+}
+
+// computeRepoTrustState classifies this repo's egress consent for status.
+// Only a globally enrolled repo has a per-repo trust decision; everything
+// else is not_applicable.
+func computeRepoTrustState(ctx context.Context, activeHere bool) (string, settings.TrustSource) {
+	if settings.RepoUntrustedEnrolled(ctx) {
+		return trustStateUntrusted, settings.TrustSourceNone
+	}
+	configured, err := settings.RepoActivationConfigured(ctx)
+	if !activeHere || err != nil || configured {
+		return trustStateNotApplicable, settings.TrustSourceNone
+	}
+	return trustStateTrusted, settings.CurrentTrustSource(ctx)
+}
+
+// heldCheckpointCount counts checkpoints held locally against the elected
+// checkpoint sync remote, shared by status, doctor, and `entire trust`.
+// Best-effort: any failure reads as 0.
+func heldCheckpointCount(ctx context.Context) int {
+	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
+	if err != nil || elected.Name == "" {
+		return 0
+	}
+	return countUnpushedCheckpointsForStatus(ctx, elected.Name)
+}
+
+// writeGlobalTrackingLine prints the machine-wide tracking line: on with the
+// user-level agent hook coverage count, off, or nothing while unconfigured.
+// In a repo the hook gate carves out of the tier, the parenthetical names the
+// carve-out instead — "on (2 agents covered)" in an excluded repo reads as
+// covered when no session here is tracked.
+func writeGlobalTrackingLine(ctx context.Context, w io.Writer, sty statusStyles) {
+	info := computeGlobalTrackingInfo(ctx)
+	if !info.Configured {
+		return
+	}
+	if !info.Enabled {
+		fmt.Fprintln(w, sty.render(sty.dim, "global tracking: off"))
+		return
+	}
+	if info.InRepo && !info.ActiveHere {
+		fmt.Fprintln(w, sty.render(sty.dim, "global tracking: on ("+globalInactiveHereText(info.InactiveReason)+")"))
+		return
+	}
+	noun := "agents"
+	if info.AgentsCovered == 1 {
+		noun = "agent"
+	}
+	fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("global tracking: on (%d %s covered)", info.AgentsCovered, noun)))
+	writeGlobalTrustLine(w, sty, info)
+}
+
+// writeGlobalTrustLine renders the per-repo egress consent under the tracking
+// line: the trusted line names its source (a revoke masked by trust_all is
+// auditable); not_applicable states stay silent.
+func writeGlobalTrustLine(w io.Writer, sty statusStyles, info globalTrackingInfo) {
+	switch info.TrustState {
+	case trustStateUntrusted:
+		line := "  sync held — repo not trusted · run `entire trust`"
+		if info.HeldCheckpoints > 0 {
+			line += fmt.Sprintf(" (%d held)", info.HeldCheckpoints)
+		}
+		fmt.Fprintln(w, sty.render(sty.yellow, line))
+	case trustStateTrusted:
+		label := "this repo"
+		if info.TrustSource == settings.TrustSourceAll {
+			label = "trust_all"
+		}
+		fmt.Fprintln(w, sty.render(sty.dim, "  checkpoint sync: trusted ("+label+")"))
+	}
+}
+
+// globalInactiveHereText renders the hook gate's per-repo carve-out for the
+// human tracking line, covering every inactive reason — not just exclusion —
+// so a repo the gate carves out never reads as covered. Mirrors the JSON
+// identifiers in inactiveReasonJSON.
+func globalInactiveHereText(reason settings.InactiveReason) string {
+	switch reason {
+	case settings.InactiveReasonGlobalExcluded:
+		return "this repo is excluded"
+	case settings.InactiveReasonRepoDisabled:
+		return "inactive here: repo-level setup has Entire disabled"
+	case settings.InactiveReasonGlobalOff, settings.InactiveReasonNone:
+		return "inactive here"
+	default:
+		return "inactive here"
+	}
 }
 
 // agentHelpCommand is the invocation a coding agent runs to get machine-readable
@@ -135,6 +300,7 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, effectiveSettings, sty))
+	writeGlobalTrackingLine(ctx, w, sty)
 	fmt.Fprintln(w) // blank line
 
 	// Show project settings if it exists
@@ -800,7 +966,46 @@ type statusJSON struct {
 	UnpushedCheckpoints        int    `json:"unpushed_checkpoints,omitempty"`
 	// SecretScanners lists the enabled engines when non-default; omitted when default.
 	SecretScanners []string `json:"secret_scanners,omitempty"`
-	Error          string   `json:"error,omitempty"`
+	// GlobalTracking reports the machine-wide tracking tier. Omitted while
+	// unconfigured (the one-time question was never answered). Present on
+	// every output shape, including the not-a-git-repository one — status
+	// works outside a repo now that the global tier is machine-wide.
+	GlobalTracking *globalTrackingJSON `json:"global_tracking,omitempty"`
+	Error          string              `json:"error,omitempty"`
+}
+
+// globalTrackingJSON mirrors globalTrackingInfo for `entire status --json`.
+type globalTrackingJSON struct {
+	Enabled bool `json:"enabled"`
+	// AgentsCovered counts agents whose user-level hooks are installed.
+	AgentsCovered int `json:"agents_covered"`
+	// ActiveHere is the hook gate's per-repo answer and InactiveReason names
+	// the carve-out ("repo_excluded", "repo_disabled", "global_off") when it
+	// is false. Both are only meaningful inside a repository and are omitted
+	// outside one.
+	ActiveHere     *bool  `json:"active_here,omitempty"`
+	InactiveReason string `json:"inactive_reason,omitempty"`
+	// TrustState is "trusted"|"untrusted"|"not_applicable"; TrustSource is
+	// "trust_all"|"repo"|"none". Both omitted outside a repository.
+	TrustState  string `json:"trust_state,omitempty"`
+	TrustSource string `json:"trust_source,omitempty"`
+}
+
+// inactiveReasonJSON maps the gate's inactive reason to its stable JSON
+// identifier; "" for none.
+func inactiveReasonJSON(reason settings.InactiveReason) string {
+	switch reason {
+	case settings.InactiveReasonGlobalExcluded:
+		return "repo_excluded"
+	case settings.InactiveReasonRepoDisabled:
+		return "repo_disabled"
+	case settings.InactiveReasonGlobalOff:
+		return "global_off"
+	case settings.InactiveReasonNone:
+		return ""
+	default:
+		return ""
+	}
 }
 
 type sessionBriefJSON struct {
@@ -813,7 +1018,26 @@ type sessionBriefJSON struct {
 }
 
 func runStatusJSON(ctx context.Context, w io.Writer) error {
+	// Attach the global-tracking tier to every output shape (including the
+	// error shapes) so `status --json` is useful outside a git repository.
+	var gt *globalTrackingJSON
+	if info := computeGlobalTrackingInfo(ctx); info.Configured {
+		gt = &globalTrackingJSON{Enabled: info.Enabled, AgentsCovered: info.AgentsCovered}
+		if info.InRepo {
+			active := info.ActiveHere
+			gt.ActiveHere = &active
+			if !active {
+				gt.InactiveReason = inactiveReasonJSON(info.InactiveReason)
+			}
+		}
+		// TrustState doubles as the in-repo marker (set even for a disabled tier).
+		if info.TrustState != "" {
+			gt.TrustState = info.TrustState
+			gt.TrustSource = string(info.TrustSource)
+		}
+	}
 	writeJSON := func(v statusJSON) error {
+		v.GlobalTracking = gt
 		return json.NewEncoder(w).Encode(v)
 	}
 

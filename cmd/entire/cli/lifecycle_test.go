@@ -26,6 +26,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/internal/coreapi"
@@ -846,6 +847,47 @@ func TestHandleLifecycleSessionStart_CodexConcurrentSessionsStaySingleLine(t *te
 	if strings.Contains(msg, "  ") {
 		t.Fatalf("expected Codex concurrent-session message to avoid repeated spaces, got %q", msg)
 	}
+}
+
+// TestHandleLifecycleSessionStart_UntrustedGlobalModeLineRidesTheBanner: the
+// trust notice is a LINE inside the one composed SessionStart banner (a second
+// WriteHookResponse would corrupt Claude's stdout JSON), absent once consented.
+// Not parallel-safe; cache clears must run after the final chdir.
+func TestHandleLifecycleSessionStart_UntrustedGlobalModeLineRidesTheBanner(t *testing.T) {
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	if err := os.WriteFile(filepath.Join(cfg, settings.UserSettingsFileName), []byte(`{"global":{"enabled":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settings.ClearGlobalModeCache()
+	paths.ClearInvisibleRuntimeCache()
+	t.Cleanup(func() {
+		settings.ClearGlobalModeCache()
+		paths.ClearInvisibleRuntimeCache()
+	})
+
+	ag := newMockHookResponseAgent()
+	err := handleLifecycleSessionStart(context.Background(), ag, &agent.Event{
+		Type:      agent.SessionStart,
+		SessionID: "test-global-trust-banner",
+		Timestamp: time.Now(),
+	})
+	require.NoError(t, err)
+	require.Contains(t, ag.lastMessage, "run `entire trust`")
+	require.Contains(t, ag.lastMessage, "link this conversation to your next commit",
+		"the trust notice must ride the standard banner, not replace it")
+
+	_, err = settings.TrustCurrentRepo(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, globalTrustBannerSuffix(context.Background(), agent.AgentNameClaudeCode),
+		"a consented repo must not get the line")
 }
 
 // --- handleLifecycleTurnStart tests ---

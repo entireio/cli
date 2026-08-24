@@ -164,7 +164,19 @@ func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
 // fetch uses it). Scoping to --local would make origin exclusion diverge
 // from git's own view, treating such a repo as origin-less.
 func GetRemoteURLsInDirIfSet(ctx context.Context, dir, remoteName string) (urls []string, found bool, err error) {
-	cmd := exec.CommandContext(ctx, "git", "config", "--get-all", "remote."+remoteName+".url")
+	return getAllRemoteConfig(ctx, dir, remoteName, "url")
+}
+
+// GetRemotePushURLsInDirIfSet is GetRemoteURLsInDirIfSet for the remote's
+// remote.<name>.pushurl values (same stored-config and exit-1-means-unset
+// contracts). When any pushurl is set, git's pushurl-replaces-url rule sends
+// pushes there INSTEAD of the fetch URLs; found=false means none configured.
+func GetRemotePushURLsInDirIfSet(ctx context.Context, dir, remoteName string) (urls []string, found bool, err error) {
+	return getAllRemoteConfig(ctx, dir, remoteName, "pushurl")
+}
+
+func getAllRemoteConfig(ctx context.Context, dir, remoteName, key string) (urls []string, found bool, err error) {
+	cmd := exec.CommandContext(ctx, "git", "config", "--get-all", "remote."+remoteName+"."+key)
 	if dir != "" {
 		cmd.Dir = dir
 	}

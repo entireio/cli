@@ -142,6 +142,71 @@ func TestWriteFileAtomic_CleansUpTempOnRenameFailure(t *testing.T) {
 	}
 }
 
+// DanglingSymlink pins the stow/chezmoi link-farm case: an existing symlink
+// whose target file does not exist yet must be written THROUGH (creating the
+// target), not replaced by a regular file — EvalSymlinks errors on a dangling
+// link exactly like on a missing file, and the old fallback took that error as
+// "no symlink here".
+func TestWriteFileAtomicFollowingSymlinks_DanglingSymlink(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "dotfiles", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "settings.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	data := []byte(`{"a":1}`)
+	if err := WriteFileAtomicFollowingSymlinks(link, data, 0o600); err != nil {
+		t.Fatalf("WriteFileAtomicFollowingSymlinks: %v", err)
+	}
+
+	fi, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("dangling symlink was replaced by a regular file")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("target file not created through the link: %v", err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("target content: got %q want %q", got, data)
+	}
+}
+
+// PreservesExistingMode pins that a rewrite keeps the file's existing mode
+// instead of forcing perm onto it — a user's 0644 settings file must not come
+// back 0600 from every hook install.
+func TestWriteFileAtomicFollowingSymlinks_PreservesExistingMode(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not meaningful on Windows")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "out.json")
+	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := WriteFileAtomicFollowingSymlinks(target, []byte("new"), 0o600); err != nil {
+		t.Fatalf("WriteFileAtomicFollowingSymlinks: %v", err)
+	}
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("perm after rewrite: got %#o want %#o", got, 0o644)
+	}
+}
+
 func TestWriteFileAtomic_ParentMissing(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

@@ -13,7 +13,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 )
@@ -136,6 +139,70 @@ func TestGitHookPreRun_ProceedUnderGlobalMode(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(tmpDir, ".entire")); !os.IsNotExist(err) {
 		t.Errorf("global mode must not create a worktree .entire directory (err=%v)", err)
+	}
+}
+
+// TestWithHookSession_ConfiguresRedactionUnderGlobalMode pins the privacy
+// half of the global-mode gate: the hook path must call
+// strategy.EnsureRedactionConfigured for globally-tracked repos, so redaction
+// inputs that exist in the repo without any repo-level setup — committed
+// .entire/redactors/ rule packs, which stay worktree-resolved under invisible
+// routing — still apply before any checkpoint write. Deleting the
+// EnsureRedactionConfigured call in withHookSession must fail this test.
+func TestWithHookSession_ConfiguresRedactionUnderGlobalMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	// No repo-level setup (no settings files) — enable the user-global tier
+	// in an isolated config dir.
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{"global":{"enabled":true}}`), 0o644); err != nil {
+		t.Fatalf("failed to write user-global settings file: %v", err)
+	}
+
+	paths.ClearWorktreeRootCache()
+	paths.ClearInvisibleRuntimeCache()
+	session.ClearGitCommonDirCache()
+	settings.ClearGlobalModeCache()
+	t.Cleanup(func() {
+		paths.ClearWorktreeRootCache()
+		paths.ClearInvisibleRuntimeCache()
+		session.ClearGitCommonDirCache()
+		settings.ClearGlobalModeCache()
+	})
+
+	// A committed redactor pack is repo content the user put there, not
+	// Entire runtime data — a globally-tracked repo can carry one without
+	// pinning routing to the worktree (only the settings files do that), so
+	// EnsureRedactionConfigured must pick it up under global mode too.
+	const canary = "entire-global-redaction-canary"
+	packPath := filepath.Join(tmpDir, ".entire", "redactors", "canary.yaml")
+	if err := os.MkdirAll(filepath.Dir(packPath), 0o755); err != nil {
+		t.Fatalf("failed to create redactors dir: %v", err)
+	}
+	pack := "name: canary\nversion: \"1\"\nrules:\n  - id: global-canary\n    regex: " + canary + "\n"
+	if err := os.WriteFile(packPath, []byte(pack), 0o644); err != nil {
+		t.Fatalf("failed to write redactor pack: %v", err)
+	}
+
+	// Start from an unconfigured redact package: drop any rules an earlier
+	// test configured, and re-arm the strategy once-guard so this
+	// withHookSession call performs the configuration pass itself.
+	redact.ConfigureCustomRules(redact.CustomRulesConfig{})
+	strategy.ResetRedactionConfiguredForTest()
+	t.Cleanup(func() { redact.ConfigureCustomRules(redact.CustomRulesConfig{}) })
+
+	input := "before " + canary + " after"
+	if got := redact.String(input); got != input {
+		t.Fatalf("precondition: canary must survive redaction before configuration, got %q", got)
+	}
+
+	withHookSession(context.Background())
+
+	if got := redact.String(input); strings.Contains(got, canary) {
+		t.Errorf("withHookSession under global mode must configure redaction (strategy.EnsureRedactionConfigured): canary survived redact.String, got %q", got)
 	}
 }
 

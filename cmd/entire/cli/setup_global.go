@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -52,14 +53,122 @@ func runEnableGlobalMode(ctx context.Context, w io.Writer) error {
 	if kept > 0 {
 		fmt.Fprintf(w, "Keeping %d exclude pattern(s) from your user settings.\n", kept)
 	}
+	// This confirmation is the announcement: don't stack the detection warn.
+	ackGlobalWarnMarker(ctx)
+	succeeded, supported := installUserAgentHooks(ctx, w)
+	if supported > 0 && succeeded == 0 {
+		// The setting is on, but with zero agents covered no session in a
+		// never-enabled repo can fire a hook: exiting 0 here would report a
+		// tracking state that does not exist. Partial success stays exit 0.
+		fmt.Fprintln(w, "No agent has user-level hooks installed — global tracking will not capture any sessions until the errors above are fixed and 'entire enable --global' is re-run.")
+		return errors.New("user-level agent hooks could not be installed for any agent")
+	}
 	return nil
+}
+
+// installUserAgentHooks installs user-level agent hooks for every registered
+// agent that supports them and reports the outcome per agent. User-level
+// hooks are what let a session in a never-enabled repo fire a hook at all, so
+// they are the activation step of enable --global. Per-agent failures are
+// reported and skipped: global tracking is already on at this point, and one
+// broken user config file must not block the other agents. Writes only
+// user-scope config — never a repo file. Returns how many supporting agents
+// ended up with hooks installed, and how many support them at all, so callers
+// can detect the zero-coverage outcome.
+func installUserAgentHooks(ctx context.Context, w io.Writer) (succeeded, supported int) {
+	fmt.Fprintln(w, "User-level agent hooks:")
+	supports, unsupportedNames := agent.UserHookSupports()
+	for _, ua := range supports {
+		supported++
+		res, err := ua.Support.InstallUserHooks(ctx)
+		switch {
+		case err != nil:
+			fmt.Fprintf(w, "  ! %s: install failed: %v\n", ua.Name, err)
+			continue
+		case res.Repaired:
+			// The file was rewritten (partial/duplicate/alternate-form install
+			// normalized) — "already installed" would claim nothing changed.
+			fmt.Fprintf(w, "  ✓ %s: hooks repaired\n", ua.Name)
+		case res.Installed == 0:
+			fmt.Fprintf(w, "  ✓ %s: already installed\n", ua.Name)
+		default:
+			fmt.Fprintf(w, "  ✓ %s: installed\n", ua.Name)
+		}
+		succeeded++
+	}
+	if len(unsupportedNames) > 0 {
+		names := make([]string, len(unsupportedNames))
+		for i, n := range unsupportedNames {
+			names[i] = string(n)
+		}
+		fmt.Fprintf(w, "  - user-level hooks not supported: %s\n", strings.Join(names, ", "))
+	}
+	return succeeded, supported
+}
+
+// maybeRemoveUserAgentHooks offers to remove Entire's user-level agent hooks
+// after disable --global. Removal only ever touches entries recognized as
+// Entire's. Interactive runs confirm first; non-interactive runs remove ours
+// without asking. A declined or aborted prompt leaves the hooks in place —
+// they gate on the (now off) global tier, so they are inert until removed.
+// An agent whose user-level config cannot be read gets a `!` line instead of
+// being silently skipped: its hooks (if any) remain, and the user must know.
+func maybeRemoveUserAgentHooks(ctx context.Context, w io.Writer) {
+	supports, _ := agent.UserHookSupports()
+	var installed []agent.UserHookAgent
+	var unreadable []string
+	for _, ua := range supports {
+		ok, err := ua.Support.AreUserHooksInstalled(ctx)
+		switch {
+		case err != nil:
+			unreadable = append(unreadable, fmt.Sprintf("  ! %s: could not remove: %v", ua.Name, err))
+		case ok:
+			installed = append(installed, ua)
+		}
+	}
+	for _, line := range unreadable {
+		fmt.Fprintln(w, line)
+	}
+	if len(installed) == 0 {
+		return
+	}
+	remove := true
+	if interactive.CanPromptInteractively() {
+		form := NewAccessibleForm(
+			huh.NewGroup(
+				huh.NewConfirm().
+					Title("Also remove Entire's user-level agent hooks?").
+					Description("Removes only Entire's entries from the agents' user-level settings.").
+					Affirmative("Yes").
+					Negative("No").
+					Value(&remove),
+			),
+		)
+		if err := form.RunWithContext(ctx); err != nil {
+			if !errors.Is(err, huh.ErrUserAborted) && !errors.Is(err, context.Canceled) {
+				logging.Debug(ctx, "user hook removal prompt failed", "error", err)
+			}
+			remove = false
+		}
+	}
+	if !remove {
+		fmt.Fprintln(w, "User-level agent hooks left in place (inert while global tracking is off); run 'entire disable --global' again to remove them.")
+		return
+	}
+	for _, ua := range installed {
+		if err := ua.Support.UninstallUserHooks(ctx); err != nil {
+			fmt.Fprintf(w, "  ! %s: could not remove user-level hooks: %v\n", ua.Name, err)
+			continue
+		}
+		fmt.Fprintf(w, "  ✓ %s: user-level hooks removed\n", ua.Name)
+	}
 }
 
 // runDisableGlobalMode turns the user-global tracking tier off. The answer is
 // durable: the file keeps global.enabled=false (rather than being removed), so
 // the setup wizard never re-asks. Repo-level settings are not touched.
 func runDisableGlobalMode(ctx context.Context, w io.Writer) error {
-	// Load first for the actionable unreadable-file message,
+	// Same shape as runEnableGlobalMode: probe for the actionable message,
 	// then read-modify-write under the user-settings lock.
 	if _, err := settings.LoadUserSettings(ctx); err != nil {
 		return unreadableUserSettingsError(err)
@@ -74,6 +183,10 @@ func runDisableGlobalMode(ctx context.Context, w io.Writer) error {
 		return fmt.Errorf("saving user settings: %w", err)
 	}
 	fmt.Fprintln(w, "Global tracking disabled.")
+	fmt.Fprintln(w, "Locally captured checkpoints in untrusted repos will not sync.")
+	// The held-data line above replaces the off-detection note.
+	retireGlobalWarnMarker(ctx)
+	maybeRemoveUserAgentHooks(ctx, w)
 	return nil
 }
 
@@ -100,7 +213,7 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 		fmt.Fprintf(w, "Warning: %v\n", unreadableUserSettingsError(err))
 		return
 	}
-	if us.Global != nil {
+	if us.GlobalConfigured() {
 		// A configured tier (either answer) must never re-ask.
 		return
 	}
@@ -125,7 +238,7 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 	// this prompt answered no longer exists — persisting would overturn
 	// that explicit choice. Explicit off is durable.
 	saveErr := settings.ModifyUserSettings(ctx, func(cur *settings.UserSettings) error {
-		if cur.Global != nil {
+		if cur.GlobalConfigured() {
 			return errGlobalAnswerSuperseded
 		}
 		cur.Global = &settings.GlobalConfig{Enabled: enable}
@@ -140,6 +253,16 @@ func maybeAskGlobalTracking(ctx context.Context, w io.Writer, opts EnableOptions
 	}
 	if enable {
 		fmt.Fprintln(w, "  ✓ Global tracking enabled")
+		// This confirmation is the announcement: don't stack the detection warn.
+		ackGlobalWarnMarker(ctx)
+		// The wizard's yes is the same commitment as enable --global, so it
+		// triggers the same user-level hook install (user-scope config only).
+		// The wizard is best-effort (enable itself already succeeded), so the
+		// zero-coverage outcome warns instead of failing the command.
+		succeeded, supported := installUserAgentHooks(ctx, w)
+		if supported > 0 && succeeded == 0 {
+			fmt.Fprintln(w, "No agent has user-level hooks installed — global tracking will not capture any sessions until the errors above are fixed and 'entire enable --global' is re-run.")
+		}
 	}
 }
 
@@ -177,7 +300,7 @@ var askGlobalTrackingConfirm = func(ctx context.Context) (bool, error) {
 // question has never been answered.
 func printGlobalTrackingHintIfUnconfigured(ctx context.Context, w io.Writer) {
 	us, err := settings.LoadUserSettings(ctx)
-	if err != nil || us.Global != nil {
+	if err != nil || us.GlobalConfigured() {
 		return
 	}
 	fmt.Fprintln(w, globalTrackingHint)

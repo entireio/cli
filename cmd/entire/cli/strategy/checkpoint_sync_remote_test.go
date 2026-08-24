@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	git "github.com/go-git/go-git/v6"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/stretchr/testify/assert"
@@ -822,4 +827,38 @@ func TestCaptureCheckpointSyncRemote_OnlyOnDelivery(t *testing.T) {
 		assert.False(t, checkpointSyncAllowedForRemote(ctx, "other", "fork"),
 			"a pending capture only admits the remote it names")
 	})
+}
+
+// Granted-at-the-prompt seam (unreachable from the integration test): the
+// SAME PrePush call must re-evaluate the gate and sync. Not parallel.
+func TestPrePush_TrustGrantedAtPromptSyncsInSameCall(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	testutil.AddRemote(t, workDir, "origin", bareDir)
+	t.Chdir(workDir)
+	t.Setenv(settings.EnvCheckpointsPrimary, checkpoint.BackendTypeGitRefs)
+	enrollRepoGlobally(t, `{"global":{"enabled":true}}`)
+	prompted := 0
+	oldResolve := resolveTrustDecisionFn
+	resolveTrustDecisionFn = func(ctx context.Context, _ io.Writer) (TrustDecision, error) {
+		prompted++
+		_, err := settings.TrustCurrentRepo(ctx)
+		require.NoError(t, err)
+		return TrustGranted, nil
+	}
+	t.Cleanup(func() { resolveTrustDecisionFn = oldResolve })
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	enqueueRefs(t, repo, refs)
+	stderr := captureStderrWriter(t)
+
+	require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "origin"))
+
+	require.Equal(t, 1, prompted, "the closed gate must consult the resolver exactly once")
+	require.NotContains(t, stderr.String(), heldMessageFragment)
+	remoteRefs := lsRemoteOutput(t, bareDir)
+	for _, ref := range refs {
+		assert.Contains(t, remoteRefs, ref.String(), "consent at the prompt must sync in that same PrePush call")
+	}
 }

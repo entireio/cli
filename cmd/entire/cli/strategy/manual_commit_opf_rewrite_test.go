@@ -289,6 +289,7 @@ func TestPrePushFromGitHook_DeferralStillRunsOPF(t *testing.T) {
 	configureFakeOPF(t, fake)
 
 	dir, repo, originalTip := setupV1RepoInDir(t)
+	writeEnabledRepoSettings(t, dir)
 	remoteDir := filepath.Join(t.TempDir(), "origin.git")
 	_, err := git.PlainInit(remoteDir, true)
 	require.NoError(t, err)
@@ -321,6 +322,7 @@ func TestPrePushFromGitHook_NoEnabledCategoriesAbortsPush(t *testing.T) {
 	configureFakeOPFWithCategories(t, fake, map[string]bool{})
 
 	dir, repo, originalTip := setupV1RepoInDir(t)
+	writeEnabledRepoSettings(t, dir)
 	remoteDir := filepath.Join(t.TempDir(), "origin.git")
 	_, err := git.PlainInit(remoteDir, true)
 	require.NoError(t, err)

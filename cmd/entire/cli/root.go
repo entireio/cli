@@ -126,6 +126,10 @@ func NewRootCmd() *cobra.Command {
 				telemetry.TrackCommandDetached(cmd, agentStr, settings.Enabled, versioninfo.Version)
 			}
 
+			// One-time global-tracking detection warn; the hidden-command
+			// walk above scopes it to foreground commands.
+			maybeWarnGlobalTracking(cmd.Context(), cmd.ErrOrStderr())
+
 			// Version check and notification (synchronous with 2s timeout)
 			// Runs AFTER command completes to avoid interfering with interactive modes.
 			// Stderr, never stdout: this hook also fires after --json commands whose
@@ -191,6 +195,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(inGroup(newEnableCmd(), groupSetup))
 	cmd.AddCommand(inGroup(newDisableCmd(), groupSetup))
 	cmd.AddCommand(inGroup(newStatusCmd(), groupSetup))
+	experimental.Register(cmd, newTrustCmd()) // 'trust' (experimental soft launch); per-repo checkpoint egress consent for global mode
 	experimental.Register(cmd, newBlameCmd()) // 'blame' (experimental)
 	experimental.Register(cmd, newWhyCmd())   // 'why' (experimental)
 	cmd.AddCommand(inGroup(newLoginCmd(), groupAccount))

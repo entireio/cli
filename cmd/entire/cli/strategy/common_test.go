@@ -1720,6 +1720,41 @@ func TestEnsureEntireGitignore_IncludesRedactorsLocal(t *testing.T) {
 	}
 }
 
+// enrollRepoGlobally enrolls the current repo via the user-global tier (no
+// repo-level setup). Call after the final chdir. Not parallel-safe: t.Setenv.
+func enrollRepoGlobally(t *testing.T, userSettingsJSON string) {
+	t.Helper()
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(userSettingsJSON), 0o600))
+	paths.ClearWorktreeRootCache()
+	paths.ClearInvisibleRuntimeCache()
+	t.Cleanup(func() {
+		paths.ClearWorktreeRootCache()
+		paths.ClearInvisibleRuntimeCache()
+	})
+}
+
+// writeEnabledRepoSettings gives a fixture repo explicit repo-level activation
+// intent (consent under the egress trust gate).
+func writeEnabledRepoSettings(t *testing.T, dir string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(`{"enabled": true}`), 0o600))
+}
+
+const heldMessageFragment = "checkpoint sync held"
+
+// lsRemoteOutput returns `git ls-remote <bareDir>`.
+func lsRemoteOutput(t *testing.T, bareDir string) string {
+	t.Helper()
+	lsCmd := exec.CommandContext(context.Background(), "git", "ls-remote", bareDir)
+	lsCmd.Env = testutil.GitIsolatedEnv()
+	out, err := lsCmd.CombinedOutput()
+	require.NoError(t, err, "ls-remote failed: %s", out)
+	return string(out)
+}
+
 // writeSettingsJSON creates .entire/settings.json in dir with the given body.
 func writeSettingsJSON(t *testing.T, dir, body string) {
 	t.Helper()

@@ -217,6 +217,7 @@ func enqueueRefs(t *testing.T, repo *git.Repository, refs []plumbing.ReferenceNa
 
 func TestPushQueuedCheckpointRefs(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	writeEnabledRepoSettings(t, workDir)
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
 
@@ -235,6 +236,26 @@ func TestPushQueuedCheckpointRefs(t *testing.T) {
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
 	assert.Empty(t, remaining, "pushed refs are removed from the queue")
+}
+
+// The second egress entry point (bypasses prePush) must hold too, refs queued.
+func TestPushQueuedCheckpointRefs_EgressGateHoldsUntrustedRepo(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	enrollRepoGlobally(t, `{"global":{"enabled":true}}`)
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	_, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.ErrorContains(t, err, "entire trust")
+	assert.False(t, pushDisabled, "a trust hold is not push_sessions=false")
+
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining, "a held push leaves refs queued")
 }
 
 func TestPushQueuedCheckpointRefs_PushDisabled(t *testing.T) {
@@ -267,6 +288,7 @@ func TestPushQueuedCheckpointRefs_PushDisabled(t *testing.T) {
 
 func TestPushQueuedCheckpointRefs_PolicyBlocked(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	writeEnabledRepoSettings(t, workDir)
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
 
@@ -294,6 +316,7 @@ func TestPushQueuedCheckpointRefs_PolicyBlocked(t *testing.T) {
 
 func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
 	workDir, _, refs := setupRepoWithCheckpointRefs(t)
+	writeEnabledRepoSettings(t, workDir)
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
 

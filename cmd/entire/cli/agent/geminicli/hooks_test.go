@@ -572,16 +572,20 @@ func TestInstallHooks_RemovesLegacyEnabledField_WhenAlreadyInstalled(t *testing.
 	}
 }
 
-func TestInstallHooks_RemovesMultipleLegacyFields(t *testing.T) {
+// TestInstallHooks_StripsOnlyLegacyEnabledField pins the narrow scope of the
+// legacy cleanup: only the "enabled" boolean old Entire versions wrote into
+// hooks is removed. Every other non-array member of hooks is USER data — an
+// earlier version deleted all of them (with only a Debug log), destroying
+// user config on a plain `entire enable`.
+func TestInstallHooks_StripsOnlyLegacyEnabledField(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	// Multiple non-array legacy fields in hooks
 	writeGeminiSettings(t, tempDir, `{
   "hooks": {
     "enabled": true,
     "version": "1.0",
-    "debug": false,
+    "myOwnMap": {"a": 1},
     "SessionStart": [
       {
         "matcher": "startup",
@@ -598,9 +602,12 @@ func TestInstallHooks_RemovesMultipleLegacyFields(t *testing.T) {
 	}
 
 	rawHooks := testutil.ReadRawHooks(t, tempDir, ".gemini")
-	for _, key := range []string{"enabled", "version", "debug"} {
-		if _, ok := rawHooks[key]; ok {
-			t.Errorf("legacy field %q should have been removed", key)
+	if _, ok := rawHooks["enabled"]; ok {
+		t.Error("legacy hooks.enabled field should have been removed")
+	}
+	for _, key := range []string{"version", "myOwnMap"} {
+		if _, ok := rawHooks[key]; !ok {
+			t.Errorf("user-authored non-array hooks member %q must be preserved", key)
 		}
 	}
 

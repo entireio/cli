@@ -78,6 +78,23 @@ type GlobalConfig struct {
 	// match what git config stores (see GetRemoteURLsInDirIfSet, which
 	// reads raw config precisely to preserve this contract).
 	ExcludeOrigins []string `json:"exclude_origins,omitempty"`
+
+	// TrustAll grants checkpoint-egress consent machine-wide; enrollment
+	// stays with Enabled and the exclude lists. The trust fields live inside
+	// this strict-decoded block deliberately: a pre-trust binary reading a
+	// trust-bearing file fails LoadUserSettings and global mode dies
+	// fail-closed rather than misreading recorded consent.
+	TrustAll bool `json:"trust_all,omitempty"`
+
+	// TrustedOrigins are exact normalized origin keys (host/owner/repo, as
+	// RepoTrustIdentity derives them from fetch AND push URLs) — never globs.
+	// A multi-URL origin syncs only when EVERY configured URL's key is listed.
+	TrustedOrigins []string `json:"trusted_origins,omitempty"`
+
+	// TrustedPaths are exact symlink-resolved worktree roots — never globs,
+	// no subtree cascade — for repos whose identity falls back to path. Each
+	// linked worktree needs its own entry.
+	TrustedPaths []string `json:"trusted_paths,omitempty"`
 }
 
 // UserSettings is the root of the user-global settings file.
@@ -89,6 +106,20 @@ type UserSettings struct {
 	// distinction: never materialize an empty GlobalConfig as a side
 	// effect of an unrelated write.
 	Global *GlobalConfig `json:"global,omitempty"`
+}
+
+// GlobalConfigured reports whether the global tier has been configured —
+// either answer counts (the ask-once wizard keys off this). Nil-safe, so
+// callers never repeat the raw us.Global nil-check.
+func (us *UserSettings) GlobalConfigured() bool {
+	return us != nil && us.Global != nil
+}
+
+// GlobalEnabled reports whether the global tier is configured AND enabled.
+// Nil-safe. This is only the file's own bit — the full activation gate
+// (worktree resolution, exclude lists, fail-closed rules) is GlobalModeActive.
+func (us *UserSettings) GlobalEnabled() bool {
+	return us.GlobalConfigured() && us.Global.Enabled
 }
 
 // UserSettingsPath returns the absolute path of the user-global settings
@@ -200,16 +231,10 @@ func persistUserSettings(path string, us *UserSettings) error {
 	if err != nil {
 		return fmt.Errorf("encoding user settings: %w", err)
 	}
-	// The atomic write renames a temp file over the target, which would
-	// replace a symlinked settings.json (common with dotfile managers — the
-	// same reason LoadUserSettings avoids readConfined) with a regular file,
-	// silently detaching the managed target. Resolve the symlink and write
-	// through to its target; fall back to the literal path when resolution
-	// fails (typically: the file does not exist yet).
-	if resolved, symErr := filepath.EvalSymlinks(path); symErr == nil {
-		path = resolved
-	}
-	if err := jsonutil.WriteFileAtomic(path, data, 0o600); err != nil {
+	// Symlink-following write: a settings.json symlinked by a dotfile manager
+	// (the same reason LoadUserSettings avoids readConfined) must be rewritten
+	// through to its target, not replaced by the atomic rename.
+	if err := jsonutil.WriteFileAtomicFollowingSymlinks(path, data, 0o600); err != nil {
 		return fmt.Errorf("writing user settings: %w", err)
 	}
 	ClearGlobalModeCache()
@@ -313,6 +338,25 @@ func resolveGlobPrefixSymlinks(expanded string) string {
 	return slashed
 }
 
+// checkExcludePathPattern expands and validates a single exclude_paths
+// pattern — the one definition of "usable" shared by the fail-closed matcher
+// and doctor's ValidateGlobalConfig, so the two surfaces can never disagree
+// about which patterns deactivate the tier. Returns the expanded pattern,
+// "" for a blank entry (no intent to honor), or the error both report.
+func checkExcludePathPattern(p string) (string, error) {
+	expanded, err := expandTilde(p)
+	if err != nil {
+		return "", err
+	}
+	if expanded == "" {
+		return "", nil
+	}
+	if !doublestar.ValidatePattern(expanded) {
+		return "", errors.New("invalid glob")
+	}
+	return expanded, nil
+}
+
 // matchesExcludePath reports whether worktreeRoot matches any exclude_paths
 // pattern. A pattern also excludes everything under it (p matches, or p/**
 // matches). Blank entries are skipped; an UNUSABLE pattern (unexpandable ~,
@@ -334,7 +378,7 @@ func matchesExcludePathFold(_ context.Context, patterns []string, worktreeRoot s
 		foldPathForms(roots)
 	}
 	for i, p := range patterns {
-		expanded, err := expandTilde(p)
+		expanded, err := checkExcludePathPattern(p)
 		if err != nil {
 			return false, fmt.Errorf("exclude_paths[%d]: %w", i, err)
 		}
@@ -466,7 +510,29 @@ func matchesExcludeOrigin(_ context.Context, patterns []string, normalizedOrigin
 	return false, nil
 }
 
-// globalModeCache memoizes GlobalModeActive per working directory. Hooks are
+// InactiveReason explains why the hook gate found Entire inactive for the
+// current worktree. It exists so the SessionStart wrong-folder notice can name
+// the reason without re-deriving (and possibly contradicting) the gate's
+// decision. InactiveReasonNone accompanies an active result.
+type InactiveReason int
+
+const (
+	// InactiveReasonNone: not inactive (the location is active).
+	InactiveReasonNone InactiveReason = iota
+	// InactiveReasonRepoDisabled: repo-level setup exists and is disabled (or
+	// unreadable — fail closed). This is an explicit veto: callers surfacing
+	// inactive-location notices must stay silent for it.
+	InactiveReasonRepoDisabled
+	// InactiveReasonGlobalExcluded: the global tier is on, but this worktree
+	// matches an exclude pattern (or exclusion could not be verified — fail
+	// closed).
+	InactiveReasonGlobalExcluded
+	// InactiveReasonGlobalOff: no repo-level setup, and the global tier is
+	// unconfigured, disabled, or unreadable.
+	InactiveReasonGlobalOff
+)
+
+// globalModeCache memoizes the global-mode probe per working directory. Hooks are
 // one-shot processes that evaluate the gate more than once (logging init plus
 // the entry gate), and the exclude_origins check forks git each time; one
 // probe per process removes that cost and guarantees every gate in the
@@ -481,16 +547,19 @@ var (
 	globalModeKey    string
 	globalModeCached bool
 	globalModeActive bool
+	globalModeReason InactiveReason
 )
 
-// ClearGlobalModeCache resets the memoized GlobalModeActive result.
-// For tests that flip user-global settings mid-process; SaveUserSettings also
-// calls it so a writer process observes its own write.
+// ClearGlobalModeCache resets the memoized global-mode probe result.
+// For tests that flip user-global settings mid-process; every user-settings
+// writer also reaches it through persistUserSettings (ModifyUserSettings and
+// SaveUserSettings alike) so a writer process observes its own write.
 func ClearGlobalModeCache() {
 	globalModeMu.Lock()
 	globalModeKey = ""
 	globalModeCached = false
 	globalModeActive = false
+	globalModeReason = InactiveReasonNone
 	globalModeMu.Unlock()
 }
 
@@ -527,13 +596,22 @@ func SetWorktreeRootFnForTesting(fn func(context.Context) (string, error)) func(
 // case with a subprocess it never needed (that is also why the memo is keyed
 // on the CWD rather than the root).
 //
-// The Debug logs here and in computeGlobalModeActive are best-effort traces,
+// The Debug logs here and in computeGlobalModeStatus are best-effort traces,
 // NOT a diagnostic channel: on the hook paths that call this predicate,
-// logging.Init runs only after the
-// gate passes, so on every failing path these records are dropped by the
-// default slog handler. A user-facing "global mode configured but inactive
-// because X" surface (status/doctor) is the planned diagnosability story.
+// logging.Init runs only after the gate passes, so on every failing path
+// these records are dropped by the default slog handler. The user-facing
+// diagnosability surfaces are doctor's checkGlobalTracking (unreadable user
+// settings, missing/unverifiable user-level hooks, unusable exclude
+// patterns) and `entire status`, whose global-tracking line reports the
+// per-repo carve-out.
 func GlobalModeActive(ctx context.Context) bool {
+	active, _ := globalModeStatus(ctx)
+	return active
+}
+
+// globalModeStatus is GlobalModeActive plus the inactive reason, memoized
+// together so both callers observe one consistent answer per process.
+func globalModeStatus(ctx context.Context) (bool, InactiveReason) {
 	cwd, err := os.Getwd() //nolint:forbidigo // memo key only; resolving the worktree root here would fork git on the fast path
 	if err != nil {
 		cwd = ""
@@ -541,52 +619,53 @@ func GlobalModeActive(ctx context.Context) bool {
 	globalModeMu.Lock()
 	defer globalModeMu.Unlock()
 	if globalModeCached && globalModeKey == cwd {
-		return globalModeActive
+		return globalModeActive, globalModeReason
 	}
-	active := computeGlobalModeActive(ctx)
+	active, reason := computeGlobalModeStatus(ctx)
 	globalModeKey = cwd
 	globalModeCached = true
 	globalModeActive = active
-	return active
+	globalModeReason = reason
+	return active, reason
 }
 
-// computeGlobalModeActive is the uncached evaluation behind GlobalModeActive:
+// computeGlobalModeStatus is the uncached evaluation behind globalModeStatus:
 // settings and the nil/disabled check first — the machine-wide common case
 // answers without any subprocess — then root resolution and exclusion
 // matching only for an enabled tier.
-func computeGlobalModeActive(ctx context.Context) bool {
+func computeGlobalModeStatus(ctx context.Context) (bool, InactiveReason) {
 	us, err := LoadUserSettings(ctx)
 	if err != nil {
 		logging.Debug(ctx, "user settings unreadable; treating global mode as inactive",
 			slog.String("error", err.Error()))
-		return false
+		return false, InactiveReasonGlobalOff
 	}
-	if us.Global == nil || !us.Global.Enabled {
-		return false
+	if !us.GlobalEnabled() {
+		return false, InactiveReasonGlobalOff
 	}
 	root, err := worktreeRootFn(ctx)
 	if err != nil {
 		logging.Debug(ctx, "worktree unresolvable; treating global mode as inactive",
 			slog.String("error", err.Error()))
-		return false
+		return false, InactiveReasonGlobalOff
 	}
 	excluded, err := matchesExcludePath(ctx, us.Global.ExcludePaths, root)
 	if err != nil {
 		logging.Debug(ctx, "unusable exclude_paths pattern; treating global mode as inactive (fail closed)",
 			slog.String("error", err.Error()))
-		return false
+		return false, InactiveReasonGlobalExcluded
 	}
 	if excluded {
-		return false
+		return false, InactiveReasonGlobalExcluded
 	}
 	excludedExact, err := matchesExcludePathExact(ctx, us.Global.ExcludePathsExact, root)
 	if err != nil {
 		logging.Debug(ctx, "unusable exclude_paths_exact entry; treating global mode as inactive (fail closed)",
 			slog.String("error", err.Error()))
-		return false
+		return false, InactiveReasonGlobalExcluded
 	}
 	if excludedExact {
-		return false
+		return false, InactiveReasonGlobalExcluded
 	}
 	if len(us.Global.ExcludeOrigins) > 0 {
 		// Vet the pattern list before the origin lookup: a malformed entry
@@ -594,13 +673,13 @@ func computeGlobalModeActive(ctx context.Context) bool {
 		if _, err := matchesExcludeOrigin(ctx, us.Global.ExcludeOrigins, ""); err != nil {
 			logging.Debug(ctx, "unusable exclude_origins pattern; treating global mode as inactive (fail closed)",
 				slog.String("error", err.Error()))
-			return false
+			return false, InactiveReasonGlobalExcluded
 		}
 		origins, found, err := gitremote.GetRemoteURLsInDirIfSet(ctx, root, "origin")
 		if err != nil {
 			logging.Debug(ctx, "origin lookup failed; treating global mode as inactive",
 				slog.String("error", err.Error()))
-			return false
+			return false, InactiveReasonGlobalExcluded
 		}
 		// found==false means the repo has NO origin remote: nothing exists
 		// for a pattern to match, so the tier stays active (documented on
@@ -614,21 +693,21 @@ func computeGlobalModeActive(ctx context.Context) bool {
 					// exclusion could not be checked against this origin —
 					// fail closed.
 					logging.Debug(ctx, "origin unparseable; treating global mode as inactive (fail closed)")
-					return false
+					return false, InactiveReasonGlobalExcluded
 				}
 				matched, err := matchesExcludeOrigin(ctx, us.Global.ExcludeOrigins, normalized)
 				if err != nil {
 					logging.Debug(ctx, "unusable exclude_origins pattern; treating global mode as inactive (fail closed)",
 						slog.String("error", err.Error()))
-					return false
+					return false, InactiveReasonGlobalExcluded
 				}
 				if matched {
-					return false
+					return false, InactiveReasonGlobalExcluded
 				}
 			}
 		}
 	}
-	return true
+	return true, InactiveReasonNone
 }
 
 // IsActiveForRepo is the gate predicate for hooks: is Entire active for the
@@ -647,14 +726,38 @@ func computeGlobalModeActive(ctx context.Context) bool {
 // Settings files created for unrelated features do not record activation
 // intent and therefore continue through the global tier.
 func IsActiveForRepo(ctx context.Context) bool {
+	active, _ := IsActiveForRepoWithReason(ctx)
+	return active
+}
+
+// GlobalTierEnabled reports whether the user-global tracking tier is
+// configured AND enabled, independent of any repository context. It exists
+// for the one gate that runs where the worktree-scoped reason variant cannot:
+// the SessionStart wrong-folder notice outside a git repository. Deliberately
+// unmemoized — it is only called on that cold path (session-start verb, no
+// repo), so the active hook path pays nothing for it. Fail closed on read
+// errors, like every other gate over this file.
+func GlobalTierEnabled(ctx context.Context) bool {
+	us, err := LoadUserSettings(ctx)
+	return err == nil && us.GlobalEnabled()
+}
+
+// IsActiveForRepoWithReason is IsActiveForRepo plus the reason a location is
+// inactive, for callers that surface a notice (the SessionStart wrong-folder
+// warning). It must stay the same decision as IsActiveForRepo — the reason is
+// derived inside the gate, never re-computed by callers.
+func IsActiveForRepoWithReason(ctx context.Context) (bool, InactiveReason) {
 	configured, err := RepoActivationConfigured(ctx)
 	if err != nil {
 		logging.Debug(ctx, "repo settings unreadable; treating repo as inactive",
 			slog.String("error", err.Error()))
-		return false
+		return false, InactiveReasonRepoDisabled
 	}
 	if configured {
-		return repoSettingsEnabled(ctx)
+		if repoSettingsEnabled(ctx) {
+			return true, InactiveReasonNone
+		}
+		return false, InactiveReasonRepoDisabled
 	}
-	return GlobalModeActive(ctx)
+	return globalModeStatus(ctx)
 }

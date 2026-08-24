@@ -52,6 +52,71 @@ func TestSaveUserSettings_CreatesDirAndRoundTrips(t *testing.T) {
 	}
 }
 
+// TestModifyUserSettings_ConcurrentWritersLoseNoUpdates pins the file-lock
+// contract: two concurrent writers — one growing the exclude list, one
+// flipping enabled — must both land. Dropping the flock.Acquire in
+// ModifyUserSettings turns the read-modify-write into a lost-update race this
+// test catches.
+func TestModifyUserSettings_ConcurrentWritersLoseNoUpdates(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+
+	const iterations = 25
+	errs := make(chan error, 2)
+	go func() {
+		for i := range iterations {
+			if err := ModifyUserSettings(ctx, func(us *UserSettings) error {
+				if us.Global == nil {
+					us.Global = &GlobalConfig{}
+				}
+				us.Global.ExcludePaths = append(us.Global.ExcludePaths, "/srv/a/"+string(rune('a'+i))+"/**")
+				return nil
+			}); err != nil {
+				errs <- err
+				return
+			}
+		}
+		errs <- nil
+	}()
+	go func() {
+		for i := range iterations {
+			enabled := i%2 == 0
+			if err := ModifyUserSettings(ctx, func(us *UserSettings) error {
+				if us.Global == nil {
+					us.Global = &GlobalConfig{}
+				}
+				us.Global.Enabled = enabled
+				return nil
+			}); err != nil {
+				errs <- err
+				return
+			}
+		}
+		errs <- nil
+	}()
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("ModifyUserSettings: %v", err)
+		}
+	}
+
+	out, err := LoadUserSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Global == nil || len(out.Global.ExcludePaths) != iterations {
+		got := 0
+		if out.Global != nil {
+			got = len(out.Global.ExcludePaths)
+		}
+		t.Fatalf("lost update: %d exclude paths survived, want %d", got, iterations)
+	}
+	// The flipper's last write (i = iterations-1, odd → false) must survive too.
+	if out.Global.Enabled != ((iterations-1)%2 == 0) {
+		t.Fatalf("lost update: enabled = %v after final flip", out.Global.Enabled)
+	}
+}
+
 // TestRepoSettingsWrites_ClearInvisibleRoutingCache pins the invalidation
 // contract documented on paths' invisibleCache: creating a repo settings
 // file — through the struct save path (saveToFile) or the raw path (saveRaw)
@@ -233,70 +298,5 @@ func TestSaveUserSettings_InvalidatesGlobalModeCache(t *testing.T) {
 	}
 	if GlobalModeActive(t.Context()) {
 		t.Fatal("SaveUserSettings must invalidate the memoized gate")
-	}
-}
-
-// TestModifyUserSettings_ConcurrentWritersLoseNoUpdates pins the file-lock
-// contract: two concurrent writers — one growing the exclude list, one
-// flipping enabled — must both land. Dropping the flock.Acquire in
-// ModifyUserSettings turns the read-modify-write into a lost-update race this
-// test catches.
-func TestModifyUserSettings_ConcurrentWritersLoseNoUpdates(t *testing.T) {
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	ctx := context.Background()
-
-	const iterations = 25
-	errs := make(chan error, 2)
-	go func() {
-		for i := range iterations {
-			if err := ModifyUserSettings(ctx, func(us *UserSettings) error {
-				if us.Global == nil {
-					us.Global = &GlobalConfig{}
-				}
-				us.Global.ExcludePaths = append(us.Global.ExcludePaths, "/srv/a/"+string(rune('a'+i))+"/**")
-				return nil
-			}); err != nil {
-				errs <- err
-				return
-			}
-		}
-		errs <- nil
-	}()
-	go func() {
-		for i := range iterations {
-			enabled := i%2 == 0
-			if err := ModifyUserSettings(ctx, func(us *UserSettings) error {
-				if us.Global == nil {
-					us.Global = &GlobalConfig{}
-				}
-				us.Global.Enabled = enabled
-				return nil
-			}); err != nil {
-				errs <- err
-				return
-			}
-		}
-		errs <- nil
-	}()
-	for range 2 {
-		if err := <-errs; err != nil {
-			t.Fatalf("ModifyUserSettings: %v", err)
-		}
-	}
-
-	out, err := LoadUserSettings(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.Global == nil || len(out.Global.ExcludePaths) != iterations {
-		got := 0
-		if out.Global != nil {
-			got = len(out.Global.ExcludePaths)
-		}
-		t.Fatalf("lost update: %d exclude paths survived, want %d", got, iterations)
-	}
-	// The flipper's last write (i = iterations-1, odd → false) must survive too.
-	if out.Global.Enabled != ((iterations-1)%2 == 0) {
-		t.Fatalf("lost update: enabled = %v after final flip", out.Global.Enabled)
 	}
 }

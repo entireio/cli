@@ -117,7 +117,9 @@ var legacyHookCommandPrefixes = []string{
 	`"$(git rev-parse --show-toplevel)"/scripts/entire-dev hooks `,
 	"${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks ",
 	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks `,
+	"go run $(git rev-parse --show-toplevel)/cmd/entire/main.go hooks ",
 	"go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks ",
+	"go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks ",
 }
 
 // WrapProductionSilentHookCommand exits successfully without output when the

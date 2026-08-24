@@ -28,6 +28,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/perf"
@@ -186,6 +187,10 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	}
 	countSessionsSpan.End()
 
+	// Untrusted global enrollment: a LINE in this composed banner, never a
+	// second WriteHookResponse (Claude parses one JSON object from stdout).
+	message += globalTrustBannerSuffix(ctx, ag.Name())
+
 	// Codex-only: surface untrusted hooks. Reaching this point means
 	// SessionStart is itself trusted, but a newer entire release may have
 	// added hooks (e.g. PostToolUse) that the user hasn't approved on
@@ -276,6 +281,21 @@ func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
 		return "\n\nEntire CLI found no commits yet — checkpoints will activate after your first commit."
 	}
 	return "\n\nEntire CLI will link this conversation to your next commit."
+}
+
+// globalTrustBannerSuffix returns the untrusted-enrollment banner line, empty
+// for every consented state (settings.RepoUntrustedEnrolled decides). Codex
+// banners are single-line, so the suffix joins with a space there.
+func globalTrustBannerSuffix(ctx context.Context, agentName types.AgentName) string {
+	if !settings.RepoUntrustedEnrolled(ctx) {
+		return ""
+	}
+	// "checkpoint sync remote", not "origin": sync targets the elected remote.
+	const notice = "Entire is capturing this repo locally via global mode. Checkpoints aren't synced yet — run `entire trust` to sync them to your checkpoint sync remote."
+	if agentName == agent.AgentNameCodex {
+		return " " + notice
+	}
+	return "\n  " + notice
 }
 
 // agentHelpBannerSuffix returns the SessionStart banner suffix that points an

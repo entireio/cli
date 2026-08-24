@@ -74,3 +74,79 @@ func WriteFileAtomic(filePath string, data []byte, perm fs.FileMode) error {
 	}
 	return nil
 }
+
+// WriteFileAtomicFollowingSymlinks writes like WriteFileAtomic but resolves a
+// symlinked filePath first and writes through to its ultimate target — dotfile
+// managers commonly symlink user-level config files, and the atomic rename
+// would otherwise replace the link with a regular file, silently detaching the
+// managed target. A dangling link (stow/chezmoi create the link before the
+// target file exists) is followed to its target so the file is created THROUGH
+// the link; only a final component that is genuinely not a symlink falls back
+// to the literal path.
+//
+// When the resolved target already exists its file mode is preserved; perm
+// applies only when the write creates the file.
+func WriteFileAtomicFollowingSymlinks(filePath string, data []byte, perm fs.FileMode) error {
+	target := resolveWriteTarget(filePath)
+	if info, err := os.Stat(target); err == nil && info.Mode().IsRegular() {
+		perm = info.Mode().Perm()
+	}
+	err := WriteFileAtomic(target, data, perm)
+	if err != nil && target != filePath {
+		// Name both paths: the failure is about the resolved target (whose
+		// directory may be unwritable, or owned by someone else), but the
+		// caller and the user only know the link they asked to write.
+		return fmt.Errorf("%s resolves through a symlink to %s: %w", filePath, target, err)
+	}
+	return err
+}
+
+// maxSymlinkHops bounds the manual final-component symlink walk in
+// resolveWriteTarget; 40 matches the Linux kernel's total-link-traversal cap.
+const maxSymlinkHops = 40
+
+// resolveWriteTarget resolves filePath to the path a write should land on,
+// following symlinks through the final component even when the link target
+// does not exist yet. filepath.EvalSymlinks alone cannot do this: it errors on
+// a dangling link exactly like on a missing file, and treating that error as
+// "no symlink here" is how an existing dangling settings.json link got
+// replaced by a regular file. A relative filePath stays relative —
+// EvalSymlinks never absolutizes — so it resolves against the CWD exactly as
+// os.WriteFile would.
+func resolveWriteTarget(filePath string) string {
+	path := filePath
+	for range maxSymlinkHops {
+		prev := path
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			return resolved
+		}
+		// Some component of path does not exist. Resolve the parent so the
+		// temp file and rename land in the real directory, then follow the
+		// final component by hand if it is a dangling symlink.
+		if resolvedDir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
+			path = filepath.Join(resolvedDir, filepath.Base(path))
+		}
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&fs.ModeSymlink == 0 {
+			// The final component is genuinely absent (create it here) or not
+			// a symlink — the literal path is the write target.
+			return path
+		}
+		target, err := os.Readlink(path)
+		if err != nil {
+			return path
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(path), target)
+		}
+		if target == prev {
+			// A self-referential link (a -> a): the kernel answers ELOOP at
+			// once, so stop here instead of re-walking it to the hop cap.
+			return path
+		}
+		path = target
+	}
+	// Hop cap exceeded (a link cycle); the kernel would fail this path with
+	// ELOOP, so let the write surface whatever error the last hop produces.
+	return path
+}

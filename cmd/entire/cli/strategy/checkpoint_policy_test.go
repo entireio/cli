@@ -1,7 +1,6 @@
 package strategy
 
 import (
-	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -159,6 +158,7 @@ func TestFinalizeAllTurnCheckpointsSkipsUnsupportedPolicy(t *testing.T) {
 
 func TestPrePushWarnsAndSkipsCheckpointPushWhenPolicyUnsupported(t *testing.T) {
 	workDir := setupRepoWithCheckpointBranch(t)
+	writeEnabledRepoSettings(t, workDir)
 	bareDir := filepath.Join(t.TempDir(), "remote.git")
 	_, err := git.PlainInit(bareDir, true)
 	require.NoError(t, err)
@@ -178,10 +178,7 @@ func TestPrePushWarnsAndSkipsCheckpointPushWhenPolicyUnsupported(t *testing.T) {
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
 	t.Setenv(interactive.EnvTestTTY, "1")
-	oldWriter := stderrWriter
-	var stderr bytes.Buffer
-	stderrWriter = &stderr
-	t.Cleanup(func() { stderrWriter = oldWriter })
+	stderr := captureStderrWriter(t)
 
 	err = NewManualCommitStrategy().PrePush(context.Background(), "origin")
 	require.NoError(t, err)
@@ -193,6 +190,7 @@ func TestPrePushWarnsAndSkipsCheckpointPushWhenPolicyUnsupported(t *testing.T) {
 
 func TestPrePushWarnsAndPushesWhenPolicyDiverged(t *testing.T) {
 	workDir := setupRepoWithCheckpointBranch(t)
+	writeEnabledRepoSettings(t, workDir)
 	bareDir := filepath.Join(t.TempDir(), "remote.git")
 	_, err := git.PlainInit(bareDir, true)
 	require.NoError(t, err)
@@ -220,10 +218,7 @@ func TestPrePushWarnsAndPushesWhenPolicyDiverged(t *testing.T) {
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
 	t.Setenv(interactive.EnvTestTTY, "1")
-	oldWriter := stderrWriter
-	var stderr bytes.Buffer
-	stderrWriter = &stderr
-	t.Cleanup(func() { stderrWriter = oldWriter })
+	stderr := captureStderrWriter(t)
 
 	err = NewManualCommitStrategy().PrePush(context.Background(), "origin")
 	require.NoError(t, err)

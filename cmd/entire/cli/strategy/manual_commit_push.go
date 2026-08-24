@@ -28,6 +28,10 @@ var errOPFAbortedByUser = errors.New("OPF prompt aborted by user; push cancelled
 
 var opfPrePushProgressWriter io.Writer = os.Stderr
 
+// resolveTrustDecisionFn is a test seam over the trust prompt (same pattern
+// as stderrWriter).
+var resolveTrustDecisionFn = resolveTrustDecisionForPrePush
+
 // PrePush is called by the git pre-push hook before pushing to a remote.
 // It pushes each ref in refs.Push alongside the user's push.
 //
@@ -97,6 +101,27 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 		}
 		if !checkpointSyncAllowedForRemote(ctx, ps.remote, pendingCapture) {
 			hintGatedCheckpointSync(ctx, ps.remote)
+			return nil
+		}
+	}
+
+	// Egress trust gate, above both backend branches: a globally enrolled repo
+	// syncs only after the user trusts it once. A hold pairs with exactly one
+	// stderr explanation and never fails the user's own push.
+	if !settings.CheckpointEgressAllowed(ctx) {
+		decision, decisionErr := resolveTrustDecisionFn(ctx, stderrWriter)
+		if decisionErr != nil {
+			logging.Warn(ctx, "trust pre-push prompt failed; holding checkpoint sync",
+				slog.String("error", decisionErr.Error()),
+			)
+		}
+		if decisionErr != nil || decision != TrustGranted {
+			fmt.Fprintln(stderrWriter, "Entire: checkpoint sync held — this repo isn't trusted yet.\nSessions are captured locally. Run `entire trust` to sync them to your checkpoint sync remote.")
+			return nil
+		}
+		// Granted at the prompt: re-evaluate the gate, never reuse a boolean.
+		if !settings.CheckpointEgressAllowed(ctx) {
+			fmt.Fprintln(stderrWriter, "Warning: trust was saved but the gate still holds; checkpoint sync skipped for this push.")
 			return nil
 		}
 	}
@@ -429,6 +454,11 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	ps := resolvePushSettings(ctx, remote)
 	if ps.pushDisabled {
 		return 0, true, nil
+	}
+	// Second egress entry point (bypasses prePush): same trust gate, no
+	// prompt; refs stay queued for after `entire trust`.
+	if !settings.CheckpointEgressAllowed(ctx) {
+		return 0, false, errors.New("checkpoint sync is held — this repo isn't trusted yet; refs stay queued — run `entire trust` first")
 	}
 	syncCheckpointPolicyForPrePush(ctx, repo, ps)
 	if !checkpointPolicyAllowsGitHook(ctx, repo) {

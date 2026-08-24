@@ -21,13 +21,26 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/spf13/pflag"
 )
 
 // No t.Parallel in this file: every test uses t.Chdir and/or t.Setenv.
 
+// isolateUserHome points os.UserHomeDir at a temp dir so the user-level agent
+// hook install/removal in the global enable/disable flow never touches the
+// developer's real ~/.claude or ~/.gemini settings.
+func isolateUserHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	return home
+}
+
 func TestRunEnableGlobalMode_OutsideGitRepo(t *testing.T) {
 	cfg := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	home := isolateUserHome(t)
 	t.Chdir(t.TempDir()) // deliberately not a git repository
 	t.Cleanup(settings.ClearGlobalModeCache)
 
@@ -42,14 +55,52 @@ func TestRunEnableGlobalMode_OutsideGitRepo(t *testing.T) {
 	if us.Global == nil || !us.Global.Enabled {
 		t.Fatalf("global.enabled not persisted: %+v", us.Global)
 	}
-	if !strings.Contains(buf.String(), "Global tracking enabled.") {
-		t.Fatalf("missing confirmation, got: %q", buf.String())
+	out := buf.String()
+	if !strings.Contains(out, "Global tracking enabled.") {
+		t.Fatalf("missing confirmation, got: %q", out)
+	}
+	// enable --global installs user-level agent hooks and reports per agent.
+	if !strings.Contains(out, "User-level agent hooks:") {
+		t.Fatalf("missing user-level hook report, got: %q", out)
+	}
+	for _, want := range []string{"claude-code: installed", "gemini: installed", "user-level hooks not supported:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q, got: %q", want, out)
+		}
+	}
+	for _, f := range []string{
+		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(home, ".gemini", "settings.json"),
+	} {
+		if _, err := os.Stat(f); err != nil {
+			t.Errorf("user-level hook file not written: %v", err)
+		}
+	}
+}
+
+func TestRunEnableGlobalMode_ReportsAlreadyInstalled(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	isolateUserHome(t)
+	t.Cleanup(settings.ClearGlobalModeCache)
+
+	if err := runEnableGlobalMode(t.Context(), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := runEnableGlobalMode(t.Context(), &buf); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"claude-code: already installed", "gemini: already installed"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("second enable missing %q, got: %q", want, buf.String())
+		}
 	}
 }
 
 func TestRunEnableGlobalMode_PreservesExcludeLists(t *testing.T) {
 	cfg := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	isolateUserHome(t)
 	t.Cleanup(settings.ClearGlobalModeCache)
 	content := `{"global":{"enabled":false,"exclude_paths":["~/oss/**"],"exclude_origins":["github.com/acme/*"]}}`
 	if err := os.WriteFile(filepath.Join(cfg, settings.UserSettingsFileName), []byte(content), 0o600); err != nil {
@@ -71,6 +122,7 @@ func TestRunEnableGlobalMode_PreservesExcludeLists(t *testing.T) {
 func TestRunDisableGlobalMode_AnswerIsDurable(t *testing.T) {
 	cfg := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	isolateUserHome(t)
 	t.Cleanup(settings.ClearGlobalModeCache)
 
 	var buf bytes.Buffer
@@ -86,11 +138,174 @@ func TestRunDisableGlobalMode_AnswerIsDurable(t *testing.T) {
 	if us.Global == nil || us.Global.Enabled {
 		t.Fatalf("disable --global must persist a durable false, got %+v", us.Global)
 	}
-
 	var wizardOut bytes.Buffer
 	maybeAskGlobalTracking(t.Context(), &wizardOut, EnableOptions{})
 	if wizardOut.Len() != 0 {
 		t.Fatalf("configured answer must silence the wizard, got: %q", wizardOut.String())
+	}
+}
+
+// Corrupt agent configs must fail only that agent's install (a `!` line, file
+// untouched, other agents proceed, exit 0); with NO agent covered the command
+// errors instead of reporting a tracking state that does not exist.
+func TestRunEnableGlobalMode_AgentFailures(t *testing.T) {
+	corruptAgentConfig := func(t *testing.T, home, dir string) string {
+		t.Helper()
+		path := filepath.Join(home, dir, "settings.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{not json`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("per-agent failure isolation", func(t *testing.T) {
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		home := isolateUserHome(t)
+		t.Cleanup(settings.ClearGlobalModeCache)
+		claudePath := corruptAgentConfig(t, home, ".claude")
+
+		var buf bytes.Buffer
+		if err := runEnableGlobalMode(t.Context(), &buf); err != nil {
+			t.Fatalf("partial success must stay exit 0, got: %v\n%s", err, buf.String())
+		}
+		out := buf.String()
+		if !strings.Contains(out, "! claude-code: install failed") || !strings.Contains(out, "✓ gemini: installed") {
+			t.Errorf("want claude failure line and gemini success, got: %q", out)
+		}
+		data, err := os.ReadFile(claudePath)
+		if err != nil || string(data) != `{not json` {
+			t.Errorf("corrupt claude settings must be left untouched (data=%q err=%v)", data, err)
+		}
+	})
+
+	t.Run("zero coverage is an error", func(t *testing.T) {
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		home := isolateUserHome(t)
+		t.Cleanup(settings.ClearGlobalModeCache)
+		corruptAgentConfig(t, home, ".claude")
+		corruptAgentConfig(t, home, ".gemini")
+
+		var buf bytes.Buffer
+		if err := runEnableGlobalMode(t.Context(), &buf); err == nil {
+			t.Fatalf("zero agents covered must return an error, output: %q", buf.String())
+		}
+		if !strings.Contains(buf.String(), "will not capture any sessions") {
+			t.Errorf("missing zero-coverage explanation, got: %q", buf.String())
+		}
+		us, loadErr := settings.LoadUserSettings(t.Context())
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if us.Global == nil || !us.Global.Enabled {
+			t.Errorf("the enabled setting itself must persist so a re-run repairs: %+v", us.Global)
+		}
+	})
+}
+
+// Non-interactive disable removes ONLY Entire's user-level entries; an agent
+// whose config cannot be read gets a `! ... could not remove` line while
+// readable agents still get their hooks removed.
+func TestRunDisableGlobalMode_HookRemoval(t *testing.T) {
+	t.Run("removes only ours without prompting", func(t *testing.T) {
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		home := isolateUserHome(t)
+		t.Cleanup(settings.ClearGlobalModeCache)
+		claudePath := filepath.Join(home, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(claudePath), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(claudePath, []byte(`{"model":"opus"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := runEnableGlobalMode(t.Context(), &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+
+		var buf bytes.Buffer
+		if err := runDisableGlobalMode(t.Context(), &buf); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(buf.String(), "user-level hooks removed") {
+			t.Fatalf("missing removal report, got: %q", buf.String())
+		}
+		data, err := os.ReadFile(claudePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "entire hooks claude-code") || !strings.Contains(string(data), "opus") {
+			t.Errorf("disable must remove only Entire entries: %s", data)
+		}
+		gemini, err := os.ReadFile(filepath.Join(home, ".gemini", "settings.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(gemini), "entire hooks gemini") {
+			t.Errorf("Entire hooks left in gemini user settings: %s", gemini)
+		}
+	})
+
+	t.Run("unreadable agent config is reported", func(t *testing.T) {
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		home := isolateUserHome(t)
+		t.Cleanup(settings.ClearGlobalModeCache)
+		if err := runEnableGlobalMode(t.Context(), &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{not json`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		var buf bytes.Buffer
+		if err := runDisableGlobalMode(t.Context(), &buf); err != nil {
+			t.Fatal(err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "! claude-code: could not remove:") || !strings.Contains(out, "✓ gemini: user-level hooks removed") {
+			t.Errorf("want claude failure line and gemini removal, got: %q", out)
+		}
+	})
+}
+
+// TestMaybeAskGlobalTracking_YesInstallsUserHooks pins the wizard's yes path
+// end to end: the stubbed confirm answers yes and the user-level hooks must
+// actually land in the isolated home — deleting the install call (not just
+// the report line) fails this test.
+func TestMaybeAskGlobalTracking_YesInstallsUserHooks(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	home := isolateUserHome(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	t.Cleanup(settings.ClearGlobalModeCache)
+	restore := askGlobalTrackingConfirm
+	askGlobalTrackingConfirm = func(context.Context) (bool, error) { return true, nil }
+	t.Cleanup(func() { askGlobalTrackingConfirm = restore })
+
+	var buf bytes.Buffer
+	maybeAskGlobalTracking(t.Context(), &buf, EnableOptions{})
+	if !strings.Contains(buf.String(), "Global tracking enabled") {
+		t.Fatalf("missing enable confirmation, got: %q", buf.String())
+	}
+	us, err := settings.LoadUserSettings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if us.Global == nil || !us.Global.Enabled {
+		t.Fatalf("wizard yes must persist enabled, got %+v", us.Global)
+	}
+	claude, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil || !strings.Contains(string(claude), "entire hooks claude-code stop") {
+		t.Errorf("claude user-level hooks not installed by the wizard yes (err=%v): %s", err, claude)
+	}
+	gemini, err := os.ReadFile(filepath.Join(home, ".gemini", "settings.json"))
+	if err != nil || !strings.Contains(string(gemini), "entire hooks gemini session-start") {
+		t.Errorf("gemini user-level hooks not installed by the wizard yes (err=%v): %s", err, gemini)
+	}
+	// The wizard's confirmation is the announcement; the detection warn must not stack on it.
+	if _, err := os.Stat(filepath.Join(cfg, globalWarnMarkerName)); err != nil {
+		t.Fatalf("wizard enable must ack the global warn marker itself: %v", err)
 	}
 }
 
@@ -790,16 +1005,6 @@ func TestMaybeMigrateGlobalRuntimeData_NoTriggerIsSilentNoop(t *testing.T) {
 	}
 }
 
-// isolateUserHome points os.UserHomeDir at a temp dir (HOME on Unix,
-// USERPROFILE on Windows) so end-to-end enable/disable runs can never touch
-// the developer's real user-level files.
-func isolateUserHome(t *testing.T) {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-}
-
 // TestEnableCmd_GlobalEndToEnd drives the full cobra command, pinning the two
 // success shapes of `entire enable --global`: outside a git repository it
 // still exits 0 and writes the user settings file; inside a repository it
@@ -1358,6 +1563,72 @@ func TestEnableCmd_GlobalRejectsRepoScopedFlags(t *testing.T) {
 		}
 	}
 	// The rejection must happen before any action: no user settings written.
+	if _, err := os.Stat(settings.UserSettingsPath()); !os.IsNotExist(err) {
+		t.Fatalf("rejected combinations must not write the user settings file (err=%v)", err)
+	}
+}
+
+// TestEnableCmd_GlobalConflictListCoversEveryFlag derives the --global
+// exclusivity contract from the live flag set instead of trusting the
+// hand-maintained list in markEnableGlobalFlagConflicts: every flag `entire
+// enable` registers must either be classified below as genuinely
+// global-compatible or be rejected by cobra when combined with --global. A
+// future repo-scoped flag added to newEnableCmd without a matching conflict
+// entry fails here until classified — the silent escape would reintroduce
+// the ignored-flag bug the pairwise registration exists to prevent.
+func TestEnableCmd_GlobalConflictListCoversEveryFlag(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+
+	// Flags that may legitimately combine with --global. Every entry needs a
+	// one-line reason; anything not listed must be mutually exclusive.
+	allowlist := map[string]string{
+		"global": "the machine-wide mode selector itself",
+		"help":   "cobra built-in; prints usage and exits before any repo-level action",
+	}
+
+	enum := newEnableCmd()
+	enum.InitDefaultHelpFlag() // Execute() registers --help; include it in the enumeration
+	var names []string
+	enum.Flags().VisitAll(func(f *pflag.Flag) {
+		if _, allowed := allowlist[f.Name]; !allowed {
+			names = append(names, f.Name)
+		}
+	})
+	if len(names) == 0 {
+		t.Fatal("enumeration found no non-allowlisted enable flags; the harness is broken")
+	}
+
+	for _, name := range names {
+		cmd := newEnableCmd()
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		arg := "--" + name
+		if typ := cmd.Flags().Lookup(name).Value.Type(); typ != "bool" {
+			// Non-bool flags need a value that parses for their type, so the
+			// rejection asserted below is cobra's mutual-exclusion check and
+			// not a value parse error.
+			val := "x"
+			switch {
+			case strings.HasPrefix(typ, "int") || strings.HasPrefix(typ, "uint") || strings.HasPrefix(typ, "float"):
+				val = "1"
+			case typ == "duration":
+				val = "1s"
+			}
+			arg += "=" + val
+		}
+		cmd.SetArgs([]string{"--global", arg})
+		err := cmd.Execute()
+		if err == nil {
+			t.Errorf("--%s combined with --global was accepted; add it to markEnableGlobalFlagConflicts or classify it in this test's allowlist", name)
+			continue
+		}
+		// Pin the rejection to cobra's mutual-exclusion validation, not some
+		// unrelated parse or runtime failure.
+		if !strings.Contains(err.Error(), "none of the others can be") {
+			t.Errorf("--%s with --global was rejected for a reason other than mutual exclusion: %v", name, err)
+		}
+	}
+
 	if _, err := os.Stat(settings.UserSettingsPath()); !os.IsNotExist(err) {
 		t.Fatalf("rejected combinations must not write the user settings file (err=%v)", err)
 	}
