@@ -27,6 +27,14 @@ func TestClassifyGlobalConfig_DisabledDoesNotResolveRepository(t *testing.T) {
 	}
 }
 
+func TestRuntimeLayoutValues(t *testing.T) {
+	t.Parallel()
+
+	if RuntimeUnknown != "unknown" {
+		t.Fatalf("RuntimeUnknown = %q, want %q", RuntimeUnknown, "unknown")
+	}
+}
+
 func TestResolveRepository_MainAndLinkedWorktree(t *testing.T) {
 	t.Parallel()
 

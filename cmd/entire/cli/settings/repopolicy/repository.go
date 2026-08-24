@@ -2,8 +2,6 @@ package repopolicy
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -13,9 +11,8 @@ import (
 	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/internal/worktreeid"
 )
-
-const worktreeIDHashLength = 6
 
 // Repository contains the stable repository facts needed by policy.
 type Repository struct {
@@ -31,8 +28,7 @@ type RepositoryResolver func(context.Context) (Repository, error)
 
 // HashWorktreeID returns the stable namespace key used for a Git worktree.
 func HashWorktreeID(worktreeID string) string {
-	hash := sha256.Sum256([]byte(worktreeID))
-	return hex.EncodeToString(hash[:])[:worktreeIDHashLength]
+	return worktreeid.Hash(worktreeID)
 }
 
 // ResolveRepository resolves repository facts for the current directory.
@@ -43,15 +39,15 @@ func ResolveRepository(ctx context.Context) (Repository, error) {
 // ResolveRepositoryAt resolves repository facts without importing the parent
 // settings or paths packages.
 func ResolveRepositoryAt(ctx context.Context, dir string) (Repository, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel", "--git-common-dir", "--git-dir")
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel", "--git-common-dir")
 	cmd.Dir = dir
 	output, err := cmd.Output()
 	if err != nil {
 		return Repository{}, fmt.Errorf("resolving repository: %w", err)
 	}
 	lines := strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")
-	if len(lines) != 3 {
-		return Repository{}, fmt.Errorf("resolving repository: expected three paths, got %d", len(lines))
+	if len(lines) != 2 {
+		return Repository{}, fmt.Errorf("resolving repository: expected two paths, got %d", len(lines))
 	}
 	base, err := filepath.Abs(dir)
 	if err != nil {
@@ -59,10 +55,9 @@ func ResolveRepositoryAt(ctx context.Context, dir string) (Repository, error) {
 	}
 	root := canonicalPath(absolutizeGitPath(base, lines[0]))
 	commonDir := canonicalPath(absolutizeGitPath(base, lines[1]))
-	gitDir := canonicalPath(absolutizeGitPath(base, lines[2]))
-	worktreeID, err := worktreeIDFromGitDirs(commonDir, gitDir)
+	worktreeID, err := worktreeid.Get(root)
 	if err != nil {
-		return Repository{}, err
+		return Repository{}, fmt.Errorf("resolving worktree identity: %w", err)
 	}
 	return Repository{
 		WorktreeRoot: root,
@@ -85,21 +80,6 @@ func canonicalPath(path string) string {
 		return filepath.Clean(resolved)
 	}
 	return filepath.Clean(path)
-}
-
-func worktreeIDFromGitDirs(commonDir, gitDir string) (string, error) {
-	if gitDir == commonDir {
-		return "", nil
-	}
-	relative, err := filepath.Rel(commonDir, gitDir)
-	if err != nil {
-		return "", fmt.Errorf("resolving worktree identity: %w", err)
-	}
-	parts := strings.Split(filepath.ToSlash(relative), "/")
-	if len(parts) == 2 && parts[0] == "worktrees" && parts[1] != "" {
-		return parts[1], nil
-	}
-	return "", fmt.Errorf("unexpected git worktree directory %q for common directory %q", gitDir, commonDir)
 }
 
 func inactiveGlobalPolicy(reason InactiveReason) RepoPolicy {

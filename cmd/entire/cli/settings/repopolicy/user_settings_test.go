@@ -49,6 +49,8 @@ func TestLoadUserSettings_MissingMalformedAndStrict(t *testing.T) {
 }
 
 func TestValidateGlobalConfig_InvalidExclusionsFailClosed(t *testing.T) {
+	t.Parallel()
+
 	config := &GlobalConfig{
 		Enabled:        true,
 		ExcludePaths:   []string{"relative/**"},

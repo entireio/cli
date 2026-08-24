@@ -15,7 +15,7 @@ const (
 type RuntimeLayout string
 
 const (
-	RuntimeUnknown   RuntimeLayout = ""
+	RuntimeUnknown   RuntimeLayout = "unknown"
 	RuntimeWorktree  RuntimeLayout = "worktree"
 	RuntimeGitCommon RuntimeLayout = "git_common"
 )
