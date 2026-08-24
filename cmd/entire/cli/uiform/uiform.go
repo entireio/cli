@@ -1,6 +1,11 @@
 // Package uiform builds huh forms wired to Entire's standard theme and
-// accessibility behavior. Centralises the Theme()+WithAccessible() recipe
-// so picker UI stays consistent across callers.
+// accessibility behavior. It centralizes form construction so picker UI stays
+// consistent across callers.
+//
+// Choose fields by selection semantics:
+//   - Radio is for single-select questions: exactly one option is the value.
+//   - Checklist is for multi-select questions: options are independently toggled.
+//   - ActionSelect is for commands such as Save or Cancel, not data selection.
 package uiform
 
 import (
@@ -22,18 +27,16 @@ func IsAccessibleMode() bool {
 	return os.Getenv("ACCESSIBLE") != ""
 }
 
-// Theme returns Entire's standard huh theme: base16 (ANSI 0–15) colors so
-// form prompts respect the user's terminal palette and stay consistent with
-// the rest of the CLI's styling. Derived from huh.ThemeBase16 with a few
-// overrides — magenta selection (pointer + chosen options); titles and
-// unselected options use the terminal's default foreground so they invert
-// with the background (dark text on light, light text on dark) like the
-// checkbox bracket does.
+// Theme returns Entire's standard huh theme. Every form uses the same visual
+// language as configure: bold questions, an orange `>` active-row cursor,
+// green checked boxes, muted empty boxes, and normal-contrast enabled labels.
 func Theme() huh.Theme {
 	return huh.ThemeFunc(func(isDark bool) *huh.Styles {
 		t := huh.ThemeBase16(isDark)
 
-		accent := lipgloss.Color(palette.Accent)
+		accent := lipgloss.Color(palette.Warning)
+		success := lipgloss.Color(palette.Success)
+		muted := lipgloss.Color(palette.Muted)
 		lightDark := lipgloss.LightDark(isDark)
 
 		// Titles and unselected options drop their explicit color and inherit
@@ -49,12 +52,31 @@ func Theme() huh.Theme {
 		t.Blurred.Title = t.Blurred.Title.UnsetForeground()
 		t.Blurred.UnselectedOption = t.Blurred.UnselectedOption.UnsetForeground()
 
-		// Magenta selection: the pointer (single + multi select) and the
-		// chosen option(s), replacing ThemeBase16's yellow/green.
-		t.Focused.SelectSelector = t.Focused.SelectSelector.Foreground(accent)
-		t.Focused.MultiSelectSelector = t.Focused.MultiSelectSelector.Foreground(accent)
-		t.Focused.SelectedOption = t.Focused.SelectedOption.Foreground(accent)
-		t.Focused.SelectedPrefix = t.Focused.SelectedPrefix.Foreground(accent)
+		// Forms have no left rail. Both single- and multi-select fields use a
+		// section-local `>` cursor; selection remains visually independent.
+		t.FieldSeparator = lipgloss.NewStyle().SetString("")
+		t.Focused.Base = lipgloss.NewStyle()
+		t.Blurred.Base = lipgloss.NewStyle()
+		t.Focused.SelectSelector = lipgloss.NewStyle().Foreground(accent).SetString("> ")
+		t.Blurred.SelectSelector = lipgloss.NewStyle().SetString("  ")
+		t.Focused.MultiSelectSelector = lipgloss.NewStyle().Foreground(accent).SetString("> ")
+		t.Blurred.MultiSelectSelector = lipgloss.NewStyle().SetString("  ")
+
+		// Keep enabled labels readable. Checkbox glyphs alone communicate state;
+		// muting the entire unselected row would incorrectly imply disabled.
+		t.Focused.SelectedPrefix = lipgloss.NewStyle().Foreground(success).SetString("◼ ")
+		t.Blurred.SelectedPrefix = lipgloss.NewStyle().Foreground(success).SetString("◼ ")
+		t.Focused.UnselectedPrefix = lipgloss.NewStyle().Foreground(muted).SetString("◻ ")
+		t.Blurred.UnselectedPrefix = lipgloss.NewStyle().Foreground(muted).SetString("◻ ")
+		t.Focused.SelectedOption = t.Focused.SelectedOption.UnsetForeground()
+		t.Blurred.SelectedOption = t.Blurred.SelectedOption.UnsetForeground()
+		t.Focused.UnselectedOption = t.Focused.UnselectedOption.UnsetForeground()
+		t.Blurred.UnselectedOption = t.Blurred.UnselectedOption.UnsetForeground()
+
+		// Questions are always bold, regardless of focus.
+		t.Focused.Title = t.Focused.Title.Bold(true)
+		t.Blurred.Title = t.Blurred.Title.Bold(true)
+		t.Group.Title = t.Group.Title.Bold(true)
 
 		// Blurred (inactive) button: no background chip and default text color,
 		// so it reads as plain text that inverts with the terminal theme while

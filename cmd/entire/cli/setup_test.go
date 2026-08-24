@@ -2455,48 +2455,6 @@ func TestManageAgents_NoChanges(t *testing.T) {
 	}
 }
 
-func TestManageAgents_NoChanges_StillPersistsVercelSetting(t *testing.T) {
-	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
-	writeSettings(t, testSettingsEnabled)
-	writeClaudeHooksFixture(t)
-
-	if err := os.WriteFile("vercel.json", []byte(`{
-  "git": {
-    "deploymentEnabled": {
-      "entire/**": false
-    }
-  }
-}`), 0o644); err != nil {
-		t.Fatalf("write vercel.json: %v", err)
-	}
-
-	selectFn := func(_ []string) ([]string, error) {
-		return []string{string(agent.AgentNameClaudeCode)}, nil
-	}
-
-	var buf bytes.Buffer
-	err := runManageAgents(context.Background(), &buf, EnableOptions{}, selectFn)
-	if err != nil {
-		t.Fatalf("runManageAgents() error = %v", err)
-	}
-
-	if strings.Contains(buf.String(), "No changes made.") {
-		t.Fatalf("did not expect no-op output when settings changed, got: %s", buf.String())
-	}
-	if !strings.Contains(buf.String(), ".entire/settings.json") {
-		t.Fatalf("expected settings update output, got: %s", buf.String())
-	}
-
-	s, err := settings.Load(context.Background())
-	if err != nil {
-		t.Fatalf("load settings: %v", err)
-	}
-	if !s.Vercel {
-		t.Fatal("expected vercel setting to be enabled")
-	}
-}
-
 func TestManageAgents_ForceReinstallsSelectedAgentHooks(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
@@ -2600,161 +2558,6 @@ func TestManageAgents_AddAndRemove(t *testing.T) {
 	}
 	if !checkGeminiCLIHooksInstalled() {
 		t.Error("Expected Gemini CLI hooks to be installed after selection")
-	}
-}
-
-func TestMaybePromptVercelDeploymentDisable_MergesExistingConfig(t *testing.T) {
-	setupTestRepo(t)
-
-	requireWriteFile := func(path, content string) {
-		t.Helper()
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatalf("write %s: %v", path, err)
-		}
-	}
-
-	requireWriteFile("vercel.json", `{
-  "cleanUrls": true,
-  "git": {
-    "deploymentEnabled": {
-      "main": true
-    }
-  }
-}`)
-
-	var prompted bool
-	var buf bytes.Buffer
-	changed, err := maybePromptVercelDeploymentDisable(context.Background(), &buf, settings.EntireSettingsFile, func() (bool, error) {
-		prompted = true
-		return true, nil
-	})
-	if err != nil {
-		t.Fatalf("maybePromptVercelDeploymentDisable() error = %v", err)
-	}
-	if !changed {
-		t.Fatal("expected Vercel setting change")
-	}
-	if !prompted {
-		t.Fatal("expected Vercel prompt to run")
-	}
-
-	projectSettings, err := settings.Load(context.Background())
-	if err != nil {
-		t.Fatalf("load settings: %v", err)
-	}
-	if !projectSettings.Vercel {
-		t.Fatal("expected vercel setting to be enabled")
-	}
-}
-
-func TestMaybePromptVercelDeploymentDisable_CreatesConfigWhenVercelDetected(t *testing.T) {
-	setupTestRepo(t)
-
-	if err := os.MkdirAll(".vercel", 0o755); err != nil {
-		t.Fatalf("mkdir .vercel: %v", err)
-	}
-
-	var buf bytes.Buffer
-	changed, err := maybePromptVercelDeploymentDisable(context.Background(), &buf, settings.EntireSettingsFile, func() (bool, error) {
-		return true, nil
-	})
-	if err != nil {
-		t.Fatalf("maybePromptVercelDeploymentDisable() error = %v", err)
-	}
-	if !changed {
-		t.Fatal("expected Vercel setting change")
-	}
-
-	projectSettings, err := settings.Load(context.Background())
-	if err != nil {
-		t.Fatalf("load settings: %v", err)
-	}
-	if !projectSettings.Vercel {
-		t.Fatal("expected vercel setting to be enabled")
-	}
-}
-
-func TestMaybePromptVercelDeploymentDisable_SkipsPromptWhenAlreadyDisabledInVercelJSON(t *testing.T) {
-	setupTestRepo(t)
-
-	if err := os.WriteFile("vercel.json", []byte(`{
-  "git": {
-    "deploymentEnabled": {
-      "entire/**": false
-    }
-  }
-}`), 0o644); err != nil {
-		t.Fatalf("write vercel.json: %v", err)
-	}
-
-	promptCalled := false
-	var buf bytes.Buffer
-	changed, err := maybePromptVercelDeploymentDisable(context.Background(), &buf, settings.EntireSettingsFile, func() (bool, error) {
-		promptCalled = true
-		return true, nil
-	})
-	if err != nil {
-		t.Fatalf("maybePromptVercelDeploymentDisable() error = %v", err)
-	}
-	if !changed {
-		t.Fatal("expected Vercel setting change from existing vercel.json")
-	}
-	if promptCalled {
-		t.Fatal("expected Vercel prompt to be skipped when already configured")
-	}
-	if !strings.Contains(buf.String(), ".entire/settings.json") {
-		t.Fatalf("expected settings update output, got %q", buf.String())
-	}
-
-	projectSettings, err := settings.Load(context.Background())
-	if err != nil {
-		t.Fatalf("load settings: %v", err)
-	}
-	if !projectSettings.Vercel {
-		t.Fatal("expected vercel setting to be enabled from existing vercel.json")
-	}
-}
-
-func TestMaybePromptVercelDeploymentDisable_WritesLocalSettingsWhenRequested(t *testing.T) {
-	setupTestRepo(t)
-
-	if err := os.MkdirAll(filepath.Dir(settings.EntireSettingsLocalFile), 0o755); err != nil {
-		t.Fatalf("mkdir settings dir: %v", err)
-	}
-	if err := os.WriteFile("vercel.json", []byte(`{}`), 0o644); err != nil {
-		t.Fatalf("write vercel.json: %v", err)
-	}
-
-	var buf bytes.Buffer
-	changed, err := maybePromptVercelDeploymentDisable(context.Background(), &buf, settings.EntireSettingsLocalFile, func() (bool, error) {
-		return true, nil
-	})
-	if err != nil {
-		t.Fatalf("maybePromptVercelDeploymentDisable() error = %v", err)
-	}
-	if !changed {
-		t.Fatal("expected Vercel setting change")
-	}
-	if !strings.Contains(buf.String(), settings.EntireSettingsLocalFile) {
-		t.Fatalf("expected local settings update output, got %q", buf.String())
-	}
-
-	localSettingsPath := filepath.Join(".", settings.EntireSettingsLocalFile)
-	localSettings, err := settings.LoadFromFile(localSettingsPath)
-	if err != nil {
-		t.Fatalf("load local settings: %v", err)
-	}
-	if !localSettings.Vercel {
-		t.Fatal("expected vercel setting in local settings")
-	}
-
-	projectSettingsPath := filepath.Join(".", settings.EntireSettingsFile)
-	projectSettings, err := settings.LoadFromFile(projectSettingsPath)
-	if err != nil {
-		t.Fatalf("load project settings: %v", err)
-	}
-	if projectSettings.Vercel {
-		t.Fatal("expected project settings to remain unchanged")
 	}
 }
 
@@ -3434,15 +3237,8 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 
 	t.Run("yes with telemetry=false", func(t *testing.T) {
 		s := &EntireSettings{}
-		opts := EnableOptions{Telemetry: false}
-		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
-			f := false
-			s.Telemetry = &f
-		} else if s.Telemetry == nil {
-			tr := true
-			s.Telemetry = &tr
-		}
-		if s.Telemetry == nil || *s.Telemetry != false {
+		applyTelemetryDefault(s, false)
+		if s.Telemetry == nil || *s.Telemetry {
 			t.Errorf("expected telemetry=false when --yes --telemetry=false, got %v", s.Telemetry)
 		}
 	})
@@ -3450,30 +3246,16 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 	t.Run("yes with ENTIRE_TELEMETRY_OPTOUT", func(t *testing.T) {
 		t.Setenv("ENTIRE_TELEMETRY_OPTOUT", "1")
 		s := &EntireSettings{}
-		opts := EnableOptions{Telemetry: true}
-		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
-			f := false
-			s.Telemetry = &f
-		} else if s.Telemetry == nil {
-			tr := true
-			s.Telemetry = &tr
-		}
-		if s.Telemetry == nil || *s.Telemetry != false {
+		applyTelemetryDefault(s, true)
+		if s.Telemetry == nil || *s.Telemetry {
 			t.Errorf("expected telemetry=false with ENTIRE_TELEMETRY_OPTOUT, got %v", s.Telemetry)
 		}
 	})
 
 	t.Run("yes defaults to telemetry enabled", func(t *testing.T) {
 		s := &EntireSettings{}
-		opts := EnableOptions{Telemetry: true}
-		if !opts.Telemetry {
-			f := false
-			s.Telemetry = &f
-		} else if s.Telemetry == nil {
-			tr := true
-			s.Telemetry = &tr
-		}
-		if s.Telemetry == nil || *s.Telemetry != true {
+		applyTelemetryDefault(s, true)
+		if s.Telemetry == nil || !*s.Telemetry {
 			t.Errorf("expected telemetry=true with --yes (default), got %v", s.Telemetry)
 		}
 	})
@@ -3481,15 +3263,8 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 	t.Run("yes preserves existing telemetry setting", func(t *testing.T) {
 		existing := false
 		s := &EntireSettings{Telemetry: &existing}
-		opts := EnableOptions{Telemetry: true}
-		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
-			f := false
-			s.Telemetry = &f
-		} else if s.Telemetry == nil {
-			tr := true
-			s.Telemetry = &tr
-		}
-		if *s.Telemetry != false {
+		applyTelemetryDefault(s, true)
+		if *s.Telemetry {
 			t.Errorf("expected existing telemetry=false to be preserved, got %v", *s.Telemetry)
 		}
 	})
@@ -3503,7 +3278,7 @@ func TestEnableCmd_YesFreshRepo_SkipsPromptsAndEnables(t *testing.T) {
 	testutil.GitCommit(t, ".", "init")
 
 	// Use --yes with --agent to test the realistic CI scenario.
-	// The --yes flag skips telemetry/Vercel prompts while --agent selects a specific agent.
+	// The --yes flag skips telemetry prompts while --agent selects a specific agent.
 	// The pure --yes-selects-all-agents path is covered by TestDetectOrSelectAgent_YesSelectsAll.
 	cmd := newEnableCmd()
 	var stdout, stderr bytes.Buffer
@@ -3581,6 +3356,31 @@ func TestEnableCmd_YesOnConfiguredRepo_ManagesAgents(t *testing.T) {
 	}
 }
 
+func TestRunEnableInteractiveSuppressAdditionalSetupAppliesTelemetryDefault(t *testing.T) {
+	setupTestRepo(t)
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+	var out bytes.Buffer
+	opts := EnableOptions{
+		Yes:                     true,
+		Telemetry:               true,
+		UseProjectSettings:      true,
+		SuppressAdditionalSetup: true,
+	}
+	if err := runEnableInteractive(context.Background(), &out, []agent.Agent{ag}, opts); err != nil {
+		t.Fatalf("runEnableInteractive() error = %v", err)
+	}
+	s, err := LoadEntireSettings(context.Background())
+	if err != nil {
+		t.Fatalf("LoadEntireSettings() error = %v", err)
+	}
+	if s.Telemetry == nil || !*s.Telemetry {
+		t.Fatalf("suppressed telemetry prompt did not apply enabled default: %v", s.Telemetry)
+	}
+}
+
 func TestEnableCmd_YesWithTelemetryFalse(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
@@ -3625,8 +3425,8 @@ func TestConfigureCmd_BarePrintsHelpHint(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "entire agent") {
-		t.Errorf("expected hint about 'entire agent' in help output, got: %s", output)
+	if !strings.Contains(output, "entire configure --yes") {
+		t.Errorf("expected non-interactive onboarding hint, got: %s", output)
 	}
 	// Bare configure must not run the agent picker.
 	if strings.Contains(output, "Cannot show agent selection in non-interactive mode") {
@@ -3643,8 +3443,8 @@ func TestConfigureCmd_AgentFlagRemoved(t *testing.T) {
 	if cmd.Flags().Lookup("remove") != nil {
 		t.Error("'configure' must not expose --remove (use 'entire agent remove')")
 	}
-	if cmd.Flags().Lookup("yes") != nil {
-		t.Error("'configure' must not expose --yes (lives on 'entire enable')")
+	if cmd.Flags().Lookup("yes") == nil {
+		t.Error("'configure' must expose --yes for non-interactive onboarding")
 	}
 }
 
