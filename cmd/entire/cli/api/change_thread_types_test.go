@@ -9,6 +9,10 @@ const threadTestLogin = "alice"
 
 func TestChangeThreadDetailDecodes(t *testing.T) {
 	t.Parallel()
+	// This payload pins entire-api's delivered wire contract for the change
+	// threads endpoint (entireio/entire-api#832) — the only hand-written
+	// cross-repo contract fixture in this repo, so don't reshape it without
+	// checking that PR's shape first.
 	payload := []byte(`{
 	  "thread": {
 	    "id": "th1", "changeId": "tr1", "kind": "discussion", "title": "Design",

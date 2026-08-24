@@ -291,7 +291,7 @@ func gatherTrails(ctx context.Context, errW io.Writer, limit int, insecureHTTP b
 			out.WriteString("Trails are enabled but none exist yet.\n")
 			return nil
 		}
-		fmt.Fprintf(&out, "- %d recent trails\n", len(list.Changes))
+		fmt.Fprintf(&out, "- %d recent changes\n", len(list.Changes))
 
 		sevCount := map[string]int{}
 		statusCount := map[string]int{}

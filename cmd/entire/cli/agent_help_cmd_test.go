@@ -91,7 +91,7 @@ func TestAgentHelpCommands_GatesTrailOnTrailsEnabled(t *testing.T) {
 
 	enabled := commandNames(agentHelpCommands(root, true))
 	if !contains(enabled, "change") {
-		t.Errorf("change should be advertised when trails are enabled, got %v", enabled)
+		t.Errorf("change should be advertised once trails are enabled for the repo, got %v", enabled)
 	}
 	if contains(enabled, "agent-help") {
 		t.Errorf("agent-help must not list itself, got %v", enabled)
