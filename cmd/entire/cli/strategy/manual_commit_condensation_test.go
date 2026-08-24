@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -1187,4 +1188,101 @@ func TestCheckpointStepCount(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCondenseSession_TaskRecordImageExternalizationBoundary verifies the fix
+// for #2063: a task transcript whose RAW size (including base64 images) exceeds
+// the cap, but whose EXTERNALIZED size is within the cap, must be stored
+// successfully.
+func TestCondenseSession_TaskRecordImageExternalizationBoundary(t *testing.T) {
+	sessionID := "2026-08-23-task-image-boundary"
+	repo, state := setupCondensableSessionWithTranscript(t, sessionID)
+	// Enable image externalization for the test via env.
+	t.Setenv("ENTIRE_EXTERNALIZE_IMAGES", "1")
+	state.AgentType = agent.AgentTypeClaudeCode
+	dir := t.TempDir()
+	agentTranscriptPath := filepath.Join(dir, "agent-transcript.jsonl")
+
+	// Helper to write a transcript with a base64 image of specified decoded size.
+	writeImageTranscript := func(path string, decodedSize int) {
+		f, err := os.Create(path)
+		require.NoError(t, err)
+		defer f.Close()
+
+		_, err = f.WriteString(`{"role":"assistant","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"`)
+		require.NoError(t, err)
+
+		// Stream base64 to avoid huge memory allocations.
+		// 3 bytes -> 4 base64 chars.
+		buf := make([]byte, 3072) // multiple of 3
+		for i := 0; i < decodedSize; i += len(buf) {
+			n := len(buf)
+			if i+n > decodedSize {
+				n = decodedSize - i
+			}
+			for j := 0; j < n; j++ {
+				buf[j] = byte((i + j) % 256)
+			}
+			_, err = f.WriteString(base64.StdEncoding.EncodeToString(buf[:n]))
+			require.NoError(t, err)
+		}
+
+		_, err = f.WriteString(`"}}],"message":{"id":"msg_123"}}` + "\n")
+		require.NoError(t, err)
+	}
+
+	// Use small test boundaries to avoid huge disk writes.
+	// We use the imageextract package's internal variable.
+	// Since we are in the strategy package, we need to export it or use the real cap.
+	// Given the constraints, we will stick to the real 40MiB size for the primary test
+	// but add a comment explaining why we aren't using a smaller mock.
+	//
+	// Note: Case 1 already uses 40MiB which is > 32MiB (approx base64 for 50MiB)
+	// but < 50MiB. Actually, 40MiB decoded -> 53.3MiB base64, which is > 50MiB cap.
+	// The goal is to prove that after externalization (placeholder only), it's < 50MiB.
+
+	// Case 1: 40 MiB decoded -> ~53.3 MiB base64.
+	// This exceeds agent.MaxChunkSize (50 MiB) in raw form.
+	// After externalization, the transcript will only contain a placeholder.
+	writeImageTranscript(agentTranscriptPath, 40*1024*1024)
+
+	state.TaskRecords = []session.TaskRecord{
+		{
+			ToolUseID:              "toolu_boundary",
+			AgentID:                "agent-boundary",
+			DeclaredTranscriptPath: agentTranscriptPath,
+			CompletedAt:            time.Now(),
+		},
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+	checkpointID := id.MustCheckpointID("aabbccdd2063")
+	result, err := (&ManualCommitStrategy{}).CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	require.False(t, result.Skipped)
+
+	// Verify the transcript was stored.
+	jsonl, ok := checkpointTaskFile(t, repo, checkpointID, "tasks/toolu_boundary/agent-agent-boundary.jsonl")
+	require.True(t, ok, "transcript must be stored because externalized size is under cap")
+	require.Contains(t, jsonl, "entire-asset:assets/", "transcript must contain the asset placeholder")
+	require.Less(t, len(jsonl), 1024, "transcript must be shrunken")
+
+	// Case 2: Image that is NOT externalized and hits the 50MiB cap.
+	// Since we can't easily mock agent.MaxChunkSize (it's a const),
+	// we use a 51MiB image. Because it's > 50MiB DECODED, it stays inline
+	// and then prepareTaskTranscriptForStorage hits the MaxChunkSize cap.
+	writeImageTranscript(agentTranscriptPath, 51*1024*1024)
+
+	state.TaskRecords[0].ToolUseID = "toolu_oversize"
+	checkpointID2 := id.MustCheckpointID("aabbccdd2064")
+	_, err = (&ManualCommitStrategy{}).CondenseSession(context.Background(), repo, checkpointID2, state, nil)
+	require.NoError(t, err)
+
+	taskJSON, ok := checkpointTaskFile(t, repo, checkpointID2, "tasks/toolu_oversize/task.json")
+	require.True(t, ok)
+	var meta struct {
+		TranscriptUnavailableReason string `json:"transcript_unavailable_reason"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(taskJSON), &meta))
+	require.Equal(t, taskTranscriptReasonTooLarge, meta.TranscriptUnavailableReason,
+		"transcript with >50MiB decoded image must hit the cap")
 }
