@@ -564,15 +564,15 @@ func computeEntityDeltas(ctx context.Context, repoDir, base, head string, sessio
 	killEntityDeltasProcessGroupOnCancel(cmd)
 
 	stdout := &cappedBuffer{limit: entityDeltasMaxOutputBytes}
-	var stderr bytes.Buffer
+	stderr := &cappedBuffer{limit: entityDeltasMaxOutputBytes}
 	cmd.Stdout = stdout
-	cmd.Stderr = &stderr
+	cmd.Stderr = stderr
 
 	if err := cmd.Run(); err != nil {
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf("%s diff timed out after %s", entityDeltasProducer, entityDeltasTimeout)
 		}
-		return nil, fmt.Errorf("%s diff failed: %w (stderr: %s)", entityDeltasProducer, err, truncateForLog(stderr.String()))
+		return nil, fmt.Errorf("%s diff failed: %w (stderr: %s)", entityDeltasProducer, err, truncateForLog(string(stderr.Bytes())))
 	}
 	if stdout.overflowed {
 		return nil, fmt.Errorf("%w: more than %d bytes; skipping rather than committing it to the checkpoint branch",
