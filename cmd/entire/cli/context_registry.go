@@ -21,6 +21,8 @@ import (
 
 const contextRegistryRetention = 30 * 24 * time.Hour
 
+const contextDisabledMarker = ".disabled"
+
 type localContextSession struct {
 	RepoID         string    `json:"repoId"`
 	RepoName       string    `json:"repoName"`
@@ -85,6 +87,30 @@ func defaultContextRegistryRoot() string {
 
 func contextNamespaceLockPath(registryPath string) string {
 	return filepath.Dir(registryPath) + ".lock"
+}
+
+func contextDisabledMarkerPath(registryPath string) string {
+	return filepath.Join(filepath.Dir(registryPath), contextDisabledMarker)
+}
+
+func contextNamespaceDisabled(registryPath string) bool {
+	_, err := os.Stat(contextDisabledMarkerPath(registryPath))
+	return err == nil
+}
+
+func markContextNamespaceDisabled(registryPath string) error {
+	marker := contextDisabledMarkerPath(registryPath)
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		return fmt.Errorf("create context namespace root: %w", err)
+	}
+	if err := os.WriteFile(marker, []byte(time.Now().UTC().Format(time.RFC3339Nano)), 0o600); err != nil {
+		return fmt.Errorf("write context disabled marker: %w", err)
+	}
+	return nil
+}
+
+func clearContextNamespaceDisabled(registryPath string) {
+	_ = os.Remove(contextDisabledMarkerPath(registryPath))
 }
 
 func readContextRegistryNoLock(path string) (contextRegistry, error) {
@@ -185,6 +211,9 @@ func mutateContextRegistry(ctx context.Context, path string, fn func(*contextReg
 		return fmt.Errorf("lock context registry: %w", err)
 	}
 	defer release()
+	if contextNamespaceDisabled(path) {
+		return errors.New("local context sharing is disabled")
+	}
 	registry, err := readContextRegistryNoLock(path)
 	if err != nil {
 		return err
@@ -194,13 +223,11 @@ func mutateContextRegistry(ctx context.Context, path string, fn func(*contextReg
 	return writeContextRegistryNoLock(path, registry)
 }
 
-func refreshContextRegistrySession(ctx context.Context, path, sessionID string, now time.Time) error {
+func refreshContextRegistrySession(ctx context.Context, path, repoID, sessionID string, now time.Time) error {
 	return mutateContextRegistry(ctx, path, func(registry *contextRegistry) {
 		for i := range registry.Sessions {
-			if registry.Sessions[i].SessionID == sessionID {
+			if registry.Sessions[i].RepoID == repoID && registry.Sessions[i].SessionID == sessionID {
 				registry.Sessions[i].LastSeen = now
-				// Re-resolve every heartbeat: the agent may have restarted
-				// under a new PID since this entry was written.
 				captureContextSessionOwner(&registry.Sessions[i])
 				return
 			}
@@ -208,12 +235,12 @@ func refreshContextRegistrySession(ctx context.Context, path, sessionID string, 
 	})
 }
 
-func refreshLocalContextSessionHeartbeat(ctx context.Context, sessionID string) error {
+func refreshLocalContextSessionHeartbeat(ctx context.Context, repoID, sessionID string) error {
 	path, err := currentContextRegistryPath(ctx)
 	if err != nil {
 		return err
 	}
-	return refreshContextRegistrySession(ctx, path, sessionID, time.Now())
+	return refreshContextRegistrySession(ctx, path, repoID, sessionID, time.Now())
 }
 
 func pruneContextRegistry(registry *contextRegistry, now time.Time) {
@@ -355,6 +382,9 @@ func removeContextNamespace(ctx context.Context, registryPath string) error {
 		return fmt.Errorf("lock context namespace: %w", err)
 	}
 	defer release()
+	if err := markContextNamespaceDisabled(registryPath); err != nil {
+		return err
+	}
 	dir := filepath.Dir(registryPath)
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("remove context namespace: %w", err)

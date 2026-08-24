@@ -47,6 +47,9 @@ func newContextEnableCmd() *cobra.Command {
 				if err != nil {
 					return "", nil, contextSharingCommandError(err)
 				}
+				if path, pathErr := currentContextRegistryPath(ctx); pathErr == nil {
+					clearContextNamespaceDisabled(path)
+				}
 				return "✓ Enabled cross-repository context sharing", out, nil
 			})
 		},

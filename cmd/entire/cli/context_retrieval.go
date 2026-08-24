@@ -19,10 +19,12 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/search"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/entireio/cli/redact"
@@ -57,6 +59,7 @@ type contextEvidence struct {
 }
 
 func redactContextQuery(query string) string {
+	strategy.EnsureRedactionConfigured()
 	return truncateUTF8Bytes(sanitizeEvidenceText(redact.String(query)), maxContextQueryBytes)
 }
 
@@ -399,6 +402,9 @@ func runContextQueryCommand(cmd *cobra.Command, query string, limit int) error {
 	if limit < 1 || limit > 10 {
 		return errors.New("--limit must be between 1 and 10")
 	}
+	if insecureHTTPRequested(cmd) {
+		auth.EnableInsecureHTTP()
+	}
 	ctx := cmd.Context()
 	targetRepoID, _, err := currentContextTarget(ctx)
 	if err != nil {
@@ -437,6 +443,11 @@ func runContextQueryCommand(cmd *cobra.Command, query string, limit int) error {
 	})
 }
 
+type localContextEvidenceResult struct {
+	evidence []contextEvidence
+	err      error
+}
+
 func retrieveContextEvidence(ctx context.Context, coreClient *coreapi.Client, targetRepoID, query string, limit int, currentSessionID string, insecureHTTP bool) ([]contextEvidence, *coreapi.ResolveContextSharingScopeOutputBody, error) {
 	// Scope is resolved before query sanitization or any cell call so a denied
 	// policy can never leak prompt-derived text outside the current process.
@@ -464,14 +475,15 @@ func retrieveContextEvidence(ctx context.Context, coreClient *coreapi.Client, ta
 	for _, source := range scope.Sources {
 		allowedRepoIDs[source.RepoId] = struct{}{}
 	}
-	localCh := make(chan []contextEvidence, 1)
-	go func() {
-		if !scope.IncludeLocalLive {
-			localCh <- nil
-			return
-		}
-		localCh <- loadLocalContextEvidence(ctx, safeQuery, targetRepoID, currentSessionID, allowedRepoIDs)
-	}()
+	localCh := make(chan localContextEvidenceResult, 1)
+	if scope.IncludeLocalLive {
+		go func() {
+			evidence, err := loadLocalContextEvidence(ctx, safeQuery, targetRepoID, currentSessionID, allowedRepoIDs)
+			localCh <- localContextEvidenceResult{evidence: evidence, err: err}
+		}()
+	} else {
+		localCh <- localContextEvidenceResult{}
+	}
 
 	cellResults, fanoutErr := fanOutCells(ctx, insecureHTTP, semanticSearchV4CellTimeout, groups, func(cellCtx context.Context, group cellGroup, client *api.Client) (*search.Response, error) {
 		resp, err := search.CellV4(cellCtx, client, search.Config{Query: safeQuery, Limit: limit, Page: 1}, group.repoIDs)
@@ -493,7 +505,10 @@ func retrieveContextEvidence(ctx context.Context, coreClient *coreapi.Client, ta
 		return nil, scope, fanoutErr
 	}
 	merged, mergeErr := mergeSemanticV4Responses(ctx, limit, 1, cellResults)
-	local := <-localCh
+	localResult := <-localCh
+	if localResult.err != nil {
+		return nil, scope, fmt.Errorf("local-live context unavailable: %w", localResult.err)
+	}
 	if err := contextFanoutCompletenessError(merged, mergeErr); err != nil {
 		return nil, scope, err
 	}
@@ -501,8 +516,8 @@ func retrieveContextEvidence(ctx context.Context, coreClient *coreapi.Client, ta
 	for _, source := range scope.Sources {
 		sourceIDs[strings.ToLower(source.FullName)] = source.RepoId
 	}
-	evidence := make([]contextEvidence, 0, len(local))
-	evidence = append(evidence, local...)
+	evidence := make([]contextEvidence, 0, len(localResult.evidence)+limit)
+	evidence = append(evidence, localResult.evidence...)
 	if merged != nil {
 		for _, result := range merged.Results {
 			if item, ok := remoteContextEvidence(result, sourceIDs); ok {
@@ -521,8 +536,13 @@ func contextFanoutCompletenessError(resp *search.Response, mergeErr error) error
 	if mergeErr != nil {
 		return mergeErr
 	}
-	if resp != nil && len(resp.Warnings) > 0 {
-		return fmt.Errorf("context search incomplete: %s", strings.Join(resp.Warnings, "; "))
+	if resp != nil {
+		if resp.Error != "" {
+			return fmt.Errorf("context search incomplete: %s", resp.Error)
+		}
+		if len(resp.Warnings) > 0 {
+			return fmt.Errorf("context search incomplete: %s", strings.Join(resp.Warnings, "; "))
+		}
 	}
 	return nil
 }
@@ -570,24 +590,28 @@ func localContextSourceAllowed(repoID, targetRepoID, sessionID, currentSessionID
 	return ok
 }
 
-func loadLocalContextEvidence(ctx context.Context, query, targetRepoID, currentSessionID string, allowedRepoIDs map[string]struct{}) []contextEvidence {
+func loadLocalContextEvidence(ctx context.Context, query, targetRepoID, currentSessionID string, allowedRepoIDs map[string]struct{}) ([]contextEvidence, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("load local context evidence: %w", err)
+	}
+	strategy.EnsureRedactionConfigured()
 	path, err := currentContextRegistryPath(ctx)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("resolve context registry: %w", err)
 	}
-	registry, err := readContextRegistry(path)
+	registry, err := readContextRegistryContext(ctx, path)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("read context registry: %w", err)
 	}
 	now := time.Now()
 	var out []contextEvidence
 	for _, session := range registry.Sessions {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("load local context evidence: %w", err)
+		}
 		if !localContextSourceAllowed(session.RepoID, targetRepoID, session.SessionID, currentSessionID, allowedRepoIDs) || now.Sub(session.LastSeen) > localContextRecentWindow {
 			continue
 		}
-		// A heartbeat within the recency window is not proof the agent is
-		// still running: it may have crashed seconds later. Exclude a
-		// positively dead owner so a vanished session stops being offered.
 		if !localContextSessionLive(session) {
 			continue
 		}
@@ -608,25 +632,42 @@ func loadLocalContextEvidence(ctx context.Context, query, targetRepoID, currentS
 		if err != nil {
 			continue
 		}
-		var lines []string
+		type scoredLine struct {
+			text  string
+			score float64
+		}
+		var lines []scoredLine
 		for _, entry := range entries {
 			if entry.Type != summarize.EntryTypeUser && entry.Type != summarize.EntryTypeAssistant {
 				continue
 			}
 			content := sanitizeEvidenceText(entry.Content)
-			if content != "" {
-				lines = append(lines, string(entry.Type)+": "+content)
+			if content == "" {
+				continue
 			}
+			line := string(entry.Type) + ": " + content
+			score := lexicalScore(query, line)
+			if score == 0 {
+				continue
+			}
+			lines = append(lines, scoredLine{text: line, score: score})
 		}
-		text := truncateUTF8Bytes(strings.Join(lines, "\n"), 4096)
-		score := lexicalScore(query, text)
-		if score == 0 || text == "" {
+		if len(lines) == 0 {
 			continue
 		}
-		summary := text
-		if len(lines) > 0 {
-			summary = lines[0]
+		sort.SliceStable(lines, func(i, j int) bool {
+			if lines[i].score != lines[j].score {
+				return lines[i].score > lines[j].score
+			}
+			return lines[i].text < lines[j].text
+		})
+		textLines := make([]string, len(lines))
+		for i, line := range lines {
+			textLines[i] = line.text
 		}
+		text := truncateUTF8Bytes(strings.Join(textLines, "\n"), 4096)
+		score := lines[0].score
+		summary := lines[0].text
 		out = append(out, sanitizeContextEvidence(contextEvidence{
 			ID: contextEvidenceID("local-live", session.RepoID, session.SessionID), SourceType: "local-live",
 			RepoID: session.RepoID, RepoName: session.RepoName, SessionID: session.SessionID,
@@ -634,7 +675,27 @@ func loadLocalContextEvidence(ctx context.Context, query, targetRepoID, currentS
 			DrillDown: "local live session " + session.SessionID, Score: score,
 		}))
 	}
-	return out
+	return out, nil
+}
+
+func readContextRegistryContext(ctx context.Context, path string) (contextRegistry, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return contextRegistry{}, fmt.Errorf("create context registry directory: %w", err)
+	}
+	release, err := flock.AcquireContext(ctx, contextNamespaceLockPath(path))
+	if err != nil {
+		return contextRegistry{}, fmt.Errorf("lock context registry: %w", err)
+	}
+	defer release()
+	if contextNamespaceDisabled(path) {
+		return contextRegistry{Sessions: []localContextSession{}}, nil
+	}
+	registry, err := readContextRegistryNoLock(path)
+	if err != nil {
+		return contextRegistry{}, err
+	}
+	pruneContextRegistry(&registry, time.Now())
+	return registry, nil
 }
 
 func evidencePath(registryPath, id string) (string, error) {
@@ -743,6 +804,9 @@ func pruneContextEvidenceFiles(dir string, now time.Time) error {
 }
 
 func inspectContextEvidence(cmd *cobra.Command, id string) error {
+	if insecureHTTPRequested(cmd) {
+		auth.EnableInsecureHTTP()
+	}
 	registryPath, err := currentContextRegistryPath(cmd.Context())
 	if err != nil {
 		return fmt.Errorf("read context evidence: %w", err)

@@ -124,20 +124,25 @@ func promptForContextInjection(ag agent.Agent, event *agent.Event) string {
 	return sanitizeEvidenceText(prompts[len(prompts)-1])
 }
 
-func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) string {
+func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) (string, func() error) {
 	if (event.Type != agent.TurnStart && event.Type != agent.ContextRequest) || event.SessionID == "" {
-		return ""
+		return "", nil
 	}
 	prompt := promptForContextInjection(ag, event)
 	if prompt == "" {
-		return ""
+		return "", nil
 	}
 	hookCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	// Keep an already-registered live session discoverable even when this turn
-	// is ineligible for another context packet (for example, after the packet
-	// cap has been reached).
-	if err := refreshLocalContextSessionHeartbeat(hookCtx, event.SessionID); err != nil {
+	coreClient, err := coreapi.New()
+	if err != nil {
+		return "", nil
+	}
+	targetRepoID, targetRepoName, err := currentContextTarget(hookCtx)
+	if err != nil {
+		return "", nil
+	}
+	if err := refreshLocalContextSessionHeartbeat(hookCtx, targetRepoID, event.SessionID); err != nil {
 		logging.Debug(hookCtx, "local context heartbeat skipped", "error", err.Error())
 	}
 	now := time.Now()
@@ -155,7 +160,7 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 		return nil
 	})
 	if mutErr != nil || !claimed {
-		return ""
+		return "", nil
 	}
 
 	fail := func() {
@@ -168,16 +173,6 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 			logging.Debug(hookCtx, "failed to record context injection backoff", "error", stateErr.Error())
 		}
 	}
-	coreClient, err := coreapi.New()
-	if err != nil {
-		fail()
-		return ""
-	}
-	targetRepoID, targetRepoName, err := currentContextTarget(hookCtx)
-	if err != nil {
-		fail()
-		return ""
-	}
 	evidence, scope, err := retrieveContextEvidence(hookCtx, coreClient, targetRepoID, prompt, 6, event.SessionID, false)
 	// Registration is consent-gated by Core scope, but independent of whether
 	// this turn finds evidence. Recording the active session here makes it
@@ -188,11 +183,8 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 		}
 	}
 	if err != nil {
-		// Disabled/unsupported is an expected fail-closed no-op. It should not
-		// turn a user's prompt into hook noise, but a short backoff still avoids
-		// hitting an old Core on every turn.
 		fail()
-		return ""
+		return "", nil
 	}
 	filtered := evidence[:0]
 	for _, item := range evidence {
@@ -203,35 +195,36 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 	evidence = filtered
 	if len(evidence) == 0 {
 		fail()
-		return ""
+		return "", nil
 	}
 	packet := renderCrossRepoContextPacket(evidence)
 	if packet == "" {
 		fail()
-		return ""
+		return "", nil
 	}
 	for _, item := range evidence {
 		if persistErr := persistContextEvidence(hookCtx, item); persistErr != nil {
 			fail()
-			return ""
+			return "", nil
 		}
 	}
 	finishedAt := time.Now()
-	mutErr = strategy.MutateSessionState(strategy.WithSessionLockWait(hookCtx, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
-		state.CrossRepoContext.PendingUntil = time.Time{}
-		state.CrossRepoContext.FailureBackoffUntil = time.Time{}
-		state.CrossRepoContext.LastSuccessfulAt = finishedAt
-		state.CrossRepoContext.LastPromptTokenHashes = promptTokenHashes(prompt)
-		state.CrossRepoContext.PacketCount++
-		for _, item := range evidence {
-			state.CrossRepoContext.EvidenceIDs = append(state.CrossRepoContext.EvidenceIDs, item.ID)
-		}
-		return nil
-	})
-	if mutErr != nil {
-		return ""
+	renderedIDs := make([]string, len(evidence))
+	for i, item := range evidence {
+		renderedIDs[i] = item.ID
 	}
-	return packet
+	finalize := func() error {
+		return strategy.MutateSessionState(strategy.WithSessionLockWait(hookCtx, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
+			state.CrossRepoContext.PendingUntil = time.Time{}
+			state.CrossRepoContext.FailureBackoffUntil = time.Time{}
+			state.CrossRepoContext.LastSuccessfulAt = finishedAt
+			state.CrossRepoContext.LastPromptTokenHashes = promptTokenHashes(prompt)
+			state.CrossRepoContext.PacketCount++
+			state.CrossRepoContext.EvidenceIDs = append(state.CrossRepoContext.EvidenceIDs, renderedIDs...)
+			return nil
+		})
+	}
+	return packet, finalize
 }
 
 func registerLocalContextSessionIfEnabled(ctx context.Context, ag agent.Agent, event *agent.Event) error {
@@ -305,12 +298,16 @@ func registerLocalContextSession(ctx context.Context, ag agent.Agent, event *age
 			TranscriptPath: transcript, LastSeen: time.Now(),
 		}
 		captureContextSessionOwner(&entry)
-		for i := range registry.Sessions {
-			if registry.Sessions[i].RepoID == repoID && registry.Sessions[i].SessionID == event.SessionID {
-				registry.Sessions[i] = entry
-				return
+		kept := registry.Sessions[:0]
+		for _, existing := range registry.Sessions {
+			if existing.SessionID == event.SessionID && existing.RepoID != repoID {
+				continue
 			}
+			if existing.RepoID == repoID && existing.SessionID == event.SessionID {
+				continue
+			}
+			kept = append(kept, existing)
 		}
-		registry.Sessions = append(registry.Sessions, entry)
+		registry.Sessions = append(kept, entry) //nolint:gocritic // kept is a filtered copy; entry is appended once.
 	})
 }

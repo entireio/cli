@@ -158,7 +158,7 @@ func TestRefreshContextRegistrySessionUpdatesHeartbeat(t *testing.T) {
 	if err := writeContextRegistry(path, contextRegistry{Sessions: []localContextSession{{SessionID: "s1", LastSeen: old}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := refreshContextRegistrySession(context.Background(), path, "s1", now); err != nil {
+	if err := refreshContextRegistrySession(context.Background(), path, "", "s1", now); err != nil {
 		t.Fatal(err)
 	}
 	got, err := readContextRegistry(path)
@@ -266,7 +266,7 @@ func TestRefreshContextRegistrySessionRefreshesOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	if err := refreshContextRegistrySession(t.Context(), path, "s1", now); err != nil {
+	if err := refreshContextRegistrySession(t.Context(), path, "", "s1", now); err != nil {
 		t.Fatal(err)
 	}
 	registry, err := readContextRegistry(path)
@@ -351,7 +351,10 @@ func TestLoadLocalContextEvidenceExcludesDeadSession(t *testing.T) {
 	}
 
 	allowed := map[string]struct{}{liveRepo: {}, deadRepo: {}}
-	got := loadLocalContextEvidence(t.Context(), "checkpoint condensation", targetRepo, "current-session", allowed)
+	got, err := loadLocalContextEvidence(t.Context(), "checkpoint condensation", targetRepo, "current-session", allowed)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var ids []string
 	for _, e := range got {

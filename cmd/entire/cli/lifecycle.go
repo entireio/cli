@@ -480,18 +480,20 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 		return
 	}
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
-	var injections []string
+	var injectionTexts []string
+	var finalizeCrossRepo func() error
 	if trail := legacyTrailContextInjection(ctx, ag, event); trail != "" {
-		injections = append(injections, trail)
+		injectionTexts = append(injectionTexts, trail)
 	}
-	if crossRepo := buildCrossRepoContextInjection(ctx, ag, event); crossRepo != "" {
-		injections = append(injections, crossRepo)
+	if crossRepo, finalize := buildCrossRepoContextInjection(ctx, ag, event); crossRepo != "" {
+		injectionTexts = append(injectionTexts, crossRepo)
+		finalizeCrossRepo = finalize
 	}
-	if len(injections) == 0 {
+	if len(injectionTexts) == 0 {
 		return
 	}
 	payload, err := injector.RenderContextInjection(agent.ContextInjection{
-		Text:       strings.Join(injections, "\n\n"),
+		Text:       strings.Join(injectionTexts, "\n\n"),
 		BaseText:   event.TransformedPrompt,
 		NativeHook: event.NativeHook,
 	})
@@ -504,6 +506,12 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	}
 	if _, err := os.Stdout.Write(payload); err != nil {
 		logging.Warn(logCtx, "failed to write context injection", slog.String("error", err.Error()))
+		return
+	}
+	if finalizeCrossRepo != nil {
+		if err := finalizeCrossRepo(); err != nil {
+			logging.Debug(logCtx, "failed to record cross-repo context delivery", slog.String("error", err.Error()))
+		}
 	}
 }
 

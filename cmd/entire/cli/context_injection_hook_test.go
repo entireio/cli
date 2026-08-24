@@ -89,8 +89,11 @@ func TestCrossRepoContextInjectionSealsHostileLocalLiveTranscript(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	evidence := loadLocalContextEvidence(t.Context(), "flux capacitor timeout",
+	evidence, err := loadLocalContextEvidence(t.Context(), "flux capacitor timeout",
 		"repo-target", "current-session", map[string]struct{}{"repo-source": {}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(evidence) != 1 {
 		t.Fatalf("local-live evidence = %d items, want 1", len(evidence))
 	}
@@ -194,8 +197,12 @@ func TestCrossRepoContextInjectionRejectsTranscriptOutsideSessionDir(t *testing.
 	}}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := loadLocalContextEvidence(t.Context(), "flux capacitor timeout",
-		"repo-target", "current-session", map[string]struct{}{"repo-source": {}}); len(got) != 0 {
+	got, err := loadLocalContextEvidence(t.Context(), "flux capacitor timeout",
+		"repo-target", "current-session", map[string]struct{}{"repo-source": {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
 		t.Fatalf("transcript outside the session directory produced %d evidence items: %+v", len(got), got)
 	}
 }

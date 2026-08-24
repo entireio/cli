@@ -118,6 +118,13 @@ type CellClientFactory struct {
 // once, for building clients aimed at several cells. See
 // NewEntireAPICellClient for the single-cell convenience wrapper.
 func NewEntireAPICellClientFactory(ctx context.Context, insecureHTTP bool) (*CellClientFactory, error) {
+	if raw, ok := os.LookupEnv(EnvTokenVar); ok {
+		subject, err := resolveEnvTokenCellSubject(raw, insecureHTTP)
+		if err != nil {
+			return nil, err
+		}
+		return &CellClientFactory{subject: subject}, nil
+	}
 	subject, err := resolveStoredCellSubject(ctx, insecureHTTP)
 	if err != nil {
 		return nil, err
