@@ -20,7 +20,7 @@ const DefaultProfileName = "general"
 
 // Review output destinations. ReviewOutputLocal prints the verdict and writes
 // the local review manifest; ReviewOutputTrail additionally posts the verdict
-// to the branch's trail as a finding (`entire trail finding`).
+// to the branch's trail as a finding (`entire change finding`).
 const (
 	ReviewOutputLocal = "local"
 	ReviewOutputTrail = "trail"

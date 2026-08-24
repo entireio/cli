@@ -18,7 +18,7 @@ import (
 // probeAndCacheTrailsEnablement must route the repo-scoped trails-enablement
 // probe through the entire-api cell that hosts THIS repo (trailRefreshAPIClient),
 // never through the generic data-API/BFF client — the BFF does not proxy
-// /api/v1/trails/... for bearer callers (COR-666).
+// /api/v1/changes/... for bearer callers (COR-666).
 // probeAndCacheTrailsEnablement performs no cache lookup of its own — this
 // isolates saveTrailsEnabledForRemote/debug logging below from the developer's
 // real repo, since the probe always runs regardless of cwd.

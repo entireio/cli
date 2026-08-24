@@ -129,7 +129,7 @@ func cellTargetForClusterHost(ctx context.Context, c cellCoreClient, clusterHost
 // the misses it survives ("cluster not in catalog", "cell name does not appear
 // in any catalog URL"). Joining on slug alone here made the single-repo path
 // hard-fail on exactly the catalog gap the fan-out was written to tolerate,
-// leaving `entire trail`, `entire experts` and `explain --repo` strictly
+// leaving `entire change`, `entire experts` and `explain --repo` strictly
 // narrower than `entire search`.
 //
 // Unlike the fan-out there is deliberately no jurisdiction-default tier: that

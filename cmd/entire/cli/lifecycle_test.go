@@ -2819,7 +2819,7 @@ func TestRunTrailEnablementRefresh_CandidateRowSavesDisabledCache(t *testing.T) 
 }
 
 // TestNewRefreshTrailEnablementCmd_APIFailureExitsZero guards against the
-// detached __refresh_trail_enablement subprocess exiting non-zero on a
+// detached __refresh_change_enablement subprocess exiting non-zero on a
 // transient network/API failure. The refresh is best-effort cache warming
 // with stdout/stderr discarded (see newRefreshTrailEnablementCmd) — there is
 // no one watching the exit code, so a failing TrailsEnabled call must be
@@ -2848,7 +2848,7 @@ func TestNewRefreshTrailEnablementCmd_APIFailureExitsZero(t *testing.T) {
 }
 
 // TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile guards
-// diagnosability: the detached __refresh_trail_enablement child runs with
+// diagnosability: the detached __refresh_change_enablement child runs with
 // stdout/stderr discarded, so a failing background refresh must still leave a
 // trail in .entire/logs/entire.log instead of vanishing. The command runs in a
 // repo with no origin remote, so the scope resolves-and-fails locally (no
@@ -2863,7 +2863,7 @@ func TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile(t *testing.T) {
 	markRepoSetUpForLogging(t)
 	t.Setenv("ENTIRE_LOG_LEVEL", "debug")
 
-	require.NoError(t, executeThroughRoot(t, "__refresh_trail_enablement"))
+	require.NoError(t, executeThroughRoot(t, "__refresh_change_enablement"))
 
 	root, err := paths.WorktreeRoot(context.Background())
 	require.NoError(t, err)
@@ -2889,7 +2889,7 @@ func TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree(t *testing.T) {
 	session.ClearGitCommonDirCache()
 	t.Setenv("ENTIRE_LOG_LEVEL", "debug")
 
-	require.NoError(t, executeThroughRoot(t, "__refresh_trail_enablement"))
+	require.NoError(t, executeThroughRoot(t, "__refresh_change_enablement"))
 
 	_, statErr := os.Stat(filepath.Join(dir, ".entire", "logs"))
 	require.True(t, os.IsNotExist(statErr),

@@ -288,7 +288,7 @@ var gitEmptyConfigOnce sync.Once
 //
 // A dead proxy (not url.insteadOf) is used deliberately: insteadOf rewrites the
 // effective URL that git reports on read, which breaks production code that
-// resolves the origin URL to detect the forge (e.g. `entire trail`). The proxy
+// resolves the origin URL to detect the forge (e.g. `entire change`). The proxy
 // blocks transport only, leaving the configured URL string intact, and is scoped
 // per host so loopback (127.0.0.1) test servers are never proxied.
 //

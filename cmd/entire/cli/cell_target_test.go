@@ -727,7 +727,7 @@ func TestRequiredCellResolveTimeoutIsItsOwnBudget(t *testing.T) {
 // via its Cell name, the way the repo-SET path (resolveCellBaseURLs ->
 // matchClusterByCellInURL) already does. Before this tier existed, the
 // single-repo path hard-failed on exactly the catalog gap the fan-out was
-// written to tolerate, making `entire trail`/`experts`/`explain --repo`
+// written to tolerate, making `entire change`/`experts`/`explain --repo`
 // strictly narrower than `entire search` on the same data.
 func TestResolveRepoCellTarget_OwnerRepo_FallsBackToCellNameWhenSlugMissing(t *testing.T) {
 	withFakeCellCore(t, &fakeCellCore{

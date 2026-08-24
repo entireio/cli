@@ -265,7 +265,7 @@ func saveAgentHelpTrailsRefreshFailure(ctx context.Context, scope trailEnablemen
 // paths (SessionStart) must not block on this: resolving the API token and
 // dialing TrailsEnabled can stall for seconds when the host is slow or
 // unreachable (VPN, firewall, offline). Instead of doing that
-// network work inline, hand it off to a detached `__refresh_trail_enablement`
+// network work inline, hand it off to a detached `__refresh_change_enablement`
 // subprocess and return immediately; a later SessionStart will observe the
 // freshly written cache once the subprocess completes. The "not supported"
 // case is answered locally (no network) since it's free.
@@ -285,12 +285,12 @@ func refreshTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEn
 // and probeAndCacheTrailsEnablement, swapped in tests so they can force the
 // refreshTrailsEnabledCacheForScope error branch (e.g. a broken API host)
 // without a real login context. Production code always uses the repo-routed
-// entire-api cell client (newTrailAPIClient) rather than the generic
-// data-API/BFF client: the BFF does not proxy /api/v1/trails/... for bearer
+// entire-api cell client (newChangeAPIClient) rather than the generic
+// data-API/BFF client: the BFF does not proxy /api/v1/changes/... for bearer
 // callers (COR-666), so probing it via the generic client silently misreads a
 // supported repo as disabled.
 var trailRefreshAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
-	return newTrailAPIClient(ctx, insecureHTTP, fullName)
+	return newChangeAPIClient(ctx, insecureHTTP, fullName)
 }
 
 // trailsCellClient resolves the entire-api cell client for ownerRepo via
@@ -321,7 +321,7 @@ func trailsCellClient(ctx context.Context, insecureHTTP bool, ownerRepo string) 
 }
 
 // runTrailEnablementRefresh performs the actual (potentially slow) network
-// refresh. It is invoked from the detached `__refresh_trail_enablement`
+// refresh. It is invoked from the detached `__refresh_change_enablement`
 // subprocess spawned by refreshTrailsEnabledCacheIfStaleForScope, never
 // synchronously from a hook path.
 func runTrailEnablementRefresh(ctx context.Context) error {
@@ -365,7 +365,7 @@ func runTrailEnablementRefresh(ctx context.Context) error {
 		logging.Debug(logCtx, "trails enablement refresh skipped: authenticated client unavailable", "error", err.Error())
 		return nil
 	}
-	// Best-effort: this runs from the detached __refresh_trail_enablement
+	// Best-effort: this runs from the detached __refresh_change_enablement
 	// subprocess (stdout/stderr discarded, see newRefreshTrailEnablementCmd),
 	// so a transient network/API failure here must not surface as a non-zero
 	// process exit — there's no one watching it and no user-visible benefit,
@@ -382,17 +382,17 @@ func runTrailEnablementRefresh(ctx context.Context) error {
 // trailRefreshSpawn is the process-spawn seam used by
 // spawnDetachedTrailEnablementRefresh. Swapped in tests so they can assert
 // SessionStart never blocks on it without forking a real subprocess (a real
-// `go test` binary doesn't understand `__refresh_trail_enablement` as an
+// `go test` binary doesn't understand `__refresh_change_enablement` as an
 // argument). Production code always uses spawnDetachedTrailRefreshProcess.
 var trailRefreshSpawn = spawnDetachedTrailRefreshProcess
 
-// spawnDetachedTrailRefreshProcess starts `entire __refresh_trail_enablement`
+// spawnDetachedTrailRefreshProcess starts `entire __refresh_change_enablement`
 // as a detached child so the trails-enablement network refresh can't add
 // latency to the SessionStart hook that spawned it. The child runs from the
 // worktree root because the refresh resolves the origin remote and
 // git-common-dir for cache storage from its working directory.
 func spawnDetachedTrailRefreshProcess(worktreeRoot string) {
-	execx.SpawnDetached(worktreeRoot, "__refresh_trail_enablement")
+	execx.SpawnDetached(worktreeRoot, "__refresh_change_enablement")
 }
 
 // trailRefreshSpawnThrottle bounds how often SessionStart forks a detached
@@ -475,7 +475,7 @@ func recentlySpawnedMarker(commonDir, marker string, ttl time.Duration, now time
 // and should not be called directly.
 func newRefreshTrailEnablementCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:    "__refresh_trail_enablement",
+		Use:    "__refresh_change_enablement",
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -534,7 +534,7 @@ func refreshTrailsEnabledCacheBestEffort(ctx context.Context, client *api.Client
 	}
 }
 
-func noteTrailCommandEnablement(ctx context.Context, client *api.Client, commandErr error) {
+func noteChangeCommandEnablement(ctx context.Context, client *api.Client, commandErr error) {
 	if commandErr == nil {
 		saveTrailsEnabledForRepoBestEffort(ctx, true)
 		return
@@ -542,22 +542,22 @@ func noteTrailCommandEnablement(ctx context.Context, client *api.Client, command
 	refreshTrailsEnabledCacheBestEffort(ctx, client)
 }
 
-// runAuthenticatedTrailAPI runs fn against the entire-api cell that owns the
+// runAuthenticatedChangeAPI runs fn against the entire-api cell that owns the
 // target repository. repoOverride is the raw --repo flag: when non-empty the
 // local clone's enablement cache is skipped because the result belongs to a
 // different repository.
-func runAuthenticatedTrailAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, repoOverride string, fn func(context.Context, *api.Client) error) error {
-	_, owner, repo, err := resolveTrailRepoOrRemote(ctx, repoOverride)
+func runAuthenticatedChangeAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, repoOverride string, fn func(context.Context, *api.Client) error) error {
+	_, owner, repo, err := resolveChangeRepoOrRemote(ctx, repoOverride)
 	if err != nil {
 		return err
 	}
-	client, err := newTrailAPIClient(ctx, insecureHTTP, owner+"/"+repo)
+	client, err := newChangeAPIClient(ctx, insecureHTTP, owner+"/"+repo)
 	if err != nil {
 		return renderDataAPIAuthError(ctx, errW, owner+"/"+repo, err)
 	}
 	err = fn(ctx, client)
 	if repoOverride == "" {
-		noteTrailCommandEnablement(ctx, client, err)
+		noteChangeCommandEnablement(ctx, client, err)
 	}
 	return err
 }

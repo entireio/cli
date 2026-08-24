@@ -281,7 +281,7 @@ type State struct {
 	AttachedManually bool `json:"attached_manually,omitempty"`
 
 	// ContextInjectionDecided records that the once-per-session model-context
-	// injection (e.g. the `entire trail` pointer) has been handled for this
+	// injection (e.g. the `entire change` pointer) has been handled for this
 	// session, so the dispatcher does not re-inject on later turns. Set on the
 	// first normal turn regardless of whether anything was injected: the prompt
 	// path reads only clone-local cached trail enablement, and a missing/stale
