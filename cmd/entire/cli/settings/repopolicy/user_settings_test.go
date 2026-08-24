@@ -46,6 +46,24 @@ func TestLoadUserSettings_MissingMalformedAndStrict(t *testing.T) {
 			t.Fatal("unknown settings fields must return an error")
 		}
 	})
+
+	t.Run("trailing junk fails strict decoding", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", dir)
+		writeUserSettingsForTest(t, dir, `{"global":{"enabled":true}} trailing`)
+		if _, err := LoadUserSettings(t.Context()); err == nil {
+			t.Fatal("trailing junk must return an error")
+		}
+	})
+
+	t.Run("second JSON value fails strict decoding", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", dir)
+		writeUserSettingsForTest(t, dir, `{"global":{"enabled":true}} {}`)
+		if _, err := LoadUserSettings(t.Context()); err == nil {
+			t.Fatal("a second JSON value must return an error")
+		}
+	})
 }
 
 func TestValidateGlobalConfig_InvalidExclusionsFailClosed(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -78,5 +79,38 @@ func TestResolveRepository_MainAndLinkedWorktree(t *testing.T) {
 	}
 	if linkedRepo.GitCommonDir != mainRepo.GitCommonDir {
 		t.Fatalf("linked common dir = %q, want %q", linkedRepo.GitCommonDir, mainRepo.GitCommonDir)
+	}
+}
+
+func TestClassifyGlobalConfig_UnnormalizableOriginDoesNotLeakCredentials(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	const (
+		secret = "super-secret"
+		origin = "https://user:super-secret@example.com"
+	)
+	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", origin)
+	cmd.Dir = root
+	cmd.Env = testutil.GitIsolatedEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+
+	policy, err := ClassifyGlobalConfig(t.Context(), &GlobalConfig{
+		Enabled:        true,
+		ExcludeOrigins: []string{"github.com/**"},
+	}, func(context.Context) (Repository, error) {
+		return Repository{WorktreeRoot: root}, nil
+	})
+	if err == nil {
+		t.Fatal("unnormalizable origin must return an error")
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), origin) {
+		t.Fatalf("error leaks origin credentials: %v", err)
+	}
+	if policy.Active || policy.InactiveReason != InactiveReasonGlobalExcluded {
+		t.Fatalf("policy = %+v, want inactive global exclusion", policy)
 	}
 }

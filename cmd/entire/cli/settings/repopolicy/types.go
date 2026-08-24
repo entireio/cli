@@ -57,16 +57,69 @@ type RepoPolicy struct {
 	Trust            TrustDecision
 }
 
-// GlobalConfig is the global section of the user settings file. Its JSON
-// contract is intentionally stable because users edit this file directly.
+// GlobalConfig is the "global" section of the user-global settings file.
+// It controls global auto-enable: tracking agent sessions in repositories
+// that have no repo-level Entire setup. Its JSON contract is intentionally
+// stable because users edit this file directly.
 type GlobalConfig struct {
-	Enabled           bool     `json:"enabled"`
-	ExcludePaths      []string `json:"exclude_paths,omitempty"`
+	// Enabled turns global mode on. Both true and false count as configured.
+	Enabled bool `json:"enabled"`
+
+	// ExcludePaths are ~-expanded doublestar globs matched against a
+	// repository's worktree root. Any match excludes that worktree.
+	// Matching is symlink-robust in both directions: the root is tried in
+	// its given and symlink-resolved forms, and a pattern's literal prefix
+	// is also tried symlink-resolved (so `~/code/**` excludes repos under a
+	// `~/code` that is a symlink to another volume). An unusable pattern
+	// (relative, unsupported ~user form, invalid glob) deactivates global
+	// mode entirely — fail closed — rather than silently tracking a repo
+	// the user meant to exclude. Note linked worktrees checked out OUTSIDE
+	// an excluded path are not covered by path exclusion; exclude_origins
+	// covers them, since all worktrees of a clone share git config.
+	ExcludePaths []string `json:"exclude_paths,omitempty"`
+
+	// ExcludePathsExact are plain paths (NOT globs — meta characters have no
+	// special meaning) excluded exactly: an entry matches only when it IS the
+	// worktree root, with no subtree cascade. This closes an expressiveness
+	// gap: a bare exclude_paths directory pattern always excludes its whole
+	// subtree (p or p/**), so it cannot exclude exactly $HOME — the
+	// home-as-dotfiles-repo case — without also excluding every repo beneath
+	// it, and such no-origin repos cannot be caught by exclude_origins
+	// either. Entries are whitespace-trimmed (blank entries skipped),
+	// ~-expanded, cleaned, case-folded per platform, and matched
+	// symlink-robustly like exclude_paths; an unusable entry (relative,
+	// unsupported ~user form) fails closed the same way.
 	ExcludePathsExact []string `json:"exclude_paths_exact,omitempty"`
-	ExcludeOrigins    []string `json:"exclude_origins,omitempty"`
-	TrustAll          bool     `json:"trust_all,omitempty"`
-	TrustedOrigins    []string `json:"trusted_origins,omitempty"`
-	TrustedPaths      []string `json:"trusted_paths,omitempty"`
+
+	// ExcludeOrigins are doublestar globs matched against the origin remote
+	// URL normalized to host/owner/repo. A repo without an origin matches
+	// no origin pattern, but a repo whose origin is PRESENT and cannot be
+	// normalized (bare filesystem path, file:// URL) deactivates global
+	// mode — exclusion could not be checked, so fail closed. Hosts with
+	// subgroups (GitLab) normalize to host/owner/sub.../repo: `*` does not
+	// cross `/`, so use `gitlab.com/acme/**` to cover a whole namespace.
+	// Origins stored via git insteadOf shorthands (e.g. gh:acme/widgets)
+	// normalize to the shorthand form, not the expanded host — patterns
+	// match what git config stores (see GetRemoteURLsInDirIfSet, which
+	// reads raw config precisely to preserve this contract).
+	ExcludeOrigins []string `json:"exclude_origins,omitempty"`
+
+	// TrustAll grants checkpoint-egress consent machine-wide; enrollment
+	// stays with Enabled and the exclude lists. The trust fields live inside
+	// this strict-decoded block deliberately: a pre-trust binary reading a
+	// trust-bearing file fails LoadUserSettings and global mode dies
+	// fail-closed rather than misreading recorded consent.
+	TrustAll bool `json:"trust_all,omitempty"`
+
+	// TrustedOrigins are exact normalized origin keys (host/owner/repo, as
+	// RepoTrustIdentity derives them from fetch AND push URLs) — never globs.
+	// A multi-URL origin syncs only when EVERY configured URL's key is listed.
+	TrustedOrigins []string `json:"trusted_origins,omitempty"`
+
+	// TrustedPaths are exact symlink-resolved worktree roots — never globs,
+	// no subtree cascade — for repos whose identity falls back to path. Each
+	// linked worktree needs its own entry.
+	TrustedPaths []string `json:"trusted_paths,omitempty"`
 }
 
 // UserSettings is the root of the user-global settings file. A nil Global

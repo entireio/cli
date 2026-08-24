@@ -148,7 +148,7 @@ func ClassifyGlobalConfig(ctx context.Context, config *GlobalConfig, resolve Rep
 				if normalized == "" {
 					policy.ActivationSource = ActivationInactive
 					policy.InactiveReason = InactiveReasonGlobalExcluded
-					return policy, fmt.Errorf("origin %q cannot be normalized", origin)
+					return policy, errors.New("origin remote cannot be normalized")
 				}
 				matched, matchErr := MatchesExcludeOrigin(ctx, config.ExcludeOrigins, normalized)
 				if matchErr != nil {

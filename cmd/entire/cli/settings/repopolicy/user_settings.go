@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -61,6 +62,13 @@ func LoadUserSettings(_ context.Context) (*UserSettings, error) {
 	var settings UserSettings
 	if err := decoder.Decode(&settings); err != nil {
 		return nil, fmt.Errorf("parsing user settings: %w", err)
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("parsing user settings: multiple JSON values")
+		}
+		return nil, fmt.Errorf("parsing user settings: trailing data: %w", err)
 	}
 	return &settings, nil
 }
