@@ -128,12 +128,30 @@ func promptForContextInjection(ag agent.Agent, event *agent.Event) string {
 	return sanitizeEvidenceText(prompts[len(prompts)-1])
 }
 
+func crossRepoContextInjectionEligible(ctx context.Context, sessionID, prompt string) bool {
+	now := time.Now()
+	if len(promptTokenHashes(prompt)) == 0 {
+		return false
+	}
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	if err != nil || state == nil {
+		return false
+	}
+	if state.Kind.IsReview() || state.Kind.IsInvestigate() {
+		return false
+	}
+	return crossRepoContextEligible(state.CrossRepoContext, prompt, now)
+}
+
 func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) (string, func() error) {
 	if (event.Type != agent.TurnStart && event.Type != agent.ContextRequest) || event.SessionID == "" {
 		return "", nil
 	}
 	prompt := promptForContextInjection(ag, event)
 	if prompt == "" {
+		return "", nil
+	}
+	if !crossRepoContextInjectionEligible(ctx, event.SessionID, prompt) {
 		return "", nil
 	}
 	hookCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

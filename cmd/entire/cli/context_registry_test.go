@@ -136,8 +136,11 @@ func TestRemoveContextNamespaceWaitsForRegistryWriter(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
-		t.Fatalf("namespace still exists after serialized removal: %v", err)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("registry file still exists after removal: %v", err)
+	}
+	if !contextNamespaceDisabled(path) {
+		t.Fatal("opt-out disabled marker must persist after namespace removal")
 	}
 }
 
@@ -146,6 +149,9 @@ func TestRemoveContextNamespaceWithoutExistingCacheRoot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "context", "namespace", "registry.json")
 	if err := removeContextNamespace(t.Context(), path); err != nil {
 		t.Fatalf("remove absent namespace: %v", err)
+	}
+	if !contextNamespaceDisabled(path) {
+		t.Fatal("opt-out disabled marker must be written even when namespace was absent")
 	}
 }
 

@@ -491,13 +491,18 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	}
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	var injectionTexts []string
-	var finalizeCrossRepo func() error
-	if trail := legacyTrailContextInjection(ctx, ag, event); trail != "" {
+	var finalizeInjections []func() error
+	if trail, finalize := legacyTrailContextInjection(ctx, ag, event); trail != "" {
 		injectionTexts = append(injectionTexts, trail)
+		if finalize != nil {
+			finalizeInjections = append(finalizeInjections, finalize)
+		}
 	}
 	if crossRepo, finalize := buildCrossRepoContextInjection(ctx, ag, event); crossRepo != "" {
 		injectionTexts = append(injectionTexts, crossRepo)
-		finalizeCrossRepo = finalize
+		if finalize != nil {
+			finalizeInjections = append(finalizeInjections, finalize)
+		}
 	}
 	if len(injectionTexts) == 0 {
 		return
@@ -518,21 +523,21 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 		logging.Warn(logCtx, "failed to write context injection", slog.String("error", err.Error()))
 		return
 	}
-	if finalizeCrossRepo != nil {
-		if err := finalizeCrossRepo(); err != nil {
-			logging.Debug(logCtx, "failed to record cross-repo context delivery", slog.String("error", err.Error()))
+	for _, finalize := range finalizeInjections {
+		if err := finalize(); err != nil {
+			logging.Debug(logCtx, "failed to record context injection delivery", slog.String("error", err.Error()))
 		}
 	}
 }
 
-func legacyTrailContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) string {
+func legacyTrailContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) (string, func() error) {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	// Unknown cache leaves the session retryable.
 	scope, scopeOK, scopeErr := loadTrailEnablementScopeHint(ctx, event.SessionID)
 	if scopeErr != nil {
 		logging.Warn(logCtx, "failed to load trails scope hint",
 			slog.String("error", scopeErr.Error()))
-		return ""
+		return "", nil
 	}
 	decision := trailEnablementCacheUnknown
 	mutated := false
@@ -553,23 +558,33 @@ func legacyTrailContextInjection(ctx context.Context, ag agent.Agent, event *age
 		if decision == trailEnablementCacheUnknown {
 			return strategy.ErrMutationSkip
 		}
-		state.ContextInjectionDecided = true
+		// Disabled is a final no-injection decision; enabled waits until stdout
+		// delivery succeeds so a render/write failure can retry next turn.
+		if decision == trailEnablementCacheDisabled {
+			state.ContextInjectionDecided = true
+		}
 		mutated = true
 		return nil
 	})
 	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
 		logging.Warn(logCtx, "failed to record context injection decision",
 			slog.String("error", mutErr.Error()))
-		return ""
+		return "", nil
 	}
 	// Only proceed after the state mutation was persisted. If saving the updated
 	// state failed, mutErr was non-nil above and we returned without injecting,
 	// leaving a later turn free to retry safely.
 	won := mutErr == nil && mutated
 	if !won || decision != trailEnablementCacheEnabled {
-		return ""
+		return "", nil
 	}
-	return entireTrailContextInjection(scope)
+	finalize := func() error {
+		return strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
+			state.ContextInjectionDecided = true
+			return nil
+		})
+	}
+	return entireTrailContextInjection(scope), finalize
 }
 
 // turnStartSessionLockWait bounds how long the TurnStart hook waits for the

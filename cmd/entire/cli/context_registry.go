@@ -385,12 +385,9 @@ func removeContextNamespace(ctx context.Context, registryPath string) error {
 		return fmt.Errorf("lock context namespace: %w", err)
 	}
 	defer release()
-	if err := markContextNamespaceDisabled(registryPath); err != nil {
-		return err
-	}
 	dir := filepath.Dir(registryPath)
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("remove context namespace: %w", err)
 	}
-	return nil
+	return markContextNamespaceDisabled(registryPath)
 }

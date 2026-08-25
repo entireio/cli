@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -10,6 +11,13 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
+
+func TestCrossRepoContextInjectionEligibleUsesLocalSessionState(t *testing.T) {
+	t.Parallel()
+	if crossRepoContextInjectionEligible(context.Background(), "missing-session-id", "debug oauth refresh failure") {
+		t.Fatal("missing session should fail local eligibility without network")
+	}
+}
 
 func TestCrossRepoContextEligibilityCadenceAndTopicChange(t *testing.T) {
 	t.Parallel()

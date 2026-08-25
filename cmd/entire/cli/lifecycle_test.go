@@ -1594,6 +1594,14 @@ func (m *mockContextInjectorAgent) RenderContextInjection(agent.ContextInjection
 	return nil, nil
 }
 
+type deliveringContextInjectorAgent struct {
+	mockContextInjectorAgent
+}
+
+func (d *deliveringContextInjectorAgent) RenderContextInjection(in agent.ContextInjection) ([]byte, error) {
+	return []byte(in.Text), nil
+}
+
 func addGitHubOriginForLifecycleTest(t *testing.T, repoDir string) {
 	t.Helper()
 	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@github.com:acme/repo.git")
@@ -1639,7 +1647,7 @@ func TestHandleLifecycleTurnStart_ContextInjectionFreshTrueMarksDecided(t *testi
 	session.ClearGitCommonDirCache()
 	require.NoError(t, saveTrailsEnabledForRepo(context.Background(), true))
 
-	ag := &mockContextInjectorAgent{mockLifecycleAgent: *newMockAgent()}
+	ag := &deliveringContextInjectorAgent{mockContextInjectorAgent: mockContextInjectorAgent{mockLifecycleAgent: *newMockAgent()}}
 	sessionID := "test-trail-inject-true"
 	scope, err := currentTrailEnablementScope(context.Background())
 	require.NoError(t, err)
@@ -1651,7 +1659,39 @@ func TestHandleLifecycleTurnStart_ContextInjectionFreshTrueMarksDecided(t *testi
 	state, err := strategy.LoadSessionState(context.Background(), sessionID)
 	require.NoError(t, err)
 	require.NotNil(t, state)
-	require.True(t, state.ContextInjectionDecided, "fresh true cache should make a final injection decision")
+	require.True(t, state.ContextInjectionDecided, "fresh true cache should mark decided only after successful delivery")
+}
+
+func TestEmitContextInjection_TrailDeliveryFailureDoesNotMarkDecided(t *testing.T) {
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	addGitHubOriginForLifecycleTest(t, tmpDir)
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	require.NoError(t, saveTrailsEnabledForRepo(context.Background(), true))
+
+	ag := &mockContextInjectorAgent{mockLifecycleAgent: *newMockAgent()}
+	sessionID := "test-trail-inject-render-fail"
+	scope, err := currentTrailEnablementScope(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, saveTrailEnablementScopeHint(context.Background(), sessionID, scope))
+	require.NoError(t, strategy.SaveSessionState(context.Background(), &strategy.SessionState{
+		SessionID: sessionID,
+		StartedAt: time.Now(),
+	}))
+
+	emitContextInjection(context.Background(), ag, &agent.Event{
+		Type: agent.TurnStart, SessionID: sessionID, Prompt: "hello", Timestamp: time.Now(),
+	})
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.False(t, state.ContextInjectionDecided, "render/write failure must leave trail injection retryable")
 }
 
 func TestHandleLifecycleTurnStart_RecordsGenericSkillSlashEvent(t *testing.T) {
