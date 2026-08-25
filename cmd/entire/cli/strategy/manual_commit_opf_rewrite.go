@@ -410,15 +410,22 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 
 	// Hold the backfill lock only for the CAS window. A multi-second rewrite
 	// must not block detached backfill children for its whole duration.
+	currentTip, err := readV1Tip(repo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("re-read local v1 before CAS: %w", err)
+	}
+	if currentTip != localTip {
+		return plumbing.ZeroHash, &V1RefMovedError{Expected: localTip, Actual: currentTip}
+	}
 	if r, lockErr := lockOutEntityDeltasBackfills(ctx, repo); lockErr == nil {
 		defer r()
 	} else {
 		logging.Debug(ctx, "OPF pre-push: proceeding without the entity-deltas lock",
 			slog.String("error", lockErr.Error()))
 	}
-	currentTip, err := readV1Tip(repo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	currentTip, err = readV1Tip(repo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("re-read local v1 before CAS: %w", err)
+		return plumbing.ZeroHash, fmt.Errorf("re-read local v1 under lock: %w", err)
 	}
 	if currentTip != localTip {
 		return plumbing.ZeroHash, &V1RefMovedError{Expected: localTip, Actual: currentTip}
