@@ -190,6 +190,15 @@ func crossRepoContextInjectionEligible(ctx context.Context, sessionID, prompt st
 	return crossRepoContextEligible(state.CrossRepoContext, prompt, now)
 }
 
+// persistContextEvidenceHook is the injection-path persist seam; tests stub partial failures.
+var persistContextEvidenceHook = persistContextEvidence
+
+// hookBoundedMutationCtx returns a context bounded by hookCtx's remaining deadline.
+// Post-retrieve session mutations must not mint a fresh timeout on context.Background().
+func hookBoundedMutationCtx(hookCtx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(hookCtx, 5*time.Second)
+}
+
 func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) (string, func() error) {
 	if (event.Type != agent.TurnStart && event.Type != agent.ContextRequest) || event.SessionID == "" {
 		return "", nil
@@ -229,7 +238,7 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 
 	var failed sync.Once
 	sessionMutationCtx := func() (context.Context, context.CancelFunc) {
-		return context.WithTimeout(context.Background(), 5*time.Second)
+		return hookBoundedMutationCtx(hookCtx)
 	}
 	fail := func() {
 		failed.Do(func() {
@@ -290,7 +299,7 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 	persistCtx, persistCancel := sessionMutationCtx()
 	defer persistCancel()
 	for _, item := range evidence {
-		if persistErr := persistContextEvidence(persistCtx, item); persistErr != nil {
+		if persistErr := persistContextEvidenceHook(persistCtx, item); persistErr != nil {
 			fail()
 			return "", nil
 		}

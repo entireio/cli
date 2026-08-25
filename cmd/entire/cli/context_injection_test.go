@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -211,4 +212,43 @@ func TestRenderCrossRepoContextPacketStaysSealedWhenTruncated(t *testing.T) {
 		})
 	}
 	assertPacketIsSealed(t, renderCrossRepoContextPacket(evidence))
+}
+
+func TestHookBoundedMutationCtxRespectsHookDeadline(t *testing.T) {
+	t.Parallel()
+	hookCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	time.Sleep(30 * time.Millisecond)
+	mutCtx, mutCancel := hookBoundedMutationCtx(hookCtx)
+	defer mutCancel()
+	deadline, ok := mutCtx.Deadline()
+	if !ok {
+		t.Fatal("mutation context has no deadline")
+	}
+	if time.Until(deadline) > 50*time.Millisecond {
+		t.Fatalf("mutation ctx deadline %v is too far in the future; want hook-bound not fresh 5s", deadline)
+	}
+}
+
+func TestCrossRepoContextPersistedIDsOnlyOnSuccessfulPersist(t *testing.T) {
+	t.Parallel()
+	evidence := []contextEvidence{{ID: "ctx_ok"}, {ID: "ctx_fail"}, {ID: "ctx_never"}}
+	orig := persistContextEvidenceHook
+	t.Cleanup(func() { persistContextEvidenceHook = orig })
+	persistContextEvidenceHook = func(_ context.Context, item contextEvidence) error {
+		if item.ID == "ctx_fail" {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	persistedIDs := make([]string, 0, len(evidence))
+	for _, item := range evidence {
+		if err := persistContextEvidenceHook(context.Background(), item); err != nil {
+			break
+		}
+		persistedIDs = append(persistedIDs, item.ID)
+	}
+	if len(persistedIDs) != 1 || persistedIDs[0] != "ctx_ok" {
+		t.Fatalf("persistedIDs = %#v, want only ctx_ok from partial persist", persistedIDs)
+	}
 }
