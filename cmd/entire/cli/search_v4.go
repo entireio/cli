@@ -63,9 +63,10 @@ func loginHintErr(err error) error {
 // path. Control-plane discovery (the repo index, per-slug repo lookups, the
 // cluster catalog) is stable for the life of one command, so it is resolved
 // once and reused across TUI re-searches and pagination instead of paying
-// several network round trips per keystroke-search. Identity tokens are NOT
-// cached here — fanOutCells mints them per search (at most one per
-// jurisdiction), which keeps expiry handling in the auth layer.
+// several network round trips per keystroke-search. The bearer is NOT cached
+// here — fanOutCells resolves it per search (cell clients carry the login
+// JWT, refreshed by the auth layer, since 3df7ea461), which keeps expiry
+// handling where it belongs.
 type semanticSearchV4Session struct {
 	insecureHTTP bool
 
@@ -383,15 +384,26 @@ type semanticCellPage struct {
 // it can't serve the search yet: its gateway has no query-serve route, or the
 // cluster catalog doesn't expose the placement's jurisdiction at all (a cell
 // mid-onboarding). Neither is worth warning the user about on every search.
-func classifySemanticCells(ctx context.Context, results []cellCallResult[*search.Response]) (pages []semanticCellPage, failed []string, lastErr error) {
+//
+// Cells that refused the caller's bearer are returned in `unauthorized` as
+// well as in `failed`: they are hard failures like any other for coverage
+// accounting, but they carry their own message and must never be folded into
+// the region or repo explanations, neither of which is true of a rejected
+// credential.
+func classifySemanticCells(ctx context.Context, results []cellCallResult[*search.Response]) (pages []semanticCellPage, failed, unauthorized []string, lastErr error) {
 	var skipped, unmatched []string
 	var skipErrs []error
 	var unmatchedErr error
+	var unauthorizedErrs []error
 	for _, r := range results {
 		switch {
 		case errors.Is(r.err, search.ErrCellUnavailable), errors.Is(r.err, auth.ErrNoCellForJurisdiction):
 			skipped = append(skipped, r.group.label())
 			skipErrs = append(skipErrs, r.err)
+		case errors.Is(r.err, search.ErrCellUnauthorized):
+			unauthorized = append(unauthorized, r.group.label())
+			failed = append(failed, r.group.label())
+			unauthorizedErrs = append(unauthorizedErrs, r.err)
 		case errors.Is(r.err, search.ErrRepoFilterUnmatched):
 			// The cell answered; the repo filter just matched nothing there.
 			// Quiet like a skip when another cell has results, but if NO cell
@@ -413,8 +425,22 @@ func classifySemanticCells(ctx context.Context, results []cellCallResult[*search
 		// the sentinel) — keep it visible here for diagnosis.
 		logging.Debug(ctx, "semantic search: cells where the repo filter matched nothing", "unmatched_cells", unmatched, "error", unmatchedErr.Error())
 	}
-	if len(pages) == 0 && lastErr == nil {
+	if len(unauthorized) > 0 {
+		// The causes carry the status and the service's own message, which
+		// name the auth stage that refused — the one clue the headline error
+		// deliberately drops.
+		logging.Debug(ctx, "semantic search: cells that rejected the caller's bearer", "unauthorized_cells", unauthorized, "error", errors.Join(unauthorizedErrs...).Error())
+	}
+	if len(pages) == 0 {
+		// Priority when nothing answered, most specific first. A rejected
+		// credential outranks even a transport/5xx failure elsewhere: it is
+		// the one outcome that is certain to repeat, and neither the repo nor
+		// the region message would be true of it.
 		switch {
+		case len(unauthorized) > 0:
+			lastErr = errCredentialsRejected(unauthorized, unauthorizedErrs)
+		case lastErr != nil:
+			// A real failure already explains the empty result.
 		case len(unmatched) > 0:
 			// Takes priority over the region message: a cell answering proves
 			// its region serves semantic search.
@@ -429,7 +455,7 @@ func classifySemanticCells(ctx context.Context, results []cellCallResult[*search
 			lastErr = &hintError{msg: errNoRegionAvailable.Error(), errs: skipErrs}
 		}
 	}
-	return pages, failed, lastErr
+	return pages, failed, unauthorized, lastErr
 }
 
 // errNoRepoAvailable is returned when at least one cell answered but none
@@ -441,6 +467,30 @@ var errNoRepoAvailable = errors.New("semantic search cannot search this repo yet
 
 // errNoRegionAvailable is returned when every queried cell lacks query-serve.
 var errNoRegionAvailable = errors.New("semantic search is not yet available in the region(s) hosting this search")
+
+// errCredentialsRejected is returned when no cell answered and at least one
+// refused the caller's bearer. There is no fix the user can apply — the index
+// is server-side and the CLI has no local substitute — so the error buys them
+// the only two things left: that retrying and re-authenticating are both dead
+// ends (cell clients carry the login JWT, and the same one is working
+// elsewhere, so the obvious reflex costs days — see entireio/cli#2121, where
+// it did), and the command that turns the dead end into a report someone can
+// act on. It deliberately does NOT offer 'entire search --code' as a
+// consolation: code search answers a different question, and pointing a user
+// looking for session history at file matches reads as a fix while being none.
+func errCredentialsRejected(cells []string, causes []error) error {
+	// hintError, like the region path below: the per-cell causes carry
+	// search.ErrCellUnauthorized and the 401/403 HTTPStatusError, which is how
+	// outcome telemetry classifies this as auth rather than "other"
+	// (ENT-1938). All causes, not just the last, so a mixed fan-out
+	// classifies by the classifier's precedence instead of cell order.
+	//
+	// No "semantic search" prefix: mergeSemanticV4Responses already wraps with
+	// one, and the older sentinels here double it ("semantic search: semantic
+	// search is not yet available ...").
+	msg := fmt.Sprintf("your credentials were rejected in %s — the search service refused a login that works everywhere else, so retrying and logging in again are both dead ends; 'entire doctor bundle' packages the details for a bug report", strings.Join(cells, ", "))
+	return &hintError{msg: msg, errs: causes}
+}
 
 // tier0Row pairs a tier-0 result with its rank within the cell that returned
 // it — the selection order the mixed-capability fallback preserves (see
@@ -670,7 +720,7 @@ func deriveSemanticCounts(merged []search.Result) (int, *search.TypeCounts) {
 // interleaving is meaningful. All-cells-failed is an error; a partial failure
 // is noted in Warnings (and the flags) and the surviving cells are merged.
 func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []cellCallResult[*search.Response]) (*search.Response, error) {
-	pages, failed, lastErr := classifySemanticCells(ctx, results)
+	pages, failed, unauthorized, lastErr := classifySemanticCells(ctx, results)
 	if len(pages) == 0 {
 		if lastErr != nil {
 			return nil, fmt.Errorf("semantic search: %w", lastErr)
@@ -685,6 +735,12 @@ func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []ce
 		logging.Debug(ctx, "semantic search: partial failure; results may be incomplete",
 			"succeeded", len(pages), "total", len(results), "failed_cells", failed)
 		warnings = append(warnings, fmt.Sprintf("search failed in %d of %d regions; results may be incomplete", len(failed), len(pages)+len(failed)))
+	}
+	if len(unauthorized) > 0 {
+		// The count above says coverage is incomplete; this says why and
+		// where, because a rejected credential is not a transient regional
+		// failure the next search will shake off.
+		warnings = append(warnings, fmt.Sprintf("credentials rejected in %s; those regions were not searched", strings.Join(unauthorized, ", ")))
 	}
 
 	merged := rankSemanticResults(pages)

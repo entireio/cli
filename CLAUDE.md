@@ -762,11 +762,18 @@ therefore has exactly three routing shapes, mirroring the entire.io BFF:
   when the skips left no cell to query), never substituted with a ready
   mirror.
 
-Token rule: identity tokens are **per-jurisdiction, not per-cell**. Multi-cell
-callers must build one `auth.CellClientFactory`
-(`NewEntireAPICellClientFactory`) per operation — it resolves the login
-subject once and mints at most one token per jurisdiction. `fanOutCells` does
-this automatically; do not call `NewEntireAPICellClient` in a loop.
+Token rule: cell clients carry the **login JWT itself**, not a minted
+identity token — the per-jurisdiction exchange they used to do was removed in
+`3df7ea461` ("Use login JWTs directly for cell auth"), so `CellTarget`'s
+jurisdiction now selects only the *host*, never an audience. Multi-cell
+callers must still build one `auth.CellClientFactory`
+(`NewEntireAPICellClientFactory`) per operation — it resolves and refreshes
+the login subject once instead of per cell. `fanOutCells` does this
+automatically; do not call `NewEntireAPICellClient` in a loop. The minting
+path survives only as `auth.JurisdictionToken`, behind
+`entire auth token --jurisdiction` (a scripting helper for the cells that DO
+require `aud=<jurisdiction host>`); do not infer from it what the CLI's own
+data-plane requests carry.
 
 ### Session Strategy (`cmd/entire/cli/strategy/`)
 

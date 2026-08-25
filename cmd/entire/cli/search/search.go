@@ -21,8 +21,8 @@ const apiTimeout = 30 * time.Second
 
 // v4ServicePath is the per-repo v4 query-serve route exposed by the entire-api
 // cell gateway. It takes repo=<ULID>. The BFF (entire.io /api/v1/search)
-// forwards to this same path; the CLI dials the cell directly with a
-// jurisdictional identity token, skipping the BFF hop.
+// forwards to this same path; the CLI dials the cell directly with the
+// caller's login JWT, skipping the BFF hop.
 const v4ServicePath = "/api/v1/semantic-search/search/v1/search"
 
 // ErrCellUnavailable reports that a cell's gateway does not expose the
@@ -63,6 +63,18 @@ type MalformedResponseError struct {
 }
 
 func (e *MalformedResponseError) Error() string { return e.Message }
+
+// ErrCellUnauthorized reports that a cell answered the semantic-search route
+// but refused the caller's bearer (HTTP 401, or 403 for a credential the
+// service verified and then declined). The login is not the suspect it looks
+// like: cell clients carry the login JWT itself (3df7ea461), so the very same
+// bearer is the one code search accepts at the same host — a rejection here is
+// this service declining a credential, not a session the user can refresh.
+// Distinct from ErrCellUnavailable because the two demand opposite things of
+// the user: wait for the query-serve rollout versus report a rejection that
+// will not age out. Never report one as the other (entireio/cli#2121,
+// entirehq/entire-search#196).
+var ErrCellUnauthorized = errors.New("semantic search rejected the caller's credentials in this cell")
 
 // WildcardQuery is the query string used when only filters are provided (no search terms).
 const WildcardQuery = "*"
@@ -734,8 +746,8 @@ func AppendUnique(existing []string, values ...string) []string {
 }
 
 // CellV4 performs a v4 query-serve search against a single entire-api
-// cell, via the pre-authenticated client (bearer = jurisdictional identity
-// token; host = the cell). repoIDs are repo ULIDs to scope to (the v4 route is
+// cell, via the pre-authenticated client (bearer = the caller's login JWT,
+// which is what cell clients carry since 3df7ea461; host = the cell). repoIDs are repo ULIDs to scope to (the v4 route is
 // per-repo and keys on ULIDs, not owner/name slugs); an empty repoIDs means
 // "every repo the caller can access in this cell" — query-serve fans out across
 // those namespaces itself. The cross-cell fan-out and merge live in the cli
@@ -786,6 +798,15 @@ func CellV4(ctx context.Context, client *api.Client, cfg Config, repoIDs []strin
 			return nil, fmt.Errorf("%w: %s", ErrRepoFilterUnmatched, errResp.Error)
 		}
 		return nil, ErrCellUnavailable
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		// Add the sentinel WITHOUT dropping the HTTPStatusError
+		// parseSearchResponse would have returned: its status is what outcome
+		// telemetry classifies as auth (ENT-1938), and its wording is what
+		// callers and tests pin. Two %w verbs keep both matchable — errors.Is
+		// for the sentinel, errors.As for the status.
+		_, statusErr := parseSearchResponse(resp.StatusCode, body)
+		return nil, fmt.Errorf("%w: %w", ErrCellUnauthorized, statusErr)
 	}
 	return parseSearchResponse(resp.StatusCode, body)
 }
