@@ -165,9 +165,14 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 	}
 
 	var failed sync.Once
+	sessionMutationCtx := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), 5*time.Second)
+	}
 	fail := func() {
 		failed.Do(func() {
-			stateErr := strategy.MutateSessionState(strategy.WithSessionLockWait(ctx, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
+			c, cancel := sessionMutationCtx()
+			defer cancel()
+			stateErr := strategy.MutateSessionState(strategy.WithSessionLockWait(c, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
 				state.CrossRepoContext.PendingUntil = time.Time{}
 				state.CrossRepoContext.FailureBackoffUntil = time.Now().Add(crossRepoFailureBackoff)
 				return nil
@@ -207,7 +212,10 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 		return "", nil
 	}
 	for _, item := range evidence {
-		if persistErr := persistContextEvidence(ctx, item); persistErr != nil {
+		persistCtx, persistCancel := sessionMutationCtx()
+		persistErr := persistContextEvidence(persistCtx, item)
+		persistCancel()
+		if persistErr != nil {
 			fail()
 			return "", nil
 		}
@@ -218,7 +226,9 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 	}
 	finalize := func() error {
 		finishedAt := time.Now()
-		return strategy.MutateSessionState(strategy.WithSessionLockWait(ctx, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
+		c, cancel := sessionMutationCtx()
+		defer cancel()
+		return strategy.MutateSessionState(strategy.WithSessionLockWait(c, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
 			state.CrossRepoContext.PendingUntil = time.Time{}
 			state.CrossRepoContext.FailureBackoffUntil = time.Time{}
 			state.CrossRepoContext.LastSuccessfulAt = finishedAt
