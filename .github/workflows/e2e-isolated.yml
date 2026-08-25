@@ -8,7 +8,7 @@ on:
         required: true
         default: "gemini-cli"
         type: choice
-        options: [claude-code, opencode, gemini-cli, cursor-cli, factoryai-droid, copilot-cli, roger-roger, codex]
+        options: [claude-code, opencode, gemini-cli, cursor-cli, factoryai-droid, copilot-cli, roger-roger, codex, grok]
       test:
         description: "Test name filter (regex)"
         required: true
@@ -42,6 +42,7 @@ jobs:
             cursor-cli)  curl https://cursor.com/install -fsS | bash ;;
             factoryai-droid) curl -fsSL https://app.factory.ai/cli | sh ;;
             copilot-cli)  npm install -g @github/copilot  ;;
+            grok)         curl -fsSL https://x.ai/cli/install.sh | bash ;;
             roger-roger) ;; # installed by mise (see mise.toml)
           esac
           echo "$HOME/.local/bin" >> $GITHUB_PATH
@@ -62,6 +63,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           # Only copilot-cli gets the token; other agents must not receive it.
           COPILOT_GITHUB_TOKEN: ${{ inputs.agent == 'copilot-cli' && secrets.COPILOT_GITHUB_TOKEN || '' }}
         run: go run ./e2e/bootstrap
@@ -74,6 +76,7 @@ jobs:
           E2E_CODEX_MODEL: ${{ inputs.agent == 'codex' && 'gpt-5.4-mini' || '' }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           # Only copilot-cli gets the token; other agents must not receive it.
           COPILOT_GITHUB_TOKEN: ${{ inputs.agent == 'copilot-cli' && secrets.COPILOT_GITHUB_TOKEN || '' }}
           E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts

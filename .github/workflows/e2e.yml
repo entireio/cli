@@ -17,6 +17,7 @@ on:
           - copilot-cli
           - roger-roger
           - codex
+          - grok
   push:
     branches:
       - main
@@ -85,6 +86,7 @@ jobs:
             cursor-cli)  curl https://cursor.com/install -fsS | bash ;;
             factoryai-droid) curl -fsSL https://app.factory.ai/cli | sh ;;
             copilot-cli)  npm install -g @github/copilot  ;;
+            grok)         curl -fsSL https://x.ai/cli/install.sh | bash ;;
             roger-roger) ;; # installed by mise (see mise.toml)
           esac
           echo "$HOME/.local/bin" >> $GITHUB_PATH
@@ -105,6 +107,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           # Only the copilot-cli leg gets the token; other agents must not receive it.
           COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
         run: go run ./e2e/bootstrap
@@ -118,6 +121,7 @@ jobs:
           E2E_GEMINI_MODEL: ${{ matrix.agent == 'gemini-cli' && 'gemini-3.1-flash-lite' || '' }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           # Only the copilot-cli leg gets the token; other agents must not receive it.
           COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
           E2E_CONCURRENT_TEST_LIMIT: ${{ matrix.agent == 'gemini-cli' && '6' || matrix.agent == 'factoryai-droid' && '1' || matrix.agent == 'cursor-cli' && '2' || '' }}

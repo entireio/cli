@@ -69,10 +69,45 @@ func (a *CursorCLI) IsTransientError(out Output, err error) bool {
 }
 
 func (a *CursorCLI) Bootstrap() error {
+	if err := a.verifyBinaryIsCursor(); err != nil {
+		return err
+	}
 	// The Cursor CLI authenticates via CURSOR_API_KEY env var or OAuth.
 	// On CI, ensure CURSOR_API_KEY is set. Locally, OAuth/keychain works.
 	if os.Getenv("CI") != "" && os.Getenv("CURSOR_API_KEY") == "" {
 		return errors.New("CURSOR_API_KEY must be set on CI for cursor-cli E2E tests")
+	}
+	return nil
+}
+
+// verifyBinaryIsCursor guards against another tool owning the name "agent".
+//
+// Cursor's CLI binary is called `agent`, which is not a name it has to itself:
+// xAI's Grok installer symlinks both `grok` and `agent` into ~/.local/bin. On a
+// machine with both, whichever wins $PATH decides what this leg actually runs,
+// and preflight only does LookPath("agent") — so it passes either way and the
+// suite would exercise Grok while reporting Cursor. Silently testing the wrong
+// agent is worse than failing, so fail loudly and name the fix.
+func (a *CursorCLI) verifyBinaryIsCursor() error {
+	path, err := exec.LookPath(a.Binary())
+	if err != nil {
+		return nil // preflight already reports a missing binary
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, path, "--version").CombinedOutput()
+	if err != nil {
+		// A version probe that fails proves nothing either way; leave the
+		// verdict to the tests rather than blocking on a flaky exec.
+		return nil // an inconclusive probe must not fail the suite
+	}
+	if v := strings.ToLower(string(out)); strings.Contains(v, "grok") {
+		return fmt.Errorf(
+			"%q resolves to Grok, not the Cursor CLI (%s reported %q).\n"+
+				"xAI's installer symlinks `agent` alongside `grok`. Put Cursor's `agent` "+
+				"earlier in $PATH, or run the Grok leg instead with --agent grok",
+			a.Binary(), path, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
