@@ -2863,6 +2863,43 @@ func TestStripEntireManagedBlock_PrePushPreservesUserClosingFi(t *testing.T) {
 	}
 }
 
+func TestStripEntireManagedBlock_LegacyPrePushWithoutSubshell(t *testing.T) {
+	t.Parallel()
+
+	user := "#!/bin/sh\necho lint\n"
+	legacy := injectEntireManagedBlock("pre-push", user, "# entire body\n")
+	legacy = strings.Replace(legacy, "_entire_status=$?\n(\n", "_entire_status=$?\n", 1)
+	legacy = strings.Replace(legacy, "\n)\n_user_status=$?", "\n_user_status=$?", 1)
+
+	got := stripEntireManagedBlock(legacy)
+	if got != user {
+		t.Fatalf("legacy pre-push without subshell must round-trip:\ngot:\n%q\nwant:\n%q", got, user)
+	}
+}
+
+func TestStripEntireManagedBlock_NonPrePushPreservesUserSubshell(t *testing.T) {
+	t.Parallel()
+
+	user := "#!/bin/sh\n(\n  npm test\n)\n"
+	body := entireManagedBegin + "\nentire body\n" + entireManagedEnd + "\n"
+	injected := user[:strings.Index(user, "\n")+1] + body + user[strings.Index(user, "\n")+1:]
+
+	got := stripEntireManagedBlock(injected)
+	if got != user {
+		t.Fatalf("non-pre-push user subshell must survive managed-block strip:\ngot:\n%q\nwant:\n%q", got, user)
+	}
+}
+
+func TestStripPrePushManagedExitWrapper_SkipsPartialWrapper(t *testing.T) {
+	t.Parallel()
+
+	user := "#!/bin/sh\n_entire_status=$?\n(\n  npm test\n)\n"
+	got := stripPrePushManagedExitWrapper(user)
+	if got != user {
+		t.Fatalf("partial wrapper must not strip prefix or subshell:\ngot:\n%q\nwant:\n%q", got, user)
+	}
+}
+
 func TestInjectEntireManagedBlock_PrePushWrapsUserExitInSubshell(t *testing.T) {
 	t.Parallel()
 

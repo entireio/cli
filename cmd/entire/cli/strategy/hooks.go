@@ -1541,15 +1541,27 @@ func stripPrePushUserSubshell(rest string) string {
 	}
 }
 
+const (
+	prePushExitStatusPrefix  = "_entire_status=$?\n"
+	prePushExitWrapperSuffix = "_user_status=$?\nif [ \"$_entire_status\" -ne 0 ]; then\n\texit \"$_entire_status\"\nfi\nexit \"$_user_status\"\n"
+)
+
+func hasPrePushManagedExitWrapper(rest string) bool {
+	return strings.HasPrefix(rest, prePushExitStatusPrefix) &&
+		strings.HasSuffix(rest, prePushExitWrapperSuffix)
+}
+
 // stripPrePushManagedExitWrapper removes the exit-status capture lines that
 // injectEntireManagedBlock adds outside the managed markers for pre-push hooks.
-// Only the exact injected suffix is removed so a user's own trailing `fi` or
-// `_user_status=$?` lines are never eaten line-by-line.
+// Only the exact injected prefix+suffix pair is removed so a user's own
+// `_entire_status=$?`, trailing `fi`, subshell groups, or `_user_status=$?`
+// lines are never eaten piecemeal.
 func stripPrePushManagedExitWrapper(content string) string {
-	const prePushExitWrapperSuffix = "_user_status=$?\nif [ \"$_entire_status\" -ne 0 ]; then\n\texit \"$_entire_status\"\nfi\nexit \"$_user_status\"\n"
-
 	shebang, rest := splitShebang(content)
-	rest = strings.TrimPrefix(rest, "_entire_status=$?\n")
+	if !hasPrePushManagedExitWrapper(rest) {
+		return content
+	}
+	rest = strings.TrimPrefix(rest, prePushExitStatusPrefix)
 	rest = strings.TrimSuffix(rest, prePushExitWrapperSuffix)
 	rest = stripPrePushUserSubshell(rest)
 	rest = strings.TrimRight(rest, "\n")
