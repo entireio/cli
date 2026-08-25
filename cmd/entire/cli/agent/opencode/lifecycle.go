@@ -83,6 +83,9 @@ func (a *OpenCodeAgent) ParseHookEvent(ctx context.Context, hookName string, std
 		}
 		transcriptPath, err := sessionTranscriptPath(ctx, raw.SessionID)
 		if err != nil {
+			if paths.IsUnroutableRuntimePath(err) {
+				return nil, nil //nolint:nilnil // invisible runtime failure skips the hook without failing the agent turn
+			}
 			return nil, err
 		}
 		return &agent.Event{
@@ -102,6 +105,9 @@ func (a *OpenCodeAgent) ParseHookEvent(ctx context.Context, hookName string, std
 		// Export is deferred to PrepareTranscript; we just compute the path here.
 		transcriptPath, err := sessionTranscriptPath(ctx, raw.SessionID)
 		if err != nil {
+			if paths.IsUnroutableRuntimePath(err) {
+				return nil, nil //nolint:nilnil // invisible runtime failure skips the hook without failing the agent turn
+			}
 			return nil, err
 		}
 		return &agent.Event{
@@ -165,6 +171,9 @@ func (a *OpenCodeAgent) PrepareTranscript(ctx context.Context, sessionRef string
 	// from a previous turn. Unlike turn-end (which always runs export), mid-turn commits
 	// need to refresh the transcript to capture agent activity since the last export.
 	_, err := a.fetchAndCacheExport(ctx, sessionID)
+	if paths.IsUnroutableRuntimePath(err) {
+		return nil
+	}
 	return err
 }
 

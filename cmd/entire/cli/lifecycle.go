@@ -187,10 +187,6 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	}
 	countSessionsSpan.End()
 
-	// Untrusted global enrollment: a LINE in this composed banner, never a
-	// second WriteHookResponse (Claude parses one JSON object from stdout).
-	message += globalTrustBannerSuffix(ctx, ag.Name())
-
 	// Codex-only: surface untrusted hooks. Reaching this point means
 	// SessionStart is itself trusted, but a newer entire release may have
 	// added hooks (e.g. PostToolUse) that the user hasn't approved on
@@ -217,7 +213,7 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// Apply any agent-supplied ResponseMessage override, then append the
 	// agent-help banner pointer so it survives the override — banner-only agents
 	// (Factory Droid) have no other in-session channel for it.
-	message = finalizeSessionStartBanner(message, event.ResponseMessage, ag.Name())
+	message = finalizeSessionStartBanner(message, event.ResponseMessage, globalTrustBannerSuffix(ctx, ag.Name()), ag.Name())
 	if writer, ok := agent.AsHookResponseWriter(ag); ok {
 		bannerFirst, bErr := strategy.ClaimSessionStartBanner(ctx, event.SessionID)
 		if bErr != nil {
@@ -322,15 +318,14 @@ func agentHelpBannerSuffix(agentName types.AgentName) string {
 }
 
 // finalizeSessionStartBanner applies an agent-supplied ResponseMessage override
-// (if any) and THEN appends the agent-help banner pointer, so the pointer
-// survives even when the agent supplies its own banner text. Order matters: a
-// ResponseMessage override replaces the assembled message wholesale, so the
-// pointer must be appended after it, not before.
-func finalizeSessionStartBanner(message, responseMessage string, agentName types.AgentName) string {
+// (if any) and THEN appends the consent and agent-help suffixes, so neither is
+// erased by custom agent banner text. Order matters: a ResponseMessage override
+// replaces the assembled message wholesale, so durable suffixes come afterward.
+func finalizeSessionStartBanner(message, responseMessage, trustSuffix string, agentName types.AgentName) string {
 	if responseMessage != "" {
 		message = responseMessage
 	}
-	return message + agentHelpBannerSuffix(agentName)
+	return message + trustSuffix + agentHelpBannerSuffix(agentName)
 }
 
 // handleLifecycleModelUpdate persists the model name for the current session.

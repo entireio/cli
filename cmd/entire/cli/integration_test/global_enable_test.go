@@ -18,14 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
-// newGloballyTrackedEnv creates a repo with a commit on a feature branch and
-// NO repo-level Entire setup (no InitEntire, no .entire anywhere), plus a
-// per-test ENTIRE_CONFIG_DIR. When globalEnabled is true, that config dir
-// contains a user-global settings file enabling the global tier.
-//
-// The config dir override rides on env.ExtraEnv (cliEnv/gitHookEnv append it
-// after the TestMain-wide ENTIRE_CONFIG_DIR; last duplicate wins in exec.Cmd)
-// and is returned for hook invocations that need it passed explicitly.
 func newGloballyTrackedEnv(t *testing.T, globalEnabled bool) (*TestEnv, []string) {
 	t.Helper()
 	env := NewTestEnv(t)
@@ -47,9 +39,6 @@ func newGloballyTrackedEnv(t *testing.T, globalEnabled bool) (*TestEnv, []string
 	return env, extraEnv
 }
 
-// gitStatusPorcelain runs `git status --porcelain` in the repo and returns
-// the trimmed output. Empty output is the invisible-mode product guarantee:
-// global tracking must never surface anything in the user's git status.
 func gitStatusPorcelain(t *testing.T, env *TestEnv) string {
 	t.Helper()
 	cmd := exec.CommandContext(context.Background(), "git", "status", "--porcelain")
@@ -81,10 +70,6 @@ func assertNoWorktreeEntireDir(t *testing.T, env *TestEnv) {
 	}
 }
 
-// TestGlobalEnable_LazyInvisibleSetup exercises the full lazy invisible
-// enable in a repo with no repo-level setup and the user-global tier on:
-// the first hook event installs git hooks and records this worktree, every runtime
-// write lands under .git/entire/worktree/, and git status stays clean.
 func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 	t.Parallel()
 	env, extraEnv := newGloballyTrackedEnv(t, true)
@@ -97,7 +82,6 @@ func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 		"prompt":          "Create hello file",
 	})
 
-	// Lazy enable happened, entirely inside .git/.
 	if !strategy.IsGitHookInstalledInDir(ctx, env.RepoDir) {
 		t.Error("git hooks not installed after first hook event")
 	}
@@ -116,9 +100,6 @@ func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 		t.Error("checkpoint metadata ref not created by lazy enable")
 	}
 
-	// The invisible guarantee: no worktree files, empty git status. The
-	// routed base is namespaced per worktree; env.RepoDir is a main
-	// worktree, whose key hashes the empty worktree ID.
 	invisibleBase := filepath.Join(env.RepoDir, ".git", "entire", "worktree", paths.HashWorktreeID(""))
 	assertNoWorktreeEntireDir(t, env)
 	if status := gitStatusPorcelain(t, env); status != "" {
@@ -132,8 +113,6 @@ func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 		t.Errorf("hook log not routed to git common dir: %v", err)
 	}
 
-	// Full turn: the agent edits a file, then Stop saves a checkpoint.
-	// The transcript lives in the agent's project dir, outside the repo.
 	env.WriteFile("hello.txt", "hello world\n")
 	builder := NewTranscriptBuilder()
 	builder.AddUserMessage("Create hello file")
@@ -149,7 +128,6 @@ func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 		"transcript_path": transcriptPath,
 	})
 
-	// Checkpoint metadata routed; only the agent's edit shows in status.
 	if _, err := os.Stat(filepath.Join(invisibleBase, "metadata", sessionID, "full.jsonl")); err != nil {
 		t.Errorf("full.jsonl not routed to git common dir: %v", err)
 	}
@@ -158,7 +136,6 @@ func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 		t.Errorf("git status should show only the agent's edit, got:\n%s", status)
 	}
 
-	// A user commit through the installed hooks links the checkpoint.
 	env.GitCommitWithShadowHooksAsAgent("Add hello file", "hello.txt")
 	commitMsg := env.GetCommitMessage(env.GetHeadHash())
 	checkpointID, found := trailers.ParseCheckpoint(commitMsg)
@@ -170,8 +147,6 @@ func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 		t.Errorf("git status not empty after commit:\n%s", status)
 	}
 
-	// Read-back through the CLI: routed data must be visible to the commands
-	// users actually run, not just present on disk.
 	statusOut, statusErr := env.RunCLIWithError("status")
 	if statusErr != nil {
 		t.Errorf("entire status failed in a globally tracked repo: %v\n%s", statusErr, statusOut)
@@ -183,23 +158,17 @@ func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 	if !strings.Contains(listOut, sessionID) {
 		t.Errorf("checkpoint list --json does not attribute the checkpoint to session %s:\n%s", sessionID, listOut)
 	}
-	// The read commands themselves must not break invisibility either.
 	assertNoWorktreeEntireDir(t, env)
 	if status := gitStatusPorcelain(t, env); status != "" {
 		t.Errorf("git status not empty after CLI read-back:\n%s", status)
 	}
 }
 
-// TestGlobalEnable_GitHookRouteTriggersSetup pins the git-hook half of the
-// lazy-setup trigger: with hooks already present but the per-worktree setup record
-// absent (e.g. cleared by doctor after drift), a plain git-hook invocation —
-// no agent hook involved — re-runs the setup and restores the record.
 func TestGlobalEnable_GitHookRouteTriggersSetup(t *testing.T) {
 	t.Parallel()
 	env, extraEnv := newGloballyTrackedEnv(t, true)
 	ctx := context.Background()
 
-	// First agent-hook activity performs the initial setup.
 	runClaudeHook(t, env, extraEnv, "user-prompt-submit", map[string]string{
 		"session_id":      "global-test-session-3",
 		"transcript_path": "",
@@ -209,7 +178,6 @@ func TestGlobalEnable_GitHookRouteTriggersSetup(t *testing.T) {
 		t.Fatal("git hooks not installed after first hook event")
 	}
 
-	// Clear the record, keep the hooks — the doctor-after-drift shape.
 	repository, err := repopolicy.ResolveRepositoryAt(ctx, env.RepoDir)
 	if err != nil {
 		t.Fatalf("resolve repository: %v", err)
@@ -219,8 +187,6 @@ func TestGlobalEnable_GitHookRouteTriggersSetup(t *testing.T) {
 		t.Fatalf("remove setup record: %v", err)
 	}
 
-	// A plain git commit through the installed hooks (prepare-commit-msg +
-	// post-commit route) must re-run the setup and restore the marker.
 	env.WriteFile("hook-route.txt", "via git hooks\n")
 	env.GitCommitWithShadowHooksAsAgent("Add file via git hook route", "hook-route.txt")
 
@@ -231,10 +197,6 @@ func TestGlobalEnable_GitHookRouteTriggersSetup(t *testing.T) {
 	assertNoWorktreeEntireDir(t, env)
 }
 
-// TestGlobalEnable_TierAbsent_CreatesNothing is the negative: with no
-// user-global settings, a hook event in a repo without repo-level setup must
-// leave zero traces — no hooks, no setup record, no runtime data,
-// nothing in the worktree.
 func TestGlobalEnable_TierAbsent_CreatesNothing(t *testing.T) {
 	t.Parallel()
 	env, extraEnv := newGloballyTrackedEnv(t, false)

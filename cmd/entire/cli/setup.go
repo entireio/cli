@@ -1649,38 +1649,25 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 		printWrongAgentError(w, name)
 		return NewSilentError(errors.New("wrong agent name"))
 	}
-
 	hookAgent, ok := agent.AsHookSupport(ag)
 	if !ok {
-		return fmt.Errorf("agent %s does not support hooks", name)
+		return fmt.Errorf("agent %s does not support hooks", ag.Name())
 	}
+	return removeRepoAgentHooks(ctx, w, hookAgent)
+}
 
+func removeRepoAgentHooks(ctx context.Context, w io.Writer, hookAgent agent.HookSupport) error {
 	repoInstalled := hookAgent.AreHooksInstalled(ctx)
-	userHooks, hasUserHooks := agent.AsUserHookSupport(ag)
-	userInstalled := false
-	if hasUserHooks {
-		userInstalled, err = userHooks.AreUserHooksInstalled(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to inspect %s user hooks: %w", ag.Type(), err)
-		}
-	}
-	if !repoInstalled && !userInstalled {
-		fmt.Fprintf(w, "%s hooks are not installed.\n", ag.Type())
+	if !repoInstalled {
+		fmt.Fprintf(w, "%s hooks are not installed.\n", hookAgent.Type())
 		return nil
 	}
 
-	if repoInstalled {
-		if err := hookAgent.UninstallHooks(ctx); err != nil {
-			return fmt.Errorf("failed to remove %s hooks: %w", ag.Type(), err)
-		}
-	}
-	if userInstalled {
-		if err := userHooks.UninstallUserHooks(ctx); err != nil {
-			return fmt.Errorf("failed to remove %s user hooks: %w", ag.Type(), err)
-		}
+	if err := hookAgent.UninstallHooks(ctx); err != nil {
+		return fmt.Errorf("failed to remove %s hooks: %w", hookAgent.Type(), err)
 	}
 
-	fmt.Fprintf(w, "Removed %s hooks.\n", ag.Type())
+	fmt.Fprintf(w, "Removed %s hooks.\n", hookAgent.Type())
 	return nil
 }
 

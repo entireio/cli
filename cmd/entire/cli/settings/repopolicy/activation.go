@@ -281,11 +281,11 @@ func rebindMovedRepositoryLocked(repository Repository) (bool, error) {
 	if oldWorktree == "" || !filepath.IsAbs(oldWorktree) || !filepath.IsAbs(oldGitCommon) {
 		return false, nil
 	}
-	if exists, statErr := policyPathExists(oldWorktree); statErr != nil || exists {
+	if vacated, statErr := relocationSourceVacatedOrSame(oldWorktree, repository.WorktreeRoot); statErr != nil || !vacated {
 		return false, statErr
 	}
 	if oldGitCommon != repository.GitCommonDir {
-		if exists, statErr := policyPathExists(oldGitCommon); statErr != nil || exists {
+		if vacated, statErr := relocationSourceVacatedOrSame(oldGitCommon, repository.GitCommonDir); statErr != nil || !vacated {
 			return false, statErr
 		}
 	}
@@ -353,6 +353,25 @@ func rebindMovedRepositoryLocked(repository Repository) (bool, error) {
 	return true, nil
 }
 
+// relocationSourceVacatedOrSame preserves the copied-registry defense while
+// allowing case-only renames on case-insensitive filesystems. Such a rename
+// leaves the old spelling resolvable, but both spellings identify the same
+// directory; a copied checkout has a different filesystem identity.
+func relocationSourceVacatedOrSame(oldPath, currentPath string) (bool, error) {
+	oldInfo, err := os.Stat(oldPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect prior repository path %q: %w", oldPath, err)
+	}
+	currentInfo, err := os.Stat(currentPath)
+	if err != nil {
+		return false, fmt.Errorf("inspect current repository path %q: %w", currentPath, err)
+	}
+	return os.SameFile(oldInfo, currentInfo), nil
+}
+
 func readOptionalPolicyRecord(path string, target any) (bool, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // callers provide package-owned registry paths, never user-supplied paths
 	if err != nil {
@@ -376,17 +395,6 @@ func writePolicyRecord(path string, value any) error {
 		return fmt.Errorf("write policy record: %w", err)
 	}
 	return nil
-}
-
-func policyPathExists(path string) (bool, error) {
-	_, err := os.Lstat(path)
-	if err == nil {
-		return true, nil
-	}
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	return false, fmt.Errorf("inspect prior repository path: %w", err)
 }
 
 func enabledFromSettingsData(data []byte) (*bool, error) {

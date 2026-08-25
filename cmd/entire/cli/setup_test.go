@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,29 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
+
+type removeAgentHooksMock struct {
+	*mockLifecycleAgent
+
+	repoInstalled      bool
+	repoUninstallCalls int
+}
+
+func (m *removeAgentHooksMock) HookNames() []string { return nil }
+
+func (m *removeAgentHooksMock) ParseHookEvent(context.Context, string, io.Reader) (*agent.Event, error) {
+	return nil, nil //nolint:nilnil // this hook-management mock never parses events
+}
+
+func (m *removeAgentHooksMock) InstallHooks(context.Context, bool) (int, error) { return 0, nil }
+
+func (m *removeAgentHooksMock) UninstallHooks(context.Context) error {
+	m.repoUninstallCalls++
+	m.repoInstalled = false
+	return nil
+}
+
+func (m *removeAgentHooksMock) AreHooksInstalled(context.Context) bool { return m.repoInstalled }
 
 // Note: Tests for hook manipulation functions (addHookToMatcher, hookCommandExists, etc.)
 // have been moved to the agent/claudecode package where these functions now reside.
@@ -60,6 +84,22 @@ func writeSettings(t *testing.T, content string) {
 	}
 	if err := os.WriteFile(EntireSettingsFile, []byte(content), 0o644); err != nil {
 		t.Fatalf("Failed to write settings file: %v", err)
+	}
+}
+
+func TestRemoveRepoAgentHooksIsRepoScoped(t *testing.T) {
+	name := types.AgentName("remove-agent-scope-test")
+	mock := &removeAgentHooksMock{
+		mockLifecycleAgent: &mockLifecycleAgent{name: name, agentType: types.AgentType(name)},
+		repoInstalled:      true,
+	}
+
+	var out bytes.Buffer
+	if err := removeRepoAgentHooks(t.Context(), &out, mock); err != nil {
+		t.Fatal(err)
+	}
+	if mock.repoUninstallCalls != 1 {
+		t.Fatalf("repo uninstall calls = %d, want 1", mock.repoUninstallCalls)
 	}
 }
 

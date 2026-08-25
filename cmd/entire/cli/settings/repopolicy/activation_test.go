@@ -586,6 +586,25 @@ func TestRebindMovedRepository_RequiresMovedPathAndActiveSession(t *testing.T) {
 	})
 }
 
+func TestRelocationSourceVacatedOrSame(t *testing.T) {
+	t.Parallel()
+
+	current := t.TempDir()
+	if ok, err := relocationSourceVacatedOrSame(current, current); err != nil || !ok {
+		t.Fatalf("same filesystem identity = %v, %v; want true", ok, err)
+	}
+
+	copied := t.TempDir()
+	if ok, err := relocationSourceVacatedOrSame(current, copied); err != nil || ok {
+		t.Fatalf("different filesystem identity = %v, %v; want false", ok, err)
+	}
+
+	missing := filepath.Join(t.TempDir(), "missing")
+	if ok, err := relocationSourceVacatedOrSame(missing, current); err != nil || !ok {
+		t.Fatalf("missing source = %v, %v; want true", ok, err)
+	}
+}
+
 func runPolicyGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), "git", args...)

@@ -49,7 +49,7 @@ func TestLoadForRepoPolicy_GlobalOnlySanitizesExecutableAndOutboundSettings(t *t
   "vercel": true,
   "checkpoints": {"primary":{"type":"fs","path":"/tmp/attacker"}},
   "redaction": {
-    "pii": {"enabled":true,"email":false,"phone":true,"address":true,"custom_patterns":{"employee":"E-[0-9]+"}},
+    "pii": {"enabled":true,"email":false,"phone":true,"address":null,"custom_patterns":{"employee":"E-[0-9]+"}},
     "custom_redactions": {"internal":"secret-[0-9]+"},
     "externalize_images": true,
     "openai_privacy_filter": {"enabled":true,"command":"./pwn"},
@@ -68,7 +68,7 @@ func TestLoadForRepoPolicy_GlobalOnlySanitizesExecutableAndOutboundSettings(t *t
 	if got.StrategyOptions != nil || got.AbsoluteGitHookPath || got.ExternalAgents || got.CommitLinking != "" || got.SignCheckpointCommits != nil || got.Vercel || got.Checkpoints != nil {
 		t.Fatalf("unsafe fields influenced global hook settings: %+v", got)
 	}
-	if got.Redaction == nil || got.Redaction.PII == nil || !got.Redaction.PII.Enabled || got.Redaction.PII.Email == nil || *got.Redaction.PII.Email || got.Redaction.PII.Phone == nil || !*got.Redaction.PII.Phone || got.Redaction.PII.Address == nil || !*got.Redaction.PII.Address {
+	if got.Redaction == nil || got.Redaction.PII == nil || !got.Redaction.PII.Enabled || got.Redaction.PII.Email == nil || *got.Redaction.PII.Email || got.Redaction.PII.Phone == nil || !*got.Redaction.PII.Phone || got.Redaction.PII.Address != nil {
 		t.Fatalf("PII settings not preserved exactly: %+v", got.Redaction)
 	}
 	if got.Redaction.PII.CustomPatterns["employee"] == "" || got.Redaction.CustomRedactions["internal"] == "" || !got.Redaction.ExternalizeImages {
@@ -139,43 +139,6 @@ func TestLoadForRepoPolicy_MalformedAllowedFieldFailsClosed(t *testing.T) {
 				t.Fatalf("error = %v, want malformed %s failure", err, tt.want)
 			}
 		})
-	}
-}
-
-func TestLoadForRepoPolicy_PreservesPIICategoryPointerNullSemantics(t *testing.T) {
-	t.Parallel()
-	root, policy := hookPolicyRepo(t)
-	testutil.WriteFile(t, root, ".entire/settings.json", `{
-  "redaction": {
-    "pii": {
-      "enabled": true,
-      "email": true,
-      "phone": false,
-      "address": null,
-      "custom_patterns": {"employee_id": "E-[0-9]+"}
-    }
-  }
-}`)
-
-	got, err := LoadForRepoPolicy(t.Context(), policy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Redaction == nil || got.Redaction.PII == nil {
-		t.Fatalf("missing PII settings: %+v", got.Redaction)
-	}
-	pii := got.Redaction.PII
-	if pii.Email == nil || !*pii.Email {
-		t.Fatalf("email = %v, want pointer to true", pii.Email)
-	}
-	if pii.Phone == nil || *pii.Phone {
-		t.Fatalf("phone = %v, want pointer to false", pii.Phone)
-	}
-	if pii.Address != nil {
-		t.Fatalf("address = %v, want nil for JSON null", pii.Address)
-	}
-	if reflect.TypeOf(pii.CustomPatterns) != reflect.TypeOf(map[string]string{}) || pii.CustomPatterns["employee_id"] != "E-[0-9]+" {
-		t.Fatalf("custom_patterns shape/value changed: %#v", pii.CustomPatterns)
 	}
 }
 
