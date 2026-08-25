@@ -634,6 +634,7 @@ func retirePendingSource(
 		if err != nil {
 			return fmt.Errorf("load source session state: %w", err)
 		}
+		//nolint:gocritic // ifElseChain: three mutually exclusive source-state branches
 		if sourceState != nil && isAdoptableSourceSession(sourceState) {
 			claim, claimErr := session.LiveSessionClaimContext(retireCtx, adopted.SessionID)
 			if claimErr != nil {
@@ -649,6 +650,9 @@ func retirePendingSource(
 		} else if sourceState != nil && sourceState.AdoptedIntoWorktreePath != "" &&
 			!sameAdoptPath(sourceState.AdoptedIntoWorktreePath, target.WorktreePath) {
 			return errors.New("source was retired into a different worktree")
+		} else if sourceState != nil && !isAdoptableSourceSession(sourceState) &&
+			sourceState.AdoptedIntoWorktreePath == "" {
+			return errors.New("source session is no longer adoptable")
 		}
 		// Release before clearing the marker. If the target save fails, the next
 		// post-commit observes the already-retired source and safely retries the
