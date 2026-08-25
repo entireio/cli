@@ -8,6 +8,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// testAgentName is the agent used across the skill/checkpoint payload tests.
+const testAgentName = "claude-code"
+
 func TestBuildPluginEventPayload(t *testing.T) {
 	t.Parallel()
 	payload := BuildPluginEventPayload("pgr", true, "1.2.3")
@@ -184,7 +187,7 @@ func TestBuildSkillEventPayload(t *testing.T) {
 	t.Parallel()
 	payload := BuildSkillEventPayload(SkillInvocation{
 		Skill:     "entire",
-		Agent:     "claude-code",
+		Agent:     testAgentName,
 		Signal:    "prompt_slash_command",
 		EventType: "prompt_invocation",
 	}, true, "1.2.3")
@@ -198,8 +201,8 @@ func TestBuildSkillEventPayload(t *testing.T) {
 	if got := payload.Properties["skill"]; got != "entire" {
 		t.Errorf("skill property = %v, want %q", got, "entire")
 	}
-	if got := payload.Properties["agent"]; got != "claude-code" {
-		t.Errorf("agent property = %v, want %q", got, "claude-code")
+	if got := payload.Properties["agent"]; got != testAgentName {
+		t.Errorf("agent property = %v, want %q", got, testAgentName)
 	}
 	if got := payload.Properties["signal"]; got != "prompt_slash_command" {
 		t.Errorf("signal property = %v, want %q", got, "prompt_slash_command")
@@ -224,7 +227,7 @@ func TestBuildSkillEventPayload(t *testing.T) {
 
 func TestBuildSkillEventPayload_EmptySkill(t *testing.T) {
 	t.Parallel()
-	if got := BuildSkillEventPayload(SkillInvocation{Agent: "claude-code"}, true, "1.0.0"); got != nil {
+	if got := BuildSkillEventPayload(SkillInvocation{Agent: testAgentName}, true, "1.0.0"); got != nil {
 		t.Errorf("expected nil for empty skill name, got %+v", got)
 	}
 }
@@ -236,7 +239,7 @@ func TestBuildSkillEventPayload_UnlistedSkillNameIsNotSent(t *testing.T) {
 	// allowlisted names pass through verbatim.
 	payload := BuildSkillEventPayload(SkillInvocation{
 		Skill:     "customer-acme-incident-123",
-		Agent:     "claude-code",
+		Agent:     testAgentName,
 		Signal:    "prompt_slash_command",
 		EventType: "prompt_invocation",
 	}, true, "1.2.3")
@@ -251,5 +254,104 @@ func TestBuildSkillEventPayload_UnlistedSkillNameIsNotSent(t *testing.T) {
 		if s, ok := v.(string); ok && s == "customer-acme-incident-123" {
 			t.Errorf("raw skill name leaked into payload property %v", v)
 		}
+	}
+}
+
+func TestBuildCommitCondensedPayload(t *testing.T) {
+	t.Parallel()
+	usedSearch := true
+	priorAI := true
+	payload := BuildCommitCondensedPayload(CommitCondensedSignal{
+		Agent:            testAgentName,
+		UsedSearch:       &usedSearch,
+		UsedSearchSource: "command",
+		PriorAIHistory:   &priorAI,
+		FilesCommitted:   4,
+	}, true, "1.2.3")
+	if payload == nil {
+		t.Fatal("BuildCommitCondensedPayload returned nil")
+		return
+	}
+	if payload.Event != "cli_commit_condensed" {
+		t.Errorf("Event = %q, want %q", payload.Event, "cli_commit_condensed")
+	}
+	if got := payload.Properties["agent"]; got != testAgentName {
+		t.Errorf("agent property = %v, want %q", got, testAgentName)
+	}
+	if got := payload.Properties["used_search"]; got != true {
+		t.Errorf("used_search property = %v, want true", got)
+	}
+	if got := payload.Properties["used_search_source"]; got != "command" {
+		t.Errorf("used_search_source property = %v, want %q", got, "command")
+	}
+	if got := payload.Properties["prior_ai_history"]; got != true {
+		t.Errorf("prior_ai_history property = %v, want true", got)
+	}
+	if got := payload.Properties["files_committed"]; got != 4 {
+		t.Errorf("files_committed property = %v, want 4", got)
+	}
+	// The payload must stay content-free: booleans and counts only, never
+	// file paths, prompts, or transcript content.
+	for _, forbidden := range []string{"files", "paths", "prompt", "transcript"} {
+		if _, ok := payload.Properties[forbidden]; ok {
+			t.Errorf("checkpoint payload must not include %q", forbidden)
+		}
+	}
+}
+
+// TestBuildCommitCondensedPayload_UnmeasurableOmitsUsedSearch pins the shape
+// that keeps the missed-opportunity ratio honest: when the probe could not run,
+// used_search is ABSENT rather than false, so a consumer filtering on
+// `used_search = false` excludes those rows instead of counting them as "did
+// not search". A missing PostHog property is not false.
+func TestBuildCommitCondensedPayload_UnmeasurableOmitsUsedSearch(t *testing.T) {
+	t.Parallel()
+	priorAI := true
+	payload := BuildCommitCondensedPayload(CommitCondensedSignal{
+		Agent:            testAgentName,
+		UsedSearch:       nil,
+		UsedSearchSource: "unsupported",
+		PriorAIHistory:   &priorAI,
+		FilesCommitted:   2,
+	}, true, "1.2.3")
+	if payload == nil {
+		t.Fatal("BuildCommitCondensedPayload returned nil")
+		return
+	}
+	if _, ok := payload.Properties["used_search"]; ok {
+		t.Errorf("used_search must be absent when unmeasurable, got %v", payload.Properties["used_search"])
+	}
+	if got := payload.Properties["used_search_source"]; got != "unsupported" {
+		t.Errorf("used_search_source property = %v, want %q", got, "unsupported")
+	}
+	if got := payload.Properties["prior_ai_history"]; got != true {
+		t.Errorf("prior_ai_history property = %v, want true", got)
+	}
+}
+
+// TestBuildCommitCondensedPayload_UnmeasurableOmitsPriorAIHistory gives
+// prior_ai_history the same honesty contract as used_search: when the git-log
+// probe could not run, the property is ABSENT rather than false, so a consumer
+// filtering on `prior_ai_history = false` excludes those rows instead of
+// counting them as "touched no AI-dense files".
+func TestBuildCommitCondensedPayload_UnmeasurableOmitsPriorAIHistory(t *testing.T) {
+	t.Parallel()
+	usedSearch := false
+	payload := BuildCommitCondensedPayload(CommitCondensedSignal{
+		Agent:            testAgentName,
+		UsedSearch:       &usedSearch,
+		UsedSearchSource: "none",
+		PriorAIHistory:   nil,
+		FilesCommitted:   2,
+	}, true, "1.2.3")
+	if payload == nil {
+		t.Fatal("BuildCommitCondensedPayload returned nil")
+		return
+	}
+	if _, ok := payload.Properties["prior_ai_history"]; ok {
+		t.Errorf("prior_ai_history must be absent when unmeasurable, got %v", payload.Properties["prior_ai_history"])
+	}
+	if got := payload.Properties["used_search"]; got != false {
+		t.Errorf("used_search property = %v, want false", got)
 	}
 }
