@@ -71,6 +71,11 @@ func TestMain(m *testing.M) {
 		os.RemoveAll(tmpDir)
 		os.Exit(1)
 	}
+	if err := os.Setenv("ENTIRE_TEST_BINARY", testBinaryPath); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to set ENTIRE_TEST_BINARY: %v\n", err)
+		os.RemoveAll(tmpDir)
+		os.Exit(1)
+	}
 
 	// Run tests
 	code := m.Run()

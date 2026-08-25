@@ -1555,9 +1555,13 @@ func splitShebang(content string) (shebang, rest string) {
 // the working tree contains run on every git operation.
 func hookCmdPrefix(absolutePath bool) (string, error) {
 	if absolutePath {
-		exe, err := os.Executable()
-		if err != nil {
-			return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve binary path: %w", err)
+		exe := os.Getenv("ENTIRE_TEST_BINARY")
+		if exe == "" {
+			var err error
+			exe, err = os.Executable()
+			if err != nil {
+				return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve binary path: %w", err)
+			}
 		}
 		resolved, err := resolveHookExePath(exe, filepath.EvalSymlinks, runtime.GOOS)
 		if err != nil {
