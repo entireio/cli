@@ -3940,3 +3940,68 @@ func TestRunEnableInteractive_FirstRunDefaultsToGitRefs(t *testing.T) {
 		}
 	})
 }
+
+// TestRunEnable_RecordsTrust: with global tracking on, an explicit enable is
+// the user's consent, so it records the repo's trust identity in the user
+// settings file; a configured-but-disabled tier, trust_all, and an
+// unconfigured tier record nothing.
+func TestRunEnable_RecordsTrust(t *testing.T) {
+	tests := []struct {
+		name         string
+		userSettings string // "" means no file
+		wantOrigin   bool
+		wantNotice   bool
+	}{
+		{name: "global on records origin", userSettings: `{"global":{"enabled":true}}`, wantOrigin: true, wantNotice: true},
+		{name: "trust_all records nothing", userSettings: `{"global":{"enabled":true,"trust_all":true}}`},
+		{name: "tier disabled records nothing", userSettings: `{"global":{"enabled":false}}`},
+		{name: "tier unconfigured records nothing"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupTestDir(t)
+			testutil.InitRepo(t, dir)
+			testutil.AddRemote(t, dir, "origin", "https://github.com/acme/widgets.git")
+			writeSettings(t, `{"enabled": false}`)
+			cfg := t.TempDir()
+			t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+			settingsPath := filepath.Join(cfg, "settings.json")
+			if tc.userSettings != "" {
+				if err := os.WriteFile(settingsPath, []byte(tc.userSettings), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, readErr := os.ReadFile(settingsPath)
+			if readErr != nil && !os.IsNotExist(readErr) {
+				t.Fatal(readErr)
+			}
+
+			var out bytes.Buffer
+			if err := runEnable(t.Context(), &out, false); err != nil {
+				t.Fatalf("runEnable: %v", err)
+			}
+
+			after, readErr := os.ReadFile(settingsPath)
+			if tc.userSettings == "" {
+				if !os.IsNotExist(readErr) {
+					t.Fatalf("enable created a user settings file in an unconfigured tier: %q", after)
+				}
+				return
+			}
+			us, err := settings.LoadUserSettings(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotOrigin := slices.Contains(us.Global.TrustedOrigins, "github.com/acme/widgets")
+			if gotOrigin != tc.wantOrigin {
+				t.Errorf("trusted_origins contains repo = %v, want %v (file: %s)", gotOrigin, tc.wantOrigin, after)
+			}
+			if !tc.wantOrigin && string(before) != string(after) {
+				t.Errorf("user settings changed although nothing should be recorded:\nbefore: %s\nafter:  %s", before, after)
+			}
+			if got := strings.Contains(out.String(), "✓ Trusted github.com/acme/widgets"); got != tc.wantNotice {
+				t.Errorf("trust notice printed = %v, want %v; output:\n%s", got, tc.wantNotice, out.String())
+			}
+		})
+	}
+}

@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 
@@ -1387,6 +1388,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	if err := saveSettings(); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
+	recordEnableTrust(ctx, w)
 
 	// Explicit, user-initiated setup: allow EnsurePrimaryRef to fetch a
 	// missing primary metadata ref from a configured checkpoint_remote
@@ -1473,10 +1475,37 @@ func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error 
 	if err := setEnabledFlag(ctx, true, useProjectSettings); err != nil {
 		return err
 	}
+	recordEnableTrust(ctx, w)
 
 	fmt.Fprintln(w, "Entire is now enabled.")
 	printEnabledStatus(ctx, w)
 	return nil
+}
+
+// recordEnableTrust records checkpoint-egress trust for a repo the user just
+// explicitly enabled. Only meaningful while global tracking is ON: from then
+// on every active repo needs trust in the user settings file before its
+// checkpoints leave the machine, and running `entire enable` here IS that
+// consent. Silent when egress is already allowed (trust_all or an existing
+// entry). Best-effort — enable never fails because of it.
+func recordEnableTrust(ctx context.Context, w io.Writer) {
+	us, err := settings.LoadUserSettings(ctx)
+	if err != nil || !us.GlobalEnabled() {
+		return
+	}
+	if settings.CheckpointEgressAllowed(ctx) {
+		return // already trusted (trust_all or an existing entry): nothing to record
+	}
+	id, err := settings.TrustCurrentRepo(ctx)
+	if err != nil {
+		fmt.Fprintf(w, "Note: could not record checkpoint-sync trust for this repo (%v); run 'entire trust' or answer the prompt on your next push.\n", err)
+		return
+	}
+	if !settings.CheckpointEgressAllowed(ctx) {
+		fmt.Fprintf(w, "Warning: trust for %s was written to %s, but checkpoint sync is still held — check that file's trust entries.\n", id.DisplayScope(), settings.UserSettingsPath())
+		return
+	}
+	fmt.Fprintf(w, "✓ Trusted %s for checkpoint sync (global tracking is on)\n", id.DisplayScope())
 }
 
 // runDisable flips the enabled flag to false in the resolved settings scope.
@@ -2053,6 +2082,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	if err := saveEnabledState(ctx, targetSettings, targetFile == EntireSettingsFile); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
+	recordEnableTrust(ctx, w)
 
 	// Hook installation decisions need the merged view across both settings
 	// files, not just the single scope we wrote to above: absolute_git_hook_path
@@ -2566,12 +2596,24 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 		fmt.Fprintln(w, "  Removed .entire directory")
 	}
 
+	// A globally tracked repo keeps its runtime data under .git/, not in
+	// <worktree>/.entire — remove that too so uninstall means what it says.
+	if policy, err := repopolicy.ClassifyRepoPolicy(ctx); err == nil && policy.ActivationSource == repopolicy.ActivationGlobal {
+		if err := os.RemoveAll(policy.RuntimeRoot()); err != nil {
+			fmt.Fprintf(errW, "Warning: failed to remove global-mode runtime data: %v\n", err)
+		}
+	}
+
 	// 5. Remove shadow branches
 	branchesRemoved, err := removeAllShadowBranches(ctx)
 	if err != nil {
 		fmt.Fprintf(errW, "Warning: failed to remove shadow branches: %v\n", err)
 	} else if branchesRemoved > 0 {
 		fmt.Fprintf(w, "  Removed %d shadow branches\n", branchesRemoved)
+	}
+
+	if settings.GlobalTierEnabled(ctx) {
+		fmt.Fprintf(w, "\nNote: global tracking is on (%s). The next agent session here will track this repo again\n  unless you add it to exclude_paths there or run 'entire disable' in this repo.\n", settings.UserSettingsPath())
 	}
 
 	fmt.Fprintln(w, "\nEntire CLI uninstalled successfully.")
