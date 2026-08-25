@@ -248,7 +248,13 @@ func runSelectedImports(ctx context.Context, w io.Writer, repoRoot string, selec
 
 	// Load repo/user-configured redaction before any checkpoint write, matching
 	// import_cmd.go; without it only always-on secret scanning would run.
-	strategy.EnsureRedactionConfigured()
+	// Scanner-config failures skip the import (this offer must never break
+	// enable), mirroring the policy-failure handling above.
+	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
+		logging.Warn(ctx, "session import skipped: redaction configuration failed", "error", err)
+		fmt.Fprintf(w, "Note: skipping agent history import: %v\n", err)
+		return
+	}
 
 	var importedLocalHistory bool
 	for _, e := range selected {

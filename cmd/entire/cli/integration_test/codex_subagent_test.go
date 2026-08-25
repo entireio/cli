@@ -14,8 +14,9 @@ import (
 )
 
 // TestCodexSubagent_StoresDeclaredSubagentTranscript drives Codex's subagent hooks
-// end to end — subagent-start → the subagent edits a file → subagent-stop — and
-// asserts the task checkpoint stores the subagent's own rollout.
+// end to end — subagent-start → the subagent edits a file → subagent-stop → commit —
+// and asserts the declared rollout reaches the condensed checkpoint's tasks/ subtree
+// via the task record the materializer follows (#2058).
 //
 // The rollout path here is deliberately flat, matching Codex's real layout and
 // matching neither candidate the Claude Code fallback probes, so the assertion can
@@ -64,11 +65,24 @@ func TestCodexSubagent_StoresDeclaredSubagentTranscript(t *testing.T) {
 	})
 
 	// Codex sends no tool_use_id, so agent_id is the correlation key and therefore
-	// names the task directory.
-	wantPath := paths.EntireMetadataDir + "/" + sessionID +
-		"/tasks/" + agentID + "/" + paths.AgentTranscriptFileName(agentID)
-	content, ok := env.ReadFileFromBranch(env.GetShadowBranchName(), wantPath)
-	require.True(t, ok,
-		"subagent transcript not stored at %s — the declared agent_transcript_path was not honoured", wantPath)
-	require.Contains(t, content, editedFile, "stored transcript is not the subagent's rollout")
+	// keys the task record.
+	state, err := env.GetSessionState(sessionID)
+	require.NoError(t, err)
+	rec := state.FindTaskRecord(agentID)
+	require.NotNil(t, rec, "expected a task record keyed by agent_id")
+	require.False(t, rec.CompletedAt.IsZero(), "subagent-stop must complete the record")
+	require.Equal(t, subagentRollout, rec.DeclaredTranscriptPath,
+		"the declared agent_transcript_path was not honoured")
+	require.True(t, containsFile(rec.Files, editedFile),
+		"the record must carry the subagent's edit, got %v", rec.Files)
+
+	// Committing condenses the session, and the materializer must store the rollout
+	// itself — the storage guarantee this test is named for.
+	env.GitCommitWithShadowHooksAsAgent("Add red doc", editedFile)
+	checkpointID := env.TryGetLatestCheckpointID()
+	require.NotEmpty(t, checkpointID, "expected a condensed checkpoint after committing the subagent's work")
+	stored, ok := env.ReadFileFromBranch(paths.MetadataBranchName,
+		CheckpointTaskFilePath(checkpointID, agentID, paths.AgentTranscriptFileName(agentID)))
+	require.True(t, ok, "declared rollout not materialized under the checkpoint's tasks/ subtree")
+	require.Contains(t, stored, editedFile, "materialized transcript is not the subagent's rollout")
 }

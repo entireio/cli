@@ -281,7 +281,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 					fmt.Fprintln(w, "No results found.")
 					return nil
 				}
-				renderSearchStatic(w, resp.Results, query, resp.Total, styles)
+				renderSearchStatic(w, resp.Results, query, resp.Total, len(resp.CountsLowerBound) > 0, styles)
 				return nil
 			}
 
@@ -305,6 +305,11 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles, codeOpts)
 			model.semanticSearch = searcher
 			model.warning = strings.Join(resp.Warnings, "; ")
+			// The initial response's counts metadata must reach the model the
+			// same way a re-search's does, or the tab counts and their
+			// lower-bound "+" are missing on the first view (ENT-1777).
+			model.counts = resp.Counts
+			model.countsLowerBound = resp.CountsLowerBound
 			p := tea.NewProgram(model)
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("TUI error: %w", err)
@@ -527,9 +532,16 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 	}
 
 	// Step 3: Group repos by cell and resolve baseURLs via shared helpers.
-	cells := groupReposByCell(indexRepos)
+	// Routes by routedRepoPlacement like semantic search (see its doc). The
+	// CLI is deliberately ahead of the BFF's code-search.ts here, which stays
+	// canonical until its code-read chain (/symbols, /usages, file viewer)
+	// flips with it — identical behavior until then, and core electing
+	// divergent primaries is gated on that web flip (tracked on ENT-1776).
+	pinned := len(opts.repoFilters) > 0
+	cells, skippedRepos := groupReposByCell(indexRepos)
+	skippedRepos = reportableSkippedRepos(ctx, pinned, len(cells), skippedRepos)
 	if len(cells) == 0 {
-		return &codesearch.SearchResponse{}, nil
+		return &codesearch.SearchResponse{SkippedRepos: skippedRepos}, nil
 	}
 	resolveCellBaseURLs(ctx, coreClient, cells)
 
@@ -563,7 +575,12 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 		return nil, fmt.Errorf("code search: %w", err)
 	}
 
-	return mergeSearchResults(ctx, opts.limit, results)
+	merged, err := mergeSearchResults(ctx, opts.limit, results)
+	if err != nil {
+		return nil, err
+	}
+	merged.SkippedRepos = skippedRepos
+	return merged, nil
 }
 
 // resolveRepoFilters matches user-provided filters against the repo index,
@@ -694,10 +711,12 @@ func mergeSearchResults(ctx context.Context, limit int, results []cellCallResult
 	}
 	merged.Results = deduped
 
-	// Deduplicate RepoStats by repo name. A repo that appears in more than one
-	// cell is a mirror placement returning the SAME content (this PR fans out
-	// across placements, so e.g. a US-homed repo with an EU mirror is now
-	// searched in both cells) — not additional matches. Keep one representative
+	// Deduplicate RepoStats by repo name. The fan-out routes each repo to one
+	// canonical cell (ENT-1672), so a repo appearing in more than one cell
+	// response should no longer happen via placements — this remains as a
+	// guard for overlapping cell scopes (e.g. a repo with empty jurisdiction
+	// searched via both home and explicit cell) returning the SAME content,
+	// not additional matches. Keep one representative
 	// entry per repo (the max of each count; mirror copies are identical, max
 	// only guards against minor per-cell skew) instead of summing, and record
 	// the duplicated portion so the aggregate stats can drop the double-count.
@@ -732,10 +751,10 @@ func mergeSearchResults(ctx context.Context, limit int, results []cellCallResult
 	}
 	merged.RepoStats = dedupedStats
 
-	// The per-cell Stats were summed above, so a mirrored repo's matches were
-	// counted once per cell. Subtract the duplicated copies identified via
-	// RepoStats so the totals reflect distinct content, not the same content
-	// seen from every mirror cell. This preserves per-cell truncation (the
+	// The per-cell Stats were summed above, so a repo answered by more than
+	// one cell was counted once per cell. Subtract the duplicated copies
+	// identified via RepoStats so the totals reflect distinct content, not
+	// the same content seen twice. This preserves per-cell truncation (the
 	// base is peregrine's own totals; we only remove the provable duplicate
 	// portion) and zero-match repos (they contribute 0 to the subtraction).
 	// A repo with matches but no RepoStats row, or a zero-match mirror repo,
@@ -766,6 +785,7 @@ func writeCodeSearchJSON(w io.Writer, resp *codesearch.SearchResponse) error {
 		Stats               codesearch.Stats       `json:"stats"`
 		RepoStats           []codesearch.RepoStats `json:"repo_stats,omitempty"`
 		FailedJurisdictions []string               `json:"failed_jurisdictions,omitempty"`
+		SkippedRepos        []string               `json:"skipped_repos,omitempty"`
 	}{
 		Query:               resp.Query,
 		Results:             resp.Results,
@@ -773,6 +793,7 @@ func writeCodeSearchJSON(w io.Writer, resp *codesearch.SearchResponse) error {
 		Stats:               resp.Stats,
 		RepoStats:           resp.RepoStats,
 		FailedJurisdictions: resp.FailedJurisdictions,
+		SkippedRepos:        resp.SkippedRepos,
 	}
 	if out.Results == nil {
 		out.Results = []codesearch.Result{}
@@ -805,9 +826,17 @@ const (
 // the writer supports them (styles.colorEnabled); piped output stays plain.
 func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse, styles statusStyles, caseSensitive bool) {
 	if len(resp.Results) == 0 {
+		// Both causes can hold at once; reporting only the first leaves the
+		// user to discover the other from a bare result count.
+		var causes []string
 		if len(resp.FailedJurisdictions) > 0 {
-			fmt.Fprintf(w, "No code search results found (some regions failed: %s)\n",
-				strings.Join(resp.FailedJurisdictions, ", "))
+			causes = append(causes, "some regions failed: "+strings.Join(resp.FailedJurisdictions, ", "))
+		}
+		if len(resp.SkippedRepos) > 0 {
+			causes = append(causes, "skipped repos with no searchable placement: "+strings.Join(resp.SkippedRepos, ", "))
+		}
+		if len(causes) > 0 {
+			fmt.Fprintf(w, "No code search results found (%s)\n", strings.Join(causes, "; "))
 		} else {
 			fmt.Fprintln(w, "No code search results found.")
 		}
@@ -880,6 +909,10 @@ func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse, styles st
 	if len(resp.FailedJurisdictions) > 0 {
 		warning := fmt.Sprintf("Warning: results may be incomplete (failed jurisdictions: %s)",
 			strings.Join(resp.FailedJurisdictions, ", "))
+		fmt.Fprintln(w, styles.render(styles.yellow, warning))
+	}
+	if len(resp.SkippedRepos) > 0 {
+		warning := "Warning: skipped repo(s) with no searchable placement (missing or not ready): " + strings.Join(resp.SkippedRepos, ", ")
 		fmt.Fprintln(w, styles.render(styles.yellow, warning))
 	}
 }
@@ -969,13 +1002,27 @@ func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error 
 		TotalPages int                `json:"total_pages"`
 		Limit      int                `json:"limit"`
 		Counts     *search.TypeCounts `json:"counts,omitempty"`
+		// Completeness metadata, passed through from the merged response with
+		// the BFF's names and semantics (ENT-1777).
+		Partial            bool            `json:"partial,omitempty"`
+		Truncated          bool            `json:"truncated,omitempty"`
+		CoverageIncomplete bool            `json:"coverage_incomplete,omitempty"`
+		TruncatedTypes     map[string]bool `json:"truncated_types,omitempty"`
+		CountsLowerBound   map[string]bool `json:"counts_lower_bound,omitempty"`
+		Reranked           *bool           `json:"reranked,omitempty"`
 	}{
-		Results:    pageResults,
-		Total:      total,
-		Page:       page,
-		TotalPages: totalPages,
-		Limit:      limit,
-		Counts:     resp.Counts,
+		Results:            pageResults,
+		Total:              total,
+		Page:               page,
+		TotalPages:         totalPages,
+		Limit:              limit,
+		Counts:             resp.Counts,
+		Partial:            resp.Partial,
+		Truncated:          resp.Truncated,
+		CoverageIncomplete: resp.CoverageIncomplete,
+		TruncatedTypes:     resp.TruncatedTypes,
+		CountsLowerBound:   resp.CountsLowerBound,
+		Reranked:           resp.Reranked,
 	}
 	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
 	if err != nil {
@@ -1072,13 +1119,27 @@ func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int)
 		TotalPages int                `json:"total_pages"`
 		Limit      int                `json:"limit"`
 		Counts     *search.TypeCounts `json:"counts,omitempty"`
+		// Completeness metadata, passed through from the merged response with
+		// the BFF's names and semantics (ENT-1777).
+		Partial            bool            `json:"partial,omitempty"`
+		Truncated          bool            `json:"truncated,omitempty"`
+		CoverageIncomplete bool            `json:"coverage_incomplete,omitempty"`
+		TruncatedTypes     map[string]bool `json:"truncated_types,omitempty"`
+		CountsLowerBound   map[string]bool `json:"counts_lower_bound,omitempty"`
+		Reranked           *bool           `json:"reranked,omitempty"`
 	}{
-		Results:    hits,
-		Total:      total,
-		Page:       page,
-		TotalPages: totalPages,
-		Limit:      limit,
-		Counts:     resp.Counts,
+		Results:            hits,
+		Total:              total,
+		Page:               page,
+		TotalPages:         totalPages,
+		Limit:              limit,
+		Counts:             resp.Counts,
+		Partial:            resp.Partial,
+		Truncated:          resp.Truncated,
+		CoverageIncomplete: resp.CoverageIncomplete,
+		TruncatedTypes:     resp.TruncatedTypes,
+		CountsLowerBound:   resp.CountsLowerBound,
+		Reranked:           resp.Reranked,
 	}
 	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
 	if err != nil {

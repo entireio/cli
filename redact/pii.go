@@ -39,6 +39,11 @@ type PIIConfig struct {
 	// Example: {"employee_id": `EMP-\d{6}`} produces [REDACTED_EMPLOYEE_ID].
 	CustomPatterns map[string]string
 
+	// Logger receives diagnostics (invalid CustomPatterns regexes). nil
+	// means slog.Default(); the CLI injects its entry-point-initialized
+	// logger so warnings land in .entire/logs/.
+	Logger *slog.Logger
+
 	// patterns holds pre-compiled patterns, populated by ConfigurePII.
 	// When nil (e.g., in tests constructing PIIConfig directly),
 	// detectPII falls back to compilePIIPatterns.
@@ -179,10 +184,14 @@ func compilePIIPatterns(cfg *PIIConfig) []piiPattern {
 			patterns = append(patterns, piiPattern{regex: bp.regex, label: bp.label})
 		}
 	}
+	logger := loggerOrDefault(cfg.Logger)
 	for label, pattern := range cfg.CustomPatterns {
 		compiled, err := regexp.Compile(pattern)
 		if err != nil {
-			slog.Warn("skipping invalid custom PII pattern", slog.String("label", label), slog.String("error", err.Error()))
+			logger.Warn("skipping invalid custom PII pattern",
+				componentAttr,
+				slog.String("label", label),
+				compileErrorAttr(err))
 			continue
 		}
 		patterns = append(patterns, piiPattern{regex: compiled, label: strings.ToUpper(label)})

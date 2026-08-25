@@ -834,3 +834,34 @@ func TestCleanCmd_MutuallyExclusiveFlags(t *testing.T) {
 		t.Errorf("Expected mutual exclusion error, got: %v", err)
 	}
 }
+
+// --- Temp file deletion ---
+
+// TestDeleteTempFiles_ToleratesVanishedFile covers the race the OpenCode export
+// staging introduces: listAllTempFiles snapshots .entire/tmp, and a staged export
+// can be renamed into place before deleteTempFiles gets to it. A name that is
+// already gone is not a deletion failure.
+func TestDeleteTempFiles_ToleratesVanishedFile(t *testing.T) {
+	setupCleanTestRepo(t)
+	ctx := context.Background()
+
+	tmpDirAbs, err := paths.AbsPath(ctx, paths.EntireTmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(tmpDirAbs, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDirAbs, "present.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, failed := deleteTempFiles(ctx, []string{"present.json", ".export-ses_x.json-42"})
+
+	if len(failed) != 0 {
+		t.Errorf("deleteTempFiles reported %d failure(s) for an already-gone file: %+v", len(failed), failed)
+	}
+	if len(deleted) != 1 || deleted[0] != "present.json" {
+		t.Errorf("deleted = %v, want [present.json]", deleted)
+	}
+}
