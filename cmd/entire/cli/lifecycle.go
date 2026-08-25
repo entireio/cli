@@ -737,12 +737,12 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	if !transcriptAvailable {
 		prepareSpan.RecordError(fmt.Errorf("transcript file not found: %s", transcriptRef))
 		// Cursor Cloud Agents never create the local agent-transcripts directory;
-		// conversation history is remote-only. When the parent directory itself is
-		// absent, fail open so turn-end still runs git file detection, stop-hook
-		// token fields, and the phase transition. A missing file under an existing
-		// parent remains a hard error (late flush / wrong path).
+		// conversation history is remote-only. For Cursor only, when the parent
+		// directory itself is absent, fail open so turn-end still runs git file
+		// detection, stop-hook token fields, and the phase transition. Other
+		// agents and a missing file under an existing parent remain hard errors.
 		// Do not gate on CURSOR_CODE_REMOTE — managed Cloud VMs leave it unset.
-		if !transcriptParentMissing(transcriptRef) {
+		if ag.Name() != agent.AgentNameCursor || !transcriptParentMissing(transcriptRef) {
 			prepareSpan.End()
 			return fmt.Errorf("transcript file not found: %s", transcriptRef)
 		}

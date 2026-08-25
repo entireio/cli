@@ -379,6 +379,7 @@ func TestDispatchLifecycleEvent_UnknownEventType(t *testing.T) {
 	t.Parallel()
 
 	ag := newMockAgent()
+	ag.name = agent.AgentNameCursor
 	event := &agent.Event{
 		Type:      agent.EventType(999), // Unknown type
 		SessionID: "test-session",
@@ -766,9 +767,24 @@ func TestHandleLifecycleTurnEnd_NonexistentTranscript(t *testing.T) {
 	}
 }
 
+func TestHandleLifecycleTurnEnd_MissingTranscriptParent_OtherAgentErrors(t *testing.T) {
+	t.Parallel()
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "other-agent-session",
+		SessionRef: filepath.Join(t.TempDir(), "missing-parent", "transcript.jsonl"),
+	}
+
+	err := handleLifecycleTurnEnd(context.Background(), ag, event)
+	if err == nil || !strings.Contains(err.Error(), "transcript file not found") {
+		t.Fatalf("expected non-Cursor agent to retain hard error, got: %v", err)
+	}
+}
+
 func TestHandleLifecycleTurnEnd_MissingTranscriptParent_Continues(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir().
-	t.Setenv("CURSOR_CODE_REMOTE", "true")
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 	setupGitRepoWithCommit(t, tmpDir)
