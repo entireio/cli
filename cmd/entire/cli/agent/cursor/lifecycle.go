@@ -28,7 +28,7 @@ func intFromJSON(n json.Number) int64 {
 func (c *CursorAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNameSessionStart:
-		return c.parseSessionStart(stdin)
+		return c.parseSessionStart(ctx, stdin)
 	case HookNameBeforeSubmitPrompt:
 		return c.parseTurnStart(ctx, stdin)
 	case HookNameStop:
@@ -36,11 +36,11 @@ func (c *CursorAgent) ParseHookEvent(ctx context.Context, hookName string, stdin
 	case HookNameSessionEnd:
 		return c.parseSessionEnd(ctx, stdin)
 	case HookNamePreCompact:
-		return c.parsePreCompact(stdin)
+		return c.parsePreCompact(ctx, stdin)
 	case HookNameSubagentStart:
-		return c.parseSubagentStart(stdin)
+		return c.parseSubagentStart(ctx, stdin)
 	case HookNameSubagentStop:
-		return c.parseSubagentStop(stdin)
+		return c.parseSubagentStop(ctx, stdin)
 	default:
 		return nil, nil //nolint:nilnil // Unknown hooks have no lifecycle action
 	}
@@ -57,11 +57,25 @@ func (c *CursorAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 
 // --- Internal hook parsing functions ---
 
-// resolveTranscriptRef returns the transcript path from the hook input, or computes
-// it dynamically when the hook doesn't provide one (Cursor CLI pattern).
+const cursorTranscriptPathEnv = "CURSOR_TRANSCRIPT_PATH"
+
+// resolveTranscriptRef returns the transcript path from the hook input, then
+// from Cursor's documented hook environment, or computes it dynamically as the
+// final fallback (Cursor CLI / IDE layout).
+//
+// Cursor Cloud and CLI often send transcript_path:null. When a local file
+// exists, Cursor may also set CURSOR_TRANSCRIPT_PATH for command hooks — prefer
+// that over fabricating a path. On Cloud Agents the local
+// ~/.cursor/projects/.../agent-transcripts directory is never created
+// (conversation history is remote-only); we still return the computed path so
+// session-agent identity matching keeps working, while PrepareTranscript skips
+// its flush wait when the parent directory is absent.
 func (c *CursorAgent) resolveTranscriptRef(ctx context.Context, conversationID, rawPath string) string {
 	if rawPath != "" {
 		return rawPath
+	}
+	if envPath := os.Getenv(cursorTranscriptPathEnv); envPath != "" {
+		return envPath
 	}
 
 	repoRoot, err := paths.WorktreeRoot(ctx)
@@ -79,7 +93,7 @@ func (c *CursorAgent) resolveTranscriptRef(ctx context.Context, conversationID, 
 	return c.ResolveSessionFile(sessionDir, conversationID)
 }
 
-func (c *CursorAgent) parseSessionStart(stdin io.Reader) (*agent.Event, error) {
+func (c *CursorAgent) parseSessionStart(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[sessionStartRaw](stdin)
 	if err != nil {
 		return nil, err
@@ -87,7 +101,7 @@ func (c *CursorAgent) parseSessionStart(stdin io.Reader) (*agent.Event, error) {
 	return &agent.Event{
 		Type:       agent.SessionStart,
 		SessionID:  raw.ConversationID,
-		SessionRef: raw.TranscriptPath,
+		SessionRef: c.resolveTranscriptRef(ctx, raw.ConversationID, raw.TranscriptPath),
 		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil
@@ -167,7 +181,7 @@ func (c *CursorAgent) parseSessionEnd(ctx context.Context, stdin io.Reader) (*ag
 	}, nil
 }
 
-func (c *CursorAgent) parsePreCompact(stdin io.Reader) (*agent.Event, error) {
+func (c *CursorAgent) parsePreCompact(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[preCompactHookInputRaw](stdin)
 	if err != nil {
 		return nil, err
@@ -175,14 +189,14 @@ func (c *CursorAgent) parsePreCompact(stdin io.Reader) (*agent.Event, error) {
 	return &agent.Event{
 		Type:              agent.Compaction,
 		SessionID:         raw.ConversationID,
-		SessionRef:        raw.TranscriptPath,
+		SessionRef:        c.resolveTranscriptRef(ctx, raw.ConversationID, raw.TranscriptPath),
 		ContextTokens:     int(intFromJSON(raw.ContextTokens)),
 		ContextWindowSize: int(intFromJSON(raw.ContextWindowSize)),
 		Timestamp:         time.Now(),
 	}, nil
 }
 
-func (c *CursorAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) {
+func (c *CursorAgent) parseSubagentStart(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[subagentStartHookInputRaw](stdin)
 	if err != nil {
 		return nil, err
@@ -193,7 +207,7 @@ func (c *CursorAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) 
 	return &agent.Event{
 		Type:            agent.SubagentStart,
 		SessionID:       raw.ConversationID,
-		SessionRef:      raw.TranscriptPath,
+		SessionRef:      c.resolveTranscriptRef(ctx, raw.ConversationID, raw.TranscriptPath),
 		SubagentID:      raw.SubagentID,
 		ToolUseID:       raw.SubagentID,
 		SubagentType:    raw.SubagentType,
@@ -202,7 +216,7 @@ func (c *CursorAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) 
 	}, nil
 }
 
-func (c *CursorAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
+func (c *CursorAgent) parseSubagentStop(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[subagentStopHookInputRaw](stdin)
 	if err != nil {
 		return nil, err
@@ -213,7 +227,7 @@ func (c *CursorAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 	event := &agent.Event{
 		Type:            agent.SubagentEnd,
 		SessionID:       raw.ConversationID,
-		SessionRef:      raw.TranscriptPath,
+		SessionRef:      c.resolveTranscriptRef(ctx, raw.ConversationID, raw.TranscriptPath),
 		ToolUseID:       raw.SubagentID,
 		SubagentType:    raw.SubagentType,
 		TaskDescription: raw.Task,

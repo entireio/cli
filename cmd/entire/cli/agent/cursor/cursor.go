@@ -148,6 +148,10 @@ func (c *CursorAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession, 
 // Cursor writes transcripts asynchronously; during mid-turn commits the file
 // may not yet contain data. This polls until the file exists and is non-empty,
 // or until the timeout expires.
+//
+// When the parent directory is absent, the wait is skipped: Cursor Cloud Agents
+// never create ~/.cursor/projects/.../agent-transcripts (conversation history
+// lives remotely). Polling for 5s on every TurnEnd only delays the hook.
 func (c *CursorAgent) PrepareTranscript(ctx context.Context, sessionRef string) error {
 	const (
 		maxWait      = 5 * time.Second
@@ -155,6 +159,23 @@ func (c *CursorAgent) PrepareTranscript(ctx context.Context, sessionRef string) 
 	)
 
 	logCtx := logging.WithComponent(ctx, "agent.cursor")
+
+	// Skip the flush wait when the parent directory is absent. Cursor Cloud
+	// Agents never create ~/.cursor/projects/.../agent-transcripts (history is
+	// remote-only), so polling only burns the TurnEnd hook budget. Do not gate
+	// this on CURSOR_CODE_REMOTE — that var is unset in managed Cloud VMs
+	// (CURSOR_AGENT=1 / AGENT_TRANSCRIPTS is what they set).
+	if parent := filepath.Dir(sessionRef); parent != "" && parent != "." {
+		if _, err := os.Stat(parent); err != nil {
+			if os.IsNotExist(err) {
+				logging.Debug(logCtx, "transcript parent directory absent, skipping wait",
+					slog.String("path", sessionRef),
+					slog.String("parent", parent),
+				)
+				return nil
+			}
+		}
+	}
 
 	start := time.Now()
 	deadline := start.Add(maxWait)

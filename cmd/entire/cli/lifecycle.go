@@ -733,10 +733,21 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 
-	if !fileExists(transcriptRef) {
+	transcriptAvailable := fileExists(transcriptRef)
+	if !transcriptAvailable {
 		prepareSpan.RecordError(fmt.Errorf("transcript file not found: %s", transcriptRef))
-		prepareSpan.End()
-		return fmt.Errorf("transcript file not found: %s", transcriptRef)
+		// Cursor Cloud Agents never create the local agent-transcripts directory;
+		// conversation history is remote-only. When the parent directory itself is
+		// absent, fail open so turn-end still runs git file detection, stop-hook
+		// token fields, and the phase transition. A missing file under an existing
+		// parent remains a hard error (late flush / wrong path).
+		// Do not gate on CURSOR_CODE_REMOTE — managed Cloud VMs leave it unset.
+		if !transcriptParentMissing(transcriptRef) {
+			prepareSpan.End()
+			return fmt.Errorf("transcript file not found: %s", transcriptRef)
+		}
+		logging.Warn(logCtx, "transcript unavailable (no local transcript directory), continuing without transcript",
+			slog.String("path", transcriptRef))
 	}
 
 	// Early check: bail out quickly if the repo has no commits yet.
@@ -765,12 +776,15 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return fmt.Errorf("failed to create session directory: %w", err)
 	}
 
-	// Copy transcript to session directory
-	transcriptData, err := ag.ReadTranscript(transcriptRef)
-	if err != nil {
-		copySpan.RecordError(err)
-		copySpan.End()
-		return fmt.Errorf("failed to read transcript: %w", err)
+	// Copy transcript to session directory (empty when local transcript is absent).
+	var transcriptData []byte
+	if transcriptAvailable {
+		transcriptData, err = ag.ReadTranscript(transcriptRef)
+		if err != nil {
+			copySpan.RecordError(err)
+			copySpan.End()
+			return fmt.Errorf("failed to read transcript: %w", err)
+		}
 	}
 	// Sanitize before writing: this copy is what the shadow-branch walk blobs and
 	// redacts on every Stop. See agent.TranscriptSanitizer for why order matters.

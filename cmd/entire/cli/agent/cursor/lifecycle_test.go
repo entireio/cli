@@ -163,6 +163,41 @@ func TestParseHookEvent_TurnStart_CLINoTranscriptPath(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_TurnEnd_CloudTranscriptPathFromEnvironment(t *testing.T) {
+	// Cannot use t.Parallel() because of t.Setenv.
+	cloudPath := filepath.Join(t.TempDir(), "cloud-transcript.jsonl")
+	t.Setenv(cursorTranscriptPathEnv, cloudPath)
+	t.Setenv("ENTIRE_TEST_CURSOR_PROJECT_DIR", t.TempDir())
+
+	// Cursor Cloud command hooks can expose the transcript through the
+	// documented environment variable while the JSON field is null.
+	input := `{"conversation_id":"cloud-session","transcript_path":null,"status":"completed"}`
+	event, err := (&CursorAgent{}).ParseHookEvent(
+		context.Background(),
+		HookNameStop,
+		strings.NewReader(input),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, cloudPath, event.SessionRef)
+}
+
+func TestParseHookEvent_TranscriptPayloadTakesPrecedenceOverEnvironment(t *testing.T) {
+	// Cannot use t.Parallel() because of t.Setenv.
+	t.Setenv(cursorTranscriptPathEnv, "/cloud/from-environment.jsonl")
+	const payloadPath = "/cursor/from-payload.jsonl"
+
+	input := `{"conversation_id":"ide-session","transcript_path":"` + payloadPath + `","status":"completed"}`
+	event, err := (&CursorAgent{}).ParseHookEvent(
+		context.Background(),
+		HookNameStop,
+		strings.NewReader(input),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, payloadPath, event.SessionRef)
+}
+
 func TestParseHookEvent_TurnEnd(t *testing.T) {
 	t.Parallel()
 
@@ -728,6 +763,26 @@ func TestPrepareTranscript_FileExistsWithContent(t *testing.T) {
 	err := ag.PrepareTranscript(context.Background(), path)
 	if err != nil {
 		t.Fatalf("expected nil error for existing non-empty file, got: %v", err)
+	}
+}
+
+func TestPrepareTranscript_MissingParentDir_SkipsWait(t *testing.T) {
+	t.Parallel()
+
+	// Cloud Agent layout: the agent-transcripts directory is never created.
+	// PrepareTranscript must return immediately rather than polling for 5s.
+	// Do not require CURSOR_CODE_REMOTE — managed Cloud VMs leave it unset.
+	missingParent := filepath.Join(t.TempDir(), "agent-transcripts", "sess", "sess.jsonl")
+
+	ag := &CursorAgent{}
+	start := time.Now()
+	err := ag.PrepareTranscript(context.Background(), missingParent)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("expected nil error when parent dir is absent, got: %v", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("PrepareTranscript took %v with missing parent; expected immediate return", elapsed)
 	}
 }
 
