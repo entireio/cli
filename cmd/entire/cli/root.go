@@ -197,6 +197,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newSendAnalyticsCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
 	cmd.AddCommand(newRefreshTrailEnablementCmd())
+	cmd.AddCommand(newRegisterLocalContextCmd())
 	cmd.AddCommand(newSweepSessionsCmd())
 
 	// Experimental command (developer-only visibility; setup/tune runners).

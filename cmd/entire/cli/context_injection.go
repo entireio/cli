@@ -14,11 +14,15 @@ import (
 	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/internal/coreapi"
+
+	"github.com/spf13/cobra"
 )
 
 const (
@@ -27,6 +31,9 @@ const (
 	crossRepoFailureBackoff = 10 * time.Minute
 	crossRepoMaxPackets     = 4
 	crossRepoPacketMaxBytes = 6000
+
+	localContextRegisterTimeout       = 5 * time.Second
+	localContextRegisterSpawnThrottle = crossRepoSuccessCadence
 )
 
 func promptTokenHashes(prompt string) []string {
@@ -306,8 +313,51 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 	return packet, finalize
 }
 
+// localContextRegisterSpawn is the process-spawn seam used by
+// spawnDetachedLocalContextRegistration. Swapped in tests so they can assert
+// SessionStart never blocks on it without forking a real subprocess (a real
+// `go test` binary doesn't understand `__register_local_context` as an
+// argument). Production code always uses spawnDetachedLocalContextRegisterProcess.
+var localContextRegisterSpawn = spawnDetachedLocalContextRegisterProcess
+
+// spawnDetachedLocalContextRegisterProcess starts `entire __register_local_context`
+// as a detached child so the scope lookup and registry write can't add latency
+// to the SessionStart hook that spawned it.
+func spawnDetachedLocalContextRegisterProcess(worktreeRoot, agentName, sessionID, sessionRef string) {
+	args := []string{
+		"__register_local_context",
+		"--agent", agentName,
+		"--session-id", sessionID,
+	}
+	if sessionRef != "" {
+		args = append(args, "--session-ref", sessionRef)
+	}
+	execx.SpawnDetached(worktreeRoot, args...)
+}
+
+// spawnDetachedLocalContextRegistration hands local-live context registration
+// off to a detached subprocess. Best-effort throughout — a failure here must
+// never fail the hook. TurnStart performs the same registration when scope is
+// already known, so this SessionStart path is opportunistic early registration
+// only.
+func spawnDetachedLocalContextRegistration(ctx context.Context, ag agent.Agent, event *agent.Event) {
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+	if commonDir, err := session.GetGitCommonDir(ctx); err == nil &&
+		localContextRegisterRecentlySpawned(commonDir, time.Now()) {
+		return
+	}
+	localContextRegisterSpawn(worktreeRoot, string(ag.Name()), event.SessionID, event.SessionRef)
+}
+
+func localContextRegisterRecentlySpawned(commonDir string, now time.Time) bool {
+	return recentlySpawnedMarker(commonDir, "local-context-register-spawn", localContextRegisterSpawnThrottle, now)
+}
+
 func registerLocalContextSessionIfEnabled(ctx context.Context, ag agent.Agent, event *agent.Event) error {
-	registerCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	registerCtx, cancel := context.WithTimeout(ctx, localContextRegisterTimeout)
 	defer cancel()
 	coreClient, err := coreapi.New()
 	if err != nil {
@@ -389,4 +439,36 @@ func registerLocalContextSession(ctx context.Context, ag agent.Agent, event *age
 		}
 		registry.Sessions = append(kept, entry) //nolint:gocritic // kept is a filtered copy; entry is appended once.
 	})
+}
+
+// newRegisterLocalContextCmd creates the hidden command that performs the
+// (potentially slow) local-live context registration out of band. It is invoked
+// by spawnDetachedLocalContextRegistration from a detached subprocess and should
+// not be called directly.
+func newRegisterLocalContextCmd() *cobra.Command {
+	var agentName, sessionID, sessionRef string
+	cmd := &cobra.Command{
+		Use:    "__register_local_context",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			logCtx := logging.WithComponent(cmd.Context(), "context-register")
+			ag, err := agent.Get(types.AgentName(agentName))
+			if err != nil {
+				return fmt.Errorf("resolve agent %q: %w", agentName, err)
+			}
+			event := &agent.Event{SessionID: sessionID, SessionRef: sessionRef}
+			registerCtx, cancel := context.WithTimeout(cmd.Context(), localContextRegisterTimeout)
+			defer cancel()
+			if err := registerLocalContextSessionIfEnabled(registerCtx, ag, event); err != nil {
+				logging.Debug(logCtx, "local context registration skipped",
+					"error", err.Error())
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&agentName, "agent", "", "Agent that owns the session")
+	cmd.Flags().StringVar(&sessionID, "session-id", "", "Session ID to register")
+	cmd.Flags().StringVar(&sessionRef, "session-ref", "", "Optional transcript path from the hook payload")
+	markRequired(cmd, "agent", "session-id")
+	return cmd
 }

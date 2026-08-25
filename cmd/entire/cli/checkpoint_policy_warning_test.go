@@ -50,6 +50,9 @@ func TestShouldCheckCheckpointPolicyWarning(t *testing.T) {
 	refreshTrailEnablement := &cobra.Command{Use: "__refresh_trail_enablement", Hidden: true}
 	root.AddCommand(refreshTrailEnablement)
 
+	registerLocalContext := &cobra.Command{Use: "__register_local_context", Hidden: true}
+	root.AddCommand(registerLocalContext)
+
 	sweepSessions := &cobra.Command{Use: "__sweep_sessions", Hidden: true}
 	root.AddCommand(sweepSessions)
 
@@ -58,5 +61,6 @@ func TestShouldCheckCheckpointPolicyWarning(t *testing.T) {
 	require.False(t, ShouldCheckCheckpointPolicyWarning(gitHook))
 	require.False(t, ShouldCheckCheckpointPolicyWarning(sendAnalytics))
 	require.False(t, ShouldCheckCheckpointPolicyWarning(refreshTrailEnablement))
+	require.False(t, ShouldCheckCheckpointPolicyWarning(registerLocalContext))
 	require.False(t, ShouldCheckCheckpointPolicyWarning(sweepSessions))
 }

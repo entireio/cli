@@ -2740,6 +2740,70 @@ func TestHandleLifecycleSessionStart_NoSynchronousNetworkForTrailEnablement(t *t
 	}
 }
 
+// TestHandleLifecycleSessionStart_NoSynchronousNetworkForLocalContextRegistration
+// guards against SessionStart hooks stalling agent startup: local-live context
+// registration must be handed off to a detached subprocess, never performed inline
+// on the SessionStart hook path.
+func TestHandleLifecycleSessionStart_NoSynchronousNetworkForLocalContextRegistration(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
+
+	var dialed int32
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			atomic.AddInt32(&dialed, 1)
+			_ = conn
+		}
+	}()
+	t.Setenv("ENTIRE_API_BASE_URL", "https://"+ln.Addr().String())
+
+	var spawnCount int32
+	prevSpawn := localContextRegisterSpawn
+	localContextRegisterSpawn = func(worktreeRoot, agentName, sessionID, _ string) {
+		atomic.AddInt32(&spawnCount, 1)
+		if worktreeRoot == "" {
+			t.Error("expected non-empty worktree root passed to local context register spawn")
+		}
+		if agentName == "" {
+			t.Error("expected non-empty agent name passed to local context register spawn")
+		}
+		if sessionID == "" {
+			t.Error("expected non-empty session id passed to local context register spawn")
+		}
+	}
+	t.Cleanup(func() { localContextRegisterSpawn = prevSpawn })
+
+	ag := newMockHookResponseAgent()
+	event := &agent.Event{
+		Type:      agent.SessionStart,
+		SessionID: "test-no-sync-local-context-register",
+		Timestamp: time.Now(),
+	}
+
+	start := time.Now()
+	err = handleLifecycleSessionStart(context.Background(), ag, event)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	if got := atomic.LoadInt32(&spawnCount); got != 1 {
+		t.Fatalf("expected exactly one detached local context registration spawn, got %d", got)
+	}
+	if got := atomic.LoadInt32(&dialed); got != 0 {
+		t.Fatalf("SessionStart dialed the context registration API synchronously; registration must run out of process")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("handleLifecycleSessionStart took %v; local context registration must be detached, not synchronous", elapsed)
+	}
+}
+
 // blockingCellCore is a cellCoreClient that hangs every call until its
 // caller's context is done, standing in for a reachable-but-unresponsive
 // control plane.

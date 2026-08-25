@@ -277,13 +277,11 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// budget is untouched; see runSessionSweep for the safety contract.
 	maybeSpawnSessionSweep(ctx)
 
-	// Local live context is registered at session start only after Core returns
-	// an enabled scope. This is best-effort so old Core deployments and offline
-	// development never make lifecycle hooks noisy or fail the session.
-	if err := registerLocalContextSessionIfEnabled(ctx, ag, event); err != nil {
-		logging.Debug(logCtx, "local context registration skipped",
-			slog.String("error", err.Error()))
-	}
+	// Local live context registration is consent-gated by Core scope and can
+	// require network round-trips, so it runs in a detached subprocess (see
+	// spawnDetachedLocalContextRegistration) to keep SessionStart within the
+	// hook timeout budget. Best-effort throughout.
+	spawnDetachedLocalContextRegistration(ctx, ag, event)
 
 	return nil
 }
