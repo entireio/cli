@@ -47,15 +47,17 @@ const omittedSubjectLabel = "[agent description omitted]"
 // than that fail closed to omittedSubjectLabel so a secret straddling the
 // boundary cannot leak a prefix that truncation would have cut mid-match.
 func SanitizeSubjectContent(s string) string {
+	if utf8.RuneCountInString(s) > maxSubjectRedactionInput {
+		return omittedSubjectLabel
+	}
 	s = stripSubjectControls(s)
 	if s == "" {
 		return ""
 	}
+	s = redact.String(s)
 	if utf8.RuneCountInString(s) > maxSubjectRedactionInput {
 		return omittedSubjectLabel
 	}
-	s = redact.String(s)
-	s = stringutil.TruncateRunes(s, maxSubjectRedactionInput, "")
 	// Redaction placeholders are plain text, but a custom rule's replacement is
 	// caller-supplied, so re-run the control strip rather than trust it.
 	return stripSubjectControls(s)
