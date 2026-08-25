@@ -367,7 +367,11 @@ func (m whyTUIModel) View() tea.View {
 func (m whyTUIModel) renderList(width, height int) string {
 	lines := m.result.Lines
 	if len(lines) == 0 {
-		return m.fitLine(m.styles.render(m.styles.dim, "(empty file)"), width)
+		rows := []string{m.fitLine(m.styles.render(m.styles.dim, "(empty file)"), width)}
+		for len(rows) < height {
+			rows = append(rows, strings.Repeat(" ", width))
+		}
+		return strings.Join(rows, "\n")
 	}
 
 	// Read-only clamp: the persisted window is maintained by
