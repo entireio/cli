@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/internal/gitpath"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 )
 
@@ -233,7 +234,15 @@ func enabledFromSettingsData(data []byte) (*bool, error) {
 }
 
 func effectiveEnabledSetting(ctx context.Context, repository Repository) (*bool, error) {
-	provenance, err := VerifySettingsProvenance(ctx, repository)
+	return effectiveEnabledSettingWithOptions(ctx, repository, defaultSettingsProvenanceOptions())
+}
+
+func effectiveEnabledSettingWithOptions(
+	ctx context.Context,
+	repository Repository,
+	options settingsProvenanceOptions,
+) (*bool, error) {
+	provenance, err := verifySettingsProvenanceWithOptions(ctx, repository, options)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +252,11 @@ func effectiveEnabledSetting(ctx context.Context, repository Repository) (*bool,
 		verified bool
 	}{
 		{data: provenance.ProjectData, verified: provenance.ProjectVerified},
-		{data: provenance.LocalData, verified: provenance.LocalVerified},
+		{
+			data: provenance.LocalData,
+			verified: provenance.LocalPathSafe &&
+				provenance.LocalOwnership != SettingsOwnershipTracked,
+		},
 	} {
 		if !candidate.verified {
 			continue
@@ -361,6 +374,9 @@ func hasRecognizedMetadataEvidence(ctx context.Context, repository Repository) (
 }
 
 func hasRecognizedMetadataEvidenceWithOptions(ctx context.Context, repository Repository, options legacyMetadataOptions) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, fmt.Errorf("scanning legacy metadata: %w", err)
+	}
 	root, err := os.OpenRoot(repository.WorktreeRoot)
 	if err != nil {
 		return false, fmt.Errorf("opening worktree root: %w", err)
@@ -373,34 +389,43 @@ func hasRecognizedMetadataEvidenceWithOptions(ctx context.Context, repository Re
 		}
 		return false, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return false, fmt.Errorf("scanning legacy metadata: %w", err)
+	}
 	tracked, err := options.loadTracked(ctx, repository)
 	if err != nil {
 		return false, err
 	}
 	started := options.now()
 	budgetExpired := func() bool { return options.now().Sub(started) > options.scanBudget }
+	if err := legacyMetadataScanCheckpoint(ctx, budgetExpired); err != nil {
+		return false, err
+	}
 	dir, err := root.Open(metadataRel)
 	if err != nil {
 		return false, fmt.Errorf("reading legacy metadata: %w", err)
 	}
 	defer dir.Close()
 	for {
-		if budgetExpired() {
-			return false, errLegacyMetadataBudget
+		if err := legacyMetadataScanCheckpoint(ctx, budgetExpired); err != nil {
+			return false, err
 		}
 		sessions, readErr := dir.ReadDir(32)
+		if err := legacyMetadataScanCheckpoint(ctx, budgetExpired); err != nil {
+			return false, err
+		}
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return false, fmt.Errorf("reading legacy metadata: %w", readErr)
 		}
 		for _, sessionEntry := range sessions {
-			if budgetExpired() {
-				return false, errLegacyMetadataBudget
+			if err := legacyMetadataScanCheckpoint(ctx, budgetExpired); err != nil {
+				return false, err
 			}
 			if !sessionEntry.IsDir() || sessionEntry.Type()&os.ModeSymlink != 0 {
 				continue
 			}
 			sessionRel := filepath.Join(".entire", "metadata", sessionEntry.Name())
-			found, evidenceErr := recognizedMetadataInSession(root, sessionRel, tracked, options, budgetExpired)
+			found, evidenceErr := recognizedMetadataInSession(ctx, root, sessionRel, tracked, options, budgetExpired)
 			if evidenceErr != nil || found {
 				return found, evidenceErr
 			}
@@ -412,15 +437,35 @@ func hasRecognizedMetadataEvidenceWithOptions(ctx context.Context, repository Re
 	return false, nil
 }
 
+// legacyMetadataScanCheckpoint makes the filesystem budget and cancellation
+// cooperative between syscalls. It cannot interrupt a filesystem call that is
+// already blocked.
+func legacyMetadataScanCheckpoint(ctx context.Context, budgetExpired func() bool) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("scanning legacy metadata: %w", err)
+	}
+	if budgetExpired() {
+		return errLegacyMetadataBudget
+	}
+	return nil
+}
+
 func recognizedMetadataInSession(
+	ctx context.Context,
 	root *os.Root,
 	sessionRel string,
 	tracked map[string]struct{},
 	options legacyMetadataOptions,
 	budgetExpired func() bool,
 ) (bool, error) {
+	if err := legacyMetadataScanCheckpoint(ctx, budgetExpired); err != nil {
+		return false, err
+	}
 	if _, err := lstatRootPath(root, sessionRel, true); err != nil {
 		return false, nil
+	}
+	if err := legacyMetadataScanCheckpoint(ctx, budgetExpired); err != nil {
+		return false, err
 	}
 	sessionDir, err := root.Open(sessionRel)
 	if err != nil {
@@ -428,16 +473,19 @@ func recognizedMetadataInSession(
 	}
 	defer sessionDir.Close()
 	for {
-		if budgetExpired() {
-			return false, errLegacyMetadataBudget
+		if err := legacyMetadataScanCheckpoint(ctx, budgetExpired); err != nil {
+			return false, err
 		}
 		files, readErr := sessionDir.ReadDir(32)
+		if err := legacyMetadataScanCheckpoint(ctx, budgetExpired); err != nil {
+			return false, err
+		}
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return false, nil
 		}
 		for _, file := range files {
-			if budgetExpired() {
-				return false, errLegacyMetadataBudget
+			if err := legacyMetadataScanCheckpoint(ctx, budgetExpired); err != nil {
+				return false, err
 			}
 			if _, recognized := legacyMetadataFiles[file.Name()]; !recognized || file.IsDir() || file.Type()&os.ModeSymlink != 0 {
 				continue
@@ -446,7 +494,10 @@ func recognizedMetadataInSession(
 			if readErr := verifyRegular(root, filepath.FromSlash(rel), options.readHooks(rel)); readErr != nil {
 				continue
 			}
-			if _, isTracked := tracked[rel]; !isTracked {
+			if err := legacyMetadataScanCheckpoint(ctx, budgetExpired); err != nil {
+				return false, err
+			}
+			if _, isTracked := tracked[gitpath.CanonicalKey(rel)]; !isTracked {
 				return true, nil
 			}
 		}
@@ -460,7 +511,7 @@ func recognizedMetadataInSession(
 func loadTrackedMetadataPaths(ctx context.Context, repository Repository) (map[string]struct{}, error) {
 	gitCtx, cancel := context.WithTimeout(ctx, legacyMetadataGitBudget)
 	defer cancel()
-	cmd := exec.CommandContext(gitCtx, "git", "-C", repository.WorktreeRoot, "ls-files", "-z", "--", ".entire/metadata")
+	cmd := exec.CommandContext(gitCtx, "git", "-C", repository.WorktreeRoot, "ls-files", "-z")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("loading tracked runtime evidence: %w", err)
@@ -468,7 +519,7 @@ func loadTrackedMetadataPaths(ctx context.Context, repository Repository) (map[s
 	tracked := make(map[string]struct{})
 	for _, name := range bytes.Split(output, []byte{0}) {
 		if len(name) != 0 {
-			tracked[filepath.ToSlash(string(name))] = struct{}{}
+			tracked[gitpath.CanonicalKey(filepath.ToSlash(string(name)))] = struct{}{}
 		}
 	}
 	return tracked, nil

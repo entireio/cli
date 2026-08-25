@@ -23,19 +23,43 @@ const (
 
 var errUnverifiedPath = errors.New("path changed while provenance was verified")
 
+// SettingsOwnership records whether Git proved ownership of safely read local
+// settings. Unknown is distinct from an unsafe path: local policy may retain
+// ordinary preferences, but executable and global-only consumers must require
+// SettingsOwnershipUntracked.
+type SettingsOwnership uint8
+
+const (
+	SettingsOwnershipUnknown SettingsOwnership = iota
+	SettingsOwnershipUntracked
+	SettingsOwnershipTracked
+)
+
 // SettingsProvenance contains settings bytes read from the same regular files
 // whose worktree-rooted paths and Git ownership were verified. Consumers must
 // use these bytes rather than reopening ProjectPath or LocalPath.
 type SettingsProvenance struct {
-	ProjectPath      string
-	ProjectPathSafe  bool
-	ProjectVerified  bool
-	ProjectData      []byte
-	LocalPath        string
-	LocalPathSafe    bool
-	LocalVerified    bool
-	LocalOPFVerified bool
-	LocalData        []byte
+	ProjectPath       string
+	ProjectPathSafe   bool
+	ProjectVerified   bool
+	ProjectData       []byte
+	LocalPath         string
+	LocalPathSafe     bool
+	LocalOwnership    SettingsOwnership
+	LocalOPFOwnership SettingsOwnership
+	LocalData         []byte
+}
+
+type settingsProvenanceOptions struct {
+	pathTracked       func(context.Context, string, string) (bool, error)
+	pathTrackedInHEAD func(context.Context, string, string) (bool, error)
+}
+
+func defaultSettingsProvenanceOptions() settingsProvenanceOptions {
+	return settingsProvenanceOptions{
+		pathTracked:       gitPathTracked,
+		pathTrackedInHEAD: gitPathTrackedInHEAD,
+	}
 }
 
 type verifiedReadHooks struct {
@@ -47,6 +71,14 @@ type verifiedReadHooks struct {
 // beneath the canonical worktree root. Unsafe, missing, tracked, or changing
 // paths are reported as unverified rather than followed.
 func VerifySettingsProvenance(ctx context.Context, repository Repository) (SettingsProvenance, error) {
+	return verifySettingsProvenanceWithOptions(ctx, repository, defaultSettingsProvenanceOptions())
+}
+
+func verifySettingsProvenanceWithOptions(
+	ctx context.Context,
+	repository Repository,
+	options settingsProvenanceOptions,
+) (SettingsProvenance, error) {
 	if err := validateRepository(repository); err != nil {
 		return SettingsProvenance{}, err
 	}
@@ -67,27 +99,49 @@ func VerifySettingsProvenance(ctx context.Context, repository Repository) (Setti
 		provenance.ProjectData = projectData
 	}
 
-	var localTracked, localTrackedInHEAD bool
 	localData, localErr := readVerifiedRegular(root, filepath.FromSlash(localSettingsRelative), func(data []byte) error {
-		var ownershipErr error
-		localTracked, ownershipErr = gitPathTracked(ctx, repository.WorktreeRoot, localSettingsRelative)
-		if ownershipErr != nil {
-			return ownershipErr
+		provenance.LocalOwnership = querySettingsOwnership(
+			ctx,
+			repository.WorktreeRoot,
+			localSettingsRelative,
+			options.pathTracked,
+		)
+		if provenance.LocalOwnership != SettingsOwnershipUntracked {
+			provenance.LocalOPFOwnership = provenance.LocalOwnership
+			return nil
 		}
+		provenance.LocalOPFOwnership = SettingsOwnershipUntracked
 		if settingsDataHasOPFCommand(data) {
-			localTrackedInHEAD, ownershipErr = gitPathTrackedInHEAD(ctx, repository.WorktreeRoot, localSettingsRelative)
+			provenance.LocalOPFOwnership = querySettingsOwnership(
+				ctx,
+				repository.WorktreeRoot,
+				localSettingsRelative,
+				options.pathTrackedInHEAD,
+			)
 		}
-		return ownershipErr
+		return nil
 	}, verifiedReadHooks{})
 	if localErr == nil {
 		provenance.LocalPathSafe = true
-		provenance.LocalVerified = !localTracked
-		provenance.LocalOPFVerified = !localTracked && !localTrackedInHEAD
-		if provenance.LocalVerified {
-			provenance.LocalData = localData
-		}
+		provenance.LocalData = localData
 	}
 	return provenance, nil
+}
+
+func querySettingsOwnership(
+	ctx context.Context,
+	root string,
+	rel string,
+	query func(context.Context, string, string) (bool, error),
+) SettingsOwnership {
+	tracked, err := query(ctx, root, rel)
+	if err != nil {
+		return SettingsOwnershipUnknown
+	}
+	if tracked {
+		return SettingsOwnershipTracked
+	}
+	return SettingsOwnershipUntracked
 }
 
 func readVerifiedRegular(root *os.Root, rel string, verify func([]byte) error, hooks verifiedReadHooks) ([]byte, error) {

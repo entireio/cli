@@ -8,8 +8,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/internal/gitpath"
 )
 
 const windowsGOOS = "windows"
@@ -170,7 +173,8 @@ func TestLegacyMetadataEvidence_LoadsTrackedSetOnceAndHonorsScanBudget(t *testin
 			calls++
 			tracked := make(map[string]struct{}, 64)
 			for i := range 64 {
-				tracked[filepath.ToSlash(filepath.Join(".entire", "metadata", fmt.Sprintf("session-%03d", i), "prompt.txt"))] = struct{}{}
+				path := filepath.ToSlash(filepath.Join(".entire", "metadata", fmt.Sprintf("session-%03d", i), "prompt.txt"))
+				tracked[gitpath.CanonicalKey(path)] = struct{}{}
 			}
 			return tracked, nil
 		}
@@ -200,6 +204,23 @@ func TestLegacyMetadataEvidence_LoadsTrackedSetOnceAndHonorsScanBudget(t *testin
 		found, err := hasRecognizedMetadataEvidenceWithOptions(t.Context(), repository, options)
 		if found || !errors.Is(err, errLegacyMetadataBudget) {
 			t.Fatalf("evidence = %v, %v; want budget failure", found, err)
+		}
+	})
+
+	t.Run("canceled context stops cooperative scan", func(t *testing.T) {
+		t.Parallel()
+		root, repository := newPolicyRepo(t)
+		writePolicyFile(t, root, ".entire/metadata/session-1/prompt.txt", "prompt")
+		options := defaultLegacyMetadataOptions()
+		options.loadTracked = func(context.Context, Repository) (map[string]struct{}, error) {
+			return map[string]struct{}{}, nil
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		found, err := hasRecognizedMetadataEvidenceWithOptions(ctx, repository, options)
+		if found || !errors.Is(err, context.Canceled) {
+			t.Fatalf("evidence = %v, %v; want canceled cooperative scan", found, err)
 		}
 	})
 }
@@ -427,6 +448,29 @@ func TestBootstrapLegacyActivation_RejectsTrackedOrSymlinkedEvidence(t *testing.
 		}
 	})
 
+	for _, alias := range []string{
+		".Entire/Metadata/Session-1/PROMPT.TXT",
+		".entire/metadata/session-1/prompt.txt.",
+	} {
+		t.Run("filesystem-equivalent tracked metadata alias "+alias, func(t *testing.T) {
+			t.Parallel()
+			root, repository := newPolicyRepo(t)
+			writePolicyFile(t, root, ".entire/settings.json", `{"enabled":true}`)
+			canonical := ".entire/metadata/session-1/prompt.txt"
+			writePolicyFile(t, root, canonical, "prompt")
+			blob := strings.TrimSpace(runPolicyGitOutput(t, root, "hash-object", "-w", canonical))
+			runPolicyGit(t, root, "update-index", "--add", "--cacheinfo", "100644,"+blob+","+alias)
+
+			activated, err := BootstrapLegacyActivation(t.Context(), repository)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if activated {
+				t.Fatalf("tracked metadata alias %q bypassed activation consent", alias)
+			}
+		})
+	}
+
 	t.Run("symlinked metadata file", func(t *testing.T) {
 		t.Parallel()
 		root, repository := newPolicyRepo(t)
@@ -475,6 +519,17 @@ func runPolicyGit(t *testing.T, dir string, args ...string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
+}
+
+func runPolicyGitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return string(out)
 }
 
 func initPolicyRepo(t *testing.T, root string) {

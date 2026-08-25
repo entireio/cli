@@ -1,6 +1,7 @@
 package repopolicy
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -18,7 +19,7 @@ func TestSettingsProvenance_RejectsTrackedLocalAndSymlinkTraversal(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !provenance.ProjectVerified || !provenance.LocalVerified {
+		if !provenance.ProjectVerified || provenance.LocalOwnership != SettingsOwnershipUntracked {
 			t.Fatalf("provenance = %+v, want both verified", provenance)
 		}
 	})
@@ -32,7 +33,7 @@ func TestSettingsProvenance_RejectsTrackedLocalAndSymlinkTraversal(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if provenance.LocalVerified {
+		if provenance.LocalOwnership != SettingsOwnershipTracked {
 			t.Fatalf("provenance = %+v, tracked local must be rejected", provenance)
 		}
 	})
@@ -49,10 +50,67 @@ func TestSettingsProvenance_RejectsTrackedLocalAndSymlinkTraversal(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if provenance.ProjectVerified || provenance.LocalVerified {
+		if provenance.ProjectVerified || provenance.LocalPathSafe {
 			t.Fatalf("provenance = %+v, symlink traversal must be rejected", provenance)
 		}
 	})
+}
+
+func TestVerifySettingsProvenance_OwnershipErrorsPreserveBoundLocalData(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name          string
+		indexErr      error
+		headErr       error
+		wantOwnership SettingsOwnership
+	}{
+		{name: "index query fails", indexErr: errors.New("index unavailable"), wantOwnership: SettingsOwnershipUnknown},
+		{name: "deep HEAD query fails", headErr: errors.New("HEAD unavailable"), wantOwnership: SettingsOwnershipUntracked},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root, repository := newPolicyRepo(t)
+			body := `{"enabled":false,"log_level":"debug","redaction":{"openai_privacy_filter":{"command":"/local/opf"}}}`
+			writePolicyFile(t, root, ".entire/settings.local.json", body)
+			options := defaultSettingsProvenanceOptions()
+			options.pathTracked = func(context.Context, string, string) (bool, error) {
+				return false, tt.indexErr
+			}
+			options.pathTrackedInHEAD = func(context.Context, string, string) (bool, error) {
+				return false, tt.headErr
+			}
+
+			provenance, err := verifySettingsProvenanceWithOptions(t.Context(), repository, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !provenance.LocalPathSafe || string(provenance.LocalData) != body {
+				t.Fatalf("secure local read was discarded: %+v", provenance)
+			}
+			if provenance.LocalOwnership != tt.wantOwnership || provenance.LocalOPFOwnership != SettingsOwnershipUnknown {
+				t.Fatalf("ownership = %q OPF=%q, want %q/unknown", provenance.LocalOwnership, provenance.LocalOPFOwnership, tt.wantOwnership)
+			}
+		})
+	}
+}
+
+func TestEffectiveEnabledSetting_OwnershipUnknownPreservesLocalDisableVeto(t *testing.T) {
+	t.Parallel()
+	root, repository := newPolicyRepo(t)
+	writePolicyFile(t, root, ".entire/settings.json", `{"enabled":true}`)
+	writePolicyFile(t, root, ".entire/settings.local.json", `{"enabled":false}`)
+	options := defaultSettingsProvenanceOptions()
+	options.pathTracked = func(context.Context, string, string) (bool, error) {
+		return false, errors.New("index query failed")
+	}
+
+	enabled, err := effectiveEnabledSettingWithOptions(t.Context(), repository, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enabled == nil || *enabled {
+		t.Fatalf("effective enabled = %v, want local false veto under unknown ownership", enabled)
+	}
 }
 
 func TestReadVerifiedRegular_RejectsDeterministicPathSwaps(t *testing.T) {
@@ -124,7 +182,7 @@ func TestVerifySettingsProvenance_ReturnsBoundContent(t *testing.T) {
 	if !provenance.ProjectVerified || string(provenance.ProjectData) != `{"enabled":true}` {
 		t.Fatalf("project provenance = %+v", provenance)
 	}
-	if !provenance.LocalVerified || string(provenance.LocalData) != `{"log_level":"debug"}` {
+	if provenance.LocalOwnership != SettingsOwnershipUntracked || string(provenance.LocalData) != `{"log_level":"debug"}` {
 		t.Fatalf("local provenance = %+v", provenance)
 	}
 }
@@ -143,7 +201,7 @@ func TestVerifySettingsProvenance_RejectsFilesystemEquivalentTrackedLocalNames(t
 			if err != nil {
 				t.Fatal(err)
 			}
-			if provenance.LocalVerified || provenance.LocalOPFVerified {
+			if provenance.LocalOwnership != SettingsOwnershipTracked || provenance.LocalOPFOwnership != SettingsOwnershipTracked {
 				t.Fatalf("filesystem-equivalent tracked path %q was trusted: %+v", rel, provenance)
 			}
 		})
@@ -164,7 +222,7 @@ func TestVerifySettingsProvenance_UnbornHEADCanVerifyUntrackedOPFCommand(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !provenance.LocalVerified || !provenance.LocalOPFVerified {
+	if provenance.LocalOwnership != SettingsOwnershipUntracked || provenance.LocalOPFOwnership != SettingsOwnershipUntracked {
 		t.Fatalf("untracked local command in unborn repository was rejected: %+v", provenance)
 	}
 }

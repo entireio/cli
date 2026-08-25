@@ -23,3 +23,16 @@ func TestEquivalent(t *testing.T) {
 		})
 	}
 }
+
+func TestCanonicalKey_CollapsesFilesystemAliases(t *testing.T) {
+	t.Parallel()
+	want := CanonicalKey(".entire/metadata/session-1/prompt.txt")
+	for _, alias := range []string{
+		".Entire/Metadata/Session-1/PROMPT.TXT",
+		".entire/metadata/session-1/prompt.txt. ",
+	} {
+		if got := CanonicalKey(alias); got != want {
+			t.Errorf("CanonicalKey(%q) = %q, want %q", alias, got, want)
+		}
+	}
+}

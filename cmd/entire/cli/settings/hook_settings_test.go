@@ -302,6 +302,36 @@ func TestLoadVerifiedPolicySettings_ConsumesProvenanceBytesWithoutReopening(t *t
 	}
 }
 
+func TestHookSettings_OwnershipUnknownIsLocalOnlyAndOPFFailsClosed(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"enabled":false,"log_level":"debug","commit_linking":"always","redaction":{"openai_privacy_filter":{"enabled":true,"command":"/local/opf"}}}`)
+	provenance := repopolicy.SettingsProvenance{
+		LocalPathSafe:     true,
+		LocalData:         data,
+		LocalOwnership:    repopolicy.SettingsOwnershipUnknown,
+		LocalOPFOwnership: repopolicy.SettingsOwnershipUnknown,
+	}
+
+	local, err := loadVerifiedPolicySettings(provenance, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if local.Enabled || local.LogLevel != debugLogLevel || local.CommitLinking != "always" {
+		t.Fatalf("safe ordinary local fields were discarded: %+v", local)
+	}
+	if local.Redaction == nil || local.Redaction.OpenAIPrivacyFilter == nil || local.Redaction.OpenAIPrivacyFilter.Command != "" {
+		t.Fatalf("unknown ownership did not fail closed for OPF: %+v", local.Redaction)
+	}
+
+	global, err := loadGlobalPolicySettings(provenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !global.Enabled || global.LogLevel != "" || global.CommitLinking != "" || global.Redaction != nil {
+		t.Fatalf("unknown local ownership influenced global hooks: %+v", global)
+	}
+}
+
 func assertJSONFieldsClassified(t *testing.T, typ reflect.Type, classifications map[string]hookFieldDisposition) {
 	t.Helper()
 	seen := map[string]bool{}

@@ -77,13 +77,17 @@ func LoadForRepoPolicy(ctx context.Context, policy repopolicy.RepoPolicy) (*Enti
 	if err != nil {
 		return nil, fmt.Errorf("verifying hook settings provenance: %w", err)
 	}
+	return loadGlobalPolicySettings(provenance)
+}
+
+func loadGlobalPolicySettings(provenance repopolicy.SettingsProvenance) (*EntireSettings, error) {
 	settings := &EntireSettings{Enabled: true}
 	if provenance.ProjectVerified {
 		if err := mergeHookSettingsData(settings, provenance.ProjectData); err != nil {
 			return nil, fmt.Errorf("reading project hook settings: %w", err)
 		}
 	}
-	if provenance.LocalVerified {
+	if provenance.LocalPathSafe && provenance.LocalOwnership == repopolicy.SettingsOwnershipUntracked {
 		if err := mergeHookSettingsData(settings, provenance.LocalData); err != nil {
 			return nil, fmt.Errorf("reading local hook settings: %w", err)
 		}
@@ -234,14 +238,18 @@ func loadVerifiedPolicySettings(provenance repopolicy.SettingsProvenance, prefer
 		}
 		applyClonePreferences(settings, preferences)
 	}
-	if provenance.LocalVerified {
+	if provenance.LocalPathSafe && provenance.LocalOwnership != repopolicy.SettingsOwnershipTracked {
 		if err := mergeJSON(settings, provenance.LocalData); err != nil {
 			return nil, fmt.Errorf("merging local settings: %w", err)
 		}
-	} else if provenance.LocalPathSafe {
+	} else if provenance.LocalPathSafe && provenance.LocalOwnership == repopolicy.SettingsOwnershipTracked {
 		settings.localLayerRejection = localLayerTrackedReason
 	}
-	enforceOPFCommandTrustForVerifiedData(settings, provenance.LocalData, provenance.LocalOPFVerified)
+	enforceOPFCommandTrustForVerifiedData(
+		settings,
+		provenance.LocalData,
+		provenance.LocalOPFOwnership == repopolicy.SettingsOwnershipUntracked,
+	)
 	if err := settings.SummaryGeneration.Validate(); err != nil {
 		return nil, fmt.Errorf("merged settings invalid: %w", err)
 	}
