@@ -2687,6 +2687,13 @@ func TestInstallGitHook_ChainsPreExistingHuskyUserHook(t *testing.T) {
 	if strings.Contains(content, `sh -e`) {
 		t.Errorf("injected husky hook should not chain via sh -e backup, got:\n%s", content)
 	}
+	info, err := os.Stat(userHook)
+	if err != nil {
+		t.Fatalf("stat installed user hook: %v", err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("installed hook mode = %o, want 0644 (preserve tracked mode)", info.Mode().Perm())
+	}
 
 	removed, err := RemoveGitHook(context.Background())
 	if err != nil {
@@ -2701,6 +2708,13 @@ func TestInstallGitHook_ChainsPreExistingHuskyUserHook(t *testing.T) {
 	}
 	if string(restored) != custom {
 		t.Errorf("restored hook = %q, want %q", restored, custom)
+	}
+	info, err = os.Stat(userHook)
+	if err != nil {
+		t.Fatalf("stat restored user hook: %v", err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("restored hook mode = %o, want 0644", info.Mode().Perm())
 	}
 
 	excludePath := filepath.Join(tmpDir, ".git", "info", "exclude")

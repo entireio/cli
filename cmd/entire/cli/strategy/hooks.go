@@ -690,7 +690,7 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, bool, 
 			if touchedUser {
 				backedUpUserHook = true
 			}
-			written, err := writeHookFile(hookPath, content)
+			written, err := writeHookFile(hookPath, content, true)
 			if err != nil {
 				return installedCount, huskySafe, fmt.Errorf("failed to install %s hook: %w", spec.name, err)
 			}
@@ -732,7 +732,7 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, bool, 
 			content = generateChainedContent(spec.content, spec.name, false)
 		}
 
-		written, err := writeHookFile(hookPath, content)
+		written, err := writeHookFile(hookPath, content, false)
 		if err != nil {
 			return installedCount, huskySafe, fmt.Errorf("failed to install %s hook: %w", spec.name, err)
 		}
@@ -998,13 +998,18 @@ func huskyUserDirHasPreEntireBackups(installDir string) bool {
 }
 
 // writeHookFile writes a hook file if it doesn't exist or has different content.
+// When preserveMode is true, an existing file's permission bits are kept so a
+// tracked husky user hook at 0644 does not flip to 0755 in git status.
 // Returns true if the file was written or its mode was healed to executable.
-func writeHookFile(path, content string) (bool, error) {
+func writeHookFile(path, content string, preserveMode bool) (bool, error) {
 	if err := rejectNonRegularHookPath(path); err != nil {
 		return false, err
 	}
 	existing, err := os.ReadFile(path) //nolint:gosec // path is controlled
 	if err == nil && string(existing) == content {
+		if preserveMode {
+			return false, nil // Already up to date; keep tracked mode (e.g. 0644).
+		}
 		info, statErr := os.Lstat(path)
 		if statErr == nil && info.Mode()&0o111 != 0 {
 			return false, nil // Already up to date
@@ -1015,10 +1020,24 @@ func writeHookFile(path, content string) (bool, error) {
 		return true, nil
 	}
 
-	if err := writeHookFileAtomic(path, content); err != nil {
+	mode := hookFileWriteMode(path, preserveMode)
+	if err := writeHookFileAtomic(path, content, mode); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// hookFileWriteMode picks the mode for a hook write. Plain .git/hooks installs
+// always use 0755; husky user-hook updates preserve the on-disk mode.
+func hookFileWriteMode(path string, preserveMode bool) os.FileMode {
+	if !preserveMode {
+		return 0o755
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return 0o755
+	}
+	return info.Mode().Perm()
 }
 
 // writeHuskyForwardingStub writes the canonical husky `_/<hook>` stub.
@@ -1026,7 +1045,7 @@ func writeHuskyForwardingStub(path string) error {
 	if err := rejectNonRegularHookPath(path); err != nil {
 		return err
 	}
-	return writeHookFileAtomic(path, huskyForwardingStub)
+	return writeHookFileAtomic(path, huskyForwardingStub, 0o755)
 }
 
 // rejectNonRegularHookPath refuses symlinks and other non-regular paths so
@@ -1051,7 +1070,7 @@ func rejectNonRegularHookPath(path string) error {
 
 // writeHookFileAtomic writes via a temp file + rename so readers never observe
 // a truncated hook, and the final path is always a regular file we created.
-func writeHookFileAtomic(path, content string) error {
+func writeHookFileAtomic(path, content string, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".entire-hook-*")
 	if err != nil {
@@ -1064,7 +1083,7 @@ func writeHookFileAtomic(path, content string) error {
 		_ = tmp.Close()
 		return fmt.Errorf("failed to write temp hook file %s: %w", path, err)
 	}
-	if err := tmp.Chmod(0o755); err != nil {
+	if err := tmp.Chmod(mode); err != nil { //nolint:gosec // caller supplies hook mode
 		_ = tmp.Close()
 		return fmt.Errorf("failed to chmod temp hook file %s: %w", path, err)
 	}
@@ -1216,7 +1235,7 @@ func rewriteHuskyOwnedHooks(hooksDir string, backfillMissing bool) (int, error) 
 			}
 			if hasActiveHuskyStubDispatch(string(data)) {
 				// Heal executable bit on an otherwise-valid stub.
-				if _, err := writeHookFile(hookPath, string(data)); err != nil {
+				if _, err := writeHookFile(hookPath, string(data), false); err != nil {
 					return changed, fmt.Errorf("heal husky stub %s: %w", hookPath, err)
 				}
 				continue
@@ -1270,7 +1289,7 @@ func removeEntireHooksFromDir(dir string) (int, error) {
 					removeErrors = append(removeErrors, fmt.Sprintf("%s: %v", hook, err))
 					continue
 				}
-			} else if err := writeHookFileAtomic(hookPath, restored); err != nil {
+			} else if err := writeHookFileAtomic(hookPath, restored, hookFileWriteMode(hookPath, true)); err != nil {
 				removeErrors = append(removeErrors, fmt.Sprintf("strip managed block %s: %v", hook, err))
 				continue
 			}
@@ -1310,9 +1329,12 @@ func removeEntireHooksFromDir(dir string) (int, error) {
 // so the pre-existing hook (backed up to .pre-entire) is called after our hook.
 //
 // Executable backups are run directly so shebang interpreters (Python, Node,
-// …) keep working. When allowShFallback is true (Husky-safe installs only),
-// non-executable backups fall back to `sh -e`, matching husky's own runner.
-// Outside Husky, non-executable backups stay inert — git ignored them before.
+// …) keep working. Non-executable backups stay inert in production: the sole
+// caller (plain .git/hooks install) always passes allowShFallback=false because
+// a mode-0644 .pre-entire was never an active git hook. Husky-safe installs
+// inject into the tracked user hook via injectEntireManagedBlock instead and
+// never call this helper. allowShFallback=true (sh -e fallback, matching
+// husky's runner) is retained for unit tests that lock the generator contract.
 //
 // Entire's exit status is preserved: a successful backup must not mask a
 // failing pre-push (OPF abort). A failing backup still fails the hook.
