@@ -2828,6 +2828,18 @@ func TestStripDelimitedBlock_IgnoresEndMarkerInsideManagedBody(t *testing.T) {
 	}
 }
 
+func TestStripEntireManagedBlock_RemovesPrePushExitWrapper(t *testing.T) {
+	user := "#!/bin/sh\necho lint\n"
+	injected := injectEntireManagedBlock("pre-push", user, "# entire body\n")
+	got := stripEntireManagedBlock(injected)
+	if got != user {
+		t.Fatalf("round-trip pre-push managed inject:\ngot:\n%q\nwant:\n%q", got, user)
+	}
+	if strings.Contains(got, "_entire_status") || strings.Contains(got, "exit $_entire_status") {
+		t.Fatalf("exit wrapper leaked into restored hook:\n%s", got)
+	}
+}
+
 func TestStripDelimitedBlock_IgnoresEndMarkerEmbeddedMidLine(t *testing.T) {
 	content := "before\n" + entireManagedBegin + "\nmid " + entireManagedEnd + " mid\nkeep\n" + entireManagedEnd + "\nafter\n"
 	got := stripDelimitedBlock(content, entireManagedBegin, entireManagedEnd)

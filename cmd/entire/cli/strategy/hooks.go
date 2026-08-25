@@ -1441,7 +1441,32 @@ trap 'rm -f "$_entire_stdin"' EXIT
 }
 
 func stripEntireManagedBlock(content string) string {
-	return stripDelimitedBlock(content, entireManagedBegin, entireManagedEnd)
+	if !strings.Contains(content, entireManagedBegin) {
+		return content
+	}
+	stripped := stripDelimitedBlock(content, entireManagedBegin, entireManagedEnd)
+	return stripPrePushManagedExitWrapper(stripped)
+}
+
+// stripPrePushManagedExitWrapper removes the exit-status capture lines that
+// injectEntireManagedBlock adds outside the managed markers for pre-push hooks.
+func stripPrePushManagedExitWrapper(content string) string {
+	shebang, rest := splitShebang(content)
+	rest = strings.TrimPrefix(rest, "_entire_status=$?\n")
+	trimmed := strings.TrimRight(rest, "\n")
+	if strings.HasSuffix(trimmed, "exit $_entire_status") {
+		rest = strings.TrimSuffix(trimmed, "exit $_entire_status")
+		if rest != "" && !strings.HasSuffix(rest, "\n") {
+			rest += "\n"
+		}
+	}
+	if shebang != "" {
+		if rest == "" {
+			return shebang + "\n"
+		}
+		return shebang + "\n" + rest
+	}
+	return rest
 }
 
 func stripDelimitedBlock(content, begin, end string) string {
