@@ -248,9 +248,9 @@ func TestWhyTUITinyWindowDoesNotPanic(t *testing.T) {
 	_ = whyTUIViewText(t, m)
 }
 
-// The agent-safe fallback contract: --tui against a non-TTY writer must fall
-// through to the deterministic plain-text output (never start the TUI, never
-// block). A bytes.Buffer is the non-TTY case IsTerminalWriter reports false for.
+// The agent-safe fallback contract: --tui when CanPromptInteractively is false
+// must fall through to the deterministic plain-text output (never start the TUI,
+// never block). go test runs are non-interactive by default.
 func TestWhyTUIFlagFallsBackToPlainTextWhenNotTTY(t *testing.T) {
 	newAttributionRepo(t)
 

@@ -274,11 +274,11 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, opts att
 		return err
 	}
 
-	// Interactive browsing is strictly opt-in AND TTY-gated (agent-safe CLI
+	// Interactive browsing is strictly opt-in AND prompt-gated (agent-safe CLI
 	// fallbacks): a non-interactive run with --tui falls through to the same
 	// deterministic plain/JSON output below, which carries the full
 	// information. --json wins over --tui so scripted callers never block.
-	if opts.TUI && !opts.JSON && interactive.IsTerminalWriter(w) && !IsAccessibleMode() {
+	if opts.TUI && !opts.JSON && interactive.CanPromptInteractively() && !IsAccessibleMode() {
 		startLine, err := whyTUIStartLine(result, hasLine, line)
 		if err != nil {
 			return err
