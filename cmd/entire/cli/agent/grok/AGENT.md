@@ -488,6 +488,62 @@ still.
 10. **`SubagentStop` fires once, inside the subagent** *(doc, `10-hooks.md:101`)* — not in the parent. Child sessions live in the normal sessions tree with only `meta.json` under the parent's `subagents/`, which is the `SubagentSessionResolver` shape (cf. Droid Workers), not a blocking tool call.
 11. **Grok has its own worktree system** under `~/.grok/worktrees/` with `grok worktree gc`/`rm` and `grok du`. Unexamined; may interact with Entire's own worktree assumptions.
 
+## E2E Runner
+
+`e2e/agents/grok.go` registers Grok with the E2E framework (`ForEachAgent`
+picks it up automatically). Modeled on the Codex runner, which has the closest
+shape — an isolated agent home plus a folder-trust gate.
+
+| | |
+|---|---|
+| Name / Binary / EntireAgent | `grok` / `grok` / `grok` |
+| PromptPattern | `❯` *(observed in the 1.0.5 TUI)* |
+| TimeoutMultiplier | 1.5 |
+| Concurrency gate | 2 |
+| Headless invocation | `grok --trust --permission-mode bypassPermissions -p <prompt>` |
+| Model override | `E2E_GROK_MODEL`, else Grok's default (`grok-4.6`) |
+| Auth | `XAI_API_KEY`, else symlink the developer's `~/.grok/auth.json` |
+
+Each run gets an isolated `GROK_HOME` under the user cache dir (not `/tmp`),
+seeded by `seedGrokHome` with three things:
+
+1. `[compat.claude] hooks = false` and `[compat.cursor] hooks = false` —
+   **load-bearing, not hygiene.** `GROK_HOME` does not isolate `~/.claude`, so
+   without this every E2E turn on a developer machine also fires
+   `entire hooks claude-code ...` against Grok payloads. See
+   [Foreign Config Collision](#foreign-config-collision).
+2. `trusted_folders.toml` pre-trusting the test repo, since project hooks are
+   silently skipped in an untrusted folder. `--trust` is passed as well; the
+   file covers the paths the flag does not.
+3. `[features] telemetry = false`.
+
+`StartSession` additionally dismisses the first-run coding-data consent banner
+("Help improve Grok", `[Opt out]` / `[Opt in]`), which renders over the input
+caret and is *not* covered by the telemetry switch — that banner is the
+separate `/privacy` setting.
+
+### Hazard: Grok installs a binary named `agent`
+
+The installer symlinks **both** `grok` and `agent` into `~/.local/bin`
+(→ `~/.grok/bin/`). `agent` is also Cursor CLI's binary name, and
+`e2e/agents/cursor_cli.go` declares `Binary() == "agent"`.
+
+On a machine with both installed, whichever wins `$PATH` decides what the
+`cursor-cli` E2E leg actually runs. Preflight only does `LookPath("agent")`, so
+it passes either way and the suite would exercise Grok while reporting Cursor.
+Verified on this machine (Cursor not installed, so nothing was displaced):
+
+```
+$ command -v agent
+/Users/…/.local/bin/agent -> /Users/…/.grok/bin/agent
+$ agent --version
+grok 1.0.5 (5115b46bc909) [stable]
+```
+
+Not fixed here — it belongs to the Cursor runner, not this one. Cheapest guard
+is a `Bootstrap()` check in `cursor_cli.go` asserting `agent --version` does not
+report Grok.
+
 ## Captured Payloads
 
 Ten invocations captured on 2026-08-25 across `session_start`,
