@@ -1083,7 +1083,7 @@ func writeHookFileAtomic(path, content string, mode os.FileMode) error {
 		_ = tmp.Close()
 		return fmt.Errorf("failed to write temp hook file %s: %w", path, err)
 	}
-	if err := tmp.Chmod(mode); err != nil { //nolint:gosec // caller supplies hook mode
+	if err := tmp.Chmod(mode); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("failed to chmod temp hook file %s: %w", path, err)
 	}
@@ -1416,12 +1416,14 @@ func injectEntireManagedBlock(hookName, existing, entireContent string) string {
 	if rest != "" {
 		if hookName == "pre-push" {
 			b.WriteString("_entire_status=$?\n")
+			b.WriteString("(\n")
 		}
 		b.WriteString(rest)
 		if !strings.HasSuffix(rest, "\n") {
 			b.WriteByte('\n')
 		}
 		if hookName == "pre-push" {
+			b.WriteString(")\n")
 			b.WriteString("_user_status=$?\n")
 			b.WriteString("if [ \"$_entire_status\" -ne 0 ]; then\n")
 			b.WriteString("\texit \"$_entire_status\"\n")
@@ -1476,6 +1478,23 @@ func stripEntireManagedBlock(content string) string {
 	return stripPrePushManagedExitWrapper(stripped)
 }
 
+// stripPrePushUserSubshell removes the subshell wrapper injectEntireManagedBlock
+// adds around pre-push user bodies so round-trip stripping restores the script.
+func stripPrePushUserSubshell(rest string) string {
+	if !strings.HasPrefix(rest, "(\n") {
+		return rest
+	}
+	rest = strings.TrimPrefix(rest, "(\n")
+	switch {
+	case strings.HasSuffix(rest, "\n)\n"):
+		return rest[:len(rest)-len("\n)\n")] + "\n"
+	case strings.HasSuffix(rest, "\n)"):
+		return rest[:len(rest)-len("\n)")] + "\n"
+	default:
+		return "(\n" + rest
+	}
+}
+
 // stripPrePushManagedExitWrapper removes the exit-status capture lines that
 // injectEntireManagedBlock adds outside the managed markers for pre-push hooks.
 // Only the exact injected suffix is removed so a user's own trailing `fi` or
@@ -1486,6 +1505,7 @@ func stripPrePushManagedExitWrapper(content string) string {
 	shebang, rest := splitShebang(content)
 	rest = strings.TrimPrefix(rest, "_entire_status=$?\n")
 	rest = strings.TrimSuffix(rest, prePushExitWrapperSuffix)
+	rest = stripPrePushUserSubshell(rest)
 	rest = strings.TrimRight(rest, "\n")
 	if rest != "" {
 		rest += "\n"

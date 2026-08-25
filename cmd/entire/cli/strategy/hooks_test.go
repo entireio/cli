@@ -2863,6 +2863,31 @@ func TestStripEntireManagedBlock_PrePushPreservesUserClosingFi(t *testing.T) {
 	}
 }
 
+func TestInjectEntireManagedBlock_PrePushWrapsUserExitInSubshell(t *testing.T) {
+	t.Parallel()
+
+	user := "#!/bin/sh\nexit 0\n"
+	got := injectEntireManagedBlock(gitHookNames[4], user, "# entire body\nfalse\n")
+	if !strings.Contains(got, "_entire_status=$?\n(\nexit 0\n)\n_user_status=$?") {
+		t.Fatalf("pre-push user body must be subshelled:\n%s", got)
+	}
+
+	tmp := t.TempDir()
+	scriptPath := filepath.Join(tmp, "pre-push")
+	if err := os.WriteFile(scriptPath, []byte(got), 0o755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+	cmd := exec.CommandContext(context.Background(), "sh", scriptPath)
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("pre-push must exit non-zero when Entire fails even if user script exits 0")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() == 0 {
+		t.Fatalf("want non-zero exit, got %v", err)
+	}
+}
+
 func TestStripDelimitedBlock_IgnoresEndMarkerEmbeddedMidLine(t *testing.T) {
 	content := "before\n" + entireManagedBegin + "\nmid " + entireManagedEnd + " mid\nkeep\n" + entireManagedEnd + "\nafter\n"
 	got := stripDelimitedBlock(content, entireManagedBegin, entireManagedEnd)
