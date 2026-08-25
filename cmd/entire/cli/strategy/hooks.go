@@ -1463,9 +1463,7 @@ func stripPrePushManagedExitWrapper(content string) string {
 
 	shebang, rest := splitShebang(content)
 	rest = strings.TrimPrefix(rest, "_entire_status=$?\n")
-	if strings.HasSuffix(rest, prePushExitWrapperSuffix) {
-		rest = rest[:len(rest)-len(prePushExitWrapperSuffix)]
-	}
+	rest = strings.TrimSuffix(rest, prePushExitWrapperSuffix)
 	rest = strings.TrimRight(rest, "\n")
 	if rest != "" {
 		rest += "\n"
