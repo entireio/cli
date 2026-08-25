@@ -456,28 +456,74 @@ func unquoteHookPrefix(p string) string {
 	return p
 }
 
-// shellCommandPrefixBefore returns the last shell token in s (handling a
-// simple double-quoted absolute path). Used to read `PREFIX` out of
-// `…; then PREFIX hooks git …`.
+// shellCommandPrefixBefore returns the last shell word in s, unquoted when the
+// word was single- or double-quoted (including POSIX '\” apostrophe escapes).
+// Used to read `PREFIX` out of `…; then PREFIX hooks git …`.
 func shellCommandPrefixBefore(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""
 	}
-	// Prefer a trailing quoted token (single- or double-quoted).
-	for _, q := range []byte{'\'', '"'} {
-		if i := strings.LastIndexByte(s, q); i >= 0 {
-			open := strings.LastIndexByte(s[:i], q)
-			if open >= 0 && i > open {
-				return s[open+1 : i]
+	var last string
+	for i := 0; i < len(s); {
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+			i++
+		}
+		if i >= len(s) {
+			break
+		}
+		switch s[i] {
+		case '\'':
+			last, i = parseShellSingleQuotedWord(s, i)
+		case '"':
+			last, i = parseShellDoubleQuotedWord(s, i)
+		default:
+			start := i
+			for i < len(s) && s[i] != ' ' && s[i] != '\t' {
+				i++
 			}
+			last = s[start:i]
 		}
 	}
-	fields := strings.Fields(s)
-	if len(fields) == 0 {
-		return ""
+	return last
+}
+
+func parseShellSingleQuotedWord(s string, i int) (word string, end int) {
+	i++ // opening '
+	var b strings.Builder
+	for i < len(s) {
+		if s[i] != '\'' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		if i+3 < len(s) && s[i+1] == '\\' && s[i+2] == '\'' && s[i+3] == '\'' {
+			b.WriteByte('\'')
+			i += 4
+			continue
+		}
+		return b.String(), i + 1
 	}
-	return fields[len(fields)-1]
+	return b.String(), i
+}
+
+func parseShellDoubleQuotedWord(s string, i int) (word string, end int) {
+	i++ // opening "
+	var b strings.Builder
+	for i < len(s) {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		if s[i] == '"' {
+			return b.String(), i + 1
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String(), i
 }
 
 func isAbsoluteHookCmdPrefix(prefix string) bool {

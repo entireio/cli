@@ -2912,6 +2912,36 @@ func TestHasActiveHuskyStubDispatch_RequiresExactLine(t *testing.T) {
 	}
 }
 
+func TestShellCommandPrefixBefore(t *testing.T) {
+	t.Parallel()
+
+	apostrophePath := "/Users/John O'Brien/bin/entire"
+	apostropheQuoted := shellQuote(apostrophePath)
+	tests := []struct {
+		name string
+		s    string
+		want string
+	}{
+		{"unquoted", "if [ -x /opt/bin/entire ]; then /opt/bin/entire", "/opt/bin/entire"},
+		{"single-quoted", "then " + shellQuote("/opt/homebrew/bin/entire"), "/opt/homebrew/bin/entire"},
+		{"double-quoted", `then "/opt/homebrew/bin/entire"`, "/opt/homebrew/bin/entire"},
+		{"apostrophe path", "then " + apostropheQuoted, apostrophePath},
+		{
+			"apostrophe path after earlier quote",
+			"if [ -x " + shellQuote("/other/clone/entire") + " ]; then " + apostropheQuoted,
+			apostrophePath,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shellCommandPrefixBefore(tt.s); got != tt.want {
+				t.Fatalf("shellCommandPrefixBefore(%q) = %q, want %q", tt.s, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestEntireHookUsesForeignAbsoluteLauncher(t *testing.T) {
 	t.Parallel()
 	content := `#!/bin/sh
@@ -2940,6 +2970,16 @@ if [ -x "/local/entire" ]; then /local/entire hooks git prepare-commit-msg "$1" 
 	}
 	if entireHookUsesForeignAbsoluteLauncher(quoted, "/opt/homebrew/bin/entire") {
 		t.Fatal("matching single-quoted absolute should not be foreign")
+	}
+	apostrophe := `#!/bin/sh
+# Entire CLI hooks
+` + shellQuote(`/Users/John O'Brien/bin/entire`) + ` hooks git prepare-commit-msg "$1" "$2" 2>/dev/null || true
+`
+	if !entireHookUsesForeignAbsoluteLauncher(apostrophe, bareEntireHookCmd) {
+		t.Fatal("apostrophe single-quoted absolute launcher should be detected as foreign")
+	}
+	if entireHookUsesForeignAbsoluteLauncher(apostrophe, "/Users/John O'Brien/bin/entire") {
+		t.Fatal("matching apostrophe single-quoted absolute should not be foreign")
 	}
 }
 
