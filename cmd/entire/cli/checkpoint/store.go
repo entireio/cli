@@ -163,6 +163,9 @@ const refRaceRetryAttempts = 5
 func writeWithRefRaceRetry(ctx context.Context, what string, write func() error) error {
 	var err error
 	for attempt := 1; attempt <= refRaceRetryAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		err = write()
 		if err == nil {
 			return nil
