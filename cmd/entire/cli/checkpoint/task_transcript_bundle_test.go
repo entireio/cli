@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -73,6 +74,40 @@ func manifestAssetNames(t *testing.T, manifestJSON string) []string {
 	return names
 }
 
+func taskPayloadFromTranscriptFile(t *testing.T, ctx context.Context, toolUseID, agentID, transcriptPath string) TaskPayload {
+	t.Helper()
+	content, err := os.ReadFile(transcriptPath)
+	require.NoError(t, err)
+	prepared, assets, tooLarge := prepareSubagentTranscript(ctx, agent.AgentTypeClaudeCode, transcriptPath, content)
+	require.False(t, tooLarge, "test fixture transcript must be under the size cap")
+	redacted, jsonlErr := redact.JSONLBytes(prepared)
+	if jsonlErr != nil {
+		redacted = redact.AlreadyRedacted(redact.Bytes(prepared))
+	}
+	return TaskPayload{
+		ToolUseID:   toolUseID,
+		AgentID:     agentID,
+		Transcript:  redacted,
+		Assets:      assets,
+		StartedAt:   time.Now(),
+		CompletedAt: time.Now(),
+	}
+}
+
+func writeSessionWithTask(t *testing.T, store sessionMetadataStore, cpID id.CheckpointID, task TaskPayload) {
+	t.Helper()
+	require.NoError(t, store.Write(context.Background(), Session{
+		CheckpointID: cpID,
+		SessionID:    "s-bundle",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
+		AuthorName:   "T",
+		AuthorEmail:  "t@t.com",
+		Agent:        agent.AgentTypeClaudeCode,
+		Tasks:        []TaskPayload{task},
+	}))
+}
+
 // The transcript and its assets land together, under the task's own directory,
 // with the image bytes stored byte-exact and gone from the transcript.
 func TestTaskBundle_PersistentWritesTranscriptAndAssetsTogether(t *testing.T) {
@@ -85,16 +120,8 @@ func TestTaskBundle_PersistentWritesTranscriptAndAssetsTogether(t *testing.T) {
 	taskDir := cpID.Path() + "/tasks/toolu_bundle1/"
 
 	transcriptPath, img := taskImageTranscript(t, t.TempDir(), "bundled")
-	require.NoError(t, store.Write(context.Background(), Session{
-		CheckpointID: cpID, SessionID: "s-bundle", Strategy: "manual-commit",
-		Transcript: redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
-		AuthorName: "T", AuthorEmail: "t@t.com",
-		Agent:                  agent.AgentTypeClaudeCode,
-		IsTask:                 true,
-		ToolUseID:              "toolu_bundle1",
-		AgentID:                "agent1",
-		SubagentTranscriptPath: transcriptPath,
-	}))
+	task := taskPayloadFromTranscriptFile(t, context.Background(), "toolu_bundle1", "agent1", transcriptPath)
+	writeSessionWithTask(t, store, cpID, task)
 
 	stored, ok := readBranchFile(t, store, taskDir+paths.AgentTranscriptFileName("agent1"))
 	require.True(t, ok, "task transcript missing")
@@ -127,16 +154,8 @@ func TestTaskBundle_PersistentRewriteWithoutImagesClearsAssets(t *testing.T) {
 
 	withImage, _ := taskImageTranscript(t, tmp, "stale")
 	write := func(transcriptPath string) {
-		require.NoError(t, store.Write(context.Background(), Session{
-			CheckpointID: cpID, SessionID: "s-bundle", Strategy: "manual-commit",
-			Transcript: redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
-			AuthorName: "T", AuthorEmail: "t@t.com",
-			Agent:                  agent.AgentTypeClaudeCode,
-			IsTask:                 true,
-			ToolUseID:              "toolu_bundle2",
-			AgentID:                "agent1",
-			SubagentTranscriptPath: transcriptPath,
-		}))
+		task := taskPayloadFromTranscriptFile(t, context.Background(), "toolu_bundle2", "agent1", transcriptPath)
+		writeSessionWithTask(t, store, cpID, task)
 	}
 
 	write(withImage)
@@ -255,15 +274,24 @@ func TestTaskBundle_PersistentFailedWriteLeavesStoredPairIntact(t *testing.T) {
 
 	transcriptPath, img := taskImageTranscript(t, t.TempDir(), "intact")
 	write := func(path string) {
+		if path == transcriptPath {
+			task := taskPayloadFromTranscriptFile(t, context.Background(), "toolu_bundle3", "agent1", path)
+			writeSessionWithTask(t, store, cpID, task)
+			return
+		}
+		// Unreadable path: store task metadata only (no new transcript/assets).
 		require.NoError(t, store.Write(context.Background(), Session{
 			CheckpointID: cpID, SessionID: "s-bundle", Strategy: "manual-commit",
 			Transcript: redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
 			AuthorName: "T", AuthorEmail: "t@t.com",
-			Agent:                  agent.AgentTypeClaudeCode,
-			IsTask:                 true,
-			ToolUseID:              "toolu_bundle3",
-			AgentID:                "agent1",
-			SubagentTranscriptPath: path,
+			Agent:      agent.AgentTypeClaudeCode,
+			Tasks: []TaskPayload{{
+				ToolUseID:                   "toolu_bundle3",
+				AgentID:                     "agent1",
+				TranscriptUnavailableReason: "transcript unreadable",
+				StartedAt:                   time.Now(),
+				CompletedAt:                 time.Now(),
+			}},
 		}))
 	}
 
@@ -303,16 +331,8 @@ func TestTaskBundle_StoredBundleReinjectsByteExact(t *testing.T) {
 	original, err := os.ReadFile(transcriptPath)
 	require.NoError(t, err)
 
-	require.NoError(t, store.Write(context.Background(), Session{
-		CheckpointID: cpID, SessionID: "s-bundle", Strategy: "manual-commit",
-		Transcript: redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
-		AuthorName: "T", AuthorEmail: "t@t.com",
-		Agent:                  agent.AgentTypeClaudeCode,
-		IsTask:                 true,
-		ToolUseID:              "toolu_bundle4",
-		AgentID:                "agent1",
-		SubagentTranscriptPath: transcriptPath,
-	}))
+	task := taskPayloadFromTranscriptFile(t, context.Background(), "toolu_bundle4", "agent1", transcriptPath)
+	writeSessionWithTask(t, store, cpID, task)
 
 	stored, ok := readBranchFile(t, store, taskDir+paths.AgentTranscriptFileName("agent1"))
 	require.True(t, ok)

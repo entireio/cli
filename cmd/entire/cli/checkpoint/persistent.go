@@ -498,16 +498,27 @@ func (s *treeWriter) writeTaskRecordEntry(task TaskPayload, basePath string, ent
 	taskDir := checkpointSubtreePath(basePath, "tasks", task.ToolUseID)
 
 	if task.Transcript.Len() > 0 {
+		staged := map[string]object.TreeEntry{}
 		agentBlobHash, err := CreateBlobFromContent(s.repo, task.Transcript.Bytes())
 		if err != nil {
 			return fmt.Errorf("failed to create task transcript blob: %w", err)
 		}
-		agentPath := checkpointSubtreePath(taskDir, "agent-"+task.AgentID+".jsonl")
-		entries[agentPath] = object.TreeEntry{
+		agentPath := checkpointSubtreePath(taskDir, paths.AgentTranscriptFileName(task.AgentID))
+		staged[agentPath] = object.TreeEntry{
 			Name: agentPath,
 			Mode: filemode.Regular,
 			Hash: agentBlobHash,
 		}
+		if _, err := s.writeAssets(task.Assets, taskDir, staged); err != nil {
+			return fmt.Errorf("write task transcript assets: %w", err)
+		}
+		assetsPrefix := checkpointSubtreePath(taskDir, paths.AssetsDirName) + "/"
+		for key := range entries {
+			if strings.HasPrefix(key, assetsPrefix) {
+				delete(entries, key)
+			}
+		}
+		maps.Copy(entries, staged)
 	}
 
 	metadata := taskRecordMetadata{
@@ -538,78 +549,6 @@ func (s *treeWriter) writeTaskRecordEntry(task TaskPayload, basePath string, ent
 	return nil
 }
 
-// writeSubagentTranscriptBundle stores a task's subagent transcript together
-// with the image assets externalized out of it, under tasks/<id>/.
-//
-// The transcript and its assets are one indivisible unit. Once an image is
-// externalized, the transcript holds only a placeholder and the bytes exist
-// nowhere else in the checkpoint, so publishing the transcript without its
-// assets is permanent data loss; publishing assets without the transcript that
-// names them leaves unreachable blobs. Everything is therefore staged and only
-// merged into entries once every blob exists.
-//
-// The asset set is also a *replacement*, not an addition. This function runs
-// again for the same task on every final-task rewrite, and the new transcript
-// only ever references the new set, so any previously stored assets are cleared
-// first — including when the new set is empty (externalization off, or a
-// transcript that no longer carries images). Skipping the clear on an empty set
-// is what would leave the previous attempt's screenshots and manifest behind,
-// referenced by nothing.
-//
-// A dropped write is different from an empty one: when nothing new is stored
-// (unreadable source, or oversize) the existing transcript and asset set are
-// left exactly as they are, because they are consistent with each other.
-func (s *treeWriter) writeSubagentTranscriptBundle(ctx context.Context, opts WriteOptions, taskDir string, entries map[string]object.TreeEntry) error {
-	content, readErr := os.ReadFile(opts.SubagentTranscriptPath)
-	if readErr != nil {
-		return fmt.Errorf("read subagent transcript: %w", readErr)
-	}
-	prepared, assets, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, content)
-	if tooLarge {
-		return nil // prepareSubagentTranscript logged why; keep the stored pair intact.
-	}
-
-	// Try JSONL-aware redaction first; fall back to plain string redaction if the
-	// content is not valid JSONL (avoids silently dropping the transcript).
-	var body []byte
-	if redacted, jsonlErr := redact.JSONLBytes(prepared); jsonlErr != nil {
-		logging.Warn(ctx, "subagent transcript is not valid JSONL, falling back to plain redaction",
-			slog.String("path", opts.SubagentTranscriptPath),
-			slog.String("error", jsonlErr.Error()),
-		)
-		body = redact.Bytes(prepared)
-	} else {
-		body = redacted.Bytes()
-	}
-
-	transcriptHash, err := CreateBlobFromContent(s.repo, body)
-	if err != nil {
-		return fmt.Errorf("create subagent transcript blob: %w", err)
-	}
-
-	// Stage into a fresh map so a mid-way blob failure cannot leave entries
-	// holding half a bundle. writeAssets' own clearing pass is a no-op on an
-	// empty map; clearing the real asset set happens at publish time below.
-	staged := map[string]object.TreeEntry{}
-	if _, err := s.writeAssets(assets, taskDir, staged); err != nil {
-		return fmt.Errorf("write subagent transcript assets: %w", err)
-	}
-	agentPath := checkpointSubtreePath(taskDir, paths.AgentTranscriptFileName(opts.AgentID))
-	staged[agentPath] = object.TreeEntry{
-		Name: agentPath,
-		Mode: filemode.Regular,
-		Hash: transcriptHash,
-	}
-
-	assetsPrefix := checkpointSubtreePath(taskDir, paths.AssetsDirName) + "/"
-	for key := range entries {
-		if strings.HasPrefix(key, assetsPrefix) {
-			delete(entries, key)
-		}
-	}
-	maps.Copy(entries, staged)
-	return nil
-}
 
 // writeStandardCheckpointEntries writes session files to numbered subdirectories and
 // maintains a CheckpointSummary at the root level with aggregated statistics.

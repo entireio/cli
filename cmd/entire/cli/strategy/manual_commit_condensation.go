@@ -434,7 +434,7 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 		}
 
 		payload.Transcript = redacted
-		assets = append(assets, taskAssets...)
+		payload.Assets = taskAssets
 		payloads = append(payloads, payload)
 	}
 
