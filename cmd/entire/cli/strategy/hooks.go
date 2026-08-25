@@ -1456,20 +1456,17 @@ func stripEntireManagedBlock(content string) string {
 
 // stripPrePushManagedExitWrapper removes the exit-status capture lines that
 // injectEntireManagedBlock adds outside the managed markers for pre-push hooks.
+// Only the exact injected suffix is removed so a user's own trailing `fi` or
+// `_user_status=$?` lines are never eaten line-by-line.
 func stripPrePushManagedExitWrapper(content string) string {
+	const prePushExitWrapperSuffix = "_user_status=$?\nif [ \"$_entire_status\" -ne 0 ]; then\n\texit \"$_entire_status\"\nfi\nexit \"$_user_status\"\n"
+
 	shebang, rest := splitShebang(content)
 	rest = strings.TrimPrefix(rest, "_entire_status=$?\n")
-	lines := strings.Split(strings.TrimRight(rest, "\n"), "\n")
-	for len(lines) > 0 {
-		switch lines[len(lines)-1] {
-		case `exit "$_user_status"`, "exit $_entire_status", `_user_status=$?`, `if [ "$_entire_status" -ne 0 ]; then`, "fi", "\texit \"$_entire_status\"":
-			lines = lines[:len(lines)-1]
-		default:
-			goto done
-		}
+	if strings.HasSuffix(rest, prePushExitWrapperSuffix) {
+		rest = rest[:len(rest)-len(prePushExitWrapperSuffix)]
 	}
-done:
-	rest = strings.Join(lines, "\n")
+	rest = strings.TrimRight(rest, "\n")
 	if rest != "" {
 		rest += "\n"
 	}

@@ -2840,6 +2840,15 @@ func TestStripEntireManagedBlock_RemovesPrePushExitWrapper(t *testing.T) {
 	}
 }
 
+func TestStripEntireManagedBlock_PrePushPreservesUserClosingFi(t *testing.T) {
+	user := "#!/bin/sh\nif [ -f foo ]; then\n  echo hi\nfi\n"
+	injected := injectEntireManagedBlock(gitHookNames[4], user, "# entire body\n")
+	got := stripEntireManagedBlock(injected)
+	if got != user {
+		t.Fatalf("round-trip must preserve user's closing fi:\ngot:\n%q\nwant:\n%q", got, user)
+	}
+}
+
 func TestStripDelimitedBlock_IgnoresEndMarkerEmbeddedMidLine(t *testing.T) {
 	content := "before\n" + entireManagedBegin + "\nmid " + entireManagedEnd + " mid\nkeep\n" + entireManagedEnd + "\nafter\n"
 	got := stripDelimitedBlock(content, entireManagedBegin, entireManagedEnd)
