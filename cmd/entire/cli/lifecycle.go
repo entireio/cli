@@ -1771,7 +1771,6 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		if err := strategy.UpsertCompletedTaskRecord(logCtx, event.SessionID, rec); err != nil {
 			return fmt.Errorf("failed to record uncorrelated task: %w", err)
 		}
-		_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 		return nil
 	}
 	completed, err := strategy.CompleteTaskRecord(logCtx, event.SessionID, rec)
@@ -1786,7 +1785,9 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 			slog.String("tool_use_id", event.ToolUseID))
 	}
 
-	_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+	if !(opts.resolvedAmbiguously && event.TaskDescription == "") {
+		_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+	}
 	return nil
 }
 
