@@ -55,7 +55,7 @@ func SanitizeSubjectContent(s string) string {
 		return ""
 	}
 	s = redact.String(s)
-	if utf8.RuneCountInString(s) > MaxDescriptionLength {
+	if utf8.RuneCountInString(s) > maxSubjectRedactionInput {
 		return omittedSubjectLabel
 	}
 	// Redaction placeholders are plain text, but a custom rule's replacement is
