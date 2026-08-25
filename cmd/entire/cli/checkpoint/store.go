@@ -164,7 +164,7 @@ func writeWithRefRaceRetry(ctx context.Context, what string, write func() error)
 	var err error
 	for attempt := 1; attempt <= refRaceRetryAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return err
+			return fmt.Errorf("checkpoint write canceled: %w", err)
 		}
 		err = write()
 		if err == nil {
