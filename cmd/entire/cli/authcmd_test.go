@@ -26,7 +26,7 @@ func TestRenderDataAPIAuthError_DistinguishesCallerContextFromWrappedDeadline(t 
 		t.Parallel()
 
 		var errW bytes.Buffer
-		result := renderDataAPIAuthError(context.Background(), &errW, wrappedDeadline)
+		result := renderDataAPIAuthError(context.Background(), &errW, "acme/widget", wrappedDeadline)
 
 		var silent *SilentError
 		if errors.As(result, &silent) {
@@ -54,7 +54,7 @@ func TestRenderDataAPIAuthError_DistinguishesCallerContextFromWrappedDeadline(t 
 		wrappedCanceled := fmt.Errorf("resolve the Entire cell for acme/widget: %w", context.Canceled)
 
 		var errW bytes.Buffer
-		result := renderDataAPIAuthError(ctx, &errW, wrappedCanceled)
+		result := renderDataAPIAuthError(ctx, &errW, "acme/widget", wrappedCanceled)
 
 		var silent *SilentError
 		if !errors.As(result, &silent) {
@@ -76,7 +76,7 @@ func TestRenderDataAPIAuthError_NotOnboardedPrintsOneActionableLine(t *testing.T
 	err := fmt.Errorf("resolve processing placement for acme/widget: %w", errRepoNotOnboarded)
 
 	var errW bytes.Buffer
-	result := renderDataAPIAuthError(context.Background(), &errW, err)
+	result := renderDataAPIAuthError(context.Background(), &errW, "acme/widget", err)
 
 	var silent *SilentError
 	if !errors.As(result, &silent) {
@@ -96,5 +96,76 @@ func TestRenderDataAPIAuthError_NotOnboardedPrintsOneActionableLine(t *testing.T
 	}
 	if strings.Count(out, "\n") != 1 {
 		t.Errorf("stderr = %q, want exactly one line", out)
+	}
+}
+
+// The rendered line must name the repo the failed call was SCOPED to, not the
+// current clone: `--repo gh/other/thing` reaches this path from an onboarded
+// repo, and because the branch returns a SilentError the raw chain that did
+// name it never prints, so this line is the only place it can appear.
+func TestRenderRepoNotOnboarded_NamesTheScopedRepo(t *testing.T) {
+	t.Parallel()
+
+	err := fmt.Errorf("resolve processing placement for other/thing: %w", errRepoNotOnboarded)
+
+	var errW bytes.Buffer
+	if result := renderRepoNotOnboarded(&errW, "other/thing", err); result == nil {
+		t.Fatal("expected the sentinel to be rendered")
+	}
+	out := errW.String()
+	if !strings.Contains(out, "other/thing") {
+		t.Errorf("stderr = %q, want it to name the repo the call was scoped to", out)
+	}
+	if strings.Contains(out, "This repository") {
+		t.Errorf("stderr = %q, want the named repo instead of a deictic that points at the wrong one", out)
+	}
+	if strings.Count(out, "other/thing") != 1 {
+		t.Errorf("stderr = %q, want the repo named exactly once", out)
+	}
+}
+
+// errRepoNotOnboarded covers three shapes and only one is really "not
+// onboarded" — zero rows also means the caller cannot see the repo, and a row
+// with no processing primary can be mid-onboarding. The line must not assert a
+// missing mirror as the only explanation.
+func TestRenderRepoNotOnboarded_DoesNotOverclaim(t *testing.T) {
+	t.Parallel()
+
+	var errW bytes.Buffer
+	if rendered := renderRepoNotOnboarded(&errW, "acme/widget", fmt.Errorf("wrapped: %w", errRepoNotOnboarded)); rendered == nil {
+		t.Fatal("expected the sentinel to be rendered")
+	}
+
+	if out := errW.String(); !strings.Contains(out, "not visible to your login") {
+		t.Errorf("stderr = %q, want it to allow for the access/visibility shape too", out)
+	}
+}
+
+// Only the sentinel is rendered; every other error passes through so callers
+// can chain this as a guard ahead of their own wrapping.
+func TestRenderRepoNotOnboarded_IgnoresOtherErrors(t *testing.T) {
+	t.Parallel()
+
+	var errW bytes.Buffer
+	if result := renderRepoNotOnboarded(&errW, "acme/widget", errors.New("boom")); result != nil {
+		t.Fatalf("expected nil for a non-sentinel error, got %v", result)
+	}
+	if errW.Len() != 0 {
+		t.Errorf("stderr = %q, want nothing written for a non-sentinel error", errW.String())
+	}
+}
+
+// Fallback wording for the callers with no repo to name (the generic data-API
+// gate, and experts' ULID form).
+func TestRenderRepoNotOnboarded_FallsBackWithoutARepo(t *testing.T) {
+	t.Parallel()
+
+	var errW bytes.Buffer
+	if rendered := renderRepoNotOnboarded(&errW, "  ", fmt.Errorf("wrapped: %w", errRepoNotOnboarded)); rendered == nil {
+		t.Fatal("expected the sentinel to be rendered")
+	}
+
+	if out := errW.String(); !strings.Contains(out, "This repository") {
+		t.Errorf("stderr = %q, want the generic subject when no repo is known", out)
 	}
 }

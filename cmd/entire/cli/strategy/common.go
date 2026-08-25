@@ -402,21 +402,72 @@ func warnUser(ctx context.Context, component, msg, breadcrumb string, attrs ...a
 	}
 }
 
-var initRedactionOnce sync.Once
+var (
+	initRedactionOnce sync.Once
+	// errRedactionScanner is set inside the Once and returned by every
+	// subsequent EnsureRedactionConfigured call (sticky failure).
+	errRedactionScanner error
+)
+
+// resetRedactionConfiguredForTest reinitializes the Once so tests can
+// exercise different settings fixtures in one process.
+func resetRedactionConfiguredForTest() {
+	initRedactionOnce = sync.Once{}
+	errRedactionScanner = nil
+}
 
 // EnsureRedactionConfigured loads redaction settings and configures the
-// redact package: PII detection (opt-in), inline custom_redactions, and rule
-// packs auto-discovered from .entire/redactors/.
+// redact package: scanner engines, PII detection (opt-in), inline
+// custom_redactions, and rule packs auto-discovered from .entire/redactors/.
 //
 // Must be called at each process entry point before checkpoint writes.
-func EnsureRedactionConfigured() {
+// Returns an error ONLY for scanner-specific failures (invalid scanner
+// config, goredact engine construction) — proceeding would run a scanner
+// set the team's committed settings did not choose. All other settings
+// problems keep the historical warn-and-default behavior.
+//
+// Pass a context descended from the root pre-run, so redact's diagnostics
+// reach .entire/logs/: hook contexts swallow stderr, so otherwise a user
+// grepping for component=redaction finds nothing and concludes their rules
+// never ran. Without a context logger they fall back to stderr and the
+// load-time summary is skipped.
+//
+// sync.Once: the first caller's context wins, and every caller is an entry
+// point that just built one.
+func EnsureRedactionConfigured(ctx context.Context) error {
 	initRedactionOnce.Do(func() {
-		ctx := context.Background()
+		// Session-stamped: redact calls this logger without a context, so it
+		// cannot pick the session up the way logging.Warn does.
+		logger := logging.SessionLoggerFromContext(ctx)
+
+		// A canceled ctx (Ctrl-C mid-hook) would fail the settings read, consume
+		// the Once, and leave custom rules unconfigured — fail-open — for the
+		// rest of the process. Keep the ctx values, not its cancellation.
+		ctx := context.WithoutCancel(ctx)
+
 		s, err := settings.Load(ctx)
 		if err != nil {
+			if errors.Is(err, settings.ErrScannerConfig) {
+				errRedactionScanner = err
+				return
+			}
 			logCtx := logging.WithComponent(ctx, "redaction")
 			logging.Warn(logCtx, "failed to load settings for redaction", slog.String("error", err.Error()))
 			return
+		}
+
+		if err := redact.ConfigureScanners(redact.ScannersConfig{
+			Betterleaks: s.BetterleaksEnabled(),
+			Goredact:    s.GoredactEnabled(),
+		}); err != nil {
+			// Keep configuring the rest: the sticky error still fails the
+			// callers that fail closed, and the one caller that only logs must
+			// not also lose the user's PII and custom rules for the whole
+			// process. No narrowed-coverage notice — the selection that would
+			// have narrowed coverage never took effect.
+			errRedactionScanner = fmt.Errorf("%w: %w", settings.ErrScannerConfig, err)
+		} else {
+			maybeWarnNarrowedScanners(ctx, s)
 		}
 
 		// A tracked .entire/settings.local.json was ignored. Report it: the
@@ -438,6 +489,7 @@ func EnsureRedactionConfigured() {
 				Enabled:        true,
 				Categories:     make(map[redact.PIICategory]bool),
 				CustomPatterns: pii.CustomPatterns,
+				Logger:         logger,
 			}
 			cfg.Categories[redact.PIIEmail] = pii.Email == nil || *pii.Email
 			cfg.Categories[redact.PIIPhone] = pii.Phone == nil || *pii.Phone
@@ -457,7 +509,7 @@ func EnsureRedactionConfigured() {
 			logging.Warn(logCtx, "failed to resolve redactors path", slog.String("error", perr.Error()))
 			packsDir = packsRelPath
 		}
-		packs, lerr := redact.LoadPacks(packsDir)
+		packs, lerr := redact.LoadPacks(packsDir, logger)
 		if lerr != nil {
 			warnUser(ctx, "redaction",
 				"failed to load redactor packs",
@@ -469,6 +521,7 @@ func EnsureRedactionConfigured() {
 			redact.ConfigureCustomRules(redact.CustomRulesConfig{
 				Inline: inline,
 				Packs:  packs,
+				Logger: logger,
 			})
 		}
 
@@ -492,9 +545,67 @@ func EnsureRedactionConfigured() {
 				Categories: opf.Categories,
 				Command:    opf.Command,
 				Timeout:    opf.TimeoutSeconds,
+				Logger:     logger,
 			})
 		}
+
+		// Load-time summary so "are my rules active?" is answerable from the
+		// log alone.
+		//
+		// Gated on an initialized logger: without one, logging.Info falls
+		// through to the process-default stderr logger, and an INFO line the
+		// user did not ask for would surface as terminal noise. WARN
+		// diagnostics are deliberately not gated — a broken rule is worth
+		// showing wherever it can be shown.
+		if logger != nil {
+			packRules := 0
+			for _, p := range packs {
+				packRules += len(p.Rules)
+			}
+			piiEnabled := s.Redaction != nil && s.Redaction.PII != nil && s.Redaction.PII.Enabled
+			logging.Info(logging.WithComponent(ctx, "redaction"), "redaction configured",
+				slog.Int("packs", len(packs)),
+				slog.Int("pack_rules", packRules),
+				slog.Int("inline_patterns", len(inline)),
+				// Configured counts above, compiled below: a gap between
+				// them means a rule failed to compile (warned separately).
+				slog.Int("active_rules", redact.ActiveCustomRules()),
+				slog.Bool("pii", piiEnabled),
+				slog.Bool("opf", redact.OPFEnabled()),
+			)
+		}
 	})
+	return errRedactionScanner
+}
+
+// maybeWarnNarrowedScanners warns, once per marker file, when betterleaks is
+// disabled. validateScannerSettings guarantees goredact is on whenever
+// betterleaks is off, so exactly one narrowed configuration is reachable
+// today. Best-effort: marker IO failures degrade to warning every run, never
+// to silence.
+// Revisit the fixed marker content when a third engine is added.
+func maybeWarnNarrowedScanners(ctx context.Context, s *settings.EntireSettings) {
+	if s.BetterleaksEnabled() {
+		return
+	}
+	const marker = "betterleaks=false goredact=true\n"
+	markerRel := filepath.Join(paths.EntireDir, "tmp", "scanner-notice")
+	markerAbs, err := paths.AbsPath(ctx, markerRel)
+	if err != nil {
+		markerAbs = markerRel
+	}
+	if prev, rerr := os.ReadFile(markerAbs); rerr == nil && string(prev) == marker { //nolint:gosec // path is from AbsPath or constant
+		return
+	}
+	// warnUser always logs but prints only on a TTY: if the first fire is in a
+	// non-TTY hook the notice is log-only and the marker still suppresses later
+	// prints — acceptable, the setting is a committed, team-reviewed choice.
+	warnUser(ctx, "redaction",
+		"betterleaks scanning disabled; checkpoint redaction narrowed to the remaining layers plus goredact",
+		"betterleaks scanning is disabled in .entire/settings.json; checkpoint redaction relies on the remaining layers plus goredact.",
+	)
+	_ = os.MkdirAll(filepath.Dir(markerAbs), 0o750)    //nolint:errcheck // best-effort marker; failure degrades to warning every run
+	_ = os.WriteFile(markerAbs, []byte(marker), 0o640) //nolint:errcheck,gosec // best-effort non-sensitive marker file
 }
 
 // resolveAgentType picks the best agent type from the context and existing state.

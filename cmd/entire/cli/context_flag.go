@@ -9,11 +9,17 @@ import (
 // parses it.
 //
 // Binding through a pflag.Value rather than a PersistentPreRun is deliberate:
-// Cobra runs only the CLOSEST PersistentPreRun in the chain, and subtrees here
-// define their own (agent_group.go, the per-agent hooks commands), so a root hook
-// would be silently skipped for exactly the commands that inherited the flag.
 // Set() runs during flag parsing — before any PreRun, before RunE, and before
 // anything resolves a token — so there is no ordering to get wrong.
+//
+// That ordering is the whole reason, and it is worth being clear that it is now
+// the only one. This used to also argue that a root PersistentPreRun would be
+// shadowed by the subtrees that define their own (agent_group.go, the per-agent
+// hooks commands), because cobra runs only the closest hook in the chain by
+// default. It no longer does: root.go sets cobra.EnableTraverseRunHooks, so
+// every ancestor's hook runs, root first. A pre-run would therefore work today
+// — it would just resolve the identity later than flag parsing does, for no
+// gain.
 type contextFlagValue struct{ name string }
 
 func (v *contextFlagValue) String() string { return v.name }

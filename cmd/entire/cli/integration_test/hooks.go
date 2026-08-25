@@ -165,6 +165,10 @@ type PostTaskInput struct {
 	TranscriptPath string
 	ToolUseID      string
 	AgentID        string
+	// RunInBackground, when true, sets tool_input.run_in_background so the
+	// hook is parsed as a background subagent launch stub (isBackgroundLaunch)
+	// instead of a foreground completion.
+	RunInBackground bool
 }
 
 // SimulatePostTask simulates the PostToolUse[Task] hook.
@@ -175,13 +179,48 @@ func (r *HookRunner) SimulatePostTask(input PostTaskInput) error {
 		"session_id":      input.SessionID,
 		"transcript_path": input.TranscriptPath,
 		"tool_use_id":     input.ToolUseID,
-		"tool_input":      map[string]string{},
+		"tool_input": map[string]interface{}{
+			"run_in_background": input.RunInBackground,
+		},
 		"tool_response": map[string]string{
 			"agentId": input.AgentID,
 		},
 	}
 
 	return r.runHookWithInput("post-task", hookInput)
+}
+
+// SubagentStopInput contains the input for the SubagentStop hook.
+type SubagentStopInput struct {
+	SessionID           string // Parent session ID.
+	TranscriptPath      string // Parent session's transcript path.
+	AgentID             string
+	AgentTranscriptPath string // Path to the subagent's own transcript.
+	ToolUseID           string // The Task tool_use_id that launched this subagent.
+}
+
+// SimulateSubagentStop simulates Claude Code's SubagentStop hook: the true
+// completion signal for a subagent, including background subagents that
+// finish long after the launch-time PostToolUse (post-task) stub fired.
+func (r *HookRunner) SimulateSubagentStop(input SubagentStopInput) error {
+	r.T.Helper()
+
+	hookInput := map[string]interface{}{
+		"session_id":            input.SessionID,
+		"transcript_path":       input.TranscriptPath,
+		"agent_id":              input.AgentID,
+		"agent_transcript_path": input.AgentTranscriptPath,
+		"tool_use_id":           input.ToolUseID,
+	}
+
+	return r.runHookWithInput("subagent-stop", hookInput)
+}
+
+// SimulateSubagentStop is a convenience method on TestEnv.
+func (env *TestEnv) SimulateSubagentStop(input SubagentStopInput) error {
+	env.T.Helper()
+	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	return runner.SimulateSubagentStop(input)
 }
 
 func (r *HookRunner) runHookWithInput(flag string, input interface{}) error {

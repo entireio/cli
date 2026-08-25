@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.2] - 2026-08-19
+
+### Added
+
+- Better subagent handling for Codex and Cursor (subagent tracking remains work in progress): Entire now consumes Codex's `SubagentStart`/`SubagentStop` hooks, and an agent can declare its own subagent transcript path instead of having the Claude Code layout guessed for it — which also fixes Cursor, which had parsed that path all along and dropped it. This is the in-session half only. Committed checkpoints still carry no per-subagent data for any agent, Codex does not aggregate subagent token usage, and only thread-spawned Codex subagents fire the hooks ([#1958](https://github.com/entireio/cli/pull/1958))
+- `entire repo create --object-format` selects `sha1` or `sha256`, validated client-side so a typo fails fast instead of coming back as an opaque 422 ([#2043](https://github.com/entireio/cli/pull/2043))
+
+### Changed
+
+- The `entire search` TUI drops its Checkpoints tab and defaults to Sessions. Search now folds checkpoint hits into their owning sessions server-side, so the old default tab always showed zero results; a checkpoint stays reachable by ID via `entire checkpoint explain` ([#2022](https://github.com/entireio/cli/pull/2022))
+
+### Security
+
+- `redaction.openai_privacy_filter.command` is honored only from a `.entire/settings.local.json` verified to be untracked. It becomes `argv[0]` of an exec on every push, and was read from the version-controlled `.entire/settings.json` with no validation — so a pull request could pair the setting with a payload committed alongside it and run code on every developer who pushes, including non-interactively in CI. A tracked `settings.local.json` is now ignored wholesale, since `.gitignore` does not apply to an already-tracked path. Rejection downgrades to resolving `opf` on `$PATH` rather than erroring, and the rewrite fails closed if that is missing ([#2056](https://github.com/entireio/cli/pull/2056))
+
+### Fixed
+
+- Repo-scoped data could be read from the wrong region. Cell resolution scanned mirrors and silently fell back to the caller's home cell whenever a repo was mirrored in more than one region, so `entire trail list --repo <multi-region repo>` printed "No open trails found" instead of the repo's real trails. Resolution now goes through the repo's processing placement, and every failure is a returned error instead of a silent fallback. `entire agent-help`'s trails probe and `entire enable`'s post-success report had the same bug against the BFF, which does not proxy trails for CLI bearers ([#2046](https://github.com/entireio/cli/pull/2046), [#2047](https://github.com/entireio/cli/pull/2047))
+- A repo that is not onboarded — or not visible to your login — is now named in one honest line across `entire trail`, `entire experts`, and `entire checkpoint explain --repo`, instead of an anonymous "This repository" on one surface and a raw internal resolution chain on the others. Single-repo cell resolution also tolerates the same catalog gaps the multi-repo fan-out already survived, and `entire enable`'s trails probe gets its own deadline so a slow enable report can no longer starve it ([#2054](https://github.com/entireio/cli/pull/2054))
+- `entire trail update --body` never worked: the description was sent as a field on the metadata `PATCH`, a route that does not serve body writes, and the rejection arrived as a bare `Service Unavailable`. Descriptions now go to the dedicated body route, and `--body=` clears one ([#2055](https://github.com/entireio/cli/pull/2055))
+- Cloud-mode `entire dispatch` sends `entire-cli/<version>` as its User-Agent instead of Go's default, so its traffic is no longer invisible to server-side CLI version gating ([#2049](https://github.com/entireio/cli/pull/2049))
+
+### Housekeeping
+
+- `go-runewidth` moves to 0.0.28 and the version pin from 0.10.1 is dropped — upstream builds its width table lazily now, so startup stays at ~18ms without pinning ([#2040](https://github.com/entireio/cli/pull/2040))
+- Trail wire handling consumes entire-api's camelCase contract directly, dropping the remaining snake_case JSON and SSE normalization along with obsolete list-response compatibility fields ([#2037](https://github.com/entireio/cli/pull/2037))
+- The Linux CI test jobs no longer `apt-get install gnome-keyring`: the token store has resolved to a temp file backend under test for some time, and the step's only remaining effect was to make three PR-blocking jobs depend on an Ubuntu mirror that intermittently hung them for the full 6-hour default timeout. Those jobs now also carry a 30-minute timeout ([#2072](https://github.com/entireio/cli/pull/2072))
+
 ## [0.10.1] - 2026-08-18
 
 ### Added

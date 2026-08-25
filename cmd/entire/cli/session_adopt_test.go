@@ -968,11 +968,15 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 		TurnID:                      "source-turn",
 		TurnCheckpointIDs:           []string{"abc123def456"},
 		LastCheckpointID:            id.MustCheckpointID("abc123def456"),
-		LastCheckpointCommitHash:    "source-commit",
-		CheckpointTokenUsage:        &agent.TokenUsage{InputTokens: 100, OutputTokens: 25, APICallCount: 1},
-		UntrackedFilesAtStart:       []string{"source-only.txt"},
-		PromptWindowBase:            3,
-		PromptWindowResetPending:    true,
+		CondensationAttempt: &session.CondensationAttempt{
+			CheckpointID:    id.MustCheckpointID("fedcba987654"),
+			RecoveryPending: true,
+		},
+		LastCheckpointCommitHash: "source-commit",
+		CheckpointTokenUsage:     &agent.TokenUsage{InputTokens: 100, OutputTokens: 25, APICallCount: 1},
+		UntrackedFilesAtStart:    []string{"source-only.txt"},
+		PromptWindowBase:         3,
+		PromptWindowResetPending: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1043,6 +1047,9 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 	}
 	if !adopted.LastCheckpointID.IsEmpty() {
 		t.Fatalf("LastCheckpointID = %s, want empty", adopted.LastCheckpointID.String())
+	}
+	if adopted.CondensationAttempt != nil {
+		t.Fatalf("CondensationAttempt = %#v, want nil", adopted.CondensationAttempt)
 	}
 	if adopted.LastCheckpointCommitHash != "" {
 		t.Fatalf("LastCheckpointCommitHash = %q, want empty", adopted.LastCheckpointCommitHash)

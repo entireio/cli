@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,8 +15,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -1689,5 +1692,105 @@ func TestEnsureEntireGitignore_IncludesRedactorsLocal(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "redactors/local/") {
 		t.Errorf(".entire/.gitignore missing redactors/local/ entry; got:\n%s", body)
+	}
+}
+
+// writeSettingsJSON creates .entire/settings.json in dir with the given body.
+func writeSettingsJSON(t *testing.T, dir, body string) {
+	t.Helper()
+	entireDir := filepath.Join(dir, paths.EntireDir)
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+}
+
+func TestEnsureRedactionConfigured_ScannerError(t *testing.T) {
+	// Cannot t.Parallel(): uses t.Chdir and resets a package-level sync.Once.
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	writeSettingsJSON(t, tmp, `{"enabled":true,"strategy":"manual-commit","redaction":{"betterleaks":{"enabled":false}}}`)
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	resetRedactionConfiguredForTest()
+	t.Cleanup(resetRedactionConfiguredForTest)
+
+	err := EnsureRedactionConfigured(t.Context())
+	if err == nil || !errors.Is(err, settings.ErrScannerConfig) {
+		t.Fatalf("EnsureRedactionConfigured() = %v, want ErrScannerConfig", err)
+	}
+	if err := EnsureRedactionConfigured(t.Context()); err == nil {
+		t.Fatal("second call returned nil; scanner error must be sticky across the Once")
+	}
+}
+
+func TestEnsureRedactionConfigured_GoredactEnabled(t *testing.T) {
+	// Cannot t.Parallel(): uses t.Chdir and resets a package-level sync.Once.
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	writeSettingsJSON(t, tmp, `{"enabled":true,"strategy":"manual-commit","redaction":{"goredact":{"enabled":true}}}`)
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	resetRedactionConfiguredForTest()
+	t.Cleanup(resetRedactionConfiguredForTest)
+	t.Cleanup(func() {
+		if err := redact.ConfigureScanners(redact.ScannersConfig{Betterleaks: true}); err != nil {
+			t.Errorf("restore default scanners: %v", err)
+		}
+	})
+
+	if err := EnsureRedactionConfigured(t.Context()); err != nil {
+		t.Fatalf("EnsureRedactionConfigured() = %v, want nil", err)
+	}
+}
+
+func TestEnsureRedactionConfigured_NarrowedScanners(t *testing.T) {
+	// Cannot t.Parallel(): uses t.Chdir and resets a package-level sync.Once.
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	writeSettingsJSON(t, tmp, `{"enabled":true,"strategy":"manual-commit","redaction":{"betterleaks":{"enabled":false},"goredact":{"enabled":true}}}`)
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	resetRedactionConfiguredForTest()
+	t.Cleanup(resetRedactionConfiguredForTest)
+	t.Cleanup(func() {
+		if err := redact.ConfigureScanners(redact.ScannersConfig{Betterleaks: true}); err != nil {
+			t.Errorf("restore default scanners: %v", err)
+		}
+	})
+
+	if err := EnsureRedactionConfigured(t.Context()); err != nil {
+		t.Fatalf("EnsureRedactionConfigured() = %v, want nil (betterleaks-off + goredact-on is legal)", err)
+	}
+	// With betterleaks disabled, redacting this low-entropy PAT (invisible to
+	// every non-scanner layer) is attributable to goredact alone.
+	const pat = "ghp_a1b2c1d2e1f2g1h2a1b2c1d2e1f2g1h2a1b2"
+	if got := redact.String("auth with token " + pat); strings.Contains(got, pat) {
+		t.Fatalf("PAT survived goredact-only redaction: %q", got)
+	}
+
+	marker := filepath.Join(tmp, ".entire", "tmp", "scanner-notice")
+	info, err := os.Stat(marker)
+	if err != nil {
+		t.Fatalf("narrowed-coverage marker not written: %v", err)
+	}
+
+	// Re-running the configure path (Once reset, marker kept) must not
+	// re-emit: an untouched marker mtime pins the early return.
+	resetRedactionConfiguredForTest()
+	if err := EnsureRedactionConfigured(t.Context()); err != nil {
+		t.Fatalf("EnsureRedactionConfigured() after Once reset = %v, want nil", err)
+	}
+	info2, err := os.Stat(marker)
+	if err != nil {
+		t.Fatalf("marker missing after re-run: %v", err)
+	}
+	if !info2.ModTime().Equal(info.ModTime()) {
+		t.Fatal("marker rewritten on re-run; narrowed-coverage notice re-emitted")
 	}
 }
