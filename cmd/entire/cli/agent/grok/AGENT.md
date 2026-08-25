@@ -491,15 +491,31 @@ still.
    - `tool_use_id` empty on `SubagentStart`.
    - **The bug:** the checkpoint recorded **2 top-level sessions**, both claiming `docs/red.md`, so the subagent's single edit was double-counted. `TestSubagentCommitFlow` still passed — it never asserts session count.
 
-   `ResolveSubagentSession` (subagent.go) now links child → parent by scanning
-   sibling sessions in the same group for the child's ID inside their
-   `subagents/` metadata. **The `subagents/` schema is undocumented and was not
-   captured before the quota ran out**, so the scan is written to fail closed:
-   it requires valid JSON, a string-value (not substring) match, and exactly
-   one claimant — zero, two, or anything unexpected returns false and restores
-   today's behaviour. If Grok keys that metadata by something other than the
-   child session ID, this is inert rather than wrong. Verify against a real
-   `subagents/` directory and tighten it to the actual field.
+   `ResolveSubagentSession` (subagent.go) links child → parent by scanning
+   sibling sessions in the same group for one whose `subagents/` metadata
+   claims this child.
+
+   The schema is undocumented, but the field names were recovered from serde
+   strings in the shipping binary rather than guessed —
+   `crates/codegen/xai-grok-shell/src/agent/subagent/mod.rs` writes `meta.json`
+   alongside `schemaVersion`, `parentSessionId`, `childSessionId`,
+   `subagentId`, `subagentType`, `parentPromptId`. The resolver prefers a typed
+   read matching `childSessionId` exactly, with an untyped "names the child
+   anywhere in this JSON" scan as the fallback.
+
+   It fails closed by construction: a unique match is required, and any stated
+   `parentSessionId` must agree with the directory that owns the record —
+   zero matches, two matches, a disagreeing record, or an unreadable tree all
+   return false and restore today's behaviour. A total schema mismatch makes it
+   inert, not wrong.
+
+   **Still unverified against a real `subagents/` directory** (the quota ran
+   out first). That is the one thing to check when quota returns; the binary
+   also mentions `output.json` and `refs/grok/subagents/<id>` git refs for
+   worktree-isolated subagents, neither of which is handled yet.
+
+   Recovering these names needed no quota: `strings` on
+   `~/.grok/downloads/grok-macos-aarch64`.
 9. **Coverage of the live run was one trivial turn** — no subagent, no compaction, no interrupt, no failure, no multi-turn session. `SubagentStart`/`SubagentStop`/`StopCancelled`/`StopFailure`/`PreCompact`/`PostCompact` and `Notification` are **still unobserved**, and those are exactly the paths with the trickiest mappings.
 9. **`SessionStart` does not fire for a subagent's own session** *(doc, `10-hooks.md:90`)*, and **`SessionEnd` carries `subagentType` for a child session** so a host can distinguish a child teardown from its own. Both matter for subagent bookkeeping.
 10. **`SubagentStop` fires once, inside the subagent** *(doc, `10-hooks.md:101`)* — not in the parent. Child sessions live in the normal sessions tree with only `meta.json` under the parent's `subagents/`, which is the `SubagentSessionResolver` shape (cf. Droid Workers), not a blocking tool call.

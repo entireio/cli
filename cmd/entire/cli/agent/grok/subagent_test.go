@@ -182,3 +182,90 @@ func TestJSONHasStringValue(t *testing.T) {
 		})
 	}
 }
+
+// linkChildTyped writes a meta.json in the shape the shipping binary's serde
+// names imply, so the typed path is exercised rather than the untyped fallback.
+func linkChildTyped(t *testing.T, group, parentID, entryName, subagentID string) {
+	t.Helper()
+	dir := filepath.Join(group, parentID, subagentsDirName, entryName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir subagents: %v", err)
+	}
+	meta := `{"schemaVersion":1,` +
+		`"parentSessionId":"` + parentID + `",` +
+		`"childSessionId":"` + testChildID + `",` +
+		`"subagentId":"` + subagentID + `",` +
+		`"subagentType":"reviewer",` +
+		`"parentPromptId":"p-1"}`
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0o644); err != nil {
+		t.Fatalf("write meta.json: %v", err)
+	}
+}
+
+func TestResolveSubagentSession_TypedMetaWins(t *testing.T) {
+	t.Parallel()
+
+	group := sessionGroup(t, testParentID, testChildID)
+	linkChildTyped(t, group, testParentID, "entry-dir", "sub-42")
+
+	g := &GrokAgent{}
+	link, ok := g.ResolveSubagentSession(childRef(group))
+	if !ok {
+		t.Fatal("ResolveSubagentSession = false, want true")
+	}
+	if link.ParentSessionID != testParentID {
+		t.Errorf("ParentSessionID = %q, want %q", link.ParentSessionID, testParentID)
+	}
+	// subagentId is more specific than the directory name, so it wins the key.
+	if link.ToolUseID != "sub-42" {
+		t.Errorf("ToolUseID = %q, want sub-42 (subagentId)", link.ToolUseID)
+	}
+	if link.SubagentType != "reviewer" {
+		t.Errorf("SubagentType = %q, want reviewer", link.SubagentType)
+	}
+}
+
+// TestResolveSubagentSession_MetaNamingAnotherChildIsIgnored: an exact
+// childSessionId match is required, so a sibling subagent's record must not
+// resolve this child.
+func TestResolveSubagentSession_MetaNamingAnotherChildIsIgnored(t *testing.T) {
+	t.Parallel()
+
+	group := sessionGroup(t, testParentID, testChildID)
+	dir := filepath.Join(group, testParentID, subagentsDirName, "entry-dir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	meta := `{"schemaVersion":1,"parentSessionId":"` + testParentID +
+		`","childSessionId":"01a03b0b-dead-7e22-b180-0c8af17af000","subagentId":"sub-9"}`
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	g := &GrokAgent{}
+	if _, ok := g.ResolveSubagentSession(childRef(group)); ok {
+		t.Error("resolved from a record naming a different child")
+	}
+}
+
+// TestResolveSubagentSession_DisagreeingParentIsRefused: a record that claims a
+// parent other than the directory owning it must not redirect the link.
+func TestResolveSubagentSession_DisagreeingParentIsRefused(t *testing.T) {
+	t.Parallel()
+
+	group := sessionGroup(t, testParentID, testChildID)
+	dir := filepath.Join(group, testParentID, subagentsDirName, "entry-dir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	meta := `{"schemaVersion":1,"parentSessionId":"01a03b0b-ffff-7e22-b180-0c8af17af111",` +
+		`"childSessionId":"` + testChildID + `","subagentId":"sub-1"}`
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	g := &GrokAgent{}
+	if _, ok := g.ResolveSubagentSession(childRef(group)); ok {
+		t.Error("resolved despite parentSessionId disagreeing with the owning directory")
+	}
+}

@@ -27,22 +27,27 @@ const subagentsDirName = "subagents"
 // resolver the child is recorded as a second top-level session and the file it
 // wrote is counted twice, once under each session.
 //
-// How the link is found: the parent's session directory holds a
-// `subagents/` entry per child. There is no documented schema for it, so
-// rather than assume field names this scans sibling sessions in the same
-// working-directory group and looks for the child's session ID appearing
-// anywhere inside their `subagents/` metadata.
+// How the link is found: the parent's session directory holds a `subagents/`
+// entry per child. This scans sibling sessions in the same working-directory
+// group for one whose subagents/ metadata claims this child — preferring a
+// typed read of meta.json (see subagentMeta) and falling back to an untyped
+// "does this JSON name the child anywhere" scan.
 //
-// It is deliberately unforgiving. A match must be unique — zero matches, two
-// matches, an unreadable tree, or an unexpected layout all return false, which
-// puts the caller back on the existing top-level-session path. Being wrong
-// here would attribute one session's work to an unrelated session, which is
-// worse than the double-count it is fixing, so ambiguity always loses.
+// It is deliberately unforgiving. A match must be unique, and the owning
+// directory must agree with any parentSessionId the file states — zero
+// matches, two matches, a disagreeing record, an unreadable tree, or an
+// unexpected layout all return false, which puts the caller back on the
+// existing top-level-session path. Being wrong here would attribute one
+// session's work to an unrelated session, which is worse than the
+// double-count it is fixing, so ambiguity always loses.
 //
-// The layout is doc-derived and has NOT been verified against a real
-// subagents/ directory; the quota ran out before one could be captured. If it
-// turns out Grok keys that metadata by something other than the child session
-// ID, this returns false everywhere and behaviour is unchanged.
+// Status: the *behaviour* (subagents are independent child sessions) is
+// confirmed from a real run. The meta.json *field names* are taken from serde
+// strings in the shipping binary, not from documentation, and have not been
+// checked against a real subagents/ directory — the quota ran out first. If
+// the real records differ, the typed path misses, the untyped scan is the
+// safety net, and a total mismatch simply returns false everywhere, leaving
+// behaviour as it is today.
 func (g *GrokAgent) ResolveSubagentSession(sessionRef string) (agent.SubagentSessionLink, bool) {
 	if sessionRef == "" {
 		return agent.SubagentSessionLink{}, false
@@ -73,7 +78,7 @@ func (g *GrokAgent) ResolveSubagentSession(sessionRef string) (agent.SubagentSes
 		if !e.IsDir() || e.Name() == childID {
 			continue
 		}
-		toolUseID, ok := subagentEntryFor(filepath.Join(groupDir, e.Name(), subagentsDirName), childID)
+		meta, toolUseID, ok := subagentEntryFor(filepath.Join(groupDir, e.Name(), subagentsDirName), childID)
 		if !ok {
 			continue
 		}
@@ -82,11 +87,18 @@ func (g *GrokAgent) ResolveSubagentSession(sessionRef string) (agent.SubagentSes
 			// Ambiguous: refuse rather than pick.
 			return agent.SubagentSessionLink{}, false
 		}
-		parentDir := filepath.Join(groupDir, e.Name())
+		// The owning directory is the parent by construction; meta's own
+		// parentSessionId is only trusted when it agrees, so a stray or copied
+		// meta.json cannot redirect the link somewhere else.
+		parentID := e.Name()
+		if meta.ParentSessionID != "" && meta.ParentSessionID != parentID {
+			return agent.SubagentSessionLink{}, false
+		}
 		found = agent.SubagentSessionLink{
-			ParentSessionID:      e.Name(),
+			ParentSessionID:      parentID,
 			ToolUseID:            toolUseID,
-			ParentTranscriptPath: filepath.Join(parentDir, transcriptFileName),
+			SubagentType:         meta.SubagentType,
+			ParentTranscriptPath: filepath.Join(groupDir, parentID, transcriptFileName),
 		}
 	}
 	if hits != 1 {
@@ -95,47 +107,99 @@ func (g *GrokAgent) ResolveSubagentSession(sessionRef string) (agent.SubagentSes
 	return found, true
 }
 
-// subagentEntryFor reports whether subagentsDir records childID, returning the
-// tool-use ID to key the task checkpoint by.
+// subagentMeta is the part of Grok's subagents/<id>/meta.json this needs.
 //
-// The entry directory's own name is preferred as the tool-use ID because that
-// is what Grok keys the subagent by; the child session ID is the fallback so
-// the returned link always has a stable, unique key.
-func subagentEntryFor(subagentsDir, childID string) (string, bool) {
+// The field names are not documented, but they are present as serde names in
+// the shipping binary (crates/codegen/xai-grok-shell/src/agent/subagent/mod.rs
+// writes "meta.json" alongside schemaVersion / parentSessionId /
+// childSessionId / subagentId / subagentType / parentPromptId). They are still
+// unverified against a real file, so every reader below tolerates their
+// absence and falls back to the untyped scan.
+type subagentMeta struct {
+	SchemaVersion   int    `json:"schemaVersion"`
+	ParentSessionID string `json:"parentSessionId"`
+	ChildSessionID  string `json:"childSessionId"`
+	SubagentID      string `json:"subagentId"`
+	SubagentType    string `json:"subagentType"`
+	ParentPromptID  string `json:"parentPromptId"`
+}
+
+// subagentEntryFor reports whether subagentsDir records childID, returning the
+// tool-use ID to key the task checkpoint by and the subagent type when known.
+//
+// It prefers a typed read of meta.json — matching childSessionId exactly and
+// taking subagentId as the key — and falls back to the untyped "does this JSON
+// mention the child ID anywhere" scan when the schema does not match, so an
+// unexpected layout degrades instead of breaking.
+func subagentEntryFor(subagentsDir, childID string) (subagentMeta, string, bool) {
 	entries, err := os.ReadDir(subagentsDir)
 	if err != nil {
-		return "", false
+		return subagentMeta{}, "", false
 	}
 	for _, e := range entries {
-		if e.IsDir() {
-			if metaMentions(filepath.Join(subagentsDir, e.Name()), childID) {
-				return e.Name(), true
+		path := filepath.Join(subagentsDir, e.Name())
+		if !e.IsDir() {
+			if meta, ok := readSubagentMeta(path, childID); ok {
+				return meta, keyFor(meta, e.Name(), childID), true
+			}
+			if fileMentions(path, childID) {
+				return subagentMeta{}, childID, true
 			}
 			continue
 		}
-		if fileMentions(filepath.Join(subagentsDir, e.Name()), childID) {
-			return childID, true
-		}
-	}
-	return "", false
-}
-
-// metaMentions reports whether any regular file directly inside dir names
-// childID.
-func metaMentions(dir, childID string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if e.IsDir() {
+		inner, err := os.ReadDir(path)
+		if err != nil {
 			continue
 		}
-		if fileMentions(filepath.Join(dir, e.Name()), childID) {
-			return true
+		for _, f := range inner {
+			if f.IsDir() {
+				continue
+			}
+			fp := filepath.Join(path, f.Name())
+			if meta, ok := readSubagentMeta(fp, childID); ok {
+				return meta, keyFor(meta, e.Name(), childID), true
+			}
+			if fileMentions(fp, childID) {
+				return subagentMeta{}, e.Name(), true
+			}
 		}
 	}
-	return false
+	return subagentMeta{}, "", false
+}
+
+// keyFor picks the most specific stable identifier available for the task
+// checkpoint key: the recorded subagent ID, else the entry directory name,
+// else the child session ID.
+func keyFor(meta subagentMeta, entryName, childID string) string {
+	if meta.SubagentID != "" {
+		return meta.SubagentID
+	}
+	if entryName != "" {
+		return entryName
+	}
+	return childID
+}
+
+// readSubagentMeta parses path as subagent metadata and reports whether it
+// names childID as its child. An exact childSessionId match is required, so a
+// file describing a different subagent never matches.
+func readSubagentMeta(path, childID string) (subagentMeta, bool) {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() || info.Size() > maxSubagentMetaSize {
+		return subagentMeta{}, false
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // path built from Grok's own session tree
+	if err != nil {
+		return subagentMeta{}, false
+	}
+	var meta subagentMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return subagentMeta{}, false
+	}
+	if meta.ChildSessionID != childID {
+		return subagentMeta{}, false
+	}
+	return meta, true
 }
 
 // maxSubagentMetaSize bounds how much of a metadata file is read. These are
