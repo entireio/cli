@@ -35,7 +35,9 @@ var newCrossRepoReader = func(ctx context.Context, insecureHTTP bool, owner, rep
 	// would be asked about an id it has never seen and answer 404.
 	placement, err := resolveRepoCellPlacement(ctx, owner, repo)
 	if err != nil {
-		return nil, fmt.Errorf("resolve %s: %w", ownerRepo, err)
+		// Not wrapped with ownerRepo: resolveRepoCellPlacement already names it,
+		// and adding it here is what made this path print the repo twice.
+		return nil, err
 	}
 	client, err := auth.NewEntireAPICellClient(ctx, insecureHTTP, placement.Target)
 	if err != nil {
@@ -166,6 +168,9 @@ func runCrossRepoExplain(ctx context.Context, w, errW io.Writer, opts crossRepoE
 
 	reader, err := newCrossRepoReader(ctx, opts.insecureHTTP, owner, repoName)
 	if err != nil {
+		if rendered := renderRepoNotOnboarded(errW, ownerRepo, err); rendered != nil {
+			return rendered
+		}
 		return err
 	}
 	// Marked for the renderers: a foreign checkpoint cannot be written to, so

@@ -229,6 +229,20 @@ type TranscriptPreparer interface {
 	PrepareTranscript(ctx context.Context, sessionRef string) error
 }
 
+// TranscriptFetcher is implemented by agents that can materialize a session
+// transcript on demand (e.g. OpenCode via `opencode export`), including for
+// sessions Entire never tracked — where no hook-cached transcript file exists
+// (e.g. sessions spawned by an external host rather than a hooked terminal).
+// TranscriptPreparer, by contrast, only refreshes an already-existing file.
+type TranscriptFetcher interface {
+	Agent
+
+	// FetchTranscript writes the session's transcript to the agent's cache
+	// location and returns its path. Errors may be shown to users after other
+	// transcript sources fail, so they must be concise and safe to display.
+	FetchTranscript(ctx context.Context, sessionID string) (string, error)
+}
+
 // SidecarImageProvider is implemented by agents that keep images OUTSIDE the
 // transcript Entire condenses — e.g. Cursor stores pasted images in a per-session
 // SQLite blob store, not the JSONL transcript. The strategy layer calls this
@@ -393,8 +407,9 @@ type HookResponseWriter interface {
 // Declaring a budget makes Entire stop itself just short of that ceiling rather
 // than being killed mid-write: the session is marked ENDED first (a single
 // atomic state-file rename), and only the eager condense — which is fail-open
-// and retried by PostCommit — runs against the remaining budget. Agents whose
-// session-end hook has a normal timeout should not implement this.
+// — runs against the remaining budget. PostCommit handles sessions with pending
+// files; doctor retries no-file ENDED sessions. Agents whose session-end hook
+// has a normal timeout should not implement this.
 type SessionEndBudgeter interface {
 	Agent
 

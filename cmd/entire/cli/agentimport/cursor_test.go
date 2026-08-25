@@ -95,7 +95,7 @@ func TestCursorSplitTurns_TwoPromptsNoTokensNoModel(t *testing.T) {
 	full := []byte(strings.Join([]string{
 		`{"role":"user","message":{"role":"user","content":"first"}}`,
 		`{"role":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}`,
-		`{"role":"user","message":{"role":"user","content":"second"}}`,
+		`{"role":"user","message":{"role":"user","content":"<timestamp>Tuesday, Aug 18, 2026, 2:37 PM</timestamp>\n<user_query>\nsecond\n</user_query>"}}`,
 	}, "\n") + "\n")
 	// Write the transcript so the importer's modtime CreatedAt fallback has a
 	// real file to stat.

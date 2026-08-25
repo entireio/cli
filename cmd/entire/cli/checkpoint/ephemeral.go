@@ -17,6 +17,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -936,7 +937,7 @@ func (s *ephemeralStore) buildTreeWithChanges(
 		if relErr != nil {
 			logInvalidGitTreePath(ctx, "add metadata directory", metadataDir, relErr)
 		} else {
-			metaChanges, metaErr := addDirectoryToChanges(ctx, s.repo, metadataDirAbs, metadataRel)
+			metaChanges, metaErr := addDirectoryToChanges(ctx, s.repo, repoRedactCache(ctx, s.repo), metadataDirAbs, metadataRel)
 			if metaErr != nil {
 				return plumbing.ZeroHash, fmt.Errorf("failed to add metadata directory: %w", metaErr)
 			}
@@ -1050,7 +1051,7 @@ type treeNode struct {
 // addDirectoryToChanges walks a filesystem directory and returns TreeChange entries
 // for each file, suitable for use with ApplyTreeChanges.
 // dirPathAbs is the absolute filesystem path; dirPathRel is the git tree-relative path.
-func addDirectoryToChanges(ctx context.Context, repo *git.Repository, dirPathAbs, dirPathRel string) ([]TreeChange, error) {
+func addDirectoryToChanges(ctx context.Context, repo *git.Repository, cache *redactCache, dirPathAbs, dirPathRel string) ([]TreeChange, error) {
 	var changes []TreeChange
 	err := filepath.Walk(dirPathAbs, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -1089,7 +1090,7 @@ func addDirectoryToChanges(ctx context.Context, repo *git.Repository, dirPathAbs
 
 		treePath := filepath.ToSlash(filepath.Join(dirPathRel, relWithinDir))
 
-		blobHash, mode, blobErr := createRedactedBlobFromFile(ctx, repo, path, treePath)
+		blobHash, mode, blobErr := createRedactedBlobFromFile(ctx, repo, cache, path, treePath)
 		if blobErr != nil {
 			return fmt.Errorf("failed to create blob for %s: %w", path, blobErr)
 		}
@@ -1326,6 +1327,28 @@ func isProtectedCheckpointPath(relPath string) bool {
 	return false
 }
 
+// gitStatusBudget bounds the first-checkpoint `git status` subprocess in
+// collectChangedFiles. A var rather than a direct use of the const so tests
+// can shrink it to force the breach path without a multi-million-file fixture.
+//
+// Deliberately independent of the go-git walk's breach latch: after a turn's
+// go-git walk breached, this subprocess still gets its own full budget rather
+// than failing fast. C git is typically orders of magnitude faster and honors
+// ignore files, so it often produces a real first checkpoint where the go-git
+// walk could not — and unlike the walk it is reliably killed on expiry, so the
+// worst case is the two budgets stacking to ~40s of the agent's ~60s hook
+// timeout (the hook still exits with degradation), never a zombie.
+var gitStatusBudget = gitrepo.StatusWalkBudget
+
+// SetGitStatusBudgetForTesting overrides the first-checkpoint git-status
+// budget so lifecycle tests can exercise the save-breach degrade path; the
+// returned func restores the real budget.
+func SetGitStatusBudgetForTesting(budget time.Duration) (restore func()) {
+	orig := gitStatusBudget
+	gitStatusBudget = budget
+	return func() { gitStatusBudget = orig }
+}
+
 // collectChangedFiles returns all changed files from git status for the first checkpoint.
 //
 // For the first checkpoint, we need to capture:
@@ -1345,14 +1368,29 @@ func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFile
 	}
 	repoRoot := wt.Filesystem().Root()
 
+	// Bound the subprocess with the shared status budget: this runs on the
+	// agent-hook first-checkpoint path, and on a pathological worktree an
+	// undeadlined C git can outlive the agent's ~60s hook timeout just like
+	// the go-git walk StatusWithBudget bounds — leaving the hook process
+	// stuck in a child git instead of a goroutine. CommandContext kills the
+	// child on expiry, so nothing survives the breach.
+	statusCtx, cancel := context.WithTimeout(ctx, gitStatusBudget)
+	defer cancel()
+
 	// Use -z for NUL-separated output (handles quoted filenames with spaces/special chars)
 	// Use -uall to list individual untracked files instead of collapsed directories.
 	// Note: CLAUDE.md warns against -uall for user-facing display, but we need the full list
 	// for checkpointing.
-	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain", "-z", "-uall")
+	cmd := exec.CommandContext(statusCtx, "git", "status", "--porcelain", "-z", "-uall")
 	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {
+		if errors.Is(statusCtx.Err(), context.DeadlineExceeded) {
+			// Wrap the shared sentinel so hook callers' warn-and-skip degrade
+			// paths recognize the breach and never fail the hook on it.
+			return changedFilesResult{}, fmt.Errorf("git status in %s exceeded budget %s: %w",
+				repoRoot, gitStatusBudget, gitrepo.ErrStatusBudgetExceeded)
+		}
 		return changedFilesResult{}, fmt.Errorf("failed to get git status in %s: %w", repoRoot, err)
 	}
 

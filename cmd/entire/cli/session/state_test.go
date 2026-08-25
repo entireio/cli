@@ -9,10 +9,92 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Regression: a test missing repo isolation once wrote fixture session states
+// (sessC and friends) into the developer's real .git/entire-sessions via the
+// CWD-resolved store, and a leaked fixture then hijacked commit-to-session
+// linking, producing a dangling Entire-Checkpoint trailer. Under `go test`,
+// a CWD-resolved store outside the temp root must refuse to open.
+func TestNewStateStore_RefusesRealRepoUnderGoTest(t *testing.T) {
+	// Deliberately NO t.Chdir: the test process's cwd is the package source
+	// dir inside the real repository — exactly the leak shape.
+	_, err := NewStateStore(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "isolation", "the error must tell the test author what to fix")
+}
+
+// Not parallel: uses t.Chdir()
+func TestNewStateStore_AllowsTempRepoUnderGoTest(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	ClearGitCommonDirCache()
+	t.Cleanup(ClearGitCommonDirCache)
+
+	store, err := NewStateStore(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, store)
+}
+
+// NewStateStoreForWorktree scopes the store to the repo being operated on,
+// for callers (like agent import) that take a target repo as an argument and
+// must not write session state wherever the process happens to be running.
+func TestNewStateStoreForWorktree_ScopesToGivenRepo(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+
+	store, err := NewStateStoreForWorktree(context.Background(), dir)
+	require.NoError(t, err)
+
+	state := &State{SessionID: "scoped-store-test", Kind: KindImported}
+	require.NoError(t, store.Save(context.Background(), state))
+	if _, statErr := os.Stat(filepath.Join(dir, ".git", SessionStateDirName, "scoped-store-test.json")); statErr != nil {
+		t.Fatalf("session state must land in the given repo's git dir: %v", statErr)
+	}
+}
+
+// The explicit-root constructor is guarded too: a test that computes its
+// "explicit" root from the process CWD is just as accidental as the CWD
+// itself, and would recreate the fixture leak through the new front door.
+// An empty root must also refuse rather than silently degrading to CWD.
+func TestNewStateStoreForWorktree_RefusesUnisolatedAndEmptyRoots(t *testing.T) {
+	t.Parallel()
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	_, err = NewStateStoreForWorktree(context.Background(), cwd)
+	require.Error(t, err, "the real repo the tests run from must be refused under go test")
+
+	_, err = NewStateStoreForWorktree(context.Background(), "")
+	require.Error(t, err, "an empty root silently resolves from CWD — the exact leak shape")
+}
+
+func TestState_CondensationAttemptLifecycle(t *testing.T) {
+	t.Parallel()
+
+	state := &State{}
+	checkpointID := id.MustCheckpointID("111111111111")
+
+	require.True(t, state.PendingCondensationID().IsEmpty())
+	require.False(t, state.NeedsCondensationRecovery())
+
+	state.BeginCondensationAttempt(checkpointID)
+	require.Equal(t, checkpointID, state.PendingCondensationID())
+	require.False(t, state.NeedsCondensationRecovery())
+
+	state.RequireCondensationRecovery()
+	require.True(t, state.NeedsCondensationRecovery())
+
+	state.ClearCondensationAttempt()
+	require.True(t, state.PendingCondensationID().IsEmpty())
+	require.False(t, state.NeedsCondensationRecovery())
+}
 
 func TestState_NormalizeAfterLoad(t *testing.T) {
 	t.Parallel()
@@ -750,4 +832,206 @@ func TestState_InvestigateRoundTrip(t *testing.T) {
 			t.Errorf("expected zero-value State to omit %q, got %s", key, zs)
 		}
 	}
+}
+
+// TestState_TaskRecords_RoundTrip pins the JSON wire format for the durable
+// task record ledger, including the fields added for #2058's pointer model
+// (DeclaredTranscriptPath, Files, TokenUsage, CompletedAt) and the renamed
+// "task_records" json key. Regression this guards: without a persisted record
+// of a dispatched subagent, the launch-time post-task hook (which fires at
+// the launch stub, seconds before any real work happens) has no way to defer
+// capture to SubagentStop — the record is the only memory that background
+// work is still outstanding, and it must also survive completion (unlike the
+// prior claim-and-remove model) so a later condensation can materialize it.
+func TestState_TaskRecords_RoundTrip(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC().Truncate(time.Second)
+	completedAt := now.Add(time.Minute)
+	s := State{
+		SessionID:  "2026-04-20-uuid",
+		BaseCommit: "abc",
+		StartedAt:  now,
+		TaskRecords: []TaskRecord{
+			{
+				ToolUseID:              "toolu_01X",
+				AgentID:                "a123",
+				StartedAt:              now,
+				SubagentType:           "code-reviewer",
+				TaskDescription:        "Review the diff",
+				DeclaredTranscriptPath: "/tmp/agent-a123.jsonl",
+				Files:                  []string{"foo.go", "bar.go"},
+				TokenUsage:             &agent.TokenUsage{InputTokens: 100, OutputTokens: 50},
+				CompletedAt:            completedAt,
+			},
+		},
+	}
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"task_records"`) {
+		t.Fatalf("expected json to use the task_records key, got %s", data)
+	}
+	if strings.Contains(string(data), `"in_flight_tasks"`) {
+		t.Fatalf("expected the legacy in_flight_tasks key to be gone, got %s", data)
+	}
+
+	var got State
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	require.Len(t, got.TaskRecords, 1)
+	record := got.TaskRecords[0]
+	assert.Equal(t, "toolu_01X", record.ToolUseID)
+	assert.Equal(t, "a123", record.AgentID)
+	assert.True(t, now.Equal(record.StartedAt))
+	assert.Equal(t, "code-reviewer", record.SubagentType)
+	assert.Equal(t, "Review the diff", record.TaskDescription)
+	assert.Equal(t, "/tmp/agent-a123.jsonl", record.DeclaredTranscriptPath)
+	assert.Equal(t, []string{"foo.go", "bar.go"}, record.Files)
+	require.NotNil(t, record.TokenUsage)
+	assert.Equal(t, 100, record.TokenUsage.InputTokens)
+	assert.Equal(t, 50, record.TokenUsage.OutputTokens)
+	assert.True(t, completedAt.Equal(record.CompletedAt))
+
+	// Zero-value: an empty task record list must be omitted entirely, not
+	// serialized as "task_records":[] or ":null".
+	zero := State{SessionID: "x", BaseCommit: "y", StartedAt: now}
+	zb, err := json.Marshal(zero)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(zb), `"task_records"`) {
+		t.Errorf("expected zero-value State to omit task_records, got %s", zb)
+	}
+}
+
+// TestState_AddTaskRecord_DedupByToolUseID pins that a duplicate launch event
+// for the same Task tool invocation replaces the existing record instead of
+// accumulating a second one. Regression this guards: without dedup, a
+// retried/duplicate PostToolUse for the same tool_use_id would leave two
+// records, and RemoveTaskRecord (which removes only the first match) would
+// leak a stale entry behind.
+func TestState_AddTaskRecord_DedupByToolUseID(t *testing.T) {
+	t.Parallel()
+	s := &State{}
+	first := time.Now().UTC()
+	s.AddTaskRecord(TaskRecord{ToolUseID: "toolu_1", AgentID: "a1", StartedAt: first})
+	require.Len(t, s.TaskRecords, 1)
+
+	second := first.Add(time.Minute)
+	s.AddTaskRecord(TaskRecord{ToolUseID: "toolu_1", AgentID: "a1-retry", StartedAt: second})
+	require.Len(t, s.TaskRecords, 1, "duplicate ToolUseID must replace, not append")
+	assert.Equal(t, "a1-retry", s.TaskRecords[0].AgentID)
+	assert.True(t, second.Equal(s.TaskRecords[0].StartedAt))
+
+	// A different ToolUseID does get appended.
+	s.AddTaskRecord(TaskRecord{ToolUseID: "toolu_2", StartedAt: second})
+	require.Len(t, s.TaskRecords, 2)
+}
+
+// TestState_TaskRecordAccessors pins Remove/Find record semantics: Remove
+// clears only the matching record; Find returns the record by reference (the
+// Final-path handler reads its launch-recorded label without copying). Both
+// treat an unknown ToolUseID safely — no-op / nil, not a panic — the
+// foreground-task / double-fire "no record" case the Final-path dedup relies
+// on. RemoveTaskRecord itself is no longer on the ordinary completion path
+// (CompleteTaskRecord keeps the record for the materializer instead) but
+// stays covered since callers can still use it to discard a record outright.
+func TestState_TaskRecordAccessors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("find", func(t *testing.T) {
+		t.Parallel()
+		s := &State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1", SubagentType: "reviewer"}, {ToolUseID: "toolu_2", SubagentType: "dev"}}}
+
+		got := s.FindTaskRecord("toolu_2")
+		require.NotNil(t, got)
+		assert.Equal(t, "dev", got.SubagentType)
+
+		// Nil (not a panic) on a ToolUseID with no record.
+		assert.Nil(t, s.FindTaskRecord("does-not-exist"))
+	})
+
+	t.Run("remove", func(t *testing.T) {
+		t.Parallel()
+		s := &State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1"}, {ToolUseID: "toolu_2"}}}
+
+		s.RemoveTaskRecord("toolu_1")
+		require.Len(t, s.TaskRecords, 1)
+		assert.Equal(t, "toolu_2", s.TaskRecords[0].ToolUseID)
+
+		// No-op when the ToolUseID has no record.
+		s.RemoveTaskRecord("does-not-exist")
+		require.Len(t, s.TaskRecords, 1)
+
+		s.RemoveTaskRecord("toolu_2")
+		assert.Empty(t, s.TaskRecords)
+	})
+}
+
+// TestState_CompleteTaskRecord_ExactlyOnce pins CompleteTaskRecord's
+// exactly-once completion guard — the replacement for the old
+// claim-and-remove semantics, now that a completed record must persist for
+// the future condensation materializer rather than being deleted.
+// Regression this guards: two racing Final-path captures for the same
+// ToolUseID (a late SubagentStop arriving just as SessionEnd sweeps, or a
+// duplicate SubagentStop delivery) must capture exactly once. Note:
+// CompleteTaskRecord only sets CompletedAt — DeclaredTranscriptPath/Files/
+// TokenUsage are populated separately by the producer, via direct field
+// mutation on the claimed record within the same MutateSessionState closure
+// (see the type doc comment), so this test does not exercise those fields.
+func TestState_CompleteTaskRecord_ExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	t.Run("absent_record_is_a_noop", func(t *testing.T) {
+		t.Parallel()
+		s := &State{}
+		ok := s.CompleteTaskRecord("does-not-exist", time.Now())
+		assert.False(t, ok)
+	})
+
+	t.Run("first_completion_succeeds", func(t *testing.T) {
+		t.Parallel()
+		s := &State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1", StartedAt: time.Now()}}}
+		completedAt := time.Now().UTC().Truncate(time.Second)
+		ok := s.CompleteTaskRecord("toolu_1", completedAt)
+		require.True(t, ok)
+		require.Len(t, s.TaskRecords, 1, "completing a record must not remove it — it must persist for the materializer")
+		assert.True(t, completedAt.Equal(s.TaskRecords[0].CompletedAt))
+	})
+
+	t.Run("second_completion_is_rejected", func(t *testing.T) {
+		t.Parallel()
+		s := &State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1", StartedAt: time.Now()}}}
+		firstCompletedAt := time.Now().UTC().Truncate(time.Second)
+		require.True(t, s.CompleteTaskRecord("toolu_1", firstCompletedAt))
+
+		// A second completion attempt (the racing duplicate) must be rejected
+		// and must not move CompletedAt.
+		second := s.CompleteTaskRecord("toolu_1", firstCompletedAt.Add(time.Hour))
+		assert.False(t, second)
+		assert.True(t, firstCompletedAt.Equal(s.TaskRecords[0].CompletedAt), "a rejected second completion must not move CompletedAt")
+	})
+}
+
+// TestState_LiveTaskRecords pins that LiveTaskRecords filters to records with
+// a zero CompletedAt. Regression this guards: since CompleteTaskRecord no
+// longer removes a record, code that used to treat "any InFlightTasks
+// present" as "any task still running" must filter for liveness explicitly,
+// or a completed-but-not-yet-materialized record would look like live
+// in-flight work forever.
+func TestState_LiveTaskRecords(t *testing.T) {
+	t.Parallel()
+	s := &State{
+		TaskRecords: []TaskRecord{
+			{ToolUseID: "toolu_live", StartedAt: time.Now()},
+			{ToolUseID: "toolu_done", StartedAt: time.Now(), CompletedAt: time.Now()},
+		},
+	}
+	live := s.LiveTaskRecords()
+	require.Len(t, live, 1)
+	assert.Equal(t, "toolu_live", live[0].ToolUseID)
+
+	assert.Empty(t, (&State{}).LiveTaskRecords())
 }

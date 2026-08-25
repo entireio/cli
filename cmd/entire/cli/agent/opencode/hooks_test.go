@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -94,7 +95,7 @@ func TestInstallHooks_SessionStartIsGuardedBySessionSwitch(t *testing.T) {
 
 	content := string(data)
 	guard := "if (resetSessionTracking(session.id)) {"
-	hook := `const proc = Bun.spawn(hookCmd("session-start"), {`
+	hook := `await callHook("session-start", {`
 
 	guardIdx := strings.Index(content, guard)
 	hookIdx := strings.Index(content, hook)
@@ -103,7 +104,7 @@ func TestInstallHooks_SessionStartIsGuardedBySessionSwitch(t *testing.T) {
 		t.Fatalf("plugin file missing guard %q", guard)
 	}
 	if hookIdx == -1 {
-		t.Fatalf("plugin file missing session-start hook spawn %q", hook)
+		t.Fatalf("plugin file missing session-start hook call %q", hook)
 	}
 	if guardIdx >= hookIdx {
 		t.Fatalf("expected guarded session-start call after guard, got guard=%d hook=%d",
@@ -111,6 +112,12 @@ func TestInstallHooks_SessionStartIsGuardedBySessionSwitch(t *testing.T) {
 	}
 	if !strings.Contains(content, `if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks opencode ${hookName}`) {
 		t.Fatal("plugin file missing silent production hook command")
+	}
+	if strings.Contains(content, "Bun.spawn") || strings.Contains(content, "Bun.spawnSync") {
+		t.Fatal("plugin must not call Bun globals — Desktop runs the server on Node (#2014)")
+	}
+	if !strings.Contains(content, `from "node:child_process"`) {
+		t.Fatal("plugin should spawn hooks via node:child_process")
 	}
 }
 
@@ -131,13 +138,16 @@ func TestInstallHooks_TurnStartUsesSyncHook(t *testing.T) {
 
 	content := string(data)
 	// turn-start is dispatched via fireTurnStart, which fires synchronously
-	// (Bun.spawnSync) so session state is ready before any mid-turn commit, and
+	// (spawnSync) so session state is ready before any mid-turn commit, and
 	// also captures the hook's stdout to apply Entire's one-time context injection.
 	if !strings.Contains(content, `fireTurnStart({`) {
 		t.Fatal("plugin file should dispatch turn-start via fireTurnStart")
 	}
-	if !strings.Contains(content, `const proc = Bun.spawnSync(hookCmd("turn-start"), {`) {
-		t.Fatal("fireTurnStart should dispatch turn-start synchronously via Bun.spawnSync")
+	if !strings.Contains(content, `spawnSync(cmd, args, {`) {
+		t.Fatal("fireTurnStart should dispatch turn-start synchronously via spawnSync")
+	}
+	if !strings.Contains(content, `hookCmd("turn-start")`) {
+		t.Fatal("fireTurnStart should invoke the turn-start hook")
 	}
 	if strings.Contains(content, `await callHook("turn-start", {`) {
 		t.Fatal("plugin file should not dispatch turn-start via async callHook")
@@ -427,6 +437,88 @@ func TestCheckHookConfig(t *testing.T) {
 func TestCommittedDogfoodPluginIsCurrent(t *testing.T) {
 	t.Parallel()
 	testutil.AssertCommittedDogfoodFile(t, ".opencode/plugins/entire.ts", renderPlugin())
+}
+
+// TestPlugin_SpawnsHooksUnderNode is the #2014 canary: load the installed plugin
+// under Node (Desktop's runtime) and assert hooks actually spawn. Covers both
+// async spawn (session-start via session.created) and sync spawnSync (turn-end
+// via session.status). Before the child_process fix this threw
+// ReferenceError: Bun is not defined inside a swallowed catch, so hooks
+// silently never ran.
+func TestPlugin_SpawnsHooksUnderNode(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not installed")
+	}
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	ag := &OpenCodeAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	pluginPath, err := filepath.Abs(filepath.Join(dir, ".opencode", "plugins", "entire.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markerPath := filepath.Join(dir, "hook-ran.txt")
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Fake `entire` on PATH: record the hook name and drain stdin.
+	fakeEntire := filepath.Join(binDir, "entire")
+	script := "#!/bin/sh\n" +
+		"echo \"$3\" >> " + markerPath + "\n" +
+		"cat >/dev/null\n"
+	if err := os.WriteFile(fakeEntire, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	driverPath := filepath.Join(dir, "canary.mjs")
+	driver := `
+import { pathToFileURL } from "node:url"
+
+const pluginPath = process.argv[2]
+const { EntirePlugin } = await import(pathToFileURL(pluginPath).href)
+const handlers = await EntirePlugin({ directory: process.cwd() })
+await handlers.event({
+  event: {
+    type: "session.created",
+    properties: { info: { id: "sess-canary" } },
+  },
+})
+await handlers.event({
+  event: {
+    type: "session.status",
+    properties: { status: { type: "idle" }, sessionID: "sess-canary" },
+  },
+})
+`
+	if err := os.WriteFile(driverPath, []byte(driver), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.CommandContext(t.Context(), "node", "--experimental-strip-types", driverPath, pluginPath)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("node canary failed: %v\n%s", err, out)
+	}
+
+	got, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("hook never spawned (marker missing): %v\nnode output:\n%s", err, out)
+	}
+	marker := string(got)
+	if !strings.Contains(marker, "session-start") {
+		t.Fatalf("expected session-start (async spawn) in marker, got %q\nnode output:\n%s", marker, out)
+	}
+	if !strings.Contains(marker, "turn-end") {
+		t.Fatalf("expected turn-end (sync spawnSync) in marker, got %q\nnode output:\n%s", marker, out)
+	}
 }
 
 // legacyLocalDevRender reproduces the plugin the removed local-dev mode wrote: the
