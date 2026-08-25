@@ -1497,6 +1497,12 @@ func SessionMetadataPath(checkpointID string) string {
 	return SessionFilePath(checkpointID, paths.MetadataFileName)
 }
 
+// CheckpointTaskFilePath returns the path to a materialized subagent task file
+// under a checkpoint's tasks/<tool-use-id>/ subtree.
+func CheckpointTaskFilePath(checkpointID, toolUseID, fileName string) string {
+	return id.CheckpointID(checkpointID).Path() + "/tasks/" + toolUseID + "/" + fileName
+}
+
 // CheckpointValidation contains expected values for checkpoint validation.
 type CheckpointValidation struct {
 	// CheckpointID is the expected checkpoint ID

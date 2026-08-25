@@ -11,6 +11,9 @@ import (
 const (
 	testSettingsEnabled  = `{"enabled": true}`
 	testSettingsDisabled = `{"enabled": false}`
+	// testSettingsGoredactOnly enables goredact and disables betterleaks — the
+	// non-default secret-scanner selection used across status scanner tests.
+	testSettingsGoredactOnly = `{"enabled": true, "redaction": {"betterleaks": {"enabled": false}, "goredact": {"enabled": true}}}`
 )
 
 func TestLoadEntireSettings_EnabledDefaultsToTrue(t *testing.T) {

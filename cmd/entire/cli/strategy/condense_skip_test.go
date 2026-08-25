@@ -447,6 +447,107 @@ func TestTryAgentCommitFastPath_SkipsEmptyButAcceptsContentSession(t *testing.T)
 	assert.Contains(t, string(content), "Entire-Checkpoint", "should add trailer from the content session")
 }
 
+// TestTryAgentCommitFastPath_IdleTaskRecordEligibility covers the idle+record
+// eligibility regressions in one table: an IDLE session links only with a
+// fresh task record (the incident fix — six of seven commits on a real
+// subagent-driven branch went unlinked under the old ACTIVE-only gate), while
+// no-record idle, ENDED-with-record, and stale-record sessions all decline.
+func TestTryAgentCommitFastPath_IdleTaskRecordEligibility(t *testing.T) {
+	freshRecord := []session.TaskRecord{
+		{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now()},
+	}
+	staleRecord := []session.TaskRecord{
+		{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now().Add(-25 * time.Hour)},
+	}
+	completedRecord := []session.TaskRecord{
+		{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now(), CompletedAt: time.Now()},
+	}
+	boundaryRecord := []session.TaskRecord{
+		{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now().Add(-activeSessionInteractionThreshold)},
+	}
+	tests := []struct {
+		name        string
+		phase       session.Phase
+		taskRecords []session.TaskRecord
+		wantLinked  bool
+	}{
+		{
+			// An idle session with a fresh task record must take the fast path.
+			name:        "AcceptsIdleSessionWithTaskRecord",
+			phase:       session.PhaseIdle,
+			taskRecords: freshRecord,
+			wantLinked:  true,
+		},
+		{
+			// A completed record is still unmaterialized until the next
+			// condensation, so it links exactly like an in-flight one.
+			name:        "AcceptsIdleSessionWithCompletedTaskRecord",
+			phase:       session.PhaseIdle,
+			taskRecords: completedRecord,
+			wantLinked:  true,
+		},
+		{
+			// An idle session with no records is an ordinary post-turn commit
+			// and must stay unlinked.
+			name:       "DeclinesIdleSessionWithoutTaskRecords",
+			phase:      session.PhaseIdle,
+			wantLinked: false,
+		},
+		{
+			// An ENDED session's records belong to its own final condensation,
+			// not this fast path.
+			name:        "DeclinesEndedSessionWithTaskRecord",
+			phase:       session.PhaseEnded,
+			taskRecords: freshRecord,
+			wantLinked:  false,
+		},
+		{
+			// A record older than idleWithTaskContent's 24h freshness bound
+			// must not confer linkage forever.
+			name:        "DeclinesIdleSessionWithStaleTaskRecord",
+			phase:       session.PhaseIdle,
+			taskRecords: staleRecord,
+			wantLinked:  false,
+		},
+		{
+			// The bound is exclusive: a record exactly at 24h is already out.
+			name:        "DeclinesIdleSessionAtFreshnessBoundary",
+			phase:       session.PhaseIdle,
+			taskRecords: boundaryRecord,
+			wantLinked:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := setupGitRepo(t)
+			t.Chdir(dir)
+
+			s := &ManualCommitStrategy{}
+			commitMsgFile := filepath.Join(dir, "COMMIT_EDITMSG")
+			require.NoError(t, os.WriteFile(commitMsgFile, []byte("test commit\n"), 0o644))
+
+			state := &SessionState{
+				SessionID:      "claude-session",
+				AgentType:      "Claude Code",
+				Phase:          tt.phase,
+				TranscriptPath: "/some/path/to/transcript.jsonl",
+				TaskRecords:    tt.taskRecords,
+			}
+
+			result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{state}, "message")
+			assert.Equal(t, tt.wantLinked, result, "fast path taken")
+
+			content, err := os.ReadFile(commitMsgFile)
+			require.NoError(t, err)
+			if tt.wantLinked {
+				assert.Contains(t, string(content), "Entire-Checkpoint")
+			} else {
+				assert.NotContains(t, string(content), "Entire-Checkpoint")
+			}
+		})
+	}
+}
+
 // getHeadHash returns the HEAD commit hash as a string.
 func getHeadHash(t *testing.T, repo *git.Repository) string {
 	t.Helper()

@@ -97,7 +97,9 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 
 	slugs, allRepos := cfg.ScopeSlugs()
 	var cells []cellGroup
+	var skipped []string
 	var warnings []string
+	indexTruncated := false
 	scoped := !allRepos
 	if scoped {
 		if len(slugs) == 0 {
@@ -107,7 +109,9 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 		if err != nil {
 			return nil, err
 		}
-		cells = groupReposByCell(entries)
+		// Scoped requests pin the picked placement's ULID (repoIDs below),
+		// which query-serve resolves from its all-accessible byID set.
+		cells, skipped = groupReposByCell(entries)
 	} else {
 		index, err := s.listFullIndex(ctx)
 		if err != nil {
@@ -116,15 +120,41 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 		if index.Truncated {
 			// Debug, not Warn: the user-facing channel is the Warnings entry;
 			// slog's default handler would print a Warn straight to stderr on
-			// commands that never ran logging.Init.
+			// commands whose context carries no logger.
 			logging.Debug(ctx, "semantic search: repo index truncated; cross-repo results may be incomplete")
 			warnings = append(warnings, "repo index truncated; cross-repo results may be incomplete")
+			indexTruncated = true
 		}
-		cells = groupReposByCell(index.Repos)
+		// Broad requests send no repo pins; query-serve narrows pin-less
+		// scope by the same election routedRepoPlacement picks by (ENT-1776),
+		// so one grouping serves both request shapes.
+		cells, skipped = groupReposByCell(index.Repos)
 	}
+	skipped = reportableSkippedRepos(ctx, scoped, len(cells), skipped)
+	if len(skipped) > 0 {
+		warnings = append(warnings, fmt.Sprintf("skipped %d repo(s) with no searchable placement (missing or not ready): %s", len(skipped), strings.Join(skipped, ", ")))
+	}
+	// The BFF's scope-loss channels (search.ts): a truncated repo index means
+	// broad coverage silently misses repos; an explicitly-filtered repo
+	// skipped as not-ready narrows the promised scope. Unfiltered skips stay
+	// silent — nothing advertised was narrowed.
+	scopeNarrowed := scoped && len(skipped) > 0
 
 	if len(cells) == 0 {
-		return &search.Response{Results: []search.Result{}, Page: 1, Warnings: warnings}, nil
+		resp := &search.Response{Results: []search.Result{}, Page: 1, Warnings: warnings, Counts: &search.TypeCounts{}}
+		if indexTruncated {
+			// Every facet count is a lower bound, not an exact zero — same
+			// contract as the BFF's zero-routable-cells answer.
+			resp.Truncated = true
+			resp.CountsLowerBound = map[string]bool{
+				facetRepos: true, facetCheckpoints: true, facetCommits: true, facetPRs: true, facetSessions: true,
+			}
+		}
+		if indexTruncated || scopeNarrowed {
+			resp.Partial = true
+			resp.CoverageIncomplete = true
+		}
+		return resp, nil
 	}
 	resolveCellBaseURLs(ctx, s.clusterClient(coreClient), cells)
 
@@ -151,6 +181,13 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 		return nil, err
 	}
 	resp.Warnings = append(warnings, resp.Warnings...)
+	if indexTruncated {
+		resp.Truncated = true
+	}
+	if indexTruncated || scopeNarrowed {
+		resp.Partial = true
+		resp.CoverageIncomplete = true
+	}
 	return resp, nil
 }
 
@@ -298,12 +335,8 @@ func (c *cachedClusterClient) ListRepos(ctx context.Context, params coreapi.List
 	return c.inner.ListRepos(ctx, params) //nolint:wrapcheck // transparent delegation
 }
 
-// mergedTier2Max mirrors query-serve's maxTier2 and the BFF's MERGED_TIER2_MAX:
-// the ANN-only fallback tail is capped when it's all there is.
-const mergedTier2Max = 15
-
-// tierOf returns a result's tier, or -1 when unset (treated as the ANN-only
-// fallback tier).
+// tierOf returns a result's tier, or -1 when unset (dropped by the merge,
+// like every tier outside 0/1 — see rankSemanticResults).
 func tierOf(r search.Result) int {
 	if r.Meta.Tier == nil {
 		return -1
@@ -328,21 +361,9 @@ func rerankOf(r search.Result) float64 {
 	return 0
 }
 
-// annOrScoreOf prefers the raw ANN score, falling back to the overall score —
-// the ordering key query-serve/BFF use for the tier-2 ANN fallback (for
-// tier-2 rows Score is itself ANN-derived, so lower is better in both cases).
-func annOrScoreOf(r search.Result) float64 {
-	if r.Meta.ANNScore != nil {
-		return *r.Meta.ANNScore
-	}
-	return r.Meta.Score
-}
-
-// semanticCellPage is one cell's successful response plus the classification
-// bit the merge keys on.
+// semanticCellPage is one cell's successful response.
 type semanticCellPage struct {
-	body     *search.Response
-	hasUpper bool // any non-repo tier-0/1 row
+	body *search.Response
 }
 
 // classifySemanticCells splits per-cell outcomes into successful pages, hard
@@ -367,16 +388,7 @@ func classifySemanticCells(ctx context.Context, results []cellCallResult[*search
 			lastErr = r.err
 			failed = append(failed, r.group.label())
 		case r.value != nil:
-			p := semanticCellPage{body: r.value}
-			for _, res := range r.value.Results {
-				// Repo rows never count as an upper tier — they're always
-				// merged regardless of the cell's checkpoint/commit tiers.
-				if res.Type != search.TypeRepo && (tierOf(res) == 0 || tierOf(res) == 1) {
-					p.hasUpper = true
-					break
-				}
-			}
-			pages = append(pages, p)
+			pages = append(pages, semanticCellPage{body: r.value})
 		}
 	}
 	if len(skipped) > 0 {
@@ -419,24 +431,17 @@ type tier0Row struct {
 }
 
 // rankSemanticResults buckets every page's rows and applies the SAME ordering
-// the BFF's cross-cell merge uses (searcher.go / routes/search.ts): repos
-// first, then tier 0 and tier 1 EACH by rerank score desc (ENT-1425/ENT-1431),
-// then promoted tier-2 by ANN asc. Ordering by rerank score — not BM25 or the
-// per-namespace retrieval Score — is what keeps the CLI in parity with the web:
-// query-serve documents that Score "is not the field results are ordered by …
-// sorting by it undoes reranking." Tier-2 rows arriving alongside tier 0/1 from
-// the same cell were deliberately promoted by query-serve; a cell whose page is
-// entirely tier 2 had nothing better — its ANN fallback, shown (uncapped here)
-// only when tiers 0/1 are empty everywhere.
-func rankSemanticResults(pages []semanticCellPage) (merged []search.Result, globalUpper bool) {
-	for _, p := range pages {
-		if p.hasUpper {
-			globalUpper = true
-			break
-		}
-	}
-
-	var repos, tier1, promotedTier2, fallbackTier2 []search.Result
+// the BFF's cross-cell merge uses (see the ordering contract on
+// mergeSemanticV4Responses): repos first by retrieval score desc, then tier 0
+// (sortTier0Rows), then tier 1 by rerank desc with retrieval Score tiebreak.
+// Every other non-repo row — tier 2 (the retired ANN-only fallback, still
+// emitted by un-redeployed cells) and rows with no tier at all — is DROPPED,
+// exactly as the BFF drops them. Ordering by rerank score — not BM25 or the
+// per-namespace retrieval Score — is what keeps the CLI in parity with the
+// web: query-serve documents that Score "is not the field results are ordered
+// by … sorting by it undoes reranking."
+func rankSemanticResults(pages []semanticCellPage) (merged []search.Result) {
+	var repos, tier1 []search.Result
 	var tier0 []tier0Row
 	for _, p := range pages {
 		cellRank := 0
@@ -449,36 +454,25 @@ func rankSemanticResults(pages []semanticCellPage) (merged []search.Result, glob
 				cellRank++
 			case tierOf(r) == 1:
 				tier1 = append(tier1, r)
-			case p.hasUpper:
-				promotedTier2 = append(promotedTier2, r)
-			default:
-				fallbackTier2 = append(fallbackTier2, r)
 			}
 		}
 	}
 	sort.SliceStable(repos, func(i, j int) bool { return repos[i].Meta.Score > repos[j].Meta.Score })
 	merged = append(merged, repos...)
-	if globalUpper {
-		sortTier0Rows(tier0)
-		// Tier 1: rerank score decides, retrieval Score breaks ties. Rows whose
-		// cell fell back (no rerank score) sort last, matching the BFF.
-		sort.SliceStable(tier1, func(i, j int) bool {
-			if ri, rj := rerankOf(tier1[i]), rerankOf(tier1[j]); ri != rj {
-				return ri > rj
-			}
-			return tier1[i].Meta.Score > tier1[j].Meta.Score
-		})
-		sort.SliceStable(promotedTier2, func(i, j int) bool { return annOrScoreOf(promotedTier2[i]) < annOrScoreOf(promotedTier2[j]) })
-		for _, t := range tier0 {
-			merged = append(merged, t.r)
+	sortTier0Rows(tier0)
+	// Tier 1: rerank score decides, retrieval Score breaks ties. Rows whose
+	// cell fell back (no rerank score) sort last, matching the BFF.
+	sort.SliceStable(tier1, func(i, j int) bool {
+		if ri, rj := rerankOf(tier1[i]), rerankOf(tier1[j]); ri != rj {
+			return ri > rj
 		}
-		merged = append(merged, tier1...)
-		merged = append(merged, promotedTier2...)
-	} else {
-		sort.SliceStable(fallbackTier2, func(i, j int) bool { return annOrScoreOf(fallbackTier2[i]) < annOrScoreOf(fallbackTier2[j]) })
-		merged = append(merged, fallbackTier2...)
+		return tier1[i].Meta.Score > tier1[j].Meta.Score
+	})
+	for _, t := range tier0 {
+		merged = append(merged, t.r)
 	}
-	return merged, globalUpper
+	merged = append(merged, tier1...)
+	return merged
 }
 
 // sortTier0Rows orders the tier-0 band the way the BFF's sortTier0 does
@@ -514,15 +508,22 @@ func sortTier0Rows(tier0 []tier0Row) {
 	})
 }
 
-// dedupSemanticResults removes cross-cell duplicates by type+id (a repo
-// mirrored across cells returns the same logical result from each), keeping
-// the first (higher-ranked) copy. Results without an id are always kept. The
-// per-type dupe tally feeds the total/count corrections.
-func dedupSemanticResults(merged []search.Result) ([]search.Result, map[string]int) {
-	seen := make(map[string]bool, len(merged))
-	dupesByType := make(map[string]int)
+// dedupSemanticResults removes cross-cell duplicate SESSION rows, keeping the
+// first (higher-ranked) copy — the BFF's exact rule: sessions are the one type
+// that legitimately repeats across cells (a crosslinked session attached to
+// repos homed in different cells), while repo-bound types are canonical to one
+// cell since the fan-out routes each repo to its single home placement
+// (ENT-1672/ENT-1776). The key is the global session id when present, else the
+// repo-qualified carrier checkpoint (server-folded legacy rows, ENT-1595);
+// rows with neither are always kept.
+func dedupSemanticResults(merged []search.Result) []search.Result {
+	seen := make(map[string]bool)
 	deduped := merged[:0]
 	for _, r := range merged {
+		if r.Type != search.TypeSession {
+			deduped = append(deduped, r)
+			continue
+		}
 		id := r.DedupID()
 		if id == "" {
 			deduped = append(deduped, r)
@@ -530,67 +531,124 @@ func dedupSemanticResults(merged []search.Result) ([]search.Result, map[string]i
 		}
 		key := r.Type + "\x00" + id
 		if seen[key] {
-			dupesByType[r.Type]++
 			continue
 		}
 		seen[key] = true
 		deduped = append(deduped, r)
 	}
-	return deduped, dupesByType
+	return deduped
 }
 
-// aggregateSemanticTotals sums per-cell totals and counts, minus dedup, and
-// excluding cells whose entire page was a discarded ANN fallback — their
-// matches are unreachable, so they must not be advertised.
-func aggregateSemanticTotals(pages []semanticCellPage, globalUpper bool, dupesByType map[string]int) (int, *search.TypeCounts) {
-	dupes := 0
-	for _, n := range dupesByType {
-		dupes += n
+// Facet names for the wire maps (truncated_types / counts_lower_bound) — the
+// BFF's RESULT_TYPE_TO_FACET values.
+const (
+	facetRepos       = "repos"
+	facetCheckpoints = "checkpoints"
+	facetCommits     = "commits"
+	facetPRs         = "prs"
+	facetSessions    = "sessions"
+)
+
+// semanticFacetOf maps a wire result type to its counts/truncation facet name
+// (the BFF's RESULT_TYPE_TO_FACET). Unknown types have no facet: they are kept
+// in results, exempt from the per-type cap, and counted only in the total.
+func semanticFacetOf(typ string) (string, bool) {
+	switch typ {
+	case search.TypeRepo:
+		return facetRepos, true
+	case search.TypeCheckpoint:
+		return facetCheckpoints, true
+	case search.TypeCommit:
+		return facetCommits, true
+	case search.TypePR:
+		return facetPRs, true
+	case search.TypeSession:
+		return facetSessions, true
 	}
-	total := -dupes
-	counts := &search.TypeCounts{}
-	for _, p := range pages {
-		if globalUpper && !p.hasUpper {
-			// This page's non-repo rows were its ANN fallback and were
-			// dropped by the merge — those matches are unreachable, so only
-			// its repo rows (which are always merged) may be counted.
-			repoRows := 0
-			if p.body.Counts != nil {
-				repoRows = p.body.Counts.Repos
-			} else {
-				for _, r := range p.body.Results {
-					if r.Type == search.TypeRepo {
-						repoRows++
-					}
-				}
-			}
-			total += repoRows
-			counts.Repos += repoRows
+	return "", false
+}
+
+// capSemanticPerType applies the BFF's per-type window: walk the merged list
+// in order and keep at most `limit` rows of each facet, recording which facets
+// overflowed. Rows without a facet mapping are kept uncounted.
+func capSemanticPerType(merged []search.Result, limit int) ([]search.Result, map[string]bool) {
+	truncated := make(map[string]bool)
+	if limit <= 0 {
+		return merged, truncated
+	}
+	perFacet := make(map[string]int, 5)
+	out := merged[:0]
+	for _, r := range merged {
+		facet, ok := semanticFacetOf(r.Type)
+		if !ok {
+			out = append(out, r)
 			continue
 		}
-		total += p.body.Total
-		if p.body.Counts != nil {
-			counts.Repos += p.body.Counts.Repos
-			counts.Checkpoints += p.body.Counts.Checkpoints
-			counts.Commits += p.body.Counts.Commits
-			counts.PRs += p.body.Counts.PRs
-			counts.Sessions += p.body.Counts.Sessions
+		perFacet[facet]++
+		if perFacet[facet] > limit {
+			truncated[facet] = true
+			continue
 		}
+		out = append(out, r)
 	}
-	subtractDupeCounts(counts, dupesByType)
-	return max(total, 0), counts
+	return out, truncated
 }
 
-// mergeSemanticV4Responses interleaves per-cell query-serve responses into one,
-// applying the SAME ordering query-serve uses within a cell (see
-// rankSemanticResults); when no cell produced tier 0/1 the ANN-only fallback
-// tail is shown (deduped, then capped). Results are deduped by type+id and
-// capped to limit. Rerank scores share a space across cells (same Cohere
-// model), so interleaving is meaningful.
+// deriveSemanticCounts computes total and per-type counts from the FINAL
+// merged list — the BFF's per-type contract (ENT-1363): counts describe
+// exactly what the caller can see, never the cells' corpus-count passes,
+// with counts_lower_bound marking the facets whose lists were capped.
+func deriveSemanticCounts(merged []search.Result) (int, *search.TypeCounts) {
+	counts := &search.TypeCounts{}
+	for _, r := range merged {
+		switch r.Type {
+		case search.TypeRepo:
+			counts.Repos++
+		case search.TypeCheckpoint:
+			counts.Checkpoints++
+		case search.TypeCommit:
+			counts.Commits++
+		case search.TypePR:
+			counts.PRs++
+		case search.TypeSession:
+			counts.Sessions++
+		}
+	}
+	return len(merged), counts
+}
+
+// mergeSemanticV4Responses interleaves per-cell query-serve responses into
+// one final page. THE CROSS-CELL MERGE ORDERING CONTRACT lives here and in
+// the BFF's mergeCellResponses (entire.io api/src/routes/search.ts) — the two
+// implementations must stay byte-identical (ENT-1777); change one, change
+// both, and update this block:
 //
-// Totals/counts include only cells whose results were actually mergeable (see
-// aggregateSemanticTotals). All-cells-failed is an error; a partial failure is
-// noted in Warnings and the surviving cells are merged.
+//  1. Band order: repo rows first (retrieval score desc), then tier 0, then
+//     tier 1. Tier 2 and tier-less non-repo rows are dropped — the ANN-only
+//     fallback tier is retired and only un-redeployed cells still emit it.
+//     Band order deliberately overrides each cell's own post-fold final
+//     order (entire-search#181 folds after ranking): the clients match each
+//     other, not the leaf.
+//  2. Tier 0: when every row carries a rerank score, rerank desc with BM25
+//     tiebreak; when any cell predates tier-0 reranking, positional
+//     interleave by in-cell rank with BM25 tiebreak (sortTier0Rows). Tier 1:
+//     rerank desc, retrieval Score tiebreak. All sorts are STABLE — equal
+//     keys keep cell-response order.
+//  3. Dedupe AFTER ordering, BEFORE the per-type cap, sessions only, first
+//     (highest-ranked) copy wins (dedupSemanticResults).
+//  4. Per-type window: at most `limit` rows of each facet, overflow recorded
+//     in truncated_types, unioned with the cells' own truncated_types
+//     (capSemanticPerType). No global cut.
+//  5. Counts and total derive from the FINAL list (deriveSemanticCounts);
+//     counts_lower_bound == the capped facets.
+//  6. Flags: truncated = any cell truncated; partial = truncated ∨ any cell
+//     failed ∨ any cell partial ∨ mixed rerank capability; coverage_incomplete
+//     = the same minus rerank-mix; reranked = every cell reranked (emitted
+//     when any cell reported the field).
+//
+// Rerank scores share a space across cells (same Cohere model), so
+// interleaving is meaningful. All-cells-failed is an error; a partial failure
+// is noted in Warnings (and the flags) and the surviving cells are merged.
 func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []cellCallResult[*search.Response]) (*search.Response, error) {
 	pages, failed, lastErr := classifySemanticCells(ctx, results)
 	if len(pages) == 0 {
@@ -603,61 +661,73 @@ func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []ce
 	if len(failed) > 0 {
 		// Debug, not Warn: the warning below already reaches the user via
 		// Response.Warnings, and slog's default handler would print a Warn
-		// straight to stderr on commands that never ran logging.Init.
+		// straight to stderr on commands whose context carries no logger.
 		logging.Debug(ctx, "semantic search: partial failure; results may be incomplete",
 			"succeeded", len(pages), "total", len(results), "failed_cells", failed)
 		warnings = append(warnings, fmt.Sprintf("search failed in %d of %d regions; results may be incomplete", len(failed), len(pages)+len(failed)))
 	}
 
-	merged, globalUpper := rankSemanticResults(pages)
-	merged, dupesByType := dedupSemanticResults(merged)
-
-	// Cap the ANN-only fallback tail AFTER dedup (repos always precede it),
-	// so cross-cell duplicates don't shrink the visible page below the cap.
-	if !globalUpper {
-		nRepos := 0
-		for _, r := range merged {
-			if r.Type != search.TypeRepo {
-				break
+	merged := rankSemanticResults(pages)
+	merged = dedupSemanticResults(merged)
+	merged, truncatedTypes := capSemanticPerType(merged, limit)
+	for _, p := range pages {
+		for facet, v := range p.body.TruncatedTypes {
+			if v {
+				truncatedTypes[facet] = true
 			}
-			nRepos++
 		}
-		if len(merged) > nRepos+mergedTier2Max {
-			merged = merged[:nRepos+mergedTier2Max]
-		}
-	}
-	if limit > 0 && len(merged) > limit {
-		merged = merged[:limit]
 	}
 	if merged == nil {
 		merged = []search.Result{}
 	}
 
-	total, counts := aggregateSemanticTotals(pages, globalUpper, dupesByType)
-	return &search.Response{
+	total, counts := deriveSemanticCounts(merged)
+	resp := &search.Response{
 		Results:  merged,
 		Total:    total,
 		Page:     max(page, 1),
 		Counts:   counts,
 		Warnings: warnings,
-	}, nil
-}
-
-// subtractDupeCounts removes deduplicated rows from the aggregate per-type
-// counts so `counts` reflects distinct results, matching the corrected total.
-func subtractDupeCounts(counts *search.TypeCounts, dupesByType map[string]int) {
-	for typ, n := range dupesByType {
-		switch typ {
-		case search.TypeCheckpoint:
-			counts.Checkpoints = max(0, counts.Checkpoints-n)
-		case search.TypeCommit:
-			counts.Commits = max(0, counts.Commits-n)
-		case search.TypeSession:
-			counts.Sessions = max(0, counts.Sessions-n)
-		case search.TypeRepo:
-			counts.Repos = max(0, counts.Repos-n)
-		case search.TypePR:
-			counts.PRs = max(0, counts.PRs-n)
+	}
+	if len(truncatedTypes) > 0 {
+		resp.TruncatedTypes = truncatedTypes
+		resp.CountsLowerBound = make(map[string]bool, len(truncatedTypes))
+		for facet := range truncatedTypes {
+			resp.CountsLowerBound[facet] = true
 		}
 	}
+
+	anyRerankedField, anyReranked, allReranked := false, false, true
+	for _, p := range pages {
+		if p.body.Truncated {
+			resp.Truncated = true
+		}
+		if p.body.Partial {
+			resp.Partial = true
+			resp.CoverageIncomplete = true
+		}
+		if p.body.Reranked != nil {
+			anyRerankedField = true
+			if *p.body.Reranked {
+				anyReranked = true
+			} else {
+				allReranked = false
+			}
+		} else {
+			allReranked = false
+		}
+	}
+	if len(failed) > 0 || resp.Truncated {
+		resp.Partial = true
+		resp.CoverageIncomplete = true
+	}
+	if anyReranked && !allReranked {
+		// Mixed rerank capability skews ordering but not coverage — partial
+		// without coverage_incomplete, matching the BFF.
+		resp.Partial = true
+	}
+	if anyRerankedField {
+		resp.Reranked = &allReranked
+	}
+	return resp, nil
 }

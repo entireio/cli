@@ -65,9 +65,21 @@ func handleClaudeCodePostTodoFromReader(ctx context.Context, reader io.Reader) e
 	// Detect file changes since last checkpoint
 	changes, err := DetectFileChanges(ctx, nil)
 	if err != nil {
-		logging.Warn(logCtx, "failed to detect changed files",
-			slog.String("error", err.Error()))
+		logStatusDegrade(logCtx, "failed to detect changed files", err)
 		return nil
+	}
+
+	// Same guard as turn-end/subagent-end: when the pre-task untracked scan
+	// was skipped (e.g. status-walk budget breach at task start), there is no
+	// baseline, and the nil baseline above classifies EVERY untracked file as
+	// New — so pre-existing untracked files would be claimed by this
+	// incremental checkpoint.
+	if preState, preErr := LoadPreTaskState(ctx, taskToolUseID); preErr != nil {
+		logging.Warn(logCtx, "failed to load pre-task state",
+			slog.String("error", preErr.Error()))
+	} else if preState != nil && preState.UntrackedScanSkipped {
+		logging.Warn(logCtx, "skipping new-file detection: pre-task untracked scan was skipped")
+		changes.New = nil
 	}
 
 	// If no file changes, skip creating a checkpoint

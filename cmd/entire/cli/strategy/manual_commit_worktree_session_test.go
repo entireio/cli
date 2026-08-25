@@ -350,15 +350,19 @@ func TestManualCommitStrategy_FindSessionsForWorktree_WarnsOnAmbiguousSiblingSes
 
 	t.Chdir(commitWorktree)
 	clearSessionMatchCaches()
-	require.NoError(t, logging.Init(ctx, "warn-test-session"))
-	t.Cleanup(logging.Close)
+	initialized, logErr := logging.New(logging.Config{Dir: filepath.Join(commitWorktree, logging.LogsDir)})
+	require.NoError(t, logErr)
+	require.NotNil(t, initialized)
+	ctx = logging.WithLogger(ctx, initialized)
+	ctx = logging.WithSessionID(ctx, "warn-test-session")
+	t.Cleanup(func() { _ = initialized.Close() })
 
 	finder := &ManualCommitStrategy{}
 	matching, err := finder.findSessionsForWorktree(ctx, commitWorktree)
 	require.NoError(t, err)
 	require.Empty(t, matching)
 
-	logging.Close()
+	require.NoError(t, initialized.Close())
 	logs := readSessionMatchLogs(t, commitWorktree)
 	require.Contains(t, logs, `"level":"WARN"`, "ambiguous sibling sessions must be surfaced at WARN, not DEBUG")
 	require.Contains(t, logs, "ambiguous sessions across worktrees")
