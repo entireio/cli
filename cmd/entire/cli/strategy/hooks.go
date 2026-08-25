@@ -450,7 +450,7 @@ func entireHookUsesForeignAbsoluteLauncher(content, expectedPrefix string) bool 
 
 func unquoteHookPrefix(p string) string {
 	p = strings.TrimSpace(p)
-	if len(p) >= 2 && p[0] == '"' && p[len(p)-1] == '"' {
+	if len(p) >= 2 && ((p[0] == '\'' && p[len(p)-1] == '\'') || (p[0] == '"' && p[len(p)-1] == '"')) {
 		return p[1 : len(p)-1]
 	}
 	return p
@@ -464,12 +464,13 @@ func shellCommandPrefixBefore(s string) string {
 	if s == "" {
 		return ""
 	}
-	// Prefer a trailing double-quoted token.
-	if i := strings.LastIndex(s, "\""); i >= 0 {
-		// Find matching open quote before i.
-		open := strings.LastIndex(s[:i], "\"")
-		if open >= 0 && i > open {
-			return s[open+1 : i]
+	// Prefer a trailing quoted token (single- or double-quoted).
+	for _, q := range []byte{'\'', '"'} {
+		if i := strings.LastIndexByte(s, q); i >= 0 {
+			open := strings.LastIndexByte(s[:i], q)
+			if open >= 0 && i > open {
+				return s[open+1 : i]
+			}
 		}
 	}
 	fields := strings.Fields(s)
@@ -480,6 +481,7 @@ func shellCommandPrefixBefore(s string) string {
 }
 
 func isAbsoluteHookCmdPrefix(prefix string) bool {
+	prefix = unquoteHookPrefix(prefix)
 	if prefix == "" || prefix == bareEntireHookCmd {
 		return false
 	}

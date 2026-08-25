@@ -2883,6 +2883,16 @@ if [ -x "/local/entire" ]; then /local/entire hooks git prepare-commit-msg "$1" 
 	if entireHookUsesForeignAbsoluteLauncher(local, "/local/entire") {
 		t.Fatal("matching absolute should not be foreign")
 	}
+	quoted := `#!/bin/sh
+# Entire CLI hooks
+` + shellQuote(`/opt/homebrew/bin/entire`) + ` hooks git prepare-commit-msg "$1" "$2" 2>/dev/null || true
+`
+	if !entireHookUsesForeignAbsoluteLauncher(quoted, bareEntireHookCmd) {
+		t.Fatal("single-quoted absolute launcher should be detected as foreign")
+	}
+	if entireHookUsesForeignAbsoluteLauncher(quoted, "/opt/homebrew/bin/entire") {
+		t.Fatal("matching single-quoted absolute should not be foreign")
+	}
 }
 
 func TestInjectPostRewriteManagedBlock_ReplaysStdin(t *testing.T) {
