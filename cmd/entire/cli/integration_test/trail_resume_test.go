@@ -27,7 +27,7 @@ import (
 
 // trailResumeIntegrationClusterSlug is the fake processing placement's
 // cluster, used to join /api/v1/repos' RepoPlacement.ClusterSlug to
-// /api/v1/clusters' Cluster.Slug (see cell_target.go's cellTargetForClusterSlug).
+// /api/v1/clusters' Cluster.Slug (see cell_target.go's cellTargetForPlacement).
 const trailResumeIntegrationClusterSlug = "trail-resume-cluster"
 
 func TestTrailResume_UsesCheckpointSessionsWhenLocalStateIsMissing(t *testing.T) {
@@ -182,10 +182,8 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli":
 			writeTrailResumeIntegrationJSON(t, w, api.TrailListResponse{
-				Trails:       []api.TrailResource{trail},
-				Total:        1,
-				Limit:        200,
-				RepoFullName: "entireio/cli",
+				Trails: []api.TrailResource{trail},
+				Total:  1,
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/321":
 			writeTrailResumeIntegrationJSON(t, w, trail)

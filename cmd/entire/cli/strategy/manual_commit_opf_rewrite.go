@@ -51,15 +51,17 @@ func (e *V1DivergedError) Error() string {
 		e.Local.String()[:7], e.Remote.String()[:7], e.MergeBase.String()[:7])
 }
 
-// BootstrapTooLargeError: first push to a remote with no v1 yet, but
-// more unpushed commits than the safety cap. OPF inference is ~30s per
-// commit, so unbounded bootstraps could take hours.
+// BootstrapTooLargeError: more un-OPF'd commits to rewrite than the
+// safety cap — a first push to a remote with no v1 yet, or a checkpoint
+// ref whose un-trailered ancestry runs deep because OPF was enabled
+// late. OPF inference is ~30s per commit, so unbounded bootstraps could
+// take hours.
 type BootstrapTooLargeError struct {
 	Count, Limit int
 }
 
 func (e *BootstrapTooLargeError) Error() string {
-	return fmt.Sprintf("OPF bootstrap would rewrite %d entire/checkpoints/v1 commits "+
+	return fmt.Sprintf("OPF bootstrap would rewrite %d checkpoint commits "+
 		"(limit %d). Set ENTIRE_OPF_BOOTSTRAP_LIMIT=<N> or =unlimited to override, "+
 		"or push without OPF (ENTIRE_OPF=no git push) to bring the remote into sync first",
 		e.Count, e.Limit)
@@ -399,7 +401,7 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 				redactedByPath[path] = globalRedacted[pc.startIdx+i]
 			}
 		}
-		newHash, err := rebuildV1Commit(ctx, repo, pc.commit, parent, redactedByPath)
+		newHash, err := rebuildCheckpointCommit(ctx, repo, pc.commit, parent, redactedByPath)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("rebuild commit %s: %w", pc.commit.Hash.String()[:7], err)
 		}
@@ -556,7 +558,9 @@ func listUnpushedV1Commits(repo *git.Repository, localTip, remoteTip plumbing.Ha
 	return unpushed, nil
 }
 
-// rebuildV1Commit re-parents the commit onto parent. Already-applied
+// rebuildCheckpointCommit re-parents the commit onto parent (backend-agnostic:
+// the v1 chain passes the rewritten predecessor, a standalone checkpoint ref
+// passes the commit's own original parent). Already-applied
 // commits keep their tree (idempotent); unapplied commits get a tree
 // rebuilt from redactedByPath (precomputed by the orchestrator's single
 // OPF batch call) plus an Entire-OPF-Applied: true trailer.
@@ -570,7 +574,7 @@ func listUnpushedV1Commits(repo *git.Repository, localTip, remoteTip plumbing.Ha
 // regex-only before this rewrite. The collect/apply walkers redact the whole
 // tree for every unapplied commit so the final rewritten tip cannot
 // reintroduce an older un-OPF-redacted shard.
-func rebuildV1Commit(ctx context.Context, repo *git.Repository, oldCommit *object.Commit, parent plumbing.Hash, redactedByPath map[string][]byte) (plumbing.Hash, error) {
+func rebuildCheckpointCommit(ctx context.Context, repo *git.Repository, oldCommit *object.Commit, parent plumbing.Hash, redactedByPath map[string][]byte) (plumbing.Hash, error) {
 	newTree := oldCommit.TreeHash
 	if !trailers.HasOPFApplied(oldCommit.Message) {
 		tree, err := repo.TreeObject(oldCommit.TreeHash)

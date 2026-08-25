@@ -171,6 +171,73 @@ the session's branch/worktree/base metadata to the target, clears target-local
 checkpoint windows and checkpoint IDs, and snapshots the target's current file
 changes so the next commit can link to the adopted session.
 
+#### Commit-to-session linking
+
+The commit hooks (prepare-commit-msg / post-commit) resolve which sessions a
+commit belongs to via `findSessionsForCommitLinking`
+(`strategy/session_identity.go`): the **worktree-matched set** (every session
+with pending content in the commit's worktree — concurrent sessions interleave
+by design) **plus the identity-matched session** when the committing process's
+ancestry names one that path matching missed.
+
+**Identity matching**: reuses the owner fingerprint liveness already
+records — `SessionState.Owner`, a `proclive.Identity` captured on every turn
+start by `captureSessionOwner` (the first non-transient ancestor of the hook:
+agents run hooks as children, possibly via `sh -c`, and proclive skips
+shells, the `entire` binary itself, and the Go toolchain). At commit time the
+hook snapshots its ancestry once (`proclive.CurrentAncestry`) and asks
+`Ancestry.Depth(owner)` per candidate: was this commit's process spawned,
+however indirectly, by that session's agent? Snapshotting once matters — the
+shared store holds one state file per session, so a per-candidate walk would
+repeat the hostname, boot-id, and proc reads dozens of times per commit.
+Host, boot, and start-time guards mean a recycled PID or an identity recorded
+on another machine can never match. The nearest ancestor wins, so a nested
+agent is attributed over the outer agent that spawned it; only sessions
+matching at the same depth (one agent process hosting several sessions) fall
+back to the most recently interacting one. On platforms proclive cannot introspect (Windows),
+identity matching reports nothing and linking falls back to worktree
+matching. This makes an agent-made commit link to
+its own session **in any worktree**, with no bookkeeping to drift. Any session
+matched outside its home worktree is **guest-linked**, whether it came from
+identity matching or the pre-existing single-worktree fallback below: it
+condenses and links, but never mutates worktree-coupled state (`BaseCommit`,
+shadow-branch realignment) — those follow only the session's own worktree HEAD.
+
+**Worktree matching** (always computed; the sole mechanism for commits with
+no recorded agent in their ancestry — human commits, detached runners): exact
+`WorktreePath` match first, then sessions from a sibling worktree of the same
+repo, provided they resolve to a single worktree. Imported sessions (`Kind=imported`) never link —
+they are historical records. When candidates span several worktrees, sessions
+that interacted within the last 15 minutes are preferred; if a single live
+worktree remains it links, otherwise the hook declines with a stderr hint
+naming `entire session adopt` (two genuinely live sessions in different
+worktrees are never guessed between). This liveness filter intentionally turns
+some cases the old code declined outright into a best-candidate link. The
+15-minute `recentSessionWindow` is therefore a correctness tradeoff: a session
+in a long-running build or tool call can age out, allowing the remaining recent
+worktree to win.
+
+Under `go test`, the session state store refuses to open outside the temp
+root (both `session.NewStateStore` and `NewStateStoreForWorktree`), so a test
+missing repo isolation fails loudly instead of leaking fixture sessions into
+a real repo's `.git/entire-sessions` — leaked fixtures once hijacked commit
+linking and produced a dangling `Entire-Checkpoint` trailer.
+
+**Background zombie sweep.** The session-start hook checks the shared
+session-state directory for zombies — non-ended sessions whose owning agent
+process has exited (including the common IDLE case), and ENDED sessions that
+still hold uncondensed checkpoint data more than 24h after ending (younger ones
+are left alone so PostCommit carry-forward keeps its chance). When any exist,
+it spawns a detached
+`__sweep_sessions` process (throttled to one spawn per repo per window via a
+flock-serialized marker in the git common dir) that finalizes/condenses them
+using the same engines as `entire doctor --force`, condense-only: the sweep
+has no interactive condense deadline and never initiates a discard — ended
+sessions without a shadow branch are left to `entire doctor` (and the existing
+orphan cleanup). The 7-day stale-session
+purge bounds the sweep's window: a zombie that stays unfixed past 7 days is
+removed by the purge, not the sweep. See `cmd/entire/cli/session_sweep.go`.
+
 ### Temporary Checkpoints
 
 Branch: `entire/<commit[:7]>-<worktreeHash[:6]>`
@@ -182,7 +249,7 @@ Contains full worktree snapshot plus metadata overlay. **Multiple concurrent ses
 .entire/metadata/<session-id-1>/
 ├── full.jsonl           # Session 1 transcript
 ├── prompt.txt           # Checkpoint-scoped user prompts
-└── tasks/<tool-use-id>/ # Task checkpoints
+└── tasks/<tool-use-id>/ # Post-todo incremental task checkpoints only
 .entire/metadata/<session-id-2>/
 ├── full.jsonl           # Session 2 transcript (concurrent)
 ├── ...
@@ -235,6 +302,115 @@ makes the comparison false forever and the session silently stops condensing.
 - Migrated automatically if base commit changes (stash → pull → apply scenario)
 - Deleted after condensation to `entire/checkpoints/v1`
 - Reset if orphaned (no session state file exists)
+
+### Task Records (Subagent Work)
+
+A subagent invocation (Claude Code's Task tool) is captured through a durable
+**task record** — `session.TaskRecord` (json `task_records`) on session state
+(`session/state.go`): `ToolUseID`, `AgentID`, `StartedAt`, `SubagentType`,
+`TaskDescription`, `DeclaredTranscriptPath`, `Files`, `TokenUsage`,
+`CompletedAt` (zero = still in flight). Mid-turn the record is a **pointer,
+not a payload**: the subagent's transcript stays wherever the agent wrote it,
+and the record remembers how to find it — the transcript path the agent's
+stop hook declared (Claude Code's `agent_transcript_path`), with the
+agent-layout convention as fallback. Nothing is written to the shadow branch
+for task work; the payload is materialized at condensation (below).
+
+**Producers.**
+
+- **Background launch** (`run_in_background: true` in the Task tool's input):
+  Claude Code's PostToolUse for a backgrounded Task fires at the launch
+  acknowledgment, seconds after dispatch, so the launch only records an
+  in-flight record and captures nothing. `SubagentType`/`TaskDescription` are
+  captured here because `SubagentStop`'s payload carries none of them.
+- **Foreground completion** (post-task, non-final): PostToolUse fires at true
+  completion, so the record is created-and-completed in one step, files and
+  transcript path attached.
+- **SubagentStop (final, authoritative)**: the real completion signal for
+  background tasks. `handleSubagentStopFinal` completes the live record —
+  bypassing any "no changes, skip" instinct: a read-only subagent (reviewer,
+  search agent) still produced a transcript worth materializing. File
+  attribution is analyzer-only (the subagent's own transcript, never a
+  whole-worktree scan that would sweep in the parent's concurrent work); the
+  accepted trade is that shell side-effect files the transcript never names,
+  and deletions, are under-captured. A record already completed (foreground
+  dedup, duplicate/racing Final event) is skipped.
+- **SessionEnd sweep** (`completeLiveTaskRecords`): a session closing with
+  tasks still in flight completes every remaining live record, strictly
+  **before** `endSessionNow` marks `PhaseEnded` and eagerly condenses, so the
+  condense materializes them.
+- **Factory Droid Workers** upsert (`UpsertCompletedTaskRecord`): a worker
+  spans multiple turns, so repeat completions merge files into the same record
+  instead of claiming exactly-once.
+
+**Exactly-once completion.** Completion goes through
+`strategy.CompleteTaskRecord`: one `MutateSessionState` closure marks
+`CompletedAt` exactly once (a racing duplicate sees false and skips), attaches
+the extraction results (files, token usage, declared transcript path) to the
+claimed record, and merges files into the session's `FilesTouched`. Completion
+happens **last**, after successful extraction, so a failed capture leaves the
+record live for the SessionEnd sweep to retry. Late-arrival guard: a
+`SubagentStop` whose parent session state is missing entirely skips outright —
+re-creating state would resurrect a zombie session; state present but
+`PhaseEnded` → complete the record, then eagerly condense
+(`CondenseAndMarkFullyCondensed`) so it doesn't linger as post-condensation
+data. Hard-killed agents get the same terminal state from the exited-owner
+sweep (`finalizeExitedSessions`, run inside `entire status`/`doctor`), which
+completes live records before ending the session — the transcript-so-far
+still reaches a permanent checkpoint.
+
+**Materialization (condensation).** `materializeTaskRecords`
+(`manual_commit_condensation.go`) resolves each record's transcript — declared
+path first, agent-layout fallback — runs the same sanitize → externalize →
+redact pipeline the session transcript gets
+(`prepareTaskTranscriptForStorage`), and writes
+`tasks/<tool-use-id>/{agent-<agent-id>.jsonl, task.json}` inside the parent
+session's checkpoint, on both persistent backends via the shared
+`applySessionWrite`. An unresolvable, unreadable, or empty transcript still
+gets a `task.json` carrying a stable, path-free
+`transcript_unavailable_reason` — the record is never silently dropped.
+Records with an empty/unsafe `ToolUseID` or `AgentID` are skipped with a
+warning, never allowed to wedge condensation.
+
+**Self-contained checkpoints.** Live records are materialized too: each
+condensation stores the transcript-so-far, so a mid-task commit carries a
+partial transcript and a later checkpoint carries the full one — the same
+self-containment rule the compact transcript follows. Live records survive
+condensation for retry; completed records are removed only after a successful
+write (`removeCompletedTaskRecords`, run from `resetCheckpointWindow`).
+
+**Trigger currency.** "Does this session have task content?" is
+`State.HasTaskContent()` (`len(TaskRecords) > 0`) everywhere — condensation
+triggers, empty-session guards, doctor classification, shadow-branch
+deletability. Records never touch the shadow branch: a records-only session
+(no shadow branch, no steps, empty parent transcript) still condenses, and
+shadow-branch existence no longer implies task content (shadow pinning keys on
+`StepCount` only). `checkpoint list --pending` renders `[Task]` rows from
+records, with `Running`/`Completed` verbs.
+
+**Shadow-branch task checkpoints** still exist in exactly one form: post-todo
+incrementals. `SaveTaskStep` (`strategy/manual_commit_git.go`) is formally
+incremental-only — it errors on non-incremental use — and its sole production
+caller is the Claude Code post-todo hook, writing under
+`.entire/metadata/<session-id>/tasks/<tool-use-id>/` when a TodoWrite fires
+inside a subagent.
+
+**Commit linkage while idle.** A background subagent's `git commit` normally
+lands between the parent session's turns, while the session is IDLE — the
+fast-path trailer decision (`tryAgentCommitFastPath`,
+`strategy/manual_commit_hooks.go`) used to trust only ACTIVE sessions, so
+these commits shipped with no `Entire-Checkpoint` trailer at all. An IDLE
+session with a fresh task record (`idleWithTaskContent`: in-flight or
+completed-unmaterialized, each record bounded by its `StartedAt` age against
+`activeSessionInteractionThreshold`, 24h) is now linkable too, so a subagent
+that dies without a completion signal doesn't leave the session trusted
+forever. The same predicate feeds `shouldCondenseWithOverlapCheck`'s
+overlap-check bypass, so the trigger and the condensation trust share one
+rule. The trailer's content guarantee is the materializer itself: the
+commit's condensation stores each record's transcript-so-far under the
+checkpoint's `tasks/` subtree, so no separate commit-time capture is needed.
+Ordinary idle commits with no task records are unaffected — they stay exactly
+as before.
 
 ### Committed Checkpoints
 
@@ -342,7 +518,10 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 │   ├── metadata.json
 │   ├── full.jsonl
 │   └── ...
-└── 2/                   # Third session...
+├── 2/                   # Third session...
+└── tasks/<tool-use-id>/ # Subagent task records, materialized at condensation
+    ├── agent-<agent-id>.jsonl # Subagent transcript, sanitized + redacted (omitted when unavailable)
+    └── task.json        # Record metadata (files, tokens, timings, unavailable reason)
 ```
 
 **Compact transcript (`transcript.jsonl`):** generated best-effort from
@@ -650,7 +829,7 @@ Strategies determine checkpoint timing and type:
 | Event | Checkpoint Type |
 |-------|----------------|
 | On Save | Temporary |
-| On Task Complete | Temporary |
+| On Task Complete | Task record on session state → materialized at condensation |
 | On User Commit | Condense → Committed |
 
 ## Rewind

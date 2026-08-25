@@ -169,9 +169,12 @@ hook — fast ones included — is traced at DEBUG.
 
 Two traps worth avoiding when benchmarking hooks by hand:
 
-- **Do not benchmark in this repo.** Its hooks run through `scripts/entire-dev`,
-  which builds and `go run`s the CLI on every invocation — a fixed cost no other
-  repo and no user pays. Use a compiled binary in a different repo.
+- **Measurements taken in this repo before 2026-08-17 are inflated.** Its hooks
+  ran through `scripts/entire-dev`, which built and `go run` the CLI on every
+  invocation — a fixed ~1.53s cost no other repo and no user paid, and it silently
+  dominated anything measured here. #1999 removed `local_dev` mode and deleted the
+  launcher, so hooks now exec the plain `entire` binary from PATH and timings taken
+  here are ordinary product timings. Keep the date in mind when reading old numbers.
 - **`git clone` does not copy `refs/entire/*`.** A clone silently has no checkpoint
   history, so it cannot reproduce costs that scale with accumulated sessions or
   refs. Copy the repo (`cp -Rc` on APFS) instead.

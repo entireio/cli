@@ -18,9 +18,9 @@ type CapabilityDeclarer interface {
 //
 // Not every optional interface appears here: built-in-only capabilities that
 // have no external-protocol equivalent (SessionBaseDirProvider, ModelExtractor,
-// SkillEventExtractor, TranscriptSanitizer) are intentionally excluded — their
-// As* helpers resolve by type assertion alone (see builtinCapability), with no
-// DeclaredCaps gate.
+// SkillEventExtractor, TranscriptSanitizer, TranscriptFetcher) are intentionally
+// excluded — their As* helpers resolve by type assertion alone (see
+// builtinCapability), with no DeclaredCaps gate.
 type DeclaredCaps struct {
 	Hooks                  bool `json:"hooks"`
 	TranscriptAnalyzer     bool `json:"transcript_analyzer"`
@@ -128,6 +128,14 @@ func SanitizeTranscriptForStorage(ag Agent, data []byte) []byte {
 	return sanitized
 }
 
+// AsTranscriptFetcher returns the agent as TranscriptFetcher if it implements
+// the interface. This is an optional capability (materializing a transcript on
+// demand for sessions with no hook-cached file), so it resolves by type
+// assertion alone with no DeclaredCaps gate.
+func AsTranscriptFetcher(ag Agent) (TranscriptFetcher, bool) {
+	return builtinCapability[TranscriptFetcher](ag)
+}
+
 // AsTokenCalculator returns the agent as TokenCalculator if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTokenCalculator(ag Agent) (TokenCalculator, bool) {
@@ -212,6 +220,14 @@ func AsModelExtractor(ag Agent) (ModelExtractor, bool) {
 // agents do not expose this optional interface through declared capabilities.
 func AsSkillEventExtractor(ag Agent) (SkillEventExtractor, bool) {
 	return builtinCapability[SkillEventExtractor](ag)
+}
+
+// AsToolInvocationScanner returns the agent as ToolInvocationScanner if it
+// implements the interface. Built-in only: reading tool calls out of a
+// transcript needs knowledge of that transcript's shape, which an external
+// agent's parse-hook does not convey.
+func AsToolInvocationScanner(ag Agent) (ToolInvocationScanner, bool) {
+	return builtinCapability[ToolInvocationScanner](ag)
 }
 
 // AsSessionEndBudgeter returns the agent as SessionEndBudgeter if it implements

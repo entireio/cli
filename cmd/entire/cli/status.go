@@ -220,6 +220,10 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		writeCheckpointSyncLines(ctx, &b, s, sty)
 	}
 
+	if s.Enabled {
+		writeSecretScannersLine(&b, s, sty)
+	}
+
 	// Show review status for HEAD's checkpoint, if any.
 	if reviewed, meta := headHasReviewCheckpoint(ctx); reviewed {
 		b.WriteString("\n")
@@ -241,6 +245,34 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 	}
 
 	return b.String()
+}
+
+// nonDefaultSecretScanners reports the enabled engines (betterleaks, then
+// goredact) when the selection differs from the default (betterleaks only);
+// nil otherwise. Both disabled is unreachable via these callers:
+// validateScannerSettings fail-closes merged settings before status loads them.
+func nonDefaultSecretScanners(s *EntireSettings) []string {
+	if s.BetterleaksEnabled() && !s.GoredactEnabled() {
+		return nil
+	}
+	var parts []string
+	if s.BetterleaksEnabled() {
+		parts = append(parts, "betterleaks")
+	}
+	if s.GoredactEnabled() {
+		parts = append(parts, "goredact")
+	}
+	return parts
+}
+
+func writeSecretScannersLine(b *strings.Builder, s *EntireSettings, sty statusStyles) {
+	parts := nonDefaultSecretScanners(s)
+	if len(parts) == 0 {
+		return
+	}
+	b.WriteString("\n")
+	b.WriteString(sty.render(sty.dim, "  Secret scanners · "))
+	b.WriteString(strings.Join(parts, ", "))
 }
 
 // formatSettingsStatus formats a settings status line with source prefix.
@@ -436,11 +468,11 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 		return
 	}
 
-	// Finalize any ACTIVE session whose agent process has exited without a
+	// Finalize any non-ended session whose agent process has exited without a
 	// SessionStop hook firing, so it doesn't linger as "active" until the
 	// inactivity timeout. The sweep marks them ended in place, so the filter
 	// below drops them.
-	if n := finalizeExitedSessions(ctx, states); n > 0 {
+	if n := finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget)); n > 0 {
 		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("Finalized %d exited session(s) (agent process gone).", n)))
 	}
 
@@ -570,6 +602,11 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 				fmt.Fprintln(w, sty.render(sty.dim, statsLine))
 			}
 			if warning := divergenceWarnings[st.SessionID]; warning != "" {
+				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
+			}
+			if st.CaptureDegradedAt != nil {
+				warning := fmt.Sprintf("capture degraded %s: status scan over budget; new-file detection skipped (see 'entire doctor logs')",
+					timeAgo(*st.CaptureDegradedAt))
 				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
 			}
 			fmt.Fprintln(w)
@@ -761,13 +798,18 @@ type statusJSON struct {
 	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|observed|default|sole|first|dedicated
 	CheckpointSyncError        string `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
 	UnpushedCheckpoints        int    `json:"unpushed_checkpoints,omitempty"`
-	Error                      string `json:"error,omitempty"`
+	// SecretScanners lists the enabled engines when non-default; omitted when default.
+	SecretScanners []string `json:"secret_scanners,omitempty"`
+	Error          string   `json:"error,omitempty"`
 }
 
 type sessionBriefJSON struct {
 	Agent  string `json:"agent"`
 	Model  string `json:"model,omitempty"`
 	Status string `json:"status"`
+	// CaptureDegraded reports that a session for this agent last turned with a
+	// status scan over budget, so new-file detection was skipped.
+	CaptureDegraded bool `json:"capture_degraded,omitempty"`
 }
 
 func runStatusJSON(ctx context.Context, w io.Writer) error {
@@ -818,6 +860,8 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 			result.Agents = names
 		}
 
+		result.SecretScanners = nonDefaultSecretScanners(s)
+
 		for _, name := range OutdatedHookAgents(ctx) {
 			result.HooksOutdated = append(result.HooksOutdated, string(name))
 		}
@@ -833,9 +877,9 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		if store, err := session.NewStateStore(ctx); err == nil {
 			if states, err := store.List(ctx); err == nil {
 				// Finalize sessions whose agent has exited (matches the human
-				// status path) so --json doesn't leave them orphaned ACTIVE or
+				// status path) so --json doesn't leave them orphaned or
 				// report them under active_sessions.
-				finalizeExitedSessions(ctx, states)
+				finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget))
 				// Deduplicate by agent: one entry per agent, "active" wins over "idle".
 				type agentEntry struct {
 					brief    sessionBriefJSON
@@ -857,12 +901,16 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 							existing.brief.Status = sessionStatusLabel(st)
 							existing.isActive = true
 						}
+						// Degradation is sticky across the dedupe: any degraded
+						// session for this agent must not be hidden by a healthy one.
+						existing.brief.CaptureDegraded = existing.brief.CaptureDegraded || st.CaptureDegradedAt != nil
 					} else {
 						byAgent[agent] = &agentEntry{
 							brief: sessionBriefJSON{
-								Agent:  agent,
-								Model:  st.ModelName,
-								Status: sessionStatusLabel(st),
+								Agent:           agent,
+								Model:           st.ModelName,
+								Status:          sessionStatusLabel(st),
+								CaptureDegraded: st.CaptureDegradedAt != nil,
 							},
 							isActive: active,
 						}

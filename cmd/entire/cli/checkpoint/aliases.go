@@ -23,6 +23,7 @@ type (
 	SessionContent   = apicheckpoint.SessionContent
 	SessionFilePaths = apicheckpoint.SessionFilePaths
 	TranscriptAsset  = apicheckpoint.TranscriptAsset
+	TaskPayload      = apicheckpoint.TaskPayload
 	SessionMetrics   = apicheckpoint.SessionMetrics
 	Summary          = apicheckpoint.Summary
 	LearningsSummary = apicheckpoint.LearningsSummary
@@ -43,10 +44,10 @@ type (
 	PersistentStore  = apicheckpoint.PersistentStore
 	Writer           = apicheckpoint.Writer
 	WriteRequest     = apicheckpoint.WriteRequest
-	// Write request union: session-level (Session, SessionTranscript,
-	// SessionSummary, SessionEntityDeltas) and checkpoint-level
-	// (CheckpointAttribution).
+	// Write request union: session-level (Session, ReservedSession, SessionTranscript,
+	// SessionSummary, SessionEntityDeltas) and checkpoint-level (CheckpointAttribution).
 	Session             = apicheckpoint.Session
+	ReservedSession     = apicheckpoint.ReservedSession
 	SessionTranscript   = apicheckpoint.SessionTranscript
 	SessionSummary      = apicheckpoint.SessionSummary
 	SessionEntityDeltas = apicheckpoint.SessionEntityDeltas

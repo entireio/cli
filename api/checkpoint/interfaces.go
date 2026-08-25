@@ -39,10 +39,12 @@ type PersistentStore interface {
 // unexported isWriteRequest marker. A store dispatches on the concrete type; a
 // mirror/fan-out store forwards the same value to each backend's Write.
 //
-// Four requests are session-level (Session, SessionTranscript, SessionSummary,
-// SessionEntityDeltas) and one is checkpoint-level (CheckpointAttribution).
-// Adding a write operation is a new request type plus one dispatch case — the
-// Store interface stays unchanged and existing backends keep compiling.
+// Four requests are session-level (Session, ReservedSession, SessionTranscript,
+// SessionSummary, SessionEntityDeltas) and one is checkpoint-level
+// (CheckpointAttribution). Adding a write operation is a new request type plus
+// one dispatch case in every backend. The Store interface stays unchanged, so
+// seam tests must exercise the full union because Go does not exhaustively
+// check type switches.
 type WriteRequest interface {
 	isWriteRequest()
 }
@@ -50,6 +52,11 @@ type WriteRequest interface {
 // Session creates or replaces a session document within a checkpoint,
 // materializing the checkpoint on its first session. (session-level)
 type Session WriteOptions
+
+// ReservedSession creates or replaces a session using an ID that was persisted
+// before the write began. Its ID kind identifies the backend that minted it, so
+// retries remain readable even if the configured primary changed meanwhile.
+type ReservedSession WriteOptions
 
 // SessionTranscript replaces a session's transcript, prompts, and skill events
 // at stop time without clobbering sibling fields. (session-level)
@@ -92,6 +99,7 @@ type SessionEntityDeltas struct {
 }
 
 func (Session) isWriteRequest()               {}
+func (ReservedSession) isWriteRequest()       {}
 func (SessionTranscript) isWriteRequest()     {}
 func (SessionSummary) isWriteRequest()        {}
 func (SessionEntityDeltas) isWriteRequest()   {}
