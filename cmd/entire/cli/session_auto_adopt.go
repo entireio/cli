@@ -634,7 +634,7 @@ func retirePendingSource(
 		if err != nil {
 			return fmt.Errorf("load source session state: %w", err)
 		}
-		//nolint:gocritic // ifElseChain: three mutually exclusive source-state branches
+		sourceRetiredThisCall := false
 		if sourceState != nil && isAdoptableSourceSession(sourceState) {
 			claim, claimErr := session.LiveSessionClaimContext(retireCtx, adopted.SessionID)
 			if claimErr != nil {
@@ -647,24 +647,32 @@ func retirePendingSource(
 			if err := sourceStore.Save(retireCtx, &retired); err != nil {
 				return fmt.Errorf("retire source session state: %w", err)
 			}
+			sourceRetiredThisCall = true
 		} else if sourceState != nil && sourceState.AdoptedIntoWorktreePath != "" &&
 			!sameAdoptPath(sourceState.AdoptedIntoWorktreePath, target.WorktreePath) {
 			return errors.New("source was retired into a different worktree")
-		} else if sourceState != nil && !isAdoptableSourceSession(sourceState) &&
-			sourceState.AdoptedIntoWorktreePath == "" {
-			return errors.New("source session is no longer adoptable")
 		}
+		// Once the bound checkpoint is committed, a source that independently ended
+		// before finalize can never be retired here — clear the marker anyway so
+		// post-commit does not warn forever on an unrecoverable source state.
+		finishCleanupDespiteRecheckFailure := sourceRetiredThisCall ||
+			sourceState == nil || !isAdoptableSourceSession(sourceState)
 		// Release before clearing the marker. If the target save fails, the next
 		// post-commit observes the already-retired source and safely retries the
 		// marker clear without requiring a claim that no longer exists.
 		//
 		// Re-read HEAD immediately before release: source retire above may have
 		// taken long enough for a new commit to land without the bound checkpoint.
+		// After a successful source retire (or when the source is already gone /
+		// unrecoverable), a recheck failure must still finish cleanup — aborting
+		// leaves a stuck marker that eventually cancels the target copy even though
+		// the source was correctly retired.
 		committed, headErr = committedCheckpointSet(retireCtx, targetWorktree)
 		if headErr != nil {
-			return fmt.Errorf("revalidate committed checkpoint before release: %w", headErr)
-		}
-		if _, ok := committed[marker.ExpectedCheckpointID]; !ok {
+			if !finishCleanupDespiteRecheckFailure {
+				return fmt.Errorf("revalidate committed checkpoint before release: %w", headErr)
+			}
+		} else if _, ok := committed[marker.ExpectedCheckpointID]; !ok && !finishCleanupDespiteRecheckFailure {
 			return errors.New("pending adoption checkpoint is not in any recent commit")
 		}
 		if _, err := session.ReleaseLiveSessionClaimIfOwned(retireCtx, adopted.SessionID, expectedClaim); err != nil {

@@ -1696,6 +1696,114 @@ func TestAutoAdopt_FailedPrepareCancelsPendingAdoption(t *testing.T) {
 	}
 }
 
+// When the bound checkpoint committed but the source independently ended before
+// finalize, the marker must still be cleared — the source can never be retired
+// here and leaving PendingSourceRetire stuck would warn on every post-commit.
+//
+// Uses t.Chdir(), so no t.Parallel().
+func TestAutoAdopt_FinalizeClearsMarkerWhenSourceEndedIndependently(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+	sessionID := "test-auto-adopt-source-ended"
+	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"services/billing/handler.go"}, true)
+	testutil.WriteFile(t, targetRepo, "services/billing/handler.go", "agent change\n")
+	testutil.GitAdd(t, targetRepo, "services/billing/handler.go")
+	t.Chdir(targetRepo)
+
+	commitMsgFile := runAutoAdoptPreparePhase(t, targetRepo)
+	testutil.RunGit(t, targetRepo, "commit", "-F", commitMsgFile)
+
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	sourceState, err := sourceStore.Load(context.Background(), sessionID)
+	if err != nil || sourceState == nil {
+		t.Fatalf("load source = %+v, %v", sourceState, err)
+	}
+	now := time.Now()
+	sourceState.Phase = session.PhaseEnded
+	sourceState.EndedAt = &now
+	sourceState.FullyCondensed = true
+	sourceState.AdoptedIntoWorktreePath = ""
+	if err := sourceStore.Save(context.Background(), sourceState); err != nil {
+		t.Fatal(err)
+	}
+
+	finalizePendingSourceRetires(context.Background())
+
+	targetStore := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	targetAfter, err := targetStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targetAfter == nil {
+		t.Fatal("target adopted session must survive finalize when source ended independently")
+	}
+	if targetAfter.PendingSourceRetire != nil {
+		t.Fatal("finalize must clear PendingSourceRetire when source can no longer be retired")
+	}
+}
+
+// After the source is already tombstoned, a retry finalize must still clear the
+// marker when the bound checkpoint is still reachable — simulating a prior
+// finalize that retired the source but aborted cleanup on the post-retire recheck.
+//
+// Uses t.Chdir(), so no t.Parallel().
+func TestAutoAdopt_FinalizeClearsMarkerAfterPartialSourceRetire(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	requireResolveOwner(t)
+
+	base := t.TempDir()
+	sourceRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-a"))
+	targetRepo := setupAdoptRepoAt(t, filepath.Join(base, "repo-b"))
+	sessionID := "test-auto-adopt-partial-finalize-retry"
+	seedAutoAdoptSourceSession(t, sourceRepo, sessionID, []string{"services/billing/handler.go"}, true)
+	testutil.WriteFile(t, targetRepo, "services/billing/handler.go", "agent change\n")
+	testutil.GitAdd(t, targetRepo, "services/billing/handler.go")
+	t.Chdir(targetRepo)
+
+	commitMsgFile := runAutoAdoptPreparePhase(t, targetRepo)
+	testutil.RunGit(t, targetRepo, "commit", "-F", commitMsgFile)
+
+	targetStore := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	targetState, err := targetStore.Load(context.Background(), sessionID)
+	if err != nil || targetState == nil || targetState.PendingSourceRetire == nil {
+		t.Fatalf("load target pending adoption = %+v, %v", targetState, err)
+	}
+
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	sourceState, err := sourceStore.Load(context.Background(), sessionID)
+	if err != nil || sourceState == nil {
+		t.Fatalf("load source = %+v, %v", sourceState, err)
+	}
+	retired := retireAdoptedSourceSession(sourceState, targetState)
+	if err := sourceStore.Save(context.Background(), &retired); err != nil {
+		t.Fatal(err)
+	}
+
+	finalizePendingSourceRetires(context.Background())
+
+	targetAfter, err := targetStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targetAfter == nil {
+		t.Fatal("target adopted session must survive finalize after source was already retired")
+	}
+	if targetAfter.PendingSourceRetire != nil {
+		t.Fatal("finalize retry must clear PendingSourceRetire once source retire is a fact")
+	}
+	claim, err := session.LiveSessionClaim(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim != nil {
+		t.Fatalf("finalize retry must release the live-session claim, got %+v", claim)
+	}
+}
+
 func TestStateBelongsToTargetWorktree_PrefersWorktreeID(t *testing.T) {
 	t.Parallel()
 
