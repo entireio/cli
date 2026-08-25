@@ -549,7 +549,6 @@ func (s *treeWriter) writeTaskRecordEntry(task TaskPayload, basePath string, ent
 	return nil
 }
 
-
 // writeStandardCheckpointEntries writes session files to numbered subdirectories and
 // maintains a CheckpointSummary at the root level with aggregated statistics.
 //
